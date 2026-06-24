@@ -76,7 +76,7 @@ export function ClipboardSafeStreamdown({
   return (
     <StreamdownFallbackBoundary raw={children}>
       <Streamdown
-        parseIncompleteMarkdown={parseIncompleteMarkdown ?? false}
+        parseIncompleteMarkdown={parseIncompleteMarkdown ?? true}
         {...props}
       >
         {safeChildren}

@@ -107,8 +107,16 @@ type MathDelimiter = {
 
 type DelimiterState = {
   openBlock: MathDelimiter | null;
-  inInlineCode: boolean;
+  inlineCodeDelimiterLength: number | null;
 };
+
+function consumeBacktickRun(line: string, index: number): number {
+  let runLength = 0;
+  while (line[index + runLength] === "`") {
+    runLength += 1;
+  }
+  return runLength;
+}
 
 function convertLatexDelimitersInLine(
   line: string,
@@ -116,21 +124,26 @@ function convertLatexDelimitersInLine(
 ): { line: string; state: DelimiterState } {
   let result = "";
   let i = 0;
-  let inInlineCode = state.inInlineCode;
+  let inlineCodeDelimiterLength = state.inlineCodeDelimiterLength;
   let currentBlock = state.openBlock;
 
   while (i < line.length) {
-    // Handle backtick for inline code tracking
     if (line[i] === "`") {
-      result += line[i];
+      const runLength = consumeBacktickRun(line, i);
+      result += line.slice(i, i + runLength);
       if (!currentBlock) {
-        inInlineCode = !inInlineCode;
+        if (inlineCodeDelimiterLength === null) {
+          inlineCodeDelimiterLength = runLength;
+        } else if (runLength === inlineCodeDelimiterLength) {
+          inlineCodeDelimiterLength = null;
+        }
       }
-      i += 1;
+      i += runLength;
       continue;
     }
 
     const two = line.slice(i, i + 2);
+    const inInlineCode = inlineCodeDelimiterLength !== null;
 
     // Consume escaped backslash as a unit — `\\` is never part of a math
     // delimiter, so skip past both characters to avoid the second `\` being
@@ -165,7 +178,10 @@ function convertLatexDelimitersInLine(
     i += 1;
   }
 
-  return { line: result, state: { openBlock: currentBlock, inInlineCode } };
+  return {
+    line: result,
+    state: { openBlock: currentBlock, inlineCodeDelimiterLength },
+  };
 }
 
 /**
@@ -187,7 +203,10 @@ export function normalizeLatexMathDelimiters(markdown: string): string {
   }
 
   let insideFence = false;
-  let mathState: DelimiterState = { openBlock: null, inInlineCode: false };
+  let mathState: DelimiterState = {
+    openBlock: null,
+    inlineCodeDelimiterLength: null,
+  };
 
   return markdown
     .split("\n")
@@ -196,7 +215,10 @@ export function normalizeLatexMathDelimiters(markdown: string): string {
         insideFence = !insideFence;
         return line;
       }
-      if (insideFence || (INDENTED_CODE_RE.test(line) && !mathState.openBlock)) {
+      if (
+        insideFence ||
+        (INDENTED_CODE_RE.test(line) && !mathState.openBlock)
+      ) {
         return line;
       }
       const converted = convertLatexDelimitersInLine(line, mathState);
@@ -206,8 +228,31 @@ export function normalizeLatexMathDelimiters(markdown: string): string {
     .join("\n");
 }
 
-function flattenDisplayMathBody(lines: string[]): string {
-  return lines.map((line) => line.trim()).join(" ");
+function hasUnescapedTexComment(line: string): boolean {
+  for (let i = 0; i < line.length; i++) {
+    if (line[i] !== "%") {
+      continue;
+    }
+
+    let backslashCount = 0;
+    for (let j = i - 1; j >= 0 && line[j] === "\\"; j--) {
+      backslashCount += 1;
+    }
+
+    if (backslashCount % 2 === 0) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function flattenDisplayMathBody(lines: string[]): string[] {
+  if (lines.some(hasUnescapedTexComment)) {
+    return lines;
+  }
+
+  return [lines.map((line) => line.trim()).join(" ")];
 }
 
 /**
@@ -246,7 +291,8 @@ export function compactDisplayMathBlocks(markdown: string): string {
       if (mathLines === null) {
         mathLines = [];
       } else {
-        output.push("$$", flattenDisplayMathBody(mathLines), "$$");
+        const flattenedMathLines = flattenDisplayMathBody(mathLines);
+        output.push("$$", ...flattenedMathLines, "$$");
         mathLines = null;
       }
       continue;
@@ -272,10 +318,7 @@ export function normalizeStreamdownMathMarkdown(markdown: string): string {
 }
 
 export function preprocessStreamdownMarkdown(markdown: string): string {
-  if (
-    !MERMAID_BLOCK_HINT_RE.test(markdown) ||
-    !markdown.includes("-.->")
-  ) {
+  if (!MERMAID_BLOCK_HINT_RE.test(markdown) || !markdown.includes("-.->")) {
     return markdown;
   }
 

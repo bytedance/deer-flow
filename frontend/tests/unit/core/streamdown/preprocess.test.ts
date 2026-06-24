@@ -157,6 +157,21 @@ test("compactDisplayMathBlocks keeps display math as display math", () => {
   expect(compactDisplayMathBlocks(input)).toBe(expected);
 });
 
+test("compactDisplayMathBlocks preserves TeX comments in display math", () => {
+  const input = ["Before", "$$", "a % step 1", "+ b", "$$", "After"].join("\n");
+  expect(compactDisplayMathBlocks(input)).toBe(input);
+});
+
+test("compactDisplayMathBlocks compacts escaped percent in display math", () => {
+  const input = ["Before", "$$", "a \\% step 1", "+ b", "$$", "After"].join(
+    "\n",
+  );
+  const expected = ["Before", "$$", "a \\% step 1 + b", "$$", "After"].join(
+    "\n",
+  );
+  expect(compactDisplayMathBlocks(input)).toBe(expected);
+});
+
 test("compactDisplayMathBlocks leaves fenced code content untouched", () => {
   const input = [
     "```md",
@@ -220,4 +235,15 @@ test("normalizeStreamdownMathMarkdown preserves delimiters inside multi-line cod
   // A backtick code span opened on line 1 should protect line 2 content
   const input = ["`code span", "with \\(x\\) inside`"].join("\n");
   expect(normalizeStreamdownMathMarkdown(input)).toBe(input);
+});
+
+test("normalizeStreamdownMathMarkdown preserves delimiters inside multi-backtick code spans", () => {
+  const input = "Use ``\\(literal\\)`` here";
+  expect(normalizeStreamdownMathMarkdown(input)).toBe(input);
+});
+
+test("normalizeStreamdownMathMarkdown requires matching backtick run to close code spans", () => {
+  const input = "Use ``\\(literal\\)` and still code`` then \\(x\\)";
+  const expected = "Use ``\\(literal\\)` and still code`` then $x$";
+  expect(normalizeStreamdownMathMarkdown(input)).toBe(expected);
 });
