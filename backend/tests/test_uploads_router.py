@@ -279,13 +279,15 @@ def test_upload_files_acquires_non_local_sandbox_before_writing(tmp_path):
     sandbox = MagicMock()
     provider.get.return_value = sandbox
 
-    def acquire_before_writes(thread_id: str) -> str:
+    def acquire_before_writes(thread_id: str, *, user_id: str | None = None) -> str:
         assert list(thread_uploads_dir.iterdir()) == []
+        assert user_id == "owner-upload"
         return "aio-1"
 
     provider.acquire.side_effect = acquire_before_writes
 
     with (
+        patch.object(uploads, "get_effective_user_id", return_value="owner-upload"),
         patch.object(uploads, "ensure_uploads_dir", return_value=thread_uploads_dir),
         patch.object(uploads, "get_sandbox_provider", return_value=provider),
     ):
@@ -293,7 +295,7 @@ def test_upload_files_acquires_non_local_sandbox_before_writing(tmp_path):
         result = asyncio.run(call_unwrapped(uploads.upload_files, "thread-aio", request=MagicMock(), files=[file], config=SimpleNamespace()))
 
     assert result.success is True
-    provider.acquire.assert_called_once_with("thread-aio")
+    provider.acquire.assert_called_once_with("thread-aio", user_id="owner-upload")
     sandbox.update_file.assert_called_once_with("/mnt/user-data/uploads/notes.txt", b"hello uploads")
 
 
@@ -393,6 +395,7 @@ def test_upload_files_does_not_sync_non_local_sandbox_when_total_size_exceeds_li
     provider.get.return_value = sandbox
 
     with (
+        patch.object(uploads, "get_effective_user_id", return_value="owner-upload"),
         patch.object(uploads, "ensure_uploads_dir", return_value=thread_uploads_dir),
         patch.object(uploads, "get_sandbox_provider", return_value=provider),
         patch.object(uploads, "_get_upload_limits", return_value=uploads.UploadLimits(max_files=10, max_file_size=10, max_total_size=5)),
@@ -405,7 +408,7 @@ def test_upload_files_does_not_sync_non_local_sandbox_when_total_size_exceeds_li
             asyncio.run(call_unwrapped(uploads.upload_files, "thread-aio", request=MagicMock(), files=files, config=SimpleNamespace()))
 
     assert exc_info.value.status_code == 413
-    provider.acquire.assert_called_once_with("thread-aio")
+    provider.acquire.assert_called_once_with("thread-aio", user_id="owner-upload")
     provider.get.assert_called_once_with("aio-1")
     sandbox.update_file.assert_not_called()
 
@@ -421,6 +424,7 @@ def test_upload_files_does_not_sync_non_local_sandbox_when_conversion_fails(tmp_
     provider.get.return_value = sandbox
 
     with (
+        patch.object(uploads, "get_effective_user_id", return_value="owner-upload"),
         patch.object(uploads, "ensure_uploads_dir", return_value=thread_uploads_dir),
         patch.object(uploads, "get_sandbox_provider", return_value=provider),
         patch.object(uploads, "_auto_convert_documents_enabled", return_value=True),
@@ -431,7 +435,7 @@ def test_upload_files_does_not_sync_non_local_sandbox_when_conversion_fails(tmp_
             asyncio.run(call_unwrapped(uploads.upload_files, "thread-aio", request=MagicMock(), files=[file], config=SimpleNamespace()))
 
     assert exc_info.value.status_code == 500
-    provider.acquire.assert_called_once_with("thread-aio")
+    provider.acquire.assert_called_once_with("thread-aio", user_id="owner-upload")
     provider.get.assert_called_once_with("aio-1")
     sandbox.update_file.assert_not_called()
     assert not (thread_uploads_dir / "report.pdf").exists()

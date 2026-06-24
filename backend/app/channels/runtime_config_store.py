@@ -125,9 +125,8 @@ def merge_runtime_channel_configs(
             channels_config.pop(provider, None)
             continue
         existing = channels_config.get(provider)
-        merged = dict(runtime_config)
-        if isinstance(existing, dict):
-            merged.update(existing)
+        merged = dict(existing) if isinstance(existing, dict) else {}
+        merged.update(runtime_config)
         channels_config[provider] = merged
 
 

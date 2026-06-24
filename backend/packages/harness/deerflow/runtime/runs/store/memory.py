@@ -14,6 +14,23 @@ from deerflow.runtime.runs.store.base import RunStore
 class MemoryRunStore(RunStore):
     def __init__(self) -> None:
         self._runs: dict[str, dict[str, Any]] = {}
+        # Secondary index: thread_id -> insertion-ordered run_id set (a dict is
+        # used as an ordered set), maintained in lockstep with ``_runs`` so
+        # per-thread queries avoid O(total in-memory runs) full scans. Mirrors
+        # the index ``RunManager`` keeps over its own in-memory records.
+        self._runs_by_thread: dict[str, dict[str, None]] = {}
+
+    def _index_run(self, run_id: str, thread_id: str) -> None:
+        """Register *run_id* under *thread_id* in the secondary index."""
+        self._runs_by_thread.setdefault(thread_id, {})[run_id] = None
+
+    def _unindex_run(self, run_id: str, thread_id: str) -> None:
+        """Drop *run_id* from the *thread_id* bucket, removing the bucket when empty."""
+        bucket = self._runs_by_thread.get(thread_id)
+        if bucket is not None:
+            bucket.pop(run_id, None)
+            if not bucket:
+                self._runs_by_thread.pop(thread_id, None)
 
     async def put(
         self,
@@ -45,6 +62,7 @@ class MemoryRunStore(RunStore):
             "created_at": created_at or now,
             "updated_at": now,
         }
+        self._index_run(run_id, thread_id)
 
     async def get(self, run_id, *, user_id=None):
         run = self._runs.get(run_id)
@@ -55,7 +73,13 @@ class MemoryRunStore(RunStore):
         return run
 
     async def list_by_thread(self, thread_id, *, user_id=None, limit=100):
-        results = [r for r in self._runs.values() if r["thread_id"] == thread_id and (user_id is None or r.get("user_id") == user_id)]
+        # Use the thread index for an O(runs-in-thread) lookup instead of
+        # scanning every run. ``self._runs.get`` is defense-in-depth: it drops a
+        # stale id still in the index but already gone from ``_runs``.
+        run_ids = self._runs_by_thread.get(thread_id)
+        if not run_ids:
+            return []
+        results = [run for run_id in run_ids if (run := self._runs.get(run_id)) is not None and (user_id is None or run.get("user_id") == user_id)]
         results.sort(key=lambda r: r["created_at"], reverse=True)
         return results[:limit]
 
@@ -74,7 +98,9 @@ class MemoryRunStore(RunStore):
             self._runs[run_id]["updated_at"] = datetime.now(UTC).isoformat()
 
     async def delete(self, run_id):
-        self._runs.pop(run_id, None)
+        run = self._runs.pop(run_id, None)
+        if run is not None:
+            self._unindex_run(run_id, run["thread_id"])
 
     async def update_run_completion(self, run_id, *, status, **kwargs):
         if run_id in self._runs:
@@ -107,7 +133,10 @@ class MemoryRunStore(RunStore):
 
     async def aggregate_tokens_by_thread(self, thread_id: str, *, include_active: bool = False) -> dict[str, Any]:
         statuses = ("success", "error", "running") if include_active else ("success", "error")
-        completed = [r for r in self._runs.values() if r["thread_id"] == thread_id and r.get("status") in statuses]
+        # Use the thread index for an O(runs-in-thread) lookup instead of
+        # scanning every run in the process (mirrors ``list_by_thread``).
+        run_ids = self._runs_by_thread.get(thread_id) or ()
+        completed = [run for run_id in run_ids if (run := self._runs.get(run_id)) is not None and run.get("status") in statuses]
         by_model: dict[str, dict] = {}
         for r in completed:
             usage_by_model = r.get("token_usage_by_model") or {}

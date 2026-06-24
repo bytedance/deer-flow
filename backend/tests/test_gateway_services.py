@@ -612,6 +612,89 @@ def test_inject_authenticated_user_context_skips_internal_role():
     assert config["context"]["user_id"] == "channel-user-7"
 
 
+async def _capture_start_run_graph_input(body):
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from langgraph.checkpoint.memory import InMemorySaver
+    from langgraph.store.memory import InMemoryStore
+
+    from app.gateway.services import start_run
+    from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
+    from deerflow.runtime import RunManager
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    run_manager = RunManager(store=MemoryRunStore())
+    state = SimpleNamespace(
+        stream_bridge=SimpleNamespace(),
+        run_manager=run_manager,
+        checkpointer=InMemorySaver(),
+        store=InMemoryStore(),
+        run_event_store=SimpleNamespace(),
+        run_events_config=None,
+        thread_store=MemoryThreadMetaStore(InMemoryStore()),
+    )
+    request = SimpleNamespace(
+        headers={},
+        state=SimpleNamespace(),
+        app=SimpleNamespace(state=state),
+    )
+    captured: dict[str, object] = {}
+
+    async def fake_run_agent(*args, **kwargs):
+        captured["graph_input"] = kwargs["graph_input"]
+
+    with (
+        patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+        patch("app.gateway.services.run_agent", side_effect=fake_run_agent),
+    ):
+        record = await start_run(body, "thread-command-test", request)
+        await record.task
+
+    return captured["graph_input"]
+
+
+def test_start_run_translates_resume_command_to_langgraph_command(_stub_app_config):
+    import asyncio
+
+    from langgraph.types import Command
+
+    from app.gateway.routers.thread_runs import RunCreateRequest
+
+    graph_input = asyncio.run(
+        _capture_start_run_graph_input(
+            RunCreateRequest(
+                input=None,
+                command={"resume": {"answer": "approved"}},
+            )
+        )
+    )
+
+    assert isinstance(graph_input, Command)
+    assert graph_input.resume == {"answer": "approved"}
+
+
+def test_start_run_uses_normalized_input_without_command(_stub_app_config):
+    import asyncio
+
+    from langchain_core.messages import HumanMessage
+
+    from app.gateway.routers.thread_runs import RunCreateRequest
+
+    graph_input = asyncio.run(
+        _capture_start_run_graph_input(
+            RunCreateRequest(
+                input={"messages": [{"role": "human", "content": "hi"}]},
+                command=None,
+            )
+        )
+    )
+
+    assert isinstance(graph_input, dict)
+    assert isinstance(graph_input["messages"][0], HumanMessage)
+    assert graph_input["messages"][0].content == "hi"
+
+
 def test_start_run_uses_internal_owner_header_for_persistence(_stub_app_config):
     import asyncio
     from types import SimpleNamespace
