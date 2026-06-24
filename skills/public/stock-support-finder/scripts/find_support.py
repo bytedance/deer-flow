@@ -153,15 +153,15 @@ def main():
     print(f"  RSI(14)   : {rsi}  —  {rsi_label}")
     print()
 
-    # Detect swing points
-    swing_lows = find_swing_lows(closes, args.window)
-    swing_highs = find_swing_highs(closes, args.window)
+    # Detect swing points — use Low for support, High for resistance (intraday wicks)
+    swing_lows = find_swing_lows(lows_raw, args.window)
+    swing_highs = find_swing_highs(highs_raw, args.window)
     support_clusters = cluster_levels(swing_lows, args.tolerance / 100)
     resistance_clusters = cluster_levels(swing_highs, args.tolerance / 100)
 
-    # Split into below/above current price
-    supports = [(p, c) for p, c in support_clusters if p < current_price * 1.03]
-    resistances = [(p, c) for p, c in resistance_clusters if p > current_price * 0.97]
+    # Split strictly below / above current price
+    supports = [(p, c) for p, c in support_clusters if p < current_price]
+    resistances = [(p, c) for p, c in resistance_clusters if p > current_price]
 
     max_touches = max([c for _, c in support_clusters + resistance_clusters], default=1)
 
@@ -204,9 +204,11 @@ def main():
     print(f"  MACD 金叉       : ⚠️  请在 Moomoo 图表上手动确认")
     print()
     if all_pass:
-        nearest_support = supports[0][0] if supports else None
-        if nearest_support and resistances:
-            target = resistances[0][0]
+        # Nearest = closest to current price, not strongest (most-touched)
+        nearest_support = min((p for p, _ in supports), key=lambda p: current_price - p, default=None)
+        nearest_resistance = min((p for p, _ in resistances), key=lambda p: p - current_price, default=None)
+        if nearest_support and nearest_resistance:
+            target = nearest_resistance
             stop = round(nearest_support * 0.99, 2)
             risk = round(current_price - stop, 2)
             reward = round(target - current_price, 2)
@@ -217,6 +219,7 @@ def main():
             print(f"     盈亏比  : {rr}:1  {'✅' if rr >= 2 else '❌ (不足2:1，不入场)'}")
         else:
             print("  🟡 基础条件满足，但找不到足够支撑/阻力参考位")
+            nearest_support = None
     else:
         print("  🔴 当前不满足入场条件，继续观察")
 
