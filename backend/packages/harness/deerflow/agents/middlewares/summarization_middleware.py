@@ -256,18 +256,54 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         messages_to_summarize: list[AnyMessage],
         preserved_messages: list[AnyMessage],
     ) -> tuple[list[AnyMessage], list[AnyMessage]]:
-        """Keep hidden dynamic-context reminders out of summary compression.
+        """Keep hidden dynamic-context reminders and their ID-swap peers out of summary compression.
 
         These reminders carry the current date and optional memory. If summarization
         removes them, DynamicContextMiddleware can mistake the summary HumanMessage
         for the first user message and inject the reminder in the wrong place.
+
+        The ID-swap triplet produced by ``_make_reminder_and_user_messages`` contains
+        three messages: ``SystemMessage(id=X)`` and ``HumanMessage(id=X__memory)`` are
+        both tagged with ``dynamic_context_reminder=True``, but ``HumanMessage(id=X__user)``
+        carries the original user content and is **not** tagged. Without peer rescue,
+        ``__user`` would stay in ``to_summarize`` and be compressed into prose — orphaning
+        the tagged messages and losing the user question from the model's direct context.
+
+        This method rescues tagged reminders and also rescues any untagged messages whose
+        ``id`` shares the same ``stable_id`` prefix (i.e. ``X__user``, ``X__memory``).
         """
         reminders = [msg for msg in messages_to_summarize if is_dynamic_context_reminder(msg)]
         if not reminders:
             return messages_to_summarize, preserved_messages
 
-        remaining = [msg for msg in messages_to_summarize if not is_dynamic_context_reminder(msg)]
-        return remaining, reminders + preserved_messages
+        # Collect the base IDs (the stable_id prefix) from tagged reminders.
+        # For a reminder with id="ctx-001__memory", the base is "ctx-001".
+        # For a reminder with id="ctx-001" (SystemMessage), the base is "ctx-001".
+        # removesuffix is suffix-only — it won't strip a "__" that sits in the
+        # middle of a stable_id (e.g. "ctx__001" stays intact, unlike rsplit
+        # which would mis-derive "ctx").  Only known ID-swap suffixes (__memory,
+        # __user) are stripped; __user is not tagged so won't appear in reminders,
+        # but is included defensively.
+        reminder_base_ids: set[str] = set()
+        for msg in reminders:
+            if msg.id:
+                base = msg.id.removesuffix("__memory").removesuffix("__user")
+                reminder_base_ids.add(base)
+
+        # Single-pass partition: walk messages_to_summarize in chronological order
+        # and rescue both tagged reminders and untagged ID-swap peers (whose id
+        # starts with a known base + "__").  This preserves the original message
+        # order within rescued — critical when multiple triplets land in one
+        # summarization window — and eliminates the need for id(m)-based dedup
+        # that the previous reminders+peers concatenation required.
+        rescued: list[AnyMessage] = []
+        remaining: list[AnyMessage] = []
+        for msg in messages_to_summarize:
+            if is_dynamic_context_reminder(msg) or (msg.id and any(msg.id.startswith(b + "__") for b in reminder_base_ids)):
+                rescued.append(msg)
+            else:
+                remaining.append(msg)
+        return remaining, rescued + preserved_messages
 
     def _partition_with_skill_rescue(
         self,

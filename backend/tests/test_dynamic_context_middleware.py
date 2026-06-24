@@ -518,3 +518,117 @@ def test_no_second_midnight_injection_once_date_updated():
         result = mw.before_agent(state, _fake_runtime())
 
     assert result is None  # same day as last injected date → no update
+
+
+# ---------------------------------------------------------------------------
+# ID-swap recursive-injection guard (issue #3725)
+# ---------------------------------------------------------------------------
+
+
+def test_user_suffix_message_is_not_injection_target():
+    """Regression guard: HumanMessage whose ID ends with ``__user`` must not be
+    treated as an injection target.
+
+    After the ID-swap in ``_make_reminder_and_user_messages``, the original user
+    text becomes ``HumanMessage(id=X__user)``. If the middleware processes this
+    message again, it would perform another ID-swap → ``X__user__user`` → … →
+    unbounded suffix growth and ghost-message re-execution (issue #3725).
+    """
+    from deerflow.agents.middlewares.dynamic_context_middleware import _is_user_injection_target
+
+    # A __user-suffix message is NOT a valid injection target
+    user_swap_msg = HumanMessage(content="Hello", id="msg-1__user")
+    assert _is_user_injection_target(user_swap_msg) is False
+
+    # A __memory-suffix message is already tagged as a reminder, also rejected
+    memory_swap_msg = HumanMessage(
+        content="<memory>prefs</memory>",
+        id="msg-1__memory",
+        additional_kwargs={"hide_from_ui": True, _DYNAMIC_CONTEXT_REMINDER_KEY: True},
+    )
+    assert _is_user_injection_target(memory_swap_msg) is False
+
+    # A normal HumanMessage without __user suffix IS a valid target
+    normal_msg = HumanMessage(content="Hello", id="msg-1")
+    assert _is_user_injection_target(normal_msg) is True
+
+
+def test_endswith_not_substring_prevents_false_positive():
+    """``endswith("__user")`` must NOT reject messages whose ID merely contains
+    ``__user`` somewhere in the middle (e.g. ``user__question-123``).
+
+    A substring check (``"__user" in id``) would incorrectly reject such IDs.
+    """
+    from deerflow.agents.middlewares.dynamic_context_middleware import _is_user_injection_target
+
+    # ID contains "__user" in the middle — should NOT be rejected
+    middle_match = HumanMessage(content="question", id="user__question-123")
+    assert _is_user_injection_target(middle_match) is True
+
+    # ID ends with "__user" — should be rejected
+    suffix_match = HumanMessage(content="question", id="msg-1__user")
+    assert _is_user_injection_target(suffix_match) is False
+
+    # Nested suffix "__user__user" — should also be rejected (recursive case)
+    recursive_match = HumanMessage(content="question", id="msg-1__user__user")
+    assert _is_user_injection_target(recursive_match) is False
+
+
+def test_no_recursive_id_swap_in_full_middleware_flow():
+    """End-to-end guard: after the first ID-swap, a second call to ``before_agent``
+    must NOT produce a second swap on the ``__user`` message.
+
+    This reproduces the exact scenario from issue #3725: a session with an
+    existing ID-swap triplet receives a new HumanMessage, and the middleware
+    must only inject into the new message — not re-process the ``__user`` peer.
+
+    The state_v2 reminder deliberately omits the parseable date from both
+    content and additional_kwargs so ``_last_injected_date`` returns None.
+    This forces the first-turn injection path to actually reach
+    ``_is_user_injection_target``, which must reject ``msg-1__user`` and
+    select ``msg-2`` instead — exercising the endswith("__user") guard
+    end-to-end rather than relying on the same-day short-circuit.
+    """
+    mw = _make_middleware()
+
+    # First call: inject into HumanMessage(id="msg-1")
+    state_v1 = {"messages": [HumanMessage(content="Hello", id="msg-1")]}
+
+    with mock.patch("deerflow.agents.middlewares.dynamic_context_middleware.datetime") as mock_dt, mock.patch("deerflow.agents.lead_agent.prompt._get_memory_context", return_value=""):
+        mock_dt.now.return_value.strftime.return_value = "2026-05-08, Friday"
+        result_v1 = mw.before_agent(state_v1, _fake_runtime())
+
+    assert result_v1 is not None
+    msgs_v1 = result_v1["messages"]
+    assert len(msgs_v1) == 2
+    assert msgs_v1[0].id == "msg-1"  # reminder takes original ID
+    assert msgs_v1[1].id == "msg-1__user"  # user content gets derived ID
+
+    # Simulate state after first turn: ID-swap triplet (without parseable date
+    # so _last_injected_date returns None → first-turn path is exercised)
+    # + AI reply + new user message.
+    state_v2 = {
+        "messages": [
+            SystemMessage(
+                content="<system-reminder>\nplaceholder\n</system-reminder>",
+                id="msg-1",
+                additional_kwargs={"hide_from_ui": True, _DYNAMIC_CONTEXT_REMINDER_KEY: True},
+            ),
+            HumanMessage(content="Hello", id="msg-1__user"),
+            AIMessage(content="Hi there"),
+            HumanMessage(content="Follow-up", id="msg-2"),
+        ]
+    }
+
+    # Second call: _last_injected_date returns None (no parseable date),
+    # so _inject enters first-turn path and must skip msg-1__user via the
+    # endswith("__user") guard, then inject into msg-2.
+    with mock.patch("deerflow.agents.middlewares.dynamic_context_middleware.datetime") as mock_dt, mock.patch("deerflow.agents.lead_agent.prompt._get_memory_context", return_value=""):
+        mock_dt.now.return_value.strftime.return_value = "2026-05-08, Friday"
+        result_v2 = mw.before_agent(state_v2, _fake_runtime())
+
+    # The guard must route injection to msg-2, not msg-1__user.
+    assert result_v2 is not None
+    msgs_v2 = result_v2["messages"]
+    assert msgs_v2[0].id == "msg-2"  # reminder takes new message's ID
+    assert msgs_v2[1].id == "msg-2__user"  # user content gets derived ID
