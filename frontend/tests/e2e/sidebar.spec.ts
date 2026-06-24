@@ -30,6 +30,39 @@ test.describe("Sidebar navigation", () => {
     await expect(page).toHaveURL(/\/workspace\/agents/);
   });
 
+  test("Agents button is disabled with a hover tooltip when agents_api is off", async ({
+    page,
+  }) => {
+    mockLangGraphAPI(page);
+    await page.route("**/api/features", (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ agents_api: { enabled: false } }),
+      }),
+    );
+
+    await page.goto("/workspace/chats/new");
+
+    const sidebar = page.locator("[data-sidebar='sidebar']");
+    // Chats remains a real link; Agents is no longer a navigable link.
+    await expect(sidebar.locator("a[href='/workspace/chats']")).toBeVisible({
+      timeout: 15_000,
+    });
+    await expect(sidebar.locator("a[href='/workspace/agents']")).toHaveCount(0);
+
+    // The disabled Agents button is rendered and announces its disabled state.
+    const agentsButton = sidebar.getByRole("button", { name: "Agents" });
+    await expect(agentsButton).toHaveAttribute("aria-disabled", "true");
+
+    // The button itself has pointer-events suppressed; force the hover so the
+    // event reaches the wrapping tooltip-trigger span that surfaces the tooltip.
+    await agentsButton.hover({ force: true });
+    await expect(page.getByText("Feature not enabled").first()).toBeVisible({
+      timeout: 5_000,
+    });
+  });
+
   test("mobile welcome layout stays within viewport and opens sidebar", async ({
     page,
   }) => {
