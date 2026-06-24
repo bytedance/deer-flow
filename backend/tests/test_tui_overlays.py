@@ -17,10 +17,12 @@ class _FakeClient:
         return {"skills": []}
 
     def list_threads(self, limit=10):
-        return {"thread_list": [
-            {"thread_id": "thread-aaaaaaaa", "title": "Refactor bridge"},
-            {"thread_id": "thread-bbbbbbbb", "title": "Write docs"},
-        ]}
+        return {
+            "thread_list": [
+                {"thread_id": "thread-aaaaaaaa", "title": "Refactor bridge"},
+                {"thread_id": "thread-bbbbbbbb", "title": "Write docs"},
+            ]
+        }
 
     def stream(self, *args, **kwargs):
         yield StreamEvent(type="end", data={})

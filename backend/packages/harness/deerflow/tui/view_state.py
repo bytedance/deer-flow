@@ -123,18 +123,7 @@ class ClearRows:
     pass
 
 
-Action = (
-    UserSubmitted
-    | RunStarted
-    | RunEnded
-    | AssistantDelta
-    | AssistantError
-    | ToolStarted
-    | ToolResult
-    | SystemMessage
-    | ThreadTitle
-    | ClearRows
-)
+Action = UserSubmitted | RunStarted | RunEnded | AssistantDelta | AssistantError | ToolStarted | ToolResult | SystemMessage | ThreadTitle | ClearRows
 
 
 # --------------------------------------------------------------------------- #

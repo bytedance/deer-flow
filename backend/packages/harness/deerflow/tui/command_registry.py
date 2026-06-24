@@ -64,9 +64,7 @@ def build_registry(skills: list[dict]) -> list[Command]:
         name = skill.get("name")
         if not name or name in _BUILTIN_NAMES:
             continue
-        commands.append(
-            Command(name=name, description=skill.get("description", "") or "", category="skill")
-        )
+        commands.append(Command(name=name, description=skill.get("description", "") or "", category="skill"))
     return commands
 
 

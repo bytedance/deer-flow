@@ -64,9 +64,7 @@ def test_translate_end_event_carries_usage():
 
 
 def test_translate_values_surfaces_title_only():
-    assert translate(StreamEvent(type="values", data={"title": "My Thread", "messages": []})) == [
-        ThreadTitle(title="My Thread")
-    ]
+    assert translate(StreamEvent(type="values", data={"title": "My Thread", "messages": []})) == [ThreadTitle(title="My Thread")]
     assert translate(StreamEvent(type="values", data={"title": None, "messages": []})) == []
     assert translate(StreamEvent(type="custom", data={"anything": 1})) == []
 

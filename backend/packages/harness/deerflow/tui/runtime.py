@@ -88,9 +88,7 @@ def _translate_message(data: Any) -> list[Action]:
     return actions
 
 
-def stream_actions(
-    client: _ClientLike, message: str, *, thread_id: str | None = None, **kwargs: Any
-) -> Iterator[Action]:
+def stream_actions(client: _ClientLike, message: str, *, thread_id: str | None = None, **kwargs: Any) -> Iterator[Action]:
     """Yield a bracketed action stream for one agent run.
 
     Always begins with ``RunStarted`` and ends with ``RunEnded`` (even on error,

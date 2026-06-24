@@ -34,10 +34,7 @@ from .view_state import (
 )
 from .widgets.composer import ComposerInput
 
-_HELP_TEXT = (
-    "Commands:  /new  /threads  /model  /skills  /tools  /mcp  /memory  /usage  /config  /quit\n"
-    "Keys:  Enter send · Ctrl+C interrupt or quit · Ctrl+L redraw · / commands · Esc close overlay"
-)
+_HELP_TEXT = "Commands:  /new  /threads  /model  /skills  /tools  /mcp  /memory  /usage  /config  /quit\nKeys:  Enter send · Ctrl+C interrupt or quit · Ctrl+L redraw · / commands · Esc close overlay"
 
 
 class SelectScreen(ModalScreen):
@@ -617,9 +614,7 @@ class DeerFlowTUI(App):
 
     def _refresh_status(self) -> None:
         spinner = SYMBOLS["spinner"][self._spinner_idx] if self._streaming else ""
-        self.query_one("#status", Static).update(
-            render_status(self.state, model=self._model, thread_label=self._thread_label(), spinner=spinner)
-        )
+        self.query_one("#status", Static).update(render_status(self.state, model=self._model, thread_label=self._thread_label(), spinner=spinner))
 
 
 def run_tui(plan) -> int:

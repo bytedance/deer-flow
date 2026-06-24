@@ -94,24 +94,20 @@ def plan_launch(
         message = args.print if isinstance(args.print, str) else None
         if message is None and stdin_isatty:
             return LaunchPlan(mode="headless-help", reason="--print needs a MESSAGE argument or piped stdin.")
-        return LaunchPlan(
-            mode="print", message=message, read_stdin=message is None, thread_id=resume, continue_recent=continue_recent
-        )
+        return LaunchPlan(mode="print", message=message, read_stdin=message is None, thread_id=resume, continue_recent=continue_recent)
 
     if args.json is not _UNSET:
         message = args.json if isinstance(args.json, str) else None
         if message is None and stdin_isatty:
             return LaunchPlan(mode="headless-help", reason="--json needs a MESSAGE argument or piped stdin.")
-        return LaunchPlan(
-            mode="json", message=message, read_stdin=message is None, thread_id=resume, continue_recent=continue_recent
-        )
+        return LaunchPlan(mode="json", message=message, read_stdin=message is None, thread_id=resume, continue_recent=continue_recent)
 
     if args.cli:
         if positional:
             return LaunchPlan(mode="print", message=positional, thread_id=resume, continue_recent=continue_recent)
         return LaunchPlan(
             mode="headless-help",
-            reason="--cli needs a message. Try: deerflow --print \"your question\".",
+            reason='--cli needs a message. Try: deerflow --print "your question".',
         )
 
     forced_tui = bool(args.tui)
@@ -221,10 +217,7 @@ def _run_tui(plan: LaunchPlan) -> int:
         from deerflow.tui.app import run_tui
     except ModuleNotFoundError as exc:  # textual missing
         if getattr(exc, "name", "") == "textual" or "textual" in str(exc):
-            msg = (
-                "The terminal UI needs the optional 'textual' dependency.\n"
-                "Install it with:  uv pip install 'deerflow-harness[tui]'   (or: pip install textual)\n"
-            )
+            msg = "The terminal UI needs the optional 'textual' dependency.\nInstall it with:  uv pip install 'deerflow-harness[tui]'   (or: pip install textual)\n"
             if plan.forced_tui:
                 print(msg, file=sys.stderr)
                 return 1
