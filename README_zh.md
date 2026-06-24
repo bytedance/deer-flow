@@ -54,6 +54,7 @@ https://github.com/user-attachments/assets/a8bcadc4-e040-4cf2-8fda-dd768b999c18
     - [长期记忆](#长期记忆)
   - [推荐模型](#推荐模型)
   - [内嵌 Python Client](#内嵌-python-client)
+  - [终端工作台 (TUI)](#终端工作台-tui)
   - [文档](#文档)
   - [⚠️ 安全使用](#️-安全使用)
   - [参与贡献](#参与贡献)
@@ -541,6 +542,26 @@ client.upload_files("thread-1", ["./report.pdf"])  # {"success": True, "files": 
 ```
 
 所有返回 dict 的方法都会在 CI 中通过 Gateway 的 Pydantic 响应模型校验（`TestGatewayConformance`），以确保内嵌 client 始终和 HTTP API schema 保持同步。完整 API 说明见 `backend/packages/harness/deerflow/client.py`。
+
+## 终端工作台 (TUI)
+
+`deerflow` 是一个面向终端用户的工作台，**内嵌**运行在 `DeerFlowClient` 之上——无需启动 Gateway、前端、nginx 或 Docker，同时沿用与 DeerFlow 其它部分相同的 `config.yaml`、checkpointer、技能、记忆、MCP 和沙箱配置。
+
+![DeerFlow TUI](docs/tui/tui-preview.svg)
+
+```bash
+uv pip install 'deerflow-harness[tui]'        # 可选的 'textual' 依赖
+
+deerflow                                      # 启动终端 UI（需要 TTY）
+deerflow --continue                           # 恢复最近一次会话
+deerflow --resume THREAD                      # 按 id 恢复指定会话
+deerflow --print "总结一下这个仓库"             # 无头模式，结果打印到 stdout
+deerflow --json  "hello"                       # 无头模式，输出按行分隔的 StreamEvent
+```
+
+键盘驱动的对话界面：流式渲染的对话区（回答按 Markdown 渲染）、紧凑的工具活动卡片、`/` 斜杠命令面板、`/model` 与 `/threads` 选择器、输入历史，以及 `Esc` / `Ctrl+C` 打断。在 TUI 里开启的会话也会出现在 Web UI 侧边栏——它会以本地默认用户身份写入共享的会话存储，因此终端与网页保持同步，**无需运行 Gateway**。
+
+完整说明见 [backend/docs/TUI.md](backend/docs/TUI.md)。
 
 ## 文档
 
