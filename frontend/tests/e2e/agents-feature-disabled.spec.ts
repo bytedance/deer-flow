@@ -37,9 +37,7 @@ test.describe("Agents feature disabled", () => {
     await expect(
       page.getByText(/contact your administrator|联系管理员/i),
     ).toBeVisible({ timeout: 15_000 });
-    await expect(
-      page.getByText(/config\.yaml|agents_api/i),
-    ).toHaveCount(0);
+    await expect(page.getByText(/config\.yaml|agents_api/i)).toHaveCount(0);
 
     // Gate prevented every agents API call, including direct navigation.
     expect(agentRequests).toEqual([]);
