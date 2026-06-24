@@ -32,10 +32,14 @@ test.describe("Agents feature disabled", () => {
 
     await page.goto("/workspace/agents");
 
-    // The "feature not enabled" message renders (en-US or zh-CN copy).
-    await expect(page.getByText(/not enabled|未启用/)).toBeVisible({
-      timeout: 15_000,
-    });
+    // The disabled message renders and directs the user to an administrator
+    // (en-US or zh-CN copy) without leaking backend config details.
+    await expect(
+      page.getByText(/contact your administrator|联系管理员/i),
+    ).toBeVisible({ timeout: 15_000 });
+    await expect(
+      page.getByText(/config\.yaml|agents_api/i),
+    ).toHaveCount(0);
 
     // Gate prevented every agents API call, including direct navigation.
     expect(agentRequests).toEqual([]);

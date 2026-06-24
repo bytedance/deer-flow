@@ -191,7 +191,7 @@ export const enUS: Translations = {
       "Create your first custom agent with a specialized system prompt.",
     featureDisabledTitle: "Agents feature is not enabled",
     featureDisabledDescription:
-      "Set agents_api.enabled: true in config.yaml to enable custom agents.",
+      "This feature is not enabled on this server. Please contact your administrator.",
     chat: "Chat",
     delete: "Delete",
     deleteConfirm:

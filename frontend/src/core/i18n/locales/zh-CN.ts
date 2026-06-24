@@ -181,8 +181,7 @@ export const zhCN: Translations = {
     emptyTitle: "还没有自定义智能体",
     emptyDescription: "创建你的第一个自定义智能体，设置专属系统提示词。",
     featureDisabledTitle: "智能体功能未启用",
-    featureDisabledDescription:
-      "在 config.yaml 中设置 agents_api.enabled: true 即可启用自定义智能体。",
+    featureDisabledDescription: "该功能未在此服务器上启用，请联系管理员。",
     chat: "对话",
     delete: "删除",
     deleteConfirm: "确定要删除该智能体吗？此操作不可撤销。",
