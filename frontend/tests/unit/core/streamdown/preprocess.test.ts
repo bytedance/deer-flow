@@ -4,6 +4,8 @@ import {
   capBlockquoteNesting,
   capListNesting,
   capMarkdownNesting,
+  compactDisplayMathBlocks,
+  normalizeStreamdownMathMarkdown,
   preprocessStreamdownMarkdown,
 } from "@/core/streamdown/preprocess";
 
@@ -100,7 +102,148 @@ test("capMarkdownNesting caps both blockquote and list nesting", () => {
   expect(/^[ \t]*/.exec(lines[1]!)![0].length).toBe(200);
 });
 
-test("preprocessStreamdownMarkdown leaves non-mermaid content unchanged", () => {
-  const input = "just some text";
-  expect(preprocessStreamdownMarkdown(input)).toBe(input);
+test("normalizeStreamdownMathMarkdown converts inline math delimiters", () => {
+  expect(
+    normalizeStreamdownMathMarkdown("Given \\(x\\), compute \\(x^2\\)."),
+  ).toBe("Given $x$, compute $x^2$.");
+});
+
+test("normalizeStreamdownMathMarkdown converts multiline display math delimiters", () => {
+  const input = [
+    "Before",
+    "\\[",
+    "\\begin{aligned}",
+    "x_t &= \\sqrt{\\bar{\\alpha}_t}x_0 + \\sqrt{1-\\bar{\\alpha}_t}\\epsilon, \\\\",
+    "\\hat{x}_0 &= x_t",
+    "\\end{aligned}",
+    "\\]",
+    "After",
+  ].join("\n");
+  const expected = [
+    "Before",
+    "$$",
+    "\\begin{aligned} x_t &= \\sqrt{\\bar{\\alpha}_t}x_0 + \\sqrt{1-\\bar{\\alpha}_t}\\epsilon, \\\\ \\hat{x}_0 &= x_t \\end{aligned}",
+    "$$",
+    "After",
+  ].join("\n");
+  expect(normalizeStreamdownMathMarkdown(input)).toBe(expected);
+});
+
+test("normalizeStreamdownMathMarkdown leaves fenced and indented code untouched", () => {
+  const input = [
+    "Text \\(x\\)",
+    "```tex",
+    "\\[",
+    "x^2",
+    "\\]",
+    "```",
+    "    \\(literal\\)",
+  ].join("\n");
+  const expected = [
+    "Text $x$",
+    "```tex",
+    "\\[",
+    "x^2",
+    "\\]",
+    "```",
+    "    \\(literal\\)",
+  ].join("\n");
+  expect(normalizeStreamdownMathMarkdown(input)).toBe(expected);
+});
+
+test("compactDisplayMathBlocks keeps display math as display math", () => {
+  const input = ["Before", "$$", "x", "=", "y", "$$", "After"].join("\n");
+  const expected = ["Before", "$$", "x = y", "$$", "After"].join("\n");
+  expect(compactDisplayMathBlocks(input)).toBe(expected);
+});
+
+test("compactDisplayMathBlocks preserves TeX comments in display math", () => {
+  const input = ["Before", "$$", "a % step 1", "+ b", "$$", "After"].join("\n");
+  expect(compactDisplayMathBlocks(input)).toBe(input);
+});
+
+test("compactDisplayMathBlocks compacts escaped percent in display math", () => {
+  const input = ["Before", "$$", "a \\% step 1", "+ b", "$$", "After"].join(
+    "\n",
+  );
+  const expected = ["Before", "$$", "a \\% step 1 + b", "$$", "After"].join(
+    "\n",
+  );
+  expect(compactDisplayMathBlocks(input)).toBe(expected);
+});
+
+test("compactDisplayMathBlocks leaves fenced code content untouched", () => {
+  const input = [
+    "```md",
+    "$$",
+    "x = y",
+    "$$",
+    "```",
+    "$$",
+    "a",
+    "=",
+    "b",
+    "$$",
+  ].join("\n");
+  const expected = [
+    "```md",
+    "$$",
+    "x = y",
+    "$$",
+    "```",
+    "$$",
+    "a = b",
+    "$$",
+  ].join("\n");
+  expect(compactDisplayMathBlocks(input)).toBe(expected);
+});
+
+test("preprocessStreamdownMarkdown applies only Mermaid fixes (not math)", () => {
+  const input = [
+    "Before \\(x\\)",
+    "```mermaid",
+    "graph TD",
+    "  A -.-> B",
+    "```",
+  ].join("\n");
+  const expected = [
+    "Before \\(x\\)",
+    "```mermaid",
+    "graph TD",
+    "  A -.-> B",
+    "```",
+  ].join("\n");
+  expect(preprocessStreamdownMarkdown(input)).toBe(expected);
+});
+
+test("normalizeStreamdownMathMarkdown preserves escaped backslash before parens", () => {
+  // When the backslash itself is escaped (\\), the following ( is not a math open
+  const input = "Use \\\\( to start inline math.";
+  expect(normalizeStreamdownMathMarkdown(input)).toBe(
+    "Use \\\\( to start inline math.",
+  );
+});
+
+test("normalizeStreamdownMathMarkdown preserves escaped backslash before brackets", () => {
+  const input = "Escape: \\\\[ is not math.";
+  expect(normalizeStreamdownMathMarkdown(input)).toBe(
+    "Escape: \\\\[ is not math.",
+  );
+});
+
+test("normalizeStreamdownMathMarkdown preserves delimiters inside multi-line code spans", () => {
+  // A backtick code span opened on line 1 should protect line 2 content
+  const input = ["`code span", "with \\(x\\) inside`"].join("\n");
+  expect(normalizeStreamdownMathMarkdown(input)).toBe(input);
+});
+
+test("normalizeStreamdownMathMarkdown preserves delimiters inside multi-backtick code spans", () => {
+  const input = "Use ``\\(literal\\)`` here";
+  expect(normalizeStreamdownMathMarkdown(input)).toBe(input);
+});
+
+test("normalizeStreamdownMathMarkdown requires matching backtick run to close code spans", () => {
+  const input = "Use ``\\(literal\\)` and still code`` then \\(x\\)";
+  const expected = "Use ``\\(literal\\)` and still code`` then $x$";
+  expect(normalizeStreamdownMathMarkdown(input)).toBe(expected);
 });

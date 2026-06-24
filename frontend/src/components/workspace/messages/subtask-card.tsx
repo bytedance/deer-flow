@@ -13,13 +13,13 @@ import {
   ChainOfThoughtStep,
 } from "@/components/ai-elements/chain-of-thought";
 import { Shimmer } from "@/components/ai-elements/shimmer";
-import { ClipboardSafeStreamdown } from "@/components/ai-elements/streamdown";
 import { Button } from "@/components/ui/button";
 import { ShineBorder } from "@/components/ui/shine-border";
 import { useI18n } from "@/core/i18n/hooks";
 import { hasToolCalls } from "@/core/messages/utils";
 import { useRehypeSplitWordsIntoSpans } from "@/core/rehype";
 import { streamdownPluginsWithWordAnimation } from "@/core/streamdown";
+import { SafeStreamdown } from "@/core/streamdown/components";
 import { useSubtask } from "@/core/tasks/context";
 import { explainLastToolCall } from "@/core/tools/utils";
 import { cn } from "@/lib/utils";
@@ -126,12 +126,12 @@ export function SubtaskCard({
           {task.prompt && (
             <ChainOfThoughtStep
               label={
-                <ClipboardSafeStreamdown
+                <SafeStreamdown
                   {...streamdownPluginsWithWordAnimation}
                   components={{ a: CitationLink }}
                 >
                   {task.prompt}
-                </ClipboardSafeStreamdown>
+                </SafeStreamdown>
               }
             ></ChainOfThoughtStep>
           )}

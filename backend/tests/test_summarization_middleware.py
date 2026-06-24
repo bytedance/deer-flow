@@ -12,7 +12,7 @@ from langchain_core.outputs import ChatGeneration, ChatResult
 from langgraph.constants import TAG_NOSTREAM
 
 from deerflow.agents.memory.summarization_hook import memory_flush_hook
-from deerflow.agents.middlewares.dynamic_context_middleware import _DYNAMIC_CONTEXT_REMINDER_KEY, DynamicContextMiddleware
+from deerflow.agents.middlewares.dynamic_context_middleware import _DYNAMIC_CONTEXT_REMINDER_KEY, DynamicContextMiddleware, is_dynamic_context_reminder
 from deerflow.agents.middlewares.summarization_middleware import DeerFlowSummarizationMiddleware, SummarizationEvent
 from deerflow.config.memory_config import MemoryConfig
 
@@ -822,3 +822,208 @@ def test_memory_flush_hook_passes_runtime_user_id(monkeypatch: pytest.MonkeyPatc
 
     queue.add_nowait.assert_called_once()
     assert queue.add_nowait.call_args.kwargs["user_id"] == "alice"
+
+
+def test_id_swap_user_peer_is_preserved_across_summarization() -> None:
+    """__user (untagged) must be rescued alongside its tagged ID-swap peers.
+
+    The ID-swap triplet from _make_reminder_and_user_messages is:
+    [SystemMessage(id=X, reminder=True), HumanMessage(id=X__memory, reminder=True),
+     HumanMessage(id=X__user)] — only the first two are tagged. Without peer
+    rescue, __user stays in to_summarize and is compressed into prose, orphaning
+    the tagged messages and losing the user question from direct model context.
+    """
+    captured: list[SummarizationEvent] = []
+    middleware = _middleware(before_summarization=[captured.append])
+
+    # Build an ID-swap triplet (SystemMessage + __memory + __user)
+    stable_id = "ctx-001"
+    reminder_system = SystemMessage(
+        content="<system-reminder>\n<current_date>2026-05-08, Friday</current_date>\n</system-reminder>",
+        id=stable_id,
+        additional_kwargs={"hide_from_ui": True, _DYNAMIC_CONTEXT_REMINDER_KEY: True},
+    )
+    memory_msg = HumanMessage(
+        content="<memory>user preferences</memory>",
+        id=f"{stable_id}__memory",
+        additional_kwargs={"hide_from_ui": True, _DYNAMIC_CONTEXT_REMINDER_KEY: True},
+    )
+    user_msg = HumanMessage(
+        content="What is the weather in Tokyo?",
+        id=f"{stable_id}__user",
+    )
+
+    result = middleware.before_model(
+        {
+            "messages": [
+                reminder_system,
+                memory_msg,
+                user_msg,
+                AIMessage(content="The weather is sunny.", id="ai-1"),
+                HumanMessage(content="user-2"),
+            ]
+        },
+        _runtime(),
+    )
+
+    assert len(captured) == 1
+    # The __user message should NOT be in messages_to_summarize
+    summarized_contents = [m.content for m in captured[0].messages_to_summarize]
+    assert "What is the weather in Tokyo?" not in summarized_contents
+
+    # All three triplet members should be in preserved_messages
+    preserved_ids = [m.id for m in captured[0].preserved_messages]
+    assert stable_id in preserved_ids
+    assert f"{stable_id}__memory" in preserved_ids
+    assert f"{stable_id}__user" in preserved_ids
+
+    # The emitted state includes all three triplet members
+    emitted = result["messages"]
+    assert isinstance(emitted[0], RemoveMessage)
+    # Find the triplet members in the emitted messages
+    emitted_ids = [m.id for m in emitted[2:]]  # Skip RemoveMessage + summary
+    assert stable_id in emitted_ids
+    assert f"{stable_id}__memory" in emitted_ids
+    assert f"{stable_id}__user" in emitted_ids
+
+
+def test_id_swap_user_peer_preserved_without_memory() -> None:
+    """When there's no __memory in the triplet, __user is still rescued."""
+    captured: list[SummarizationEvent] = []
+    middleware = _middleware(before_summarization=[captured.append])
+
+    stable_id = "ctx-002"
+    reminder_system = SystemMessage(
+        content="<system-reminder>\n<current_date>2026-05-09, Saturday</current_date>\n</system-reminder>",
+        id=stable_id,
+        additional_kwargs={"hide_from_ui": True, _DYNAMIC_CONTEXT_REMINDER_KEY: True},
+    )
+    user_msg = HumanMessage(
+        content="How are you?",
+        id=f"{stable_id}__user",
+    )
+
+    middleware.before_model(
+        {
+            "messages": [
+                reminder_system,
+                user_msg,
+                AIMessage(content="I'm fine.", id="ai-2"),
+                HumanMessage(content="user-3"),
+            ]
+        },
+        _runtime(),
+    )
+
+    assert len(captured) == 1
+    summarized_contents = [m.content for m in captured[0].messages_to_summarize]
+    assert "How are you?" not in summarized_contents
+
+    preserved_ids = [m.id for m in captured[0].preserved_messages]
+    assert stable_id in preserved_ids
+    assert f"{stable_id}__user" in preserved_ids
+
+
+def test_non_reminder_messages_with_double_underscore_id_not_rescued() -> None:
+    """Messages whose IDs contain "__" but are NOT ID-swap peers are not rescued."""
+    captured: list[SummarizationEvent] = []
+    middleware = _middleware(before_summarization=[captured.append])
+
+    # A normal reminder without any ID-swap peers
+    reminder = _dynamic_context_reminder("standalone-reminder")
+    # A message whose ID happens to contain "__" but is unrelated
+    unrelated = HumanMessage(content="unrelated question", id="some-other__msg")
+
+    middleware.before_model(
+        {
+            "messages": [
+                reminder,
+                unrelated,
+                AIMessage(content="answer"),
+                HumanMessage(content="user-2"),
+            ]
+        },
+        _runtime(),
+    )
+
+    assert len(captured) == 1
+    # The unrelated message is NOT rescued — it stays in to_summarize
+    preserved_ids = [m.id for m in captured[0].preserved_messages]
+    assert "some-other__msg" not in preserved_ids
+    # Only the standalone reminder is rescued (no peer lookup triggered)
+    assert "standalone-reminder" in preserved_ids
+
+
+def test_multiple_id_swap_triplets_preserve_chronological_order() -> None:
+    """When multiple ID-swap triplets sit in one summarization window, rescued
+    messages must retain their original chronological order — not be scrambled
+    by separating tagged reminders from untagged peers.
+
+    Regression: the previous reminders+peers concatenation rescued as
+    [Sys(base1), Sys(base2), Mem(base1), Mem(base2), User(base1), User(base2)],
+    detaching each user question from its AI answer. The single-pass partition
+    preserves [Sys(base1), Mem(base1), User(base1), Sys(base2), Mem(base2), User(base2)].
+    """
+    captured: list[SummarizationEvent] = []
+    middleware = _middleware(before_summarization=[captured.append])
+
+    # Two complete triplets (first-turn + midnight crossing) plus an AI reply
+    # between them, all sitting before the summarization cutoff.
+    base1 = "ctx-001"
+    base2 = "ctx-002"
+    reminder_1 = SystemMessage(
+        content="<system-reminder>\n<current_date>2026-05-08, Friday</current_date>\n</system-reminder>",
+        id=base1,
+        additional_kwargs={"hide_from_ui": True, _DYNAMIC_CONTEXT_REMINDER_KEY: True},
+    )
+    memory_1 = HumanMessage(
+        content="<memory>prefs v1</memory>",
+        id=f"{base1}__memory",
+        additional_kwargs={"hide_from_ui": True, _DYNAMIC_CONTEXT_REMINDER_KEY: True},
+    )
+    user_1 = HumanMessage(content="What is the weather?", id=f"{base1}__user")
+    ai_1 = AIMessage(content="Sunny.", id="ai-1")
+
+    reminder_2 = SystemMessage(
+        content="<system-reminder>\n<current_date>2026-05-09, Saturday</current_date>\n</system-reminder>",
+        id=base2,
+        additional_kwargs={"hide_from_ui": True, _DYNAMIC_CONTEXT_REMINDER_KEY: True},
+    )
+    memory_2 = HumanMessage(
+        content="<memory>prefs v2</memory>",
+        id=f"{base2}__memory",
+        additional_kwargs={"hide_from_ui": True, _DYNAMIC_CONTEXT_REMINDER_KEY: True},
+    )
+    user_2 = HumanMessage(content="How are you?", id=f"{base2}__user")
+    ai_2 = AIMessage(content="Fine.", id="ai-2")
+
+    middleware.before_model(
+        {
+            "messages": [
+                reminder_1,
+                memory_1,
+                user_1,
+                ai_1,
+                reminder_2,
+                memory_2,
+                user_2,
+                ai_2,
+                HumanMessage(content="latest question"),
+            ]
+        },
+        _runtime(),
+    )
+
+    assert len(captured) == 1
+    # Rescued messages must appear in their original chronological order:
+    # each triplet stays contiguous, not re-grouped by role.
+    preserved = captured[0].preserved_messages
+    rescued_ids = [m.id for m in preserved if m.id and (is_dynamic_context_reminder(m) or m.id in (f"{base1}__user", f"{base2}__user"))]
+    assert rescued_ids == [
+        base1,
+        f"{base1}__memory",
+        f"{base1}__user",
+        base2,
+        f"{base2}__memory",
+        f"{base2}__user",
+    ]

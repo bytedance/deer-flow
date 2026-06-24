@@ -7,7 +7,7 @@ must stay identical.
 
 from __future__ import annotations
 
-from sqlalchemy import Integer, String
+from sqlalchemy import Integer, MetaData, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from deerflow.persistence.base import Base, _column_keys
@@ -15,6 +15,10 @@ from deerflow.persistence.base import Base, _column_keys
 
 class _Widget(Base):
     __tablename__ = "_widget_to_dict_test"
+    # Keep this test-only model out of the application metadata. Pytest imports
+    # test modules during collection, so registering it on ``Base.metadata``
+    # would leak the table into unrelated create_all/schema-parity tests.
+    metadata = MetaData()
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     name: Mapped[str] = mapped_column(String(32))
