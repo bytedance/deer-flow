@@ -19,7 +19,6 @@ import {
   ArtifactHeader,
   ArtifactTitle,
 } from "@/components/ai-elements/artifact";
-import { ClipboardSafeStreamdown } from "@/components/ai-elements/streamdown";
 import { Button } from "@/components/ui/button";
 import { Select, SelectItem } from "@/components/ui/select";
 import {
@@ -44,6 +43,7 @@ import { useI18n } from "@/core/i18n/hooks";
 import { findToolCallResult } from "@/core/messages/utils";
 import { installSkill } from "@/core/skills/api";
 import { streamdownPlugins } from "@/core/streamdown";
+import { SafeStreamdown } from "@/core/streamdown/components";
 import {
   canBrowserPreviewFile,
   checkCodeFile,
@@ -462,13 +462,13 @@ export function ArtifactFilePreview({
   if (language === "markdown") {
     return (
       <div className="size-full px-4">
-        <ClipboardSafeStreamdown
+        <SafeStreamdown
           className="size-full"
           {...streamdownPlugins}
           components={{ a: ArtifactLink }}
         >
           {content ?? ""}
-        </ClipboardSafeStreamdown>
+        </SafeStreamdown>
       </div>
     );
   }

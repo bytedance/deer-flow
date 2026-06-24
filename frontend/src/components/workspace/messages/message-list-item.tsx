@@ -23,7 +23,6 @@ import {
 } from "@/components/ai-elements/message";
 import {
   Reasoning,
-  ReasoningContent,
   ReasoningTrigger,
 } from "@/components/ai-elements/reasoning";
 import { Task, TaskTrigger } from "@/components/ai-elements/task";
@@ -43,6 +42,7 @@ import {
   type FileInMessage,
 } from "@/core/messages/utils";
 import { useRehypeSplitWordsIntoSpans } from "@/core/rehype";
+import { SafeReasoningContent } from "@/core/streamdown/components";
 import { cn } from "@/lib/utils";
 
 import { CopyButton } from "../copy-button";
@@ -346,7 +346,7 @@ function MessageContent_({
           onTurnDurationChange={handleDurationChange}
         >
           <ReasoningTrigger />
-          <ReasoningContent>{reasoningContent}</ReasoningContent>
+          <SafeReasoningContent>{reasoningContent}</SafeReasoningContent>
         </Reasoning>
       </AIElementMessageContent>
     );
@@ -389,7 +389,7 @@ function MessageContent_({
           >
             <ReasoningTrigger hasContent={!!reasoningContent} />
             {reasoningContent && (
-              <ReasoningContent>{reasoningContent}</ReasoningContent>
+              <SafeReasoningContent>{reasoningContent}</SafeReasoningContent>
             )}
           </Reasoning>
         )}

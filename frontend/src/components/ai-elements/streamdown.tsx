@@ -1,13 +1,9 @@
 "use client";
 
-import { Component, useMemo, type ComponentProps, type ReactNode } from "react";
+import { Component, type ComponentProps, type ReactNode } from "react";
 import { Streamdown } from "streamdown";
 
 import { installClipboardFallback } from "@/core/clipboard";
-import {
-  capMarkdownNesting,
-  normalizeStreamdownMathMarkdown,
-} from "@/core/streamdown/preprocess";
 
 export type ClipboardSafeStreamdownProps = ComponentProps<typeof Streamdown>;
 
@@ -59,28 +55,11 @@ class StreamdownFallbackBoundary extends Component<
 
 export function ClipboardSafeStreamdown({
   children,
-  parseIncompleteMarkdown,
   ...props
 }: ClipboardSafeStreamdownProps) {
-  // Fast path for the dominant pathological inputs (deep ">" chains and deeply
-  // nested lists both blow up marked's recursive tokenizers) so the error
-  // boundary below rarely has to absorb a stack overflow — and never has to
-  // face the heap exhaustion the same lists cause on larger stacks, which it
-  // cannot catch.
-  const safeChildren = useMemo(() => {
-    if (typeof children !== "string") {
-      return children;
-    }
-    return normalizeStreamdownMathMarkdown(capMarkdownNesting(children));
-  }, [children]);
   return (
     <StreamdownFallbackBoundary raw={children}>
-      <Streamdown
-        parseIncompleteMarkdown={parseIncompleteMarkdown ?? true}
-        {...props}
-      >
-        {safeChildren}
-      </Streamdown>
+      <Streamdown {...props}>{children}</Streamdown>
     </StreamdownFallbackBoundary>
   );
 }
