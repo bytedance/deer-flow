@@ -45,6 +45,27 @@ def test_render_transcript_includes_all_row_kinds():
     assert "a note" in out
 
 
+def test_finalized_assistant_renders_markdown():
+    state = initial_state()
+    state = reduce(state, AssistantDelta(id="m1", text="**bold** text\n\n## A Heading\n\n- item one"))
+    out = _render_to_text(render_transcript(state))
+    # Markdown is rendered: the syntax markers are consumed, the content remains.
+    assert "bold" in out
+    assert "**bold**" not in out
+    assert "A Heading" in out
+    assert "## A Heading" not in out
+    assert "item one" in out
+
+
+def test_actively_streaming_assistant_stays_plain():
+    state = initial_state()
+    state = reduce(state, RunStarted())
+    state = reduce(state, AssistantDelta(id="m1", text="**partial heading ##"))
+    out = _render_to_text(render_transcript(state))
+    # The streaming row must NOT be markdown-rendered (avoids reflow jumpiness).
+    assert "**partial heading ##" in out
+
+
 def test_render_status_ready_and_working():
     ready = _render_to_text(render_status(initial_state(), model="gpt", thread_label="new"))
     assert "ready" in ready

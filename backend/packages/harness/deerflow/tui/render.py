@@ -8,6 +8,8 @@ Rich ``Console`` and inspecting the text.
 from __future__ import annotations
 
 from rich.console import Group, RenderableType
+from rich.markdown import Markdown
+from rich.table import Table
 from rich.text import Text
 
 from .theme import SYMBOLS, THEME
@@ -22,14 +24,23 @@ _TOOL_STATUS_STYLE = {"running": THEME.warning, "ok": THEME.accent, "error": THE
 def render_transcript(state: ViewState) -> RenderableType:
     if not state.rows:
         return Text(_EMPTY_HINT, style=f"italic {THEME.dim}")
+
+    # The actively-streaming assistant row renders as plain text to avoid Markdown
+    # reflow jumpiness; every finalized assistant message renders as Markdown.
+    last_assistant = -1
+    for i, row in enumerate(state.rows):
+        if isinstance(row, AssistantRow):
+            last_assistant = i
+
     blocks: list[RenderableType] = []
-    for row in state.rows:
-        blocks.append(render_row(row))
+    for i, row in enumerate(state.rows):
+        streaming_now = state.streaming and i == last_assistant
+        blocks.append(render_row(row, as_markdown=not streaming_now))
         blocks.append(Text(""))  # one blank line between blocks for breathing room
     return Group(*blocks[:-1])
 
 
-def render_row(row: Row) -> RenderableType:
+def render_row(row: Row, *, as_markdown: bool = True) -> RenderableType:
     if isinstance(row, UserRow):
         text = Text()
         text.append(f"{SYMBOLS['user']} ", style=f"bold {THEME.user}")
@@ -37,6 +48,8 @@ def render_row(row: Row) -> RenderableType:
         return text
 
     if isinstance(row, AssistantRow):
+        if not row.error and as_markdown and row.text.strip():
+            return _assistant_markdown(row.text)
         style = THEME.error if row.error else THEME.assistant
         text = Text()
         text.append(f"{SYMBOLS['assistant']} ", style=f"bold {style}")
@@ -51,6 +64,18 @@ def render_row(row: Row) -> RenderableType:
         return Text(f"{SYMBOLS['system']} {row.text}", style=f"italic {style}")
 
     return Text(str(row))
+
+
+def _assistant_markdown(text: str) -> RenderableType:
+    """A ``●`` speaker marker aligned to the top of the Markdown-rendered body."""
+    grid = Table.grid(padding=(0, 1, 0, 0))
+    grid.add_column(width=1, vertical="top")  # marker
+    grid.add_column(ratio=1)  # markdown body
+    grid.add_row(
+        Text(SYMBOLS["assistant"], style=f"bold {THEME.assistant}"),
+        Markdown(text),
+    )
+    return grid
 
 
 def _render_tool(row: ToolRow) -> RenderableType:

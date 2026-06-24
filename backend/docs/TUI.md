@@ -36,8 +36,12 @@ instead of hanging.
 ## Surface
 
 - **Header** — model, thread, project root, skill/tool counts.
-- **Transcript** — user prompts, streamed assistant text, and compact tool
-  cards (`⚙ Read path ✓`) with dimmed result previews.
+- **Transcript** — user prompts, assistant answers, and compact tool cards
+  (`⚙ Read path ✓`) with dimmed result previews. Finalized assistant messages
+  render as Markdown (headings, bold, lists, code, links); the actively-streaming
+  message stays plain text to avoid reflow jumpiness and snaps to Markdown when
+  it completes. Transcript re-renders are coalesced (~16 fps) so streaming stays
+  smooth on long threads.
 - **Status line** — run state + animated spinner, model, thread title, token
   usage, and an `esc interrupt` hint while a run is active.
 - **Composer** — rounded input box. `/` opens the command palette.

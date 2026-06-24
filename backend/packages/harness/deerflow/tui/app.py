@@ -175,6 +175,7 @@ class DeerFlowTUI(App):
         self._palette_items: list = []
         self._palette_index = 0
         self._history = InputHistory()
+        self._transcript_dirty = False
 
     # ----- composition --------------------------------------------------- #
 
@@ -190,6 +191,7 @@ class DeerFlowTUI(App):
         self._load_session_info()
         self._refresh_all()
         self.set_interval(0.1, self._tick_spinner)
+        self.set_interval(0.06, self._flush_transcript)  # coalesce streaming re-renders
         self.query_one("#composer", Input).focus()
         if self.plan and getattr(self.plan, "message", None):
             self._send_to_agent(self.plan.message)
@@ -530,10 +532,21 @@ class DeerFlowTUI(App):
         self.state = reduce(self.state, action)
         if isinstance(action, RunStarted):
             self._streaming = True
+            self._transcript_dirty = True
         elif isinstance(action, RunEnded):
             self._streaming = False
-        self._refresh_transcript()
+            # Flush now so the finished message snaps to its Markdown rendering.
+            self._transcript_dirty = False
+            self._refresh_transcript()
+        else:
+            # Coalesce rapid streaming deltas; _flush_transcript renders them.
+            self._transcript_dirty = True
         self._refresh_status()
+
+    def _flush_transcript(self) -> None:
+        if self._transcript_dirty:
+            self._transcript_dirty = False
+            self._refresh_transcript()
 
     # ----- key actions --------------------------------------------------- #
 
