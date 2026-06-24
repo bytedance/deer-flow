@@ -67,13 +67,16 @@ test.describe("Thread history", () => {
       .first();
     await expect(firstThreadItem).toBeVisible({ timeout: 15_000 });
 
-    const box = await firstThreadItem.boundingBox();
+    const firstThreadLink = firstThreadItem.getByRole("link");
+    await expect(firstThreadLink).toBeVisible();
+
+    const box = await firstThreadLink.boundingBox();
     expect(box).not.toBeNull();
     if (!box) {
       return;
     }
 
-    await page.mouse.click(box.x + 4, box.y + box.height / 2);
+    await firstThreadLink.click({ position: { x: 4, y: box.height / 2 } });
 
     await page.waitForURL(`**/workspace/chats/${MOCK_THREAD_ID}`);
     await expect(page).toHaveURL(new RegExp(MOCK_THREAD_ID));

@@ -242,7 +242,7 @@ export function RecentChatList() {
                   >
                     <SidebarMenuButton isActive={isActive} asChild>
                       <Link
-                        className="text-muted-foreground min-w-0 gap-1.5 whitespace-nowrap group-hover/side-menu-item:overflow-hidden"
+                        className="text-muted-foreground min-w-0 whitespace-nowrap group-hover/side-menu-item:overflow-hidden"
                         href={pathOfThread(thread)}
                       >
                         <ThreadChannelIcon source={channelSource} />
@@ -266,7 +266,7 @@ export function RecentChatList() {
                         <DropdownMenuTrigger asChild>
                           <SidebarMenuAction
                             showOnHover
-                            className="bg-background/50 hover:bg-background"
+                            className="bg-background/50 hover:bg-background after:left-0!"
                           >
                             <MoreHorizontal />
                             <span className="sr-only">{t.common.more}</span>
