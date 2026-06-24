@@ -182,16 +182,7 @@ def reduce(state: ViewState, action: Action) -> ViewState:
         return _append(state, AssistantRow(text=action.text, error=True))
 
     if isinstance(action, ToolStarted):
-        return _append(
-            state,
-            ToolRow(
-                tool_call_id=action.tool_call_id,
-                tool_name=action.tool_name,
-                title=summarize_tool_title(action.tool_name),
-                detail=format_tool_detail(action.tool_name, action.args),
-                status="running",
-            ),
-        )
+        return _apply_tool_started(state, action)
 
     if isinstance(action, ToolResult):
         return _apply_tool_result(state, action)
@@ -211,9 +202,15 @@ def reduce(state: ViewState, action: Action) -> ViewState:
 def _apply_assistant_delta(state: ViewState, action: AssistantDelta) -> ViewState:
     """Append to the existing assistant row with this id, or start a new one.
 
-    Deltas for a given message id are contiguous, so it is enough to match the
-    most recent assistant row by id. A new id (e.g. a fresh assistant turn after
-    a tool call) starts its own row, preserving transcript order.
+    Robust to non-strict streaming: the client can re-emit a message's *full*
+    content (e.g. a ``values`` snapshot synthesised after the ``messages``
+    deltas), or stream cumulative snapshots instead of pure deltas. So when an
+    update for an existing id arrives, we merge by content rather than blindly
+    concatenating:
+
+    * new text == accumulated, or starts with it  -> cumulative/re-send: replace
+    * accumulated starts with new text            -> stale/shorter re-send: keep
+    * otherwise                                   -> a real delta: append
     """
 
     rows = list(state.rows)
@@ -221,13 +218,56 @@ def _apply_assistant_delta(state: ViewState, action: AssistantDelta) -> ViewStat
         row = rows[i]
         if isinstance(row, AssistantRow):
             if row.id == action.id and not row.error:
-                rows[i] = replace(row, text=row.text + action.text)
+                rows[i] = replace(row, text=_merge_stream_text(row.text, action.text))
                 return replace(state, rows=tuple(rows))
             break  # most recent assistant row has a different id -> new row
     return _append(state, AssistantRow(text=action.text, id=action.id))
 
 
+def _merge_stream_text(existing: str, incoming: str) -> str:
+    if not existing:
+        return incoming
+    if incoming.startswith(existing):
+        return incoming  # cumulative snapshot or exact full re-send
+    if existing.startswith(incoming):
+        return existing  # shorter/stale re-send
+    return existing + incoming  # genuine incremental delta
+
+
+def _apply_tool_started(state: ViewState, action: ToolStarted) -> ViewState:
+    """Create or update a tool card, de-duplicated by ``tool_call_id``.
+
+    Streaming tool calls arrive as multiple chunks for one call id (name first,
+    then growing arguments), and the client may re-emit the call via a values
+    snapshot. Chunks with no id are argument-fragment noise and are dropped.
+    """
+    if not action.tool_call_id:
+        return state
+
+    rows = list(state.rows)
+    for i, row in enumerate(rows):
+        if isinstance(row, ToolRow) and row.tool_call_id == action.tool_call_id:
+            name = action.tool_name or row.tool_name
+            detail = format_tool_detail(name, action.args) or row.detail
+            rows[i] = replace(row, tool_name=name, title=summarize_tool_title(name), detail=detail)
+            return replace(state, rows=tuple(rows))
+
+    return _append(
+        state,
+        ToolRow(
+            tool_call_id=action.tool_call_id,
+            tool_name=action.tool_name,
+            title=summarize_tool_title(action.tool_name),
+            detail=format_tool_detail(action.tool_name, action.args),
+            status="running",
+        ),
+    )
+
+
 def _apply_tool_result(state: ViewState, action: ToolResult) -> ViewState:
+    if not action.tool_call_id:
+        return state
+
     rows = list(state.rows)
     for i, row in enumerate(rows):
         if isinstance(row, ToolRow) and row.tool_call_id == action.tool_call_id:
@@ -237,4 +277,15 @@ def _apply_tool_result(state: ViewState, action: ToolResult) -> ViewState:
                 result=format_tool_result(action.content),
             )
             return replace(state, rows=tuple(rows))
-    return state  # unknown tool_call_id -> ignore
+
+    # No matching tool card (started chunks missed) -> surface the result anyway.
+    return _append(
+        state,
+        ToolRow(
+            tool_call_id=action.tool_call_id,
+            tool_name=action.tool_name,
+            title=summarize_tool_title(action.tool_name),
+            status="error" if action.is_error else "ok",
+            result=format_tool_result(action.content),
+        ),
+    )

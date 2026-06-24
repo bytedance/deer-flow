@@ -108,6 +108,19 @@ async def test_up_arrow_recalls_previous_input_from_history():
 
 
 @pytest.mark.asyncio
+async def test_tab_keeps_focus_on_composer_when_palette_closed():
+    app = DeerFlowTUI(_FakeSession(), LaunchPlan(mode="tui"))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        composer = app.query_one("#composer")
+        assert app.focused is composer
+        await pilot.press("tab")
+        await pilot.pause()
+        # Tab must not move focus off the composer to the scroll region.
+        assert app.focused is composer
+
+
+@pytest.mark.asyncio
 async def test_unknown_command_shows_error_system_row():
     app = DeerFlowTUI(_FakeSession(), LaunchPlan(mode="tui"))
     async with app.run_test() as pilot:

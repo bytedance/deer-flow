@@ -243,8 +243,10 @@ class DeerFlowTUI(App):
             # intercept its keys; let the overlay handle them natively.
             if len(self.screen_stack) > 1:
                 return None
-            if action in {"nav_up", "nav_down"}:
-                return True  # always: palette nav when open, else input history
+            # nav (history) and Tab are always consumed so Tab can't move focus
+            # off the composer; Enter/Esc fall through to the Input when idle.
+            if action in {"nav_up", "nav_down", "palette_complete"}:
+                return True
             return True if self._palette_open else None
         return True
 
@@ -308,7 +310,11 @@ class DeerFlowTUI(App):
         self._close_palette()
 
     def action_palette_complete(self) -> None:
-        self._fill_from_palette()
+        # When the palette is open, Tab completes the highlighted command.
+        # When it's closed, Tab is a no-op here (consumed) so focus stays in the
+        # composer instead of moving to the scroll region.
+        if self._palette_open:
+            self._fill_from_palette()
 
     def action_palette_accept(self) -> None:
         item = self._current_palette_item()

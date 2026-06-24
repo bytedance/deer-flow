@@ -58,6 +58,8 @@ def truncate(text: str, limit: int) -> str:
 
 
 def summarize_tool_title(tool_name: str) -> str:
+    if not tool_name or not tool_name.strip():
+        return "Tool"
     if tool_name in _TOOL_TITLES:
         return _TOOL_TITLES[tool_name]
     return _humanize(tool_name)
