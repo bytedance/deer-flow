@@ -6,10 +6,14 @@ test.describe("Agents feature disabled", () => {
   test("shows disabled message and issues no /api/agents requests when feature is off", async ({
     page,
   }) => {
-    // Track any request to the agents API — there should be none.
+    // Track any request to the agents API — there should be none. Anchor the
+    // match so it only catches the real agents routes (/api/agents,
+    // /api/agents/check, /api/agents/{name}) and never a future unrelated
+    // path that merely contains the substring.
+    const AGENTS_API = /\/api\/agents(\/|$)/;
     const agentRequests: string[] = [];
     page.on("request", (req) => {
-      if (req.url().includes("/api/agents")) {
+      if (AGENTS_API.test(new URL(req.url()).pathname)) {
         agentRequests.push(req.url());
       }
     });
