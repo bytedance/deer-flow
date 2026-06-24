@@ -5,8 +5,11 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import logging
 from pathlib import Path
 from typing import Any
+from unittest import mock
+from unittest.mock import AsyncMock
 
 from app.channels.message_bus import InboundMessageType, MessageBus, OutboundMessage
 
@@ -355,6 +358,66 @@ def test_allowed_users_filter_blocks_non_whitelisted_sender():
         )
 
         assert published == []
+
+    _run(go())
+
+
+def test_connect_code_bypasses_allowed_users_filter(tmp_path: Path):
+    from app.channels.wechat import WechatChannel
+    from deerflow.persistence.channel_connections import ChannelConnectionRepository, ChannelCredentialCipher
+    from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
+
+    async def go():
+        from datetime import UTC, datetime, timedelta
+
+        await init_engine("sqlite", url=f"sqlite+aiosqlite:///{tmp_path / 'wechat.db'}", sqlite_dir=str(tmp_path))
+        try:
+            repo = ChannelConnectionRepository(
+                get_session_factory(),
+                cipher=ChannelCredentialCipher.from_key("wechat-secret"),
+            )
+            code = "wechat-bind-code"
+            await repo.create_oauth_state(
+                owner_user_id="deerflow-user-1",
+                provider="wechat",
+                state=code,
+                expires_at=datetime.now(UTC) + timedelta(minutes=5),
+            )
+
+            bus = MessageBus()
+            published = []
+
+            async def capture(msg):
+                published.append(msg)
+
+            bus.publish_inbound = capture  # type: ignore[method-assign]
+
+            # The newcomer ("blocked-user") is not in allowed_users yet, but a valid
+            # /connect code must still bootstrap their first bind.
+            channel = WechatChannel(
+                bus=bus,
+                config={"bot_token": "test-token", "allowed_users": ["allowed-user"], "connection_repo": repo},
+            )
+            channel._send_connection_reply = AsyncMock()  # type: ignore[method-assign]
+
+            await channel._handle_update(
+                {
+                    "message_type": 1,
+                    "from_user_id": "blocked-user",
+                    "context_token": "ctx-connect",
+                    "item_list": [{"type": 1, "text_item": {"text": f"/connect {code}"}}],
+                }
+            )
+
+            connections = await repo.list_connections("deerflow-user-1")
+            assert len(connections) == 1
+            assert connections[0]["provider"] == "wechat"
+            assert connections[0]["external_account_id"] == "blocked-user"
+            # The connect-code reply was sent and no normal inbound was published.
+            channel._send_connection_reply.assert_awaited_once()
+            assert published == []
+        finally:
+            await close_engine()
 
     _run(go())
 
@@ -1249,5 +1312,67 @@ def test_qrcode_login_binds_and_persists_auth_state(monkeypatch, tmp_path: Path)
         assert auth_state["status"] == "confirmed"
         assert auth_state["bot_token"] == "bound-token"
         assert auth_state["ilink_bot_id"] == "bot-99"
+        assert ((state_dir / "wechat-auth.json").stat().st_mode & 0o777) == 0o600
 
     _run(go())
+
+
+def test_save_auth_state_tightens_preexisting_loose_file(tmp_path: Path):
+    """A world-readable auth file is replaced by an owner-only one, atomically.
+
+    The bot_token must never be observable at loose permissions: the atomic
+    0o600-temp + ``Path.replace`` path swaps in a fresh owner-only inode rather
+    than truncating the existing 0o644 file in place. Seeding the destination at
+    0o644 first means a regression back to ``write_text`` + late ``chmod`` would
+    leave a detectable window (and, here, the temp-file artifact behind).
+    """
+    from app.channels.wechat import WechatChannel
+
+    state_dir = tmp_path / "wechat-state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    auth_path = state_dir / "wechat-auth.json"
+    auth_path.write_text(json.dumps({"status": "pending"}), encoding="utf-8")
+    auth_path.chmod(0o644)
+
+    channel = WechatChannel(
+        bus=MessageBus(),
+        config={"state_dir": str(state_dir), "qrcode_login_enabled": True},
+    )
+    channel._save_auth_state(status="confirmed", bot_token="bound-token", ilink_bot_id="bot-1")
+
+    assert (auth_path.stat().st_mode & 0o777) == 0o600
+    assert json.loads(auth_path.read_text(encoding="utf-8"))["bot_token"] == "bound-token"
+    # Atomic write leaves no temp-file residue behind.
+    assert list(state_dir.glob("*.tmp")) == []
+
+
+def test_save_auth_state_chmod_failure_is_logged_not_warned(tmp_path: Path, caplog):
+    """A chmod failure on a perms-less filesystem must not look like a persist failure.
+
+    With the post-replace chmod split into its own try/except, a chmod ``OSError``
+    is logged at debug while the JSON is genuinely on disk — operators must not see
+    the misleading ``failed to persist`` warning that the shared try/except produced.
+    """
+    from app.channels.wechat import WechatChannel
+
+    state_dir = tmp_path / "wechat-state"
+    channel = WechatChannel(
+        bus=MessageBus(),
+        config={"state_dir": str(state_dir), "qrcode_login_enabled": True},
+    )
+
+    real_chmod = Path.chmod
+
+    def chmod_spy(self: Path, mode: int, *args, **kwargs):
+        if self.suffix == ".json":
+            raise OSError("chmod unsupported on this filesystem")
+        return real_chmod(self, mode, *args, **kwargs)
+
+    with caplog.at_level(logging.DEBUG, logger="app.channels.wechat"), mock.patch.object(Path, "chmod", chmod_spy):
+        channel._save_auth_state(status="confirmed", bot_token="bound-token")
+
+    auth_path = state_dir / "wechat-auth.json"
+    assert json.loads(auth_path.read_text(encoding="utf-8"))["bot_token"] == "bound-token"
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("unable to chmod auth state" in message for message in messages)
+    assert not any("failed to persist auth state" in message for message in messages)

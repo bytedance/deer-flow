@@ -348,6 +348,13 @@ def build_middlewares(
 
         middlewares.append(DeferredToolFilterMiddleware(deferred_setup.deferred_names, deferred_setup.catalog_hash))
 
+    # Coalesce every SystemMessage into a single leading one before the request
+    # reaches the provider. Strict backends (vLLM, SGLang, Qwen, Anthropic)
+    # reject non-leading SystemMessages. See system_message_coalescing_middleware.py.
+    from deerflow.agents.middlewares.system_message_coalescing_middleware import SystemMessageCoalescingMiddleware
+
+    middlewares.append(SystemMessageCoalescingMiddleware())
+
     # Add SubagentLimitMiddleware to truncate excess parallel task calls
     subagent_enabled = cfg.get("subagent_enabled", False)
     if subagent_enabled:
@@ -358,6 +365,13 @@ def build_middlewares(
     loop_detection_config = resolved_app_config.loop_detection
     if loop_detection_config.enabled:
         middlewares.append(LoopDetectionMiddleware.from_config(loop_detection_config))
+
+    # TokenBudgetMiddleware - enforce per-run token limits
+    token_budget_config = resolved_app_config.token_budget
+    if token_budget_config.enabled:
+        from deerflow.agents.middlewares.token_budget_middleware import TokenBudgetMiddleware
+
+        middlewares.append(TokenBudgetMiddleware.from_config(token_budget_config))
 
     # Inject custom middlewares before ClarificationMiddleware
     if custom_middlewares:

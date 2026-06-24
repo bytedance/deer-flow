@@ -13,7 +13,7 @@ class SandboxProvider(ABC):
     needs_upload_permission_adjustment: bool = True
 
     @abstractmethod
-    def acquire(self, thread_id: str | None = None) -> str:
+    def acquire(self, thread_id: str | None = None, *, user_id: str | None = None) -> str:
         """Acquire a sandbox environment and return its ID.
 
         Returns:
@@ -21,7 +21,7 @@ class SandboxProvider(ABC):
         """
         pass
 
-    async def acquire_async(self, thread_id: str | None = None) -> str:
+    async def acquire_async(self, thread_id: str | None = None, *, user_id: str | None = None) -> str:
         """Acquire a sandbox without blocking the event loop.
 
         Most sandbox providers expose a synchronous lifecycle API because local
@@ -29,7 +29,7 @@ class SandboxProvider(ABC):
         this method so those blocking operations run in a worker thread instead
         of stalling the event loop.
         """
-        return await asyncio.to_thread(self.acquire, thread_id)
+        return await asyncio.to_thread(self.acquire, thread_id, user_id=user_id)
 
     @abstractmethod
     def get(self, sandbox_id: str) -> Sandbox | None:

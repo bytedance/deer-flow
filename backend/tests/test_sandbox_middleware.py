@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from typing import get_type_hints
 
 import pytest
 from langchain.agents.middleware import AgentMiddleware
@@ -10,7 +11,8 @@ from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.runtime import Runtime
 from langgraph.types import Command
 
-from deerflow.sandbox.middleware import SandboxMiddleware
+from deerflow.agents.thread_state import ThreadState
+from deerflow.sandbox.middleware import SandboxMiddleware, SandboxMiddlewareState
 from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.sandbox_provider import SandboxProvider, reset_sandbox_provider, set_sandbox_provider
 from deerflow.sandbox.search import GrepMatch
@@ -20,9 +22,11 @@ from deerflow.sandbox.tools import ls_tool
 class _SyncProvider(SandboxProvider):
     def __init__(self) -> None:
         self.thread_ids: list[str | None] = []
+        self.user_ids: list[str | None] = []
 
-    def acquire(self, thread_id: str | None = None) -> str:
+    def acquire(self, thread_id: str | None = None, *, user_id: str | None = None) -> str:
         self.thread_ids.append(thread_id)
+        self.user_ids.append(user_id)
         return "sync-sandbox"
 
     def get(self, sandbox_id: str) -> Sandbox | None:
@@ -70,14 +74,17 @@ class _SandboxStub(Sandbox):
 class _AsyncOnlyProvider(SandboxProvider):
     def __init__(self) -> None:
         self.thread_ids: list[str | None] = []
+        self.user_ids: list[str | None] = []
         self.released_ids: list[str] = []
         self.sandbox = _SandboxStub("async-sandbox")
 
-    def acquire(self, thread_id: str | None = None) -> str:
+    def acquire(self, thread_id: str | None = None, *, user_id: str | None = None) -> str:
+        del user_id
         raise AssertionError("async middleware should not call sync acquire")
 
-    async def acquire_async(self, thread_id: str | None = None) -> str:
+    async def acquire_async(self, thread_id: str | None = None, *, user_id: str | None = None) -> str:
         self.thread_ids.append(thread_id)
+        self.user_ids.append(user_id)
         return "async-sandbox"
 
     def get(self, sandbox_id: str) -> Sandbox | None:
@@ -90,14 +97,22 @@ class _AsyncOnlyProvider(SandboxProvider):
         return None
 
 
+def test_sandbox_middleware_state_matches_thread_state_sandbox_field() -> None:
+    """Middleware-local schema must not drift from ThreadState.sandbox."""
+    middleware_hints = get_type_hints(SandboxMiddlewareState, include_extras=True)
+    thread_hints = get_type_hints(ThreadState, include_extras=True)
+
+    assert middleware_hints["sandbox"] == thread_hints["sandbox"]
+
+
 @pytest.mark.anyio
 async def test_provider_default_acquire_async_offloads_sync_acquire(monkeypatch: pytest.MonkeyPatch) -> None:
     provider = _SyncProvider()
     calls: list[tuple[object, tuple[object, ...]]] = []
 
-    async def fake_to_thread(func, /, *args):
-        calls.append((func, args))
-        return func(*args)
+    async def fake_to_thread(func, /, *args, **kwargs):
+        calls.append((func, args, kwargs))
+        return func(*args, **kwargs)
 
     monkeypatch.setattr(asyncio, "to_thread", fake_to_thread)
 
@@ -105,7 +120,8 @@ async def test_provider_default_acquire_async_offloads_sync_acquire(monkeypatch:
 
     assert sandbox_id == "sync-sandbox"
     assert provider.thread_ids == ["thread-1"]
-    assert calls == [(provider.acquire, ("thread-1",))]
+    assert provider.user_ids == [None]
+    assert calls == [(provider.acquire, ("thread-1",), {"user_id": None})]
 
 
 @pytest.mark.anyio
@@ -115,12 +131,13 @@ async def test_abefore_agent_uses_async_provider_acquire() -> None:
     try:
         middleware = SandboxMiddleware(lazy_init=False)
 
-        result = await middleware.abefore_agent({}, Runtime(context={"thread_id": "thread-2"}))
+        result = await middleware.abefore_agent({}, Runtime(context={"thread_id": "thread-2", "user_id": "owner-2"}))
     finally:
         reset_sandbox_provider()
 
     assert result == {"sandbox": {"sandbox_id": "async-sandbox"}}
     assert provider.thread_ids == ["thread-2"]
+    assert provider.user_ids == ["owner-2"]
 
 
 @pytest.mark.anyio
@@ -159,7 +176,7 @@ async def test_default_lazy_tool_acquisition_uses_async_provider() -> None:
     try:
         runtime = ToolRuntime(
             state={},
-            context={"thread_id": "thread-lazy"},
+            context={"thread_id": "thread-lazy", "user_id": "owner-lazy"},
             config={"configurable": {}},
             stream_writer=lambda _: None,
             tools=[],
@@ -173,6 +190,7 @@ async def test_default_lazy_tool_acquisition_uses_async_provider() -> None:
 
     assert result == "/mnt/user-data/workspace/file.txt"
     assert provider.thread_ids == ["thread-lazy"]
+    assert provider.user_ids == ["owner-lazy"]
     assert runtime.state["sandbox"] == {"sandbox_id": "async-sandbox"}
     assert runtime.context["sandbox_id"] == "async-sandbox"
 

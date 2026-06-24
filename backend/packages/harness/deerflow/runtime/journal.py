@@ -29,6 +29,8 @@ from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import AIMessage, AnyMessage, BaseMessage, HumanMessage, ToolMessage
 from langgraph.types import Command
 
+from deerflow.utils.messages import message_to_text
+
 if TYPE_CHECKING:
     from deerflow.runtime.events.store.base import RunEventStore
 
@@ -77,6 +79,9 @@ class RunJournal(BaseCallbackHandler):
         self._subagent_tokens = 0
         self._middleware_tokens = 0
 
+        # Per-model token accumulator
+        self._tokens_by_model: dict[str, dict[str, int]] = {}
+
         # Dedup: LangChain may fire on_llm_end multiple times for the same run_id
         self._counted_llm_run_ids: set[str] = set()
         self._counted_external_source_ids: set[str] = set()
@@ -101,33 +106,7 @@ class RunJournal(BaseCallbackHandler):
     @staticmethod
     def _message_text(message: BaseMessage) -> str:
         """Extract displayable text from a message's mixed content shape."""
-        content = getattr(message, "content", None)
-        if isinstance(content, str):
-            return content
-        if isinstance(content, list):
-            parts: list[str] = []
-            for block in content:
-                if isinstance(block, str):
-                    parts.append(block)
-                elif isinstance(block, Mapping):
-                    text = block.get("text")
-                    if isinstance(text, str):
-                        parts.append(text)
-                    else:
-                        nested = block.get("content")
-                        if isinstance(nested, str):
-                            parts.append(nested)
-            return "".join(parts)
-        if isinstance(content, Mapping):
-            for key in ("text", "content"):
-                value = content.get(key)
-                if isinstance(value, str):
-                    return value
-
-        text = getattr(message, "text", None)
-        if isinstance(text, str):
-            return text
-        return ""
+        return message_to_text(message, text_attribute_fallback=True)
 
     def _record_message_summary(self, message: BaseMessage, *, caller: str | None = None) -> None:
         """Update run-level convenience fields for persisted run rows."""
@@ -222,7 +201,7 @@ class RunJournal(BaseCallbackHandler):
         if not self._first_human_msg and messages:
             for batch in reversed(messages):
                 for m in reversed(batch):
-                    if isinstance(m, HumanMessage) and m.name != "summary":
+                    if isinstance(m, HumanMessage) and m.name != "summary" and m.additional_kwargs.get("hide_from_ui") is not True:
                         caller = self._identify_caller(tags)
                         self.set_first_human_message(m.text)
                         self._put(
@@ -326,6 +305,13 @@ class RunJournal(BaseCallbackHandler):
                         self._middleware_tokens += total_tk
                     else:
                         self._lead_agent_tokens += total_tk
+
+                    # Per-model bucket
+                    response_metadata = getattr(message, "response_metadata", None) or {}
+                    per_call_model: str | None = None
+                    if isinstance(response_metadata, Mapping):
+                        per_call_model = response_metadata.get("model_name") or response_metadata.get("model")
+                    self._record_model_usage(per_call_model, input_tk, output_tk, total_tk)
 
                     self._schedule_progress_flush()
 
@@ -435,17 +421,42 @@ class RunJournal(BaseCallbackHandler):
         # themselves.
         return "lead_agent"
 
+    def _record_model_usage(
+        self,
+        model_name: str | None,
+        input_tokens: int,
+        output_tokens: int,
+        total_tokens: int,
+    ) -> None:
+        """Add a single LLM call's token usage to the per-model accumulator.
+
+        Missing / empty ``model_name`` collapses into a shared ``"unknown"``
+        bucket so the breakdown stays usable when a provider doesn't surface
+        ``response_metadata.model_name``.
+        """
+        if total_tokens <= 0:
+            return
+        bucket = self._tokens_by_model.setdefault(
+            model_name or "unknown",
+            {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+        )
+        bucket["input_tokens"] += int(input_tokens or 0)
+        bucket["output_tokens"] += int(output_tokens or 0)
+        bucket["total_tokens"] += int(total_tokens)
+
     # -- Public methods (called by worker) --
 
     def record_external_llm_usage_records(
         self,
-        records: list[dict[str, int | str]],
+        records: list[dict[str, int | str | None]],
     ) -> None:
         """Record token usage from external sources (e.g., subagents).
 
         Each record should contain:
             source_run_id: Unique identifier to prevent double-counting
             caller: Caller tag (e.g. "subagent:general-purpose")
+            model_name: Real per-call model name (str or None; falls back to
+                ``"unknown"`` bucket when missing)
             input_tokens: Input token count
             output_tokens: Output token count
             total_tokens: Total token count (computed from input+output if 0/missing)
@@ -467,9 +478,12 @@ class RunJournal(BaseCallbackHandler):
             if total_tk <= 0:
                 continue
 
+            input_tk = record.get("input_tokens", 0) or 0
+            output_tk = record.get("output_tokens", 0) or 0
+
             self._counted_external_source_ids.add(source_id)
-            self._total_input_tokens += record.get("input_tokens", 0) or 0
-            self._total_output_tokens += record.get("output_tokens", 0) or 0
+            self._total_input_tokens += input_tk
+            self._total_output_tokens += output_tk
             self._total_tokens += total_tk
 
             caller = str(record.get("caller", ""))
@@ -479,6 +493,8 @@ class RunJournal(BaseCallbackHandler):
                 self._middleware_tokens += total_tk
             else:
                 self._lead_agent_tokens += total_tk
+
+            self._record_model_usage(record.get("model_name"), input_tk, output_tk, total_tk)
 
             self._schedule_progress_flush()
 
@@ -590,6 +606,7 @@ class RunJournal(BaseCallbackHandler):
             "lead_agent_tokens": self._lead_agent_tokens,
             "subagent_tokens": self._subagent_tokens,
             "middleware_tokens": self._middleware_tokens,
+            "token_usage_by_model": {model: dict(usage) for model, usage in self._tokens_by_model.items()},
             "message_count": self._msg_count,
             "last_ai_message": self._last_ai_msg,
             "first_human_message": self._first_human_msg,

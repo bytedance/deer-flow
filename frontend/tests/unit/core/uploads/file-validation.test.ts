@@ -1,4 +1,4 @@
-import { expect, test } from "vitest";
+import { expect, test } from "@rstest/core";
 
 import {
   MACOS_APP_BUNDLE_UPLOAD_MESSAGE,

@@ -1,6 +1,17 @@
-import { createContext, useCallback, useContext, useState } from "react";
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 
 import type { Subtask } from "./types";
+
+function isTerminalSubtaskStatus(status: Subtask["status"] | undefined) {
+  return status === "completed" || status === "failed";
+}
 
 export interface SubtaskContextValue {
   tasks: Record<string, Subtask>;
@@ -40,14 +51,45 @@ export function useSubtask(id: string) {
 
 export function useUpdateSubtask() {
   const { tasks, setTasks } = useSubtaskContext();
+  const shouldNotifyAfterRenderRef = useRef(false);
+  // No deps: must run after every render to check the ref set during render.
+  useEffect(() => {
+    if (!shouldNotifyAfterRenderRef.current) {
+      return;
+    }
+    shouldNotifyAfterRenderRef.current = false;
+    setTasks({ ...tasks });
+  });
+
   const updateSubtask = useCallback(
     (task: Partial<Subtask> & { id: string }) => {
-      tasks[task.id] = { ...tasks[task.id], ...task } as Subtask;
+      const previous = tasks[task.id];
+      const previousStatus = previous?.status;
+      // MessageList writes the pending task tool-call state before parsing the
+      // matching ToolMessage in the same render. Keep terminal results stable
+      // across the next render so the refresh notification does not loop.
+      const next = {
+        ...previous,
+        ...task,
+        ...(task.status === "in_progress" &&
+        isTerminalSubtaskStatus(previousStatus)
+          ? { status: previousStatus }
+          : {}),
+      } as Subtask;
+
+      const becameTerminal =
+        isTerminalSubtaskStatus(next.status) && previousStatus !== next.status;
+
+      tasks[task.id] = next;
+
       if (task.latestMessage) {
         setTasks({ ...tasks });
+      } else if (becameTerminal) {
+        shouldNotifyAfterRenderRef.current = true;
       }
     },
     [tasks, setTasks],
   );
+
   return updateSubtask;
 }

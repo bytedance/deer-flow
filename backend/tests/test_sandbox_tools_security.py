@@ -9,6 +9,7 @@ from deerflow.sandbox.exceptions import SandboxError
 from deerflow.sandbox.tools import (
     VIRTUAL_PATH_PREFIX,
     _apply_cwd_prefix,
+    _compiled_mask_patterns,
     _get_custom_mount_for_path,
     _get_custom_mounts,
     _is_acp_workspace_path,
@@ -112,6 +113,40 @@ def test_mask_local_paths_in_output_hides_skills_host_paths() -> None:
 
         assert "/home/user/deer-flow/skills" not in masked
         assert "/mnt/skills/public/bootstrap/SKILL.md" in masked
+
+
+def test_mask_local_paths_compiled_patterns_are_cached() -> None:
+    """The compiled patterns for a given source set are built once and reused
+    (mask runs once per glob/grep match, so this avoids per-match recompiles)."""
+    sources = (("/tmp/deer-flow/threads/t1/user-data/workspace", "/mnt/user-data/workspace"),)
+    first = _compiled_mask_patterns(sources)
+    second = _compiled_mask_patterns(sources)
+    assert first is second  # cache hit -> identical object, not rebuilt
+
+
+def test_mask_local_paths_stable_across_repeated_and_batched_calls() -> None:
+    """Masking is identical whether applied once or repeatedly (per-match path)."""
+    output = "a /tmp/deer-flow/threads/t1/user-data/workspace/x.txt and /tmp/deer-flow/threads/t1/user-data/outputs/y.log"
+    once = mask_local_paths_in_output(output, _THREAD_DATA)
+    twice = mask_local_paths_in_output(once, _THREAD_DATA)
+    assert "/tmp/deer-flow/threads/t1/user-data" not in once
+    assert "/mnt/user-data/workspace/x.txt" in once
+    assert "/mnt/user-data/outputs/y.log" in once
+    # Re-masking already-masked output leaves it unchanged (no host paths left).
+    assert twice == once
+    # Mapping outputs one-by-one matches masking each independently.
+    assert [mask_local_paths_in_output(o, _THREAD_DATA) for o in (output, output)] == [once, once]
+
+
+def test_mask_local_paths_no_thread_data_still_masks_skills() -> None:
+    """With thread_data=None, skills host paths are still masked (user-data skipped)."""
+    with (
+        patch("deerflow.sandbox.tools._get_skills_container_path", return_value="/mnt/skills"),
+        patch("deerflow.sandbox.tools._get_skills_host_path", return_value="/home/user/deer-flow/skills"),
+    ):
+        masked = mask_local_paths_in_output("Reading: /home/user/deer-flow/skills/a/b.md", None)
+        assert "/home/user/deer-flow/skills" not in masked
+        assert "/mnt/skills/a/b.md" in masked
 
 
 # ---------- _reject_path_traversal ----------
@@ -443,6 +478,54 @@ def test_validate_local_bash_command_paths_allows_http_url_dotdot_segments() -> 
         "curl http://example.com/packages/../archive.tar.gz -o /mnt/user-data/workspace/archive.tar.gz",
         _THREAD_DATA,
     )
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # f-string / string-literal fragments with CJK text or template braces are
+        # NOT path arguments and must not be flagged as unsafe absolute paths.
+        "python3 -c \"print(f'/端口{port}')\"",
+        "echo '健康检查 /端口 状态'",
+        "python3 -c \"x = f'/{port}'\"",
+        "python3 -c \"print('/devices/{id}/port')\"",
+    ],
+)
+def test_validate_local_bash_command_paths_allows_non_path_string_literals(command: str) -> None:
+    validate_local_bash_command_paths(command, _THREAD_DATA)
+
+
+def test_validate_local_bash_command_paths_still_blocks_ascii_host_path_in_code() -> None:
+    """The literal exemption is shape-based (non-ASCII / identifier-template
+    braces); a plain ASCII host path stays blocked even when written inside a
+    code string, so the guard keeps nudging the model toward virtual paths."""
+    with pytest.raises(PermissionError, match="Unsafe absolute paths"):
+        validate_local_bash_command_paths("python3 -c \"open('/etc/passwd').read()\"", _THREAD_DATA)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # Bash brace expansion reconstitutes plain host paths at runtime
+        # (`cat /etc/{passwd,shadow}` -> `cat /etc/passwd /etc/shadow`), so the
+        # brace exemption must NOT fire on these — only single identifier-like
+        # template placeholders such as `/devices/{id}/port` are text.
+        "cat /etc/{passwd,shadow}",
+        "cat /etc/passwd{,.bak}",
+        "cat /{etc,var}/passwd",
+        'bash -c "cat /etc/{passwd,shadow}"',
+        # ``${VAR}`` shell variable expansion is the same bypass class: bash
+        # substitutes a real host path at runtime even though `USER` is
+        # identifier-shaped, so it must stay blocked too.
+        "cat /home/${USER}/.ssh/id_rsa",
+    ],
+)
+def test_validate_local_bash_command_paths_blocks_brace_expansion_host_paths(command: str) -> None:
+    """Regression for the brace-expansion bypass: a `{...}` block that is not a
+    single identifier placeholder (commas, dots, leading separators) must keep
+    the host path blocked rather than be exempted as a literal."""
+    with pytest.raises(PermissionError, match="Unsafe absolute paths"):
+        validate_local_bash_command_paths(command, _THREAD_DATA)
 
 
 def test_bash_tool_rejects_host_bash_when_local_sandbox_default(monkeypatch) -> None:

@@ -10,6 +10,7 @@ import {
   useCallback,
   useMemo,
   useState,
+  useEffect,
   type AnchorHTMLAttributes,
   type ImgHTMLAttributes,
 } from "react";
@@ -124,6 +125,7 @@ export function MessageListItem({
   runId,
   threadId,
   showCopyButton = true,
+  turnStartTime,
 }: {
   className?: string;
   message: Message;
@@ -132,6 +134,7 @@ export function MessageListItem({
   feedback?: FeedbackData | null;
   runId?: string;
   showCopyButton?: boolean;
+  turnStartTime?: number | null;
 }) {
   const isHuman = message.type === "human";
   return (
@@ -144,6 +147,7 @@ export function MessageListItem({
         message={message}
         isLoading={isLoading}
         threadId={threadId}
+        turnStartTime={turnStartTime}
       />
       {!isLoading && showCopyButton && (
         <MessageToolbar
@@ -206,19 +210,66 @@ function MessageImage({
   );
 }
 
+const clientTurnDurations = new Map<string, number>();
+
 function MessageContent_({
   className,
   message,
   isLoading = false,
   threadId,
+  turnStartTime,
 }: {
   className?: string;
   message: Message;
   isLoading?: boolean;
   threadId: string;
+  turnStartTime?: number | null;
 }) {
   const rehypePlugins = useRehypeSplitWordsIntoSpans(isLoading);
   const isHuman = message.type === "human";
+  const rawTurnDuration = message.additional_kwargs?.turn_duration as
+    | number
+    | undefined;
+
+  const [cachedDuration, setCachedDuration] = useState<number | undefined>(
+    () =>
+      message.id
+        ? clientTurnDurations.get(`${threadId}:${message.id}`)
+        : undefined,
+  );
+  const turnDuration = rawTurnDuration ?? cachedDuration;
+
+  useEffect(() => {
+    if (rawTurnDuration !== undefined && message.id) {
+      clientTurnDurations.set(`${threadId}:${message.id}`, rawTurnDuration);
+      setCachedDuration(rawTurnDuration);
+    }
+  }, [rawTurnDuration, message.id]);
+
+  const handleDurationChange = useCallback(
+    (d: number | undefined) => {
+      if (d !== undefined && message.id) {
+        clientTurnDurations.set(`${threadId}:${message.id}`, d);
+        setCachedDuration(d);
+      }
+    },
+    [message.id],
+  );
+
+  useEffect(() => {
+    return () => {
+      for (const key of clientTurnDurations.keys()) {
+        if (key.startsWith(`${threadId}:`)) {
+          clientTurnDurations.delete(key);
+        }
+      }
+    };
+  }, [threadId]);
+
+  const [wasLoading, setWasLoading] = useState(isLoading);
+  useEffect(() => {
+    if (isLoading) setWasLoading(true);
+  }, [isLoading]);
   const components = useMemo(
     () => ({
       img: (props: ImgHTMLAttributes<HTMLImageElement>) => (
@@ -289,7 +340,12 @@ function MessageContent_({
   if (!isHuman && reasoningContent && !rawContent) {
     return (
       <AIElementMessageContent className={className}>
-        <Reasoning isStreaming={isLoading}>
+        <Reasoning
+          isStreaming={isLoading}
+          startTimeProp={turnStartTime}
+          duration={turnDuration}
+          onTurnDurationChange={handleDurationChange}
+        >
           <ReasoningTrigger />
           <ReasoningContent>{reasoningContent}</ReasoningContent>
         </Reasoning>
@@ -324,6 +380,20 @@ function MessageContent_({
   return (
     <AIElementMessageContent className={className}>
       {filesList}
+      {!isHuman &&
+        (!!reasoningContent || wasLoading || turnDuration !== undefined) && (
+          <Reasoning
+            isStreaming={isLoading}
+            startTimeProp={turnStartTime}
+            duration={turnDuration}
+            onTurnDurationChange={handleDurationChange}
+          >
+            <ReasoningTrigger hasContent={!!reasoningContent} />
+            {reasoningContent && (
+              <ReasoningContent>{reasoningContent}</ReasoningContent>
+            )}
+          </Reasoning>
+        )}
       <MarkdownContent
         content={contentToDisplay}
         isLoading={isLoading}

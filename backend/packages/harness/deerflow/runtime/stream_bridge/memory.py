@@ -48,13 +48,36 @@ class MemoryStreamBridge(StreamBridge):
         seq = self._counters[run_id] - 1
         return f"{ts}-{seq}"
 
+    @staticmethod
+    def _parse_event_seq(event_id: str) -> int | None:
+        """Extract the per-run sequence number from a ``{ts}-{seq}`` event id.
+
+        ``seq`` (assigned by :meth:`_next_id`) increases by one per published
+        event, so it equals the event's absolute offset within the run. Returns
+        ``None`` for ids that do not match the expected format.
+        """
+        _, sep, seq_text = event_id.rpartition("-")
+        if not sep:
+            return None
+        try:
+            return int(seq_text)
+        except ValueError:
+            return None
+
     def _resolve_start_offset(self, stream: _RunStream, last_event_id: str | None) -> int:
         if last_event_id is None:
             return stream.start_offset
 
-        for index, entry in enumerate(stream.events):
-            if entry.id == last_event_id:
-                return stream.start_offset + index + 1
+        # Event ids embed a per-run, monotonically increasing ``seq`` that equals
+        # the event's absolute offset, so locate the event by arithmetic in O(1)
+        # rather than scanning the retained buffer. The id is verified at the
+        # computed index, so a stale/evicted/foreign/malformed id still falls back
+        # to replay-from-earliest — identical to the previous linear scan.
+        seq = self._parse_event_seq(last_event_id)
+        if seq is not None:
+            local_index = seq - stream.start_offset
+            if 0 <= local_index < len(stream.events) and stream.events[local_index].id == last_event_id:
+                return stream.start_offset + local_index + 1
 
         if stream.events:
             logger.warning(

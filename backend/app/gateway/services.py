@@ -18,8 +18,9 @@ from typing import Any
 from fastapi import HTTPException, Request
 from langchain_core.messages import BaseMessage
 from langchain_core.messages.utils import convert_to_messages
+from langgraph.types import Command
 
-from app.gateway.deps import get_run_context, get_run_manager, get_stream_bridge
+from app.gateway.deps import get_checkpointer, get_run_context, get_run_manager, get_stream_bridge
 from app.gateway.internal_auth import INTERNAL_SYSTEM_ROLE, get_trusted_internal_owner_user_id
 from app.gateway.utils import sanitize_log_param
 from deerflow.config.app_config import get_app_config
@@ -184,6 +185,9 @@ def inject_authenticated_user_context(config: dict[str, Any], request: Request) 
     runtime_context = config.setdefault("context", {})
     if isinstance(runtime_context, dict):
         runtime_context["user_id"] = str(user_id)
+        runtime_context["user_role"] = getattr(user, "system_role", None)
+        runtime_context["oauth_provider"] = getattr(user, "oauth_provider", None)
+        runtime_context["oauth_id"] = getattr(user, "oauth_id", None)
 
 
 def resolve_agent_factory(assistant_id: str | None):
@@ -211,16 +215,24 @@ def build_run_config(
 
     When *assistant_id* refers to a custom agent (anything other than
     ``"lead_agent"`` / ``None``), the name is forwarded as ``agent_name`` in
-    whichever runtime options container is active: ``context`` for
-    LangGraph >= 0.6.0 requests, otherwise ``configurable``.
-    ``make_lead_agent`` reads this key to load the matching
-    ``agents/<name>/SOUL.md`` and per-agent config — without it the agent
-    silently runs as the default lead agent.
+    both ``configurable`` and ``context`` so it is visible to legacy
+    configurable readers and to LangGraph ``ToolRuntime.context`` consumers
+    (e.g. the ``setup_agent`` tool, which since LangGraph >=1.1.9 no longer
+    falls back from ``context`` to ``configurable``).  An explicit
+    ``agent_name`` in either container takes precedence over the value
+    derived from ``assistant_id``.  ``make_lead_agent`` reads this key to
+    load the matching ``agents/<name>/SOUL.md`` and per-agent config —
+    without it the agent silently runs as the default lead agent.
 
     This mirrors the channel manager's ``_resolve_run_params`` logic so that
     the LangGraph Platform-compatible HTTP API and the IM channel path behave
     identically.
     """
+    # Lead-agent recursion budget (LangGraph super-steps for the lead graph
+    # only). Independent of subagent depth: a `task()` dispatch runs the whole
+    # subagent inside ONE lead tools-node step, and subagents enforce their own
+    # limit via `subagents.max_turns`. Do not conflate this 100 with the
+    # general-purpose subagent's max_turns.
     config: dict[str, Any] = {"recursion_limit": 100}
     if request_config:
         # LangGraph >= 0.6.0 introduced ``context`` as the preferred way to
@@ -241,6 +253,7 @@ def build_run_config(
                 context = dict(context_value)
             else:
                 raise ValueError("request config 'context' must be a mapping or null.")
+            context["thread_id"] = thread_id
             config["context"] = context
         else:
             configurable = {"thread_id": thread_id}
@@ -253,23 +266,86 @@ def build_run_config(
         config["configurable"] = {"thread_id": thread_id}
 
     # Inject custom agent name when the caller specified a non-default assistant.
-    # Honour an explicit agent_name in the active runtime options container.
+    # Honour an explicit agent_name in either runtime options container.
     if assistant_id and assistant_id != _DEFAULT_ASSISTANT_ID:
         normalized = assistant_id.strip().lower().replace("_", "-")
         if not normalized or not re.fullmatch(r"[a-z0-9-]+", normalized):
             raise ValueError(f"Invalid assistant_id {assistant_id!r}: must contain only letters, digits, and hyphens after normalization.")
-        if "configurable" in config:
-            target = config["configurable"]
-        elif "context" in config:
-            target = config["context"]
-        else:
-            target = config.setdefault("configurable", {})
-        if target is not None and "agent_name" not in target:
-            target["agent_name"] = normalized
+        configurable = config.setdefault("configurable", {})
+        runtime_context = config.setdefault("context", {})
+        explicit_agent_name: str | None = None
+        if isinstance(configurable, dict) and isinstance(configurable.get("agent_name"), str):
+            explicit_agent_name = configurable["agent_name"]
+        elif isinstance(runtime_context, dict) and isinstance(runtime_context.get("agent_name"), str):
+            explicit_agent_name = runtime_context["agent_name"]
+        effective_agent_name = explicit_agent_name or normalized
+        if isinstance(configurable, dict):
+            configurable["agent_name"] = effective_agent_name
+        if isinstance(runtime_context, dict):
+            runtime_context["agent_name"] = effective_agent_name
         config.setdefault("run_name", resolve_root_run_name(config, normalized))
     if metadata:
         config.setdefault("metadata", {}).update(metadata)
     return config
+
+
+async def apply_checkpoint_to_run_config(
+    config: dict[str, Any],
+    *,
+    body: Any,
+    thread_id: str,
+    request: Request,
+) -> None:
+    """Validate an optional run checkpoint and attach it to RunnableConfig."""
+    checkpoint = getattr(body, "checkpoint", None)
+    checkpoint_id = getattr(body, "checkpoint_id", None)
+    checkpoint_ns = ""
+    checkpoint_map = None
+
+    if checkpoint:
+        if not isinstance(checkpoint, Mapping):
+            raise HTTPException(status_code=400, detail="checkpoint must be an object")
+        checkpoint_thread_id = checkpoint.get("thread_id")
+        if checkpoint_thread_id is not None and str(checkpoint_thread_id) != thread_id:
+            raise HTTPException(status_code=400, detail="checkpoint thread_id does not match request thread_id")
+        raw_checkpoint_id = checkpoint.get("checkpoint_id")
+        if raw_checkpoint_id:
+            checkpoint_id = str(raw_checkpoint_id)
+        raw_checkpoint_ns = checkpoint.get("checkpoint_ns")
+        if raw_checkpoint_ns is not None:
+            checkpoint_ns = str(raw_checkpoint_ns)
+        checkpoint_map = checkpoint.get("checkpoint_map")
+
+    if not checkpoint_id:
+        return
+
+    read_config: dict[str, Any] = {
+        "configurable": {
+            "thread_id": thread_id,
+            "checkpoint_ns": checkpoint_ns,
+            "checkpoint_id": str(checkpoint_id),
+        }
+    }
+    if checkpoint_map is not None:
+        read_config["configurable"]["checkpoint_map"] = checkpoint_map
+
+    checkpointer = get_checkpointer(request)
+    try:
+        checkpoint_tuple = await checkpointer.aget_tuple(read_config)
+    except Exception as exc:
+        logger.exception("Failed to validate checkpoint %s for thread %s", checkpoint_id, sanitize_log_param(thread_id))
+        raise HTTPException(status_code=500, detail="Failed to validate checkpoint") from exc
+    if checkpoint_tuple is None:
+        raise HTTPException(status_code=404, detail=f"Checkpoint {checkpoint_id} not found")
+
+    configurable = config.setdefault("configurable", {})
+    if not isinstance(configurable, dict):
+        raise HTTPException(status_code=400, detail="request config configurable must be an object")
+    configurable["thread_id"] = thread_id
+    configurable["checkpoint_ns"] = checkpoint_ns
+    configurable["checkpoint_id"] = str(checkpoint_id)
+    if checkpoint_map is not None:
+        configurable["checkpoint_map"] = checkpoint_map
 
 
 # ---------------------------------------------------------------------------
@@ -382,8 +458,13 @@ async def start_run(
             logger.warning("Failed to upsert thread_meta for %s (non-fatal)", sanitize_log_param(thread_id))
 
         agent_factory = resolve_agent_factory(body.assistant_id)
-        graph_input = normalize_input(body.input)
+        command = getattr(body, "command", None)
+        if command and command.get("resume") is not None:
+            graph_input = Command(resume=command["resume"])
+        else:
+            graph_input = normalize_input(body.input)
         config = build_run_config(thread_id, body.config, body.metadata, assistant_id=body.assistant_id)
+        await apply_checkpoint_to_run_config(config, body=body, thread_id=thread_id, request=request)
 
         # Merge DeerFlow-specific context overrides into both ``configurable`` and ``context``.
         # The ``context`` field is a custom extension for the langgraph-compat layer

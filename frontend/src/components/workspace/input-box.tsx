@@ -59,11 +59,14 @@ import {
 import { fetch } from "@/core/api/fetcher";
 import { getBackendBaseURL } from "@/core/config";
 import { useI18n } from "@/core/i18n/hooks";
+import { isHiddenFromUIMessage } from "@/core/messages/utils";
 import { useModels } from "@/core/models/hooks";
 import type { Skill } from "@/core/skills";
 import { useSkills } from "@/core/skills/hooks";
+import { useSuggestionsConfig } from "@/core/suggestions/hooks";
 import type { AgentThreadContext } from "@/core/threads";
 import { textOfMessage } from "@/core/threads/utils";
+import { isIMEComposing } from "@/lib/ime";
 import { cn } from "@/lib/utils";
 
 import {
@@ -201,8 +204,11 @@ export function InputBox({
   const { skills } = useSkills();
   const promptRootRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const promptHistoryIndexRef = useRef<number | null>(null);
+  const promptHistoryDraftRef = useRef("");
 
   const [followups, setFollowups] = useState<string[]>([]);
+  const { data: suggestionsConfig } = useSuggestionsConfig();
   const [followupsHidden, setFollowupsHidden] = useState(false);
   const [followupsLoading, setFollowupsLoading] = useState(false);
   const [textareaFocused, setTextareaFocused] = useState(false);
@@ -258,6 +264,44 @@ export function InputBox({
     [selectedModel],
   );
 
+  const promptHistory = useMemo(() => {
+    const history: string[] = [];
+    for (const message of thread.messages) {
+      if (message.type !== "human") {
+        continue;
+      }
+      const additionalKwargs = message.additional_kwargs;
+      if (
+        additionalKwargs &&
+        typeof additionalKwargs === "object" &&
+        Reflect.get(additionalKwargs, "hide_from_ui") === true
+      ) {
+        continue;
+      }
+      const text = textOfMessage(message)?.trim();
+      if (!text) {
+        continue;
+      }
+      if (history.at(-1) !== text) {
+        history.push(text);
+      }
+    }
+    return history;
+  }, [thread.messages]);
+
+  useEffect(() => {
+    promptHistoryIndexRef.current = null;
+    promptHistoryDraftRef.current = "";
+  }, [threadId]);
+
+  useEffect(() => {
+    const currentIndex = promptHistoryIndexRef.current;
+    if (currentIndex !== null && currentIndex >= promptHistory.length) {
+      promptHistoryIndexRef.current = null;
+      promptHistoryDraftRef.current = "";
+    }
+  }, [promptHistory.length]);
+
   const handleModelSelect = useCallback(
     (model_name: string) => {
       const model = models.find((m) => m.name === model_name);
@@ -312,6 +356,8 @@ export function InputBox({
       if (!message.text.trim() && message.files.length === 0) {
         return;
       }
+      promptHistoryIndexRef.current = null;
+      promptHistoryDraftRef.current = "";
       setFollowups([]);
       setFollowupsHidden(false);
       setFollowupsLoading(false);
@@ -486,6 +532,91 @@ export function InputBox({
     ],
   );
 
+  const setPromptHistoryValue = useCallback(
+    (value: string) => {
+      textInput.setInput(value);
+      requestAnimationFrame(() => {
+        const textarea = textareaRef.current;
+        if (!textarea) {
+          return;
+        }
+        textarea.focus();
+        textarea.setSelectionRange(value.length, value.length);
+      });
+    },
+    [textInput],
+  );
+
+  const handlePromptHistoryKeyDown = useCallback(
+    (event: KeyboardEvent<HTMLTextAreaElement>) => {
+      if (
+        event.altKey ||
+        event.ctrlKey ||
+        event.metaKey ||
+        event.shiftKey ||
+        isIMEComposing(event) ||
+        promptHistory.length === 0 ||
+        (event.key !== "ArrowUp" && event.key !== "ArrowDown")
+      ) {
+        return;
+      }
+
+      const currentValue = textInput.value ?? "";
+      const currentHistoryIndex = promptHistoryIndexRef.current;
+      const isBrowsingHistory = currentHistoryIndex !== null;
+
+      if (!isBrowsingHistory && currentValue.length > 0) {
+        return;
+      }
+
+      if (event.key === "ArrowUp") {
+        event.preventDefault();
+        const nextIndex = isBrowsingHistory
+          ? Math.max(currentHistoryIndex - 1, 0)
+          : promptHistory.length - 1;
+        if (!isBrowsingHistory) {
+          promptHistoryDraftRef.current = currentValue;
+        }
+        promptHistoryIndexRef.current = nextIndex;
+        setPromptHistoryValue(promptHistory[nextIndex] ?? "");
+        return;
+      }
+
+      if (!isBrowsingHistory) {
+        return;
+      }
+
+      event.preventDefault();
+      if (currentHistoryIndex >= promptHistory.length - 1) {
+        promptHistoryIndexRef.current = null;
+        setPromptHistoryValue(promptHistoryDraftRef.current);
+        promptHistoryDraftRef.current = "";
+        return;
+      }
+
+      const nextIndex = currentHistoryIndex + 1;
+      promptHistoryIndexRef.current = nextIndex;
+      setPromptHistoryValue(promptHistory[nextIndex] ?? "");
+    },
+    [promptHistory, setPromptHistoryValue, textInput.value],
+  );
+
+  const handlePromptTextareaKeyDown = useCallback(
+    (event: KeyboardEvent<HTMLTextAreaElement>) => {
+      handleSkillSuggestionKeyDown(event);
+      if (event.defaultPrevented) {
+        return;
+      }
+      handlePromptHistoryKeyDown(event);
+    },
+    [handlePromptHistoryKeyDown, handleSkillSuggestionKeyDown],
+  );
+
+  const handlePromptTextareaChange = useCallback(() => {
+    promptHistoryIndexRef.current = null;
+    promptHistoryDraftRef.current = "";
+  }, []);
+
   const showFollowups =
     !disabled &&
     !isWelcomeMode &&
@@ -524,10 +655,14 @@ export function InputBox({
     if (!lastAiId || lastAiId === lastGeneratedForAiIdRef.current) {
       return;
     }
+    if (suggestionsConfig === undefined) {
+      return;
+    }
     lastGeneratedForAiIdRef.current = lastAiId;
 
     const recent = messagesRef.current
       .filter((m) => m.type === "human" || m.type === "ai")
+      .filter((m) => !isHiddenFromUIMessage(m))
       .map((m) => {
         const role = m.type === "human" ? "user" : "assistant";
         const content = textOfMessage(m) ?? "";
@@ -537,6 +672,11 @@ export function InputBox({
       .slice(-6);
 
     if (recent.length === 0) {
+      return;
+    }
+
+    if (!suggestionsConfig?.enabled) {
+      setFollowups([]);
       return;
     }
 
@@ -576,13 +716,20 @@ export function InputBox({
       });
 
     return () => controller.abort();
-  }, [context.model_name, disabled, isMock, status, threadId]);
+  }, [
+    context.model_name,
+    disabled,
+    isMock,
+    status,
+    threadId,
+    suggestionsConfig?.enabled,
+  ]);
 
   return (
     <div
       ref={promptRootRef}
       className={cn(
-        "relative flex flex-col",
+        "relative flex min-w-0 flex-col",
         isWelcomeMode ? "gap-4" : "gap-2",
       )}
     >
@@ -689,13 +836,14 @@ export function InputBox({
             autoFocus={autoFocus}
             defaultValue={initialValue}
             onBlur={() => setTextareaFocused(false)}
+            onChange={handlePromptTextareaChange}
             onFocus={() => setTextareaFocused(true)}
-            onKeyDown={handleSkillSuggestionKeyDown}
+            onKeyDown={handlePromptTextareaKeyDown}
             ref={textareaRef}
           />
         </PromptInputBody>
-        <PromptInputFooter className="flex">
-          <PromptInputTools>
+        <PromptInputFooter className="flex flex-wrap gap-2 sm:flex-nowrap">
+          <PromptInputTools className="min-w-0 flex-1 flex-wrap">
             {/* TODO: Add more connectors here
           <PromptInputActionMenu>
             <PromptInputActionMenuTrigger className="px-2!" />
@@ -717,7 +865,7 @@ export function InputBox({
                     : "flash"
                 }
               >
-                <PromptInputActionMenuTrigger className="gap-1! px-2!">
+                <PromptInputActionMenuTrigger className="max-w-28 gap-1! px-2! sm:max-w-none">
                   <div>
                     {context.mode === "flash" && <ZapIcon className="size-3" />}
                     {context.mode === "thinking" && (
@@ -732,7 +880,7 @@ export function InputBox({
                   </div>
                   <div
                     className={cn(
-                      "text-xs font-normal",
+                      "truncate text-xs font-normal",
                       context.mode === "ultra" ? "golden-text" : "",
                     )}
                   >
@@ -879,7 +1027,7 @@ export function InputBox({
             </PromptInputActionMenu>
             {supportReasoningEffort && context.mode !== "flash" && (
               <PromptInputActionMenu>
-                <PromptInputActionMenuTrigger className="gap-1! px-2!">
+                <PromptInputActionMenuTrigger className="hidden gap-1! px-2! sm:inline-flex">
                   <div className="text-xs font-normal">
                     {t.inputBox.reasoningEffort}:
                     {context.reasoning_effort === "minimal" &&
@@ -994,13 +1142,13 @@ export function InputBox({
               </PromptInputActionMenu>
             )}
           </PromptInputTools>
-          <PromptInputTools>
+          <PromptInputTools className="min-w-0 justify-end">
             <ModelSelector
               open={modelDialogOpen}
               onOpenChange={setModelDialogOpen}
             >
               <ModelSelectorTrigger asChild>
-                <PromptInputButton>
+                <PromptInputButton className="max-w-40 min-w-0 sm:max-w-56">
                   <div className="flex min-w-0 flex-col items-start text-left">
                     <ModelSelectorName className="text-xs font-normal">
                       {selectedModel?.display_name}
@@ -1103,7 +1251,7 @@ function SuggestionList() {
     [textInput],
   );
   return (
-    <Suggestions className="min-h-16 w-fit items-start">
+    <Suggestions className="min-h-16 w-full max-w-full justify-center px-4 sm:w-fit sm:px-0">
       <ConfettiButton
         className="text-muted-foreground cursor-pointer rounded-full px-4 text-xs font-normal"
         variant="outline"

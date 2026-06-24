@@ -8,7 +8,9 @@ from typing import Literal
 from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
+from app.gateway.deps import require_admin_user
 from deerflow.config.extensions_config import ExtensionsConfig, get_extensions_config, reload_extensions_config
+from deerflow.mcp.cache import reset_mcp_tools_cache
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["mcp"])
@@ -19,6 +21,7 @@ router = APIRouter(prefix="/api", tags=["mcp"])
 # PUT /api/mcp/config calls could otherwise interleave and clobber each other.
 # (Cross-process writers remain a separate, pre-existing concern.)
 _mcp_config_write_lock = asyncio.Lock()
+_ADMIN_REQUIRED_DETAIL = "Admin privileges required to manage MCP configuration."
 
 
 _MCP_STDIO_COMMAND_ALLOWLIST_ENV = "DEER_FLOW_MCP_STDIO_COMMAND_ALLOWLIST"
@@ -77,28 +80,14 @@ class McpConfigUpdateRequest(BaseModel):
     )
 
 
+class McpCacheResetResponse(BaseModel):
+    """Response model for resetting the MCP tools cache."""
+
+    success: bool = Field(description="Whether the MCP tools cache was reset")
+    message: str = Field(description="Human-readable reset status")
+
+
 _MASKED_VALUE = "***"
-
-
-async def _require_admin_user(request: Request) -> None:
-    """Require the authenticated caller to be an admin user.
-
-    ``AuthMiddleware`` normally stamps ``request.state.user`` before the
-    request reaches this router. Falling back to the strict dependency keeps
-    this route safe even in tests or alternative ASGI compositions that mount
-    the router without the global middleware.
-    """
-    user = getattr(request.state, "user", None)
-    if user is None:
-        from app.gateway.deps import get_current_user_from_request
-
-        user = await get_current_user_from_request(request)
-
-    if getattr(user, "system_role", None) != "admin":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Admin privileges required to manage MCP configuration.",
-        )
 
 
 def _allowed_stdio_commands() -> set[str]:
@@ -269,7 +258,7 @@ async def get_mcp_configuration(request: Request) -> McpConfigResponse:
         }
         ```
     """
-    await _require_admin_user(request)
+    await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
 
     config = get_extensions_config()
 
@@ -341,6 +330,27 @@ def _apply_mcp_config_update(body: McpConfigUpdateRequest) -> dict:
     return reloaded_config.mcp_servers
 
 
+@router.post(
+    "/mcp/cache/reset",
+    response_model=McpCacheResetResponse,
+    summary="Reset MCP Tools Cache",
+    description=("Reset cached MCP tools and pooled sessions process-wide so tools are reloaded on next use. This affects all threads and users in the current Gateway process."),
+)
+async def reset_mcp_tools_cache_endpoint(request: Request) -> McpCacheResetResponse:
+    """Reset cached MCP tools and persistent sessions process-wide.
+
+    The next agent run or tool lookup will reload tools from the configured MCP
+    servers. This affects all threads and users in the current Gateway process,
+    and avoids relying on extensions_config.json mtime changes.
+    """
+    await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
+    reset_mcp_tools_cache()
+    return McpCacheResetResponse(
+        success=True,
+        message="MCP tools cache reset. Tools will reload on next use.",
+    )
+
+
 @router.put(
     "/mcp/config",
     response_model=McpConfigResponse,
@@ -380,7 +390,7 @@ async def update_mcp_configuration(request: Request, body: McpConfigUpdateReques
         ```
     """
     try:
-        await _require_admin_user(request)
+        await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
         _validate_mcp_update_request(body)
 
         # Offload the blocking read-modify-write of extensions_config.json
@@ -391,6 +401,12 @@ async def update_mcp_configuration(request: Request, body: McpConfigUpdateReques
             reloaded_servers = await asyncio.to_thread(_apply_mcp_config_update, body)
 
         servers = {name: _mask_server_config(McpServerConfigResponse(**server.model_dump())) for name, server in reloaded_servers.items()}
+        # Reload the Gateway configuration and update the global cache. The
+        # agent runtime lives in Gateway, so this keeps API reads and tool
+        # execution aligned after extensions_config.json changes.
+        reloaded_config = reload_extensions_config()
+        reset_mcp_tools_cache()
+        servers = {name: _mask_server_config(McpServerConfigResponse(**server.model_dump())) for name, server in reloaded_config.mcp_servers.items()}
         return McpConfigResponse(mcp_servers=servers)
 
     except HTTPException:

@@ -17,6 +17,7 @@ from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import Response, StreamingResponse
+from langchain_core.messages import BaseMessage
 from pydantic import BaseModel, Field
 
 from app.gateway.authz import require_permission
@@ -24,9 +25,29 @@ from app.gateway.deps import get_checkpointer, get_current_user, get_feedback_re
 from app.gateway.pagination import trim_run_message_page
 from app.gateway.services import sse_consumer, start_run, wait_for_run_completion
 from deerflow.runtime import RunRecord, RunStatus, serialize_channel_values_for_api
+from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, get_original_user_content_text, message_to_text
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/threads", tags=["runs"])
+REGENERATE_HISTORY_SCAN_LIMIT = 200
+
+
+def compute_run_durations(runs) -> dict[str, int]:
+    """Map run_id -> duration in seconds from run timestamps."""
+    from datetime import datetime
+
+    durations: dict[str, int] = {}
+    for r in runs:
+        if r.created_at and r.updated_at:
+            try:
+                created = datetime.fromisoformat(r.created_at.replace("Z", "+00:00"))
+                updated = datetime.fromisoformat(r.updated_at.replace("Z", "+00:00"))
+                # Note: updated_at - created_at represents the row's total lifetime,
+                # which can slightly overshoot the actual AI turn end if the row is mutated later.
+                durations[r.run_id] = int((updated - created).total_seconds())
+            except Exception:
+                logger.warning("Failed to parse timestamps for run %s", r.run_id, exc_info=True)
+    return durations
 
 
 # ---------------------------------------------------------------------------
@@ -57,6 +78,17 @@ class RunCreateRequest(BaseModel):
     feedback_keys: list[str] | None = Field(default=None, description="LangSmith feedback keys")
 
 
+class RegeneratePrepareRequest(BaseModel):
+    message_id: str = Field(..., min_length=1, description="Assistant message id to regenerate")
+
+
+class RegeneratePrepareResponse(BaseModel):
+    input: dict[str, Any]
+    checkpoint: dict[str, Any]
+    metadata: dict[str, Any]
+    target_run_id: str
+
+
 class RunResponse(BaseModel):
     run_id: str
     thread_id: str
@@ -79,7 +111,10 @@ class RunResponse(BaseModel):
 
 class ThreadTokenUsageModelBreakdown(BaseModel):
     tokens: int = 0
-    runs: int = 0
+    runs: int = Field(
+        default=0,
+        description="Number of runs in which this model appeared; counts are non-exclusive for runs that used multiple models.",
+    )
 
 
 class ThreadTokenUsageCallerBreakdown(BaseModel):
@@ -131,9 +166,249 @@ def _record_to_response(record: RunRecord) -> RunResponse:
     )
 
 
+def _message_id(message: Any) -> str | None:
+    value = getattr(message, "id", None)
+    if value is None and isinstance(message, dict):
+        value = message.get("id")
+    return str(value) if value else None
+
+
+def _message_type(message: Any) -> str | None:
+    value = getattr(message, "type", None)
+    if value is None and isinstance(message, dict):
+        value = message.get("type") or message.get("role")
+    if value == "assistant":
+        return "ai"
+    return str(value) if value else None
+
+
+def _message_name(message: Any) -> str | None:
+    value = getattr(message, "name", None)
+    if value is None and isinstance(message, dict):
+        value = message.get("name")
+    return str(value) if value else None
+
+
+def _message_content(message: Any) -> Any:
+    if isinstance(message, dict):
+        return message.get("content")
+    return getattr(message, "content", None)
+
+
+def _message_text(message: Any) -> str:
+    return message_to_text(message)
+
+
+def _message_additional_kwargs(message: Any) -> dict[str, Any]:
+    value = getattr(message, "additional_kwargs", None)
+    if value is None and isinstance(message, dict):
+        value = message.get("additional_kwargs")
+    return dict(value or {}) if isinstance(value, dict) else {}
+
+
+def _is_hidden_or_control_message(message: Any) -> bool:
+    message_type = _message_type(message)
+    additional_kwargs = _message_additional_kwargs(message)
+    return message_type == "remove" or _message_name(message) == "summary" or additional_kwargs.get("hide_from_ui") is True
+
+
+def _is_visible_human_message(message: Any) -> bool:
+    return _message_type(message) == "human" and not _is_hidden_or_control_message(message)
+
+
+def _is_visible_ai_message(message: Any) -> bool:
+    return _message_type(message) == "ai" and not _is_hidden_or_control_message(message)
+
+
+def _checkpoint_messages(checkpoint_tuple: Any) -> list[Any]:
+    checkpoint = getattr(checkpoint_tuple, "checkpoint", None) or {}
+    channel_values = checkpoint.get("channel_values", {}) if isinstance(checkpoint, dict) else {}
+    messages = channel_values.get("messages", []) if isinstance(channel_values, dict) else []
+    return messages if isinstance(messages, list) else []
+
+
+def _checkpoint_configurable(checkpoint_tuple: Any) -> dict[str, Any]:
+    config = getattr(checkpoint_tuple, "config", None) or {}
+    configurable = config.get("configurable", {}) if isinstance(config, dict) else {}
+    return dict(configurable) if isinstance(configurable, dict) else {}
+
+
+def _checkpoint_response(checkpoint_tuple: Any) -> dict[str, Any]:
+    configurable = _checkpoint_configurable(checkpoint_tuple)
+    checkpoint_id = configurable.get("checkpoint_id")
+    if not checkpoint_id:
+        raise HTTPException(status_code=409, detail="Checkpoint is missing checkpoint_id")
+    return {
+        "checkpoint_ns": str(configurable.get("checkpoint_ns") or ""),
+        "checkpoint_id": str(checkpoint_id),
+        "checkpoint_map": configurable.get("checkpoint_map"),
+    }
+
+
+def _clean_human_message_for_regenerate(message: Any) -> dict[str, Any]:
+    additional_kwargs = _message_additional_kwargs(message)
+    content = get_original_user_content_text(_message_content(message), additional_kwargs)
+    additional_kwargs.pop(ORIGINAL_USER_CONTENT_KEY, None)
+    additional_kwargs.pop("hide_from_ui", None)
+
+    clean_message: dict[str, Any] = {
+        "type": "human",
+        "content": [{"type": "text", "text": content}],
+        "additional_kwargs": additional_kwargs,
+    }
+    message_id = _message_id(message)
+    if message_id:
+        clean_message["id"] = message_id
+    name = _message_name(message)
+    if name:
+        clean_message["name"] = name
+    return clean_message
+
+
+def _event_message_id(row: dict[str, Any]) -> str | None:
+    content = row.get("content")
+    if isinstance(content, BaseMessage):
+        return _message_id(content)
+    if isinstance(content, dict):
+        return _message_id(content)
+    return None
+
+
+def _run_last_ai_matches_message(record: RunRecord, message: Any) -> bool:
+    last_ai_message = (record.last_ai_message or "").strip()
+    if not last_ai_message:
+        return False
+    target_text = _message_text(message).strip()
+    if not target_text:
+        return False
+    return last_ai_message == target_text[: len(last_ai_message)]
+
+
+async def _find_target_run_id(thread_id: str, message_id: str, target_message: Any, request: Request) -> str:
+    event_store = get_run_event_store(request)
+    rows = await event_store.list_messages(thread_id, limit=REGENERATE_HISTORY_SCAN_LIMIT)
+    for row in reversed(rows):
+        if row.get("event_type") not in {"ai_message", "llm.ai.response"}:
+            continue
+        if _event_message_id(row) == message_id:
+            run_id = row.get("run_id")
+            if isinstance(run_id, str) and run_id:
+                return run_id
+    run_mgr = get_run_manager(request)
+    user_id = await get_current_user(request)
+    records = await run_mgr.list_by_thread(thread_id, user_id=user_id, limit=10)
+    fallback_record = next(
+        (record for record in records if record.status == RunStatus.success and _run_last_ai_matches_message(record, target_message)),
+        None,
+    )
+    if fallback_record is not None:
+        return fallback_record.run_id
+    if len(rows) >= REGENERATE_HISTORY_SCAN_LIMIT:
+        logger.warning(
+            "Could not find source run for regenerate message %s in recent run events for thread %s (limit=%s)",
+            message_id,
+            thread_id,
+            REGENERATE_HISTORY_SCAN_LIMIT,
+        )
+    raise HTTPException(status_code=409, detail="Could not find source run for assistant message")
+
+
+async def _find_base_checkpoint_before_human(thread_id: str, human_message_id: str, request: Request) -> Any:
+    checkpointer = get_checkpointer(request)
+    base_config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+    try:
+        checkpoints = [item async for item in checkpointer.alist(base_config, limit=REGENERATE_HISTORY_SCAN_LIMIT)]
+    except Exception as exc:
+        logger.exception("Failed to list checkpoints for regenerate thread %s", thread_id)
+        raise HTTPException(status_code=500, detail="Failed to inspect checkpoint history") from exc
+
+    previous_checkpoint = None
+    for checkpoint_tuple in reversed(checkpoints):
+        messages = _checkpoint_messages(checkpoint_tuple)
+        message_ids = {_message_id(message) for message in messages}
+        if human_message_id in message_ids:
+            if previous_checkpoint is None:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Could not find an addressable checkpoint before the target user message",
+                )
+            return previous_checkpoint
+        if _checkpoint_configurable(checkpoint_tuple).get("checkpoint_id"):
+            previous_checkpoint = checkpoint_tuple
+
+    if len(checkpoints) >= REGENERATE_HISTORY_SCAN_LIMIT:
+        logger.warning(
+            "Could not locate target user message %s in recent checkpoint history for thread %s (limit=%s)",
+            human_message_id,
+            thread_id,
+            REGENERATE_HISTORY_SCAN_LIMIT,
+        )
+    raise HTTPException(
+        status_code=409,
+        detail=(f"Could not locate target user message in recent checkpoint history (limit={REGENERATE_HISTORY_SCAN_LIMIT})"),
+    )
+
+
+async def _prepare_regenerate_payload(thread_id: str, message_id: str, request: Request) -> RegeneratePrepareResponse:
+    checkpointer = get_checkpointer(request)
+    latest_config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+    try:
+        latest_checkpoint = await checkpointer.aget_tuple(latest_config)
+    except Exception as exc:
+        logger.exception("Failed to read latest checkpoint for regenerate thread %s", thread_id)
+        raise HTTPException(status_code=500, detail="Failed to read latest checkpoint") from exc
+    if latest_checkpoint is None:
+        raise HTTPException(status_code=404, detail=f"Thread {thread_id} has no checkpoint")
+
+    messages = _checkpoint_messages(latest_checkpoint)
+    target_index = next((i for i, message in enumerate(messages) if _message_id(message) == message_id), None)
+    if target_index is None:
+        raise HTTPException(status_code=404, detail=f"Message {message_id} not found")
+    target_message = messages[target_index]
+    if not _is_visible_ai_message(target_message):
+        raise HTTPException(status_code=409, detail="Only visible assistant messages can be regenerated")
+
+    latest_visible_ai = next((message for message in reversed(messages) if _is_visible_ai_message(message)), None)
+    if _message_id(latest_visible_ai) != message_id:
+        raise HTTPException(status_code=409, detail="Only the latest assistant message can be regenerated")
+
+    previous_human = next((message for message in reversed(messages[:target_index]) if _is_visible_human_message(message)), None)
+    if previous_human is None:
+        raise HTTPException(status_code=409, detail="Could not find the user message for this assistant response")
+    previous_human_id = _message_id(previous_human)
+    if not previous_human_id:
+        raise HTTPException(status_code=409, detail="The source user message is missing an id")
+
+    base_checkpoint_tuple = await _find_base_checkpoint_before_human(thread_id, previous_human_id, request)
+    target_run_id = await _find_target_run_id(thread_id, message_id, target_message, request)
+    checkpoint = _checkpoint_response(base_checkpoint_tuple)
+    metadata = {
+        "regenerate_from_message_id": message_id,
+        "regenerate_from_run_id": target_run_id,
+        "regenerate_checkpoint_id": checkpoint["checkpoint_id"],
+    }
+    return RegeneratePrepareResponse(
+        input={"messages": [_clean_human_message_for_regenerate(previous_human)]},
+        checkpoint=checkpoint,
+        metadata=metadata,
+        target_run_id=target_run_id,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
+
+
+@router.post("/{thread_id}/runs/regenerate/prepare", response_model=RegeneratePrepareResponse)
+@require_permission("runs", "create", owner_check=True, require_existing=True)
+async def prepare_regenerate_run(
+    thread_id: str,
+    body: RegeneratePrepareRequest,
+    request: Request,
+) -> RegeneratePrepareResponse:
+    """Prepare input and checkpoint for regenerating the latest assistant turn."""
+    return await _prepare_regenerate_payload(thread_id, body.message_id, request)
 
 
 @router.post("/{thread_id}/runs", response_model=RunResponse)
@@ -349,18 +624,26 @@ async def list_thread_messages(
     event_store = get_run_event_store(request)
     messages = await event_store.list_messages(thread_id, limit=limit, before_seq=before_seq, after_seq=after_seq)
 
-    # Attach feedback to the last AI message of each run
-    feedback_repo = get_feedback_repo(request)
+    # Resolve the caller once; it is needed both to scope the feedback query
+    # below and to list the thread's runs for turn-duration injection.
     user_id = await get_current_user(request)
-    feedback_map = await feedback_repo.list_by_thread_grouped(thread_id, user_id=user_id)
 
-    # Find the last ai_message per run_id
+    # Find the last AI message per run_id. AI messages are persisted by
+    # RunJournal with event_type "llm.ai.response" (see runtime/journal.py);
+    # the event store returns that value verbatim, so match on it here.
     last_ai_per_run: dict[str, int] = {}  # run_id -> index in messages list
     for i, msg in enumerate(messages):
-        if msg.get("event_type") == "ai_message":
+        if msg.get("event_type") == "llm.ai.response":
             last_ai_per_run[msg["run_id"]] = i
 
-    # Attach feedback field
+    # Attach feedback to the last AI message of each run. Only query when there
+    # is an AI message to attach it to — threads with no completed AI turn yet
+    # would otherwise pay for a grouped feedback lookup whose result is unused.
+    feedback_map: dict[str, dict] = {}
+    if last_ai_per_run:
+        feedback_repo = get_feedback_repo(request)
+        feedback_map = await feedback_repo.list_by_thread_grouped(thread_id, user_id=user_id)
+
     last_ai_indices = set(last_ai_per_run.values())
     for i, msg in enumerate(messages):
         if i in last_ai_indices:
@@ -377,6 +660,20 @@ async def list_thread_messages(
             )
         else:
             msg["feedback"] = None
+
+    run_mgr = get_run_manager(request)
+    runs = await run_mgr.list_by_thread(thread_id, user_id=user_id)
+    run_durations = compute_run_durations(runs)
+
+    if run_durations:
+        for msg in messages:
+            content = msg.get("content", {})
+            if isinstance(content, dict) and content.get("type") == "ai":
+                rid = msg.get("run_id")
+                if rid and rid in run_durations:
+                    if "additional_kwargs" not in content:
+                        content["additional_kwargs"] = {}
+                    content["additional_kwargs"]["turn_duration"] = run_durations[rid]
 
     return messages
 
@@ -404,6 +701,23 @@ async def list_run_messages(
         after_seq=after_seq,
     )
     data, has_more = trim_run_message_page(rows, limit=limit, after_seq=after_seq)
+
+    if data:
+        run_mgr = get_run_manager(request)
+        record = await run_mgr.get(run_id)
+        if record:
+            durations = compute_run_durations([record])
+            duration = durations.get(run_id)
+            if duration is not None:
+                for msg in reversed(data):
+                    content = msg.get("content")
+                    metadata = msg.get("metadata", {})
+                    is_middleware = str(metadata.get("caller", "")).startswith("middleware:")
+                    if isinstance(content, dict) and content.get("type") == "ai" and not is_middleware:
+                        if "additional_kwargs" not in content:
+                            content["additional_kwargs"] = {}
+                        content["additional_kwargs"]["turn_duration"] = duration
+
     return {"data": data, "has_more": has_more}
 
 

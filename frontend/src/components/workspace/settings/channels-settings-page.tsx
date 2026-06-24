@@ -117,9 +117,11 @@ function ChannelProviderItem({
   const configureMutation = useConfigureChannelProvider();
   const disconnectProviderMutation = useDisconnectChannelProvider();
   const [setupOpen, setSetupOpen] = useState(false);
+  const runtimeAvailable = provider.configured && !provider.unavailable_reason;
   const isConnected =
-    connection?.status === "connected" ||
-    provider.connection_status === "connected";
+    runtimeAvailable &&
+    (connection?.status === "connected" ||
+      provider.connection_status === "connected");
   const canEditRuntimeConfig = providerCanEditRuntimeConfig(provider);
   const canConnect =
     (provider.connectable ?? (provider.enabled && provider.configured)) &&
@@ -186,7 +188,7 @@ function ChannelProviderItem({
           </ItemTitle>
           <ItemDescription className="line-clamp-none">
             {getProviderDescription(provider, t.channels.descriptions)}
-            {connectionLabel
+            {isConnected && connectionLabel
               ? ` ${t.channels.connectedAs(connectionLabel)}`
               : ""}
             {!isConnected && provider.unavailable_reason

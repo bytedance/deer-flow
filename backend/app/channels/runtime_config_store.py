@@ -51,6 +51,10 @@ class ChannelRuntimeConfigStore:
             delete=False,
         )
         try:
+            try:
+                Path(fd.name).chmod(0o600)
+            except OSError:
+                logger.debug("Unable to chmod temporary channel runtime config store at %s", fd.name, exc_info=True)
             json.dump(self._data, fd, indent=2, ensure_ascii=False)
             fd.close()
             Path(fd.name).replace(self._path)
@@ -121,9 +125,8 @@ def merge_runtime_channel_configs(
             channels_config.pop(provider, None)
             continue
         existing = channels_config.get(provider)
-        merged = dict(runtime_config)
-        if isinstance(existing, dict):
-            merged.update(existing)
+        merged = dict(existing) if isinstance(existing, dict) else {}
+        merged.update(runtime_config)
         channels_config[provider] = merged
 
 

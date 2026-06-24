@@ -105,7 +105,7 @@ _is_deerflow_pid() {
         return 0
     fi
 
-    files=$(lsof -p "$pid" 2>/dev/null) || return 1
+    files=$(lsof -b -w -p "$pid" 2>/dev/null) || return 1
     while IFS= read -r root; do
         [ -n "$root" ] || continue
         case "$files" in
@@ -122,7 +122,7 @@ _report_reclaimed_ports() {
     for port in 8001 3000 2026; do
         for pid in $(lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null); do
             _is_deerflow_pid "$pid" || continue
-            files=$(lsof -p "$pid" 2>/dev/null)
+            files=$(lsof -b -w -p "$pid" 2>/dev/null)
             case "$files" in *"$REPO_ROOT"/*) continue ;; esac  # this worktree — normal
             owner=""
             while IFS= read -r root; do

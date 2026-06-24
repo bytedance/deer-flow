@@ -75,7 +75,7 @@ class LocalSandboxProvider(SandboxProvider):
         """
         self._path_mappings = self._setup_path_mappings()
         self._generic_sandbox: LocalSandbox | None = None
-        self._thread_sandboxes: OrderedDict[str, LocalSandbox] = OrderedDict()
+        self._thread_sandboxes: OrderedDict[tuple[str, str], LocalSandbox] = OrderedDict()
         self._max_cached_threads = max_cached_threads
         self._lock = threading.Lock()
 
@@ -185,19 +185,41 @@ class LocalSandboxProvider(SandboxProvider):
         return mappings
 
     @staticmethod
-    def _build_thread_path_mappings(thread_id: str) -> list[PathMapping]:
-        """Build per-thread path mappings for /mnt/user-data and /mnt/acp-workspace.
-
-        Resolves ``user_id`` via :func:`get_effective_user_id` (the same path
-        :class:`AioSandboxProvider` uses) and ensures the backing host
-        directories exist before they are mapped into the sandbox view.
-        """
-        from deerflow.config.paths import get_paths
+    def _effective_acquire_user_id(user_id: str | None) -> str:
         from deerflow.runtime.user_context import get_effective_user_id
 
+        return user_id or get_effective_user_id()
+
+    @staticmethod
+    def _thread_key(thread_id: str, user_id: str) -> tuple[str, str]:
+        return (user_id, thread_id)
+
+    @staticmethod
+    def _sandbox_id_for_thread(thread_id: str, user_id: str) -> str:
+        return f"local:{user_id}:{thread_id}"
+
+    @staticmethod
+    def _key_from_sandbox_id(sandbox_id: str) -> tuple[str, str] | None:
+        if not sandbox_id.startswith("local:"):
+            return None
+        value = sandbox_id[len("local:") :]
+        user_id, separator, thread_id = value.partition(":")
+        if not separator or not user_id or not thread_id:
+            return None
+        return (user_id, thread_id)
+
+    @staticmethod
+    def _build_thread_path_mappings(thread_id: str, *, user_id: str | None = None) -> list[PathMapping]:
+        """Build per-thread path mappings for /mnt/user-data and /mnt/acp-workspace.
+
+        Uses the explicitly resolved user id when provided, falling back to
+        :func:`get_effective_user_id` for legacy callers.
+        """
+        from deerflow.config.paths import get_paths
+
         paths = get_paths()
-        user_id = get_effective_user_id()
-        paths.ensure_thread_dirs(thread_id, user_id=user_id)
+        effective_user_id = LocalSandboxProvider._effective_acquire_user_id(user_id)
+        paths.ensure_thread_dirs(thread_id, user_id=effective_user_id)
 
         return [
             # Aggregate parent mapping so ``ls /mnt/user-data`` and other
@@ -207,32 +229,32 @@ class LocalSandboxProvider(SandboxProvider):
             # because ``_find_path_mapping`` sorts by container_path length.
             PathMapping(
                 container_path=_USER_DATA_VIRTUAL_PREFIX,
-                local_path=str(paths.sandbox_user_data_dir(thread_id, user_id=user_id)),
+                local_path=str(paths.sandbox_user_data_dir(thread_id, user_id=effective_user_id)),
                 read_only=False,
             ),
             PathMapping(
                 container_path=f"{_USER_DATA_VIRTUAL_PREFIX}/workspace",
-                local_path=str(paths.sandbox_work_dir(thread_id, user_id=user_id)),
+                local_path=str(paths.sandbox_work_dir(thread_id, user_id=effective_user_id)),
                 read_only=False,
             ),
             PathMapping(
                 container_path=f"{_USER_DATA_VIRTUAL_PREFIX}/uploads",
-                local_path=str(paths.sandbox_uploads_dir(thread_id, user_id=user_id)),
+                local_path=str(paths.sandbox_uploads_dir(thread_id, user_id=effective_user_id)),
                 read_only=False,
             ),
             PathMapping(
                 container_path=f"{_USER_DATA_VIRTUAL_PREFIX}/outputs",
-                local_path=str(paths.sandbox_outputs_dir(thread_id, user_id=user_id)),
+                local_path=str(paths.sandbox_outputs_dir(thread_id, user_id=effective_user_id)),
                 read_only=False,
             ),
             PathMapping(
                 container_path=_ACP_WORKSPACE_VIRTUAL_PREFIX,
-                local_path=str(paths.acp_workspace_dir(thread_id, user_id=user_id)),
+                local_path=str(paths.acp_workspace_dir(thread_id, user_id=effective_user_id)),
                 read_only=False,
             ),
         ]
 
-    def acquire(self, thread_id: str | None = None) -> str:
+    def acquire(self, thread_id: str | None = None, *, user_id: str | None = None) -> str:
         """Return a sandbox id scoped to *thread_id* (or the generic singleton).
 
         - ``thread_id=None`` keeps the legacy singleton with id ``"local"`` for
@@ -254,29 +276,32 @@ class LocalSandboxProvider(SandboxProvider):
                     _singleton = self._generic_sandbox
                 return self._generic_sandbox.id
 
+        effective_user_id = self._effective_acquire_user_id(user_id)
+        key = self._thread_key(thread_id, effective_user_id)
+
         # Fast path under lock.
         with self._lock:
-            cached = self._thread_sandboxes.get(thread_id)
+            cached = self._thread_sandboxes.get(key)
             if cached is not None:
                 # Mark as most-recently used so frequently-touched threads
                 # survive eviction.
-                self._thread_sandboxes.move_to_end(thread_id)
+                self._thread_sandboxes.move_to_end(key)
                 return cached.id
 
         # ``_build_thread_path_mappings`` touches the filesystem
         # (``ensure_thread_dirs``); release the lock during I/O.
-        new_mappings = list(self._path_mappings) + self._build_thread_path_mappings(thread_id)
+        new_mappings = list(self._path_mappings) + self._build_thread_path_mappings(thread_id, user_id=effective_user_id)
 
         with self._lock:
             # Re-check after the lock-free I/O: another caller may have
             # populated the cache while we were computing mappings.
-            cached = self._thread_sandboxes.get(thread_id)
+            cached = self._thread_sandboxes.get(key)
             if cached is None:
-                cached = LocalSandbox(f"local:{thread_id}", path_mappings=new_mappings)
-                self._thread_sandboxes[thread_id] = cached
+                cached = LocalSandbox(self._sandbox_id_for_thread(thread_id, effective_user_id), path_mappings=new_mappings)
+                self._thread_sandboxes[key] = cached
                 self._evict_until_within_cap_locked()
             else:
-                self._thread_sandboxes.move_to_end(thread_id)
+                self._thread_sandboxes.move_to_end(key)
             return cached.id
 
     def _evict_until_within_cap_locked(self) -> None:
@@ -285,10 +310,11 @@ class LocalSandboxProvider(SandboxProvider):
         Caller MUST hold ``self._lock``.
         """
         while len(self._thread_sandboxes) > self._max_cached_threads:
-            evicted_thread_id, _ = self._thread_sandboxes.popitem(last=False)
+            evicted_key, _ = self._thread_sandboxes.popitem(last=False)
             logger.info(
-                "Evicting LocalSandbox cache entry for thread %s (cap=%d)",
-                evicted_thread_id,
+                "Evicting LocalSandbox cache entry for user/thread %s/%s (cap=%d)",
+                evicted_key[0],
+                evicted_key[1],
                 self._max_cached_threads,
             )
 
@@ -302,14 +328,16 @@ class LocalSandboxProvider(SandboxProvider):
                     return self._generic_sandbox
             return generic
         if isinstance(sandbox_id, str) and sandbox_id.startswith("local:"):
-            thread_id = sandbox_id[len("local:") :]
+            key = self._key_from_sandbox_id(sandbox_id)
+            if key is None:
+                return None
             with self._lock:
-                cached = self._thread_sandboxes.get(thread_id)
+                cached = self._thread_sandboxes.get(key)
                 if cached is not None:
                     # Touching a thread via ``get`` (used by tools.py to look
                     # up the sandbox once per tool call) promotes it in LRU
                     # order so an active thread isn't evicted under load.
-                    self._thread_sandboxes.move_to_end(thread_id)
+                    self._thread_sandboxes.move_to_end(key)
                 return cached
         return None
 

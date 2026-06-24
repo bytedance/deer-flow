@@ -18,6 +18,18 @@ const BLOCKQUOTE_PREFIX_RE = /^ {0,3}(?:[ \t]*>)+/;
 const CODE_FENCE_RE = /^ {0,3}(?:```|~~~)/;
 const INDENTED_CODE_RE = /^(?: {4}|\t)/;
 
+// marked's list tokenizer recurses once per nesting level too (list ->
+// blockTokens -> list -> ...). In the browser's tighter stack a deeply nested
+// list overflows during render and throws "Maximum call stack size exceeded"
+// from inside Streamdown's lexing useMemo (see issue #3393); on larger stacks
+// the same input instead goes quadratic and exhausts the heap. Each list level
+// requires at least ~2 columns of indentation, so capping leading whitespace at
+// 200 columns bounds the effective nesting near 100 levels — far beyond any
+// legitimate content while keeping marked safe. Anything indented past this is
+// pathological nesting, not prose or code.
+const MAX_LIST_INDENT = 200;
+const DEEP_INDENT_HINT_RE = new RegExp(`^[ \\t]{${MAX_LIST_INDENT + 1},}`, "m");
+
 export function capBlockquoteNesting(markdown: string): string {
   if (!DEEP_BLOCKQUOTE_HINT_RE.test(markdown)) {
     return markdown;
@@ -53,6 +65,39 @@ export function capBlockquoteNesting(markdown: string): string {
       return line;
     })
     .join("\n");
+}
+
+export function capListNesting(markdown: string): string {
+  if (!DEEP_INDENT_HINT_RE.test(markdown)) {
+    return markdown;
+  }
+
+  let insideFence = false;
+  return markdown
+    .split("\n")
+    .map((line) => {
+      if (CODE_FENCE_RE.test(line)) {
+        insideFence = !insideFence;
+        return line;
+      }
+      // Indentation inside fenced code is literal layout (ASCII art, pasted
+      // source); collapsing it would corrupt the rendered block.
+      if (insideFence) {
+        return line;
+      }
+      const whitespace = /^[ \t]*/.exec(line)![0];
+      if (whitespace.length <= MAX_LIST_INDENT) {
+        return line;
+      }
+      return " ".repeat(MAX_LIST_INDENT) + line.slice(whitespace.length);
+    })
+    .join("\n");
+}
+
+// Cap every runaway nesting construct that can take down a message render
+// before marked sees the content.
+export function capMarkdownNesting(markdown: string): string {
+  return capListNesting(capBlockquoteNesting(markdown));
 }
 
 export function preprocessStreamdownMarkdown(markdown: string): string {

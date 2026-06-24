@@ -252,11 +252,17 @@ def test_build_run_config_explicit_agent_name_not_overwritten():
         assistant_id="other-agent",
     )
     assert config["configurable"]["agent_name"] == "explicit-agent"
+    assert config["context"]["agent_name"] == "explicit-agent"
     assert config["run_name"] == "explicit-agent"
 
 
 def test_build_run_config_context_custom_agent_injects_agent_name():
-    """Custom assistant_id must be forwarded as context['agent_name'] in context mode."""
+    """Custom assistant_id must be forwarded as ``agent_name`` in both
+    ``context`` and ``configurable`` (issue #3549). Previously only the
+    active container was populated, so when the caller sent context-only the
+    setup_agent tool — which reads ``ToolRuntime.context`` — saw
+    ``agent_name=None`` and wrote SOUL.md to the global base_dir.
+    """
     from app.gateway.services import build_run_config
 
     config = build_run_config(
@@ -267,7 +273,7 @@ def test_build_run_config_context_custom_agent_injects_agent_name():
     )
 
     assert config["context"]["agent_name"] == "finalis"
-    assert "configurable" not in config
+    assert config["configurable"]["agent_name"] == "finalis"
 
 
 def test_resolve_agent_factory_returns_make_lead_agent():
@@ -279,6 +285,56 @@ def test_resolve_agent_factory_returns_make_lead_agent():
     assert resolve_agent_factory("lead_agent") is make_lead_agent
     assert resolve_agent_factory("finalis") is make_lead_agent
     assert resolve_agent_factory("custom-agent-123") is make_lead_agent
+
+
+def test_build_run_config_configurable_custom_agent_dual_writes_agent_name():
+    """Regression for issue #3549: even when the caller uses the legacy
+    ``configurable`` path, ``agent_name`` must also land in
+    ``config['context']`` so LangGraph >=1.1.9 ``ToolRuntime.context`` consumers
+    (e.g. ``setup_agent``) observe the same value.
+    """
+    from app.gateway.services import build_run_config
+
+    config = build_run_config("thread-1", None, None, assistant_id="finalis")
+
+    assert config["configurable"]["agent_name"] == "finalis"
+    assert config["context"]["agent_name"] == "finalis"
+
+
+def test_build_run_config_context_explicit_agent_name_not_overwritten():
+    """An explicit ``context['agent_name']`` from the request must take
+    precedence over the value derived from ``assistant_id`` and be mirrored
+    to ``configurable`` so the two containers never diverge.
+    """
+    from app.gateway.services import build_run_config
+
+    config = build_run_config(
+        "thread-1",
+        {"context": {"agent_name": "explicit-agent"}},
+        None,
+        assistant_id="other-agent",
+    )
+
+    assert config["context"]["agent_name"] == "explicit-agent"
+    assert config["configurable"]["agent_name"] == "explicit-agent"
+    assert config["run_name"] == "explicit-agent"
+
+
+def test_build_run_config_dual_write_matches_merge_run_context_overrides_shape():
+    """The shape produced by ``build_run_config`` for a custom agent must be
+    indistinguishable from what ``merge_run_context_overrides`` would produce
+    when ``agent_name`` is supplied via ``body.context`` — guarding against
+    the two code paths drifting apart again (issue #3549).
+    """
+    from app.gateway.services import build_run_config, merge_run_context_overrides
+
+    via_assistant_id = build_run_config("thread-1", None, None, assistant_id="finalis")
+
+    via_context = build_run_config("thread-1", None, None)
+    merge_run_context_overrides(via_context, {"agent_name": "finalis"})
+
+    assert via_assistant_id["configurable"]["agent_name"] == via_context["configurable"]["agent_name"]
+    assert via_assistant_id["context"]["agent_name"] == via_context["context"]["agent_name"]
 
 
 # ---------------------------------------------------------------------------
@@ -315,6 +371,70 @@ def test_run_create_request_context_defaults_to_none():
 
     body = RunCreateRequest(input=None)
     assert body.context is None
+
+
+def test_apply_checkpoint_to_run_config_writes_checkpoint_fields():
+    import asyncio
+    from types import SimpleNamespace
+
+    from app.gateway.services import apply_checkpoint_to_run_config
+
+    class FakeCheckpointer:
+        def __init__(self):
+            self.seen_config = None
+
+        async def aget_tuple(self, config):
+            self.seen_config = config
+            return SimpleNamespace(config=config, checkpoint={"channel_values": {}})
+
+    checkpointer = FakeCheckpointer()
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(checkpointer=checkpointer)))
+    body = SimpleNamespace(
+        checkpoint={
+            "checkpoint_ns": "",
+            "checkpoint_id": "ckpt-1",
+            "checkpoint_map": {"": "ckpt-1"},
+        },
+        checkpoint_id=None,
+    )
+    config = {"configurable": {"thread_id": "thread-1"}}
+
+    asyncio.run(apply_checkpoint_to_run_config(config, body=body, thread_id="thread-1", request=request))
+
+    assert checkpointer.seen_config == {
+        "configurable": {
+            "thread_id": "thread-1",
+            "checkpoint_ns": "",
+            "checkpoint_id": "ckpt-1",
+            "checkpoint_map": {"": "ckpt-1"},
+        }
+    }
+    assert config["configurable"]["checkpoint_id"] == "ckpt-1"
+    assert config["configurable"]["checkpoint_ns"] == ""
+    assert config["configurable"]["checkpoint_map"] == {"": "ckpt-1"}
+
+
+def test_apply_checkpoint_to_run_config_rejects_missing_checkpoint():
+    import asyncio
+    from types import SimpleNamespace
+
+    from fastapi import HTTPException
+
+    from app.gateway.services import apply_checkpoint_to_run_config
+
+    class FakeCheckpointer:
+        async def aget_tuple(self, config):
+            return None
+
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(checkpointer=FakeCheckpointer())))
+    body = SimpleNamespace(checkpoint=None, checkpoint_id="missing")
+    config = {"configurable": {"thread_id": "thread-1"}}
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(apply_checkpoint_to_run_config(config, body=body, thread_id="thread-1", request=request))
+
+    assert exc.value.status_code == 404
+    assert "missing" in exc.value.detail
 
 
 def test_context_merges_into_configurable():
@@ -492,6 +612,89 @@ def test_inject_authenticated_user_context_skips_internal_role():
     assert config["context"]["user_id"] == "channel-user-7"
 
 
+async def _capture_start_run_graph_input(body):
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from langgraph.checkpoint.memory import InMemorySaver
+    from langgraph.store.memory import InMemoryStore
+
+    from app.gateway.services import start_run
+    from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
+    from deerflow.runtime import RunManager
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    run_manager = RunManager(store=MemoryRunStore())
+    state = SimpleNamespace(
+        stream_bridge=SimpleNamespace(),
+        run_manager=run_manager,
+        checkpointer=InMemorySaver(),
+        store=InMemoryStore(),
+        run_event_store=SimpleNamespace(),
+        run_events_config=None,
+        thread_store=MemoryThreadMetaStore(InMemoryStore()),
+    )
+    request = SimpleNamespace(
+        headers={},
+        state=SimpleNamespace(),
+        app=SimpleNamespace(state=state),
+    )
+    captured: dict[str, object] = {}
+
+    async def fake_run_agent(*args, **kwargs):
+        captured["graph_input"] = kwargs["graph_input"]
+
+    with (
+        patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+        patch("app.gateway.services.run_agent", side_effect=fake_run_agent),
+    ):
+        record = await start_run(body, "thread-command-test", request)
+        await record.task
+
+    return captured["graph_input"]
+
+
+def test_start_run_translates_resume_command_to_langgraph_command(_stub_app_config):
+    import asyncio
+
+    from langgraph.types import Command
+
+    from app.gateway.routers.thread_runs import RunCreateRequest
+
+    graph_input = asyncio.run(
+        _capture_start_run_graph_input(
+            RunCreateRequest(
+                input=None,
+                command={"resume": {"answer": "approved"}},
+            )
+        )
+    )
+
+    assert isinstance(graph_input, Command)
+    assert graph_input.resume == {"answer": "approved"}
+
+
+def test_start_run_uses_normalized_input_without_command(_stub_app_config):
+    import asyncio
+
+    from langchain_core.messages import HumanMessage
+
+    from app.gateway.routers.thread_runs import RunCreateRequest
+
+    graph_input = asyncio.run(
+        _capture_start_run_graph_input(
+            RunCreateRequest(
+                input={"messages": [{"role": "human", "content": "hi"}]},
+                command=None,
+            )
+        )
+    )
+
+    assert isinstance(graph_input, dict)
+    assert isinstance(graph_input["messages"][0], HumanMessage)
+    assert graph_input["messages"][0].content == "hi"
+
+
 def test_start_run_uses_internal_owner_header_for_persistence(_stub_app_config):
     import asyncio
     from types import SimpleNamespace
@@ -585,8 +788,24 @@ def test_build_run_config_with_context():
     )
     assert "context" in config
     assert config["context"]["user_id"] == "u-42"
+    assert config["context"]["thread_id"] == "thread-1"
     assert "configurable" not in config
     assert config["recursion_limit"] == 100
+
+
+def test_build_run_config_context_injects_thread_id():
+    from app.gateway.services import build_run_config
+
+    config = build_run_config(
+        "T-deadbeef-42",
+        {"context": {"user_id": "u-1", "thinking_enabled": True}},
+        None,
+    )
+
+    assert config["context"]["user_id"] == "u-1"
+    assert config["context"]["thinking_enabled"] is True
+    assert config["context"]["thread_id"] == "T-deadbeef-42"
+    assert "configurable" not in config
 
 
 def test_build_run_config_null_context_becomes_empty_context():
@@ -595,7 +814,7 @@ def test_build_run_config_null_context_becomes_empty_context():
 
     config = build_run_config("thread-1", {"context": None}, None)
 
-    assert config["context"] == {}
+    assert config["context"] == {"thread_id": "thread-1"}
     assert "configurable" not in config
 
 
@@ -610,13 +829,15 @@ def test_build_run_config_rejects_non_mapping_context():
 
 
 def test_build_run_config_null_context_custom_agent_injects_agent_name():
-    """Custom assistant_id can still be injected when context=null starts context mode."""
+    """Custom assistant_id must be injected into both containers even when the
+    request started in context-only mode with ``context=null`` .
+    """
     from app.gateway.services import build_run_config
 
     config = build_run_config("thread-1", {"context": None}, None, assistant_id="finalis")
 
-    assert config["context"] == {"agent_name": "finalis"}
-    assert "configurable" not in config
+    assert config["context"]["agent_name"] == "finalis"
+    assert config["configurable"]["agent_name"] == "finalis"
 
 
 def test_build_run_config_context_plus_configurable_warns(caplog):

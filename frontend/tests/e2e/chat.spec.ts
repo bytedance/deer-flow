@@ -44,6 +44,44 @@ test.describe("Chat workspace", () => {
     await expect(textarea).toHaveValue("/data-analysis ");
   });
 
+  test("uses arrow keys to navigate skill suggestions before prompt history", async ({
+    page,
+  }) => {
+    await page.goto("/workspace/chats/new");
+
+    const textarea = page.getByPlaceholder(/how can i assist you/i);
+    await expect(textarea).toBeVisible({ timeout: 15_000 });
+
+    await textarea.fill("/");
+
+    const dataAnalysis = page.getByRole("option", {
+      name: /data-analysis/i,
+    });
+    const frontendDesign = page.getByRole("option", {
+      name: /frontend-design/i,
+    });
+    await expect(dataAnalysis).toBeVisible();
+    await expect(frontendDesign).toBeVisible();
+    await expect(dataAnalysis).toHaveAttribute("aria-selected", "true");
+
+    await textarea.press("ArrowDown");
+
+    await expect(textarea).toHaveValue("/");
+    await expect(dataAnalysis).toHaveAttribute("aria-selected", "false");
+    await expect(frontendDesign).toHaveAttribute("aria-selected", "true");
+
+    await textarea.press("ArrowUp");
+
+    await expect(textarea).toHaveValue("/");
+    await expect(dataAnalysis).toHaveAttribute("aria-selected", "true");
+    await expect(frontendDesign).toHaveAttribute("aria-selected", "false");
+
+    await textarea.press("ArrowDown");
+    await textarea.press("Enter");
+
+    await expect(textarea).toHaveValue("/frontend-design ");
+  });
+
   test("keeps Shift+Enter as newline while skill suggestions are visible", async ({
     page,
   }) => {
@@ -309,5 +347,48 @@ test.describe("Chat workspace", () => {
       timeout: 10_000,
     });
     await expect(promptForm.getByText("report.docx")).toBeHidden();
+  });
+
+  test("does not fetch follow-up suggestions when disabled in config", async ({
+    page,
+  }) => {
+    await page.route("**/api/suggestions/config", (route) => {
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ enabled: false }),
+      });
+    });
+
+    let suggestionsFetched = false;
+    await page.route("**/api/threads/*/suggestions", (route) => {
+      suggestionsFetched = true;
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ suggestions: [] }),
+      });
+    });
+
+    let streamCalled = false;
+    await page.route("**/runs/stream", (route) => {
+      streamCalled = true;
+      return handleRunStream(route);
+    });
+
+    await page.goto("/workspace/chats/new");
+
+    const textarea = page.getByPlaceholder(/how can i assist you/i);
+    await expect(textarea).toBeVisible({ timeout: 15_000 });
+
+    await textarea.fill("Hello");
+    await textarea.press("Enter");
+
+    await expect.poll(() => streamCalled, { timeout: 10_000 }).toBeTruthy();
+    await expect(page.getByText("Hello from DeerFlow!")).toBeVisible({
+      timeout: 10_000,
+    });
+    await page.waitForTimeout(1000);
+    expect(suggestionsFetched).toBe(false);
   });
 });

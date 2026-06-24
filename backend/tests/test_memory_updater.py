@@ -78,6 +78,27 @@ def test_apply_updates_skips_existing_duplicate_and_preserves_removals() -> None
     assert all(fact["id"] != "fact_remove" for fact in result["facts"])
 
 
+def test_apply_updates_skips_whitespace_only_facts() -> None:
+    updater = MemoryUpdater()
+    current_memory = _make_memory()
+    update_data = {
+        "newFacts": [
+            {"content": "   ", "category": "context", "confidence": 0.9},
+            {"content": "User prefers dark mode", "category": "preference", "confidence": 0.9},
+        ],
+    }
+
+    with patch(
+        "deerflow.agents.memory.updater.get_memory_config",
+        return_value=_memory_config(max_facts=100, fact_confidence_threshold=0.7),
+    ):
+        result = updater._apply_updates(current_memory, update_data, thread_id="thread-ws")
+
+    # The whitespace-only fact must not be stored; the real fact still is.
+    assert [fact["content"] for fact in result["facts"]] == ["User prefers dark mode"]
+    assert all(fact["content"].strip() for fact in result["facts"])
+
+
 def test_prepare_update_prompt_preserves_non_ascii_memory_text() -> None:
     updater = MemoryUpdater()
     current_memory = _make_memory(
