@@ -200,13 +200,17 @@ def reduce(state: ViewState, action: Action) -> ViewState:
 
 
 def _apply_assistant_delta(state: ViewState, action: AssistantDelta) -> ViewState:
-    """Append to the existing assistant row with this id, or start a new one.
+    """Update the assistant row with this id (anywhere in the transcript), or
+    start a new one.
 
-    Robust to non-strict streaming: the client can re-emit a message's *full*
-    content (e.g. a ``values`` snapshot synthesised after the ``messages``
-    deltas), or stream cumulative snapshots instead of pure deltas. So when an
-    update for an existing id arrives, we merge by content rather than blindly
-    concatenating:
+    On a thread with history, the client re-emits every prior message on each
+    new turn (its dedup is per-turn), and a re-emitted *older* message can arrive
+    after a newer one has started — so we must match by id across the whole
+    transcript, not just the most recent assistant row, or prior answers get
+    duplicated.
+
+    Updates also merge by content rather than blindly concatenating, to absorb
+    full re-sends / cumulative snapshots vs. genuine incremental deltas:
 
     * new text == accumulated, or starts with it  -> cumulative/re-send: replace
     * accumulated starts with new text            -> stale/shorter re-send: keep
@@ -214,13 +218,10 @@ def _apply_assistant_delta(state: ViewState, action: AssistantDelta) -> ViewStat
     """
 
     rows = list(state.rows)
-    for i in range(len(rows) - 1, -1, -1):
-        row = rows[i]
-        if isinstance(row, AssistantRow):
-            if row.id == action.id and not row.error:
-                rows[i] = replace(row, text=_merge_stream_text(row.text, action.text))
-                return replace(state, rows=tuple(rows))
-            break  # most recent assistant row has a different id -> new row
+    for i, row in enumerate(rows):
+        if isinstance(row, AssistantRow) and row.id == action.id and not row.error:
+            rows[i] = replace(row, text=_merge_stream_text(row.text, action.text))
+            return replace(state, rows=tuple(rows))
     return _append(state, AssistantRow(text=action.text, id=action.id))
 
 

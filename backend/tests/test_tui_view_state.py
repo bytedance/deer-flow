@@ -114,6 +114,21 @@ def test_assistant_delta_treats_cumulative_snapshot_as_replace():
     assert state.rows[0].text == "Hel lo world"
 
 
+def test_assistant_resend_of_older_message_updates_in_place_not_duplicated():
+    # On a thread with history, the client re-emits every prior message on each
+    # new turn. A values snapshot can re-emit an OLDER message's full text AFTER
+    # a newer message has already started — the reducer must update the old row
+    # by id, not append a verbatim duplicate at the end.
+    state = initial_state()
+    state = reduce(state, AssistantDelta(id="m1", text="First answer."))
+    state = reduce(state, UserSubmitted("second question"))
+    state = reduce(state, AssistantDelta(id="m2", text="Second answer."))
+    state = reduce(state, AssistantDelta(id="m1", text="First answer."))  # re-emit of old m1
+
+    assistants = [r for r in state.rows if r.kind == "assistant"]
+    assert [a.text for a in assistants] == ["First answer.", "Second answer."]
+
+
 def test_tool_started_dedupes_by_call_id():
     state = initial_state()
     state = reduce(state, ToolStarted(tool_call_id="tc1", tool_name="bash", args={"cmd": "l"}))
