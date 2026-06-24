@@ -1,0 +1,5 @@
+prefix_rule(
+    pattern = [["python3", "python"], ".codex/docs/get_context.py"],
+    decision = "allow",
+    justification = "Allow get_context.py for file and folder context.",
+)
