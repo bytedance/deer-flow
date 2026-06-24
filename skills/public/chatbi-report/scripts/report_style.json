@@ -1,0 +1,25 @@
+{
+  "font": {
+    "title":    {"name": "微软雅黑", "size": 18, "bold": true},
+    "section":  {"name": "微软雅黑", "size": 14, "bold": true},
+    "report":   {"name": "微软雅黑", "size": 12, "bold": true},
+    "body":     {"name": "宋体",    "size": 11},
+    "subtitle": {"name": "宋体",    "size": 9,  "color": "#666666"}
+  },
+  "table": {
+    "header_bg":     "#F0F0F0",
+    "border_color":  "#888888",
+    "border_width_pt": 0.5,
+    "cell_padding_pt": 4,
+    "number_format": {
+      "number":      "#,##0",
+      "currency":    "¥#,##0.00",
+      "percentage":  "0.0%",
+      "ratio":       "0.00"
+    }
+  },
+  "page": {
+    "orientation": "landscape",
+    "margins_cm": {"top": 2, "bottom": 2, "left": 2, "right": 2}
+  }
+}

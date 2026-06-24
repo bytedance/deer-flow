@@ -47,6 +47,9 @@ debug.log
 # Local git hooks (keep only on this machine, do not push)
 .githooks/
 
+# chatbi-report test runtime-generated driver scripts
+backend/tests/chatbi_report/fixtures/_render_driver*.py
+
 # pnpm
 .pnpm-store
 sandbox_image_cache.tar
