@@ -20,7 +20,7 @@ def sqlbot_env(monkeypatch):
 def fixture_dir() -> Path:
     """Path to backend/tests/chatbi_report/fixtures for integration-style unit tests."""
     return (
-        Path(__file__).resolve().parents[3]
+        Path(__file__).resolve().parents[5]
         / "backend"
         / "tests"
         / "chatbi_report"
