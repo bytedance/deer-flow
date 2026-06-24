@@ -203,8 +203,12 @@ _is_repo_nginx_pid() {
     local args
 
     command=$(ps -p "$pid" -o comm= 2>/dev/null) || return 1
+    # On macOS nginx rewrites argv[0] (e.g. "nginx: master process ..." or
+    # "nginx: worker process"), and `ps -o comm=` returns that rewritten string
+    # rather than the executable basename. Accept the macOS form as well so
+    # `make stop` actually reaps repo-owned nginx processes here.
     case "$command" in
-        nginx|*/nginx) ;;
+        nginx|*/nginx|nginx:*) ;;
         *) return 1 ;;
     esac
 
