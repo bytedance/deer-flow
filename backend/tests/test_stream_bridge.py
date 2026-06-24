@@ -47,7 +47,7 @@ class _FakeRedis:
         timeout = None if block is None else block / 1000
         while True:
             async with self.conditions[name]:
-                entries = [(event_id, fields) for event_id, fields in self.streams[name] if _stream_id_gt(event_id, last_id)]
+                entries = [(event_id, fields) for event_id, fields in self.streams.get(name, []) if _stream_id_gt(event_id, last_id)]
                 if entries:
                     return [(name, entries[:count] if count is not None else entries)]
                 if timeout is None:
@@ -61,6 +61,9 @@ class _FakeRedis:
         self.deleted.append(name)
         self.streams.pop(name, None)
         return 1
+
+    async def exists(self, name):
+        return 1 if name in self.streams else 0
 
     async def aclose(self):
         self.closed = True
@@ -439,14 +442,19 @@ async def test_redis_replays_after_last_event_id(redis_bridge: RedisStreamBridge
 
 @pytest.mark.anyio
 async def test_redis_heartbeat(redis_bridge: RedisStreamBridge):
-    """Redis bridge should yield heartbeats when XREAD times out."""
+    """Redis bridge should yield heartbeats when XREAD times out on an existing stream."""
+    run_id = "redis-run-heartbeat"
+    await redis_bridge.publish(run_id, "init", {})
+
     received = []
-    async for entry in redis_bridge.subscribe("redis-run-heartbeat", heartbeat_interval=0.01):
+    async for entry in redis_bridge.subscribe(run_id, heartbeat_interval=0.01):
         received.append(entry)
         if entry is HEARTBEAT_SENTINEL:
             break
 
-    assert received == [HEARTBEAT_SENTINEL]
+    assert len(received) == 2
+    assert received[0].event == "init"
+    assert received[1] is HEARTBEAT_SENTINEL
 
 
 @pytest.mark.anyio
@@ -477,6 +485,96 @@ async def test_redis_cleanup_deletes_stream(redis_bridge: RedisStreamBridge):
     await redis_bridge.cleanup(run_id)
 
     assert fake.deleted == ["deerflow:stream_bridge:redis-run-cleanup"]
+
+
+@pytest.mark.anyio
+async def test_redis_subscribe_waits_for_first_publish(redis_bridge: RedisStreamBridge):
+    """A subscriber that starts before the first XADD must not receive END."""
+    run_id = "redis-run-first-publish"
+    received = []
+
+    async def publish_later() -> None:
+        await anyio.sleep(0.05)
+        await redis_bridge.publish(run_id, "metadata", {"run_id": run_id})
+        await redis_bridge.publish_end(run_id)
+
+    with anyio.fail_after(2):
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(publish_later)
+            async for entry in redis_bridge.subscribe(run_id, heartbeat_interval=0.01):
+                if entry is HEARTBEAT_SENTINEL:
+                    continue
+                received.append(entry)
+                if entry is END_SENTINEL:
+                    break
+
+    assert [entry.event for entry in received[:-1]] == ["metadata"]
+    assert received[-1] is END_SENTINEL
+
+
+@pytest.mark.anyio
+async def test_redis_stream_exists_reports_cleanup(redis_bridge: RedisStreamBridge):
+    """Callers can detect when retained Redis stream data has been cleaned up."""
+    run_id = "redis-run-post-cleanup"
+    await redis_bridge.publish(run_id, "event-1", {"n": 1})
+    await redis_bridge.publish_end(run_id)
+
+    assert await redis_bridge.stream_exists(run_id) is True
+    await redis_bridge.cleanup(run_id)
+    assert await redis_bridge.stream_exists(run_id) is False
+
+
+@pytest.mark.anyio
+async def test_redis_transient_error_retries():
+    """Transient RedisError during XREAD should be retried, not propagated."""
+    from redis.exceptions import RedisError
+
+    fake = _FakeRedis()
+    call_count = 0
+    original_xread = fake.xread
+
+    async def flaky_xread(streams, count=None, block=None):
+        nonlocal call_count
+        call_count += 1
+        if call_count <= 2:
+            raise RedisError("Transient connection error")
+        return await original_xread(streams, count=count, block=block)
+
+    fake.xread = flaky_xread
+    bridge = RedisStreamBridge(redis_url="redis://fake", queue_maxsize=2, client=fake)
+
+    run_id = "redis-run-retry"
+    await bridge.publish(run_id, "event-1", {"n": 1})
+    await bridge.publish_end(run_id)
+
+    received = []
+    with anyio.fail_after(5):
+        async for entry in bridge.subscribe(run_id, heartbeat_interval=0.01):
+            received.append(entry)
+            if entry is END_SENTINEL:
+                break
+
+    assert call_count > 2
+    assert [e.event for e in received[:-1]] == ["event-1"]
+    assert received[-1] is END_SENTINEL
+
+
+@pytest.mark.anyio
+async def test_redis_transient_error_gives_up_after_max_retries():
+    """After exceeding max consecutive errors, RedisError should propagate."""
+    from redis.exceptions import RedisError
+
+    fake = _FakeRedis()
+
+    async def always_fail_xread(streams, count=None, block=None):
+        raise RedisError("Persistent connection error")
+
+    fake.xread = always_fail_xread
+    bridge = RedisStreamBridge(redis_url="redis://fake", queue_maxsize=2, client=fake)
+
+    with pytest.raises(RedisError, match="Persistent connection error"):
+        async for _ in bridge.subscribe("redis-run-fail", heartbeat_interval=0.01):
+            pass
 
 
 # ---------------------------------------------------------------------------

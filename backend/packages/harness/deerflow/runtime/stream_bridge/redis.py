@@ -11,7 +11,7 @@ from typing import Any
 
 try:
     from redis.asyncio import Redis
-    from redis.exceptions import ResponseError
+    from redis.exceptions import RedisError, ResponseError
 except ImportError:  # pragma: no cover - only hit when the optional extra is missing
     # ``redis`` is an optional extra (mirrors the ``postgres``/asyncpg path in
     # persistence/engine.py). This module is imported lazily from
@@ -38,6 +38,12 @@ _KIND_END = "end"
 # yields each event as it arrives because the consume loop returns mid-batch on
 # the end marker.
 _XREAD_COUNT = 64
+
+# Maximum consecutive transient Redis errors (``ConnectionError``,
+# ``TimeoutError``, etc.) tolerated during ``subscribe`` before the error
+# propagates to the caller.  Brief blips are retried with exponential backoff
+# capped at ``heartbeat_interval``.
+_MAX_SUBSCRIBE_RETRIES = 3
 
 
 class RedisStreamBridge(StreamBridge):
@@ -127,6 +133,10 @@ class RedisStreamBridge(StreamBridge):
             approximate=False,
         )
 
+    async def stream_exists(self, run_id: str) -> bool:
+        """Return whether Redis still has retained stream data for *run_id*."""
+        return bool(await self._redis.exists(self._stream_key(run_id)))
+
     async def subscribe(
         self,
         run_id: str,
@@ -137,6 +147,7 @@ class RedisStreamBridge(StreamBridge):
         key = self._stream_key(run_id)
         stream_id = last_event_id or "0-0"
         block_ms = max(1, int(heartbeat_interval * 1000)) if heartbeat_interval > 0 else 1
+        consecutive_errors = 0
 
         while True:
             try:
@@ -158,6 +169,22 @@ class RedisStreamBridge(StreamBridge):
                 )
                 stream_id = "0-0"
                 continue
+            except RedisError:
+                consecutive_errors += 1
+                if consecutive_errors > _MAX_SUBSCRIBE_RETRIES:
+                    raise
+                delay = min(2 ** consecutive_errors, heartbeat_interval)
+                logger.warning(
+                    "Transient Redis error in stream bridge subscriber (retry %d/%d); backing off %.1fs",
+                    consecutive_errors,
+                    _MAX_SUBSCRIBE_RETRIES,
+                    delay,
+                    exc_info=True,
+                )
+                await asyncio.sleep(delay)
+                continue
+            else:
+                consecutive_errors = 0
 
             if not response:
                 yield HEARTBEAT_SENTINEL
