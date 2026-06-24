@@ -355,8 +355,6 @@ def _exec_source(source: str) -> dict:
 
 def _cli_extract_ir(args: argparse.Namespace) -> int:
     """从 parsed.json -> ir.json。"""
-    from parse_md import Report, ReportDoc, OrgContext, Th  # 延迟导入（避免 unit_conversion 路径下无关 import）
-
     with open(args.parsed, "r", encoding="utf-8") as f:
         data = json.load(f)
 

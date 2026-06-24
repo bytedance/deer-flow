@@ -28,14 +28,6 @@ def compute_yoy(df: pd.DataFrame) -> pd.Series:
 '''
 
 
-VALID_SOURCE_QOQ = '''
-import pandas as pd
-
-def compute_qoq(df: pd.DataFrame) -> pd.Series:
-    return (df["x"] - df["x_prev"]) / df["x_prev"]
-'''
-
-
 NO_TYPE_ANNOTATION = '''
 import pandas as pd
 
@@ -74,14 +66,6 @@ import pandas as pd
 
 def compute_yoy(df: pd.DataFrame) -> pd.Series:
     return eval("df['a']")
-'''
-
-
-SOURCE_WITH_DUNDER = '''
-import pandas as pd
-
-def compute_yoy(df: pd.DataFrame) -> pd.Series:
-    return df.__class__
 '''
 
 

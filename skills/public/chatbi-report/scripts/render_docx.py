@@ -4,8 +4,6 @@
 - 主列标题读取 `headers[].text`（来自 MD 的中文显示名）
   —— 不是 SQLBot idx_id，也不是 SQLBot idx_name 查询结果。
 - 副标题仅为 `(data-unit)`（如 `(个)`）。
-- 渲染过程中调用 SQLBot 的唯一路径，是旧式 `<th>{{idx_id}}</th>`
-  占位符的回退（此时 `headers[].text` 就是 idx_id，需要向 SQLBot 查询 idx_name）。
 - 多级 thead 通过跨 rowspan/colspan 的 cell.merge() 渲染。
 """
 
@@ -15,7 +13,6 @@ import json
 from decimal import Decimal
 from pathlib import Path
 
-import sqlbot_client as sc
 from docx import Document
 from docx.shared import Cm, Pt, RGBColor
 
@@ -76,17 +73,13 @@ def _leaf_cells(headers: list[list]) -> list:
 
 
 def render_docx(
-    doc,
+    report_doc,
     wide_by_report: list[list[dict]],
-    compute_status: dict,
     *,
     out_path: str,
     style_path: str,
-    sqlbot_client: sc.RealSQLBotClient | sc.MockSQLBotClient | None = None,
 ) -> None:
-    """渲染完整 DOCX。`sqlbot_client` 仅在 MD 缺少中文显示名的旧式
-    `<th>{{idx_id}}</th>` 列上被查询。
-    """
+    """渲染完整 DOCX。"""
     style = _load_style(style_path)
     docx = Document()
 
@@ -104,32 +97,27 @@ def render_docx(
 
     # 标题
     p = docx.add_paragraph()
-    run = p.add_run(doc.title)
+    run = p.add_run(report_doc.title)
     _apply_font(run, style["font"]["title"])
 
     ridx = 0
-    for sec in doc.sections if False else _iter_sections(doc):  # 占位修复见下
-        _render_section(docx, sec, wide_by_report, ridx, compute_status, style, sqlbot_client)
+    for sec in report_doc.sections:
+        _render_section(docx, sec, wide_by_report, ridx, style)
         ridx += len(sec.reports)
 
     docx.save(out_path)
 
 
-# 为能在自己的循环中遍历 doc.sections 而不遮蔽 docx Document.sections 属性:
-def _iter_sections(doc):
-    return doc.sections
-
-
-def _render_section(docx, sec, wide_by_report, ridx, compute_status, style, sqlbot_client):
+def _render_section(docx, sec, wide_by_report, ridx, style):
     p = docx.add_paragraph()
     run = p.add_run(sec.title)
     _apply_font(run, style["font"]["section"])
 
     for rep_idx, report in enumerate(sec.reports):
-        _render_report(docx, report, wide_by_report[ridx + rep_idx] if ridx + rep_idx < len(wide_by_report) else [], compute_status, style, sqlbot_client)
+        _render_report(docx, report, wide_by_report[ridx + rep_idx] if ridx + rep_idx < len(wide_by_report) else [], style)
 
 
-def _render_report(docx, report, wide_rows, compute_status, style, sqlbot_client):
+def _render_report(docx, report, wide_rows, style):
     p = docx.add_paragraph()
     run = p.add_run(report.title)
     _apply_font(run, style["font"]["report"])

@@ -5,7 +5,7 @@
 - `Th.is_indicator` 优先由 `data-idx` HTML 属性推导，`{{}}` 占位符正则
   作为旧式 MD 的回退。
 - 旧式 `<th>{{BAS_0263}}</th>`（无 data-idx，但 `{{}}` 匹配 idx_id 正则）
-  仍被识别为 is_indicator=True（render_docx 在此对 idx_name 进行 SQLBot 回退查询）。
+  仍被识别为 is_indicator=True。
 - 类目标签单元格（多级 thead 父级，无 data-idx，无 {{}}）以
   is_indicator=False、is_computed=False、idx_id=None 输出 —— 不报错。
 """

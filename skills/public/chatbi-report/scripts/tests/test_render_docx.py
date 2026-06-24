@@ -27,7 +27,7 @@ wide = [{{
     "cells": {{"BAS_0263": "1,420"}},
     "raw_cells": {{"BAS_0263": "1,420"}},
 }}]
-rd.render_docx(doc, [wide], {{}}, out_path=r"{out_path}",
+rd.render_docx(doc, [wide], out_path=r"{out_path}",
                style_path=r"{style_path}")
 """,
         encoding="utf-8",
@@ -116,7 +116,7 @@ wide = [{{
     "cells": {{"BAS_0263": "⚠️QUERY_FAILED"}},
     "raw_cells": {{"BAS_0263": None}},
 }}]
-rd.render_docx(doc, [wide], {{}}, out_path=r"{out}",
+rd.render_docx(doc, [wide], out_path=r"{out}",
                style_path=r"{style_path}")
 """,
         encoding="utf-8",

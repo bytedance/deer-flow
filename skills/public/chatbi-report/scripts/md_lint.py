@@ -2,8 +2,8 @@
 
 - Real-indicator columns are identified by the `data-idx` HTML attribute.
 - Old-style `<th data-unit="...">{{BAS_0263}}</th>` (no `data-idx` but
-  `{{}}` matches the idx_id regex) is accepted with a WARN; render_docx
-  falls back to a SQLBot idx_name lookup for these.
+  `{{}}` matches the idx_id regex) is accepted with a WARN; this format
+  is retired — use `data-idx` attribute instead.
 - Computed columns are `{{虚拟名}}` text only; an additional ERROR
   fires if such a column ALSO carries `data-idx`.
 """
@@ -313,7 +313,7 @@ def _lint_table(
             report.warnings.append(LintWarning(
                 "CHATBI-OLD-PLACEHOLDER",
                 f"old-style placeholder `{{{{{old_match.group(1)}}}}}` without data-idx; "
-                f"render_docx will fall back to SQLBot idx_name lookup",
+                f"this format is retired; use data-idx attribute instead",
                 location=location,
             ))
             real_idx_ids_in_table.add(old_match.group(1))

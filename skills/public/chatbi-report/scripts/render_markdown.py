@@ -7,8 +7,6 @@
 """
 from __future__ import annotations
 
-from typing import Iterable
-
 from parse_md import ReportDoc, Th
 
 
