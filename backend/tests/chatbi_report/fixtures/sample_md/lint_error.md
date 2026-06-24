@@ -13,7 +13,7 @@
   <thead>
     <tr>
       <th>季度</th>
-      <th>无属性列</th>
+      <th data-unit="个">无属性列</th>
       <th data-idx="bad id" data-unit="个">错误ID</th>
       <th data-idx="BAS_0263" data-unit="%">{{收单商户同比}}</th>
     </tr>
