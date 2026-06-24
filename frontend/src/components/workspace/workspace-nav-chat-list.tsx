@@ -50,9 +50,11 @@ export function WorkspaceNavChatList() {
             // that still surfaces the "feature not enabled" tooltip.
             <Tooltip>
               <TooltipTrigger asChild>
-                <span className="block w-full">
+                {/* cursor-not-allowed lives on the span (the element that
+                    still receives pointer events), not the inert button. */}
+                <span className="block w-full cursor-not-allowed">
                   <SidebarMenuButton
-                    className="text-muted-foreground/50 cursor-not-allowed"
+                    className="text-muted-foreground/50"
                     aria-disabled
                     tabIndex={-1}
                   >
