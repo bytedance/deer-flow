@@ -10,7 +10,7 @@ from typing import Any
 
 from diagnosis.context_index import resolve_sub_device_targets
 from diagnosis.models import CandidateFault, DeviceContext, DiagnosisResult, FinalFault
-from ins.client import datetime_input_to_ms
+from ins.client import close_shared_http_client, datetime_input_to_ms
 from tools.device_analysis import close_clients as close_device_clients
 from tools.extract_orbit_centerline_features_tool import _extract_orbit_centerline_features_impl
 from tools.extract_s_trend_features_tool import extract_trend_features_tool as _extract_segmented_trend_features_tool
@@ -139,6 +139,7 @@ class TrendSnapshot:
 class TrendCollectionResult:
     snapshots: list[TrendSnapshot]
     failures: list[dict[str, Any]]
+    raw_30d_data: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -290,11 +291,19 @@ def _resolve_target(context: DeviceContext, sub_device_id: str, root_device_id: 
     )
 
 
-def _build_component_features(context: DeviceContext, target_info: dict[str, Any], config: dict[str, Any]) -> dict[str, list[str]]:
+def _build_component_features(
+    context: DeviceContext,
+    target_info: dict[str, Any],
+    config: dict[str, Any],
+    sub_device_id: str | None = None,
+) -> dict[str, list[str]]:
     feature_map = config.get("trend_feature_map") or {}
     component_features: dict[str, list[str]] = {}
     probe_ids = [str(item) for item in (target_info.get("probe_ids") or [])]
     owner_device_id = str(target_info.get("owner_device_id") or "")
+
+    # 构建目标测点 ID 集合（resolve_sub_device_targets 已正确过滤）
+    target_probe_ids: set[str] = set(probe_ids)
 
     for probe_id in probe_ids:
         probe = context.probe_index.get(probe_id)
@@ -305,7 +314,9 @@ def _build_component_features(context: DeviceContext, target_info: dict[str, Any
             component_features[probe_id] = _normalized_feature_list(probe.point_type, feature_list)
 
     for process_probe in context.process_points:
-        if owner_device_id and process_probe.owner_device_id and process_probe.owner_device_id != owner_device_id:
+        # 只包含 point_id 已在 target_probe_ids 中的工艺参数
+        # （InS 树扁平化导致所有测点挂在同一个轴承下，owner_device_id 无法准确过滤）
+        if process_probe.point_id not in target_probe_ids:
             continue
         feature_list = feature_map.get(process_probe.point_type) or feature_map.get("其他工艺参数")
         if isinstance(feature_list, list) and feature_list:
@@ -451,13 +462,33 @@ def _build_process_signal_profile(process_type_summary: dict[str, dict[str, Any]
     }
 
 
+def _slice_trend_data_by_window(raw_payload: dict[str, Any], window_days: int, end_ms: int) -> dict[str, Any]:
+    """Slice 30-day trend data in-memory to produce a smaller window subset.
+
+    Since the 30d fetch contains all data points, we can filter by time_ms
+    to get 1d / 3d subsets without additional HTTP calls.
+    """
+    if window_days >= 30:
+        return raw_payload  # 30d = full data, no slicing needed
+    window_ms = window_days * 24 * 3600 * 1000
+    start_ms_threshold = str(max(0, end_ms - window_ms))
+    component_ids = raw_payload.get("component_ids") or []
+    data = raw_payload.get("data") or {}
+    sliced: dict[str, list[Any]] = {}
+    for cid in component_ids:
+        points = data.get(cid) or []
+        sliced[cid] = [p for p in points if str(p.get("time_ms") or "") >= start_ms_threshold]
+    return {**raw_payload, "data": sliced}
+
+
 async def _collect_trend_snapshots(
     context: DeviceContext,
     target_info: dict[str, Any],
     time_ms: str,
     config: dict[str, Any],
+    sub_device_id: str | None = None,
 ) -> TrendCollectionResult:
-    component_features = _build_component_features(context, target_info, config)
+    component_features = _build_component_features(context, target_info, config, sub_device_id=sub_device_id)
     if not component_features:
         return TrendCollectionResult(
             snapshots=[],
@@ -475,118 +506,104 @@ async def _collect_trend_snapshots(
         )
 
     end_ms = int(datetime_input_to_ms(time_ms))
-    window_days = _safe_float(config.get("trend_window_days")) or 30
+    window_days = int(_safe_float(config.get("trend_window_days")) or 30)
     windows: list[tuple[str, int]] = [
         ("1d", 1),
         ("3d", 3),
-        ("30d", int(window_days)),
+        ("30d", window_days),
     ]
 
-    import asyncio as _asyncio
+    # ── Step 1: Fetch 30d raw data ONCE (saves 2 HTTP round-trips) ──────
+    window_30d_ms = window_days * 24 * 3600 * 1000
+    start_30d_ms = str(max(0, end_ms - window_30d_ms))
+    try:
+        raw_30d = await cached_get_trend_data(
+            component_features=component_features,
+            start=start_30d_ms,
+            end=str(end_ms),
+        )
+    except Exception as exc:
+        return TrendCollectionResult(
+            snapshots=[],
+            failures=[{
+                "window": "30d",
+                "stage": "get_trend_data",
+                "start_ms": start_30d_ms,
+                "end_ms": str(end_ms),
+                "component_count": len(component_features),
+                "feature_union": collect_union_features(component_features),
+                "component_features": component_features,
+                "error": str(exc),
+            }],
+        )
 
-    async def _fetch_raw_payload(label: str, start_ms: str) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
-        try:
-            return (
-                await cached_get_trend_data(
-                    component_features=component_features,
-                    start=start_ms,
-                    end=str(end_ms),
-                ),
-                None,
-            )
-        except Exception as exc:
-            return (
-                None,
-                {
-                    "window": label,
-                    "stage": "get_trend_data",
-                    "start_ms": start_ms,
-                    "end_ms": str(end_ms),
-                    "component_count": len(component_features),
-                    "feature_union": collect_union_features(component_features),
-                    "component_features": component_features,
-                    "error": str(exc),
-                },
-            )
+    # Validate that we got some data
+    raw_data = raw_30d.get("data") or {}
+    if not any(raw_data.get(cid) for cid in raw_30d.get("component_ids") or []):
+        return TrendCollectionResult(
+            snapshots=[],
+            failures=[{
+                "window": "30d",
+                "stage": "get_trend_data",
+                "start_ms": start_30d_ms,
+                "end_ms": str(end_ms),
+                "component_count": len(component_features),
+                "reason": "empty_trend_data",
+                "component_ids": raw_30d.get("component_ids") or [],
+            }],
+            raw_30d_data=raw_30d,
+        )
 
-    async def _fetch_window(label: str, days: int) -> tuple[list[TrendSnapshot], list[dict[str, Any]]]:
-        window_ms = days * 24 * 3600 * 1000
-        start_ms = str(max(0, end_ms - window_ms))
-        failures: list[dict[str, Any]] = []
-        raw_payload, raw_error = await _fetch_raw_payload(label, start_ms)
-        if raw_error is not None:
-            failures.append(raw_error)
-            return [], failures
-        if raw_payload is None:
-            failures.append(
-                {
-                    "window": label,
-                    "stage": "get_trend_data",
-                    "start_ms": start_ms,
-                    "end_ms": str(end_ms),
-                    "component_count": len(component_features),
-                    "feature_union": collect_union_features(component_features),
-                    "component_features": component_features,
-                    "reason": "raw_payload_is_none",
-                }
-            )
-            return [], failures
+    # ── Step 2: Slice 30d data in-memory for 1d / 3d ────────────────────
+    raw_by_window: dict[str, dict[str, Any]] = {}
+    for label, days in windows:
+        raw_by_window[label] = _slice_trend_data_by_window(raw_30d, days, end_ms)
 
-        raw_data = raw_payload.get("data") or {}
-        if not any(raw_data.get(component_id) for component_id in raw_payload.get("component_ids") or []):
-            failures.append(
-                {
-                    "window": label,
-                    "stage": "get_trend_data",
-                    "start_ms": start_ms,
-                    "end_ms": str(end_ms),
-                    "component_count": len(component_features),
-                    "feature_union": collect_union_features(component_features),
-                    "component_features": component_features,
-                    "reason": "empty_trend_data",
-                    "component_ids": raw_payload.get("component_ids") or [],
-                }
-            )
-            return [], failures
+    # ── Step 3: All feature extraction tasks in parallel (3 windows × 2 = 6) ─
+    extraction_tasks: list[Any] = []
+    task_labels: list[tuple[str, str]] = []  # (window_label, "trend"|"segmented")
+    for label, _days in windows:
+        raw = raw_by_window[label]
+        extraction_tasks.append(cached_extract_trend_features(trend_data_payload=raw))
+        task_labels.append((label, "trend"))
+        extraction_tasks.append(cached_extract_segmented_trend_features(trend_data_payload=raw))
+        task_labels.append((label, "segmented"))
 
-        try:
-            trend_payload = await cached_extract_trend_features(trend_data_payload=raw_payload)
-        except Exception as exc:
-            failures.append(
-                {
-                    "window": label,
-                    "stage": "extract_trend_features",
-                    "start_ms": start_ms,
-                    "end_ms": str(end_ms),
-                    "component_ids": raw_payload.get("component_ids") or [],
-                    "feature_union": collect_union_features(component_features),
-                    "error": str(exc),
-                }
-            )
-            return [], failures
+    extraction_results = await asyncio.gather(*extraction_tasks, return_exceptions=True)
 
-        try:
-            segmented_payload = await cached_extract_segmented_trend_features(trend_data_payload=raw_payload)
-        except Exception as exc:
-            failures.append(
-                {
-                    "window": label,
-                    "stage": "extract_segmented_trend_features",
-                    "start_ms": start_ms,
-                    "end_ms": str(end_ms),
-                    "component_ids": raw_payload.get("component_ids") or [],
-                    "feature_union": collect_union_features(component_features),
-                    "error": str(exc),
-                }
-            )
-            segmented_payload = {"point_results": []}
+    # Map results back to per-window payloads
+    trend_payloads: dict[str, dict[str, Any]] = {}
+    segmented_payloads: dict[str, dict[str, Any]] = {}
+    all_failures: list[dict[str, Any]] = []
+    for idx, ((label, kind), result) in enumerate(zip(task_labels, extraction_results)):
+        if isinstance(result, Exception):
+            all_failures.append({
+                "window": label,
+                "stage": f"extract_{'trend' if kind == 'trend' else 'segmented_trend'}_features",
+                "error": str(result),
+            })
+            continue
+        if kind == "trend":
+            trend_payloads[label] = result
+        else:
+            segmented_payloads[label] = result
 
+    # ── Step 4: Build TrendSnapshot per window (pure in-memory) ─────────
+    all_snapshots: list[TrendSnapshot] = []
+    for label, _days in windows:
+        trend_payload = trend_payloads.get(label)
+        if not trend_payload:
+            continue
+        segmented_payload = segmented_payloads.get(label, {"point_results": []})
         thresholds = config.get("thresholds") or {}
-        snapshots: list[TrendSnapshot] = []
+        raw = raw_by_window[label]
+        window_ms = _days * 24 * 3600 * 1000
+        start_ms = str(max(0, end_ms - window_ms))
+
         segmented_results = {
-            str(point_result.get("component_id") or ""): point_result
-            for point_result in (segmented_payload.get("point_results") or [])
-            if isinstance(point_result, dict)
+            str(pr.get("component_id") or ""): pr
+            for pr in (segmented_payload.get("point_results") or [])
+            if isinstance(pr, dict)
         }
         for point_result in trend_payload.get("point_results") or []:
             component_id = str(point_result.get("component_id") or "")
@@ -616,7 +633,7 @@ async def _collect_trend_snapshots(
                     for item in ((segmented_detail or {}).get("changepoints") or [])
                     if isinstance(item, dict) and item.get("type")
                 )
-                snapshots.append(
+                all_snapshots.append(
                     TrendSnapshot(
                         component_id=component_id,
                         point_type=probe.point_type,
@@ -652,28 +669,7 @@ async def _collect_trend_snapshots(
                         window=label,
                     )
                 )
-        if not snapshots:
-            failures.append(
-                {
-                    "window": label,
-                    "stage": "build_trend_snapshots",
-                    "start_ms": start_ms,
-                    "end_ms": str(end_ms),
-                    "component_ids": raw_payload.get("component_ids") or [],
-                    "point_result_count": len(trend_payload.get("point_results") or []),
-                    "segmented_point_result_count": len(segmented_payload.get("point_results") or []),
-                    "reason": "no_snapshots_built",
-                }
-            )
-        return snapshots, failures
-
-    results = await _asyncio.gather(*[_fetch_window(label, days) for label, days in windows])
-    all_snapshots: list[TrendSnapshot] = []
-    all_failures: list[dict[str, Any]] = []
-    for snapshots, failures in results:
-        all_snapshots.extend(snapshots)
-        all_failures.extend(failures)
-    return TrendCollectionResult(snapshots=all_snapshots, failures=all_failures)
+    return TrendCollectionResult(snapshots=all_snapshots, failures=all_failures, raw_30d_data=raw_30d)
 
 
 def _select_anomaly_times(trend_snapshots: list[TrendSnapshot], input_time_ms: str) -> list[str]:
@@ -890,6 +886,144 @@ async def _resolve_waveform_times(
         reverse=True,
     )
     return result
+
+
+def _resolve_waveform_times_from_trend(
+    waveform_probe_ids: list[str],
+    trend_raw_data: dict[str, Any],
+    trend_snapshots: list[TrendSnapshot],
+    input_time_ms: str,
+) -> list[str]:
+    """Resolve waveform timestamps from already-fetched trend data (zero API calls).
+
+    The 30d trend fetch includes pp_value for all probes. Instead of making
+    additional HTTP calls to find peak timestamps (as _resolve_waveform_times does),
+    we search pp_value directly from the in-memory trend data.
+
+    This eliminates 4-6 redundant API calls per diagnosis run.
+    """
+    if not waveform_probe_ids:
+        return [str(input_time_ms)]
+
+    probe_id = waveform_probe_ids[0]
+    input_int = int(input_time_ms)
+
+    # Get pp_value series from the already-fetched 30d trend data
+    trend_points = (trend_raw_data.get("data") or {}).get(probe_id) or []
+
+    # Collect anomaly ranges from trend snapshots (same logic as original)
+    anomaly_ranges: list[tuple[int, int, float]] = []
+    preferred_snapshots = [s for s in trend_snapshots if s.window == "1d" and s.point_type == "轴振"] \
+        or [s for s in trend_snapshots if s.point_type == "轴振"]
+    changepoint_window_ms = 30 * 60 * 1000
+    for snapshot in preferred_snapshots:
+        for item in snapshot.raw_feature_stats.get("rising_periods") or []:
+            if not isinstance(item, dict):
+                continue
+            s = _safe_float(item.get("start_time_ms"))
+            e = _safe_float(item.get("end_time_ms"))
+            if s and e and e > s:
+                score = (_safe_float(item.get("relative_rise")) or 0.0) + (_safe_float(item.get("confidence")) or 0.0)
+                anomaly_ranges.append((int(s), int(e), score))
+        for item in snapshot.raw_feature_stats.get("high_volatility_periods") or []:
+            if not isinstance(item, dict):
+                continue
+            s = _safe_float(item.get("start_time_ms"))
+            e = _safe_float(item.get("end_time_ms"))
+            if s and e and e > s:
+                score = (_safe_float(item.get("peak_volatility_score")) or 0.0) + (_safe_float(item.get("confidence")) or 0.0)
+                anomaly_ranges.append((int(s), int(e), score))
+        for item in snapshot.raw_feature_stats.get("changepoints") or []:
+            if not isinstance(item, dict):
+                continue
+            ts = _safe_float(item.get("time_ms"))
+            if ts is None:
+                continue
+            score = (
+                (_safe_float(item.get("score")) or 0.0)
+                + (_safe_float(item.get("relative_change")) or 0.0)
+                + (_safe_float(item.get("magnitude")) or 0.0) * 0.05
+            )
+            anomaly_ranges.append((max(0, int(ts) - changepoint_window_ms), int(ts) + changepoint_window_ms, score))
+
+    anomaly_ranges.sort(key=lambda x: x[2], reverse=True)
+    top_ranges = anomaly_ranges[:2]
+
+    candidates: dict[str, float] = {}  # ts -> pp_value
+
+    def _find_peak_in_range(start: int, end: int) -> tuple[str | None, float]:
+        """Find the timestamp with highest pp_value within [start, end] from in-memory data."""
+        best_ts: str | None = None
+        best_val = float("-inf")
+        for point in trend_points:
+            ts = str(point.get("time_ms") or "")
+            if not ts:
+                continue
+            ts_int = int(ts)
+            if ts_int < start or ts_int > end:
+                continue
+            val = _safe_float((point.get("values") or {}).get("pp_value"))
+            if val is not None and val > best_val:
+                best_val = val
+                best_ts = ts
+        return best_ts, best_val if best_ts else (None, float("-inf"))
+
+    def _find_nearest_in_window(start: int, end: int) -> tuple[str | None, float]:
+        """Find the timestamp closest to input_time_ms within [start, end] from in-memory data."""
+        best_ts: str | None = None
+        best_diff = float("inf")
+        best_val = 0.0
+        for point in trend_points:
+            ts = str(point.get("time_ms") or "")
+            if not ts:
+                continue
+            ts_int = int(ts)
+            if ts_int < start or ts_int > end:
+                continue
+            diff = abs(ts_int - input_int)
+            if diff < best_diff:
+                best_diff = diff
+                best_ts = ts
+                best_val = _safe_float((point.get("values") or {}).get("pp_value")) or 0.0
+        return best_ts, best_val
+
+    if top_ranges:
+        # Find peaks in each top anomaly range (in-memory, zero API calls)
+        for start, end, _ in top_ranges:
+            ts, val = _find_peak_in_range(start, end)
+            if ts:
+                candidates[ts] = val
+
+        # Find nearest to input time around the closest anomaly range
+        nearest_range_end = max(e for _, e, _ in top_ranges)
+        window = 2 * 60 * 60 * 1000  # ±2 hours
+        ts, val = _find_nearest_in_window(max(0, input_int - window), input_int + window)
+        if ts:
+            candidates.setdefault(ts, val)
+        else:
+            candidates.setdefault(str(input_time_ms), 0.0)
+    else:
+        # Fallback: search ±1 day around input time
+        window_ms = 24 * 3600 * 1000
+        ts_peak, val_peak = _find_peak_in_range(max(0, input_int - window_ms), input_int + window_ms)
+        ts_near, val_near = _find_nearest_in_window(max(0, input_int - window_ms), input_int + window_ms)
+        if ts_peak:
+            candidates[ts_peak] = val_peak
+        if ts_near:
+            candidates.setdefault(ts_near, val_near)
+        if not candidates:
+            candidates[str(input_time_ms)] = 0.0
+
+    if not candidates:
+        return [str(input_time_ms)]
+
+    # Sort by pp_value descending, take top 3, then sort by time descending
+    sorted_by_val = sorted(candidates.items(), key=lambda x: x[1], reverse=True)[:3]
+    return sorted(
+        [ts for ts, _ in sorted_by_val],
+        key=lambda ts: int(ts),
+        reverse=True,
+    )
 
 
 async def _collect_waveform_results(target_info: dict[str, Any], times_ms: list[str], config: dict[str, Any]) -> list[dict[str, Any]]:
@@ -3372,28 +3506,25 @@ async def run_diagnosis(device_id: str, sub_device_id: str, time: str) -> Diagno
     diagnosis_target = _resolve_target(context, sub_device_id, device_id, config)
     target_info = diagnosis_target.target_info
 
-    trend_collection = await _collect_trend_snapshots(context, target_info, time_ms, config)
+    trend_collection = await _collect_trend_snapshots(context, target_info, time_ms, config, sub_device_id=sub_device_id)
     trends = trend_collection.snapshots
     trend_failures = trend_collection.failures
+    raw_30d_data = trend_collection.raw_30d_data
     waveform_probe_ids = [str(item) for item in (target_info.get("waveform_probe_ids") or [])]
 
-    # 每个探头单独解析波形时间戳（不同探头的异常峰值时刻不同）
+    # 从已有 30d 趋势数据中内存搜索峰值时间戳（零 API 调用）
     waveform_results: list[dict[str, Any]] = []
     all_waveform_times: list[str] = []
     waveform_failures: list[dict[str, str]] = []
 
-    # 第一步：并行获取所有探头的时间戳
-    probe_times_tasks = [
-        _resolve_waveform_times([probe_id], trends, time_ms, config)
-        for probe_id in waveform_probe_ids
-    ]
-    probe_times_results = await asyncio.gather(*probe_times_tasks, return_exceptions=True)
-
-    # 收集所有唯一时间点
-    for result in probe_times_results:
-        if isinstance(result, Exception):
-            continue
-        for t in result:
+    # 每个探头从趋势数据中解析波形时间戳（纯内存操作，零 API 调用）
+    for probe_id in waveform_probe_ids:
+        if raw_30d_data:
+            times = _resolve_waveform_times_from_trend([probe_id], raw_30d_data, trends, time_ms)
+        else:
+            # Fallback: 如果 30d 数据不可用，使用原来的 API 调用方式
+            times = await _resolve_waveform_times([probe_id], trends, time_ms, config)
+        for t in times:
             if t not in all_waveform_times:
                 all_waveform_times.append(t)
 
@@ -3403,31 +3534,61 @@ async def run_diagnosis(device_id: str, sub_device_id: str, time: str) -> Diagno
         for t in all_waveform_times:
             extraction_tasks.append((probe_id, t, _extract_spectral_waveform_features_impl(component_id=probe_id, time_ms=t)))
 
-    if extraction_tasks:
-        # 使用 asyncio.gather 并行执行所有提取任务
-        results = await asyncio.gather(*[task for _, _, task in extraction_tasks], return_exceptions=True)
-
-        for (probe_id, t, _), result in zip(extraction_tasks, results):
-            if isinstance(result, Exception):
-                waveform_failures.append(
-                    {
-                        "component_id": probe_id,
-                        "time_ms": t,
-                        "error": str(result),
-                    }
-                )
-                print(f"[waveform.fail] component_id={probe_id} time_ms={t} error={result}")
-            else:
-                waveform_results.append(result)
-
     all_waveform_times.sort(key=lambda t: int(t), reverse=True)
-    orbit_results, orbit_failures = await _collect_orbit_results(
-        diagnosis_target.root_device_id,
-        context,
-        target_info,
-        all_waveform_times[:2],
-        config,
-    )
+
+    # 第三步：波形提取 + 轴心轨迹提取 全部并行（单一 asyncio.gather）
+    # 这消除了原来的串行依赖，将 2 个 API 轮次合并为 1 个
+    orbit_tasks = []
+    orbit_task_metadata = []
+    bearing_ids = [str(item) for item in (target_info.get("bearing_ids") or [])]
+    max_orbit_points = int(_safe_float(config.get("max_orbit_points")) or 2)
+    for bearing_id in bearing_ids[:max_orbit_points]:
+        probe_ids_for_orbit = _bearing_waveform_probe_ids(context, bearing_id)
+        for t in all_waveform_times[:2]:
+            orbit_tasks.append(
+                cached_extract_orbit(
+                    root_device_id=diagnosis_target.root_device_id,
+                    bearing_id=bearing_id,
+                    time_ms=t,
+                    probe_ids=probe_ids_for_orbit,
+                )
+            )
+            orbit_task_metadata.append((bearing_id, t, probe_ids_for_orbit))
+
+    # 合并所有任务: 波形提取 + 轴心轨迹提取 → 一次 gather
+    all_tasks = []
+    task_type = []  # "waveform" or "orbit"
+    for _, _, coro in extraction_tasks:
+        all_tasks.append(coro)
+        task_type.append("waveform")
+    for orbit_coro in orbit_tasks:
+        all_tasks.append(orbit_coro)
+        task_type.append("orbit")
+
+    orbit_results: list[dict[str, Any]] = []
+    orbit_failures: list[dict[str, str]] = []
+
+    if all_tasks:
+        all_results = await asyncio.gather(*all_tasks, return_exceptions=True)
+        for task_result, kind, idx in zip(all_results, task_type, range(len(all_results))):
+            if kind == "waveform":
+                probe_id, t, _ = extraction_tasks[idx]
+                if isinstance(task_result, Exception):
+                    waveform_failures.append({"component_id": probe_id, "time_ms": t, "error": str(task_result)})
+                    print(f"[waveform.fail] component_id={probe_id} time_ms={t} error={task_result}")
+                else:
+                    waveform_results.append(task_result)
+            else:  # orbit
+                orbit_idx = idx - len(extraction_tasks)
+                bearing_id, t, probe_ids = orbit_task_metadata[orbit_idx]
+                if isinstance(task_result, Exception):
+                    orbit_failures.append({
+                        "bearing_id": bearing_id, "time_ms": t,
+                        "probe_ids": ",".join(probe_ids), "error": str(task_result),
+                    })
+                    print(f"[orbit.fail] bearing_id={bearing_id} time_ms={t} error={task_result}")
+                else:
+                    orbit_results.append(task_result)
     candidates, score_debug_info = _score_candidates(diagnosis_target, trends, waveform_results, orbit_results, config)
 
     if not candidates:
@@ -3540,8 +3701,4 @@ async def run_diagnosis(device_id: str, sub_device_id: str, time: str) -> Diagno
 
 
 async def close_all_clients() -> None:
-    await close_rule_context_clients()
-    await close_device_clients()
-    await close_trend_clients()
-    await close_waveform_clients()
-    await close_orbit_clients()
+    await close_shared_http_client()

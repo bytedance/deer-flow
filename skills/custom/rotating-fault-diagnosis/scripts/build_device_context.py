@@ -29,7 +29,7 @@ from typing import Any
 # ── Point type inference for type_82 ──────────────────────────────────────
 
 _TYPE_82_CATEGORIES = [
-    (re.compile(r"轴承温度|轴瓦温度|支撑轴承温度|止推轴瓦温度"), "轴承温度"),
+    (re.compile(r"轴承温度|轴瓦温度|支撑轴承温度|止推轴瓦温度|推力轴承.*温度|推力瓦.*温度"), "轴承温度"),
     (re.compile(r"轴位移|位移"), "轴位移"),
     (re.compile(r"入口流量"), "入口流量"),
     (re.compile(r"入口压力|入口温度|进气"), "压缩机进气参数"),
@@ -153,42 +153,122 @@ def _build_bearing_index(root: dict) -> dict[str, list[dict]]:
 def _remount_orphans(root: dict, all_points: list[dict], bearings_by_shaft: dict[str, list[dict]]):
     """Return orphan points that should be re-mounted, grouped by their target location.
 
+    Three-tier logic:
+    1. Points already correctly placed under a bearing → skip
+    2. Points directly under a ROTOR_DEVICE → remount to bearings under the SAME rotor
+    3. Points NOT under any ROTOR_DEVICE (compressor-level orphans) →
+       infer the owning rotor by probe name keywords, then remount to that rotor's bearings
+
     Returns: list of (target_parent_id, point_dict) tuples.
     """
     orphans: list[tuple[str | None, dict]] = []
 
+    # ── Tier 1: mark probes already correctly placed under a bearing ──────
+    def _find_correctly_placed(root_node: dict, placed: set[str]) -> None:
+        for child in root_node.get("children", []):
+            if not isinstance(child, dict):
+                continue
+            if child.get("unit_type") == 2 and child.get("type_num") == 70:
+                for pt in child.get("children", []):
+                    if isinstance(pt, dict) and pt.get("unit_type") == 3:
+                        placed.add(pt["id"])
+            _find_correctly_placed(child, placed)
+
+    correctly_placed: set[str] = set()
+    _find_correctly_placed(root, correctly_placed)
+
+    # ── Build indices: rotor→bearings, point→rotor, rotor→inferred_type ──
+    rotor_bearing_ids: dict[str, set[str]] = defaultdict(set)
+    point_rotor: dict[str, str] = {}          # point_id → rotor_id (from raw tree)
+    rotor_inferred_type: dict[str, str] = {}   # rotor_id → "汽轮机" / "离心式压缩机"
+
+    def _index_tree(n: dict, rotor_id: str | None = None) -> None:
+        if n.get("unit_type") == 2 and n.get("type_num") == 80:
+            rotor_id = n["id"]
+            rotor_inferred_type[rotor_id] = _infer_80_device_type(n.get("name", ""))
+        if rotor_id and n.get("unit_type") == 2 and n.get("type_num") == 70:
+            rotor_bearing_ids[rotor_id].add(n["id"])
+        if n.get("unit_type") == 3:
+            if rotor_id:
+                point_rotor[n["id"]] = rotor_id
+        for c in n.get("children", []):
+            if isinstance(c, dict):
+                _index_tree(c, rotor_id)
+    _index_tree(root)
+
+    # ── Helper: infer which rotor a probe name belongs to ─────────────────
+    def _infer_rotor_by_name(name: str) -> str | None:
+        """Given a probe name, return the rotor_id it likely belongs to.
+        Matches by device type keywords: 汽轮机→turbine rotor, 压缩机→compressor rotor.
+        Returns None if ambiguous (shared/common parameter)."""
+        # Detect device type from name
+        if re.search(r"汽轮机|汽机|汽轮", name):
+            inferred_type = "汽轮机"
+        elif re.search(r"压缩机|压缩|叶轮", name):
+            inferred_type = "离心式压缩机"
+        else:
+            return None  # ambiguous, leave as root orphan
+
+        # Find the rotor with this inferred type
+        for rid, dtype in rotor_inferred_type.items():
+            if dtype == inferred_type:
+                return rid
+        return None
+
+    # ── Main loop ────────────────────────────────────────────────────────
     for pt in all_points:
-        # Check if point is already under a correct 80/70 hierarchy
-        sid = str(pt.get("belongShaftId", ""))
+        # Tier 1: skip already correctly placed
+        if pt["id"] in correctly_placed:
+            continue
+
         name = pt.get("name", "")
+
+        # Tier 2: point is already under a ROTOR_DEVICE → use that rotor's bearings
+        pt_rotor_id = point_rotor.get(pt["id"])
+
+        # Tier 3: point is NOT under any rotor → infer by name
+        if pt_rotor_id is None:
+            pt_rotor_id = _infer_rotor_by_name(name)
+
+        # ── Find target bearing ───────────────────────────────────────
+        sid = str(pt.get("belongShaftId", ""))
+        direction = _infer_direction(name)
+
         if not sid:
-            # Try key-phase shaft inference
+            # Key-phase fallback: borrow any shaft ID
             tn = pt.get("type_num", 0)
             if tn == 81:
-                # Key-phase: try to match to any shaft by name
                 for s, bearings in bearings_by_shaft.items():
-                    # Use first bearing's shaft
                     if bearings:
                         sid = s
                         break
 
         if not sid:
-            orphans.append((None, pt))  # Can't determine shaft, leave as root orphan
+            # No shaft ID and no inference → truly orphan
+            orphans.append((None, pt))
             continue
 
-        # Find matching bearing on this shaft
-        bearings = bearings_by_shaft.get(sid, [])
-        direction = _infer_direction(name)
-        target_bearing = None
+        all_bearings = bearings_by_shaft.get(sid, [])
+        rotor_bids = rotor_bearing_ids.get(pt_rotor_id, set()) if pt_rotor_id else set()
 
-        # Exact direction match
+        # If point has no rotor context (not under any rotor, and name inference
+        # failed), treat as root orphan — don't force-attach to wrong bearings
+        if not rotor_bids:
+            orphans.append((None, pt))
+            continue
+
+        # Scope bearings to the point's rotor
+        bearings = [b for b in all_bearings if b["id"] in rotor_bids]
+
+        target_bearing = None
+        # Exact direction match (within same-rotor bearings)
         for b in bearings:
             b_dir = _infer_direction(b.get("name", ""))
             if direction and b_dir == direction:
                 target_bearing = b
                 break
 
-        # Fallback: first bearing on this shaft
+        # Fallback: first bearing under the same rotor on this shaft
         if not target_bearing and bearings:
             target_bearing = bearings[0]
 
@@ -250,6 +330,9 @@ def main():
 
         _walk(root, _find_machine)
 
+    # Collect remounted point IDs to avoid duplicates in original tree walk
+    remounted_point_ids: set[str] = {pt["id"] for _, pt in remounts if pt.get("id")}
+
     def _build_device_node(node: dict) -> dict:
         """Recursively build a child_device_list node, keeping valid hierarchy."""
         ut = node.get("unit_type", 0)
@@ -287,12 +370,15 @@ def main():
             result["unit_type"] = ut
             result["type_num"] = tn
 
-        # Build children
+        # Build children — skip unit_type=3 probes that were remounted
         children = []
         for child in node.get("children", []):
             if isinstance(child, dict):
                 cu = child.get("unit_type", 0)
-                # Only preserve 80/70/3 nodes; skip intermediate org nodes
+                cid = child.get("id", "")
+                # Skip remounted probes to avoid duplicates
+                if cu == 3 and cid in remounted_point_ids:
+                    continue
                 if cu in (2, 3):
                     children.append(_build_device_node(child))
                 elif cu == 1:

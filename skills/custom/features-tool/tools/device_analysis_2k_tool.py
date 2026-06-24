@@ -14,7 +14,7 @@ _FEATURES_TOOL_ROOT = Path(__file__).resolve().parent.parent
 if str(_FEATURES_TOOL_ROOT) not in sys.path:
     sys.path.insert(0, str(_FEATURES_TOOL_ROOT))
 
-from ins import InsApiClient, load_dotenv_file, load_ins_settings
+from ins import InsApiClient, close_shared_http_client, load_dotenv_file, load_ins_settings
 
 ENDPOINT_SERIES = "2k"
 
@@ -76,7 +76,7 @@ async def get_device_children_2k(device_id: str) -> dict:
 
 
 async def close_clients() -> None:
-    await ins_client.close()
+    await close_shared_http_client()
 
 
 async def main() -> None:
