@@ -24,14 +24,14 @@ class _FakeSession:
 
 
 def test_main_print_outputs_chat_answer(monkeypatch, capsys):
-    monkeypatch.setattr(cli, "_make_session", lambda: _FakeSession())
+    monkeypatch.setattr(cli, "_make_session", _FakeSession)
     rc = cli.main(["--print", "hello"])
     assert rc == 0
     assert "answer:hello" in capsys.readouterr().out
 
 
 def test_main_json_emits_ndjson_stream_events(monkeypatch, capsys):
-    monkeypatch.setattr(cli, "_make_session", lambda: _FakeSession())
+    monkeypatch.setattr(cli, "_make_session", _FakeSession)
     rc = cli.main(["--json", "hello"])
     assert rc == 0
     lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]

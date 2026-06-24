@@ -34,7 +34,8 @@ class _StreamEventLike(Protocol):
 
 
 class _ClientLike(Protocol):
-    def stream(self, message: str, *, thread_id: str | None = None, **kwargs: Any) -> Iterator[Any]: ...
+    def stream(self, message: str, *, thread_id: str | None = None, **kwargs: Any) -> Iterator[Any]:
+        """Yield streaming events for *message* (see ``DeerFlowClient.stream``)."""
 
 
 def translate(event: _StreamEventLike) -> list[Action]:
