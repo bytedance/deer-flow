@@ -32,6 +32,7 @@ from .view_state import (
     initial_state,
     reduce,
 )
+from .widgets.composer import ComposerInput
 
 _HELP_TEXT = (
     "Commands:  /new  /threads  /model  /skills  /tools  /mcp  /memory  /usage  /config  /quit\n"
@@ -183,7 +184,7 @@ class DeerFlowTUI(App):
             yield Static(id="transcript")
         yield Static(id="status")
         yield Static(id="palette")
-        yield Input(placeholder="Message DeerFlow…   ( / for commands )", id="composer")
+        yield ComposerInput(placeholder="Message DeerFlow…   ( / for commands )", id="composer")
 
     def on_mount(self) -> None:
         self._load_session_info()
