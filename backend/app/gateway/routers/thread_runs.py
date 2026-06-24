@@ -25,7 +25,7 @@ from app.gateway.deps import get_checkpointer, get_current_user, get_feedback_re
 from app.gateway.pagination import trim_run_message_page
 from app.gateway.services import sse_consumer, start_run, wait_for_run_completion
 from deerflow.runtime import RunRecord, RunStatus, serialize_channel_values_for_api
-from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, get_original_user_content_text
+from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, get_original_user_content_text, message_to_text
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/threads", tags=["runs"])
@@ -196,29 +196,7 @@ def _message_content(message: Any) -> Any:
 
 
 def _message_text(message: Any) -> str:
-    content = _message_content(message)
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts: list[str] = []
-        for block in content:
-            if isinstance(block, str):
-                parts.append(block)
-            elif isinstance(block, dict):
-                text = block.get("text")
-                if isinstance(text, str):
-                    parts.append(text)
-                else:
-                    nested = block.get("content")
-                    if isinstance(nested, str):
-                        parts.append(nested)
-        return "".join(parts)
-    if isinstance(content, dict):
-        for key in ("text", "content"):
-            value = content.get(key)
-            if isinstance(value, str):
-                return value
-    return ""
+    return message_to_text(message)
 
 
 def _message_additional_kwargs(message: Any) -> dict[str, Any]:

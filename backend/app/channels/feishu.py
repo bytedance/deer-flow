@@ -412,7 +412,7 @@ class FeishuChannel(Channel):
 
         try:
             sandbox_provider = get_sandbox_provider()
-            sandbox_id = sandbox_provider.acquire(thread_id)
+            sandbox_id = sandbox_provider.acquire(thread_id, user_id=effective_user_id)
             if sandbox_id != "local":
                 sandbox = sandbox_provider.get(sandbox_id)
                 if sandbox is None:

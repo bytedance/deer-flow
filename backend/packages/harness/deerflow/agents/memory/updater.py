@@ -38,11 +38,6 @@ _SYNC_MEMORY_UPDATER_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
 atexit.register(lambda: _SYNC_MEMORY_UPDATER_EXECUTOR.shutdown(wait=False))
 
 
-def _create_empty_memory() -> dict[str, Any]:
-    """Backward-compatible wrapper around the storage-layer empty-memory factory."""
-    return create_empty_memory()
-
-
 def _save_memory_to_file(memory_data: dict[str, Any], agent_name: str | None = None, *, user_id: str | None = None) -> bool:
     """Backward-compatible wrapper around the configured memory storage save path."""
     return get_memory_storage().save(memory_data, agent_name, user_id=user_id)
