@@ -10,11 +10,13 @@ import {
   SidebarMenuButton,
   SidebarMenuItem,
 } from "@/components/ui/sidebar";
+import { useAgentsApiEnabled } from "@/core/agents";
 import { useI18n } from "@/core/i18n/hooks";
 
 export function WorkspaceNavChatList() {
   const { t } = useI18n();
   const pathname = usePathname();
+  const { enabled: agentsEnabled } = useAgentsApiEnabled();
   return (
     <SidebarGroup className="pt-1">
       <SidebarMenu>
@@ -27,15 +29,27 @@ export function WorkspaceNavChatList() {
           </SidebarMenuButton>
         </SidebarMenuItem>
         <SidebarMenuItem>
-          <SidebarMenuButton
-            isActive={pathname.startsWith("/workspace/agents")}
-            asChild
-          >
-            <Link className="text-muted-foreground" href="/workspace/agents">
+          {agentsEnabled ? (
+            <SidebarMenuButton
+              isActive={pathname.startsWith("/workspace/agents")}
+              asChild
+            >
+              <Link className="text-muted-foreground" href="/workspace/agents">
+                <BotIcon />
+                <span>{t.sidebar.agents}</span>
+              </Link>
+            </SidebarMenuButton>
+          ) : (
+            <SidebarMenuButton
+              className="text-muted-foreground/50 cursor-not-allowed"
+              tooltip={t.sidebar.agentsDisabledTooltip}
+              aria-disabled
+              onClick={(e) => e.preventDefault()}
+            >
               <BotIcon />
               <span>{t.sidebar.agents}</span>
-            </Link>
-          </SidebarMenuButton>
+            </SidebarMenuButton>
+          )}
         </SidebarMenuItem>
       </SidebarMenu>
     </SidebarGroup>
