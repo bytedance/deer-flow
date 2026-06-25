@@ -435,3 +435,67 @@ def test_update_skill_refreshes_prompt_cache_before_return(monkeypatch, tmp_path
     assert response.json()["enabled"] is False
     assert refresh_calls == ["refresh"]
     assert json.loads(config_path.read_text(encoding="utf-8")) == {"mcpServers": {}, "skills": {"demo-skill": {"enabled": False}}}
+
+
+def test_update_skill_preserves_extension_top_level_keys(monkeypatch, tmp_path):
+    config_path = tmp_path / "extensions_config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "mcpInterceptors": ["demo.module:builder"],
+                "customExtension": {"enabled": True},
+                "mcpServers": {
+                    "demo-a": {
+                        "enabled": False,
+                        "type": "stdio",
+                        "command": "echo",
+                        "args": ["demo-a"],
+                        "env": {"DEMO_TOKEN": "$DEMO_TOKEN"},
+                    }
+                },
+                "skills": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    calls = iter(
+        [
+            [_make_skill("demo-skill", enabled=True)],
+            [_make_skill("demo-skill", enabled=False)],
+        ]
+    )
+
+    def _load_skills(*, enabled_only: bool):
+        return next(calls)
+
+    async def _refresh():
+        return None
+
+    mcp_server = SimpleNamespace(
+        model_dump=lambda: {
+            "enabled": False,
+            "type": "stdio",
+            "command": "echo",
+            "args": ["demo-a"],
+            "env": {"DEMO_TOKEN": "resolved-token"},
+        }
+    )
+    mock_storage = SimpleNamespace(load_skills=_load_skills)
+    monkeypatch.setattr("app.gateway.routers.skills.get_or_new_skill_storage", lambda **kwargs: mock_storage)
+    monkeypatch.setattr("app.gateway.routers.skills.get_extensions_config", lambda: SimpleNamespace(mcp_servers={"demo-a": mcp_server}, skills={}))
+    monkeypatch.setattr("app.gateway.routers.skills.reload_extensions_config", lambda: None)
+    monkeypatch.setattr(skills_router.ExtensionsConfig, "resolve_config_path", staticmethod(lambda: config_path))
+    monkeypatch.setattr("app.gateway.routers.skills.refresh_skills_system_prompt_cache_async", _refresh)
+
+    app = _make_test_app(SimpleNamespace())
+
+    with TestClient(app) as client:
+        response = client.put("/api/skills/demo-skill", json={"enabled": False})
+
+    assert response.status_code == 200
+    written = json.loads(config_path.read_text(encoding="utf-8"))
+    assert written["mcpInterceptors"] == ["demo.module:builder"]
+    assert written["customExtension"] == {"enabled": True}
+    assert written["mcpServers"]["demo-a"]["env"] == {"DEMO_TOKEN": "$DEMO_TOKEN"}
+    assert written["skills"] == {"demo-skill": {"enabled": False}}
