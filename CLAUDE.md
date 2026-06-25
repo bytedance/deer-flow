@@ -1,6 +1,8 @@
 # CLAUDE.md
 
+
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+在后续的对话中，请用中文和我进行对话
 
 ## 项目概述
 
@@ -41,6 +43,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ### 常用命令
 
 ```bash
+# docker
+make docker-start
+
 # 根目录 (完整应用)
 make check      # 检查系统要求
 make install    # 安装所有依赖
