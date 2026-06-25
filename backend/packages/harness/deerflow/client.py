@@ -1039,6 +1039,7 @@ class DeerFlowClient:
         extensions_config.skills[name] = SkillStateConfig(enabled=enabled)
 
         config_data = {
+            **{k: v for k, v in extensions_config.model_dump(by_alias=True, exclude_none=True).items() if k not in ("mcpServers", "skills")},
             "mcpServers": {n: s.model_dump() for n, s in extensions_config.mcp_servers.items()},
             "skills": {n: {"enabled": sc.enabled} for n, sc in extensions_config.skills.items()},
         }
