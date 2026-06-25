@@ -42,4 +42,52 @@ test.describe("Agents feature disabled", () => {
     // Gate prevented every agents API call, including direct navigation.
     expect(agentRequests).toEqual([]);
   });
+
+  test("stays disabled (no 403 storm) when /api/features goes down after a known-disabled result", async ({
+    page,
+  }) => {
+    const AGENTS_API = /\/api\/agents(\/|$)/;
+    const agentRequests: string[] = [];
+    page.on("request", (req) => {
+      if (AGENTS_API.test(new URL(req.url()).pathname)) {
+        agentRequests.push(req.url());
+      }
+    });
+
+    mockLangGraphAPI(page, { agents: [] });
+
+    // /api/features first reports disabled, then starts failing — simulating
+    // an outage of the features endpoint after the flag is already known.
+    let featuresUp = true;
+    await page.route("**/api/features", (route) =>
+      featuresUp
+        ? route.fulfill({
+            status: 200,
+            contentType: "application/json",
+            body: JSON.stringify({ agents_api: { enabled: false } }),
+          })
+        : route.fulfill({
+            status: 500,
+            contentType: "application/json",
+            body: "{}",
+          }),
+    );
+
+    // First visit observes a definitive "disabled" and persists it.
+    await page.goto("/workspace/agents");
+    await expect(
+      page.getByText(/contact your administrator|联系管理员/i),
+    ).toBeVisible({ timeout: 15_000 });
+
+    // The features endpoint now fails. A reload must NOT fail open and remount
+    // the agents page (which would re-trigger the 403 storm of #3757); the
+    // last-known "disabled" value is sticky.
+    featuresUp = false;
+    agentRequests.length = 0;
+    await page.goto("/workspace/agents");
+    await expect(
+      page.getByText(/contact your administrator|联系管理员/i),
+    ).toBeVisible({ timeout: 15_000 });
+    expect(agentRequests).toEqual([]);
+  });
 });

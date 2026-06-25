@@ -1,4 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useEffect, useState } from "react";
 
 import {
   createAgent,
@@ -8,6 +9,11 @@ import {
   listAgents,
   updateAgent,
 } from "./api";
+import {
+  readCachedAgentsApiEnabled,
+  resolveAgentsApiEnabled,
+  writeCachedAgentsApiEnabled,
+} from "./feature-cache";
 import type { CreateAgentRequest, UpdateAgentRequest } from "./types";
 
 export function useAgentsApiEnabled() {
@@ -20,8 +26,33 @@ export function useAgentsApiEnabled() {
     refetchOnMount: true,
     retry: false,
   });
-  // Fail-open: while loading or on error, do not hide a working feature.
-  return { enabled: data ?? true, isLoading: isPending };
+
+  // localStorage only exists in the browser, so read the last-known value
+  // after mount (not during render). This keeps the first client render equal
+  // to the server's (cache unknown → fail open), avoiding a hydration mismatch
+  // on the non-loading-gated sidebar; the sticky value is applied on the next
+  // render.
+  const [cached, setCached] = useState<boolean | undefined>(undefined);
+  useEffect(() => {
+    setCached(readCachedAgentsApiEnabled());
+  }, []);
+
+  // Persist every definitive answer so a cold start during an /api/features
+  // outage can fall back to it instead of failing open and re-introducing the
+  // 403 storm (#3757).
+  useEffect(() => {
+    if (data !== undefined) {
+      writeCachedAgentsApiEnabled(data);
+      setCached(data);
+    }
+  }, [data]);
+
+  // A live answer wins; otherwise stay on the last-known value (sticky) and
+  // only fail open when nothing has ever been observed.
+  return {
+    enabled: resolveAgentsApiEnabled(data, cached),
+    isLoading: isPending,
+  };
 }
 
 export function useAgents() {
