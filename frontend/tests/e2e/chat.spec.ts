@@ -391,4 +391,33 @@ test.describe("Chat workspace", () => {
     await page.waitForTimeout(1000);
     expect(suggestionsFetched).toBe(false);
   });
+
+  test("blocks submission when suggestion placeholder is not replaced", async ({
+    page,
+  }) => {
+    await page.goto("/workspace/chats/new");
+
+    const textarea = page.getByPlaceholder(/how can i assist you/i);
+    await expect(textarea).toBeVisible({ timeout: 15_000 });
+
+    // Click the "Research" suggestion button to insert the template
+    await page
+      .getByRole("button", { name: /research|研究/i })
+      .first()
+      .click();
+
+    // Verify the template text with placeholder is in the textarea
+    await expect(textarea).toHaveValue(/\[.*\]/);
+
+    // Try to submit without replacing the placeholder
+    await textarea.press("Enter");
+
+    // The textarea should still contain the template (message was not sent)
+    await expect(textarea).toHaveValue(/\[.*\]/);
+
+    // A toast warning should appear
+    await expect(page.getByText(/please fill in|请先填写/i)).toBeVisible({
+      timeout: 3_000,
+    });
+  });
 });
