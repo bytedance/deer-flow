@@ -22,6 +22,7 @@ import {
   type ComponentProps,
   type KeyboardEvent,
 } from "react";
+import { toast } from "sonner";
 
 import {
   PromptInput,
@@ -64,6 +65,7 @@ import { useModels } from "@/core/models/hooks";
 import type { Skill } from "@/core/skills";
 import { useSkills } from "@/core/skills/hooks";
 import { useSuggestionsConfig } from "@/core/suggestions/hooks";
+import { hasUnreplacedPlaceholder } from "@/core/suggestions/placeholders";
 import type { AgentThreadContext } from "@/core/threads";
 import { textOfMessage } from "@/core/threads/utils";
 import { isIMEComposing } from "@/lib/ime";
@@ -356,6 +358,26 @@ export function InputBox({
       if (!message.text.trim() && message.files.length === 0) {
         return;
       }
+
+      // Block submission if the message still contains an unreplaced suggestion
+      // template placeholder (e.g., [topic], [主题], [source], [来源]).
+      if (hasUnreplacedPlaceholder(message.text)) {
+        toast.warning(t.inputBox.placeholderNotFilled);
+        // Re-select the placeholder in the textarea for easy replacement.
+        const textarea = textareaRef.current;
+        if (textarea) {
+          const match = /\[(?:topic|source|主题|来源)\]/gi.exec(textarea.value);
+          if (match?.index !== undefined) {
+            textarea.focus();
+            textarea.setSelectionRange(
+              match.index,
+              match.index + match[0].length,
+            );
+          }
+        }
+        return;
+      }
+
       promptHistoryIndexRef.current = null;
       promptHistoryDraftRef.current = "";
       setFollowups([]);
@@ -390,6 +412,7 @@ export function InputBox({
       resolvedModelName,
       selectedModel?.supports_thinking,
       status,
+      t,
     ],
   );
 
