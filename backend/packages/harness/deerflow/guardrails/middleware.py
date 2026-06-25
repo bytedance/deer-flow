@@ -16,6 +16,8 @@ from deerflow.guardrails.provider import GuardrailDecision, GuardrailProvider, G
 
 logger = logging.getLogger(__name__)
 
+_REASON_MESSAGE_LIMIT = 500
+
 
 class GuardrailMiddleware(AgentMiddleware[AgentState]):
     """Evaluate tool calls against a GuardrailProvider before execution.
@@ -63,6 +65,57 @@ class GuardrailMiddleware(AgentMiddleware[AgentState]):
             status="error",
         )
 
+    def _record_guardrail_event(
+        self,
+        request: ToolCallRequest,
+        guardrail_request: GuardrailRequest,
+        decision: GuardrailDecision,
+        *,
+        action: str,
+        provider_error: bool,
+    ) -> None:
+        """Persist a security-relevant guardrail decision to RunJournal.
+
+        This mirrors SafetyFinishReasonMiddleware: audit persistence is
+        best-effort and must never change tool execution behavior.
+        """
+        runtime = getattr(request, "runtime", None)
+        context = getattr(runtime, "context", None) if runtime is not None else None
+        if not isinstance(context, dict):
+            return
+
+        journal = context.get("__run_journal")
+        if journal is None:
+            return
+
+        reason_codes = [reason.code for reason in decision.reasons if reason.code]
+        reason_messages = [reason.message[:_REASON_MESSAGE_LIMIT] for reason in decision.reasons if reason.message]
+
+        changes = {
+            "tool_name": guardrail_request.tool_name,
+            "tool_call_id": guardrail_request.tool_call_id,
+            "agent_id": guardrail_request.agent_id,
+            "is_subagent": guardrail_request.is_subagent,
+            "user_role": guardrail_request.user_role,
+            "allow": decision.allow,
+            "policy_id": decision.policy_id,
+            "reason_codes": reason_codes,
+            "reason_messages": reason_messages,
+            "fail_closed": self.fail_closed,
+            "provider_error": provider_error,
+        }
+
+        try:
+            journal.record_middleware(
+                tag="guardrail",
+                name=type(self).__name__,
+                hook="wrap_tool_call",
+                action=action,
+                changes=changes,
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug("Failed to record middleware:guardrail event", exc_info=True)
+
     @override
     def wrap_tool_call(
         self,
@@ -79,10 +132,33 @@ class GuardrailMiddleware(AgentMiddleware[AgentState]):
             logger.exception("Guardrail provider error (sync)")
             if self.fail_closed:
                 decision = GuardrailDecision(allow=False, reasons=[GuardrailReason(code="oap.evaluator_error", message="guardrail provider error (fail-closed)")])
+                self._record_guardrail_event(
+                    request,
+                    gr,
+                    decision,
+                    action="deny_tool_call",
+                    provider_error=True,
+                )
+                return self._build_denied_message(request, decision)
             else:
+                decision = GuardrailDecision(allow=True, reasons=[GuardrailReason(code="oap.evaluator_error", message="guardrail provider error (fail-open)")])
+                self._record_guardrail_event(
+                    request,
+                    gr,
+                    decision,
+                    action="allow_tool_call_after_provider_error",
+                    provider_error=True,
+                )
                 return handler(request)
         if not decision.allow:
             logger.warning("Guardrail denied: tool=%s policy=%s code=%s", gr.tool_name, decision.policy_id, decision.reasons[0].code if decision.reasons else "unknown")
+            self._record_guardrail_event(
+                request,
+                gr,
+                decision,
+                action="deny_tool_call",
+                provider_error=False,
+            )
             return self._build_denied_message(request, decision)
         return handler(request)
 
@@ -102,9 +178,32 @@ class GuardrailMiddleware(AgentMiddleware[AgentState]):
             logger.exception("Guardrail provider error (async)")
             if self.fail_closed:
                 decision = GuardrailDecision(allow=False, reasons=[GuardrailReason(code="oap.evaluator_error", message="guardrail provider error (fail-closed)")])
+                self._record_guardrail_event(
+                    request,
+                    gr,
+                    decision,
+                    action="deny_tool_call",
+                    provider_error=True,
+                )
+                return self._build_denied_message(request, decision)
             else:
+                decision = GuardrailDecision(allow=True, reasons=[GuardrailReason(code="oap.evaluator_error", message="guardrail provider error (fail-open)")])
+                self._record_guardrail_event(
+                    request,
+                    gr,
+                    decision,
+                    action="allow_tool_call_after_provider_error",
+                    provider_error=True,
+                )
                 return await handler(request)
         if not decision.allow:
             logger.warning("Guardrail denied: tool=%s policy=%s code=%s", gr.tool_name, decision.policy_id, decision.reasons[0].code if decision.reasons else "unknown")
+            self._record_guardrail_event(
+                request,
+                gr,
+                decision,
+                action="deny_tool_call",
+                provider_error=False,
+            )
             return self._build_denied_message(request, decision)
         return await handler(request)
