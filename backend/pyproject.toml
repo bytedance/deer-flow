@@ -34,6 +34,9 @@ dev = [
     "pytest>=9.0.3",
     "pytest-asyncio>=1.3.0",
     "ruff>=0.14.11",
+    # TUI runtime dep (also declared as the deerflow-harness[tui] extra); kept in
+    # the dev group so the terminal workbench can be run and tested locally / in CI.
+    "textual>=0.80",
 ]
 
 [tool.pytest.ini_options]

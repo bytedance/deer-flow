@@ -39,7 +39,13 @@ dependencies = [
     "cryptography>=48.0.1",
 ]
 
+[project.scripts]
+deerflow = "deerflow.tui.cli:main"
+
 [project.optional-dependencies]
+# Terminal workbench (TUI). Kept optional so the core harness install stays lean;
+# the `deerflow` console script degrades to headless help when textual is absent.
+tui = ["textual>=0.80"]
 # GroundRoute needs no extra packages (httpx is already a core dependency). This
 # empty extra exists so the documented `uv add 'deerflow-harness[groundroute]'`
 # install command resolves cleanly without an "unknown extra" warning.
