@@ -4528,7 +4528,8 @@ class TestChannelService:
         service = ChannelService.from_app_config(app_config)
 
         assert service._config["telegram"]["bot_token"] == "telegram-token"
-        assert service._config["slack"]["app_token"] == "xapp"
+        # The runtime (UI-entered) value must win over the yaml value.
+        assert service._config["slack"]["app_token"] == "xapp-ui"
         assert service._config["discord"]["bot_token"] == "discord-bot-token"
 
     def test_from_app_config_loads_persisted_runtime_channel_config(self, monkeypatch, tmp_path):

@@ -1,9 +1,9 @@
 "use client";
 
-import { ClipboardSafeStreamdown } from "@/components/ai-elements/streamdown";
+import { SafeStreamdown } from "@/core/streamdown/components";
 
 import { aboutMarkdown } from "./about-content";
 
 export function AboutSettingsPage() {
-  return <ClipboardSafeStreamdown>{aboutMarkdown}</ClipboardSafeStreamdown>;
+  return <SafeStreamdown>{aboutMarkdown}</SafeStreamdown>;
 }

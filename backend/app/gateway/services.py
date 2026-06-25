@@ -18,6 +18,7 @@ from typing import Any
 from fastapi import HTTPException, Request
 from langchain_core.messages import BaseMessage
 from langchain_core.messages.utils import convert_to_messages
+from langgraph.types import Command
 
 from app.gateway.deps import get_checkpointer, get_run_context, get_run_manager, get_stream_bridge
 from app.gateway.internal_auth import INTERNAL_SYSTEM_ROLE, get_trusted_internal_owner_user_id
@@ -252,6 +253,7 @@ def build_run_config(
                 context = dict(context_value)
             else:
                 raise ValueError("request config 'context' must be a mapping or null.")
+            context["thread_id"] = thread_id
             config["context"] = context
         else:
             configurable = {"thread_id": thread_id}
@@ -456,7 +458,11 @@ async def start_run(
             logger.warning("Failed to upsert thread_meta for %s (non-fatal)", sanitize_log_param(thread_id))
 
         agent_factory = resolve_agent_factory(body.assistant_id)
-        graph_input = normalize_input(body.input)
+        command = getattr(body, "command", None)
+        if command and command.get("resume") is not None:
+            graph_input = Command(resume=command["resume"])
+        else:
+            graph_input = normalize_input(body.input)
         config = build_run_config(thread_id, body.config, body.metadata, assistant_id=body.assistant_id)
         await apply_checkpoint_to_run_config(config, body=body, thread_id=thread_id, request=request)
 

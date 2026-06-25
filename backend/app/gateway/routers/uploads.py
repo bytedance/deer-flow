@@ -227,10 +227,11 @@ async def upload_files(
         raise HTTPException(status_code=413, detail=f"Too many files: maximum is {limits.max_files}")
 
     try:
-        uploads_dir = ensure_uploads_dir(thread_id)
+        effective_user_id = get_effective_user_id()
+        uploads_dir = ensure_uploads_dir(thread_id, user_id=effective_user_id)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    sandbox_uploads = get_paths().sandbox_uploads_dir(thread_id, user_id=get_effective_user_id())
+    sandbox_uploads = get_paths().sandbox_uploads_dir(thread_id, user_id=effective_user_id)
     uploaded_files = []
     written_paths = []
     sandbox_sync_targets = []
@@ -245,7 +246,7 @@ async def upload_files(
     sync_to_sandbox = not _uses_thread_data_mounts(sandbox_provider)
     sandbox = None
     if sync_to_sandbox:
-        sandbox_id = sandbox_provider.acquire(thread_id)
+        sandbox_id = sandbox_provider.acquire(thread_id, user_id=effective_user_id)
         sandbox = sandbox_provider.get(sandbox_id)
         if sandbox is None:
             raise HTTPException(status_code=500, detail="Failed to acquire sandbox")
