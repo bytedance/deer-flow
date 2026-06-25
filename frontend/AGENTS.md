@@ -1,90 +1,103 @@
-# Agents Architecture
+# AGENTS.md
 
-## Overview
+This file provides guidance to AI coding agents (Claude Code, Codex, and others) when working with the DeerFlow frontend. It is the source of truth; the sibling `CLAUDE.md` imports it via `@AGENTS.md`.
 
-DeerFlow is built on a sophisticated agent-based architecture using the [LangGraph SDK](https://github.com/langchain-ai/langgraph) to enable intelligent, stateful AI interactions. This document outlines the agent system architecture, patterns, and best practices for working with agents in the frontend application.
+## Project Overview
 
-## Architecture Overview
+DeerFlow Frontend is a Next.js 16 web interface for an AI agent system. It communicates with a LangGraph-based backend to provide thread-based AI conversations with streaming responses, artifacts, and a skills/tools system.
 
-### Core Components
+**Stack**: Next.js 16, React 19, TypeScript 5.8, Tailwind CSS 4, pnpm 10.26.2. Requires Node.js 22+ and pnpm 10.26.2+.
+
+### Core dependencies
+
+- **LangGraph SDK** (`@langchain/langgraph-sdk` ^1.5.3) — Agent orchestration and streaming
+- **LangChain Core** (`@langchain/core` ^1.1.15) — Fundamental AI building blocks
+- **TanStack Query** (`@tanstack/react-query` ^5.90.17) — Server state management
+- **UI**: Shadcn UI, MagicUI, React Bits, and Vercel AI SDK elements (generated from registries — see Code Style)
+
+## Commands
+
+| Command          | Purpose                                           |
+| ---------------- | ------------------------------------------------- |
+| `pnpm dev`       | Dev server with Turbopack (http://localhost:3000) |
+| `pnpm build`     | Production build                                  |
+| `pnpm check`     | Lint + type check (run before committing)         |
+| `pnpm lint`      | ESLint only                                       |
+| `pnpm lint:fix`  | ESLint with auto-fix                              |
+| `pnpm format`    | Prettier check (`pnpm format:write` to apply)     |
+| `pnpm test`      | Run unit tests with Rstest                        |
+| `pnpm test:e2e`  | Run E2E tests with Playwright (Chromium)          |
+| `pnpm typecheck` | TypeScript type check (`tsc --noEmit`)            |
+| `pnpm start`     | Start production server                           |
+
+Unit tests live under `tests/unit/` and mirror the `src/` layout (e.g., `tests/unit/core/api/stream-mode.test.ts` tests `src/core/api/stream-mode.ts`). Powered by Rstest; import source modules via the `@/` path alias.
+
+E2E tests live under `tests/e2e/` and use Playwright with Chromium. They mock all backend APIs via `page.route()` network interception and test real page interactions (navigation, chat input, streaming responses). Config: `playwright.config.ts`.
+
+## Architecture
 
 ```
-┌────────────────────────────────────────────────────────┐
-│                    Frontend (Next.js)                  │
-├────────────────────────────────────────────────────────┤
-│  ┌──────────────┐    ┌──────────────┐    ┌──────────┐  │
-│  │ UI Components│───▶│ Thread Hooks │───▶│ LangGraph│  │
-│  │              │    │              │    │   SDK    │  │
-│  └──────────────┘    └──────────────┘    └──────────┘  │
-│         │                    │                  │      │
-│         │                    ▼                  │      │
-│         │            ┌──────────────┐           │      │
-│         └───────────▶│ Thread State │◀──────────┘      │
-│                      │  Management  │                  │
-│                      └──────────────┘                  │
-└────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌────────────────────────────────────────────────────────┐
-│              LangGraph Backend (lead_agent)            │
-│  ┌────────────┐  ┌──────────┐  ┌───────────────────┐   │
-│  │Main Agent  │─▶│Sub-Agents│─▶│  Tools & Skills   │   │
-│  └────────────┘  └──────────┘  └───────────────────┘   │
-└────────────────────────────────────────────────────────┘
+Frontend (Next.js) ──▶ LangGraph SDK ──▶ LangGraph Backend (lead_agent)
+                                              ├── Sub-Agents
+                                              └── Tools & Skills
 ```
 
-## Project Structure
+The frontend is a stateful chat application. Users create **threads** (conversations), send messages, and receive streamed AI responses. The backend orchestrates agents that can produce **artifacts** (files/code) and **todos**.
 
-```
-tests/
-├── e2e/                    # E2E tests (Playwright, Chromium, mocked backend)
-└── unit/                   # Unit tests (mirrors src/ layout, powered by Rstest)
-src/
-├── app/                    # Next.js App Router pages
-│   ├── api/                # API routes
-│   ├── workspace/          # Main workspace pages
-│   └── mock/               # Mock/demo pages
-├── components/             # React components
-│   ├── ui/                 # Reusable UI components
-│   ├── workspace/          # Workspace-specific components
-│   ├── landing/            # Landing page components
-│   └── ai-elements/        # AI-related UI elements
-├── core/                   # Core business logic
-│   ├── api/                # API client & data fetching
-│   ├── artifacts/          # Artifact management
-│   ├── channels/           # IM channel connections (providers, connect flow)
-│   ├── config/              # App configuration
-│   ├── i18n/               # Internationalization
-│   ├── mcp/                # MCP integration
-│   ├── messages/           # Message handling
-│   ├── models/             # Data models & types
-│   ├── settings/           # User settings
-│   ├── skills/             # Skills system
-│   ├── threads/            # Thread management
-│   ├── todos/              # Todo system
-│   └── utils/              # Utility functions
-├── hooks/                  # Custom React hooks
-├── lib/                    # Shared libraries & utilities
-├── server/                 # Server-side code (Not available yet)
-│   └── better-auth/        # Authentication setup (Not available yet)
-└── styles/                 # Global styles
-```
+### Source Layout (`src/`)
 
-### Technology Stack
+- **`app/`** — Next.js App Router. Routes include `/` (landing), `/workspace/chats/[thread_id]` (chat), `/workspace/agents/[agent_name]` and `/workspace/agents/new` (custom agents), `/blog/…`, the `(auth)/{login,setup,auth/callback}` flow, `/[lang]/docs/…`, and `/api/…` route handlers (e.g. `/api/memory`).
+- **`components/`** — React components:
+  - `ui/` — Shadcn UI primitives (auto-generated, ESLint-ignored)
+  - `ai-elements/` — Vercel AI SDK elements (auto-generated, ESLint-ignored)
+  - `workspace/` — Chat page components (messages, artifacts, settings)
+  - `landing/` — Landing page sections
+  - `docs/` — Docs / MDX rendering components
+- **`core/`** — Business logic, the heart of the app. Domains include `threads/` (creation, streaming, state), `api/` (LangGraph client singleton), `agents/` (custom agents), `auth/` (authentication), `artifacts/`, `channels/` (IM connections), `i18n/` (en-US, zh-CN), `settings/`, `memory/`, `skills/`, `messages/`, `mcp/`, `models/`, `suggestions/`, `tasks/`, `todos/`, `tools/`, `config/`, `notification/`, `blog/`, plus rendering helpers (`rehype/`, `streamdown/`) and `utils/`.
+- **`hooks/`** — Shared React hooks
+- **`lib/`** — Utilities (`cn()` from clsx + tailwind-merge)
+- **`content/`** — MDX content (blog posts, docs) rendered by the app
+- **`styles/`** — Global CSS with Tailwind v4 `@import` syntax and CSS variables for theming
+- **`typings/`** — Ambient TypeScript declarations
+- Root files: `env.js` (env validation), `mdx-components.ts` (MDX component map)
 
-- **LangGraph SDK** (`@langchain/langgraph-sdk@1.5.3`) - Agent orchestration and streaming
-- **LangChain Core** (`@langchain/core@1.1.15`) - Fundamental AI building blocks
-- **TanStack Query** (`@tanstack/react-query@5.90.17`) - Server state management
-- **React Hooks** - Thread lifecycle and state management
-- **Shadcn UI** - UI components
-- **MagicUI** - Magic UI components
-- **React Bits** - React bits components
+### Data Flow
+
+1. User input → thread hooks (`core/threads/hooks.ts`) → LangGraph SDK streaming
+2. Stream events update thread state (messages, artifacts, todos)
+3. TanStack Query manages server state; localStorage stores user settings
+4. Components subscribe to thread state and render updates
+
+### Key Patterns
+
+- **Server Components by default**, `"use client"` only for interactive components
+- **Thread hooks** (`useThreadStream`, `useSubmitThread`, `useThreads`) are the primary API interface
+- **LangGraph client** is a singleton obtained via `getAPIClient()` in `core/api/`
+- **Environment validation** uses `@t3-oss/env-nextjs` with Zod schemas (`src/env.js`). Skip with `SKIP_ENV_VALIDATION=1`
 
 ### Interaction Ownership
 
 - `src/app/workspace/chats/[thread_id]/page.tsx` owns composer busy-state wiring.
 - `src/core/threads/hooks.ts` owns pre-submit upload state and thread submission.
-- `src/hooks/usePoseStream.ts` is a passive store selector; global WebSocket lifecycle stays in `App.tsx`.
+
+## Code Style
+
+- **Imports**: Enforced ordering (builtin → external → internal → parent → sibling), alphabetized, newlines between groups. Use inline type imports: `import { type Foo }`.
+- **Unused variables**: Prefix with `_`.
+- **Class names**: Use `cn()` from `@/lib/utils` for conditional Tailwind classes.
+- **Path alias**: `@/*` maps to `src/*`.
+- **Components**: `ui/` and `ai-elements/` are generated from registries (Shadcn, MagicUI, React Bits, Vercel AI SDK) — don't manually edit these.
+
+## Environment
+
+Backend API URLs are optional; an nginx proxy is used by default:
+
+```
+NEXT_PUBLIC_BACKEND_BASE_URL=http://localhost:8001
+NEXT_PUBLIC_LANGGRAPH_BASE_URL=http://localhost:8001/api
+```
+
+Leave these unset for the standard `make dev` / Docker flow, where nginx serves the public `/api/langgraph/*` prefix and rewrites it to Gateway's native `/api/*` routes.
 
 ## Resources
 
@@ -95,15 +108,10 @@ src/
 
 ## Contributing
 
-When adding new agent features:
+When adding features:
 
-1. Follow the established project structure
-2. Add comprehensive TypeScript types
-3. Implement proper error handling
-4. Write unit tests under `tests/unit/` (run with `pnpm test`) and E2E tests under `tests/e2e/` (run with `pnpm test:e2e`)
-5. Update this documentation
-6. Follow the code style guide (ESLint + Prettier)
-
-## License
-
-This agent architecture is part of the DeerFlow project.
+1. Follow the established `src/` structure
+2. Add TypeScript types and proper error handling
+3. Write unit tests under `tests/unit/` (`pnpm test`) and E2E tests under `tests/e2e/` (`pnpm test:e2e`)
+4. Run `pnpm check` before committing
+5. Update this `AGENTS.md` when architecture, commands, or conventions change
