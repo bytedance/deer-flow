@@ -68,14 +68,27 @@ export function useUpdateSubtask() {
       // MessageList writes the pending task tool-call state before parsing the
       // matching ToolMessage in the same render. Keep terminal results stable
       // across the next render so the refresh notification does not loop.
+      //
+      // Exclude messageHistory from the spread: it is managed separately below
+      // so that accumulated intermediate messages survive re-renders.
+      const { messageHistory: _ignored, ...taskWithoutHistory } = task;
       const next = {
         ...previous,
-        ...task,
+        ...taskWithoutHistory,
         ...(task.status === "in_progress" &&
         isTerminalSubtaskStatus(previousStatus)
           ? { status: previousStatus }
           : {}),
       } as Subtask;
+
+      // Accumulate intermediate messages so the subtask card can show the
+      // full execution history instead of only the latest step.
+      if (task.latestMessage) {
+        const history = previous?.messageHistory ?? [];
+        next.messageHistory = [...history, task.latestMessage];
+      } else {
+        next.messageHistory = previous?.messageHistory ?? [];
+      }
 
       const becameTerminal =
         isTerminalSubtaskStatus(next.status) && previousStatus !== next.status;

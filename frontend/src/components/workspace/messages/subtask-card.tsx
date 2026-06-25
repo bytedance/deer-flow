@@ -21,7 +21,7 @@ import { useRehypeSplitWordsIntoSpans } from "@/core/rehype";
 import { streamdownPluginsWithWordAnimation } from "@/core/streamdown";
 import { SafeStreamdown } from "@/core/streamdown/components";
 import { useSubtask } from "@/core/tasks/context";
-import { explainLastToolCall } from "@/core/tools/utils";
+import { explainLastToolCall, explainToolCall } from "@/core/tools/utils";
 import { cn } from "@/lib/utils";
 
 import { CitationLink } from "../citations/citation-link";
@@ -136,15 +136,40 @@ export function SubtaskCard({
             ></ChainOfThoughtStep>
           )}
           {task.status === "in_progress" &&
-            task.latestMessage &&
-            hasToolCalls(task.latestMessage) && (
-              <ChainOfThoughtStep
-                label={t.subtasks.in_progress}
-                icon={<Loader2Icon className="size-4 animate-spin" />}
-              >
-                {explainLastToolCall(task.latestMessage, t)}
-              </ChainOfThoughtStep>
-            )}
+            task.messageHistory &&
+            task.messageHistory.length > 0 &&
+            task.messageHistory.map((msg, idx) => {
+              const isLatest = idx === task.messageHistory.length - 1;
+              const steps: React.ReactNode[] = [];
+              if (hasToolCalls(msg)) {
+                for (const tc of msg.tool_calls!) {
+                  steps.push(
+                    <ChainOfThoughtStep
+                      key={`${msg.id ?? idx}-tc-${tc.id ?? steps.length}`}
+                      label={explainToolCall(tc, t)}
+                      icon={
+                        isLatest ? (
+                          <Loader2Icon className="size-4 animate-spin" />
+                        ) : undefined
+                      }
+                    />,
+                  );
+                }
+              } else {
+                steps.push(
+                  <ChainOfThoughtStep
+                    key={`${msg.id ?? idx}-thinking`}
+                    label={t.common.thinking}
+                    icon={
+                      isLatest ? (
+                        <Loader2Icon className="size-4 animate-spin" />
+                      ) : undefined
+                    }
+                  />,
+                );
+              }
+              return steps;
+            })}
           {task.status === "completed" && (
             <>
               <ChainOfThoughtStep

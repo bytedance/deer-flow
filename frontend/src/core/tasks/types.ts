@@ -6,6 +6,8 @@ export interface Subtask {
   subagent_type: string;
   description: string;
   latestMessage?: AIMessage;
+  /** All intermediate AI messages received while the subtask was running. */
+  messageHistory: AIMessage[];
   prompt: string;
   result?: string;
   error?: string;

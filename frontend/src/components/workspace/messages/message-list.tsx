@@ -491,6 +491,7 @@ export function MessageList({
                       description: toolCall.args.description,
                       prompt: toolCall.args.prompt,
                       status,
+                      messageHistory: [],
                       ...(status === "failed"
                         ? { error: t.subtasks.failed }
                         : {}),
