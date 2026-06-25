@@ -22,7 +22,6 @@ import {
   useState,
   type ComponentProps,
   type KeyboardEvent,
-  type RefObject,
 } from "react";
 import { toast } from "sonner";
 
@@ -66,6 +65,7 @@ import { isHiddenFromUIMessage } from "@/core/messages/utils";
 import { useModels } from "@/core/models/hooks";
 import { useSkills } from "@/core/skills/hooks";
 import { useSuggestionsConfig } from "@/core/suggestions/hooks";
+import { findSuggestionTemplatePlaceholder } from "@/core/suggestions/placeholders";
 import type { AgentThreadContext, GoalState } from "@/core/threads";
 import { textOfMessage } from "@/core/threads/utils";
 import {
@@ -541,7 +541,7 @@ export function InputBox({
       }
       const placeholder = findSuggestionTemplatePlaceholder(message.text);
       if (placeholder) {
-        toast.error(t.inputBox.suggestionPlaceholderRequired);
+        toast.warning(t.inputBox.suggestionPlaceholderRequired);
         requestAnimationFrame(() => {
           const textarea = textareaRef.current;
           if (!textarea) {
@@ -968,6 +968,18 @@ export function InputBox({
     suggestionsEnabled,
     threadId,
   ]);
+
+  const onSelectPlaceholder = useCallback(() => {
+    const textarea = textareaRef.current;
+    if (!textarea) return;
+    const placeholder = findSuggestionTemplatePlaceholder(textarea.value);
+    if (placeholder) {
+      requestAnimationFrame(() => {
+        textarea.focus();
+        textarea.setSelectionRange(placeholder.start, placeholder.end);
+      });
+    }
+  }, []);
 
   return (
     <div
@@ -1449,7 +1461,7 @@ export function InputBox({
         searchParams.get("mode") !== "skill" &&
         !showSkillSuggestions && (
           <div className="flex items-center justify-center pt-2">
-            <SuggestionList textareaRef={textareaRef} />
+            <SuggestionList onSelectPlaceholder={onSelectPlaceholder} />
           </div>
         )}
 
@@ -1479,9 +1491,9 @@ export function InputBox({
 }
 
 function SuggestionList({
-  textareaRef,
+  onSelectPlaceholder,
 }: {
-  textareaRef: RefObject<HTMLTextAreaElement | null>;
+  onSelectPlaceholder: () => void;
 }) {
   const { t } = useI18n();
   const { textInput } = usePromptInputController();
@@ -1489,16 +1501,9 @@ function SuggestionList({
     (prompt: string | undefined) => {
       if (!prompt) return;
       textInput.setInput(prompt);
-      requestAnimationFrame(() => {
-        const textarea = textareaRef.current;
-        const placeholder = findSuggestionTemplatePlaceholder(prompt);
-        if (textarea && placeholder) {
-          textarea.focus();
-          textarea.setSelectionRange(placeholder.start, placeholder.end);
-        }
-      });
+      onSelectPlaceholder();
     },
-    [textareaRef, textInput],
+    [textInput, onSelectPlaceholder],
   );
   return (
     <Suggestions className="min-h-16 w-full max-w-full justify-center px-4 sm:w-fit sm:px-0">
