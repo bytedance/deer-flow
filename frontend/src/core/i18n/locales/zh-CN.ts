@@ -111,6 +111,7 @@ export const zhCN: Translations = {
     followupConfirmDescription: "当前输入框已有内容，选择发送方式。",
     followupConfirmAppend: "追加并发送",
     followupConfirmReplace: "替换并发送",
+    placeholderNotFilled: "请先填写高亮显示的占位符后再发送。",
     suggestions: [
       {
         suggestion: "写作",

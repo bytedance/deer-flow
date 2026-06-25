@@ -116,6 +116,8 @@ export const enUS: Translations = {
       "You already have text in the input. Choose how to send it.",
     followupConfirmAppend: "Append & send",
     followupConfirmReplace: "Replace & send",
+    placeholderNotFilled:
+      "Please fill in the highlighted placeholder before sending.",
     suggestions: [
       {
         suggestion: "Write",
