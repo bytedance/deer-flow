@@ -1191,6 +1191,11 @@ class TestBenchmarkSummary:
         "> /usr/bin/python3",
         "> ~/.bashrc",
         ">> ~/.profile",
+        # home directory named with a variable, same targets as the tilde rules
+        "rm -rf $HOME/",
+        "rm -rf ${HOME}/*",
+        "> $HOME/.bashrc",
+        ">> ${HOME}/.profile",
         # new: /proc environ
         "cat /proc/self/environ",
         # new: dynamic linker hijack
@@ -1239,6 +1244,12 @@ class TestBenchmarkSummary:
         'echo "Today is $(date)"',
         "echo `whoami`",
         "mkdir -p src/{components,utils}",
+        # home-directory variable spellings that are not destructive targets
+        "echo $HOME",
+        "cat $HOME/.bashrc",
+        "ls $HOME/Documents",
+        "rm -rf $HOMELESS",
+        "rm -rf ${HOME_CACHE}",
         "backup() { rsync -a src/ | logger & }",  # function pipeline whose target is not the function itself
     ]
 
