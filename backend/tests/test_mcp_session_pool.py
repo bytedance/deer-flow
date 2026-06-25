@@ -889,7 +889,15 @@ async def test_http_transport_tools_not_pooled():
         patch("langchain_mcp_adapters.sessions.create_session", return_value=mock_cm),
     ):
         mock_client_instance = MockClient.return_value
-        mock_client_instance.get_tools = AsyncMock(return_value=[http_tool, stdio_tool])
+
+        async def get_tools_for_server(*, server_name: str | None = None):
+            if server_name == "myserver":
+                return [http_tool]
+            if server_name == "playwright":
+                return [stdio_tool]
+            raise AssertionError(f"unexpected server_name: {server_name}")
+
+        mock_client_instance.get_tools = AsyncMock(side_effect=get_tools_for_server)
 
         tools = await get_mcp_tools()
 
