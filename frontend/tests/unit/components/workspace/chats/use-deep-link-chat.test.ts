@@ -8,11 +8,14 @@ const {
   validateAutoSend,
   validateSource,
   validateContext,
+  validateLaunchId,
   validatePassthroughValue,
   MAX_PROMPT_LEN,
   MAX_SOURCE_LEN,
   MAX_CONTEXT_LEN,
+  MAX_LAUNCH_ID_LEN,
   MAX_PASSTHROUGH_LEN,
+  RESERVED_PARAMS,
 } = __test_only;
 
 describe("stripControlChars", () => {
@@ -105,6 +108,22 @@ describe("validateContext", () => {
   });
 });
 
+describe("validateLaunchId", () => {
+  it("returns trimmed value", () => {
+    expect(validateLaunchId("  launch-123  ")).toBe("launch-123");
+  });
+
+  it("returns null for empty", () => {
+    expect(validateLaunchId("")).toBeNull();
+    expect(validateLaunchId(null)).toBeNull();
+  });
+
+  it("truncates at max length", () => {
+    const long = "a".repeat(MAX_LAUNCH_ID_LEN + 50);
+    expect(validateLaunchId(long)).toHaveLength(MAX_LAUNCH_ID_LEN);
+  });
+});
+
 describe("validatePassthroughValue", () => {
   it("returns trimmed value", () => {
     expect(validatePassthroughValue("  P-203A  ")).toBe("P-203A");
@@ -125,5 +144,11 @@ describe("validatePassthroughValue", () => {
 
   it("strips control characters", () => {
     expect(validatePassthroughValue("P-203\x00A")).toBe("P-203A");
+  });
+});
+
+describe("RESERVED_PARAMS", () => {
+  it("treats launch_id as reserved", () => {
+    expect(RESERVED_PARAMS.has("launch_id")).toBe(true);
   });
 });

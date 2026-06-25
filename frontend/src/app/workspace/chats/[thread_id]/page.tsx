@@ -2,7 +2,10 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { type PromptInputMessage, usePromptInputController } from "@/components/ai-elements/prompt-input";
+import {
+  type PromptInputMessage,
+  usePromptInputController,
+} from "@/components/ai-elements/prompt-input";
 import { ArtifactTrigger } from "@/components/workspace/artifacts";
 import {
   CHAT_COMPOSER_INPUT_BOX_CLASSNAME,
@@ -32,6 +35,10 @@ import { TodoCountIndicator } from "@/components/workspace/todo-count-indicator"
 import { TodoList } from "@/components/workspace/todo-list";
 import { Welcome } from "@/components/workspace/welcome";
 import { useGreeting } from "@/core/greeting/use-greeting";
+import {
+  getLaunchThread,
+  setLaunchThread,
+} from "@/core/deep-link/launch-session";
 import { useI18n } from "@/core/i18n/hooks";
 import { useNotification } from "@/core/notification/hooks";
 import { useThreadSettings } from "@/core/settings";
@@ -49,6 +56,11 @@ export default function ChatPage() {
   const mountedRef = useRef(false);
   useSpecificChatMode();
   const deepLink = useDeepLinkChat(isNewThread);
+  const launchRouteKey = "chat";
+  const restoredLaunchThreadId =
+    isNewThread && deepLink.launchId
+      ? getLaunchThread(deepLink.launchId, launchRouteKey)
+      : null;
 
   useEffect(() => {
     mountedRef.current = true;
@@ -72,6 +84,9 @@ export default function ChatPage() {
       setIsNewThread(false);
     },
     onStart: (createdThreadId) => {
+      if (deepLink.launchId) {
+        setLaunchThread(deepLink.launchId, createdThreadId, launchRouteKey);
+      }
       setThreadId(createdThreadId);
       setIsNewThread(false);
       // ! Important: Never use next.js router for navigation in this case, otherwise it will cause the thread to re-mount and lose all states. Use native history API instead.
@@ -108,14 +123,36 @@ export default function ChatPage() {
   );
 
   useEffect(() => {
+    if (!isNewThread || !restoredLaunchThreadId) return;
+    setThreadId(restoredLaunchThreadId);
+    setIsNewThread(false);
+    history.replaceState(
+      null,
+      "",
+      `/workspace/chats/${restoredLaunchThreadId}`,
+    );
+  }, [isNewThread, restoredLaunchThreadId, setThreadId, setIsNewThread]);
+
+  useEffect(() => {
     const handler = (e: Event) => {
-      const { threadId: eventThreadId, callbackId, payload } = (e as CustomEvent).detail;
+      const {
+        threadId: eventThreadId,
+        callbackId,
+        payload,
+      } = (e as CustomEvent).detail;
       if (eventThreadId !== threadId) return;
-      const text = JSON.stringify({ type: "ui_interaction", callback_id: callbackId, payload });
-      void sendMessage(threadId, { text, files: [] }, undefined, { additionalKwargs: { hide_from_ui: true } });
+      const text = JSON.stringify({
+        type: "ui_interaction",
+        callback_id: callbackId,
+        payload,
+      });
+      void sendMessage(threadId, { text, files: [] }, undefined, {
+        additionalKwargs: { hide_from_ui: true },
+      });
     };
     window.addEventListener("genui:interaction-submitted", handler);
-    return () => window.removeEventListener("genui:interaction-submitted", handler);
+    return () =>
+      window.removeEventListener("genui:interaction-submitted", handler);
   }, [threadId, sendMessage]);
 
   // Deep-link auto-send
@@ -131,7 +168,9 @@ export default function ChatPage() {
   }, [deepLink.source]);
 
   useEffect(() => {
-    if (!deepLink.autoSend || !deepLink.prompt || deepLinkFiredRef.current) return;
+    if (restoredLaunchThreadId) return;
+    if (!deepLink.autoSend || !deepLink.prompt || deepLinkFiredRef.current)
+      return;
     deepLinkFiredRef.current = true;
     const allParams = {
       ...(deepLink.source ? { source: deepLink.source } : {}),
@@ -144,11 +183,21 @@ export default function ChatPage() {
       undefined,
       { additionalKwargs: allParams },
     );
-  }, [deepLink.autoSend, deepLink.prompt, deepLink.source, deepLink.context, deepLink.passthroughParams, threadId, sendMessage]);
+  }, [
+    deepLink.autoSend,
+    deepLink.prompt,
+    deepLink.source,
+    deepLink.context,
+    deepLink.passthroughParams,
+    threadId,
+    sendMessage,
+    restoredLaunchThreadId,
+  ]);
 
   // Deep-link pre-fill (when auto_send is not set)
   const lastPreFillRef = useRef<string | null>(null);
   useEffect(() => {
+    if (restoredLaunchThreadId) return;
     if (deepLink.autoSend) return;
     const text = deepLink.prompt;
     if (!text || text === lastPreFillRef.current) return;
@@ -163,7 +212,7 @@ export default function ChatPage() {
       }
     }, 100);
     return () => clearTimeout(timer);
-  }, [deepLink.autoSend, deepLink.prompt]);
+  }, [deepLink.autoSend, deepLink.prompt, restoredLaunchThreadId]);
 
   const handleStop = useCallback(async () => {
     await thread.stop();
@@ -176,110 +225,111 @@ export default function ChatPage() {
 
   return (
     <>
-    <ThreadContext.Provider value={{ thread, isMock }}>
-      <ChatBox threadId={threadId}>
-        <div className="relative flex size-full min-h-0 justify-between">
-          <header
-            className={cn(
-              "absolute top-0 right-0 left-0 z-30 flex h-12 shrink-0 items-center px-4",
-              isNewThread
-                ? "bg-background/0 backdrop-blur-none"
-                : "bg-background/80 shadow-xs backdrop-blur",
-            )}
-          >
-            <div className="flex w-full items-center gap-3 text-sm font-medium">
-              <SourceBreadcrumb className="shrink-0" />
-              <ThreadTitle threadId={threadId} thread={thread} />
-            </div>
-            <div className="flex items-center gap-2">
-              <TodoCountIndicator />
-              <ExportTrigger threadId={threadId} />
-              <ChatReportTrigger threadId={threadId} />
-              <ArtifactTrigger />
-            </div>
-          </header>
-          <main className="flex min-h-0 max-w-full grow flex-col">
-            <div className="flex size-full justify-center">
-              <MessageList
-                className={cn("size-full", !isNewThread && "pt-10")}
-                threadId={threadId}
-                thread={thread}
-                paddingBottom={messageListPaddingBottom}
-                hasMoreHistory={hasMoreHistory}
-                loadMoreHistory={loadMoreHistory}
-                isHistoryLoading={isHistoryLoading}
-                agentName={settings.context.agent_name as string | undefined}
-              />
-            </div>
-            <div className={getChatComposerDockClassName()}>
-              <div className={getChatComposerFrameClassName(isNewThread)}>
-                <div className="absolute -top-4 right-0 left-0 z-0">
-                  <div className="absolute right-0 bottom-0 left-0">
-                    <TodoList
-                      className="bg-background/5"
-                      todos={thread.values.todos ?? []}
-                      hidden={
-                        !thread.values.todos || thread.values.todos.length === 0
-                      }
-                    />
-                  </div>
-                </div>
-                {mountedRef.current ? (
-                  <InputBox
-                    className={CHAT_COMPOSER_INPUT_BOX_CLASSNAME}
-                    isNewThread={isNewThread}
-                    threadId={threadId}
-                    autoFocus={isNewThread}
-                    status={
-                      thread.error
-                        ? "error"
-                        : thread.isLoading
-                          ? "streaming"
-                          : "ready"
-                    }
-                    context={settings.context}
-                    extraHeader={
-                      isNewThread &&
-                      (greeting ? (
-                        <GreetingCard
-                          greeting={greeting.greeting}
-                          isLoading={isGreetingLoading}
-                        />
-                      ) : (
-                        <Welcome mode={settings.context.mode} />
-                      ))
-                    }
-                    disabled={
-                      env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true" ||
-                      isUploading
-                    }
-                    onContextChange={(context) =>
-                      setSettings("context", context)
-                    }
-                    onFollowupsVisibilityChange={setShowFollowups}
-                    onSubmit={handleSubmit}
-                    onStop={handleStop}
-                  />
-                ) : (
-                  <div
-                    aria-hidden="true"
-                    className={cn(
-                      "bg-background/5 h-32 w-full -translate-y-4 rounded-2xl",
-                    )}
-                  />
-                )}
-                {env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true" && (
-                  <div className="text-muted-foreground/67 w-full translate-y-12 text-center text-xs">
-                    {t.common.notAvailableInDemoMode}
-                  </div>
-                )}
+      <ThreadContext.Provider value={{ thread, isMock }}>
+        <ChatBox threadId={threadId}>
+          <div className="relative flex size-full min-h-0 justify-between">
+            <header
+              className={cn(
+                "absolute top-0 right-0 left-0 z-30 flex h-12 shrink-0 items-center px-4",
+                isNewThread
+                  ? "bg-background/0 backdrop-blur-none"
+                  : "bg-background/80 shadow-xs backdrop-blur",
+              )}
+            >
+              <div className="flex w-full items-center gap-3 text-sm font-medium">
+                <SourceBreadcrumb className="shrink-0" />
+                <ThreadTitle threadId={threadId} thread={thread} />
               </div>
-            </div>
-          </main>
-        </div>
-      </ChatBox>
-    </ThreadContext.Provider>
-    <IndustrialOnboardingOverlay />
-  </>
+              <div className="flex items-center gap-2">
+                <TodoCountIndicator />
+                <ExportTrigger threadId={threadId} />
+                <ChatReportTrigger threadId={threadId} />
+                <ArtifactTrigger />
+              </div>
+            </header>
+            <main className="flex min-h-0 max-w-full grow flex-col">
+              <div className="flex size-full justify-center">
+                <MessageList
+                  className={cn("size-full", !isNewThread && "pt-10")}
+                  threadId={threadId}
+                  thread={thread}
+                  paddingBottom={messageListPaddingBottom}
+                  hasMoreHistory={hasMoreHistory}
+                  loadMoreHistory={loadMoreHistory}
+                  isHistoryLoading={isHistoryLoading}
+                  agentName={settings.context.agent_name as string | undefined}
+                />
+              </div>
+              <div className={getChatComposerDockClassName()}>
+                <div className={getChatComposerFrameClassName(isNewThread)}>
+                  <div className="absolute -top-4 right-0 left-0 z-0">
+                    <div className="absolute right-0 bottom-0 left-0">
+                      <TodoList
+                        className="bg-background/5"
+                        todos={thread.values.todos ?? []}
+                        hidden={
+                          !thread.values.todos ||
+                          thread.values.todos.length === 0
+                        }
+                      />
+                    </div>
+                  </div>
+                  {mountedRef.current ? (
+                    <InputBox
+                      className={CHAT_COMPOSER_INPUT_BOX_CLASSNAME}
+                      isNewThread={isNewThread}
+                      threadId={threadId}
+                      autoFocus={isNewThread}
+                      status={
+                        thread.error
+                          ? "error"
+                          : thread.isLoading
+                            ? "streaming"
+                            : "ready"
+                      }
+                      context={settings.context}
+                      extraHeader={
+                        isNewThread &&
+                        (greeting ? (
+                          <GreetingCard
+                            greeting={greeting.greeting}
+                            isLoading={isGreetingLoading}
+                          />
+                        ) : (
+                          <Welcome mode={settings.context.mode} />
+                        ))
+                      }
+                      disabled={
+                        env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true" ||
+                        isUploading
+                      }
+                      onContextChange={(context) =>
+                        setSettings("context", context)
+                      }
+                      onFollowupsVisibilityChange={setShowFollowups}
+                      onSubmit={handleSubmit}
+                      onStop={handleStop}
+                    />
+                  ) : (
+                    <div
+                      aria-hidden="true"
+                      className={cn(
+                        "bg-background/5 h-32 w-full -translate-y-4 rounded-2xl",
+                      )}
+                    />
+                  )}
+                  {env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true" && (
+                    <div className="text-muted-foreground/67 w-full translate-y-12 text-center text-xs">
+                      {t.common.notAvailableInDemoMode}
+                    </div>
+                  )}
+                </div>
+              </div>
+            </main>
+          </div>
+        </ChatBox>
+      </ThreadContext.Provider>
+      <IndustrialOnboardingOverlay />
+    </>
   );
 }

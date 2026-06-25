@@ -20,7 +20,11 @@ import {
   getChatComposerFrameClassName,
 } from "@/components/workspace/chat-composer-layout";
 import { SourceBreadcrumb } from "@/components/workspace/source-breadcrumb";
-import { ChatBox, useDeepLinkChat, useThreadChat } from "@/components/workspace/chats";
+import {
+  ChatBox,
+  useDeepLinkChat,
+  useThreadChat,
+} from "@/components/workspace/chats";
 import { ExportTrigger } from "@/components/workspace/export-trigger";
 import { InputBox } from "@/components/workspace/input-box";
 import {
@@ -34,6 +38,10 @@ import { TodoList } from "@/components/workspace/todo-list";
 import { TodoCountIndicator } from "@/components/workspace/todo-count-indicator";
 import { Tooltip } from "@/components/workspace/tooltip";
 import { useAgent } from "@/core/agents";
+import {
+  getLaunchThread,
+  setLaunchThread,
+} from "@/core/deep-link/launch-session";
 import type { DefectWorkflowDeepLinkTarget } from "@/core/defect-workflow";
 import { useBlockStore, type UIBlock } from "@/core/genui/store";
 import { useI18n } from "@/core/i18n/hooks";
@@ -48,7 +56,10 @@ const DEFECT_WORKFLOW_CLOSURE_AGENT = "defect-workflow-closure";
 
 type DefectWorkflowSelectedContext = Record<string, unknown>;
 
-function storeDefectWorkflowSelectedTask(threadId: string, selectedTaskId: unknown): void {
+function storeDefectWorkflowSelectedTask(
+  threadId: string,
+  selectedTaskId: unknown,
+): void {
   if (typeof window === "undefined") return;
   const key = `${DEFECT_WORKFLOW_SELECTED_TASK_STORAGE_PREFIX}${threadId}`;
   if (selectedTaskId == null) {
@@ -135,14 +146,21 @@ export default function AgentChatPage() {
   const { threadId, setThreadId, isNewThread, setIsNewThread } =
     useThreadChat();
   const deepLink = useDeepLinkChat(isNewThread);
+  const launchRouteKey = `agent:${agent_name}`;
+  const restoredLaunchThreadId =
+    isNewThread && deepLink.launchId
+      ? getLaunchThread(deepLink.launchId, launchRouteKey)
+      : null;
   const defectWorkflowDeepLinkTarget = useMemo(
     () => createDefectWorkflowDeepLinkTarget(deepLink.passthroughParams),
     [deepLink.passthroughParams],
   );
   const [settings, setSettings] = useThreadSettings(threadId);
   const [localSettings, setLocalSettings] = useLocalSettings();
-  const isDefectWorkflowClosureAgent = agent_name === DEFECT_WORKFLOW_CLOSURE_AGENT;
-  const selectedDefectWorkflowContextRef = useRef<DefectWorkflowSelectedContext | null>(null);
+  const isDefectWorkflowClosureAgent =
+    agent_name === DEFECT_WORKFLOW_CLOSURE_AGENT;
+  const selectedDefectWorkflowContextRef =
+    useRef<DefectWorkflowSelectedContext | null>(null);
 
   const { showNotification } = useNotification();
   const {
@@ -155,6 +173,9 @@ export default function AgentChatPage() {
     threadId: isNewThread ? undefined : threadId,
     context: { ...settings.context, agent_name: agent_name },
     onStart: (createdThreadId) => {
+      if (deepLink.launchId) {
+        setLaunchThread(deepLink.launchId, createdThreadId, launchRouteKey);
+      }
       if (agent_name === DEFECT_WORKFLOW_CLOSURE_AGENT) {
         const store = useBlockStore.getState();
         const selectedTaskId = selectedDefectWorkflowContextRef.current?.taskId;
@@ -162,7 +183,11 @@ export default function AgentChatPage() {
         store.setActiveThread(createdThreadId);
         store.upsertBlock(
           createdThreadId,
-          createDefectWorkflowTodoListBlock(createdThreadId, selectedTaskId, defectWorkflowDeepLinkTarget),
+          createDefectWorkflowTodoListBlock(
+            createdThreadId,
+            selectedTaskId,
+            defectWorkflowDeepLinkTarget,
+          ),
         );
       }
       setThreadId(createdThreadId);
@@ -194,6 +219,23 @@ export default function AgentChatPage() {
 
   const autoStartFired = useRef(false);
 
+  useEffect(() => {
+    if (!isNewThread || !restoredLaunchThreadId) return;
+    setThreadId(restoredLaunchThreadId);
+    setIsNewThread(false);
+    history.replaceState(
+      null,
+      "",
+      `/workspace/agents/${agent_name}/chats/${restoredLaunchThreadId}`,
+    );
+  }, [
+    agent_name,
+    isNewThread,
+    restoredLaunchThreadId,
+    setThreadId,
+    setIsNewThread,
+  ]);
+
   const handleSubmit = useCallback(
     (message: PromptInputMessage) => {
       if (isDefectWorkflowClosureAgent) {
@@ -201,12 +243,17 @@ export default function AgentChatPage() {
           message.text.trim(),
           selectedDefectWorkflowContextRef.current,
         );
-        void sendMessage(threadId, message, { agent_name }, {
-          additionalKwargs: {
-            model_text: modelText,
-            defect_workflow_context: selectedDefectWorkflowContextRef.current,
+        void sendMessage(
+          threadId,
+          message,
+          { agent_name },
+          {
+            additionalKwargs: {
+              model_text: modelText,
+              defect_workflow_context: selectedDefectWorkflowContextRef.current,
+            },
           },
-        });
+        );
         return;
       }
 
@@ -216,7 +263,14 @@ export default function AgentChatPage() {
   );
 
   useEffect(() => {
-    if (!isNewThread || !isDefectWorkflowClosureAgent || deepLink.autoSend) return;
+    if (
+      !isNewThread ||
+      !isDefectWorkflowClosureAgent ||
+      deepLink.autoSend ||
+      restoredLaunchThreadId
+    ) {
+      return;
+    }
 
     const store = useBlockStore.getState();
     const selectedTaskId = selectedDefectWorkflowContextRef.current?.taskId;
@@ -228,9 +282,20 @@ export default function AgentChatPage() {
     store.setActiveThread(threadId);
     store.upsertBlock(
       threadId,
-      createDefectWorkflowTodoListBlock(threadId, selectedTaskId, defectWorkflowDeepLinkTarget),
+      createDefectWorkflowTodoListBlock(
+        threadId,
+        selectedTaskId,
+        defectWorkflowDeepLinkTarget,
+      ),
     );
-  }, [isNewThread, isDefectWorkflowClosureAgent, deepLink.autoSend, threadId, defectWorkflowDeepLinkTarget]);
+  }, [
+    isNewThread,
+    isDefectWorkflowClosureAgent,
+    deepLink.autoSend,
+    threadId,
+    defectWorkflowDeepLinkTarget,
+    restoredLaunchThreadId,
+  ]);
 
   useEffect(() => {
     if (!isDefectWorkflowClosureAgent) return;
@@ -246,12 +311,17 @@ export default function AgentChatPage() {
     };
 
     window.addEventListener(DEFECT_WORKFLOW_SELECTED_CONTEXT_EVENT, handler);
-    return () => window.removeEventListener(DEFECT_WORKFLOW_SELECTED_CONTEXT_EVENT, handler);
+    return () =>
+      window.removeEventListener(
+        DEFECT_WORKFLOW_SELECTED_CONTEXT_EVENT,
+        handler,
+      );
   }, [isDefectWorkflowClosureAgent, threadId]);
 
   // Deep-link auto-send: takes precedence over agent auto_start
   useEffect(() => {
     if (!isNewThread || autoStartFired.current) return;
+    if (restoredLaunchThreadId) return;
 
     if (deepLink.autoSend) {
       const allParams = {
@@ -263,7 +333,12 @@ export default function AgentChatPage() {
       if (deepLink.prompt) {
         // Deep-link has its own prompt — send immediately
         autoStartFired.current = true;
-        void sendMessage(threadId, { text: deepLink.prompt, files: [] }, { agent_name }, { additionalKwargs: allParams });
+        void sendMessage(
+          threadId,
+          { text: deepLink.prompt, files: [] },
+          { agent_name },
+          { additionalKwargs: allParams },
+        );
         return;
       }
 
@@ -273,7 +348,12 @@ export default function AgentChatPage() {
         const agentPrompt = agent.starters?.find((s) => s.auto_start)?.prompt;
         if (agentPrompt) {
           autoStartFired.current = true;
-          void sendMessage(threadId, { text: agentPrompt, files: [] }, { agent_name }, { additionalKwargs: allParams });
+          void sendMessage(
+            threadId,
+            { text: agentPrompt, files: [] },
+            { agent_name },
+            { additionalKwargs: allParams },
+          );
           return;
         }
       }
@@ -291,9 +371,23 @@ export default function AgentChatPage() {
     const autoStarter = agent.starters?.find((s) => s.auto_start);
     if (autoStarter) {
       autoStartFired.current = true;
-      void sendMessage(threadId, { text: autoStarter.prompt, files: [] }, { agent_name }, { additionalKwargs: { hide_from_ui: true } });
+      void sendMessage(
+        threadId,
+        { text: autoStarter.prompt, files: [] },
+        { agent_name },
+        { additionalKwargs: { hide_from_ui: true } },
+      );
     }
-  }, [isNewThread, agent, sendMessage, threadId, agent_name, deepLink, isDefectWorkflowClosureAgent]);
+  }, [
+    isNewThread,
+    agent,
+    sendMessage,
+    threadId,
+    agent_name,
+    deepLink,
+    isDefectWorkflowClosureAgent,
+    restoredLaunchThreadId,
+  ]);
 
   // Deep-link pre-fill (when auto_send is not set)
   const promptInputController = usePromptInputController();
@@ -308,6 +402,7 @@ export default function AgentChatPage() {
 
   const lastPreFillRef = useRef<string | null>(null);
   useEffect(() => {
+    if (restoredLaunchThreadId) return;
     if (deepLink.autoSend) return;
     const text = deepLink.prompt;
     if (!text || text === lastPreFillRef.current) return;
@@ -322,7 +417,7 @@ export default function AgentChatPage() {
       }
     }, 100);
     return () => clearTimeout(timer);
-  }, [deepLink.autoSend, deepLink.prompt]);
+  }, [deepLink.autoSend, deepLink.prompt, restoredLaunchThreadId]);
 
   // Handoff from another agent (e.g. abnormal-judgment → fault-diagnosis)
   const handoffFired = useRef(false);
@@ -371,7 +466,10 @@ export default function AgentChatPage() {
         selectedDefectWorkflowContextRef.current = null;
         const store = useBlockStore.getState();
         store.setActiveThread(threadId);
-        store.upsertBlock(threadId, createDefectWorkflowTodoListBlock(threadId));
+        store.upsertBlock(
+          threadId,
+          createDefectWorkflowTodoListBlock(threadId),
+        );
         return;
       }
 
@@ -382,13 +480,27 @@ export default function AgentChatPage() {
 
   useEffect(() => {
     const handler = (e: Event) => {
-      const { threadId: eventThreadId, callbackId, payload } = (e as CustomEvent).detail;
+      const {
+        threadId: eventThreadId,
+        callbackId,
+        payload,
+      } = (e as CustomEvent).detail;
       if (eventThreadId !== threadId) return;
-      const text = JSON.stringify({ type: "ui_interaction", callback_id: callbackId, payload });
-      void sendMessage(threadId, { text, files: [] }, { agent_name }, { additionalKwargs: { hide_from_ui: true } });
+      const text = JSON.stringify({
+        type: "ui_interaction",
+        callback_id: callbackId,
+        payload,
+      });
+      void sendMessage(
+        threadId,
+        { text, files: [] },
+        { agent_name },
+        { additionalKwargs: { hide_from_ui: true } },
+      );
     };
     window.addEventListener("genui:interaction-submitted", handler);
-    return () => window.removeEventListener("genui:interaction-submitted", handler);
+    return () =>
+      window.removeEventListener("genui:interaction-submitted", handler);
   }, [threadId, sendMessage, agent_name]);
 
   const handleStop = useCallback(async () => {
@@ -400,7 +512,10 @@ export default function AgentChatPage() {
       MESSAGE_LIST_FOLLOWUPS_EXTRA_PADDING_BOTTOM
     : undefined;
   const showDefectWorkflowLocalHome =
-    isNewThread && isDefectWorkflowClosureAgent && !deepLink.autoSend;
+    isNewThread &&
+    isDefectWorkflowClosureAgent &&
+    !deepLink.autoSend &&
+    !restoredLaunchThreadId;
   const useNewThreadLayout = isNewThread && !showDefectWorkflowLocalHome;
 
   return (
@@ -469,7 +584,9 @@ export default function AgentChatPage() {
             </div>
 
             <div className={getChatComposerDockClassName()}>
-              <div className={getChatComposerFrameClassName(useNewThreadLayout)}>
+              <div
+                className={getChatComposerFrameClassName(useNewThreadLayout)}
+              >
                 <div className="absolute -top-4 right-0 left-0 z-0">
                   <div className="absolute right-0 bottom-0 left-0">
                     <TodoList
@@ -497,7 +614,11 @@ export default function AgentChatPage() {
                   context={settings.context}
                   extraHeader={
                     useNewThreadLayout && (
-                      <AgentWelcome agent={agent} agentName={agent_name} onStarterClick={handleStarterClick} />
+                      <AgentWelcome
+                        agent={agent}
+                        agentName={agent_name}
+                        onStarterClick={handleStarterClick}
+                      />
                     )
                   }
                   disabled={env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true"}

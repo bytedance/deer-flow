@@ -6,14 +6,30 @@
 
 ## 约定
 
-| 项目 | 说明 |
-|------|------|
-| 协议 | HTTPS |
-| 方法 | GET |
-| 认证 | 用户需持有 DeerFlow 有效会话，否则重定向到登录页 |
-| 根路径 | `https://<deerflow-host>` |
-| 编码 | 参数值须经 `encodeURIComponent` 编码 |
-| 生效条件 | 仅新对话（`/new`）生效，已有对话忽略所有参数 |
+| 项目     | 说明                                             |
+| -------- | ------------------------------------------------ |
+| 协议     | HTTPS                                            |
+| 方法     | GET                                              |
+| 认证     | 用户需持有 DeerFlow 有效会话，否则重定向到登录页 |
+| 根路径   | `https://<deerflow-host>`                        |
+| 编码     | 参数值须经 `encodeURIComponent` 编码             |
+| 生效条件 | 仅新对话（`/new`）生效，已有对话忽略所有参数     |
+
+### 启动会话恢复（`launch_id`）
+
+当调用方希望同时支持：
+
+- 用户显式再次点击同一个业务入口时重新执行
+- 用户刷新浏览器或宿主 iframe 重建时恢复刚才那次会话
+
+应传入 `launch_id`。
+
+规则如下：
+
+- `launch_id` 只用于 DeerFlow 前端恢复逻辑，不透传给 Agent
+- 同一浏览器会话内，DeerFlow 首次使用某个 `launch_id` 创建线程后，会记录 `launch_id -> threadId`
+- 后续再次打开同一个 `/chats/new?...&launch_id=<same>` 时，若映射仍存在，DeerFlow 应直接恢复该 thread，而不是重复 `auto_send`
+- 若调用方希望即使业务参数完全相同也重新执行，必须生成新的 `launch_id`
 
 ### 登录验证
 
@@ -70,42 +86,42 @@ DeerFlow 支持两种认证方式：
 
 **EHM Token 参数**：
 
-| 参数 | 传递方式 | 类型 | 必填 | 约束 | 说明 |
-|------|----------|------|------|------|------|
-| `ehm_token` | Cookie 或 URL | string | 是 | 有效 JWT，未过期 | EHM 签发的身份令牌。payload：`{id, exp, iat}` |
-| `ehm_user` | Cookie 或 URL | string | 推荐 | base64 编码的 JSON | 用户信息。结构：`{id, user_name, real_name, org_id}` |
+| 参数        | 传递方式      | 类型   | 必填 | 约束               | 说明                                                 |
+| ----------- | ------------- | ------ | ---- | ------------------ | ---------------------------------------------------- |
+| `ehm_token` | Cookie 或 URL | string | 是   | 有效 JWT，未过期   | EHM 签发的身份令牌。payload：`{id, exp, iat}`        |
+| `ehm_user`  | Cookie 或 URL | string | 推荐 | base64 编码的 JSON | 用户信息。结构：`{id, user_name, real_name, org_id}` |
 
 > **推荐 Cookie 方式**：外部系统在 DeerFlow 域名下写入 `ehm_token` / `ehm_user` Cookie（`SameSite=Lax, path=/, max-age=86400`），然后直接跳转 deep-link URL，全程 token 不出现在地址栏。需外部系统与 DeerFlow 同域或可通过接口写 DeerFlow 域的 Cookie。
 
 **EHM Token 校验规则**：
 
-| 校验项 | 失败行为 |
-|--------|----------|
-| `ehm_token` 不存在或无法解码 | 显示错误 "EHM 单点登录失败：token 无效或已过期" |
-| `ehm_token.exp` 已过期 | 同上 |
-| `ehm_user` base64 解码失败 | 仅使用 token payload 的 `id`，其他字段留空 |
+| 校验项                                      | 失败行为                                           |
+| ------------------------------------------- | -------------------------------------------------- |
+| `ehm_token` 不存在或无法解码                | 显示错误 "EHM 单点登录失败：token 无效或已过期"    |
+| `ehm_token.exp` 已过期                      | 同上                                               |
+| `ehm_user` base64 解码失败                  | 仅使用 token payload 的 `id`，其他字段留空         |
 | `ehm_user` JSON 中 `id` 或 `user_name` 缺失 | 视为无效，user 返回 null（后续行为取决于前端守卫） |
 
 **auth 链路**（代码来源）：
 
-| 阶段 | 位置 | 说明 |
-|------|------|------|
-| 登录页读取 EHM 参数 | [login/page.tsx:65-86](frontend/src/app/(auth)/login/page.tsx#L65-L86) | 从 `searchParams` 提取 `ehm_token`、`ehm_user` |
-| JWT 校验 | [ehm-auth.ts:93-98](frontend/src/core/auth/ehm-auth.ts#L93-L98) | `isEhmTokenValid()` 检查 `exp` 是否过期 |
-| Cookie 写入 | [ehm-auth.ts:159-166](frontend/src/core/auth/ehm-auth.ts#L159-L166) | `setEhmCookieAndRedirect()` 写 cookie → 跳转 |
-| SSR 身份恢复 | [server.ts:31-37](frontend/src/core/auth/server.ts#L31-L37) | `getServerEhmToken()` → `getServerEhmUser()` |
-| 401 自动重试 | [fetcher.ts:114-126](frontend/src/core/api/fetcher.ts#L114-L126) | API 401 → `reauthenticateEhmSession()` → 重试请求 |
+| 阶段                | 位置                                                                     | 说明                                              |
+| ------------------- | ------------------------------------------------------------------------ | ------------------------------------------------- |
+| 登录页读取 EHM 参数 | [login/page.tsx:65-86](<frontend/src/app/(auth)/login/page.tsx#L65-L86>) | 从 `searchParams` 提取 `ehm_token`、`ehm_user`    |
+| JWT 校验            | [ehm-auth.ts:93-98](frontend/src/core/auth/ehm-auth.ts#L93-L98)          | `isEhmTokenValid()` 检查 `exp` 是否过期           |
+| Cookie 写入         | [ehm-auth.ts:159-166](frontend/src/core/auth/ehm-auth.ts#L159-L166)      | `setEhmCookieAndRedirect()` 写 cookie → 跳转      |
+| SSR 身份恢复        | [server.ts:31-37](frontend/src/core/auth/server.ts#L31-L37)              | `getServerEhmToken()` → `getServerEhmUser()`      |
+| 401 自动重试        | [fetcher.ts:114-126](frontend/src/core/api/fetcher.ts#L114-L126)         | API 401 → `reauthenticateEhmSession()` → 重试请求 |
 
 **认证场景汇总**：
 
-| 场景 | 认证方式 | 预期行为 |
-|------|----------|----------|
-| 浏览器直接打开 deep-link（已登录） | Session Cookie | 直接进入目标页面 |
-| 浏览器直接打开 deep-link（未登录） | Session Cookie | 重定向到 `/login?next=<原始路径>`，登录后跳回 |
-| 会话已过期 | Session Cookie | API 返回 401 → 2s 后重定向到登录页 |
-| EHM 系统跳转（已持有 EHM 会话） | EHM Token | 构造 `/login?next=...&ehm_token=...`，自动免登 |
-| EHM iframe 嵌入（Cookie 已预置） | EHM Cookie | `getServerEhmToken()` 直接恢复用户，跳过登录页 |
-| EHM Token 过期 | EHM Token | 登录页显示 token 无效错误，清除 `ehm_token` 参数 |
+| 场景                               | 认证方式       | 预期行为                                         |
+| ---------------------------------- | -------------- | ------------------------------------------------ |
+| 浏览器直接打开 deep-link（已登录） | Session Cookie | 直接进入目标页面                                 |
+| 浏览器直接打开 deep-link（未登录） | Session Cookie | 重定向到 `/login?next=<原始路径>`，登录后跳回    |
+| 会话已过期                         | Session Cookie | API 返回 401 → 2s 后重定向到登录页               |
+| EHM 系统跳转（已持有 EHM 会话）    | EHM Token      | 构造 `/login?next=...&ehm_token=...`，自动免登   |
+| EHM iframe 嵌入（Cookie 已预置）   | EHM Cookie     | `getServerEhmToken()` 直接恢复用户，跳过登录页   |
+| EHM Token 过期                     | EHM Token      | 登录页显示 token 无效错误，清除 `ehm_token` 参数 |
 
 **调用方验证方式**
 
@@ -124,22 +140,23 @@ EHM Token：
 
 ### 通用参数（所有接口适用）
 
-| 参数 | 类型 | 必填 | 约束 | 说明 |
-|------|------|------|------|------|
-| `prompt` | string | 否 | ≤ 2000 字符 | 消息文本。不带 `auto_send` 时仅预填输入框；带 `auto_send=1` 时自动发送 |
-| `auto_send` | string | 否 | 仅 `"1"` | 是否自动发送。非 `"1"` 的任何值视为不自动发送 |
-| `source` | string | 否 | ≤ 100 字符 | 来源系统标识，写入日志 `[DeepLink] source=<value>` |
-| `context` | string | 否 | ≤ 500 字符 | 业务上下文 key，透传至 Agent，用于结果关联 |
+| 参数        | 类型   | 必填 | 约束        | 说明                                                                   |
+| ----------- | ------ | ---- | ----------- | ---------------------------------------------------------------------- |
+| `prompt`    | string | 否   | ≤ 2000 字符 | 消息文本。不带 `auto_send` 时仅预填输入框；带 `auto_send=1` 时自动发送 |
+| `auto_send` | string | 否   | 仅 `"1"`    | 是否自动发送。非 `"1"` 的任何值视为不自动发送                          |
+| `source`    | string | 否   | ≤ 100 字符  | 来源系统标识，写入日志 `[DeepLink] source=<value>`                     |
+| `context`   | string | 否   | ≤ 500 字符  | 业务上下文 key，透传至 Agent，用于结果关联                             |
+| `launch_id` | string | 否   | ≤ 100 字符  | 启动会话 ID。用于刷新恢复已创建 thread；不透传给 Agent                 |
 
 ### 参数校验规则（通用）
 
-| 规则 | 违规时行为 |
-|------|-----------|
-| 长度超限（prompt ≤ 2000，source ≤ 100，context ≤ 500） | 截断至最大长度 |
-| 透传参数值超过 500 字符 | 丢弃该参数 |
-| 含控制字符 `\x00-\x08 \x0B \x0C \x0E-\x1F \x7F` | 自动过滤 |
-| 纯空白字符串 | 视为未提供 |
-| `auto_send` 值 ≠ `"1"` | 视为 `false`，仅预填 |
+| 规则                                                   | 违规时行为           |
+| ------------------------------------------------------ | -------------------- |
+| 长度超限（prompt ≤ 2000，source ≤ 100，context ≤ 500） | 截断至最大长度       |
+| 透传参数值超过 500 字符                                | 丢弃该参数           |
+| 含控制字符 `\x00-\x08 \x0B \x0C \x0E-\x1F \x7F`        | 自动过滤             |
+| 纯空白字符串                                           | 视为未提供           |
+| `auto_send` 值 ≠ `"1"`                                 | 视为 `false`，仅预填 |
 
 > **校验归属说明**：上文"通用参数"和"参数校验规则（通用）"中的规则由前端执行。各接口表格中列出的业务校验规则（如 `device_id` 的正则格式、日期字段格式等）由 **Agent 侧**（SOUL.md）在收到消息后校验，前端只做透传——非法值不会被前端拦截，而是由 Agent 判定后静默回退到表单交互流程。
 
@@ -200,12 +217,12 @@ GET /workspace/agents/fault-diagnosis--pump/chats/new
 
 除通用参数外：
 
-| 参数 | 类型 | 必填 | 校验规则 | 说明 |
-|------|------|------|----------|------|
-| `device_id` | string | 否* | `^[A-Za-z0-9_-]+$`，≤ 100 字符 | 设备 ID |
-| `component_id` | string | 否* | `^[A-Za-z0-9_-]+$`，≤ 100 字符 | 子设备/部件/测点 ID |
-| `diagnosis_date` | string | 否* | `^\d{4}-\d{2}-\d{2}$` | 诊断日期 |
-| `diagnosis_hour` | string | 否* | `"0"` ~ `"23"` | 诊断小时 |
+| 参数             | 类型   | 必填 | 校验规则                       | 说明                |
+| ---------------- | ------ | ---- | ------------------------------ | ------------------- |
+| `device_id`      | string | 否\* | `^[A-Za-z0-9_-]+$`，≤ 100 字符 | 设备 ID             |
+| `component_id`   | string | 否\* | `^[A-Za-z0-9_-]+$`，≤ 100 字符 | 子设备/部件/测点 ID |
+| `diagnosis_date` | string | 否\* | `^\d{4}-\d{2}-\d{2}$`          | 诊断日期            |
+| `diagnosis_hour` | string | 否\* | `"0"` ~ `"23"`                 | 诊断小时            |
 
 > \* 四个参数**全部填写且校验通过**时，Agent 跳过交互表单直接执行诊断。任一缺失或校验失败则回退到正常的交互流程（弹出设备选择器让用户手动选择）。
 
@@ -253,12 +270,12 @@ GET /workspace/agents/fault-diagnosis--rotating/chats/new
 
 **参数**
 
-| 参数 | 类型 | 必填 | 校验规则 | 说明 |
-|------|------|------|----------|------|
-| `device_id` | string | 否* | `^[A-Za-z0-9_-]+$`，≤ 100 字符 | 设备 ID |
-| `component_id` | string | 否* | `^[A-Za-z0-9_-]+$`，≤ 100 字符 | 子设备/测点 ID |
-| `diagnosis_date` | string | 否* | `^\d{4}-\d{2}-\d{2}$` | 诊断日期 |
-| `diagnosis_hour` | string | 否* | `"0"` ~ `"23"` | 诊断小时 |
+| 参数             | 类型   | 必填 | 校验规则                       | 说明           |
+| ---------------- | ------ | ---- | ------------------------------ | -------------- |
+| `device_id`      | string | 否\* | `^[A-Za-z0-9_-]+$`，≤ 100 字符 | 设备 ID        |
+| `component_id`   | string | 否\* | `^[A-Za-z0-9_-]+$`，≤ 100 字符 | 子设备/测点 ID |
+| `diagnosis_date` | string | 否\* | `^\d{4}-\d{2}-\d{2}$`          | 诊断日期       |
+| `diagnosis_hour` | string | 否\* | `"0"` ~ `"23"`                 | 诊断小时       |
 
 > \* 规则同机泵诊断：四参数齐全且校验通过则直达诊断，否则回退交互。
 
@@ -299,12 +316,12 @@ GET /workspace/agents/fault-diagnosis--reciprocating/chats/new
 
 **参数**
 
-| 参数 | 类型 | 必填 | 校验规则 | 说明 |
-|------|------|------|----------|------|
-| `device_id` | string | 否* | `^[A-Za-z0-9_-]+$`，≤ 100 字符 | 设备 ID |
-| `component_id` | string | 否* | `^[A-Za-z0-9_-]+$`，≤ 100 字符 | 子设备/气缸/测点 ID |
-| `diagnosis_date` | string | 否* | `^\d{4}-\d{2}-\d{2}$` | 诊断日期 |
-| `diagnosis_hour` | string | 否* | `"0"` ~ `"23"` | 诊断小时 |
+| 参数             | 类型   | 必填 | 校验规则                       | 说明                |
+| ---------------- | ------ | ---- | ------------------------------ | ------------------- |
+| `device_id`      | string | 否\* | `^[A-Za-z0-9_-]+$`，≤ 100 字符 | 设备 ID             |
+| `component_id`   | string | 否\* | `^[A-Za-z0-9_-]+$`，≤ 100 字符 | 子设备/气缸/测点 ID |
+| `diagnosis_date` | string | 否\* | `^\d{4}-\d{2}-\d{2}$`          | 诊断日期            |
+| `diagnosis_hour` | string | 否\* | `"0"` ~ `"23"`                 | 诊断小时            |
 
 > \* 规则同上。
 
@@ -347,15 +364,15 @@ GET /workspace/agents/monitoring-analysis/chats/new
 
 除通用参数外：
 
-| 参数 | 类型 | 必填 | 校验规则 | 说明 |
-|------|------|------|----------|------|
-| `point_ids` | string | **是** | 逗号分隔的非空字符串 | 测点 ID 列表，如 `140529abc,140529def` |
-| `device_id` | string | 否 | — | 设备 ID，用于辅助定位 |
-| `device_type` | string | 否 | — | 设备类型编码 |
-| `date_start` | string | **是** | `^\d{4}-\d{2}-\d{2}$` | 开始日期，如 `2026-05-01` |
-| `date_end` | string | **是** | `^\d{4}-\d{2}-\d{2}$`，且 `date_end` > `date_start` | 结束日期，如 `2026-06-01` |
-| `include_waveform` | string | 否 | — | 是否包含波形数据 |
-| `analysis_focus` | string | 否 | — | 分析侧重点，如 `full` |
+| 参数               | 类型   | 必填   | 校验规则                                            | 说明                                   |
+| ------------------ | ------ | ------ | --------------------------------------------------- | -------------------------------------- |
+| `point_ids`        | string | **是** | 逗号分隔的非空字符串                                | 测点 ID 列表，如 `140529abc,140529def` |
+| `device_id`        | string | 否     | —                                                   | 设备 ID，用于辅助定位                  |
+| `device_type`      | string | 否     | —                                                   | 设备类型编码                           |
+| `date_start`       | string | **是** | `^\d{4}-\d{2}-\d{2}$`                               | 开始日期，如 `2026-05-01`              |
+| `date_end`         | string | **是** | `^\d{4}-\d{2}-\d{2}$`，且 `date_end` > `date_start` | 结束日期，如 `2026-06-01`              |
+| `include_waveform` | string | 否     | —                                                   | 是否包含波形数据                       |
+| `analysis_focus`   | string | 否     | —                                                   | 分析侧重点，如 `full`                  |
 
 > \* `point_ids` + `date_start` + `date_end` 三参数**全部填写且校验通过**时，Agent 跳过测点选择表单直接执行数据获取与分析。任一缺失或校验失败则回退到正常的表单交互流程（渲染测点多选器让用户手动选择）。
 
@@ -406,13 +423,13 @@ GET /workspace/agents/defect-workflow-closure/chats/new
 
 除通用参数外：
 
-| 参数 | 类型 | 必填 | 校验规则 | 说明 |
-|------|------|------|----------|------|
-| `task_id` | string | 否 | `^[A-Za-z0-9_-]+$`，≤ 100 字符 | 当前流程任务 ID。用于优先匹配并自动打开当前用户待办中的目标行 |
-| `defect_id` | string | 否 | `^[A-Za-z0-9_-]+$`，≤ 100 字符 | 闭环平台缺陷业务 ID。`task_id` 未命中时作为第二优先级匹配条件 |
-| `defect_no` | string | 否 | ≤ 100 字符 | 缺陷编号，如 `QX20260621-C158E400`。作为第三优先级匹配条件和页面提示文案 |
-| `auto_open` | string | 否 | 仅 `"1"` | 是否在待办列表加载后自动选中匹配行并打开详情 |
-| `mode` | string | 否 | `todo` / `view` / `assist` | `todo` 表示查看待办列表；`view` 表示引导查看某条缺陷；`assist` 表示围绕当前缺陷辅助查询设备/测点/报警等信息 |
+| 参数        | 类型   | 必填 | 校验规则                       | 说明                                                                                                        |
+| ----------- | ------ | ---- | ------------------------------ | ----------------------------------------------------------------------------------------------------------- |
+| `task_id`   | string | 否   | `^[A-Za-z0-9_-]+$`，≤ 100 字符 | 当前流程任务 ID。用于优先匹配并自动打开当前用户待办中的目标行                                               |
+| `defect_id` | string | 否   | `^[A-Za-z0-9_-]+$`，≤ 100 字符 | 闭环平台缺陷业务 ID。`task_id` 未命中时作为第二优先级匹配条件                                               |
+| `defect_no` | string | 否   | ≤ 100 字符                     | 缺陷编号，如 `QX20260621-C158E400`。作为第三优先级匹配条件和页面提示文案                                    |
+| `auto_open` | string | 否   | 仅 `"1"`                       | 是否在待办列表加载后自动选中匹配行并打开详情                                                                |
+| `mode`      | string | 否   | `todo` / `view` / `assist`     | `todo` 表示查看待办列表；`view` 表示引导查看某条缺陷；`assist` 表示围绕当前缺陷辅助查询设备/测点/报警等信息 |
 
 > **当前行为说明**：打开该入口后，页面会立即展示当前登录用户的“缺陷待办”列表。若 URL 携带 `auto_open=1` 和目标参数，AI 工作台会在当前用户已加载的待办列表中按 `task_id` → `defect_id` → `defect_no` 的优先级匹配，命中后自动选中该行并打开详情。当前选中缺陷会进入后续对话上下文。
 >
@@ -433,6 +450,7 @@ GET /workspace/agents/defect-workflow-closure/chats/new
   &defect_no=QX20260621-C158E400
   &mode=view
   &auto_open=1
+  &launch_id=ehm-defect-20260625-001
   &source=ehm-defect-management
 
 # 进入缺陷闭环并请求辅助查询当前缺陷绑定设备的监测信息
@@ -447,7 +465,7 @@ GET /workspace/agents/defect-workflow-closure/chats/new
 
 ```
 GET /login
-  ?next=<encodeURIComponent(/workspace/agents/defect-workflow-closure/chats/new?task_id=90296&defect_id=1781744317660112&defect_no=QX20260621-C158E400&mode=view&auto_open=1&source=ehm-defect-management)>
+  ?next=<encodeURIComponent(/workspace/agents/defect-workflow-closure/chats/new?task_id=90296&defect_id=1781744317660112&defect_no=QX20260621-C158E400&mode=view&auto_open=1&launch_id=ehm-defect-20260625-001&source=ehm-defect-management)>
   &ehm_token=<EHM_JWT>
   &ehm_user=<base64_user_info>
 ```
@@ -478,15 +496,15 @@ GET /workspace/agents/ai-report--daily/chats/new
 
 除通用参数外：
 
-| 参数 | 类型 | 必填 | 校验规则 | 说明 |
-|------|------|------|----------|------|
-| `template_id` | string | **是** | ≤ 100 字符 | 报告模板 ID，如 `daily-equipment` |
-| `report_date` | string | **是** | `^\d{4}-\d{2}-\d{2}$` | 报告日期 |
-| `equipment_type` | string | 否 | `all` / `static_equipment` / `rotating_machinery` / `pump` / `reciprocating_machinery` | 设备类型，默认 `all` |
-| `compare_with` | string | 否 | `previous_day` / `previous_week` / `none` | 对比基准，默认 `previous_day` |
-| `equipment_ids` | string | 否 | `^[A-Za-z0-9_-]+(,[A-Za-z0-9_-]+)*$` | 逗号分隔的设备 ID，默认全部设备 |
-| `equipment_labels` | string | 否 | — | 逗号分隔的设备名称，与 `equipment_ids` 一一对应。仅 `equipment_ids` 提供时有效；缺省时用设备 ID 作为显示名称 |
-| `kpi_keys` | string | 否 | `^[a-z_]+(,[a-z_]+)*$` | 逗号分隔的 KPI 列表，如 `runtime_rate,alarm_count`。默认按模板勾选 |
+| 参数               | 类型   | 必填   | 校验规则                                                                               | 说明                                                                                                         |
+| ------------------ | ------ | ------ | -------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| `template_id`      | string | **是** | ≤ 100 字符                                                                             | 报告模板 ID，如 `daily-equipment`                                                                            |
+| `report_date`      | string | **是** | `^\d{4}-\d{2}-\d{2}$`                                                                  | 报告日期                                                                                                     |
+| `equipment_type`   | string | 否     | `all` / `static_equipment` / `rotating_machinery` / `pump` / `reciprocating_machinery` | 设备类型，默认 `all`                                                                                         |
+| `compare_with`     | string | 否     | `previous_day` / `previous_week` / `none`                                              | 对比基准，默认 `previous_day`                                                                                |
+| `equipment_ids`    | string | 否     | `^[A-Za-z0-9_-]+(,[A-Za-z0-9_-]+)*$`                                                   | 逗号分隔的设备 ID，默认全部设备                                                                              |
+| `equipment_labels` | string | 否     | —                                                                                      | 逗号分隔的设备名称，与 `equipment_ids` 一一对应。仅 `equipment_ids` 提供时有效；缺省时用设备 ID 作为显示名称 |
+| `kpi_keys`         | string | 否     | `^[a-z_]+(,[a-z_]+)*$`                                                                 | 逗号分隔的 KPI 列表，如 `runtime_rate,alarm_count`。默认按模板勾选                                           |
 
 > \* `template_id` + `report_date` 两参数**全部填写且校验通过**时，Agent 跳过交互表单直接执行完整报告生成。可选参数提供时覆盖表单默认值，全部缺省则使用模板默认值。
 
@@ -517,7 +535,7 @@ GET /workspace/agents/ai-report--daily/chats/new
 
 ```
 GET /login
-  ?next=<encodeURIComponent(/workspace/agents/ai-report--daily/chats/new?template_id=daily-equipment&report_date=2026-06-01&auto_send=1&source=report-scheduler)>
+  ?next=<encodeURIComponent(/workspace/agents/ai-report--daily/chats/new?template_id=daily-equipment&report_date=2026-06-01&auto_send=1&launch_id=ehm-report-20260625-001&source=report-scheduler)>
   &ehm_token=<EHM_JWT>
   &ehm_user=<base64_user_info>
 ```
@@ -543,16 +561,16 @@ GET /workspace/agents/ai-report--weekly/chats/new
 
 除通用参数外：
 
-| 参数 | 类型 | 必填 | 校验规则 | 说明 |
-|------|------|------|----------|------|
-| `template_id` | string | **是** | ≤ 100 字符 | 报告模板 ID，如 `weekly-equipment` |
-| `week_start` | string | **是** | `^\d{4}-\d{2}-\d{2}$` | 周报开始日期 |
-| `date_end` | string | **是** | `^\d{4}-\d{2}-\d{2}$` | 周报结束日期，必须 ≥ `week_start`。仅用于校验，不传入模板 |
-| `equipment_type` | string | 否 | `all` / `static_equipment` / `rotating_machinery` / `pump` / `reciprocating_machinery` | 设备类型，默认 `all` |
-| `compare_with` | string | 否 | `previous_week` / `previous_year` / `none` | 对比基准，默认 `previous_week` |
-| `equipment_ids` | string | 否 | `^[A-Za-z0-9_-]+(,[A-Za-z0-9_-]+)*$` | 逗号分隔的设备 ID，默认全部设备 |
-| `equipment_labels` | string | 否 | — | 逗号分隔的设备名称，与 `equipment_ids` 一一对应。仅 `equipment_ids` 提供时有效；缺省时用设备 ID 作为显示名称 |
-| `kpi_keys` | string | 否 | `^[a-z_]+(,[a-z_]+)*$` | 逗号分隔的 KPI 列表，如 `runtime_rate,alarm_count`。默认按模板勾选 |
+| 参数               | 类型   | 必填   | 校验规则                                                                               | 说明                                                                                                         |
+| ------------------ | ------ | ------ | -------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| `template_id`      | string | **是** | ≤ 100 字符                                                                             | 报告模板 ID，如 `weekly-equipment`                                                                           |
+| `week_start`       | string | **是** | `^\d{4}-\d{2}-\d{2}$`                                                                  | 周报开始日期                                                                                                 |
+| `date_end`         | string | **是** | `^\d{4}-\d{2}-\d{2}$`                                                                  | 周报结束日期，必须 ≥ `week_start`。仅用于校验，不传入模板                                                    |
+| `equipment_type`   | string | 否     | `all` / `static_equipment` / `rotating_machinery` / `pump` / `reciprocating_machinery` | 设备类型，默认 `all`                                                                                         |
+| `compare_with`     | string | 否     | `previous_week` / `previous_year` / `none`                                             | 对比基准，默认 `previous_week`                                                                               |
+| `equipment_ids`    | string | 否     | `^[A-Za-z0-9_-]+(,[A-Za-z0-9_-]+)*$`                                                   | 逗号分隔的设备 ID，默认全部设备                                                                              |
+| `equipment_labels` | string | 否     | —                                                                                      | 逗号分隔的设备名称，与 `equipment_ids` 一一对应。仅 `equipment_ids` 提供时有效；缺省时用设备 ID 作为显示名称 |
+| `kpi_keys`         | string | 否     | `^[a-z_]+(,[a-z_]+)*$`                                                                 | 逗号分隔的 KPI 列表，如 `runtime_rate,alarm_count`。默认按模板勾选                                           |
 
 > \* `template_id` + `week_start` + `date_end` 三参数**全部填写且校验通过**时，Agent 跳过交互表单直接执行报告生成直到导出完成。可选参数提供时覆盖表单默认值。
 
@@ -585,7 +603,7 @@ GET /workspace/agents/ai-report--weekly/chats/new
 
 ```
 GET /login
-  ?next=<encodeURIComponent(/workspace/agents/ai-report--weekly/chats/new?template_id=weekly-equipment&week_start=2026-05-25&date_end=2026-06-01&auto_send=1&source=report-scheduler)>
+  ?next=<encodeURIComponent(/workspace/agents/ai-report--weekly/chats/new?template_id=weekly-equipment&week_start=2026-05-25&date_end=2026-06-01&auto_send=1&launch_id=ehm-report-20260625-002&source=report-scheduler)>
   &ehm_token=<EHM_JWT>
   &ehm_user=<base64_user_info>
 ```
@@ -611,15 +629,15 @@ GET /workspace/agents/ai-report--monthly/chats/new
 
 除通用参数外：
 
-| 参数 | 类型 | 必填 | 校验规则 | 说明 |
-|------|------|------|----------|------|
-| `template_id` | string | **是** | ≤ 100 字符 | 报告模板 ID，如 `monthly-equipment` |
-| `report_month` | string | **是** | `^\d{4}-\d{2}$` | 报告月份，如 `2026-06` |
-| `equipment_type` | string | 否 | `all` / `static_equipment` / `rotating_machinery` / `pump` / `reciprocating_machinery` | 设备类型，默认 `all` |
-| `compare_with` | string | 否 | 逗号分隔：`mom` / `yoy` / `none`。`none` 不可与其他值并存 | 对比基准（可多选），默认 `mom` |
-| `equipment_ids` | string | 否 | `^[A-Za-z0-9_-]+(,[A-Za-z0-9_-]+)*$` | 逗号分隔的设备 ID，默认全部设备 |
-| `equipment_labels` | string | 否 | — | 逗号分隔的设备名称，与 `equipment_ids` 一一对应。仅 `equipment_ids` 提供时有效；缺省时用设备 ID 作为显示名称 |
-| `kpi_keys` | string | 否 | `^[a-z_]+(,[a-z_]+)*$` | 逗号分隔的 KPI 列表，如 `runtime_rate,mtbf,mttr,target_rate`。默认按模板勾选 |
+| 参数               | 类型   | 必填   | 校验规则                                                                               | 说明                                                                                                         |
+| ------------------ | ------ | ------ | -------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| `template_id`      | string | **是** | ≤ 100 字符                                                                             | 报告模板 ID，如 `monthly-equipment`                                                                          |
+| `report_month`     | string | **是** | `^\d{4}-\d{2}$`                                                                        | 报告月份，如 `2026-06`                                                                                       |
+| `equipment_type`   | string | 否     | `all` / `static_equipment` / `rotating_machinery` / `pump` / `reciprocating_machinery` | 设备类型，默认 `all`                                                                                         |
+| `compare_with`     | string | 否     | 逗号分隔：`mom` / `yoy` / `none`。`none` 不可与其他值并存                              | 对比基准（可多选），默认 `mom`                                                                               |
+| `equipment_ids`    | string | 否     | `^[A-Za-z0-9_-]+(,[A-Za-z0-9_-]+)*$`                                                   | 逗号分隔的设备 ID，默认全部设备                                                                              |
+| `equipment_labels` | string | 否     | —                                                                                      | 逗号分隔的设备名称，与 `equipment_ids` 一一对应。仅 `equipment_ids` 提供时有效；缺省时用设备 ID 作为显示名称 |
+| `kpi_keys`         | string | 否     | `^[a-z_]+(,[a-z_]+)*$`                                                                 | 逗号分隔的 KPI 列表，如 `runtime_rate,mtbf,mttr,target_rate`。默认按模板勾选                                 |
 
 > \* `template_id` + `report_month` 两参数**全部填写且校验通过**时，Agent 跳过交互表单直接执行报告生成直到导出完成。可选参数提供时覆盖表单默认值。
 
@@ -650,7 +668,7 @@ GET /workspace/agents/ai-report--monthly/chats/new
 
 ```
 GET /login
-  ?next=<encodeURIComponent(/workspace/agents/ai-report--monthly/chats/new?template_id=monthly-equipment&report_month=2026-06&auto_send=1&source=report-scheduler)>
+  ?next=<encodeURIComponent(/workspace/agents/ai-report--monthly/chats/new?template_id=monthly-equipment&report_month=2026-06&auto_send=1&launch_id=ehm-report-20260625-003&source=report-scheduler)>
   &ehm_token=<EHM_JWT>
   &ehm_user=<base64_user_info>
 ```
@@ -720,12 +738,12 @@ GET /workspace/agents/crm-analyst/chats/new
 
 除通用参数外，可传入以下业务参数：
 
-| 参数 | 类型 | 必填 | 校验规则 | 说明 |
-|------|------|------|----------|------|
-| `query_type` | string | 否 | ≤ 100 字符 | 查询类型：`product_shipment` / `service_events` / `combined` |
-| `date_range` | string | 否 | ≤ 100 字符 | 时间范围：`last_7d` / `last_30d` / `last_90d` / `custom` |
-| `date_start` | string | 否 | `^\d{4}-\d{2}-\d{2}$` | 自定义开始日期（date_range=custom 时使用） |
-| `date_end` | string | 否 | `^\d{4}-\d{2}-\d{2}$` | 自定义结束日期（date_range=custom 时使用） |
+| 参数         | 类型   | 必填 | 校验规则              | 说明                                                         |
+| ------------ | ------ | ---- | --------------------- | ------------------------------------------------------------ |
+| `query_type` | string | 否   | ≤ 100 字符            | 查询类型：`product_shipment` / `service_events` / `combined` |
+| `date_range` | string | 否   | ≤ 100 字符            | 时间范围：`last_7d` / `last_30d` / `last_90d` / `custom`     |
+| `date_start` | string | 否   | `^\d{4}-\d{2}-\d{2}$` | 自定义开始日期（date_range=custom 时使用）                   |
+| `date_end`   | string | 否   | `^\d{4}-\d{2}-\d{2}$` | 自定义结束日期（date_range=custom 时使用）                   |
 
 > **⚠️ 直达执行暂未实现**：该 Agent（[crm-analyst/SOUL.md](agents/builtin/crm-analyst/SOUL.md)）尚未在 SOUL.md 中解析 `<deep_link_params>` 块。所有参数会经前端透传至 Agent 的 `additional_kwargs`，但 **Agent 不会根据参数直达执行**，而是始终走正常交互流程（用户需手动输入查询意图）。待 Agent 端实现 deep-link 直达逻辑后，本节内容将补充更新。
 
@@ -803,8 +821,8 @@ function buildDiagnosisUrl(alert) {
 
 // EHM 免登方式：构造 /login URL 携带 ehm_token
 function buildEhmDiagnosisUrl(alert, ehmToken, ehmUserBase64) {
-  const deepLink = `/workspace/agents/fault-diagnosis--pump/chats/new?${
-    new URLSearchParams({
+  const deepLink = `/workspace/agents/fault-diagnosis--pump/chats/new?${new URLSearchParams(
+    {
       device_id: alert.labels.device_id,
       component_id: alert.labels.component_id,
       diagnosis_date: new Date(alert.startsAt).toISOString().slice(0, 10),
@@ -812,15 +830,13 @@ function buildEhmDiagnosisUrl(alert, ehmToken, ehmUserBase64) {
       auto_send: "1",
       source: "grafana-alerting",
       context: alert.fingerprint,
-    })
-  }`;
-  return `${DEERFLOW_HOST}/login?${
-    new URLSearchParams({
-      next: deepLink,
-      ehm_token: ehmToken,
-      ehm_user: ehmUserBase64,
-    })
-  }`;
+    },
+  )}`;
+  return `${DEERFLOW_HOST}/login?${new URLSearchParams({
+    next: deepLink,
+    ehm_token: ehmToken,
+    ehm_user: ehmUserBase64,
+  })}`;
 }
 ```
 
@@ -973,18 +989,18 @@ xdg-open "$URL" 2>/dev/null || open "$URL" 2>/dev/null
 
 集成方可按以下步骤逐项验证：
 
-| # | 验证项 | 预期结果 |
-|---|--------|----------|
-| 1 | 未登录状态下打开任意 deep-link URL | 重定向到 `/login?next=...`，登录后跳回目标页面 |
-| 2 | EHM 免登：构造 `/login?next=<deep-link>&ehm_token=<有效JWT>&ehm_user=<base64>` | 不显示登录表单，直接跳转到目标页面 |
-| 3 | EHM 免登：`ehm_token` 已过期 | 显示 "token 无效或已过期"，清除 `ehm_token` 参数 |
-| 4 | EHM 免登：不传 `ehm_user` | 仅 token 验证通过，用户详情从后端补全 |
-| 5 | `auto_send=1` + `prompt=测试` | 页面打开后自动发送 "测试" |
-| 6 | `prompt=测试` 不带 `auto_send` | 输入框预填 "测试"，不自动发送 |
-| 7 | `auto_send=2` | 视为不自动发送 |
-| 8 | `prompt=<超2000字符>` | 截断至 2000 字符后发送 |
-| 9 | `device_id=P-203;rm+rf` (诊断接口) | 参数透传至 Agent，Agent 校验失败后回退交互流程 |
-| 10 | `diagnosis_date=2026/06/01` (诊断接口) | 参数透传至 Agent，Agent 校验失败后回退交互流程 |
-| 11 | 已有对话 URL 后加 `?prompt=xxx` | 参数被忽略，对话正常加载 |
-| 12 | 监测分析只传 `device_id` 不传 `point_ids` | Agent 回退到测点多选器交互 |
-| 13 | 控制台检查 `[DeepLink] source=<value>` | source 参数正确输出到控制台 |
+| #   | 验证项                                                                         | 预期结果                                         |
+| --- | ------------------------------------------------------------------------------ | ------------------------------------------------ |
+| 1   | 未登录状态下打开任意 deep-link URL                                             | 重定向到 `/login?next=...`，登录后跳回目标页面   |
+| 2   | EHM 免登：构造 `/login?next=<deep-link>&ehm_token=<有效JWT>&ehm_user=<base64>` | 不显示登录表单，直接跳转到目标页面               |
+| 3   | EHM 免登：`ehm_token` 已过期                                                   | 显示 "token 无效或已过期"，清除 `ehm_token` 参数 |
+| 4   | EHM 免登：不传 `ehm_user`                                                      | 仅 token 验证通过，用户详情从后端补全            |
+| 5   | `auto_send=1` + `prompt=测试`                                                  | 页面打开后自动发送 "测试"                        |
+| 6   | `prompt=测试` 不带 `auto_send`                                                 | 输入框预填 "测试"，不自动发送                    |
+| 7   | `auto_send=2`                                                                  | 视为不自动发送                                   |
+| 8   | `prompt=<超2000字符>`                                                          | 截断至 2000 字符后发送                           |
+| 9   | `device_id=P-203;rm+rf` (诊断接口)                                             | 参数透传至 Agent，Agent 校验失败后回退交互流程   |
+| 10  | `diagnosis_date=2026/06/01` (诊断接口)                                         | 参数透传至 Agent，Agent 校验失败后回退交互流程   |
+| 11  | 已有对话 URL 后加 `?prompt=xxx`                                                | 参数被忽略，对话正常加载                         |
+| 12  | 监测分析只传 `device_id` 不传 `point_ids`                                      | Agent 回退到测点多选器交互                       |
+| 13  | 控制台检查 `[DeepLink] source=<value>`                                         | source 参数正确输出到控制台                      |

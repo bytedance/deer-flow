@@ -3,11 +3,18 @@
 import { useSearchParams } from "next/navigation";
 import { useMemo } from "react";
 
-const RESERVED_PARAMS = new Set(["prompt", "auto_send", "source", "context"]);
+const RESERVED_PARAMS = new Set([
+  "prompt",
+  "auto_send",
+  "source",
+  "context",
+  "launch_id",
+]);
 
 const MAX_PROMPT_LEN = 2000;
 const MAX_SOURCE_LEN = 100;
 const MAX_CONTEXT_LEN = 500;
+const MAX_LAUNCH_ID_LEN = 100;
 const MAX_PASSTHROUGH_LEN = 500;
 
 /** Strip control characters except space, tab, newline, carriage return */
@@ -40,6 +47,13 @@ function validateContext(raw: string | null): string | null {
   return stripControlChars(trimmed).slice(0, MAX_CONTEXT_LEN);
 }
 
+function validateLaunchId(raw: string | null): string | null {
+  if (!raw) return null;
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  return stripControlChars(trimmed).slice(0, MAX_LAUNCH_ID_LEN);
+}
+
 function validatePassthroughValue(raw: string): string | null {
   const trimmed = raw.trim();
   if (!trimmed) return null;
@@ -51,6 +65,7 @@ export interface DeepLinkParams {
   autoSend: boolean;
   source: string | null;
   context: string | null;
+  launchId: string | null;
   passthroughParams: Record<string, string>;
 }
 
@@ -64,13 +79,21 @@ export function useDeepLinkChat(isNewThread: boolean): DeepLinkParams {
 
   const result = useMemo<DeepLinkParams>(() => {
     if (!isNewThread) {
-      return { prompt: null, autoSend: false, source: null, context: null, passthroughParams: {} };
+      return {
+        prompt: null,
+        autoSend: false,
+        source: null,
+        context: null,
+        launchId: null,
+        passthroughParams: {},
+      };
     }
 
     const prompt = validatePrompt(searchParams.get("prompt"));
     const autoSend = validateAutoSend(searchParams.get("auto_send"));
     const source = validateSource(searchParams.get("source"));
     const context = validateContext(searchParams.get("context"));
+    const launchId = validateLaunchId(searchParams.get("launch_id"));
 
     const passthroughParams: Record<string, string> = {};
     searchParams.forEach((value, key) => {
@@ -81,7 +104,7 @@ export function useDeepLinkChat(isNewThread: boolean): DeepLinkParams {
       }
     });
 
-    return { prompt, autoSend, source, context, passthroughParams };
+    return { prompt, autoSend, source, context, launchId, passthroughParams };
   }, [isNewThread, searchParams]);
 
   return result;
@@ -93,10 +116,12 @@ export const __test_only = {
   validateAutoSend,
   validateSource,
   validateContext,
+  validateLaunchId,
   validatePassthroughValue,
   RESERVED_PARAMS,
   MAX_PROMPT_LEN,
   MAX_SOURCE_LEN,
   MAX_CONTEXT_LEN,
+  MAX_LAUNCH_ID_LEN,
   MAX_PASSTHROUGH_LEN,
 };
