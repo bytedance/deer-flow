@@ -150,8 +150,9 @@ def _classify_single_command(command: str) -> str:
             if pattern.search(joined):
                 return "block"
     except ValueError:
-        # shlex.split fails on unclosed quotes — treat as suspicious
-        return "block"
+        # Heredocs and other multiline shell forms may be valid bash but
+        # unparseable by shlex. Raw high-risk patterns were already checked.
+        pass
 
     for pattern in _MEDIUM_RISK_PATTERNS:
         if pattern.search(normalized):
