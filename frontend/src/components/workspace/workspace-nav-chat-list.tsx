@@ -47,7 +47,10 @@ export function WorkspaceNavChatList() {
           ) : (
             // Disabled: aria-disabled drives the sidebar CVA to suppress
             // pointer events on the button, so wrap it in a hoverable span
-            // that still surfaces the "feature not enabled" tooltip.
+            // that still surfaces the "feature not enabled" tooltip for mouse
+            // users. The button stays in the tab order (no tabIndex={-1}) and
+            // is wired via aria-describedby to a visually-hidden reason, so
+            // keyboard and screen-reader users also learn why it is disabled.
             <Tooltip>
               <TooltipTrigger asChild>
                 {/* cursor-not-allowed lives on the span (the element that
@@ -56,11 +59,14 @@ export function WorkspaceNavChatList() {
                   <SidebarMenuButton
                     className="text-muted-foreground/50"
                     aria-disabled
-                    tabIndex={-1}
+                    aria-describedby="agents-disabled-reason"
                   >
                     <BotIcon />
                     <span>{t.sidebar.agents}</span>
                   </SidebarMenuButton>
+                  <span id="agents-disabled-reason" className="sr-only">
+                    {t.sidebar.agentsDisabledTooltip}
+                  </span>
                 </span>
               </TooltipTrigger>
               <TooltipContent side="right">

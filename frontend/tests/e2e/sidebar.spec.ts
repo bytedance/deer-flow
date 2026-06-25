@@ -61,6 +61,17 @@ test.describe("Sidebar navigation", () => {
     await expect(page.getByText("Feature not enabled").first()).toBeVisible({
       timeout: 5_000,
     });
+
+    // Keyboard/screen-reader users get the reason too: the disabled entry
+    // stays in the tab order (focusable) and is wired to a visually-hidden
+    // description rather than relying on the hover-only tooltip.
+    const describedById = await agentsButton.getAttribute("aria-describedby");
+    expect(describedById).toBeTruthy();
+    await expect(page.locator(`#${describedById}`)).toHaveText(
+      "Feature not enabled",
+    );
+    await agentsButton.focus();
+    await expect(agentsButton).toBeFocused();
   });
 
   test("mobile welcome layout stays within viewport and opens sidebar", async ({
