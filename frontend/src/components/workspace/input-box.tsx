@@ -748,6 +748,18 @@ export function InputBox({
     suggestionsConfig?.enabled,
   ]);
 
+  const onSelectPlaceholder = useCallback(() => {
+    const textarea = textareaRef.current;
+    if (!textarea) return;
+    const match = /\[(?:topic|source|主题|来源)\]/gi.exec(textarea.value);
+    if (match?.index !== undefined) {
+      requestAnimationFrame(() => {
+        textarea.focus();
+        textarea.setSelectionRange(match.index, match.index + match[0].length);
+      });
+    }
+  }, []);
+
   return (
     <div
       ref={promptRootRef}
@@ -1221,7 +1233,7 @@ export function InputBox({
         searchParams.get("mode") !== "skill" &&
         !showSkillSuggestions && (
           <div className="flex items-center justify-center pt-2">
-            <SuggestionList />
+            <SuggestionList onSelectPlaceholder={onSelectPlaceholder} />
           </div>
         )}
 
@@ -1250,28 +1262,21 @@ export function InputBox({
   );
 }
 
-function SuggestionList() {
+function SuggestionList({
+  onSelectPlaceholder,
+}: {
+  onSelectPlaceholder: () => void;
+}) {
   const { t } = useI18n();
   const { textInput } = usePromptInputController();
+
   const handleSuggestionClick = useCallback(
     (prompt: string | undefined) => {
       if (!prompt) return;
       textInput.setInput(prompt);
-      setTimeout(() => {
-        const textarea = document.querySelector<HTMLTextAreaElement>(
-          "textarea[name='message']",
-        );
-        if (textarea) {
-          const selStart = prompt.indexOf("[");
-          const selEnd = prompt.indexOf("]");
-          if (selStart !== -1 && selEnd !== -1) {
-            textarea.setSelectionRange(selStart, selEnd + 1);
-            textarea.focus();
-          }
-        }
-      }, 500);
+      onSelectPlaceholder();
     },
-    [textInput],
+    [textInput, onSelectPlaceholder],
   );
   return (
     <Suggestions className="min-h-16 w-full max-w-full justify-center px-4 sm:w-fit sm:px-0">
