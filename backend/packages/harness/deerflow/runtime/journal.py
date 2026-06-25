@@ -203,6 +203,9 @@ class RunJournal(BaseCallbackHandler):
                 for m in reversed(batch):
                     if isinstance(m, HumanMessage) and m.name != "summary" and m.additional_kwargs.get("hide_from_ui") is not True:
                         caller = self._identify_caller(tags)
+                        # Skip messages from middleware (e.g., summarization)
+                        if caller.startswith("middleware:"):
+                            continue
                         self.set_first_human_message(m.text)
                         self._put(
                             event_type="llm.human.input",
