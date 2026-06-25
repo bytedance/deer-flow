@@ -48,6 +48,21 @@ def test_translate_ai_content_blocks_list_extracts_text():
     assert actions == [AssistantDelta(id="m9", text="abcdef")]
 
 
+def test_translate_tool_call_with_none_id_yields_empty_id():
+    # Some providers' first tool-call chunk has id=None; it must coerce to "" (not
+    # "None"), so the empty-id guard in the reducer drops the noise chunk.
+    event = StreamEvent(
+        type="messages-tuple",
+        data={"type": "ai", "content": "", "id": "m1", "tool_calls": [{"id": None, "name": None, "args": {}}]},
+    )
+    assert translate(event) == [ToolStarted(tool_call_id="", tool_name="", args={})]
+
+
+def test_translate_tool_result_with_none_id_yields_empty_id():
+    event = StreamEvent(type="messages-tuple", data={"type": "tool", "content": "x", "name": None, "tool_call_id": None})
+    assert translate(event) == [ToolResult(tool_call_id="", content="x", is_error=False, tool_name="")]
+
+
 def test_translate_tool_result_with_error_status():
     event = StreamEvent(
         type="messages-tuple",

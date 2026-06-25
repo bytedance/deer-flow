@@ -38,6 +38,15 @@ class _FakeSession:
     def recent_threads(self, limit=20):
         return self.client.list_threads(limit=limit)["thread_list"]
 
+    def resolve_ref(self, ref):
+        threads = self.client.list_threads(limit=100)["thread_list"]
+        if any(t["thread_id"] == ref for t in threads):
+            return ref
+        for t in threads:
+            if (t.get("title") or "") == ref:
+                return t["thread_id"]
+        return ref
+
 
 async def _settle(pilot, predicate, timeout=2.0):
     elapsed = 0.0
@@ -48,6 +57,28 @@ async def _settle(pilot, predicate, timeout=2.0):
         await asyncio.sleep(0.02)
         elapsed += 0.02
     return predicate()
+
+
+@pytest.mark.asyncio
+async def test_resume_command_with_title_switches_thread():
+    app = DeerFlowTUI(_FakeSession(), LaunchPlan(mode="tui"))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        # Resolve a thread by its title (not id) — the by-title resume path.
+        app.query_one("#composer").value = "/resume Refactor bridge"
+        await pilot.press("enter")
+        await _settle(pilot, lambda: app._conv_thread_id == "thread-aaaaaaaa")
+    assert app._conv_thread_id == "thread-aaaaaaaa"
+    assert any(r.kind == "system" and "Resumed" in r.text for r in app.state.rows)
+
+
+def test_resume_without_arg_routes_to_thread_switcher():
+    # /resume with no id/title falls back to the thread switcher.
+    app = DeerFlowTUI(_FakeSession(), LaunchPlan(mode="tui"))
+    calls = []
+    app._open_thread_switcher = lambda: calls.append("switcher")
+    app._handle_builtin("resume", "")
+    assert calls == ["switcher"]
 
 
 @pytest.mark.asyncio

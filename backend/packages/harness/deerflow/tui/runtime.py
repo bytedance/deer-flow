@@ -64,14 +64,14 @@ def _translate_message(data: Any) -> list[Action]:
     if message_type == "ai":
         text = _extract_text(data.get("content"))
         if text:
-            actions.append(AssistantDelta(id=str(data.get("id", "")), text=text))
+            actions.append(AssistantDelta(id=_as_str(data.get("id")), text=text))
         for tool_call in data.get("tool_calls") or []:
             if not isinstance(tool_call, dict):
                 continue
             actions.append(
                 ToolStarted(
-                    tool_call_id=str(tool_call.get("id", "")),
-                    tool_name=str(tool_call.get("name", "")),
+                    tool_call_id=_as_str(tool_call.get("id")),
+                    tool_name=_as_str(tool_call.get("name")),
                     args=tool_call.get("args") or {},
                 )
             )
@@ -79,14 +79,21 @@ def _translate_message(data: Any) -> list[Action]:
         is_error = bool(data.get("is_error")) or data.get("status") == "error"
         actions.append(
             ToolResult(
-                tool_call_id=str(data.get("tool_call_id", "")),
+                tool_call_id=_as_str(data.get("tool_call_id")),
                 content=_extract_text(data.get("content")),
                 is_error=is_error,
-                tool_name=str(data.get("name", "")),
+                tool_name=_as_str(data.get("name")),
             )
         )
 
     return actions
+
+
+def _as_str(value: Any) -> str:
+    # Provider stream chunks can carry an explicit ``None`` id/name (the key is
+    # present, so ``.get(k, "")`` would return None, and ``str(None) == "None"``
+    # — a truthy value that would defeat the empty-id guard downstream).
+    return "" if value is None else str(value)
 
 
 def stream_actions(client: _ClientLike, message: str, *, thread_id: str | None = None, **kwargs: Any) -> Iterator[Action]:

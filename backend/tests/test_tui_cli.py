@@ -60,6 +60,19 @@ def test_cli_flag_without_message_is_headless_help():
     assert p.mode == "headless-help"
 
 
+def test_cli_continue_runs_headless_reading_stdin():
+    p = plan(["--cli", "--continue"], stdin_tty=False)
+    assert p.mode == "print"
+    assert p.read_stdin is True
+    assert p.continue_recent is True
+
+
+def test_cli_with_piped_stdin_runs_headless():
+    p = plan(["--cli"], stdin_tty=False)
+    assert p.mode == "print"
+    assert p.read_stdin is True
+
+
 def test_continue_recent_flag():
     p = plan(["--continue"])
     assert p.mode == "tui"

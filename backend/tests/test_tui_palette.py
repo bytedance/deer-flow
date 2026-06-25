@@ -51,6 +51,21 @@ async def test_typing_slash_opens_palette_with_matches():
 
 
 @pytest.mark.asyncio
+async def test_palette_index_resets_when_filter_changes():
+    app = DeerFlowTUI(_FakeSession(), LaunchPlan(mode="tui"))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press("slash", "m")  # memory / mcp / model …
+        await _settle(pilot, lambda: app._palette_open and len(app._palette_items) > 1)
+        await pilot.press("down", "down")
+        await pilot.pause()
+        assert app._palette_index > 0
+        await pilot.press("e")  # filter narrows ("/me") -> highlight must reset
+        await pilot.pause()
+    assert app._palette_index == 0
+
+
+@pytest.mark.asyncio
 async def test_palette_enter_runs_builtin_and_closes():
     app = DeerFlowTUI(_FakeSession(), LaunchPlan(mode="tui"))
     async with app.run_test() as pilot:

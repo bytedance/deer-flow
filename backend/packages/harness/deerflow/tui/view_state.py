@@ -218,6 +218,9 @@ def _apply_assistant_delta(state: ViewState, action: AssistantDelta) -> ViewStat
 
     rows = list(state.rows)
     for i, row in enumerate(rows):
+        # ``not row.error``: error rows are appended without an id, so they never
+        # match here anyway — the guard is belt-and-suspenders to keep an error
+        # row from being merged into if a future change ever gives it an id.
         if isinstance(row, AssistantRow) and row.id == action.id and not row.error:
             merged = _merge_stream_text(row.text, action.text)
             if merged == row.text:

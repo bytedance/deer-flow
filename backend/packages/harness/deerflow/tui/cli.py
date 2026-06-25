@@ -105,6 +105,9 @@ def plan_launch(
     if args.cli:
         if positional:
             return LaunchPlan(mode="print", message=positional, thread_id=resume, continue_recent=continue_recent)
+        # Mirror --print: a piped message or --continue is enough to run headless.
+        if continue_recent or not stdin_isatty:
+            return LaunchPlan(mode="print", message=None, read_stdin=True, thread_id=resume, continue_recent=continue_recent)
         return LaunchPlan(
             mode="headless-help",
             reason='--cli needs a message. Try: deerflow --print "your question".',
@@ -178,9 +181,11 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 def _make_session():
     # Imported lazily so the pure planning path never imports the heavy harness.
+    # Headless one-shots never use the threads_meta writer, so skip persistence
+    # (no background loop / engine / connection pool just to discard it).
     from .session import open_session
 
-    return open_session()
+    return open_session(persistence=False)
 
 
 def _run_print(plan: LaunchPlan) -> int:

@@ -162,7 +162,6 @@ class DeerFlowTUI(App):
         self._model = ""
         self._skill_names: list[str] = []
         self._skills = 0
-        self._tools = 0
         self._spinner_idx = 0
         self._streaming = False
         self._cancelled = False
@@ -230,6 +229,9 @@ class DeerFlowTUI(App):
             from .command_registry import build_registry, filter_commands
 
             items = filter_commands(build_registry(self._skills_meta), value[1:])
+            # The candidate set changed, so the previous highlight index is stale —
+            # reset to the top rather than clamping to a now-different command.
+            self._palette_index = 0
             self._open_palette(items)
         else:
             self._close_palette()
@@ -364,6 +366,8 @@ class DeerFlowTUI(App):
             self._open_model_picker()
         elif name in {"threads", "switch"}:
             self._open_thread_switcher()
+        elif name == "resume":
+            self._resume_thread(args)
         elif name == "skills":
             self._show_skills()
         elif name == "mcp":
@@ -424,12 +428,23 @@ class DeerFlowTUI(App):
 
         def on_choice(choice: str | None) -> None:
             if choice:
-                self._conv_thread_id = choice
-                self.state = initial_state()
-                self._dispatch(SystemMessage(f"Resumed thread {choice[:8]}."))
-                self._refresh_header()
+                self._switch_to_thread(choice)
 
         self.push_screen(SelectScreen("Resume thread", options), on_choice)
+
+    def _resume_thread(self, ref: str) -> None:
+        """/resume [id-or-title]: switch to a thread, or open the picker if blank."""
+        ref = ref.strip()
+        if not ref:
+            self._open_thread_switcher()
+            return
+        self._switch_to_thread(self.session.resolve_ref(ref))
+
+    def _switch_to_thread(self, thread_id: str) -> None:
+        self._conv_thread_id = thread_id
+        self.state = initial_state()
+        self._dispatch(SystemMessage(f"Resumed thread {thread_id[:8]}."))
+        self._refresh_header()
 
     def _show_skills(self) -> None:
         names = ", ".join(self._skill_names) or "none"
@@ -522,7 +537,9 @@ class DeerFlowTUI(App):
                 latest_title = action.title
             self.call_from_thread(self._on_action, action)
 
-        if writer is not None and latest_title:
+        # Only persist a title for a run that completed normally — an interrupted
+        # run may only have emitted the title middleware's first, truncated guess.
+        if writer is not None and latest_title and not self._cancelled:
             writer.set_title(thread_id, latest_title)
 
     def _on_action(self, action) -> None:
@@ -604,7 +621,6 @@ class DeerFlowTUI(App):
                 thread_label=self._thread_label(),
                 cwd=os.getcwd(),
                 skills=self._skills,
-                tools=self._tools,
             )
         )
 
@@ -623,5 +639,10 @@ def run_tui(plan) -> int:
 
     session = open_session()
     app = DeerFlowTUI(session, plan)
-    app.run()
+    try:
+        app.run()
+    finally:
+        # Stop the background DB loop + dispose the engine so repeated run_tui
+        # calls in one process don't leak loops / connection pools.
+        session.close()
     return 0

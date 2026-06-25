@@ -137,7 +137,7 @@ def render_palette(items, index: int, limit: int = 8) -> RenderableType:
     return Group(*lines)
 
 
-def render_header(*, model: str, thread_label: str, cwd: str, skills: int = 0, tools: int = 0) -> Text:
+def render_header(*, model: str, thread_label: str, cwd: str, skills: int = 0) -> Text:
     text = Text(no_wrap=True, overflow="ellipsis")
     text.append(" DeerFlow ", style=f"bold {THEME.bg} on {THEME.primary}")
     text.append("  ")
@@ -146,12 +146,7 @@ def render_header(*, model: str, thread_label: str, cwd: str, skills: int = 0, t
     text.append(thread_label, style=THEME.muted)
     text.append("  ·  ", style=THEME.dim)
     text.append(cwd, style=THEME.dim)
-    bits = []
     if skills:
-        bits.append(f"{skills} skills")
-    if tools:
-        bits.append(f"{tools} tools")
-    if bits:
         text.append("  ·  ", style=THEME.dim)
-        text.append("  ".join(bits), style=THEME.dim)
+        text.append(f"{skills} skills", style=THEME.dim)
     return text

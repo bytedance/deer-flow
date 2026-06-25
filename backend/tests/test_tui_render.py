@@ -112,7 +112,7 @@ def test_render_status_shows_token_usage():
 
 
 def test_render_header_includes_model_and_cwd():
-    out = _render_to_text(render_header(model="claude", thread_label="new", cwd="/tmp/proj", skills=3, tools=9))
+    out = _render_to_text(render_header(model="claude", thread_label="new", cwd="/tmp/proj", skills=3))
     assert "DeerFlow" in out
     assert "claude" in out
     assert "/tmp/proj" in out

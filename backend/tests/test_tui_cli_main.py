@@ -40,7 +40,9 @@ def test_main_json_emits_ndjson_stream_events(monkeypatch, capsys):
     assert payloads[-1]["type"] == "end"
 
 
-def test_main_headless_help_returns_2_and_prints_usage(capsys):
-    rc = cli.main(["--cli"])  # --cli without a message -> headless help
+def test_main_headless_help_returns_2_and_prints_usage(monkeypatch, capsys):
+    # On a TTY with no message and no piped stdin, --cli has nothing to run.
+    monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True)
+    rc = cli.main(["--cli"])
     assert rc == 2
     assert "deerflow" in capsys.readouterr().err
