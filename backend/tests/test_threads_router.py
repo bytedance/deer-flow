@@ -219,6 +219,65 @@ def test_create_thread_returns_iso_timestamps() -> None:
     assert body["created_at"] == body["updated_at"]
 
 
+def test_create_thread_returns_existing_when_insert_loses_race() -> None:
+    """A concurrent create that loses the INSERT race stays idempotent.
+
+    The idempotency ``get`` check and the ``create`` INSERT are not atomic:
+    a competing request for the same ``thread_id`` can commit in between, and
+    the SQL-backed store then rejects ours on the duplicate primary key. The
+    endpoint documents idempotency ("returns the existing record when
+    ``thread_id`` already exists"), so it must surface the now-present row
+    rather than turning the integrity error into an HTTP 500.
+    """
+    from sqlalchemy.exc import IntegrityError
+
+    app, store, _checkpointer = _build_thread_app()
+
+    class _RacingThreadMetaStore(_PermissiveThreadMetaStore):
+        """First create loses the race: the row is committed by a competing
+        request, then our INSERT fails with an integrity violation."""
+
+        def __init__(self, backing):
+            super().__init__(backing)
+            self._raised = False
+
+        async def create(self, thread_id, *, assistant_id=None, user_id=None, display_name=None, metadata=None):  # type: ignore[override]
+            if not self._raised:
+                self._raised = True
+                await super().create(
+                    thread_id,
+                    assistant_id=assistant_id,
+                    user_id=user_id,
+                    display_name=display_name,
+                    metadata=metadata,
+                )
+                raise IntegrityError(
+                    "INSERT INTO threads_meta",
+                    {},
+                    Exception("UNIQUE constraint failed: threads_meta.thread_id"),
+                )
+            return await super().create(
+                thread_id,
+                assistant_id=assistant_id,
+                user_id=user_id,
+                display_name=display_name,
+                metadata=metadata,
+            )
+
+    app.state.thread_store = _RacingThreadMetaStore(store)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/threads",
+            json={"thread_id": "race-thread", "metadata": {"k": "v"}},
+        )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["thread_id"] == "race-thread"
+    assert body["metadata"] == {"k": "v"}
+
+
 def test_internal_owner_header_assigns_thread_to_owner() -> None:
     import asyncio
 

@@ -289,6 +289,22 @@ async def create_thread(body: ThreadCreateRequest, request: Request) -> ThreadRe
             metadata=body.metadata,
         )
     except Exception:
+        # The idempotency ``get`` above and this insert are not atomic: a
+        # concurrent request for the same thread_id can commit in between,
+        # and the store then rejects ours on the duplicate primary key.
+        # Honour the documented idempotency contract by returning the
+        # now-existing record instead of surfacing the conflict as a 500.
+        existing_record = await thread_store.get(thread_id, **thread_owner_kwargs)
+        if existing_record is None and thread_owner_user_id:
+            existing_record = await thread_store.get(thread_id, user_id=None)
+        if existing_record is not None:
+            return ThreadResponse(
+                thread_id=thread_id,
+                status=existing_record.get("status", "idle"),
+                created_at=coerce_iso(existing_record.get("created_at", "")),
+                updated_at=coerce_iso(existing_record.get("updated_at", "")),
+                metadata=existing_record.get("metadata", {}),
+            )
         logger.exception("Failed to write thread_meta for %s", sanitize_log_param(thread_id))
         raise HTTPException(status_code=500, detail="Failed to create thread")
 
