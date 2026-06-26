@@ -130,8 +130,9 @@ async def _request_sms_async(path: str, params: dict) -> dict:
 
     try:
         token = await client.ensure_token()
+        base_url = os.environ.get("SMS_BASE_URL", client.settings.base_url).rstrip("/")
         response = await client.http.get(
-            f"{client.settings.base_url}/{path.lstrip('/')}",
+            f"{base_url}/{path.lstrip('/')}",
             headers={"Authorization": f"Bearer {token}"},
             params=str_params,
         )
