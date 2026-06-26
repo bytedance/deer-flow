@@ -19,6 +19,7 @@ DeerFlow 当前支持两类 EHM 免登恢复方式：
 - 收到宿主新 token 后，更新前端保存的 `ehm_token` / `ehm_user`
 - 收到新 token 后，主动调用一次 `/api/v1/auth/ins-base/authenticate` 重建 DeerFlow session cookie
 - 让后续 `401` 恢复逻辑优先使用最新同步的 EHM token
+- 让首次 `401` 仅作为恢复触发器，不直接把 iframe 判定为必须跳转登录页
 - 更新文档，明确 EHM iframe 长驻场景下的 token 重同步协议
 
 ## Capabilities

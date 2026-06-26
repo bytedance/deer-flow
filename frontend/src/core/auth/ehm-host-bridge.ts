@@ -10,6 +10,7 @@ const AI_TOKEN_REFRESH = "AI_TOKEN_REFRESH";
 const MAX_HOST_TOKEN_AGE_MS = 24 * 60 * 60 * 1000;
 const HOST_TOKEN_REQUEST_TIMEOUT_MS = 5000;
 const HOST_BRIDGE_LOG_PREFIX = "[EHM Host Bridge]";
+export const EHM_SESSION_RECOVERED_EVENT = "ehm:session-recovered";
 
 type HostBridgePayload = {
   type?: string;
@@ -74,6 +75,18 @@ function postToParent(message: Record<string, unknown>) {
   }
 }
 
+function emitSessionRecovered(source: "host-bridge" | "host-init") {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(
+    new CustomEvent(EHM_SESSION_RECOVERED_EVENT, {
+      detail: {
+        source,
+        recoveredAt: Date.now(),
+      },
+    }),
+  );
+}
+
 let latestIssuedAt = 0;
 let started = false;
 let hostBridgeCleanup: (() => void) | null = null;
@@ -116,6 +129,9 @@ async function handleTokenRefresh(payload: HostBridgePayload) {
     authenticated,
     path: window.location.pathname,
   });
+  if (authenticated) {
+    emitSessionRecovered(payload.type === AI_INIT ? "host-init" : "host-bridge");
+  }
   if (pendingHostTokenResolver) {
     pendingHostTokenResolver(authenticated);
     pendingHostTokenResolver = null;

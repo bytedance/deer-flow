@@ -81,3 +81,65 @@ When DeerFlow asks the host for a fresh EHM token, it SHALL wait long enough to 
 - **WHEN** DeerFlow is waiting for `AI_TOKEN_REFRESH`
 - **THEN** it SHALL keep waiting within the configured recovery timeout window
 - **AND** SHALL NOT fail over to the login redirect solely because of the earlier 1.5-second limit
+
+### Requirement: DeerFlow shall gate new business requests while session recovery is running
+
+When DeerFlow has already started EHM session recovery, new business API requests SHALL wait for that recovery to finish before they are sent, so the UI does not surface a cascade of avoidable 401 responses.
+
+#### Scenario: concurrent requests arrive during session recovery
+
+- **GIVEN** one DeerFlow API request has already received `401`
+- **AND** DeerFlow has started EHM session recovery
+- **WHEN** additional DeerFlow business requests are triggered before recovery completes
+- **THEN** those requests SHALL wait for the in-flight recovery promise
+- **AND** SHALL only be sent after recovery completes or fails
+- **AND** SHALL NOT independently hit the gateway with the stale pre-recovery session by default
+
+### Requirement: DeerFlow shall cancel stale delayed login redirects after recovery succeeds
+
+When DeerFlow has already scheduled a delayed redirect to `/login`, that redirect SHALL be canceled if session recovery later succeeds before the timer fires.
+
+#### Scenario: delayed login redirect becomes stale after recovery
+
+- **GIVEN** one request has already scheduled a delayed redirect to `/login`
+- **AND** DeerFlow later restores session successfully through host recovery or refresh
+- **WHEN** the earlier redirect timer is about to fire
+- **THEN** DeerFlow SHALL cancel or suppress that stale redirect
+- **AND** SHALL keep the user on the recovered workspace page
+
+### Requirement: Bridge-driven session recovery shall notify the global auth recovery state
+
+When DeerFlow restores its session from an `AI_TOKEN_REFRESH` message outside the original failed request path, that success SHALL still update the global auth recovery state used by the fetch layer.
+
+#### Scenario: host bridge authenticates successfully before stale redirect fires
+
+- **GIVEN** a prior request has already scheduled a delayed redirect to `/login`
+- **AND** the host bridge later receives `AI_TOKEN_REFRESH`
+- **AND** the bridge successfully calls `/api/v1/auth/ins-base/authenticate`
+- **WHEN** that bridge-side recovery succeeds
+- **THEN** DeerFlow SHALL publish a global recovery success signal
+- **AND** the fetch layer SHALL treat that signal as sufficient to cancel the stale delayed redirect
+
+### Requirement: The first iframe 401 shall only trigger recovery, not an immediate login redirect
+
+When DeerFlow is running with an `ehm_token` inside the host iframe, the first business request that hits `401` SHALL start recovery without immediately treating that single failure as a final signal to redirect the whole iframe to `/login`.
+
+#### Scenario: first 401 happens before the refreshed host token has finished rebuilding session
+
+- **GIVEN** DeerFlow is running inside the EHM iframe with an `ehm_token`
+- **AND** the first business request returns `401`
+- **WHEN** DeerFlow begins its EHM recovery flow for that request
+- **THEN** that request SHALL only trigger recovery and surface its own `401` result
+- **AND** SHALL NOT immediately schedule a whole-page redirect to `/login`
+- **AND** a later request may still trigger the final login redirect if recovery remains unsuccessful
+
+### Requirement: Shared auth error helpers shall honor the iframe recovery window
+
+When a business component catches a `401` and uses the shared auth error helper, that helper SHALL suppress any extra login redirect while the iframe EHM recovery window is still active.
+
+#### Scenario: business error handling sees 401 during the recovery window
+
+- **GIVEN** DeerFlow has already entered an EHM recovery window for an iframe session
+- **WHEN** a component resolves the same `401` through the shared auth error helper
+- **THEN** the helper SHALL NOT schedule an additional redirect to `/login`
+- **AND** SHALL allow the global recovery flow to decide whether the session ultimately recovers or fails

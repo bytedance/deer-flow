@@ -1,4 +1,5 @@
 import { EHM_TOKEN_COOKIE } from "./ehm-auth";
+import { shouldSuppressAuthErrorRedirect } from "@/core/api/fetcher";
 import {
   authErrorMessage,
   buildLoginUrl,
@@ -72,6 +73,9 @@ export function applyResolvedAuthError(
   }
 
   if (resolved.shouldRedirect && typeof window !== "undefined") {
+    if (shouldSuppressAuthErrorRedirect()) {
+      return;
+    }
     window.setTimeout(() => {
       window.location.href = buildLoginUrl(pathname);
     }, 1500);
