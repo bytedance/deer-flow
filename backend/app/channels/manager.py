@@ -806,6 +806,9 @@ class ChannelManager:
         self._require_bound_identity = require_bound_identity
         self._client = None  # lazy init — langgraph_sdk async client
         self._channel_metadata_synced: set[str] = set()
+        # Per-conversation locks so concurrent inbound messages for the same
+        # chat don't race to create duplicate threads (see _get_or_create_thread).
+        self._thread_create_locks: dict[tuple[str, str, str | None], asyncio.Lock] = {}
         self._skill_storage: SkillStorage | None = None
         self._csrf_token = generate_csrf_token()
         self._semaphore: asyncio.Semaphore | None = None
@@ -1211,6 +1214,36 @@ class ChannelManager:
         logger.info("[Manager] new thread created through Gateway: thread_id=%s for chat_id=%s topic_id=%s", thread_id, msg.chat_id, msg.topic_id)
         return thread_id
 
+    async def _get_or_create_thread(self, client, msg: InboundMessage) -> tuple[str, bool]:
+        """Return ``(thread_id, created)``, creating a thread only if needed.
+
+        Each inbound message is dispatched on its own task, so two messages that
+        arrive close together for the same chat would both look up a missing
+        thread and then both create one — the second store silently overwrites
+        the first, orphaning a Gateway thread and splitting the conversation.
+        Serialize the create path per conversation and re-check inside the lock
+        so only the first message creates a thread and the rest reuse it.
+        """
+        thread_id = await self._lookup_thread_id(msg)
+        if thread_id:
+            return thread_id, False
+
+        key = (msg.channel_name, msg.chat_id, msg.topic_id)
+        lock = self._thread_create_locks.setdefault(key, asyncio.Lock())
+        try:
+            async with lock:
+                # A concurrent message for the same chat may have created the
+                # thread while we were waiting on the lock.
+                thread_id = await self._lookup_thread_id(msg)
+                if thread_id:
+                    return thread_id, False
+                return await self._create_thread(client, msg), True
+        finally:
+            # Once the thread is stored, later messages short-circuit on the
+            # lookup above and never reach this lock, so it's safe to drop the
+            # entry and keep the registry bounded to in-flight conversations.
+            self._thread_create_locks.pop(key, None)
+
     async def _update_thread_channel_metadata(self, client, msg: InboundMessage, thread_id: str) -> None:
         """Best-effort source metadata backfill for existing IM-created threads."""
         # The metadata (provider/chat/topic) is constant for a thread, so one
@@ -1248,17 +1281,14 @@ class ChannelManager:
         client = self._get_client()
         storage_user_id = _channel_storage_user_id(msg)
 
-        # Look up existing DeerFlow thread.
-        # topic_id may be None (e.g. Telegram private chats) — the store
-        # handles this by using the "channel:chat_id" key without a topic suffix.
-        thread_id = await self._lookup_thread_id(msg)
-        if thread_id:
+        # Look up the existing DeerFlow thread, creating one if this is the
+        # first message for the chat. topic_id may be None (e.g. Telegram
+        # private chats) — the store handles this by using the "channel:chat_id"
+        # key without a topic suffix.
+        thread_id, created = await self._get_or_create_thread(client, msg)
+        if not created:
             logger.info("[Manager] reusing thread: thread_id=%s for topic_id=%s", thread_id, msg.topic_id)
             await self._update_thread_channel_metadata(client, msg, thread_id)
-
-        # No existing thread found — create a new one
-        if thread_id is None:
-            thread_id = await self._create_thread(client, msg)
 
         assistant_id, run_config, run_context = self._resolve_run_params(msg, thread_id)
 
