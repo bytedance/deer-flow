@@ -123,6 +123,7 @@ sandbox:
   image: deer-flow-sandbox:latest
   environment:
     INS_BASE_URL: $INS_BASE_URL
+    SMS_BASE_URL: $SMS_BASE_URL
     INS_CONNECT_TIMEOUT: $INS_CONNECT_TIMEOUT
     INS_READ_TIMEOUT: $INS_READ_TIMEOUT
     INS_WRITE_TIMEOUT: $INS_WRITE_TIMEOUT
@@ -388,7 +389,7 @@ integrations:
       display_name: "SMS设备异常统计与评估系统"
       description: "SMS集成，提供异常列表/详情、健康评估、风险排名、待办统计"
       transport_type: http
-      base_url: "http://182.92.187.198"
+      base_url: "$SMS_BASE_URL"
       auth_type: bearer
       auth_mode: user_token
       timeout_seconds: 30.0
