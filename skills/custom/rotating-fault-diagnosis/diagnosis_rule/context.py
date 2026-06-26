@@ -7,7 +7,7 @@ from typing import Any
 
 from diagnosis.device_context_artifact import normalize_device_analysis_result
 from diagnosis.models import DeviceContext
-from ins import InsApiClient, load_dotenv_file, load_ins_settings
+from ins import InsApiClient, close_shared_http_client, load_dotenv_file, load_ins_settings
 
 from .config import load_config
 
@@ -57,6 +57,4 @@ async def build_rule_device_context(device_id: str, sub_device_id: str | None = 
 
 
 async def close_clients() -> None:
-    await _ins_client.close()
-    from tools.device_analysis import close_clients as close_device_analysis_clients
-    await close_device_analysis_clients()
+    await close_shared_http_client()

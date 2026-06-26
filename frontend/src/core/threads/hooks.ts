@@ -44,6 +44,7 @@ export type ThreadStreamOptions = {
 
 type SendMessageOptions = {
   additionalKwargs?: Record<string, unknown>;
+  interactionRetryAttempt?: number;
 };
 
 function getModelText(
@@ -69,8 +70,26 @@ function getSubmitAdditionalKwargs(
   };
 }
 
+const UI_INTERACTION_RETRY_DELAY_MS = 300;
+const UI_INTERACTION_MAX_RETRY_ATTEMPTS = 60;
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isHiddenUiInteractionMessage(
+  text: string,
+  options?: SendMessageOptions,
+): boolean {
+  if (options?.additionalKwargs?.hide_from_ui !== true) {
+    return false;
+  }
+  try {
+    const parsed = JSON.parse(text);
+    return isRecord(parsed) && parsed.type === "ui_interaction";
+  } catch {
+    return false;
+  }
 }
 
 function mergeMessages(
@@ -577,12 +596,27 @@ export function useThreadStream({
       extraContext?: Record<string, unknown>,
       options?: SendMessageOptions,
     ) => {
+      const text = message.text.trim();
+      const shouldRetryUiInteraction = isHiddenUiInteractionMessage(text, options);
+
       if (sendInFlightRef.current) {
+        if (shouldRetryUiInteraction) {
+          const retryAttempt = options?.interactionRetryAttempt ?? 0;
+          if (retryAttempt < UI_INTERACTION_MAX_RETRY_ATTEMPTS) {
+            window.setTimeout(() => {
+              void sendMessage(threadId, message, extraContext, {
+                ...options,
+                interactionRetryAttempt: retryAttempt + 1,
+              });
+            }, UI_INTERACTION_RETRY_DELAY_MS);
+          } else {
+            toast.error("交互提交已收到，但线程暂时忙碌，未能继续执行。请稍后重试。");
+          }
+        }
         return;
       }
       sendInFlightRef.current = true;
 
-      const text = message.text.trim();
       const modelText = getModelText(text, options?.additionalKwargs);
 
       // Capture current count before showing optimistic messages

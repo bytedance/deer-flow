@@ -247,15 +247,8 @@ def _embed_chart_image(svg_str: str, alt: str, thread_id: str | None = None) -> 
 def render_markdown(payload: dict, thread_id: str | None = None) -> str:
     """Render monthly KPI payload as a Markdown report string.
 
-    Eight sections, in order:
-      1. 月度总览
-      2. 月 KPI 表
-      3. 周维度趋势
-      4. 异常 TopN
-      5. 重大事件回顾
-      6. 月环比 + 同比
-      7. 改进措施跟踪
-      8. 下月计划
+    Sections are numbered dynamically — conditional sections only increment
+    the counter when they are actually rendered, so numbering stays sequential.
     """
     period = payload.get("report_period") or {}
     month_label = period.get("report_month") or ""
@@ -263,6 +256,11 @@ def render_markdown(payload: dict, thread_id: str | None = None) -> str:
     month_end = period.get("month_end", "")
     compare_types = payload.get("compare_types") or []
     compare_periods = payload.get("compare_periods") or {}
+
+    # Dynamic section counter — avoids hardcoded numbering gaps when
+    # conditional sections (trend / anomaly / critical-events / SMS /
+    # MoM+YoY / improvement) are empty.
+    section = 1
 
     lines: list[str] = []
     lines.append(f"# 设备运行月报：{month_label}")
@@ -287,13 +285,15 @@ def render_markdown(payload: dict, thread_id: str | None = None) -> str:
     lines.append("")
 
     overall = payload.get("overall_status") or {}
-    lines.append("## 1. 月度总览")
+    lines.append(f"## {section}. 月度总览")
+    section += 1
     lines.append("")
     lines.append(f"- 状态：{overall.get('level', 'good')}")
     lines.append(f"- 总结：{overall.get('summary', '')}")
     lines.append("")
 
-    lines.append("## 2. 月 KPI")
+    lines.append(f"## {section}. 月 KPI")
+    section += 1
     lines.append("")
     lines.append(
         "| 指标 | 月均值 | 月峰值 | 月低谷 | 波动率 | 达标率 | 上月均值 | 月环比 | 去年同月 | 同比 |"
@@ -338,14 +338,16 @@ def render_markdown(payload: dict, thread_id: str | None = None) -> str:
     if trend_chart and trend_chart.get("series"):
         svg_str = trend_chart_to_svg(trend_chart)
         if svg_str:
-            lines.append("## 3. 周维度趋势")
+            lines.append(f"## {section}. 周维度趋势")
+            section += 1
             lines.append("")
             lines.append(_embed_chart_image(svg_str, "本月周维度趋势图", thread_id))
             lines.append("")
 
     anomaly_top_n = payload.get("anomaly_top_n") or []
     if anomaly_top_n:
-        lines.append("## 4. 异常 TopN")
+        lines.append(f"## {section}. 异常 TopN")
+        section += 1
         lines.append("")
         lines.append("| 设备 | 级别 | 次数 | 最近一次 | 主导原因 |")
         lines.append("| --- | --- | --- | --- | --- |")
@@ -363,7 +365,8 @@ def render_markdown(payload: dict, thread_id: str | None = None) -> str:
 
     critical_events = payload.get("critical_events") or []
     if critical_events:
-        lines.append("## 5. 重大事件回顾")
+        lines.append(f"## {section}. 重大事件回顾")
+        section += 1
         lines.append("")
         lines.append("| 时间 | 设备 | 级别 | 描述 | 处置时长(分钟) | 已处置 |")
         lines.append("| --- | --- | --- | --- | --- | --- |")
@@ -380,10 +383,13 @@ def render_markdown(payload: dict, thread_id: str | None = None) -> str:
             )
         lines.append("")
 
-    # SMS 异常事件 — section 5.5 between 重大事件回顾 (5) and 月环比+同比 (6)
+    # SMS 异常事件 — follows the last rendered section (typically after
+    # critical-events or anomaly-TopN); uses a simple sequential number so
+    # numbering stays consecutive when critical-events is empty.
     sms_table = payload.get("sms_abnormal_table") or []
     if sms_table:
-        lines.append("## 5.5 SMS 异常事件")
+        lines.append(f"## {section}. SMS 异常事件")
+        section += 1
         lines.append("")
         lines.append("| 排名 | 设备 | 部件 | 健康度 | 等级 | 严重性 | 事件数 | 处置状态 |")
         lines.append("| --- | --- | --- | --- | --- | --- | --- | --- |")
@@ -403,7 +409,8 @@ def render_markdown(payload: dict, thread_id: str | None = None) -> str:
         lines.append("")
 
     if compare_types:
-        lines.append("## 6. 月环比 + 同比")
+        lines.append(f"## {section}. 月环比 + 同比")
+        section += 1
         lines.append("")
         lines.append("| 指标 | 月环比 (MoM) | 同比 (YoY) |")
         lines.append("| --- | --- | --- |")
@@ -419,7 +426,8 @@ def render_markdown(payload: dict, thread_id: str | None = None) -> str:
 
     improvement_tracking = payload.get("improvement_tracking") or []
     if improvement_tracking:
-        lines.append("## 7. 改进措施跟踪")
+        lines.append(f"## {section}. 改进措施跟踪")
+        section += 1
         lines.append("")
         lines.append("| 编号 | 负责人 | 计划 | 截止 | 状态 | 完成度 | 备注 |")
         lines.append("| --- | --- | --- | --- | --- | --- | --- |")
@@ -441,7 +449,8 @@ def render_markdown(payload: dict, thread_id: str | None = None) -> str:
             )
         lines.append("")
 
-    lines.append("## 8. 下月计划")
+    lines.append(f"## {section}. 下月计划")
+    section += 1
     lines.append("")
     next_month_plan = payload.get("next_month_plan") or []
     if next_month_plan:

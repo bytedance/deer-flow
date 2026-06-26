@@ -173,7 +173,7 @@ Nginx 代理: `/api/langgraph/*` → LangGraph, 其他 `/api/*` → Gateway。
 3. **内置工具**: `present_files`, `ask_clarification`, `view_image`, `http_connector`, `setup_agent`, `update_agent`, `create/list/update/close_closure_ticket`
 4. **子代理工具** (可选): `task`
 
-详见 [docs/TOOLS_SYSTEM.md](docs/TOOLS_SYSTEM.md)
+详见 [docs/TOOLS_SYSTEM.md](docs/TOOLS_SYSTEM.md)。关于 Tool 与 Skill 的职责边界，参见 [docs/TOOL_VS_SKILL.md](docs/TOOL_VS_SKILL.md)。
 
 ### 报告模板
 
@@ -280,6 +280,7 @@ make dev
 | [AGENTS_SYSTEM.md](docs/AGENTS_SYSTEM.md) | 多级 Agent 系统 |
 | [REPORT_TEMPLATES.md](docs/REPORT_TEMPLATES.md) | 报告模板平台 |
 | [TOOLS_SYSTEM.md](docs/TOOLS_SYSTEM.md) | 工具系统 |
+| [TOOL_VS_SKILL.md](docs/TOOL_VS_SKILL.md) | Tool 与 Skill 边界 |
 | [MEMORY_SYSTEM.md](docs/MEMORY_SYSTEM.md) | 记忆系统 |
 | [INSIGHTS_SYSTEM.md](docs/INSIGHTS_SYSTEM.md) | 洞察系统 |
 | [RAG.md](docs/RAG.md) | 知识库 |
