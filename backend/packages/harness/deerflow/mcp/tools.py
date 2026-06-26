@@ -636,21 +636,20 @@ async def get_mcp_tools() -> list[BaseTool]:
         # internally which cannot be closed from a different async task, so
         # pooling them causes RuntimeError on cleanup (see #3203).
         wrapped_tools: list[BaseTool] = []
-        for tool in tools:
-            tool_server: str | None = None
-            for name in servers_config:
-                if tool.name.startswith(f"{name}_"):
-                    tool_server = name
-                    break
-
-            if tool_server is not None:
-                transport = servers_config[tool_server].get("transport", "stdio")
-                if transport == "stdio":
-                    wrapped_tools.append(_make_session_pool_tool(tool, tool_server, servers_config[tool_server], tool_interceptors))
+        # Route each tool by the server that actually produced it: tools_by_server[i]
+        # corresponds to the i-th server in servers_config. Inferring the source server by
+        # scanning servers_config for a name prefix is ambiguous when one server name is a
+        # prefix of another (e.g. "web" vs "web_scraper" → "web_scraper_search".startswith(
+        # "web_") matches "web" first), which pools the tool under the wrong server. Using the
+        # source grouping makes routing exact; the prefix guard preserves the previous
+        # behavior of leaving unprefixed tools unwrapped.
+        for source_name, server_tools in zip(servers_config, tools_by_server):
+            transport = servers_config[source_name].get("transport", "stdio")
+            for tool in server_tools:
+                if tool.name.startswith(f"{source_name}_") and transport == "stdio":
+                    wrapped_tools.append(_make_session_pool_tool(tool, source_name, servers_config[source_name], tool_interceptors))
                 else:
                     wrapped_tools.append(tool)
-            else:
-                wrapped_tools.append(tool)
 
         # Patch tools to support sync invocation, as deerflow client streams synchronously
         for tool in wrapped_tools:
