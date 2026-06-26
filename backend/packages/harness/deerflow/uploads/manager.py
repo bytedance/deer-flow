@@ -115,6 +115,25 @@ def validate_path_traversal(path: Path, base: Path) -> None:
         raise PathTraversalError("Path traversal detected") from None
 
 
+def validate_upload_destination(base_dir: Path, filename: str) -> Path:
+    """Validate an upload destination without mutating an existing file."""
+    safe_name = normalize_filename(filename)
+    dest = base_dir / safe_name
+
+    try:
+        st = os.lstat(dest)
+    except FileNotFoundError:
+        st = None
+
+    if st is not None and not stat.S_ISREG(st.st_mode):
+        raise UnsafeUploadPathError(f"Upload destination is not a regular file: {safe_name}")
+    if st is not None and st.st_nlink > 1:
+        raise UnsafeUploadPathError(f"Upload destination has multiple links: {safe_name}")
+
+    validate_path_traversal(dest, base_dir)
+    return dest
+
+
 def open_upload_file_no_symlink(base_dir: Path, filename: str) -> tuple[Path, object]:
     """Open an upload destination for safe streaming writes.
 
@@ -128,17 +147,11 @@ def open_upload_file_no_symlink(base_dir: Path, filename: str) -> tuple[Path, ob
     validation prevents escapes from *base_dir* in both cases.
     """
     safe_name = normalize_filename(filename)
-    dest = base_dir / safe_name
-
+    dest = validate_upload_destination(base_dir, safe_name)
     try:
         st = os.lstat(dest)
     except FileNotFoundError:
         st = None
-
-    if st is not None and not stat.S_ISREG(st.st_mode):
-        raise UnsafeUploadPathError(f"Upload destination is not a regular file: {safe_name}")
-
-    validate_path_traversal(dest, base_dir)
 
     has_nofollow = hasattr(os, "O_NOFOLLOW")
 
