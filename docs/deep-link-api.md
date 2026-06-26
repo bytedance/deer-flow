@@ -111,6 +111,7 @@ DeerFlow 支持两种认证方式：
 | Cookie 写入         | [ehm-auth.ts:159-166](frontend/src/core/auth/ehm-auth.ts#L159-L166)      | `setEhmCookieAndRedirect()` 写 cookie → 跳转      |
 | SSR 身份恢复        | [server.ts:31-37](frontend/src/core/auth/server.ts#L31-L37)              | `getServerEhmToken()` → `getServerEhmUser()`      |
 | 401 自动重试        | [fetcher.ts:114-126](frontend/src/core/api/fetcher.ts#L114-L126)         | API 401 → `reauthenticateEhmSession()` → 重试请求 |
+| iframe 宿主刷新同步 | `frontend/src/core/auth/ehm-host-bridge.ts`                              | 接收宿主 `AI_TOKEN_REFRESH`，更新 cookie 并主动重建 session |
 
 **认证场景汇总**：
 
@@ -121,6 +122,7 @@ DeerFlow 支持两种认证方式：
 | 会话已过期                         | Session Cookie | API 返回 401 → 2s 后重定向到登录页               |
 | EHM 系统跳转（已持有 EHM 会话）    | EHM Token      | 构造 `/login?next=...&ehm_token=...`，自动免登   |
 | EHM iframe 嵌入（Cookie 已预置）   | EHM Cookie     | `getServerEhmToken()` 直接恢复用户，跳过登录页   |
+| EHM iframe 长驻期间宿主 token 刷新 | EHM Cookie/消息 | 接收宿主 `AI_TOKEN_REFRESH`，更新 `ehm_token` 并主动重建 DeerFlow session |
 | EHM Token 过期                     | EHM Token      | 登录页显示 token 无效错误，清除 `ehm_token` 参数 |
 
 **调用方验证方式**

@@ -9,6 +9,7 @@ import { IndustrialBackdrop } from "@/components/auth/industrial-backdrop";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useAuth } from "@/core/auth/AuthProvider";
+import { requestFreshHostToken } from "@/core/auth/ehm-host-bridge";
 import { setCurrentTenantId } from "@/core/tenant/store";
 import { setEhmCookieAndRedirect, isEhmTokenValid } from "@/core/auth/ehm-auth";
 import { encryptInsBaseCredential } from "@/core/auth/rsa-login";
@@ -53,6 +54,7 @@ export default function LoginPage() {
   const [ehmAutoLogin, setEhmAutoLogin] = useState(false);
   const ehmAttemptedRef = useRef(false);
   const lastEhmTokenRef = useRef<string>("");
+  const hostRecoveryAttemptedRef = useRef(false);
 
   const nextParam = searchParams.get("next");
   const redirectPath = validateNextParam(nextParam) ?? "/workspace";
@@ -63,6 +65,17 @@ export default function LoginPage() {
       window.location.href = redirectPath;
     }
   }, [isAuthenticated, redirectPath]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (window.parent === window) return;
+    if (isAuthenticated) return;
+    if (ehmAutoLogin) return;
+    if (hostRecoveryAttemptedRef.current) return;
+
+    hostRecoveryAttemptedRef.current = true;
+    void requestFreshHostToken();
+  }, [ehmAutoLogin, isAuthenticated]);
 
   // EHM token auto-login: set cookie and redirect (no backend call)
   useEffect(() => {

@@ -1,4 +1,5 @@
 import { EHM_TOKEN_COOKIE, isEhmTokenExpired } from "@/core/auth/ehm-auth";
+import { requestFreshHostToken } from "@/core/auth/ehm-host-bridge";
 import { buildLoginUrl } from "@/core/auth/types";
 
 /** HTTP methods that the gateway's CSRFMiddleware checks. */
@@ -19,6 +20,8 @@ const CSRF_COOKIE_PREFIX = "csrf_token=";
 const REFRESH_PATH = "/api/v1/auth/refresh";
 const EHM_AUTHENTICATE_PATH = "/api/v1/auth/ins-base/authenticate";
 const INS_REFRESH_COOKIE = "InS-refresh";
+
+let ehmSessionRecoveryPromise: Promise<boolean> | null = null;
 
 /**
  * Read a named cookie from document.cookie.
@@ -158,8 +161,8 @@ export async function fetch(
 
   if (res.status === 401) {
     if (hasEhmTokenCookie()) {
-      const authRes = await reauthenticateEhmSession(url, merged);
-      if (authRes?.ok) {
+      const ehmSessionRecovered = await recoverEhmSession(url);
+      if (ehmSessionRecovered) {
         const retryRes = await globalThis.fetch(input, {
           ...init,
           headers: buildAuthHeaders(init?.headers, init?.method ?? "GET", url),
@@ -232,16 +235,43 @@ export async function fetch(
   return res;
 }
 
-async function reauthenticateEhmSession(
-  requestUrl: string,
-  headers: Headers,
-): Promise<Response | null> {
+async function recoverEhmSession(requestUrl: string): Promise<boolean> {
+  if (requestUrl.includes(EHM_AUTHENTICATE_PATH)) {
+    return false;
+  }
+
+  if (ehmSessionRecoveryPromise) {
+    return ehmSessionRecoveryPromise;
+  }
+
+  ehmSessionRecoveryPromise = recoverEhmSessionOnce(requestUrl).finally(() => {
+    ehmSessionRecoveryPromise = null;
+  });
+
+  return ehmSessionRecoveryPromise;
+}
+
+async function recoverEhmSessionOnce(requestUrl: string): Promise<boolean> {
+  const authRes = await reauthenticateEhmSession(requestUrl);
+  if (authRes?.ok) {
+    return true;
+  }
+
+  const hostTokenUpdated = await requestFreshHostToken();
+  if (!hostTokenUpdated) {
+    return false;
+  }
+
+  const authRetryRes = await reauthenticateEhmSession(requestUrl);
+  return Boolean(authRetryRes?.ok);
+}
+
+async function reauthenticateEhmSession(requestUrl: string): Promise<Response | null> {
   const currentToken = readEhmTokenCookie();
   if (!currentToken) {
     return null;
   }
   if (isEhmTokenExpired(currentToken)) {
-    clearEhmTokenCookie();
     return null;
   }
   if (requestUrl.includes(EHM_AUTHENTICATE_PATH)) {
@@ -251,7 +281,7 @@ async function reauthenticateEhmSession(
   try {
     return await globalThis.fetch(resolveAuthUrl(requestUrl, EHM_AUTHENTICATE_PATH), {
       method: "POST",
-      headers: buildAuthHeaders(headers, "POST", EHM_AUTHENTICATE_PATH),
+      headers: buildEhmAuthenticateHeaders(),
       credentials: "include",
     });
   } catch {
@@ -266,9 +296,19 @@ function resolveAuthUrl(requestUrl: string, authPath: string): string {
   return authPath;
 }
 
-function clearEhmTokenCookie(): void {
-  if (typeof document === "undefined") return;
-  document.cookie = `${EHM_TOKEN_COOKIE}=; path=/; max-age=0`;
+function buildEhmAuthenticateHeaders(): Headers {
+  const headers = new Headers();
+  const ehmToken = readEhmTokenCookie();
+  if (ehmToken) {
+    headers.set("Authorization", `Bearer ${ehmToken}`);
+  }
+
+  const csrfToken = readCsrfCookie();
+  if (csrfToken) {
+    headers.set("X-CSRF-Token", csrfToken);
+  }
+
+  return headers;
 }
 
 function buildAuthHeaders(
