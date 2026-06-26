@@ -8,7 +8,7 @@ The SMS /api/abnormal/detail endpoint does NOT return mac_id / component_id.
 Pass them from the list-side data so they are merged into the output for downstream use.
 
 Environment:
-    INS_BASE_URL          — SMS/InS base URL (default: http://182.92.187.198)
+    SMS_BASE_URL          — SMS base URL (default: http://182.92.187.198)
     INS_ACCESS_TOKEN      — Bearer token for SMS authentication
 """
 
@@ -21,7 +21,7 @@ import sys
 import urllib.request
 import urllib.error
 
-SMS_BASE = os.environ.get("INS_BASE_URL", "http://182.92.187.198")
+SMS_BASE = os.environ.get("SMS_BASE_URL", "http://182.92.187.198")
 TOKEN = os.environ.get("INS_ACCESS_TOKEN", "")
 
 
