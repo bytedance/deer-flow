@@ -59,6 +59,25 @@ services:
       retries: 6
       start_period: 15s
 
+  # ── SearXNG Search Engine ──────────────────────────────────────────────
+  # Local search engine for privacy-focused web search
+  searxng:
+    image: searxng/searxng:latest
+    container_name: deer-flow-searxng
+    ports:
+      - "8888:8080"
+    volumes:
+      - ./searxng-settings.yml:/etc/searxng/settings.yml:ro
+    networks:
+      - deer-flow-dev
+    restart: unless-stopped
+    healthcheck:
+      test: [ "CMD", "wget", "--spider", "-q", "http://localhost:8080/health" ]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
   # ── Reverse Proxy ──────────────────────────────────────────────────────
   # Routes API traffic to gateway and (optionally) provisioner.
   nginx:

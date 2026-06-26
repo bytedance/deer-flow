@@ -66,6 +66,9 @@ COPY --from=docker:cli /usr/local/bin/docker /usr/local/bin/docker
 
 EXPOSE 8001
 
+# Install Playwright browsers (Chromium for PDF generation)
+RUN apt-get update && sh -c "cd backend && uv run playwright install --with-deps chromium"
+
 CMD ["sh", "-c", "cd backend && PYTHONPATH=. uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001"]
 
 # ── Stage 3: Runtime ──────────────────────────────────────────────────────────
@@ -96,6 +99,9 @@ COPY --from=builder /app/backend ./backend
 
 # Expose Gateway API port.
 EXPOSE 8001
+
+# Install Playwright browsers (Chromium for PDF generation)
+RUN apt-get update && sh -c "cd backend && uv run playwright install --with-deps chromium"
 
 # Default command (can be overridden in docker-compose)
 CMD ["sh", "-c", "cd backend && PYTHONPATH=. uv run --no-sync uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001"]

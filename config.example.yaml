@@ -540,6 +540,30 @@ models:
   #   write_timeout: 60.0
   #   pool_timeout: 30.0
 
+  # Example: Claude via OpenAI-compatible proxy (e.g. a corporate Hyperspace proxy)
+  # Use deerflow.models.claude_provider:ClaudeChatModel for Anthropic-native API features
+  # (prompt caching, extended thinking, etc.) behind an OpenAI-compatible gateway.
+  # - name: claude-sonnet
+  #   display_name: Claude Sonnet (via proxy)
+  #   use: deerflow.models.claude_provider:ClaudeChatModel
+  #   model: anthropic--claude-sonnet-latest   # model id as expected by the proxy
+  #   api_key: $ANTHROPIC_AUTH_TOKEN
+  #   base_url: http://your-proxy-host/anthropic/
+  #   max_tokens: 32000
+  #   temperature: 0.7
+  #   supports_thinking: true
+  #   enable_prompt_caching: false
+  #
+  # - name: claude-haiku
+  #   display_name: Claude Haiku (sub-agent)
+  #   use: deerflow.models.claude_provider:ClaudeChatModel
+  #   model: anthropic--claude-haiku-latest
+  #   api_key: $ANTHROPIC_AUTH_TOKEN
+  #   base_url: http://your-proxy-host/anthropic/
+  #   max_tokens: 16000
+  #   temperature: 0.7
+  #   enable_prompt_caching: false
+
 # ============================================================================
 # Tool Groups Configuration
 # ============================================================================
@@ -565,6 +589,27 @@ tools:
     # backend: auto          # DDGS backend(s): auto, duckduckgo, brave, wikipedia, etc.
     # region: wt-wt          # wt-wt is normalized for Wikipedia when backend includes auto/all/wikipedia.
     # safesearch: moderate   # on, moderate, off
+
+  # Web search tool (uses multi-provider chain with automatic fallback)
+  # Tries providers in order: SearXNG (self-hosted) → InfoQuest → Tavily.
+  # Requires: docker/searxng-settings.yml + searxng service in docker-compose-dev.yaml.
+  # Any provider can be disabled; the chain skips it and continues to the next.
+  # - name: web_search
+  #   group: web
+  #   use: deerflow.community.multi_provider.tools:web_search_multi
+  #   max_results: 5
+  #   providers:
+  #     - name: searxng
+  #       enabled: true
+  #     - name: infoquest
+  #       enabled: true
+  #     - name: tavily
+  #       enabled: true
+  #   searxng_host: http://searxng:8080   # Docker service name; use http://localhost:8888 outside Docker
+  #   searxng_engines: []                 # Empty = use SearXNG defaults
+  #   searxng_categories: []
+  #   searxng_language: en
+  #   search_time_range: 10               # Days to restrict results; 0 = no restriction
 
   # Web search tool (uses SearXNG, self-hosted, no API key required)
   # SearXNG is a free internet metasearch engine which aggregates results from
@@ -681,6 +726,14 @@ tools:
     # proxy: $HTTPS_PROXY
     # trust_env: true
 
+  # Web fetch tool (uses multi-provider chain with automatic fallback)
+  # Pairs with the multi-provider web_search above; replaces Jina AI web_fetch.
+  # NOTE: Only one web_fetch provider can be active at a time.
+  # Comment out the Jina AI web_fetch entry above before enabling this one.
+  # - name: web_fetch
+  #   group: web
+  #   use: deerflow.community.multi_provider.tools:web_fetch_multi
+
   # Web fetch tool (uses InfoQuest)
   # - name: web_fetch
   #   group: web
@@ -765,6 +818,17 @@ tools:
   - name: write_file
     group: file:write
     use: deerflow.sandbox.tools:write_file_tool
+
+  # Markdown to PDF conversion (requires Playwright/Chromium — see Dockerfile)
+  # Renders Markdown as a styled PDF via headless Chromium.
+  # - name: markdown_to_pdf
+  #   group: file:write
+  #   use: deerflow.community.md_to_pdf.tools:markdown_to_pdf_tool
+
+  # Markdown to PowerPoint conversion
+  # - name: markdown_to_ppt
+  #   group: file:write
+  #   use: deerflow.community.md_to_ppt.tools:markdown_to_ppt_tool
 
   - name: str_replace
     group: file:write
