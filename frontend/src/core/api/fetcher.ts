@@ -27,7 +27,7 @@ const INS_REFRESH_COOKIE = "InS-refresh";
 const LOGIN_REDIRECT_DELAY_MS = 2000;
 
 let ehmSessionRecoveryPromise: Promise<boolean> | null = null;
-let pendingLoginRedirectTimer: ReturnType<typeof setTimeout> | null = null;
+let pendingLoginRedirectTimer: number | null = null;
 let recoveryEpoch = 0;
 let isRecoveryEventBound = false;
 let hasPendingEhmRedirectConfirmation = false;

@@ -19,6 +19,16 @@ _adapter: SmsAdapter | None = None
 _adapter_initialized: bool = False
 
 
+def _expand_sms_url_fields(sms_raw: dict) -> None:
+    """Expand environment placeholders used by SMS URL config fields."""
+    import os
+
+    for key in ("base_url", "base_path"):
+        value = sms_raw.get(key)
+        if isinstance(value, str):
+            sms_raw[key] = os.path.expandvars(value)
+
+
 def _load_sms_config() -> IntegrationSystemConfig | None:
     """Load SMS system config from the integrations section of config.yaml."""
     import os
@@ -63,6 +73,7 @@ def _load_sms_config() -> IntegrationSystemConfig | None:
     # Inject system_key from the dict key (same behaviour as IntegrationsConfig parser)
     if "system_key" not in sms_raw:
         sms_raw["system_key"] = "sms"
+    _expand_sms_url_fields(sms_raw)
 
     return IntegrationSystemConfig.model_validate(sms_raw)
 
