@@ -3,6 +3,7 @@
 import { SparklesIcon } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useMemo, useState } from "react";
+import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -58,11 +59,18 @@ function SkillSettingsList({
   const { t } = useI18n();
   const router = useRouter();
   const [filter, setFilter] = useState<string>("public");
-  const { mutate: enableSkill } = useEnableSkill();
+  const { mutateAsync: enableSkill } = useEnableSkill();
   const filteredSkills = useMemo(
     () => skills.filter((skill) => skill.category === filter),
     [skills, filter],
   );
+  const handleToggleSkill = (skillName: string, enabled: boolean) => {
+    void enableSkill({ skillName, enabled }).catch((error) => {
+      toast.error(
+        error instanceof Error ? error.message : "Failed to update skill",
+      );
+    });
+  };
   const handleCreateSkill = () => {
     onClose?.();
     router.push("/workspace/chats/new?mode=skill");
@@ -104,7 +112,7 @@ function SkillSettingsList({
                 checked={skill.enabled}
                 disabled={env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true"}
                 onCheckedChange={(checked) =>
-                  enableSkill({ skillName: skill.name, enabled: checked })
+                  handleToggleSkill(skill.name, checked)
                 }
               />
             </ItemActions>
