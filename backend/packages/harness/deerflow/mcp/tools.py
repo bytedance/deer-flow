@@ -615,9 +615,20 @@ async def get_mcp_tools() -> list[BaseTool]:
             tool_name_prefix=True,
         )
 
-        # Get all tools from all servers (discovers tool definitions via
-        # temporary sessions – the persistent-session wrapping is applied below).
-        tools = await client.get_tools()
+        async def load_server_tools(server_name: str) -> list[BaseTool]:
+            try:
+                return await client.get_tools(server_name=server_name)
+            except Exception as e:
+                logger.warning(
+                    f"Skipping MCP server '{server_name}' after tool discovery failed: {e}",
+                    exc_info=True,
+                )
+                return []
+
+        # Get tools from each server independently so one broken MCP server does
+        # not prevent healthy servers from contributing their tools.
+        tools_by_server = await asyncio.gather(*(load_server_tools(name) for name in servers_config))
+        tools = [tool for server_tools in tools_by_server for tool in server_tools]
         logger.info(f"Successfully loaded {len(tools)} tool(s) from MCP servers")
 
         # Wrap each tool with persistent-session logic.
