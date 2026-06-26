@@ -1149,6 +1149,7 @@ Notes:
 - Slack stop waits up to five seconds for an in-flight Socket Mode connection and its cleanup. If cleanup is still pending, the previous instance stays tracked and a restart can be retried after it finishes. SDK cleanup failures report their original error and remain retryable.
 - In Telegram private chats, text, attachment and streaming replies (including "Working on it...") can still be delivered if their referenced user or bot message was deleted, such as after clearing chat history during a run. Group reply-target requirements remain unchanged to preserve forum routing.
 - Feishu/Lark now queues rapid follow-up messages per mapped DeerFlow `thread_id` instead of immediately surfacing the generic busy reply, and topic replies keep a per-message card with a compact source-message preview across queued/running/final patches.
+- GitHub comments that arrive while that thread already has an autonomous run are queued. Issue comments and pull-request review comments receive an `eyes` reaction; if the per-thread queue is full, the oldest queued comment is dropped and marked `confused`. Review summaries and issue or pull-request bodies have no reaction endpoint and stay unmarked. The reaction uses the GitHub App installation token and does not post a comment.
 - Streaming IM channels treat backend `error` events like transport failures and follow the same reply and retry path. The channel logs the error type and message for diagnosis.
 
 Set the corresponding API keys in your `.env` file:

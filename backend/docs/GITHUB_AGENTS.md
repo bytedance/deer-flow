@@ -246,6 +246,7 @@ sequenceDiagram
     Mgr->>Client: runs.create()
     Client-->>Mgr: 409 ConflictError
     Mgr->>Mgr: _buffer_followup(thread_id, msg)<br/>(deduped by delivery_id, capped at 20)
+    Mgr-->>C2: eyes on a reactable comment<br/>(confused if the cap drops it)
     Mgr-->>C2: THREAD_BUSY_MESSAGE (log-only on GitHub)
 
     Note over SB: run-1 completes
@@ -259,10 +260,10 @@ sequenceDiagram
 Key properties:
 
 - **Dedupe**: buffering keys on the GitHub webhook delivery id (falling back to the generic provider-message-id metadata keys, mirroring `_inbound_dedupe_key`), so a redelivered webhook for a comment already buffered is a no-op rather than a duplicate entry.
-- **Cap**: 20 entries per thread. Overflow drops the *oldest* buffered entry (not the newest) with a WARNING log — recent activity is a more useful signal than the stalest queued comment once a thread is deep enough in the backlog to hit the cap. No reaction/acknowledgment is sent on drop; see the reactions note below.
+- **Cap**: 20 entries per thread. Overflow drops the *oldest* buffered entry (not the newest) with a WARNING log — recent activity is a more useful signal than the stalest queued comment once a thread is deep enough in the backlog to hit the cap. The dropped comment gets a `confused` reaction when GitHub can react to it.
 - **Batching**: a drain coalesces at most 10 entries into one `<followups-while-busy>` input block. A backlog deeper than 10 is not force-fit into a single turn — the drained run is itself watched, so its own completion triggers another drain cycle for the remainder.
 - **Drain-conflict edge case**: if the drain's own `runs.create()` also hits `ConflictError` — e.g. a manual Web UI turn or a scheduled run raced onto the same thread — the popped batch is requeued (not lost, not retried in a tight loop). It is picked up again the next time this manager successfully creates *and watches* a run on that thread, which is guaranteed to eventually happen once whatever is occupying the thread finishes and any subsequent trigger succeeds.
-- **Reactions are out of scope for this slice.** GitHub's reaction API (`eyes`/`confused` acknowledgment) has no existing integration in this codebase and needs its own design pass; buffered comments are coalesced silently, with no per-comment acknowledgment.
+- **Reactions**: a newly queued `issue_comment` or `pull_request_review_comment` gets an `eyes` reaction (`queued; will pick up after the current run`). A comment dropped by the cap gets `confused`. The manager calls `GitHubChannel.acknowledge_followup`, which POSTs through the installation token (`app/gateway/github/reactions.py`). `pull_request_review` summaries and `issues` / `pull_request` bodies have no comment-reaction endpoint and stay unmarked. A failed or skipped reaction does not change buffering, and `send()` remains log-only. `+1` ("working on this now") stays the agent's own `gh` flow.
 - **Config**: gated behind `ChannelRunPolicy.buffer_followups_on_busy` (default `False`); GitHub's own registration in `app/gateway/github/run_policy.py` opts in, since it is exactly the fire_and_forget + log-only-send channel this was designed for. Any other channel that adopts `fire_and_forget=True` in the future keeps the old silent-drop-with-log behavior unless it opts in too.
 - **Plumbing**: the watcher subscribes to the Gateway's `StreamBridge` singleton (`app.state.stream_bridge`), which `ChannelManager` previously had no way to reach — every other consumer gets it via `get_stream_bridge(request)`, which needs an HTTP `Request` the bus-consumer loop doesn't have. It is threaded as a zero-arg closure from `app.py`'s lifespan (`get_stream_bridge=lambda: getattr(app.state, "stream_bridge", None)`) through `start_channel_service()` → `ChannelService.__init__` → `ChannelManager.__init__`, mirroring the existing `launch_run=lambda **kwargs: launch_scheduled_thread_run(app=app, **kwargs)` closure already used for `ScheduledTaskService` in the same lifespan function.
 - **Single-process scope (known limitation)**: the buffer and watcher tasks live in one `ChannelManager` instance's process memory. Under `GATEWAY_WORKERS>1` or a multi-pod deployment, a follow-up comment that a load balancer or webhook fan-out routes to a *different* worker than the one that created the busy run will not see that worker's buffer. This mirrors the cross-pod gap already documented for issue #4120 (IM leader election or a shared buffer store would close it) and is deliberately deferred — single-process/single-pod deployments, the safe default, are unaffected.
@@ -301,6 +302,7 @@ This is also why the GitHub channel registers `ChannelRunPolicy.fire_and_forget=
 - [IM_CHANNEL_CONNECTIONS.md](IM_CHANNEL_CONNECTIONS.md) — interactive IM channels (Telegram/Slack/etc.) for the full `_handle_chat` and owner-scoped file storage flow
 - `app/gateway/github/dispatcher.py` — `fanout_event`, `_is_self_event`, mention precedence chain
 - `app/channels/manager.py` — `_buffer_followup`, `_drain_followups_for_thread`, `_watch_run_and_drain_followups` (follow-up buffering while busy, issue #4121)
+- `app/gateway/github/reactions.py` — `eyes` / `confused` posts for queued and dropped comments
 - `app/gateway/github/identity.py` — `resolve_thread_id` (UUID5), `extract_target`
 - `app/gateway/github/triggers.py` — `event_should_fire`, `DEFAULT_TRIGGERS`
 - `app/gateway/github/run_policy.py` — `inject_github_credentials`, `register_policy`

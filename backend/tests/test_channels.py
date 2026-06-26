@@ -5998,8 +5998,8 @@ class TestGithubFollowupBuffer:
     point of view. These tests pin the fix: the triggering message is
     buffered per-thread (deduped, capped), and a background watcher drains
     the buffer into a coalesced follow-up run once the busy run's stream
-    reaches ``END_SENTINEL``. Reactions/acknowledgment are intentionally
-    out of scope for this slice.
+    reaches ``END_SENTINEL``. Visible ``eyes`` / ``confused`` reactions are
+    covered in ``test_github_followup_acks.py``.
     """
 
     def test_followup_block_escapes_markup_and_indents_multiline_text(self):
