@@ -19,14 +19,20 @@ _adapter: SmsAdapter | None = None
 _adapter_initialized: bool = False
 
 
-def _expand_sms_url_fields(sms_raw: dict) -> None:
-    """Expand environment placeholders used by SMS URL config fields."""
+def _resolve_env_vars(value):
+    """Recursively resolve $ENV_VAR references in config values."""
     import os
 
-    for key in ("base_url", "base_path"):
-        value = sms_raw.get(key)
-        if isinstance(value, str):
-            sms_raw[key] = os.path.expandvars(value)
+    if isinstance(value, str):
+        if value.startswith("$"):
+            env_var = value[1:]
+            return os.environ.get(env_var, value)
+        return value
+    elif isinstance(value, dict):
+        return {k: _resolve_env_vars(v) for k, v in value.items()}
+    elif isinstance(value, list):
+        return [_resolve_env_vars(item) for item in value]
+    return value
 
 
 def _load_sms_config() -> IntegrationSystemConfig | None:
@@ -57,6 +63,9 @@ def _load_sms_config() -> IntegrationSystemConfig | None:
         logger.exception("Failed to read config.yaml at %s", config_path)
         return None
 
+    # Resolve environment variables (e.g., $SMS_BASE_URL -> http://...)
+    raw = _resolve_env_vars(raw)
+
     integrations_raw = raw.get("integrations")
     if not isinstance(integrations_raw, dict):
         return None
@@ -73,7 +82,6 @@ def _load_sms_config() -> IntegrationSystemConfig | None:
     # Inject system_key from the dict key (same behaviour as IntegrationsConfig parser)
     if "system_key" not in sms_raw:
         sms_raw["system_key"] = "sms"
-    _expand_sms_url_fields(sms_raw)
 
     return IntegrationSystemConfig.model_validate(sms_raw)
 
