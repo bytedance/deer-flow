@@ -325,6 +325,7 @@ async def update_skill(skill_name: str, request: SkillUpdateRequest, config: App
         extensions_config.skills[skill_name] = SkillStateConfig(enabled=request.enabled)
 
         config_data = {
+            **{k: v for k, v in extensions_config.model_dump(by_alias=True, exclude_none=True).items() if k not in ("mcpServers", "skills")},
             "mcpServers": {name: server.model_dump() for name, server in extensions_config.mcp_servers.items()},
             "skills": {name: {"enabled": skill_config.enabled} for name, skill_config in extensions_config.skills.items()},
         }
