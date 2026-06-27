@@ -97,6 +97,7 @@ class GuardrailMiddleware(AgentMiddleware[AgentState]):
             "tool_name": guardrail_request.tool_name,
             "tool_call_id": guardrail_request.tool_call_id,
             "agent_id": guardrail_request.agent_id,
+            "is_subagent": guardrail_request.is_subagent,
             "user_role": guardrail_request.user_role,
             "allow": decision.allow,
             "policy_id": decision.policy_id,

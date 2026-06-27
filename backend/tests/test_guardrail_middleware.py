@@ -332,6 +332,7 @@ class TestGuardrailMiddleware:
             call_id="tool_call_1",
             context={
                 "__run_journal": journal,
+                "is_subagent": True,
                 "user_role": "member",
             },
         )
@@ -348,6 +349,7 @@ class TestGuardrailMiddleware:
         assert changes["tool_name"] == "bash"
         assert changes["tool_call_id"] == "tool_call_1"
         assert changes["agent_id"] == "lead-agent"
+        assert changes["is_subagent"] is True
         assert changes["user_role"] == "member"
         assert changes["allow"] is False
         assert changes["policy_id"] == "test.deny.v1"
@@ -361,7 +363,6 @@ class TestGuardrailMiddleware:
         assert "user_id" not in changes
         assert "oauth_provider" not in changes
         assert "oauth_id" not in changes
-        assert "is_subagent" not in changes
 
     # Journal: a fail-closed provider error is recorded as a denied tool call.
     def test_fail_closed_provider_error_records_guardrail_event(self):
@@ -458,7 +459,7 @@ class TestGuardrailMiddleware:
         assert changes["tool_name"] == "bash"
         assert changes["tool_call_id"] == "async_call_1"
         assert changes["agent_id"] == "lead-agent"
-        assert "is_subagent" not in changes
+        assert changes["is_subagent"] is False
         assert changes["allow"] is False
         assert changes["provider_error"] is False
 
