@@ -474,6 +474,55 @@ test("does not mark a completed assistant group streaming from a later processin
   ).toBe(false);
 });
 
+test("keeps assistant text and reasoning when the same message also has tool calls", () => {
+  const messages = [
+    {
+      id: "human-1",
+      type: "human",
+      content: "Find the latest release notes",
+    },
+    {
+      id: "ai-1",
+      type: "ai",
+      content:
+        "<think>Need the latest source before answering.</think>I will search the release notes and summarize them.",
+      tool_calls: [
+        {
+          id: "tool-1",
+          name: "web_search",
+          args: { query: "deer-flow release notes" },
+        },
+      ],
+    },
+    {
+      id: "tool-result-1",
+      type: "tool",
+      tool_call_id: "tool-1",
+      name: "web_search",
+      content: "[]",
+    },
+  ] as Message[];
+
+  const groups = getMessageGroups(messages);
+
+  expect(groups.map((group) => group.type)).toEqual([
+    "human",
+    "assistant:processing",
+    "assistant",
+  ]);
+  expect(groups[1]?.messages.map((message) => message.id)).toEqual([
+    "ai-1",
+    "tool-result-1",
+  ]);
+  expect(groups[2]?.messages.map((message) => message.id)).toEqual(["ai-1"]);
+  expect(extractReasoningContentFromMessage(groups[1]!.messages[0]!)).toBe(
+    "Need the latest source before answering.",
+  );
+  expect(extractContentFromMessage(groups[2]!.messages[0]!)).toBe(
+    "I will search the release notes and summarize them.",
+  );
+});
+
 test("keeps streaming assistant hidden when a hidden control message follows it", () => {
   const messages = [
     {

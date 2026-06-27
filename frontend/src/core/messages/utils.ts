@@ -40,18 +40,55 @@ export function getMessageGroups(messages: Message[]): MessageGroup[] {
 
   const groups: MessageGroup[] = [];
 
+  function canAcceptToolMessages(group: MessageGroup) {
+    return (
+      group.type !== "human" &&
+      group.type !== "assistant" &&
+      group.type !== "assistant:clarification"
+    );
+  }
+
   // Returns the last group if it can still accept tool messages
   // (i.e. it's an in-flight processing group, not a terminal human/assistant group).
   function lastOpenGroup() {
     const last = groups[groups.length - 1];
-    if (
-      last &&
-      last.type !== "human" &&
-      last.type !== "assistant" &&
-      last.type !== "assistant:clarification"
-    ) {
+    if (last && canAcceptToolMessages(last)) {
       return last;
     }
+    return null;
+  }
+
+  function findToolCallGroup(message: Message) {
+    if (message.type !== "tool") {
+      return null;
+    }
+
+    const toolCallId = message.tool_call_id;
+    if (typeof toolCallId !== "string" || toolCallId.length === 0) {
+      return null;
+    }
+
+    for (let index = groups.length - 1; index >= 0; index--) {
+      const group = groups[index];
+      if (!group || group.type === "human") {
+        break;
+      }
+      if (!canAcceptToolMessages(group)) {
+        continue;
+      }
+      if (
+        group.messages.some(
+          (groupMessage) =>
+            groupMessage.type === "ai" &&
+            groupMessage.tool_calls?.some(
+              (toolCall) => toolCall.id === toolCallId,
+            ),
+        )
+      ) {
+        return group;
+      }
+    }
+
     return null;
   }
 
@@ -69,14 +106,14 @@ export function getMessageGroups(messages: Message[]): MessageGroup[] {
       if (isClarificationToolMessage(message)) {
         // Add to the preceding processing group to preserve tool-call association,
         // then also open a standalone clarification group for prominent display.
-        lastOpenGroup()?.messages.push(message);
+        (findToolCallGroup(message) ?? lastOpenGroup())?.messages.push(message);
         groups.push({
           id: message.id,
           type: "assistant:clarification",
           messages: [message],
         });
       } else {
-        const open = lastOpenGroup();
+        const open = findToolCallGroup(message) ?? lastOpenGroup();
         if (open) {
           open.messages.push(message);
         } else {
@@ -116,9 +153,14 @@ export function getMessageGroups(messages: Message[]): MessageGroup[] {
         }
       }
 
-      // Not an else-if: a message with reasoning + content (but no tool calls) goes
-      // into the processing group above AND gets its own assistant bubble here.
-      if (hasContent(message) && !hasToolCalls(message)) {
+      // Not an else-if: a message can carry reasoning/tool calls and visible
+      // text. Keep dedicated tool-call UI groups from also rendering as a
+      // normal assistant bubble.
+      if (
+        hasContent(message) &&
+        !hasPresentFiles(message) &&
+        !hasSubagent(message)
+      ) {
         groups.push({ id: message.id, type: "assistant", messages: [message] });
       }
     }
