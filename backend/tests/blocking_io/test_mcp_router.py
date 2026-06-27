@@ -32,10 +32,10 @@ async def test_update_mcp_configuration_does_not_block_event_loop(tmp_path: Path
     await asyncio.to_thread(config_path.write_text, '{"mcpServers": {}, "skills": {}}', encoding="utf-8")
     monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(config_path))
 
-    async def _noop_admin(_request) -> None:
+    async def _noop_admin(_request, **_kwargs) -> None:
         return None
 
-    monkeypatch.setattr(mcp_router, "_require_admin_user", _noop_admin)
+    monkeypatch.setattr(mcp_router, "require_admin_user", _noop_admin)
 
     # An http transport skips the stdio command allowlist check, so the anchor
     # stays focused on the filesystem offload rather than command validation.
@@ -61,10 +61,10 @@ async def test_concurrent_mcp_updates_are_serialized(monkeypatch) -> None:
     max concurrency would exceed 1.)
     """
 
-    async def _noop_admin(_request) -> None:
+    async def _noop_admin(_request, **_kwargs) -> None:
         return None
 
-    monkeypatch.setattr(mcp_router, "_require_admin_user", _noop_admin)
+    monkeypatch.setattr(mcp_router, "require_admin_user", _noop_admin)
     monkeypatch.setattr(mcp_router, "_validate_mcp_update_request", lambda _body: None)
 
     state_lock = threading.Lock()

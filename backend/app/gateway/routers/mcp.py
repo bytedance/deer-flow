@@ -401,12 +401,7 @@ async def update_mcp_configuration(request: Request, body: McpConfigUpdateReques
             reloaded_servers = await asyncio.to_thread(_apply_mcp_config_update, body)
 
         servers = {name: _mask_server_config(McpServerConfigResponse(**server.model_dump())) for name, server in reloaded_servers.items()}
-        # Reload the Gateway configuration and update the global cache. The
-        # agent runtime lives in Gateway, so this keeps API reads and tool
-        # execution aligned after extensions_config.json changes.
-        reloaded_config = reload_extensions_config()
         reset_mcp_tools_cache()
-        servers = {name: _mask_server_config(McpServerConfigResponse(**server.model_dump())) for name, server in reloaded_config.mcp_servers.items()}
         return McpConfigResponse(mcp_servers=servers)
 
     except HTTPException:
