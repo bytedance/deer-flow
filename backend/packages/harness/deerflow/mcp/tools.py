@@ -635,22 +635,20 @@ async def get_mcp_tools() -> list[BaseTool]:
         # Only pool stdio sessions. HTTP/SSE transports use anyio TaskGroups
         # internally which cannot be closed from a different async task, so
         # pooling them causes RuntimeError on cleanup (see #3203).
+        # Route each tool to the server that produced it via the authoritative
+        # tools_by_server grouping (gather preserves servers_config order).
+        # Re-deriving the server by `tool.name.startswith(f"{name}_")` is
+        # ambiguous when one server name is a prefix of another (e.g. `web` and
+        # `web_scraper`): the first prefix match wins and the tool is routed to
+        # the wrong server (see #3811).
         wrapped_tools: list[BaseTool] = []
-        for tool in tools:
-            tool_server: str | None = None
-            for name in servers_config:
-                if tool.name.startswith(f"{name}_"):
-                    tool_server = name
-                    break
-
-            if tool_server is not None:
+        for tool_server, server_tools in zip(servers_config, tools_by_server):
+            for tool in server_tools:
                 transport = servers_config[tool_server].get("transport", "stdio")
                 if transport == "stdio":
                     wrapped_tools.append(_make_session_pool_tool(tool, tool_server, servers_config[tool_server], tool_interceptors))
                 else:
                     wrapped_tools.append(tool)
-            else:
-                wrapped_tools.append(tool)
 
         # Patch tools to support sync invocation, as deerflow client streams synchronously
         for tool in wrapped_tools:

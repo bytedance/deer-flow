@@ -917,6 +917,89 @@ async def test_http_transport_tools_not_pooled():
 
 
 # ---------------------------------------------------------------------------
+# Regression for #3811: tools must route to the server that produced them
+# even when one server name is a prefix of another (e.g. `web` / `web_scraper`).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_overlapping_server_name_prefixes_route_to_correct_server():
+    """A tool from `web_scraper` must be wrapped against `web_scraper`, not `web`.
+
+    Before the fix, get_mcp_tools() re-derived each tool's source server by
+    scanning servers_config for the first name that is a prefix of the tool
+    name. With overlapping prefixes, `web_scraper_search` matched `web` first
+    (length-4 strip → `scraper_search`) instead of `web_scraper` (length-12
+    strip → `search`), so the call was routed to the wrong server with the
+    wrong stripped name and failed at the MCP layer.
+    """
+    from langchain_core.tools import StructuredTool
+    from pydantic import BaseModel, Field
+
+    from deerflow.mcp.tools import _make_session_pool_tool, get_mcp_tools
+
+    class Args(BaseModel):
+        query: str = Field(..., description="query")
+
+    web_tool = StructuredTool(
+        name="web_search",
+        description="web search",
+        args_schema=Args,
+        coroutine=AsyncMock(),
+        response_format="content_and_artifact",
+    )
+    web_scraper_tool = StructuredTool(
+        name="web_scraper_search",
+        description="web_scraper search",
+        args_schema=Args,
+        coroutine=AsyncMock(),
+        response_format="content_and_artifact",
+    )
+
+    extensions_config = MagicMock()
+    extensions_config.get_enabled_mcp_servers.return_value = {
+        "web": MagicMock(type="stdio", command="web-bin", args=[], env=None, url=None, headers=None),
+        "web_scraper": MagicMock(type="stdio", command="ws-bin", args=[], env=None, url=None, headers=None),
+    }
+    extensions_config.model_extra = {}
+
+    servers_config = {
+        "web": {"transport": "stdio", "command": "web-bin", "args": []},
+        "web_scraper": {"transport": "stdio", "command": "ws-bin", "args": []},
+    }
+
+    with (
+        patch("deerflow.mcp.tools.ExtensionsConfig.from_file", return_value=extensions_config),
+        patch("deerflow.mcp.tools.build_servers_config", return_value=servers_config),
+        patch("deerflow.mcp.tools.get_initial_oauth_headers", return_value={}),
+        patch("deerflow.mcp.tools.build_oauth_tool_interceptor", return_value=None),
+        patch("langchain_mcp_adapters.client.MultiServerMCPClient") as MockClient,
+        patch("deerflow.mcp.tools._make_session_pool_tool", side_effect=_make_session_pool_tool) as wrap_spy,
+    ):
+        mock_client_instance = MockClient.return_value
+
+        async def get_tools_for_server(*, server_name: str | None = None):
+            if server_name == "web":
+                return [web_tool]
+            if server_name == "web_scraper":
+                return [web_scraper_tool]
+            raise AssertionError(f"unexpected server_name: {server_name}")
+
+        mock_client_instance.get_tools = AsyncMock(side_effect=get_tools_for_server)
+
+        await get_mcp_tools()
+
+    # Each (tool_name, server_name) pair that the wrapper was called with.
+    # The bug routes `web_scraper_search` to server `web` (first prefix match),
+    # so this would show ("web_scraper_search", "web") instead of
+    # ("web_scraper_search", "web_scraper").
+    wrap_calls = [(call.args[0].name, call.args[1]) for call in wrap_spy.call_args_list]
+    assert ("web_search", "web") in wrap_calls
+    assert ("web_scraper_search", "web_scraper") in wrap_calls
+    assert ("web_scraper_search", "web") not in wrap_calls
+
+
+# ---------------------------------------------------------------------------
 # Regression for #3379: cancel scope must be exited in the entering task
 # ---------------------------------------------------------------------------
 
