@@ -118,6 +118,36 @@ def _agent_factory_supports_app_config(agent_factory: Any) -> bool:
         return _compute_agent_factory_supports_app_config(agent_factory)
 
 
+async def _persist_subagent_event(
+    event_store: Any | None,
+    thread_id: str,
+    run_id: str,
+    chunk: Any,
+) -> None:
+    """Persist a subagent ``task_*`` custom event to the RunEventStore (#3779).
+
+    The live SSE bridge already forwards these events for real-time display; this
+    additionally writes them so the subtask card's step history survives a reload.
+    A missing store (run_events not configured) or an unrecognized chunk is a
+    no-op, and store failures are logged but never propagate into the stream loop.
+    """
+    if event_store is None:
+        return
+    # Lazy import: importing deerflow.subagents at module load triggers its
+    # package __init__ (executor → agents → tools → task_tool), which imports
+    # back from deerflow.subagents and deadlocks at gateway startup. Deferring it
+    # to call time (after all modules are loaded) breaks that cycle.
+    from deerflow.subagents.step_events import subagent_run_event
+
+    record = subagent_run_event(chunk)
+    if record is None:
+        return
+    try:
+        await event_store.put(thread_id=thread_id, run_id=run_id, **record)
+    except Exception:
+        logger.warning("Run %s: failed to persist subagent step event", run_id, exc_info=True)
+
+
 async def run_agent(
     bridge: StreamBridge,
     run_manager: RunManager,
@@ -313,6 +343,8 @@ async def run_agent(
                 llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(chunk)
                 sse_event = _lg_mode_to_sse_event(single_mode)
                 await bridge.publish(run_id, sse_event, serialize(chunk, mode=single_mode))
+                if single_mode == "custom":
+                    await _persist_subagent_event(event_store, thread_id, run_id, chunk)
         else:
             # Multiple modes or subgraphs: astream yields tuples
             async for item in agent.astream(
@@ -332,6 +364,8 @@ async def run_agent(
                 llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(chunk)
                 sse_event = _lg_mode_to_sse_event(mode)
                 await bridge.publish(run_id, sse_event, serialize(chunk, mode=mode))
+                if mode == "custom":
+                    await _persist_subagent_event(event_store, thread_id, run_id, chunk)
 
         # 8. Final status
         if record.abort_event.is_set():

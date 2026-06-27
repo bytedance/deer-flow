@@ -7,6 +7,7 @@ import {
   useState,
 } from "react";
 
+import { mergeSteps } from "./steps";
 import type { Subtask } from "./types";
 
 function isTerminalSubtaskStatus(status: Subtask["status"] | undefined) {
@@ -77,12 +78,19 @@ export function useUpdateSubtask() {
           : {}),
       } as Subtask;
 
+      // `steps` carries deltas to accumulate, not a replacement: merge them into
+      // the existing history (deduped/ordered by message_index) so live SSE steps
+      // and fetched-on-expand steps build one timeline (#3779).
+      if (task.steps) {
+        next.steps = mergeSteps(previous?.steps ?? [], task.steps);
+      }
+
       const becameTerminal =
         isTerminalSubtaskStatus(next.status) && previousStatus !== next.status;
 
       tasks[task.id] = next;
 
-      if (task.latestMessage) {
+      if (task.latestMessage || task.steps) {
         setTasks({ ...tasks });
       } else if (becameTerminal) {
         shouldNotifyAfterRenderRef.current = true;
