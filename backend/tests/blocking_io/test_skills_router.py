@@ -32,15 +32,13 @@ def _config(skills_root: Path) -> SimpleNamespace:
             get_skills_path=lambda: skills_root,
             container_path="/mnt/skills",
             use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage",
-        ),
-        skill_evolution=SimpleNamespace(enabled=True, moderation_model_name=None),
+        )
     )
 
 
-async def test_get_custom_skill_history_does_not_block_event_loop(tmp_path: Path, monkeypatch) -> None:
+async def test_get_custom_skill_history_does_not_block_event_loop(tmp_path: Path) -> None:
     skills_root = tmp_path / "skills"
     config = _config(skills_root)
-    monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
 
     def _seed() -> None:
         # Real custom skill + history file on disk (seeding offloaded; not under test).
