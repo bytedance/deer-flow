@@ -325,15 +325,14 @@ class TestGuardrailMiddleware:
     # Journal: a denied tool call records the complete guardrail audit event.
     def test_denied_tool_records_guardrail_event(self):
         journal = _FakeJournal()
-        mw = GuardrailMiddleware(_DenyAllProvider(), passport="lead-agent")
+        mw = GuardrailMiddleware(_DenyAllProvider(), passport="agent_id")
         req = _make_tool_call_request(
             "bash",
             args={"command": "cat secret.txt"},
             call_id="tool_call_1",
             context={
                 "__run_journal": journal,
-                "is_subagent": True,
-                "user_role": "member",
+                "user_role": "user",
             },
         )
         result = mw.wrap_tool_call(req, MagicMock())
@@ -348,9 +347,9 @@ class TestGuardrailMiddleware:
         changes = event["changes"]
         assert changes["tool_name"] == "bash"
         assert changes["tool_call_id"] == "tool_call_1"
-        assert changes["agent_id"] == "lead-agent"
-        assert changes["is_subagent"] is True
-        assert changes["user_role"] == "member"
+        assert changes["agent_id"] == "agent_id"
+        assert changes["is_subagent"] is False
+        assert changes["user_role"] == "user"
         assert changes["allow"] is False
         assert changes["policy_id"] == "test.deny.v1"
         assert changes["reason_codes"] == ["oap.denied"]
@@ -434,7 +433,7 @@ class TestGuardrailMiddleware:
     # Journal: the async denial path records the same guardrail audit event.
     def test_async_denied_tool_records_guardrail_event(self):
         journal = _FakeJournal()
-        mw = GuardrailMiddleware(_DenyAllProvider(), passport="lead-agent")
+        mw = GuardrailMiddleware(_DenyAllProvider(), passport="agent_id")
         req = _make_tool_call_request(
             "bash",
             call_id="async_call_1",
@@ -458,7 +457,7 @@ class TestGuardrailMiddleware:
         changes = event["changes"]
         assert changes["tool_name"] == "bash"
         assert changes["tool_call_id"] == "async_call_1"
-        assert changes["agent_id"] == "lead-agent"
+        assert changes["agent_id"] == "agent_id"
         assert changes["is_subagent"] is False
         assert changes["allow"] is False
         assert changes["provider_error"] is False

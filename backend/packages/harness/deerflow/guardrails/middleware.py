@@ -76,10 +76,10 @@ class GuardrailMiddleware(AgentMiddleware[AgentState]):
     ) -> None:
         """Persist a security-relevant guardrail decision to RunJournal.
 
-        This mirrors SafetyFinishReasonMiddleware: audit persistence is
-        best-effort and must never change tool execution behavior. Runtimes
-        without ``__run_journal`` (including embedded and subagent execution)
-        skip persistence.
+        This follows the optional-Journal pattern used by existing middleware:
+        audit persistence is best-effort and must never change tool execution
+        behavior. Runtimes without ``__run_journal`` (including embedded and
+        subagent execution) skip persistence.
         """
         runtime = getattr(request, "runtime", None)
         context = getattr(runtime, "context", None) if runtime is not None else None
