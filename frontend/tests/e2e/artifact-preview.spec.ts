@@ -8,6 +8,7 @@ const JSON_ARTIFACT_PATH = "/artifact-fixtures/report.json";
 const IN_PROGRESS_THREAD_ID = "00000000-0000-0000-0000-000000003119";
 const COMPLETE_THREAD_ID = "00000000-0000-0000-0000-000000003120";
 const MARKDOWN_THREAD_ID = "00000000-0000-0000-0000-000000003121";
+const MARKDOWN_ANCHOR_THREAD_ID = "00000000-0000-0000-0000-000000003123";
 const JSON_THREAD_ID = "00000000-0000-0000-0000-000000003122";
 
 function writeFileMessages({
@@ -138,6 +139,69 @@ test.describe("Artifact preview stability", () => {
     await expect(artifactsPanel.getByText("report.md")).toBeVisible();
     await expect(artifactsPanel.getByText("Markdown draft")).toBeVisible();
     await expect(artifactsPanel.getByText("测试内容 1")).toBeVisible();
+  });
+
+  test("scrolls markdown artifact preview to heading anchors", async ({
+    page,
+  }) => {
+    const filler = Array.from(
+      { length: 40 },
+      (_, index) => `填充段落 ${index + 1}`,
+    ).join("\n\n");
+
+    mockLangGraphAPI(page, {
+      threads: [
+        {
+          thread_id: MARKDOWN_ANCHOR_THREAD_ID,
+          title: "Markdown artifact anchor navigation",
+          messages: writeFileMessages({
+            path: MARKDOWN_ARTIFACT_PATH,
+            content: [
+              "# Report",
+              "",
+              "- [概述](#概述)",
+              "",
+              filler,
+              "",
+              "## 概述",
+              "",
+              "目标章节内容",
+            ].join("\n"),
+          }),
+        },
+      ],
+    });
+
+    await page.goto(`/workspace/chats/${MARKDOWN_ANCHOR_THREAD_ID}`);
+
+    await expect(page.getByText(MARKDOWN_ARTIFACT_PATH)).toBeVisible({
+      timeout: 15_000,
+    });
+    await page.getByText(MARKDOWN_ARTIFACT_PATH).click();
+
+    const artifactsPanel = page.locator("#artifacts");
+    await expect(artifactsPanel.getByText("report.md")).toBeVisible();
+
+    const targetHeading = artifactsPanel.locator("h2#概述");
+    await expect(targetHeading).toHaveCount(1);
+    await artifactsPanel.getByRole("link", { name: "概述" }).click();
+
+    await expect
+      .poll(async () =>
+        targetHeading.evaluate((element) => {
+          const panel = document.querySelector("#artifacts");
+          if (!panel) {
+            return false;
+          }
+          const panelRect = panel.getBoundingClientRect();
+          const headingRect = element.getBoundingClientRect();
+          return (
+            headingRect.top >= panelRect.top &&
+            headingRect.top <= panelRect.bottom
+          );
+        }),
+      )
+      .toBe(true);
   });
 
   test("renders code view for an in-progress non-preview write artifact", async ({
