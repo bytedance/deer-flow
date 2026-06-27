@@ -5,10 +5,13 @@ import { mockLangGraphAPI } from "./utils/mock-api";
 const ARTIFACT_PATH = "/artifact-fixtures/report.html";
 const MARKDOWN_ARTIFACT_PATH = "/artifact-fixtures/report.md";
 const JSON_ARTIFACT_PATH = "/artifact-fixtures/report.json";
+const PRESENTED_ARTIFACT_PATH = "/mnt/user-data/outputs/presented-report.md";
 const IN_PROGRESS_THREAD_ID = "00000000-0000-0000-0000-000000003119";
 const COMPLETE_THREAD_ID = "00000000-0000-0000-0000-000000003120";
 const MARKDOWN_THREAD_ID = "00000000-0000-0000-0000-000000003121";
+const MARKDOWN_ANCHOR_THREAD_ID = "00000000-0000-0000-0000-000000003123";
 const JSON_THREAD_ID = "00000000-0000-0000-0000-000000003122";
+const PRESENTED_THREAD_ID = "00000000-0000-0000-0000-000000003123";
 
 function writeFileMessages({
   path = ARTIFACT_PATH,
@@ -54,6 +57,30 @@ function writeFileMessages({
   }
 
   return messages;
+}
+
+function presentFilesMessages() {
+  return [
+    {
+      type: "human",
+      id: "msg-human-present-file",
+      content: [{ type: "text", text: "Create a markdown report" }],
+    },
+    {
+      type: "ai",
+      id: "msg-ai-present-file",
+      content: "The report has been written. Now let me present the file.",
+      tool_calls: [
+        {
+          id: "present-file-artifact",
+          name: "present_files",
+          args: {
+            filepaths: [PRESENTED_ARTIFACT_PATH],
+          },
+        },
+      ],
+    },
+  ];
 }
 
 test.describe("Artifact preview stability", () => {
@@ -140,6 +167,69 @@ test.describe("Artifact preview stability", () => {
     await expect(artifactsPanel.getByText("测试内容 1")).toBeVisible();
   });
 
+  test("scrolls markdown artifact preview to heading anchors", async ({
+    page,
+  }) => {
+    const filler = Array.from(
+      { length: 40 },
+      (_, index) => `填充段落 ${index + 1}`,
+    ).join("\n\n");
+
+    mockLangGraphAPI(page, {
+      threads: [
+        {
+          thread_id: MARKDOWN_ANCHOR_THREAD_ID,
+          title: "Markdown artifact anchor navigation",
+          messages: writeFileMessages({
+            path: MARKDOWN_ARTIFACT_PATH,
+            content: [
+              "# Report",
+              "",
+              "- [概述](#概述)",
+              "",
+              filler,
+              "",
+              "## 概述",
+              "",
+              "目标章节内容",
+            ].join("\n"),
+          }),
+        },
+      ],
+    });
+
+    await page.goto(`/workspace/chats/${MARKDOWN_ANCHOR_THREAD_ID}`);
+
+    await expect(page.getByText(MARKDOWN_ARTIFACT_PATH)).toBeVisible({
+      timeout: 15_000,
+    });
+    await page.getByText(MARKDOWN_ARTIFACT_PATH).click();
+
+    const artifactsPanel = page.locator("#artifacts");
+    await expect(artifactsPanel.getByText("report.md")).toBeVisible();
+
+    const targetHeading = artifactsPanel.locator("h2#概述");
+    await expect(targetHeading).toHaveCount(1);
+    await artifactsPanel.getByRole("link", { name: "概述" }).click();
+
+    await expect
+      .poll(async () =>
+        targetHeading.evaluate((element) => {
+          const panel = document.querySelector("#artifacts");
+          if (!panel) {
+            return false;
+          }
+          const panelRect = panel.getBoundingClientRect();
+          const headingRect = element.getBoundingClientRect();
+          return (
+            headingRect.top >= panelRect.top &&
+            headingRect.top <= panelRect.bottom
+          );
+        }),
+      )
+      .toBe(true);
+  });
+
   test("renders code view for an in-progress non-preview write artifact", async ({
     page,
   }) => {
@@ -170,5 +260,46 @@ test.describe("Artifact preview stability", () => {
     await expect(
       artifactsPanel.getByText('"中文字段": "测试内容"'),
     ).toBeVisible();
+  });
+
+  test("shows the title for a presented artifact missing from thread artifacts", async ({
+    page,
+  }) => {
+    mockLangGraphAPI(page, {
+      threads: [
+        {
+          thread_id: PRESENTED_THREAD_ID,
+          title: "Presented artifact title fallback",
+          messages: presentFilesMessages(),
+          artifacts: [],
+        },
+      ],
+    });
+    await page.route(
+      `**/api/threads/${PRESENTED_THREAD_ID}/artifacts/mnt/user-data/outputs/presented-report.md`,
+      (route) =>
+        route.fulfill({
+          status: 200,
+          contentType: "text/markdown",
+          body: "# Presented Report\n\nGenerated content",
+        }),
+    );
+
+    await page.goto(`/workspace/chats/${PRESENTED_THREAD_ID}`);
+
+    // The file card in the message list shows the basename only.
+    await expect(page.getByText("presented-report.md")).toBeVisible({
+      timeout: 15_000,
+    });
+    await page.getByText("presented-report.md").first().click();
+
+    const artifactsPanel = page.locator("#artifacts");
+
+    // 1. Header title should fall back to the current filepath even though
+    //    thread.values.artifacts is empty.
+    await expect(artifactsPanel.getByText("presented-report.md")).toBeVisible();
+
+    // 2. Preview content should still render correctly.
+    await expect(artifactsPanel.getByText("Presented Report")).toBeVisible();
   });
 });
