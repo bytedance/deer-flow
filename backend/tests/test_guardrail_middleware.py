@@ -322,6 +322,7 @@ class TestGuardrailMiddleware:
         with pytest.raises(GraphBubbleUp):
             asyncio.run(run())
 
+    # Journal: a denied tool call records the complete guardrail audit event.
     def test_denied_tool_records_guardrail_event(self):
         journal = _FakeJournal()
         mw = GuardrailMiddleware(_DenyAllProvider(), passport="lead-agent")
@@ -331,7 +332,6 @@ class TestGuardrailMiddleware:
             call_id="tool_call_1",
             context={
                 "__run_journal": journal,
-                "is_subagent": True,
                 "user_role": "member",
             },
         )
@@ -348,7 +348,6 @@ class TestGuardrailMiddleware:
         assert changes["tool_name"] == "bash"
         assert changes["tool_call_id"] == "tool_call_1"
         assert changes["agent_id"] == "lead-agent"
-        assert changes["is_subagent"] is True
         assert changes["user_role"] == "member"
         assert changes["allow"] is False
         assert changes["policy_id"] == "test.deny.v1"
@@ -362,7 +361,9 @@ class TestGuardrailMiddleware:
         assert "user_id" not in changes
         assert "oauth_provider" not in changes
         assert "oauth_id" not in changes
+        assert "is_subagent" not in changes
 
+    # Journal: a fail-closed provider error is recorded as a denied tool call.
     def test_fail_closed_provider_error_records_guardrail_event(self):
         journal = _FakeJournal()
         mw = GuardrailMiddleware(_ExplodingProvider(), fail_closed=True)
@@ -382,6 +383,7 @@ class TestGuardrailMiddleware:
         assert changes["provider_error"] is True
         assert changes["fail_closed"] is True
 
+    # Journal: a fail-open provider error is recorded without blocking the tool.
     def test_fail_open_provider_error_records_guardrail_event_and_allows_handler(self):
         journal = _FakeJournal()
         mw = GuardrailMiddleware(_ExplodingProvider(), fail_closed=False)
@@ -402,6 +404,7 @@ class TestGuardrailMiddleware:
         assert changes["provider_error"] is True
         assert changes["fail_closed"] is False
 
+    # Journal: ordinary allowed decisions do not create guardrail audit events.
     def test_allowed_tool_does_not_record_guardrail_event(self):
         journal = _FakeJournal()
         mw = GuardrailMiddleware(_AllowAllProvider())
@@ -414,6 +417,7 @@ class TestGuardrailMiddleware:
         assert result is expected
         assert journal.calls == []
 
+    # Journal: a recording failure must not alter the guardrail denial outcome.
     def test_guardrail_event_recording_failure_does_not_change_denial(self):
         journal = _FakeJournal(fail=True)
         mw = GuardrailMiddleware(_DenyAllProvider())
@@ -426,13 +430,14 @@ class TestGuardrailMiddleware:
         assert result.status == "error"
         assert "oap.denied" in result.content
 
+    # Journal: the async denial path records the same guardrail audit event.
     def test_async_denied_tool_records_guardrail_event(self):
         journal = _FakeJournal()
-        mw = GuardrailMiddleware(_DenyAllProvider(), passport="subagent:research")
+        mw = GuardrailMiddleware(_DenyAllProvider(), passport="lead-agent")
         req = _make_tool_call_request(
             "bash",
             call_id="async_call_1",
-            context={"__run_journal": journal, "is_subagent": True},
+            context={"__run_journal": journal},
         )
 
         async def handler(r):
@@ -452,11 +457,12 @@ class TestGuardrailMiddleware:
         changes = event["changes"]
         assert changes["tool_name"] == "bash"
         assert changes["tool_call_id"] == "async_call_1"
-        assert changes["agent_id"] == "subagent:research"
-        assert changes["is_subagent"] is True
+        assert changes["agent_id"] == "lead-agent"
+        assert "is_subagent" not in changes
         assert changes["allow"] is False
         assert changes["provider_error"] is False
 
+    # Journal: the async fail-open path records the error and still runs the tool.
     def test_async_fail_open_provider_error_records_guardrail_event_and_allows_handler(self):
         journal = _FakeJournal()
         mw = GuardrailMiddleware(_ExplodingProvider(), fail_closed=False)
