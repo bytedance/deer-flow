@@ -7,6 +7,7 @@ import {
   useState,
 } from "react";
 
+import { mergeSubtaskStep } from "./steps";
 import type { Subtask } from "./types";
 
 function isTerminalSubtaskStatus(status: Subtask["status"] | undefined) {
@@ -62,15 +63,29 @@ export function useUpdateSubtask() {
   });
 
   const updateSubtask = useCallback(
-    (task: Partial<Subtask> & { id: string }) => {
+    (
+      update: Partial<Subtask> & {
+        id: string;
+        runningMessageIndex?: number;
+      },
+    ) => {
+      const { runningMessageIndex, ...task } = update;
       const previous = tasks[task.id];
       const previousStatus = previous?.status;
+      const steps = task.latestMessage
+        ? mergeSubtaskStep(
+            previous?.steps,
+            task.latestMessage,
+            runningMessageIndex,
+          )
+        : task.steps;
       // MessageList writes the pending task tool-call state before parsing the
       // matching ToolMessage in the same render. Keep terminal results stable
       // across the next render so the refresh notification does not loop.
       const next = {
         ...previous,
         ...task,
+        ...(steps ? { steps } : {}),
         ...(task.status === "in_progress" &&
         isTerminalSubtaskStatus(previousStatus)
           ? { status: previousStatus }

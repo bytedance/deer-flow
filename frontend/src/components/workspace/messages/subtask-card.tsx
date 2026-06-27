@@ -42,6 +42,13 @@ export function SubtaskCard({
   const [collapsed, setCollapsed] = useState(true);
   const rehypePlugins = useRehypeSplitWordsIntoSpans(isLoading);
   const task = useSubtask(taskId)!;
+  const runningSteps =
+    task.steps
+      ?.map((step) => step.message)
+      .filter((message) => hasToolCalls(message)) ??
+    (task.latestMessage && hasToolCalls(task.latestMessage)
+      ? [task.latestMessage]
+      : []);
   const icon = useMemo(() => {
     if (task.status === "completed") {
       return <CheckCircleIcon className="size-3" />;
@@ -136,15 +143,15 @@ export function SubtaskCard({
             ></ChainOfThoughtStep>
           )}
           {task.status === "in_progress" &&
-            task.latestMessage &&
-            hasToolCalls(task.latestMessage) && (
+            runningSteps.map((message, index) => (
               <ChainOfThoughtStep
+                key={message.id ?? `${task.id}-${index}`}
                 label={t.subtasks.in_progress}
                 icon={<Loader2Icon className="size-4 animate-spin" />}
               >
-                {explainLastToolCall(task.latestMessage, t)}
+                {explainLastToolCall(message, t)}
               </ChainOfThoughtStep>
-            )}
+            ))}
           {task.status === "completed" && (
             <>
               <ChainOfThoughtStep

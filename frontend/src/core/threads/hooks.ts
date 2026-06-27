@@ -816,8 +816,14 @@ export function useThreadStream({
           type: "task_running";
           task_id: string;
           message: AIMessage;
+          message_index?: unknown;
         };
-        updateSubtask({ id: e.task_id, latestMessage: e.message });
+        updateSubtask({
+          id: e.task_id,
+          latestMessage: e.message,
+          runningMessageIndex:
+            typeof e.message_index === "number" ? e.message_index : undefined,
+        });
         return;
       }
 
