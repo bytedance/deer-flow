@@ -29,7 +29,7 @@ from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import AIMessage, AnyMessage, BaseMessage, HumanMessage, ToolMessage
 from langgraph.types import Command
 
-from deerflow.utils.messages import message_to_text
+from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, get_original_user_content_text, message_to_text
 
 if TYPE_CHECKING:
     from deerflow.runtime.events.store.base import RunEventStore
@@ -107,6 +107,16 @@ class RunJournal(BaseCallbackHandler):
     def _message_text(message: BaseMessage) -> str:
         """Extract displayable text from a message's mixed content shape."""
         return message_to_text(message, text_attribute_fallback=True)
+
+    @staticmethod
+    def _display_human_message(message: HumanMessage) -> HumanMessage:
+        """Return the user-facing form of a model-facing human message."""
+        additional_kwargs = dict(message.additional_kwargs or {})
+        if ORIGINAL_USER_CONTENT_KEY not in additional_kwargs:
+            return message
+        content = get_original_user_content_text(message.content, additional_kwargs)
+        additional_kwargs.pop(ORIGINAL_USER_CONTENT_KEY, None)
+        return message.model_copy(update={"content": content, "additional_kwargs": additional_kwargs})
 
     def _record_message_summary(self, message: BaseMessage, *, caller: str | None = None) -> None:
         """Update run-level convenience fields for persisted run rows."""
@@ -203,14 +213,15 @@ class RunJournal(BaseCallbackHandler):
                 for m in reversed(batch):
                     if isinstance(m, HumanMessage) and m.name != "summary" and m.additional_kwargs.get("hide_from_ui") is not True:
                         caller = self._identify_caller(tags)
-                        self.set_first_human_message(m.text)
+                        display_message = self._display_human_message(m)
+                        self.set_first_human_message(self._message_text(display_message))
                         self._put(
                             event_type="llm.human.input",
                             category="message",
-                            content=m.model_dump(),
+                            content=display_message.model_dump(),
                             metadata={"caller": caller},
                         )
-                        self._record_message_summary(m, caller=caller)
+                        self._record_message_summary(display_message, caller=caller)
                         break
                 if self._first_human_msg:
                     break

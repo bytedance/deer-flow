@@ -19,6 +19,7 @@ from deerflow.agents.middlewares.input_sanitization_middleware import (
     _check_user_content,
     _is_genuine_user_message,
 )
+from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
 
 
 def _make_middleware() -> InputSanitizationMiddleware:
@@ -269,6 +270,34 @@ class TestWrapModelCallCleanInput:
         sanitized_content = captured[0].messages[-1].content
         assert _USER_INPUT_BEGIN in sanitized_content
         assert "Hello" in sanitized_content
+
+    def test_stamps_original_user_content_for_display_surfaces(self):
+        mw = _make_middleware()
+        request = _make_request([HumanMessage(content="Hello", id="msg-1")])
+        captured = []
+
+        mw.wrap_model_call(request, lambda req: captured.append(req) or "ok")
+
+        sanitized_message = captured[0].messages[-1]
+        assert sanitized_message.additional_kwargs[ORIGINAL_USER_CONTENT_KEY] == "Hello"
+
+    def test_preserves_existing_original_user_content(self):
+        mw = _make_middleware()
+        request = _make_request(
+            [
+                HumanMessage(
+                    content="<uploaded_files>...</uploaded_files>\n\nHello",
+                    id="msg-1",
+                    additional_kwargs={ORIGINAL_USER_CONTENT_KEY: "Hello"},
+                )
+            ]
+        )
+        captured = []
+
+        mw.wrap_model_call(request, lambda req: captured.append(req) or "ok")
+
+        sanitized_message = captured[0].messages[-1]
+        assert sanitized_message.additional_kwargs[ORIGINAL_USER_CONTENT_KEY] == "Hello"
 
     def test_does_not_mutate_original_request(self):
         mw = _make_middleware()

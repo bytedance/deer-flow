@@ -11,6 +11,7 @@ import pytest
 
 from deerflow.runtime.events.store.memory import MemoryRunEventStore
 from deerflow.runtime.journal import RunJournal
+from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
 
 
 @pytest.fixture
@@ -839,6 +840,35 @@ class TestChatModelStartHumanMessage:
         human_events = [e for e in events if e["event_type"] == "llm.human.input"]
         assert len(human_events) == 1
         assert human_events[0]["content"]["content"] == "What is AI?"
+
+    @pytest.mark.anyio
+    async def test_human_input_event_uses_original_user_content(self, journal_setup):
+        """Model-facing guardrail wrappers must not leak into UI message events."""
+        from langchain_core.messages import HumanMessage
+
+        j, store = journal_setup
+        wrapped_content = "--- BEGIN USER INPUT ---\nWhat is AI?\n--- END USER INPUT ---"
+        messages_batch = [
+            [
+                HumanMessage(
+                    content=wrapped_content,
+                    additional_kwargs={
+                        ORIGINAL_USER_CONTENT_KEY: "What is AI?",
+                        "files": [{"filename": "notes.txt"}],
+                    },
+                )
+            ],
+        ]
+        j.on_chat_model_start({}, messages_batch, run_id=uuid4(), tags=["lead_agent"])
+        await j.flush()
+
+        assert j._first_human_msg == "What is AI?"
+        events = await store.list_events("t1", "r1")
+        human_events = [e for e in events if e["event_type"] == "llm.human.input"]
+        assert len(human_events) == 1
+        content = human_events[0]["content"]
+        assert content["content"] == "What is AI?"
+        assert content["additional_kwargs"] == {"files": [{"filename": "notes.txt"}]}
 
     @pytest.mark.anyio
     async def test_skips_summary_named_human_messages(self, journal_setup):
