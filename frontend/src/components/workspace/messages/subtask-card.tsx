@@ -3,6 +3,7 @@ import {
   ChevronUp,
   ClipboardListIcon,
   Loader2Icon,
+  SparklesIcon,
   WrenchIcon,
   XCircleIcon,
 } from "lucide-react";
@@ -23,7 +24,7 @@ import { streamdownPluginsWithWordAnimation } from "@/core/streamdown";
 import { SafeStreamdown } from "@/core/streamdown/components";
 import { fetchSubtaskSteps } from "@/core/tasks/api";
 import { useSubtask, useUpdateSubtask } from "@/core/tasks/context";
-import { toolStepsForDisplay } from "@/core/tasks/steps";
+import { stepsForDisplay } from "@/core/tasks/steps";
 import { explainLastToolCall } from "@/core/tools/utils";
 import { cn } from "@/lib/utils";
 
@@ -51,9 +52,10 @@ export function SubtaskCard({
   const task = useSubtask(taskId)!;
   const updateSubtask = useUpdateSubtask();
 
-  // The card shows the tools the subagent ran, by name only (#3779) — not the
-  // verbose tool output bodies.
-  const toolSteps = toolStepsForDisplay(task.steps);
+  // The card shows the subagent's step timeline (#3779): its reasoning turns
+  // (AI text) interleaved with the tools it ran (by name). See stepsForDisplay
+  // for what is kept/dropped.
+  const displaySteps = stepsForDisplay(task.steps, task.status);
 
   // Backfill step history on expand for historical runs (#3779). Live runs
   // already have steps from SSE, so the `steps.length` guard skips the fetch.
@@ -171,20 +173,33 @@ export function SubtaskCard({
               }
             ></ChainOfThoughtStep>
           )}
-          {toolSteps.map((step, i) => {
+          {displaySteps.map((step, i) => {
             const isLastWhileRunning =
-              task.status === "in_progress" && i === toolSteps.length - 1;
+              task.status === "in_progress" && i === displaySteps.length - 1;
+            const icon = isLastWhileRunning ? (
+              <Loader2Icon className="size-4 animate-spin" />
+            ) : step.kind === "tool" ? (
+              <WrenchIcon className="size-4" />
+            ) : (
+              <SparklesIcon className="size-4" />
+            );
             return (
               <ChainOfThoughtStep
                 key={`${step.message_index}-${i}`}
-                label={step.tool_name ?? t.subtasks[task.status]}
-                icon={
-                  isLastWhileRunning ? (
-                    <Loader2Icon className="size-4 animate-spin" />
+                label={
+                  step.kind === "tool" ? (
+                    (step.tool_name ?? t.subtasks[task.status])
                   ) : (
-                    <WrenchIcon className="size-4" />
+                    <div className="text-muted-foreground line-clamp-3 text-sm">
+                      <MarkdownContent
+                        content={step.text}
+                        isLoading={false}
+                        rehypePlugins={rehypePlugins}
+                      />
+                    </div>
                   )
                 }
+                icon={icon}
               />
             );
           })}

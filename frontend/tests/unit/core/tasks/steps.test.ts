@@ -4,7 +4,7 @@ import {
   eventsToSteps,
   mergeSteps,
   messageToStep,
-  toolStepsForDisplay,
+  stepsForDisplay,
 } from "@/core/tasks/steps";
 
 describe("messageToStep", () => {
@@ -84,28 +84,57 @@ describe("mergeSteps", () => {
   });
 });
 
-describe("toolStepsForDisplay", () => {
-  it("keeps only tool steps (the tools that ran), in order", () => {
+describe("stepsForDisplay", () => {
+  it("keeps tool steps and AI steps that have text, ordered by message_index", () => {
     const steps = [
+      messageToStep({ type: "tool", name: "web_search", content: "big result body" }, 2),
       messageToStep(
-        { type: "ai", content: "searching", tool_calls: [{ name: "web_search", args: {} }] },
+        { type: "ai", content: "Let me search", tool_calls: [{ name: "web_search", args: {} }] },
         1,
       ),
-      messageToStep({ type: "tool", name: "web_search", content: "big result body" }, 2),
-      messageToStep({ type: "ai", content: "final answer" }, 3),
-      messageToStep({ type: "tool", name: "read_file", content: "file contents" }, 4),
     ];
 
-    const display = toolStepsForDisplay(steps);
+    const display = stepsForDisplay(steps, "in_progress");
 
-    expect(display.map((s) => s.tool_name)).toEqual(["web_search", "read_file"]);
+    expect(display.map((s) => s.message_index)).toEqual([1, 2]);
+    expect(display.map((s) => s.kind)).toEqual(["ai", "tool"]);
   });
 
-  it("returns empty for undefined or no tool steps", () => {
-    expect(toolStepsForDisplay(undefined)).toEqual([]);
-    expect(
-      toolStepsForDisplay([messageToStep({ type: "ai", content: "thinking" }, 1)]),
-    ).toEqual([]);
+  it("drops AI steps with blank text even if they have tool_calls", () => {
+    const steps = [
+      messageToStep(
+        { type: "ai", content: "   ", tool_calls: [{ name: "web_search", args: {} }] },
+        1,
+      ),
+      messageToStep({ type: "tool", name: "read_file", content: "x" }, 2),
+    ];
+
+    expect(stepsForDisplay(steps, "in_progress").map((s) => s.message_index)).toEqual([2]);
+  });
+
+  it("drops the trailing final AI answer when completed (already shown as result)", () => {
+    const steps = [
+      messageToStep({ type: "tool", name: "web_search", content: "x" }, 1),
+      messageToStep({ type: "ai", content: "The final answer is 42." }, 2),
+    ];
+
+    expect(stepsForDisplay(steps, "completed").map((s) => s.kind)).toEqual(["tool"]);
+  });
+
+  it("keeps the trailing AI step while still in progress", () => {
+    const steps = [
+      messageToStep({ type: "tool", name: "web_search", content: "x" }, 1),
+      messageToStep({ type: "ai", content: "Thinking about the answer..." }, 2),
+    ];
+
+    expect(stepsForDisplay(steps, "in_progress").map((s) => s.kind)).toEqual([
+      "tool",
+      "ai",
+    ]);
+  });
+
+  it("returns empty for undefined", () => {
+    expect(stepsForDisplay(undefined, "in_progress")).toEqual([]);
   });
 });
 

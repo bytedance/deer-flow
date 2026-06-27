@@ -79,15 +79,32 @@ export function messageToStep(
 }
 
 /**
- * Steps to render in the subtask card: the tool steps (the tools that actually
- * ran), one row each. The card shows tool names only — not the verbose tool
- * output bodies, and not the assistant reasoning turns. Tool steps give a clean
- * "which tools ran, in order" timeline (web_search → read_file → …).
+ * Steps to render in the subtask card timeline (#3779). Interleaves the
+ * subagent's assistant turns and tool steps, ordered by `message_index`:
+ *
+ * - tool steps are always kept (one "the subagent ran <tool>" row each);
+ * - AI steps are kept only when they carry visible reasoning text — a turn that
+ *   only requests tools (blank text) adds no information beyond the tool rows
+ *   that follow it, so it is dropped;
+ * - when the task is `completed`, a trailing AI step with no tool_calls is the
+ *   subagent's final answer, which the card already renders as `task.result`,
+ *   so it is dropped here to avoid showing the answer twice.
  */
-export function toolStepsForDisplay(
+export function stepsForDisplay(
   steps: SubtaskStep[] | undefined,
+  status: "in_progress" | "completed" | "failed",
 ): SubtaskStep[] {
-  return (steps ?? []).filter((step) => step.kind === "tool");
+  const visible = (steps ?? [])
+    .filter((step) => step.kind === "tool" || step.text.trim() !== "")
+    .sort((a, b) => a.message_index - b.message_index);
+
+  if (status === "completed") {
+    const last = visible[visible.length - 1];
+    if (last?.kind === "ai" && !last?.tool_calls?.length) {
+      return visible.slice(0, -1);
+    }
+  }
+  return visible;
 }
 
 type RunEvent = {
