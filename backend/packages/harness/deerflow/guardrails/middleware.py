@@ -33,11 +33,13 @@ class GuardrailMiddleware(AgentMiddleware[AgentState]):
         self.fail_closed = fail_closed
         self.passport = passport
 
-    def _build_request(self, request: ToolCallRequest) -> GuardrailRequest:
+    @staticmethod
+    def _resolve_context(request: ToolCallRequest) -> dict:
         runtime = getattr(request, "runtime", None)
         context = getattr(runtime, "context", None) if runtime is not None else None
-        context = context if isinstance(context, dict) else {}
+        return context if isinstance(context, dict) else {}
 
+    def _build_request(self, request: ToolCallRequest, context: dict) -> GuardrailRequest:
         return GuardrailRequest(
             tool_name=str(request.tool_call.get("name", "")),
             tool_input=request.tool_call.get("args", {}),
@@ -67,7 +69,7 @@ class GuardrailMiddleware(AgentMiddleware[AgentState]):
 
     def _record_guardrail_event(
         self,
-        request: ToolCallRequest,
+        context: dict,
         guardrail_request: GuardrailRequest,
         decision: GuardrailDecision,
         *,
@@ -81,11 +83,6 @@ class GuardrailMiddleware(AgentMiddleware[AgentState]):
         behavior. Runtimes without ``__run_journal`` (including embedded and
         subagent execution) skip persistence.
         """
-        runtime = getattr(request, "runtime", None)
-        context = getattr(runtime, "context", None) if runtime is not None else None
-        if not isinstance(context, dict):
-            return
-
         journal = context.get("__run_journal")
         if journal is None:
             return
@@ -97,6 +94,8 @@ class GuardrailMiddleware(AgentMiddleware[AgentState]):
             "tool_name": guardrail_request.tool_name,
             "tool_call_id": guardrail_request.tool_call_id,
             "agent_id": guardrail_request.agent_id,
+            # Native subagents do not currently inherit __run_journal; custom
+            # runtimes may still provide one with subagent attribution.
             "is_subagent": guardrail_request.is_subagent,
             "user_role": guardrail_request.user_role,
             "allow": decision.allow,
@@ -124,7 +123,8 @@ class GuardrailMiddleware(AgentMiddleware[AgentState]):
         request: ToolCallRequest,
         handler: Callable[[ToolCallRequest], ToolMessage | Command],
     ) -> ToolMessage | Command:
-        gr = self._build_request(request)
+        context = self._resolve_context(request)
+        gr = self._build_request(request, context)
         try:
             decision = self.provider.evaluate(gr)
         except GraphBubbleUp:
@@ -135,7 +135,7 @@ class GuardrailMiddleware(AgentMiddleware[AgentState]):
             if self.fail_closed:
                 decision = GuardrailDecision(allow=False, reasons=[GuardrailReason(code="oap.evaluator_error", message="guardrail provider error (fail-closed)")])
                 self._record_guardrail_event(
-                    request,
+                    context,
                     gr,
                     decision,
                     action="deny_tool_call",
@@ -145,7 +145,7 @@ class GuardrailMiddleware(AgentMiddleware[AgentState]):
             else:
                 decision = GuardrailDecision(allow=True, reasons=[GuardrailReason(code="oap.evaluator_error", message="guardrail provider error (fail-open)")])
                 self._record_guardrail_event(
-                    request,
+                    context,
                     gr,
                     decision,
                     action="allow_tool_call_after_provider_error",
@@ -155,7 +155,7 @@ class GuardrailMiddleware(AgentMiddleware[AgentState]):
         if not decision.allow:
             logger.warning("Guardrail denied: tool=%s policy=%s code=%s", gr.tool_name, decision.policy_id, decision.reasons[0].code if decision.reasons else "unknown")
             self._record_guardrail_event(
-                request,
+                context,
                 gr,
                 decision,
                 action="deny_tool_call",
@@ -170,7 +170,8 @@ class GuardrailMiddleware(AgentMiddleware[AgentState]):
         request: ToolCallRequest,
         handler: Callable[[ToolCallRequest], Awaitable[ToolMessage | Command]],
     ) -> ToolMessage | Command:
-        gr = self._build_request(request)
+        context = self._resolve_context(request)
+        gr = self._build_request(request, context)
         try:
             decision = await self.provider.aevaluate(gr)
         except GraphBubbleUp:
@@ -181,7 +182,7 @@ class GuardrailMiddleware(AgentMiddleware[AgentState]):
             if self.fail_closed:
                 decision = GuardrailDecision(allow=False, reasons=[GuardrailReason(code="oap.evaluator_error", message="guardrail provider error (fail-closed)")])
                 self._record_guardrail_event(
-                    request,
+                    context,
                     gr,
                     decision,
                     action="deny_tool_call",
@@ -191,7 +192,7 @@ class GuardrailMiddleware(AgentMiddleware[AgentState]):
             else:
                 decision = GuardrailDecision(allow=True, reasons=[GuardrailReason(code="oap.evaluator_error", message="guardrail provider error (fail-open)")])
                 self._record_guardrail_event(
-                    request,
+                    context,
                     gr,
                     decision,
                     action="allow_tool_call_after_provider_error",
@@ -201,7 +202,7 @@ class GuardrailMiddleware(AgentMiddleware[AgentState]):
         if not decision.allow:
             logger.warning("Guardrail denied: tool=%s policy=%s code=%s", gr.tool_name, decision.policy_id, decision.reasons[0].code if decision.reasons else "unknown")
             self._record_guardrail_event(
-                request,
+                context,
                 gr,
                 decision,
                 action="deny_tool_call",
