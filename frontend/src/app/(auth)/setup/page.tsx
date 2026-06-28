@@ -11,6 +11,8 @@ import { getCsrfHeaders } from "@/core/api/fetcher";
 import { useAuth } from "@/core/auth/AuthProvider";
 import { parseAuthError } from "@/core/auth/types";
 
+import { decideSetupModeFromSetupStatus } from "./setup-status-helpers";
+
 type SetupMode = "loading" | "init_admin" | "change_password";
 
 export default function SetupPage() {
@@ -35,20 +37,33 @@ export default function SetupPage() {
     if (isAuthenticated && user?.needs_setup) {
       setMode("change_password");
     } else if (!isAuthenticated) {
-      // Check if the system has no users yet
+      // Check if the system has no users yet. Fail-safe to init_admin on
+      // any non-ok response (e.g. 429 rate-limited) so the operator can
+      // still reach first-boot setup — see #2999.
       void fetch("/api/v1/auth/setup-status")
-        .then((r) => r.json())
-        .then((data: { needs_setup?: boolean }) => {
+        .then(async (r) => {
+          let needsSetup: boolean | undefined;
+          if (r.ok) {
+            try {
+              const data = (await r.json()) as { needs_setup?: boolean };
+              needsSetup = data.needs_setup;
+            } catch {
+              needsSetup = undefined;
+            }
+          }
           if (cancelled) return;
-          if (data.needs_setup) {
-            setMode("init_admin");
-          } else {
-            // System already set up and user is not logged in — go to login
+          if (
+            decideSetupModeFromSetupStatus(r.ok, needsSetup) === "redirect_login"
+          ) {
             router.push("/login");
+          } else {
+            setMode("init_admin");
           }
         })
         .catch(() => {
-          if (!cancelled) router.push("/login");
+          // Network error: fail-safe to init_admin so the operator can
+          // still reach the setup form when the gateway is flaky — see #2999.
+          if (!cancelled) setMode("init_admin");
         });
     } else {
       // Authenticated but needs_setup is false — already set up
