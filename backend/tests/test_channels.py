@@ -1571,7 +1571,7 @@ class TestChannelManager:
             await manager.stop()
 
             mock_client.runs.stream.assert_called_once()
-            assert [msg.text for msg in outbound_received] == ["Hello", "Hello world", "Hello world"]
+            assert [msg.text for msg in outbound_received] == ["Hello ▉", "Hello world ▉", "Hello world"]
             assert [msg.is_final for msg in outbound_received] == [False, False, True]
             assert all(msg.thread_ts == "om-source-1" for msg in outbound_received)
 
@@ -1642,7 +1642,7 @@ class TestChannelManager:
             await manager.stop()
 
             mock_client.runs.stream.assert_called_once()
-            assert [msg.text for msg in outbound_received] == ["Hello", "Hello world", "Hello world"]
+            assert [msg.text for msg in outbound_received] == ["Hello ▉", "Hello world ▉", "Hello world"]
             assert [msg.is_final for msg in outbound_received] == [False, False, True]
 
         _run(go())
@@ -1700,8 +1700,8 @@ class TestChannelManager:
             await manager.stop()
 
             assert [msg.is_final for msg in outbound_received] == [False, False, True]
-            assert outbound_received[0].text == "Thinking"
-            assert outbound_received[1].text == "Which environment?"
+            assert outbound_received[0].text == "Thinking ▉"
+            assert outbound_received[1].text == "Which environment? ▉"
             assert outbound_received[2].text == "Which environment?"
             assert all(PENDING_CLARIFICATION_METADATA_KEY not in msg.metadata for msg in outbound_received[:-1])
             assert outbound_received[-1].metadata[PENDING_CLARIFICATION_METADATA_KEY] is True
