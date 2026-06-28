@@ -203,8 +203,10 @@ _is_repo_nginx_pid() {
     local args
 
     command=$(ps -p "$pid" -o comm= 2>/dev/null) || return 1
+    # nginx rewrites argv[0] for master/worker processes. On macOS,
+    # `ps -o comm=` can report that rewritten form instead of the binary name.
     case "$command" in
-        nginx|*/nginx) ;;
+        nginx|*/nginx|nginx:*) ;;
         *) return 1 ;;
     esac
 

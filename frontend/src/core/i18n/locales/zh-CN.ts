@@ -545,6 +545,10 @@ export const zhCN: Translations = {
     pleaseWait: "请稍候...",
     signIn: "登录",
     createAccount: "创建账号",
+    createAdminAccount: "创建管理员账号",
+    adminSetupRequiredTitle: "需要先完成管理员初始化",
+    adminSetupRequiredDescription:
+      "DeerFlow 需要先创建管理员账号，然后才能创建新的普通账号。",
     orContinueWith: "或使用以下方式登录",
     ssoHint: "如果你的账号使用单点登录（SSO），请改用下方的选项登录。",
     continueWith: (provider: string) => `使用 ${provider} 登录`,

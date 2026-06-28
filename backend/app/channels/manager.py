@@ -54,7 +54,8 @@ DEFAULT_RUN_CONTEXT: dict[str, Any] = {
     "is_plan_mode": False,
     "subagent_enabled": False,
 }
-STREAM_UPDATE_MIN_INTERVAL_SECONDS = 0.35
+STREAM_UPDATE_MIN_INTERVAL_SECONDS = 1.0
+STREAM_UPDATE_MIN_CHARS = 60  # flush immediately when this many chars accumulate
 # Stream modes requested from the runtime, and the SSE event names under which
 # the message-tuple stream may arrive: the embedded runtime (and LangGraph
 # Platform) deliver the requested "messages-tuple" mode as event "messages".
@@ -1403,6 +1404,7 @@ class ChannelManager:
         current_message_id: str | None = None
         latest_text = ""
         last_published_text = ""
+        last_published_len = 0
         last_publish_at = 0.0
         stream_error: BaseException | None = None
         stream_kwargs: dict[str, Any] = {
@@ -1430,23 +1432,30 @@ class ChannelManager:
                         latest_text = accumulated_text
                 elif event == "values" and isinstance(data, (dict, list)):
                     last_values = data
-                    snapshot_text = _extract_response_text(data)
-                    if snapshot_text:
-                        latest_text = snapshot_text
+                    # Clarification text is only in the values snapshot;
+                    # publish it so the user sees the question mid-stream.
+                    if _has_current_turn_clarification(data):
+                        clarification_text = _extract_response_text(data)
+                        if clarification_text and clarification_text != latest_text:
+                            latest_text = clarification_text
 
                 if not latest_text or latest_text == last_published_text:
                     continue
 
                 now = time.monotonic()
-                if last_published_text and now - last_publish_at < STREAM_UPDATE_MIN_INTERVAL_SECONDS:
-                    continue
+                new_chars = len(latest_text) - last_published_len
+                # OR logic: flush when interval elapsed OR enough chars accumulated
+                if last_published_text:
+                    if now - last_publish_at < STREAM_UPDATE_MIN_INTERVAL_SECONDS and new_chars < STREAM_UPDATE_MIN_CHARS:
+                        continue
 
+                display_text = latest_text + " ▉"
                 await self.bus.publish_outbound(
                     OutboundMessage(
                         channel_name=msg.channel_name,
                         chat_id=msg.chat_id,
                         thread_id=thread_id,
-                        text=latest_text,
+                        text=display_text,
                         is_final=False,
                         thread_ts=msg.thread_ts,
                         connection_id=msg.connection_id,
@@ -1455,6 +1464,7 @@ class ChannelManager:
                     )
                 )
                 last_published_text = latest_text
+                last_published_len = len(latest_text)
                 last_publish_at = now
         except Exception as exc:
             stream_error = exc
