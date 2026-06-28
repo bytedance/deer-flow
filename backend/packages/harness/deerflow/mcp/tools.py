@@ -657,7 +657,8 @@ async def get_mcp_tools() -> list[BaseTool]:
             if tool_server is not None:
                 transport = servers_config[tool_server].get("transport", "stdio")
                 if transport == "stdio":
-                    _timeout = servers_config[tool_server].get("tool_call_timeout")
+                    server_cfg = extensions_config.mcp_servers.get(tool_server)
+                    _timeout = server_cfg.tool_call_timeout if server_cfg else None
                     wrapped_tools.append(_make_session_pool_tool(tool, tool_server, servers_config[tool_server], tool_interceptors, tool_call_timeout=_timeout))
                 else:
                     wrapped_tools.append(tool)
