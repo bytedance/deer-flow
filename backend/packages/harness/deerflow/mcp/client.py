@@ -21,6 +21,9 @@ def build_server_params(server_name: str, config: McpServerConfig) -> dict[str, 
     transport_type = config.type or "stdio"
     params: dict[str, Any] = {"transport": transport_type}
 
+    if config.tool_call_timeout is not None:
+        params["tool_call_timeout"] = config.tool_call_timeout
+
     if transport_type == "stdio":
         if not config.command:
             raise ValueError(f"MCP server '{server_name}' with stdio transport requires 'command' field")
