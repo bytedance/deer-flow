@@ -197,12 +197,12 @@ class RunJournal(BaseCallbackHandler):
             [len(batch) for batch in messages],
         )
 
-        # Capture the first human message sent to any LLM in this run.
-        if not self._first_human_msg and messages:
+        # Capture the first user message sent to the lead agent in this run.
+        caller = self._identify_caller(tags)
+        if caller == "lead_agent" and not self._first_human_msg and messages:
             for batch in reversed(messages):
                 for m in reversed(batch):
                     if isinstance(m, HumanMessage) and m.name != "summary" and m.additional_kwargs.get("hide_from_ui") is not True:
-                        caller = self._identify_caller(tags)
                         self.set_first_human_message(m.text)
                         self._put(
                             event_type="llm.human.input",
