@@ -136,17 +136,38 @@ export function SubtaskCard({
             ></ChainOfThoughtStep>
           )}
           {task.status === "in_progress" &&
-            task.messageHistory &&
-            task.messageHistory.length > 0 &&
-            task.messageHistory.map((msg, idx) => {
-              const isLatest = idx === task.messageHistory.length - 1;
-              const steps: React.ReactNode[] = [];
-              if (hasToolCalls(msg)) {
-                for (const tc of msg.tool_calls!) {
+            (() => {
+              // Snapshot the array so TS keeps the non-null narrowing across
+              // the map callback and we can read .length without `!`. Empty
+              // and missing-history are both rendered as "nothing yet" by
+              // returning null.
+              const history = task.messageHistory;
+              if (!history || history.length === 0) {
+                return null;
+              }
+              const lastIdx = history.length - 1;
+              return history.map((msg, idx) => {
+                const isLatest = idx === lastIdx;
+                const steps: React.ReactNode[] = [];
+                if (hasToolCalls(msg)) {
+                  for (const tc of msg.tool_calls!) {
+                    steps.push(
+                      <ChainOfThoughtStep
+                        key={`${msg.id ?? idx}-tc-${tc.id ?? steps.length}`}
+                        label={explainToolCall(tc, t)}
+                        icon={
+                          isLatest ? (
+                            <Loader2Icon className="size-4 animate-spin" />
+                          ) : undefined
+                        }
+                      />,
+                    );
+                  }
+                } else {
                   steps.push(
                     <ChainOfThoughtStep
-                      key={`${msg.id ?? idx}-tc-${tc.id ?? steps.length}`}
-                      label={explainToolCall(tc, t)}
+                      key={`${msg.id ?? idx}-thinking`}
+                      label={t.common.thinking}
                       icon={
                         isLatest ? (
                           <Loader2Icon className="size-4 animate-spin" />
@@ -155,21 +176,9 @@ export function SubtaskCard({
                     />,
                   );
                 }
-              } else {
-                steps.push(
-                  <ChainOfThoughtStep
-                    key={`${msg.id ?? idx}-thinking`}
-                    label={t.common.thinking}
-                    icon={
-                      isLatest ? (
-                        <Loader2Icon className="size-4 animate-spin" />
-                      ) : undefined
-                    }
-                  />,
-                );
-              }
-              return steps;
-            })}
+                return steps;
+              });
+            })()}
           {task.status === "completed" && (
             <>
               <ChainOfThoughtStep
