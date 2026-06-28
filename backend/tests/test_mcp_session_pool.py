@@ -917,6 +917,108 @@ async def test_http_transport_tools_not_pooled():
 
 
 # ---------------------------------------------------------------------------
+# Regression for #3811: tools must route to the server that produced them when
+# one server name is a prefix of another (e.g. `web` and `web_scraper`).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_get_mcp_tools_routes_tools_by_authoritative_server_when_names_overlap():
+    """A tool from `web_scraper` must be pooled under `web_scraper`, not under `web`.
+
+    With `tool_name_prefix=True`, a tool from `web_scraper` is named
+    `web_scraper_fetch`. The previous code re-derived the source server by
+    picking the first name in `servers_config` whose `name_` prefix matched the
+    tool name. `web_scraper_fetch`.startswith(`web_`) is True, so the tool was
+    pooled under `web` and invoked with the wrong stripped name (`scraper_fetch`
+    instead of `fetch`), producing "tool not found" at call time. The fix uses
+    the authoritative per-server grouping from `asyncio.gather` instead of
+    inferring the server from the tool-name prefix.
+    """
+    from langchain_core.tools import StructuredTool
+    from pydantic import BaseModel, Field
+
+    from deerflow.mcp.tools import get_mcp_tools
+
+    class Args(BaseModel):
+        url: str = Field(..., description="url")
+
+    # Both servers are stdio so both tools get wrapped. The shorter-named server
+    # is declared first to make a prefix-match regression visible: if
+    # `web_scraper_fetch` were matched against `web_` first, it would route
+    # under `web` with the wrong stripped name.
+    short_tool = StructuredTool(
+        name="web_search",
+        description="web search",
+        args_schema=Args,
+        coroutine=AsyncMock(),
+        response_format="content_and_artifact",
+    )
+    long_tool = StructuredTool(
+        name="web_scraper_fetch",
+        description="web scraper fetch",
+        args_schema=Args,
+        coroutine=AsyncMock(),
+        response_format="content_and_artifact",
+    )
+
+    mock_session = AsyncMock()
+    mock_session.call_tool = AsyncMock(return_value=MagicMock(content=[], isError=False, structuredContent=None))
+    mock_cm = MagicMock()
+    mock_cm.__aenter__ = AsyncMock(return_value=mock_session)
+    mock_cm.__aexit__ = AsyncMock(return_value=False)
+
+    extensions_config = MagicMock()
+    extensions_config.get_enabled_mcp_servers.return_value = {
+        "web": MagicMock(
+            type="stdio", command="web-srv", args=[], env=None, url=None, headers=None
+        ),
+        "web_scraper": MagicMock(
+            type="stdio", command="scraper-srv", args=[], env=None, url=None, headers=None
+        ),
+    }
+    extensions_config.model_extra = {}
+
+    servers_config = {
+        "web": {"transport": "stdio", "command": "web-srv", "args": []},
+        "web_scraper": {"transport": "stdio", "command": "scraper-srv", "args": []},
+    }
+
+    with (
+        patch("deerflow.mcp.tools.ExtensionsConfig.from_file", return_value=extensions_config),
+        patch("deerflow.mcp.tools.build_servers_config", return_value=servers_config),
+        patch("deerflow.mcp.tools.get_initial_oauth_headers", return_value={}),
+        patch("deerflow.mcp.tools.build_oauth_tool_interceptor", return_value=None),
+        patch("langchain_mcp_adapters.client.MultiServerMCPClient") as MockClient,
+        patch("langchain_mcp_adapters.sessions.create_session", return_value=mock_cm),
+    ):
+        mock_client_instance = MockClient.return_value
+
+        async def get_tools_for_server(*, server_name: str | None = None):
+            if server_name == "web":
+                return [short_tool]
+            if server_name == "web_scraper":
+                return [long_tool]
+            raise AssertionError(f"unexpected server_name: {server_name}")
+
+        mock_client_instance.get_tools = AsyncMock(side_effect=get_tools_for_server)
+
+        tools = await get_mcp_tools()
+
+        # Both tools are present and retain their original (prefixed) names.
+        names = sorted(t.name for t in tools)
+        assert names == ["web_scraper_fetch", "web_search"]
+
+        # Invoke the longer-named tool and verify the call lands on the right server
+        # with the correctly stripped name (`fetch`, not `scraper_fetch`). This must
+        # run inside the `create_session` patch so pool entry uses the mock session.
+        long_wrapped = next(t for t in tools if t.name == "web_scraper_fetch")
+        long_wrapped.func(url="https://example.com")
+
+    mock_session.call_tool.assert_called_once_with("fetch", {"url": "https://example.com"})
+
+
+# ---------------------------------------------------------------------------
 # Regression for #3379: cancel scope must be exited in the entering task
 # ---------------------------------------------------------------------------
 
