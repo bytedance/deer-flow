@@ -884,18 +884,16 @@ class FeishuChannel(Channel):
 
             # topic_id determines which LangGraph thread the message maps to.
             # P2P chats: topic_id=None so all messages share one thread (like Telegram DMs).
-            # Group chats: use root_id for replies (same topic), msg_id for new messages.
-            if chat_type == "p2p":
+            # But check stored mappings first for backward compatibility with pre-upgrade P2P threads.
+            topic_id, resolved_from_stored_mapping = self._resolve_topic_id(
+                chat_id,
+                msg_id,
+                root_id=root_id,
+                parent_id=parent_id,
+                thread_id=feishu_thread_id,
+            )
+            if chat_type == "p2p" and not resolved_from_stored_mapping:
                 topic_id = None
-                resolved_from_stored_mapping = False
-            else:
-                topic_id, resolved_from_stored_mapping = self._resolve_topic_id(
-                    chat_id,
-                    msg_id,
-                    root_id=root_id,
-                    parent_id=parent_id,
-                    thread_id=feishu_thread_id,
-                )
             resolved_from_pending = False
             if msg_type == InboundMessageType.CHAT and not resolved_from_stored_mapping:
                 pending = self._consume_pending_clarification(chat_id, sender_id)

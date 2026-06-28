@@ -1431,8 +1431,13 @@ class ChannelManager:
                     if accumulated_text:
                         latest_text = accumulated_text
                 elif event == "values" and isinstance(data, (dict, list)):
-                    # Only capture final state; don't overwrite delta text (values snapshots can cause content jumps)
                     last_values = data
+                    # Clarification text is only in the values snapshot;
+                    # publish it so the user sees the question mid-stream.
+                    if _has_current_turn_clarification(data):
+                        clarification_text = _extract_response_text(data)
+                        if clarification_text and clarification_text != latest_text:
+                            latest_text = clarification_text
 
                 if not latest_text or latest_text == last_published_text:
                     continue
