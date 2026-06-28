@@ -31,6 +31,8 @@ from langchain.agents.middleware.types import (
 from langchain_core.messages import HumanMessage
 from langgraph.errors import GraphBubbleUp
 
+from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, message_content_to_text
+
 logger = logging.getLogger(__name__)
 
 _SUMMARY_MESSAGE_NAME = "summary"
@@ -233,11 +235,22 @@ class InputSanitizationMiddleware(AgentMiddleware[AgentState]):
             else:
                 new_content = processed
 
+            # Stamp the pre-wrap text so downstream surfaces (journal's
+            # first_human_message, GET /threads/{id}/messages) can unwrap
+            # the boundary markers via get_original_user_content_text.
+            # setdefault preserves an existing stamp from an earlier middleware
+            # (e.g. UploadsMiddleware) so the earliest pre-transform text wins.
+            new_additional_kwargs = dict(msg.additional_kwargs or {})
+            new_additional_kwargs.setdefault(
+                ORIGINAL_USER_CONTENT_KEY,
+                message_content_to_text(content),
+            )
+
             messages[i] = HumanMessage(
                 content=new_content,
                 id=msg.id,
                 name=msg.name,
-                additional_kwargs=msg.additional_kwargs,
+                additional_kwargs=new_additional_kwargs,
             )
             logger.debug(
                 "InputSanitizationMiddleware: original=%r -> processed=%r",

@@ -997,3 +997,41 @@ class TestChatModelStartHumanMessage:
         j.on_chat_model_start({}, [], run_id=uuid4(), tags=["lead_agent"])
         await j.flush()
         assert j._first_human_msg is None
+
+    @pytest.mark.anyio
+    async def test_first_human_message_unwraps_prompt_injection_boundary(
+        self, journal_setup
+    ):
+        """first_human_message reflects the user's text, not the model-facing wrapper.
+
+        Regression for issue #3689: InputSanitizationMiddleware stamps the
+        pre-wrap text in ORIGINAL_USER_CONTENT_KEY. The journal must prefer
+        that stamp over the wrapped model-facing ``.text`` so thread titles /
+        previews stay clean.
+        """
+        from langchain_core.messages import HumanMessage
+
+        from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
+
+        j, store = journal_setup
+        wrapped_content = "--- BEGIN USER INPUT ---\ntest\n--- END USER INPUT ---"
+        message = HumanMessage(
+            content=wrapped_content,
+            additional_kwargs={ORIGINAL_USER_CONTENT_KEY: "test"},
+        )
+        j.on_chat_model_start({}, [[message]], run_id=uuid4(), tags=["lead_agent"])
+        await j.flush()
+
+        # first_human_message is the unwrapped user text
+        assert j._first_human_msg == "test"
+        # The persisted llm.human.input event still has the wrapped content
+        # for parity with the model-facing stream — list_thread_messages
+        # handles the read-side unwrap separately.
+        events = await store.list_events("t1", "r1")
+        human_events = [e for e in events if e["event_type"] == "llm.human.input"]
+        assert len(human_events) == 1
+        assert human_events[0]["content"]["content"] == wrapped_content
+        assert (
+            human_events[0]["content"]["additional_kwargs"][ORIGINAL_USER_CONTENT_KEY]
+            == "test"
+        )

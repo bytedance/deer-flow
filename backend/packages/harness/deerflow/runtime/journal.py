@@ -29,7 +29,7 @@ from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import AIMessage, AnyMessage, BaseMessage, HumanMessage, ToolMessage
 from langgraph.types import Command
 
-from deerflow.utils.messages import message_to_text
+from deerflow.utils.messages import get_original_user_content_text, message_to_text
 
 if TYPE_CHECKING:
     from deerflow.runtime.events.store.base import RunEventStore
@@ -203,7 +203,12 @@ class RunJournal(BaseCallbackHandler):
             for batch in reversed(messages):
                 for m in reversed(batch):
                     if isinstance(m, HumanMessage) and m.name != "summary" and m.additional_kwargs.get("hide_from_ui") is not True:
-                        self.set_first_human_message(m.text)
+                        # Unwrap boundary-marker wrappers stamped by
+                        # InputSanitizationMiddleware (and UploadsMiddleware)
+                        # so first_human_message reflects the user's text,
+                        # not the model-facing guardrail wrapper.
+                        original_text = get_original_user_content_text(m.content, m.additional_kwargs)
+                        self.set_first_human_message(original_text)
                         self._put(
                             event_type="llm.human.input",
                             category="message",

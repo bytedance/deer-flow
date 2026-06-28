@@ -624,6 +624,23 @@ async def list_thread_messages(
     event_store = get_run_event_store(request)
     messages = await event_store.list_messages(thread_id, limit=limit, before_seq=before_seq, after_seq=after_seq)
 
+    # Unwrap prompt-injection boundary wrappers stamped by InputSanitizationMiddleware
+    # so the UI sees the original user text, not the model-facing wrapper. Only
+    # human-input events are affected; AI messages and tool flows pass through.
+    for row in messages:
+        if row.get("event_type") != "llm.human.input":
+            continue
+        inner = row.get("content")
+        if not isinstance(inner, dict) or inner.get("type") != "human":
+            continue
+        additional_kwargs = inner.get("additional_kwargs")
+        if not isinstance(additional_kwargs, dict):
+            continue
+        original_content = additional_kwargs.get(ORIGINAL_USER_CONTENT_KEY)
+        if not isinstance(original_content, str) or not original_content.strip():
+            continue
+        inner["content"] = [{"type": "text", "text": original_content}]
+
     # Resolve the caller once; it is needed both to scope the feedback query
     # below and to list the thread's runs for turn-duration injection.
     user_id = await get_current_user(request)

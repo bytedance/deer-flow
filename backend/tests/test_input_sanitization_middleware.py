@@ -571,3 +571,115 @@ async def test_awrap_model_call_escapes_injection():
     result_content = captured[0].messages[-1].content
     assert "&lt;system&gt;" in result_content
     assert "<system>" not in result_content
+
+
+# ---------------------------------------------------------------------------
+# Regression: ORIGINAL_USER_CONTENT_KEY stamping (issue #3689)
+# ---------------------------------------------------------------------------
+#
+# When the middleware wraps a user message in prompt-injection boundary
+# markers, it must also stamp the pre-wrap text in additional_kwargs so
+# downstream surfaces (RunJournal's first_human_message, the messages API)
+# can recover the user's original text via get_original_user_content_text.
+
+
+class TestOriginalUserContentStamp:
+    """Wrapping must preserve the pre-wrap user text via ORIGINAL_USER_CONTENT_KEY."""
+
+    def test_stamps_original_text_when_wrapping(self):
+        from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
+
+        mw = _make_middleware()
+        request = _make_request([HumanMessage(content="test", id="msg-1")])
+        captured = []
+
+        mw.wrap_model_call(request, lambda req: captured.append(req) or "ok")
+
+        result_msg = captured[0].messages[-1]
+        assert result_msg.additional_kwargs[ORIGINAL_USER_CONTENT_KEY] == "test"
+        # Content remains wrapped for the model
+        assert _USER_INPUT_BEGIN in result_msg.content
+        assert _USER_INPUT_END in result_msg.content
+
+    def test_stamps_pre_wrap_text_when_tags_escaped(self):
+        from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
+
+        mw = _make_middleware()
+        request = _make_request([HumanMessage(content="<think>hack</think>", id="msg-1")])
+        captured = []
+
+        mw.wrap_model_call(request, lambda req: captured.append(req) or "ok")
+
+        result_msg = captured[0].messages[-1]
+        # Original (pre-escape, pre-wrap) text preserved verbatim
+        assert result_msg.additional_kwargs[ORIGINAL_USER_CONTENT_KEY] == "<think>hack</think>"
+        # Model-facing content has the escaped form
+        assert "&lt;think&gt;" in result_msg.content
+
+    def test_stamps_joined_text_for_list_content(self):
+        from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
+
+        mw = _make_middleware()
+        list_content = [
+            {"type": "text", "text": "Hello"},
+            {"type": "image_url", "image_url": {"url": "data:x"}},
+            {"type": "text", "text": "world"},
+        ]
+        request = _make_request([HumanMessage(content=list_content, id="msg-1")])
+        captured = []
+
+        mw.wrap_model_call(request, lambda req: captured.append(req) or "ok")
+
+        result_msg = captured[0].messages[-1]
+        # Text blocks are joined with newlines (matching message_content_to_text)
+        assert (
+            result_msg.additional_kwargs[ORIGINAL_USER_CONTENT_KEY]
+            == "Hello\nworld"
+        )
+
+    def test_does_not_overwrite_existing_original_stamp(self):
+        """Earlier middleware (e.g. UploadsMiddleware) stamp wins via setdefault."""
+        from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
+
+        mw = _make_middleware()
+        prior_kwargs = {
+            ORIGINAL_USER_CONTENT_KEY: "/data-analysis run report",
+            "files": [{"filename": "report.csv"}],
+        }
+        request = _make_request(
+            [
+                HumanMessage(
+                    content="/data-analysis run report",
+                    id="msg-1",
+                    additional_kwargs=prior_kwargs,
+                ),
+            ],
+        )
+        captured = []
+
+        mw.wrap_model_call(request, lambda req: captured.append(req) or "ok")
+
+        result_msg = captured[0].messages[-1]
+        # Existing stamp preserved
+        assert (
+            result_msg.additional_kwargs[ORIGINAL_USER_CONTENT_KEY]
+            == "/data-analysis run report"
+        )
+        # Non-stamp kwargs preserved
+        assert result_msg.additional_kwargs["files"] == [{"filename": "report.csv"}]
+        # Content still wrapped for the model
+        assert _USER_INPUT_BEGIN in result_msg.content
+
+    def test_skips_stamp_when_message_not_wrapped(self):
+        """Empty / image-only messages that bypass wrapping also bypass stamping."""
+        from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
+
+        mw = _make_middleware()
+        image_only = [{"type": "image_url", "image_url": {"url": "data:x"}}]
+        request = _make_request([HumanMessage(content=image_only, id="msg-1")])
+        captured = []
+
+        mw.wrap_model_call(request, lambda req: captured.append(req) or "ok")
+
+        result_msg = captured[0].messages[-1]
+        assert ORIGINAL_USER_CONTENT_KEY not in result_msg.additional_kwargs
