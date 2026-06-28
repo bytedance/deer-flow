@@ -480,23 +480,28 @@ def _make_session_pool_tool(
             session_connection["env"] = session_env
         session = await pool.get_session(server_name, scope_key, session_connection)
 
+        # Build common call_tool kwargs once — only add keys when needed so
+        # existing call-sites that assert on exact arguments are not affected.
+        call_kwargs: dict[str, Any] = {}
+        if tool_call_timeout:
+            call_kwargs["read_timeout_seconds"] = timedelta(seconds=tool_call_timeout)
+
         if tool_interceptors:
             from langchain_mcp_adapters.interceptors import MCPToolCallRequest
 
             async def base_handler(request: MCPToolCallRequest) -> Any:
                 # Preserve interceptor-injected headers for stdio MCP calls by
                 # forwarding them through MCP call meta.
-                call_kwargs: dict[str, Any] = {}
+                kwargs = dict(call_kwargs)
                 if request.headers:
                     if isinstance(request.headers, Mapping):
-                        call_kwargs["meta"] = {"headers": dict(request.headers)}
+                        kwargs["meta"] = {"headers": dict(request.headers)}
                     else:
                         logger.warning("Ignoring MCP interceptor headers with unsupported type: %s", type(request.headers).__name__)
                 return await session.call_tool(
                     request.name,
                     request.args,
-                    read_timeout_seconds=timedelta(seconds=tool_call_timeout) if tool_call_timeout else None,
-                    **call_kwargs,
+                    **kwargs,
                 )
 
             handler = base_handler
@@ -519,7 +524,7 @@ def _make_session_pool_tool(
             call_tool_result = await session.call_tool(
                 original_name,
                 arguments,
-                read_timeout_seconds=timedelta(seconds=tool_call_timeout) if tool_call_timeout else None,
+                **call_kwargs,
             )
 
         # The after-call snapshot diff only feeds bare-filename correlation in
