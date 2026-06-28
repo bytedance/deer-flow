@@ -917,6 +917,83 @@ async def test_http_transport_tools_not_pooled():
 
 
 # ---------------------------------------------------------------------------
+# Regression for PR #3843: tool_call_timeout must not leak into connection dict
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_stdio_tool_call_timeout_does_not_raise_typeerror():
+    """A stdio server with tool_call_timeout must load tools without TypeError.
+
+    The timeout must be read from McpServerConfig (extensions_config), NOT from
+    the connection dict that langchain's create_session receives.  If it leaks
+    into the connection dict, _create_stdio_session() raises TypeError.
+    Regression for PR #3843 P1 bug.
+    """
+    from langchain_core.tools import StructuredTool
+    from pydantic import BaseModel, Field
+
+    from deerflow.config.extensions_config import McpServerConfig
+    from deerflow.mcp.tools import get_mcp_tools
+
+    class Args(BaseModel):
+        query: str = Field(..., description="query")
+
+    stdio_tool = StructuredTool(
+        name="biomcp_search",
+        description="Search biomedical data",
+        args_schema=Args,
+        coroutine=AsyncMock(),
+        response_format="content_and_artifact",
+    )
+
+    mock_session = AsyncMock()
+    mock_cm = MagicMock()
+    mock_cm.__aenter__ = AsyncMock(return_value=mock_session)
+    mock_cm.__aexit__ = AsyncMock(return_value=False)
+
+    # Use real McpServerConfig so tool_call_timeout is a real field value,
+    # not a MagicMock that might accidentally work.
+    server_cfg = McpServerConfig(
+        type="stdio",
+        command="biomcp",
+        args=["serve"],
+        tool_call_timeout=60.0,
+    )
+
+    extensions_config = MagicMock()
+    extensions_config.get_enabled_mcp_servers.return_value = {"biomcp": server_cfg}
+    extensions_config.mcp_servers = {"biomcp": server_cfg}
+    extensions_config.model_extra = {}
+
+    # Connection dict must NOT contain tool_call_timeout — this is the key assertion.
+    servers_config = {
+        "biomcp": {"transport": "stdio", "command": "biomcp", "args": ["serve"]},
+    }
+
+    with (
+        patch("deerflow.mcp.tools.ExtensionsConfig.from_file", return_value=extensions_config),
+        patch("deerflow.mcp.tools.build_servers_config", return_value=servers_config),
+        patch("deerflow.mcp.tools.get_initial_oauth_headers", return_value={}),
+        patch("deerflow.mcp.tools.build_oauth_tool_interceptor", return_value=None),
+        patch("langchain_mcp_adapters.client.MultiServerMCPClient") as MockClient,
+        patch("langchain_mcp_adapters.sessions.create_session", return_value=mock_cm),
+    ):
+        mock_client_instance = MockClient.return_value
+        mock_client_instance.get_tools = AsyncMock(return_value=[stdio_tool])
+
+        # This must NOT raise TypeError from _create_stdio_session()
+        tools = await get_mcp_tools()
+
+    assert len(tools) == 1
+    # The tool should be wrapped with session pool (it's stdio)
+    assert tools[0].coroutine is not stdio_tool.coroutine
+
+    # Verify the connection dict passed to the pool does NOT contain tool_call_timeout
+    assert "tool_call_timeout" not in servers_config["biomcp"]
+
+
+# ---------------------------------------------------------------------------
 # Regression for #3379: cancel scope must be exited in the entering task
 # ---------------------------------------------------------------------------
 
