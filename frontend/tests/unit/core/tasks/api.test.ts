@@ -47,7 +47,9 @@ describe("fetchSubtaskSteps", () => {
     await fetchSubtaskSteps("thread 1", "run/1", "task-A");
 
     const url = mockedFetch.mock.calls[0]![0] as string;
-    expect(url).toContain("/backend/api/threads/thread%201/runs/run%2F1/events");
+    expect(url).toContain(
+      "/backend/api/threads/thread%201/runs/run%2F1/events",
+    );
     expect(url).toContain("task_id=task-A");
     expect(url).toContain("event_types=subagent.step");
     expect(url).toContain("limit=");
@@ -57,21 +59,30 @@ describe("fetchSubtaskSteps", () => {
   test("pages forward with after_seq until a short page, accumulating in order", async () => {
     mockedFetch
       .mockResolvedValueOnce(
-        jsonResponse(200, [stepEvent(10, 0, "web_search"), stepEvent(11, 1, "read_file")]),
+        jsonResponse(200, [
+          stepEvent(10, 0, "web_search"),
+          stepEvent(11, 1, "read_file"),
+        ]),
       )
       .mockResolvedValueOnce(jsonResponse(200, [stepEvent(12, 2, "bash")]));
 
     const steps = await fetchSubtaskSteps("t", "r", "A", 2);
 
     expect(steps.map((s) => s.message_index)).toEqual([0, 1, 2]);
-    expect(steps.map((s) => s.tool_name)).toEqual(["web_search", "read_file", "bash"]);
+    expect(steps.map((s) => s.tool_name)).toEqual([
+      "web_search",
+      "read_file",
+      "bash",
+    ]);
     expect(mockedFetch).toHaveBeenCalledTimes(2);
     expect(mockedFetch.mock.calls[0]![0] as string).not.toContain("after_seq");
     expect(mockedFetch.mock.calls[1]![0] as string).toContain("after_seq=11");
   });
 
   test("stops after a single page when it is shorter than the page size", async () => {
-    mockedFetch.mockResolvedValueOnce(jsonResponse(200, [stepEvent(10, 0, "web_search")]));
+    mockedFetch.mockResolvedValueOnce(
+      jsonResponse(200, [stepEvent(10, 0, "web_search")]),
+    );
 
     const steps = await fetchSubtaskSteps("t", "r", "A", 500);
 

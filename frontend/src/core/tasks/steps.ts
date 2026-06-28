@@ -163,5 +163,7 @@ export function mergeSteps(
   for (const step of incoming) {
     byIndex.set(step.message_index, step);
   }
-  return [...byIndex.values()].sort((a, b) => a.message_index - b.message_index);
+  return [...byIndex.values()].sort(
+    (a, b) => a.message_index - b.message_index,
+  );
 }

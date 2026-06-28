@@ -22,7 +22,9 @@ describe("messageToStep", () => {
     expect(step.kind).toBe("ai");
     expect(step.message_index).toBe(1);
     expect(step.text).toBe("Let me search.");
-    expect(step.tool_calls).toEqual([{ name: "web_search", args: { query: "x" } }]);
+    expect(step.tool_calls).toEqual([
+      { name: "web_search", args: { query: "x" } },
+    ]);
     expect(step.tool_name).toBeUndefined();
   });
 
@@ -87,9 +89,16 @@ describe("mergeSteps", () => {
 describe("stepsForDisplay", () => {
   it("keeps tool steps and AI steps that have text, ordered by message_index", () => {
     const steps = [
-      messageToStep({ type: "tool", name: "web_search", content: "big result body" }, 2),
       messageToStep(
-        { type: "ai", content: "Let me search", tool_calls: [{ name: "web_search", args: {} }] },
+        { type: "tool", name: "web_search", content: "big result body" },
+        2,
+      ),
+      messageToStep(
+        {
+          type: "ai",
+          content: "Let me search",
+          tool_calls: [{ name: "web_search", args: {} }],
+        },
         1,
       ),
     ];
@@ -103,13 +112,19 @@ describe("stepsForDisplay", () => {
   it("drops AI steps with blank text even if they have tool_calls", () => {
     const steps = [
       messageToStep(
-        { type: "ai", content: "   ", tool_calls: [{ name: "web_search", args: {} }] },
+        {
+          type: "ai",
+          content: "   ",
+          tool_calls: [{ name: "web_search", args: {} }],
+        },
         1,
       ),
       messageToStep({ type: "tool", name: "read_file", content: "x" }, 2),
     ];
 
-    expect(stepsForDisplay(steps, "in_progress").map((s) => s.message_index)).toEqual([2]);
+    expect(
+      stepsForDisplay(steps, "in_progress").map((s) => s.message_index),
+    ).toEqual([2]);
   });
 
   it("drops the trailing final AI answer when completed (already shown as result)", () => {
@@ -118,7 +133,9 @@ describe("stepsForDisplay", () => {
       messageToStep({ type: "ai", content: "The final answer is 42." }, 2),
     ];
 
-    expect(stepsForDisplay(steps, "completed").map((s) => s.kind)).toEqual(["tool"]);
+    expect(stepsForDisplay(steps, "completed").map((s) => s.kind)).toEqual([
+      "tool",
+    ]);
   });
 
   it("keeps the trailing AI step while still in progress", () => {
@@ -147,12 +164,25 @@ describe("eventsToSteps", () => {
     },
     {
       event_type: "subagent.step",
-      content: { task_id: "call_1", message_index: 2, kind: "tool", tool_name: "web_search", text: "results", truncated: false },
+      content: {
+        task_id: "call_1",
+        message_index: 2,
+        kind: "tool",
+        tool_name: "web_search",
+        text: "results",
+        truncated: false,
+      },
       metadata: { task_id: "call_1", message_index: 2 },
     },
     {
       event_type: "subagent.step",
-      content: { task_id: "call_1", message_index: 1, kind: "ai", text: "searching", tool_calls: [{ name: "web_search", args: {} }] },
+      content: {
+        task_id: "call_1",
+        message_index: 1,
+        kind: "ai",
+        text: "searching",
+        tool_calls: [{ name: "web_search", args: {} }],
+      },
       metadata: { task_id: "call_1", message_index: 1 },
     },
     {
