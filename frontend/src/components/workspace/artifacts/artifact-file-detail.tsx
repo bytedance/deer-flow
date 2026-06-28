@@ -84,13 +84,41 @@ export function ArtifactFileDetail({
     }
     return filepathFromProps;
   }, [filepathFromProps, isWriteFile]);
-  const artifactOptions = useMemo(() => {
-    const list = artifacts ?? [];
-    if (list.includes(filepath)) {
-      return list;
+  // Keep these local because ChatBox replaces context artifacts with thread state.
+  const [openedPresentedFilepaths, setOpenedPresentedFilepaths] = useState<
+    string[]
+  >(() => {
+    if (isWriteFile || artifacts.includes(filepath)) {
+      return [];
     }
-    return [filepath, ...list];
-  }, [artifacts, filepath]);
+    return [filepath];
+  });
+  useEffect(() => {
+    if (isWriteFile || artifacts.includes(filepath)) {
+      return;
+    }
+    setOpenedPresentedFilepaths((current) => {
+      if (current.includes(filepath)) {
+        return current;
+      }
+      return [...current, filepath];
+    });
+  }, [artifacts, filepath, isWriteFile]);
+  const artifactOptions = useMemo(() => {
+    if (isWriteFile) {
+      return artifacts;
+    }
+    const currentIsPresented = !artifacts.includes(filepath);
+    const presentedFilepaths =
+      currentIsPresented && !openedPresentedFilepaths.includes(filepath)
+        ? [...openedPresentedFilepaths, filepath]
+        : openedPresentedFilepaths;
+    const presentedSet = new Set(presentedFilepaths);
+    return [
+      ...presentedFilepaths,
+      ...artifacts.filter((artifact) => !presentedSet.has(artifact)),
+    ];
+  }, [artifacts, filepath, isWriteFile, openedPresentedFilepaths]);
   const isSkillFile = useMemo(() => {
     return filepath.endsWith(".skill");
   }, [filepath]);
