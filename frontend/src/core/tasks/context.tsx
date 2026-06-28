@@ -62,16 +62,27 @@ export function useUpdateSubtask() {
   });
 
   const updateSubtask = useCallback(
-    (task: Partial<Subtask> & { id: string }) => {
+    (
+      task: Partial<Subtask> & {
+        id: string;
+        latestMessageIndex?: number;
+      },
+    ) => {
       const previous = tasks[task.id];
       const previousStatus = previous?.status;
       // MessageList writes the pending task tool-call state before parsing the
       // matching ToolMessage in the same render. Keep terminal results stable
       // across the next render so the refresh notification does not loop.
       //
-      // Exclude messageHistory from the spread: it is managed separately below
-      // so that accumulated intermediate messages survive re-renders.
-      const { messageHistory: _ignored, ...taskWithoutHistory } = task;
+      // Exclude messageHistory / seenMessageIndices / latestMessageIndex from
+      // the spread: they are managed separately below so that accumulated
+      // intermediate messages survive re-renders.
+      const {
+        messageHistory: _ignoredHistory,
+        seenMessageIndices: _ignoredIndices,
+        latestMessageIndex,
+        ...taskWithoutHistory
+      } = task;
       const next = {
         ...previous,
         ...taskWithoutHistory,
@@ -83,11 +94,40 @@ export function useUpdateSubtask() {
 
       // Accumulate intermediate messages so the subtask card can show the
       // full execution history instead of only the latest step.
+      //
+      // The stream re-emits `task_running` events on reconnect — see
+      // `reconnectOnMount: true` + `streamResumable: true` on the useStream
+      // call — so we deduplicate before appending. Identity is resolved in
+      // this priority order:
+      //   1. `AIMessage.id` if present (stable across re-emits).
+      //   2. `message_index` from the backend (1-based, monotonic per task).
+      //   3. Reference equality (rare same-session id-less repeats).
+      const history = previous?.messageHistory ?? [];
+      const seenIndices = previous?.seenMessageIndices ?? [];
       if (task.latestMessage) {
-        const history = previous?.messageHistory ?? [];
-        next.messageHistory = [...history, task.latestMessage];
+        const incoming = task.latestMessage;
+        const incomingIndex = latestMessageIndex;
+        let isDuplicate = false;
+        if (incoming.id) {
+          isDuplicate = history.some((m) => m.id === incoming.id);
+        } else if (incomingIndex !== undefined) {
+          isDuplicate = seenIndices.includes(incomingIndex);
+        } else {
+          isDuplicate = history.some((m) => m === incoming);
+        }
+        if (isDuplicate) {
+          next.messageHistory = history;
+          next.seenMessageIndices = seenIndices;
+        } else {
+          next.messageHistory = [...history, incoming];
+          next.seenMessageIndices =
+            incomingIndex !== undefined
+              ? [...seenIndices, incomingIndex]
+              : seenIndices;
+        }
       } else {
-        next.messageHistory = previous?.messageHistory ?? [];
+        next.messageHistory = history;
+        next.seenMessageIndices = seenIndices;
       }
 
       const becameTerminal =

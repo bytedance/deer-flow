@@ -812,12 +812,24 @@ export function useThreadStream({
         "type" in event &&
         event.type === "task_running"
       ) {
+        // Backend emits `message_index` / `total_messages` alongside `message`
+        // (see backend/packages/harness/deerflow/tools/builtins/task_tool.py
+        // and the task_running payload in task_tool.run). Preserve
+        // `message_index` so the subtask-card dedup logic in context.tsx can
+        // resolve identity even when AIMessage.id is missing — important
+        // because streamResumable is on and the same task_running event can be
+        // re-delivered on reconnect.
         const e = event as {
           type: "task_running";
           task_id: string;
           message: AIMessage;
+          message_index?: number;
         };
-        updateSubtask({ id: e.task_id, latestMessage: e.message });
+        updateSubtask({
+          id: e.task_id,
+          latestMessage: e.message,
+          latestMessageIndex: e.message_index,
+        });
         return;
       }
 
