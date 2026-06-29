@@ -81,6 +81,76 @@ test("aggregates token usage messages once per assistant turn", () => {
   ).toEqual([null, null, ["ai-1", "ai-2"], null, ["ai-3"]]);
 });
 
+test("reasoning + content (no tool calls) yields a single assistant bubble, not a duplicate processing group", () => {
+  // Regression for #3868: in thinking/pro/ultra modes the final assistant
+  // message carries both reasoning_content and answer text. It must surface its
+  // reasoning exactly once — inside the assistant bubble's <Reasoning>
+  // collapsible. Routing the same message into a processing group as well makes
+  // the ChainOfThought panel above the bubble paint the identical reasoning a
+  // second time.
+  const messages = [
+    { id: "human-1", type: "human", content: "Why is the sky blue?" },
+    {
+      id: "ai-1",
+      type: "ai",
+      content: "Rayleigh scattering makes the sky blue.",
+      additional_kwargs: { reasoning_content: "Recall Rayleigh scattering." },
+    },
+  ] as Message[];
+
+  const groups = getMessageGroups(messages);
+
+  expect(groups.map((group) => group.type)).toEqual(["human", "assistant"]);
+
+  // The reasoning-bearing message lands in exactly one group, so turn-usage
+  // aggregation never double-counts it (see #2770).
+  const turnUsage = getAssistantTurnUsageMessages(groups);
+  expect(turnUsage.at(-1)?.map((message) => message.id)).toEqual(["ai-1"]);
+});
+
+test("keeps tool-call reasoning in the processing group while the final answer's reasoning rides its own bubble", () => {
+  // Companion to #3868: only the message that also becomes an assistant bubble
+  // (content, no tool calls) is pulled out of the processing group. Reasoning
+  // attached to an intermediate tool-calling step still belongs above, with its
+  // tool steps.
+  const messages = [
+    { id: "human-1", type: "human", content: "Search and summarize" },
+    {
+      id: "ai-1",
+      type: "ai",
+      content: "",
+      additional_kwargs: { reasoning_content: "I should search first." },
+      tool_calls: [{ id: "tool-1", name: "web_search", args: { query: "x" } }],
+    },
+    {
+      id: "tool-1-result",
+      type: "tool",
+      name: "web_search",
+      tool_call_id: "tool-1",
+      content: "[]",
+    },
+    {
+      id: "ai-2",
+      type: "ai",
+      content: "Here is the summary.",
+      additional_kwargs: { reasoning_content: "Synthesize the findings." },
+    },
+  ] as Message[];
+
+  const groups = getMessageGroups(messages);
+
+  expect(groups.map((group) => group.type)).toEqual([
+    "human",
+    "assistant:processing",
+    "assistant",
+  ]);
+  expect(groups[1]?.messages.map((message) => message.id)).toEqual([
+    "ai-1",
+    "tool-1-result",
+  ]);
+  expect(groups[2]?.messages.map((message) => message.id)).toEqual(["ai-2"]);
+});
+
 describe("inline <think> tag splitting", () => {
   test("strips a fully closed <think> block from AI content", () => {
     const message = aiMessage("<think>internal reasoning</think>final answer");
