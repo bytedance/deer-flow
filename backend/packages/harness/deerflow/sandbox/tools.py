@@ -1408,14 +1408,16 @@ def bash_tool(runtime: Runtime, description: str, command: str) -> str:
             validate_local_bash_command_paths(command, thread_data)
             command = replace_virtual_paths_in_command(command, thread_data)
             command = _apply_cwd_prefix(command, thread_data)
-            output = sandbox.execute_command(command)
             try:
                 from deerflow.config.app_config import get_app_config
 
                 sandbox_cfg = get_app_config().sandbox
                 max_chars = sandbox_cfg.bash_output_max_chars if sandbox_cfg else 20000
+                command_timeout = sandbox_cfg.bash_command_timeout if sandbox_cfg else None
             except Exception:
                 max_chars = 20000
+                command_timeout = None
+            output = sandbox.execute_command(command, timeout=command_timeout)
             return _truncate_bash_output(mask_local_paths_in_output(output, thread_data), max_chars)
         ensure_thread_directories_exist(runtime)
         try:

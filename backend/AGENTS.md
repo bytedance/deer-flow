@@ -315,7 +315,7 @@ Proxied through nginx: `/api/langgraph/*` → Gateway LangGraph-compatible runti
 - Detection: `is_local_sandbox()` accepts both `sandbox_id == "local"` (legacy / no-thread) and `sandbox_id.startswith("local:")` (per-thread)
 
 **Sandbox Tools** (in `packages/harness/deerflow/sandbox/tools.py`):
-- `bash` - Execute commands with path translation and error handling
+- `bash` - Execute commands with path translation and error handling. For `LocalSandbox` (host bash), output is captured to temp files (not pipes) and stdin is `/dev/null`, so a backgrounded long-lived process (`server &`) returns immediately instead of blocking the turn on an inherited pipe, while a command that reads stdin gets immediate EOF. The command runs in its own process group with a wall-clock timeout (`sandbox.bash_command_timeout`, default 600s); on timeout the whole group is killed and the agent gets a notice telling it to background long-lived processes. See `LocalSandbox.execute_command` / `_run_posix_command`.
 - `ls` - Directory listing (tree format, max 2 levels)
 - `read_file` - Read file contents with optional line range
 - `write_file` - Write/append to files, creates directories; overwrites by default and exposes the `append` argument in the model-facing schema for end-of-file writes

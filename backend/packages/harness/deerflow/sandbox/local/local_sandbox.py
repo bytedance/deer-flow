@@ -4,7 +4,9 @@ import ntpath
 import os
 import re
 import shutil
+import signal
 import subprocess
+import tempfile
 from dataclasses import dataclass
 from functools import cached_property
 from pathlib import Path
@@ -16,6 +18,13 @@ from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.search import GrepMatch, find_glob_matches, find_grep_matches
 
 logger = logging.getLogger(__name__)
+
+# Default wall-clock timeout (seconds) for a single host bash command. A
+# blocking foreground command (for example a server started without
+# backgrounding) is terminated after this long so the agent's turn cannot hang
+# indefinitely. Overridable per call via ``execute_command(timeout=...)`` and,
+# for the bash tool, via ``sandbox.bash_command_timeout`` in config.yaml.
+DEFAULT_COMMAND_TIMEOUT_SECONDS = 600
 
 
 @dataclass(frozen=True)
@@ -327,11 +336,14 @@ class LocalSandbox(Sandbox):
 
         raise RuntimeError("No suitable shell executable found. Tried /bin/zsh, /bin/bash, /bin/sh, and `sh` on PATH.")
 
-    def execute_command(self, command: str) -> str:
+    def execute_command(self, command: str, timeout: float | None = None) -> str:
         # Resolve container paths in command before execution
         resolved_command = self._resolve_paths_in_command(command)
         shell = self._get_shell()
+        if timeout is None:
+            timeout = DEFAULT_COMMAND_TIMEOUT_SECONDS
 
+        timed_out = False
         if os.name == "nt":
             env = None
             if self._is_powershell(shell):
@@ -352,27 +364,84 @@ class LocalSandbox(Sandbox):
                 shell=False,
                 capture_output=True,
                 text=True,
-                timeout=600,
+                timeout=timeout,
                 env=env,
             )
+            stdout, stderr, returncode = result.stdout, result.stderr, result.returncode
         else:
             args = [shell, "-c", resolved_command]
-            result = subprocess.run(
-                args,
-                shell=False,
-                capture_output=True,
-                text=True,
-                timeout=600,
-            )
-        output = result.stdout
-        if result.stderr:
-            output += f"\nStd Error:\n{result.stderr}" if output else result.stderr
-        if result.returncode != 0:
-            output += f"\nExit Code: {result.returncode}"
+            stdout, stderr, returncode, timed_out = self._run_posix_command(args, timeout)
+
+        output = stdout
+        if stderr:
+            output += f"\nStd Error:\n{stderr}" if output else stderr
+        if timed_out:
+            notice = f"Command timed out after {int(timeout)} seconds and was terminated. To run a long-lived process such as a web server, start it in the background and redirect its output, e.g. `your-command > /tmp/server.log 2>&1 &`."
+            output += f"\n{notice}" if output else notice
+        elif returncode != 0:
+            output += f"\nExit Code: {returncode}"
 
         final_output = output if output else "(no output)"
         # Reverse resolve local paths back to container paths in output
         return self._reverse_resolve_paths_in_output(final_output)
+
+    @staticmethod
+    def _run_posix_command(args: list[str], timeout: float) -> tuple[str, str, int, bool]:
+        """Run a command on POSIX, capturing output via temp files instead of pipes.
+
+        Captured pipes are inherited by every process the command spawns, so a
+        backgrounded long-lived process (``server &``) keeps the read end open
+        and blocks the parent until the timeout fires — even though the
+        foreground command already returned. Writing stdout/stderr to temp
+        files lets the call return as soon as the foreground command exits while
+        the background process keeps running. ``stdin`` is taken from
+        ``/dev/null`` so a command that reads stdin gets immediate EOF instead
+        of blocking, and ``start_new_session`` puts the command in its own
+        process group so a genuinely blocking foreground command can be killed
+        in full (children included) when it times out.
+
+        Returns ``(stdout, stderr, returncode, timed_out)``.
+        """
+        timed_out = False
+        with tempfile.TemporaryFile() as out_file, tempfile.TemporaryFile() as err_file:
+            process = subprocess.Popen(
+                args,
+                shell=False,
+                stdin=subprocess.DEVNULL,
+                stdout=out_file,
+                stderr=err_file,
+                start_new_session=True,
+            )
+            try:
+                process.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                LocalSandbox._terminate_process_group(process)
+            returncode = process.returncode if process.returncode is not None else 0
+            out_file.seek(0)
+            err_file.seek(0)
+            stdout = out_file.read().decode("utf-8", errors="replace")
+            stderr = err_file.read().decode("utf-8", errors="replace")
+        return stdout, stderr, returncode, timed_out
+
+    @staticmethod
+    def _terminate_process_group(process: subprocess.Popen) -> None:
+        """Kill the command's whole process group, then reap it.
+
+        Falls back to killing just the direct child if the group is already
+        gone (e.g. the command exited between the timeout and this call).
+        """
+        try:
+            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            try:
+                process.kill()
+            except OSError:
+                pass
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            logger.warning("Process group for pid %s did not exit after SIGKILL", process.pid)
 
     def list_dir(self, path: str, max_depth=2) -> list[str]:
         resolved_path = self._resolve_path(path)
