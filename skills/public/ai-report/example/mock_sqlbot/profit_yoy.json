@@ -1,0 +1,14 @@
+{
+  "BAS_0263@2024Q4": {
+    "success": true,
+    "data": [
+      {"org_ecd": "王益联社", "value": "1000", "data_dt": "2024-12-31"}
+    ]
+  },
+  "BAS_0263@2023Q4": {
+    "success": true,
+    "data": [
+      {"org_ecd": "王益联社", "value": "900", "data_dt": "2023-12-31"}
+    ]
+  }
+}
