@@ -15,13 +15,24 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 15
+config_version: 16
 
 # ============================================================================
 # Logging
 # ============================================================================
 # Log level for deerflow modules (debug/info/warning/error)
 log_level: info
+
+# ============================================================================
+# Optional Modules
+# ============================================================================
+# These gates are startup-only: restart the gateway after changing them.
+# Durable workflows are the small runtime identity/trace layer.
+modules:
+  durable_workflows:
+    enabled: true
+    api_enabled: true
+    auto_envelope_for_runs: true
 
 # ============================================================================
 # Token Usage
