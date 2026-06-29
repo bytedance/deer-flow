@@ -376,7 +376,11 @@ class LocalSandbox(Sandbox):
         if stderr:
             output += f"\nStd Error:\n{stderr}" if output else stderr
         if timed_out:
-            notice = f"Command timed out after {int(timeout)} seconds and was terminated. To run a long-lived process such as a web server, start it in the background and redirect its output, e.g. `your-command > /tmp/server.log 2>&1 &`."
+            notice = (
+                f"Command timed out after {int(timeout)} seconds and was terminated. "
+                "To run a long-lived process such as a web server, start it in the background "
+                "and redirect its output, e.g. `your-command > /mnt/user-data/workspace/server.log 2>&1 &`."
+            )
             output += f"\n{notice}" if output else notice
         elif returncode != 0:
             output += f"\nExit Code: {returncode}"

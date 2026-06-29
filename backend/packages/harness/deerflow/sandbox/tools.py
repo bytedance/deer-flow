@@ -1393,6 +1393,10 @@ def bash_tool(runtime: Runtime, description: str, command: str) -> str:
     - Use `python` to run Python code.
     - Prefer a thread-local virtual environment in `/mnt/user-data/workspace/.venv`.
     - Use `python -m pip` (inside the virtual environment) to install Python packages.
+    - To start a long-lived process such as a web server, ALWAYS run it in the background with its
+      output redirected, e.g. `your-command > /mnt/user-data/workspace/server.log 2>&1 &`, then check
+      the log file or poll the port. A long-lived process run in the foreground blocks the turn until
+      it is killed at the command timeout.
 
     Args:
         description: Explain why you are running this command in short words. ALWAYS PROVIDE THIS PARAMETER FIRST.
