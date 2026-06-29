@@ -438,10 +438,14 @@ class LocalSandbox(Sandbox):
         try:
             os.killpg(os.getpgid(process.pid), signal.SIGKILL)
         except (ProcessLookupError, PermissionError, OSError):
+            # The process group is already gone (the command exited in the race
+            # between the timeout and this call); fall back to killing just the
+            # direct child.
             try:
                 process.kill()
             except OSError:
-                pass
+                # Direct child already reaped too — nothing left to kill.
+                logger.debug("Process %s already exited before fallback kill", process.pid)
         try:
             process.wait(timeout=10)
         except subprocess.TimeoutExpired:
