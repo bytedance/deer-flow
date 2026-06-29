@@ -9,6 +9,7 @@ model always sees "already delegated: ..." and stops re-delegating.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -18,6 +19,8 @@ from langgraph.runtime import Runtime
 
 from deerflow.agents.thread_state import DelegationEntry
 from deerflow.subagents.status_contract import SUBAGENT_STATUS_KEY, extract_subagent_status
+
+logger = logging.getLogger(__name__)
 
 
 def extract_delegations(messages: list) -> list[DelegationEntry]:
@@ -89,9 +92,13 @@ class DelegationLedgerMiddleware(AgentMiddleware):
         return self._derive_update(state)
 
     def _inject(self, request: ModelRequest) -> ModelRequest:
-        block = format_delegation_block(list(request.state.get("delegations") or []))
+        entries = list(request.state.get("delegations") or [])
+        block = format_delegation_block(entries)
+
         if not block:
+            logger.info("[delegation-ledger][temp] no delegations to inject this call")
             return request
+        logger.info("[delegation-ledger][temp] injecting ledger reminder (%d entries):\n%s", len(entries), block)
         reminder = SystemMessage(content=block, additional_kwargs={"hide_from_ui": True})
         return request.override(messages=[*request.messages, reminder])
 
