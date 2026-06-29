@@ -9,7 +9,6 @@ import { IndustrialBackdrop } from "@/components/auth/industrial-backdrop";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useAuth } from "@/core/auth/AuthProvider";
-import { requestFreshHostToken } from "@/core/auth/ehm-host-bridge";
 import { setCurrentTenantId } from "@/core/tenant/store";
 import { encryptInsBaseCredential } from "@/core/auth/rsa-login";
 
@@ -50,10 +49,6 @@ export default function LoginPage() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
-  const [ehmAutoLogin, setEhmAutoLogin] = useState(false);
-  const ehmAttemptedRef = useRef(false);
-  const lastEhmTokenRef = useRef<string>("");
-  const hostRecoveryAttemptedRef = useRef(false);
 
   const nextParam = searchParams.get("next");
   const redirectPath = validateNextParam(nextParam) ?? "/workspace";
@@ -64,45 +59,6 @@ export default function LoginPage() {
       window.location.href = redirectPath;
     }
   }, [isAuthenticated, redirectPath]);
-
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    if (window.parent === window) return;
-    if (isAuthenticated) return;
-    if (ehmAutoLogin) return;
-    if (hostRecoveryAttemptedRef.current) return;
-
-    hostRecoveryAttemptedRef.current = true;
-    void requestFreshHostToken();
-  }, [ehmAutoLogin, isAuthenticated]);
-
-  // EHM token auto-login: set cookie and redirect (no backend call)
-  useEffect(() => {
-    const ehmToken = searchParams.get("ehm_token");
-    if (ehmToken && ehmToken !== lastEhmTokenRef.current) {
-      lastEhmTokenRef.current = ehmToken;
-      ehmAttemptedRef.current = false;
-    }
-    if (!ehmToken || ehmAttemptedRef.current || isAuthenticated) return;
-    ehmAttemptedRef.current = true;
-
-    if (!isEhmTokenValid(ehmToken)) {
-      setError("EHM 单点登录失败：token 无效或已过期");
-      const params = new URLSearchParams(searchParams);
-      params.delete("ehm_token");
-      router.replace(`/login?${params.toString()}`);
-      return;
-    }
-
-    setEhmAutoLogin(true);
-    setLoading(true);
-
-    // Pass user info from EHM (base64-encoded JSON) as cookie
-    const ehmUser = searchParams.get("ehm_user") || undefined;
-
-    // Set cookie and redirect — the target page's SSR will read the cookie
-    setEhmCookieAndRedirect(ehmToken, redirectPath, ehmUser);
-  }, [searchParams, isAuthenticated, redirectPath, router]);
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();

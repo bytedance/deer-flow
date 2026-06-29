@@ -1,4 +1,3 @@
-import { EHM_TOKEN_COOKIE } from "./ehm-auth";
 import { shouldSuppressAuthErrorRedirect } from "@/core/api/fetcher";
 import {
   authErrorMessage,

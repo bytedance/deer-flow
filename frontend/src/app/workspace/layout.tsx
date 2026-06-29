@@ -4,7 +4,6 @@ import { Toaster } from "sonner";
 
 import { QueryClientProvider } from "@/components/query-client-provider";
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
-import { EhmHostBridgeProvider } from "@/components/workspace/ehm-host-bridge-provider";
 import { CommandPalette } from "@/components/workspace/command-palette";
 import { IndustrialMigrationDialog } from "@/components/workspace/industrial-migration-dialog";
 import { TenantGuardWrapper } from "@/components/workspace/tenant-guard-wrapper";
@@ -43,7 +42,6 @@ export default async function WorkspaceLayout({
     <AuthProvider initialUser={initialUser}>
       <QueryClientProvider>
         <TenantGuardWrapper>
-          <EhmHostBridgeProvider />
           <SidebarProvider className="min-h-dvh" defaultOpen={initialSidebarOpen}>
             <WorkspaceSidebar />
             <SidebarInset id="main-content" className="min-w-0">{children}</SidebarInset>
