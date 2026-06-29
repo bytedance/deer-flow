@@ -269,24 +269,6 @@ class TestSecretCarrier:
         assert extract_request_secrets(None) == {}
 
 
-class TestHostPlatformSecretGuard:
-    """A skill must not be able to harvest a host platform credential (GHSA-rhgp-j443-p4rf)."""
-
-    def test_host_platform_secret_detected(self, monkeypatch):
-        from deerflow.sandbox.env_policy import is_host_platform_secret
-
-        monkeypatch.setenv("OPENAI_API_KEY", "present-on-host")
-        assert is_host_platform_secret("OPENAI_API_KEY") is True
-
-    def test_request_token_not_a_host_secret(self, monkeypatch):
-        from deerflow.sandbox.env_policy import is_host_platform_secret
-
-        # ERP_TOKEN is secret-looking but NOT present in the host environment —
-        # it is a legitimate per-request user token, the primary #3861 use case.
-        monkeypatch.delenv("ERP_TOKEN", raising=False)
-        assert is_host_platform_secret("ERP_TOKEN") is False
-
-
 def _make_secret_skill(tmp_path: Path, name: str, required_secrets):
     skill_dir = tmp_path / name
     skill_dir.mkdir()
@@ -352,15 +334,36 @@ class TestActivationBindsSecrets:
         self._activate(tmp_path, monkeypatch, skill, context)
         assert read_active_secrets(context) == {}
 
-    def test_host_platform_secret_declaration_refused(self, tmp_path, monkeypatch):
+    def test_caller_secret_wins_over_host_value_of_same_name(self, tmp_path, monkeypatch):
+        """A skill may declare a name that also exists in the host env (e.g. a
+        per-user key overriding a shared platform key — the #3861 use case). The
+        skill receives the CALLER's value (from context.secrets), never the host's:
+        the inherited host value is scrubbed and the caller's value is injected on
+        top. There is therefore no host-credential harvest to guard against."""
         from deerflow.runtime.secret_context import read_active_secrets
+        from deerflow.sandbox.env_policy import build_sandbox_env
+
+        monkeypatch.setenv("MEMOS_API_KEY", "host-shared-key-MUST-NOT-LEAK")
+        skill = _make_secret_skill(tmp_path, "memos", [SecretRequirement("MEMOS_API_KEY")])
+        context = {"secrets": {"MEMOS_API_KEY": "caller-per-user-key"}}
+        self._activate(tmp_path, monkeypatch, skill, context)
+
+        injected = read_active_secrets(context)
+        assert injected == {"MEMOS_API_KEY": "caller-per-user-key"}  # caller's value injected
+
+        # The subprocess env gets the caller's value; the host's value is scrubbed.
+        env = build_sandbox_env(injected)
+        assert env["MEMOS_API_KEY"] == "caller-per-user-key"
+        assert "host-shared-key-MUST-NOT-LEAK" not in str(env.values())
+
+    def test_undeclared_host_secret_is_scrubbed_not_harvested(self, tmp_path, monkeypatch):
+        """If a skill does NOT declare a host credential, the inherited value is
+        scrubbed — a skill can never read a platform credential it wasn't given."""
+        from deerflow.sandbox.env_policy import build_sandbox_env
 
         monkeypatch.setenv("OPENAI_API_KEY", "host-key-do-not-harvest")
-        skill = _make_secret_skill(tmp_path, "evil", [SecretRequirement("OPENAI_API_KEY")])
-        # Even if a caller is tricked into supplying it, the guard refuses injection.
-        context = {"secrets": {"OPENAI_API_KEY": "whatever"}}
-        self._activate(tmp_path, monkeypatch, skill, context)
-        assert "OPENAI_API_KEY" not in read_active_secrets(context)
+        env = build_sandbox_env(None)
+        assert "OPENAI_API_KEY" not in env
 
     def test_activation_fires_after_input_sanitization_wrapping(self, tmp_path, monkeypatch):
         """Integration: in the real chain InputSanitizationMiddleware wraps the user

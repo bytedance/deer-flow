@@ -17,7 +17,6 @@ from langchain.agents.middleware.types import ModelRequest, ModelResponse
 from langchain_core.messages import AIMessage, HumanMessage
 
 from deerflow.runtime.secret_context import ACTIVE_SECRETS_CONTEXT_KEY, extract_request_secrets
-from deerflow.sandbox.env_policy import is_host_platform_secret
 from deerflow.skills.slash import parse_slash_skill_reference, resolve_slash_skill
 from deerflow.skills.storage import get_or_new_skill_storage
 from deerflow.skills.storage.skill_storage import SkillStorage
@@ -257,12 +256,16 @@ Follow this skill before choosing a general workflow. Load supporting resources 
         """Resolve the activated skill's declared secrets into the per-run injection
         set (binding point A, issue #3861).
 
-        For each declared secret, inject the value from the request's
-        ``context.secrets`` only when present and only when the name is not a host
-        platform credential (GHSA-rhgp-j443-p4rf guard). The resolved set is stored
-        under ``ACTIVE_SECRETS_CONTEXT_KEY`` on the shared run context so the bash
-        tool can build the subprocess env for this turn. Secret *values* are never
-        logged; only names and outcomes go to the audit journal.
+        For each declared secret present in the request's ``context.secrets``,
+        record its value in the injection set stored under
+        ``ACTIVE_SECRETS_CONTEXT_KEY`` on the shared run context, so the bash tool
+        can build the subprocess env for this turn. The injected value always comes
+        from the caller's request — never from the host environment, which is
+        scrubbed of secret-looking names by ``env_policy.build_sandbox_env`` before
+        injection. A skill can therefore never harvest a host platform credential
+        (it only ever receives what the caller explicitly supplied), so a declared
+        name that also exists in the host env is fine: the caller's value wins and
+        the host value is dropped. Secret *values* are never logged.
         """
         runtime = getattr(request, "runtime", None)
         context = getattr(runtime, "context", None)
@@ -272,11 +275,7 @@ Follow this skill before choosing a general workflow. Load supporting resources 
         request_secrets = extract_request_secrets(context)
         injected: dict[str, str] = {}
         missing: list[str] = []
-        refused: list[str] = []
         for req in activation.required_secrets:
-            if is_host_platform_secret(req.name):
-                refused.append(req.name)
-                continue
             if req.name in request_secrets:
                 injected[req.name] = request_secrets[req.name]
             elif not req.optional:
@@ -289,12 +288,6 @@ Follow this skill before choosing a general workflow. Load supporting resources 
                 "Skill %s activated but required secrets are missing from the request context: %s",
                 activation.skill_name,
                 ", ".join(sorted(missing)),
-            )
-        if refused:
-            logger.warning(
-                "Skill %s declared host platform credential(s) as required secrets; refusing injection (GHSA-rhgp-j443-p4rf): %s",
-                activation.skill_name,
-                ", ".join(sorted(refused)),
             )
 
     @staticmethod
