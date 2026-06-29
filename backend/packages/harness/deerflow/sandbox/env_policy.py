@@ -28,6 +28,33 @@ _SECRET_NAME_PATTERNS: tuple[str, ...] = (
     "*PASSWORD*",
     "*PASSWD*",
     "*CREDENTIAL*",
+    "*DSN*",  # data source name — almost always a connection string with a password
+)
+
+# Connection-string / credential-bearing variable names that carry no
+# KEY/SECRET/TOKEN/DSN substring but routinely embed a password (e.g.
+# ``postgresql://user:pw@host/db``). A blanket ``*URL*`` block is intentionally
+# avoided — it would strip benign service URLs a skill may legitimately read.
+# A skill that genuinely needs one of these must declare it via required-secrets
+# (the caller then supplies it through context.secrets, and injection wins).
+_BLOCKED_EXACT_NAMES: frozenset[str] = frozenset(
+    {
+        "DATABASE_URL",
+        "DATABASE_URI",
+        "REDIS_URL",
+        "MONGODB_URI",
+        "MONGO_URL",
+        "AMQP_URL",
+        "RABBITMQ_URL",
+        "POSTGRES_URL",
+        "POSTGRESQL_URL",
+        "MYSQL_URL",
+        "CLICKHOUSE_URL",
+        "CONNECTION_STRING",
+        "CONN_STR",
+        "GH_PAT",
+        "GITHUB_PAT",
+    }
 )
 
 
@@ -35,6 +62,8 @@ def is_blocked_env_name(name: str) -> bool:
     """Return True if ``name`` looks like a credential that must not be inherited
     by a sandbox subprocess."""
     upper = name.upper()
+    if upper in _BLOCKED_EXACT_NAMES:
+        return True
     return any(fnmatch.fnmatchcase(upper, pattern) for pattern in _SECRET_NAME_PATTERNS)
 
 

@@ -119,6 +119,16 @@ class TestEnvPolicy:
             "MY_SERVICE_CREDENTIAL",
             "api_key",
             "Some_Token_Here",
+            # Connection-string credentials (no KEY/SECRET/TOKEN substring) — these
+            # routinely embed a password, e.g. postgresql://user:pw@host/db.
+            "DATABASE_URL",
+            "REDIS_URL",
+            "MONGODB_URI",
+            "AMQP_URL",
+            "SENTRY_DSN",
+            "POSTGRES_DSN",
+            "CONN_STR",
+            "GH_PAT",
         ],
     )
     def test_secret_like_names_are_blocked(self, name):
@@ -140,6 +150,10 @@ class TestEnvPolicy:
             "VIRTUAL_ENV",
             "PYTHONPATH",
             "DEERFLOW_PLAIN_VAR",
+            # Not a blanket *URL* block: a benign service URL a skill may legitimately
+            # read is not treated as a credential.
+            "NEXT_PUBLIC_BASE_URL",
+            "SERVICE_ENDPOINT",
         ],
     )
     def test_benign_names_are_allowed(self, name):
@@ -348,6 +362,50 @@ class TestActivationBindsSecrets:
         self._activate(tmp_path, monkeypatch, skill, context)
         assert "OPENAI_API_KEY" not in read_active_secrets(context)
 
+    def test_activation_fires_after_input_sanitization_wrapping(self, tmp_path, monkeypatch):
+        """Integration: in the real chain InputSanitizationMiddleware wraps the user
+        message in ``--- BEGIN USER INPUT ---`` markers before SkillActivationMiddleware
+        sees it. Slash activation (and therefore secret resolution) must still fire — it
+        relies on the original content being recoverable. Regression for the gateway
+        path where no upload preserved it."""
+        from deerflow.agents.middlewares import skill_activation_middleware as mw
+        from deerflow.agents.middlewares.input_sanitization_middleware import InputSanitizationMiddleware
+        from deerflow.agents.middlewares.skill_activation_middleware import SkillActivationMiddleware
+        from deerflow.config.app_config import AppConfig, reset_app_config, set_app_config
+        from deerflow.runtime.secret_context import read_active_secrets
+
+        skill = _make_secret_skill(tmp_path, "erp-report", [SecretRequirement("ERP_TOKEN")])
+        storage = SimpleNamespace(
+            load_skills=lambda *, enabled_only: [skill],
+            get_container_root=lambda: "/mnt/skills",
+            get_skills_root_path=lambda: tmp_path,
+        )
+        monkeypatch.setattr(mw, "get_or_new_skill_storage", lambda **kwargs: storage)
+
+        context = {"secrets": {"ERP_TOKEN": "tok-xyz"}}
+        request = ModelRequest(
+            model=object(),
+            messages=[HumanMessage(content="/erp-report pull it", id="m1")],
+            state={"messages": []},
+            runtime=SimpleNamespace(context=context),
+        )
+        # The sanitizer loads enabled skills during wrap, so keep a stub app config
+        # in place for the whole composed call.
+        set_app_config(AppConfig.model_validate({"sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"}}))
+        try:
+            sanitizer = InputSanitizationMiddleware()
+            skill_mw = SkillActivationMiddleware()
+
+            # Compose in real order: sanitizer (outer) -> skill activation (inner) -> model.
+            def skill_layer(req):
+                return skill_mw.wrap_model_call(req, lambda r: AIMessage(content="ok"))
+
+            sanitizer.wrap_model_call(request, skill_layer)
+        finally:
+            reset_app_config()
+
+        assert read_active_secrets(context) == {"ERP_TOKEN": "tok-xyz"}
+
 
 class TestBashToolInjectsActiveSecrets:
     """The bash tool forwards the per-run injection set to execute_command(env=...)."""
@@ -449,6 +507,27 @@ class TestLeakSurfaces:
         assert redacted == {"thread_id": "t"}
         assert _SECRET not in str(redacted)
 
+    def test_redact_config_secrets_strips_from_persisted_config(self):
+        # The run-record persistence + run API echo the raw request config; the
+        # stored/echoed copy must not carry secrets (verifier blocker), while the
+        # live config used to drive the run keeps them.
+        from deerflow.runtime.secret_context import redact_config_secrets
+
+        config = {"context": {"secrets": {"ERP_TOKEN": _SECRET}, "thread_id": "t", "model_name": "m"}, "recursion_limit": 100}
+        redacted = redact_config_secrets(config)
+        assert _SECRET not in str(redacted)
+        assert redacted["context"]["thread_id"] == "t"
+        assert redacted["context"]["model_name"] == "m"
+        assert "secrets" not in redacted["context"]
+        # Original is untouched (live config still has secrets).
+        assert config["context"]["secrets"] == {"ERP_TOKEN": _SECRET}
+
+    def test_redact_config_secrets_handles_none_and_no_context(self):
+        from deerflow.runtime.secret_context import redact_config_secrets
+
+        assert redact_config_secrets(None) is None
+        assert redact_config_secrets({"configurable": {"thread_id": "t"}}) == {"configurable": {"thread_id": "t"}}
+
     def test_stdout_surface_redacted(self):
         from deerflow.sandbox.tools import mask_secret_values
 
@@ -456,3 +535,58 @@ class TestLeakSurfaces:
         masked = mask_secret_values(leaked, {"ERP_TOKEN": _SECRET})
         assert _SECRET not in masked
         assert "[redacted]" in masked
+
+
+@pytest.mark.skipif(__import__("os").name == "nt", reason="POSIX shell semantics")
+class TestEndToEndRealSubprocess:
+    """End-to-end across the real chain (no sandbox mock): activation resolves the
+    secret, a REAL LocalSandbox subprocess receives it via env, the value lands in
+    a file but is redacted from the returned output, and a later un-injected call
+    cannot see it."""
+
+    def test_secret_reaches_real_subprocess_only_via_env_and_is_scoped(self, tmp_path, monkeypatch):
+        from deerflow.agents.middlewares import skill_activation_middleware as mw
+        from deerflow.agents.middlewares.skill_activation_middleware import SkillActivationMiddleware
+        from deerflow.runtime.secret_context import read_active_secrets
+        from deerflow.sandbox.tools import mask_secret_values
+
+        # 1. Activate a skill that declares ERP_TOKEN; caller supplies it in context.secrets.
+        skill = _make_secret_skill(tmp_path, "erp-report", [SecretRequirement("ERP_TOKEN")])
+        storage = SimpleNamespace(
+            load_skills=lambda *, enabled_only: [skill],
+            get_container_root=lambda: "/mnt/skills",
+            get_skills_root_path=lambda: tmp_path,
+        )
+        monkeypatch.setattr(mw, "get_or_new_skill_storage", lambda **kwargs: storage)
+        # A platform secret is present on the host and must NOT leak to the subprocess.
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-host-platform-secret")
+        context = {"secrets": {"ERP_TOKEN": _SECRET}}
+        request = ModelRequest(
+            model=object(),
+            messages=[HumanMessage(content="/erp-report pull report", id="m1")],
+            state={"messages": []},
+            runtime=SimpleNamespace(context=context),
+        )
+        SkillActivationMiddleware().wrap_model_call(request, lambda r: AIMessage(content="ok"))
+        injected = read_active_secrets(context)
+        assert injected == {"ERP_TOKEN": _SECRET}
+
+        # 2. A REAL LocalSandbox runs a script that writes the token to a file and echoes it.
+        out_file = tmp_path / "token.txt"
+        sandbox = LocalSandbox(id="local")
+        raw = sandbox.execute_command(
+            f'printf "%s" "$ERP_TOKEN" > {out_file}; echo "leaked:$ERP_TOKEN"; echo "platform:$OPENAI_API_KEY"',
+            env=injected,
+        )
+
+        # 3. The skill genuinely received the token via env (file written by the subprocess).
+        assert out_file.read_text() == _SECRET
+        # 4. Platform secret was scrubbed — not available to the script.
+        assert "sk-host-platform-secret" not in raw
+        # 5. Stdout masking redacts the echoed token before it would re-enter context.
+        masked = mask_secret_values(raw, injected)
+        assert _SECRET not in masked
+
+        # 6. Per-call scope: a later command without injection cannot see the token.
+        leaked = sandbox.execute_command("echo [$ERP_TOKEN]")
+        assert _SECRET not in leaked
