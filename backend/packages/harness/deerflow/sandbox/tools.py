@@ -12,6 +12,7 @@ from langchain.tools import tool
 from deerflow.agents.thread_state import ThreadDataState
 from deerflow.config import get_app_config
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
+from deerflow.runtime.secret_context import read_active_secrets
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.sandbox.exceptions import (
     SandboxError,
@@ -1309,6 +1310,27 @@ def ensure_thread_directories_exist(runtime: Runtime | None) -> None:
     runtime.state["thread_directories_created"] = True
 
 
+_SECRET_REDACTION = "[redacted]"
+
+
+def mask_secret_values(output: str, injected_env: dict[str, str] | None) -> str:
+    """Redact injected secret values from bash output before it re-enters context.
+
+    Skill scripts receive request-scoped secrets as env vars (#3861). If a script
+    echoes one (debugging, ``set -x``, an error dump), the value would otherwise
+    flow into the tool result — and thus into the prompt and the trace. This is
+    the skill-specific fifth leak surface (the bash tool returns subprocess stdout,
+    unlike MCP tools). Replace each non-empty secret value with a redaction marker.
+    Longest values first so a value that is a substring of another is not partially
+    revealed.
+    """
+    if not injected_env or not output:
+        return output
+    for value in sorted((v for v in injected_env.values() if v), key=len, reverse=True):
+        output = output.replace(value, _SECRET_REDACTION)
+    return output
+
+
 def _truncate_bash_output(output: str, max_chars: int) -> str:
     """Middle-truncate bash output, preserving head and tail (50/50 split).
 
@@ -1400,6 +1422,9 @@ def bash_tool(runtime: Runtime, description: str, command: str) -> str:
     """
     try:
         sandbox = ensure_sandbox_initialized(runtime)
+        # Request-scoped secrets resolved for the active skill (#3861); injected as
+        # per-call env into the subprocess, never placed in the command string.
+        injected_env = read_active_secrets(getattr(runtime, "context", None)) or None
         if is_local_sandbox(runtime):
             if not is_host_bash_allowed():
                 return f"Error: {LOCAL_HOST_BASH_DISABLED_MESSAGE}"
@@ -1408,7 +1433,7 @@ def bash_tool(runtime: Runtime, description: str, command: str) -> str:
             validate_local_bash_command_paths(command, thread_data)
             command = replace_virtual_paths_in_command(command, thread_data)
             command = _apply_cwd_prefix(command, thread_data)
-            output = sandbox.execute_command(command)
+            output = sandbox.execute_command(command, env=injected_env)
             try:
                 from deerflow.config.app_config import get_app_config
 
@@ -1416,7 +1441,7 @@ def bash_tool(runtime: Runtime, description: str, command: str) -> str:
                 max_chars = sandbox_cfg.bash_output_max_chars if sandbox_cfg else 20000
             except Exception:
                 max_chars = 20000
-            return _truncate_bash_output(mask_local_paths_in_output(output, thread_data), max_chars)
+            return _truncate_bash_output(mask_secret_values(mask_local_paths_in_output(output, thread_data), injected_env), max_chars)
         ensure_thread_directories_exist(runtime)
         try:
             from deerflow.config.app_config import get_app_config
@@ -1425,7 +1450,7 @@ def bash_tool(runtime: Runtime, description: str, command: str) -> str:
             max_chars = sandbox_cfg.bash_output_max_chars if sandbox_cfg else 20000
         except Exception:
             max_chars = 20000
-        return _truncate_bash_output(sandbox.execute_command(command), max_chars)
+        return _truncate_bash_output(mask_secret_values(sandbox.execute_command(command, env=injected_env), injected_env), max_chars)
     except SandboxError as e:
         return f"Error: {e}"
     except PermissionError as e:

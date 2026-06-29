@@ -16,19 +16,36 @@ from __future__ import annotations
 
 from typing import Any
 
-# Reserved sub-key of the run context that holds request-scoped secrets.
+# Reserved sub-key of the run context that holds request-scoped secrets supplied
+# by the caller. Source of truth for what a skill *may* receive.
 SECRETS_CONTEXT_KEY = "secrets"
+
+# Reserved sub-key holding the secrets resolved for the currently activated skill
+# (binding point A). Written by the skill-activation middleware, read by the bash
+# tool. Both reserved keys are stripped from trace payloads (see tracing redactor).
+ACTIVE_SECRETS_CONTEXT_KEY = "__active_skill_secrets"
+
+
+def _string_pairs(raw: Any) -> dict[str, str]:
+    if not isinstance(raw, dict):
+        return {}
+    return {key: value for key, value in raw.items() if isinstance(key, str) and isinstance(value, str)}
 
 
 def extract_request_secrets(context: Any) -> dict[str, str]:
-    """Return the request-scoped secrets mapping from a run context, or ``{}``.
+    """Return the caller-supplied request-scoped secrets mapping, or ``{}``.
 
     Only string-keyed, string-valued entries are kept; anything else is ignored
     so a malformed carrier can never crash secret resolution or injection.
     """
     if not isinstance(context, dict):
         return {}
-    raw = context.get(SECRETS_CONTEXT_KEY)
-    if not isinstance(raw, dict):
+    return _string_pairs(context.get(SECRETS_CONTEXT_KEY))
+
+
+def read_active_secrets(context: Any) -> dict[str, str]:
+    """Return the secrets resolved for the active skill (the per-run injection
+    set), or ``{}``. Read by the bash tool to build the subprocess env."""
+    if not isinstance(context, dict):
         return {}
-    return {key: value for key, value in raw.items() if isinstance(key, str) and isinstance(value, str)}
+    return _string_pairs(context.get(ACTIVE_SECRETS_CONTEXT_KEY))

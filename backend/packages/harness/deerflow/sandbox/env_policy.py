@@ -38,6 +38,19 @@ def is_blocked_env_name(name: str) -> bool:
     return any(fnmatch.fnmatchcase(upper, pattern) for pattern in _SECRET_NAME_PATTERNS)
 
 
+def is_host_platform_secret(name: str) -> bool:
+    """Return True if ``name`` is a secret-looking variable that actually exists
+    in the host (Gateway) environment.
+
+    A skill must not be able to declare such a name as a required secret and
+    thereby harvest the platform's own credential — the bypass class behind
+    GHSA-rhgp-j443-p4rf. A legitimate per-request user token (e.g. ``ERP_TOKEN``)
+    is secret-looking but absent from the host environment, so it is *not* a host
+    platform secret and remains injectable.
+    """
+    return is_blocked_env_name(name) and name in os.environ
+
+
 def build_sandbox_env(injected: dict[str, str] | None = None) -> dict[str, str]:
     """Build the environment dict for a sandbox subprocess.
 

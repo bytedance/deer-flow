@@ -9,12 +9,16 @@ Covers the full feature surface:
   - Slice 5: the five leak surfaces (prompt / trace / checkpoint / audit / stdout).
 """
 
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+from langchain.agents.middleware.types import ModelRequest
+from langchain_core.messages import AIMessage, HumanMessage
 
 from deerflow.sandbox.local.local_sandbox import LocalSandbox
+from deerflow.skills.types import SecretRequirement, Skill, SkillCategory
 
 
 class TestLocalSandboxEnvInjection:
@@ -249,3 +253,129 @@ class TestSecretCarrier:
         assert extract_request_secrets({}) == {}
         assert extract_request_secrets({"secrets": "not-a-dict"}) == {}
         assert extract_request_secrets(None) == {}
+
+
+class TestHostPlatformSecretGuard:
+    """A skill must not be able to harvest a host platform credential (GHSA-rhgp-j443-p4rf)."""
+
+    def test_host_platform_secret_detected(self, monkeypatch):
+        from deerflow.sandbox.env_policy import is_host_platform_secret
+
+        monkeypatch.setenv("OPENAI_API_KEY", "present-on-host")
+        assert is_host_platform_secret("OPENAI_API_KEY") is True
+
+    def test_request_token_not_a_host_secret(self, monkeypatch):
+        from deerflow.sandbox.env_policy import is_host_platform_secret
+
+        # ERP_TOKEN is secret-looking but NOT present in the host environment —
+        # it is a legitimate per-request user token, the primary #3861 use case.
+        monkeypatch.delenv("ERP_TOKEN", raising=False)
+        assert is_host_platform_secret("ERP_TOKEN") is False
+
+
+def _make_secret_skill(tmp_path: Path, name: str, required_secrets):
+    skill_dir = tmp_path / name
+    skill_dir.mkdir()
+    skill_file = skill_dir / "SKILL.md"
+    skill_file.write_text(f"# {name}\n", encoding="utf-8")
+    return Skill(
+        name=name,
+        description=f"Description for {name}",
+        license="MIT",
+        skill_dir=skill_dir,
+        skill_file=skill_file,
+        relative_path=Path(name),
+        category=SkillCategory.CUSTOM,
+        enabled=True,
+        required_secrets=required_secrets,
+    )
+
+
+class TestActivationBindsSecrets:
+    """Binding point A: activation turn resolves declared secrets into the per-run injection set."""
+
+    def _activate(self, tmp_path, monkeypatch, skill, context):
+        from deerflow.agents.middlewares import skill_activation_middleware as mw
+        from deerflow.agents.middlewares.skill_activation_middleware import SkillActivationMiddleware
+
+        storage = SimpleNamespace(
+            load_skills=lambda *, enabled_only: [skill],
+            get_container_root=lambda: "/mnt/skills",
+            get_skills_root_path=lambda: tmp_path,
+        )
+        monkeypatch.setattr(mw, "get_or_new_skill_storage", lambda **kwargs: storage)
+        middleware = SkillActivationMiddleware()
+        request = ModelRequest(
+            model=object(),
+            messages=[HumanMessage(content=f"/{skill.name} do it", id="m1")],
+            state={"messages": []},
+            runtime=SimpleNamespace(context=context),
+        )
+        middleware.wrap_model_call(request, lambda r: AIMessage(content="ok"))
+
+    def test_declared_secret_resolved_into_active_set(self, tmp_path, monkeypatch):
+        from deerflow.runtime.secret_context import read_active_secrets
+
+        skill = _make_secret_skill(tmp_path, "erp-report", [SecretRequirement("ERP_TOKEN")])
+        context = {"secrets": {"ERP_TOKEN": "tok-123", "UNUSED": "x"}}
+        self._activate(tmp_path, monkeypatch, skill, context)
+        # Only the declared secret is injected — not the whole secrets bag.
+        assert read_active_secrets(context) == {"ERP_TOKEN": "tok-123"}
+
+    def test_skill_without_declaration_gets_no_injection(self, tmp_path, monkeypatch):
+        from deerflow.runtime.secret_context import read_active_secrets
+
+        skill = _make_secret_skill(tmp_path, "plain", [])
+        context = {"secrets": {"ERP_TOKEN": "tok-123"}}
+        self._activate(tmp_path, monkeypatch, skill, context)
+        assert read_active_secrets(context) == {}
+
+    def test_missing_required_secret_not_injected(self, tmp_path, monkeypatch):
+        from deerflow.runtime.secret_context import read_active_secrets
+
+        skill = _make_secret_skill(tmp_path, "erp-report", [SecretRequirement("ERP_TOKEN")])
+        context = {"secrets": {}}  # caller provided none
+        self._activate(tmp_path, monkeypatch, skill, context)
+        assert read_active_secrets(context) == {}
+
+    def test_host_platform_secret_declaration_refused(self, tmp_path, monkeypatch):
+        from deerflow.runtime.secret_context import read_active_secrets
+
+        monkeypatch.setenv("OPENAI_API_KEY", "host-key-do-not-harvest")
+        skill = _make_secret_skill(tmp_path, "evil", [SecretRequirement("OPENAI_API_KEY")])
+        # Even if a caller is tricked into supplying it, the guard refuses injection.
+        context = {"secrets": {"OPENAI_API_KEY": "whatever"}}
+        self._activate(tmp_path, monkeypatch, skill, context)
+        assert "OPENAI_API_KEY" not in read_active_secrets(context)
+
+
+class TestBashToolInjectsActiveSecrets:
+    """The bash tool forwards the per-run injection set to execute_command(env=...)."""
+
+    def _run_bash(self, context):
+        from deerflow.sandbox import tools as tools_mod
+
+        captured = {}
+
+        class FakeSandbox:
+            def execute_command(self, command, env=None):
+                captured["env"] = env
+                return "done"
+
+        runtime = SimpleNamespace(context=context, state={"sandbox": {"sandbox_id": "aio:1"}})
+        with (
+            patch.object(tools_mod, "ensure_sandbox_initialized", return_value=FakeSandbox()),
+            patch.object(tools_mod, "is_local_sandbox", return_value=False),
+            patch.object(tools_mod, "ensure_thread_directories_exist", return_value=None),
+        ):
+            out = tools_mod.bash_tool.func(runtime, "run skill", "echo hi")
+        return out, captured
+
+    def test_active_secret_forwarded_as_env(self):
+        out, captured = self._run_bash({"__active_skill_secrets": {"ERP_TOKEN": "tok-123"}})
+        assert captured["env"] == {"ERP_TOKEN": "tok-123"}
+        assert "done" in out
+
+    def test_no_active_secret_forwards_no_env(self):
+        out, captured = self._run_bash({})
+        assert captured["env"] in (None, {})

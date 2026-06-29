@@ -16,10 +16,12 @@ from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.middleware.types import ModelRequest, ModelResponse
 from langchain_core.messages import AIMessage, HumanMessage
 
+from deerflow.runtime.secret_context import ACTIVE_SECRETS_CONTEXT_KEY, extract_request_secrets
+from deerflow.sandbox.env_policy import is_host_platform_secret
 from deerflow.skills.slash import parse_slash_skill_reference, resolve_slash_skill
 from deerflow.skills.storage import get_or_new_skill_storage
 from deerflow.skills.storage.skill_storage import SkillStorage
-from deerflow.skills.types import SKILL_MD_FILE
+from deerflow.skills.types import SKILL_MD_FILE, SecretRequirement
 from deerflow.utils.messages import get_original_user_content_text
 
 if TYPE_CHECKING:
@@ -40,6 +42,7 @@ class _Activation:
     skill_content: str
     content_hash: str
     remaining_text: str
+    required_secrets: tuple[SecretRequirement, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -134,6 +137,7 @@ class SkillActivationMiddleware(AgentMiddleware):
                 skill_content=skill_content,
                 content_hash=content_hash,
                 remaining_text=resolved.remaining_text,
+                required_secrets=tuple(resolved.skill.required_secrets or ()),
             )
         )
 
@@ -242,10 +246,56 @@ Follow this skill before choosing a general workflow. Load supporting resources 
             activation.content_hash,
         )
         self._record_activation(request, activation, hook=hook)
+        self._apply_skill_secrets(request, activation)
         activation_msg = self._make_activation_message(target, self._build_activation_reminder(activation))
         messages = list(request.messages)
         messages.insert(target_index, activation_msg)
         return request.override(messages=messages)
+
+    @staticmethod
+    def _apply_skill_secrets(request: ModelRequest, activation: _Activation) -> None:
+        """Resolve the activated skill's declared secrets into the per-run injection
+        set (binding point A, issue #3861).
+
+        For each declared secret, inject the value from the request's
+        ``context.secrets`` only when present and only when the name is not a host
+        platform credential (GHSA-rhgp-j443-p4rf guard). The resolved set is stored
+        under ``ACTIVE_SECRETS_CONTEXT_KEY`` on the shared run context so the bash
+        tool can build the subprocess env for this turn. Secret *values* are never
+        logged; only names and outcomes go to the audit journal.
+        """
+        runtime = getattr(request, "runtime", None)
+        context = getattr(runtime, "context", None)
+        if not isinstance(context, dict) or not activation.required_secrets:
+            return
+
+        request_secrets = extract_request_secrets(context)
+        injected: dict[str, str] = {}
+        missing: list[str] = []
+        refused: list[str] = []
+        for req in activation.required_secrets:
+            if is_host_platform_secret(req.name):
+                refused.append(req.name)
+                continue
+            if req.name in request_secrets:
+                injected[req.name] = request_secrets[req.name]
+            elif not req.optional:
+                missing.append(req.name)
+
+        if injected:
+            context[ACTIVE_SECRETS_CONTEXT_KEY] = injected
+        if missing:
+            logger.warning(
+                "Skill %s activated but required secrets are missing from the request context: %s",
+                activation.skill_name,
+                ", ".join(sorted(missing)),
+            )
+        if refused:
+            logger.warning(
+                "Skill %s declared host platform credential(s) as required secrets; refusing injection (GHSA-rhgp-j443-p4rf): %s",
+                activation.skill_name,
+                ", ".join(sorted(refused)),
+            )
 
     @staticmethod
     def _make_activation_message(target: HumanMessage, activation_content: str) -> HumanMessage:
