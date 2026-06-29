@@ -178,3 +178,24 @@ def test_wrap_model_call_is_noop_without_delegations():
     mw.wrap_model_call(req, handler)
 
     assert len(captured["messages"]) == 1
+
+
+def _mw_names(middlewares):
+    return [type(m).__name__ for m in middlewares]
+
+
+def test_middleware_registered_when_subagent_enabled():
+    from deerflow.agents.lead_agent.agent import build_middlewares
+
+    middlewares = build_middlewares({"configurable": {"subagent_enabled": True}}, None)
+    names = _mw_names(middlewares)
+    assert "DelegationLedgerMiddleware" in names
+    # Must run before coalescing so its injected SystemMessage gets folded in.
+    assert names.index("DelegationLedgerMiddleware") < names.index("SystemMessageCoalescingMiddleware")
+
+
+def test_middleware_absent_when_subagent_disabled():
+    from deerflow.agents.lead_agent.agent import build_middlewares
+
+    middlewares = build_middlewares({"configurable": {"subagent_enabled": False}}, None)
+    assert "DelegationLedgerMiddleware" not in _mw_names(middlewares)
