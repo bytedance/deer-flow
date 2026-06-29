@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
+from deerflow.sandbox.env_policy import build_sandbox_env
 from deerflow.sandbox.local.list_dir import list_dir
 from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.search import GrepMatch, find_glob_matches, find_grep_matches
@@ -327,13 +328,17 @@ class LocalSandbox(Sandbox):
 
         raise RuntimeError("No suitable shell executable found. Tried /bin/zsh, /bin/bash, /bin/sh, and `sh` on PATH.")
 
-    def execute_command(self, command: str) -> str:
+    def execute_command(self, command: str, env: dict[str, str] | None = None) -> str:
         # Resolve container paths in command before execution
         resolved_command = self._resolve_paths_in_command(command)
         shell = self._get_shell()
 
+        # Inherit os.environ minus platform secrets, then layer any injected
+        # request-scoped secrets on top (#3861). An explicit env is always passed
+        # so platform credentials never leak into skill subprocesses.
+        sandbox_env = build_sandbox_env(env)
+
         if os.name == "nt":
-            env = None
             if self._is_powershell(shell):
                 args = [shell, "-NoProfile", "-Command", resolved_command]
             elif self._is_cmd_shell(shell):
@@ -341,8 +346,8 @@ class LocalSandbox(Sandbox):
             else:
                 args = [shell, "-c", resolved_command]
                 if self._is_msys_shell(shell):
-                    env = {
-                        **os.environ,
+                    sandbox_env = {
+                        **sandbox_env,
                         "MSYS_NO_PATHCONV": "1",
                         "MSYS2_ARG_CONV_EXCL": "*",
                     }
@@ -353,7 +358,7 @@ class LocalSandbox(Sandbox):
                 capture_output=True,
                 text=True,
                 timeout=600,
-                env=env,
+                env=sandbox_env,
             )
         else:
             args = [shell, "-c", resolved_command]
@@ -363,6 +368,7 @@ class LocalSandbox(Sandbox):
                 capture_output=True,
                 text=True,
                 timeout=600,
+                env=sandbox_env,
             )
         output = result.stdout
         if result.stderr:

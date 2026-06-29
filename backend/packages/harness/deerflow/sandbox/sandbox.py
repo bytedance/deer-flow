@@ -16,11 +16,16 @@ class Sandbox(ABC):
         return self._id
 
     @abstractmethod
-    def execute_command(self, command: str) -> str:
+    def execute_command(self, command: str, env: dict[str, str] | None = None) -> str:
         """Execute bash command in sandbox.
 
         Args:
             command: The command to execute.
+            env: Optional per-call environment variables to inject into the
+                command's process. Used to pass request-scoped secrets (e.g. a
+                short-lived end-user token) to skill scripts without placing them
+                in the prompt, tool arguments, or the command string (issue #3861).
+                When ``None`` the sandbox uses its default environment.
 
         Returns:
             The standard or error output of the command.

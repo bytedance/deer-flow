@@ -110,7 +110,7 @@ class AioSandbox(Sandbox):
     # default.
     _DEFAULT_NO_CHANGE_TIMEOUT = 600
 
-    def execute_command(self, command: str) -> str:
+    def execute_command(self, command: str, env: dict[str, str] | None = None) -> str:
         """Execute a shell command in the sandbox.
 
         Uses a lock to serialize concurrent requests. The AIO sandbox
@@ -122,10 +122,19 @@ class AioSandbox(Sandbox):
 
         Args:
             command: The command to execute.
+            env: Optional per-call environment variables (request-scoped secrets,
+                issue #3861). When provided, the command runs via the ``bash.exec``
+                API (which supports per-command env) on a fresh auto-created session
+                so the secrets are scoped to this single command and never persist;
+                secret values travel in the structured ``env`` field, never in the
+                command string. When ``None`` the legacy persistent-shell path runs
+                unchanged.
 
         Returns:
             The output of the command.
         """
+        if env:
+            return self._execute_with_env(command, env)
         with self._lock:
             try:
                 result = self._client.shell.exec_command(command=command, no_change_timeout=self._DEFAULT_NO_CHANGE_TIMEOUT)
@@ -152,6 +161,34 @@ class AioSandbox(Sandbox):
                 return output if output else "(no output)"
             except Exception as e:
                 logger.error(f"Failed to execute command in sandbox: {e}")
+                return f"Error: {e}"
+
+    def _execute_with_env(self, command: str, env: dict[str, str]) -> str:
+        """Execute a command with per-call environment variables injected.
+
+        The persistent-shell ``shell.exec_command`` API has no env parameter, so
+        injected commands use the ``bash.exec`` API which accepts per-command env.
+        Each call lets the sandbox auto-create a fresh session (no ``session_id``),
+        so injected request-scoped secrets are scoped to this command and never
+        persist across calls. Secret values travel in the structured ``env`` field,
+        never in the command string.
+        """
+        with self._lock:
+            try:
+                result = self._client.bash.exec(
+                    command=command,
+                    env=env,
+                    hard_timeout=float(self._DEFAULT_NO_CHANGE_TIMEOUT),
+                )
+                data = result.data if result else None
+                stdout = (data.stdout or "") if data else ""
+                stderr = (data.stderr or "") if data else ""
+                output = stdout
+                if stderr:
+                    output += f"\nStd Error:\n{stderr}" if output else stderr
+                return output if output else "(no output)"
+            except Exception as e:
+                logger.error(f"Failed to execute command with injected env in sandbox: {e}")
                 return f"Error: {e}"
 
     def read_file(self, path: str) -> str:
