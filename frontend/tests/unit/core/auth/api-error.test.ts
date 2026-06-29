@@ -19,7 +19,6 @@ describe("resolveAuthError", () => {
       code: "token_expired",
       message: "登录已过期，请重新登录后再发布",
       shouldRedirect: true,
-      shouldClearEhmCookie: true,
     });
   });
 
@@ -39,7 +38,6 @@ describe("resolveAuthError", () => {
       code: "not_authenticated",
       message: "登录状态异常，请重新登录后再发布",
       shouldRedirect: true,
-      shouldClearEhmCookie: false,
     });
   });
 
@@ -59,7 +57,6 @@ describe("resolveAuthError", () => {
       code: "provider_unavailable",
       message: "Authentication service unavailable",
       shouldRedirect: false,
-      shouldClearEhmCookie: false,
     });
   });
 

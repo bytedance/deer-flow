@@ -14,7 +14,6 @@ import { queryClient } from "@/components/query-client-provider";
 import { setCurrentTenantId } from "@/core/tenant/store";
 
 import { type User, buildLoginUrl } from "./types";
-import { EHM_TOKEN_COOKIE } from "./ehm-auth";
 
 // Re-export for consumers
 export type { User };
@@ -35,11 +34,6 @@ const AuthContext = createContext<AuthContextType | undefined>(undefined);
 interface AuthProviderProps {
   children: ReactNode;
   initialUser: User | null;
-}
-
-function hasEhmCookie(): boolean {
-  if (typeof document === "undefined") return false;
-  return document.cookie.includes(`${EHM_TOKEN_COOKIE}=`);
 }
 
 /**
@@ -68,12 +62,8 @@ export function AuthProvider({ children, initialUser }: AuthProviderProps) {
   /**
    * Fetch current user from FastAPI
    * Used when initialUser might be stale (e.g., after tab was inactive).
-   * Skipped for EHM-token-authenticated users (no backend session).
    */
   const refreshUser = useCallback(async () => {
-    // EHM auth: no backend session to refresh, skip
-    if (hasEhmCookie()) return;
-
     try {
       setIsLoading(true);
       const res = await fetch("/api/v1/auth/me", {
@@ -104,17 +94,12 @@ export function AuthProvider({ children, initialUser }: AuthProviderProps) {
   }, [pathname, router]);
 
   /**
-   * Logout - clear EHM cookie if present, then call FastAPI logout endpoint
+   * Logout - call FastAPI logout endpoint
    * Per RFC-001: Immediately clear local state, don't wait for server confirmation
    */
   const logout = useCallback(async () => {
     setUser(null);
     queryClient.clear();
-
-    // Clear EHM token cookie if present
-    if (hasEhmCookie()) {
-      document.cookie = `${EHM_TOKEN_COOKIE}=; path=/; max-age=0`;
-    }
 
     try {
       await fetch("/api/v1/auth/logout", {

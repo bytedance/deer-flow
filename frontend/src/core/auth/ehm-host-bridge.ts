@@ -1,7 +1,5 @@
 "use client";
 
-import { setEhmCookies } from "./ehm-auth";
-
 const AI_READY_MESSAGE = { type: "AI_READY" } as const;
 const AI_REQUEST_USER_MESSAGE = { type: "AI_REQUEST_USER" } as const;
 const AI_PING = "AI_PING";
@@ -151,18 +149,24 @@ function resolveLoginRecoveryTarget(): string {
 }
 
 async function handleTokenRefresh(payload: HostBridgePayload) {
+  console.info(HOST_BRIDGE_LOG_PREFIX, "handleTokenRefresh payload", {
+    ehmToken: payload.ehmToken,
+    token: payload.token,
+    issuedAt: payload.issuedAt,
+  });
   const ehmToken =
     normalizeToken(payload.ehmToken) ||
     normalizeToken(payload.token?.accessToken);
-  const ehmUser = normalizeToken(payload.ehmUser);
   const issuedAt = normalizeIssuedAt(payload.issuedAt) || Date.now();
 
-  if (!ehmToken) return;
+  if (!ehmToken) {
+    console.warn(HOST_BRIDGE_LOG_PREFIX, "no token found in payload");
+    return;
+  }
   if (issuedAt < latestIssuedAt) return;
-  if (issuedAt - latestIssuedAt > MAX_HOST_TOKEN_AGE_MS) return;
+  if (latestIssuedAt > 0 && issuedAt - latestIssuedAt > MAX_HOST_TOKEN_AGE_MS) return;
 
   latestIssuedAt = issuedAt;
-  setEhmCookies(ehmToken, ehmUser || undefined);
   console.info(HOST_BRIDGE_LOG_PREFIX, "received AI_TOKEN_REFRESH", {
     issuedAt,
     path: window.location.pathname,
@@ -195,12 +199,10 @@ async function handleTokenRefresh(payload: HostBridgePayload) {
 function handleInit(payload: HostBridgePayload) {
   const ehmToken = normalizeToken(payload.token?.accessToken);
   if (!ehmToken) return;
-  const ehmUser = normalizeToken(payload.ehmUser);
   const issuedAt = Date.now();
   void handleTokenRefresh({
     type: AI_TOKEN_REFRESH,
     ehmToken,
-    ehmUser,
     issuedAt,
   });
 }

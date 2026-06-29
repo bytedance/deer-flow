@@ -52,36 +52,23 @@ DeerFlow 支持两种认证方式：
   自动跳回 next 参数指定的路径
 ```
 
-#### 方式 B：EHM Token 免登（外部系统跳转推荐）
+#### 方式 B：Cookie 预置免登（外部系统跳转推荐）
 
-适用于 EHM 等外部系统跳转场景。外部系统预先签发 JWT，DeerFlow 直接恢复用户身份，无需用户手动输入凭据。
+适用于 EHM 等外部系统跳转场景。外部系统预先在 DeerFlow 域名下设置标准的 `access_token` Cookie，DeerFlow 直接恢复用户身份，无需用户手动输入凭据。
 
-**推荐：Cookie 预置**（token 不在地址栏出现，无泄漏风险）
+**Cookie 预置方式**（推荐，token 不在地址栏出现，无泄漏风险）
 
 ```
 外部系统在 DeerFlow 域名下预置 Cookie：
-  ehm_token=<JWT> （SameSite=Lax, path=/, max-age=86400）
-  ehm_user=<base64 JSON> （可选，SameSite=Lax, path=/, max-age=86400）
+  access_token=<JWT> （HttpOnly, SameSite=Lax, path=/）
+  refresh_token=<JWT> （HttpOnly, SameSite=Lax, path=/, 可选）
+  csrf_token=<random> （SameSite=Lax, path=/）
         │
         ▼
   直接跳转到 deep-link URL（无需经过 /login）
         │
         ▼
-  SSR getServerSideUser() 读取 Cookie，注入用户上下文
-```
-
-> 实现：[ehm-auth.ts:140-145](frontend/src/core/auth/ehm-auth.ts#L140-L145) `setEhmCookies`，[server.ts:31-37](frontend/src/core/auth/server.ts#L31-L37) `getServerSideUser` 读取 cookie 直接恢复用户。
-
-**备选：URL 传参**（token 经地址栏传递，用于无法跨域写 cookie 的场景）
-
-```
-外部系统构造 /login?next=<deep-link>&ehm_token=<JWT>&ehm_user=<base64>
-        │
-        ▼
-  登录页校验 JWT，写 Cookie（setEhmCookieAndRedirect）
-        │
-        ▼
-  302 跳转到 deep-link 页面
+  SSR getServerSideUser() 调用 /api/v1/auth/me 获取用户信息
 ```
 
 **EHM Token 参数**：
@@ -134,10 +121,10 @@ Session Cookie：
 3. 完成登录后，自动跳回目标页面
 4. 确认查询参数完整保留
 
-EHM Token：
-1. 在已登录的 EHM 系统中点击包含 ehm_token 的链接
-2. 确认页面不出现登录表单，直接跳转到 deep-link 目标页面
-3. 若 ehm_token 已过期，应看到 "token 无效或已过期" 提示
+外部系统 Cookie 预置：
+1. 外部系统设置 access_token cookie 后跳转到 deep-link URL
+2. 确认页面不出现登录表单，直接进入目标页面
+3. 确认用户信息正确显示
 ```
 
 ### 通用参数（所有接口适用）
@@ -195,8 +182,6 @@ GET /workspace/chats/new?prompt=%E5%88%86%E6%9E%90%E5%85%A8%E5%8E%82%E6%9C%AC%E6
 ```
 GET /login
   ?next=<encodeURIComponent(/workspace/chats/new?prompt=分析全厂本月设备可用率&auto_send=1&source=portal)>
-  &ehm_token=<EHM_JWT>
-  &ehm_user=<base64_user_info>
 ```
 
 **调用方验证方式**
@@ -240,17 +225,6 @@ GET /workspace/agents/fault-diagnosis--pump/chats/new
   &source=grafana-alerting
   &context=alert-12345
 ```
-
-**EHM 免登示例**（外部系统跳转，无需用户手动登录）
-
-```
-GET /login
-  ?next=%2Fworkspace%2Fagents%2Ffault-diagnosis--pump%2Fchats%2Fnew%3Fdevice_id%3DP-203A%26component_id%3DBearing-1%26diagnosis_date%3D2026-06-01%26diagnosis_hour%3D8%26auto_send%3D1%26source%3Dgrafana-alerting%26context%3Dalert-12345
-  &ehm_token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
-  &ehm_user=eyJpZCI6IjEwMDAiLCJ1c2VyX25hbWUiOiJ6aGFuZ3NhbiIsInJlYWxfbmFtZSI6IuW8oOS4iSIsIm9yZ19pZCI6Ijk5OSJ9
-```
-
-> `ehm_token` 为 EHM 签发的 JWT（payload: `{id, exp, iat}`），`ehm_user` 为 base64 编码的用户信息 JSON（`{id, user_name, real_name, org_id}`）。登录页校验通过后自动跳回 deep-link 页面。
 
 **调用方验证方式**
 
@@ -298,8 +272,6 @@ GET /workspace/agents/fault-diagnosis--rotating/chats/new
 ```
 GET /login
   ?next=<encodeURIComponent(/workspace/agents/fault-diagnosis--rotating/chats/new?device_id=T-501A&component_id=DE-Bearing&diagnosis_date=2026-06-01&diagnosis_hour=14&auto_send=1&source=dcs-alert)>
-  &ehm_token=<EHM_JWT>
-  &ehm_user=<base64_user_info>
 ```
 
 **调用方验证方式**
@@ -344,8 +316,6 @@ GET /workspace/agents/fault-diagnosis--reciprocating/chats/new
 ```
 GET /login
   ?next=<encodeURIComponent(/workspace/agents/fault-diagnosis--reciprocating/chats/new?device_id=R-301&component_id=Cyl-1&diagnosis_date=2026-05-31&diagnosis_hour=6&auto_send=1&source=plc-alert)>
-  &ehm_token=<EHM_JWT>
-  &ehm_user=<base64_user_info>
 ```
 
 **调用方验证方式**
@@ -398,8 +368,6 @@ GET /workspace/agents/monitoring-analysis/chats/new
 ```
 GET /login
   ?next=<encodeURIComponent(/workspace/agents/monitoring-analysis/chats/new?point_ids=140529abc,140529def&device_id=12345&date_start=2026-05-01&date_end=2026-06-01&auto_send=1&source=monitoring-dashboard)>
-  &ehm_token=<EHM_JWT>
-  &ehm_user=<base64_user_info>
 ```
 
 **调用方验证方式**
@@ -467,9 +435,7 @@ GET /workspace/agents/defect-workflow-closure/chats/new
 
 ```
 GET /login
-  ?next=<encodeURIComponent(/workspace/agents/defect-workflow-closure/chats/new?task_id=90296&defect_id=1781744317660112&defect_no=QX20260621-C158E400&mode=view&auto_open=1&launch_id=ehm-defect-20260625-001&source=ehm-defect-management)>
-  &ehm_token=<EHM_JWT>
-  &ehm_user=<base64_user_info>
+  ?next=<encodeURIComponent(/workspace/agents/defect-closure/chats/new?ticket_id=TCKT-0042&action=view&auto_send=1&source=jira)>
 ```
 
 **调用方验证方式**
@@ -537,9 +503,7 @@ GET /workspace/agents/ai-report--daily/chats/new
 
 ```
 GET /login
-  ?next=<encodeURIComponent(/workspace/agents/ai-report--daily/chats/new?template_id=daily-equipment&report_date=2026-06-01&auto_send=1&launch_id=ehm-report-20260625-001&source=report-scheduler)>
-  &ehm_token=<EHM_JWT>
-  &ehm_user=<base64_user_info>
+  ?next=<encodeURIComponent(/workspace/agents/ai-report--daily/chats/new?template_id=daily-equipment&report_date=2026-06-01&auto_send=1&source=report-scheduler)>
 ```
 
 **调用方验证方式**
@@ -605,9 +569,7 @@ GET /workspace/agents/ai-report--weekly/chats/new
 
 ```
 GET /login
-  ?next=<encodeURIComponent(/workspace/agents/ai-report--weekly/chats/new?template_id=weekly-equipment&week_start=2026-05-25&date_end=2026-06-01&auto_send=1&launch_id=ehm-report-20260625-002&source=report-scheduler)>
-  &ehm_token=<EHM_JWT>
-  &ehm_user=<base64_user_info>
+  ?next=<encodeURIComponent(/workspace/agents/ai-report--weekly/chats/new?template_id=weekly-equipment&week_start=2026-05-25&date_end=2026-06-01&auto_send=1&source=report-scheduler)>
 ```
 
 **调用方验证方式**
@@ -670,9 +632,7 @@ GET /workspace/agents/ai-report--monthly/chats/new
 
 ```
 GET /login
-  ?next=<encodeURIComponent(/workspace/agents/ai-report--monthly/chats/new?template_id=monthly-equipment&report_month=2026-06&auto_send=1&launch_id=ehm-report-20260625-003&source=report-scheduler)>
-  &ehm_token=<EHM_JWT>
-  &ehm_user=<base64_user_info>
+  ?next=<encodeURIComponent(/workspace/agents/ai-report--monthly/chats/new?template_id=monthly-equipment&report_month=2026-06&auto_send=1&source=report-scheduler)>
 ```
 
 **调用方验证方式**
@@ -715,8 +675,6 @@ GET /workspace/agents/abnormal-judgment--rotating/chats/new
 ```http
 GET /login
   ?next=<encodeURIComponent(/workspace/agents/abnormal-judgment--rotating/chats/new?device_id=E-301&anomaly_type=vibration_spike&start_time=2026-06-01T06:00:00&end_time=2026-06-01T10:00:00&auto_send=1&source=prometheus-alertmanager)>
-  &ehm_token=<EHM_JWT>
-  &ehm_user=<base64_user_info>
 ```
 
 **调用方验证方式**
@@ -767,8 +725,6 @@ GET /workspace/agents/crm-analyst/chats/new
 ```http
 GET /login
   ?next=<encodeURIComponent(/workspace/agents/crm-analyst/chats/new?query_type=service_events&date_range=last_30d&auto_send=1&source=sap-erp)>
-  &ehm_token=<EHM_JWT>
-  &ehm_user=<base64_user_info>
 ```
 
 **调用方验证方式**
@@ -821,25 +777,8 @@ function buildDiagnosisUrl(alert) {
   return `${DEERFLOW_HOST}/workspace/agents/fault-diagnosis--pump/chats/new?${params}`;
 }
 
-// EHM 免登方式：构造 /login URL 携带 ehm_token
-function buildEhmDiagnosisUrl(alert, ehmToken, ehmUserBase64) {
-  const deepLink = `/workspace/agents/fault-diagnosis--pump/chats/new?${new URLSearchParams(
-    {
-      device_id: alert.labels.device_id,
-      component_id: alert.labels.component_id,
-      diagnosis_date: new Date(alert.startsAt).toISOString().slice(0, 10),
-      diagnosis_hour: String(new Date(alert.startsAt).getHours()),
-      auto_send: "1",
-      source: "grafana-alerting",
-      context: alert.fingerprint,
-    },
-  )}`;
-  return `${DEERFLOW_HOST}/login?${new URLSearchParams({
-    next: deepLink,
-    ehm_token: ehmToken,
-    ehm_user: ehmUserBase64,
-  })}`;
-}
+// 外部系统需要先设置 access_token cookie（通过后端接口或同域 cookie）
+// 然后直接跳转到 deep-link URL，无需经过 /login
 ```
 
 ### Go (Prometheus AlertManager)
@@ -858,22 +797,8 @@ func BuildMonitoringDeepLink(alert *Alert) string {
     return "https://deerflow.example.com/workspace/agents/monitoring-analysis/chats/new?" + params.Encode()
 }
 
-// EHM 免登方式：构造 /login URL
-func BuildEhmMonitoringDeepLink(alert *Alert, ehmToken string, ehmUserBase64 string) string {
-    deepLink := "/workspace/agents/monitoring-analysis/chats/new?" + url.Values{
-        "point_ids":  {alert.Labels["point_ids"]},
-        "device_id":  {alert.Labels["device_id"]},
-        "date_start": {alert.StartsAt.Format("2006-01-02")},
-        "date_end":   {time.Now().Format("2006-01-02")},
-        "auto_send":  {"1"},
-        "source":     {"prometheus-alertmanager"},
-    }.Encode()
-    loginParams := url.Values{
-        "next":      {deepLink},
-        "ehm_token": {ehmToken},
-        "ehm_user":  {ehmUserBase64},
-    }
-    return "https://deerflow.example.com/login?" + loginParams.Encode()
+// 外部系统需要先设置 access_token cookie（通过后端接口或同域 cookie）
+// 然后直接跳转到 deep-link URL，无需经过 /login
 }
 ```
 
@@ -991,18 +916,16 @@ xdg-open "$URL" 2>/dev/null || open "$URL" 2>/dev/null
 
 集成方可按以下步骤逐项验证：
 
-| #   | 验证项                                                                         | 预期结果                                         |
-| --- | ------------------------------------------------------------------------------ | ------------------------------------------------ |
-| 1   | 未登录状态下打开任意 deep-link URL                                             | 重定向到 `/login?next=...`，登录后跳回目标页面   |
-| 2   | EHM 免登：构造 `/login?next=<deep-link>&ehm_token=<有效JWT>&ehm_user=<base64>` | 不显示登录表单，直接跳转到目标页面               |
-| 3   | EHM 免登：`ehm_token` 已过期                                                   | 显示 "token 无效或已过期"，清除 `ehm_token` 参数 |
-| 4   | EHM 免登：不传 `ehm_user`                                                      | 仅 token 验证通过，用户详情从后端补全            |
-| 5   | `auto_send=1` + `prompt=测试`                                                  | 页面打开后自动发送 "测试"                        |
-| 6   | `prompt=测试` 不带 `auto_send`                                                 | 输入框预填 "测试"，不自动发送                    |
-| 7   | `auto_send=2`                                                                  | 视为不自动发送                                   |
-| 8   | `prompt=<超2000字符>`                                                          | 截断至 2000 字符后发送                           |
-| 9   | `device_id=P-203;rm+rf` (诊断接口)                                             | 参数透传至 Agent，Agent 校验失败后回退交互流程   |
-| 10  | `diagnosis_date=2026/06/01` (诊断接口)                                         | 参数透传至 Agent，Agent 校验失败后回退交互流程   |
-| 11  | 已有对话 URL 后加 `?prompt=xxx`                                                | 参数被忽略，对话正常加载                         |
-| 12  | 监测分析只传 `device_id` 不传 `point_ids`                                      | Agent 回退到测点多选器交互                       |
-| 13  | 控制台检查 `[DeepLink] source=<value>`                                         | source 参数正确输出到控制台                      |
+| # | 验证项 | 预期结果 |
+|---|--------|----------|
+| 1 | 未登录状态下打开任意 deep-link URL | 重定向到 `/login?next=...`，登录后跳回目标页面 |
+| 2 | 外部系统预置 access_token cookie 后跳转 deep-link | 直接进入目标页面，无需登录 |
+| 3 | `auto_send=1` + `prompt=测试` | 页面打开后自动发送 "测试" |
+| 4 | `prompt=测试` 不带 `auto_send` | 输入框预填 "测试"，不自动发送 |
+| 5 | `auto_send=2` | 视为不自动发送 |
+| 6 | `prompt=<超2000字符>` | 截断至 2000 字符后发送 |
+| 7 | `device_id=P-203;rm+rf` (诊断接口) | 参数透传至 Agent，Agent 校验失败后回退交互流程 |
+| 8 | `diagnosis_date=2026/06/01` (诊断接口) | 参数透传至 Agent，Agent 校验失败后回退交互流程 |
+| 9 | 已有对话 URL 后加 `?prompt=xxx` | 参数被忽略，对话正常加载 |
+| 10 | 监测分析只传 `device_id` 不传 `point_ids` | Agent 回退到测点多选器交互 |
+| 11 | 控制台检查 `[DeepLink] source=<value>` | source 参数正确输出到控制台 |

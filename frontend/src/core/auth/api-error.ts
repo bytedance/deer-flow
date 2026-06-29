@@ -1,4 +1,3 @@
-import { EHM_TOKEN_COOKIE } from "./ehm-auth";
 import { shouldSuppressAuthErrorRedirect } from "@/core/api/fetcher";
 import {
   authErrorMessage,
@@ -16,7 +15,6 @@ export interface ResolvedAuthError {
   code: AuthErrorCode;
   message: string;
   shouldRedirect: boolean;
-  shouldClearEhmCookie: boolean;
 }
 
 const REDIRECT_CODES = new Set<AuthErrorCode>([
@@ -51,8 +49,6 @@ export function resolveAuthError(
       code: parsed.code,
       message: sessionErrorMessage(parsed.code, action),
       shouldRedirect: true,
-      shouldClearEhmCookie:
-        parsed.code === "token_expired" || parsed.code === "token_invalid",
     };
   }
 
@@ -60,7 +56,6 @@ export function resolveAuthError(
     code: parsed.code,
     message: parsed.message || authErrorMessage(parsed.code),
     shouldRedirect: false,
-    shouldClearEhmCookie: false,
   };
 }
 
@@ -68,10 +63,6 @@ export function applyResolvedAuthError(
   resolved: ResolvedAuthError,
   pathname: string,
 ): void {
-  if (resolved.shouldClearEhmCookie && typeof document !== "undefined") {
-    document.cookie = `${EHM_TOKEN_COOKIE}=; path=/; max-age=0`;
-  }
-
   if (resolved.shouldRedirect && typeof window !== "undefined") {
     if (shouldSuppressAuthErrorRedirect()) {
       return;
