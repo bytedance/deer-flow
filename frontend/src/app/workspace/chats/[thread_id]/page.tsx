@@ -22,12 +22,14 @@ import { ThreadTitle } from "@/components/workspace/thread-title";
 import { TodoList } from "@/components/workspace/todo-list";
 import { TokenUsageIndicator } from "@/components/workspace/token-usage-indicator";
 import { Welcome } from "@/components/workspace/welcome";
+import { WorkflowTraceTrigger } from "@/components/workspace/workflow-trace-trigger";
 import { useI18n } from "@/core/i18n/hooks";
 import { useModels } from "@/core/models/hooks";
 import { useNotification } from "@/core/notification/hooks";
 import { useLocalSettings, useThreadSettings } from "@/core/settings";
 import {
   useThreadMetadata,
+  useThreadRuns,
   useThreadStream,
   useThreadTokenUsage,
 } from "@/core/threads/hooks";
@@ -54,11 +56,15 @@ export default function ChatPage() {
     isNewThread || isMock ? undefined : threadId,
     { enabled: tokenUsageEnabled && !isMock },
   );
+  const threadRuns = useThreadRuns(isNewThread || isMock ? undefined : threadId, {
+    enabled: !isNewThread && !isMock,
+  });
   const threadMetadata = useThreadMetadata(threadId, {
     enabled: !isNewThread && !isMock,
     isMock,
   });
   const backendTokenUsage = threadTokenUsageToTokenUsage(threadTokenUsage.data);
+  const latestRunId = threadRuns.data?.[0]?.run_id;
   const mountedRef = useRef(false);
   useSpecificChatMode();
 
@@ -200,6 +206,10 @@ export default function ChatPage() {
                 }
               />
               <ExportTrigger threadId={threadId} />
+              <WorkflowTraceTrigger
+                enabled={!isMock}
+                runId={latestRunId}
+              />
               <ArtifactTrigger />
             </div>
           </header>

@@ -623,6 +623,7 @@ async def _capture_start_run_graph_input(body):
     from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
     from deerflow.runtime import RunManager
     from deerflow.runtime.runs.store.memory import MemoryRunStore
+    from deerflow.runtime.workflows.store.memory import MemoryWorkflowStore
 
     run_manager = RunManager(store=MemoryRunStore())
     state = SimpleNamespace(
@@ -633,6 +634,7 @@ async def _capture_start_run_graph_input(body):
         run_event_store=SimpleNamespace(),
         run_events_config=None,
         thread_store=MemoryThreadMetaStore(InMemoryStore()),
+        workflow_store=MemoryWorkflowStore(),
     )
     request = SimpleNamespace(
         headers={},
@@ -709,6 +711,7 @@ def test_start_run_uses_internal_owner_header_for_persistence(_stub_app_config):
     from deerflow.runtime import RunManager
     from deerflow.runtime.runs.store.memory import MemoryRunStore
     from deerflow.runtime.user_context import get_effective_user_id
+    from deerflow.runtime.workflows.store.memory import MemoryWorkflowStore
 
     async def _scenario():
         run_store = MemoryRunStore()
@@ -723,6 +726,7 @@ def test_start_run_uses_internal_owner_header_for_persistence(_stub_app_config):
             run_event_store=SimpleNamespace(),
             run_events_config=None,
             thread_store=thread_store,
+            workflow_store=MemoryWorkflowStore(),
         )
         request = SimpleNamespace(
             headers={INTERNAL_OWNER_USER_ID_HEADER_NAME: "owner-1"},
