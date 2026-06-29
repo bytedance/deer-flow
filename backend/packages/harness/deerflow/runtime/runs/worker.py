@@ -29,9 +29,12 @@ from langgraph.checkpoint.base import empty_checkpoint
 from deerflow.agents.goal_state import GoalEvaluation, GoalState
 from deerflow.config.app_config import AppConfig
 from deerflow.runtime.goal import (
+    DEFAULT_MAX_GOAL_CONTINUATIONS,
+    DEFAULT_MAX_NO_PROGRESS_CONTINUATIONS,
     attach_goal_evaluation,
     compute_no_progress_count,
     evaluate_goal_completion,
+    latest_visible_assistant_signature,
     make_goal_continuation_message,
     read_thread_goal,
     should_continue_goal,
@@ -470,13 +473,17 @@ async def run_agent(
 
 async def _call_checkpointer_method(checkpointer: Any, async_name: str, sync_name: str, *args: Any, **kwargs: Any) -> Any:
     """Call a checkpointer method, supporting async and sync variants."""
-    method = getattr(checkpointer, async_name, None) or getattr(checkpointer, sync_name, None)
-    if method is None:
+    async_method = getattr(checkpointer, async_name, None)
+    if async_method is not None:
+        result = async_method(*args, **kwargs)
+        return await result if inspect.isawaitable(result) else result
+    sync_method = getattr(checkpointer, sync_name, None)
+    if sync_method is None:
         raise AttributeError(f"Missing checkpointer method: {async_name}/{sync_name}")
-    result = method(*args, **kwargs)
-    if inspect.isawaitable(result):
-        return await result
-    return result
+    # Offload the synchronous checkpointer call so its blocking IO never runs on
+    # the event loop (backend/AGENTS.md blocking-IO gate).
+    result = await asyncio.to_thread(sync_method, *args, **kwargs)
+    return await result if inspect.isawaitable(result) else result
 
 
 def _checkpoint_id(checkpoint_tuple: Any) -> str | None:
@@ -553,9 +560,11 @@ def _stand_down_reason(goal: GoalState, evaluation: GoalEvaluation, no_progress_
         return None
     if evaluation["blocker"] != "goal_not_met_yet":
         return f"blocked:{evaluation['blocker']}"
-    if int(goal.get("continuation_count", 0)) >= int(goal.get("max_continuations", 0)):
+    # Default caps mirror should_continue_goal so the two gate functions agree on
+    # a goal dict that is missing these fields.
+    if int(goal.get("continuation_count", 0)) >= int(goal.get("max_continuations", DEFAULT_MAX_GOAL_CONTINUATIONS)):
         return "max_continuations_reached"
-    if no_progress_count >= int(goal.get("max_no_progress_continuations", 0)):
+    if no_progress_count >= int(goal.get("max_no_progress_continuations", DEFAULT_MAX_NO_PROGRESS_CONTINUATIONS)):
         return "no_progress_detected"
     return None
 
@@ -571,6 +580,7 @@ async def _persist_goal_evaluation(
     no_progress_count: int,
     continuation_count: int | None = None,
     stand_down_reason: str | None = None,
+    evidence_signature: str = "",
 ) -> GoalState | None:
     try:
         current_goal = await read_thread_goal(checkpointer, thread_id)
@@ -583,6 +593,7 @@ async def _persist_goal_evaluation(
             continuation_count=continuation_count,
             no_progress_count=no_progress_count,
             stand_down_reason=stand_down_reason,
+            evidence_signature=evidence_signature,
         )
         values = await write_thread_goal(checkpointer, thread_id, updated_goal, as_node="goal_evaluator")
         await bridge.publish(run_id, "values", serialize(values, mode="values"))
@@ -625,6 +636,7 @@ async def _prepare_goal_continuation_input(
         checkpoint_id_before = _checkpoint_id(checkpoint_tuple)
         messages = _read_checkpoint_messages(checkpoint_tuple)
         conversation_signature_before = visible_conversation_signature(messages)
+        evidence_signature = latest_visible_assistant_signature(messages)
 
         if not _has_durable_goal_turn_receipt(checkpoint_tuple, messages):
             evaluation = GoalEvaluation(
@@ -633,7 +645,7 @@ async def _prepare_goal_continuation_input(
                 reason="No durable assistant end-of-turn receipt was available.",
                 evidence_summary="",
             )
-            no_progress_count = compute_no_progress_count(goal, evaluation)
+            no_progress_count = compute_no_progress_count(goal, evaluation, evidence_signature=evidence_signature)
             await _persist_goal_evaluation(
                 bridge=bridge,
                 checkpointer=checkpointer,
@@ -643,6 +655,7 @@ async def _prepare_goal_continuation_input(
                 evaluation=evaluation,
                 no_progress_count=no_progress_count,
                 stand_down_reason="no_durable_end_of_turn",
+                evidence_signature=evidence_signature,
             )
             return None
 
@@ -656,7 +669,7 @@ async def _prepare_goal_continuation_input(
         logger.warning("Goal evaluator failed for thread %s after run %s", thread_id, run_id, exc_info=True)
         return None
 
-    no_progress_count = compute_no_progress_count(goal, evaluation)
+    no_progress_count = compute_no_progress_count(goal, evaluation, evidence_signature=evidence_signature)
 
     try:
         current_goal = await read_thread_goal(checkpointer, thread_id)
@@ -687,6 +700,7 @@ async def _prepare_goal_continuation_input(
             evaluation=evaluation,
             no_progress_count=no_progress_count,
             stand_down_reason="thread_changed_after_evaluation",
+            evidence_signature=evidence_signature,
         )
         return None
 
@@ -709,6 +723,7 @@ async def _prepare_goal_continuation_input(
             evaluation=evaluation,
             no_progress_count=no_progress_count,
             stand_down_reason=stand_down_reason,
+            evidence_signature=evidence_signature,
         )
         return None
 
@@ -722,6 +737,7 @@ async def _prepare_goal_continuation_input(
         evaluation=evaluation,
         no_progress_count=no_progress_count,
         continuation_count=next_count,
+        evidence_signature=evidence_signature,
     )
     if updated_goal is None:
         return None
@@ -752,6 +768,7 @@ async def _prepare_goal_continuation_input(
             no_progress_count=no_progress_count,
             continuation_count=next_count,
             stand_down_reason="thread_changed_before_continuation",
+            evidence_signature=evidence_signature,
         )
         return None
 

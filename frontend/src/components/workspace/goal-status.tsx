@@ -1,5 +1,8 @@
+"use client";
+
 import { TargetIcon } from "lucide-react";
 
+import { useI18n } from "@/core/i18n/hooks";
 import type { GoalState } from "@/core/threads";
 import { cn } from "@/lib/utils";
 
@@ -10,6 +13,7 @@ export function GoalStatus({
   className?: string;
   goal: GoalState;
 }) {
+  const { t } = useI18n();
   return (
     <div
       className={cn(
@@ -19,7 +23,9 @@ export function GoalStatus({
     >
       <TargetIcon className="text-primary size-4 shrink-0" />
       <div className="min-w-0 flex-1 truncate">
-        <span className="text-muted-foreground mr-2">Goal</span>
+        <span className="text-muted-foreground mr-2">
+          {t.inputBox.goalLabel}
+        </span>
         <span className="font-medium">{goal.objective}</span>
       </div>
       <div className="text-muted-foreground shrink-0 text-xs tabular-nums">

@@ -96,6 +96,7 @@ export interface Translations {
     followupConfirmReplace: string;
     suggestionPlaceholderRequired: string;
     goalCommandDescription: string;
+    goalLabel: string;
     goalSet: string;
     goalCleared: string;
     goalNone: string;

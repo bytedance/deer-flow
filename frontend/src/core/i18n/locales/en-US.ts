@@ -119,6 +119,7 @@ export const enUS: Translations = {
     suggestionPlaceholderRequired:
       "Replace the suggestion placeholder before sending.",
     goalCommandDescription: "Set, show, or clear an active goal",
+    goalLabel: "Goal",
     goalSet: "Goal set.",
     goalCleared: "Goal cleared.",
     goalNone: "No active goal.",

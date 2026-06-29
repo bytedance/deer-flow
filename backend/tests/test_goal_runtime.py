@@ -156,3 +156,41 @@ def test_attach_goal_evaluation_records_blocker_progress_and_stand_down_reason()
     assert updated["last_evaluation"]["evidence_summary"] == "Deploy is pending"
     assert updated["last_evaluation"]["stand_down_reason"] == "blocked:external_wait"
     assert updated["last_evaluation"]["progress_key"]
+
+
+def test_latest_visible_assistant_signature_tracks_last_ai_evidence():
+    base = [HumanMessage(content="go"), AIMessage(content="answer one")]
+    sig1 = goal.latest_visible_assistant_signature(base)
+    # Signature depends only on the latest visible assistant text, not the prompt.
+    sig1_again = goal.latest_visible_assistant_signature([HumanMessage(content="different prompt"), AIMessage(content="answer one")])
+    # It changes when the assistant produces new output.
+    sig2 = goal.latest_visible_assistant_signature([HumanMessage(content="go"), AIMessage(content="answer two")])
+
+    assert sig1 and sig1 == sig1_again
+    assert sig1 != sig2
+    # Hidden continuations and human-only transcripts contribute no evidence.
+    hidden = AIMessage(content="hidden", additional_kwargs={"hide_from_ui": True})
+    assert goal.latest_visible_assistant_signature([HumanMessage(content="only human"), hidden]) == ""
+
+
+def test_no_progress_count_keys_on_evidence_not_volatile_free_text():
+    """The breaker must survive the evaluator rewording its reason.
+
+    Same visible assistant evidence + reworded free-text reason/evidence_summary
+    must still count as 'no progress'. The previous implementation keyed on the
+    volatile free-text, so the breaker effectively never fired.
+    """
+    evidence = "I made a start, but I am not done."
+    first = goal.GoalEvaluation(satisfied=False, blocker="goal_not_met_yet", reason="The same work remains.", evidence_summary="No new verification evidence.")
+    prior = goal.attach_goal_evaluation(goal.build_goal_state("Finish"), first, run_id="r1", no_progress_count=0, evidence_signature=evidence)
+
+    reworded = goal.GoalEvaluation(satisfied=False, blocker="goal_not_met_yet", reason="Still the same outstanding work, phrased differently.", evidence_summary="Evidence remains thin; nothing new verified.")
+    assert goal.compute_no_progress_count(prior, reworded, evidence_signature=evidence) == 1
+
+
+def test_no_progress_count_resets_when_evidence_advances():
+    first = goal.GoalEvaluation(satisfied=False, blocker="goal_not_met_yet", reason="x", evidence_summary="y")
+    prior = goal.attach_goal_evaluation(goal.build_goal_state("Finish"), first, run_id="r1", no_progress_count=1, evidence_signature="step 1 done")
+
+    # Identical evaluator wording, but the agent produced NEW visible evidence -> progress.
+    assert goal.compute_no_progress_count(prior, first, evidence_signature="step 2 done") == 0

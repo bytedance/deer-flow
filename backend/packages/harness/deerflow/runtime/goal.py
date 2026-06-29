@@ -7,7 +7,9 @@ the harness can evaluate and continue runs without importing the FastAPI app.
 
 from __future__ import annotations
 
+import asyncio
 import copy
+import hashlib
 import inspect
 import json
 import logging
@@ -272,25 +274,48 @@ def should_continue_goal(goal: GoalState, evaluation: GoalEvaluation, *, no_prog
     return current_no_progress < max_no_progress
 
 
-def compute_goal_progress_key(evaluation: GoalEvaluation) -> str:
-    """Return a stable key used to detect repeated non-progress evaluations."""
+def latest_visible_assistant_signature(messages: list[Any]) -> str:
+    """Return a stable signature of the latest visible assistant evidence.
+
+    The "no progress" breaker keys on what the agent actually produced — the
+    text of the most recent user-visible assistant message — not on the
+    evaluator's free-text ``reason``/``evidence_summary`` (which an LLM rewords
+    on every turn, so it almost never repeats byte-for-byte). When a
+    continuation adds no new visible assistant output, the signature is
+    unchanged and the breaker can recognise the stalled turn.
+    """
+    for message in reversed(messages):
+        if not _is_visible_message(message) or _message_type(message) != "ai":
+            continue
+        text = message_to_text(message).strip()
+        if text:
+            return hashlib.sha256(text.encode("utf-8")).hexdigest()
+    return ""
+
+
+def compute_goal_progress_key(evaluation: GoalEvaluation, *, evidence_signature: str = "") -> str:
+    """Return a stable key used to detect repeated non-progress evaluations.
+
+    Keyed on the typed ``blocker`` plus a signature of the visible assistant
+    evidence, so a stalled goal is detected even when the evaluator rewords its
+    free-text ``reason``/``evidence_summary``.
+    """
     return json.dumps(
         {
             "satisfied": evaluation["satisfied"],
             "blocker": evaluation["blocker"],
-            "reason": evaluation.get("reason", ""),
-            "evidence_summary": evaluation.get("evidence_summary", ""),
+            "evidence_signature": evidence_signature,
         },
         ensure_ascii=False,
         sort_keys=True,
     )
 
 
-def compute_no_progress_count(goal: GoalState, evaluation: GoalEvaluation) -> int:
-    """Increment repeated-progress count when evaluator evidence has not changed."""
+def compute_no_progress_count(goal: GoalState, evaluation: GoalEvaluation, *, evidence_signature: str = "") -> int:
+    """Increment repeated-progress count when visible evidence has not advanced."""
     if evaluation["satisfied"]:
         return 0
-    progress_key = compute_goal_progress_key(evaluation)
+    progress_key = compute_goal_progress_key(evaluation, evidence_signature=evidence_signature)
     previous = goal.get("last_evaluation", {})
     if isinstance(previous, dict) and previous.get("progress_key") == progress_key:
         return int(goal.get("no_progress_count", 0)) + 1
@@ -318,13 +343,17 @@ def make_goal_continuation_message(goal: GoalState, evaluation: GoalEvaluation) 
 
 
 async def _call_checkpointer_method(checkpointer: Any, async_name: str, sync_name: str, *args: Any, **kwargs: Any) -> Any:
-    method = getattr(checkpointer, async_name, None) or getattr(checkpointer, sync_name, None)
-    if method is None:
+    async_method = getattr(checkpointer, async_name, None)
+    if async_method is not None:
+        result = async_method(*args, **kwargs)
+        return await result if inspect.isawaitable(result) else result
+    sync_method = getattr(checkpointer, sync_name, None)
+    if sync_method is None:
         raise AttributeError(f"Missing checkpointer method: {async_name}/{sync_name}")
-    result = method(*args, **kwargs)
-    if inspect.isawaitable(result):
-        return await result
-    return result
+    # Offload the synchronous checkpointer call so its blocking IO never runs on
+    # the event loop (backend/AGENTS.md blocking-IO gate).
+    result = await asyncio.to_thread(sync_method, *args, **kwargs)
+    return await result if inspect.isawaitable(result) else result
 
 
 async def ensure_thread_checkpoint(checkpointer: Any, thread_id: str) -> None:
@@ -426,6 +455,7 @@ def attach_goal_evaluation(
     continuation_count: int | None = None,
     no_progress_count: int | None = None,
     stand_down_reason: str | None = None,
+    evidence_signature: str = "",
 ) -> GoalState:
     """Return a goal copy with the latest evaluator result attached."""
     next_goal = copy.deepcopy(goal)
@@ -441,7 +471,7 @@ def attach_goal_evaluation(
         "evidence_summary": evaluation.get("evidence_summary", ""),
         "run_id": run_id,
         "evaluated_at": next_goal["updated_at"],
-        "progress_key": compute_goal_progress_key(evaluation),
+        "progress_key": compute_goal_progress_key(evaluation, evidence_signature=evidence_signature),
     }
     if stand_down_reason:
         next_goal["last_evaluation"]["stand_down_reason"] = stand_down_reason

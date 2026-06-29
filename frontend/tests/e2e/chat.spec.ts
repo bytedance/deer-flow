@@ -76,7 +76,9 @@ test.describe("Chat workspace", () => {
     const textarea = page.getByPlaceholder(/how can i assist you/i);
     await expect(textarea).toBeVisible({ timeout: 15_000 });
 
-    await textarea.fill("/goal finish a small repo check and report the result");
+    await textarea.fill(
+      "/goal finish a small repo check and report the result",
+    );
     await textarea.press("Enter");
 
     const goal = page.locator("span.font-medium", {

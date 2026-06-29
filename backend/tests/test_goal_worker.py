@@ -5,7 +5,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.checkpoint.base import empty_checkpoint, uuid6
 from langgraph.checkpoint.memory import InMemorySaver
 
-from deerflow.runtime.goal import GoalEvaluation, attach_goal_evaluation, build_goal_state, read_thread_goal, write_thread_goal
+from deerflow.runtime.goal import GoalEvaluation, attach_goal_evaluation, build_goal_state, latest_visible_assistant_signature, read_thread_goal, write_thread_goal
 from deerflow.runtime.runs import worker
 
 
@@ -176,7 +176,8 @@ async def test_goal_worker_stands_down_for_non_continuable_blocker(monkeypatch):
 async def test_goal_worker_stands_down_when_no_progress_repeats(monkeypatch):
     checkpointer = InMemorySaver()
     thread_id = "no-progress-goal-thread"
-    await _seed_goal_thread(checkpointer, thread_id=thread_id, goal_text="Finish all tests")
+    messages = [HumanMessage(content="Please finish this task."), AIMessage(content="I made a start, but I am not done.")]
+    await _seed_goal_thread(checkpointer, thread_id=thread_id, goal_text="Finish all tests", messages=messages)
     previous_goal = await read_thread_goal(checkpointer, thread_id)
     assert previous_goal is not None
     repeated_evaluation = GoalEvaluation(
@@ -185,10 +186,14 @@ async def test_goal_worker_stands_down_when_no_progress_repeats(monkeypatch):
         reason="The same work remains.",
         evidence_summary="No new verification evidence.",
     )
+    # Seed the prior evaluation with the SAME visible assistant evidence the worker
+    # will recompute, so the no-progress breaker recognises the stalled turn even
+    # though the evaluator may reword its free-text reason.
+    evidence_signature = latest_visible_assistant_signature(messages)
     await write_thread_goal(
         checkpointer,
         thread_id,
-        attach_goal_evaluation(previous_goal, repeated_evaluation, run_id="previous-run", no_progress_count=1),
+        attach_goal_evaluation(previous_goal, repeated_evaluation, run_id="previous-run", no_progress_count=1, evidence_signature=evidence_signature),
     )
     bridge = _CollectingBridge()
 
@@ -308,3 +313,19 @@ async def test_goal_worker_stands_down_without_durable_assistant_receipt():
     assert latest_goal is not None
     assert latest_goal["last_evaluation"]["blocker"] == "run_failed"
     assert latest_goal["last_evaluation"]["stand_down_reason"] == "no_durable_end_of_turn"
+
+
+def test_stand_down_reason_uses_documented_default_caps_when_missing():
+    """_stand_down_reason must fall back to the same default caps as
+    should_continue_goal (8 / 2). A bare goal dict missing the cap fields must
+    not be reported as 'max reached' / 'no progress' when it has not actually
+    exhausted the documented defaults.
+    """
+    bare_goal = {"objective": "x", "status": "active", "continuation_count": 0}
+    unmet = GoalEvaluation(satisfied=False, blocker="goal_not_met_yet", reason="", evidence_summary="")
+
+    assert worker._stand_down_reason(bare_goal, unmet, no_progress_count=0) is None
+    # And the two gate functions agree on the same bare goal.
+    from deerflow.runtime.goal import should_continue_goal
+
+    assert should_continue_goal(bare_goal, unmet, no_progress_count=0) is True
