@@ -63,10 +63,27 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
         return ""
 
     @staticmethod
-    def _is_user_message_for_title(message: object) -> bool:
-        return getattr(message, "type", None) == "human" and not is_dynamic_context_reminder(message)
+    def _message_type(message: object) -> str | None:
+        message_type = getattr(message, "type", None)
+        if message_type is None and isinstance(message, dict):
+            message_type = message.get("type") or message.get("role")
+        if message_type == "user":
+            return "human"
+        if message_type == "assistant":
+            return "ai"
+        return message_type if isinstance(message_type, str) else None
 
-    def _should_generate_title(self, state: TitleMiddlewareState) -> bool:
+    @staticmethod
+    def _message_content(message: object) -> object:
+        if isinstance(message, dict):
+            return message.get("content", "")
+        return getattr(message, "content", "")
+
+    @staticmethod
+    def _is_user_message_for_title(message: object) -> bool:
+        return TitleMiddleware._message_type(message) == "human" and not is_dynamic_context_reminder(message)
+
+    def _should_generate_title(self, state: TitleMiddlewareState, *, allow_partial_exchange: bool = False) -> bool:
         """Check if we should generate a title for this thread."""
         config = self._get_title_config()
         if not config.enabled:
@@ -83,10 +100,10 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
 
         # Count user and assistant messages
         user_messages = [m for m in messages if self._is_user_message_for_title(m)]
-        assistant_messages = [m for m in messages if m.type == "ai"]
+        assistant_messages = [m for m in messages if self._message_type(m) == "ai"]
 
         # Generate title after first complete exchange
-        return len(user_messages) == 1 and len(assistant_messages) >= 1
+        return len(user_messages) == 1 and (len(assistant_messages) >= 1 or allow_partial_exchange)
 
     def _build_title_prompt(self, state: TitleMiddlewareState) -> tuple[str, str]:
         """Extract user/assistant messages and build the title prompt.
@@ -96,8 +113,8 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
         config = self._get_title_config()
         messages = state.get("messages", [])
 
-        user_msg_content = next((m.content for m in messages if self._is_user_message_for_title(m)), "")
-        assistant_msg_content = next((m.content for m in messages if m.type == "ai"), "")
+        user_msg_content = next((self._message_content(m) for m in messages if self._is_user_message_for_title(m)), "")
+        assistant_msg_content = next((self._message_content(m) for m in messages if self._message_type(m) == "ai"), "")
 
         user_msg = self._normalize_content(user_msg_content)
         assistant_msg = self._strip_think_tags(self._normalize_content(assistant_msg_content))
@@ -143,9 +160,9 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
         config["tags"] = [*(config.get("tags") or []), "middleware:title"]
         return config
 
-    def _generate_title_result(self, state: TitleMiddlewareState) -> dict | None:
+    def _generate_title_result(self, state: TitleMiddlewareState, *, allow_partial_exchange: bool = False) -> dict | None:
         """Generate a local fallback title without blocking on an LLM call."""
-        if not self._should_generate_title(state):
+        if not self._should_generate_title(state, allow_partial_exchange=allow_partial_exchange):
             return None
 
         _, user_msg = self._build_title_prompt(state)

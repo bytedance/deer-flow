@@ -214,7 +214,7 @@ Lead-agent middlewares are assembled in strict append order across `packages/har
 10. **SummarizationMiddleware** - Context reduction when approaching token limits (optional, if enabled)
 11. **TodoListMiddleware** - Task tracking with `write_todos` tool (optional, if plan_mode)
 12. **TokenUsageMiddleware** - Records token usage metrics when token tracking is enabled (optional); subagent usage is cached by `tool_call_id` only while token usage is enabled and merged back into the dispatching AIMessage by message position rather than message id
-13. **TitleMiddleware** - Auto-generates thread title after first complete exchange and normalizes structured message content before prompting the title model
+13. **TitleMiddleware** - Auto-generates thread title after first complete exchange and normalizes structured message content before prompting the title model. If a first-turn run is interrupted before this middleware can write a title, `runtime/runs/worker.py` persists a local fallback title from the checkpoint during interrupted-run cleanup and then syncs it to `threads_meta.display_name`.
 14. **MemoryMiddleware** - Queues conversations for async memory update (filters to user + final AI responses)
 15. **ViewImageMiddleware** - Injects base64 image data before LLM call (conditional on vision support)
 16. **DeferredToolFilterMiddleware** - Hides deferred (MCP) tool schemas from the bound model using a build-time deferred-name set + catalog hash, reading per-thread promotions from `ThreadState.promoted` (hash-scoped, no ContextVar); a tool becomes bound on subsequent turns after `tool_search` returns its schema (optional, if `tool_search.enabled`)

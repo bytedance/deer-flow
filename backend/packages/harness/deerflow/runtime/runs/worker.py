@@ -412,6 +412,12 @@ async def run_agent(
             except Exception:
                 logger.warning("Failed to persist run completion for %s (non-fatal)", run_id, exc_info=True)
 
+        if checkpointer is not None and record.status == RunStatus.interrupted:
+            try:
+                await _ensure_interrupted_title(checkpointer=checkpointer, thread_id=thread_id, app_config=ctx.app_config)
+            except Exception:
+                logger.debug("Failed to generate interrupted title for thread %s (non-fatal)", thread_id)
+
         # Sync title from checkpoint to threads_meta.display_name
         if checkpointer is not None and thread_store is not None:
             try:
@@ -549,6 +555,44 @@ async def _rollback_to_pre_run_checkpoint(
 def _new_checkpoint_marker() -> dict[str, str]:
     marker = empty_checkpoint()
     return {"id": marker["id"], "ts": marker["ts"]}
+
+
+async def _ensure_interrupted_title(*, checkpointer: Any, thread_id: str, app_config: AppConfig | None) -> str | None:
+    """Persist a local fallback title for interrupted first-turn runs."""
+    ckpt_config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+    ckpt_tuple = await _call_checkpointer_method(checkpointer, "aget_tuple", "get_tuple", ckpt_config)
+    if ckpt_tuple is None:
+        return None
+
+    checkpoint = copy.deepcopy(getattr(ckpt_tuple, "checkpoint", {}) or {})
+    channel_values = dict(checkpoint.get("channel_values", {}) or {})
+    existing_title = channel_values.get("title")
+    if existing_title:
+        return existing_title
+
+    from deerflow.agents.middlewares.title_middleware import TitleMiddleware
+
+    middleware = TitleMiddleware(app_config=app_config) if app_config is not None else TitleMiddleware()
+    result = middleware._generate_title_result(channel_values, allow_partial_exchange=True)
+    title = result.get("title") if isinstance(result, dict) else None
+    if not title:
+        return None
+
+    channel_values["title"] = title
+    marker = _new_checkpoint_marker()
+    checkpoint.update({"id": marker["id"], "ts": marker["ts"], "channel_values": channel_values})
+
+    metadata = dict(getattr(ckpt_tuple, "metadata", {}) or {})
+    metadata["source"] = "update"
+    metadata["step"] = metadata.get("step", 0) + 1
+    metadata["writes"] = {"runtime_interrupt_title": {"title": title}}
+
+    ckpt_config = getattr(ckpt_tuple, "config", {}) or {}
+    ckpt_configurable = ckpt_config.get("configurable", {}) if isinstance(ckpt_config, dict) else {}
+    checkpoint_ns = ckpt_configurable.get("checkpoint_ns", "") if isinstance(ckpt_configurable, dict) else ""
+    write_config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": checkpoint_ns}}
+    await _call_checkpointer_method(checkpointer, "aput", "put", write_config, checkpoint, metadata, {})
+    return title
 
 
 def _lg_mode_to_sse_event(mode: str) -> str:
