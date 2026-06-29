@@ -8,7 +8,7 @@ _FEATURES_TOOL_ROOT = Path(__file__).resolve().parent.parent
 if str(_FEATURES_TOOL_ROOT) not in sys.path:
     sys.path.insert(0, str(_FEATURES_TOOL_ROOT))
 
-from ins import InsApiClient, load_dotenv_file, load_ins_settings
+from ins import InsApiClient, close_shared_http_client, load_dotenv_file, load_ins_settings
 from ins.client import datetime_input_to_ms
 
 load_dotenv_file()
@@ -35,7 +35,7 @@ async def get_waveform_data_tool(component_id: str, time: str) -> dict[str, obje
 
 
 async def close_clients() -> None:
-    await ins_client.close()
+    await close_shared_http_client()
 
 
 async def main() -> None:

@@ -73,6 +73,67 @@ _RETRIABLE_EXCEPTIONS = (
 )
 
 
+# ---------------------------------------------------------------------------
+# Shared HTTP client — all InsApiClient instances share a single httpx
+# AsyncClient so that TCP connections are reused across tool modules.
+#
+# IMPORTANT: httpx.AsyncClient binds to the event loop of its first request.
+# When asyncio.run() is used multiple times (each creates/closes a new loop),
+# the old client becomes unusable. We track the loop ID and recreate the
+# client when the loop changes.
+# ---------------------------------------------------------------------------
+_shared_http_client: httpx.AsyncClient | None = None
+_shared_http_client_loop_id: int | None = None
+
+
+def _get_current_loop_id() -> int | None:
+    """Return the id of the running event loop, or None if no loop is running."""
+    try:
+        loop = asyncio.get_running_loop()
+        return id(loop)
+    except RuntimeError:
+        return None
+
+
+def get_shared_http_client() -> httpx.AsyncClient:
+    """Return the process-wide shared httpx.AsyncClient (lazy init).
+
+    If the event loop has changed since the client was created (e.g. after
+    asyncio.run() closed the previous loop), recreate the client to avoid
+    "Event loop is closed" errors.
+    """
+    global _shared_http_client, _shared_http_client_loop_id
+    current_loop_id = _get_current_loop_id()
+
+    # Recreate if: no client, client is closed, or event loop changed
+    needs_recreate = (
+        _shared_http_client is None
+        or _shared_http_client.is_closed
+        or (current_loop_id is not None and _shared_http_client_loop_id != current_loop_id)
+    )
+
+    if needs_recreate:
+        # If old client exists but loop changed, we can't properly await aclose().
+        # Just discard it — the old loop is gone anyway.
+        _shared_http_client = None
+        _shared_http_client = httpx.AsyncClient(
+            headers={"Content-Type": "application/json;charset=utf-8"},
+            timeout=_timeout_from_env(),
+        )
+        _shared_http_client_loop_id = current_loop_id
+
+    return _shared_http_client
+
+
+async def close_shared_http_client() -> None:
+    """Close the process-wide shared httpx.AsyncClient and reset it."""
+    global _shared_http_client, _shared_http_client_loop_id
+    if _shared_http_client is not None and not _shared_http_client.is_closed:
+        await _shared_http_client.aclose()
+    _shared_http_client = None
+    _shared_http_client_loop_id = None
+
+
 def _timeout_from_env() -> httpx.Timeout:
     """Build httpx.Timeout from environment variables.
 
@@ -239,16 +300,23 @@ def _safe_error_detail(response: Any) -> str | None:
 
 
 class InsApiClient:
-    def __init__(self, settings: InsSettings, access_token: str | None = None) -> None:
+    def __init__(
+        self,
+        settings: InsSettings,
+        access_token: str | None = None,
+        *,
+        http: httpx.AsyncClient | None = None,
+    ) -> None:
         self.settings = settings
-        self.http = httpx.AsyncClient(
-            headers={"Content-Type": "application/json;charset=utf-8"},
-            timeout=_timeout_from_env(),
-        )
+        self.http = http or get_shared_http_client()
+        self._owns_http = http is not None  # True if caller provided their own client
         self.access_token = (access_token or settings.access_token or "").strip() or None
 
     async def close(self) -> None:
-        await self.http.aclose()
+        # When using the shared client, close is managed centrally via
+        # close_shared_http_client(). Only close if we own a private client.
+        if self._owns_http:
+            await self.http.aclose()
 
     async def ensure_token(self) -> str:
         if self.access_token:

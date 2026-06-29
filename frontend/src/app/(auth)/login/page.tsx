@@ -3,14 +3,13 @@
 import { LockIcon, MailIcon } from "@/components/ui/icons";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useState } from "react";
 
 import { IndustrialBackdrop } from "@/components/auth/industrial-backdrop";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useAuth } from "@/core/auth/AuthProvider";
 import { setCurrentTenantId } from "@/core/tenant/store";
-import { setEhmCookieAndRedirect, isEhmTokenValid } from "@/core/auth/ehm-auth";
 import { encryptInsBaseCredential } from "@/core/auth/rsa-login";
 
 /**
@@ -63,34 +62,6 @@ export default function LoginPage() {
       window.location.href = redirectPath;
     }
   }, [isAuthenticated, redirectPath]);
-
-  // EHM token auto-login: set cookie and redirect (no backend call)
-  useEffect(() => {
-    const ehmToken = searchParams.get("ehm_token");
-    if (ehmToken && ehmToken !== lastEhmTokenRef.current) {
-      lastEhmTokenRef.current = ehmToken;
-      ehmAttemptedRef.current = false;
-    }
-    if (!ehmToken || ehmAttemptedRef.current || isAuthenticated) return;
-    ehmAttemptedRef.current = true;
-
-    if (!isEhmTokenValid(ehmToken)) {
-      setError("EHM 单点登录失败：token 无效或已过期");
-      const params = new URLSearchParams(searchParams);
-      params.delete("ehm_token");
-      router.replace(`/login?${params.toString()}`);
-      return;
-    }
-
-    setEhmAutoLogin(true);
-    setLoading(true);
-
-    // Pass user info from EHM (base64-encoded JSON) as cookie
-    const ehmUser = searchParams.get("ehm_user") || undefined;
-
-    // Set cookie and redirect — the target page's SSR will read the cookie
-    setEhmCookieAndRedirect(ehmToken, redirectPath, ehmUser);
-  }, [searchParams, isAuthenticated, redirectPath, router]);
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -186,64 +157,56 @@ export default function LoginPage() {
             </p>
           </div>
 
-          {ehmAutoLogin ? (
-            <div className="space-y-4">
-              <p className="text-muted-foreground text-sm text-center">
-                正在通过 EHM 单点登录...
-              </p>
+          <form onSubmit={handleLogin} className="space-y-4">
+            <div className="space-y-2">
+              <label
+                htmlFor="username"
+                className="text-muted-foreground block text-xs font-medium"
+              >
+                用户名
+              </label>
+              <div className="relative">
+                <MailIcon className="text-muted-foreground pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2" />
+                <Input
+                  id="username"
+                  type="text"
+                  value={username}
+                  onChange={(e) => setUsername(e.target.value)}
+                  className="pl-10"
+                  placeholder="请输入用户名"
+                  required
+                />
+              </div>
             </div>
-          ) : (
-            <form onSubmit={handleLogin} className="space-y-4">
-              <div className="space-y-2">
-                <label
-                  htmlFor="username"
-                  className="text-muted-foreground block text-xs font-medium"
-                >
-                  用户名
-                </label>
-                <div className="relative">
-                  <MailIcon className="text-muted-foreground pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2" />
-                  <Input
-                    id="username"
-                    type="text"
-                    value={username}
-                    onChange={(e) => setUsername(e.target.value)}
-                    className="pl-10"
-                    placeholder="请输入用户名"
-                    required
-                  />
-                </div>
+            <div className="space-y-2">
+              <label
+                htmlFor="password"
+                className="text-muted-foreground block text-xs font-medium"
+              >
+                密码
+              </label>
+              <div className="relative">
+                <LockIcon className="text-muted-foreground pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2" />
+                <Input
+                  id="password"
+                  type="password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  className="pl-10"
+                  placeholder="•••••••"
+                  required
+                />
               </div>
-              <div className="space-y-2">
-                <label
-                  htmlFor="password"
-                  className="text-muted-foreground block text-xs font-medium"
-                >
-                  密码
-                </label>
-                <div className="relative">
-                  <LockIcon className="text-muted-foreground pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2" />
-                  <Input
-                    id="password"
-                    type="password"
-                    value={password}
-                    onChange={(e) => setPassword(e.target.value)}
-                    className="pl-10"
-                    placeholder="•••••••"
-                    required
-                  />
-                </div>
-              </div>
+            </div>
 
-              {error && (
-                <p className="text-destructive text-sm">{error}</p>
-              )}
+            {error && (
+              <p className="text-destructive text-sm">{error}</p>
+            )}
 
-              <Button type="submit" className="w-full" disabled={loading}>
-                {loading ? "登录中..." : "登录"}
-              </Button>
-            </form>
-          )}
+            <Button type="submit" className="w-full" disabled={loading}>
+              {loading ? "登录中..." : "登录"}
+            </Button>
+          </form>
 
           <div className="text-muted-foreground text-center text-xs">
             <Link href="/" className="hover:underline">

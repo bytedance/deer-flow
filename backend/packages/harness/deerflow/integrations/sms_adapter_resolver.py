@@ -19,6 +19,22 @@ _adapter: SmsAdapter | None = None
 _adapter_initialized: bool = False
 
 
+def _resolve_env_vars(value):
+    """Recursively resolve $ENV_VAR references in config values."""
+    import os
+
+    if isinstance(value, str):
+        if value.startswith("$"):
+            env_var = value[1:]
+            return os.environ.get(env_var, value)
+        return value
+    elif isinstance(value, dict):
+        return {k: _resolve_env_vars(v) for k, v in value.items()}
+    elif isinstance(value, list):
+        return [_resolve_env_vars(item) for item in value]
+    return value
+
+
 def _load_sms_config() -> IntegrationSystemConfig | None:
     """Load SMS system config from the integrations section of config.yaml."""
     import os
@@ -46,6 +62,9 @@ def _load_sms_config() -> IntegrationSystemConfig | None:
     except Exception:
         logger.exception("Failed to read config.yaml at %s", config_path)
         return None
+
+    # Resolve environment variables (e.g., $SMS_BASE_URL -> http://...)
+    raw = _resolve_env_vars(raw)
 
     integrations_raw = raw.get("integrations")
     if not isinstance(integrations_raw, dict):

@@ -1,4 +1,3 @@
-import { EHM_TOKEN_COOKIE, isEhmTokenExpired } from "@/core/auth/ehm-auth";
 import { buildLoginUrl } from "@/core/auth/types";
 
 /** HTTP methods that the gateway's CSRFMiddleware checks. */
@@ -17,7 +16,6 @@ export function isStateChangingMethod(method: string): boolean {
 
 const CSRF_COOKIE_PREFIX = "csrf_token=";
 const REFRESH_PATH = "/api/v1/auth/refresh";
-const EHM_AUTHENTICATE_PATH = "/api/v1/auth/ins-base/authenticate";
 const INS_REFRESH_COOKIE = "InS-refresh";
 
 /**
@@ -86,38 +84,6 @@ export function readCsrfCookie(): string | null {
 }
 
 /**
- * Read the EHM token cookie for auto-login users.
- * Returns the raw token whenever the cookie is present. Expiry is checked
- * later in the 401 handler, where we decide whether to clear the cookie.
- *
- * SSR-safe: returns null when document is undefined.
- */
-function readEhmTokenCookie(): string | null {
-  if (typeof document === "undefined") return null;
-  for (const pair of document.cookie.split("; ")) {
-    if (pair.startsWith(`${EHM_TOKEN_COOKIE}=`)) {
-      const raw = pair.slice(EHM_TOKEN_COOKIE.length + 1);
-      return decodeURIComponent(raw);
-    }
-  }
-  return null;
-}
-
-/**
- * Check if the EHM token cookie exists, even if expired.
- * Used to detect EHM auto-login users for 401 handling.
- */
-function hasEhmTokenCookie(): boolean {
-  if (typeof document === "undefined") return false;
-  for (const pair of document.cookie.split("; ")) {
-    if (pair.startsWith(`${EHM_TOKEN_COOKIE}=`)) {
-      return true;
-    }
-  }
-  return false;
-}
-
-/**
  * Fetch with credentials and automatic CSRF protection.
  *
  * Two centralized contracts every API call needs:
@@ -129,9 +95,6 @@ function hasEhmTokenCookie(): boolean {
  *    CSRFMiddleware enforces Double Submit Cookie comparison and returns
  *    403 if the header is missing, silently breaking every call site
  *    that uses raw ``fetch()`` instead of this wrapper.
- *
- * 3. If an EHM token cookie is present (iframed auto-login), it is sent
- *    as ``Authorization: Bearer <ehm_token>`` header.
  *
  * Auto-redirects to ``/login`` on 401. Caller-supplied headers are
  * preserved; the helper only adds headers when they are not already
@@ -148,7 +111,7 @@ export async function fetch(
         ? input.toString()
         : input.url;
 
-  const merged = buildAuthHeaders(init?.headers, init?.method ?? "GET", url);
+  const merged = buildAuthHeaders(init?.headers, init?.method ?? "GET");
 
   const res = await globalThis.fetch(url, {
     ...init,
@@ -157,20 +120,6 @@ export async function fetch(
   });
 
   if (res.status === 401) {
-    if (hasEhmTokenCookie()) {
-      const authRes = await reauthenticateEhmSession(url, merged);
-      if (authRes?.ok) {
-        const retryRes = await globalThis.fetch(input, {
-          ...init,
-          headers: buildAuthHeaders(init?.headers, init?.method ?? "GET", url),
-          credentials: "include",
-        });
-        if (retryRes.status !== 401) {
-          return retryRes;
-        }
-      }
-    }
-
     // EHM-authenticated session: try refreshing via InS-refresh cookie
     // (set by EHM platform when running under same-origin reverse proxy)
     if (!url.includes(REFRESH_PATH) && readInsRefreshCookie()) {
@@ -178,7 +127,7 @@ export async function fetch(
       if (insRefreshed) {
         const retryRes = await globalThis.fetch(input, {
           ...init,
-          headers: buildAuthHeaders(init?.headers, init?.method ?? "GET", url),
+          headers: buildAuthHeaders(init?.headers, init?.method ?? "GET"),
           credentials: "include",
         });
         if (retryRes.status !== 401) {
@@ -191,13 +140,13 @@ export async function fetch(
       try {
         const refreshRes = await globalThis.fetch(resolveAuthUrl(url, REFRESH_PATH), {
           method: "POST",
-          headers: buildAuthHeaders(merged, "POST", REFRESH_PATH),
+          headers: buildAuthHeaders(merged, "POST"),
           credentials: "include",
         });
         if (refreshRes.ok) {
           const retryRes = await globalThis.fetch(input, {
             ...init,
-            headers: buildAuthHeaders(init?.headers, init?.method ?? "GET", url),
+            headers: buildAuthHeaders(init?.headers, init?.method ?? "GET"),
             credentials: "include",
           });
           if (retryRes.status !== 401) {
@@ -232,33 +181,6 @@ export async function fetch(
   return res;
 }
 
-async function reauthenticateEhmSession(
-  requestUrl: string,
-  headers: Headers,
-): Promise<Response | null> {
-  const currentToken = readEhmTokenCookie();
-  if (!currentToken) {
-    return null;
-  }
-  if (isEhmTokenExpired(currentToken)) {
-    clearEhmTokenCookie();
-    return null;
-  }
-  if (requestUrl.includes(EHM_AUTHENTICATE_PATH)) {
-    return null;
-  }
-
-  try {
-    return await globalThis.fetch(resolveAuthUrl(requestUrl, EHM_AUTHENTICATE_PATH), {
-      method: "POST",
-      headers: buildAuthHeaders(headers, "POST", EHM_AUTHENTICATE_PATH),
-      credentials: "include",
-    });
-  } catch {
-    return null;
-  }
-}
-
 function resolveAuthUrl(requestUrl: string, authPath: string): string {
   if (requestUrl.startsWith("http://") || requestUrl.startsWith("https://")) {
     return new URL(authPath, requestUrl).toString();
@@ -266,24 +188,11 @@ function resolveAuthUrl(requestUrl: string, authPath: string): string {
   return authPath;
 }
 
-function clearEhmTokenCookie(): void {
-  if (typeof document === "undefined") return;
-  document.cookie = `${EHM_TOKEN_COOKIE}=; path=/; max-age=0`;
-}
-
 function buildAuthHeaders(
   headers: HeadersInit | undefined,
   method: string,
-  _url: string,
 ): Headers {
   const merged = new Headers(headers);
-
-  if (!merged.has("Authorization")) {
-    const ehmToken = readEhmTokenCookie();
-    if (ehmToken) {
-      merged.set("Authorization", `Bearer ${ehmToken}`);
-    }
-  }
 
   if (isStateChangingMethod(method)) {
     const token = readCsrfCookie();

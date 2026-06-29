@@ -13,7 +13,7 @@ dependencies = [
     "slowapi>=0.1.9",
     "python-multipart>=0.0.26",
     "sse-starlette>=3.3.4",
-    "uvicorn[standard]>=0.46.0",
+    "uvicorn[standard]>=0.46.0,<0.49.0",
     "lark-oapi>=1.4.0",
     "slack-sdk>=3.33.0",
     "python-telegram-bot>=22.7",
@@ -25,6 +25,7 @@ dependencies = [
     "pyjwt>=2.9.0",
     "email-validator>=2.0.0",
     "chromadb>=1.5.9",
+    "click>=8.0.0,<8.2.0",
 ]
 
 [project.optional-dependencies]

@@ -1,5 +1,7 @@
 # 工具系统 (Tool System)
 
+> 关于 Tool 与 Skill 的职责边界和选择标准，参见 [TOOL_VS_SKILL.md](TOOL_VS_SKILL.md)。
+
 `get_available_tools(groups, include_mcp, model_name, subagent_enabled)` 组装工具集。
 
 ## 工具分类
