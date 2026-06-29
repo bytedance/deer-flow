@@ -9,6 +9,10 @@ import { FlickeringGrid } from "@/components/ui/flickering-grid";
 import { Input } from "@/components/ui/input";
 import { getCsrfHeaders } from "@/core/api/fetcher";
 import { useAuth } from "@/core/auth/AuthProvider";
+import {
+  fetchSetupStatus,
+  isSystemAlreadyInitializedError,
+} from "@/core/auth/setup";
 import { parseAuthError } from "@/core/auth/types";
 
 import { decideSetupModeFromSetupStatus } from "./setup-status-helpers";
@@ -40,34 +44,25 @@ export default function SetupPage() {
       // Check if the system has no users yet. Fail-safe to init_admin on
       // any non-ok response (e.g. 429 rate-limited) so the operator can
       // still reach first-boot setup — see #2999.
-      void fetch("/api/v1/auth/setup-status")
-        .then(async (r) => {
-          let needsSetup: boolean | undefined;
-          if (r.ok) {
-            try {
-              const data = (await r.json()) as { needs_setup?: boolean };
-              needsSetup = data.needs_setup;
-            } catch {
-              needsSetup = undefined;
-            }
-          }
+      void fetchSetupStatus()
+        .then((data: { needs_setup?: boolean }) => {
           if (cancelled) return;
           if (
-            decideSetupModeFromSetupStatus(r.ok, needsSetup) === "redirect_login"
+            decideSetupModeFromSetupStatus(true, data.needs_setup) ===
+            "redirect_login"
           ) {
-            router.push("/login");
+            // System already set up and user is not logged in — go to login
+            router.replace("/login");
           } else {
             setMode("init_admin");
           }
         })
         .catch(() => {
-          // Network error: fail-safe to init_admin so the operator can
-          // still reach the setup form when the gateway is flaky — see #2999.
           if (!cancelled) setMode("init_admin");
         });
     } else {
       // Authenticated but needs_setup is false — already set up
-      router.push("/workspace");
+      router.replace("/workspace");
     }
 
     return () => {
@@ -99,6 +94,10 @@ export default function SetupPage() {
 
       if (!res.ok) {
         const data = await res.json();
+        if (isSystemAlreadyInitializedError(data)) {
+          router.replace("/login");
+          return;
+        }
         const authError = parseAuthError(data);
         setError(authError.message);
         return;
