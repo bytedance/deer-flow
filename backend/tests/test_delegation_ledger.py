@@ -184,10 +184,29 @@ def _mw_names(middlewares):
     return [type(m).__name__ for m in middlewares]
 
 
+def _explicit_app_config():
+    """Build a minimal in-memory AppConfig (with one model) so build_middlewares
+    never reads the gitignored, CI-absent config.yaml via get_app_config()."""
+    from deerflow.config.app_config import AppConfig
+    from deerflow.config.model_config import ModelConfig
+    from deerflow.config.sandbox_config import SandboxConfig
+
+    model = ModelConfig(
+        name="test-model",
+        display_name="test-model",
+        description=None,
+        use="langchain_openai:ChatOpenAI",
+        model="test-model",
+        supports_thinking=False,
+        supports_vision=False,
+    )
+    return AppConfig(models=[model], sandbox=SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider"))
+
+
 def test_middleware_registered_when_subagent_enabled():
     from deerflow.agents.lead_agent.agent import build_middlewares
 
-    middlewares = build_middlewares({"configurable": {"subagent_enabled": True}}, None)
+    middlewares = build_middlewares({"configurable": {"subagent_enabled": True}}, None, app_config=_explicit_app_config())
     names = _mw_names(middlewares)
     assert "DelegationLedgerMiddleware" in names
     # Must run before coalescing so its injected SystemMessage gets folded in.
@@ -197,5 +216,5 @@ def test_middleware_registered_when_subagent_enabled():
 def test_middleware_absent_when_subagent_disabled():
     from deerflow.agents.lead_agent.agent import build_middlewares
 
-    middlewares = build_middlewares({"configurable": {"subagent_enabled": False}}, None)
+    middlewares = build_middlewares({"configurable": {"subagent_enabled": False}}, None, app_config=_explicit_app_config())
     assert "DelegationLedgerMiddleware" not in _mw_names(middlewares)

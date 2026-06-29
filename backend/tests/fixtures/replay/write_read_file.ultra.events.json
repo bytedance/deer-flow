@@ -13,6 +13,7 @@
       "event": "values",
       "keys": [
         "artifacts",
+        "delegations",
         "messages",
         "viewed_images"
       ]
@@ -21,15 +22,7 @@
       "event": "values",
       "keys": [
         "artifacts",
-        "messages",
-        "thread_data",
-        "viewed_images"
-      ]
-    },
-    {
-      "event": "values",
-      "keys": [
-        "artifacts",
+        "delegations",
         "messages",
         "thread_data",
         "viewed_images"
@@ -39,6 +32,7 @@
       "event": "values",
       "keys": [
         "artifacts",
+        "delegations",
         "messages",
         "thread_data",
         "viewed_images"
@@ -48,9 +42,9 @@
       "event": "values",
       "keys": [
         "artifacts",
+        "delegations",
         "messages",
         "thread_data",
-        "title",
         "viewed_images"
       ]
     },
@@ -58,6 +52,7 @@
       "event": "values",
       "keys": [
         "artifacts",
+        "delegations",
         "messages",
         "thread_data",
         "title",
@@ -68,6 +63,18 @@
       "event": "values",
       "keys": [
         "artifacts",
+        "delegations",
+        "messages",
+        "thread_data",
+        "title",
+        "viewed_images"
+      ]
+    },
+    {
+      "event": "values",
+      "keys": [
+        "artifacts",
+        "delegations",
         "messages",
         "sandbox",
         "thread_data",
@@ -79,6 +86,7 @@
       "event": "values",
       "keys": [
         "artifacts",
+        "delegations",
         "messages",
         "sandbox",
         "thread_data",
@@ -90,6 +98,7 @@
       "event": "values",
       "keys": [
         "artifacts",
+        "delegations",
         "messages",
         "sandbox",
         "thread_data",
@@ -101,6 +110,7 @@
       "event": "values",
       "keys": [
         "artifacts",
+        "delegations",
         "messages",
         "sandbox",
         "thread_data",
@@ -112,6 +122,7 @@
       "event": "values",
       "keys": [
         "artifacts",
+        "delegations",
         "messages",
         "sandbox",
         "thread_data",
@@ -123,6 +134,7 @@
       "event": "values",
       "keys": [
         "artifacts",
+        "delegations",
         "messages",
         "sandbox",
         "thread_data",
