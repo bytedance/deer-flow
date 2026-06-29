@@ -108,6 +108,39 @@ def merge_promoted(existing: PromotedTools | None, new: PromotedTools | None) ->
     }
 
 
+# Terminal subagent statuses (mirrors deerflow.subagents.status_contract.SUBAGENT_STATUS_VALUES).
+# Defined here so merge_delegations can guard against status downgrades without
+# importing the middleware/subagents layer (keeps thread_state import-light).
+TERMINAL_STATUSES: frozenset[str] = frozenset({"completed", "failed", "cancelled", "timed_out", "polling_timed_out"})
+
+
+class DelegationEntry(TypedDict):
+    task_id: str
+    description: str
+    subagent_type: str
+    status: str  # "in_progress" or one of TERMINAL_STATUSES
+
+
+def merge_delegations(
+    existing: list[DelegationEntry] | None,
+    new: list[DelegationEntry] | None,
+) -> list[DelegationEntry]:
+    """Reducer for the delegation ledger: upsert by task_id, preserve dispatch order.
+
+    A terminal status is never overwritten by a non-terminal one, so a later
+    re-derivation from a partially-summarized message list cannot regress a
+    finished subtask back to "in_progress".
+    """
+    merged: dict[str, DelegationEntry] = {}
+    for entry in list(existing or []) + list(new or []):
+        task_id = entry["task_id"]
+        prev = merged.get(task_id)
+        if prev is not None and prev["status"] in TERMINAL_STATUSES and entry["status"] not in TERMINAL_STATUSES:
+            continue
+        merged[task_id] = {**prev, **entry} if prev else dict(entry)
+    return list(merged.values())
+
+
 class ThreadState(AgentState):
     sandbox: SandboxStateField
     thread_data: NotRequired[ThreadDataState | None]
@@ -117,3 +150,4 @@ class ThreadState(AgentState):
     uploaded_files: NotRequired[list[dict] | None]
     viewed_images: Annotated[dict[str, ViewedImageData], merge_viewed_images]  # image_path -> {base64, mime_type}
     promoted: Annotated[PromotedTools | None, merge_promoted]
+    delegations: Annotated[list[DelegationEntry], merge_delegations]
