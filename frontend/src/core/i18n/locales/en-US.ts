@@ -120,6 +120,9 @@ export const enUS: Translations = {
       "Replace the suggestion placeholder before sending.",
     goalCommandDescription: "Set, show, or clear an active goal",
     goalLabel: "Goal",
+    goalContinuing: "Continuing {count}/{max}",
+    goalContinuationTooltip:
+      "Auto-continued {count}/{max} times toward the goal; stops at the limit.",
     goalSet: "Goal set.",
     goalCleared: "Goal cleared.",
     goalNone: "No active goal.",

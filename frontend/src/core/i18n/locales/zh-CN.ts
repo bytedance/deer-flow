@@ -114,6 +114,9 @@ export const zhCN: Translations = {
     suggestionPlaceholderRequired: "发送前请先填写建议模板中的占位内容。",
     goalCommandDescription: "设置、查看或清除当前目标",
     goalLabel: "目标",
+    goalContinuing: "续跑中 {count}/{max}",
+    goalContinuationTooltip:
+      "为达成目标已自动续跑 {count}/{max} 次，达上限后自动停止",
     goalSet: "目标已设置。",
     goalCleared: "目标已清除。",
     goalNone: "当前没有目标。",

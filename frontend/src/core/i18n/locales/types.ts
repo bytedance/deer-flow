@@ -97,6 +97,8 @@ export interface Translations {
     suggestionPlaceholderRequired: string;
     goalCommandDescription: string;
     goalLabel: string;
+    goalContinuing: string;
+    goalContinuationTooltip: string;
     goalSet: string;
     goalCleared: string;
     goalNone: string;
