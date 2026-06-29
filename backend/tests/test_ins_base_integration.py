@@ -243,6 +243,37 @@ async def test_ins_base_authenticate_bearer_sets_session_cookie():
 
 
 @pytest.mark.asyncio
+async def test_ins_base_authenticate_prefers_bearer_over_stale_cookie():
+    """Bearer authenticate should replace a stale gateway session cookie."""
+    _setup_config()
+    client = _make_client()
+
+    mock_provider = MagicMock()
+
+    async def get_user(token: str):
+        if token == "fresh-token":
+            return type("obj", (), {
+                "ins_base_permissions": ["read"],
+                "email": "user@example.com",
+            })()
+        return None
+
+    mock_provider.get_user = AsyncMock(side_effect=get_user)
+
+    with patch("app.gateway.routers.ins_base_auth.get_ins_base_provider", return_value=mock_provider):
+        client.cookies = {"access_token": "stale-token"}
+        response = client.post(
+            "/api/v1/auth/ins-base/authenticate",
+            headers={"Authorization": "Bearer fresh-token"},
+        )
+
+    assert response.status_code == 200
+    mock_provider.get_user.assert_awaited_once_with("fresh-token")
+    cookies = _get_set_cookie_headers(response)
+    assert any("access_token=fresh-token" in header for header in cookies)
+
+
+@pytest.mark.asyncio
 async def test_ins_base_authenticate_failure():
     """Failed authentication returns 401."""
     _setup_config()

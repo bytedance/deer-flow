@@ -71,16 +71,46 @@ DeerFlow 支持两种认证方式：
   SSR getServerSideUser() 调用 /api/v1/auth/me 获取用户信息
 ```
 
-> 外部系统需要与 DeerFlow 同域，或可通过后端接口设置 DeerFlow 域的 Cookie。
+**EHM Token 参数**：
+
+| 参数        | 传递方式      | 类型   | 必填 | 约束               | 说明                                                 |
+| ----------- | ------------- | ------ | ---- | ------------------ | ---------------------------------------------------- |
+| `ehm_token` | Cookie 或 URL | string | 是   | 有效 JWT，未过期   | EHM 签发的身份令牌。payload：`{id, exp, iat}`        |
+| `ehm_user`  | Cookie 或 URL | string | 推荐 | base64 编码的 JSON | 用户信息。结构：`{id, user_name, real_name, org_id}` |
+
+> **推荐 Cookie 方式**：外部系统在 DeerFlow 域名下写入 `ehm_token` / `ehm_user` Cookie（`SameSite=Lax, path=/, max-age=86400`），然后直接跳转 deep-link URL，全程 token 不出现在地址栏。需外部系统与 DeerFlow 同域或可通过接口写 DeerFlow 域的 Cookie。
+
+**EHM Token 校验规则**：
+
+| 校验项                                      | 失败行为                                           |
+| ------------------------------------------- | -------------------------------------------------- |
+| `ehm_token` 不存在或无法解码                | 显示错误 "EHM 单点登录失败：token 无效或已过期"    |
+| `ehm_token.exp` 已过期                      | 同上                                               |
+| `ehm_user` base64 解码失败                  | 仅使用 token payload 的 `id`，其他字段留空         |
+| `ehm_user` JSON 中 `id` 或 `user_name` 缺失 | 视为无效，user 返回 null（后续行为取决于前端守卫） |
+
+**auth 链路**（代码来源）：
+
+| 阶段                | 位置                                                                     | 说明                                              |
+| ------------------- | ------------------------------------------------------------------------ | ------------------------------------------------- |
+| 登录页读取 EHM 参数 | [login/page.tsx:65-86](<frontend/src/app/(auth)/login/page.tsx#L65-L86>) | 从 `searchParams` 提取 `ehm_token`、`ehm_user`    |
+| JWT 校验            | [ehm-auth.ts:93-98](frontend/src/core/auth/ehm-auth.ts#L93-L98)          | `isEhmTokenValid()` 检查 `exp` 是否过期           |
+| Cookie 写入         | [ehm-auth.ts:159-166](frontend/src/core/auth/ehm-auth.ts#L159-L166)      | `setEhmCookieAndRedirect()` 写 cookie → 跳转      |
+| SSR 身份恢复        | [server.ts:31-37](frontend/src/core/auth/server.ts#L31-L37)              | `getServerEhmToken()` → `getServerEhmUser()`      |
+| 401 自动重试        | [fetcher.ts:114-126](frontend/src/core/api/fetcher.ts#L114-L126)         | API 401 → `reauthenticateEhmSession()` → 重试请求 |
+| iframe 宿主刷新同步 | `frontend/src/core/auth/ehm-host-bridge.ts`                              | 接收宿主 `AI_TOKEN_REFRESH`，更新 cookie 并主动重建 session |
 
 **认证场景汇总**：
 
-| 场景 | 认证方式 | 预期行为 |
-|------|----------|----------|
-| 浏览器直接打开 deep-link（已登录） | Session Cookie | 直接进入目标页面 |
-| 浏览器直接打开 deep-link（未登录） | Session Cookie | 重定向到 `/login?next=<原始路径>`，登录后跳回 |
-| 会话已过期 | Session Cookie | API 返回 401 → 2s 后重定向到登录页 |
-| EHM 系统跳转（Cookie 已预置） | access_token Cookie | 直接进入目标页面，无需登录 |
+| 场景                               | 认证方式       | 预期行为                                         |
+| ---------------------------------- | -------------- | ------------------------------------------------ |
+| 浏览器直接打开 deep-link（已登录） | Session Cookie | 直接进入目标页面                                 |
+| 浏览器直接打开 deep-link（未登录） | Session Cookie | 重定向到 `/login?next=<原始路径>`，登录后跳回    |
+| 会话已过期                         | Session Cookie | API 返回 401 → 2s 后重定向到登录页               |
+| EHM 系统跳转（已持有 EHM 会话）    | EHM Token      | 构造 `/login?next=...&ehm_token=...`，自动免登   |
+| EHM iframe 嵌入（Cookie 已预置）   | EHM Cookie     | `getServerEhmToken()` 直接恢复用户，跳过登录页   |
+| EHM iframe 长驻期间宿主 token 刷新 | EHM Cookie/消息 | 接收宿主 `AI_TOKEN_REFRESH`，更新 `ehm_token` 并主动重建 DeerFlow session |
+| EHM Token 过期                     | EHM Token      | 登录页显示 token 无效错误，清除 `ehm_token` 参数 |
 
 **调用方验证方式**
 

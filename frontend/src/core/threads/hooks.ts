@@ -47,9 +47,6 @@ type SendMessageOptions = {
   interactionRetryAttempt?: number;
 };
 
-const UI_INTERACTION_RETRY_DELAY_MS = 300;
-const UI_INTERACTION_MAX_RETRY_ATTEMPTS = 60;
-
 function getModelText(
   text: string,
   additionalKwargs: Record<string, unknown> | undefined,
@@ -72,6 +69,10 @@ function getSubmitAdditionalKwargs(
     ...(filesForSubmit.length > 0 ? { files: filesForSubmit } : {}),
   };
 }
+
+const UI_INTERACTION_RETRY_DELAY_MS = 300;
+const UI_INTERACTION_MAX_RETRY_ATTEMPTS = 60;
+
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);

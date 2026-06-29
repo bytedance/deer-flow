@@ -179,11 +179,10 @@ async def refresh(request: Request, response: Response, body: InsBaseRefreshRequ
 @router.post("/authenticate", response_model=InsBaseAuthResponse)
 async def authenticate(request: Request, response: Response):
     """Verify a token via ins-base-rpc /auth/authentication."""
-    access_token = request.cookies.get("access_token")
+    auth_header = request.headers.get("Authorization", "")
+    access_token = auth_header[7:] if auth_header.startswith("Bearer ") else None
     if not access_token:
-        auth_header = request.headers.get("Authorization", "")
-        if auth_header.startswith("Bearer "):
-            access_token = auth_header[7:]
+        access_token = request.cookies.get("access_token")
 
     if not access_token:
         raise HTTPException(

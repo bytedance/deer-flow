@@ -1,3 +1,8 @@
+import { EHM_TOKEN_COOKIE, isEhmTokenExpired } from "@/core/auth/ehm-auth";
+import {
+  EHM_SESSION_RECOVERED_EVENT,
+  requestFreshHostToken,
+} from "@/core/auth/ehm-host-bridge";
 import { buildLoginUrl } from "@/core/auth/types";
 
 /** HTTP methods that the gateway's CSRFMiddleware checks. */
@@ -16,7 +21,16 @@ export function isStateChangingMethod(method: string): boolean {
 
 const CSRF_COOKIE_PREFIX = "csrf_token=";
 const REFRESH_PATH = "/api/v1/auth/refresh";
+const EHM_AUTHENTICATE_PATH = "/api/v1/auth/ins-base/authenticate";
+const INS_BASE_REFRESH_PATH = "/api/v1/auth/ins-base/refresh";
 const INS_REFRESH_COOKIE = "InS-refresh";
+const LOGIN_REDIRECT_DELAY_MS = 2000;
+
+let ehmSessionRecoveryPromise: Promise<boolean> | null = null;
+let pendingLoginRedirectTimer: number | null = null;
+let recoveryEpoch = 0;
+let isRecoveryEventBound = false;
+let hasPendingEhmRedirectConfirmation = false;
 
 /**
  * Read a named cookie from document.cookie.
@@ -104,14 +118,18 @@ export async function fetch(
   input: RequestInfo | URL | string,
   init?: RequestInit,
 ): Promise<Response> {
+  ensureRecoveryEventBinding();
+
   const url =
     typeof input === "string"
       ? input
       : input instanceof URL
-        ? input.toString()
-        : input.url;
+      ? input.toString()
+      : input.url;
 
-  const merged = buildAuthHeaders(init?.headers, init?.method ?? "GET");
+  await waitForOngoingEhmRecovery(url);
+
+  const merged = buildAuthHeaders(init?.headers, init?.method ?? "GET", url);
 
   const res = await globalThis.fetch(url, {
     ...init,
@@ -119,17 +137,44 @@ export async function fetch(
     credentials: "include",
   });
 
+  if (res.ok) {
+    clearEhmRedirectConfirmation();
+    cancelPendingLoginRedirect();
+  }
+
   if (res.status === 401) {
+    if (hasEhmTokenCookie()) {
+      const ehmSessionRecovered = await recoverEhmSession(url);
+      if (ehmSessionRecovered) {
+        cancelPendingLoginRedirect();
+        const retryRes = await globalThis.fetch(input, {
+          ...init,
+          headers: buildAuthHeaders(init?.headers, init?.method ?? "GET", url),
+          credentials: "include",
+        });
+        if (retryRes.ok) {
+          cancelPendingLoginRedirect();
+        }
+        if (retryRes.status !== 401) {
+          return retryRes;
+        }
+      }
+    }
+
     // EHM-authenticated session: try refreshing via InS-refresh cookie
     // (set by EHM platform when running under same-origin reverse proxy)
     if (!url.includes(REFRESH_PATH) && readInsRefreshCookie()) {
       const insRefreshed = await refreshInsBaseSession();
       if (insRefreshed) {
+        markRecoverySucceeded();
         const retryRes = await globalThis.fetch(input, {
           ...init,
           headers: buildAuthHeaders(init?.headers, init?.method ?? "GET"),
           credentials: "include",
         });
+        if (retryRes.ok) {
+          cancelPendingLoginRedirect();
+        }
         if (retryRes.status !== 401) {
           return retryRes;
         }
@@ -144,11 +189,15 @@ export async function fetch(
           credentials: "include",
         });
         if (refreshRes.ok) {
+          markRecoverySucceeded();
           const retryRes = await globalThis.fetch(input, {
             ...init,
             headers: buildAuthHeaders(init?.headers, init?.method ?? "GET"),
             credentials: "include",
           });
+          if (retryRes.ok) {
+            cancelPendingLoginRedirect();
+          }
           if (retryRes.status !== 401) {
             return retryRes;
           }
@@ -158,11 +207,23 @@ export async function fetch(
       }
     }
 
-    // Delay redirect so callers (e.g. publish dialog) can catch the error
-    // and show a toast before the page navigates away.
-    window.setTimeout(() => {
-      window.location.href = buildLoginUrl(window.location.pathname);
-    }, 2000);
+    if (shouldDeferInitialEhmLoginRedirect()) {
+      let detail: unknown = { code: "not_authenticated", message: "Session expired" };
+      try {
+        detail = await res.clone().json();
+      } catch {
+        // Response body is not JSON — keep the fallback detail.
+      }
+      const err = new Error("Unauthorized") as Error & {
+        status: number;
+        detail: unknown;
+      };
+      err.status = 401;
+      err.detail = detail;
+      throw err;
+    }
+
+    scheduleLoginRedirect();
 
     // Preserve the original server response body so callers can inspect
     // the real error code/message (e.g. token_expired vs not_authenticated).
@@ -181,11 +242,178 @@ export async function fetch(
   return res;
 }
 
+function ensureRecoveryEventBinding(): void {
+  if (isRecoveryEventBound || typeof window === "undefined") {
+    return;
+  }
+
+  window.addEventListener(EHM_SESSION_RECOVERED_EVENT, () => {
+    markRecoverySucceeded();
+  });
+  isRecoveryEventBound = true;
+}
+
+async function waitForOngoingEhmRecovery(requestUrl: string): Promise<void> {
+  if (!ehmSessionRecoveryPromise) {
+    return;
+  }
+  if (shouldBypassRecoveryWait(requestUrl)) {
+    return;
+  }
+
+  try {
+    await ehmSessionRecoveryPromise;
+  } catch {
+    // Keep the original request flow: if recovery failed, the request should
+    // proceed and fall through to the existing 401 handling.
+  }
+}
+
+function markRecoverySucceeded(): void {
+  recoveryEpoch += 1;
+  clearEhmRedirectConfirmation();
+  cancelPendingLoginRedirect();
+}
+
+function clearEhmRedirectConfirmation(): void {
+  hasPendingEhmRedirectConfirmation = false;
+}
+
+function cancelPendingLoginRedirect(): void {
+  if (!pendingLoginRedirectTimer) {
+    return;
+  }
+  clearTimeout(pendingLoginRedirectTimer);
+  pendingLoginRedirectTimer = null;
+}
+
+function scheduleLoginRedirect(): void {
+  if (pendingLoginRedirectTimer) {
+    return;
+  }
+
+  const scheduledEpoch = recoveryEpoch;
+  pendingLoginRedirectTimer = window.setTimeout(() => {
+    pendingLoginRedirectTimer = null;
+
+    if (ehmSessionRecoveryPromise) {
+      return;
+    }
+    if (scheduledEpoch !== recoveryEpoch) {
+      return;
+    }
+
+    window.location.href = buildLoginUrl(window.location.pathname);
+  }, LOGIN_REDIRECT_DELAY_MS);
+}
+
+function shouldDeferInitialEhmLoginRedirect(): boolean {
+  if (!hasEhmTokenCookie()) {
+    return false;
+  }
+  if (hasPendingEhmRedirectConfirmation) {
+    return false;
+  }
+
+  hasPendingEhmRedirectConfirmation = true;
+  return true;
+}
+
+export function shouldSuppressAuthErrorRedirect(): boolean {
+  return (
+    ehmSessionRecoveryPromise !== null ||
+    pendingLoginRedirectTimer !== null ||
+    hasPendingEhmRedirectConfirmation
+  );
+}
+
+function shouldBypassRecoveryWait(requestUrl: string): boolean {
+  return (
+    requestUrl.includes(EHM_AUTHENTICATE_PATH) ||
+    requestUrl.includes(INS_BASE_REFRESH_PATH) ||
+    requestUrl.includes(REFRESH_PATH)
+  );
+}
+
+async function recoverEhmSession(requestUrl: string): Promise<boolean> {
+  if (requestUrl.includes(EHM_AUTHENTICATE_PATH)) {
+    return false;
+  }
+
+  if (ehmSessionRecoveryPromise) {
+    return ehmSessionRecoveryPromise;
+  }
+
+  ehmSessionRecoveryPromise = recoverEhmSessionOnce(requestUrl).finally(() => {
+    ehmSessionRecoveryPromise = null;
+  });
+
+  return ehmSessionRecoveryPromise;
+}
+
+async function recoverEhmSessionOnce(requestUrl: string): Promise<boolean> {
+  const authRes = await reauthenticateEhmSession(requestUrl);
+  if (authRes?.ok) {
+    markRecoverySucceeded();
+    return true;
+  }
+
+  const hostTokenUpdated = await requestFreshHostToken();
+  if (!hostTokenUpdated) {
+    return false;
+  }
+
+  const authRetryRes = await reauthenticateEhmSession(requestUrl);
+  if (authRetryRes?.ok) {
+    markRecoverySucceeded();
+    return true;
+  }
+  return false;
+}
+
+async function reauthenticateEhmSession(requestUrl: string): Promise<Response | null> {
+  const currentToken = readEhmTokenCookie();
+  if (!currentToken) {
+    return null;
+  }
+  if (isEhmTokenExpired(currentToken)) {
+    return null;
+  }
+  if (requestUrl.includes(EHM_AUTHENTICATE_PATH)) {
+    return null;
+  }
+
+  try {
+    return await globalThis.fetch(resolveAuthUrl(requestUrl, EHM_AUTHENTICATE_PATH), {
+      method: "POST",
+      headers: buildEhmAuthenticateHeaders(),
+      credentials: "include",
+    });
+  } catch {
+    return null;
+  }
+}
+
 function resolveAuthUrl(requestUrl: string, authPath: string): string {
   if (requestUrl.startsWith("http://") || requestUrl.startsWith("https://")) {
     return new URL(authPath, requestUrl).toString();
   }
   return authPath;
+}
+
+function buildEhmAuthenticateHeaders(): Headers {
+  const headers = new Headers();
+  const ehmToken = readEhmTokenCookie();
+  if (ehmToken) {
+    headers.set("Authorization", `Bearer ${ehmToken}`);
+  }
+
+  const csrfToken = readCsrfCookie();
+  if (csrfToken) {
+    headers.set("X-CSRF-Token", csrfToken);
+  }
+
+  return headers;
 }
 
 function buildAuthHeaders(
