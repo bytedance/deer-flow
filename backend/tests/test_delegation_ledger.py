@@ -106,3 +106,75 @@ def test_format_block_lists_entries_and_returns_none_when_empty():
     assert "Research A" in block and "completed" in block
     assert "Research B" in block and "in_progress" in block
     assert "re-delegate" in block.lower() or "already delegated" in block.lower()
+
+
+def test_after_model_returns_derived_delegations():
+    from deerflow.agents.middlewares.delegation_ledger_middleware import DelegationLedgerMiddleware
+
+    mw = DelegationLedgerMiddleware()
+    state = {"messages": [AIMessage(content="", tool_calls=[_task_call("call_1", "Research A")])]}
+
+    update = mw.after_model(state, runtime=None)
+
+    assert update == {"delegations": [{"task_id": "call_1", "description": "Research A", "subagent_type": "general-purpose", "status": "in_progress"}]}
+
+
+def test_after_model_returns_none_when_no_delegations():
+    from deerflow.agents.middlewares.delegation_ledger_middleware import DelegationLedgerMiddleware
+
+    mw = DelegationLedgerMiddleware()
+    state = {"messages": [AIMessage(content="hi")]}
+
+    assert mw.after_model(state, runtime=None) is None
+
+
+class _FakeRequest:
+    """Minimal stand-in for ModelRequest: holds state + messages, supports override()."""
+
+    def __init__(self, state, messages):
+        self.state = state
+        self.messages = messages
+
+    def override(self, *, messages):
+        return _FakeRequest(self.state, messages)
+
+
+def test_wrap_model_call_injects_ledger_block():
+    from langchain_core.messages import SystemMessage
+
+    from deerflow.agents.middlewares.delegation_ledger_middleware import DelegationLedgerMiddleware
+
+    mw = DelegationLedgerMiddleware()
+    captured = {}
+
+    def handler(req):
+        captured["messages"] = req.messages
+        return "RESPONSE"
+
+    state = {"delegations": [{"task_id": "call_1", "description": "Research A", "subagent_type": "general-purpose", "status": "completed"}]}
+    req = _FakeRequest(state, [AIMessage(content="prev")])
+
+    result = mw.wrap_model_call(req, handler)
+
+    assert result == "RESPONSE"
+    injected = captured["messages"]
+    assert isinstance(injected[-1], SystemMessage)
+    assert "Research A" in injected[-1].content
+    assert len(injected) == 2
+
+
+def test_wrap_model_call_is_noop_without_delegations():
+    from deerflow.agents.middlewares.delegation_ledger_middleware import DelegationLedgerMiddleware
+
+    mw = DelegationLedgerMiddleware()
+    captured = {}
+
+    def handler(req):
+        captured["messages"] = req.messages
+        return "RESPONSE"
+
+    req = _FakeRequest({"delegations": []}, [AIMessage(content="prev")])
+
+    mw.wrap_model_call(req, handler)
+
+    assert len(captured["messages"]) == 1

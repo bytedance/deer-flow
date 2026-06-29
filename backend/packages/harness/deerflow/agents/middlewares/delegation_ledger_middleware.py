@@ -9,7 +9,12 @@ model always sees "already delegated: ..." and stops re-delegating.
 
 from __future__ import annotations
 
-from langchain_core.messages import AIMessage, ToolMessage
+from collections.abc import Awaitable, Callable
+from typing import Any
+
+from langchain.agents.middleware import AgentMiddleware, ModelRequest
+from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
+from langgraph.runtime import Runtime
 
 from deerflow.agents.thread_state import DelegationEntry
 from deerflow.subagents.status_contract import SUBAGENT_STATUS_KEY, extract_subagent_status
@@ -68,3 +73,30 @@ def format_delegation_block(entries: list[DelegationEntry]) -> str | None:
     lines.append("</delegated_subtasks>")
     lines.append("</system-reminder>")
     return "\n".join(lines)
+
+
+class DelegationLedgerMiddleware(AgentMiddleware):
+    """Maintain (after_model) and inject (wrap_model_call) the delegation ledger."""
+
+    def _derive_update(self, state: Any) -> dict | None:
+        entries = extract_delegations(list(state.get("messages", [])))
+        return {"delegations": entries} if entries else None
+
+    def after_model(self, state: Any, runtime: Runtime | None = None) -> dict | None:
+        return self._derive_update(state)
+
+    async def aafter_model(self, state: Any, runtime: Runtime | None = None) -> dict | None:
+        return self._derive_update(state)
+
+    def _inject(self, request: ModelRequest) -> ModelRequest:
+        block = format_delegation_block(list(request.state.get("delegations") or []))
+        if not block:
+            return request
+        reminder = SystemMessage(content=block, additional_kwargs={"hide_from_ui": True})
+        return request.override(messages=[*request.messages, reminder])
+
+    def wrap_model_call(self, request: ModelRequest, handler: Callable[[ModelRequest], Any]) -> Any:
+        return handler(self._inject(request))
+
+    async def awrap_model_call(self, request: ModelRequest, handler: Callable[[ModelRequest], Awaitable[Any]]) -> Any:
+        return await handler(self._inject(request))
