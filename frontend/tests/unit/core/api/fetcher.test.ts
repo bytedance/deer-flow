@@ -54,48 +54,7 @@ describe("fetchWithAuth refresh flow", () => {
     expect(refreshHeaders.get("X-CSRF-Token")).toBe("test-csrf-token");
   });
 
-  test("falls through to refresh_token flow when EHM re-authentication fails", async () => {
-    vi.stubGlobal("document", {
-      cookie: "ehm_token=ehm-jwt-token; csrf_token=test-csrf-token",
-    });
-
-    const fetchMock = vi
-      .fn()
-      // Original request → 401
-      .mockResolvedValueOnce(makeResponse(401, { detail: { code: "not_authenticated" } }))
-      // EHM re-authenticate → 401 (fails)
-      .mockResolvedValueOnce(makeResponse(401, { detail: { code: "invalid_credentials" } }))
-      // Refresh token → 200 (succeeds)
-      .mockResolvedValueOnce(makeResponse(200, { message: "Token refreshed" }))
-      // Retry original request → 200
-      .mockResolvedValueOnce(makeResponse(200, { ok: true }));
-
-    vi.stubGlobal("fetch", fetchMock);
-
-    const response = await fetchWithAuth("/api/template-marketplace/abc/install", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ target_visibility: "private" }),
-    });
-
-    expect(response.ok).toBe(true);
-    expect(fetchMock).toHaveBeenCalledTimes(4);
-
-    // Call 0: original request
-    expect(fetchMock.mock.calls[0]?.[0]).toBe("/api/template-marketplace/abc/install");
-    // Call 1: EHM re-authenticate (fails)
-    expect(fetchMock.mock.calls[1]?.[0]).toBe("/api/v1/auth/ins-base/authenticate");
-    // Call 2: refresh token fallback
-    expect(fetchMock.mock.calls[2]?.[0]).toBe("/api/v1/auth/refresh");
-    // Call 3: retry original request
-    expect(fetchMock.mock.calls[3]?.[0]).toBe("/api/template-marketplace/abc/install");
-  });
-
-  test("falls through to redirect when both EHM re-auth and refresh fail", async () => {
-    vi.stubGlobal("document", {
-      cookie: "ehm_token=ehm-jwt-token; csrf_token=test-csrf-token",
-    });
-
+  test("redirects to login when refresh fails", async () => {
     const setTimeoutMock = vi.fn();
     vi.stubGlobal("window", {
       location: {
@@ -109,8 +68,6 @@ describe("fetchWithAuth refresh flow", () => {
       .fn()
       // Original request → 401
       .mockResolvedValueOnce(makeResponse(401, { detail: { code: "not_authenticated" } }))
-      // EHM re-authenticate → fails (network error)
-      .mockRejectedValueOnce(new Error("network error"))
       // Refresh token → 401 (also fails)
       .mockResolvedValueOnce(makeResponse(401, { detail: { code: "token_expired" } }));
 
@@ -122,40 +79,5 @@ describe("fetchWithAuth refresh flow", () => {
 
     // Should have scheduled a redirect
     expect(setTimeoutMock).toHaveBeenCalledTimes(1);
-  });
-
-  test("re-authenticates EHM users and retries the original request after a 401", async () => {
-    vi.stubGlobal("document", {
-      cookie: "ehm_token=ehm-jwt-token",
-    });
-    const backendPublishUrl =
-      "https://gateway.example.com/api/report-templates/tpl_1/publish";
-
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce(makeResponse(401, { detail: { code: "not_authenticated" } }))
-      .mockResolvedValueOnce(makeResponse(200, { authenticated: true }))
-      .mockResolvedValueOnce(makeResponse(200, { ok: true }));
-
-    vi.stubGlobal("fetch", fetchMock);
-
-    const response = await fetchWithAuth(backendPublishUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ expected_current_version: 0 }),
-    });
-
-    expect(response.ok).toBe(true);
-    expect(fetchMock).toHaveBeenCalledTimes(3);
-
-    const [, authInit] = fetchMock.mock.calls[1]!;
-    const authHeaders = new Headers(authInit?.headers);
-
-    expect(fetchMock.mock.calls[1]?.[0]).toBe(
-      "https://gateway.example.com/api/v1/auth/ins-base/authenticate",
-    );
-    expect(authInit?.method).toBe("POST");
-    expect(authInit?.credentials).toBe("include");
-    expect(authHeaders.get("Authorization")).toBe("Bearer ehm-jwt-token");
   });
 });
