@@ -353,6 +353,124 @@ class TestApplyUpdatesStaleness:
         assert len(result["facts"]) == 1
         assert result["facts"][0]["id"] == "fact_keep"
 
+    def test_protected_category_fact_refused_at_apply(self):
+        """Regression: LLM hallucinating a correction-category fact id in
+        staleFactsToRemove must be silently rejected at the apply layer,
+        even though it appears in the serialized prompt JSON."""
+        updater = MemoryUpdater()
+        current_memory = _make_memory(
+            [
+                _make_fact("fact_stale", category="knowledge", days_ago=200),
+                _make_fact("fact_correction", category="correction", days_ago=200),
+            ]
+        )
+        update_data = {
+            "user": {},
+            "history": {},
+            "newFacts": [],
+            "factsToRemove": [],
+            "staleFactsToRemove": [
+                {"id": "fact_stale", "reason": "outdated"},
+                {"id": "fact_correction", "reason": "LLM slip"},
+            ],
+        }
+
+        with patch(
+            "deerflow.agents.memory.updater.get_memory_config",
+            return_value=_memory_config(
+                max_facts=100,
+                staleness_review_enabled=True,
+                staleness_age_days=90,
+                staleness_min_candidates=1,
+                staleness_max_removals_per_cycle=10,
+                staleness_protected_categories=["correction"],
+            ),
+        ):
+            result = updater._apply_updates(current_memory, update_data)
+
+        # fact_stale removed, fact_correction kept (protected)
+        assert len(result["facts"]) == 1
+        assert result["facts"][0]["id"] == "fact_correction"
+
+    def test_non_aged_fact_refused_at_apply(self):
+        """Regression: LLM returning a fresh (non-aged) fact id in
+        staleFactsToRemove must be silently rejected."""
+        updater = MemoryUpdater()
+        current_memory = _make_memory(
+            [
+                _make_fact("fact_stale", days_ago=200),
+                _make_fact("fact_fresh", days_ago=10),
+            ]
+        )
+        update_data = {
+            "user": {},
+            "history": {},
+            "newFacts": [],
+            "factsToRemove": [],
+            "staleFactsToRemove": [
+                {"id": "fact_stale", "reason": "outdated"},
+                {"id": "fact_fresh", "reason": "LLM hallucination"},
+            ],
+        }
+
+        with patch(
+            "deerflow.agents.memory.updater.get_memory_config",
+            return_value=_memory_config(
+                max_facts=100,
+                staleness_review_enabled=True,
+                staleness_age_days=90,
+                staleness_min_candidates=1,
+                staleness_max_removals_per_cycle=10,
+                staleness_protected_categories=["correction"],
+            ),
+        ):
+            result = updater._apply_updates(current_memory, update_data)
+
+        # fact_stale removed, fact_fresh kept (not in candidate set)
+        assert len(result["facts"]) == 1
+        assert result["facts"][0]["id"] == "fact_fresh"
+
+    def test_guardrail_runs_when_staleness_review_disabled(self):
+        """Regression: guardrail must reject invalid ids even when
+        staleness_review_enabled=False, so the protection is independent
+        of the feature flag and model behavior."""
+        updater = MemoryUpdater()
+        current_memory = _make_memory(
+            [
+                _make_fact("fact_stale", days_ago=200),
+                _make_fact("fact_fresh", days_ago=5),
+            ]
+        )
+        update_data = {
+            "user": {},
+            "history": {},
+            "newFacts": [],
+            "factsToRemove": [],
+            "staleFactsToRemove": [
+                {"id": "fact_stale", "reason": "LLM hallucination"},
+                {"id": "fact_fresh", "reason": "LLM hallucination"},
+            ],
+        }
+
+        with patch(
+            "deerflow.agents.memory.updater.get_memory_config",
+            return_value=_memory_config(
+                max_facts=100,
+                staleness_review_enabled=False,
+                staleness_age_days=90,
+                staleness_min_candidates=3,
+                staleness_max_removals_per_cycle=10,
+                staleness_protected_categories=["correction"],
+            ),
+        ):
+            result = updater._apply_updates(current_memory, update_data)
+
+        # Guardrail runs regardless of feature flag:
+        # fact_stale is a valid candidate (200 days old) → removed
+        # fact_fresh is not a candidate (5 days old) → kept
+        assert len(result["facts"]) == 1
+        assert result["facts"][0]["id"] == "fact_fresh"
+
 
 # ── _normalize_memory_update_data with staleFactsToRemove ─────────────────
 

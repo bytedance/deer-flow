@@ -744,17 +744,29 @@ class MemoryUpdater:
         if isinstance(stale_removals, list) and stale_removals:
             stale_ids_to_remove = {entry["id"] for entry in stale_removals if isinstance(entry, dict) and "id" in entry}
 
-            # Safety cap: limit max staleness removals per cycle.
-            # When the LLM returns more than the cap, keep only the
-            # lowest-confidence entries up to the limit so the most
-            # questionable facts are removed first.
-            max_stale = config.staleness_max_removals_per_cycle
-            if len(stale_ids_to_remove) > max_stale:
-                stale_facts = [f for f in current_memory.get("facts", []) if f.get("id") in stale_ids_to_remove]
-                stale_facts.sort(key=lambda f: f.get("confidence", 0))
-                stale_ids_to_remove = {f["id"] for f in stale_facts[:max_stale]}
+            # Deterministic guardrail: intersect with actual staleness
+            # candidates so an LLM slip that emits a protected-category or
+            # non-aged fact id is silently rejected.  Runs unconditionally
+            # so the apply-layer protection is independent of model behavior
+            # AND of the staleness_review_enabled flag.
+            candidate_ids = {f["id"] for f in _select_stale_candidates(current_memory, config)}
+            stale_ids_to_remove &= candidate_ids
 
-            current_memory["facts"] = [f for f in current_memory.get("facts", []) if f.get("id") not in stale_ids_to_remove]
+            if not stale_ids_to_remove:
+                # After intersection with candidate set, nothing to remove.
+                stale_removals = []
+            else:
+                # Safety cap: limit max staleness removals per cycle.
+                # When the LLM returns more than the cap, keep only the
+                # lowest-confidence entries up to the limit so the most
+                # questionable facts are removed first.
+                max_stale = config.staleness_max_removals_per_cycle
+                if len(stale_ids_to_remove) > max_stale:
+                    stale_facts = [f for f in current_memory.get("facts", []) if f.get("id") in stale_ids_to_remove]
+                    stale_facts.sort(key=lambda f: f.get("confidence", 0))
+                    stale_ids_to_remove = {f["id"] for f in stale_facts[:max_stale]}
+
+                current_memory["facts"] = [f for f in current_memory.get("facts", []) if f.get("id") not in stale_ids_to_remove]
 
             # Log removals for observability
             for entry in stale_removals:
