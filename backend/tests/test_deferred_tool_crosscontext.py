@@ -38,6 +38,12 @@ def mcp_secret(x: str) -> str:
     return x
 
 
+@as_tool
+def read_file(path: str) -> str:
+    "framework tool needed for progressive skill loading"
+    return ""
+
+
 _BOUND: list[list[str]] = []
 
 
@@ -171,3 +177,22 @@ def test_tool_search_appended_after_policy_but_never_exposes_denied_tool():
     assert "tool_search" in names  # appended despite not being in the allowlist
     assert setup.deferred_names == frozenset({"mcp_secret"})
     assert set(setup.deferred_names) <= set(allowed)  # catalog never exceeds the allowlist
+
+
+def test_skill_allowed_tools_preserves_read_file_for_progressive_loading():
+    """Regression for #3862.
+
+    A skill that declares a restrictive ``allowed-tools`` list (omitting
+    ``read_file``) must not strip ``read_file`` from the bound tool list,
+    because the lead-agent prompt instructs the model to ``read_file`` the
+    matched skill's ``SKILL.md`` for progressive skill loading. Without this
+    exemption the model calls ``read_file`` and the run fails with
+    "read_file is not a valid tool".
+    """
+    filtered = filter_tools_by_skill_allowed_tools(
+        [active_tool, read_file],
+        [_make_skill(["active_tool"])],  # allowed-tools omits read_file
+    )
+    names = {t.name for t in filtered}
+    assert "active_tool" in names
+    assert "read_file" in names  # framework tool preserved despite the allowlist
