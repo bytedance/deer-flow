@@ -5,6 +5,7 @@ import { type Metadata } from "next";
 
 import { CookieConsentBanner } from "@/components/cookie-consent-banner";
 import { ThemeProvider } from "@/components/theme-provider";
+import { EhmHostBridgeProvider } from "@/components/workspace/ehm-host-bridge-provider";
 import { I18nProvider } from "@/core/i18n/context";
 import { detectLocaleServer } from "@/core/i18n/server";
 
@@ -44,6 +45,7 @@ export default async function RootLayout({
           disableTransitionOnChange
         >
           <I18nProvider initialLocale={locale}>
+            <EhmHostBridgeProvider />
             {children}
           </I18nProvider>
           <CookieConsentBanner />

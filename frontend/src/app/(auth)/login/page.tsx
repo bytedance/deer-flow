@@ -3,12 +3,13 @@
 import { LockIcon, MailIcon } from "@/components/ui/icons";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { IndustrialBackdrop } from "@/components/auth/industrial-backdrop";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useAuth } from "@/core/auth/AuthProvider";
+import { requestFreshHostToken } from "@/core/auth/ehm-host-bridge";
 import { setCurrentTenantId } from "@/core/tenant/store";
 import { encryptInsBaseCredential } from "@/core/auth/rsa-login";
 
@@ -49,6 +50,7 @@ export default function LoginPage() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const hostRecoveryAttemptedRef = useRef(false);
 
   const nextParam = searchParams.get("next");
   const redirectPath = validateNextParam(nextParam) ?? "/workspace";
@@ -59,6 +61,17 @@ export default function LoginPage() {
       window.location.href = redirectPath;
     }
   }, [isAuthenticated, redirectPath]);
+
+  // When embedded in an iframe, request a fresh token from the parent page
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (window.parent === window) return;
+    if (isAuthenticated) return;
+    if (hostRecoveryAttemptedRef.current) return;
+
+    hostRecoveryAttemptedRef.current = true;
+    void requestFreshHostToken();
+  }, [isAuthenticated]);
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
