@@ -204,7 +204,9 @@ export function downloadAsFile(
   a.download = filename;
   document.body.appendChild(a);
   a.click();
-  document.body.removeChild(a);
+  if (a.parentNode === document.body) {
+    document.body.removeChild(a);
+  }
   URL.revokeObjectURL(url);
 }
 
