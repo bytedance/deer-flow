@@ -365,6 +365,107 @@ export function mergeMessages(
   });
 }
 
+/**
+ * Derive the live turns that context summarization is about to drop and that
+ * therefore must be re-archived into history.
+ *
+ * Summarization emits `RemoveMessage(ALL)` + a hidden summary + the retained
+ * tail. Everything in the current live thread before the first retained visible
+ * message is being removed; we keep those (minus the summary control messages
+ * already tracked) so the UI can still show the full conversation (#3825).
+ */
+export function computeSummarizationMovedMessages(
+  currentMessages: Message[],
+  summarizationMessages: Message[],
+  summarizedMessageIds: ReadonlySet<string>,
+): Message[] {
+  const firstRetainedVisibleIdentity = summarizationMessages
+    .filter((message) => message.type !== "remove")
+    .filter((message) => !isHiddenFromUIMessage(message))
+    .map(messageIdentity)
+    .find(isNonEmptyString);
+
+  const moved: Message[] = [];
+  for (const message of currentMessages) {
+    if (
+      firstRetainedVisibleIdentity &&
+      messageIdentity(message) === firstRetainedVisibleIdentity
+    ) {
+      break;
+    }
+    if (!summarizedMessageIds.has(message.id ?? "")) {
+      moved.push(message);
+    }
+  }
+  return moved;
+}
+
+/**
+ * Overlay the messages rescued from context summarization on top of the
+ * (possibly stale) visible history so the merged view never drops them.
+ *
+ * Background (#3825): after summarization the backend removes every live
+ * message (`RemoveMessage(ALL)`) and `onUpdateEvent` re-archives the removed
+ * messages into history through an async `setState`. The live thread messages
+ * are owned by the LangGraph SDK external store while the archived history is
+ * React state, so a render can observe the post-summary (shrunk) thread before
+ * the archive `setState` commits — leaving the rescued messages in neither
+ * merge input. Reading them from a synchronous buffer here keeps the merge
+ * correct at every render regardless of how the two state channels interleave.
+ *
+ * The rescued messages are the oldest live turns, so they follow whatever the
+ * already-loaded history holds. Only messages still missing from history are
+ * appended: once history absorbs a rescued message, its live copy stays
+ * authoritative (the buffered copy is an older snapshot and must never overwrite
+ * it), and ordering is preserved.
+ */
+export function resolvePreservedHistory(
+  visibleHistory: Message[],
+  pendingArchivedMessages: Message[],
+): Message[] {
+  if (pendingArchivedMessages.length === 0) {
+    return visibleHistory;
+  }
+  const presentIdentities = new Set(
+    visibleHistory.map(messageIdentity).filter(isNonEmptyString),
+  );
+  const missing = pendingArchivedMessages.filter((message) => {
+    const identity = messageIdentity(message);
+    // Identity-less messages are intentionally skipped: without a stable
+    // identity they cannot be matched against history to drain or dedupe, so
+    // overlaying them would risk a permanent duplicate. They are still archived
+    // through appendMessages and surface via the normal history path instead.
+    return identity !== undefined && !presentIdentities.has(identity);
+  });
+  if (missing.length === 0) {
+    return visibleHistory;
+  }
+  return [...visibleHistory, ...missing];
+}
+
+/**
+ * Drop the archive-buffer entries that the canonical history state has already
+ * absorbed. This keeps the buffer a transient bridge across the async gap
+ * rather than a second long-lived source of truth — otherwise a stale copy
+ * could resurrect a message that history later filtered out (e.g. a superseded
+ * or regenerated run).
+ */
+export function pruneConfirmedArchivedMessages(
+  pendingArchivedMessages: Message[],
+  visibleHistory: Message[],
+): Message[] {
+  if (pendingArchivedMessages.length === 0) {
+    return pendingArchivedMessages;
+  }
+  const confirmedIdentities = new Set(
+    visibleHistory.map(messageIdentity).filter(isNonEmptyString),
+  );
+  return pendingArchivedMessages.filter((message) => {
+    const identity = messageIdentity(message);
+    return !identity || !confirmedIdentities.has(identity);
+  });
+}
+
 function getMessagesAfterBaseline(
   messages: Message[],
   baselineMessageIds: ReadonlySet<string>,
@@ -734,24 +835,19 @@ export function useThreadStream({
             summarizedRef.current?.add(m.id ?? "");
           }
         }
-        const firstRetainedVisibleIdentity = _messages
-          .filter((message) => message.type !== "remove")
-          .filter((message) => !isHiddenFromUIMessage(message))
-          .map(messageIdentity)
-          .find(isNonEmptyString);
-        const _currentMessages = [...messagesRef.current];
-        const _movedMessages: Message[] = [];
-        for (const m of _currentMessages) {
-          if (
-            firstRetainedVisibleIdentity &&
-            messageIdentity(m) === firstRetainedVisibleIdentity
-          ) {
-            break;
-          }
-          if (!summarizedRef.current?.has(m.id ?? "")) {
-            _movedMessages.push(m);
-          }
-        }
+        const _movedMessages = computeSummarizationMovedMessages(
+          messagesRef.current,
+          _messages,
+          summarizedRef.current ?? new Set<string>(),
+        );
+        // Buffer the rescued messages synchronously so the merge can keep
+        // displaying them immediately, even though appendMessages below only
+        // updates the archived-history state asynchronously (#3825).
+        pendingArchivedMessagesRef.current = dedupeMessagesByIdentity([
+          ...pendingArchivedMessagesRef.current,
+          ..._movedMessages,
+        ]);
+        pendingArchiveThreadIdRef.current = threadIdRef.current;
         appendMessages(_movedMessages);
         messagesRef.current = [];
       }
@@ -896,6 +992,17 @@ export function useThreadStream({
   const latestMessageCountsRef = useRef({ humanMessageCount });
   const sendInFlightRef = useRef(false);
   const messagesRef = useRef<Message[]>([]);
+  // Synchronous bridge for messages rescued from context summarization. The
+  // archived-history `setState` (via appendMessages) lands on a different
+  // schedule than the live thread external store, so the merge reads this buffer
+  // to avoid dropping rescued messages in the render window before history
+  // catches up (#3825).
+  const pendingArchivedMessagesRef = useRef<Message[]>([]);
+  // The thread the rescue buffer belongs to, captured when onUpdateEvent fills
+  // it. The merge only overlays the buffer when this matches the viewed
+  // `threadId`, so a previous thread's rescued messages can never flash into
+  // another thread or the new-chat screen (#3825).
+  const pendingArchiveThreadIdRef = useRef<string | null>(null);
   const summarizedRef = useRef<Set<string>>(null);
   // Track human message count before sending to prevent clearing optimistic
   // messages before the server's human message arrives (e.g. when AI messages
@@ -912,6 +1019,8 @@ export function useThreadStream({
     startedRef.current = false;
     sendInFlightRef.current = false;
     messagesRef.current = [];
+    pendingArchivedMessagesRef.current = [];
+    pendingArchiveThreadIdRef.current = null;
     summarizedRef.current = new Set<string>();
     pendingUsageBaselineMessageIdsRef.current = new Set();
     setPendingSupersededRunIds(new Set());
@@ -919,6 +1028,16 @@ export function useThreadStream({
     prevHumanMsgCountRef.current =
       latestMessageCountsRef.current.humanMessageCount;
   }, [threadId]);
+
+  // Release archive-buffer entries once the canonical history state has absorbed
+  // them, so the synchronous bridge stays transient and never resurrects a
+  // message that history later filters out (e.g. a superseded run) (#3825).
+  useEffect(() => {
+    pendingArchivedMessagesRef.current = pruneConfirmedArchivedMessages(
+      pendingArchivedMessagesRef.current,
+      visibleHistory,
+    );
+  }, [visibleHistory]);
 
   useEffect(() => {
     if (optimisticThreadId && optimisticThreadId !== currentViewThreadId) {
@@ -1295,8 +1414,18 @@ export function useThreadStream({
     humanMessageCount,
   );
 
+  // Overlay the summarization rescue buffer only onto the history of the thread
+  // it was captured from. visibleHistory is gated on `threadId`, so comparing the
+  // same prop keeps the buffer from flashing into another thread or the new-chat
+  // screen, and reading it here (instead of clearing a ref during render) is
+  // concurrent-mode safe (#3825).
+  const rescueBuffer = pendingArchivedMessagesRef.current;
+  const effectiveHistory =
+    rescueBuffer.length > 0 && pendingArchiveThreadIdRef.current === threadId
+      ? resolvePreservedHistory(visibleHistory, rescueBuffer)
+      : visibleHistory;
   const mergedMessages = mergeMessages(
-    visibleHistory,
+    effectiveHistory,
     persistedMessages,
     visibleOptimisticMessages,
   );

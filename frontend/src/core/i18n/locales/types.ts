@@ -481,6 +481,9 @@ export interface Translations {
     pleaseWait: string;
     signIn: string;
     createAccount: string;
+    createAdminAccount: string;
+    adminSetupRequiredTitle: string;
+    adminSetupRequiredDescription: string;
     orContinueWith: string;
     ssoHint: string;
     continueWith: (provider: string) => string;

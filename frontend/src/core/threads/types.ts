@@ -32,7 +32,7 @@ export interface GoalState {
 export interface AgentThreadState extends Record<string, unknown> {
   title: string;
   messages: Message[];
-  artifacts: string[];
+  artifacts?: string[];
   todos?: Todo[];
   goal?: GoalState | null;
 }
