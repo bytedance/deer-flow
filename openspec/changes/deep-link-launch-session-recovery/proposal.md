@@ -18,6 +18,7 @@ EHM 通过 DeerFlow deep-link 打开日报、周报、月报和缺陷 AI 分析�
 - DeerFlow 前端为 `/chats/new` deep-link 建立 `launch_id -> threadId` 的会话级映射
 - 同一浏览器会话内再次打开相同 `launch_id` 时，优先恢复已创建线程，而不是重复 auto-send
 - 调用方若希望相同业务参数重新执行，必须生成新的 `launch_id`
+- DeerFlow 在 EHM iframe 模式下向宿主同步当前真实 thread route，支持宿主整页刷新后优先恢复当前会话
 - 更新 deep-link API 文档，明确 `launch_id` 的恢复语义和调用方约定
 
 ## Capabilities

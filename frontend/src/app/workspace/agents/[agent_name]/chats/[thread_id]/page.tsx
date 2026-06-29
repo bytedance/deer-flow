@@ -42,6 +42,10 @@ import {
   getLaunchThread,
   setLaunchThread,
 } from "@/core/deep-link/launch-session";
+import {
+  EHM_VIEWPORT_RESUME_EVENT,
+  syncRouteToParent,
+} from "@/core/auth/ehm-host-bridge";
 import type { DefectWorkflowDeepLinkTarget } from "@/core/defect-workflow";
 import { useBlockStore, type UIBlock } from "@/core/genui/store";
 import { useI18n } from "@/core/i18n/hooks";
@@ -132,6 +136,7 @@ function createDefectWorkflowModelText(
 }
 
 export default function AgentChatPage() {
+  const [layoutEpoch, setLayoutEpoch] = useState(0);
   const { t } = useI18n();
   const [showFollowups, setShowFollowups] = useState(false);
   const router = useRouter();
@@ -198,6 +203,12 @@ export default function AgentChatPage() {
         "",
         `/workspace/agents/${agent_name}/chats/${createdThreadId}`,
       );
+      syncRouteToParent({
+        routePath: `/workspace/agents/${agent_name}/chats/${createdThreadId}`,
+        threadId: createdThreadId,
+        agentName: agent_name,
+        isNewThread: false,
+      });
     },
     onFinish: (state) => {
       if (document.hidden || !document.hasFocus()) {
@@ -228,6 +239,12 @@ export default function AgentChatPage() {
       "",
       `/workspace/agents/${agent_name}/chats/${restoredLaunchThreadId}`,
     );
+    syncRouteToParent({
+      routePath: `/workspace/agents/${agent_name}/chats/${restoredLaunchThreadId}`,
+      threadId: restoredLaunchThreadId,
+      agentName: agent_name,
+      isNewThread: false,
+    });
   }, [
     agent_name,
     isNewThread,
@@ -235,6 +252,19 @@ export default function AgentChatPage() {
     setThreadId,
     setIsNewThread,
   ]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const routePath = isNewThread
+      ? `/workspace/agents/${agent_name}/chats/new${window.location.search || ""}`
+      : `/workspace/agents/${agent_name}/chats/${threadId}`;
+    syncRouteToParent({
+      routePath,
+      threadId: isNewThread ? undefined : threadId,
+      agentName: agent_name,
+      isNewThread,
+    });
+  }, [agent_name, isNewThread, threadId, searchParams]);
 
   const handleSubmit = useCallback(
     (message: PromptInputMessage) => {
@@ -518,9 +548,22 @@ export default function AgentChatPage() {
     !restoredLaunchThreadId;
   const useNewThreadLayout = isNewThread && !showDefectWorkflowLocalHome;
 
+  useEffect(() => {
+    const handleViewportResume = () => {
+      window.dispatchEvent(new Event("resize"));
+      setLayoutEpoch((value) => value + 1);
+    };
+    window.addEventListener(EHM_VIEWPORT_RESUME_EVENT, handleViewportResume);
+    return () =>
+      window.removeEventListener(
+        EHM_VIEWPORT_RESUME_EVENT,
+        handleViewportResume,
+      );
+  }, []);
+
   return (
     <ThreadContext.Provider value={{ thread }}>
-      <ChatBox threadId={threadId}>
+      <ChatBox key={`${threadId}:${layoutEpoch}`} threadId={threadId}>
         <div className="relative flex size-full min-h-0 justify-between">
           <header
             className={cn(
@@ -583,9 +626,13 @@ export default function AgentChatPage() {
               />
             </div>
 
-            <div className={getChatComposerDockClassName()}>
+            <div className={getChatComposerDockClassName(useNewThreadLayout)}>
               <div
-                className={getChatComposerFrameClassName(useNewThreadLayout)}
+                className={cn(
+                  getChatComposerFrameClassName(useNewThreadLayout),
+                  useNewThreadLayout &&
+                    "flex min-h-[clamp(22rem,55vh,34rem)] flex-col justify-center",
+                )}
               >
                 <div className="absolute -top-4 right-0 left-0 z-0">
                   <div className="absolute right-0 bottom-0 left-0">

@@ -39,6 +39,10 @@ import {
   getLaunchThread,
   setLaunchThread,
 } from "@/core/deep-link/launch-session";
+import {
+  EHM_VIEWPORT_RESUME_EVENT,
+  syncRouteToParent,
+} from "@/core/auth/ehm-host-bridge";
 import { useI18n } from "@/core/i18n/hooks";
 import { useNotification } from "@/core/notification/hooks";
 import { useThreadSettings } from "@/core/settings";
@@ -50,6 +54,7 @@ import { cn } from "@/lib/utils";
 export default function ChatPage() {
   const { t } = useI18n();
   const [showFollowups, setShowFollowups] = useState(false);
+  const [layoutEpoch, setLayoutEpoch] = useState(0);
   const { threadId, setThreadId, isNewThread, setIsNewThread, isMock } =
     useThreadChat();
   const [settings, setSettings] = useThreadSettings(threadId);
@@ -64,6 +69,19 @@ export default function ChatPage() {
 
   useEffect(() => {
     mountedRef.current = true;
+  }, []);
+
+  useEffect(() => {
+    const handleViewportResume = () => {
+      window.dispatchEvent(new Event("resize"));
+      setLayoutEpoch((value) => value + 1);
+    };
+    window.addEventListener(EHM_VIEWPORT_RESUME_EVENT, handleViewportResume);
+    return () =>
+      window.removeEventListener(
+        EHM_VIEWPORT_RESUME_EVENT,
+        handleViewportResume,
+      );
   }, []);
 
   const { showNotification } = useNotification();
@@ -91,6 +109,11 @@ export default function ChatPage() {
       setIsNewThread(false);
       // ! Important: Never use next.js router for navigation in this case, otherwise it will cause the thread to re-mount and lose all states. Use native history API instead.
       history.replaceState(null, "", `/workspace/chats/${createdThreadId}`);
+      syncRouteToParent({
+        routePath: `/workspace/chats/${createdThreadId}`,
+        threadId: createdThreadId,
+        isNewThread: false,
+      });
     },
     onFinish: (state) => {
       if (document.hidden || !document.hasFocus()) {
@@ -131,7 +154,30 @@ export default function ChatPage() {
       "",
       `/workspace/chats/${restoredLaunchThreadId}`,
     );
+    syncRouteToParent({
+      routePath: `/workspace/chats/${restoredLaunchThreadId}`,
+      threadId: restoredLaunchThreadId,
+      isNewThread: false,
+    });
   }, [isNewThread, restoredLaunchThreadId, setThreadId, setIsNewThread]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const routePath = isNewThread
+      ? `/workspace/chats/new${window.location.search || ""}`
+      : `/workspace/chats/${threadId}`;
+    syncRouteToParent({
+      routePath,
+      threadId: isNewThread ? undefined : threadId,
+      isNewThread,
+    });
+  }, [
+    deepLink.autoSend,
+    deepLink.launchId,
+    deepLink.prompt,
+    isNewThread,
+    threadId,
+  ]);
 
   useEffect(() => {
     const handler = (e: Event) => {
@@ -226,7 +272,7 @@ export default function ChatPage() {
   return (
     <>
       <ThreadContext.Provider value={{ thread, isMock }}>
-        <ChatBox threadId={threadId}>
+        <ChatBox key={`${threadId}:${layoutEpoch}`} threadId={threadId}>
           <div className="relative flex size-full min-h-0 justify-between">
             <header
               className={cn(
@@ -260,8 +306,14 @@ export default function ChatPage() {
                   agentName={settings.context.agent_name as string | undefined}
                 />
               </div>
-              <div className={getChatComposerDockClassName()}>
-                <div className={getChatComposerFrameClassName(isNewThread)}>
+              <div className={getChatComposerDockClassName(isNewThread)}>
+                <div
+                  className={cn(
+                    getChatComposerFrameClassName(isNewThread),
+                    isNewThread &&
+                      "flex min-h-[clamp(22rem,55vh,34rem)] flex-col justify-center",
+                  )}
+                >
                   <div className="absolute -top-4 right-0 left-0 z-0">
                     <div className="absolute right-0 bottom-0 left-0">
                       <TodoList

@@ -7,16 +7,25 @@ const AI_REQUEST_USER_MESSAGE = { type: "AI_REQUEST_USER" } as const;
 const AI_PING = "AI_PING";
 const AI_INIT = "AI_INIT";
 const AI_TOKEN_REFRESH = "AI_TOKEN_REFRESH";
+const AI_ROUTE_SYNC = "AI_ROUTE_SYNC";
+const AI_VIEWPORT_RESUME = "AI_VIEWPORT_RESUME";
 const MAX_HOST_TOKEN_AGE_MS = 24 * 60 * 60 * 1000;
 const HOST_TOKEN_REQUEST_TIMEOUT_MS = 5000;
 const HOST_BRIDGE_LOG_PREFIX = "[EHM Host Bridge]";
 export const EHM_SESSION_RECOVERED_EVENT = "ehm:session-recovered";
+export const EHM_ROUTE_SYNC_EVENT = "ehm:route-sync";
+export const EHM_VIEWPORT_RESUME_EVENT = "ehm:viewport-resume";
 
 type HostBridgePayload = {
   type?: string;
+  routePath?: unknown;
+  threadId?: unknown;
+  agentName?: unknown;
+  isNewThread?: unknown;
   ehmToken?: unknown;
   ehmUser?: unknown;
   issuedAt?: unknown;
+  reason?: unknown;
   token?: {
     accessToken?: unknown;
     userId?: unknown;
@@ -87,6 +96,40 @@ function emitSessionRecovered(source: "host-bridge" | "host-init") {
   );
 }
 
+function emitRouteSynced(detail: {
+  routePath: string;
+  threadId?: string;
+  agentName?: string;
+  isNewThread?: boolean;
+}) {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(
+    new CustomEvent(EHM_ROUTE_SYNC_EVENT, {
+      detail: {
+        ...detail,
+        syncedAt: Date.now(),
+      },
+    }),
+  );
+}
+
+function emitViewportResumed(detail: { reason?: string; issuedAt?: number }) {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(
+    new CustomEvent(EHM_VIEWPORT_RESUME_EVENT, {
+      detail: {
+        reason:
+          typeof detail.reason === "string" ? detail.reason : "unspecified",
+        issuedAt:
+          typeof detail.issuedAt === "number" &&
+          Number.isFinite(detail.issuedAt)
+            ? detail.issuedAt
+            : Date.now(),
+      },
+    }),
+  );
+}
+
 let latestIssuedAt = 0;
 let started = false;
 let hostBridgeCleanup: (() => void) | null = null;
@@ -130,7 +173,9 @@ async function handleTokenRefresh(payload: HostBridgePayload) {
     path: window.location.pathname,
   });
   if (authenticated) {
-    emitSessionRecovered(payload.type === AI_INIT ? "host-init" : "host-bridge");
+    emitSessionRecovered(
+      payload.type === AI_INIT ? "host-init" : "host-bridge",
+    );
   }
   if (pendingHostTokenResolver) {
     pendingHostTokenResolver(authenticated);
@@ -170,7 +215,7 @@ export function requestFreshHostToken(): Promise<boolean> {
     pendingHostTokenTimeout = null;
   }
 
-  return new Promise(resolve => {
+  return new Promise((resolve) => {
     pendingHostTokenResolver = resolve;
     pendingHostTokenTimeout = setTimeout(() => {
       console.warn(HOST_BRIDGE_LOG_PREFIX, "AI_REQUEST_USER timed out", {
@@ -211,10 +256,22 @@ export function startEhmHostBridge() {
     }
 
     if (payload.type === AI_TOKEN_REFRESH) {
-      console.info(HOST_BRIDGE_LOG_PREFIX, "message AI_TOKEN_REFRESH received", {
-        path: window.location.pathname,
-      });
+      console.info(
+        HOST_BRIDGE_LOG_PREFIX,
+        "message AI_TOKEN_REFRESH received",
+        {
+          path: window.location.pathname,
+        },
+      );
       void handleTokenRefresh(payload);
+      return;
+    }
+
+    if (payload.type === AI_VIEWPORT_RESUME) {
+      emitViewportResumed({
+        reason: typeof payload.reason === "string" ? payload.reason : undefined,
+        issuedAt: normalizeIssuedAt(payload.issuedAt) || Date.now(),
+      });
     }
   };
 
@@ -239,4 +296,34 @@ export function startEhmHostBridge() {
     hostBridgeCleanup = null;
   };
   return hostBridgeCleanup;
+}
+
+export function syncRouteToParent(detail: {
+  routePath: string;
+  threadId?: string | null;
+  agentName?: string | null;
+  isNewThread?: boolean;
+}) {
+  const routePath =
+    typeof detail.routePath === "string" ? detail.routePath.trim() : "";
+  if (!routePath.startsWith("/workspace/")) return;
+
+  postToParent({
+    type: AI_ROUTE_SYNC,
+    routePath,
+    ...(detail.threadId ? { threadId: String(detail.threadId) } : {}),
+    ...(detail.agentName ? { agentName: String(detail.agentName) } : {}),
+    ...(typeof detail.isNewThread === "boolean"
+      ? { isNewThread: detail.isNewThread }
+      : {}),
+  });
+
+  emitRouteSynced({
+    routePath,
+    ...(detail.threadId ? { threadId: String(detail.threadId) } : {}),
+    ...(detail.agentName ? { agentName: String(detail.agentName) } : {}),
+    ...(typeof detail.isNewThread === "boolean"
+      ? { isNewThread: detail.isNewThread }
+      : {}),
+  });
 }

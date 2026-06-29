@@ -58,12 +58,24 @@
      - 刷新恢复：复用旧 `launch_id`
      - 显式重开：生成新 `launch_id`
 
+6. **当前真实 thread route 通过宿主桥同步回 EHM**
+   - `launch_id` 只能帮助 DeerFlow 在 `/chats/new` 场景恢复已创建 thread
+   - 若宿主整页刷新时只记得初始 deep-link，不记得 DeerFlow 当前已经切到 `/chats/{threadId}`，仍可能回到入口初始态
+   - 因此 DeerFlow 在 EHM iframe 模式下，通过现有 host bridge 向父窗口发送 `AI_ROUTE_SYNC`
+   - 同步字段包括：
+     - `routePath`
+     - `threadId`
+     - `agentName`
+     - `isNewThread`
+   - 宿主可据此把“当前真实 route”独立持久化，并在整页刷新后优先恢复该 route
+
 ## Risks / Trade-offs
 
 - **宿主不传 `launch_id`** -> DeerFlow 无法区分刷新与重开，行为维持现状。缓解：文档明确 EHM / 外部系统集成建议。
 - **`sessionStorage` 生命周期有限** -> 关闭标签页后无法恢复。缓解：本次目标仅覆盖刷新和同标签页 iframe 重建场景。
 - **错误恢复到跨 Agent thread** -> 若不同 Agent 误用同一个 `launch_id` 可能恢复错误线程。缓解：映射记录中保存 `routeKey`，恢复时做路径校验。
 - **普通 `/workspace/chats/new` 与 Agent chat 页实现重复** -> 两个页面都支持 deep-link，需要共享 helper，避免分叉逻辑。
+- **宿主持久化旧 route 造成误恢复** -> DeerFlow 只负责同步当前真实 route；宿主应在显式新打开命令或关闭 AI 工作台标签时清理旧 route。
 
 ## Migration Plan
 

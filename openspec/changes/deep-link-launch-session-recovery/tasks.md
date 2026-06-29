@@ -11,6 +11,7 @@
 - [x] 2.3 In `/workspace/agents/[agent_name]/chats/[thread_id]/page.tsx`, check for an existing thread mapping before deep-link auto-send / auto_start and restore the thread when found.
 - [x] 2.4 Persist the mapping when a new thread is created from a deep-link carrying `launch_id`.
 - [x] 2.5 Validate that repeated loads with the same `launch_id` restore the existing thread, while a new `launch_id` still triggers a fresh execution.
+- [x] 2.6 Sync the current real workspace route/thread back to the EHM host bridge after restore or thread creation.
 
 ## 3. Verification
 
