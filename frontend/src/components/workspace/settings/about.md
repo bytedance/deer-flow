@@ -8,4 +8,4 @@ EHM AI 工作台（Equipment Health Management AI Workspace）是面向石油石
 
 ## 版权
 
-© 沈阳因思科技有限公司
+© 深圳因思科技有限公司

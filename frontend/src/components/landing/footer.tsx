@@ -15,7 +15,7 @@ export function Footer({ className }: FooterProps) {
     >
       <hr className="from-border/0 via-border/40 to-border/0 m-0 h-px w-full border-none bg-linear-to-r" />
       <div className="text-muted-foreground container mb-8 mt-6 flex flex-col items-center justify-center gap-1 text-xs">
-        <p>&copy; {year} 沈阳因思科技有限公司</p>
+        <p>&copy; {year} 深圳因思科技有限公司</p>
         <div className="flex gap-4 mt-2">
           <a
             href="/privacy"

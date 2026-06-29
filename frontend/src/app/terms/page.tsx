@@ -9,7 +9,7 @@ export default function TermsPage() {
           一、服务说明
         </h2>
         <p>
-          EHM AI 工作台（以下简称"本平台"）是沈阳因思科技有限公司提供的工业设备健康管理软件即服务（SaaS）平台。本平台提供 AI 驱动的实时监测、故障诊断、运行报告生成等功能，面向石油石化行业用户。
+          EHM AI 工作台（以下简称"本平台"）是深圳因思科技有限公司提供的工业设备健康管理软件即服务（SaaS）平台。本平台提供 AI 驱动的实时监测、故障诊断、运行报告生成等功能，面向石油石化行业用户。
         </p>
 
         <h2 className="mt-8 mb-3 text-lg font-semibold text-foreground">

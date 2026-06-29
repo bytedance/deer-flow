@@ -72,12 +72,13 @@ describe("WorkspaceHeader", () => {
 
     const html = renderToStaticMarkup(React.createElement(WorkspaceHeader));
 
-    expect(html).toContain("EHM");
+    expect(html).toContain("AI工作台");
+    expect(html).not.toContain(">E<");
     expect(html).toContain("New chat");
     expect(html).not.toContain(">test<");
   });
 
-  test("renders collapsed state with short brand", () => {
+  test("renders collapsed state without legacy short brand", () => {
     mocks.useSidebar.mockReturnValue({ state: "collapsed" });
     mocks.usePathname.mockReturnValue("/workspace/chats/new");
     mocks.useTenant.mockReturnValue(["default", vi.fn()]);
@@ -90,7 +91,8 @@ describe("WorkspaceHeader", () => {
 
     const html = renderToStaticMarkup(React.createElement(WorkspaceHeader));
 
-    expect(html).toContain(">E<");
+    expect(html).not.toContain(">E<");
+    expect(html).toContain("toggle");
     expect(html).toContain("New chat");
   });
 });
