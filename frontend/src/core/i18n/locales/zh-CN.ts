@@ -112,6 +112,12 @@ export const zhCN: Translations = {
     followupConfirmAppend: "追加并发送",
     followupConfirmReplace: "替换并发送",
     suggestionPlaceholderRequired: "发送前请先填写建议模板中的占位内容。",
+    goalCommandDescription: "设置、查看或清除当前目标",
+    goalSet: "目标已设置。",
+    goalCleared: "目标已清除。",
+    goalNone: "当前没有目标。",
+    goalActive: "当前目标：{goal}",
+    goalFailed: "目标命令执行失败。",
     suggestions: [
       {
         suggestion: "写作",

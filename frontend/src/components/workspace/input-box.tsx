@@ -9,6 +9,7 @@ import {
   PlusIcon,
   SparklesIcon,
   RocketIcon,
+  TargetIcon,
   XIcon,
   ZapIcon,
 } from "lucide-react";
@@ -66,7 +67,7 @@ import { useModels } from "@/core/models/hooks";
 import type { Skill } from "@/core/skills";
 import { useSkills } from "@/core/skills/hooks";
 import { useSuggestionsConfig } from "@/core/suggestions/hooks";
-import type { AgentThreadContext } from "@/core/threads";
+import type { AgentThreadContext, GoalState } from "@/core/threads";
 import { textOfMessage } from "@/core/threads/utils";
 import { isIMEComposing } from "@/lib/ime";
 import { cn } from "@/lib/utils";
@@ -98,6 +99,17 @@ const MAX_SKILL_SUGGESTIONS = 6;
 const SUGGESTION_TEMPLATE_PLACEHOLDER_PATTERN =
   /\[(?:主题|来源|topic|source)\]/i;
 
+type SlashSuggestion = {
+  name: string;
+  description: string;
+  kind: "builtin" | "skill";
+};
+
+type GoalCommand =
+  | { kind: "status" }
+  | { kind: "clear" }
+  | { kind: "set"; objective: string };
+
 function findSuggestionTemplatePlaceholder(text: string) {
   const match = SUGGESTION_TEMPLATE_PLACEHOLDER_PATTERN.exec(text);
   if (!match) {
@@ -123,10 +135,24 @@ function getLeadingSlashSkillQuery(value: string): string | null {
   return query;
 }
 
-function getMatchingSkillSuggestions(skills: Skill[], query: string): Skill[] {
+function getMatchingSkillSuggestions(
+  skills: Skill[],
+  query: string,
+  builtinCommands: SlashSuggestion[],
+): SlashSuggestion[] {
   const normalizedQuery = query.toLowerCase();
 
-  return skills
+  const builtinMatches = builtinCommands.filter(({ name, description }) => {
+    if (!normalizedQuery) {
+      return true;
+    }
+    return (
+      name.toLowerCase().includes(normalizedQuery) ||
+      description.toLowerCase().includes(normalizedQuery)
+    );
+  });
+
+  const skillMatches = skills
     .map((skill, index) => ({
       skill,
       index,
@@ -147,7 +173,42 @@ function getMatchingSkillSuggestions(skills: Skill[], query: string): Skill[] {
       return a.index - b.index;
     })
     .slice(0, MAX_SKILL_SUGGESTIONS)
-    .map(({ skill }) => skill);
+    .map(({ skill }) => ({
+      name: skill.name,
+      description: skill.description,
+      kind: "skill" as const,
+    }));
+
+  return [...skillMatches, ...builtinMatches].slice(0, MAX_SKILL_SUGGESTIONS);
+}
+
+function parseGoalCommand(value: string): GoalCommand | null {
+  const trimmed = value.trim();
+  const match = /^\/goal(?:\s+|$)/i.exec(trimmed);
+  if (!match) {
+    return null;
+  }
+
+  const args = trimmed.slice(match[0].length).trim();
+  if (!args) {
+    return { kind: "status" };
+  }
+  if (["clear", "reset", "off"].includes(args.toLowerCase())) {
+    return { kind: "clear" };
+  }
+  return { kind: "set", objective: args };
+}
+
+async function readGoalResponseError(response: Response): Promise<string> {
+  try {
+    const body = (await response.json()) as { detail?: unknown };
+    if (typeof body.detail === "string") {
+      return body.detail;
+    }
+  } catch {
+    // Fall through to generic message.
+  }
+  return `HTTP ${response.status}`;
 }
 
 function getResolvedMode(
@@ -175,6 +236,7 @@ export function InputBox({
   initialValue,
   onContextChange,
   onFollowupsVisibilityChange,
+  onGoalChange,
   onSubmit,
   onStop,
   ...props
@@ -208,6 +270,7 @@ export function InputBox({
     },
   ) => void;
   onFollowupsVisibilityChange?: (visible: boolean) => void;
+  onGoalChange?: (goal: GoalState | null) => void;
   onSubmit?: (message: PromptInputMessage) => void | Promise<void>;
   onStop?: () => void;
 }) {
@@ -240,6 +303,16 @@ export function InputBox({
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [pendingSuggestion, setPendingSuggestion] = useState<string | null>(
     null,
+  );
+  const builtinSlashCommands = useMemo<SlashSuggestion[]>(
+    () => [
+      {
+        name: "goal",
+        description: t.inputBox.goalCommandDescription,
+        kind: "builtin",
+      },
+    ],
+    [t.inputBox.goalCommandDescription],
   );
 
   useEffect(() => {
@@ -365,15 +438,83 @@ export function InputBox({
     [onContextChange, context],
   );
 
-  const handleSubmit = useCallback(
+  const handleGoalCommand = useCallback(
+    async (command: GoalCommand) => {
+      try {
+        let goal: GoalState | null = null;
+        if (command.kind === "status") {
+          const response = await fetch(
+            `${getBackendBaseURL()}/api/threads/${encodeURIComponent(
+              threadId,
+            )}/goal`,
+            { method: "GET" },
+          );
+          if (!response.ok) {
+            throw new Error(await readGoalResponseError(response));
+          }
+          goal =
+            ((await response.json()) as { goal?: GoalState | null }).goal ??
+            null;
+          toast.info(
+            goal
+              ? t.inputBox.goalActive.replace("{goal}", goal.objective)
+              : t.inputBox.goalNone,
+          );
+          onGoalChange?.(goal);
+        } else if (command.kind === "clear") {
+          const response = await fetch(
+            `${getBackendBaseURL()}/api/threads/${encodeURIComponent(
+              threadId,
+            )}/goal`,
+            { method: "DELETE" },
+          );
+          if (!response.ok) {
+            throw new Error(await readGoalResponseError(response));
+          }
+          toast.success(t.inputBox.goalCleared);
+          onGoalChange?.(null);
+        } else {
+          const response = await fetch(
+            `${getBackendBaseURL()}/api/threads/${encodeURIComponent(
+              threadId,
+            )}/goal`,
+            {
+              method: "PUT",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ objective: command.objective }),
+            },
+          );
+          if (!response.ok) {
+            throw new Error(await readGoalResponseError(response));
+          }
+          goal =
+            ((await response.json()) as { goal?: GoalState | null }).goal ??
+            null;
+          toast.success(t.inputBox.goalSet);
+          onGoalChange?.(goal);
+        }
+        textInput.setInput("");
+      } catch (error) {
+        toast.error(
+          error instanceof Error ? error.message : t.inputBox.goalFailed,
+        );
+        throw error;
+      }
+    },
+    [
+      onGoalChange,
+      t.inputBox.goalActive,
+      t.inputBox.goalCleared,
+      t.inputBox.goalFailed,
+      t.inputBox.goalNone,
+      t.inputBox.goalSet,
+      textInput,
+      threadId,
+    ],
+  );
+
+  const submitThreadMessage = useCallback(
     (message: PromptInputMessage) => {
-      if (status === "streaming") {
-        onStop?.();
-        return;
-      }
-      if (!message.text.trim() && message.files.length === 0) {
-        return;
-      }
       const placeholder = findSuggestionTemplatePlaceholder(message.text);
       if (placeholder) {
         toast.error(t.inputBox.suggestionPlaceholderRequired);
@@ -419,12 +560,41 @@ export function InputBox({
       context,
       onContextChange,
       onSubmit,
-      onStop,
       resolvedModelName,
       selectedModel?.supports_thinking,
-      status,
       t.inputBox.suggestionPlaceholderRequired,
     ],
+  );
+
+  const handleSubmit = useCallback(
+    async (message: PromptInputMessage) => {
+      if (status === "streaming") {
+        onStop?.();
+        return;
+      }
+      if (!message.text.trim() && message.files.length === 0) {
+        return;
+      }
+      const goalCommand = parseGoalCommand(message.text);
+      if (goalCommand && message.files.length === 0) {
+        promptHistoryIndexRef.current = null;
+        promptHistoryDraftRef.current = "";
+        setFollowups([]);
+        setFollowupsHidden(false);
+        setFollowupsLoading(false);
+        await handleGoalCommand(goalCommand);
+        if (goalCommand.kind === "set") {
+          return submitThreadMessage({
+            ...message,
+            text: goalCommand.objective,
+            files: [],
+          });
+        }
+        return;
+      }
+      return submitThreadMessage(message);
+    },
+    [handleGoalCommand, onStop, status, submitThreadMessage],
   );
 
   const requestFormSubmit = useCallback(() => {
@@ -486,8 +656,12 @@ export function InputBox({
     () =>
       slashSkillQuery === null
         ? []
-        : getMatchingSkillSuggestions(skills, slashSkillQuery),
-    [skills, slashSkillQuery],
+        : getMatchingSkillSuggestions(
+            skills,
+            slashSkillQuery,
+            builtinSlashCommands,
+          ),
+    [builtinSlashCommands, skills, slashSkillQuery],
   );
   const showSkillSuggestions =
     !disabled &&
@@ -501,8 +675,8 @@ export function InputBox({
   }, [slashSkillQuery, skillSuggestions.length]);
 
   const applySkillSuggestion = useCallback(
-    (skill: Skill) => {
-      const nextValue = `/${skill.name} `;
+    (suggestion: SlashSuggestion) => {
+      const nextValue = `/${suggestion.name} `;
       textInput.setInput(nextValue);
       setDismissedSkillSuggestionValue(nextValue);
       requestAnimationFrame(() => {
@@ -807,7 +981,7 @@ export function InputBox({
             className="bg-popover/95 text-popover-foreground border-border max-h-72 overflow-y-auto rounded-xl border p-1 shadow-lg backdrop-blur-sm"
             role="listbox"
           >
-            {skillSuggestions.map((skill, index) => {
+            {skillSuggestions.map((suggestion, index) => {
               const selected = index === skillSuggestionIndex;
               return (
                 <button
@@ -818,21 +992,25 @@ export function InputBox({
                       ? "bg-accent text-accent-foreground"
                       : "text-popover-foreground hover:bg-accent/70 hover:text-accent-foreground",
                   )}
-                  key={skill.name}
-                  onClick={() => applySkillSuggestion(skill)}
+                  key={suggestion.name}
+                  onClick={() => applySkillSuggestion(suggestion)}
                   onMouseDown={(event) => event.preventDefault()}
                   onMouseEnter={() => setSkillSuggestionIndex(index)}
                   role="option"
                   type="button"
                 >
-                  <SparklesIcon className="text-muted-foreground size-4 shrink-0" />
+                  {suggestion.kind === "builtin" ? (
+                    <TargetIcon className="text-muted-foreground size-4 shrink-0" />
+                  ) : (
+                    <SparklesIcon className="text-muted-foreground size-4 shrink-0" />
+                  )}
                   <span className="min-w-0 flex-1">
                     <span className="block truncate text-sm font-medium">
-                      /{skill.name}
+                      /{suggestion.name}
                     </span>
-                    {skill.description && (
+                    {suggestion.description && (
                       <span className="text-muted-foreground block truncate text-xs">
-                        {skill.description}
+                        {suggestion.description}
                       </span>
                     )}
                   </span>

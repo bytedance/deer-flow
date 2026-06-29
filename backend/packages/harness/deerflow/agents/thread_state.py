@@ -2,6 +2,8 @@ from typing import Annotated, NotRequired, TypedDict
 
 from langchain.agents import AgentState
 
+from deerflow.agents.goal_state import GoalState
+
 
 class SandboxState(TypedDict):
     sandbox_id: NotRequired[str | None]
@@ -82,6 +84,13 @@ def merge_todos(existing: list | None, new: list | None) -> list | None:
     return new
 
 
+def merge_goal(existing: GoalState | None, new: GoalState | None) -> GoalState | None:
+    """Reducer for goal state - preserves existing when a node does not touch it."""
+    if new is None:
+        return existing
+    return new
+
+
 class PromotedTools(TypedDict):
     catalog_hash: str
     names: list[str]
@@ -114,6 +123,7 @@ class ThreadState(AgentState):
     title: NotRequired[str | None]
     artifacts: Annotated[list[str], merge_artifacts]
     todos: Annotated[list | None, merge_todos]
+    goal: Annotated[GoalState | None, merge_goal]
     uploaded_files: NotRequired[list[dict] | None]
     viewed_images: Annotated[dict[str, ViewedImageData], merge_viewed_images]  # image_path -> {base64, mime_type}
     promoted: Annotated[PromotedTools | None, merge_promoted]

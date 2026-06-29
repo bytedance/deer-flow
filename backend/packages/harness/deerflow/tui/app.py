@@ -34,7 +34,7 @@ from .view_state import (
 )
 from .widgets.composer import ComposerInput
 
-_HELP_TEXT = "Commands:  /new  /threads  /model  /skills  /tools  /mcp  /memory  /usage  /config  /quit\nKeys:  Enter send · Ctrl+C interrupt or quit · Ctrl+L redraw · / commands · Esc close overlay"
+_HELP_TEXT = "Commands:  /new  /threads  /goal  /model  /skills  /tools  /mcp  /memory  /usage  /config  /quit\nKeys:  Enter send · Ctrl+C interrupt or quit · Ctrl+L redraw · / commands · Esc close overlay"
 
 
 class SelectScreen(ModalScreen):
@@ -368,6 +368,8 @@ class DeerFlowTUI(App):
             self._open_thread_switcher()
         elif name == "resume":
             self._resume_thread(args)
+        elif name == "goal":
+            self._handle_goal(args)
         elif name == "skills":
             self._show_skills()
         elif name == "mcp":
@@ -445,6 +447,43 @@ class DeerFlowTUI(App):
         self.state = initial_state()
         self._dispatch(SystemMessage(f"Resumed thread {thread_id[:8]}."))
         self._refresh_header()
+
+    def _handle_goal(self, args: str) -> None:
+        args = args.strip()
+        if not args:
+            if not self._conv_thread_id:
+                self._dispatch(SystemMessage("No active goal."))
+                return
+            try:
+                goal = self.session.client.get_goal(self._conv_thread_id).get("goal")
+            except Exception:  # noqa: BLE001
+                self._dispatch(SystemMessage("Could not read goal.", tone="error"))
+                return
+            if not goal:
+                self._dispatch(SystemMessage("No active goal."))
+                return
+            self._dispatch(SystemMessage(f"Goal: {goal.get('objective')}"))
+            return
+
+        if args.lower() in {"clear", "reset", "off"}:
+            if self._conv_thread_id:
+                try:
+                    self.session.client.clear_goal(self._conv_thread_id)
+                except Exception:  # noqa: BLE001
+                    self._dispatch(SystemMessage("Could not clear goal.", tone="error"))
+                    return
+            self._dispatch(SystemMessage("Goal cleared."))
+            return
+
+        if self._conv_thread_id is None:
+            self._conv_thread_id = str(uuid.uuid4())
+            self._refresh_header()
+        try:
+            goal = self.session.client.set_goal(self._conv_thread_id, args).get("goal")
+        except Exception:  # noqa: BLE001
+            self._dispatch(SystemMessage("Could not set goal.", tone="error"))
+            return
+        self._dispatch(SystemMessage(f"Goal set: {goal.get('objective') if goal else args}"))
 
     def _show_skills(self) -> None:
         names = ", ".join(self._skill_names) or "none"

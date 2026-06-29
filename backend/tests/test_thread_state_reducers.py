@@ -12,6 +12,7 @@ import pytest
 from deerflow.agents.thread_state import (
     ThreadState,
     merge_artifacts,
+    merge_goal,
     merge_sandbox,
     merge_todos,
     merge_viewed_images,
@@ -80,6 +81,23 @@ class TestMergeTodos:
         assert merge_todos(existing, []) == []
 
 
+class TestMergeGoal:
+    """Reducer for ThreadState.goal - preserves active goal on untouched nodes."""
+
+    def test_none_new_preserves_existing(self):
+        existing = {"objective": "ship the feature", "status": "active"}
+        assert merge_goal(existing, None) == existing
+
+    def test_none_existing_accepts_new(self):
+        new = {"objective": "ship the feature", "status": "active"}
+        assert merge_goal(None, new) == new
+
+    def test_new_value_overrides_existing(self):
+        existing = {"objective": "old", "status": "active"}
+        new = {"objective": "new", "status": "active"}
+        assert merge_goal(existing, new) == new
+
+
 class TestMergeArtifacts:
     """Sanity check for the existing artifacts reducer."""
 
@@ -127,6 +145,13 @@ class TestThreadStateAnnotations:
         todos_hint = hints["todos"]
         assert hasattr(todos_hint, "__metadata__"), "ThreadState.todos must be Annotated with a reducer"
         assert merge_todos in todos_hint.__metadata__, "ThreadState.todos must be wired to merge_todos reducer (see #3123)"
+
+    def test_goal_field_is_wired_to_merge_goal(self):
+        """ThreadState.goal must preserve active goals across partial writes."""
+        hints = get_type_hints(ThreadState, include_extras=True)
+        goal_hint = hints["goal"]
+        assert hasattr(goal_hint, "__metadata__"), "ThreadState.goal must be Annotated with a reducer"
+        assert merge_goal in goal_hint.__metadata__, "ThreadState.goal must be wired to merge_goal reducer"
 
     def test_artifacts_field_is_wired_to_merge_artifacts(self):
         """Sanity check that existing reducer wiring is preserved."""

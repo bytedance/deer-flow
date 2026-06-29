@@ -33,16 +33,19 @@ async def _run_lifespan_with_hanging_stop() -> float:
 
     app = FastAPI()
 
+    startup_config = MagicMock()
+    startup_config.log_level = "INFO"
+    startup_config.memory.token_counting = "char"
     fake_service = MagicMock()
     fake_service.get_status = MagicMock(return_value={})
 
-    async def fake_start():
+    async def fake_start(_startup_config):
         return fake_service
 
     close_oidc_service = AsyncMock()
 
     with (
-        patch("app.gateway.app.get_app_config"),
+        patch("app.gateway.app.get_app_config", return_value=startup_config),
         patch("app.gateway.app.get_gateway_config", return_value=MagicMock(host="x", port=0)),
         patch("app.gateway.app.langgraph_runtime", _noop_langgraph_runtime),
         patch("app.gateway.app.auth.close_oidc_service", close_oidc_service),

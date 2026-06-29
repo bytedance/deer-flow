@@ -16,6 +16,7 @@ Usage:
 """
 
 import asyncio
+import copy
 import json
 import logging
 import mimetypes
@@ -32,7 +33,9 @@ from langchain.agents import create_agent
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
+from langgraph.checkpoint.base import empty_checkpoint, uuid6
 
+from deerflow.agents.goal_state import GoalState
 from deerflow.agents.lead_agent.agent import build_middlewares
 from deerflow.agents.lead_agent.prompt import apply_prompt_template
 from deerflow.agents.thread_state import ThreadState
@@ -41,6 +44,7 @@ from deerflow.config.app_config import get_app_config, reload_app_config
 from deerflow.config.extensions_config import ExtensionsConfig, SkillStateConfig, get_extensions_config, reload_extensions_config
 from deerflow.config.paths import get_paths
 from deerflow.models import create_chat_model
+from deerflow.runtime.goal import DEFAULT_MAX_GOAL_CONTINUATIONS, build_goal_state
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.skills.storage import get_or_new_skill_storage
 from deerflow.tools.builtins.tool_search import assemble_deferred_tools
@@ -55,6 +59,7 @@ from deerflow.uploads.manager import (
     upload_artifact_url,
     upload_virtual_path,
 )
+from deerflow.utils.time import now_iso
 
 logger = logging.getLogger(__name__)
 
@@ -410,6 +415,98 @@ class DeerFlowClient:
     # Public API — threads
     # ------------------------------------------------------------------
 
+    def _get_thread_checkpointer(self):
+        checkpointer = self._checkpointer
+        if checkpointer is None:
+            from deerflow.runtime.checkpointer.provider import get_checkpointer
+
+            checkpointer = get_checkpointer()
+        return checkpointer
+
+    @staticmethod
+    def _ensure_thread_checkpoint(checkpointer, thread_id: str) -> None:
+        config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+        if checkpointer.get_tuple(config) is not None:
+            return
+        checkpointer.put(
+            config,
+            empty_checkpoint(),
+            {
+                "step": -1,
+                "source": "input",
+                "writes": None,
+                "parents": {},
+                "created_at": now_iso(),
+            },
+            {},
+        )
+
+    @staticmethod
+    def _write_goal_checkpoint(checkpointer, thread_id: str, goal: GoalState | None) -> None:
+        config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+        checkpoint_tuple = checkpointer.get_tuple(config)
+        if checkpoint_tuple is None:
+            raise LookupError(f"Thread {thread_id} checkpoint not found")
+        checkpoint = dict(getattr(checkpoint_tuple, "checkpoint", {}) or {})
+        metadata = dict(getattr(checkpoint_tuple, "metadata", {}) or {})
+        channel_values = dict(checkpoint.get("channel_values", {}) or {})
+        if goal is None:
+            channel_values.pop("goal", None)
+        else:
+            channel_values["goal"] = copy.deepcopy(goal)
+        channel_versions = dict(checkpoint.get("channel_versions", {}) or {})
+        current_version = channel_versions.get("goal")
+        get_next_version = getattr(checkpointer, "get_next_version", None)
+        if callable(get_next_version):
+            next_version = get_next_version(current_version, None)
+        elif isinstance(current_version, int):
+            next_version = current_version + 1
+        else:
+            next_version = 1
+        channel_versions["goal"] = next_version
+        checkpoint["channel_values"] = channel_values
+        checkpoint["channel_versions"] = channel_versions
+        checkpoint["id"] = str(uuid6())
+        metadata["updated_at"] = now_iso()
+        metadata["source"] = "update"
+        metadata["step"] = metadata.get("step", 0) + 1
+        metadata["writes"] = {"goal": {"goal": goal}}
+        checkpointer.put(config, checkpoint, metadata, {"goal": next_version})
+
+    def get_goal(self, thread_id: str) -> dict:
+        """Return the active goal for a thread, if any."""
+        checkpointer = self._get_thread_checkpointer()
+        checkpoint_tuple = checkpointer.get_tuple({"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}})
+        if checkpoint_tuple is None:
+            return {"goal": None}
+        checkpoint = getattr(checkpoint_tuple, "checkpoint", {}) or {}
+        channel_values = checkpoint.get("channel_values", {}) if isinstance(checkpoint, dict) else {}
+        raw_goal = channel_values.get("goal") if isinstance(channel_values, dict) else None
+        return {"goal": copy.deepcopy(raw_goal) if isinstance(raw_goal, dict) else None}
+
+    def set_goal(
+        self,
+        thread_id: str,
+        objective: str,
+        *,
+        max_continuations: int = DEFAULT_MAX_GOAL_CONTINUATIONS,
+    ) -> dict:
+        """Set or replace a thread-scoped goal."""
+        checkpointer = self._get_thread_checkpointer()
+        self._ensure_thread_checkpoint(checkpointer, thread_id)
+        goal = build_goal_state(objective, max_continuations=max_continuations)
+        self._write_goal_checkpoint(checkpointer, thread_id, goal)
+        return {"goal": goal}
+
+    def clear_goal(self, thread_id: str) -> dict:
+        """Clear the active goal for a thread."""
+        checkpointer = self._get_thread_checkpointer()
+        try:
+            self._write_goal_checkpoint(checkpointer, thread_id, None)
+        except LookupError:
+            pass
+        return {"goal": None}
+
     def list_threads(self, limit: int = 10) -> dict:
         """List the recent N threads.
 
@@ -420,11 +517,7 @@ class DeerFlowClient:
             Dict with "thread_list" key containing list of thread info dicts,
             sorted by thread creation time descending.
         """
-        checkpointer = self._checkpointer
-        if checkpointer is None:
-            from deerflow.runtime.checkpointer.provider import get_checkpointer
-
-            checkpointer = get_checkpointer()
+        checkpointer = self._get_thread_checkpointer()
 
         thread_info_map = {}
 
@@ -475,11 +568,7 @@ class DeerFlowClient:
         Returns:
             Dict containing the thread's full checkpoint history.
         """
-        checkpointer = self._checkpointer
-        if checkpointer is None:
-            from deerflow.runtime.checkpointer.provider import get_checkpointer
-
-            checkpointer = get_checkpointer()
+        checkpointer = self._get_thread_checkpointer()
 
         config = {"configurable": {"thread_id": thread_id}}
         checkpoints = []

@@ -39,6 +39,7 @@ BUILTIN_COMMANDS: tuple[Command, ...] = (
     Command("threads", "Open the thread switcher"),
     Command("switch", "Open the thread switcher"),
     Command("resume", "Resume a thread by id or title"),
+    Command("goal", "Set, show or clear the active goal"),
     Command("model", "Open the model picker"),
     Command("skills", "Browse enabled and available skills"),
     Command("tools", "Show built-in, MCP and sandbox tools"),

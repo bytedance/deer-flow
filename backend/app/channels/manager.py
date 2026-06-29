@@ -12,6 +12,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 from langgraph_sdk.errors import ConflictError
@@ -1554,10 +1555,13 @@ class ChannelManager:
             reply = await self._fetch_gateway("/api/models", "models", msg=msg)
         elif reply is None and command == "memory":
             reply = await self._fetch_gateway("/api/memory", "memory", msg=msg)
+        elif reply is None and command == "goal":
+            reply = await self._handle_goal_command(msg, parts[1] if len(parts) > 1 else "")
         elif reply is None and command == "help":
             reply = (
                 "Available commands:\n"
                 "/bootstrap — Start a bootstrap session (enables agent setup)\n"
+                "/goal [condition|clear] — Set, show, or clear an active goal\n"
                 "/new — Start a new conversation\n"
                 "/status — Show current thread info\n"
                 "/models — List available models\n"
@@ -1595,6 +1599,62 @@ class ChannelManager:
             metadata=_slim_metadata(msg.metadata),
         )
         await self.bus.publish_outbound(outbound)
+
+    async def _handle_goal_command(self, msg: InboundMessage, args: str) -> str:
+        args = args.strip()
+        thread_id = await self._lookup_thread_id(msg)
+        headers = _owner_headers(msg) or create_internal_auth_headers()
+
+        if not args:
+            if not thread_id:
+                return "No active goal."
+            try:
+                async with httpx.AsyncClient() as http:
+                    response = await http.get(
+                        f"{self._gateway_url}/api/threads/{quote(thread_id, safe='')}/goal",
+                        timeout=10,
+                        headers=headers,
+                    )
+                    response.raise_for_status()
+                    goal = (response.json() or {}).get("goal")
+            except Exception:
+                logger.exception("Failed to fetch goal from gateway")
+                return "Failed to fetch goal information."
+            return f"Goal: {goal.get('objective')}" if goal else "No active goal."
+
+        if args.lower() in {"clear", "reset", "off"}:
+            if not thread_id:
+                return "Goal cleared."
+            try:
+                async with httpx.AsyncClient() as http:
+                    response = await http.delete(
+                        f"{self._gateway_url}/api/threads/{quote(thread_id, safe='')}/goal",
+                        timeout=10,
+                        headers=headers,
+                    )
+                    response.raise_for_status()
+            except Exception:
+                logger.exception("Failed to clear goal through gateway")
+                return "Failed to clear goal."
+            return "Goal cleared."
+
+        if not thread_id:
+            thread_id = await self._create_thread(self._get_client(), msg)
+
+        try:
+            async with httpx.AsyncClient() as http:
+                response = await http.put(
+                    f"{self._gateway_url}/api/threads/{quote(thread_id, safe='')}/goal",
+                    timeout=10,
+                    headers=headers,
+                    json={"objective": args},
+                )
+                response.raise_for_status()
+                goal = (response.json() or {}).get("goal")
+        except Exception:
+            logger.exception("Failed to set goal through gateway")
+            return "Failed to set goal."
+        return f"Goal set: {goal.get('objective') if goal else args}"
 
     async def _fetch_gateway(self, path: str, kind: str, *, msg: InboundMessage | None = None) -> str:
         """Fetch data from the Gateway API for command responses."""

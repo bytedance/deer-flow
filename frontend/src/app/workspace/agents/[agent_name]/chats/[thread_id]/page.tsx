@@ -11,6 +11,7 @@ import { AgentWelcome } from "@/components/workspace/agent-welcome";
 import { ArtifactTrigger } from "@/components/workspace/artifacts";
 import { ChatBox, useThreadChat } from "@/components/workspace/chats";
 import { ExportTrigger } from "@/components/workspace/export-trigger";
+import { GoalStatus } from "@/components/workspace/goal-status";
 import { InputBox } from "@/components/workspace/input-box";
 import {
   MessageList,
@@ -32,6 +33,7 @@ import {
   useThreadTokenUsage,
 } from "@/core/threads/hooks";
 import { threadTokenUsageToTokenUsage } from "@/core/threads/token-usage";
+import type { GoalState } from "@/core/threads/types";
 import { textOfMessage } from "@/core/threads/utils";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
@@ -52,6 +54,9 @@ export default function AgentChatPage() {
   // the thread. `isWelcomeMode` controls only the centered welcome layout, so
   // it can flip immediately on submit without triggering eager history loads.
   const [isWelcomeMode, setIsWelcomeMode] = useState(isNewThread);
+  const [localGoal, setLocalGoal] = useState<GoalState | null | undefined>(
+    undefined,
+  );
   const [settings, setSettings] = useThreadSettings(threadId);
   const [localSettings, setLocalSettings] = useLocalSettings();
   const { tokenUsageEnabled } = useModels();
@@ -70,6 +75,10 @@ export default function AgentChatPage() {
   useEffect(() => {
     setIsWelcomeMode(isNewThread);
   }, [isNewThread]);
+
+  useEffect(() => {
+    setLocalGoal(undefined);
+  }, [threadId]);
 
   const {
     thread,
@@ -162,6 +171,9 @@ export default function AgentChatPage() {
     ? localSettings.tokenUsage.inlineMode
     : "off";
   const hasTodos = (thread.values.todos?.length ?? 0) > 0;
+  const activeGoal =
+    localGoal !== undefined ? localGoal : (thread.values.goal ?? null);
+  const hasGoal = Boolean(activeGoal);
 
   return (
     <ThreadContext.Provider value={{ thread }}>
@@ -247,7 +259,7 @@ export default function AgentChatPage() {
                     : "max-w-(--container-width-md)",
                 )}
               >
-                {hasTodos && (
+                {(hasGoal || hasTodos) && (
                   <div
                     className={cn(
                       "right-0 left-0 z-0",
@@ -256,15 +268,18 @@ export default function AgentChatPage() {
                   >
                     <div
                       className={cn(
-                        "right-0 bottom-0 left-0",
+                        "right-0 bottom-0 left-0 flex flex-col",
                         isWelcomeMode ? "absolute" : "relative",
                       )}
                     >
-                      <TodoList
-                        className="bg-background/5"
-                        todos={thread.values.todos ?? []}
-                        hidden={false}
-                      />
+                      {activeGoal && <GoalStatus goal={activeGoal} />}
+                      {hasTodos && (
+                        <TodoList
+                          className="bg-background/5"
+                          todos={thread.values.todos ?? []}
+                          hidden={false}
+                        />
+                      )}
                     </div>
                   </div>
                 )}
@@ -286,7 +301,9 @@ export default function AgentChatPage() {
                   }
                   context={settings.context}
                   extraHeader={
-                    isWelcomeMode && (
+                    isWelcomeMode &&
+                    !hasGoal &&
+                    !hasTodos && (
                       <AgentWelcome agent={agent} agentName={agent_name} />
                     )
                   }
@@ -295,6 +312,7 @@ export default function AgentChatPage() {
                     isUploading
                   }
                   onContextChange={(context) => setSettings("context", context)}
+                  onGoalChange={setLocalGoal}
                   onSubmit={handleSubmit}
                   onStop={handleStop}
                 />

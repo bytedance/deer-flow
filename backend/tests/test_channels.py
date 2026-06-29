@@ -4972,7 +4972,7 @@ class TestChannelService:
         service._start_channel = mock_start_channel
 
         async def go():
-            await service.restart_channel("feishu")
+            await service.restart_channel("feishu", reload_config=False)
 
         _run(go())
 

@@ -219,6 +219,50 @@ def test_create_thread_returns_iso_timestamps() -> None:
     assert body["created_at"] == body["updated_at"]
 
 
+def test_put_goal_creates_missing_thread_checkpoint_and_returns_goal() -> None:
+    app, _store, _checkpointer = _build_thread_app()
+
+    with TestClient(app) as client:
+        response = client.put(
+            "/api/threads/goal-thread/goal",
+            json={"objective": "Finish the feature and make all tests pass"},
+        )
+        state_response = client.get("/api/threads/goal-thread/state")
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["goal"]["objective"] == "Finish the feature and make all tests pass"
+    assert body["goal"]["status"] == "active"
+    assert body["goal"]["continuation_count"] == 0
+    assert body["goal"]["max_continuations"] == 8
+    assert state_response.status_code == 200, state_response.text
+    assert state_response.json()["values"]["goal"]["objective"] == "Finish the feature and make all tests pass"
+
+
+def test_goal_status_and_clear_round_trip() -> None:
+    app, _store, _checkpointer = _build_thread_app()
+
+    with TestClient(app) as client:
+        set_response = client.put(
+            "/api/threads/goal-thread/goal",
+            json={"objective": "Ship it", "max_continuations": 3},
+        )
+        get_response = client.get("/api/threads/goal-thread/goal")
+        clear_response = client.delete("/api/threads/goal-thread/goal")
+        after_clear_response = client.get("/api/threads/goal-thread/goal")
+        state_response = client.get("/api/threads/goal-thread/state")
+
+    assert set_response.status_code == 200, set_response.text
+    assert get_response.status_code == 200, get_response.text
+    assert get_response.json()["goal"]["objective"] == "Ship it"
+    assert get_response.json()["goal"]["max_continuations"] == 3
+    assert clear_response.status_code == 200, clear_response.text
+    assert clear_response.json()["goal"] is None
+    assert after_clear_response.status_code == 200, after_clear_response.text
+    assert after_clear_response.json()["goal"] is None
+    assert "goal" not in state_response.json()["values"]
+
+
 def test_internal_owner_header_assigns_thread_to_owner() -> None:
     import asyncio
 

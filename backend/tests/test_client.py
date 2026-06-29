@@ -16,6 +16,7 @@ from app.gateway.routers.mcp import McpConfigResponse
 from app.gateway.routers.memory import MemoryConfigResponse, MemoryStatusResponse
 from app.gateway.routers.models import ModelResponse, ModelsListResponse
 from app.gateway.routers.skills import SkillInstallResponse, SkillResponse, SkillsListResponse
+from app.gateway.routers.threads import ThreadGoalResponse
 from app.gateway.routers.uploads import UploadResponse
 from deerflow.client import DeerFlowClient
 from deerflow.config.paths import Paths
@@ -1171,6 +1172,29 @@ class TestThreadQueries:
         assert result["thread_id"] == "t99"
         assert result["checkpoints"] == []
         mock_checkpointer.list.assert_called_once_with({"configurable": {"thread_id": "t99"}})
+
+
+# ---------------------------------------------------------------------------
+# Goal management
+# ---------------------------------------------------------------------------
+
+
+class TestGoalManagement:
+    def test_goal_round_trip_uses_checkpoint(self, client):
+        from langgraph.checkpoint.memory import InMemorySaver
+
+        client._checkpointer = InMemorySaver()
+
+        set_result = client.set_goal("goal-thread", "finish all tests", max_continuations=3)
+        get_result = client.get_goal("goal-thread")
+        clear_result = client.clear_goal("goal-thread")
+        after_clear = client.get_goal("goal-thread")
+
+        assert set_result["goal"]["objective"] == "finish all tests"
+        assert set_result["goal"]["max_continuations"] == 3
+        assert get_result["goal"]["objective"] == "finish all tests"
+        assert clear_result == {"goal": None}
+        assert after_clear == {"goal": None}
 
 
 # ---------------------------------------------------------------------------
@@ -2462,6 +2486,18 @@ class TestGatewayConformance:
         assert parsed.success is True
         assert len(parsed.files) == 1
         assert parsed.files[0].size == len("hello")
+
+    def test_goal_methods(self, client):
+        from langgraph.checkpoint.memory import InMemorySaver
+
+        client._checkpointer = InMemorySaver()
+
+        result = client.set_goal("t-goal", "ship it")
+
+        parsed = ThreadGoalResponse(**result)
+        assert parsed.goal is not None
+        assert parsed.goal["objective"] == "ship it"
+        assert ThreadGoalResponse(**client.clear_goal("t-goal")).goal is None
 
     def test_get_memory_config(self, client):
         mem_cfg = MagicMock()

@@ -95,6 +95,12 @@ export interface Translations {
     followupConfirmAppend: string;
     followupConfirmReplace: string;
     suggestionPlaceholderRequired: string;
+    goalCommandDescription: string;
+    goalSet: string;
+    goalCleared: string;
+    goalNone: string;
+    goalActive: string;
+    goalFailed: string;
     suggestions: {
       suggestion: string;
       prompt: string;
