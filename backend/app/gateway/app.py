@@ -22,12 +22,14 @@ from app.gateway.routers import (
     mcp,
     memory,
     models,
+    modules,
     runs,
     skills,
     suggestions,
     thread_runs,
     threads,
     uploads,
+    workflows,
 )
 from deerflow.config import app_config as deerflow_app_config
 from deerflow.config.app_config import apply_logging_level
@@ -159,6 +161,75 @@ async def _migrate_orphaned_threads(store, admin_user_id: str) -> int:
     return migrated
 
 
+def _openapi_tags(config: AppConfig) -> list[dict[str, str]]:
+    tags = [
+        {
+            "name": "models",
+            "description": "Operations for querying available AI models and their configurations",
+        },
+        {
+            "name": "mcp",
+            "description": "Manage Model Context Protocol (MCP) server configurations",
+        },
+        {
+            "name": "memory",
+            "description": "Access and manage global memory data for personalized conversations",
+        },
+        {
+            "name": "skills",
+            "description": "Manage skills and their configurations",
+        },
+        {
+            "name": "artifacts",
+            "description": "Access and download thread artifacts and generated files",
+        },
+        {
+            "name": "uploads",
+            "description": "Upload and manage user files for threads",
+        },
+        {
+            "name": "threads",
+            "description": "Manage DeerFlow thread-local filesystem data",
+        },
+        {
+            "name": "agents",
+            "description": "Create and manage custom agents with per-agent config and prompts",
+        },
+        {
+            "name": "suggestions",
+            "description": "Generate follow-up question suggestions for conversations",
+        },
+        {
+            "name": "channels",
+            "description": "Manage IM channel integrations (Feishu, Slack, Telegram)",
+        },
+        {
+            "name": "modules",
+            "description": "Public optional module feature flags",
+        },
+        {
+            "name": "assistants-compat",
+            "description": "LangGraph Platform-compatible assistants API (stub)",
+        },
+        {
+            "name": "runs",
+            "description": "LangGraph Platform-compatible runs lifecycle (create, stream, cancel)",
+        },
+        {
+            "name": "health",
+            "description": "Health check and system status endpoints",
+        },
+    ]
+    if config.modules.durable_workflows.api_enabled:
+        tags.append(
+            {
+                "name": "workflows",
+                "description": "Durable workflow runtime envelopes and lifecycle events",
+            }
+        )
+    return tags
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Application lifespan handler."""
@@ -257,6 +328,7 @@ def create_app() -> FastAPI:
         Configured FastAPI application instance.
     """
     config = get_gateway_config()
+    startup_config = get_app_config()
     docs_url = "/docs" if config.enable_docs else None
     redoc_url = "/redoc" if config.enable_docs else None
     openapi_url = "/openapi.json" if config.enable_docs else None
@@ -287,60 +359,7 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
         docs_url=docs_url,
         redoc_url=redoc_url,
         openapi_url=openapi_url,
-        openapi_tags=[
-            {
-                "name": "models",
-                "description": "Operations for querying available AI models and their configurations",
-            },
-            {
-                "name": "mcp",
-                "description": "Manage Model Context Protocol (MCP) server configurations",
-            },
-            {
-                "name": "memory",
-                "description": "Access and manage global memory data for personalized conversations",
-            },
-            {
-                "name": "skills",
-                "description": "Manage skills and their configurations",
-            },
-            {
-                "name": "artifacts",
-                "description": "Access and download thread artifacts and generated files",
-            },
-            {
-                "name": "uploads",
-                "description": "Upload and manage user files for threads",
-            },
-            {
-                "name": "threads",
-                "description": "Manage DeerFlow thread-local filesystem data",
-            },
-            {
-                "name": "agents",
-                "description": "Create and manage custom agents with per-agent config and prompts",
-            },
-            {
-                "name": "suggestions",
-                "description": "Generate follow-up question suggestions for conversations",
-            },
-            {
-                "name": "channels",
-                "description": "Manage IM channel integrations (Feishu, Slack, Telegram)",
-            },
-            {
-                "name": "assistants-compat",
-                "description": "LangGraph Platform-compatible assistants API (stub)",
-            },
-            {
-                "name": "runs",
-                "description": "LangGraph Platform-compatible runs lifecycle (create, stream, cancel)",
-            },
-            {
-                "name": "health",
-                "description": "Health check and system status endpoints",
-            },
-        ],
+        openapi_tags=_openapi_tags(startup_config),
     )
 
     # Auth: reject unauthenticated requests to non-public paths (fail-closed safety net)
@@ -390,6 +409,9 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
     # Suggestions API is mounted at /api/threads/{thread_id}/suggestions
     app.include_router(suggestions.router)
 
+    # Public module feature flags are mounted at /api/modules
+    app.include_router(modules.router)
+
     # User-facing IM channel connection API is mounted at /api/channels
     app.include_router(channel_connections.router)
 
@@ -410,6 +432,10 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
 
     # Stateless Runs API (stream/wait without a pre-existing thread)
     app.include_router(runs.router)
+
+    # Durable workflow runtime read API
+    if startup_config.modules.durable_workflows.api_enabled:
+        app.include_router(workflows.router)
 
     @app.get("/health", tags=["health"])
     async def health_check() -> dict[str, str]:
