@@ -379,3 +379,80 @@ class TestBashToolInjectsActiveSecrets:
     def test_no_active_secret_forwards_no_env(self):
         out, captured = self._run_bash({})
         assert captured["env"] in (None, {})
+
+
+_SECRET = "sk-erp-9f3c-DO-NOT-LEAK"
+
+
+class TestLeakSurfaces:
+    """Assert the secret value is absent from all five leak surfaces (#3861)."""
+
+    def _activate_with_secret(self, tmp_path, monkeypatch):
+        from deerflow.agents.middlewares import skill_activation_middleware as mw
+        from deerflow.agents.middlewares.skill_activation_middleware import SkillActivationMiddleware
+
+        skill = _make_secret_skill(tmp_path, "erp-report", [SecretRequirement("ERP_TOKEN")])
+        storage = SimpleNamespace(
+            load_skills=lambda *, enabled_only: [skill],
+            get_container_root=lambda: "/mnt/skills",
+            get_skills_root_path=lambda: tmp_path,
+        )
+        monkeypatch.setattr(mw, "get_or_new_skill_storage", lambda **kwargs: storage)
+
+        journal_records: list[dict] = []
+        journal = SimpleNamespace(record_middleware=lambda *a, **k: journal_records.append({"a": a, "k": k}))
+        context = {"secrets": {"ERP_TOKEN": _SECRET}, "__run_journal": journal}
+        request = ModelRequest(
+            model=object(),
+            messages=[HumanMessage(content="/erp-report pull report", id="m1")],
+            state={"messages": []},
+            runtime=SimpleNamespace(context=context),
+        )
+        captured = {}
+        SkillActivationMiddleware().wrap_model_call(request, lambda r: captured.setdefault("messages", r.messages) or AIMessage(content="ok"))
+        return context, captured["messages"], journal_records
+
+    def test_prompt_surface_has_no_secret(self, tmp_path, monkeypatch):
+        # The injected activation message (the only thing added to the prompt /
+        # checkpointed messages) must not contain the secret value.
+        _, messages, _ = self._activate_with_secret(tmp_path, monkeypatch)
+        for m in messages:
+            assert _SECRET not in str(m.content)
+
+    def test_checkpoint_surface_separation(self, tmp_path, monkeypatch):
+        # Secrets live on runtime.context, never in the graph state that gets
+        # checkpointed (messages/state).
+        context, messages, _ = self._activate_with_secret(tmp_path, monkeypatch)
+        assert context["secrets"]["ERP_TOKEN"] == _SECRET  # present in context...
+        assert _SECRET not in str([m.content for m in messages])  # ...not in state
+
+    def test_audit_surface_has_no_secret(self, tmp_path, monkeypatch):
+        _, _, journal_records = self._activate_with_secret(tmp_path, monkeypatch)
+        assert journal_records, "activation should record an audit event"
+        assert _SECRET not in str(journal_records)
+
+    def test_trace_metadata_has_no_secret(self, monkeypatch):
+        from deerflow.tracing import metadata as meta
+
+        monkeypatch.setattr(meta, "get_enabled_tracing_providers", lambda: {"langfuse"})
+        config = {"context": {"secrets": {"ERP_TOKEN": _SECRET}}, "metadata": {}}
+        meta.inject_langfuse_metadata(config, thread_id="t", user_id="u", model_name="m")
+        assert _SECRET not in str(config["metadata"])
+        # And secrets were never mirrored into configurable.
+        assert _SECRET not in str(config.get("configurable", {}))
+
+    def test_redact_helper_strips_secret_keys(self):
+        from deerflow.runtime.secret_context import redact_secret_context_keys
+
+        ctx = {"thread_id": "t", "secrets": {"ERP_TOKEN": _SECRET}, "__active_skill_secrets": {"ERP_TOKEN": _SECRET}}
+        redacted = redact_secret_context_keys(ctx)
+        assert redacted == {"thread_id": "t"}
+        assert _SECRET not in str(redacted)
+
+    def test_stdout_surface_redacted(self):
+        from deerflow.sandbox.tools import mask_secret_values
+
+        leaked = f"DEBUG: token is {_SECRET} done"
+        masked = mask_secret_values(leaked, {"ERP_TOKEN": _SECRET})
+        assert _SECRET not in masked
+        assert "[redacted]" in masked

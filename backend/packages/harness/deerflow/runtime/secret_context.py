@@ -49,3 +49,21 @@ def read_active_secrets(context: Any) -> dict[str, str]:
     if not isinstance(context, dict):
         return {}
     return _string_pairs(context.get(ACTIVE_SECRETS_CONTEXT_KEY))
+
+
+# Run-context keys whose values are request-scoped secrets and must be stripped
+# before a context mapping is serialized anywhere observable (traces, logs).
+REDACTED_CONTEXT_KEYS = frozenset({SECRETS_CONTEXT_KEY, ACTIVE_SECRETS_CONTEXT_KEY})
+
+
+def redact_secret_context_keys(context: Any) -> Any:
+    """Return a shallow copy of ``context`` with secret-bearing keys removed.
+
+    Defensive helper for any code path that serializes the run context into an
+    observable surface. DeerFlow's own trace-metadata builder never copies the
+    context, so this is belt-and-suspenders for future call sites and custom
+    tracer configurations.
+    """
+    if not isinstance(context, dict):
+        return context
+    return {key: value for key, value in context.items() if key not in REDACTED_CONTEXT_KEYS}
