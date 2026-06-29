@@ -22,6 +22,7 @@ import { ThreadContext } from "@/components/workspace/messages/context";
 import { ThreadTitle } from "@/components/workspace/thread-title";
 import { TodoList } from "@/components/workspace/todo-list";
 import { TokenUsageIndicator } from "@/components/workspace/token-usage-indicator";
+import { useActiveGoal } from "@/components/workspace/use-active-goal";
 import { Welcome } from "@/components/workspace/welcome";
 import { useI18n } from "@/core/i18n/hooks";
 import { useModels } from "@/core/models/hooks";
@@ -33,7 +34,6 @@ import {
   useThreadTokenUsage,
 } from "@/core/threads/hooks";
 import { threadTokenUsageToTokenUsage } from "@/core/threads/token-usage";
-import type { GoalState } from "@/core/threads/types";
 import { textOfMessage } from "@/core/threads/utils";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
@@ -49,9 +49,6 @@ export default function ChatPage() {
   // the moment the user submits so the UI animates immediately, even though
   // `isNewThread` stays true until the backend actually creates the thread.
   const [isWelcomeMode, setIsWelcomeMode] = useState(isNewThread);
-  const [localGoal, setLocalGoal] = useState<GoalState | null | undefined>(
-    undefined,
-  );
   const [settings, setSettings] = useThreadSettings(threadId);
   const [localSettings, setLocalSettings] = useLocalSettings();
   const { tokenUsageEnabled } = useModels();
@@ -78,10 +75,6 @@ export default function ChatPage() {
   useEffect(() => {
     setIsWelcomeMode(isNewThread);
   }, [isNewThread]);
-
-  useEffect(() => {
-    setLocalGoal(undefined);
-  }, [threadId]);
 
   const { showNotification } = useNotification();
 
@@ -179,9 +172,10 @@ export default function ChatPage() {
     ? localSettings.tokenUsage.inlineMode
     : "off";
   const hasTodos = (thread.values.todos?.length ?? 0) > 0;
-  const activeGoal =
-    localGoal !== undefined ? localGoal : (thread.values.goal ?? null);
-  const hasGoal = Boolean(activeGoal);
+  const { activeGoal, hasGoal, setLocalGoal } = useActiveGoal(
+    threadId,
+    thread.values.goal ?? null,
+  );
 
   return (
     <ThreadContext.Provider value={{ thread, isMock }}>

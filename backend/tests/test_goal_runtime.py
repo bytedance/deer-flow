@@ -194,3 +194,19 @@ def test_no_progress_count_resets_when_evidence_advances():
 
     # Identical evaluator wording, but the agent produced NEW visible evidence -> progress.
     assert goal.compute_no_progress_count(prior, first, evidence_signature="step 2 done") == 0
+
+
+def test_parse_goal_command_status_for_empty_and_whitespace():
+    assert goal.parse_goal_command("") == goal.GoalCommand("status")
+    assert goal.parse_goal_command("   ") == goal.GoalCommand("status")
+
+
+def test_parse_goal_command_clear_aliases_case_insensitive():
+    for alias in ("clear", "reset", "off", "CLEAR", "  Reset  ", "Off"):
+        assert goal.parse_goal_command(alias) == goal.GoalCommand("clear")
+
+
+def test_parse_goal_command_set_trims_and_preserves_objective():
+    assert goal.parse_goal_command("  finish the work  ") == goal.GoalCommand("set", "finish the work")
+    # A multi-word objective that merely starts with an alias is a set, not a clear.
+    assert goal.parse_goal_command("clear the build cache") == goal.GoalCommand("set", "clear the build cache")

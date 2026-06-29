@@ -331,7 +331,7 @@ export function InputBox({
   );
 
   const handleGoalCommand = useCallback(
-    async (command: GoalCommand) => {
+    async (command: GoalCommand): Promise<boolean> => {
       try {
         let goal: GoalState | null = null;
         if (command.kind === "status") {
@@ -347,9 +347,12 @@ export function InputBox({
           goal =
             ((await response.json()) as { goal?: GoalState | null }).goal ??
             null;
+          const objective = goal?.objective;
           toast.info(
-            goal
-              ? t.inputBox.goalActive.replace("{goal}", goal.objective)
+            objective !== undefined
+              ? // Function replacer so a goal containing `$&`/`$1` isn't
+                // interpreted as a replacement pattern.
+                t.inputBox.goalActive.replace("{goal}", () => objective)
               : t.inputBox.goalNone,
           );
           onGoalChange?.(goal);
@@ -386,11 +389,12 @@ export function InputBox({
           onGoalChange?.(goal);
         }
         textInput.setInput("");
+        return true;
       } catch (error) {
         toast.error(
           error instanceof Error ? error.message : t.inputBox.goalFailed,
         );
-        throw error;
+        return false;
       }
     },
     [
@@ -474,8 +478,9 @@ export function InputBox({
         setFollowups([]);
         setFollowupsHidden(false);
         setFollowupsLoading(false);
-        await handleGoalCommand(goalCommand);
-        if (goalCommand.kind === "set") {
+        const saved = await handleGoalCommand(goalCommand);
+        // Only start a run when a goal was actually saved; status/clear never run.
+        if (saved && goalCommand.kind === "set") {
           return submitThreadMessage({
             ...message,
             text: goalCommand.objective,

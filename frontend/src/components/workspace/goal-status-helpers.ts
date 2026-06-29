@@ -23,3 +23,25 @@ export function getGoalContinuationDisplay(
   }
   return { count, max };
 }
+
+/**
+ * Stable signature of the *server* goal, used to decide when an optimistic
+ * client override should yield back to server state.
+ *
+ * It changes whenever a new goal is set (`created_at`), the agent auto-continues
+ * (`continuation_count`/`updated_at`), or the backend clears/satisfies the goal
+ * (`null`). `useActiveGoal` resets its optimistic copy when this key changes, so
+ * the streamed continuation counter is never permanently shadowed.
+ */
+export function goalReconciliationKey(goal: GoalState | null): string {
+  if (!goal) {
+    return "none";
+  }
+  return [
+    goal.objective,
+    goal.status,
+    goal.created_at ?? "",
+    goal.updated_at ?? "",
+    goal.continuation_count ?? 0,
+  ].join("|");
+}

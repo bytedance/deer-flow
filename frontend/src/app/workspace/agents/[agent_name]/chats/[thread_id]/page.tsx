@@ -22,6 +22,7 @@ import { ThreadTitle } from "@/components/workspace/thread-title";
 import { TodoList } from "@/components/workspace/todo-list";
 import { TokenUsageIndicator } from "@/components/workspace/token-usage-indicator";
 import { Tooltip } from "@/components/workspace/tooltip";
+import { useActiveGoal } from "@/components/workspace/use-active-goal";
 import { useAgent } from "@/core/agents";
 import { useI18n } from "@/core/i18n/hooks";
 import { useModels } from "@/core/models/hooks";
@@ -33,7 +34,6 @@ import {
   useThreadTokenUsage,
 } from "@/core/threads/hooks";
 import { threadTokenUsageToTokenUsage } from "@/core/threads/token-usage";
-import type { GoalState } from "@/core/threads/types";
 import { textOfMessage } from "@/core/threads/utils";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
@@ -54,9 +54,6 @@ export default function AgentChatPage() {
   // the thread. `isWelcomeMode` controls only the centered welcome layout, so
   // it can flip immediately on submit without triggering eager history loads.
   const [isWelcomeMode, setIsWelcomeMode] = useState(isNewThread);
-  const [localGoal, setLocalGoal] = useState<GoalState | null | undefined>(
-    undefined,
-  );
   const [settings, setSettings] = useThreadSettings(threadId);
   const [localSettings, setLocalSettings] = useLocalSettings();
   const { tokenUsageEnabled } = useModels();
@@ -75,10 +72,6 @@ export default function AgentChatPage() {
   useEffect(() => {
     setIsWelcomeMode(isNewThread);
   }, [isNewThread]);
-
-  useEffect(() => {
-    setLocalGoal(undefined);
-  }, [threadId]);
 
   const {
     thread,
@@ -171,9 +164,10 @@ export default function AgentChatPage() {
     ? localSettings.tokenUsage.inlineMode
     : "off";
   const hasTodos = (thread.values.todos?.length ?? 0) > 0;
-  const activeGoal =
-    localGoal !== undefined ? localGoal : (thread.values.goal ?? null);
-  const hasGoal = Boolean(activeGoal);
+  const { activeGoal, hasGoal, setLocalGoal } = useActiveGoal(
+    threadId,
+    thread.values.goal ?? null,
+  );
 
   return (
     <ThreadContext.Provider value={{ thread }}>

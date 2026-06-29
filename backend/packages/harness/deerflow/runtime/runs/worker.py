@@ -31,6 +31,9 @@ from deerflow.config.app_config import AppConfig
 from deerflow.runtime.goal import (
     DEFAULT_MAX_GOAL_CONTINUATIONS,
     DEFAULT_MAX_NO_PROGRESS_CONTINUATIONS,
+    _call_checkpointer_method,
+    _is_visible_message,
+    _message_type,
     attach_goal_evaluation,
     compute_no_progress_count,
     evaluate_goal_completion,
@@ -471,21 +474,6 @@ async def run_agent(
 # ---------------------------------------------------------------------------
 
 
-async def _call_checkpointer_method(checkpointer: Any, async_name: str, sync_name: str, *args: Any, **kwargs: Any) -> Any:
-    """Call a checkpointer method, supporting async and sync variants."""
-    async_method = getattr(checkpointer, async_name, None)
-    if async_method is not None:
-        result = async_method(*args, **kwargs)
-        return await result if inspect.isawaitable(result) else result
-    sync_method = getattr(checkpointer, sync_name, None)
-    if sync_method is None:
-        raise AttributeError(f"Missing checkpointer method: {async_name}/{sync_name}")
-    # Offload the synchronous checkpointer call so its blocking IO never runs on
-    # the event loop (backend/AGENTS.md blocking-IO gate).
-    result = await asyncio.to_thread(sync_method, *args, **kwargs)
-    return await result if inspect.isawaitable(result) else result
-
-
 def _checkpoint_id(checkpoint_tuple: Any) -> str | None:
     config = getattr(checkpoint_tuple, "config", {}) or {}
     configurable = config.get("configurable", {}) if isinstance(config, dict) else {}
@@ -514,37 +502,16 @@ def _read_checkpoint_messages(checkpoint_tuple: Any) -> list[Any]:
     return messages if isinstance(messages, list) else []
 
 
-def _message_type(message: Any) -> str | None:
-    value = getattr(message, "type", None)
-    if value is None and isinstance(message, dict):
-        value = message.get("type") or message.get("role")
-    if value == "assistant":
-        return "ai"
-    if value == "user":
-        return "human"
-    return str(value) if value else None
-
-
-def _additional_kwargs(message: Any) -> dict[str, Any]:
-    value = getattr(message, "additional_kwargs", None)
-    if value is None and isinstance(message, dict):
-        value = message.get("additional_kwargs")
-    return dict(value) if isinstance(value, dict) else {}
-
-
-def _is_visible_message(message: Any) -> bool:
-    if _additional_kwargs(message).get("hide_from_ui") is True:
-        return False
-    return _message_type(message) in {"human", "ai"}
-
-
 def _has_durable_goal_turn_receipt(checkpoint_tuple: Any, messages: list[Any]) -> bool:
-    """Return true when a completed visible assistant turn is safely checkpointed."""
+    """Return true when a completed visible assistant turn is safely checkpointed.
+
+    ``pending_writes`` is the durability signal: a ``CheckpointTuple`` carries no
+    ``tasks`` field (those live on a ``StateSnapshot``), so the presence of any
+    queued writes is what tells us the turn is still in flight.
+    """
     if _checkpoint_id(checkpoint_tuple) is None:
         return False
     if getattr(checkpoint_tuple, "pending_writes", None):
-        return False
-    if getattr(checkpoint_tuple, "tasks", None):
         return False
     visible_messages = []
     for message in messages:
@@ -603,6 +570,18 @@ async def _persist_goal_evaluation(
         return None
 
 
+async def _reread_goal_and_checkpoint(checkpointer: Any, thread_id: str) -> tuple[GoalState | None, Any]:
+    """Re-read the goal and latest checkpoint together for a concurrency re-check."""
+    goal = await read_thread_goal(checkpointer, thread_id)
+    checkpoint_tuple = await _call_checkpointer_method(
+        checkpointer,
+        "aget_tuple",
+        "get_tuple",
+        {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}},
+    )
+    return goal, checkpoint_tuple
+
+
 async def _prepare_goal_continuation_input(
     *,
     bridge: StreamBridge,
@@ -612,7 +591,15 @@ async def _prepare_goal_continuation_input(
     model_name: str | None,
     app_config: AppConfig | None,
 ) -> dict[str, Any] | None:
-    """Evaluate the active goal and return a hidden continuation input if needed."""
+    """Evaluate the active goal and return a hidden continuation input if needed.
+
+    NOTE: ``write_thread_goal`` is a last-writer-wins read-modify-write. The
+    re-reads below catch a racing user message or ``/goal clear`` in the common
+    case, but with an async (DB-backed) checkpointer a clear that lands inside the
+    persist write window can still be clobbered. Serializing goal writes per
+    thread (a Gateway-scoped lock, or routing them through ``update_state``) would
+    close that window — tracked as a follow-up.
+    """
     if checkpointer is None:
         return None
 
@@ -623,6 +610,28 @@ async def _prepare_goal_continuation_input(
         return None
     if not goal or goal.get("status") != "active":
         return None
+
+    async def _persist(
+        goal: GoalState,
+        evaluation: GoalEvaluation,
+        no_progress_count: int,
+        *,
+        stand_down_reason: str | None = None,
+        continuation_count: int | None = None,
+    ) -> GoalState | None:
+        """Record the evaluation against the still-current goal instance."""
+        return await _persist_goal_evaluation(
+            bridge=bridge,
+            checkpointer=checkpointer,
+            thread_id=thread_id,
+            run_id=run_id,
+            goal=goal,
+            evaluation=evaluation,
+            no_progress_count=no_progress_count,
+            continuation_count=continuation_count,
+            stand_down_reason=stand_down_reason,
+            evidence_signature=evidence_signature,
+        )
 
     try:
         checkpoint_tuple = await _call_checkpointer_method(
@@ -646,17 +655,7 @@ async def _prepare_goal_continuation_input(
                 evidence_summary="",
             )
             no_progress_count = compute_no_progress_count(goal, evaluation, evidence_signature=evidence_signature)
-            await _persist_goal_evaluation(
-                bridge=bridge,
-                checkpointer=checkpointer,
-                thread_id=thread_id,
-                run_id=run_id,
-                goal=goal,
-                evaluation=evaluation,
-                no_progress_count=no_progress_count,
-                stand_down_reason="no_durable_end_of_turn",
-                evidence_signature=evidence_signature,
-            )
+            await _persist(goal, evaluation, no_progress_count, stand_down_reason="no_durable_end_of_turn")
             return None
 
         evaluation = await evaluate_goal_completion(
@@ -671,37 +670,21 @@ async def _prepare_goal_continuation_input(
 
     no_progress_count = compute_no_progress_count(goal, evaluation, evidence_signature=evidence_signature)
 
+    # Re-check that neither the goal nor the visible conversation changed while the
+    # evaluator ran — a user message or /goal clear racing the evaluation must win.
     try:
-        current_goal = await read_thread_goal(checkpointer, thread_id)
-        current_checkpoint_tuple = await _call_checkpointer_method(
-            checkpointer,
-            "aget_tuple",
-            "get_tuple",
-            {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}},
-        )
+        current_goal, current_checkpoint_tuple = await _reread_goal_and_checkpoint(checkpointer, thread_id)
     except Exception:
         logger.warning("Could not re-check goal state for thread %s after evaluation", thread_id, exc_info=True)
         return None
 
-    if not _goal_instance_matches(goal, current_goal):
-        return None
-    if current_checkpoint_tuple is None:
+    if not _goal_instance_matches(goal, current_goal) or current_checkpoint_tuple is None:
         return None
 
     checkpoint_changed = _checkpoint_id(current_checkpoint_tuple) != checkpoint_id_before
     messages_changed = visible_conversation_signature(_read_checkpoint_messages(current_checkpoint_tuple)) != conversation_signature_before
     if checkpoint_changed or messages_changed:
-        await _persist_goal_evaluation(
-            bridge=bridge,
-            checkpointer=checkpointer,
-            thread_id=thread_id,
-            run_id=run_id,
-            goal=current_goal,
-            evaluation=evaluation,
-            no_progress_count=no_progress_count,
-            stand_down_reason="thread_changed_after_evaluation",
-            evidence_signature=evidence_signature,
-        )
+        await _persist(current_goal, evaluation, no_progress_count, stand_down_reason="thread_changed_after_evaluation")
         return None
 
     if evaluation["satisfied"]:
@@ -714,61 +697,30 @@ async def _prepare_goal_continuation_input(
 
     stand_down_reason = _stand_down_reason(goal, evaluation, no_progress_count)
     if stand_down_reason is not None or not should_continue_goal(goal, evaluation, no_progress_count=no_progress_count):
-        await _persist_goal_evaluation(
-            bridge=bridge,
-            checkpointer=checkpointer,
-            thread_id=thread_id,
-            run_id=run_id,
-            goal=goal,
-            evaluation=evaluation,
-            no_progress_count=no_progress_count,
-            stand_down_reason=stand_down_reason,
-            evidence_signature=evidence_signature,
-        )
+        await _persist(goal, evaluation, no_progress_count, stand_down_reason=stand_down_reason)
         return None
 
     next_count = int(goal.get("continuation_count", 0)) + 1
-    updated_goal = await _persist_goal_evaluation(
-        bridge=bridge,
-        checkpointer=checkpointer,
-        thread_id=thread_id,
-        run_id=run_id,
-        goal=goal,
-        evaluation=evaluation,
-        no_progress_count=no_progress_count,
-        continuation_count=next_count,
-        evidence_signature=evidence_signature,
-    )
+    updated_goal = await _persist(goal, evaluation, no_progress_count, continuation_count=next_count)
     if updated_goal is None:
         return None
 
+    # Final guard: the persist above bumped the checkpoint id, so only the visible
+    # conversation signature is meaningful for detecting a racing user turn here.
     try:
-        latest_goal = await read_thread_goal(checkpointer, thread_id)
-        latest_checkpoint_tuple = await _call_checkpointer_method(
-            checkpointer,
-            "aget_tuple",
-            "get_tuple",
-            {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}},
-        )
+        latest_goal, latest_checkpoint_tuple = await _reread_goal_and_checkpoint(checkpointer, thread_id)
     except Exception:
         logger.warning("Could not verify queued goal continuation for thread %s", thread_id, exc_info=True)
         return None
-    if not _goal_instance_matches(updated_goal, latest_goal):
-        return None
-    if latest_checkpoint_tuple is None:
+    if not _goal_instance_matches(updated_goal, latest_goal) or latest_checkpoint_tuple is None:
         return None
     if visible_conversation_signature(_read_checkpoint_messages(latest_checkpoint_tuple)) != conversation_signature_before:
-        await _persist_goal_evaluation(
-            bridge=bridge,
-            checkpointer=checkpointer,
-            thread_id=thread_id,
-            run_id=run_id,
-            goal=latest_goal,
-            evaluation=evaluation,
-            no_progress_count=no_progress_count,
+        await _persist(
+            latest_goal,
+            evaluation,
+            no_progress_count,
             continuation_count=next_count,
             stand_down_reason="thread_changed_before_continuation",
-            evidence_signature=evidence_signature,
         )
         return None
 

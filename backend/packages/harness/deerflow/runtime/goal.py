@@ -14,7 +14,7 @@ import inspect
 import json
 import logging
 import re
-from typing import Any
+from typing import Any, Literal, NamedTuple
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.checkpoint.base import empty_checkpoint, uuid6
@@ -47,6 +47,32 @@ CONTINUABLE_GOAL_BLOCKERS: set[GoalBlocker] = {"goal_not_met_yet"}
 
 _THINK_BLOCK_RE = re.compile(r"<think\b[^>]*>.*?</think\s*>", re.IGNORECASE | re.DOTALL)
 _OPEN_THINK_RE = re.compile(r"<think\b[^>]*>", re.IGNORECASE)
+
+
+GOAL_CLEAR_ALIASES = frozenset({"clear", "reset", "off"})
+
+
+class GoalCommand(NamedTuple):
+    """Parsed intent of a ``/goal`` slash command argument string."""
+
+    kind: Literal["status", "clear", "set"]
+    objective: str = ""
+
+
+def parse_goal_command(args: str) -> GoalCommand:
+    """Parse the argument string of a ``/goal`` command into an intent.
+
+    Shared by the TUI and IM-channel surfaces so the three-way semantics stay in
+    one place: empty shows the active goal, ``clear``/``reset``/``off`` clears it,
+    and anything else sets the goal to that (trimmed) objective. The frontend
+    keeps a parallel TypeScript copy in ``input-box-helpers.ts``.
+    """
+    stripped = args.strip()
+    if not stripped:
+        return GoalCommand("status")
+    if stripped.lower() in GOAL_CLEAR_ALIASES:
+        return GoalCommand("clear")
+    return GoalCommand("set", stripped)
 
 
 def normalize_goal_objective(objective: str) -> str:

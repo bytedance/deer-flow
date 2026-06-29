@@ -31,6 +31,7 @@ from app.gateway.csrf_middleware import CSRF_COOKIE_NAME, CSRF_HEADER_NAME, gene
 from app.gateway.internal_auth import create_internal_auth_headers
 from deerflow.config.agents_config import load_agent_config
 from deerflow.config.paths import make_safe_user_id
+from deerflow.runtime.goal import parse_goal_command
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.skills.slash import parse_slash_skill_reference
 from deerflow.skills.storage import get_or_new_skill_storage
@@ -1611,11 +1612,11 @@ class ChannelManager:
         await self.bus.publish_outbound(outbound)
 
     async def _handle_goal_command(self, msg: InboundMessage, args: str) -> str:
-        args = args.strip()
+        command = parse_goal_command(args)
         thread_id = await self._lookup_thread_id(msg)
         headers = _owner_headers(msg) or create_internal_auth_headers()
 
-        if not args:
+        if command.kind == "status":
             if not thread_id:
                 return "No active goal."
             try:
@@ -1632,7 +1633,7 @@ class ChannelManager:
                 return "Failed to fetch goal information."
             return f"Goal: {goal.get('objective')}" if goal else "No active goal."
 
-        if args.lower() in {"clear", "reset", "off"}:
+        if command.kind == "clear":
             if not thread_id:
                 return "Goal cleared."
             try:
@@ -1657,14 +1658,14 @@ class ChannelManager:
                     f"{self._gateway_url}/api/threads/{quote(thread_id, safe='')}/goal",
                     timeout=10,
                     headers=headers,
-                    json={"objective": args},
+                    json={"objective": command.objective},
                 )
                 response.raise_for_status()
                 goal = (response.json() or {}).get("goal")
         except Exception:
             logger.exception("Failed to set goal through gateway")
             return "Failed to set goal."
-        return f"Goal set: {goal.get('objective') if goal else args}"
+        return f"Goal set: {goal.get('objective') if goal else command.objective}"
 
     async def _fetch_gateway(self, path: str, kind: str, *, msg: InboundMessage | None = None) -> str:
         """Fetch data from the Gateway API for command responses."""

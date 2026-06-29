@@ -18,6 +18,8 @@ from textual.screen import ModalScreen
 from textual.widgets import Input, Label, OptionList, Static
 from textual.widgets.option_list import Option
 
+from deerflow.runtime.goal import parse_goal_command
+
 from .input_history import InputHistory
 from .render import render_header, render_status, render_transcript
 from .runtime import stream_actions
@@ -449,8 +451,9 @@ class DeerFlowTUI(App):
         self._refresh_header()
 
     def _handle_goal(self, args: str) -> None:
-        args = args.strip()
-        if not args:
+        command = parse_goal_command(args)
+
+        if command.kind == "status":
             if not self._conv_thread_id:
                 self._dispatch(SystemMessage("No active goal."))
                 return
@@ -465,7 +468,7 @@ class DeerFlowTUI(App):
             self._dispatch(SystemMessage(f"Goal: {goal.get('objective')}"))
             return
 
-        if args.lower() in {"clear", "reset", "off"}:
+        if command.kind == "clear":
             if self._conv_thread_id:
                 try:
                     self.session.client.clear_goal(self._conv_thread_id)
@@ -479,11 +482,11 @@ class DeerFlowTUI(App):
             self._conv_thread_id = str(uuid.uuid4())
             self._refresh_header()
         try:
-            goal = self.session.client.set_goal(self._conv_thread_id, args).get("goal")
+            goal = self.session.client.set_goal(self._conv_thread_id, command.objective).get("goal")
         except Exception:  # noqa: BLE001
             self._dispatch(SystemMessage("Could not set goal.", tone="error"))
             return
-        self._dispatch(SystemMessage(f"Goal set: {goal.get('objective') if goal else args}"))
+        self._dispatch(SystemMessage(f"Goal set: {goal.get('objective') if goal else command.objective}"))
 
     def _show_skills(self) -> None:
         names = ", ".join(self._skill_names) or "none"
