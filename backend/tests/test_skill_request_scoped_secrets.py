@@ -160,3 +160,61 @@ class TestEnvPolicy:
         monkeypatch.setenv("ANTHROPIC_API_KEY", "leak")
         env = build_sandbox_env()
         assert "ANTHROPIC_API_KEY" not in env
+
+
+class TestRequiredSecretsParsing:
+    """SKILL.md ``required-secrets`` frontmatter parsing (Slice 2)."""
+
+    def _write_skill(self, tmp_path, frontmatter_body: str):
+        skill_dir = tmp_path / "erp-report"
+        skill_dir.mkdir()
+        skill_file = skill_dir / "SKILL.md"
+        skill_file.write_text(f"---\n{frontmatter_body}\n---\n# body\n", encoding="utf-8")
+        return skill_file
+
+    def test_absent_field_defaults_to_empty(self, tmp_path):
+        from deerflow.skills.parser import parse_skill_file
+        from deerflow.skills.types import SkillCategory
+
+        skill_file = self._write_skill(tmp_path, "name: erp-report\ndescription: Pull an ERP report")
+        skill = parse_skill_file(skill_file, SkillCategory.CUSTOM)
+        assert skill is not None
+        assert skill.required_secrets == []
+
+    def test_string_list_form(self, tmp_path):
+        from deerflow.skills.parser import parse_skill_file
+        from deerflow.skills.types import SkillCategory
+
+        skill_file = self._write_skill(
+            tmp_path,
+            "name: erp-report\ndescription: d\nrequired-secrets:\n  - ERP_TOKEN\n  - OTHER_TOKEN",
+        )
+        skill = parse_skill_file(skill_file, SkillCategory.CUSTOM)
+        assert [s.name for s in skill.required_secrets] == ["ERP_TOKEN", "OTHER_TOKEN"]
+        assert all(s.optional is False for s in skill.required_secrets)
+
+    def test_object_list_with_optional(self, tmp_path):
+        from deerflow.skills.parser import parse_skill_file
+        from deerflow.skills.types import SkillCategory
+
+        skill_file = self._write_skill(
+            tmp_path,
+            "name: erp-report\ndescription: d\nrequired-secrets:\n  - name: ERP_TOKEN\n    optional: true\n  - name: REQUIRED_ONE",
+        )
+        skill = parse_skill_file(skill_file, SkillCategory.CUSTOM)
+        by_name = {s.name: s for s in skill.required_secrets}
+        assert by_name["ERP_TOKEN"].optional is True
+        assert by_name["REQUIRED_ONE"].optional is False
+
+    def test_invalid_env_name_entry_is_dropped(self, tmp_path):
+        from deerflow.skills.parser import parse_skill_file
+        from deerflow.skills.types import SkillCategory
+
+        skill_file = self._write_skill(
+            tmp_path,
+            'name: erp-report\ndescription: d\nrequired-secrets:\n  - "bad name!"\n  - GOOD_TOKEN',
+        )
+        skill = parse_skill_file(skill_file, SkillCategory.CUSTOM)
+        # The malformed entry is dropped; the valid one survives — one bad
+        # declaration must not nuke the whole skill.
+        assert [s.name for s in skill.required_secrets] == ["GOOD_TOKEN"]
