@@ -25,7 +25,12 @@ from app.gateway.deps import get_checkpointer, get_current_user, get_feedback_re
 from app.gateway.pagination import trim_run_message_page
 from app.gateway.services import sse_consumer, start_run, wait_for_run_completion
 from deerflow.runtime import RunRecord, RunStatus, serialize_channel_values_for_api
-from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, get_original_user_content_text, message_to_text
+from deerflow.utils.messages import (
+    ORIGINAL_USER_CONTENT_KEY,
+    get_original_user_content_text,
+    message_to_text,
+    restore_original_user_content_blocks,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/threads", tags=["runs"])
@@ -247,13 +252,17 @@ def _checkpoint_response(checkpoint_tuple: Any) -> dict[str, Any]:
 
 def _clean_human_message_for_regenerate(message: Any) -> dict[str, Any]:
     additional_kwargs = _message_additional_kwargs(message)
-    content = get_original_user_content_text(_message_content(message), additional_kwargs)
+    raw_content = _message_content(message)
+    original_text = get_original_user_content_text(raw_content, additional_kwargs)
     additional_kwargs.pop(ORIGINAL_USER_CONTENT_KEY, None)
     additional_kwargs.pop("hide_from_ui", None)
 
     clean_message: dict[str, Any] = {
         "type": "human",
-        "content": [{"type": "text", "text": content}],
+        # Preserve non-text blocks (images/files) for multimodal messages by
+        # restoring through the merge helper instead of collapsing to a lone
+        # text block. See restore_original_user_content_blocks.
+        "content": restore_original_user_content_blocks(raw_content, original_text),
         "additional_kwargs": additional_kwargs,
     }
     message_id = _message_id(message)
@@ -639,7 +648,14 @@ async def list_thread_messages(
         original_content = additional_kwargs.get(ORIGINAL_USER_CONTENT_KEY)
         if not isinstance(original_content, str) or not original_content.strip():
             continue
-        inner["content"] = [{"type": "text", "text": original_content}]
+        # Preserve non-text blocks (images, files) for multimodal messages by
+        # restoring through the merge helper instead of collapsing to a lone
+        # text block. Without this an uploaded image disappears from history
+        # on reload — see InputSanitizationMiddleware._rebuild_content for the
+        # mirror-shape on the write path. (#3689 review feedback.)
+        inner["content"] = restore_original_user_content_blocks(
+            inner.get("content"), original_content
+        )
 
     # Resolve the caller once; it is needed both to scope the feedback query
     # below and to list the thread's runs for turn-duration injection.

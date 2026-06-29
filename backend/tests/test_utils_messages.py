@@ -70,3 +70,113 @@ def test_non_string_text_attribute_ignored():
 
 def test_message_content_to_text_still_joins_with_newline():
     assert message_content_to_text(["a", {"text": "b"}]) == "a\nb"
+
+
+# ---------- restore_original_user_content_blocks (#3689 review feedback) ----------
+
+
+def _image(url: str = "data:image/png;base64,ABC") -> dict:
+    return {"type": "image_url", "image_url": {"url": url}}
+
+
+def test_restore_string_content_returns_single_text_block():
+    from deerflow.utils.messages import restore_original_user_content_blocks
+
+    assert restore_original_user_content_blocks("anything", "look") == [
+        {"type": "text", "text": "look"},
+    ]
+
+
+def test_restore_non_list_non_string_returns_single_text_block():
+    """Non-list content (e.g. legacy Mapping shape) collapses to a text block."""
+    from deerflow.utils.messages import restore_original_user_content_blocks
+
+    assert restore_original_user_content_blocks(None, "look") == [
+        {"type": "text", "text": "look"},
+    ]
+    assert restore_original_user_content_blocks({"text": "wrapped"}, "look") == [
+        {"type": "text", "text": "look"},
+    ]
+
+
+def test_restore_list_replaces_first_text_block_with_original_text():
+    from deerflow.utils.messages import restore_original_user_content_blocks
+
+    content = [
+        {"type": "text", "text": "--- BEGIN USER INPUT ---\nlook\n--- END USER INPUT ---"},
+        _image(),
+    ]
+    assert restore_original_user_content_blocks(content, "look") == [
+        {"type": "text", "text": "look"},
+        _image(),
+    ]
+
+
+def test_restore_list_drops_subsequent_text_blocks_already_merged_into_first():
+    """The middleware merges all text blocks into one; the read path must not
+    re-emit the merged-away text blocks (would duplicate displayed text)."""
+    from deerflow.utils.messages import restore_original_user_content_blocks
+
+    content = [
+        {"type": "text", "text": "wrapped-1"},
+        _image(),
+        {"type": "text", "text": "wrapped-2"},
+    ]
+    out = restore_original_user_content_blocks(content, "merged text")
+    assert out == [
+        {"type": "text", "text": "merged text"},
+        _image(),
+    ]
+
+
+def test_restore_list_preserves_non_text_blocks_between_text_blocks():
+    from deerflow.utils.messages import restore_original_user_content_blocks
+
+    file_block = {"type": "file", "file_id": "f1"}
+    content = [
+        {"type": "text", "text": "wrapped"},
+        file_block,
+        _image("data:image/png;base64,XYZ"),
+    ]
+    out = restore_original_user_content_blocks(content, "look")
+    assert out == [
+        {"type": "text", "text": "look"},
+        file_block,
+        _image("data:image/png;base64,XYZ"),
+    ]
+
+
+def test_restore_list_with_no_text_block_prepends_original_text():
+    """Edge case: persisted content has only non-text blocks (rare, but
+    defensive). Original text should still surface."""
+    from deerflow.utils.messages import restore_original_user_content_blocks
+
+    content = [_image()]
+    out = restore_original_user_content_blocks(content, "look")
+    assert out == [
+        {"type": "text", "text": "look"},
+        _image(),
+    ]
+
+
+def test_restore_empty_list_prepends_original_text():
+    from deerflow.utils.messages import restore_original_user_content_blocks
+
+    assert restore_original_user_content_blocks([], "look") == [
+        {"type": "text", "text": "look"},
+    ]
+
+
+def test_restore_list_does_not_mutate_input_blocks():
+    """Helper must not mutate the caller's block dicts — display path should
+    be a fresh list with a new first text block."""
+    from deerflow.utils.messages import restore_original_user_content_blocks
+
+    original_text_block = {"type": "text", "text": "wrapped"}
+    content = [original_text_block, _image()]
+    out = restore_original_user_content_blocks(content, "look")
+    # Caller's text block unchanged
+    assert original_text_block == {"type": "text", "text": "wrapped"}
+    # Output is a fresh shape
+    assert out[0] == {"type": "text", "text": "look"}
+    assert out[0] is not original_text_block

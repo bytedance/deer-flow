@@ -259,3 +259,56 @@ def test_prepare_regenerate_payload_reports_recent_checkpoint_scan_limit():
     assert exc.value.status_code == 409
     assert exc.value.detail == "Could not locate target user message in recent checkpoint history (limit=200)"
     assert checkpointer.alist_limits == [200]
+
+
+def test_prepare_regenerate_payload_preserves_image_block_for_multimodal_message():
+    """Regression for #3689 review feedback: regenerating from a multimodal
+    human message must preserve the image/file blocks. The original code
+    collapsed ``content`` to ``[{text}]`` for every regenerated message,
+    which dropped image_url blocks when the source message had text + image.
+    """
+    from app.gateway.routers.thread_runs import _prepare_regenerate_payload
+
+    image_block = {"type": "image_url", "image_url": {"url": "data:image/png;base64,ABC"}}
+    # Persisted shape after middleware's _rebuild_content: single merged text
+    # block carrying the boundary wrapper, followed by the image block.
+    human = HumanMessage(
+        id="human-1",
+        content=[
+            {
+                "type": "text",
+                "text": "--- BEGIN USER INPUT ---\nlook at this\n--- END USER INPUT ---",
+            },
+            image_block,
+        ],
+        additional_kwargs={
+            ORIGINAL_USER_CONTENT_KEY: "look at this",
+        },
+    )
+    ai = AIMessage(id="ai-1", content="answer v1")
+    base = _checkpoint("ckpt-base", [])
+    after_human = _checkpoint("ckpt-human", [human])
+    latest = _checkpoint("ckpt-ai", [human, ai])
+    checkpointer = FakeCheckpointer([latest, after_human, base])
+    event_store = FakeEventStore(
+        [
+            {
+                "run_id": "run-old",
+                "event_type": "llm.ai.response",
+                "category": "message",
+                "content": {"id": "ai-1", "type": "ai", "content": "answer v1"},
+                "metadata": {"caller": "lead_agent"},
+            }
+        ]
+    )
+
+    response = asyncio.run(_prepare_regenerate_payload("thread-1", "ai-1", _request(checkpointer, event_store)))
+
+    regenerated_human = response.input["messages"][0]
+    assert regenerated_human["id"] == "human-1"
+    # Text block carries the original (unwrapped) text; image block preserved.
+    assert regenerated_human["content"] == [
+        {"type": "text", "text": "look at this"},
+        image_block,
+    ]
+    assert "BEGIN USER INPUT" not in str(regenerated_human["content"])
