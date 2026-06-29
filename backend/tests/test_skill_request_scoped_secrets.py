@@ -218,3 +218,34 @@ class TestRequiredSecretsParsing:
         # The malformed entry is dropped; the valid one survives — one bad
         # declaration must not nuke the whole skill.
         assert [s.name for s in skill.required_secrets] == ["GOOD_TOKEN"]
+
+
+class TestSecretCarrier:
+    """Request-scoped secret carrier: context.secrets → runtime.context (Slice 3)."""
+
+    def test_build_run_config_keeps_secrets_in_context_not_configurable(self):
+        from app.gateway.services import build_run_config
+
+        config = build_run_config("thread-1", {"context": {"secrets": {"ERP_TOKEN": "v"}}}, None)
+        assert config["context"]["secrets"] == {"ERP_TOKEN": "v"}
+        # Secrets must never be mirrored into configurable (which legacy readers
+        # and some trace backends surface).
+        assert "secrets" not in config.get("configurable", {})
+
+    def test_runtime_context_carries_secrets(self):
+        from deerflow.runtime.runs.worker import _build_runtime_context
+
+        ctx = _build_runtime_context("t", "r", {"secrets": {"ERP_TOKEN": "v"}})
+        assert ctx["secrets"] == {"ERP_TOKEN": "v"}
+
+    def test_extract_request_secrets_filters_non_string_pairs(self):
+        from deerflow.runtime.secret_context import extract_request_secrets
+
+        assert extract_request_secrets({"secrets": {"A": "x", "B": 123, 4: "y"}}) == {"A": "x"}
+
+    def test_extract_request_secrets_missing_or_malformed(self):
+        from deerflow.runtime.secret_context import extract_request_secrets
+
+        assert extract_request_secrets({}) == {}
+        assert extract_request_secrets({"secrets": "not-a-dict"}) == {}
+        assert extract_request_secrets(None) == {}
