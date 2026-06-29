@@ -96,9 +96,9 @@ class DelegationLedgerMiddleware(AgentMiddleware):
         block = format_delegation_block(entries)
 
         if not block:
-            logger.info("[delegation-ledger][temp] no delegations to inject this call")
+            logger.debug("delegation ledger: nothing to inject this call")
             return request
-        logger.info("[delegation-ledger][temp] injecting ledger reminder (%d entries):\n%s", len(entries), block)
+        logger.info("delegation ledger: injected %d subtask(s) into the model request", len(entries))
         reminder = SystemMessage(content=block, additional_kwargs={"hide_from_ui": True})
         return request.override(messages=[*request.messages, reminder])
 
