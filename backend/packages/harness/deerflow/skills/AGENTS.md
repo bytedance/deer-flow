@@ -67,6 +67,9 @@ owners. Publication and derived-view status remain separate.
 `tests/blocking_io/test_skill_mutation_host.py` exercises the real host lifetime,
 evidence pages, scanner, publication, revert and admin routes under Blockbuster;
 only remote moderation is stubbed. Keep new async paths inside that gate.
+Publication paths that capture a package or acquire `PublicationTopology` skip
+when `os.name != "posix"`; `tests/test_skill_mutation_nonposix.py` covers that
+refusal by monkeypatching `os.name`. See `backend/tests/AGENTS.md`.
 
 Standalone SDK/storage processes have no publication runtime. `mutations/enrollment.py` checks the configured application DB on each access and refuses enrolled owners with `MUTATION_RUNTIME_REQUIRED`; global toggles check all persisted owners. Never cache negative enrollment or infer it from the plugin list. Reads and writes must keep these guards, and the local storage factory must retain its AppConfig so the probe uses the same DB as the Gateway. `tests/test_skill_sdk_enrollment.py` exercises fresh real SDK processes without injected runtime state.
 

@@ -111,6 +111,21 @@ The local sandbox's UTF-8 subprocess guard inspects each text-mode call with
 `ast`, checking both `encoding` and `errors`; module-wide literal counts can
 hide unpinned calls behind unrelated settings.
 
+## Skill mutation publication
+
+Host skill publication is POSIX-only (`O_NOFOLLOW`, `dir_fd`, and `fcntl`).
+`capture_package`, `PublicationTopology.acquire`, and
+`HostSkillMutationService._authorize` refuse every other `os.name` before
+doing filesystem work. Suites that drive those paths skip on non-POSIX hosts
+with reason `Skill publication requires POSIX local storage`:
+`test_skill_mutations.py`, `test_skill_mutation_package_cost.py`, the capture
+cases in `test_skill_mutation_validation.py` and `test_skill_sdk_enrollment.py`,
+and the lifecycle cases that acquire the publication lock. Grant, evidence, and
+frontmatter checks that return before that lock stay portable.
+`test_skill_mutation_nonposix.py` monkeypatches `os.name` so the refusal is
+covered on POSIX CI. `test_remove_preexisting_nonportable_support_file` skips
+on Windows because its `scripts/AUX.py` fixture is a reserved device name.
+
 ## PostgreSQL batch fixtures
 
 Batch fixtures use `support.postgres.asyncpg_test_url` to map libpq `sslmode`
