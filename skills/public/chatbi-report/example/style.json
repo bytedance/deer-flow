@@ -1,0 +1,17 @@
+{
+  "page": {
+    "orientation": "portrait",
+    "margins_cm": {
+      "top": 2.54,
+      "bottom": 2.54,
+      "left": 2.54,
+      "right": 2.54
+    }
+  },
+  "font": {
+    "title": {"name": "宋体", "size": 16, "bold": true},
+    "section": {"name": "宋体", "size": 14, "bold": true},
+    "report": {"name": "宋体", "size": 12, "bold": true},
+    "body": {"name": "宋体", "size": 11}
+  }
+}

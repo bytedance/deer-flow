@@ -2,10 +2,13 @@
 
 零 LLM 依赖（参考 skills/public/data-analysis/scripts/analyze.py）：
 - extract_compute_ir()：从 ReportDoc.computed_specs 用 regex/AST 静态解析公式字符串
-- assemble_wide_table()：SQLBot 长表 -> chatbi 宽表（按 branch_num × period 透视）
+- assemble_wide_table()：SQLBot 查询 -> chatbi 宽表
+  * 行 = branch_num（每个机构一行）
+  * 列 = (idx_id, period) 二元组：单期 `BAS_0263`，多期 `BAS_0263@2023`
 - validate_ast() / validate_signature() / run_smoke() / run_example()：四层校验
 - evaluate_column()：列填充顶层 API
-- CLI: extract-ir / assemble-wide / validate / evaluate（4 个子命令）
+- CLI: extract-ir / assemble-wide / validate / evaluate / apply-computed
+  （5 个子命令）
 
 LLM codegen（生成 pandas 函数源码）不在本模块 —— 由 lead agent 在 SKILL.md
 step 7 读取 prompts/compute_codegen.md + ComputeIR JSON 拼装 prompt 调用模型，
@@ -94,57 +97,87 @@ def extract_compute_ir(report: Report) -> list[ComputeIR]:
 QUERY_FAILED_SENTINEL = "⚠️QUERY_FAILED"
 
 
-def assemble_wide_table(per_idx_responses: list[dict], report: Report) -> list[dict]:
-    """将 SQLBot 长表（每个 idx_id 一份 {branch_num, period, results: [...]})
-    透视为 chatbi 宽表行：每个 (branch_num, period) 一行，列 = idx_id 列 + 计算列占位。
+def assemble_wide_table(per_idx_responses: list[dict], report: Report,
+                        section_idx: int = 0, report_idx: int = 0) -> list[dict]:
+    """将 SQLBot 查询结果（每个 (idx_id, period) 一份 {branch_num, raw_value}）
+    透视为 chatbi 宽表行：每个 branch_num 一行，列 = (idx_id, period) 二元组。
+
+    多期报表：同一 idx_id 在 thead 中多次出现时，每列必须有 data-period，
+    宽表列名采用 `{idx_id}@{period}` 形式；单期报表列名保持 `{idx_id}`。
 
     所有数值列以 Decimal 累加（无 float 精度损失）；失败单元格以
     ⚠️QUERY_FAILED 标记。
-    """
-    # 收集所有 (branch_num, period) 组合
-    keys: set[tuple[str, str]] = set()
-    for resp in per_idx_responses:
-        for row in resp.get("results", []):
-            keys.add((str(row.get("branch_num", "")),
-                      str(row.get("period", ""))))
-    sorted_keys = sorted(keys)
 
-    # 索引：idx_id -> {(branch_num, period): raw_value}
-    idx_index: dict[str, dict[tuple[str, str], str]] = {}
+    每行额外带 `section_idx` / `report_idx`，与 `query_from_parsed` 输出一致，
+    供 `apply-computed` 按 report 分组。
+
+    协议：per_idx_responses[i] = {"idx_id": str, "period": str | None,
+                                  "section_idx"?: int, "report_idx"?: int,
+                                  "results": [{"branch_num", "raw_value", "success"}]}
+    """
+    # 全部 (idx_id, period) 列键：time_info 是取数全集，thead 是展示子集
+    idx_ids: list[str] = []
+    header_keys: list[tuple[str, str | None]] = []
+    for row in report.headers:
+        for cell in row:
+            if not cell.is_indicator or not cell.idx_id:
+                continue
+            if cell.idx_id not in idx_ids:
+                idx_ids.append(cell.idx_id)
+            key = (cell.idx_id, cell.period)
+            if key not in header_keys:
+                header_keys.append(key)
+
+    periods = [str(period) for period in report.time_info if str(period).strip()]
+    if periods:
+        col_keys = []
+        for idx_id in idx_ids:
+            for period in periods:
+                key = (idx_id, period)
+                if key not in col_keys:
+                    col_keys.append(key)
+        for key in header_keys:
+            if key not in col_keys:
+                col_keys.append(key)
+    else:
+        col_keys = header_keys
+
+    # 索引：(idx_id, period) -> {branch_num: raw_value}
+    cell_index: dict[tuple[str, str | None], dict[str, str]] = {}
+    branches: set[str] = set()
     for resp in per_idx_responses:
         idx = resp.get("idx_id")
         if not idx:
             continue
-        per_row = idx_index.setdefault(idx, {})
+        per = resp.get("period")
+        per_row = cell_index.setdefault((idx, per), {})
         for row in resp.get("results", []):
-            k = (str(row.get("branch_num", "")),
-                 str(row.get("period", "")))
+            bn = str(row.get("branch_num", ""))
             if row.get("success") is True:
-                per_row[k] = str(row.get("raw_value", ""))
+                per_row[bn] = str(row.get("raw_value", ""))
             else:
-                per_row[k] = QUERY_FAILED_SENTINEL
-
-    # 全部 idx_id（来自 thead）
-    all_idx: list[str] = []
-    for row in report.headers:
-        for cell in row:
-            if cell.is_indicator and cell.idx_id and cell.idx_id not in all_idx:
-                all_idx.append(cell.idx_id)
+                per_row[bn] = QUERY_FAILED_SENTINEL
+            branches.add(bn)
 
     wide: list[dict] = []
-    for k in sorted_keys:
-        line: dict = {"branch_num": k[0], "period": k[1]}
-        for idx in all_idx:
-            raw = idx_index.get(idx, {}).get(k, "")
+    for bn in sorted(branches):
+        line: dict = {
+            "branch_num": bn,
+            "section_idx": section_idx,
+            "report_idx": report_idx,
+        }
+        for idx_id, period in col_keys:
+            col_name = f"{idx_id}@{period}" if period else idx_id
+            raw = cell_index.get((idx_id, period), {}).get(bn, "")
             if raw == QUERY_FAILED_SENTINEL:
-                line[idx] = QUERY_FAILED_SENTINEL
+                line[col_name] = QUERY_FAILED_SENTINEL
             elif raw == "":
-                line[idx] = None
+                line[col_name] = None
             else:
                 try:
-                    line[idx] = Decimal(raw.replace(",", "").strip())
+                    line[col_name] = Decimal(raw.replace(",", "").strip())
                 except Exception:
-                    line[idx] = QUERY_FAILED_SENTINEL
+                    line[col_name] = QUERY_FAILED_SENTINEL
         wide.append(line)
     return wide
 
@@ -374,9 +407,9 @@ def _cli_extract_ir(args: argparse.Namespace) -> int:
 
 
 def _dict_to_report(d: dict) -> Report:
-    """最小 Report 重建（仅供 extract_compute_ir 所需字段）。"""
+    """最小 Report 重建（仅供 extract_compute_ir 与 assemble_wide_table 所需字段）。"""
     from parse_md import Report, OrgContext, Th
-    org = OrgContext(**d["org_context"])
+    orgs = [OrgContext(**o) for o in d["org_contexts"]]
     headers: list[list[Th]] = []
     for row in d.get("headers", []):
         cells: list[Th] = []
@@ -387,13 +420,14 @@ def _dict_to_report(d: dict) -> Report:
                 is_computed=c["is_computed"],
                 idx_id=c.get("idx_id"),
                 data_unit=c.get("data_unit"),
+                period=c.get("period"),
                 rowspan=c.get("rowspan"),
                 colspan=c.get("colspan"),
             ))
         headers.append(cells)
     return Report(
         title=d["title"],
-        org_context=org,
+        org_contexts=orgs,
         time_info=d["time_info"],
         headers=headers,
         data_rows=d.get("data_rows", []),
@@ -408,18 +442,79 @@ def _specs_from_dict(specs: list[dict]) -> list:
 
 
 def _cli_assemble_wide(args: argparse.Namespace) -> int:
-    """从 query.json + parsed.json -> wide.json。"""
+    """从 query.json + parsed.json -> wide.json。
+
+    按 `(section_idx, report_idx)` 分组生成每 report 的宽表行，并保留这两个字段
+    以便 `apply-computed` 按 report 分组取值。
+    """
     with open(args.query, "r", encoding="utf-8") as f:
         query = json.load(f)
     with open(args.parsed, "r", encoding="utf-8") as f:
         parsed = json.load(f)
 
     per_idx_responses = query.get("results", query if isinstance(query, list) else [query])
-    rep = _dict_to_report(parsed["sections"][0]["reports"][0])
-    wide = assemble_wide_table(per_idx_responses, rep)
+
+    grouped: dict[tuple[int, int], list[dict]] = {}
+    for resp in per_idx_responses:
+        key = (int(resp.get("section_idx", 0)), int(resp.get("report_idx", 0)))
+        grouped.setdefault(key, []).append(resp)
+
+    wide: list[dict] = []
+    for section_idx, section in enumerate(parsed.get("sections", [])):
+        for report_idx, _ in enumerate(section.get("reports", [])):
+            report = _dict_to_report(section["reports"][report_idx])
+            rows = grouped.get((section_idx, report_idx), [])
+            wide.extend(assemble_wide_table(rows, report, section_idx, report_idx))
+
     with open(args.out, "w", encoding="utf-8") as f:
         json.dump(wide, f, ensure_ascii=False, indent=2, default=str)
     print(f"OK: pivoted {len(wide)} wide rows -> {args.out}")
+    return 0
+
+
+def apply_computed_results(wide: list[dict], computed: dict[str, dict]) -> list[dict]:
+    """按 `branch_num` 把 computed values 写回 wide rows。
+
+    `payload["name"]` 是模板中的计算列业务名；computed 文件名只作旧格式 fallback。
+    `payload["index"]` 是 branch_num 列表，`values` 与之一一对应。
+    """
+    for fallback_name, payload in computed.items():
+        name = str(payload.get("name") or fallback_name)
+        values = payload.get("values", [])
+        index_keys = payload.get("index", [])
+        for row, key, value in zip(wide, index_keys, values):
+            if str(row.get("branch_num", "")) != str(key):
+                continue
+            row[name] = value
+    return wide
+
+
+def _computed_name_from_path(path: Path, stem: str) -> str:
+    prefix = f"{stem}.computed."
+    suffix = ".json"
+    name = path.name
+    if not name.startswith(prefix) or not name.endswith(suffix):
+        raise ComputeValidationError(f"invalid computed result filename: {path.name}")
+    return name[len(prefix):-len(suffix)]
+
+
+def _load_computed_results(computed_dir: str, stem: str) -> dict[str, dict]:
+    base = Path(computed_dir)
+    out: dict[str, dict] = {}
+    for path in sorted(base.glob(f"{stem}.computed.*.json")):
+        out[_computed_name_from_path(path, stem)] = json.loads(path.read_text(encoding="utf-8"))
+    return out
+
+
+def _cli_apply_computed(args: argparse.Namespace) -> int:
+    wide = json.loads(Path(args.wide).read_text(encoding="utf-8"))
+    computed = _load_computed_results(args.computed_dir, args.stem)
+    merged = apply_computed_results(wide, computed)
+    Path(args.out or args.wide).write_text(
+        json.dumps(merged, ensure_ascii=False, indent=2, default=str),
+        encoding="utf-8",
+    )
+    print(f"OK: applied {len(computed)} computed columns -> {args.out or args.wide}")
     return 0
 
 
@@ -433,7 +528,7 @@ def _cli_validate(args: argparse.Namespace) -> int:
         validate_ast(source)
         run_smoke(source, args.function, df)
         if args.example_input and args.example_expected is not None:
-            ex_df = pd.DataFrame(json.loads(args.example_input) if args.example_input.startswith("{") else _parse_kv(args.example_input))
+            ex_df = _example_df(args.example_input, df)
             ok = run_example(source, args.function, ex_df, expected=str(args.example_expected))
             if not ok:
                 print(f"FAIL: example mismatch (expected {args.example_expected})", file=sys.stderr)
@@ -443,6 +538,22 @@ def _cli_validate(args: argparse.Namespace) -> int:
     except ComputeValidationError as e:
         print(f"FAIL: {e}", file=sys.stderr)
         return 1
+
+
+def _example_df(example_input: str, wide_df: pd.DataFrame) -> pd.DataFrame:
+    if not example_input.startswith("{"):
+        return pd.DataFrame(_parse_kv(example_input))
+    payload = json.loads(example_input)
+    if isinstance(payload, dict):
+        return pd.DataFrame([{_resolve_example_key(str(k), wide_df): v for k, v in payload.items()}])
+    return pd.DataFrame(payload)
+
+
+def _resolve_example_key(key: str, wide_df: pd.DataFrame) -> str:
+    if key in wide_df.columns:
+        return key
+    matches = [col for col in wide_df.columns if str(col).endswith(f"@{key}")]
+    return str(matches[0]) if len(matches) == 1 else key
 
 
 def _parse_kv(s: str) -> list[dict]:
@@ -457,11 +568,19 @@ def _parse_kv(s: str) -> list[dict]:
 
 
 def _cli_evaluate(args: argparse.Namespace) -> int:
-    """执行函数返回 pd.Series（序列化为 JSON）。"""
+    """执行函数返回 pd.Series（序列化为 JSON）。
+
+    将 `branch_num` 设为 df.index，使序列化的 `index` 字段为 branch_num 字符串，
+    供下游 `apply-computed` 按 branch_num 对齐。
+    """
     df = pd.read_json(args.df) if args.df.endswith(".json") else pd.DataFrame(json.loads(args.df))
+    if "branch_num" in df.columns:
+        df = df.set_index("branch_num")
     source = Path(args.source).read_text(encoding="utf-8") if args.source != "-" else sys.stdin.read()
     out = evaluate_column(source, args.function, df)
     payload = {"index": [str(i) for i in out.index], "values": [str(v) for v in out.values]}
+    if args.name:
+        payload["name"] = args.name
     with open(args.out, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
     print(f"OK: evaluated {len(out)} values -> {args.out}")
@@ -496,7 +615,15 @@ def main(argv: list[str] | None = None) -> int:
     p_eval.add_argument("--function", required=True)
     p_eval.add_argument("--df", required=True)
     p_eval.add_argument("--out", required=True)
+    p_eval.add_argument("--name", default=None, help="模板中的计算列业务名；用于 apply-computed 写回 wide key")
     p_eval.set_defaults(func=_cli_evaluate)
+
+    p_apply = sub.add_parser("apply-computed", help="将 computed.*.json 合并回 wide.json")
+    p_apply.add_argument("--wide", required=True)
+    p_apply.add_argument("--computed-dir", required=True)
+    p_apply.add_argument("--stem", required=True)
+    p_apply.add_argument("--out", default=None)
+    p_apply.set_defaults(func=_cli_apply_computed)
 
     args = parser.parse_args(argv)
     return args.func(args)

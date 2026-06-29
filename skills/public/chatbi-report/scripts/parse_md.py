@@ -8,11 +8,15 @@
   仍被识别为 is_indicator=True。
 - 类目标签单元格（多级 thead 父级，无 data-idx，无 {{}}）以
   is_indicator=False、is_computed=False、idx_id=None 输出 —— 不报错。
+- 可选 `> 描述:` 块保存用户的描述生成提示词；由 step 8c LLM 调用消费，
+  渲染时插入 report heading 与 table 之间。
 """
 from __future__ import annotations
 
+import argparse
 import json
 import re
+import sys
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from pathlib import Path
@@ -30,6 +34,7 @@ class Th:
     is_computed: bool
     idx_id: str | None = None
     data_unit: str | None = None
+    period: str | None = None
     rowspan: int | None = None
     colspan: int | None = None
 
@@ -43,6 +48,8 @@ class Th:
             d["idx_id"] = self.idx_id
         if self.data_unit is not None:
             d["data_unit"] = self.data_unit
+        if self.period is not None:
+            d["period"] = self.period
         if self.rowspan is not None:
             d["rowspan"] = self.rowspan
         if self.colspan is not None:
@@ -66,17 +73,19 @@ class OrgContext:
 @dataclass
 class Report:
     title: str
-    org_context: OrgContext
+    org_contexts: list[OrgContext]
     time_info: list[str]
     headers: list[list[Th]]                # 二维：外层 = thead 行索引
     data_rows: list[dict] = field(default_factory=list)
     computed_specs: list[ComputedSpec] = field(default_factory=list)
+    description_prompt: str | None = None  # `> 描述:` 块内容；step 8c 消费
 
     def to_dict(self) -> dict:
         return {
             "title": self.title,
-            "org_context": {"branch_num": self.org_context.branch_num,
-                            "branch_short_name": self.org_context.branch_short_name},
+            "org_contexts": [{"branch_num": o.branch_num,
+                              "branch_short_name": o.branch_short_name}
+                             for o in self.org_contexts],
             "time_info": list(self.time_info),
             "headers": [[c.to_dict() for c in row] for row in self.headers],
             "data_rows": list(self.data_rows),
@@ -84,6 +93,8 @@ class Report:
                 {"name": s.name, "prompt": s.prompt, "examples": s.examples}
                 for s in self.computed_specs
             ],
+            **({"description_prompt": self.description_prompt}
+               if self.description_prompt is not None else {}),
         }
 
 
@@ -200,13 +211,14 @@ class _TheadCellCollector(HTMLParser):
             self._current_cell = {
                 "data-idx": a.get("data-idx"),
                 "data-unit": a.get("data-unit"),
+                "data-period": a.get("data-period"),
                 "rowspan": int(a["rowspan"]) if a.get("rowspan") else None,
                 "colspan": int(a["colspan"]) if a.get("colspan") else None,
                 "text": "",
             }
         elif tag == "td" and self._current_row is not None:
             self._current_cell = {
-                "data-idx": None, "data-unit": None,
+                "data-idx": None, "data-unit": None, "data-period": None,
                 "rowspan": None, "colspan": None, "text": "",
             }
 
@@ -223,14 +235,60 @@ class _TheadCellCollector(HTMLParser):
             self._current_cell["text"] += data
 
 
+# `> 机构:` 多行块：仅支持新格式（`> 机构:` 后接 ≥2 空格缩进的多条 entry）
+# 旧式单行（`> 机构: branch_num=...; branch_short_name=...`）不再支持
+_ORG_LINE_RE = re.compile(r"^branch_num=([^;]+);\s*branch_short_name=(.+)$")
+
+
+def _parse_org_block(body: str) -> list[OrgContext]:
+    """解析 `> 机构:` 块。返回 1..N 个 OrgContext。
+
+    唯一支持的格式：
+        > 机构:
+        >   branch_num=27020199; branch_short_name=王益联社
+        >   branch_num=27020100; branch_short_name=印台联社
+    """
+    org_match = re.search(r"^>\s*机构:(.*)$", body, re.MULTILINE)
+    if not org_match:
+        raise ValueError("missing `> 机构:` block")
+    first_line_rest = org_match.group(1).strip()
+    if first_line_rest != "":
+        raise ValueError(
+            "`> 机构:` must use multi-line format: "
+            "`> 机构:` followed by indented `branch_num=X; branch_short_name=Y` lines"
+        )
+
+    start = org_match.end()
+    out: list[OrgContext] = []
+    for line in body[start:].splitlines():
+        if not line:
+            continue
+        if not line.startswith(">"):
+            break
+        # 兄弟块（`> 时期:` 等）跳出：仅 0/1 空格缩进的 `> <非空>` 即视为新块
+        if re.match(r"^>\s?\S", line) and not re.match(r"^>\s{2,}\S", line):
+            break
+        stripped = line.lstrip("> ").rstrip()
+        if not stripped:
+            continue
+        m = _ORG_LINE_RE.match(stripped)
+        if not m:
+            raise ValueError(
+                f"malformed `> 机构:` entry "
+                f"(must match `branch_num=X; branch_short_name=Y`): {stripped!r}"
+            )
+        out.append(OrgContext(branch_num=m.group(1).strip(),
+                              branch_short_name=m.group(2).strip()))
+    if not out:
+        raise ValueError("`> 机构:` block is empty")
+    return out
+
+
 def _parse_one_report(report_title: str, body: str) -> Report:
-    org_match = re.search(r"^>\s*机构:\s*branch_num=([^;]+);\s*branch_short_name=(.+)$",
-                          body, re.MULTILINE)
+    org_contexts = _parse_org_block(body)
     time_match = re.search(r"^>\s*时期:\s*time_info\s*=\s*(\[.*?\])\s*$", body, re.MULTILINE)
-    if not org_match or not time_match:
-        raise ValueError(f"report `{report_title}` missing `> 机构:` or `> 时期:`; run md_lint first")
-    org = OrgContext(branch_num=org_match.group(1).strip(),
-                     branch_short_name=org_match.group(2).strip())
+    if not time_match:
+        raise ValueError(f"report `{report_title}` missing `> 时期:`; run md_lint first")
     time_info = json.loads(time_match.group(1))
 
     thead_match = re.search(r"<thead[^>]*>(.*?)</thead>", body, re.DOTALL | re.IGNORECASE)
@@ -258,13 +316,16 @@ def _parse_one_report(report_title: str, body: str) -> Report:
     }
     computed_specs = [s for s in computed_specs if s.name in header_computed_names]
 
+    description_prompt = _parse_description_block(body)
+
     return Report(
         title=report_title,
-        org_context=org,
+        org_contexts=org_contexts,
         time_info=time_info,
         headers=headers_2d,
         data_rows=data_rows,
         computed_specs=computed_specs,
+        description_prompt=description_prompt,
     )
 
 
@@ -272,6 +333,7 @@ def _cell_to_th(cell: dict) -> Th:
     text = (cell.get("text") or "").strip()
     data_idx = cell.get("data-idx")
     data_unit = cell.get("data-unit")
+    data_period = cell.get("data-period")
     rowspan = cell.get("rowspan")
     colspan = cell.get("colspan")
 
@@ -282,17 +344,20 @@ def _cell_to_th(cell: dict) -> Th:
         # 旧式占位符：仍为 is_indicator；idx_id 与 text 均取自 {{}}（剥离大括号）
         return Th(text=old_match.group(1), is_indicator=True, is_computed=False,
                   idx_id=old_match.group(1),
-                  data_unit=data_unit, rowspan=rowspan, colspan=colspan)
+                  data_unit=data_unit, period=data_period,
+                  rowspan=rowspan, colspan=colspan)
     if comp_match:
         return Th(text=text, is_indicator=False, is_computed=True,
-                  data_unit=data_unit, rowspan=rowspan, colspan=colspan)
+                  data_unit=data_unit, period=data_period,
+                  rowspan=rowspan, colspan=colspan)
     if data_idx and IDX_ID_PATTERN.match(data_idx):
         return Th(text=text, is_indicator=True, is_computed=False,
-                  idx_id=data_idx, data_unit=data_unit,
+                  idx_id=data_idx, data_unit=data_unit, period=data_period,
                   rowspan=rowspan, colspan=colspan)
     # 既无 data-idx 也无 {{}} 也无公式匹配 —— 类目标签单元格或占位
     return Th(text=text, is_indicator=False, is_computed=False,
-              data_unit=data_unit, rowspan=rowspan, colspan=colspan)
+              data_unit=data_unit, period=data_period,
+              rowspan=rowspan, colspan=colspan)
 
 
 def _parse_compute_block(body: str) -> list[ComputedSpec]:
@@ -330,3 +395,53 @@ def _parse_example(tail: str) -> dict | None:
     for kv in re.findall(r"(\w+)\s*=\s*([^,]+)", inputs_str):
         inputs[kv[0].strip()] = kv[1].strip()
     return {"inputs": inputs, "expected": m.group(3)}
+
+
+def _parse_description_block(body: str) -> str | None:
+    """解析可选 `> 描述:` 块，返回 prompt 字符串或 None（无块）。
+
+    格式约定（与 `> 机构:` / `> 计算:` 一致的多行 `>` 块）：
+        > 描述:
+        >   请基于表格数据生成一段经营分析描述...
+        >   重点关注：
+        >   - 同比变化
+        >   - 同业对比
+
+    块内容直接拼成多行字符串供 step 8c LLM 消费，不做任何结构化解析。
+    兄弟块（`> 时期:` / `> 计算:` 等非缩进 `> X` 行）或非 `>` 行作为终止边界。
+    """
+    desc_match = re.search(r"^>\s*描述:\s*$", body, re.MULTILINE)
+    if not desc_match:
+        return None
+    lines: list[str] = []
+    for raw in body[desc_match.end():].splitlines():
+        if not raw:
+            continue
+        if not raw.startswith(">"):
+            break
+        if re.match(r"^>\s?\S", raw) and not re.match(r"^>\s{2,}\S", raw):
+            break
+        line = raw.lstrip("> ").strip()
+        if line:
+            lines.append(line)
+    return "\n".join(lines) if lines else None
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="parse_md", description=__doc__.splitlines()[0])
+    parser.add_argument("input", help="chatbi-report Markdown input")
+    parser.add_argument("--out", required=True, help="parsed ReportDoc JSON output")
+    args = parser.parse_args(argv)
+
+    try:
+        doc = parse_file(args.input)
+    except Exception as exc:
+        print(f"FAIL: {exc}", file=sys.stderr)
+        return 1
+    Path(args.out).write_text(json.dumps(doc.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"OK: parsed {args.input} -> {args.out}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

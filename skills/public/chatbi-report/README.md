@@ -6,10 +6,9 @@ to a SQLBot indicator plus a Chinese display name.
 
 ## Quickstart (operator)
 
-1. Ensure `.env` has `SQLBOT_BASE_URL` set (no API key required):
-   ```bash
-   cp skills/public/chatbi-report/.env.example .env
-   echo "SQLBOT_BASE_URL=http://your-sqlbot:9070" >> .env
+1. Current default is mock SQLBot data. No `SQLBOT_BASE_URL` is required for the bundled demo fixture:
+   ```text
+   skills/public/chatbi-report/example/mock_sqlbot/profit_yoy.json
    ```
 2. Bring up the gateway (no extra setup — the skill is auto-discovered):
    ```bash
@@ -40,6 +39,54 @@ skills/public/chatbi-report/
     └── compute_codegen.md    # LLM system prompt + few-shot
 ```
 
+## SQLBot query mode
+
+The skill is temporarily configured to use mock SQLBot data in `SKILL.md` Step 3:
+
+```bash
+python /mnt/skills/public/chatbi-report/scripts/sqlbot_client.py query \
+  --parsed /mnt/user-data/outputs/<stem>.parsed.json \
+  --mock \
+  --out /mnt/user-data/outputs/<stem>.query.json
+```
+
+`--mock` uses the bundled fixture:
+
+```text
+/mnt/skills/public/chatbi-report/example/mock_sqlbot/profit_yoy.json
+```
+
+Use a different fixture with `--mock-fixture`:
+
+```bash
+python /mnt/skills/public/chatbi-report/scripts/sqlbot_client.py query \
+  --parsed /mnt/user-data/outputs/<stem>.parsed.json \
+  --mock-fixture /mnt/user-data/uploads/custom_sqlbot_fixture.json \
+  --out /mnt/user-data/outputs/<stem>.query.json
+```
+
+To switch to the real SQLBot REST API:
+
+1. Remove `--mock` from Step 3 in `SKILL.md`.
+2. Set `SQLBOT_BASE_URL` in the runtime environment, for example:
+   ```bash
+   SQLBOT_BASE_URL=http://your-sqlbot:9070
+   ```
+3. Keep the same `query` command shape:
+   ```bash
+   python /mnt/skills/public/chatbi-report/scripts/sqlbot_client.py query \
+     --parsed /mnt/user-data/outputs/<stem>.parsed.json \
+     --out /mnt/user-data/outputs/<stem>.query.json
+   ```
+
+Real mode posts to:
+
+```text
+${SQLBOT_BASE_URL}/api/v1/indicator/query-report-info
+```
+
+No API key or Authorization header is used by the current client.
+
 ## Tests
 
 ```bash
@@ -65,8 +112,8 @@ for the full rule list.
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| F17 error at step 5 | SQLBot unreachable | Check `SQLBOT_BASE_URL`; `curl ${SQLBOT_BASE_URL}/api/v1/indicator/query-report-info` |
+| Step 3 query fails or all cells show ⚠️QUERY_FAILED | SQLBot unreachable or returned no matching data | Check `SQLBOT_BASE_URL`; `curl ${SQLBOT_BASE_URL}/api/v1/indicator/query-report-info` |
 | All idx marked ⚠️QUERY_FAILED | `data_dt` mismatch between MD tbody and SQLBot response | Verify `> 时期:` block matches what SQLBot returns |
-| Compute column skipped | AST/signature/smoke failure | Read `report.query.log`; column is marked `compute_*_failed` in JSON |
+| Compute column skipped | AST/signature/smoke failure | Read step 8a stderr; column is marked `⚠️COMPUTE_FAILED` in outputs |
 | DOCX shows English | `data-idx` attribute missing on real-indicator `<th>` | Re-run `md_lint.py` for the exact fix |
 | Sandbox can't import pandas | Container missing deps | Restart with `make dev` (the gateway image ships pandas) |

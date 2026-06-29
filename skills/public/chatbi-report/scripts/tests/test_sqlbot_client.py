@@ -83,9 +83,19 @@ def test_real_client_raises_sqlbot_error_on_top_level_code_nonzero(sqlbot_env):
     assert m_post.call_count == 1
 
 
-def test_mock_client_returns_per_idx_data(fixture_dir):
+def test_mock_client_returns_per_idx_data(tmp_path):
     """Mock client: queries with single idx_id and returns that idx_id's rows only."""
-    client = sc.MockSQLBotClient(fixture_path=str(fixture_dir / "mock_sqlbot" / "query_responses.json"))
+    fixture = tmp_path / "query_responses.json"
+    fixture.write_text(json.dumps({
+        "BAS_0263": {
+            "success": True,
+            "data": [
+                {"data_dt": "2025-12-31", "org_ecd": "王益联社",
+                 "idx_name": "贷款收单商户数", "value": "1420"},
+            ],
+        },
+    }), encoding="utf-8")
+    client = sc.MockSQLBotClient(fixture_path=str(fixture))
     resp = client.query_report_info(
         org_info=[{"branch_num": "27020199", "branch_short_name": "王益联社"}],
         index_info=[{"idx_id": "BAS_0263"}],
@@ -99,11 +109,146 @@ def test_mock_client_returns_per_idx_data(fixture_dir):
     assert all(row.get("idx_name") == "贷款收单商户数" for row in elem["data"])
 
 
-def test_mock_client_returns_success_false_for_failing_idx(fixture_dir):
+def test_mock_client_returns_success_false_for_failing_idx(tmp_path):
     """Mock client for partial_failure fixture: success=false（F18 情形）。"""
-    client = sc.MockSQLBotClient(fixture_path=str(fixture_dir / "mock_sqlbot" / "partial_failure.json"))
+    fixture = tmp_path / "partial_failure.json"
+    fixture.write_text(json.dumps({
+        "BAS_0264": {
+            "success": False,
+            "msg": "数据不可用。",
+            "data": [],
+        },
+    }), encoding="utf-8")
+    client = sc.MockSQLBotClient(fixture_path=str(fixture))
     resp = client.query_report_info(
         org_info=[], index_info=[{"idx_id": "BAS_0264"}], time_info=[]
     )
     assert resp.code == 0   # 顶层仍然为 0（依规格）
     assert resp.data[0]["success"] is False
+
+
+def test_mock_client_filters_data_by_time_info_prefix(tmp_path):
+    """Wide-wide: simple-key fixture 的 data 按 time_info[0] 前缀过滤 data_dt。"""
+    fixture = tmp_path / "multi_period.json"
+    fixture.write_text(json.dumps({
+        "BAS_0263": {
+            "success": True,
+            "data": [
+                {"data_dt": "2023-12-31", "org_ecd": "A", "value": "100"},
+                {"data_dt": "2024-12-31", "org_ecd": "A", "value": "200"},
+                {"data_dt": "2025-12-31", "org_ecd": "A", "value": "300"},
+            ],
+        },
+    }), encoding="utf-8")
+    client = sc.MockSQLBotClient(fixture_path=str(fixture))
+    resp = client.query_report_info(
+        org_info=[], index_info=[{"idx_id": "BAS_0263"}], time_info=["2024"]
+    )
+    assert resp.data[0]["success"] is True
+    assert len(resp.data[0]["data"]) == 1
+    assert resp.data[0]["data"][0]["value"] == "200"
+
+
+def test_mock_client_composite_key_takes_priority_over_simple(tmp_path):
+    """Wide-wide: `idx_id@period` 复合键优先于简单键（同一 fixture 可两种风格并存）。"""
+    fixture = tmp_path / "composite.json"
+    fixture.write_text(json.dumps({
+        "BAS_0263@2023": {"success": True, "data": [{"value": "explicit"}]},
+        "BAS_0263": {"success": True, "data": [
+            {"data_dt": "2023-12-31", "value": "fallback-2023"},
+            {"data_dt": "2024-12-31", "value": "fallback-2024"},
+        ]},
+    }), encoding="utf-8")
+    client = sc.MockSQLBotClient(fixture_path=str(fixture))
+    resp = client.query_report_info(
+        org_info=[], index_info=[{"idx_id": "BAS_0263"}], time_info=["2023"]
+    )
+    # 复合键命中 → 返回 explicit（不进入 simple-key fallback）
+    assert resp.data[0]["data"][0]["value"] == "explicit"
+
+    # 复合键未命中 → 退到 simple-key + time_info 过滤
+    resp = client.query_report_info(
+        org_info=[], index_info=[{"idx_id": "BAS_0263"}], time_info=["2024"]
+    )
+    assert resp.data[0]["data"][0]["value"] == "fallback-2024"
+
+
+def test_query_from_parsed_uses_time_info_as_fetch_periods():
+    class RecordingClient:
+        def __init__(self):
+            self.calls = []
+
+        def query_report_info(self, org_info, index_info, time_info):
+            self.calls.append((index_info[0]["idx_id"], list(time_info)))
+            period = time_info[0]
+            return sc.QueryReportInfoResponse(code=0, data=[{
+                "success": True,
+                "data": [{"data_dt": f"{period}-12-31", "org_ecd": "王益联社", "value": period}],
+            }])
+
+    parsed = {
+        "sections": [{
+            "reports": [{
+                "org_contexts": [
+                    {"branch_num": "27020199", "branch_short_name": "王益联社"},
+                ],
+                "time_info": ["2022", "2023", "2024", "2025"],
+                "headers": [[
+                    {"text": "2023年", "is_indicator": True, "is_computed": False,
+                     "idx_id": "BAS_0263", "period": "2023"},
+                    {"text": "2024年", "is_indicator": True, "is_computed": False,
+                     "idx_id": "BAS_0263", "period": "2024"},
+                    {"text": "2025年", "is_indicator": True, "is_computed": False,
+                     "idx_id": "BAS_0263", "period": "2025"},
+                ]],
+            }],
+        }],
+    }
+    client = RecordingClient()
+
+    payload = sc.query_from_parsed(parsed, client)
+
+    assert client.calls == [
+        ("BAS_0263", ["2022"]),
+        ("BAS_0263", ["2023"]),
+        ("BAS_0263", ["2024"]),
+        ("BAS_0263", ["2025"]),
+    ]
+    assert [(r["idx_id"], r["period"]) for r in payload["results"]] == [
+        ("BAS_0263", "2022"),
+        ("BAS_0263", "2023"),
+        ("BAS_0263", "2024"),
+        ("BAS_0263", "2025"),
+    ]
+
+
+def test_query_from_parsed_mock_filters_to_template_orgs(tmp_path):
+    fixture = tmp_path / "profit_yoy.json"
+    fixture.write_text(json.dumps({
+        "BAS_0263": {
+            "success": True,
+            "data": [
+                {"data_dt": "2025-12-31", "org_ecd": "王益联社", "value": "322.78"},
+                {"data_dt": "2025-12-31", "org_ecd": "耀州", "value": "842.72"},
+            ],
+        },
+    }), encoding="utf-8")
+    parsed = {
+        "sections": [{
+            "reports": [{
+                "org_contexts": [
+                    {"branch_num": "27020199", "branch_short_name": "王益联社"},
+                ],
+                "time_info": ["2025"],
+                "headers": [[
+                    {"text": "2025年", "is_indicator": True, "is_computed": False,
+                     "idx_id": "BAS_0263", "period": "2025"},
+                ]],
+            }],
+        }],
+    }
+
+    payload = sc.query_from_parsed(parsed, sc.MockSQLBotClient(str(fixture)))
+
+    rows = payload["results"][0]["results"]
+    assert rows == [{"branch_num": "27020199", "raw_value": "322.78", "success": True}]

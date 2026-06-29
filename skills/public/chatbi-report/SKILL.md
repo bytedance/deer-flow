@@ -1,93 +1,137 @@
 ---
 name: chatbi-report
-identifier: chatbi-report
 version: 0.1.0
 description: |
   Generate structured JSON, backfilled Markdown, and DOCX from a Markdown
-  报表样张：`<th>` cells carry `data-idx` (SQLBot indicator id) + Chinese
-  display name；computed columns carry `data-compute` Python source.
-  Auto-fills cells, applies unit conversion, runs LLM-generated compute
-  per spec, then renders to `.md` / `.docx` / `.status.json`.
-
-  Triggers: "生成报表 / 生成 chatbi 报表 / 跑一下样张 / 回填 data-idx
-  样张 / 出一份 docx 报表"; "render chatbi report", "fill data-idx
-  template".
-
-  Do NOT use for: 自由文本表格（没有 `data-idx` 属性）、纯统计分析
-  (use data-analysis)、旧式 `{{BAS_xxx}}` 占位符样张（已下线）。
+  报表样张 whose HTML th cells carry data-idx indicators, `{{虚拟名}}`
+  computed columns, or `> 描述:` narrative prompts. Use this skill whenever
+  the user asks to generate/run/fill a chatbi report sample, render a data-idx
+  template, produce a DOCX report, or review intermediate SQLBot/compute/
+  description checkpoints. Do NOT use for free-form tables without data-idx or
+  computed placeholders, pure Excel/statistical analysis, audio/video, or files
+  that only need ordinary reading.
 ---
 
 # chatbi-report Skill
 
-从带 `data-idx` 属性的 Markdown 样张生成结构化 JSON、回填 MD 和 DOCX。
+Generate a structured report from a Markdown sample: lint and parse the template,
+query SQLBot data, assemble a wide table, generate and validate computed columns,
+optionally generate descriptions, then render `report.md` / `report.docx`.
 
-## 触发匹配规则（Agent 加载后必读）
+This skill is checkpoint-heavy. The user must explicitly confirm lint findings,
+SQLBot query results, and generated descriptions when those checkpoints trigger.
 
-> 本节是**给 LLM 的执行指令**，不是给人类阅读的。
+## Trigger rules
 
-**Step 1 — 匹配判断**：用户消息含以下任一条件时加载本 Skill：
-- 给出一份 `.md` 文件且文件含 `<th data-idx="..."` 或 `<th ... data-compute="...">`
-- 含动词："生成报表 / 跑样张 / 回填模板 / 出 docx / 生成 chatbi"
-- 含英文："render report", "fill template", "generate chatbi report"
+Load this skill when the user asks to generate, run, fill, or render a chatbi
+report from a Markdown sample, especially when the file contains any of:
 
-**反例（不要触发本 skill）**：
-- 自由文本表格 / Markdown 不含 `data-idx` 属性 → 改用 data-analysis 或直接回复
-- 旧式 `{{BAS_xxx}}` 文本占位符样张 → 已下线，告知用户改用新模板
-- 纯统计分析（pivot/groupby Excel）→ 改用 data-analysis
+- `<th data-idx="...">`
+- `{{虚拟名}}` or legacy `{{BAS_xxx}}`
+- `> 计算:`
+- `> 描述:`
 
-**Step 2 — 复杂度模式**：
+Common phrases:
 
-| Mode | 触发 | 执行 |
-|------|------|------|
-| **lint-only** | "检查 / 校验 / lint 一下样张" | 仅 step 1（`md_lint.py`），输出 LintReport，结束 |
-| **full** | "生成 / 跑 / 回填"（默认） | 完整 9 步流水线 |
-| **skip-docx** | "只要 JSON / 不要 docx" | 1–8 步 + step 9 仅 `render_markdown.py` + `assemble_status.py` |
+- `生成报表`, `生成 chatbi 报表`, `跑样张`, `回填模板`, `出 docx`, `跑一下这个 md`
+- `render report`, `fill template`, `generate chatbi report`
 
-**Step 3 — 绝不主动扩大范围**：不主动给数据解读、不主动改样张结构、不主动加列。
+Do not trigger for:
 
-## 9 步工作流契约
+- free-form Markdown tables with no `data-idx` and no computed placeholders
+- pure statistics or spreadsheet analysis, use data-analysis instead
+- ordinary file reading or summary where no report generation is requested
+- changing the skill itself, unless the user explicitly asks to edit this skill
 
-每一步的命令与产物固定如下。步骤 1–6 与 8a/8b/9 全部是 **bash CLI 子进程**（沙箱中不可达 LLM）。**只有 step 7 是 agent-turn LLM step**。
+## Modes
 
-| Step | 类型 | 命令 / 责任方 | 产物 |
-|---|---|---|---|
-| 1. lint | bash | `python scripts/md_lint.py <upload.md>` | exit code + LintReport |
-| 2. parse | bash | `python scripts/parse_md.py <upload.md> --out report.parsed.json` | `report.parsed.json` |
-| 3. query | bash | `python scripts/sqlbot_client.py query --idx-ids ... --out report.query.json` | `report.query.json` |
-| 4. assemble wide | bash | `python scripts/compute.py assemble-wide --query report.query.json --parsed report.parsed.json --out report.wide.json` | `report.wide.json` |
-| 5. unit convert | bash | `python scripts/unit_conversion.py --in report.wide.json --out report.wide.json` | wide 内 cells 转 Decimal 字符串 |
-| 6. extract IR | bash | `python scripts/compute.py extract-ir --parsed report.parsed.json --out report.ir.json` | `report.ir.json`（**静态，零 LLM**） |
-| **7. codegen** | **agent-turn** | **lead agent 调 LLM**（读 `prompts/compute_codegen.md` + `report.ir.json`，逐 spec 生成函数源码，**用 `write_file` 工具落盘**） | `report.compute.<slug>.py` × N |
-| **8a. validate** | bash | `python scripts/compute.py validate --source ... --function ... --df ... --example-input ... --example-expected ...` | exit 0/1 |
-| **8b. evaluate** | bash | `python scripts/compute.py evaluate --source ... --function ... --df ... --out report.computed.<slug>.json` | `report.computed.<slug>.json` × N |
-| 9. render + status | bash | `python scripts/render_markdown.py ...` + `python scripts/render_docx.py ...` + `python scripts/assemble_status.py ...` | `report.{md,docx,status.json}` |
+| Mode | Trigger | Behavior |
+|---|---|---|
+| `lint-only` | user asks to check/lint/validate the sample only | run Step 1, then Step 1.5 if findings exist |
+| `full` | default for generate/run/fill/render requests | run the full pipeline with all checkpoints |
+| `skip-docx` | user asks for JSON/Markdown only or says no DOCX | run full pipeline but skip DOCX rendering in Step 9 |
 
-## 关键不变量
+## Sandbox paths
 
-- **Step 7 是唯一的 agent-turn LLM step**。step 1–6 与 8a/8b/9 全部是 bash CLI 子进程，**沙箱中不可达 LLM**。
-- **Step 7 失败重试在 agent-turn 内做**：agent 读 step 8a 的 stderr，决定要不要再调一次 LLM 生成新版源码。bash 脚本不参与重试调度。**最多重试 1 次**；再失败则该 spec 标记 `⚠️COMPUTE_FAILED` 进入 step 9。
-- **Step 3 query 失败**：单元格保留 `⚠️QUERY_FAILED` 标记，流水线继续。
-- **`data-idx` 是唯一指标锚点**：不要从 `idx_name` 或正文文案反推。中文显示名从 `<th>` 文本读取，**不调 SQLBot**。
+| Type | Path |
+|---|---|
+| user upload | `/mnt/user-data/uploads/<file>.md` |
+| intermediate JSON | `/mnt/user-data/outputs/<stem>.{parsed,query,wide,ir}.json` |
+| run ledger | `/mnt/user-data/outputs/<stem>.runlog.md` |
+| compute source/result | `/mnt/user-data/outputs/<stem>.compute.<slug>.py`, `/mnt/user-data/outputs/<stem>.computed.<slug>.json` |
+| description text | `/mnt/user-data/outputs/<stem>.description.report-<idx>.txt` |
+| final report | `/mnt/user-data/outputs/<stem>.report.md`, `/mnt/user-data/outputs/<stem>.report.docx` |
+| final status | `/mnt/user-data/outputs/<stem>.status.json` |
+| scripts | `/mnt/skills/public/chatbi-report/scripts/*.py` |
+| prompts | `/mnt/skills/public/chatbi-report/prompts/{compute_codegen.md,description_gen.md}` |
+| references | `/mnt/skills/public/chatbi-report/references/*.md` |
 
-## 退出 status
+Use these absolute sandbox paths when running the skill. Do not assume the current
+working directory is the skill directory.
 
-完成（或中断）时，`assemble_status.py` 写出 `report.status.json`：
+## Reference loading
 
-```json
-{
-  "status": "success | partial | error",
-  "exit_step": 1-9,
-  "error_class": null | "F1..F20",
-  "error_detail": "...",
-  "outputs": {"json": "...", "docx": "...", "md": "..."},
-  "metrics": {
-    "queried_count": 0, "query_failures": 0,
-    "computed_count": 0, "compute_validation_failures": 0,
-    "llm_calls": 0, "duration_seconds": 0.0
-  }
-}
+Read only the reference needed for the current decision:
+
+| Need | Read |
+|---|---|
+| exact pipeline steps, commands, retries, progress messages | `references/pipeline.md` |
+| checkpoint questions/options/branches for 1.5, 3.5, 8d.5 | `references/checkpoints.md` |
+| final reply, status schema, runlog, sentinel handling, metric sources | `references/status-output.md` |
+| template format, SQLBot modes, troubleshooting, user fix guidance | `references/template-troubleshooting.md` |
+
+For a normal full run, read `pipeline.md`, `checkpoints.md`, and
+`status-output.md` before Step 1. Read `template-troubleshooting.md` when lint,
+parse, SQLBot, compute, description, or DOCX issues need explanation.
+
+## Pipeline quick view
+
+```text
+1 lint → 1.5 lint checkpoint → 2 parse → 3 query → 3.5 query checkpoint
+→ 4 assemble-wide → 6 extract-ir
+→ 7 codegen → 8a validate → 8b evaluate → 8c apply-computed
+→ 8d describe → 8d.5 description checkpoint
+→ 9 render/status
 ```
 
-- `success`：`error_class` 为 None 且无查询/计算失败
-- `partial`：`error_class` 为 None 但 `query_failures > 0` 或 `compute_validation_failures > 0`
-- `error`：`error_class` 设置（F1..F20）
+Note: Step 5 (unit-convert) was removed — `unit_conversion.py` is a library
+(`convert_unit()` + `SCALE_FACTOR`), not a CLI. Unit conversion is folded into
+Step 4 `assemble-wide` and the per-idx `unit` field on `<th data-idx>`.
+
+Key points:
+
+- Step 3.5 always triggers, even when `ok == 0` — fail-fast is disabled (per
+  2026-06-27 policy reversal). The user picks between partial-with-sentinel
+  and stop-and-investigate at every query checkpoint.
+- Do not add an IR-preview checkpoint before codegen.
+- Step 8d.5 triggers only when at least one report has a `> 描述:` block.
+- Checkpoints use `ask_clarification(..., clarification_type="risk_confirmation", ...)`.
+- If a user stops at Step 8d.5, tell them to edit the original `> 描述:` block and rerun.
+- Do not accept in-run replacement prompts or modify uploaded source templates.
+
+## Output rules
+
+User-facing outputs are Chinese progress messages, checkpoint summaries, final
+Chinese status summary, `report.md`, and `report.docx`.
+
+- Echo generated `report.md` content in chat when short; summarize and share the
+  file when long.
+- Share `report.md` and `report.docx` with the user.
+- Do not paste raw `status.json`.
+- Do not force `status.json` or `runlog.md` paths into the final user reply.
+- Mention internal paths only when troubleshooting or when the user asks.
+
+## Safety and scope
+
+During a report run, only write `/mnt/user-data/outputs/<stem>.*`.
+
+Do not modify these unless the user explicitly asks to edit the skill or template:
+
+- `/mnt/skills/public/chatbi-report/SKILL.md`
+- `/mnt/skills/public/chatbi-report/scripts/*`
+- `/mnt/skills/public/chatbi-report/prompts/*`
+- `/mnt/user-data/uploads/<file>.md`
+
+Do not add analysis dimensions, columns, or business interpretation unless the
+user asks. Preserve sentinels `⚠️QUERY_FAILED`, `⚠️COMPUTE_FAILED`, and
+`⚠️DESCRIPTION_FAILED` so partial output remains auditable.

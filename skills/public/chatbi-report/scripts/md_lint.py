@@ -6,6 +6,8 @@
   is retired — use `data-idx` attribute instead.
 - Computed columns are `{{虚拟名}}` text only; an additional ERROR
   fires if such a column ALSO carries `data-idx`.
+- Optional `> 描述:` blocks must use multi-line prompt format; lint warns
+  if the block is present but empty or inline.
 """
 from __future__ import annotations
 
@@ -22,6 +24,8 @@ RECOGNIZED_UNITS = {"元", "万元", "亿元", "%", "百分点", "个", "次"}
 IDX_ID_PATTERN = re.compile(r"^[A-Z]+_\d+$")
 COMPUTED_NAME_PATTERN = re.compile(r"^\{\{([^{}!]+)\}\}$")   # {{name}}，无内层花括号
 OLD_PLACEHOLDER_PATTERN = re.compile(r"^\{\{([A-Z]+_\d+)\}\}$")
+# data-period 格式：YYYY 或 YYYY-{Q1..Q4 | H1..H2 | M1..M12}（语法约束，不校验值范围）
+PERIOD_PATTERN = re.compile(r"^\d{4}(-[QHM]\d)?$")
 
 
 @dataclass
@@ -66,6 +70,7 @@ class _TableCellCollector(HTMLParser):
                 "tag": "th",
                 "data-idx": a.get("data-idx"),
                 "data-unit": a.get("data-unit"),
+                "data-period": a.get("data-period"),
                 "rowspan": a.get("rowspan"),
                 "colspan": a.get("colspan"),
                 "text": "",
@@ -169,13 +174,10 @@ def _split_reports(section_body: str) -> list[tuple[str, str]]:
 
 def _lint_one_report(report_title: str, body: str, report: LintReport, *, location: str) -> None:
     loc = f"{location} > 报表 `{report_title}`"
-    org_match = re.search(r"^>\s*机构:\s*(.+)$", body, re.MULTILINE)
     time_match = re.search(r"^>\s*时期:\s*(.+)$", body, re.MULTILINE)
 
-    if not org_match:
-        report.errors.append(LintError("F19", "missing `> 机构:` block", location=loc))
-    else:
-        _lint_org_block(org_match.group(1), report, location=loc)
+    _lint_org_block(body, report, location=loc)
+    _lint_description_block(body, report, location=loc)
 
     if not time_match:
         report.errors.append(LintError("F19", "missing `> 时期:` block", location=loc))
@@ -192,15 +194,92 @@ def _lint_one_report(report_title: str, body: str, report: LintReport, *, locati
         _lint_table(t, compute_left, compute_right_idxs, report, location=loc)
 
 
-def _lint_org_block(line: str, report: LintReport, *, location: str) -> None:
-    if "branch_num=" not in line or "branch_short_name=" not in line:
-        report.errors.append(
-            LintError("F1",
-                      ">` 机构:` block must contain both `branch_num=` and `branch_short_name=`",
-                      location=location)
-        )
+def _lint_org_block(body: str, report: LintReport, *, location: str) -> None:
+    """校验 `> 机构:` 块：必须多行；每行必须有 branch_num= 与 branch_short_name=；branch_num 唯一。"""
+    org_match = re.search(r"^>\s*机构:(.*)$", body, re.MULTILINE)
+    if not org_match:
+        report.errors.append(LintError("F19", "missing `> 机构:` block", location=location))
+        return
+    first_line_rest = org_match.group(1).strip()
+    if first_line_rest != "":
+        report.errors.append(LintError(
+            "F1",
+            "`> 机构:` must use multi-line format: "
+            "`> 机构:` followed by indented `branch_num=X; branch_short_name=Y` lines",
+            location=location,
+        ))
+        return
+
+    start = org_match.end()
+    entries: list[str] = []
+    seen_nums: set[str] = set()
+    for line in body[start:].splitlines():
+        if not line:
+            continue
+        if not line.startswith(">"):
+            break
+        # 兄弟块（`> 时期:` 等）跳出：仅 0/1 空格缩进的 `> <非空>` 即视为新块
+        if re.match(r"^>\s?\S", line) and not re.match(r"^>\s{2,}\S", line):
+            break
+        stripped = line.lstrip("> ").rstrip()
+        if stripped:
+            entries.append(stripped)
+
+    if not entries:
+        report.errors.append(LintError("F19", "`> 机构:` block is empty", location=location))
+        return
+
+    for entry in entries:
+        if "branch_num=" not in entry or "branch_short_name=" not in entry:
+            report.errors.append(LintError(
+                "F1",
+                f"`> 机构:` entry must contain both `branch_num=` and `branch_short_name=`: {entry!r}",
+                location=location,
+            ))
+            continue
+        m = re.match(r"^branch_num=([^;]+);", entry)
+        if m:
+            bn = m.group(1).strip()
+            if bn in seen_nums:
+                report.errors.append(LintError(
+                    "F1",
+                    f"duplicate branch_num={bn!r} in `> 机构:` block",
+                    location=location,
+                ))
+            seen_nums.add(bn)
 
 
+def _lint_description_block(body: str, report: LintReport, *, location: str) -> None:
+    desc_match = re.search(r"^>\s*描述:(.*)$", body, re.MULTILINE)
+    if not desc_match:
+        return
+    first_line_rest = desc_match.group(1).strip()
+    if first_line_rest:
+        report.warnings.append(LintWarning(
+            "CHATBI-DESC-1",
+            "`> 描述:` should use multi-line format: `> 描述:` followed by indented prompt lines",
+            location=location,
+        ))
+        return
+
+    start = desc_match.end()
+    entries: list[str] = []
+    for line in body[start:].splitlines():
+        if not line:
+            continue
+        if not line.startswith(">"):
+            break
+        if re.match(r"^>\s?\S", line) and not re.match(r"^>\s{2,}\S", line):
+            break
+        stripped = line.lstrip("> ").strip()
+        if stripped:
+            entries.append(stripped)
+    if not entries:
+        report.warnings.append(LintWarning(
+            "CHATBI-DESC-1",
+            "`> 描述:` block is empty; no report description will be generated",
+            location=location,
+        ))
 def _lint_time_block(line: str, report: LintReport, *, location: str) -> None:
     m = re.search(r"time_info\s*=\s*(\[.*?\])", line)
     if not m:
@@ -344,8 +423,16 @@ def _lint_table(
         if not data_idx and not text:
             continue
 
+        # colspan 或 rowspan > 1 的父级表头：天然没有 data-idx，不视作"真指标缺 data-idx"
+        colspan_str = cell.get("colspan")
+        rowspan_str = cell.get("rowspan")
+        is_group_header = (
+            (colspan_str and colspan_str.isdigit() and int(colspan_str) > 1)
+            or (rowspan_str and rowspan_str.isdigit() and int(rowspan_str) > 1)
+        )
+
         is_parent_label = not data_unit
-        if not is_parent_label:
+        if not is_parent_label and not is_group_header:
             report.errors.append(LintError(
                 "CHATBI-DATAIDX-MISSING",
                 f"real-indicator <th> with text {text!r} is missing `data-idx` attribute",
@@ -374,6 +461,56 @@ def _lint_table(
             f"`> 计算:` references idx_id={idx!r} which is not in the header data-idx set",
             location=location,
         ))
+
+    # data-period 多期校验：同 idx 多次出现 → 必填 + 唯一
+    per_idx_cells: dict[str, list[dict]] = {}
+    for cell in leaves:
+        di = cell.get("data-idx")
+        if not di or not IDX_ID_PATTERN.match(di):
+            continue
+        per_idx_cells.setdefault(di, []).append(cell)
+    for idx, cells in per_idx_cells.items():
+        if len(cells) <= 1:
+            continue
+        periods = [c.get("data-period") for c in cells]
+        if any(p is None for p in periods):
+            report.errors.append(LintError(
+                "CHATBI-PERIOD-MISSING",
+                f"data-idx={idx!r} appears {len(cells)} times across thead; each <th> must carry data-period",
+                location=location,
+            ))
+        non_null = [p for p in periods if p is not None]
+        if len(non_null) != len(set(non_null)):
+            seen: set[str] = set()
+            for p in non_null:
+                if p in seen:
+                    report.errors.append(LintError(
+                        "CHATBI-PERIOD-DUPLICATE",
+                        f"data-idx={idx!r} has duplicate data-period={p!r}",
+                        location=location,
+                    ))
+                seen.add(p)
+
+    # data-period 格式 + 孤立检查（计算列 {{name}} 也允许带 data-period）
+    for cell in leaves:
+        p = cell.get("data-period")
+        if p is None:
+            continue
+        if not PERIOD_PATTERN.match(p):
+            report.errors.append(LintError(
+                "CHATBI-PERIOD-FORMAT",
+                f"data-period={p!r} does not match `^\\d{{4}}(-[QHM]\\d)?$`",
+                location=location,
+            ))
+        di = cell.get("data-idx")
+        text = (cell.get("text") or "").strip()
+        is_computed = bool(COMPUTED_NAME_PATTERN.match(text))
+        if not is_computed and (not di or not IDX_ID_PATTERN.match(di)):
+            report.errors.append(LintError(
+                "CHATBI-PERIOD-ORPHAN",
+                f"data-period={p!r} on <th> without valid data-idx (orphaned)",
+                location=location,
+            ))
 
     if len(computed_names_in_table) != len(set(computed_names_in_table)):
         report.warnings.append(LintWarning(

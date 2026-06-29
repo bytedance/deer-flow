@@ -5,16 +5,21 @@
   —— 不是 SQLBot idx_id，也不是 SQLBot idx_name 查询结果。
 - 副标题仅为 `(data-unit)`（如 `(个)`）。
 - 多级 thead 通过跨 rowspan/colspan 的 cell.merge() 渲染。
+- 若 report 挂载 `description_text`，在 report heading 与 table 之间渲染描述段。
 """
 
 from __future__ import annotations
 
+import argparse
 import json
+import sys
 from decimal import Decimal
 from pathlib import Path
 
 from docx import Document
 from docx.shared import Cm, Pt, RGBColor
+
+from render_markdown import attach_description_files, doc_from_dict, normalize_wide_by_report
 
 DATA_TYPE_MAP = {
     "元": "currency",
@@ -68,8 +73,50 @@ def _format_value(value, data_type: str, style: dict) -> str:
     return f"{v:,.0f}"
 
 
+def _value_key(th) -> str | None:
+    if getattr(th, "is_computed", False):
+        return th.text.strip("{}") if th.text.startswith("{{") else th.text
+    if getattr(th, "idx_id", None):
+        return f"{th.idx_id}@{th.period}" if getattr(th, "period", None) else th.idx_id
+    return None
+
+
+def _header_grid(headers: list[list]) -> list[list]:
+    grid: list[list] = []
+    for r_idx, row in enumerate(headers):
+        while len(grid) <= r_idx:
+            grid.append([])
+        c_idx = 0
+        for th in row:
+            while c_idx < len(grid[r_idx]) and grid[r_idx][c_idx] is not None:
+                c_idx += 1
+            rowspan = th.rowspan or 1
+            colspan = th.colspan or 1
+            for rr in range(r_idx, r_idx + rowspan):
+                while len(grid) <= rr:
+                    grid.append([])
+                while len(grid[rr]) < c_idx + colspan:
+                    grid[rr].append(None)
+            for rr in range(r_idx, r_idx + rowspan):
+                for cc in range(c_idx, c_idx + colspan):
+                    grid[rr][cc] = th
+            c_idx += colspan
+    width = max((len(row) for row in grid), default=0)
+    for row in grid:
+        while len(row) < width:
+            row.append(None)
+    return grid
+
+
 def _leaf_cells(headers: list[list]) -> list:
-    return [c for row in headers for c in row if c.idx_id is not None or c.is_computed]
+    grid = _header_grid(headers)
+    return [c for c in grid[-1] if c is not None] if grid else []
+
+
+def _add_styled_paragraph(docx, text: str, font_cfg: dict) -> None:
+    p = docx.add_paragraph()
+    run = p.add_run(text)
+    _apply_font(run, font_cfg)
 
 
 def render_docx(
@@ -122,14 +169,17 @@ def _render_report(docx, report, wide_rows, style):
     run = p.add_run(report.title)
     _apply_font(run, style["font"]["report"])
 
+    description_text = getattr(report, "description_text", None)
+    if description_text:
+        _add_styled_paragraph(docx, str(description_text).strip(), style["font"]["body"])
+
     if not wide_rows:
         docx.add_paragraph().add_run("（无数据行）").italic = True
         return
 
     leaves = _leaf_cells(report.headers)
-    leaf_row = report.headers[-1] if report.headers else []
-    n_cols = max((len(row) for row in report.headers), default=0) or len(leaves) or 1
-    n_rows = 1 + len(report.headers) + len(wide_rows)
+    n_cols = len(leaves) or max((len(row) for row in report.headers), default=0) or 1
+    n_rows = len(report.headers) + len(wide_rows)
     table = docx.add_table(rows=n_rows, cols=n_cols)
     table.style = "Table Grid"
 
@@ -147,29 +197,51 @@ def _render_report(docx, report, wide_rows, style):
             # 背景
             tc._tc.get_or_add_tcPr()
 
-    # 数据行：按叶子层（最后一行表头）对齐
+    # 数据行：按叶子表头网格对齐，保留 rowspan 维度列
     for d_idx, row in enumerate(wide_rows):
         cells = row.get("cells", {})
-        for c_idx, th in enumerate(leaf_row):
+        for c_idx, th in enumerate(leaves):
             if c_idx >= n_cols:
                 break
-            tc = table.rows[1 + len(report.headers) + d_idx].cells[c_idx]
-            if th.is_computed:
-                key = th.text.strip("{}") if th.text.startswith("{{") else th.text
+            tc = table.rows[len(report.headers) + d_idx].cells[c_idx]
+            key = _value_key(th)
+            if key:
                 val = cells.get(key, "—")
                 data_type = DATA_TYPE_MAP.get(th.data_unit or "", "number")
                 text = _format_value(val, data_type, style)
-            elif th.idx_id:
-                val = cells.get(th.idx_id, "—")
-                data_type = DATA_TYPE_MAP.get(th.data_unit or "", "number")
-                text = _format_value(val, data_type, style)
             else:
-                # placeholder 列（如 季度 / 机构）：填 data_dt / org_ecd
                 label = (th.text or "").strip()
                 if label in {"季度", "时期", "日期", "period"}:
                     text = str(row.get("data_dt", ""))
-                elif label in {"机构", "分行", "网点", "org"}:
+                elif label in {"机构", "行社", "分行", "网点", "org"}:
                     text = str(row.get("org_ecd", ""))
                 else:
                     text = ""
             _set_cell_text(tc, text, main_font=style["font"]["body"])
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="render_docx", description=__doc__.splitlines()[0])
+    parser.add_argument("--parsed", required=True)
+    parser.add_argument("--wide", required=True)
+    parser.add_argument("--style", required=True)
+    parser.add_argument("--out", required=True)
+    parser.add_argument("--descriptions-dir", default=None)
+    parser.add_argument("--stem", default=None)
+    args = parser.parse_args(argv)
+
+    try:
+        parsed = json.loads(Path(args.parsed).read_text(encoding="utf-8"))
+        doc = doc_from_dict(parsed)
+        wide = normalize_wide_by_report(doc, json.loads(Path(args.wide).read_text(encoding="utf-8")))
+        attach_description_files(doc, args.descriptions_dir, args.stem or Path(args.parsed).name.removesuffix(".parsed.json"))
+        render_docx(doc, wide, out_path=args.out, style_path=args.style)
+    except Exception as exc:
+        print(f"FAIL: {exc}", file=sys.stderr)
+        return 1
+    print(f"OK: rendered docx -> {args.out}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

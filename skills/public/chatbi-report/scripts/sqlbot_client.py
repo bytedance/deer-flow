@@ -1,8 +1,10 @@
 """SQLBot REST client (real) + test double (mock). No authentication required."""
 from __future__ import annotations
 
+import argparse
 import json
 import os
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -97,6 +99,15 @@ class MockSQLBotClient:
     """Test double. Reads `idx_id -> {success, data}` from a fixture JSON file.
 
     Honors the per-idx calling convention by indexing `index_info[0]`.
+
+    Wide-wide support (2026-06-25): the wide-wide protocol makes one call per
+    `(idx_id, period)` tuple. The fixture can be keyed two ways:
+
+    1. Composite: `BAS_0263@2023` — the caller passes
+       `index_info[0]={"idx_id": "BAS_0263@2023"}` and `time_info=["2023"]`.
+    2. Simple: `BAS_0263` — all periods live in `data`, the mock filters by
+       `time_info[0]` prefix-matching `data_dt` (e.g. "2023-12-31" matches
+       time_info=["2023"]).
     """
 
     def __init__(self, fixture_path: str) -> None:
@@ -112,7 +123,8 @@ class MockSQLBotClient:
         if not index_info:
             raise SQLBotError("index_info must contain at least one idx_id")
         idx_id = index_info[0]["idx_id"]
-        entry = self._fixture.get(idx_id, {"success": False, "data": []})
+        period = time_info[0] if time_info else None
+        entry = self._lookup(idx_id, period)
         success = bool(entry.get("success", False))
         elem = {
             "success": success,
@@ -138,3 +150,172 @@ class MockSQLBotClient:
             },
         }
         return QueryReportInfoResponse(code=0, data=[elem])
+
+    def _lookup(self, idx_id: str, period: str | None) -> dict[str, Any]:
+        """Resolve a fixture entry. See class docstring for key formats."""
+        # 1. Composite key `BAS_0263@2023` takes priority (explicit period).
+        if period:
+            composite = f"{idx_id}@{period}"
+            if composite in self._fixture:
+                return self._fixture[composite]
+        # 2. Simple key `BAS_0263` — filter data by data_dt prefix.
+        if idx_id in self._fixture:
+            entry = dict(self._fixture[idx_id])
+            if period and isinstance(entry.get("data"), list):
+                entry["data"] = [
+                    r for r in entry["data"]
+                    if isinstance(r, dict) and str(r.get("data_dt", "")).startswith(period)
+                ]
+            return entry
+        return {"success": False, "data": []}
+
+
+DEFAULT_MOCK_FIXTURE = Path(__file__).resolve().parents[1] / "example" / "mock_sqlbot" / "profit_yoy.json"
+
+
+def _unique_indicator_periods(report: dict) -> list[tuple[str, str | None]]:
+    idx_ids: list[str] = []
+    header_pairs: list[tuple[str, str | None]] = []
+    for row in report.get("headers", []):
+        for cell in row:
+            idx_id = cell.get("idx_id")
+            if not idx_id or not cell.get("is_indicator"):
+                continue
+            idx_id = str(idx_id)
+            if idx_id not in idx_ids:
+                idx_ids.append(idx_id)
+            pair = (idx_id, cell.get("period"))
+            if pair not in header_pairs:
+                header_pairs.append(pair)
+
+    periods = [str(period) for period in report.get("time_info", []) if str(period).strip()]
+    if not periods:
+        return header_pairs
+
+    pairs: list[tuple[str, str | None]] = []
+    for idx_id in idx_ids:
+        for period in periods:
+            pair = (idx_id, period)
+            if pair not in pairs:
+                pairs.append(pair)
+    for pair in header_pairs:
+        if pair not in pairs:
+            pairs.append(pair)
+    return pairs
+
+
+def _normalize_name(value: object) -> str:
+    text = str(value or "").strip()
+    return text.removesuffix("联社") if text.endswith("联社") else text
+
+
+def _org_lookup(org_contexts: list[dict]) -> dict[str, str]:
+    lookup: dict[str, str] = {}
+    for org in org_contexts:
+        branch_num = str(org.get("branch_num", "")).strip()
+        short_name = str(org.get("branch_short_name", "")).strip()
+        if not branch_num or not short_name:
+            continue
+        lookup[short_name] = branch_num
+        lookup[_normalize_name(short_name)] = branch_num
+    return lookup
+
+
+def _rows_from_response(resp: QueryReportInfoResponse, org_contexts: list[dict]) -> list[dict]:
+    org_by_name = _org_lookup(org_contexts)
+    allowed = {str(org.get("branch_num", "")).strip() for org in org_contexts}
+    allowed.discard("")
+    elem = resp.data[0] if resp.data else {"success": False, "data": []}
+    success = bool(elem.get("success", False))
+    by_branch: dict[str, dict] = {}
+
+    if success:
+        for item in elem.get("data", []):
+            if not isinstance(item, dict):
+                continue
+            branch_num = org_by_name.get(str(item.get("org_ecd", "")).strip())
+            if not branch_num or branch_num not in allowed:
+                continue
+            by_branch[branch_num] = {
+                "branch_num": branch_num,
+                "raw_value": str(item.get("value", "")),
+                "success": True,
+            }
+
+    rows: list[dict] = []
+    for org in org_contexts:
+        branch_num = str(org.get("branch_num", "")).strip()
+        if not branch_num:
+            continue
+        rows.append(by_branch.get(branch_num, {
+            "branch_num": branch_num,
+            "raw_value": "",
+            "success": False,
+        }))
+    return rows
+
+
+def query_from_parsed(parsed: dict, client: Any) -> dict:
+    """遍历 parsed 中所有 (section, report)，逐个调 SQLBot。
+
+    每条结果携带 `section_idx` / `report_idx`，方便下游
+    `assemble_wide_table` / `apply-computed` 按 report 分组，
+    避免多 report 样张静默丢失数据。
+    """
+    results: list[dict] = []
+    for section_idx, section in enumerate(parsed.get("sections", [])):
+        for report_idx, report in enumerate(section.get("reports", [])):
+            org_contexts = report.get("org_contexts", [])
+            for idx_id, period in _unique_indicator_periods(report):
+                resp = client.query_report_info(
+                    org_info=org_contexts,
+                    index_info=[{"idx_id": idx_id}],
+                    time_info=[period] if period else report.get("time_info", []),
+                )
+                results.append({
+                    "section_idx": section_idx,
+                    "report_idx": report_idx,
+                    "idx_id": idx_id,
+                    "period": period,
+                    "results": _rows_from_response(resp, org_contexts),
+                })
+    return {"results": results}
+
+
+def _cli_query(args: argparse.Namespace) -> int:
+    parsed = json.loads(Path(args.parsed).read_text(encoding="utf-8"))
+    if args.mock or args.mock_fixture:
+        fixture = args.mock_fixture or str(DEFAULT_MOCK_FIXTURE)
+        client: Any = MockSQLBotClient(fixture)
+    else:
+        client = RealSQLBotClient(base_url=args.base_url)
+
+    payload = query_from_parsed(parsed, client)
+    Path(args.out).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    mode = "mock" if args.mock or args.mock_fixture else "real"
+    print(f"OK: queried {len(payload['results'])} indicator-periods via {mode} -> {args.out}")
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="sqlbot_client", description=__doc__)
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    p_query = sub.add_parser("query", help="Query SQLBot and write compute.py-compatible query.json")
+    p_query.add_argument("--parsed", required=True, help="parsed ReportDoc JSON from parse_md.py")
+    p_query.add_argument("--out", required=True, help="query.json output path")
+    p_query.add_argument("--base-url", default=None, help="SQLBot base URL; defaults to SQLBOT_BASE_URL")
+    p_query.add_argument("--mock", action="store_true", help="use default example mock fixture")
+    p_query.add_argument("--mock-fixture", default=None, help="mock fixture path; implies --mock")
+    p_query.set_defaults(func=_cli_query)
+
+    args = parser.parse_args(argv)
+    try:
+        return args.func(args)
+    except Exception as exc:
+        print(f"FAIL: {exc}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

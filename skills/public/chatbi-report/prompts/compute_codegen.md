@@ -72,7 +72,7 @@ import pandas as pd
 from decimal import Decimal
 
 
-def compute_收单商户同比(df: pd.DataFrame) -> pd.Series:
+def compute_indicator_name(df: pd.DataFrame) -> pd.Series:
     """YoY = (current - prior) / prior. Decimal-cast for precision."""
     cur = df["BAS_0263.current"].apply(lambda v: Decimal(str(v)))
     pri = df["BAS_0263.yoy_same"].apply(lambda v: Decimal(str(v)))
