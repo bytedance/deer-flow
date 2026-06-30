@@ -152,6 +152,7 @@ class LocalSandbox(Sandbox):
             try:
                 os.close(fd)
             except OSError:
+                # The fd may already be closed during pipe teardown; cleanup is best-effort.
                 pass
 
     @staticmethod
@@ -522,6 +523,7 @@ class LocalSandbox(Sandbox):
                 try:
                     os.close(fd)
                 except OSError:
+                    # Preserve the original Popen failure; fd cleanup is best-effort.
                     pass
             raise
         finally:
@@ -529,6 +531,7 @@ class LocalSandbox(Sandbox):
                 try:
                     os.close(fd)
                 except OSError:
+                    # The write fd may already be closed by the exception cleanup above.
                     pass
 
         stdout_capture, stdout_thread = LocalSandbox._start_pipe_drain(stdout_read_fd, "deerflow-bash-stdout-drain")
