@@ -227,6 +227,42 @@ class TestTitleMiddlewareCoreLogic:
         assert result == {"title": "请帮我写测试"}
         create_chat_model.assert_not_called()
 
+    def test_async_generate_title_result_uses_local_fallback_without_model_name(self, monkeypatch):
+        """The default async helper path avoids the hidden title-model LLM call."""
+        _set_test_title_config(max_chars=20, model_name=None)
+        middleware = TitleMiddleware()
+        create_chat_model = MagicMock()
+        monkeypatch.setattr(title_middleware_module, "create_chat_model", create_chat_model)
+
+        state = {
+            "messages": [
+                HumanMessage(content="流式回答结束后不要再等待标题模型"),
+                AIMessage(content="好的"),
+            ]
+        }
+        result = asyncio.run(middleware._agenerate_title_result(state))
+
+        assert result == {"title": "流式回答结束后不要再等待标题模型"}
+        create_chat_model.assert_not_called()
+
+    def test_async_local_fallback_does_not_format_unused_prompt_template(self, monkeypatch):
+        """Local fallback should not depend on the LLM prompt template."""
+        _set_test_title_config(max_chars=20, model_name=None, prompt_template="{missing_placeholder}")
+        middleware = TitleMiddleware()
+        create_chat_model = MagicMock()
+        monkeypatch.setattr(title_middleware_module, "create_chat_model", create_chat_model)
+
+        state = {
+            "messages": [
+                HumanMessage(content="默认标题路径不应读取模型 prompt"),
+                AIMessage(content="好的"),
+            ]
+        }
+        result = asyncio.run(middleware._agenerate_title_result(state))
+
+        assert result == {"title": "默认标题路径不应读取模型 prompt"}
+        create_chat_model.assert_not_called()
+
     def test_after_model_sync_delegates_to_sync_helper(self, monkeypatch):
         middleware = TitleMiddleware()
 

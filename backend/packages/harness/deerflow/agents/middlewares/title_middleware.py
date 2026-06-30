@@ -67,6 +67,11 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
     def _is_user_message_for_title(message: object) -> bool:
         return getattr(message, "type", None) == "human" and not is_dynamic_context_reminder(message)
 
+    def _get_title_user_message(self, state: TitleMiddlewareState) -> str:
+        messages = state.get("messages", [])
+        user_msg_content = next((m.content for m in messages if self._is_user_message_for_title(m)), "")
+        return self._normalize_content(user_msg_content)
+
     def _should_generate_title(self, state: TitleMiddlewareState) -> bool:
         """Check if we should generate a title for this thread."""
         config = self._get_title_config()
@@ -97,10 +102,9 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
         config = self._get_title_config()
         messages = state.get("messages", [])
 
-        user_msg_content = next((m.content for m in messages if self._is_user_message_for_title(m)), "")
         assistant_msg_content = next((m.content for m in messages if m.type == "ai"), "")
 
-        user_msg = self._normalize_content(user_msg_content)
+        user_msg = self._get_title_user_message(state)
         assistant_msg = self._strip_think_tags(self._normalize_content(assistant_msg_content))
 
         prompt = config.prompt_template.format(
@@ -153,7 +157,7 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
         if not self._should_generate_title(state):
             return None
 
-        _, user_msg = self._build_title_prompt(state)
+        user_msg = self._get_title_user_message(state)
         return {"title": self._fallback_title(user_msg)}
 
     async def _agenerate_title_result(self, state: TitleMiddlewareState) -> dict | None:
@@ -163,7 +167,8 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
 
         config = self._get_title_config()
         if not config.model_name:
-            return self._generate_title_result(state)
+            user_msg = self._get_title_user_message(state)
+            return {"title": self._fallback_title(user_msg)}
 
         prompt, user_msg = self._build_title_prompt(state)
 
