@@ -489,8 +489,8 @@ class TestMultipleMounts:
         )
 
         # Mock subprocess to capture the resolved command. The POSIX path runs
-        # commands via subprocess.Popen (output captured to temp files), so wrap
-        # that and still execute the real command.
+        # commands via subprocess.Popen, so wrap that and still execute the real
+        # command.
         captured = {}
         original_popen = __import__("subprocess").Popen
 

@@ -941,8 +941,9 @@ sandbox:
   # terminated (process group and all). A blocking foreground command — e.g. a
   # server started without backgrounding — is killed after this long so the
   # agent's turn cannot hang. Start long-lived processes in the background with
-  # output redirected (e.g. `your-command > /tmp/server.log 2>&1 &`); those
-  # return immediately and are unaffected.
+  # output redirected (e.g. `your-command > /tmp/server.log 2>&1 &`) when you
+  # need logs; unredirected background output is drained with bounded capture
+  # and excess output is discarded.
   bash_command_timeout: 600
 
 # Option 2: Container-based AIO Sandbox

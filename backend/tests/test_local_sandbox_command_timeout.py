@@ -6,18 +6,24 @@ the timeout, and a genuinely blocking foreground command must be terminated
 (process group and all) once it exceeds the timeout.
 
 The POSIX cases exercise real subprocess/process-group semantics, so they are
-skipped on Windows (which keeps the legacy ``subprocess.run`` path).
+skipped on Windows. Windows keeps the ``subprocess.run`` path, but timeout
+errors still use the same user-facing notice.
 """
 
 import os
+import shlex
+import sys
 import time
+from pathlib import Path
 
 import pytest
 
 from deerflow.config.sandbox_config import SandboxConfig
+from deerflow.sandbox.local import local_sandbox
 from deerflow.sandbox.local.local_sandbox import LocalSandbox
 
 posix_only = pytest.mark.skipif(os.name == "nt", reason="POSIX process-group semantics")
+linux_proc_fd_only = pytest.mark.skipif(not Path("/proc/self/fd").exists(), reason="requires Linux /proc fd links")
 
 
 @posix_only
@@ -36,6 +42,27 @@ def test_backgrounded_process_returns_promptly():
 
 
 @posix_only
+@linux_proc_fd_only
+def test_backgrounded_process_does_not_inherit_deleted_temp_capture(tmp_path):
+    """A backgrounded process that forgets to redirect output must not inherit
+    an anonymous deleted temp file for fd 1. That would be an invisible,
+    unbounded disk leak for long-lived processes that keep writing."""
+    marker = tmp_path / "fd1"
+    script = f"import os, pathlib, time; pathlib.Path({str(marker)!r}).write_text(os.readlink('/proc/self/fd/1')); time.sleep(2)"
+    sandbox = LocalSandbox("t")
+
+    output = sandbox.execute_command(f"{shlex.quote(sys.executable)} -c {shlex.quote(script)} & echo launched", timeout=10)
+
+    assert "launched" in output
+    for _ in range(50):
+        if marker.exists():
+            break
+        time.sleep(0.1)
+    assert marker.exists()
+    assert " (deleted)" not in marker.read_text()
+
+
+@posix_only
 def test_foreground_blocking_command_times_out_with_notice():
     """A foreground command that never exits is terminated at the timeout and
     the agent receives an explanatory notice instead of a generic error."""
@@ -46,6 +73,31 @@ def test_foreground_blocking_command_times_out_with_notice():
 
     assert elapsed < 5, f"timeout not enforced, took {elapsed:.1f}s"
     assert "timed out" in output.lower()
+
+
+def test_timeout_notice_formats_fractional_and_singular_timeouts(monkeypatch):
+    monkeypatch.setattr(LocalSandbox, "_get_shell", lambda self: "/bin/sh")
+    monkeypatch.setattr(LocalSandbox, "_run_posix_command", staticmethod(lambda args, timeout: ("", "", 0, True)))
+
+    assert "after 1.5 seconds" in LocalSandbox("t").execute_command("wait", timeout=1.5)
+    assert "after 1 second" in LocalSandbox("t").execute_command("wait", timeout=1)
+
+
+def test_windows_timeout_expired_returns_notice(monkeypatch):
+    def fake_run(*args, **kwargs):
+        raise local_sandbox.subprocess.TimeoutExpired(cmd=args[0], timeout=kwargs["timeout"], output="partial out", stderr="partial err")
+
+    monkeypatch.setattr(local_sandbox.os, "name", "nt")
+    monkeypatch.setattr(LocalSandbox, "_get_shell", lambda self: "cmd.exe")
+    monkeypatch.setattr(local_sandbox.subprocess, "run", fake_run)
+
+    output = LocalSandbox("t").execute_command("wait", timeout=1.5)
+
+    assert "partial out" in output
+    assert "Std Error:" in output
+    assert "partial err" in output
+    assert "after 1.5 seconds" in output
+    assert "Unexpected error" not in output
 
 
 @posix_only
