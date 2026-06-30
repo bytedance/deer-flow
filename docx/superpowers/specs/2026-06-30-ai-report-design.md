@@ -3,9 +3,7 @@
 > **Date:** 2026-06-30
 > **Status:** Draft (awaiting user review)
 > **Author:** brainstorm session (Claude + user)
-> **Related:**
-> - V2 discussion draft: [`docx/ai-report/archive/2026-06-30-v2-design-discussion-draft.md`](../ai-report/archive/2026-06-30-v2-design-discussion-draft.md) (superseded)
-> - Greenfield DuckDB architecture: [`docx/chatbi-report/chatbi-report-greenfield-duckdb-architecture.md`](../chatbi-report/chatbi-report-greenfield-duckdb-architecture.md) (conceptual reference, not source code)
+> **Related:** Greenfield DuckDB architecture: [`docx/chatbi-report/chatbi-report-greenfield-duckdb-architecture.md`](../chatbi-report/chatbi-report-greenfield-duckdb-architecture.md) (conceptual reference, not source code)
 
 ---
 
