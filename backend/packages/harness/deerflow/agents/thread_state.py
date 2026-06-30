@@ -2,6 +2,8 @@ from typing import Annotated, NotRequired, TypedDict
 
 from langchain.agents import AgentState
 
+from deerflow.subagents.status_contract import SUBAGENT_STATUS_VALUES
+
 
 class SandboxState(TypedDict):
     sandbox_id: NotRequired[str | None]
@@ -108,10 +110,13 @@ def merge_promoted(existing: PromotedTools | None, new: PromotedTools | None) ->
     }
 
 
-# Terminal subagent statuses (mirrors deerflow.subagents.status_contract.SUBAGENT_STATUS_VALUES).
-# Defined here so merge_delegations can guard against status downgrades without
-# importing the middleware/subagents layer (keeps thread_state import-light).
-TERMINAL_STATUSES: frozenset[str] = frozenset({"completed", "failed", "cancelled", "timed_out", "polling_timed_out"})
+# Terminal subagent statuses. Derived from the single source of truth
+# (SUBAGENT_STATUS_VALUES) so the set can never drift from the status contract:
+# every value the contract enumerates is terminal, and the only non-terminal
+# status, "in_progress", is intentionally absent from the contract. merge_delegations
+# uses this to guard against status downgrades. test_delegation_ledger pins the
+# derivation so a future contract edit cannot silently desync this set.
+TERMINAL_STATUSES: frozenset[str] = frozenset(SUBAGENT_STATUS_VALUES)
 
 
 class DelegationEntry(TypedDict):

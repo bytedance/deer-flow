@@ -11,7 +11,8 @@ from deerflow.agents.middlewares.delegation_ledger_middleware import (
     extract_delegations,
     format_delegation_block,
 )
-from deerflow.agents.thread_state import merge_delegations
+from deerflow.agents.thread_state import TERMINAL_STATUSES, merge_delegations
+from deerflow.subagents.status_contract import SUBAGENT_STATUS_VALUES
 
 
 def _entry(task_id, status, description="d", subagent_type="general-purpose"):
@@ -20,6 +21,19 @@ def _entry(task_id, status, description="d", subagent_type="general-purpose"):
 
 def _task_call(task_id, description, subagent_type="general-purpose"):
     return {"name": "task", "args": {"description": description, "subagent_type": subagent_type}, "id": task_id, "type": "tool_call"}
+
+
+def test_terminal_statuses_derived_from_status_contract():
+    """TERMINAL_STATUSES must stay the exact set the status contract enumerates.
+
+    Pins the derivation in thread_state.py: every value the contract declares is a
+    terminal status, and the lone non-terminal status "in_progress" is never part of
+    the contract. If a future contract edit adds a non-terminal value (or otherwise
+    changes the set), this fails loudly instead of letting merge_delegations'
+    downgrade guard silently desync.
+    """
+    assert TERMINAL_STATUSES == frozenset(SUBAGENT_STATUS_VALUES)
+    assert "in_progress" not in TERMINAL_STATUSES
 
 
 def test_merge_upserts_by_task_id_preserving_order():
