@@ -121,6 +121,30 @@ def test_evaluate_goal_completion_uses_non_thinking_model(monkeypatch):
     assert fake_model.ainvoke.await_args.kwargs["config"] == {"run_name": "goal_evaluator"}
 
 
+def test_evaluate_goal_completion_uses_injected_model(monkeypatch):
+    fake_model = MagicMock()
+    fake_model.ainvoke = AsyncMock(return_value=SimpleNamespace(content='{"satisfied": true, "reason": "Done", "evidence_summary": "Done"}'))
+    create_chat_model = MagicMock()
+    monkeypatch.setattr(goal, "create_chat_model", create_chat_model)
+    state = goal.build_goal_state("Finish")
+
+    result = asyncio.run(
+        goal.evaluate_goal_completion(
+            state,
+            [
+                HumanMessage(content="Please finish this."),
+                AIMessage(content="Done."),
+            ],
+            model=fake_model,
+            app_config=object(),
+        )
+    )
+
+    assert result["satisfied"] is True
+    create_chat_model.assert_not_called()
+    fake_model.ainvoke.assert_awaited_once()
+
+
 def test_evaluate_goal_completion_fails_closed_without_assistant_evidence(monkeypatch):
     fake_model = MagicMock()
     fake_model.ainvoke = AsyncMock()

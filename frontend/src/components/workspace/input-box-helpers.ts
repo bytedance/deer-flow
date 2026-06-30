@@ -16,6 +16,84 @@ export type GoalCommand =
   | { kind: "clear" }
   | { kind: "set"; objective: string };
 
+export type GoalRequestState = {
+  controller: AbortController | null;
+  sequence: number;
+  threadId: string | null;
+};
+
+export type ActiveGoalRequest = {
+  controller: AbortController;
+  sequence: number;
+  threadId: string;
+};
+
+export function createGoalRequestState(): GoalRequestState {
+  return {
+    controller: null,
+    sequence: 0,
+    threadId: null,
+  };
+}
+
+export function beginGoalRequest(
+  state: GoalRequestState,
+  threadId: string,
+): ActiveGoalRequest {
+  state.controller?.abort();
+  const controller = new AbortController();
+  const request = {
+    controller,
+    sequence: state.sequence + 1,
+    threadId,
+  };
+  state.controller = controller;
+  state.sequence = request.sequence;
+  state.threadId = threadId;
+  return request;
+}
+
+export function abortGoalRequest(state: GoalRequestState): void {
+  state.controller?.abort();
+  state.controller = null;
+  state.sequence += 1;
+  state.threadId = null;
+}
+
+export function finishGoalRequest(
+  state: GoalRequestState,
+  request: ActiveGoalRequest,
+): void {
+  if (
+    state.controller === request.controller &&
+    state.sequence === request.sequence
+  ) {
+    state.controller = null;
+  }
+}
+
+export function isCurrentGoalRequest(
+  state: GoalRequestState,
+  request: ActiveGoalRequest,
+  threadId: string,
+): boolean {
+  return (
+    state.controller === request.controller &&
+    state.sequence === request.sequence &&
+    state.threadId === threadId &&
+    !request.controller.signal.aborted
+  );
+}
+
+export function isAbortError(error: unknown): boolean {
+  return (
+    (error instanceof DOMException && error.name === "AbortError") ||
+    (typeof error === "object" &&
+      error !== null &&
+      Reflect.get(error, "name") === "AbortError")
+  );
+}
+
 export function findSuggestionTemplatePlaceholder(text: string) {
   const match = SUGGESTION_TEMPLATE_PLACEHOLDER_PATTERN.exec(text);
   if (!match) {

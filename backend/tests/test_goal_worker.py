@@ -1,3 +1,4 @@
+import asyncio
 import copy
 
 import pytest
@@ -7,6 +8,8 @@ from langgraph.checkpoint.memory import InMemorySaver
 
 from deerflow.runtime.goal import GoalEvaluation, attach_goal_evaluation, build_goal_state, latest_visible_assistant_signature, read_thread_goal, write_thread_goal
 from deerflow.runtime.runs import worker
+from deerflow.runtime.runs.manager import RunRecord
+from deerflow.runtime.runs.schemas import DisconnectMode, RunStatus
 
 
 class _CollectingBridge:
@@ -250,6 +253,42 @@ async def test_goal_worker_does_not_resurrect_goal_cleared_during_evaluation(mon
 
 
 @pytest.mark.asyncio
+async def test_goal_worker_stops_when_abort_is_requested_during_evaluation(monkeypatch):
+    checkpointer = InMemorySaver()
+    thread_id = "abort-during-eval-thread"
+    await _seed_goal_thread(checkpointer, thread_id=thread_id, goal_text="Finish all tests")
+    bridge = _CollectingBridge()
+    abort_event = asyncio.Event()
+
+    async def fake_evaluate_goal_completion(_goal, _messages, **_kwargs):
+        abort_event.set()
+        return GoalEvaluation(
+            satisfied=False,
+            blocker="goal_not_met_yet",
+            reason="More work remains.",
+            evidence_summary="Work remains.",
+        )
+
+    monkeypatch.setattr(worker, "evaluate_goal_completion", fake_evaluate_goal_completion)
+
+    continuation = await worker._prepare_goal_continuation_input(
+        bridge=bridge,
+        checkpointer=checkpointer,
+        thread_id=thread_id,
+        run_id="run-abort",
+        model_name="test-model",
+        app_config=None,
+        abort_event=abort_event,
+    )
+
+    assert continuation is None
+    latest_goal = await read_thread_goal(checkpointer, thread_id)
+    assert latest_goal is not None
+    assert latest_goal["continuation_count"] == 0
+    assert "last_evaluation" not in latest_goal
+
+
+@pytest.mark.asyncio
 async def test_goal_worker_stands_down_when_thread_changes_after_evaluation(monkeypatch):
     checkpointer = InMemorySaver()
     thread_id = "user-wins-thread"
@@ -329,3 +368,159 @@ def test_stand_down_reason_uses_documented_default_caps_when_missing():
     from deerflow.runtime.goal import should_continue_goal
 
     assert should_continue_goal(bare_goal, unmet, no_progress_count=0) is True
+
+
+@pytest.mark.asyncio
+async def test_run_agent_does_not_stream_continuation_after_abort(monkeypatch):
+    class FakeAgent:
+        def __init__(self) -> None:
+            self.inputs = []
+            self.metadata = {}
+            self.checkpointer = None
+            self.store = None
+            self.interrupt_before_nodes = []
+            self.interrupt_after_nodes = []
+
+        def astream(self, input_payload, **_kwargs):
+            self.inputs.append(input_payload)
+
+            async def _gen():
+                yield {"messages": []}
+
+            return _gen()
+
+    class FakeRunManager:
+        async def set_status(self, _run_id, status, **_kwargs):
+            record.status = status
+
+        async def update_model_name(self, *_args, **_kwargs):
+            return None
+
+        async def update_run_completion(self, *_args, **_kwargs):
+            return None
+
+    class FakeBridge:
+        async def publish(self, *_args, **_kwargs):
+            return None
+
+        async def publish_end(self, *_args, **_kwargs):
+            return None
+
+        async def cleanup(self, *_args, **_kwargs):
+            return None
+
+    async def fake_prepare(**kwargs):
+        kwargs["abort_event"].set()
+        return {"messages": [HumanMessage(content="continue", additional_kwargs={"hide_from_ui": True})]}
+
+    monkeypatch.setattr(worker, "_prepare_goal_continuation_input", fake_prepare)
+
+    fake_agent = FakeAgent()
+    record = RunRecord(
+        run_id="run-abort-loop",
+        thread_id="thread-abort-loop",
+        assistant_id="lead-agent",
+        status=RunStatus.pending,
+        on_disconnect=DisconnectMode.cancel,
+        model_name="test-model",
+    )
+    record.abort_event = asyncio.Event()
+
+    await worker.run_agent(
+        FakeBridge(),
+        FakeRunManager(),
+        record,
+        ctx=worker.RunContext(checkpointer=None),
+        agent_factory=lambda config: fake_agent,
+        graph_input={"messages": [HumanMessage(content="start")]},
+        config={"configurable": {"thread_id": "thread-abort-loop"}},
+    )
+
+    assert len(fake_agent.inputs) == 1
+    assert fake_agent.inputs[0] == {"messages": [HumanMessage(content="start")]}
+    assert record.status == RunStatus.interrupted
+
+
+@pytest.mark.asyncio
+async def test_run_agent_reuses_goal_evaluator_model_for_goal_loop(monkeypatch):
+    class FakeAgent:
+        def __init__(self) -> None:
+            self.inputs = []
+            self.metadata = {}
+            self.checkpointer = None
+            self.store = None
+            self.interrupt_before_nodes = []
+            self.interrupt_after_nodes = []
+
+        def astream(self, input_payload, **_kwargs):
+            self.inputs.append(input_payload)
+
+            async def _gen():
+                yield {"messages": []}
+
+            return _gen()
+
+    class FakeRunManager:
+        async def set_status(self, _run_id, status, **_kwargs):
+            record.status = status
+
+        async def update_model_name(self, *_args, **_kwargs):
+            return None
+
+        async def update_run_completion(self, *_args, **_kwargs):
+            return None
+
+    class FakeBridge:
+        async def publish(self, *_args, **_kwargs):
+            return None
+
+        async def publish_end(self, *_args, **_kwargs):
+            return None
+
+        async def cleanup(self, *_args, **_kwargs):
+            return None
+
+    evaluator_model = object()
+    create_calls = []
+
+    def fake_create_goal_evaluator_model(**kwargs):
+        create_calls.append(kwargs)
+        return evaluator_model
+
+    prepare_models = []
+
+    async def fake_prepare(**kwargs):
+        prepare_models.append(kwargs["evaluator_model_factory"]())
+        if len(prepare_models) == 1:
+            return {"messages": [HumanMessage(content="continue", additional_kwargs={"hide_from_ui": True})]}
+        return None
+
+    monkeypatch.setattr(worker, "create_goal_evaluator_model", fake_create_goal_evaluator_model)
+    monkeypatch.setattr(worker, "_prepare_goal_continuation_input", fake_prepare)
+
+    fake_agent = FakeAgent()
+    record = RunRecord(
+        run_id="run-model-cache",
+        thread_id="thread-model-cache",
+        assistant_id="lead-agent",
+        status=RunStatus.pending,
+        on_disconnect=DisconnectMode.cancel,
+        model_name="test-model",
+    )
+    record.abort_event = asyncio.Event()
+
+    await worker.run_agent(
+        FakeBridge(),
+        FakeRunManager(),
+        record,
+        ctx=worker.RunContext(checkpointer=None, app_config=object()),
+        agent_factory=lambda config: fake_agent,
+        graph_input={"messages": [HumanMessage(content="start")]},
+        config={"configurable": {"thread_id": "thread-model-cache"}},
+    )
+
+    assert len(fake_agent.inputs) == 2
+    assert prepare_models == [evaluator_model, evaluator_model]
+    assert len(create_calls) == 1
+    assert create_calls[0]["model_name"] == "test-model"
+    assert record.status == RunStatus.success

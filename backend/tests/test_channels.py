@@ -6454,10 +6454,20 @@ class TestHandleGoalCommand:
 
         async def go():
             manager = self._make_manager(monkeypatch, thread_id="t-1")
+            chats = []
+
+            async def _handle_chat(msg, **kwargs):
+                chats.append((msg, kwargs))
+
+            monkeypatch.setattr(manager, "_handle_chat", _handle_chat)
+
             reply = await manager._handle_goal_command(self._msg("/goal finish the work"), "finish the work")
-            assert reply == "Goal set: finish the work"
+            assert reply is None
             assert calls[0]["method"] == "put"
             assert calls[0]["json"] == {"objective": "finish the work"}
+            assert chats[0][0].text == "finish the work"
+            assert chats[0][0].msg_type == InboundMessageType.CHAT
+            assert chats[0][1] == {"bound_identity_checked": True}
 
         _run(go())
 
@@ -6467,17 +6477,24 @@ class TestHandleGoalCommand:
 
         async def go():
             manager = self._make_manager(monkeypatch, thread_id=None)
+            chats = []
 
             async def _create(client, msg):
                 return "new-thread"
 
+            async def _handle_chat(msg, **kwargs):
+                chats.append((msg, kwargs))
+
             monkeypatch.setattr(manager, "_create_thread", _create)
             monkeypatch.setattr(manager, "_get_client", lambda: object())
+            monkeypatch.setattr(manager, "_handle_chat", _handle_chat)
 
             reply = await manager._handle_goal_command(self._msg("/goal do X"), "do X")
-            assert reply == "Goal set: do X"
+            assert reply is None
             assert calls[0]["method"] == "put"
             assert calls[0]["url"].endswith("/api/threads/new-thread/goal")
+            assert chats[0][0].text == "do X"
+            assert chats[0][0].msg_type == InboundMessageType.CHAT
 
         _run(go())
 

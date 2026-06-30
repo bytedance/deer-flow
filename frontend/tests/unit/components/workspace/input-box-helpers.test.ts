@@ -1,9 +1,15 @@
 import { describe, expect, it } from "@rstest/core";
 
 import {
+  abortGoalRequest,
+  beginGoalRequest,
+  createGoalRequestState,
   findSuggestionTemplatePlaceholder,
+  finishGoalRequest,
   getLeadingSlashSkillQuery,
   getMatchingSkillSuggestions,
+  isAbortError,
+  isCurrentGoalRequest,
   parseGoalCommand,
   readGoalResponseError,
   type SlashSuggestion,
@@ -127,6 +133,46 @@ describe("readGoalResponseError", () => {
       },
     } as unknown as Response;
     expect(await readGoalResponseError(broken)).toBe("HTTP 503");
+  });
+});
+
+describe("goal request lifecycle", () => {
+  it("aborts a pending goal request when the thread changes and blocks stale updates", () => {
+    const state = createGoalRequestState();
+    const first = beginGoalRequest(state, "thread-1");
+    const updates: string[] = [];
+
+    abortGoalRequest(state);
+    const second = beginGoalRequest(state, "thread-2");
+
+    if (isCurrentGoalRequest(state, first, "thread-1")) {
+      updates.push("thread-1");
+    }
+    if (isCurrentGoalRequest(state, second, "thread-2")) {
+      updates.push("thread-2");
+    }
+
+    expect(first.controller.signal.aborted).toBe(true);
+    expect(second.controller.signal.aborted).toBe(false);
+    expect(updates).toEqual(["thread-2"]);
+  });
+
+  it("does not let an older request finish a newer one", () => {
+    const state = createGoalRequestState();
+    const first = beginGoalRequest(state, "thread-1");
+    const second = beginGoalRequest(state, "thread-1");
+
+    finishGoalRequest(state, first);
+
+    expect(isCurrentGoalRequest(state, second, "thread-1")).toBe(true);
+  });
+
+  it("recognizes abort-shaped errors", () => {
+    expect(isAbortError(new DOMException("aborted", "AbortError"))).toBe(true);
+    expect(
+      isAbortError(Object.assign(new Error("aborted"), { name: "AbortError" })),
+    ).toBe(true);
+    expect(isAbortError(new Error("other"))).toBe(false);
   });
 });
 

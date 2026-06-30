@@ -1568,6 +1568,8 @@ class ChannelManager:
             reply = await self._fetch_gateway("/api/memory", "memory", msg=msg)
         elif reply is None and command == "goal":
             reply = await self._handle_goal_command(msg, parts[1] if len(parts) > 1 else "")
+            if reply is None:
+                return
         elif reply is None and command == "help":
             reply = (
                 "Available commands:\n"
@@ -1611,7 +1613,24 @@ class ChannelManager:
         )
         await self.bus.publish_outbound(outbound)
 
-    async def _handle_goal_command(self, msg: InboundMessage, args: str) -> str:
+    async def _goal_request(
+        self,
+        method: str,
+        thread_id: str,
+        *,
+        headers: dict[str, str],
+        json: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        async with httpx.AsyncClient() as http:
+            request = getattr(http, method.lower())
+            kwargs: dict[str, Any] = {"timeout": 10, "headers": headers}
+            if json is not None:
+                kwargs["json"] = json
+            response = await request(f"{self._gateway_url}/api/threads/{quote(thread_id, safe='')}/goal", **kwargs)
+            response.raise_for_status()
+            return response.json() or {}
+
+    async def _handle_goal_command(self, msg: InboundMessage, args: str) -> str | None:
         command = parse_goal_command(args)
         thread_id = await self._lookup_thread_id(msg)
         headers = _owner_headers(msg) or create_internal_auth_headers()
@@ -1620,14 +1639,7 @@ class ChannelManager:
             if not thread_id:
                 return "No active goal."
             try:
-                async with httpx.AsyncClient() as http:
-                    response = await http.get(
-                        f"{self._gateway_url}/api/threads/{quote(thread_id, safe='')}/goal",
-                        timeout=10,
-                        headers=headers,
-                    )
-                    response.raise_for_status()
-                    goal = (response.json() or {}).get("goal")
+                goal = (await self._goal_request("get", thread_id, headers=headers)).get("goal")
             except Exception:
                 logger.exception("Failed to fetch goal from gateway")
                 return "Failed to fetch goal information."
@@ -1637,13 +1649,7 @@ class ChannelManager:
             if not thread_id:
                 return "Goal cleared."
             try:
-                async with httpx.AsyncClient() as http:
-                    response = await http.delete(
-                        f"{self._gateway_url}/api/threads/{quote(thread_id, safe='')}/goal",
-                        timeout=10,
-                        headers=headers,
-                    )
-                    response.raise_for_status()
+                await self._goal_request("delete", thread_id, headers=headers)
             except Exception:
                 logger.exception("Failed to clear goal through gateway")
                 return "Failed to clear goal."
@@ -1653,19 +1659,16 @@ class ChannelManager:
             thread_id = await self._create_thread(self._get_client(), msg)
 
         try:
-            async with httpx.AsyncClient() as http:
-                response = await http.put(
-                    f"{self._gateway_url}/api/threads/{quote(thread_id, safe='')}/goal",
-                    timeout=10,
-                    headers=headers,
-                    json={"objective": command.objective},
-                )
-                response.raise_for_status()
-                goal = (response.json() or {}).get("goal")
+            await self._goal_request("put", thread_id, headers=headers, json={"objective": command.objective})
         except Exception:
             logger.exception("Failed to set goal through gateway")
             return "Failed to set goal."
-        return f"Goal set: {goal.get('objective') if goal else command.objective}"
+
+        from dataclasses import replace as _dc_replace
+
+        chat_msg = _dc_replace(msg, text=command.objective, msg_type=InboundMessageType.CHAT)
+        await self._handle_chat(chat_msg, bound_identity_checked=True)
+        return None
 
     async def _fetch_gateway(self, path: str, kind: str, *, msg: InboundMessage | None = None) -> str:
         """Fetch data from the Gateway API for command responses."""

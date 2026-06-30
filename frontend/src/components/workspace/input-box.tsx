@@ -89,10 +89,16 @@ import {
 } from "../ui/dropdown-menu";
 
 import {
+  abortGoalRequest,
+  beginGoalRequest,
+  createGoalRequestState,
   findSuggestionTemplatePlaceholder,
+  finishGoalRequest,
   getLeadingSlashSkillQuery,
   getMatchingSkillSuggestions,
   type GoalCommand,
+  isAbortError,
+  isCurrentGoalRequest,
   parseGoalCommand,
   readGoalResponseError,
   type SlashSuggestion,
@@ -175,6 +181,7 @@ export function InputBox({
   const { skills } = useSkills();
   const promptRootRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const goalRequestStateRef = useRef(createGoalRequestState());
   const promptHistoryIndexRef = useRef<number | null>(null);
   const promptHistoryDraftRef = useRef("");
 
@@ -278,6 +285,11 @@ export function InputBox({
   }, [threadId]);
 
   useEffect(() => {
+    const goalRequestState = goalRequestStateRef.current;
+    return () => abortGoalRequest(goalRequestState);
+  }, [threadId]);
+
+  useEffect(() => {
     const currentIndex = promptHistoryIndexRef.current;
     if (currentIndex !== null && currentIndex >= promptHistory.length) {
       promptHistoryIndexRef.current = null;
@@ -332,6 +344,8 @@ export function InputBox({
 
   const handleGoalCommand = useCallback(
     async (command: GoalCommand): Promise<boolean> => {
+      const request = beginGoalRequest(goalRequestStateRef.current, threadId);
+      const signal = request.controller.signal;
       try {
         let goal: GoalState | null = null;
         if (command.kind === "status") {
@@ -339,7 +353,7 @@ export function InputBox({
             `${getBackendBaseURL()}/api/threads/${encodeURIComponent(
               threadId,
             )}/goal`,
-            { method: "GET" },
+            { method: "GET", signal },
           );
           if (!response.ok) {
             throw new Error(await readGoalResponseError(response));
@@ -347,6 +361,15 @@ export function InputBox({
           goal =
             ((await response.json()) as { goal?: GoalState | null }).goal ??
             null;
+          if (
+            !isCurrentGoalRequest(
+              goalRequestStateRef.current,
+              request,
+              threadId,
+            )
+          ) {
+            return false;
+          }
           const objective = goal?.objective;
           toast.info(
             objective !== undefined
@@ -361,10 +384,19 @@ export function InputBox({
             `${getBackendBaseURL()}/api/threads/${encodeURIComponent(
               threadId,
             )}/goal`,
-            { method: "DELETE" },
+            { method: "DELETE", signal },
           );
           if (!response.ok) {
             throw new Error(await readGoalResponseError(response));
+          }
+          if (
+            !isCurrentGoalRequest(
+              goalRequestStateRef.current,
+              request,
+              threadId,
+            )
+          ) {
+            return false;
           }
           toast.success(t.inputBox.goalCleared);
           onGoalChange?.(null);
@@ -377,6 +409,7 @@ export function InputBox({
               method: "PUT",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({ objective: command.objective }),
+              signal,
             },
           );
           if (!response.ok) {
@@ -385,16 +418,33 @@ export function InputBox({
           goal =
             ((await response.json()) as { goal?: GoalState | null }).goal ??
             null;
+          if (
+            !isCurrentGoalRequest(
+              goalRequestStateRef.current,
+              request,
+              threadId,
+            )
+          ) {
+            return false;
+          }
           toast.success(t.inputBox.goalSet);
           onGoalChange?.(goal);
         }
         textInput.setInput("");
         return true;
       } catch (error) {
+        if (
+          isAbortError(error) ||
+          !isCurrentGoalRequest(goalRequestStateRef.current, request, threadId)
+        ) {
+          return false;
+        }
         toast.error(
           error instanceof Error ? error.message : t.inputBox.goalFailed,
         );
         return false;
+      } finally {
+        finishGoalRequest(goalRequestStateRef.current, request);
       }
     },
     [

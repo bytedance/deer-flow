@@ -36,6 +36,7 @@ from deerflow.runtime.goal import (
     _message_type,
     attach_goal_evaluation,
     compute_no_progress_count,
+    create_goal_evaluator_model,
     evaluate_goal_completion,
     latest_visible_assistant_signature,
     make_goal_continuation_message,
@@ -320,6 +321,17 @@ async def run_agent(
 
         logger.info("Run %s: streaming with modes %s (requested: %s)", run_id, lg_modes, requested_modes)
 
+        goal_evaluator_model: Any | None = None
+
+        def _get_goal_evaluator_model() -> Any:
+            nonlocal goal_evaluator_model
+            if goal_evaluator_model is None:
+                goal_evaluator_model = create_goal_evaluator_model(
+                    model_name=record.model_name,
+                    app_config=ctx.app_config,
+                )
+            return goal_evaluator_model
+
         async def _stream_once(input_payload: Any) -> None:
             nonlocal llm_error_fallback_message
             if len(lg_modes) == 1 and not stream_subgraphs:
@@ -363,8 +375,10 @@ async def run_agent(
                 run_id=run_id,
                 model_name=record.model_name,
                 app_config=ctx.app_config,
+                evaluator_model_factory=_get_goal_evaluator_model,
+                abort_event=record.abort_event,
             )
-            if continuation_input is None:
+            if continuation_input is None or record.abort_event.is_set():
                 break
             await _stream_once(continuation_input)
 
@@ -590,6 +604,8 @@ async def _prepare_goal_continuation_input(
     run_id: str,
     model_name: str | None,
     app_config: AppConfig | None,
+    evaluator_model_factory: Any | None = None,
+    abort_event: asyncio.Event | None = None,
 ) -> dict[str, Any] | None:
     """Evaluate the active goal and return a hidden continuation input if needed.
 
@@ -601,6 +617,8 @@ async def _prepare_goal_continuation_input(
     close that window — tracked as a follow-up.
     """
     if checkpointer is None:
+        return None
+    if abort_event is not None and abort_event.is_set():
         return None
 
     try:
@@ -658,12 +676,18 @@ async def _prepare_goal_continuation_input(
             await _persist(goal, evaluation, no_progress_count, stand_down_reason="no_durable_end_of_turn")
             return None
 
+        if abort_event is not None and abort_event.is_set():
+            return None
+        evaluator_model = evaluator_model_factory() if evaluator_model_factory is not None else None
         evaluation = await evaluate_goal_completion(
             goal,
             messages,
+            model=evaluator_model,
             model_name=model_name,
             app_config=app_config,
         )
+        if abort_event is not None and abort_event.is_set():
+            return None
     except Exception:
         logger.warning("Goal evaluator failed for thread %s after run %s", thread_id, run_id, exc_info=True)
         return None

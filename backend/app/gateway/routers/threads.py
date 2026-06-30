@@ -242,7 +242,7 @@ async def _ensure_thread_for_goal(thread_id: str, request: Request) -> None:
             record = await thread_store.get(thread_id, **thread_owner_kwargs)
     if record is None:
         try:
-            await thread_store.create(thread_id, metadata={})
+            await thread_store.create(thread_id, metadata={}, **thread_owner_kwargs)
         except Exception:
             logger.exception("Failed to create thread_meta for goal thread %s", sanitize_log_param(thread_id))
             raise HTTPException(status_code=500, detail="Failed to create thread") from None

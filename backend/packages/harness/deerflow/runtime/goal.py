@@ -13,12 +13,12 @@ import hashlib
 import inspect
 import json
 import logging
-import re
 from typing import Any, Literal, NamedTuple
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.checkpoint.base import empty_checkpoint, uuid6
 
+import deerflow.utils.llm_text as llm_text
 from deerflow.agents.goal_state import GoalBlocker, GoalEvaluation, GoalState
 from deerflow.models import create_chat_model
 from deerflow.utils.messages import message_to_text
@@ -44,12 +44,11 @@ GOAL_BLOCKERS: set[GoalBlocker] = {
 }
 CONTINUABLE_GOAL_BLOCKERS: set[GoalBlocker] = {"goal_not_met_yet"}
 
-
-_THINK_BLOCK_RE = re.compile(r"<think\b[^>]*>.*?</think\s*>", re.IGNORECASE | re.DOTALL)
-_OPEN_THINK_RE = re.compile(r"<think\b[^>]*>", re.IGNORECASE)
-
-
 GOAL_CLEAR_ALIASES = frozenset({"clear", "reset", "off"})
+
+_extract_response_text = llm_text.extract_response_text
+_strip_markdown_code_fence = llm_text.strip_markdown_code_fence
+_strip_think_blocks = llm_text.strip_think_blocks
 
 
 class GoalCommand(NamedTuple):
@@ -106,42 +105,6 @@ def build_goal_state(
         no_progress_count=0,
         max_no_progress_continuations=max(0, int(max_no_progress_continuations)),
     )
-
-
-def _strip_think_blocks(text: str) -> str:
-    text = _THINK_BLOCK_RE.sub("", text)
-    open_match = _OPEN_THINK_RE.search(text)
-    if open_match:
-        text = text[: open_match.start()]
-    return text.strip()
-
-
-def _strip_markdown_code_fence(text: str) -> str:
-    stripped = text.strip()
-    if not stripped.startswith("```"):
-        return stripped
-    lines = stripped.splitlines()
-    if len(lines) >= 3 and lines[0].startswith("```") and lines[-1].startswith("```"):
-        return "\n".join(lines[1:-1]).strip()
-    return stripped
-
-
-def _extract_response_text(content: object) -> str:
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts: list[str] = []
-        for block in content:
-            if isinstance(block, str):
-                parts.append(block)
-            elif isinstance(block, dict) and block.get("type") in {"text", "output_text"}:
-                text = block.get("text")
-                if isinstance(text, str):
-                    parts.append(text)
-        return "\n".join(parts)
-    if content is None:
-        return ""
-    return str(content)
 
 
 def parse_goal_evaluation_response(text: str) -> GoalEvaluation:
@@ -245,10 +208,25 @@ def format_visible_conversation(messages: list[Any]) -> str:
     return conversation
 
 
+def create_goal_evaluator_model(
+    *,
+    model_name: str | None = None,
+    app_config: Any | None = None,
+) -> Any:
+    """Create the non-thinking chat model used by the goal evaluator."""
+    return create_chat_model(
+        name=model_name,
+        thinking_enabled=False,
+        app_config=app_config,
+        attach_tracing=False,
+    )
+
+
 async def evaluate_goal_completion(
     goal: GoalState,
     messages: list[Any],
     *,
+    model: Any | None = None,
     model_name: str | None = None,
     app_config: Any | None = None,
 ) -> GoalEvaluation:
@@ -274,12 +252,8 @@ async def evaluate_goal_completion(
     )
     user_content = f"Active goal:\n{goal['objective']}\n\nVisible conversation evidence:\n{conversation}\n\nIs the active goal fully satisfied?"
 
-    model = create_chat_model(
-        name=model_name,
-        thinking_enabled=False,
-        app_config=app_config,
-        attach_tracing=False,
-    )
+    if model is None:
+        model = create_goal_evaluator_model(model_name=model_name, app_config=app_config)
     response = await model.ainvoke(
         [SystemMessage(content=system_instruction), HumanMessage(content=user_content)],
         config={"run_name": "goal_evaluator"},

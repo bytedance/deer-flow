@@ -294,6 +294,35 @@ def test_internal_owner_header_assigns_thread_to_owner() -> None:
     assert internal_row is None
 
 
+def test_goal_thread_creation_uses_internal_owner_header() -> None:
+    import asyncio
+
+    from app.gateway.internal_auth import INTERNAL_OWNER_USER_ID_HEADER_NAME, INTERNAL_SYSTEM_ROLE
+
+    store = InMemoryStore()
+    checkpointer = InMemorySaver()
+    thread_store = MemoryThreadMetaStore(store)
+    request = SimpleNamespace(
+        headers={INTERNAL_OWNER_USER_ID_HEADER_NAME: "owner-1"},
+        state=SimpleNamespace(user=SimpleNamespace(id="default", system_role=INTERNAL_SYSTEM_ROLE)),
+        app=SimpleNamespace(state=SimpleNamespace(checkpointer=checkpointer, thread_store=thread_store)),
+    )
+
+    async def _scenario():
+        await threads._ensure_thread_for_goal("channel-goal-thread", request)
+        owner_row = await thread_store.get("channel-goal-thread", user_id="owner-1")
+        internal_row = await thread_store.get("channel-goal-thread", user_id="default")
+        owner_threads = await thread_store.search(user_id="owner-1")
+        return owner_row, internal_row, owner_threads
+
+    owner_row, internal_row, owner_threads = asyncio.run(_scenario())
+
+    assert owner_row is not None
+    assert owner_row["user_id"] == "owner-1"
+    assert internal_row is None
+    assert [thread["thread_id"] for thread in owner_threads] == ["channel-goal-thread"]
+
+
 def test_get_thread_returns_iso_for_legacy_unix_record() -> None:
     """A thread record written by older versions stores ``time.time()``
     floats. ``get_thread`` must transparently surface them as ISO so the
