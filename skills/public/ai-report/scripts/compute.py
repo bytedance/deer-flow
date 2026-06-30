@@ -3,7 +3,11 @@
 Phase 1 政策:
 - 数据层纯 DuckDB DECIMAL(38,10), 无 float (银行精度要求)
 - 失败 cell 不编码哨兵字符串, NULL 留空; 哨兵聚合走 assemble_status (task 13)
-- DuckDB 连接模块化 (_get_conn 单例, validate 接收 caller conn)
+- DuckDB 连接模型:
+  - assemble_wide / evaluate: 每次 call 新建 :memory: conn (per-call), 5ms 开销换线程安全
+    (DuckDB connection 不是线程安全, 共享单例在多 thread 调用下会炸)
+  - validate: caller 注入 conn (typically Store.conn), 因为 TEMP TABLE 生命周期
+    需要跟随 caller 事务; caller 自己保证线程安全 (Store._write_lock)
 """
 
 from __future__ import annotations
@@ -15,30 +19,22 @@ from decimal import Decimal
 import duckdb
 
 
-# ---------- 模块级 DuckDB 连接 (assemble_wide / evaluate 用 :memory: 单例) ---------- #
+# ---------- per-call :memory: conn (线程安全, 每次新建) ---------- #
 
-_conn: duckdb.DuckDBPyConnection | None = None
+def _new_conn() -> duckdb.DuckDBPyConnection:
+    """Create a fresh :memory: DuckDB connection.
 
+    Why per-call (not module singleton): DuckDB connection is NOT thread-safe.
+    If assemble_wide / evaluate share a module-level conn, concurrent threads
+    calling them will interleave execute() and corrupt state. Per-call costs
+    ~5ms but guarantees isolation.
 
-def _get_conn() -> duckdb.DuckDBPyConnection:
-    """Module-level :memory: DuckDB singleton.
-
-    为什么 :memory: 而不是 Store.conn: 本模块是纯转换函数 (输入 list[dict] →
-    输出 list[dict]), 不读写 ai-report.duckdb 持久表. validate(conn, ...)
-    接收 caller 注入的 conn, 因为它需要 TEMP TABLE 生命周期跟随 caller 事务.
+    Why :memory: (not Store.conn): these are pure in-memory transforms
+    (input list[dict] → output list[dict]); no persistent table is read or
+    written. validate() takes caller-injected conn because its TEMP TABLE
+    lifecycle follows the caller transaction.
     """
-    global _conn
-    if _conn is None:
-        _conn = duckdb.connect(":memory:")
-    return _conn
-
-
-def reset_conn_for_tests() -> None:
-    """Test helper: close module conn so next call reopens. Test fixture only."""
-    global _conn
-    if _conn is not None:
-        _conn.close()
-        _conn = None
+    return duckdb.connect(":memory:")
 
 
 # ---------- extract-ir ---------- #
@@ -94,27 +90,29 @@ def assemble_wide(metric_facts: list[dict], run_id: str, table_id: str) -> list[
         if not all_branches:
             return []
         return [{"branch_num": bn, **{k: None for k in distinct_keys}} for bn in all_branches]
-    conn = _get_conn()
-    conn.execute("DROP TABLE IF EXISTS facts")
-    conn.execute(
-        "CREATE TABLE facts (branch_num TEXT, col_key TEXT, numeric_value DECIMAL(38,10))"
-    )
-    for f in ok_facts:
+    conn = _new_conn()
+    try:
         conn.execute(
-            "INSERT INTO facts VALUES (?, ?, ?)",
+            "CREATE TABLE facts (branch_num TEXT, col_key TEXT, numeric_value DECIMAL(38,10))"
+        )
+        rows_to_insert = [
             [f.get("branch_num", ""),
              f"{f.get('idx_id','')}@{f.get('period_alias','')}",
-             f.get("numeric_value")],
-        )
-    in_clause = ", ".join(f"'{k}'" for k in distinct_keys)
-    rows = conn.execute(
-        f"""SELECT * FROM facts PIVOT (
-              MAX(numeric_value)
-              FOR col_key IN ({in_clause})
-            )"""
-    ).fetchall()
-    cols = [d[0] for d in conn.description]
-    return [dict(zip(cols, r)) for r in rows]
+             f.get("numeric_value")]
+            for f in ok_facts
+        ]
+        conn.executemany("INSERT INTO facts VALUES (?, ?, ?)", rows_to_insert)
+        in_clause = ", ".join(f"'{k}'" for k in distinct_keys)
+        rows = conn.execute(
+            f"""SELECT * FROM facts PIVOT (
+                  MAX(numeric_value)
+                  FOR col_key IN ({in_clause})
+                )"""
+        ).fetchall()
+        cols = [d[0] for d in conn.description]
+        return [dict(zip(cols, r)) for r in rows]
+    finally:
+        conn.close()
 
 
 # ---------- validate (3 layers) + evaluate + apply-computed ---------- #
@@ -304,35 +302,38 @@ def evaluate(
     """
     if not wide_rows:
         return [], "ok"
-    conn = _get_conn()
-    _materialize_wide_table(conn, wide_rows, "wide")
+    conn = _new_conn()
     try:
-        rows = conn.execute(sql).fetchall()
-    except duckdb.Error:
-        return [None] * len(wide_rows), "compute_failed"
+        _materialize_wide_table(conn, wide_rows, "wide")
+        try:
+            rows = conn.execute(sql).fetchall()
+        except duckdb.Error:
+            return [None] * len(wide_rows), "compute_failed"
 
-    # P0-1: row count must match wide_rows (no silent truncation by WHERE/etc.)
-    if len(rows) != len(wide_rows):
-        return [None] * len(wide_rows), "compute_failed"
+        # P0-1: row count must match wide_rows (no silent truncation by WHERE/etc.)
+        if len(rows) != len(wide_rows):
+            return [None] * len(wide_rows), "compute_failed"
 
-    cols_returned = [d[0] for d in conn.description]
-    if column_name not in cols_returned:
-        return [None] * len(wide_rows), "compute_failed"
-    col_idx = cols_returned.index(column_name)
+        cols_returned = [d[0] for d in conn.description]
+        if column_name not in cols_returned:
+            return [None] * len(wide_rows), "compute_failed"
+        col_idx = cols_returned.index(column_name)
 
-    values: list[Decimal | None] = []
-    for r in rows:
-        v = r[col_idx]
-        if v is None:
-            values.append(None)
-        elif isinstance(v, Decimal):
-            values.append(v)
-        else:
-            try:
-                values.append(Decimal(str(v)))
-            except (ValueError, ArithmeticError):
+        values: list[Decimal | None] = []
+        for r in rows:
+            v = r[col_idx]
+            if v is None:
                 values.append(None)
-    return values, "ok"
+            elif isinstance(v, Decimal):
+                values.append(v)
+            else:
+                try:
+                    values.append(Decimal(str(v)))
+                except (ValueError, ArithmeticError):
+                    values.append(None)
+        return values, "ok"
+    finally:
+        conn.close()
 
 
 # ---------- apply-computed ---------- #

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from decimal import Decimal
 
 import duckdb
@@ -10,20 +11,14 @@ import pytest
 from compute import (
     ComputeIR,
     ValidationResult,
+    _detect_column_types,
+    apply_computed,
     assemble_wide,
     decimal_isclose,
+    evaluate,
     extract_ir,
-    reset_conn_for_tests,
     validate,
 )
-
-
-@pytest.fixture(autouse=True)
-def _reset_module_conn():
-    """Each test starts and ends with no module-level DuckDB conn (test isolation)."""
-    reset_conn_for_tests()
-    yield
-    reset_conn_for_tests()
 
 
 def test_extract_ir_parses_compute_block():
@@ -243,8 +238,6 @@ def test_decimal_isclose_helper():
 
 # ---- task 10: evaluate + apply-computed ---- #
 
-from compute import apply_computed, evaluate
-
 
 def test_evaluate_runs_sql_against_wide():
     sql = "SELECT branch_num, 2.0 AS x FROM wide"
@@ -335,8 +328,6 @@ def test_apply_computed_multiple_columns():
 
 # ---- review fixes: P0-1 / P1-1 / P1-3 / P1-5 / P1-6 ---- #
 
-from compute import _detect_column_types
-
 
 def test_evaluate_returns_compute_failed_on_row_count_mismatch():
     """P0-1: SQL with WHERE/GROUP BY/DISTINCT can return fewer rows than wide_rows.
@@ -405,3 +396,65 @@ def test_evaluate_preserves_row_order_and_count():
     assert status == "ok"
     assert len(values) == 20
     assert values == [Decimal(str(i)) for i in range(20)]
+
+
+# ---- Phase 1 concurrency: per-call :memory: conn thread safety ---- #
+
+def test_assemble_wide_thread_safe_concurrent():
+    """Per-call :memory: conn: multiple threads call assemble_wide concurrently.
+
+    Old module-level singleton conn would interleave execute() across threads,
+    corrupting the `facts` temp table. Per-call conn guarantees isolation.
+    """
+    errors: list[Exception] = []
+    results: list[list[dict]] = []
+
+    def worker(thread_id: int):
+        try:
+            facts = [
+                {"branch_num": f"{thread_id}_{i}", "idx_id": "A", "period_alias": "202603",
+                 "numeric_value": thread_id * 100 + i, "status": "ok"}
+                for i in range(10)
+            ]
+            wide = assemble_wide(facts, run_id=f"r{thread_id}", table_id=f"t{thread_id}")
+            results.append(wide)
+        except Exception as e:
+            errors.append(e)
+
+    threads = [threading.Thread(target=worker, args=(t,)) for t in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert not errors, f"threads raised: {errors}"
+    assert len(results) == 8
+    # Each thread should have its own 10 rows, not cross-contaminated
+    for i, wide in enumerate(results):
+        assert len(wide) == 10, f"thread {i} got {len(wide)} rows, expected 10"
+        for row in wide:
+            assert row["A@202603"] is not None, f"thread {i} row {row['branch_num']} has NULL cell"
+
+
+def test_evaluate_thread_safe_concurrent():
+    """Per-call :memory: conn: multiple threads call evaluate concurrently."""
+    errors: list[Exception] = []
+    results: list[tuple] = []
+
+    def worker(thread_id: int):
+        try:
+            sql = "SELECT branch_num, 2.0 AS x FROM wide"
+            wide = [{"branch_num": str(i)} for i in range(5)]
+            values, status = evaluate(sql, wide, "x")
+            results.append((values, status))
+        except Exception as e:
+            errors.append(e)
+
+    threads = [threading.Thread(target=worker, args=(t,)) for t in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert not errors, f"threads raised: {errors}"
+    for values, status in results:
+        assert status == "ok"
+        assert values == [Decimal("2.0")] * 5

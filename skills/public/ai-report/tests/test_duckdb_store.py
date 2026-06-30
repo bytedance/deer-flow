@@ -166,3 +166,88 @@ def test_schema_uses_timestamptz(store):
     assert type_set, "应至少有一种时戳类型"
     assert all("WITH TIME ZONE" in dt.upper() or "TIMESTAMPTZ" in dt.upper() for (_, _, dt) in rows), \
         f"时戳列必须带时区, 实际: {type_set}"
+
+
+# ---- Phase 1 concurrency: write_lock serializes concurrent threads ---- #
+
+import threading
+
+
+def test_concurrent_writers_dont_corrupt_data(tmp_path):
+    """Multiple threads inserting distinct rows should not lose any row.
+
+    Phase 1 contract: single-process + threading.Lock around write methods.
+    Without the lock, DuckDB's execute() on the same connection from multiple
+    threads interleaves and can raise or drop rows.
+    """
+    with Store(db_path=str(tmp_path / "concurrent.duckdb")) as s:
+        s.init_schema()
+        rid = s.upsert_report("rid", "t", "/x", "h")
+        sid = s.upsert_section(rid, 0, "s")
+        tid = s.upsert_table(rid, sid, 0, "table", "md", "h", {})
+        errors: list[Exception] = []
+
+        def writer(thread_id: int):
+            try:
+                for i in range(20):
+                    s.insert_metric_facts(
+                        f"r{thread_id}", tid, rid,
+                        [{"branch_num": f"{thread_id}_{i}", "idx_id": "A",
+                          "period_alias": "202603", "numeric_value": i, "status": "ok"}],
+                    )
+            except Exception as e:
+                errors.append(e)
+
+        threads = [threading.Thread(target=writer, args=(t,)) for t in range(5)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert not errors, f"threads raised: {errors}"
+        # 5 threads × 20 facts = 100 rows expected
+        count = s._conn.execute(
+            "SELECT COUNT(*) FROM metric_facts WHERE table_id=?", [tid]
+        ).fetchone()[0]
+        assert count == 100, f"expected 100 facts, got {count} (lock not serializing)"
+
+
+def test_concurrent_writers_preserve_atomic_save_approved_run(tmp_path):
+    """save_approved_run wraps UPDATE parent + INSERT child in one write lock.
+
+    A reader concurrent with save_approved_run should either see the old state
+    (no approved_run yet) or the new state (both parent approved AND child row
+    present), never "parent approved but child missing".
+    """
+    with Store(db_path=str(tmp_path / "atomic.duckdb")) as s:
+        s.init_schema()
+        rid = s.upsert_report("rid", "t", "/x", "h")
+        sid = s.upsert_section(rid, 0, "s")
+        tid = s.upsert_table(rid, sid, 0, "table", "md", "h", {})
+        errors: list[Exception] = []
+
+        def saver(i: int):
+            try:
+                s.save_approved_run(
+                    f"run_{i}", tid, rid, sid, [], [], [], "ok", [], "log", "/x.md"
+                )
+            except Exception as e:
+                errors.append(e)
+
+        # Fire 8 concurrent saves; only one will land (PK conflict on table_id
+        # in approved_table_runs), the rest raise. That's fine — what matters
+        # is no torn state: either 0 or 1 approved_run row, and parent
+        # approval_status is consistent.
+        threads = [threading.Thread(target=saver, args=(i,)) for i in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        approved_count = s._conn.execute(
+            "SELECT COUNT(*) FROM approved_table_runs WHERE table_id=?", [tid]
+        ).fetchone()[0]
+        assert approved_count == 1, f"expected 1 approved run, got {approved_count}"
+        # Parent should reflect approved status
+        parent_status = s._conn.execute(
+            "SELECT approval_status FROM report_tables WHERE table_id=?", [tid]
+        ).fetchone()[0]
+        assert parent_status == "approved"

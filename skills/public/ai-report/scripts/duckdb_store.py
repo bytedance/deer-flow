@@ -1,8 +1,16 @@
-"""ai-report: 5-table DuckDB store with run_id history (新写, 纯 DuckDB, 无 pandas)."""
+"""ai-report: 5-table DuckDB store with run_id history (新写, 纯 DuckDB, 无 pandas).
+
+Phase 1 并发模型 (全局单 DuckDB 文件 `/mnt/ai-report-data/duckdb/ai-report.duckdb`):
+- 单进程内多 thread 安全: 写操作用 `threading.Lock` 串行化.
+- 读操作 (get_metric_facts / list_approved_tables 等) 不加锁, 依赖 DuckDB MVCC.
+- **多进程不支持**: DuckDB 文件锁会让第二个进程打开失败. 多 worker 部署 (uvicorn --workers > 1)
+  必须抽独立 data-service 单进程持有 conn, gateway 通过 HTTP 调用 (Phase 2).
+"""
 from __future__ import annotations
 
 import hashlib
 import json as _json
+import threading
 import uuid
 from pathlib import Path
 
@@ -18,6 +26,7 @@ class Store:
     def __init__(self, db_path: str = DEFAULT_DB_PATH):
         self._db_path = db_path
         self._conn: duckdb.DuckDBPyConnection | None = None
+        self._write_lock = threading.Lock()
 
     def __enter__(self) -> "Store":
         self.open()
@@ -43,7 +52,8 @@ class Store:
         return self._conn
 
     def init_schema(self) -> None:
-        self.conn.execute(_SCHEMA_SQL)
+        with self._write_lock:
+            self.conn.execute(_SCHEMA_SQL)
 
 
 # ID 命名见 spec §preamble
@@ -66,29 +76,31 @@ def make_table_id(section_id: str, table_order: int) -> str:
 # ---------- CRUD ---------- #
 
 def upsert_report(self, report_id: str, title: str, source_md_path: str, source_md_hash: str) -> str:
-    self.conn.execute(
-        """INSERT INTO reports (report_id, schema_version, report_title, source_md_path, source_md_hash)
-           VALUES (?, 1, ?, ?, ?)
-           ON CONFLICT (report_id) DO UPDATE SET
-             report_title=excluded.report_title,
-             source_md_path=excluded.source_md_path,
-             source_md_hash=excluded.source_md_hash,
-             updated_at=now()""",
-        [report_id, title, source_md_path, source_md_hash],
-    )
+    with self._write_lock:
+        self.conn.execute(
+            """INSERT INTO reports (report_id, schema_version, report_title, source_md_path, source_md_hash)
+               VALUES (?, 1, ?, ?, ?)
+               ON CONFLICT (report_id) DO UPDATE SET
+                 report_title=excluded.report_title,
+                 source_md_path=excluded.source_md_path,
+                 source_md_hash=excluded.source_md_hash,
+                 updated_at=now()""",
+            [report_id, title, source_md_path, source_md_hash],
+        )
     return report_id
 
 
 def upsert_section(self, report_id: str, section_order: int, section_title: str) -> str:
     section_id = make_section_id(report_id, section_order)
-    self.conn.execute(
-        """INSERT INTO report_sections (section_id, schema_version, report_id, section_order, section_title)
-           VALUES (?, 1, ?, ?, ?)
-           ON CONFLICT (section_id) DO UPDATE SET
-             section_title=excluded.section_title,
-             updated_at=now()""",
-        [section_id, report_id, section_order, section_title],
-    )
+    with self._write_lock:
+        self.conn.execute(
+            """INSERT INTO report_sections (section_id, schema_version, report_id, section_order, section_title)
+               VALUES (?, 1, ?, ?, ?)
+               ON CONFLICT (section_id) DO UPDATE SET
+                 section_title=excluded.section_title,
+                 updated_at=now()""",
+            [section_id, report_id, section_order, section_title],
+        )
     return section_id
 
 
@@ -97,20 +109,21 @@ def upsert_table(
     source_md_snapshot: str, source_md_hash: str, parsed_payload: dict,
 ) -> str:
     table_id = make_table_id(section_id, table_order)
-    self.conn.execute(
-        """INSERT INTO report_tables
-           (table_id, schema_version, report_id, section_id, table_order, table_title,
-            approval_status, source_md_snapshot, source_md_hash, parsed_payload)
-           VALUES (?, 1, ?, ?, ?, ?, 'draft', ?, ?, ?)
-           ON CONFLICT (table_id) DO UPDATE SET
-             table_title=excluded.table_title,
-             source_md_snapshot=excluded.source_md_snapshot,
-             source_md_hash=excluded.source_md_hash,
-             parsed_payload=excluded.parsed_payload,
-             updated_at=now()""",
-        [table_id, report_id, section_id, table_order, table_title,
-         source_md_snapshot, source_md_hash, _json.dumps(parsed_payload, ensure_ascii=False)],
-    )
+    with self._write_lock:
+        self.conn.execute(
+            """INSERT INTO report_tables
+               (table_id, schema_version, report_id, section_id, table_order, table_title,
+                approval_status, source_md_snapshot, source_md_hash, parsed_payload)
+               VALUES (?, 1, ?, ?, ?, ?, 'draft', ?, ?, ?)
+               ON CONFLICT (table_id) DO UPDATE SET
+                 table_title=excluded.table_title,
+                 source_md_snapshot=excluded.source_md_snapshot,
+                 source_md_hash=excluded.source_md_hash,
+                 parsed_payload=excluded.parsed_payload,
+                 updated_at=now()""",
+            [table_id, report_id, section_id, table_order, table_title,
+             source_md_snapshot, source_md_hash, _json.dumps(parsed_payload, ensure_ascii=False)],
+        )
     return table_id
 
 
@@ -144,14 +157,15 @@ def insert_metric_facts(self, run_id: str, table_id: str, report_id: str, facts:
         ]
         for f in facts
     ]
-    self.conn.executemany(
-        """INSERT INTO metric_facts
-           (run_id, schema_version, table_id, report_id, branch_num, branch_short_name,
-            idx_id, period_alias, period_value, raw_value, numeric_value, status, error_message)
-           VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-           ON CONFLICT DO NOTHING""",
-        rows,
-    )
+    with self._write_lock:
+        self.conn.executemany(
+            """INSERT INTO metric_facts
+               (run_id, schema_version, table_id, report_id, branch_num, branch_short_name,
+                idx_id, period_alias, period_value, raw_value, numeric_value, status, error_message)
+               VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT DO NOTHING""",
+            rows,
+        )
 
 
 def get_metric_facts(self, run_id: str, table_id: str) -> list[dict]:
@@ -168,29 +182,31 @@ def save_approved_run(
     wide_table: list, computed_columns: list, descriptions: list, status: str,
     sentinels: list, runlog_markdown: str, design_md_path: str,
 ) -> None:
-    # Phase 1 fix: UPDATE report_tables BEFORE INSERT into approved_table_runs.
-    # DuckDB 1.5.2 raises FK violation on any UPDATE of a parent row that has
-    # existing children, even when the FK column is not changing. So we must
-    # update the parent first (when it has no approved_run children yet),
-    # then insert the child. (Alternative would be ON UPDATE CASCADE, but
-    # DuckDB 1.5.2 doesn't support FK action clauses.)
-    self.conn.execute(
-        """UPDATE report_tables
-           SET approval_status='approved', last_design_run_id=?, updated_at=now()
-           WHERE table_id=?""",
-        [run_id, table_id],
-    )
-    self.conn.execute(
-        """INSERT INTO approved_table_runs
-           (run_id, schema_version, table_id, report_id, section_id, wide_table,
-            computed_columns, descriptions, status, sentinels, runlog_markdown, design_md_path)
-           VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        [run_id, table_id, report_id, section_id, _json.dumps(wide_table, ensure_ascii=False),
-         _json.dumps(computed_columns, ensure_ascii=False),
-         _json.dumps(descriptions, ensure_ascii=False),
-         status, _json.dumps(sentinels, ensure_ascii=False),
-         runlog_markdown, design_md_path],
-    )
+    """Atomically persist approved run: UPDATE parent + INSERT child under one write lock.
+
+    DuckDB 1.5.2 FK quirk: UPDATE on a parent row with existing children raises
+    FK violation even when the FK column is unchanged. So we update the parent
+    first (when no approved_run children exist yet), then insert the child.
+    The write_lock wraps both statements so concurrent callers can't interleave.
+    """
+    with self._write_lock:
+        self.conn.execute(
+            """UPDATE report_tables
+               SET approval_status='approved', last_design_run_id=?, updated_at=now()
+               WHERE table_id=?""",
+            [run_id, table_id],
+        )
+        self.conn.execute(
+            """INSERT INTO approved_table_runs
+               (run_id, schema_version, table_id, report_id, section_id, wide_table,
+                computed_columns, descriptions, status, sentinels, runlog_markdown, design_md_path)
+               VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            [run_id, table_id, report_id, section_id, _json.dumps(wide_table, ensure_ascii=False),
+             _json.dumps(computed_columns, ensure_ascii=False),
+             _json.dumps(descriptions, ensure_ascii=False),
+             status, _json.dumps(sentinels, ensure_ascii=False),
+             runlog_markdown, design_md_path],
+        )
 
 
 def list_approved_tables(self, report_id: str) -> list[dict]:
