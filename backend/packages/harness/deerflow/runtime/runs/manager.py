@@ -104,6 +104,7 @@ class RunRecord:
     message_count: int = 0
     last_ai_message: str | None = None
     first_human_message: str | None = None
+    finalizing: bool = False
 
 
 class RunManager:
@@ -484,6 +485,16 @@ class RunManager:
         await self._persist_status(record, status, error=error)
         logger.info("Run %s -> %s", run_id, status.value)
 
+    async def set_finalizing(self, run_id: str, finalizing: bool) -> None:
+        """Mark whether a run is performing post-cancel cleanup."""
+        async with self._lock:
+            record = self._runs.get(run_id)
+            if record is None:
+                logger.warning("set_finalizing called for unknown run %s", run_id)
+                return
+            record.finalizing = finalizing
+            record.updated_at = _now_iso()
+
     async def _persist_model_name(self, run_id: str, model_name: str | None) -> None:
         """Best-effort persist model_name update to the backing store."""
         if self._store is None:
@@ -532,7 +543,9 @@ class RunManager:
                 return False
             record.abort_action = action
             record.abort_event.set()
-            if record.task is not None and not record.task.done():
+            task_active = record.task is not None and not record.task.done()
+            record.finalizing = task_active
+            if task_active:
                 record.task.cancel()
             record.status = RunStatus.interrupted
             record.updated_at = _now_iso()
@@ -571,9 +584,11 @@ class RunManager:
             if multitask_strategy not in _supported_strategies:
                 raise UnsupportedStrategyError(f"Multitask strategy '{multitask_strategy}' is not yet supported. Supported strategies: {', '.join(_supported_strategies)}")
 
-            inflight = [r for r in self._thread_records_locked(thread_id) if r.status in (RunStatus.pending, RunStatus.running)]
+            inflight = [r for r in self._thread_records_locked(thread_id) if r.status in (RunStatus.pending, RunStatus.running) or r.finalizing]
 
             if multitask_strategy == "reject" and inflight:
+                raise ConflictError(f"Thread {thread_id} already has an active run")
+            if any(r.finalizing for r in inflight):
                 raise ConflictError(f"Thread {thread_id} already has an active run")
 
             if multitask_strategy in ("interrupt", "rollback") and inflight:
@@ -617,7 +632,9 @@ class RunManager:
                 for r in inflight:
                     r.abort_action = multitask_strategy
                     r.abort_event.set()
-                    if r.task is not None and not r.task.done():
+                    task_active = r.task is not None and not r.task.done()
+                    r.finalizing = task_active
+                    if task_active:
                         r.task.cancel()
                     r.status = RunStatus.interrupted
                     r.updated_at = now
@@ -685,7 +702,7 @@ class RunManager:
     async def has_inflight(self, thread_id: str) -> bool:
         """Return ``True`` if *thread_id* has a pending or running run."""
         async with self._lock:
-            return any(r.status in (RunStatus.pending, RunStatus.running) for r in self._thread_records_locked(thread_id))
+            return any(r.status in (RunStatus.pending, RunStatus.running) or r.finalizing for r in self._thread_records_locked(thread_id))
 
     async def cleanup(self, run_id: str, *, delay: float = 300) -> None:
         """Remove a run record after an optional delay."""

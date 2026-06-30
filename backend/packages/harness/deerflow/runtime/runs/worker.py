@@ -335,6 +335,7 @@ async def run_agent(
 
         # 8. Final status
         if record.abort_event.is_set():
+            await run_manager.set_finalizing(run_id, True)
             action = record.abort_action
             if action == "rollback":
                 await run_manager.set_status(run_id, RunStatus.error, error="Rolled back by user")
@@ -362,6 +363,7 @@ async def run_agent(
             await run_manager.set_status(run_id, RunStatus.success)
 
     except asyncio.CancelledError:
+        await run_manager.set_finalizing(run_id, True)
         action = record.abort_action
         if action == "rollback":
             await run_manager.set_status(run_id, RunStatus.error, error="Rolled back by user")
@@ -411,7 +413,7 @@ async def run_agent(
 
         if checkpointer is not None and record.status == RunStatus.interrupted:
             try:
-                await _ensure_interrupted_title(checkpointer=checkpointer, thread_id=thread_id, app_config=ctx.app_config)
+                await _ensure_interrupted_title(checkpointer=checkpointer, thread_id=thread_id, app_config=ctx.app_config, graph_input=graph_input)
             except Exception:
                 logger.debug("Failed to generate interrupted title for thread %s (non-fatal)", thread_id)
 
@@ -435,6 +437,9 @@ async def run_agent(
                 await thread_store.update_status(thread_id, final_status)
             except Exception:
                 logger.debug("Failed to update thread_meta status for %s (non-fatal)", thread_id)
+
+        if record.finalizing:
+            await run_manager.set_finalizing(run_id, False)
 
         await bridge.publish_end(run_id)
         asyncio.create_task(bridge.cleanup(run_id, delay=60))
@@ -594,7 +599,46 @@ def _bump_channel_version(checkpointer: Any, current_version: Any) -> Any:
     return 1
 
 
-async def _ensure_interrupted_title(*, checkpointer: Any, thread_id: str, app_config: AppConfig | None) -> str | None:
+def _checkpoint_identity(ckpt_tuple: Any | None, checkpoint: dict[str, Any]) -> str | None:
+    tuple_config = getattr(ckpt_tuple, "config", {}) or {}
+    tuple_configurable = tuple_config.get("configurable", {}) if isinstance(tuple_config, dict) else {}
+    if isinstance(tuple_configurable, dict):
+        checkpoint_id = tuple_configurable.get("checkpoint_id")
+        if isinstance(checkpoint_id, str) and checkpoint_id:
+            return checkpoint_id
+    checkpoint_id = checkpoint.get("id")
+    return checkpoint_id if isinstance(checkpoint_id, str) and checkpoint_id else None
+
+
+def _checkpoint_namespace(ckpt_tuple: Any | None) -> str:
+    tuple_config = getattr(ckpt_tuple, "config", {}) or {}
+    tuple_configurable = tuple_config.get("configurable", {}) if isinstance(tuple_config, dict) else {}
+    checkpoint_ns = tuple_configurable.get("checkpoint_ns", "") if isinstance(tuple_configurable, dict) else ""
+    return checkpoint_ns if isinstance(checkpoint_ns, str) else ""
+
+
+def _graph_input_messages(graph_input: Any | None) -> list[Any]:
+    if not isinstance(graph_input, dict):
+        return []
+    messages = graph_input.get("messages")
+    if isinstance(messages, list):
+        return messages
+    if isinstance(messages, tuple):
+        return list(messages)
+    return []
+
+
+def _title_generation_state(channel_values: dict[str, Any], graph_input: Any | None) -> dict[str, Any]:
+    state = dict(channel_values)
+    messages = state.get("messages")
+    if not messages:
+        fallback_messages = _graph_input_messages(graph_input)
+        if fallback_messages:
+            state["messages"] = fallback_messages
+    return state
+
+
+async def _ensure_interrupted_title(*, checkpointer: Any, thread_id: str, app_config: AppConfig | None, graph_input: Any | None = None) -> str | None:
     """Persist a local fallback title for interrupted first-turn runs.
 
     Returns the title that is now persisted (existing or newly written), or
@@ -602,61 +646,73 @@ async def _ensure_interrupted_title(*, checkpointer: Any, thread_id: str, app_co
     Idempotent: re-invoking against a checkpoint that already carries a title
     short-circuits without writing a new checkpoint.
     """
-    ckpt_config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
-    ckpt_tuple = await _call_checkpointer_method(checkpointer, "aget_tuple", "get_tuple", ckpt_config)
-    if ckpt_tuple is None:
-        return None
-
-    checkpoint = copy.deepcopy(getattr(ckpt_tuple, "checkpoint", {}) or {})
-    channel_values = dict(checkpoint.get("channel_values", {}) or {})
-    existing_title = channel_values.get("title")
-    if existing_title:
-        return existing_title
-
     from deerflow.agents.middlewares.title_middleware import TitleMiddleware
 
     middleware = TitleMiddleware(app_config=app_config) if app_config is not None else TitleMiddleware()
-    result = middleware._generate_title_result(channel_values, allow_partial_exchange=True)
-    title = result.get("title") if isinstance(result, dict) else None
-    if not title:
-        return None
+    ckpt_config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
 
-    channel_values["title"] = title
-    marker = _new_checkpoint_marker()
-    checkpoint.update({"id": marker["id"], "ts": marker["ts"], "channel_values": channel_values})
+    for _attempt in range(3):
+        ckpt_tuple = await _call_checkpointer_method(checkpointer, "aget_tuple", "get_tuple", ckpt_config)
+        checkpoint = copy.deepcopy(getattr(ckpt_tuple, "checkpoint", {}) or {}) if ckpt_tuple is not None else empty_checkpoint()
+        channel_values = dict(checkpoint.get("channel_values", {}) or {})
+        existing_title = channel_values.get("title")
+        if existing_title:
+            return existing_title
 
-    # Bump ``channel_versions["title"]`` and declare the bump in ``new_versions``
-    # so DB-backed savers (SqliteSaver v4 / PostgresSaver) actually persist the
-    # new blob — those savers strip inline ``channel_values`` from ``put`` and
-    # only write blobs for channels listed in ``new_versions``. The legacy
-    # single-table sqlite saver ignores ``new_versions`` and inlines the
-    # snapshot, so this path is correct for both layouts. Mirrors
-    # ``_rollback_to_pre_run_checkpoint`` in the same file.
-    channel_versions = dict(checkpoint.get("channel_versions", {}) or {})
-    next_title_version = _bump_channel_version(checkpointer, channel_versions.get("title"))
-    channel_versions["title"] = next_title_version
-    checkpoint["channel_versions"] = channel_versions
+        result = middleware._generate_title_result(_title_generation_state(channel_values, graph_input), allow_partial_exchange=True)
+        title = result.get("title") if isinstance(result, dict) else None
+        if not title:
+            return None
 
-    metadata = dict(getattr(ckpt_tuple, "metadata", {}) or {})
-    metadata["source"] = "update"
-    prev_step = metadata.get("step")
-    metadata["step"] = (prev_step + 1) if isinstance(prev_step, int) else 1
-    metadata["writes"] = {"runtime_interrupt_title": {"title": title}}
+        base_identity = _checkpoint_identity(ckpt_tuple, checkpoint)
+        latest_tuple = await _call_checkpointer_method(checkpointer, "aget_tuple", "get_tuple", ckpt_config)
+        latest_checkpoint = copy.deepcopy(getattr(latest_tuple, "checkpoint", {}) or {}) if latest_tuple is not None else empty_checkpoint()
+        latest_identity = _checkpoint_identity(latest_tuple, latest_checkpoint)
+        if latest_identity != base_identity:
+            continue
 
-    tuple_config = getattr(ckpt_tuple, "config", {}) or {}
-    tuple_configurable = tuple_config.get("configurable", {}) if isinstance(tuple_config, dict) else {}
-    checkpoint_ns = tuple_configurable.get("checkpoint_ns", "") if isinstance(tuple_configurable, dict) else ""
-    write_config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": checkpoint_ns}}
-    await _call_checkpointer_method(
-        checkpointer,
-        "aput",
-        "put",
-        write_config,
-        checkpoint,
-        metadata,
-        {"title": next_title_version},
-    )
-    return title
+        checkpoint = latest_checkpoint
+        channel_values = dict(checkpoint.get("channel_values", {}) or {})
+        existing_title = channel_values.get("title")
+        if existing_title:
+            return existing_title
+
+        channel_values["title"] = title
+        marker = _new_checkpoint_marker()
+        checkpoint.update({"id": marker["id"], "ts": marker["ts"], "channel_values": channel_values})
+
+        # Bump ``channel_versions["title"]`` and declare the bump in ``new_versions``
+        # so DB-backed savers (SqliteSaver v4 / PostgresSaver) actually persist the
+        # new blob — those savers strip inline ``channel_values`` from ``put`` and
+        # only write blobs for channels listed in ``new_versions``. The legacy
+        # single-table sqlite saver ignores ``new_versions`` and inlines the
+        # snapshot, so this path is correct for both layouts. Mirrors
+        # ``_rollback_to_pre_run_checkpoint`` in the same file.
+        channel_versions = dict(checkpoint.get("channel_versions", {}) or {})
+        next_title_version = _bump_channel_version(checkpointer, channel_versions.get("title"))
+        channel_versions["title"] = next_title_version
+        checkpoint["channel_versions"] = channel_versions
+
+        metadata = dict(getattr(latest_tuple, "metadata", {}) or {})
+        metadata["source"] = "update"
+        prev_step = metadata.get("step")
+        metadata["step"] = (prev_step + 1) if isinstance(prev_step, int) else 1
+        metadata["writes"] = {"runtime_interrupt_title": {"title": title}}
+
+        checkpoint_ns = _checkpoint_namespace(latest_tuple)
+        write_config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": checkpoint_ns}}
+        await _call_checkpointer_method(
+            checkpointer,
+            "aput",
+            "put",
+            write_config,
+            checkpoint,
+            metadata,
+            {"title": next_title_version},
+        )
+        return title
+
+    return None
 
 
 def _lg_mode_to_sse_event(mode: str) -> str:

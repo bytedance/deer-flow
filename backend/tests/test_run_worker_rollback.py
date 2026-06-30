@@ -1,4 +1,5 @@
 import asyncio
+import copy
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, call
@@ -8,7 +9,7 @@ from langchain_core.messages import AIMessage
 from langgraph.checkpoint.base import empty_checkpoint
 from langgraph.checkpoint.memory import InMemorySaver
 
-from deerflow.runtime.runs.manager import RunManager
+from deerflow.runtime.runs.manager import ConflictError, RunManager
 from deerflow.runtime.runs.schemas import RunStatus
 from deerflow.runtime.runs.worker import (
     RunContext,
@@ -704,6 +705,168 @@ class _TitleCheckpointer:
             except ValueError:
                 return f"{current}.1"
         return 1
+
+
+@pytest.mark.anyio
+async def test_interrupted_title_finalization_blocks_new_same_thread_run(monkeypatch):
+    """A cancelled run must remain active while its title-only checkpoint is finalizing."""
+    from deerflow.agents.middlewares.title_middleware import TitleMiddleware
+
+    monkeypatch.setattr(
+        TitleMiddleware,
+        "_generate_title_result",
+        lambda self, state, allow_partial_exchange=False: {"title": "Old Prompt"},
+    )
+
+    initial_checkpoint = {
+        "id": "ckpt-old",
+        "ts": "2026-06-29T00:00:00Z",
+        "channel_values": {"messages": [{"type": "human", "content": "old prompt"}]},
+        "channel_versions": {"messages": 1},
+    }
+
+    class _BlockingTitleCheckpointer:
+        def __init__(self) -> None:
+            self.latest_checkpoint = copy.deepcopy(initial_checkpoint)
+            self.latest_metadata = {"source": "loop", "step": 1}
+            self.title_write_started = asyncio.Event()
+            self.release_title_write = asyncio.Event()
+
+        async def aget_tuple(self, config):
+            del config
+            return _FakeCheckpointTuple(
+                checkpoint=copy.deepcopy(self.latest_checkpoint),
+                metadata=dict(self.latest_metadata),
+                config={
+                    "configurable": {
+                        "thread_id": "thread-1",
+                        "checkpoint_ns": "",
+                        "checkpoint_id": self.latest_checkpoint["id"],
+                    }
+                },
+            )
+
+        async def aput(self, config, checkpoint, metadata, new_versions):
+            del config, new_versions
+            self.title_write_started.set()
+            await self.release_title_write.wait()
+            self.latest_checkpoint = copy.deepcopy(checkpoint)
+            self.latest_metadata = dict(metadata)
+            return {
+                "configurable": {
+                    "thread_id": "thread-1",
+                    "checkpoint_ns": "",
+                    "checkpoint_id": checkpoint["id"],
+                }
+            }
+
+        def get_next_version(self, current, _channel):
+            return (current or 0) + 1
+
+    run_manager = RunManager()
+    record = await run_manager.create("thread-1")
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+    checkpointer = _BlockingTitleCheckpointer()
+
+    class _AbortingAgent:
+        metadata = {"model_name": "fake-test-model"}
+        checkpointer: Any | None = None
+        store: Any | None = None
+        interrupt_before_nodes = None
+        interrupt_after_nodes = None
+
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            del graph_input, config, stream_mode, subgraphs
+            record.abort_event.set()
+            if False:
+                yield  # pragma: no cover
+
+    def factory(*, config):
+        del config
+        return _AbortingAgent()
+
+    task = asyncio.create_task(
+        run_agent(
+            bridge,
+            run_manager,
+            record,
+            ctx=RunContext(checkpointer=checkpointer),
+            agent_factory=factory,
+            graph_input={"messages": [{"role": "user", "content": "old prompt"}]},
+            config={},
+        )
+    )
+    record.task = task
+
+    try:
+        await asyncio.wait_for(checkpointer.title_write_started.wait(), timeout=1.0)
+        with pytest.raises(ConflictError, match="active run"):
+            await run_manager.create_or_reject("thread-1", multitask_strategy="reject")
+    finally:
+        checkpointer.release_title_write.set()
+        await task
+
+    records = await run_manager.list_by_thread("thread-1")
+    assert [item.run_id for item in records] == [record.run_id]
+    assert checkpointer.latest_checkpoint["channel_values"]["messages"] == [{"type": "human", "content": "old prompt"}]
+
+
+@pytest.mark.anyio
+async def test_ensure_interrupted_title_reloads_latest_checkpoint_before_write():
+    """If the checkpoint advances before the title write, preserve the newer messages."""
+    from deerflow.config.title_config import TitleConfig
+
+    old_checkpoint = {
+        "id": "ckpt-old",
+        "ts": "2026-06-29T00:00:00Z",
+        "channel_values": {"messages": [{"type": "human", "content": "Old prompt"}]},
+        "channel_versions": {"messages": 1},
+    }
+    new_messages = [{"type": "human", "content": "New prompt"}]
+    new_checkpoint = {
+        "id": "ckpt-new",
+        "ts": "2026-06-29T00:00:01Z",
+        "channel_values": {"messages": new_messages},
+        "channel_versions": {"messages": 2},
+    }
+
+    class _AdvancingTitleCheckpointer:
+        def __init__(self) -> None:
+            self.read_count = 0
+            self.aput = AsyncMock(return_value={})
+
+        async def aget_tuple(self, config):
+            del config
+            self.read_count += 1
+            checkpoint = old_checkpoint if self.read_count == 1 else new_checkpoint
+            return _FakeCheckpointTuple(
+                checkpoint=copy.deepcopy(checkpoint),
+                metadata={"source": "loop", "step": self.read_count},
+                config={
+                    "configurable": {
+                        "thread_id": "thread-1",
+                        "checkpoint_ns": "",
+                        "checkpoint_id": checkpoint["id"],
+                    }
+                },
+            )
+
+        def get_next_version(self, current, _channel):
+            return (current or 0) + 1
+
+    checkpointer = _AdvancingTitleCheckpointer()
+    app_config = SimpleNamespace(title=TitleConfig(enabled=True, max_chars=40, max_words=20))
+
+    title = await _ensure_interrupted_title(checkpointer=checkpointer, thread_id="thread-1", app_config=app_config)
+
+    assert title == "New prompt"
+    _, written_checkpoint, _, _ = checkpointer.aput.await_args.args
+    assert written_checkpoint["channel_values"]["messages"] == new_messages
+    assert written_checkpoint["channel_values"]["title"] == "New prompt"
 
 
 @pytest.mark.anyio

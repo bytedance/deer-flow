@@ -80,12 +80,14 @@ class _ScriptedAgent:
         title: str,
         answer: str,
         block_after_first_chunk: bool = False,
+        block_before_checkpoint: bool = False,
         write_title: bool = True,
     ) -> None:
         self.controller = controller
         self.title = title
         self.answer = answer
         self.block_after_first_chunk = block_after_first_chunk
+        self.block_before_checkpoint = block_before_checkpoint
         self.write_title = write_title
         self.checkpointer: Any | None = None
         self.store: Any | None = None
@@ -100,6 +102,9 @@ class _ScriptedAgent:
 
         try:
             thread_id = _thread_id_from_config(config)
+            if self.block_before_checkpoint:
+                while not self.controller.release.is_set():
+                    await asyncio.sleep(0.05)
             human_text = _last_human_text(graph_input)
             human = HumanMessage(content=human_text)
             ai = await self.model.ainvoke([human], config=config)
@@ -638,6 +643,62 @@ def test_cancel_interrupt_generates_missing_title_from_checkpoint(isolated_app_w
             headers={"X-CSRF-Token": csrf_token},
         )
         assert cancelled.status_code == 204, cancelled.text
+
+        thread = client.get(f"/api/threads/{thread_id}")
+        assert thread.status_code == 200, thread.text
+        assert thread.json()["values"]["title"] == "Run lifecycle E2E prompt"
+
+        search = client.post("/api/threads/search", json={"limit": 20}, headers={"X-CSRF-Token": csrf_token})
+        assert search.status_code == 200, search.text
+        matching = [item for item in search.json() if item["thread_id"] == thread_id]
+        assert matching[0]["values"]["title"] == "Run lifecycle E2E prompt"
+
+
+def test_stop_stream_generates_title_from_graph_input_before_checkpoint(isolated_app_with_title):
+    """Frontend stop flow should title early cancellations before a useful checkpoint exists."""
+    from starlette.testclient import TestClient
+
+    controller = _RunController()
+    factory = _make_agent_factory(
+        controller,
+        title="",
+        answer="This answer should never be checkpointed.",
+        block_before_checkpoint=True,
+        write_title=False,
+    )
+
+    with (
+        patch("app.gateway.services.resolve_agent_factory", return_value=factory),
+        TestClient(isolated_app_with_title) as client,
+    ):
+        csrf_token = _register_user(client, email="interrupt-title-early-e2e@example.com")
+        thread_id = _create_thread(client, csrf_token)
+
+        created = client.post(
+            f"/api/threads/{thread_id}/runs",
+            json=_run_body(),
+            headers={"X-CSRF-Token": csrf_token},
+        )
+        assert created.status_code == 200, created.text
+        run_id = created.json()["run_id"]
+        assert controller.started.wait(5), "fake agent never started"
+        assert not controller.checkpoint_written.is_set()
+
+        with client.stream(
+            "POST",
+            f"/api/threads/{thread_id}/runs/{run_id}/stream?action=interrupt",
+            headers={"X-CSRF-Token": csrf_token},
+        ) as response:
+            assert response.status_code == 200, response.read().decode()
+            transcript = _drain_stream(response, timeout=10.0)
+
+        events = _parse_sse(transcript)
+        assert events[-1]["event"] == "end"
+        assert controller.cancelled.wait(5), "fake agent task was not cancelled"
+        assert not controller.checkpoint_written.is_set()
+
+        run = _wait_for_status(client, thread_id, run_id, "interrupted")
+        assert run["status"] == "interrupted"
 
         thread = client.get(f"/api/threads/{thread_id}")
         assert thread.status_code == 200, thread.text
