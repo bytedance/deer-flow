@@ -19,7 +19,6 @@ _LEDGER_ENTRY_RESULT_RENDER_CAP = 120
 _TASK_SUCCESS_PREFIX = "Task Succeeded. Result:"
 _TASK_FAILED_PREFIX = "Task failed. Error:"
 _TASK_TIMED_OUT_PREFIX = "Task timed out. Error:"
-_TASK_POLLING_TIMED_OUT_PREFIX = "Task polling timed out"
 
 
 def _utc_now_iso() -> str:
