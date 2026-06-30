@@ -170,9 +170,10 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
             user_msg = self._get_title_user_message(state)
             return {"title": self._fallback_title(user_msg)}
 
-        prompt, user_msg = self._build_title_prompt(state)
+        user_msg = self._get_title_user_message(state)
 
         try:
+            prompt, user_msg = self._build_title_prompt(state)
             # attach_tracing=False because ``_get_runnable_config()`` inherits
             # the graph-level RunnableConfig (set in ``_make_lead_agent``) whose
             # callbacks already carry tracing handlers; binding them again at

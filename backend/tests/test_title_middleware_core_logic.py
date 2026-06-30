@@ -263,6 +263,24 @@ class TestTitleMiddlewareCoreLogic:
         assert result == {"title": "默认标题路径不应读取模型 prompt"}
         create_chat_model.assert_not_called()
 
+    def test_async_title_model_falls_back_when_prompt_template_is_invalid(self, monkeypatch):
+        """Opt-in LLM title generation still degrades locally on template errors."""
+        _set_test_title_config(max_chars=20, model_name="title-model", prompt_template="{usr_msg}")
+        middleware = TitleMiddleware()
+        create_chat_model = MagicMock()
+        monkeypatch.setattr(title_middleware_module, "create_chat_model", create_chat_model)
+
+        state = {
+            "messages": [
+                HumanMessage(content="请帮我写测试"),
+                AIMessage(content="好的"),
+            ]
+        }
+        result = asyncio.run(middleware._agenerate_title_result(state))
+
+        assert result == {"title": "请帮我写测试"}
+        create_chat_model.assert_not_called()
+
     def test_after_model_sync_delegates_to_sync_helper(self, monkeypatch):
         middleware = TitleMiddleware()
 
