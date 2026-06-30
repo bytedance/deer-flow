@@ -1,0 +1,12 @@
+{
+  "font": {
+    "title": {"name": "宋体", "size": 18, "bold": true, "color": "#000000"},
+    "section": {"name": "宋体", "size": 14, "bold": true, "color": "#000000"},
+    "report": {"name": "宋体", "size": 12, "bold": true, "color": "#000000"},
+    "body": {"name": "宋体", "size": 11, "bold": false, "color": "#000000"}
+  },
+  "page": {
+    "orientation": "landscape",
+    "margins_cm": {"top": 2.0, "bottom": 2.0, "left": 1.5, "right": 1.5}
+  }
+}
