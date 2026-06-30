@@ -16,6 +16,8 @@ from deerflow.config.paths import get_paths
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.sandbox.sandbox_provider import SandboxProvider, get_sandbox_provider
 from deerflow.uploads.manager import (
+    UPLOAD_STAGING_PREFIX,
+    UPLOAD_STAGING_SUFFIX,
     PathTraversalError,
     UnsafeUploadPathError,
     claim_unique_filename,
@@ -177,7 +179,7 @@ async def _write_upload_file_with_limits(
     file_size = 0
     uploads_dir_path = Path(uploads_dir)
     file_path = validate_upload_destination(uploads_dir_path, display_filename)
-    temp_fd, temp_path_str = tempfile.mkstemp(prefix=".upload-", suffix=".part", dir=uploads_dir_path)
+    temp_fd, temp_path_str = tempfile.mkstemp(prefix=UPLOAD_STAGING_PREFIX, suffix=UPLOAD_STAGING_SUFFIX, dir=uploads_dir_path)
     temp_path = Path(temp_path_str)
     fh = os.fdopen(temp_fd, "wb")
     try:
