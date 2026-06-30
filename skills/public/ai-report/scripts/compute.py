@@ -115,3 +115,137 @@ def assemble_wide(metric_facts: list[dict], run_id: str, table_id: str) -> list[
     ).fetchall()
     cols = [d[0] for d in conn.description]
     return [dict(zip(cols, r)) for r in rows]
+
+
+# ---------- validate (5 layers) ---------- #
+
+@dataclass
+class ValidationResult:
+    passed: bool
+    layer: str  # "all" if passed; else "explain" | "from_wide" | "branch_num" | "smoke" | "columns" | "example"
+    error: str | None = None
+
+
+def decimal_isclose(a: Decimal, b: Decimal, rel_tol: Decimal = Decimal("1e-3")) -> bool:
+    """Decimal-only approximate equality (replaces math.isclose for banking precision).
+
+    |a - b| <= rel_tol * |b|. Zero corner: a == b returns True (rel_tol * 0 is 0).
+    """
+    a, b = Decimal(a), Decimal(b)
+    if a == b:
+        return True
+    return abs(a - b) <= rel_tol * abs(b)
+
+
+def validate(
+    conn: duckdb.DuckDBPyConnection,
+    sql: str,
+    wide_sample_rows: list[dict],
+    expected_columns: list[str],
+    example_input: dict | None,
+    example_expected: Decimal | None,
+) -> ValidationResult:
+    """5-layer validation. 无 keyword blacklist (Phase 1 政策).
+
+    conn: caller-provided DuckDB connection (typically Store.conn).
+
+    Layer order:
+    1. EXPLAIN (catches syntax/semantic errors on a stub table)
+    2. FROM wide text check (cheap, no DB action)
+    3. BRANCH_NUM text check (cheap, no DB action)
+    4. smoke (SAMPLE 3 ROWS on real sample rows)
+    5. example (Decimal precision check on one row)
+
+    Why stub for EXPLAIN: DuckDB EXPLAIN resolves table references. Without a
+    stub `wide` table, EXPLAIN fails on missing-table for SQL that passes text
+    checks (e.g. `SELECT branch_num, 1 AS x FROM wide`). Stub ensures EXPLAIN
+    only catches actual SQL-level errors.
+    """
+    stub_created = False
+    try:
+        # Pre-create stub wide for EXPLAIN (idempotent; ignore if already exists)
+        try:
+            conn.execute("CREATE TEMP TABLE _validate_wide_stub (branch_num VARCHAR)")
+            stub_created = True
+        except Exception:
+            pass
+
+        # 第 1 层: EXPLAIN (with wide → stub)
+        explain_sql = sql.replace("FROM wide", "FROM _validate_wide_stub").replace(
+            "from wide", "from _validate_wide_stub"
+        )
+        try:
+            conn.execute(f"EXPLAIN {explain_sql}")
+        except Exception as e:
+            return ValidationResult(False, "explain", str(e))
+
+        # 第 2 层: FROM wide
+        upper = sql.upper()
+        if "FROM WIDE" not in upper:
+            return ValidationResult(False, "from_wide", "SQL must contain 'FROM wide'")
+
+        # 第 3 层: branch_num
+        if "BRANCH_NUM" not in upper:
+            return ValidationResult(False, "branch_num", "SQL must SELECT branch_num")
+
+        # 建 TEMP TABLE wide_validate, 灌入 sample rows
+        if wide_sample_rows:
+            cols = list(wide_sample_rows[0].keys())
+            col_defs = ", ".join(f'"{c}" VARCHAR' for c in cols)
+            conn.execute(f"CREATE TEMP TABLE wide_validate ({col_defs})")
+            for row in wide_sample_rows:
+                conn.execute(
+                    f"INSERT INTO wide_validate VALUES ({', '.join(['?'] * len(cols))})",
+                    [str(row.get(c, "")) for c in cols],
+                )
+        else:
+            conn.execute("CREATE TEMP TABLE wide_validate (branch_num VARCHAR)")
+
+        # 隔离 caller schema: wide → wide_validate
+        exec_sql = sql.replace("FROM wide", "FROM wide_validate").replace(
+            "from wide", "from wide_validate"
+        )
+
+        # 第 4 层: smoke (SAMPLE 3 ROWS)
+        try:
+            smoke_sql = f"SELECT * FROM ({exec_sql}) USING SAMPLE 3 ROWS"
+            result = conn.execute(smoke_sql).fetchall()
+            if not result:
+                return ValidationResult(False, "smoke", "SAMPLE 3 ROWS returned no rows")
+        except Exception as e:
+            return ValidationResult(False, "smoke", str(e))
+
+        # 第 4.5 层: 输出列 ⊇ expected_columns
+        if expected_columns:
+            cols_returned = [d[0] for d in conn.description]
+            missing = [c for c in expected_columns[1:] if c not in cols_returned]
+            if missing:
+                return ValidationResult(False, "columns", f"missing output columns: {missing}")
+
+        # 第 5 层: example (Decimal 精度)
+        if example_input is not None and example_expected is not None:
+            try:
+                target_branch = example_input.get("branch_num", "")
+                row = conn.execute(
+                    f"SELECT * FROM ({exec_sql}) WHERE branch_num=? LIMIT 1", [target_branch]
+                ).fetchone()
+                if not row:
+                    return ValidationResult(False, "example", f"no row for branch_num={target_branch}")
+                actual = row[1] if len(row) > 1 else None
+                if actual is None:
+                    return ValidationResult(False, "example", "actual value is None")
+                actual_d = Decimal(str(actual))
+                expected_d = Decimal(str(example_expected))
+                if not decimal_isclose(actual_d, expected_d):
+                    return ValidationResult(False, "example", f"expected {expected_d}, got {actual_d}")
+            except Exception as e:
+                return ValidationResult(False, "example", str(e))
+
+        return ValidationResult(True, "all", None)
+    finally:
+        # 清理 TEMP TABLEs (避免 store.conn 长生命周期泄漏)
+        for t in ("wide_validate", "_validate_wide_stub"):
+            try:
+                conn.execute(f"DROP TABLE IF EXISTS {t}")
+            except Exception:
+                pass

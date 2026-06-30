@@ -4,9 +4,18 @@ from __future__ import annotations
 
 from decimal import Decimal
 
+import duckdb
 import pytest
 
-from compute import ComputeIR, assemble_wide, extract_ir, reset_conn_for_tests
+from compute import (
+    ComputeIR,
+    ValidationResult,
+    assemble_wide,
+    decimal_isclose,
+    extract_ir,
+    reset_conn_for_tests,
+    validate,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -128,3 +137,78 @@ def test_assemble_wide_branch_set_is_complete():
     ]
     wide = assemble_wide(facts, run_id="r1", table_id="t1")
     assert {r["branch_num"] for r in wide} == {"1", "2", "3"}
+
+
+# ---- task 9: validate (5 layers) ---- #
+
+@pytest.fixture
+def conn():
+    """Per-test :memory: DuckDB conn (no module-level state for validate)."""
+    c = duckdb.connect(":memory:")
+    yield c
+    c.close()
+
+
+def test_validate_explain_fails_on_broken_sql(conn):
+    res = validate(conn, "SELECT * FORM wide", [], ["branch_num"], None, None)
+    assert res.passed is False
+    assert res.layer == "explain"
+
+
+def test_validate_from_wide_fails_when_no_from_wide(conn):
+    res = validate(conn, "SELECT 1 AS x", [{"branch_num": "1"}], ["branch_num", "x"], None, None)
+    assert res.passed is False
+    assert res.layer == "from_wide"
+
+
+def test_validate_branch_num_fails_when_no_branch_num(conn):
+    res = validate(conn, "SELECT 1 AS x FROM wide", [{"branch_num": "1"}], ["x"], None, None)
+    assert res.passed is False
+    assert res.layer == "branch_num"
+
+
+def test_validate_smoke_passes_on_simple_select(conn):
+    res = validate(
+        conn,
+        "SELECT branch_num, 1 AS x FROM wide",
+        [{"branch_num": "1"}, {"branch_num": "2"}, {"branch_num": "3"}],
+        ["branch_num", "x"],
+        None, None,
+    )
+    assert res.passed is True
+    assert res.layer == "all"
+
+
+def test_validate_example_passes_when_close(conn):
+    """Example comparison uses Decimal precision (banking requirement)."""
+    res = validate(
+        conn,
+        "SELECT branch_num, 2.0 AS x FROM wide",
+        [{"branch_num": "1"}],
+        ["branch_num", "x"],
+        example_input={"branch_num": "1"},
+        example_expected=Decimal("2.0"),
+    )
+    assert res.passed is True
+    assert res.layer == "all"
+
+
+def test_validate_example_fails_when_far(conn):
+    res = validate(
+        conn,
+        "SELECT branch_num, 5.0 AS x FROM wide",
+        [{"branch_num": "1"}],
+        ["branch_num", "x"],
+        example_input={"branch_num": "1"},
+        example_expected=Decimal("2.0"),
+    )
+    assert res.passed is False
+    assert res.layer == "example"
+
+
+def test_decimal_isclose_helper():
+    """Unit test for the precision helper used by validate's example layer."""
+    assert decimal_isclose(Decimal("2.0"), Decimal("2.0"))
+    assert decimal_isclose(Decimal("2.0"), Decimal("2.0001"), rel_tol=Decimal("0.001"))
+    assert not decimal_isclose(Decimal("2.0"), Decimal("5.0"))
+    assert decimal_isclose(Decimal("0"), Decimal("0"))  # zero corner case
