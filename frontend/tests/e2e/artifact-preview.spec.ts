@@ -262,16 +262,16 @@ test.describe("Artifact preview stability", () => {
     ).toBeVisible();
   });
 
-  test("shows the title for a presented artifact missing from thread artifacts", async ({
+  test("keeps an opened presented artifact in the header dropdown", async ({
     page,
   }) => {
     mockLangGraphAPI(page, {
       threads: [
         {
           thread_id: PRESENTED_THREAD_ID,
-          title: "Presented artifact title fallback",
+          title: "Presented artifact dropdown history",
           messages: presentFilesMessages(),
-          artifacts: [],
+          artifacts: [MARKDOWN_ARTIFACT_PATH],
         },
       ],
     });
@@ -282,6 +282,15 @@ test.describe("Artifact preview stability", () => {
           status: 200,
           contentType: "text/markdown",
           body: "# Presented Report\n\nGenerated content",
+        }),
+    );
+    await page.route(
+      `**/api/threads/${PRESENTED_THREAD_ID}/artifacts/artifact-fixtures/report.md`,
+      (route) =>
+        route.fulfill({
+          status: 200,
+          contentType: "text/markdown",
+          body: "# Thread Report\n\nTracked artifact content",
         }),
     );
 
@@ -295,11 +304,20 @@ test.describe("Artifact preview stability", () => {
 
     const artifactsPanel = page.locator("#artifacts");
 
-    // 1. Header title should fall back to the current filepath even though
-    //    thread.values.artifacts is empty.
     await expect(artifactsPanel.getByText("presented-report.md")).toBeVisible();
+    await expect(artifactsPanel.getByText("Presented Report")).toBeVisible();
 
-    // 2. Preview content should still render correctly.
+    const artifactSelect = artifactsPanel.getByRole("combobox");
+    await artifactSelect.click();
+    await page.getByRole("option", { name: "report.md", exact: true }).click();
+    await expect(artifactsPanel.getByText("Thread Report")).toBeVisible();
+
+    await artifactSelect.click();
+    const presentedOption = page.getByRole("option", {
+      name: "presented-report.md",
+    });
+    await expect(presentedOption).toBeVisible();
+    await presentedOption.click();
     await expect(artifactsPanel.getByText("Presented Report")).toBeVisible();
   });
 });

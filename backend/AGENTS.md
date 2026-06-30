@@ -207,8 +207,8 @@ Lead-agent middlewares are assembled in strict order across three functions: the
 
 1. **InputSanitizationMiddleware** - First, so it is the outermost `wrap_model_call` wrapper; every inner middleware (including LLM retries) sees sanitized messages
 2. **ToolOutputBudgetMiddleware** - Caps tool output size (per app config) before it re-enters the model context
-3. **UploadsMiddleware** - Tracks and injects newly uploaded files into conversation (lead agent only)
-4. **ThreadDataMiddleware** - Creates per-thread directories under the user's isolation scope (`backend/.deer-flow/users/{user_id}/threads/{thread_id}/user-data/{workspace,uploads,outputs}`); resolves `user_id` via `get_effective_user_id()` (falls back to `"default"` in no-auth mode)
+3. **ThreadDataMiddleware** - Creates per-thread directories under the user's isolation scope (`backend/.deer-flow/users/{user_id}/threads/{thread_id}/user-data/{workspace,uploads,outputs}`); resolves `user_id` via `get_effective_user_id()` (falls back to `"default"` in no-auth mode)
+4. **UploadsMiddleware** - Tracks and injects newly uploaded files into conversation (lead agent only)
 5. **SandboxMiddleware** - Acquires sandbox, stores `sandbox_id` in state
 6. **DanglingToolCallMiddleware** - Injects placeholder ToolMessages for AIMessage tool_calls that lack responses (e.g., user interruption), preserving raw provider tool-call payloads in `additional_kwargs["tool_calls"]`
 7. **LLMErrorHandlingMiddleware** - Normalizes provider/model invocation failures into recoverable assistant-facing errors before later stages run
@@ -315,7 +315,7 @@ Proxied through nginx: `/api/langgraph/*` → Gateway LangGraph-compatible runti
 - Detection: `is_local_sandbox()` accepts both `sandbox_id == "local"` (legacy / no-thread) and `sandbox_id.startswith("local:")` (per-thread)
 
 **Sandbox Tools** (in `packages/harness/deerflow/sandbox/tools.py`):
-- `bash` - Execute commands with path translation and error handling
+- `bash` - Execute commands with path translation and error handling. For `LocalSandbox` (host bash), POSIX output is captured through bounded pipe-drain threads and stdin is `/dev/null`, so a backgrounded long-lived process (`server &`) returns immediately instead of blocking the turn on an inherited pipe, while unredirected background output is drained without growing anonymous temp files. Commands that read stdin get immediate EOF. The command runs in its own process group with a wall-clock timeout (`sandbox.bash_command_timeout`, default 600s); on timeout the whole group is killed and the agent gets a notice telling it to background long-lived processes. The bash tool description itself also instructs the model to background long-lived processes (e.g. servers) up front so it doesn't waste the turn waiting on a foreground server. See `LocalSandbox.execute_command` / `_run_posix_command` and `bash_tool`'s docstring.
 - `ls` - Directory listing (tree format, max 2 levels)
 - `read_file` - Read file contents with optional line range
 - `write_file` - Write/append to files, creates directories; overwrites by default and exposes the `append` argument in the model-facing schema for end-of-file writes
