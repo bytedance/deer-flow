@@ -13,6 +13,7 @@ interface ChartScreenshotState {
   addCapture: (threadId: string, dataUrl: string, filename: string) => void;
   getUploadedPaths: (threadId: string) => string[];
   clear: (threadId: string) => void;
+  clearAll: () => void;
   _setUploaded: (threadId: string, paths: string[]) => void;
 }
 
@@ -36,6 +37,8 @@ export const useChartScreenshotStore = create<ChartScreenshotState>(
         nextUploaded.delete(threadId);
         return { pending: nextPending, uploaded: nextUploaded };
       }),
+    clearAll: () =>
+      set({ pending: new Map(), uploaded: new Map() }),
     _setUploaded: (threadId, paths) =>
       set((state) => {
         const nextUploaded = new Map(state.uploaded);

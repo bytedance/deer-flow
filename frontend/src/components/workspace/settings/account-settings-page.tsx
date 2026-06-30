@@ -39,7 +39,7 @@ export function AccountSettingsPage() {
         <Button
           variant="destructive"
           size="sm"
-          onClick={logout}
+          onClick={() => void logout()}
           className="gap-2"
         >
           <LogOutIcon className="size-4" />

@@ -89,8 +89,10 @@ async def logout(request: Request, response: Response):
     from app.gateway.csrf_middleware import is_secure_request
 
     is_https = is_secure_request(request)
-    response.delete_cookie(key="access_token", secure=is_https, samesite="lax")
-    response.delete_cookie(key="refresh_token", secure=is_https, samesite="lax")
+    # Must match the samesite value used when setting the cookie (see _set_session_cookie)
+    samesite = "none" if is_https else "lax"
+    response.delete_cookie(key="access_token", secure=is_https, samesite=samesite)
+    response.delete_cookie(key="refresh_token", secure=is_https, samesite=samesite)
     return MessageResponse(message="Successfully logged out")
 
 
@@ -128,8 +130,9 @@ async def refresh(request: Request, response: Response):
         from app.gateway.csrf_middleware import is_secure_request
 
         is_https = is_secure_request(request)
-        response.delete_cookie(key="access_token", secure=is_https, samesite="lax")
-        response.delete_cookie(key="refresh_token", secure=is_https, samesite="lax")
+        samesite = "none" if is_https else "lax"
+        response.delete_cookie(key="access_token", secure=is_https, samesite=samesite)
+        response.delete_cookie(key="refresh_token", secure=is_https, samesite=samesite)
         raise HTTPException(
             status_code=401,
             detail=AuthErrorResponse(

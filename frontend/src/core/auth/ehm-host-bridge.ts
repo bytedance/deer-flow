@@ -7,12 +7,15 @@ const AI_INIT = "AI_INIT";
 const AI_TOKEN_REFRESH = "AI_TOKEN_REFRESH";
 const AI_ROUTE_SYNC = "AI_ROUTE_SYNC";
 const AI_VIEWPORT_RESUME = "AI_VIEWPORT_RESUME";
+const AI_LOGOUT = "AI_LOGOUT";
 const MAX_HOST_TOKEN_AGE_MS = 24 * 60 * 60 * 1000;
 const HOST_TOKEN_REQUEST_TIMEOUT_MS = 5000;
 const HOST_BRIDGE_LOG_PREFIX = "[EHM Host Bridge]";
 export const EHM_SESSION_RECOVERED_EVENT = "ehm:session-recovered";
 export const EHM_ROUTE_SYNC_EVENT = "ehm:route-sync";
 export const EHM_VIEWPORT_RESUME_EVENT = "ehm:viewport-resume";
+export const EHM_LOGOUT_EVENT = "ehm:logout";
+export const EHM_AUTH_SUCCESS_EVENT = "ehm:auth-success";
 
 type HostBridgePayload = {
   type?: string;
@@ -133,6 +136,7 @@ let started = false;
 let hostBridgeCleanup: (() => void) | null = null;
 let pendingHostTokenResolver: ((received: boolean) => void) | null = null;
 let pendingHostTokenTimeout: ReturnType<typeof setTimeout> | null = null;
+let currentUserId: string | null = null;
 
 function resolveLoginRecoveryTarget(): string {
   if (typeof window === "undefined") return "/workspace";
@@ -158,11 +162,26 @@ async function handleTokenRefresh(payload: HostBridgePayload) {
     normalizeToken(payload.ehmToken) ||
     normalizeToken(payload.token?.accessToken);
   const issuedAt = normalizeIssuedAt(payload.issuedAt) || Date.now();
+  const userId =
+    typeof payload.token?.userId === "string" ? payload.token.userId : null;
 
   if (!ehmToken) {
     console.warn(HOST_BRIDGE_LOG_PREFIX, "no token found in payload");
     return;
   }
+
+  // Detect account switch by userId change — reset token tracking
+  if (userId !== null && currentUserId !== null && userId !== currentUserId) {
+    console.info(HOST_BRIDGE_LOG_PREFIX, "userId changed, resetting token tracking", {
+      oldUserId: currentUserId,
+      newUserId: userId,
+    });
+    latestIssuedAt = 0;
+  }
+  if (userId !== null) {
+    currentUserId = userId;
+  }
+
   if (issuedAt < latestIssuedAt) return;
   if (latestIssuedAt > 0 && issuedAt - latestIssuedAt > MAX_HOST_TOKEN_AGE_MS) return;
 
@@ -180,6 +199,14 @@ async function handleTokenRefresh(payload: HostBridgePayload) {
     emitSessionRecovered(
       payload.type === AI_INIT ? "host-init" : "host-bridge",
     );
+    // Notify AuthProvider to refresh user state after successful auth
+    if (typeof window !== "undefined") {
+      window.dispatchEvent(
+        new CustomEvent(EHM_AUTH_SUCCESS_EVENT, {
+          detail: { userId, issuedAt },
+        }),
+      );
+    }
   }
   if (pendingHostTokenResolver) {
     pendingHostTokenResolver(authenticated);
@@ -199,6 +226,9 @@ async function handleTokenRefresh(payload: HostBridgePayload) {
 function handleInit(payload: HostBridgePayload) {
   const ehmToken = normalizeToken(payload.token?.accessToken);
   if (!ehmToken) return;
+  // AI_INIT means a brand new session (e.g., account switch) — reset token tracking
+  latestIssuedAt = 0;
+  currentUserId = null;
   const issuedAt = Date.now();
   void handleTokenRefresh({
     type: AI_TOKEN_REFRESH,
@@ -274,6 +304,16 @@ export function startEhmHostBridge() {
         reason: typeof payload.reason === "string" ? payload.reason : undefined,
         issuedAt: normalizeIssuedAt(payload.issuedAt) || Date.now(),
       });
+    }
+
+    if (payload.type === AI_LOGOUT) {
+      console.info(HOST_BRIDGE_LOG_PREFIX, "message AI_LOGOUT received", {
+        path: window.location.pathname,
+      });
+      // Reset token tracking so the next account's token is accepted
+      latestIssuedAt = 0;
+      currentUserId = null;
+      window.dispatchEvent(new CustomEvent(EHM_LOGOUT_EVENT));
     }
   };
 

@@ -11,7 +11,13 @@ import React, {
 } from "react";
 
 import { queryClient } from "@/components/query-client-provider";
+import { useBlockStore } from "@/core/genui/store";
+import { useChartScreenshotStore } from "@/core/genui/chart-screenshots";
 import { setCurrentTenantId } from "@/core/tenant/store";
+import {
+  EHM_AUTH_SUCCESS_EVENT,
+  EHM_LOGOUT_EVENT,
+} from "@/core/auth/ehm-host-bridge";
 
 import { type User, buildLoginUrl } from "./types";
 
@@ -25,7 +31,7 @@ interface AuthContextType {
   user: User | null;
   isAuthenticated: boolean;
   isLoading: boolean;
-  logout: () => Promise<void>;
+  logout: (options?: { skipNavigation?: boolean }) => Promise<void>;
   refreshUser: () => Promise<void>;
 }
 
@@ -96,22 +102,36 @@ export function AuthProvider({ children, initialUser }: AuthProviderProps) {
   /**
    * Logout - call FastAPI logout endpoint
    * Per RFC-001: Immediately clear local state, don't wait for server confirmation
+   *
+   * Note: When triggered by EHM host (AI_LOGOUT), we don't navigate — EHM controls the flow.
+   * When triggered by user clicking logout button, we navigate to home.
    */
-  const logout = useCallback(async () => {
-    setUser(null);
-    queryClient.clear();
+  const logout = useCallback(
+    async (options?: { skipNavigation?: boolean }) => {
+      // Clear authentication state
+      setUser(null);
+      queryClient.clear();
 
-    try {
-      await fetch("/api/v1/auth/logout", {
-        method: "POST",
-        credentials: "include",
-      });
-    } catch (err) {
-      console.error("Logout request failed:", err);
-    }
+      // Clear all frontend state stores to prevent UI leakage between accounts
+      useBlockStore.getState().reset();
+      useChartScreenshotStore.getState().clearAll();
 
-    router.push("/");
-  }, [router]);
+      try {
+        await fetch("/api/v1/auth/logout", {
+          method: "POST",
+          credentials: "include",
+        });
+      } catch (err) {
+        console.error("Logout request failed:", err);
+      }
+
+      // Only navigate if not triggered by EHM host
+      if (!options?.skipNavigation) {
+        router.push("/");
+      }
+    },
+    [router],
+  );
 
   /**
    * Handle visibility change - refresh user when tab becomes visible again.
@@ -133,6 +153,40 @@ export function AuthProvider({ children, initialUser }: AuthProviderProps) {
       document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
   }, [user, refreshUser]);
+
+  /**
+   * Handle EHM host logout — when embedded in EHM iframe and EHM logs out,
+   * EHM sends an AI_LOGOUT postMessage to the iframe. The host bridge
+   * dispatches this custom event so we can sync the logout.
+   *
+   * We pass skipNavigation: true because EHM controls the navigation flow
+   * (it will send AI_INIT with the new account's token after logout).
+   */
+  useEffect(() => {
+    const handleEhmLogout = () => {
+      console.info("[AuthProvider] EHM logout received, clearing session");
+      void logout({ skipNavigation: true });
+    };
+    window.addEventListener(EHM_LOGOUT_EVENT, handleEhmLogout);
+    return () => {
+      window.removeEventListener(EHM_LOGOUT_EVENT, handleEhmLogout);
+    };
+  }, [logout]);
+
+  /**
+   * Handle EHM auth success — after reauthenticateWithEhmToken succeeds,
+   * refresh the user state so the UI shows the new account.
+   */
+  useEffect(() => {
+    const handleEhmAuthSuccess = () => {
+      console.info("[AuthProvider] EHM auth success, refreshing user");
+      void refreshUser();
+    };
+    window.addEventListener(EHM_AUTH_SUCCESS_EVENT, handleEhmAuthSuccess);
+    return () => {
+      window.removeEventListener(EHM_AUTH_SUCCESS_EVENT, handleEhmAuthSuccess);
+    };
+  }, [refreshUser]);
 
   const value: AuthContextType = {
     user,
