@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import json as _json
 import uuid
 from pathlib import Path
 
@@ -9,20 +10,32 @@ import duckdb
 
 DEFAULT_DB_PATH = "/mnt/ai-report-data/duckdb/ai-report.duckdb"
 
+# JSON columns auto-decoded by list_approved_tables (so callers get Python objects, not raw strings).
+_JSON_COLUMNS = ("wide_table", "computed_columns", "descriptions", "sentinels")
+
 
 class Store:
     def __init__(self, db_path: str = DEFAULT_DB_PATH):
         self._db_path = db_path
         self._conn: duckdb.DuckDBPyConnection | None = None
 
+    def __enter__(self) -> "Store":
+        self.open()
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.close()
+
     def open(self) -> None:
         Path(self._db_path).parent.mkdir(parents=True, exist_ok=True)
         self._conn = duckdb.connect(self._db_path)
 
     def close(self) -> None:
-        if self._conn:
-            self._conn.close()
-            self._conn = None
+        if self._conn is not None:
+            try:
+                self._conn.close()
+            finally:
+                self._conn = None
 
     @property
     def conn(self) -> duckdb.DuckDBPyConnection:
@@ -71,7 +84,9 @@ def upsert_section(self, report_id: str, section_order: int, section_title: str)
     self.conn.execute(
         """INSERT INTO report_sections (section_id, schema_version, report_id, section_order, section_title)
            VALUES (?, 1, ?, ?, ?)
-           ON CONFLICT (section_id) DO UPDATE SET section_title=excluded.section_title""",
+           ON CONFLICT (section_id) DO UPDATE SET
+             section_title=excluded.section_title,
+             updated_at=now()""",
         [section_id, report_id, section_order, section_title],
     )
     return section_id
@@ -82,7 +97,6 @@ def upsert_table(
     source_md_snapshot: str, source_md_hash: str, parsed_payload: dict,
 ) -> str:
     table_id = make_table_id(section_id, table_order)
-    import json as _json
     self.conn.execute(
         """INSERT INTO report_tables
            (table_id, schema_version, report_id, section_id, table_order, table_title,
@@ -117,21 +131,27 @@ def get_table(self, table_id: str) -> dict | None:
 
 
 def insert_metric_facts(self, run_id: str, table_id: str, report_id: str, facts: list[dict]) -> None:
-    for f in facts:
-        self.conn.execute(
-            """INSERT INTO metric_facts
-               (run_id, schema_version, table_id, report_id, branch_num, branch_short_name,
-                idx_id, period_alias, period_value, raw_value, numeric_value, status, error_message)
-               VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-               ON CONFLICT DO NOTHING""",
-            [
-                run_id, table_id, report_id,
-                f.get("branch_num", ""), f.get("branch_short_name"),
-                f.get("idx_id", ""), f.get("period_alias", ""), f.get("period_value"),
-                f.get("raw_value"), f.get("numeric_value"),
-                f.get("status", "ok"), f.get("error_message"),
-            ],
-        )
+    """Batch insert via executemany (one round-trip for N facts)."""
+    if not facts:
+        return
+    rows = [
+        [
+            run_id, table_id, report_id,
+            f.get("branch_num", ""), f.get("branch_short_name"),
+            f.get("idx_id", ""), f.get("period_alias", ""), f.get("period_value"),
+            f.get("raw_value"), f.get("numeric_value"),
+            f.get("status", "ok"), f.get("error_message"),
+        ]
+        for f in facts
+    ]
+    self.conn.executemany(
+        """INSERT INTO metric_facts
+           (run_id, schema_version, table_id, report_id, branch_num, branch_short_name,
+            idx_id, period_alias, period_value, raw_value, numeric_value, status, error_message)
+           VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT DO NOTHING""",
+        rows,
+    )
 
 
 def get_metric_facts(self, run_id: str, table_id: str) -> list[dict]:
@@ -148,7 +168,6 @@ def save_approved_run(
     wide_table: list, computed_columns: list, descriptions: list, status: str,
     sentinels: list, runlog_markdown: str, design_md_path: str,
 ) -> None:
-    import json as _json
     # Phase 1 fix: UPDATE report_tables BEFORE INSERT into approved_table_runs.
     # DuckDB 1.5.2 raises FK violation on any UPDATE of a parent row that has
     # existing children, even when the FK column is not changing. So we must
@@ -188,7 +207,14 @@ def list_approved_tables(self, report_id: str) -> list[dict]:
         [report_id],
     ).fetchall()
     cols = [d[0] for d in self.conn.description]
-    return [dict(zip(cols, r)) for r in rows]
+    out: list[dict] = []
+    for r in rows:
+        d = dict(zip(cols, r))
+        for jc in _JSON_COLUMNS:
+            if jc in d and isinstance(d[jc], str):
+                d[jc] = _json.loads(d[jc])
+        out.append(d)
+    return out
 
 
 def get_approved_run(self, table_id: str) -> dict | None:
@@ -230,6 +256,9 @@ Store.get_approved_run = get_approved_run
 Store.list_tables_by_section = list_tables_by_section
 
 
+# TIMESTAMPTZ (UTC) instead of naive TIMESTAMP — survives server timezone drift.
+# now() consistent across DEFAULT clauses and ON CONFLICT DO UPDATE SET clauses
+# (DuckDB 1.5.2 treats bare `current_timestamp` in ON CONFLICT as a column ref).
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS reports (
   report_id        TEXT PRIMARY KEY,
@@ -237,8 +266,8 @@ CREATE TABLE IF NOT EXISTS reports (
   report_title     TEXT NOT NULL,
   source_md_path   TEXT NOT NULL,
   source_md_hash   TEXT NOT NULL,
-  created_at       TIMESTAMP NOT NULL DEFAULT current_timestamp,
-  updated_at       TIMESTAMP NOT NULL DEFAULT current_timestamp
+  created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE TABLE IF NOT EXISTS report_sections (
@@ -247,7 +276,8 @@ CREATE TABLE IF NOT EXISTS report_sections (
   report_id        TEXT NOT NULL REFERENCES reports(report_id),
   section_order    INTEGER NOT NULL,
   section_title    TEXT NOT NULL,
-  created_at       TIMESTAMP NOT NULL DEFAULT current_timestamp,
+  created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
   UNIQUE(report_id, section_order)
 );
 
@@ -264,8 +294,8 @@ CREATE TABLE IF NOT EXISTS report_tables (
   source_md_hash        TEXT NOT NULL,
   parsed_payload        JSON NOT NULL,
   last_design_run_id    TEXT,
-  created_at            TIMESTAMP NOT NULL DEFAULT current_timestamp,
-  updated_at            TIMESTAMP NOT NULL DEFAULT current_timestamp,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
   UNIQUE(report_id, section_id, table_order)
 );
 CREATE INDEX IF NOT EXISTS idx_report_tables_status ON report_tables(report_id, approval_status);
@@ -284,7 +314,7 @@ CREATE TABLE IF NOT EXISTS metric_facts (
   numeric_value       DECIMAL(38,10),
   status              TEXT NOT NULL,
   error_message       TEXT,
-  created_at          TIMESTAMP NOT NULL DEFAULT current_timestamp,
+  created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY(run_id, table_id, branch_num, idx_id, period_alias)
 );
 CREATE INDEX IF NOT EXISTS idx_metric_facts_run ON metric_facts(run_id, table_id);
@@ -302,7 +332,7 @@ CREATE TABLE IF NOT EXISTS approved_table_runs (
   sentinels           JSON NOT NULL DEFAULT '[]',
   runlog_markdown     TEXT NOT NULL,
   design_md_path      TEXT NOT NULL,
-  created_at          TIMESTAMP NOT NULL DEFAULT current_timestamp,
+  created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY(run_id, table_id)
 );
 CREATE INDEX IF NOT EXISTS idx_approved_runs_table ON approved_table_runs(table_id, created_at DESC);
