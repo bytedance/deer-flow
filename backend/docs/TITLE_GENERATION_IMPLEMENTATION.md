@@ -18,7 +18,7 @@
 - ✅ 实现 `_should_generate_title()` 检查是否需要生成
 - ✅ 默认使用本地 fallback 生成标题，避免流式回复结束前等待额外 LLM 调用；显式配置 `model_name` 时可使用 LLM 标题
 - ✅ 实现 `after_model()` / `aafter_model()` 钩子，在首次对话后自动触发
-- ✅ 包含 fallback 策略（LLM 未配置或失败时使用用户消息前几个词）
+- ✅ 包含 fallback 策略（LLM 未配置或失败时使用用户消息前几个字符）
 
 #### [`packages/harness/deerflow/config/app_config.py`](../packages/harness/deerflow/config/app_config.py)
 - ✅ 导入 `load_title_config_from_dict`

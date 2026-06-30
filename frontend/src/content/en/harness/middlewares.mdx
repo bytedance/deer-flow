@@ -82,7 +82,7 @@ Limits the number of parallel subagent task calls the agent can make in a single
 
 ### TitleMiddleware
 
-Automatically generates a title for the thread after the first exchange. The title is derived from the user's first message and the agent's response.
+Automatically generates a title for the thread after the first exchange. By default, the title is a fast local fallback derived from the user's first message. Set `title.model_name` only when you want the optional LLM title path.
 
 **Configuration**: `title:` section in `config.yaml`.
 
@@ -91,7 +91,7 @@ title:
   enabled: true
   max_words: 6
   max_chars: 60
-  model_name: null # use default model
+  model_name: null # local fallback; set a model name to use LLM title generation
 ```
 
 ---
