@@ -212,3 +212,95 @@ def test_decimal_isclose_helper():
     assert decimal_isclose(Decimal("2.0"), Decimal("2.0001"), rel_tol=Decimal("0.001"))
     assert not decimal_isclose(Decimal("2.0"), Decimal("5.0"))
     assert decimal_isclose(Decimal("0"), Decimal("0"))  # zero corner case
+
+
+# ---- task 10: evaluate + apply-computed ---- #
+
+from compute import apply_computed, evaluate
+
+
+def test_evaluate_runs_sql_against_wide():
+    sql = "SELECT branch_num, 2.0 AS x FROM wide"
+    wide = [{"branch_num": "1"}, {"branch_num": "2"}]
+    values, status = evaluate(sql, wide, "x")
+    assert status == "ok"
+    assert values == [Decimal("2.0"), Decimal("2.0")]
+
+
+def test_evaluate_returns_none_cells_on_failure():
+    """SQL failure → status='compute_failed', values all None (no sentinel strings).
+
+    Phase 1 policy: in-cell sentinels removed (consistent with assemble_wide).
+    Failure info flows to a separate sentinels collection via assemble_status
+    (task 13). evaluate's status field tells caller "this compute failed;
+    treat all cells as missing".
+
+    Note: DuckDB returns `inf` for `1/0` (not an error). Use undefined_fn() to
+    trigger a real catalog error.
+    """
+    sql = "SELECT branch_num, undefined_fn() AS x FROM wide"
+    wide = [{"branch_num": "1"}, {"branch_num": "2"}]
+    values, status = evaluate(sql, wide, "x")
+    assert status == "compute_failed"
+    assert values == [None, None]
+
+
+def test_evaluate_returns_none_when_column_missing():
+    """If SQL doesn't SELECT the requested column_name → status=compute_failed."""
+    sql = "SELECT branch_num, 1 AS y FROM wide"  # produces 'y', not 'x'
+    wide = [{"branch_num": "1"}]
+    values, status = evaluate(sql, wide, "x")
+    assert status == "compute_failed"
+    assert values == [None]
+
+
+def test_evaluate_preserves_decimal_precision():
+    """Computed values should be Decimal, not float."""
+    sql = "SELECT branch_num, CAST(1234567890.1234567890 AS DECIMAL(38,10)) AS x FROM wide"
+    wide = [{"branch_num": "1"}]
+    values, status = evaluate(sql, wide, "x")
+    assert status == "ok"
+    assert len(values) == 1
+    assert isinstance(values[0], Decimal)
+    assert values[0] == Decimal("1234567890.1234567890")
+
+
+def test_apply_computed_merges_column():
+    wide = [
+        {"branch_num": "1", "A@202603": Decimal("100")},
+        {"branch_num": "2", "A@202603": Decimal("200")},
+    ]
+    computed = {"利润率": [Decimal("0.1"), Decimal("0.2")]}
+    out = apply_computed(wide, computed)
+    assert out[0]["利润率"] == Decimal("0.1")
+    assert out[1]["利润率"] == Decimal("0.2")
+    assert out[0]["A@202603"] == Decimal("100")  # original column preserved
+
+
+def test_apply_computed_handles_missing_computed():
+    """If a computed column is shorter than wide, missing entries stay absent."""
+    wide = [
+        {"branch_num": "1", "A@202603": Decimal("100")},
+        {"branch_num": "2", "A@202603": Decimal("200")},
+    ]
+    computed = {"利润率": [Decimal("0.1")]}  # only 1 entry, wide has 2 rows
+    out = apply_computed(wide, computed)
+    assert out[0]["利润率"] == Decimal("0.1")
+    assert "利润率" not in out[1]
+
+
+def test_apply_computed_empty_wide():
+    out = apply_computed([], {"利润率": []})
+    assert out == []
+
+
+def test_apply_computed_multiple_columns():
+    wide = [{"branch_num": "1"}, {"branch_num": "2"}]
+    computed = {
+        "利润率": [Decimal("0.1"), Decimal("0.2")],
+        "成本率": [Decimal("0.9"), Decimal("0.8")],
+    }
+    out = apply_computed(wide, computed)
+    assert out[0]["利润率"] == Decimal("0.1")
+    assert out[0]["成本率"] == Decimal("0.9")
+    assert out[1]["成本率"] == Decimal("0.8")

@@ -249,3 +249,105 @@ def validate(
                 conn.execute(f"DROP TABLE IF EXISTS {t}")
             except Exception:
                 pass
+
+
+# ---------- evaluate ---------- #
+
+def _detect_column_types(rows: list[dict]) -> dict[str, str]:
+    """Per-column SQL type: DECIMAL(38,10) if any row has Decimal/int, else VARCHAR.
+
+    Wide tables from assemble_wide always have Decimal cells (precision policy).
+    evaluate also supports arbitrary wide_rows (for tests, ad-hoc runs); type
+    detection lets us preserve Decimal precision end-to-end.
+    """
+    cols = list(rows[0].keys())
+    types: dict[str, str] = {}
+    for c in cols:
+        has_numeric = any(isinstance(r.get(c), (Decimal, int)) and not isinstance(r.get(c), bool) for r in rows)
+        types[c] = "DECIMAL(38,10)" if has_numeric else "VARCHAR"
+    return types
+
+
+def evaluate(
+    sql: str,
+    wide_rows: list[dict],
+    column_name: str,
+) -> tuple[list[Decimal | None], str]:
+    """Run compute SQL against wide_rows, return (values, status).
+
+    - values: list of Decimal | None, one per row (preserves wide_rows order).
+    - status: 'ok' or 'compute_failed'.
+
+    Phase 1 policy: in-cell sentinels removed (consistent with assemble_wide).
+    On SQL failure, values is all None; status='compute_failed'. The caller
+    decides how to surface the failure (assemble_status / task 13 aggregates
+    these into the runlog).
+
+    DECIMAL precision: wide_rows cells with Decimal/int values get DECIMAL(38,10)
+    columns in the temp table, so SQL arithmetic preserves precision (no float).
+    """
+    if not wide_rows:
+        return [], "ok"
+    conn = _get_conn()
+    conn.execute("DROP TABLE IF EXISTS wide")
+    col_types = _detect_column_types(wide_rows)
+    cols = list(col_types.keys())
+    col_defs = ", ".join(f'"{c}" {col_types[c]}' for c in cols)
+    conn.execute(f"CREATE TEMP TABLE wide ({col_defs})")
+    for row in wide_rows:
+        vals: list = []
+        for c in cols:
+            v = row.get(c)
+            if v is None:
+                vals.append(None)
+            elif col_types[c] == "DECIMAL(38,10)":
+                vals.append(Decimal(str(v)))
+            else:
+                vals.append(str(v))
+        conn.execute(
+            f"INSERT INTO wide VALUES ({', '.join(['?'] * len(cols))})",
+            vals,
+        )
+    try:
+        rows = conn.execute(sql).fetchall()
+    except Exception:
+        return [None] * len(wide_rows), "compute_failed"
+
+    cols_returned = [d[0] for d in conn.description]
+    if column_name not in cols_returned:
+        return [None] * len(wide_rows), "compute_failed"
+    col_idx = cols_returned.index(column_name)
+
+    values: list[Decimal | None] = []
+    for r in rows:
+        v = r[col_idx]
+        if v is None:
+            values.append(None)
+        elif isinstance(v, Decimal):
+            values.append(v)
+        else:
+            try:
+                values.append(Decimal(str(v)))
+            except Exception:
+                values.append(None)
+    return values, "ok"
+
+
+# ---------- apply-computed ---------- #
+
+def apply_computed(wide: list[dict], computed: dict[str, list]) -> list[dict]:
+    """Merge computed columns into wide rows. Preserves wide's row order.
+
+    If a computed column has fewer entries than wide, trailing rows just won't
+    get that column added (no error).
+    """
+    if not wide:
+        return []
+    out: list[dict] = []
+    for i, row in enumerate(wide):
+        new_row = dict(row)
+        for col_name, col_values in computed.items():
+            if i < len(col_values):
+                new_row[col_name] = col_values[i]
+        out.append(new_row)
+    return out
