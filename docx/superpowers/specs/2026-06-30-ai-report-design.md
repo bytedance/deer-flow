@@ -47,6 +47,7 @@
 - ❌ 改 chatbi-report 任何文件
 - ❌ 多用户协作(同一 report 多 user 同时 design)
 - ❌ 跨 session 报告迁移工具
+- ❌ 默认写中间产物到 per-thread `/mnt/user-data/outputs/`(仅 `--debug` 例外,见 §8.1)
 
 ---
 
@@ -144,10 +145,13 @@ report_id
 
 **DB 路径:** `/mnt/ai-report-data/duckdb/ai-report.duckdb` (全局单库,所有报告共享)
 
+**Schema 版本:** Phase 1 锁定 `schema_version=1`。所有 5 张表带 `schema_version INTEGER NOT NULL DEFAULT 1` 字段;Phase 2 加 migrate 工具按 version 平滑升级。
+
 ```sql
 -- 1/5 reports (报告级)
 CREATE TABLE reports (
   report_id        TEXT PRIMARY KEY,
+  schema_version   INTEGER NOT NULL DEFAULT 1,
   report_title     TEXT NOT NULL,
   source_md_path   TEXT NOT NULL,
   source_md_hash   TEXT NOT NULL,
@@ -158,6 +162,7 @@ CREATE TABLE reports (
 -- 2/5 report_sections (章 H2)
 CREATE TABLE report_sections (
   section_id       TEXT PRIMARY KEY,
+  schema_version   INTEGER NOT NULL DEFAULT 1,
   report_id        TEXT NOT NULL REFERENCES reports(report_id),
   section_order    INTEGER NOT NULL,
   section_title    TEXT NOT NULL,
@@ -168,6 +173,7 @@ CREATE TABLE report_sections (
 -- 3/5 report_tables (节 H3 + 设计元数据)
 CREATE TABLE report_tables (
   table_id              TEXT PRIMARY KEY,
+  schema_version        INTEGER NOT NULL DEFAULT 1,
   report_id             TEXT NOT NULL REFERENCES reports(report_id),
   section_id            TEXT NOT NULL REFERENCES report_sections(section_id),
   table_order           INTEGER NOT NULL,
@@ -184,9 +190,10 @@ CREATE TABLE report_tables (
 );
 CREATE INDEX idx_report_tables_status ON report_tables(report_id, approval_status);
 
--- 4/5 metric_facts (Step 3 写的原始事实,带 run_id 历史)
+-- 4/5 metric_facts (Step 2 写的原始事实,带 run_id 历史)
 CREATE TABLE metric_facts (
   run_id              TEXT NOT NULL,
+  schema_version      INTEGER NOT NULL DEFAULT 1,
   table_id            TEXT NOT NULL REFERENCES report_tables(table_id),
   report_id           TEXT NOT NULL,
   branch_num          TEXT NOT NULL,
@@ -206,6 +213,7 @@ CREATE INDEX idx_metric_facts_run ON metric_facts(run_id, table_id);
 -- 5/5 approved_table_runs (approved 后落盘的快照,带 run_id 历史)
 CREATE TABLE approved_table_runs (
   run_id              TEXT NOT NULL,
+  schema_version      INTEGER NOT NULL DEFAULT 1,
   table_id            TEXT NOT NULL REFERENCES report_tables(table_id),
   report_id           TEXT NOT NULL,
   section_id          TEXT NOT NULL,
@@ -215,7 +223,7 @@ CREATE TABLE approved_table_runs (
   status              TEXT NOT NULL,            -- 'ok' / 'partial_with_sentinel' / 'aborted'
   sentinels           JSON NOT NULL DEFAULT '[]',
   runlog_markdown     TEXT NOT NULL,
-  design_md_path      TEXT,
+  design_md_path      TEXT NOT NULL,            -- 总是指向 /mnt/ai-report-data/<report_id>.design.md
   created_at          TIMESTAMP NOT NULL DEFAULT current_timestamp,
   PRIMARY KEY(run_id, table_id)
 );
@@ -327,8 +335,8 @@ output:
 
 | 哨兵 | 来源 | 触发 | 粒度 |
 |---|---|---|---|
-| `⚠️QUERY_FAILED` | Step 3 sqlbot_client | HTTP 错 / 业务错 | per-cell |
-| `⚠️CAST_FAILED` | Step 4 metric_facts 写库 | TRY_CAST 失败 | per-cell |
+| `⚠️QUERY_FAILED` | Step 2 sqlbot_client | HTTP 错 / 业务错 | per-cell |
+| `⚠️CAST_FAILED` | Step 2 metric_facts TRY_CAST | TRY_CAST 失败 | per-cell |
 | `⚠️COMPUTE_FAILED` | Step 7/8 validate/evaluate | EXPLAIN 失败 / FROM wide 缺失 / branch_num 缺失 / smoke / example 失败 | per-compute-column |
 | `⚠️DESCRIPTION_FAILED` | Step 11 LLM describe | LLM 失败 (regenerate 1 次后) | per-section |
 | `⚠️LINT_FAILED` | Step 0 lint | per-section 报错归类 | per-section |
@@ -347,6 +355,12 @@ output:
 | 11 | Section N approved | 整本 | ❌ (推进) | 继续 / 跳节 / 预览 / 完成 |
 
 **所有 checkpoint 走 `ask_clarification(..., clarification_type="risk_confirmation", ...)` 异步等**,和 chatbi-report 同构。
+
+**Checkpoint ID 映射说明:** Checkpoint `1.5` / `3.5` / `8d.5` 沿用 chatbi-report 编号惯例(chatbi-report 的 step 1-9 子步骤),不是 ai-report 自己的 Step 0-14 编号。映射关系:
+- Checkpoint 1.5 → ai-report Step 0 lint pass 后
+- Checkpoint 3.5 → ai-report Step 2 sqlbot_client 后
+- Checkpoint 8d.5 → ai-report Step 11 describe 后
+- Checkpoint 0 / 10 / 11 是 ai-report 新加的(无 chatbi-report 对应)
 
 ### 7.3 数据完整性
 
@@ -375,7 +389,7 @@ output:
 
 | 输出 | 默认 | --debug | 路径 |
 |---|---|---|---|
-| `<report_id>.ai-report.duckdb` | ✅ 必写 | ✅ | `/mnt/ai-report-data/duckdb/ai-report.duckdb` (单文件) |
+| `ai-report.duckdb` (全局单库) | ✅ 必写 | ✅ | `/mnt/ai-report-data/duckdb/ai-report.duckdb` |
 | `<report_id>.design.md` | ✅ 必写 | ✅ | `/mnt/ai-report-data/<report_id>.design.md` |
 | `<report_id>.report.md` | ✅ 必写 | ✅ | `/mnt/ai-report-data/<report_id>.report.md` |
 | `<report_id>.report.docx` | ✅ 必写 | ✅ | `/mnt/ai-report-data/<report_id>.report.docx` |
@@ -402,7 +416,7 @@ output:
 - 不 import `unit_conversion.py`;单位字典硬编码在 `unit_convert.py`
 - 应用层从 `parsed_payload` 读出每列 `data_unit`,动态拼 UPDATE
 
-### 8.3 Compute 4 层校验契约 (无 keyword blacklist)
+### 8.3 Compute 5 层校验契约 (无 keyword blacklist)
 
 ai-report `compute.validate`:
 1. **EXPLAIN 通过** —— DuckDB parser/binder 接受
@@ -468,7 +482,7 @@ skills/public/ai-report/tests/
 
 ## 10. Deliverables
 
-### 10.1 新增文件 (16 scripts + 2 prompts + 5 references + ~10 test files + 1 example + 1 SKILL.md)
+### 10.1 新增文件 (16 scripts + 2 prompts + 5 references + 11 test files + 1 example + 1 SKILL.md)
 
 ```
 skills/public/ai-report/
