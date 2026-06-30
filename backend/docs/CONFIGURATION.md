@@ -387,7 +387,7 @@ title:
   enabled: true
   max_words: 6
   max_chars: 60
-  model_name: null  # Use first model in list
+  model_name: null  # null = fast local fallback; set a model name to use LLM title generation
 ```
 
 ### GitHub API Token (Optional for GitHub Deep Research Skill)

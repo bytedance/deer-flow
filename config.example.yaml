@@ -937,6 +937,15 @@ sandbox:
   read_file_output_max_chars: 50000
   ls_output_max_chars: 20000
 
+  # Maximum wall-clock seconds a single host bash command may run before it is
+  # terminated (process group and all). A blocking foreground command — e.g. a
+  # server started without backgrounding — is killed after this long so the
+  # agent's turn cannot hang. Start long-lived processes in the background with
+  # output redirected (e.g. `your-command > /tmp/server.log 2>&1 &`) when you
+  # need logs; unredirected background output is drained with bounded capture
+  # and excess output is discarded.
+  bash_command_timeout: 600
+
 # Option 2: Container-based AIO Sandbox
 # Executes commands in isolated containers (Docker or Apple Container)
 # On macOS: Automatically prefers Apple Container if available, falls back to Docker
@@ -1105,7 +1114,7 @@ title:
   enabled: true
   max_words: 6
   max_chars: 60
-  model_name: null # Use default model (first model in models list)
+  model_name: null # null = fast local fallback; set a model name to use LLM title generation
 
 # ============================================================================
 # Summarization Configuration

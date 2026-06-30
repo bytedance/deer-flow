@@ -82,7 +82,7 @@ memory:
 
 ### TitleMiddleware
 
-在第一次交互后自动为线程生成标题。标题从用户的第一条消息和 Agent 的响应中派生。
+在第一次交互后自动为线程生成标题。默认从用户的第一条消息生成快速本地 fallback 标题；只有设置 `title.model_name` 时，才启用可选的 LLM 标题路径。
 
 **配置**：`config.yaml` 中的 `title:` 部分。
 
@@ -91,7 +91,7 @@ title:
   enabled: true
   max_words: 6
   max_chars: 60
-  model_name: null # 使用默认模型
+  model_name: null # 本地 fallback；填模型名才启用 LLM 标题
 ```
 
 ---

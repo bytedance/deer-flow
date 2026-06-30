@@ -4,7 +4,9 @@ import ntpath
 import os
 import re
 import shutil
+import signal
 import subprocess
+import threading
 from dataclasses import dataclass
 from functools import cached_property
 from pathlib import Path
@@ -16,6 +18,49 @@ from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.search import GrepMatch, find_glob_matches, find_grep_matches
 
 logger = logging.getLogger(__name__)
+
+# Default wall-clock timeout (seconds) for a single host bash command. A
+# blocking foreground command (for example a server started without
+# backgrounding) is terminated after this long so the agent's turn cannot hang
+# indefinitely. Overridable per call via ``execute_command(timeout=...)`` and,
+# for the bash tool, via ``sandbox.bash_command_timeout`` in config.yaml.
+DEFAULT_COMMAND_TIMEOUT_SECONDS = 600
+_COMMAND_CAPTURE_LIMIT_BYTES = 10 * 1024 * 1024
+_PIPE_DRAIN_JOIN_TIMEOUT_SECONDS = 0.2
+
+
+class _BoundedPipeCapture:
+    """Drain a subprocess pipe while keeping only bounded output in memory."""
+
+    def __init__(self, *, limit_bytes: int = _COMMAND_CAPTURE_LIMIT_BYTES) -> None:
+        self._limit_bytes = limit_bytes
+        self._chunks: list[bytes] = []
+        self._kept_bytes = 0
+        self._total_bytes = 0
+        self._lock = threading.Lock()
+
+    def append(self, chunk: bytes) -> None:
+        with self._lock:
+            self._total_bytes += len(chunk)
+            if self._kept_bytes >= self._limit_bytes:
+                return
+            remaining = self._limit_bytes - self._kept_bytes
+            kept = chunk[:remaining]
+            self._chunks.append(kept)
+            self._kept_bytes += len(kept)
+
+    def read(self) -> str:
+        with self._lock:
+            data = b"".join(self._chunks)
+            truncated = self._total_bytes > self._kept_bytes
+            total_bytes = self._total_bytes
+            kept_bytes = self._kept_bytes
+
+        output = data.decode("utf-8", errors="replace")
+        if truncated:
+            notice = f"\n... [output truncated after {kept_bytes} of {total_bytes} bytes; remaining output discarded] ..."
+            output += notice
+        return output
 
 
 @dataclass(frozen=True)
@@ -69,6 +114,67 @@ class LocalSandbox(Sandbox):
                 return shell_from_path
 
         return None
+
+    @staticmethod
+    def _format_timeout_duration(timeout: float) -> str:
+        seconds = float(timeout)
+        if seconds.is_integer():
+            amount = str(int(seconds))
+        else:
+            amount = f"{seconds:g}"
+        unit = "second" if seconds == 1 else "seconds"
+        return f"{amount} {unit}"
+
+    @staticmethod
+    def _format_timeout_notice(timeout: float) -> str:
+        return (
+            f"Command timed out after {LocalSandbox._format_timeout_duration(timeout)} and was terminated. "
+            "To run a long-lived process such as a web server, start it in the background "
+            "and redirect its output, e.g. `your-command > /mnt/user-data/workspace/server.log 2>&1 &`."
+        )
+
+    @staticmethod
+    def _coerce_process_output(value: str | bytes | None) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, bytes):
+            return value.decode("utf-8", errors="replace")
+        return value
+
+    @staticmethod
+    def _drain_pipe(fd: int, capture: _BoundedPipeCapture) -> None:
+        try:
+            while chunk := os.read(fd, 8192):
+                capture.append(chunk)
+        except OSError:
+            logger.debug("Subprocess output pipe closed while draining", exc_info=True)
+        finally:
+            try:
+                os.close(fd)
+            except OSError:
+                # The fd may already be closed during pipe teardown; cleanup is best-effort.
+                pass
+
+    @staticmethod
+    def _start_pipe_drain(fd: int, name: str) -> tuple[_BoundedPipeCapture, threading.Thread]:
+        capture = _BoundedPipeCapture()
+        thread = threading.Thread(target=LocalSandbox._drain_pipe, args=(fd, capture), name=name, daemon=True)
+        thread.start()
+        return capture, thread
+
+    @staticmethod
+    def _process_group_exists(pgid: int | None) -> bool:
+        if pgid is None:
+            return False
+        try:
+            os.killpg(pgid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        except OSError:
+            return False
 
     def __init__(self, id: str, path_mappings: list[PathMapping] | None = None):
         """
@@ -327,11 +433,14 @@ class LocalSandbox(Sandbox):
 
         raise RuntimeError("No suitable shell executable found. Tried /bin/zsh, /bin/bash, /bin/sh, and `sh` on PATH.")
 
-    def execute_command(self, command: str) -> str:
+    def execute_command(self, command: str, timeout: float | None = None) -> str:
         # Resolve container paths in command before execution
         resolved_command = self._resolve_paths_in_command(command)
         shell = self._get_shell()
+        if timeout is None:
+            timeout = DEFAULT_COMMAND_TIMEOUT_SECONDS
 
+        timed_out = False
         if os.name == "nt":
             env = None
             if self._is_powershell(shell):
@@ -347,32 +456,131 @@ class LocalSandbox(Sandbox):
                         "MSYS2_ARG_CONV_EXCL": "*",
                     }
 
-            result = subprocess.run(
-                args,
-                shell=False,
-                capture_output=True,
-                text=True,
-                timeout=600,
-                env=env,
-            )
+            try:
+                result = subprocess.run(
+                    args,
+                    shell=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout,
+                    env=env,
+                )
+                stdout, stderr, returncode = result.stdout, result.stderr, result.returncode
+            except subprocess.TimeoutExpired as exc:
+                timed_out = True
+                stdout = self._coerce_process_output(exc.stdout if exc.stdout is not None else exc.output)
+                stderr = self._coerce_process_output(exc.stderr)
+                returncode = 0
         else:
             args = [shell, "-c", resolved_command]
-            result = subprocess.run(
-                args,
-                shell=False,
-                capture_output=True,
-                text=True,
-                timeout=600,
-            )
-        output = result.stdout
-        if result.stderr:
-            output += f"\nStd Error:\n{result.stderr}" if output else result.stderr
-        if result.returncode != 0:
-            output += f"\nExit Code: {result.returncode}"
+            stdout, stderr, returncode, timed_out = self._run_posix_command(args, timeout)
+
+        output = stdout
+        if stderr:
+            output += f"\nStd Error:\n{stderr}" if output else stderr
+        if timed_out:
+            notice = self._format_timeout_notice(timeout)
+            output += f"\n{notice}" if output else notice
+        elif returncode != 0:
+            output += f"\nExit Code: {returncode}"
 
         final_output = output if output else "(no output)"
         # Reverse resolve local paths back to container paths in output
         return self._reverse_resolve_paths_in_output(final_output)
+
+    @staticmethod
+    def _run_posix_command(args: list[str], timeout: float) -> tuple[str, str, int, bool]:
+        """Run a command on POSIX with bounded pipe capture.
+
+        ``subprocess.communicate()`` cannot be used here: a backgrounded
+        long-lived process (``server &``) inherits stdout/stderr and keeps the
+        pipes open, so ``communicate()`` would block until timeout even though
+        the foreground shell already returned. Instead, daemon drain threads
+        keep the pipes flowing while retaining only bounded output in memory.
+        This lets the call return as soon as the foreground shell exits without
+        handing backgrounded processes anonymous temp files that can grow
+        invisibly. ``stdin`` is taken from ``/dev/null`` so commands that read
+        stdin get immediate EOF, and ``start_new_session`` puts the command in
+        its own process group so a genuinely blocking foreground command can be
+        killed in full (children included) when it times out.
+
+        Returns ``(stdout, stderr, returncode, timed_out)``.
+        """
+        timed_out = False
+        stdout_read_fd, stdout_write_fd = os.pipe()
+        stderr_read_fd, stderr_write_fd = os.pipe()
+        try:
+            process = subprocess.Popen(
+                args,
+                shell=False,
+                stdin=subprocess.DEVNULL,
+                stdout=stdout_write_fd,
+                stderr=stderr_write_fd,
+                start_new_session=True,
+            )
+        except Exception:
+            for fd in (stdout_read_fd, stdout_write_fd, stderr_read_fd, stderr_write_fd):
+                try:
+                    os.close(fd)
+                except OSError:
+                    # Preserve the original Popen failure; fd cleanup is best-effort.
+                    pass
+            raise
+        finally:
+            for fd in (stdout_write_fd, stderr_write_fd):
+                try:
+                    os.close(fd)
+                except OSError:
+                    # The write fd may already be closed by the exception cleanup above.
+                    pass
+
+        stdout_capture, stdout_thread = LocalSandbox._start_pipe_drain(stdout_read_fd, "deerflow-bash-stdout-drain")
+        stderr_capture, stderr_thread = LocalSandbox._start_pipe_drain(stderr_read_fd, "deerflow-bash-stderr-drain")
+        try:
+            process_group_id = os.getpgid(process.pid)
+        except OSError:
+            process_group_id = None
+
+        try:
+            try:
+                process.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                LocalSandbox._terminate_process_group(process)
+            returncode = process.returncode if process.returncode is not None else 0
+        finally:
+            join_timeout = 10 if timed_out or not LocalSandbox._process_group_exists(process_group_id) else _PIPE_DRAIN_JOIN_TIMEOUT_SECONDS
+            for thread in (stdout_thread, stderr_thread):
+                thread.join(timeout=join_timeout)
+                if thread.is_alive():
+                    logger.debug("Subprocess output drain thread still active after command returned")
+
+        stdout = stdout_capture.read()
+        stderr = stderr_capture.read()
+        return stdout, stderr, returncode, timed_out
+
+    @staticmethod
+    def _terminate_process_group(process: subprocess.Popen) -> None:
+        """Kill the command's whole process group, then reap it.
+
+        Falls back to killing just the direct child if the group is already
+        gone (e.g. the command exited between the timeout and this call).
+        """
+        try:
+            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            # The process group is already gone (the command exited in the race
+            # between the timeout and this call); fall back to killing just the
+            # direct child.
+            try:
+                process.kill()
+            except OSError:
+                # Direct child already reaped too — nothing left to kill.
+                logger.debug("Process %s already exited before fallback kill", process.pid)
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            logger.warning("Process group for pid %s did not exit after SIGKILL", process.pid)
 
     def list_dir(self, path: str, max_depth=2) -> list[str]:
         resolved_path = self._resolve_path(path)
