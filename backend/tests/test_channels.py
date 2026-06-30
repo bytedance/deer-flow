@@ -638,6 +638,57 @@ class TestChannelManager:
         assert headers["Cookie"] == f"csrf_token={csrf_token}"
         assert headers["X-DeerFlow-Internal-Token"]
 
+    def test_concurrent_inbound_for_same_chat_reuses_single_thread(self):
+        # Each inbound message is dispatched on its own task, so two messages
+        # arriving close together for the same chat can both look up a missing
+        # thread before either stores one. Without per-conversation locking they
+        # each create a thread and the second store overwrites the first,
+        # orphaning a Gateway thread and splitting the conversation. The create
+        # path must be serialized so only one thread is created and reused.
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+
+            created_ids: list[str] = []
+            first_create_started = asyncio.Event()
+            release_create = asyncio.Event()
+
+            async def blocking_create(*, metadata=None, headers=None):
+                thread_id = f"thread-{len(created_ids) + 1}"
+                created_ids.append(thread_id)
+                first_create_started.set()
+                # Hold the create open so a second concurrent message has a
+                # chance to race in before this one stores its thread_id.
+                await release_create.wait()
+                return {"thread_id": thread_id}
+
+            mock_client = MagicMock()
+            mock_client.threads.create = blocking_create
+            manager._client = mock_client
+
+            msg = InboundMessage(channel_name="slack", chat_id="C1", user_id="U1", text="hi")
+
+            task1 = asyncio.create_task(manager._get_or_create_thread(mock_client, msg))
+            await first_create_started.wait()
+            # task2 should block on the per-conversation lock rather than enter
+            # threads.create a second time.
+            task2 = asyncio.create_task(manager._get_or_create_thread(mock_client, msg))
+            await asyncio.sleep(0)
+            release_create.set()
+
+            (tid1, created1), (tid2, created2) = await asyncio.gather(task1, task2)
+
+            assert len(created_ids) == 1
+            assert tid1 == tid2 == "thread-1"
+            assert created1 is True
+            assert created2 is False
+            assert store.get_thread_id("slack", "C1") == "thread-1"
+
+        _run(go())
+
     def test_fetch_gateway_includes_internal_auth_headers(self, monkeypatch):
         from app.channels.manager import ChannelManager
 
@@ -1520,7 +1571,7 @@ class TestChannelManager:
             await manager.stop()
 
             mock_client.runs.stream.assert_called_once()
-            assert [msg.text for msg in outbound_received] == ["Hello", "Hello world", "Hello world"]
+            assert [msg.text for msg in outbound_received] == ["Hello ▉", "Hello world ▉", "Hello world"]
             assert [msg.is_final for msg in outbound_received] == [False, False, True]
             assert all(msg.thread_ts == "om-source-1" for msg in outbound_received)
 
@@ -1591,7 +1642,7 @@ class TestChannelManager:
             await manager.stop()
 
             mock_client.runs.stream.assert_called_once()
-            assert [msg.text for msg in outbound_received] == ["Hello", "Hello world", "Hello world"]
+            assert [msg.text for msg in outbound_received] == ["Hello ▉", "Hello world ▉", "Hello world"]
             assert [msg.is_final for msg in outbound_received] == [False, False, True]
 
         _run(go())
@@ -1649,8 +1700,8 @@ class TestChannelManager:
             await manager.stop()
 
             assert [msg.is_final for msg in outbound_received] == [False, False, True]
-            assert outbound_received[0].text == "Thinking"
-            assert outbound_received[1].text == "Which environment?"
+            assert outbound_received[0].text == "Thinking ▉"
+            assert outbound_received[1].text == "Which environment? ▉"
             assert outbound_received[2].text == "Which environment?"
             assert all(PENDING_CLARIFICATION_METADATA_KEY not in msg.metadata for msg in outbound_received[:-1])
             assert outbound_received[-1].metadata[PENDING_CLARIFICATION_METADATA_KEY] is True
