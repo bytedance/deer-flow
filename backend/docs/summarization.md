@@ -10,7 +10,7 @@ The summarization feature uses LangChain's `SummarizationMiddleware` to monitor 
 2. Triggers summarization when thresholds are met
 3. Keeps recent messages intact while summarizing older exchanges
 4. Maintains AI/Tool message pairs together for context continuity
-5. Stores the summary in `ThreadState.summary_text` and injects it ephemerally through `<durable_context>`
+5. Stores the summary in `ThreadState.summary_text` and projects it ephemerally through durable context data
 
 ## Configuration
 
@@ -135,7 +135,7 @@ keep:
 #### `skill_file_read_tool_names`
 - **Type**: List of strings
 - **Default**: `["read_file", "read", "view", "cat"]`
-- **Description**: Tool names treated as skill file reads when `DurableContextMiddleware` captures loaded skills into the checkpointed `skill_context` channel. A tool call is captured only when its name appears in this list and its target path is under `skills.container_path`.
+- **Description**: Tool names treated as skill file reads when `DurableContextMiddleware` captures loaded skills into the checkpointed `skill_context` channel. A tool call is captured only when its name appears in this list and its target path is under `skills.container_path`. Set this list to `[]` to disable durable skill-reference capture.
 
 Legacy `preserve_recent_skill_*` settings are no longer used. Loaded skill retention is handled by the durable `skill_context` reference channel instead of by preserving raw skill-read messages in the summarization window.
 
@@ -150,7 +150,7 @@ The default LangChain prompt instructs the model to:
 
 ### Summarization Flow
 
-1. **Monitoring**: Before each model call, the middleware counts tokens in the message history
+1. **Monitoring**: Before each model call, the middleware counts tokens in the message history plus the existing `summary_text`, because both are projected into the next model request
 2. **Trigger Check**: If any configured threshold is met, summarization is triggered
 3. **Message Partitioning**: Messages are split into:
    - Messages to summarize (older messages beyond the `keep` threshold)
@@ -161,7 +161,7 @@ The default LangChain prompt instructs the model to:
    - Recent messages are preserved
    - The generated prose summary is stored in `summary_text`
 6. **AI/Tool Pair Protection**: The system ensures AI messages and their corresponding tool messages stay together
-7. **Skill context channel**: Skill files read during the conversation (tool calls whose name is in `skill_file_read_tool_names` and whose path is under `skills.container_path`, narrowed to `.../SKILL.md`) are captured by `DurableContextMiddleware` into the checkpointed `skill_context` channel as references: `name`, `path`, a one-line `description` parsed in-memory from the file's frontmatter, and `loaded_at`, deduped by path. On every model call they are rendered into the `<durable_context>` block as a compact "active skills" reminder that points at each `SKILL.md` for on-demand re-read, so which skills are active survives summarization without persisting or re-injecting the verbatim body. The channel keeps the most recently read skills (cap `_SKILL_CONTEXT_MAX_ENTRIES`; re-reading an existing skill refreshes its recency); sessions typically load only 1-3.
+7. **Skill context channel**: Skill files read during the conversation (tool calls whose name is in `skill_file_read_tool_names` and whose path is under `skills.container_path`, narrowed to `.../SKILL.md`) are captured by `DurableContextMiddleware` into the checkpointed `skill_context` channel as references: `name`, `path`, a one-line `description` parsed in-memory from the file's frontmatter, and `loaded_at`, deduped by path. On every model call they are rendered into a hidden durable-context data message as a compact "active skills" reminder that points at each `SKILL.md` for on-demand re-read, so which skills are active survives summarization without persisting or re-injecting the verbatim body. The channel keeps the most recently read skills (cap `_SKILL_CONTEXT_MAX_ENTRIES`; re-reading an existing skill refreshes its recency); sessions typically load only 1-3.
 
 ### Token Counting
 
@@ -176,12 +176,12 @@ The middleware intelligently preserves message context:
 
 - **Recent Messages**: Always kept intact based on `keep` configuration
 - **AI/Tool Pairs**: Never split - if a cutoff point falls within tool messages, the system adjusts to keep the entire AI + Tool message sequence together
-- **Summary Format**: Summary prose is stored in `summary_text` and rendered into the ephemeral `<durable_context>` system block with the format:
+- **Summary Format**: Summary prose is stored in `summary_text` and rendered into an ephemeral hidden durable-context data message. Static handling rules live in a separate system message; summary text and other user/tool/model-derived values stay in the lower-authority data message.
   ```
-  <durable_context>
+  <durable_context_data>
   ## Conversation summary so far
   [Generated summary text]
-  </durable_context>
+  </durable_context_data>
   ```
 
 ## Best Practices
@@ -291,19 +291,24 @@ The middleware intelligently preserves message context:
 
 ### Middleware Order
 
-Summarization runs after ThreadData and Sandbox initialization but before Title and Clarification:
+Durable context capture runs before summarization so completed delegations and
+loaded skill references are recorded before their raw tool messages can be
+compacted. Summarization then reduces message history before downstream
+middlewares such as title generation, memory queuing, and clarification:
 
-1. ThreadDataMiddleware
-2. SandboxMiddleware
-3. **SummarizationMiddleware** ← Runs here
-4. TitleMiddleware
-5. ClarificationMiddleware
+1. Runtime middlewares, including ThreadData and Sandbox initialization
+2. DynamicContextMiddleware
+3. SkillActivationMiddleware
+4. DurableContextMiddleware
+5. **SummarizationMiddleware** ← Runs here
+6. Downstream lead middlewares such as Title, Memory, and Clarification
 
 ### State Management
 
-- Summarization is stateless - configuration is loaded once at startup
-- Summaries are added as regular messages in the conversation history
-- The checkpointer persists the summarized history automatically
+- Summarization configuration is loaded from `config.yaml`
+- Generated summaries are stored in `ThreadState.summary_text`, not as regular `messages`
+- The message reducer removes compacted raw messages while the checkpointer persists `summary_text`
+- DurableContextMiddleware projects `summary_text` back into later model calls as hidden durable context data
 
 ## Example Configurations
 

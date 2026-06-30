@@ -10,14 +10,15 @@ from typing import Any
 from langchain_core.messages import AIMessage, AnyMessage, ToolMessage
 
 from deerflow.agents.thread_state import DelegationEntry
+from deerflow.subagents.status_contract import extract_subagent_status
 
 _RESULT_BRIEF_CAP = 2000
 _DESCRIPTION_CAP = 200
 _LEDGER_RENDER_CHAR_BUDGET = 6000
 _LEDGER_ENTRY_RESULT_RENDER_CAP = 120
-_TASK_SUCCESS_PREFIX = "Task Succeeded. Result: "
-_TASK_FAILED_PREFIX = "Task failed. Error: "
-_TASK_TIMED_OUT_PREFIX = "Task timed out. Error: "
+_TASK_SUCCESS_PREFIX = "Task Succeeded. Result:"
+_TASK_FAILED_PREFIX = "Task failed. Error:"
+_TASK_TIMED_OUT_PREFIX = "Task timed out. Error:"
 _TASK_POLLING_TIMED_OUT_PREFIX = "Task polling timed out"
 
 
@@ -29,29 +30,34 @@ def _bound_text(text: str, cap: int = _RESULT_BRIEF_CAP) -> str:
     """Deterministic head/tail truncation. This is not an LLM summary."""
     if len(text) <= cap:
         return text
+    if cap <= 0:
+        return ""
     head = cap * 2 // 3
     omitted_marker = "\n...\n"
+    if cap <= len(omitted_marker):
+        return text[:cap]
     tail = cap - head - len(omitted_marker)
+    if tail <= 0:
+        return text[:cap]
     return f"{text[:head]}{omitted_marker}{text[-tail:]}"
 
 
-def _parse_task_result(content: str) -> tuple[str, str]:
-    text = content if isinstance(content, str) else str(content)
-    if text.startswith(_TASK_SUCCESS_PREFIX):
-        return "completed", text[len(_TASK_SUCCESS_PREFIX) :]
-    if text.startswith(_TASK_FAILED_PREFIX):
-        return "failed", text[len(_TASK_FAILED_PREFIX) :]
-    if text.startswith(_TASK_POLLING_TIMED_OUT_PREFIX):
-        return "polling_timed_out", text
-    if text.startswith(_TASK_TIMED_OUT_PREFIX):
-        return "timed_out", text[len(_TASK_TIMED_OUT_PREFIX) :]
-    if text.startswith("Task cancelled"):
-        return "cancelled", text
-    return "failed", text
+def _parse_task_result(content: str) -> tuple[str, str] | None:
+    text = (content if isinstance(content, str) else str(content)).strip()
+    status = extract_subagent_status(text)
+    if status is None:
+        return None
+    if status == "completed" and text.startswith(_TASK_SUCCESS_PREFIX):
+        return status, text[len(_TASK_SUCCESS_PREFIX) :].strip()
+    if status == "failed" and text.startswith(_TASK_FAILED_PREFIX):
+        return status, text[len(_TASK_FAILED_PREFIX) :].strip()
+    if status == "timed_out" and text.startswith(_TASK_TIMED_OUT_PREFIX):
+        return status, text[len(_TASK_TIMED_OUT_PREFIX) :].strip()
+    return status, text
 
 
 def _escape_context_text(value: object) -> str:
-    return escape(str(value), quote=False)
+    return escape(" ".join(str(value).split()), quote=False)
 
 
 def _status_guidance(status: str) -> str:
@@ -117,7 +123,10 @@ def extract_delegations(messages: list[AnyMessage]) -> list[DelegationEntry]:
         if task_call is None:
             continue
         content = message.content if isinstance(message.content, str) else str(message.content)
-        status, result_text = _parse_task_result(content)
+        parsed = _parse_task_result(content)
+        if parsed is None:
+            continue
+        status, result_text = parsed
         result_ref = str(message.id or tool_call_id)
         entries.append(
             {

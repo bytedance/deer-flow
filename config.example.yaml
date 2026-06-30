@@ -1164,11 +1164,14 @@ summarization:
   # The prompt should guide the model to extract important context
   summary_prompt: null
 
-  # Loaded skill files (read_file calls under skills.container_path) are captured
-  # into the durable skill_context channel and re-injected after compaction, so
-  # skill instructions survive summarization. Tool names counted as skill reads:
+  # Loaded SKILL.md references (read_file calls under skills.container_path) are
+  # captured into the durable skill_context channel and re-injected after
+  # compaction as name/path/description reminders. The full skill body is not
+  # persisted; the agent should re-read the file before applying instructions.
+  # Tool names counted as skill reads:
   # Legacy preserve_recent_skill_* summarization settings are no longer used;
-  # skill retention is handled by this durable reference channel instead.
+  # skill retention is handled by this durable reference channel instead. Set
+  # this list to [] to disable durable skill-reference capture.
   skill_file_read_tool_names:
     - read_file
     - read

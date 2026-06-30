@@ -246,6 +246,11 @@ def test_genuine_user_message_false_for_hide_from_ui():
     assert not _is_genuine_user_message(msg)
 
 
+def test_genuine_user_message_false_for_legacy_summary_message():
+    msg = HumanMessage(content="Here is a summary of the conversation", name="summary")
+    assert not _is_genuine_user_message(msg)
+
+
 # ---------------------------------------------------------------------------
 # wrap_model_call — clean input
 # ---------------------------------------------------------------------------

@@ -120,6 +120,9 @@ class DelegationEntry(TypedDict):
     created_at: str
 
 
+_DELEGATION_LEDGER_MAX_ENTRIES = 50
+
+
 def merge_delegation_ledger(existing: list[DelegationEntry] | None, new: list[DelegationEntry] | None) -> list[DelegationEntry]:
     """Reducer for the delegation ledger.
 
@@ -139,7 +142,10 @@ def merge_delegation_ledger(existing: list[DelegationEntry] | None, new: list[De
         elif by_id[entry_id].get("created_at"):
             entry = {**entry, "created_at": by_id[entry_id]["created_at"]}
         by_id[entry_id] = entry
-    return [by_id[entry_id] for entry_id in order]
+    merged = [by_id[entry_id] for entry_id in order]
+    if len(merged) > _DELEGATION_LEDGER_MAX_ENTRIES:
+        merged = merged[-_DELEGATION_LEDGER_MAX_ENTRIES:]
+    return merged
 
 
 _SKILL_CONTEXT_MAX_ENTRIES = 8

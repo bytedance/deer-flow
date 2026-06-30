@@ -8,7 +8,7 @@ from typing import Protocol, override, runtime_checkable
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import SummarizationMiddleware
-from langchain_core.messages import AnyMessage, RemoveMessage, get_buffer_string
+from langchain_core.messages import AnyMessage, HumanMessage, RemoveMessage, get_buffer_string, trim_messages
 from langgraph.config import get_config
 from langgraph.constants import TAG_NOSTREAM
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
@@ -17,6 +17,7 @@ from langgraph.runtime import Runtime
 from deerflow.agents.middlewares.dynamic_context_middleware import is_dynamic_context_reminder
 
 logger = logging.getLogger(__name__)
+_SUMMARY_TRIGGER_MESSAGE_NAME = "summary"
 
 
 @dataclass(frozen=True)
@@ -133,26 +134,113 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
             logger.exception("Summary generation failed; skipping compaction this turn")
             return None
 
+    @staticmethod
+    def _summary_count_message(summary_text: str) -> HumanMessage:
+        return HumanMessage(content=summary_text, name=_SUMMARY_TRIGGER_MESSAGE_NAME)
+
+    def _messages_for_trigger_count(self, messages: list[AnyMessage], summary_text: str | None) -> list[AnyMessage]:
+        if not summary_text:
+            return messages
+        return [*messages, self._summary_count_message(summary_text)]
+
+    @staticmethod
+    def _bound_text(text: str, cap: int) -> str:
+        if len(text) <= cap:
+            return text
+        if cap <= 0:
+            return ""
+        head = cap * 2 // 3
+        omitted_marker = "\n...\n"
+        if cap <= len(omitted_marker):
+            return text[:cap]
+        tail = max(0, cap - head - len(omitted_marker))
+        if tail == 0:
+            return text[:cap]
+        return f"{text[:head]}{omitted_marker}{text[-tail:]}"
+
+    def _trim_summary_section_text(self, text: str, max_tokens: int, *, strategy: str) -> str:
+        if not text.strip():
+            return ""
+        max_tokens = max(1, max_tokens)
+        try:
+            trimmed = trim_messages(
+                [HumanMessage(content=text)],
+                max_tokens=max_tokens,
+                token_counter=self.token_counter,
+                strategy=strategy,
+                allow_partial=True,
+                text_splitter=list,
+            )
+            if trimmed:
+                content = trimmed[-1].content
+                if isinstance(content, str) and content.strip():
+                    return content
+        except Exception:
+            logger.debug("Failed to trim summary prompt section with token counter; falling back to deterministic text cap", exc_info=True)
+        return self._bound_text(text, max_tokens)
+
+    def _build_summary_input_text(self, formatted_messages: str, previous_summary: str | None = None) -> str | None:
+        if self.trim_tokens_to_summarize is None:
+            trimmed_new_messages = formatted_messages
+            trimmed_previous_summary = previous_summary.strip() if previous_summary else ""
+        else:
+            max_tokens = max(1, self.trim_tokens_to_summarize)
+            if previous_summary:
+                new_message_tokens = max(1, max_tokens // 2)
+                previous_summary_tokens = max(1, max_tokens - new_message_tokens)
+                trimmed_previous_summary = self._trim_summary_section_text(
+                    previous_summary.strip(),
+                    previous_summary_tokens,
+                    strategy="last",
+                )
+                trimmed_new_messages = self._trim_summary_section_text(
+                    formatted_messages,
+                    new_message_tokens,
+                    strategy="first",
+                )
+            else:
+                trimmed_previous_summary = ""
+                trimmed_new_messages = self._trim_summary_section_text(
+                    formatted_messages,
+                    max_tokens,
+                    strategy="first",
+                )
+
+        parts: list[str] = []
+        if trimmed_previous_summary:
+            parts.extend(
+                [
+                    "<existing_summary>",
+                    trimmed_previous_summary,
+                    "</existing_summary>",
+                    "",
+                ]
+            )
+        if trimmed_new_messages:
+            parts.extend(
+                [
+                    "<new_messages>",
+                    trimmed_new_messages,
+                    "</new_messages>",
+                ]
+            )
+        if not parts:
+            return None
+        return "\n".join(parts)
+
     def _build_summary_prompt(self, messages_to_summarize: list[AnyMessage], previous_summary: str | None = None) -> str | None:
         """Build the summary prompt, returning ``None`` when trimming leaves nothing."""
         trimmed_messages = self._trim_messages_for_summary(messages_to_summarize)
+        if not trimmed_messages:
+            trimmed_messages = messages_to_summarize[-1:]
         if not trimmed_messages:
             return None
         # Format messages to avoid token inflation from metadata when str() is called on
         # message objects.
         formatted_messages = get_buffer_string(trimmed_messages)
-        if previous_summary:
-            formatted_messages = "\n".join(
-                [
-                    "<existing_summary>",
-                    previous_summary.strip(),
-                    "</existing_summary>",
-                    "",
-                    "<new_messages>",
-                    formatted_messages,
-                    "</new_messages>",
-                ]
-            )
+        formatted_messages = self._build_summary_input_text(formatted_messages, previous_summary=previous_summary)
+        if not formatted_messages:
+            return None
         return self.summary_prompt.format(messages=formatted_messages).rstrip()
 
     def before_model(self, state: AgentState, runtime: Runtime) -> dict | None:
@@ -165,8 +253,10 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         messages = state["messages"]
         self._ensure_message_ids(messages)
 
-        total_tokens = self.token_counter(messages)
-        if not self._should_summarize(messages, total_tokens):
+        previous_summary = state.get("summary_text") if isinstance(state.get("summary_text"), str) else None
+        trigger_messages = self._messages_for_trigger_count(messages, previous_summary)
+        total_tokens = self.token_counter(trigger_messages)
+        if not self._should_summarize(trigger_messages, total_tokens):
             return None
 
         cutoff_index = self._determine_cutoff_index(messages)
@@ -178,7 +268,6 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         if not messages_to_summarize:
             return None
         self._fire_hooks(messages_to_summarize, preserved_messages, runtime)
-        previous_summary = state.get("summary_text") if isinstance(state.get("summary_text"), str) else None
         summary = self._summarize_with(messages_to_summarize, previous_summary=previous_summary)
         if summary is None:
             return None
@@ -194,8 +283,10 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         messages = state["messages"]
         self._ensure_message_ids(messages)
 
-        total_tokens = self.token_counter(messages)
-        if not self._should_summarize(messages, total_tokens):
+        previous_summary = state.get("summary_text") if isinstance(state.get("summary_text"), str) else None
+        trigger_messages = self._messages_for_trigger_count(messages, previous_summary)
+        total_tokens = self.token_counter(trigger_messages)
+        if not self._should_summarize(trigger_messages, total_tokens):
             return None
 
         cutoff_index = self._determine_cutoff_index(messages)
@@ -207,7 +298,6 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         if not messages_to_summarize:
             return None
         self._fire_hooks(messages_to_summarize, preserved_messages, runtime)
-        previous_summary = state.get("summary_text") if isinstance(state.get("summary_text"), str) else None
         summary = await self._asummarize_with(messages_to_summarize, previous_summary=previous_summary)
         if summary is None:
             return None

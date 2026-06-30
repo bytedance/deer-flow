@@ -9,6 +9,7 @@ from typing import get_type_hints
 
 import pytest
 
+from deerflow.agents import thread_state as thread_state_module
 from deerflow.agents.thread_state import (
     _SKILL_CONTEXT_MAX_ENTRIES,
     SkillEntry,
@@ -142,6 +143,18 @@ class TestMergeDelegationLedger:
         out = merge_delegation_ledger(existing, new)
 
         assert out == [{"id": "a", "status": "completed", "created_at": "first", "result_sha256": "x"}]
+
+    def test_over_cap_keeps_most_recent_entries(self):
+        cap = getattr(thread_state_module, "_DELEGATION_LEDGER_MAX_ENTRIES", None)
+        assert isinstance(cap, int)
+        existing = [{"id": f"call_{i}", "status": "completed"} for i in range(cap)]
+        new = [{"id": "call_new", "status": "completed"}]
+
+        out = merge_delegation_ledger(existing, new)
+
+        assert len(out) == cap
+        assert out[0]["id"] == "call_1"
+        assert out[-1]["id"] == "call_new"
 
 
 def test_skill_entry_is_a_reference_not_content():

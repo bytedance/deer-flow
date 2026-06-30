@@ -29,6 +29,7 @@ logger = logging.getLogger(__name__)
 
 _SLASH_SKILL_ACTIVATION_KEY = "slash_skill_activation"
 _SLASH_SKILL_ACTIVATION_TARGET_ID_KEY = "slash_skill_activation_target_id"
+_SUMMARY_MESSAGE_NAME = "summary"
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,6 +55,8 @@ def is_slash_skill_activation_reminder(message: object) -> bool:
 
 def _is_user_activation_target(message: object) -> bool:
     if not isinstance(message, HumanMessage):
+        return False
+    if message.name == _SUMMARY_MESSAGE_NAME:
         return False
     if message.additional_kwargs.get("hide_from_ui"):
         return False

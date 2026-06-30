@@ -9,6 +9,14 @@ from deerflow.agents.middlewares.dynamic_context_middleware import _DYNAMIC_CONT
 from deerflow.agents.middlewares.summarization_middleware import DeerFlowSummarizationMiddleware
 
 
+def _char_count(messages) -> int:
+    return sum(len(str(getattr(message, "content", ""))) for message in messages)
+
+
+def _raising_count(messages) -> int:
+    raise RuntimeError("token counter unavailable")
+
+
 class _RaisingChatModel(BaseChatModel):
     @property
     def _llm_type(self) -> str:
@@ -134,3 +142,74 @@ class TestSummaryWritesChannel:
         assert out["summary_text"] == "UPDATED_SUMMARY"
         assert model.prompts
         assert "OLD_SUMMARY_SENTINEL" in model.prompts[-1]
+
+    def test_summary_text_counts_toward_summarization_trigger(self):
+        middleware = DeerFlowSummarizationMiddleware(
+            model=_StaticChatModel(text="UPDATED_SUMMARY"),
+            trigger=("tokens", 80),
+            keep=("messages", 2),
+            token_counter=_char_count,
+        )
+
+        out = middleware._maybe_summarize(
+            {
+                "messages": [
+                    HumanMessage(content="old"),
+                    AIMessage(content="older"),
+                    HumanMessage(content="latest"),
+                ],
+                "summary_text": "S" * 120,
+            },
+            None,
+        )
+
+        assert out is not None
+        assert out["summary_text"] == "UPDATED_SUMMARY"
+
+    def test_previous_summary_is_trimmed_with_summary_prompt_input(self):
+        middleware = DeerFlowSummarizationMiddleware(
+            model=_StaticChatModel(text="UPDATED_SUMMARY"),
+            trigger=("messages", 4),
+            keep=("messages", 2),
+            token_counter=_char_count,
+            trim_tokens_to_summarize=80,
+        )
+        previous_summary = "OLD_SUMMARY_START " + ("S" * 240) + " OLD_SUMMARY_END"
+
+        prompt = middleware._build_summary_prompt(
+            [HumanMessage(content="NEW_MESSAGE_SENTINEL " + ("N" * 240))],
+            previous_summary=previous_summary,
+        )
+
+        assert prompt is not None
+        assert previous_summary not in prompt
+        assert "NEW_MESSAGE_SENTINEL" in prompt
+
+    def test_new_message_summary_prompt_trim_uses_token_counter_budget(self):
+        middleware = DeerFlowSummarizationMiddleware(
+            model=_StaticChatModel(text="UPDATED_SUMMARY"),
+            trigger=("messages", 4),
+            keep=("messages", 2),
+            token_counter=_char_count,
+            trim_tokens_to_summarize=40,
+        )
+
+        body = middleware._build_summary_input_text("Human: NEW_MESSAGE_SENTINEL " + ("N" * 200))
+
+        assert body is not None
+        new_messages = body.split("<new_messages>\n", 1)[1].split("\n</new_messages>", 1)[0]
+        assert len(new_messages) <= 40
+        assert "NEW_MESSAGE_SENTINEL" in new_messages
+
+    def test_summary_prompt_fallback_bound_respects_small_budget(self):
+        middleware = DeerFlowSummarizationMiddleware(
+            model=_StaticChatModel(text="UPDATED_SUMMARY"),
+            trigger=("messages", 4),
+            keep=("messages", 2),
+            token_counter=_raising_count,
+            trim_tokens_to_summarize=2,
+        )
+
+        text = middleware._trim_summary_section_text("abcdef", 2, strategy="first")
+
+        assert len(text) <= 2

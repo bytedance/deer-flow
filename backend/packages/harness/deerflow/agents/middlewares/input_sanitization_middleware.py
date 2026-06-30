@@ -33,6 +33,8 @@ from langgraph.errors import GraphBubbleUp
 
 logger = logging.getLogger(__name__)
 
+_SUMMARY_MESSAGE_NAME = "summary"
+
 # Finite set of blocked tag names: system-reserved + common injection patterns.
 _BLOCKED_TAG_NAMES: frozenset[str] = frozenset(
     {
@@ -92,6 +94,8 @@ def _is_genuine_user_message(message: object) -> bool:
     if not isinstance(message, HumanMessage):
         return False
     if message.additional_kwargs.get("hide_from_ui"):
+        return False
+    if message.name == _SUMMARY_MESSAGE_NAME:
         return False
     return True
 

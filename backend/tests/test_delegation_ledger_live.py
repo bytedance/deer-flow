@@ -19,7 +19,7 @@ import pytest
 import yaml
 from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.middleware.types import ModelCallResult, ModelRequest, ModelResponse
-from langchain_core.messages import AIMessage, BaseMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.runtime import Runtime
 
@@ -373,7 +373,13 @@ After the tool result returns, briefly say you are ready. Do not use any other t
     assert recorder.injected_calls, "durable context never injected"
     last_injected = recorder.injected_calls[-1]
     active = next(
-        (message for message in last_injected if isinstance(message, SystemMessage) and "Active skills" in _message_text(message)),
+        (
+            message
+            for message in last_injected
+            if isinstance(message, HumanMessage)
+            and message.additional_kwargs.get("durable_context_data")
+            and "Active skills" in _message_text(message)
+        ),
         None,
     )
     assert active is not None, "skill context not present in final injected request"

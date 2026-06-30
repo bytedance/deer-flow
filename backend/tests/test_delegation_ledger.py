@@ -75,6 +75,25 @@ class TestExtractDelegations:
         assert out[0]["status"] == "polling_timed_out"
         assert "background task is stuck" in out[0]["result_brief"]
 
+    def test_status_parser_matches_shared_contract_whitespace_cases(self):
+        msgs = [
+            _ai_task_call("call_whitespace", "completed with whitespace"),
+            ToolMessage(content="  Task Succeeded. Result: ok  ", tool_call_id="call_whitespace", id="tm_whitespace"),
+        ]
+
+        out = extract_delegations(msgs)
+
+        assert out[0]["status"] == "completed"
+        assert out[0]["result_brief"] == "ok"
+
+    def test_unknown_non_terminal_task_result_is_not_captured(self):
+        msgs = [
+            _ai_task_call("call_streaming", "streaming task"),
+            ToolMessage(content="Investigating ...", tool_call_id="call_streaming", id="tm_streaming"),
+        ]
+
+        assert extract_delegations(msgs) == []
+
     def test_task_without_result_is_skipped(self):
         msgs = [_ai_task_call("call_4", "pending")]
         assert extract_delegations(msgs) == []

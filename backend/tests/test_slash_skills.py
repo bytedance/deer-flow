@@ -418,6 +418,12 @@ def test_skill_activation_middleware_ignores_hidden_user_messages(monkeypatch, t
     assert not any(is_slash_skill_activation_reminder(message) for message in captured["messages"])
 
 
+def test_skill_activation_middleware_ignores_legacy_summary_messages():
+    summary_msg = HumanMessage(content="/data-analysis should not activate from summary", name="summary")
+
+    assert middleware_module._is_user_activation_target(summary_msg) is False
+
+
 def test_skill_activation_middleware_returns_clear_error_for_disallowed_skill(monkeypatch, tmp_path):
     skill = _make_skill(tmp_path, "data-analysis")
     monkeypatch.setattr(middleware_module, "get_or_new_skill_storage", lambda **kwargs: _make_storage(tmp_path, [skill]))

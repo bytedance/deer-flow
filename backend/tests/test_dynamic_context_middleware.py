@@ -529,6 +529,14 @@ def test_user_suffix_message_is_not_injection_target():
     assert _is_user_injection_target(normal_msg) is True
 
 
+def test_legacy_summary_message_is_not_injection_target():
+    from deerflow.agents.middlewares.dynamic_context_middleware import _is_user_injection_target
+
+    summary_msg = HumanMessage(content="Here is a summary of the conversation", name="summary")
+
+    assert _is_user_injection_target(summary_msg) is False
+
+
 def test_endswith_not_substring_prevents_false_positive():
     """``endswith("__user")`` must NOT reject messages whose ID merely contains
     ``__user`` somewhere in the middle (e.g. ``user__question-123``).
