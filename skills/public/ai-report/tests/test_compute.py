@@ -331,3 +331,77 @@ def test_apply_computed_multiple_columns():
     assert out[0]["利润率"] == Decimal("0.1")
     assert out[0]["成本率"] == Decimal("0.9")
     assert out[1]["成本率"] == Decimal("0.8")
+
+
+# ---- review fixes: P0-1 / P1-1 / P1-3 / P1-5 / P1-6 ---- #
+
+from compute import _detect_column_types
+
+
+def test_evaluate_returns_compute_failed_on_row_count_mismatch():
+    """P0-1: SQL with WHERE/GROUP BY/DISTINCT can return fewer rows than wide_rows.
+    Without a row-count check, evaluate would silently return a short list with
+    status='ok' — caller gets truncated data.
+    """
+    sql = "SELECT branch_num, 1.0 AS x FROM wide WHERE branch_num != '1'"
+    wide = [{"branch_num": "1"}, {"branch_num": "2"}, {"branch_num": "3"}]
+    values, status = evaluate(sql, wide, "x")
+    assert status == "compute_failed"
+    assert values == [None, None, None]
+
+
+def test_detect_column_types_mixed_values_falls_back_to_varchar():
+    """P1-6: column with mixed Decimal+str values → VARCHAR (don't blow up on INSERT).
+
+    Previous logic: any Decimal/int present → DECIMAL(38,10), then 'hello' insert
+    would raise. Fix: only DECIMAL when ALL non-None values are numeric.
+    """
+    rows = [
+        {"a": Decimal("1.0"), "b": "x"},
+        {"a": "hello", "b": "y"},
+    ]
+    types = _detect_column_types(rows)
+    assert types["a"] == "VARCHAR", "mixed column must fall back to VARCHAR"
+    assert types["b"] == "VARCHAR"
+
+
+def test_detect_column_types_all_numeric_is_decimal():
+    """P1-6 sanity: all-numeric column stays DECIMAL."""
+    rows = [{"a": Decimal("1.0")}, {"a": Decimal("2.0")}, {"a": None}]
+    types = _detect_column_types(rows)
+    assert types["a"] == "DECIMAL(38,10)"
+
+
+def test_validate_uses_decimal_columns_consistent_with_evaluate(conn):
+    """P1-1: validate must use same column type inference as evaluate, so SQL that
+    passes validate also passes evaluate (no VARCHAR/DECIMAL divergence).
+
+    Both should detect Decimal cells and use DECIMAL(38,10), so SQL like
+    `CAST(col AS DECIMAL)` works identically in both.
+    """
+    wide = [{"branch_num": "1", "x": Decimal("2.0")}]
+    # validate should accept this SQL on DECIMAL-typed sample rows
+    res = validate(
+        conn,
+        "SELECT branch_num, x FROM wide",
+        wide,
+        ["branch_num", "x"],
+        None, None,
+    )
+    assert res.passed is True, f"validate should pass with DECIMAL columns: {res}"
+    # evaluate should produce the same result
+    values, status = evaluate("SELECT branch_num, x FROM wide", wide, "x")
+    assert status == "ok"
+    assert values == [Decimal("2.0")]
+
+
+def test_evaluate_preserves_row_order_and_count():
+    """P1-3 side-effect check: executemany preserves row order (no reordering).
+    Also doubles as a regression test that the new fast-path doesn't lose rows.
+    """
+    sql = "SELECT branch_num, CAST(branch_num AS DECIMAL(38,10)) AS x FROM wide"
+    wide = [{"branch_num": str(i)} for i in range(20)]
+    values, status = evaluate(sql, wide, "x")
+    assert status == "ok"
+    assert len(values) == 20
+    assert values == [Decimal(str(i)) for i in range(20)]

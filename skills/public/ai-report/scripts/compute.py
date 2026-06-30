@@ -117,12 +117,12 @@ def assemble_wide(metric_facts: list[dict], run_id: str, table_id: str) -> list[
     return [dict(zip(cols, r)) for r in rows]
 
 
-# ---------- validate (5 layers) ---------- #
+# ---------- validate (3 layers) + evaluate + apply-computed ---------- #
 
 @dataclass
 class ValidationResult:
     passed: bool
-    layer: str  # "all" if passed; else "explain" | "from_wide" | "branch_num" | "smoke" | "columns" | "example"
+    layer: str  # "all" if passed; else "explain" | "columns" | "example"
     error: str | None = None
 
 
@@ -130,11 +130,69 @@ def decimal_isclose(a: Decimal, b: Decimal, rel_tol: Decimal = Decimal("1e-3")) 
     """Decimal-only approximate equality (replaces math.isclose for banking precision).
 
     |a - b| <= rel_tol * |b|. Zero corner: a == b returns True (rel_tol * 0 is 0).
+    rel_tol=1e-3 (0.1%) is loose enough to tolerate LLM SQL rounding differences
+    but tight enough to catch real semantic errors.
     """
     a, b = Decimal(a), Decimal(b)
     if a == b:
         return True
     return abs(a - b) <= rel_tol * abs(b)
+
+
+def _detect_column_types(rows: list[dict]) -> dict[str, str]:
+    """Per-column SQL type: DECIMAL(38,10) only if ALL non-None values are numeric.
+
+    P1-6 fix: previous logic promoted to DECIMAL if ANY row was numeric, which
+    blew up on INSERT when another row had a string in the same column. Now
+    requires uniform numeric content; mixed → VARCHAR (loses precision but
+    doesn't raise; mixed columns are not expected from assemble_wide output).
+    """
+    cols = list(rows[0].keys()) if rows else []
+    types: dict[str, str] = {}
+    for c in cols:
+        non_none = [r.get(c) for r in rows if r.get(c) is not None]
+        all_numeric = bool(non_none) and all(
+            isinstance(v, (Decimal, int)) and not isinstance(v, bool) for v in non_none
+        )
+        types[c] = "DECIMAL(38,10)" if all_numeric else "VARCHAR"
+    return types
+
+
+def _materialize_wide_table(
+    conn: duckdb.DuckDBPyConnection,
+    rows: list[dict],
+    table_name: str,
+) -> None:
+    """Create TEMP TABLE `table_name` from `rows` with type-inferred columns.
+
+    Shared by validate (caller conn) and evaluate (module conn). Fixes:
+    - P1-1: both use _detect_column_types so SQL behavior is identical
+      (no VARCHAR/DECIMAL divergence between validate-pass and evaluate-fail).
+    - P1-3: executemany batch-insert replaces N+1 execute() loop.
+    - P1-6: _detect_column_types falls back to VARCHAR on mixed columns.
+    """
+    conn.execute(f"DROP TABLE IF EXISTS {table_name}")
+    if not rows:
+        conn.execute(f"CREATE TEMP TABLE {table_name} (branch_num VARCHAR)")
+        return
+    col_types = _detect_column_types(rows)
+    cols = list(col_types.keys())
+    col_defs = ", ".join(f'"{c}" {col_types[c]}' for c in cols)
+    conn.execute(f"CREATE TEMP TABLE {table_name} ({col_defs})")
+    placeholders = ", ".join(["?"] * len(cols))
+    batch: list[list] = []
+    for row in rows:
+        vals: list = []
+        for c in cols:
+            v = row.get(c)
+            if v is None:
+                vals.append(None)
+            elif col_types[c] == "DECIMAL(38,10)":
+                vals.append(v if isinstance(v, Decimal) else Decimal(str(v)))
+            else:
+                vals.append(str(v))
+        batch.append(vals)
+    conn.executemany(f"INSERT INTO {table_name} VALUES ({placeholders})", batch)
 
 
 def validate(
@@ -145,59 +203,35 @@ def validate(
     example_input: dict | None,
     example_expected: Decimal | None,
 ) -> ValidationResult:
-    """3-layer validation (simplified from 5 layers). 无 keyword blacklist (Phase 1 政策).
+    """3-layer validation. 无 keyword blacklist (Phase 1 政策).
 
     Layer order:
-    1. EXPLAIN — catch syntax/semantic errors on a stub `wide` table.
-       DuckDB EXPLAIN resolves table references; without a stub, EXPLAIN fails
-       on missing-table for SQL that should pass. Stub ensures EXPLAIN only
-       catches actual SQL-level errors.
-    2. RUN + COLUMNS — run SQL on real sample rows, then check output columns
-       cover expected_columns. Replaces old layers 2 (FROM wide text), 3
-       (BRANCH_NUM text), 4 (smoke), 4.5 (columns). One execution covers all.
+    1. EXPLAIN — catch syntax/semantic errors. Materializes wide_validate first
+       (real columns) so EXPLAIN sees actual column references; no separate stub.
+    2. RUN + COLUMNS — execute SQL on the materialized sample rows, then check
+       output columns cover expected_columns.
     3. EXAMPLE — optional Decimal precision check on one row. Reuses Layer 2's
        result (no second SQL execution).
-
-    Why simplify: 5-layer design had 2 redundant text checks (FROM wide and
-    BRANCH_NUM) whose failure modes were already covered by EXPLAIN + column
-    check. Smoke + example executed SQL twice when example was provided.
-    Simplified design: same failure coverage, half the SQL executions, ~40%
-    less code. Friendly error messages ("must contain FROM wide") moved to
-    prompts/compute_codegen.md as LLM guidance, not runtime checks.
     """
     try:
-        # 第 1 层: EXPLAIN (with wide → stub)
-        try:
-            conn.execute("CREATE TEMP TABLE _validate_wide_stub (branch_num VARCHAR)")
-        except Exception:
-            pass  # already exists, fine
-        explain_sql = sql.replace("FROM wide", "FROM _validate_wide_stub").replace(
-            "from wide", "from _validate_wide_stub"
-        )
-        try:
-            conn.execute(f"EXPLAIN {explain_sql}")
-        except Exception as e:
-            return ValidationResult(False, "explain", str(e))
-
-        # 第 2 层: RUN + COLUMNS (灌入 sample rows, 跑 SQL, 检查输出列)
-        if wide_sample_rows:
-            cols = list(wide_sample_rows[0].keys())
-            col_defs = ", ".join(f'"{c}" VARCHAR' for c in cols)
-            conn.execute(f"CREATE TEMP TABLE wide_validate ({col_defs})")
-            for row in wide_sample_rows:
-                conn.execute(
-                    f"INSERT INTO wide_validate VALUES ({', '.join(['?'] * len(cols))})",
-                    [str(row.get(c, "")) for c in cols],
-                )
-        else:
-            conn.execute("CREATE TEMP TABLE wide_validate (branch_num VARCHAR)")
-
+        # Materialize sample rows into wide_validate (shared with evaluate for
+        # column-type consistency). Done BEFORE EXPLAIN so column references
+        # resolve to real columns.
+        _materialize_wide_table(conn, wide_sample_rows, "wide_validate")
         exec_sql = sql.replace("FROM wide", "FROM wide_validate").replace(
             "from wide", "from wide_validate"
         )
+
+        # 第 1 层: EXPLAIN
+        try:
+            conn.execute(f"EXPLAIN {exec_sql}")
+        except duckdb.Error as e:
+            return ValidationResult(False, "explain", str(e))
+
+        # 第 2 层: RUN + COLUMNS
         try:
             rows = conn.execute(exec_sql).fetchall()
-        except Exception as e:
+        except duckdb.Error as e:
             return ValidationResult(False, "columns", str(e))
 
         cols_returned = [d[0] for d in conn.description]
@@ -231,36 +265,20 @@ def validate(
             try:
                 actual_d = Decimal(str(actual))
                 expected_d = Decimal(str(example_expected))
-            except Exception as e:
+            except (ValueError, ArithmeticError) as e:
                 return ValidationResult(False, "example", f"cannot convert actual to Decimal: {e}")
             if not decimal_isclose(actual_d, expected_d):
                 return ValidationResult(False, "example", f"expected {expected_d}, got {actual_d}")
 
         return ValidationResult(True, "all", None)
     finally:
-        for t in ("wide_validate", "_validate_wide_stub"):
-            try:
-                conn.execute(f"DROP TABLE IF EXISTS {t}")
-            except Exception:
-                pass
+        try:
+            conn.execute("DROP TABLE IF EXISTS wide_validate")
+        except duckdb.Error:
+            pass
 
 
 # ---------- evaluate ---------- #
-
-def _detect_column_types(rows: list[dict]) -> dict[str, str]:
-    """Per-column SQL type: DECIMAL(38,10) if any row has Decimal/int, else VARCHAR.
-
-    Wide tables from assemble_wide always have Decimal cells (precision policy).
-    evaluate also supports arbitrary wide_rows (for tests, ad-hoc runs); type
-    detection lets us preserve Decimal precision end-to-end.
-    """
-    cols = list(rows[0].keys())
-    types: dict[str, str] = {}
-    for c in cols:
-        has_numeric = any(isinstance(r.get(c), (Decimal, int)) and not isinstance(r.get(c), bool) for r in rows)
-        types[c] = "DECIMAL(38,10)" if has_numeric else "VARCHAR"
-    return types
-
 
 def evaluate(
     sql: str,
@@ -277,34 +295,24 @@ def evaluate(
     decides how to surface the failure (assemble_status / task 13 aggregates
     these into the runlog).
 
+    Row-count contract (P0-1): if SQL has WHERE/GROUP BY/DISTINCT that changes
+    row count, status='compute_failed' (silent truncation is a data bug).
+
     DECIMAL precision: wide_rows cells with Decimal/int values get DECIMAL(38,10)
-    columns in the temp table, so SQL arithmetic preserves precision (no float).
+    columns via _materialize_wide_table, shared with validate() so behavior
+    is identical (P1-1).
     """
     if not wide_rows:
         return [], "ok"
     conn = _get_conn()
-    conn.execute("DROP TABLE IF EXISTS wide")
-    col_types = _detect_column_types(wide_rows)
-    cols = list(col_types.keys())
-    col_defs = ", ".join(f'"{c}" {col_types[c]}' for c in cols)
-    conn.execute(f"CREATE TEMP TABLE wide ({col_defs})")
-    for row in wide_rows:
-        vals: list = []
-        for c in cols:
-            v = row.get(c)
-            if v is None:
-                vals.append(None)
-            elif col_types[c] == "DECIMAL(38,10)":
-                vals.append(Decimal(str(v)))
-            else:
-                vals.append(str(v))
-        conn.execute(
-            f"INSERT INTO wide VALUES ({', '.join(['?'] * len(cols))})",
-            vals,
-        )
+    _materialize_wide_table(conn, wide_rows, "wide")
     try:
         rows = conn.execute(sql).fetchall()
-    except Exception:
+    except duckdb.Error:
+        return [None] * len(wide_rows), "compute_failed"
+
+    # P0-1: row count must match wide_rows (no silent truncation by WHERE/etc.)
+    if len(rows) != len(wide_rows):
         return [None] * len(wide_rows), "compute_failed"
 
     cols_returned = [d[0] for d in conn.description]
@@ -322,7 +330,7 @@ def evaluate(
         else:
             try:
                 values.append(Decimal(str(v)))
-            except Exception:
+            except (ValueError, ArithmeticError):
                 values.append(None)
     return values, "ok"
 
