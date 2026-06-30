@@ -397,15 +397,14 @@ def test_skill_activation_middleware_activates_only_latest_real_user_message(mon
     assert not any(is_slash_skill_activation_reminder(message) for message in captured["messages"])
 
 
-def test_skill_activation_middleware_ignores_hidden_and_summary_user_messages(monkeypatch, tmp_path):
+def test_skill_activation_middleware_ignores_hidden_user_messages(monkeypatch, tmp_path):
     skill = _make_skill(tmp_path, "data-analysis", content="# Data Analysis\nUse pandas.")
     monkeypatch.setattr(middleware_module, "get_or_new_skill_storage", lambda **kwargs: _make_storage(tmp_path, [skill]))
 
     middleware = SkillActivationMiddleware()
     real_user = HumanMessage(content="continue normally", id="msg-1")
     hidden_slash = HumanMessage(content="/data-analysis hidden request", id="msg-2", additional_kwargs={"hide_from_ui": True})
-    summary_slash = HumanMessage(content="/data-analysis summary request", id="msg-3", name="summary")
-    request = _make_model_request([real_user, hidden_slash, summary_slash])
+    request = _make_model_request([real_user, hidden_slash])
     captured = {}
 
     def handler(model_request: ModelRequest):

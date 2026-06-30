@@ -33,8 +33,6 @@ from langgraph.errors import GraphBubbleUp
 
 logger = logging.getLogger(__name__)
 
-_SUMMARY_MESSAGE_NAME = "summary"
-
 # Finite set of blocked tag names: system-reserved + common injection patterns.
 _BLOCKED_TAG_NAMES: frozenset[str] = frozenset(
     {
@@ -88,14 +86,12 @@ def _escape_tag_match(match: re.Match) -> str:
 def _is_genuine_user_message(message: object) -> bool:
     """Return True for real user messages, excluding system-injected HumanMessages.
 
-    System-injected context is marked via ``hide_from_ui`` or ``name == "summary"``
-    — the same convention used by DynamicContextMiddleware and TodoMiddleware.
+    System-injected context is marked via ``hide_from_ui`` — the same convention
+    used by DynamicContextMiddleware and TodoMiddleware.
     """
     if not isinstance(message, HumanMessage):
         return False
     if message.additional_kwargs.get("hide_from_ui"):
-        return False
-    if message.name == _SUMMARY_MESSAGE_NAME:
         return False
     return True
 

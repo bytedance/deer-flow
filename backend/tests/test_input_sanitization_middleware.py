@@ -246,11 +246,6 @@ def test_genuine_user_message_false_for_hide_from_ui():
     assert not _is_genuine_user_message(msg)
 
 
-def test_genuine_user_message_false_for_summary():
-    msg = HumanMessage(content="summary...", name="summary")
-    assert not _is_genuine_user_message(msg)
-
-
 # ---------------------------------------------------------------------------
 # wrap_model_call — clean input
 # ---------------------------------------------------------------------------
@@ -368,19 +363,6 @@ class TestWrapModelCallSpecialCases:
         )
         user = HumanMessage(content="Real question", id="msg-2")
         request = _make_request([reminder, user])
-        captured = []
-
-        mw.wrap_model_call(request, lambda req: captured.append(req) or "ok")
-
-        result_msgs = captured[0].messages
-        assert _USER_INPUT_BEGIN not in result_msgs[0].content
-        assert _USER_INPUT_BEGIN in result_msgs[1].content
-
-    def test_skips_summary_message(self):
-        mw = _make_middleware()
-        summary = HumanMessage(content="Summary of chat...", id="s1", name="summary")
-        user = HumanMessage(content="Follow up", id="msg-2")
-        request = _make_request([summary, user])
         captured = []
 
         mw.wrap_model_call(request, lambda req: captured.append(req) or "ok")

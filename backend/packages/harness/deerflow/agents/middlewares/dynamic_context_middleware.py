@@ -56,7 +56,6 @@ _DYNAMIC_CONTEXT_REMINDER_KEY = "dynamic_context_reminder"
 # SystemMessage. Detection reads this instead of regex-parsing message content,
 # so it is never exposed to user-influenceable memory content.
 _REMINDER_DATE_KEY = "reminder_date"
-_SUMMARY_MESSAGE_NAME = "summary"
 
 
 def _extract_date(content: str) -> str | None:
@@ -108,8 +107,6 @@ def _is_user_injection_target(message: object) -> bool:
     if not isinstance(message, HumanMessage):
         return False
     if is_dynamic_context_reminder(message):
-        return False
-    if message.name == _SUMMARY_MESSAGE_NAME:
         return False
     # Prevent recursive ID-swap: a message whose ID ends with "__user" was
     # produced by a prior _make_reminder_and_user_messages call and must not

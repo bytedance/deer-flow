@@ -202,7 +202,7 @@ class RunJournal(BaseCallbackHandler):
         if caller == "lead_agent" and not self._first_human_msg and messages:
             for batch in reversed(messages):
                 for m in reversed(batch):
-                    if isinstance(m, HumanMessage) and m.name != "summary" and m.additional_kwargs.get("hide_from_ui") is not True:
+                    if isinstance(m, HumanMessage) and m.additional_kwargs.get("hide_from_ui") is not True:
                         self.set_first_human_message(m.text)
                         self._put(
                             event_type="llm.human.input",

@@ -841,20 +841,6 @@ class TestChatModelStartHumanMessage:
         assert human_events[0]["content"]["content"] == "What is AI?"
 
     @pytest.mark.anyio
-    async def test_skips_summary_named_human_messages(self, journal_setup):
-        """HumanMessages with name='summary' are skipped."""
-        from langchain_core.messages import HumanMessage
-
-        j, store = journal_setup
-        messages_batch = [
-            [HumanMessage(content="Summarized context", name="summary"), HumanMessage(content="Real question")],
-        ]
-        j.on_chat_model_start({}, messages_batch, run_id=uuid4(), tags=["lead_agent"])
-        await j.flush()
-
-        assert j._first_human_msg == "Real question"
-
-    @pytest.mark.anyio
     async def test_skips_hidden_human_messages(self, journal_setup):
         """HumanMessages hidden from the UI are internal context, not user input."""
         from langchain_core.messages import HumanMessage
