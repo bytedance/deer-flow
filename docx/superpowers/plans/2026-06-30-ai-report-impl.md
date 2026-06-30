@@ -5,7 +5,7 @@
 **目标：** 实现 `ai-report` skill —— 用户上传一份含 H1/H2/H3 多章节多表 的 Markdown（每个 H3 嵌一张 `<table>` 加 `data-idx`/`data-unit` 元数据），DeerFlow lead agent 走 **design 模式**（默认）：对每节 checkpoint 交互、按 `<th data-idx>` 调 SQLBot 拉原始事实（**源单位固定 = 元**），落地到全局单 DuckDB（`/mnt/ai-report-data/duckdb/ai-report.duckdb`），DuckDB PIVOT 出宽表，LLM 生成 DuckDB SQL 计算列，5 层校验（EXPLAIN + FROM wide + branch_num + smoke + example，无 keyword blacklist），DuckDB UPDATE 应用单位换算，approved 后写 `approved_table_runs` 快照并回填 `/mnt/ai-report-data/<report_id>.design.md`；用户说"运行报告"时走 **runtime 模式**：读 approved 快照拼整本 `report.md` + `report.docx`。
 
 **架构：**
-- **Skill 层**（触发 + 模式分流 + 中文回执）：`SKILL.md` 决定 design vs runtime；checkpoint 走 `ask_clarification(clarification_type="risk_confirmation", ...)`，和 chatbi-report 同构。
+- **Skill 层**（触发 + 模式分流 + 中文回执）：`SKILL.md` 决定 design vs runtime。**Phase 1 入口契约**：ai-report Phase 1 通过 CLI / Python import 调用（`design_pipeline.run_report` 和 `runtime_pipeline.run_report`），pytest 全跑通；**不做 LangGraph `make_lead_agent` 集成**——`_checkpoint` 在 Phase 1 是占位函数（raise `NotImplementedError`，测试用 `monkeypatch` 注入 auto-approve），`_llm_codegen` / `_llm_describe` 同理。Phase 2 在 harness 包里加 `@tool` / `ask_clarification` shim，把 `_checkpoint` 替换为 `ask_clarification(clarification_type="risk_confirmation", ...)`，把 `_llm_codegen` / `_llm_describe` 替换为 `make_lead_agent` in-turn 调 `prompts/*.md`。
 - **数据层**（持久 + 状态）：5 张表 DuckDB 全局单库 — `reports / report_sections / report_tables / metric_facts / approved_table_runs`，所有表带 `schema_version INTEGER NOT NULL DEFAULT 1`。`run_id` 是 UUID4，入 PK，**保留所有 design 历史**。`source_md_hash` 是 sha256，原 MD 改动可 detect。
 - **Pipeline 层**（design 14 step / runtime 5 step）：16 个新写 script，**不 import chatbi-report 任何 module，不复制 chatbi-report 任何代码块**，可读 chatbi-report 源码借鉴算法 / 模式 / lint 规则 / 库选择，在 ai-report 目录**重新写**。所有确定性 step（lint / parse / sqlbot / compute / unit / render）走 `bash` 调本地 Python；LLM 决策（compute SQL codegen + 描述）由 lead agent in-turn 调绑定模型 + `prompts/*.md`。
 - **Checkpoint 编号沿用 chatbi-report 惯例**（1.5/3.5/8d.5）+ ai-report 新加 0/10/11。
@@ -1917,11 +1917,19 @@ def assemble_wide(metric_facts: list[dict], run_id: str, table_id: str) -> list[
             [f.get("branch_num", ""), f.get("idx_id", ""), f.get("period_alias", ""),
              json.dumps(cell) if isinstance(cell, str) else cell, f.get("status", "ok")],
         )
+    if not metric_facts:
+        return []
+    # DuckDB PIVOT only accepts a single column in FOR; concat idx_id + '@' + period_alias as col_key,
+    # then build a static IN clause from distinct values (avoids subquery-in-IN parsing limitation).
+    distinct_keys = sorted({f"{f.get('idx_id','')}@{f.get('period_alias','')}" for f in metric_facts})
+    in_clause = ", ".join(f"'{k}'" for k in distinct_keys)
     rows = conn.execute(
-        """SELECT * FROM facts PIVOT (
-             MAX(CASE WHEN status='ok' THEN CAST(numeric_value AS DOUBLE) ELSE NULL END)
-             FOR (idx_id, period_alias) IN (SELECT idx_id, period_alias FROM facts)
-           )"""
+        f"""SELECT * FROM (
+              SELECT *, idx_id || '@' || period_alias AS col_key FROM facts
+            ) PIVOT (
+              MAX(CASE WHEN status='ok' THEN CAST(numeric_value AS DOUBLE) ELSE NULL END)
+              FOR col_key IN ({in_clause})
+            )"""
     ).fetchall()
     cols = [d[0] for d in conn.description]
     return [dict(zip(cols, r)) for r in rows]
@@ -2067,6 +2075,13 @@ def validate(
             return ValidationResult(False, "smoke", "SAMPLE 3 ROWS returned no rows")
     except Exception as e:
         return ValidationResult(False, "smoke", str(e))
+
+    # 第 4.5 层: 输出列 ⊇ expected_columns (excluding branch_num 在 index 0)
+    if expected_columns:
+        cols_returned = [d[0] for d in conn.description]
+        missing = [c for c in expected_columns[1:] if c not in cols_returned]
+        if missing:
+            return ValidationResult(False, "columns", f"missing output columns: {missing}")
 
     # 第 5 层: example (math.isclose)
     if example_input is not None and example_expected is not None:
@@ -2649,7 +2664,7 @@ from assemble_status import build_status, format_zh_receipt
 
 def test_build_status_aggregates_sentinels():
     sections = [
-        {"section_title": "存款", "approval_status": "approved", "sentinels": ["A@202603", "B@202603"], "computed_sentinels": {"利润率": "⚠️COMPUTE_FAILED"}},
+        {"section_title": "存款", "approval_status": "approved", "sentinels": ["⚠️QUERY_FAILED", "⚠️QUERY_FAILED"], "computed_sentinels": {"利润率": "⚠️COMPUTE_FAILED"}},
         {"section_title": "贷款", "approval_status": "draft", "sentinels": [], "computed_sentinels": {}},
     ]
     status = build_status("rid", sections, design_md_path="/mnt/ai-report-data/rid.design.md")
@@ -2837,11 +2852,13 @@ def build_runtime_payload(store: Store, report_id: str) -> dict:
         sentinels = json.loads(r["sentinels"]) if isinstance(r["sentinels"], str) else r["sentinels"]
         computed_cols = json.loads(r["computed_columns"]) if isinstance(r["computed_columns"], str) else r["computed_columns"]
         descriptions = json.loads(r["descriptions"]) if isinstance(r["descriptions"], str) else r["descriptions"]
-        # 简化: 不在这里反查 parsed_payload 重建 headers, 而是直接从 description / sentinels 拼
+        # 从 r 中拼出每张表 dict. headers 从 report_tables.parsed_payload.headers_2d 反查(list_approved_tables 已 JOIN).
+        parsed_raw = r.get("parsed_payload")
+        parsed = json.loads(parsed_raw) if isinstance(parsed_raw, str) else (parsed_raw or {})
         sections_dict[sec_order]["reports"].append({
             "title": r["table_title"],
             "description": descriptions[0] if descriptions else None,
-            "headers": [[]],  # runtime 走简化路径, 详细 headers 由 task 16 runtime_pipeline 补
+            "headers": parsed.get("headers_2d", []),
             "rows": wide,
             "sentinels": sentinels,
             "computed_sentinels": {},
@@ -2904,7 +2921,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--db-path", default=DEFAULT_DB_PATH)
     parser.add_argument("--report-id", required=True)
     parser.add_argument("--out", required=True)
-    parser.add_argument("--style", default="scripts/report_style.json")
+    parser.add_argument("--style", default=str(Path(__file__).resolve().parent / "report_style.json"))
     args = parser.parse_args(argv)
     try:
         store = Store(db_path=args.db_path)
@@ -3038,6 +3055,7 @@ import hashlib
 import json
 import re
 import sys
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -3217,9 +3235,9 @@ def run_report(store: Store, sqlbot: Any, md_path: str) -> dict:
             {
                 "title": doc.sections[sb.section_order].reports[0].title,
                 "all_idx_ids": list(doc.all_idx_ids),
-                "org_contexts": [vars(o) for o in doc.sections[sb.section_order].reports[0].org_contexts],
+                "org_contexts": [asdict(o) for o in doc.sections[sb.section_order].reports[0].org_contexts],
                 "time_info": doc.sections[sb.section_order].reports[0].time_info,
-                "headers_2d": [[vars(th) for th in row] for row in doc.sections[sb.section_order].reports[0].headers],
+                "headers_2d": [[asdict(th) for th in row] for row in doc.sections[sb.section_order].reports[0].headers],
                 "compute_block_md": sb.source_md,
                 "description_prompt": None,
             },
@@ -3955,6 +3973,16 @@ No type mismatches found.
 - 1 SKILL.md ✓
 
 **Self-review verdict:** Plan is at the level to execute. No placeholders, no type mismatches, spec coverage complete.
+
+**Post-review fix log (applied after Python + superpowers skill expert review on 2026-06-30):**
+- **C1 (Task 8 PIVOT)**: DuckDB `FOR (idx_id, period_alias) IN (subquery)` 是无效语法（多列 tuple 不接受）。改为先派生 `col_key = idx_id || '@' || period_alias`，再用静态 `IN ('k1', 'k2', ...)` 列出 distinct col_key。
+- **C2 (Task 13 sentinel)**: `build_status` 测试 sentinel 列表从列键 (`["A@202603", "B@202603"]`) 改为 sentinel code (`["⚠️QUERY_FAILED", "⚠️QUERY_FAILED"]`)，让 `by_code` 累加命中。
+- **C3 (Phase 1 入口)**: Plan header "Skill 层" 段落补加 Phase 1 入口契约：CLI / Python import / pytest only，`_checkpoint` / `_llm_codegen` / `_llm_describe` Phase 1 是 `monkeypatch` 占位。LangGraph `make_lead_agent` shim 是 Phase 2，明确 spec §4.3 已挪到 Phase 2。
+- **S1 (Task 9 validate)**: `expected_columns` 不再是死参数——smoke 之后追加第 4.5 层"输出列 ⊇ expected_columns[1:]"，返回 `layer='columns'`。
+- **S2 (Task 14 build_runtime_payload)**: `headers` 不再硬编码 `[[]]`，从 `r["parsed_payload"].headers_2d` 反查（`list_approved_tables` 已 JOIN report_tables）。
+- **S4 (Task 15 run_report)**: `[vars(o) for o in ...]` / `[[vars(th) for th in row] ...]` 改为 `dataclasses.asdict`（递归展开稳），import 同步加 `from dataclasses import asdict`。
+- **M1 (Task 14 report_docx.py)**: `--style` 默认值从相对路径 `"scripts/report_style.json"` 改为 `Path(__file__).resolve().parent / "report_style.json"`，与 Task 16 runtime_pipeline 一致。
+- (S3 pyproject.toml: SKIP — 用户确认 httpx / duckdb / python-docx 已装，不另声明依赖。)
 
 ---
 
