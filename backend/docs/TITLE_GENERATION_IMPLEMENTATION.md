@@ -16,9 +16,9 @@
 #### [`packages/harness/deerflow/agents/middlewares/title_middleware.py`](../packages/harness/deerflow/agents/middlewares/title_middleware.py) (新建)
 - ✅ 创建 `TitleMiddleware` 类
 - ✅ 实现 `_should_generate_title()` 检查是否需要生成
-- ✅ 实现 `_generate_title()` 调用 LLM 生成标题
-- ✅ 实现 `after_agent()` 钩子，在首次对话后自动触发
-- ✅ 包含 fallback 策略（LLM 失败时使用用户消息前几个词）
+- ✅ 默认使用本地 fallback 生成标题，避免流式回复结束前等待额外 LLM 调用；显式配置 `model_name` 时可使用 LLM 标题
+- ✅ 实现 `after_model()` / `aafter_model()` 钩子，在首次对话后自动触发
+- ✅ 包含 fallback 策略（LLM 未配置或失败时使用用户消息前几个词）
 
 #### [`packages/harness/deerflow/config/app_config.py`](../packages/harness/deerflow/config/app_config.py)
 - ✅ 导入 `load_title_config_from_dict`
@@ -37,7 +37,7 @@ title:
   enabled: true
   max_words: 6
   max_chars: 60
-  model_name: null
+  model_name: null  # null = 快速本地 fallback；填模型名才启用 LLM 标题
 ```
 
 ### 3. 文档
@@ -113,7 +113,7 @@ title:
   enabled: true
   max_words: 8      # 标题最多 8 个词
   max_chars: 80     # 标题最多 80 个字符
-  model_name: null  # 使用默认模型
+  model_name: null  # null = 快速本地 fallback；填模型名才启用 LLM 标题
 ```
 
 3. **配置持久化（可选）**

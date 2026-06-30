@@ -9,7 +9,7 @@
 使用 `TitleMiddleware` 在 `after_model` 钩子中：
 1. 检测是否是首次对话（1个用户消息 + 1个助手回复）
 2. 检查 state 是否已有 title
-3. 调用 LLM 生成简洁的标题（默认最多6个词）
+3. 默认从首条用户消息生成本地 fallback 标题，避免在流式回复结束前额外等待一次 LLM 调用；显式配置 `model_name` 时才调用 LLM 生成标题（默认最多6个词）
 4. 将 title 存储到 `ThreadState` 中（会被 checkpointer 持久化）
 
 TitleMiddleware 会先把 LangChain message content 里的结构化 block/list 内容归一化为纯文本，再拼到 title prompt 里，避免把 Python/JSON 的原始 repr 泄漏到标题生成模型。
@@ -67,7 +67,7 @@ title:
   enabled: true
   max_words: 6
   max_chars: 60
-  model_name: null  # 使用默认模型
+  model_name: null  # null = 快速本地 fallback；填模型名才启用 LLM 标题
 ```
 
 或在代码中配置：

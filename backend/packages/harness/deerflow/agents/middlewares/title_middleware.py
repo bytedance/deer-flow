@@ -157,11 +157,14 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
         return {"title": self._fallback_title(user_msg)}
 
     async def _agenerate_title_result(self, state: TitleMiddlewareState) -> dict | None:
-        """Generate a title asynchronously and fall back locally on failure."""
+        """Generate a configured LLM title asynchronously and fall back locally."""
         if not self._should_generate_title(state):
             return None
 
         config = self._get_title_config()
+        if not config.model_name:
+            return self._generate_title_result(state)
+
         prompt, user_msg = self._build_title_prompt(state)
 
         try:
@@ -172,10 +175,7 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
             model_kwargs = {"thinking_enabled": False, "attach_tracing": False}
             if self._app_config is not None:
                 model_kwargs["app_config"] = self._app_config
-            if config.model_name:
-                model = create_chat_model(name=config.model_name, **model_kwargs)
-            else:
-                model = create_chat_model(**model_kwargs)
+            model = create_chat_model(name=config.model_name, **model_kwargs)
             response = await model.ainvoke(prompt, config=self._get_runnable_config())
             title = self._parse_title(response.content)
             if title:
