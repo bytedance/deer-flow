@@ -8,8 +8,7 @@ export function useSkills() {
   const { data, isLoading, error } = useQuery({
     queryKey: ["skills"],
     queryFn: () => loadSkills(),
-    retry: (count, err) =>
-      !(err instanceof SkillRequestError) && count < 3,
+    retry: (count, err) => !(err instanceof SkillRequestError) && count < 3,
   });
   return { skills: data ?? [], isLoading, error };
 }
