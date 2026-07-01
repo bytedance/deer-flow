@@ -495,6 +495,42 @@ class RunManager:
             record.finalizing = finalizing
             record.updated_at = _now_iso()
 
+    async def wait_for_prior_finalizing(
+        self,
+        thread_id: str,
+        run_id: str,
+        *,
+        poll_interval: float = 0.01,
+    ) -> None:
+        """Wait until older same-thread runs have finished post-cancel cleanup."""
+        while True:
+            async with self._lock:
+                found_current = False
+                prior_finalizing = False
+                for record in self._thread_records_locked(thread_id):
+                    if record.run_id == run_id:
+                        found_current = True
+                        break
+                    if record.finalizing:
+                        prior_finalizing = True
+
+                if not found_current or not prior_finalizing:
+                    return
+
+            await asyncio.sleep(poll_interval)
+
+    async def has_later_run(self, thread_id: str, run_id: str) -> bool:
+        """Return whether a newer in-memory run has been admitted for the thread."""
+        async with self._lock:
+            seen_current = False
+            for record in self._thread_records_locked(thread_id):
+                if record.run_id == run_id:
+                    seen_current = True
+                    continue
+                if seen_current:
+                    return True
+        return False
+
     async def _persist_model_name(self, run_id: str, model_name: str | None) -> None:
         """Best-effort persist model_name update to the backing store."""
         if self._store is None:

@@ -1,4 +1,4 @@
-import { describe, expect, test } from "@rstest/core";
+import { describe, expect, rs, test } from "@rstest/core";
 import { QueryClient, type InfiniteData } from "@tanstack/react-query";
 
 import {
@@ -6,7 +6,9 @@ import {
   getInfiniteThreadsNextPageParam,
   INFINITE_THREADS_PAGE_SIZE,
   INFINITE_THREADS_QUERY_KEY_PREFIX,
+  invalidateStoppedThreadCaches,
   mapInfiniteThreadsCache,
+  stopThreadAndInvalidateCaches,
   upsertThreadInInfiniteCache,
 } from "@/core/threads/hooks";
 import type { AgentThread } from "@/core/threads/types";
@@ -224,5 +226,88 @@ describe("upsertThreadInInfiniteCache", () => {
     const ids = cache?.pages[0]?.map((t) => t.thread_id);
     expect(ids).toEqual(["a", "b"]);
     expect(cache?.pages[0]?.[0]?.values.title).toBe("Old title");
+  });
+});
+
+describe("invalidateStoppedThreadCaches", () => {
+  function invalidatedQueryKeys(client: QueryClient) {
+    const invalidate = rs.spyOn(client, "invalidateQueries");
+    return {
+      invalidate,
+      queryKeys: () =>
+        invalidate.mock.calls.map(([filters]) => filters?.queryKey),
+    };
+  }
+
+  test("refreshes current thread and sidebar caches after fire-and-forget stop", () => {
+    const client = new QueryClient();
+    const { queryKeys } = invalidatedQueryKeys(client);
+
+    invalidateStoppedThreadCaches(client, "thread-1", false);
+
+    expect(queryKeys()).toContainEqual(["threads", "search"]);
+    expect(queryKeys()).toContainEqual(INFINITE_THREADS_QUERY_KEY_PREFIX);
+    expect(queryKeys()).toContainEqual(["thread", "thread-1"]);
+    expect(queryKeys()).toContainEqual([
+      "thread",
+      "metadata",
+      "thread-1",
+      false,
+    ]);
+    expect(queryKeys()).toContainEqual(["thread-token-usage", "thread-1"]);
+  });
+
+  test("does not refresh per-thread API caches for mock threads", () => {
+    const client = new QueryClient();
+    const { queryKeys } = invalidatedQueryKeys(client);
+
+    invalidateStoppedThreadCaches(client, "thread-1", true);
+
+    expect(queryKeys()).toContainEqual(["threads", "search"]);
+    expect(queryKeys()).toContainEqual(INFINITE_THREADS_QUERY_KEY_PREFIX);
+    expect(queryKeys()).not.toContainEqual(["thread", "thread-1"]);
+    expect(queryKeys()).not.toContainEqual([
+      "thread",
+      "metadata",
+      "thread-1",
+      true,
+    ]);
+    expect(queryKeys()).not.toContainEqual(["thread-token-usage", "thread-1"]);
+  });
+
+  test("wraps SDK stop and refreshes caches after it resolves", async () => {
+    const client = new QueryClient();
+    const stop = rs.fn(() => Promise.resolve());
+    const { queryKeys } = invalidatedQueryKeys(client);
+
+    await stopThreadAndInvalidateCaches(client, stop, "thread-1", false);
+
+    expect(stop).toHaveBeenCalledTimes(1);
+    expect(queryKeys()).toContainEqual([
+      "thread",
+      "metadata",
+      "thread-1",
+      false,
+    ]);
+  });
+
+  test("still refreshes caches when SDK stop rejects", async () => {
+    const client = new QueryClient();
+    const stop = rs.fn(async () => {
+      throw new Error("cancel failed");
+    });
+    const { queryKeys } = invalidatedQueryKeys(client);
+
+    await expect(
+      stopThreadAndInvalidateCaches(client, stop, "thread-1", false),
+    ).rejects.toThrow("cancel failed");
+
+    expect(queryKeys()).toContainEqual(["threads", "search"]);
+    expect(queryKeys()).toContainEqual([
+      "thread",
+      "metadata",
+      "thread-1",
+      false,
+    ]);
   });
 });

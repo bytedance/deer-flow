@@ -1,5 +1,6 @@
 import asyncio
 import copy
+from contextlib import suppress
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, call
@@ -813,6 +814,196 @@ async def test_interrupted_title_finalization_blocks_new_same_thread_run(monkeyp
     records = await run_manager.list_by_thread("thread-1")
     assert [item.run_id for item in records] == [record.run_id]
     assert checkpointer.latest_checkpoint["channel_values"]["messages"] == [{"type": "human", "content": "old prompt"}]
+
+
+@pytest.mark.anyio
+async def test_interrupted_title_does_not_overwrite_checkpoint_from_admitted_replacement(monkeypatch):
+    """A replacement run admitted by multitask interrupt must not lose its newer checkpoint."""
+    from deerflow.agents.middlewares.title_middleware import TitleMiddleware
+
+    monkeypatch.setattr(
+        TitleMiddleware,
+        "_generate_title_result",
+        lambda self, state, allow_partial_exchange=False: {"title": "Old prompt"},
+    )
+
+    old_checkpoint = {
+        "id": "ckpt-old",
+        "ts": "2026-06-29T00:00:00Z",
+        "channel_values": {"messages": [{"type": "human", "content": "Old prompt"}]},
+        "channel_versions": {"messages": 1},
+    }
+    replacement_messages = [
+        {"type": "human", "content": "Old prompt"},
+        {"type": "human", "content": "Replacement prompt"},
+    ]
+    replacement_checkpoint = {
+        "id": "ckpt-replacement",
+        "ts": "2026-06-29T00:00:01Z",
+        "channel_values": {"messages": replacement_messages},
+        "channel_versions": {"messages": 2},
+    }
+
+    class _ReplacementRaceCheckpointer:
+        def __init__(self) -> None:
+            self.latest_checkpoint = copy.deepcopy(old_checkpoint)
+            self.latest_metadata = {"source": "loop", "step": 1}
+            self.title_write_started = asyncio.Event()
+            self.replacement_checkpoint_written = asyncio.Event()
+
+        async def aget_tuple(self, config):
+            del config
+            return _FakeCheckpointTuple(
+                checkpoint=copy.deepcopy(self.latest_checkpoint),
+                metadata=dict(self.latest_metadata),
+                config={
+                    "configurable": {
+                        "thread_id": "thread-1",
+                        "checkpoint_ns": "",
+                        "checkpoint_id": self.latest_checkpoint["id"],
+                    }
+                },
+            )
+
+        async def aput(self, config, checkpoint, metadata, new_versions):
+            del config, new_versions
+            self.title_write_started.set()
+            await self.replacement_checkpoint_written.wait()
+            self.latest_checkpoint = copy.deepcopy(checkpoint)
+            self.latest_metadata = dict(metadata)
+            return {
+                "configurable": {
+                    "thread_id": "thread-1",
+                    "checkpoint_ns": "",
+                    "checkpoint_id": checkpoint["id"],
+                }
+            }
+
+        def get_next_version(self, current, _channel):
+            return (current or 0) + 1
+
+    run_manager = RunManager()
+    old_record = await run_manager.create("thread-1")
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+    checkpointer = _ReplacementRaceCheckpointer()
+    old_agent_started = asyncio.Event()
+
+    class _BlockingAgent:
+        metadata = {"model_name": "fake-test-model"}
+        checkpointer: Any | None = None
+        store: Any | None = None
+        interrupt_before_nodes = None
+        interrupt_after_nodes = None
+
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            del graph_input, config, stream_mode, subgraphs
+            old_agent_started.set()
+            while True:
+                await asyncio.sleep(0.05)
+            if False:
+                yield  # pragma: no cover
+
+    def factory(*, config):
+        del config
+        return _BlockingAgent()
+
+    old_task = asyncio.create_task(
+        run_agent(
+            bridge,
+            run_manager,
+            old_record,
+            ctx=RunContext(checkpointer=checkpointer),
+            agent_factory=factory,
+            graph_input={"messages": [{"role": "user", "content": "Old prompt"}]},
+            config={},
+        )
+    )
+    old_record.task = old_task
+
+    try:
+        await asyncio.wait_for(old_agent_started.wait(), timeout=1.0)
+        replacement_record = await run_manager.create_or_reject("thread-1", multitask_strategy="interrupt")
+        assert replacement_record.run_id != old_record.run_id
+
+        with suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(checkpointer.title_write_started.wait(), timeout=0.25)
+
+        checkpointer.latest_checkpoint = copy.deepcopy(replacement_checkpoint)
+        checkpointer.latest_metadata = {"source": "loop", "step": 2}
+        checkpointer.replacement_checkpoint_written.set()
+        await old_task
+    finally:
+        checkpointer.replacement_checkpoint_written.set()
+        if not old_task.done():
+            old_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await old_task
+
+    assert checkpointer.latest_checkpoint["channel_values"]["messages"] == replacement_messages
+
+
+@pytest.mark.anyio
+async def test_replacement_run_waits_for_prior_finalizing_run():
+    """Replacement workers must not enter the graph while an older run is finalizing."""
+    run_manager = RunManager()
+    old_record = await run_manager.create("thread-1")
+    replacement_record = await run_manager.create("thread-1")
+    await run_manager.set_finalizing(old_record.run_id, True)
+
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+    replacement_started = asyncio.Event()
+
+    class _ReplacementAgent:
+        metadata = {"model_name": "fake-test-model"}
+        checkpointer: Any | None = None
+        store: Any | None = None
+        interrupt_before_nodes = None
+        interrupt_after_nodes = None
+
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            del graph_input, config, stream_mode, subgraphs
+            replacement_started.set()
+            if False:
+                yield  # pragma: no cover
+
+    def factory(*, config):
+        del config
+        return _ReplacementAgent()
+
+    task = asyncio.create_task(
+        run_agent(
+            bridge,
+            run_manager,
+            replacement_record,
+            ctx=RunContext(checkpointer=None),
+            agent_factory=factory,
+            graph_input={"messages": [{"role": "user", "content": "Replacement prompt"}]},
+            config={},
+        )
+    )
+    replacement_record.task = task
+
+    try:
+        await asyncio.sleep(0.1)
+        assert not replacement_started.is_set()
+
+        await run_manager.set_finalizing(old_record.run_id, False)
+        await asyncio.wait_for(replacement_started.wait(), timeout=1.0)
+        await task
+    finally:
+        await run_manager.set_finalizing(old_record.run_id, False)
+        if not task.done():
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
 
 
 @pytest.mark.anyio

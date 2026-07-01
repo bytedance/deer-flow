@@ -606,6 +606,42 @@ export function upsertThreadInInfiniteCache(
   );
 }
 
+export function invalidateStoppedThreadCaches(
+  queryClient: QueryClient,
+  threadId: string | null | undefined,
+  isMock = false,
+) {
+  void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
+  void queryClient.invalidateQueries({
+    queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
+  });
+
+  if (!threadId || isMock) {
+    return;
+  }
+
+  void queryClient.invalidateQueries({ queryKey: ["thread", threadId] });
+  void queryClient.invalidateQueries({
+    queryKey: ["thread", "metadata", threadId, isMock],
+  });
+  void queryClient.invalidateQueries({
+    queryKey: threadTokenUsageQueryKey(threadId),
+  });
+}
+
+export async function stopThreadAndInvalidateCaches(
+  queryClient: QueryClient,
+  stop: () => Promise<void> | void,
+  threadId: string | null | undefined,
+  isMock = false,
+) {
+  try {
+    await stop();
+  } finally {
+    invalidateStoppedThreadCaches(queryClient, threadId, isMock);
+  }
+}
+
 function getStreamErrorMessage(error: unknown): string {
   if (typeof error === "string" && error.trim()) {
     return error;
@@ -955,20 +991,20 @@ export function useThreadStream({
           .map(messageIdentity)
           .filter((id): id is string => Boolean(id)),
       );
-      void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
-      void queryClient.invalidateQueries({
-        queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
-      });
-      if (threadIdRef.current && !isMock) {
-        void queryClient.invalidateQueries({
-          queryKey: ["thread", threadIdRef.current],
-        });
-        void queryClient.invalidateQueries({
-          queryKey: threadTokenUsageQueryKey(threadIdRef.current),
-        });
-      }
+      invalidateStoppedThreadCaches(queryClient, threadIdRef.current, isMock);
     },
   });
+
+  const stopThread = useCallback(async () => {
+    const stoppedThreadId =
+      threadIdRef.current ?? displayThreadId ?? threadId ?? null;
+    await stopThreadAndInvalidateCaches(
+      queryClient,
+      () => thread.stop(),
+      stoppedThreadId,
+      isMock,
+    );
+  }, [displayThreadId, isMock, queryClient, thread, threadId]);
 
   const hasVisibleStreamState =
     Boolean(threadId) || liveMessagesThreadId === currentViewThreadId;
@@ -1440,6 +1476,7 @@ export function useThreadStream({
   // History messages may overlap with thread.messages; thread.messages take precedence
   const mergedThread = {
     ...thread,
+    stop: stopThread,
     values: hasVisibleStreamState ? thread.values : EMPTY_THREAD_VALUES,
     messages: mergedMessages,
   } as typeof thread;

@@ -407,6 +407,34 @@ def _wait_for_status(client, thread_id: str, run_id: str, status: str, *, timeou
     raise AssertionError(f"Run {run_id} did not reach {status!r}; last={last!r}")
 
 
+def _wait_for_thread_title(client, thread_id: str, expected_title: str, *, timeout: float = 5.0) -> dict:
+    deadline = time.monotonic() + timeout
+    last: dict | None = None
+    while time.monotonic() < deadline:
+        response = client.get(f"/api/threads/{thread_id}")
+        assert response.status_code == 200, response.text
+        last = response.json()
+        if last.get("values", {}).get("title") == expected_title:
+            return last
+        time.sleep(0.05)
+    raise AssertionError(f"Thread {thread_id} did not reach title {expected_title!r}; last={last!r}")
+
+
+def _wait_for_search_title(client, csrf_token: str, thread_id: str, expected_title: str, *, timeout: float = 5.0) -> dict:
+    deadline = time.monotonic() + timeout
+    last_match: dict | None = None
+    while time.monotonic() < deadline:
+        response = client.post("/api/threads/search", json={"limit": 20}, headers={"X-CSRF-Token": csrf_token})
+        assert response.status_code == 200, response.text
+        matching = [item for item in response.json() if item["thread_id"] == thread_id]
+        if matching:
+            last_match = matching[0]
+            if last_match.get("values", {}).get("title") == expected_title:
+                return last_match
+        time.sleep(0.05)
+    raise AssertionError(f"Search result for {thread_id} did not reach title {expected_title!r}; last={last_match!r}")
+
+
 def _thread_id_from_config(config: dict | None) -> str:
     config = config or {}
     context = config.get("context") if isinstance(config.get("context"), dict) else {}
@@ -654,8 +682,8 @@ def test_cancel_interrupt_generates_missing_title_from_checkpoint(isolated_app_w
         assert matching[0]["values"]["title"] == "Run lifecycle E2E prompt"
 
 
-def test_stop_stream_generates_title_from_graph_input_before_checkpoint(isolated_app_with_title):
-    """Frontend stop flow should title early cancellations before a useful checkpoint exists."""
+def test_cancel_wait_false_generates_title_from_graph_input_before_checkpoint(isolated_app_with_title):
+    """Fire-and-forget cancel should title early interruptions before checkpoint."""
     from starlette.testclient import TestClient
 
     controller = _RunController()
@@ -684,30 +712,22 @@ def test_stop_stream_generates_title_from_graph_input_before_checkpoint(isolated
         assert controller.started.wait(5), "fake agent never started"
         assert not controller.checkpoint_written.is_set()
 
-        with client.stream(
-            "POST",
-            f"/api/threads/{thread_id}/runs/{run_id}/stream?action=interrupt",
+        cancelled = client.post(
+            f"/api/threads/{thread_id}/runs/{run_id}/cancel?wait=false&action=interrupt",
             headers={"X-CSRF-Token": csrf_token},
-        ) as response:
-            assert response.status_code == 200, response.read().decode()
-            transcript = _drain_stream(response, timeout=10.0)
-
-        events = _parse_sse(transcript)
-        assert events[-1]["event"] == "end"
+        )
+        assert cancelled.status_code == 202, cancelled.text
         assert controller.cancelled.wait(5), "fake agent task was not cancelled"
         assert not controller.checkpoint_written.is_set()
 
         run = _wait_for_status(client, thread_id, run_id, "interrupted")
         assert run["status"] == "interrupted"
 
-        thread = client.get(f"/api/threads/{thread_id}")
-        assert thread.status_code == 200, thread.text
-        assert thread.json()["values"]["title"] == "Run lifecycle E2E prompt"
+        thread = _wait_for_thread_title(client, thread_id, "Run lifecycle E2E prompt")
+        assert thread["values"]["title"] == "Run lifecycle E2E prompt"
 
-        search = client.post("/api/threads/search", json={"limit": 20}, headers={"X-CSRF-Token": csrf_token})
-        assert search.status_code == 200, search.text
-        matching = [item for item in search.json() if item["thread_id"] == thread_id]
-        assert matching[0]["values"]["title"] == "Run lifecycle E2E prompt"
+        matching = _wait_for_search_title(client, csrf_token, thread_id, "Run lifecycle E2E prompt")
+        assert matching["values"]["title"] == "Run lifecycle E2E prompt"
 
 
 @pytest.mark.anyio
