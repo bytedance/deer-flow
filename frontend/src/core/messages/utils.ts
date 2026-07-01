@@ -80,10 +80,26 @@ export function getMessageGroups(messages: Message[]): MessageGroup[] {
         if (open) {
           open.messages.push(message);
         } else {
-          console.error(
-            "Unexpected tool message outside a processing group",
-            message,
-          );
+          // Fallback for orphan tool messages — LangGraph `messages-tuple` can
+          // emit tool-result events out of order or replay them from subagent
+          // state (e.g. bash subagent under LocalSandboxProvider with
+          // allow_host_bash). When that happens, the tool message arrives after
+          // a terminal group and lastOpenGroup() returns null. Previously we
+          // dropped the message with console.error, silently hiding the tool
+          // result from the UI. Attach to the most recent group instead so the
+          // user can still see what the agent did.
+          const lastGroup = groups[groups.length - 1];
+          if (lastGroup) {
+            lastGroup.messages.push(message);
+          } else {
+            // groups is empty (shouldn't happen — the outer for loop is guarded
+            // by `messages.length === 0 -> return []`), but keep the diagnostic
+            // just in case.
+            console.error(
+              "Unexpected tool message with no preceding group",
+              message,
+            );
+          }
         }
       }
       continue;
