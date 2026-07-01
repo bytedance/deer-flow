@@ -60,9 +60,11 @@ class _Repo:
 class _Service:
     def __init__(self) -> None:
         self.calls = []
+        self.result = {"outcome": "launched"}
 
     async def dispatch_task(self, task, *, now, trigger):
         self.calls.append((task, now, trigger))
+        return self.result
 
 
 class _RunStore:
@@ -208,6 +210,48 @@ async def test_trigger_scheduled_task_dispatches_manual_run():
 
 
 @pytest.mark.asyncio
+async def test_trigger_scheduled_task_returns_conflict_when_dispatch_conflicts():
+    repo = _Repo()
+    service = _Service()
+    service.result = {"outcome": "conflict", "error": "Thread thread-1 already has an active run"}
+    task = await repo.create(
+        task_id="task-1",
+        user_id="user-1",
+        thread_id="thread-1",
+        context_mode="reuse_thread",
+        assistant_id="lead_agent",
+        title="Daily summary",
+        prompt="Summarize thread",
+        schedule_type="cron",
+        schedule_spec={"cron": "0 9 * * *"},
+        timezone="UTC",
+        next_run_at=None,
+    )
+    request = SimpleNamespace()
+    user = SimpleNamespace(id="user-1")
+
+    old_repo = scheduled_tasks.get_scheduled_task_repo
+    old_service = scheduled_tasks.get_scheduled_task_service
+    old_user = scheduled_tasks.get_optional_user_from_request
+    try:
+        scheduled_tasks.get_scheduled_task_repo = lambda _request: repo
+        scheduled_tasks.get_scheduled_task_service = lambda _request: service
+        scheduled_tasks.get_optional_user_from_request = AsyncMock(return_value=user)
+
+        with pytest.raises(Exception) as exc_info:
+            await scheduled_tasks.trigger_scheduled_task.__wrapped__(
+                task_id=task["id"],
+                request=request,
+            )
+    finally:
+        scheduled_tasks.get_scheduled_task_repo = old_repo
+        scheduled_tasks.get_scheduled_task_service = old_service
+        scheduled_tasks.get_optional_user_from_request = old_user
+
+    assert "already has an active run" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
 async def test_update_scheduled_task_writes_repo():
     repo = _Repo()
     task = await repo.create(
@@ -332,6 +376,91 @@ async def test_pause_and_resume_scheduled_task_update_status():
 
 
 @pytest.mark.asyncio
+async def test_pause_rejects_running_task():
+    repo = _Repo()
+    task = await repo.create(
+        task_id="task-1",
+        user_id="user-1",
+        thread_id="thread-1",
+        context_mode="reuse_thread",
+        assistant_id="lead_agent",
+        title="Daily summary",
+        prompt="Summarize thread",
+        schedule_type="cron",
+        schedule_spec={"cron": "0 9 * * *"},
+        timezone="UTC",
+        next_run_at=None,
+    )
+    task["status"] = "running"
+    request = SimpleNamespace()
+    user = SimpleNamespace(id="user-1")
+
+    old_repo = scheduled_tasks.get_scheduled_task_repo
+    old_user = scheduled_tasks.get_optional_user_from_request
+    try:
+        scheduled_tasks.get_scheduled_task_repo = lambda _request: repo
+        scheduled_tasks.get_optional_user_from_request = AsyncMock(return_value=user)
+
+        with pytest.raises(Exception) as exc_info:
+            await scheduled_tasks.pause_scheduled_task.__wrapped__(
+                task_id=task["id"],
+                request=request,
+            )
+    finally:
+        scheduled_tasks.get_scheduled_task_repo = old_repo
+        scheduled_tasks.get_optional_user_from_request = old_user
+
+    assert "currently running" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_update_rejects_running_task():
+    repo = _Repo()
+    task = await repo.create(
+        task_id="task-1",
+        user_id="user-1",
+        thread_id="thread-1",
+        context_mode="reuse_thread",
+        assistant_id="lead_agent",
+        title="Daily summary",
+        prompt="Summarize thread",
+        schedule_type="cron",
+        schedule_spec={"cron": "0 9 * * *"},
+        timezone="UTC",
+        next_run_at=None,
+    )
+    task["status"] = "running"
+    request = SimpleNamespace()
+    user = SimpleNamespace(id="user-1")
+    config = _Config()
+    thread_store = SimpleNamespace(check_access=AsyncMock(return_value=True))
+
+    old_repo = scheduled_tasks.get_scheduled_task_repo
+    old_thread_store = scheduled_tasks.get_thread_store
+    old_config = scheduled_tasks.get_config
+    old_user = scheduled_tasks.get_optional_user_from_request
+    try:
+        scheduled_tasks.get_scheduled_task_repo = lambda _request: repo
+        scheduled_tasks.get_thread_store = lambda _request: thread_store
+        scheduled_tasks.get_config = lambda: config
+        scheduled_tasks.get_optional_user_from_request = AsyncMock(return_value=user)
+
+        with pytest.raises(Exception) as exc_info:
+            await scheduled_tasks.update_scheduled_task.__wrapped__(
+                task_id=task["id"],
+                request=request,
+                body=scheduled_tasks.ScheduledTaskUpdateRequest(title="Updated title"),
+            )
+    finally:
+        scheduled_tasks.get_scheduled_task_repo = old_repo
+        scheduled_tasks.get_thread_store = old_thread_store
+        scheduled_tasks.get_config = old_config
+        scheduled_tasks.get_optional_user_from_request = old_user
+
+    assert "currently running" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
 async def test_list_thread_scheduled_tasks_filters_by_thread_id():
     repo = _Repo()
     await repo.create(
@@ -382,7 +511,7 @@ async def test_list_thread_scheduled_tasks_filters_by_thread_id():
 
 
 @pytest.mark.asyncio
-async def test_list_scheduled_task_runs_derives_status_from_real_run():
+async def test_list_scheduled_task_runs_returns_persisted_rows_without_side_effects():
     repo = _Repo()
     task = await repo.create(
         task_id="task-1",
@@ -410,29 +539,16 @@ async def test_list_scheduled_task_runs_derives_status_from_real_run():
                 }
             ]
         ),
-        update_by_run_id=AsyncMock(),
-    )
-    run_store = _RunStore(
-        {
-            "run-1": {
-                "run_id": "run-1",
-                "user_id": "user-1",
-                "status": "success",
-                "error": None,
-            }
-        }
     )
     request = SimpleNamespace()
     user = SimpleNamespace(id="user-1")
 
     old_task_repo = scheduled_tasks.get_scheduled_task_repo
     old_run_repo = scheduled_tasks.get_scheduled_task_run_repo
-    old_run_store = scheduled_tasks.get_run_store
     old_user = scheduled_tasks.get_optional_user_from_request
     try:
         scheduled_tasks.get_scheduled_task_repo = lambda _request: repo
         scheduled_tasks.get_scheduled_task_run_repo = lambda _request: run_repo
-        scheduled_tasks.get_run_store = lambda _request: run_store
         scheduled_tasks.get_optional_user_from_request = AsyncMock(return_value=user)
 
         result = await scheduled_tasks.list_scheduled_task_runs.__wrapped__(
@@ -442,10 +558,9 @@ async def test_list_scheduled_task_runs_derives_status_from_real_run():
     finally:
         scheduled_tasks.get_scheduled_task_repo = old_task_repo
         scheduled_tasks.get_scheduled_task_run_repo = old_run_repo
-        scheduled_tasks.get_run_store = old_run_store
         scheduled_tasks.get_optional_user_from_request = old_user
 
-    assert result[0]["status"] == "success"
+    assert result[0]["status"] == "running"
 
 
 @pytest.mark.asyncio

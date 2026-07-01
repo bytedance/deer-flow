@@ -337,6 +337,16 @@ def test_build_run_config_dual_write_matches_merge_run_context_overrides_shape()
     assert via_assistant_id["context"]["agent_name"] == via_context["context"]["agent_name"]
 
 
+def test_build_run_config_accepts_non_interactive_context_override():
+    from app.gateway.services import build_run_config, merge_run_context_overrides
+
+    config = build_run_config("thread-1", None, None)
+    merge_run_context_overrides(config, {"non_interactive": True})
+
+    assert config["configurable"]["non_interactive"] is True
+    assert config["context"]["non_interactive"] is True
+
+
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
@@ -770,6 +780,41 @@ def test_start_run_uses_internal_owner_header_for_persistence(_stub_app_config):
     assert owner_thread["metadata"] == {"legacy": True}
     assert default_thread is None
     assert task_context["user_id"] == "owner-1"
+
+
+def test_launch_scheduled_thread_run_marks_context_non_interactive(_stub_app_config):
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from app.gateway.services import launch_scheduled_thread_run
+
+    async def _scenario():
+        captured: dict[str, object] = {}
+
+        async def fake_start_run(body, thread_id, request):
+            captured["thread_id"] = thread_id
+            captured["context"] = body.context
+            captured["metadata"] = body.metadata
+            return SimpleNamespace(run_id="run-1", thread_id=thread_id)
+
+        with patch("app.gateway.services.start_run", side_effect=fake_start_run):
+            result = await launch_scheduled_thread_run(
+                thread_id="thread-scheduled",
+                assistant_id="lead_agent",
+                prompt="Run in background",
+                app=SimpleNamespace(state=SimpleNamespace()),
+                owner_user_id="user-1",
+                metadata={"scheduled_task_id": "task-1"},
+            )
+        return captured, result
+
+    captured, result = asyncio.run(_scenario())
+
+    assert captured["thread_id"] == "thread-scheduled"
+    assert captured["context"] == {"non_interactive": True}
+    assert captured["metadata"] == {"scheduled_task_id": "task-1"}
+    assert result == {"run_id": "run-1", "thread_id": "thread-scheduled"}
 
 
 # ---------------------------------------------------------------------------

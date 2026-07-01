@@ -48,13 +48,13 @@ export default function ScheduledTasksPage() {
   const [editTitle, setEditTitle] = useState("");
   const [editPrompt, setEditPrompt] = useState("");
   const [editScheduleValue, setEditScheduleValue] = useState("");
-  const selectedTask =
-    (data ?? []).find((task) => task.id === selectedTaskId) ?? (data ?? [])[0];
   const filteredData = (data ?? []).filter((task) => {
     const statusPass = statusFilter === "all" || task.status === statusFilter;
     const typePass = typeFilter === "all" || task.schedule_type === typeFilter;
     return statusPass && typePass;
   });
+  const selectedTask =
+    filteredData.find((task) => task.id === selectedTaskId) ?? filteredData[0];
   const taskRunsQuery = useScheduledTaskRuns(selectedTask?.id);
   const createTask = useCreateScheduledTask();
   const updateTask = useUpdateScheduledTask(selectedTask?.id ?? "");
@@ -66,6 +66,19 @@ export default function ScheduledTasksPage() {
   useEffect(() => {
     document.title = `${t.sidebar.scheduledTasks} - ${t.pages.appName}`;
   }, [t.pages.appName, t.sidebar.scheduledTasks]);
+
+  useEffect(() => {
+    if (!selectedTaskId) {
+      return;
+    }
+    const stillVisible = filteredData.some(
+      (task) => task.id === selectedTaskId,
+    );
+    if (!stillVisible) {
+      setSelectedTaskId(filteredData[0]?.id ?? null);
+      setEditing(false);
+    }
+  }, [filteredData, selectedTaskId]);
 
   useEffect(() => {
     if (!selectedTask) {
@@ -265,6 +278,7 @@ export default function ScheduledTasksPage() {
                     type="button"
                     key={task.id}
                     onClick={() => setSelectedTaskId(task.id)}
+                    data-testid={`scheduled-task-item-${task.id}`}
                     className={`rounded-lg border p-4 text-left ${
                       isSelected ? "border-foreground" : "border-border"
                     }`}

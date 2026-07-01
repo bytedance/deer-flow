@@ -56,6 +56,9 @@ export function useUpdateScheduledTask(taskId: string) {
     ) => updateScheduledTask(taskId, payload),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["scheduled-tasks"] });
+      void queryClient.invalidateQueries({
+        queryKey: ["scheduled-tasks", "thread"],
+      });
     },
   });
 }
@@ -66,6 +69,9 @@ export function usePauseScheduledTask() {
     mutationFn: (taskId: string) => pauseScheduledTask(taskId),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["scheduled-tasks"] });
+      void queryClient.invalidateQueries({
+        queryKey: ["scheduled-tasks", "thread"],
+      });
     },
   });
 }
@@ -76,6 +82,9 @@ export function useResumeScheduledTask() {
     mutationFn: (taskId: string) => resumeScheduledTask(taskId),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["scheduled-tasks"] });
+      void queryClient.invalidateQueries({
+        queryKey: ["scheduled-tasks", "thread"],
+      });
     },
   });
 }
@@ -84,8 +93,14 @@ export function useTriggerScheduledTask() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (taskId: string) => triggerScheduledTask(taskId),
-    onSuccess: () => {
+    onSuccess: (_result, taskId) => {
       void queryClient.invalidateQueries({ queryKey: ["scheduled-tasks"] });
+      void queryClient.invalidateQueries({
+        queryKey: ["scheduled-tasks", "thread"],
+      });
+      void queryClient.invalidateQueries({
+        queryKey: ["scheduled-tasks", "runs", taskId],
+      });
     },
   });
 }
@@ -96,6 +111,9 @@ export function useDeleteScheduledTask() {
     mutationFn: (taskId: string) => deleteScheduledTask(taskId),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["scheduled-tasks"] });
+      void queryClient.invalidateQueries({
+        queryKey: ["scheduled-tasks", "thread"],
+      });
     },
   });
 }

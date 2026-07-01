@@ -141,6 +141,7 @@ _CONTEXT_CONFIGURABLE_KEYS: frozenset[str] = frozenset(
         "max_concurrent_subagents",
         "agent_name",
         "is_bootstrap",
+        "non_interactive",
     }
 )
 
@@ -535,7 +536,7 @@ async def launch_scheduled_thread_run(
         command=None,
         metadata=metadata or {},
         config=None,
-        context=None,
+        context={"non_interactive": True},
         webhook=None,
         checkpoint_id=None,
         checkpoint=None,

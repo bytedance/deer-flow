@@ -3,6 +3,9 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from app.scheduler.service import ScheduledTaskService
+from deerflow.runtime import ConflictError, RunStatus
+from deerflow.runtime.runs.manager import RunRecord
+from deerflow.runtime.runs.schemas import DisconnectMode
 
 
 class DummyTaskRepo:
@@ -20,18 +23,29 @@ class DummyTaskRepo:
     async def update_after_launch(self, *args, **kwargs):
         self.updated = (args, kwargs)
 
+    async def get(self, task_id: str, *, user_id: str):
+        row = next((item for item in self.rows if item["id"] == task_id and item["user_id"] == user_id), None)
+        return dict(row) if row is not None else None
+
+    async def update(self, task_id: str, *, user_id: str, updates):
+        row = next((item for item in self.rows if item["id"] == task_id and item["user_id"] == user_id), None)
+        if row is None:
+            return None
+        row.update(updates)
+        return dict(row)
+
 
 class DummyRunRepo:
     def __init__(self):
         self.created = None
-        self.updated = None
+        self.updated = []
 
     async def create(self, **kwargs):
         self.created = kwargs
         return {"id": kwargs["run_record_id"]}
 
     async def update_status(self, run_record_id, **kwargs):
-        self.updated = (run_record_id, kwargs)
+        self.updated.append((run_record_id, kwargs))
 
 
 @pytest.mark.asyncio
@@ -70,7 +84,7 @@ async def test_service_claims_and_dispatches_due_task():
     await service.run_once(now=datetime.now(UTC) + timedelta(days=1))
 
     assert run_repo.created["task_id"] == "task-1"
-    assert run_repo.updated[1]["status"] == "running"
+    assert run_repo.updated[0][1]["status"] == "running"
 
 
 @pytest.mark.asyncio
@@ -153,3 +167,139 @@ async def test_fresh_thread_per_run_creates_new_execution_thread():
 
     assert run_repo.created["thread_id"] != "thread-template"
     assert task_repo.updated[1]["last_thread_id"] == run_repo.created["thread_id"]
+
+
+@pytest.mark.asyncio
+async def test_scheduled_overlap_conflict_is_recorded_as_skip():
+    async def fake_launch(**_kwargs):
+        raise ConflictError("Thread thread-1 already has an active run")
+
+    task_repo = DummyTaskRepo(
+        [
+            {
+                "id": "task-4",
+                "user_id": "user-1",
+                "thread_id": "thread-1",
+                "context_mode": "reuse_thread",
+                "assistant_id": "lead_agent",
+                "prompt": "Summarize thread",
+                "schedule_type": "cron",
+                "schedule_spec": {"cron": "0 9 * * *"},
+                "timezone": "UTC",
+                "status": "running",
+                "overlap_policy": "skip",
+                "last_run_id": "run-old",
+                "last_thread_id": "thread-1",
+                "last_run_at": "2026-07-01T00:00:00+00:00",
+            }
+        ]
+    )
+    run_repo = DummyRunRepo()
+    service = ScheduledTaskService(
+        task_repo=task_repo,
+        task_run_repo=run_repo,
+        launch_run=fake_launch,
+        poll_interval_seconds=5,
+        lease_seconds=120,
+        max_concurrent_runs=3,
+    )
+
+    result = await service.dispatch_task(
+        task_repo.rows[0],
+        now=datetime.now(UTC),
+        trigger="scheduled",
+    )
+
+    assert result["outcome"] == "skipped"
+    assert run_repo.updated[-1][1]["status"] == "skipped"
+    assert task_repo.updated[1]["status"] == "enabled"
+
+
+@pytest.mark.asyncio
+async def test_manual_overlap_conflict_returns_conflict():
+    async def fake_launch(**_kwargs):
+        raise ConflictError("Thread thread-1 already has an active run")
+
+    task_repo = DummyTaskRepo(
+        [
+            {
+                "id": "task-5",
+                "user_id": "user-1",
+                "thread_id": "thread-1",
+                "context_mode": "reuse_thread",
+                "assistant_id": "lead_agent",
+                "prompt": "Summarize thread",
+                "schedule_type": "cron",
+                "schedule_spec": {"cron": "0 9 * * *"},
+                "timezone": "UTC",
+                "status": "enabled",
+                "overlap_policy": "skip",
+            }
+        ]
+    )
+    run_repo = DummyRunRepo()
+    service = ScheduledTaskService(
+        task_repo=task_repo,
+        task_run_repo=run_repo,
+        launch_run=fake_launch,
+        poll_interval_seconds=5,
+        lease_seconds=120,
+        max_concurrent_runs=3,
+    )
+
+    result = await service.dispatch_task(
+        task_repo.rows[0],
+        now=datetime.now(UTC),
+        trigger="manual",
+    )
+
+    assert result["outcome"] == "conflict"
+    assert run_repo.updated[-1][1]["status"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_handle_run_completion_persists_success():
+    task_repo = DummyTaskRepo(
+        [
+            {
+                "id": "task-6",
+                "user_id": "user-1",
+                "thread_id": None,
+                "context_mode": "fresh_thread_per_run",
+                "assistant_id": "lead_agent",
+                "prompt": "Summarize thread",
+                "schedule_type": "cron",
+                "schedule_spec": {"cron": "0 9 * * *"},
+                "timezone": "UTC",
+                "status": "enabled",
+            }
+        ]
+    )
+    run_repo = DummyRunRepo()
+    service = ScheduledTaskService(
+        task_repo=task_repo,
+        task_run_repo=run_repo,
+        launch_run=lambda **_kwargs: None,
+        poll_interval_seconds=5,
+        lease_seconds=120,
+        max_concurrent_runs=3,
+    )
+
+    record = RunRecord(
+        run_id="run-6",
+        thread_id="thread-6",
+        assistant_id="lead_agent",
+        status=RunStatus.success,
+        on_disconnect=DisconnectMode.continue_,
+        metadata={
+            "scheduled_task_id": "task-6",
+            "scheduled_task_run_id": "task-run-6",
+        },
+        user_id="user-1",
+    )
+
+    await service.handle_run_completion(record)
+
+    assert run_repo.updated[-1][0] == "task-run-6"
+    assert run_repo.updated[-1][1]["status"] == "success"
+    assert task_repo.rows[0]["last_error"] is None

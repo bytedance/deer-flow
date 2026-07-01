@@ -4,8 +4,11 @@ import asyncio
 import socket
 import uuid
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal
 
+from fastapi import HTTPException
+
+from deerflow.runtime import ConflictError, RunRecord
 from deerflow.scheduler.schedules import next_run_at
 
 
@@ -40,7 +43,33 @@ class ScheduledTaskService:
         for task in claimed:
             await self.dispatch_task(task, now=now, trigger="scheduled")
 
-    async def dispatch_task(self, task: dict[str, Any], *, now: datetime, trigger: str) -> None:
+    @staticmethod
+    def _is_overlap_conflict(exc: Exception) -> bool:
+        if isinstance(exc, ConflictError):
+            return True
+        return isinstance(exc, HTTPException) and exc.status_code == 409
+
+    @staticmethod
+    def _task_status_for_failure(task: dict[str, Any], *, trigger: str) -> str:
+        if trigger == "manual" and task.get("status") == "paused":
+            return "paused"
+        if task["schedule_type"] == "once":
+            return "failed"
+        return "enabled"
+
+    @staticmethod
+    def _task_status_for_skip(task: dict[str, Any]) -> str:
+        if task["schedule_type"] == "once":
+            return "completed"
+        return "enabled"
+
+    async def dispatch_task(
+        self,
+        task: dict[str, Any],
+        *,
+        now: datetime,
+        trigger: str,
+    ) -> dict[str, Any]:
         execution_thread_id = task.get("thread_id")
         if task.get("context_mode") == "fresh_thread_per_run" or not execution_thread_id:
             execution_thread_id = str(uuid.uuid4())
@@ -61,6 +90,7 @@ class ScheduledTaskService:
                 owner_user_id=task.get("user_id"),
                 metadata={
                     "scheduled_task_id": task["id"],
+                    "scheduled_task_run_id": task_run_id,
                     "scheduled_trigger": trigger,
                 },
             )
@@ -92,19 +122,47 @@ class ScheduledTaskService:
                 last_error=None,
                 increment_run_count=True,
             )
+            return {
+                "outcome": "launched",
+                "task_run_id": task_run_id,
+                "run_id": result["run_id"],
+                "thread_id": result["thread_id"],
+                "error": None,
+            }
         except Exception as exc:
-            if task["schedule_type"] == "once":
-                task_status = "failed"
-            elif trigger == "manual" and task.get("status") == "paused":
-                task_status = "paused"
-            else:
-                task_status = "enabled"
             next_at = next_run_at(
                 task["schedule_type"],
                 task["schedule_spec"],
                 task["timezone"],
                 now=now,
             )
+            if self._is_overlap_conflict(exc) and trigger == "scheduled" and task.get("overlap_policy", "skip") == "skip":
+                await self._task_run_repo.update_status(
+                    task_run_id,
+                    status="skipped",
+                    error=str(exc),
+                    started_at=now,
+                    finished_at=now,
+                )
+                await self._task_repo.update_after_launch(
+                    task["id"],
+                    status=self._task_status_for_skip(task),
+                    next_run_at=next_at,
+                    last_run_at=task.get("last_run_at"),
+                    last_run_id=task.get("last_run_id"),
+                    last_thread_id=task.get("last_thread_id"),
+                    last_error=None,
+                    increment_run_count=False,
+                )
+                return {
+                    "outcome": "skipped",
+                    "task_run_id": task_run_id,
+                    "run_id": None,
+                    "thread_id": execution_thread_id,
+                    "error": str(exc),
+                }
+
+            task_status = self._task_status_for_failure(task, trigger=trigger)
             await self._task_run_repo.update_status(
                 task_run_id,
                 status="failed",
@@ -122,6 +180,51 @@ class ScheduledTaskService:
                 last_error=str(exc),
                 increment_run_count=False,
             )
+            return {
+                "outcome": "conflict" if self._is_overlap_conflict(exc) else "failed",
+                "task_run_id": task_run_id,
+                "run_id": None,
+                "thread_id": execution_thread_id,
+                "error": str(exc),
+            }
+
+    async def handle_run_completion(self, record: RunRecord) -> None:
+        metadata = record.metadata or {}
+        task_id = metadata.get("scheduled_task_id")
+        task_run_id = metadata.get("scheduled_task_run_id")
+        user_id = record.user_id
+        if not isinstance(task_id, str) or not isinstance(task_run_id, str) or not user_id:
+            return
+
+        terminal_status: Literal["success", "failed"] | None
+        if record.status.value == "success":
+            terminal_status = "success"
+            error = None
+        elif record.status.value in {"error", "timeout", "interrupted"}:
+            terminal_status = "failed"
+            error = record.error
+        else:
+            terminal_status = None
+            error = record.error
+        if terminal_status is None:
+            return
+
+        await self._task_run_repo.update_status(
+            task_run_id,
+            status=terminal_status,
+            run_id=record.run_id,
+            error=error,
+            finished_at=datetime.now(UTC),
+        )
+
+        task = await self._task_repo.get(task_id, user_id=user_id)
+        if task is None:
+            return
+
+        updates: dict[str, Any] = {"last_error": error}
+        if task["schedule_type"] == "once":
+            updates["status"] = "completed" if terminal_status == "success" else "failed"
+        await self._task_repo.update(task_id, user_id=user_id, updates=updates)
 
     async def start(self) -> None:
         if self._task is not None:

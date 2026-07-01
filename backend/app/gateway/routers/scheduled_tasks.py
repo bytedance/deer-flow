@@ -11,7 +11,6 @@ from app.gateway.authz import require_permission
 from app.gateway.deps import (
     get_config,
     get_optional_user_from_request,
-    get_run_store,
     get_scheduled_task_repo,
     get_scheduled_task_run_repo,
     get_scheduled_task_service,
@@ -26,6 +25,14 @@ from deerflow.scheduler.schedules import (
 )
 
 router = APIRouter(prefix="/api", tags=["scheduled-tasks"])
+
+
+def _ensure_task_mutable(task: dict[str, Any]) -> None:
+    if task.get("status") == "running":
+        raise HTTPException(
+            status_code=409,
+            detail="Scheduled task is currently running; retry after the active execution finishes",
+        )
 
 
 class ScheduledTaskCreateRequest(BaseModel):
@@ -140,6 +147,7 @@ async def update_scheduled_task(task_id: str, request: Request, body: ScheduledT
     existing = await repo.get(task_id, user_id=str(user.id))
     if existing is None:
         raise HTTPException(status_code=404, detail="Scheduled task not found")
+    _ensure_task_mutable(existing)
 
     updates = body.model_dump(exclude_none=True)
     if "context_mode" in updates:
@@ -208,6 +216,10 @@ async def pause_scheduled_task(task_id: str, request: Request):
     user = await get_optional_user_from_request(request)
     if user is None:
         raise HTTPException(status_code=401, detail="Authentication required")
+    existing = await repo.get(task_id, user_id=str(user.id))
+    if existing is None:
+        raise HTTPException(status_code=404, detail="Scheduled task not found")
+    _ensure_task_mutable(existing)
     updated = await repo.update(task_id, user_id=str(user.id), updates={"status": "paused"})
     if updated is None:
         raise HTTPException(status_code=404, detail="Scheduled task not found")
@@ -221,6 +233,10 @@ async def resume_scheduled_task(task_id: str, request: Request):
     user = await get_optional_user_from_request(request)
     if user is None:
         raise HTTPException(status_code=401, detail="Authentication required")
+    existing = await repo.get(task_id, user_id=str(user.id))
+    if existing is None:
+        raise HTTPException(status_code=404, detail="Scheduled task not found")
+    _ensure_task_mutable(existing)
     updated = await repo.update(task_id, user_id=str(user.id), updates={"status": "enabled"})
     if updated is None:
         raise HTTPException(status_code=404, detail="Scheduled task not found")
@@ -238,7 +254,11 @@ async def trigger_scheduled_task(task_id: str, request: Request):
     task = await repo.get(task_id, user_id=str(user.id))
     if task is None:
         raise HTTPException(status_code=404, detail="Scheduled task not found")
-    await service.dispatch_task(task, now=datetime.now(UTC), trigger="manual")
+    result = await service.dispatch_task(task, now=datetime.now(UTC), trigger="manual")
+    if result["outcome"] == "conflict":
+        raise HTTPException(status_code=409, detail=result["error"] or "Scheduled task trigger conflicted with an active run")
+    if result["outcome"] == "failed":
+        raise HTTPException(status_code=409, detail=result["error"] or "Scheduled task trigger failed")
     return {"id": task_id, "triggered": True}
 
 
@@ -260,44 +280,13 @@ async def delete_scheduled_task(task_id: str, request: Request):
 async def list_scheduled_task_runs(task_id: str, request: Request):
     task_repo = get_scheduled_task_repo(request)
     run_repo = get_scheduled_task_run_repo(request)
-    run_store = get_run_store(request)
     user = await get_optional_user_from_request(request)
     if user is None:
         raise HTTPException(status_code=401, detail="Authentication required")
     task = await task_repo.get(task_id, user_id=str(user.id))
     if task is None:
         raise HTTPException(status_code=404, detail="Scheduled task not found")
-    rows = await run_repo.list_by_task(task_id)
-
-    normalized: list[dict[str, Any]] = []
-    for row in rows:
-        run_id = row.get("run_id")
-        if isinstance(run_id, str) and run_id:
-            run = await run_store.get(run_id, user_id=str(user.id))
-            if run is not None:
-                run_status = str(run.get("status", ""))
-                if run_status == "success":
-                    row["status"] = "success"
-                    row["error"] = None
-                    await run_repo.update_by_run_id(
-                        run_id,
-                        status="success",
-                        error=None,
-                        finished_at=datetime.now(UTC),
-                    )
-                elif run_status in {"error", "timeout", "interrupted"}:
-                    row["status"] = "failed"
-                    row["error"] = run.get("error")
-                    await run_repo.update_by_run_id(
-                        run_id,
-                        status="failed",
-                        error=run.get("error"),
-                        finished_at=datetime.now(UTC),
-                    )
-                elif run_status in {"pending", "running"}:
-                    row["status"] = "running"
-        normalized.append(row)
-    return normalized
+    return await run_repo.list_by_task(task_id)
 
 
 @router.get("/threads/{thread_id}/scheduled-tasks")

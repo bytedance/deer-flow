@@ -125,8 +125,9 @@ test("user can pause a scheduled task from the detail pane", async ({
   await page.goto("/workspace/scheduled-tasks");
   const detail = page.getByTestId("scheduled-task-detail");
   await detail.getByRole("button", { name: "Pause" }).click();
+  await expect(page.getByTestId("scheduled-task-item-task-1")).toBeVisible();
   await expect(
-    page.getByRole("button", { name: "Pausable task cron · paused" }),
+    page.getByTestId("scheduled-task-item-task-1").getByText("cron · paused"),
   ).toBeVisible();
 });
 
@@ -160,4 +161,66 @@ test("trigger shows a run entry in the detail pane", async ({ page }) => {
   await expect(
     page.getByTestId("scheduled-task-run-list").getByText("manual · success"),
   ).toBeVisible();
+});
+
+test("detail pane falls back to a visible task after filters hide the selected task", async ({
+  page,
+}) => {
+  mockLangGraphAPI(page, {
+    threads: [],
+    scheduledTasks: [
+      {
+        id: "task-enabled",
+        thread_id: "thread-1",
+        title: "Enabled task",
+        prompt: "Enabled prompt",
+        schedule_type: "cron",
+        schedule_spec: { cron: "0 9 * * *" },
+        timezone: "UTC",
+        status: "enabled",
+        next_run_at: "2026-07-02T01:00:00+00:00",
+        last_run_at: null,
+        last_run_id: null,
+        last_error: null,
+        run_count: 0,
+        created_at: "2026-07-01T00:00:00+00:00",
+        updated_at: "2026-07-01T00:00:00+00:00",
+      },
+      {
+        id: "task-paused",
+        thread_id: "thread-2",
+        title: "Paused task",
+        prompt: "Paused prompt",
+        schedule_type: "cron",
+        schedule_spec: { cron: "0 10 * * *" },
+        timezone: "UTC",
+        status: "paused",
+        next_run_at: "2026-07-02T02:00:00+00:00",
+        last_run_at: null,
+        last_run_id: null,
+        last_error: null,
+        run_count: 0,
+        created_at: "2026-07-01T00:00:00+00:00",
+        updated_at: "2026-07-01T00:00:00+00:00",
+      },
+    ],
+  });
+
+  await page.goto("/workspace/scheduled-tasks");
+  await page.getByTestId("scheduled-task-item-task-paused").click();
+  await expect(
+    page.getByTestId("scheduled-task-detail").getByText("Paused task"),
+  ).toBeVisible();
+
+  await page.getByRole("button", { name: "Enabled", exact: true }).click();
+
+  await expect(
+    page.getByTestId("scheduled-task-detail").getByText("Enabled task"),
+  ).toBeVisible();
+  await expect(
+    page.getByTestId("scheduled-task-item-task-enabled"),
+  ).toBeVisible();
+  await expect(page.getByTestId("scheduled-task-item-task-paused")).toHaveCount(
+    0,
+  );
 });
