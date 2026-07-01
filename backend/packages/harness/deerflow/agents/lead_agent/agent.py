@@ -126,19 +126,9 @@ def _create_summarization_middleware(*, app_config: AppConfig | None = None) -> 
     if resolved_app_config.memory.enabled:
         hooks.append(memory_flush_hook)
 
-    # The logic below relies on two assumptions holding true: this factory is
-    # the sole entry point for DeerFlowSummarizationMiddleware, and the runtime
-    # config is not expected to change after startup.
-    skills_container_path = resolved_app_config.skills.container_path or "/mnt/skills"
-
     return DeerFlowSummarizationMiddleware(
         **kwargs,
-        skills_container_path=skills_container_path,
-        skill_file_read_tool_names=config.skill_file_read_tool_names,
         before_summarization=hooks,
-        preserve_recent_skill_count=config.preserve_recent_skill_count,
-        preserve_recent_skill_tokens=config.preserve_recent_skill_tokens,
-        preserve_recent_skill_tokens_per_skill=config.preserve_recent_skill_tokens_per_skill,
     )
 
 
@@ -312,6 +302,18 @@ def build_middlewares(
 
     middlewares.append(SkillActivationMiddleware(available_skills=available_skills, app_config=resolved_app_config))
 
+    # Capture completed task delegations and loaded skill files before
+    # summarization can compact them, then inject durable context channels
+    # (summary + ledger + skills) into model calls.
+    from deerflow.agents.middlewares.durable_context_middleware import DurableContextMiddleware
+
+    middlewares.append(
+        DurableContextMiddleware(
+            skills_container_path=resolved_app_config.skills.container_path,
+            skill_file_read_tool_names=resolved_app_config.summarization.skill_file_read_tool_names,
+        )
+    )
+
     # Add summarization middleware if enabled
     summarization_middleware = _create_summarization_middleware(app_config=resolved_app_config)
     if summarization_middleware is not None:
@@ -347,14 +349,6 @@ def build_middlewares(
         from deerflow.agents.middlewares.deferred_tool_filter_middleware import DeferredToolFilterMiddleware
 
         middlewares.append(DeferredToolFilterMiddleware(deferred_setup.deferred_names, deferred_setup.catalog_hash))
-
-    # Maintain + inject the subagent delegation ledger (only when delegation is on).
-    # Registered before coalescing so its injected <system-reminder> SystemMessage
-    # is folded into the single leading SystemMessage for strict backends.
-    if cfg.get("subagent_enabled", False):
-        from deerflow.agents.middlewares.delegation_ledger_middleware import DelegationLedgerMiddleware
-
-        middlewares.append(DelegationLedgerMiddleware())
 
     # Coalesce every SystemMessage into a single leading one before the request
     # reaches the provider. Strict backends (vLLM, SGLang, Qwen, Anthropic)
