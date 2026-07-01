@@ -151,6 +151,16 @@ def test_capture_ignores_human_message():
     assert captured == []
 
 
+def test_none_content_flattens_to_empty_string():
+    # A tool-call-only AI turn can carry content=None; it must render as "" (not
+    # the literal "None"), matching the shared message_content_to_text guard.
+    message = {"type": "ai", "content": None, "tool_calls": []}
+
+    step = build_subagent_step(message, task_id="t", message_index=1)
+
+    assert step["text"] == ""
+
+
 def test_ai_step_caps_large_tool_call_args():
     # Regression for #3779: build_subagent_step capped `text` but copied
     # `tool_calls[].args` verbatim, so a write_file/bash call carrying a big

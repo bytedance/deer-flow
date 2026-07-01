@@ -23,6 +23,8 @@ from typing import Any
 
 from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
 
+from deerflow.utils.messages import message_content_to_text
+
 #: Default per-step character cap for the ``text`` field. Tool outputs (web
 #: search results, file contents) can be large; this cap bounds the persisted
 #: run-event row and the streamed frame. It only affects display/storage — the
@@ -111,23 +113,6 @@ def truncate_step_text(text: str, max_chars: int) -> tuple[str, bool]:
     return text, False
 
 
-def _content_to_text(content: Any) -> str:
-    """Flatten message content (string or list-of-blocks) to plain text."""
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts: list[str] = []
-        for block in content:
-            if isinstance(block, str):
-                parts.append(block)
-            elif isinstance(block, dict):
-                text = block.get("text")
-                if isinstance(text, str):
-                    parts.append(text)
-        return "\n".join(parts)
-    return ""
-
-
 def _bounded_tool_call(call: dict[str, Any], max_chars: int) -> dict[str, Any]:
     """Return ``{name, args}`` for a captured tool call, capping large args (#3779).
 
@@ -162,7 +147,9 @@ def build_subagent_step(
     ``truncated`` flag set accordingly.
     """
     kind = "tool" if message.get("type") == "tool" else "ai"
-    text, truncated = truncate_step_text(_content_to_text(message.get("content")), max_chars)
+    # ``... or ""`` keeps a tool-call-only turn's content=None rendering as ""
+    # (message_content_to_text would otherwise str()-ify it to "None").
+    text, truncated = truncate_step_text(message_content_to_text(message.get("content") or ""), max_chars)
 
     step: dict[str, Any] = {
         "task_id": task_id,
