@@ -419,8 +419,9 @@ class TestBashToolInjectsActiveSecrets:
         captured = {}
 
         class FakeSandbox:
-            def execute_command(self, command, env=None):
+            def execute_command(self, command, env=None, timeout=None):
                 captured["env"] = env
+                captured["timeout"] = timeout
                 return "done"
 
         runtime = SimpleNamespace(context=context, state={"sandbox": {"sandbox_id": "aio:1"}})
@@ -440,6 +441,42 @@ class TestBashToolInjectsActiveSecrets:
     def test_no_active_secret_forwards_no_env(self):
         out, captured = self._run_bash({})
         assert captured["env"] in (None, {})
+
+    def test_local_bash_forwards_env_and_timeout(self, monkeypatch):
+        from deerflow.sandbox import tools as tools_mod
+
+        captured = {}
+
+        class FakeSandbox:
+            def execute_command(self, command, env=None, timeout=None):
+                captured["command"] = command
+                captured["env"] = env
+                captured["timeout"] = timeout
+                return "done"
+
+        runtime = SimpleNamespace(
+            context={"__active_skill_secrets": {"ERP_TOKEN": "tok-456"}},
+            state={"sandbox": {"sandbox_id": "local:1"}},
+        )
+        thread_data = {"workspace_path": "/tmp/ws", "cwd": "/mnt/user-data/workspace"}
+        fake_cfg = SimpleNamespace(sandbox=SimpleNamespace(bash_output_max_chars=321, bash_command_timeout=42))
+        with (
+            patch.object(tools_mod, "ensure_sandbox_initialized", return_value=FakeSandbox()),
+            patch.object(tools_mod, "is_local_sandbox", return_value=True),
+            patch.object(tools_mod, "is_host_bash_allowed", return_value=True),
+            patch.object(tools_mod, "ensure_thread_directories_exist", return_value=None),
+            patch.object(tools_mod, "get_thread_data", return_value=thread_data),
+            patch.object(tools_mod, "validate_local_bash_command_paths", return_value=None),
+            patch.object(tools_mod, "replace_virtual_paths_in_command", side_effect=lambda command, td: command),
+            patch.object(tools_mod, "_apply_cwd_prefix", side_effect=lambda command, td: command),
+            patch("deerflow.config.app_config.get_app_config", return_value=fake_cfg),
+        ):
+            out = tools_mod.bash_tool.func(runtime, "run local skill", "echo hi")
+
+        assert out == "done"
+        assert captured["command"] == "echo hi"
+        assert captured["env"] == {"ERP_TOKEN": "tok-456"}
+        assert captured["timeout"] == 42
 
 
 _SECRET = "sk-erp-9f3c-DO-NOT-LEAK"

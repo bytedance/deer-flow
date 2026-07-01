@@ -37,7 +37,13 @@ class _SyncProvider(SandboxProvider):
 
 
 class _SandboxStub(Sandbox):
-    def execute_command(self, command: str) -> str:
+    def execute_command(
+        self,
+        command: str,
+        env: dict[str, str] | None = None,
+        timeout: float | None = None,
+    ) -> str:
+        del env, timeout
         return "OK"
 
     def read_file(self, path: str) -> str:

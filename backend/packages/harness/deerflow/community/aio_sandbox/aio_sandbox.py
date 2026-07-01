@@ -110,7 +110,12 @@ class AioSandbox(Sandbox):
     # default.
     _DEFAULT_NO_CHANGE_TIMEOUT = 600
 
-    def execute_command(self, command: str, env: dict[str, str] | None = None) -> str:
+    def execute_command(
+        self,
+        command: str,
+        env: dict[str, str] | None = None,
+        timeout: float | None = None,
+    ) -> str:
         """Execute a shell command in the sandbox.
 
         Uses a lock to serialize concurrent requests. The AIO sandbox
@@ -129,10 +134,14 @@ class AioSandbox(Sandbox):
                 secret values travel in the structured ``env`` field, never in the
                 command string. When ``None`` the legacy persistent-shell path runs
                 unchanged.
+            timeout: Optional per-call timeout. The current sandbox SDK does not
+                expose a command-level timeout distinct from its client/request
+                timeout, so DeerFlow keeps using the backend's default here.
 
         Returns:
             The output of the command.
         """
+        del timeout
         if env:
             return self._execute_with_env(command, env)
         with self._lock:
