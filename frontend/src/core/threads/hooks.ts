@@ -831,6 +831,9 @@ export function useThreadStream({
       const _messages = getSummarizationMiddlewareMessages(data);
       if (_messages && _messages.length >= 2) {
         for (const m of _messages) {
+          // Backward-compat shim: pre-PR2 threads may still carry a synthetic
+          // HumanMessage(name="summary") from the old summarization path. New
+          // threads keep the summary in ThreadState.summary_text instead.
           if (m.name === "summary" && m.type === "human") {
             summarizedRef.current?.add(m.id ?? "");
           }

@@ -199,6 +199,21 @@ make down   # 停止并移除容器
    make check  # 校验 Node.js 22+、pnpm、uv、nginx
    ```
 
+   如果你要提交本地安装、配置或运行问题，可以执行：
+
+   ```bash
+   make support-bundle
+   ```
+
+   命令会直接打印 reporter 下一步建议，并在 `.deer-flow/support-bundles/` 下生成
+   `*-issue-summary.md`、面向 AI 辅助提 issue 的 `*-issue-draft.md`，以及可选证据
+   zip。提交 GitHub issue 时，先把 `*-issue-summary.md` 粘贴到 issue 正文；如果由
+   AI 助手代填 issue，就从 `*-issue-draft.md` 开始，并先替换所有 REQUIRED 占位符，
+   不要编造未知事实。只有维护者要求证据包，或摘要不足以诊断时，再附上 zip。维护者
+   或 AI 辅助 triage 可以优先读取 `triage.json`；bundle 只包含脱敏后的诊断信息和
+   文件 manifest，不包含 `.env`、原始对话消息或用户文件内容；提交前仍建议自己快速
+   检查一遍。
+
 2. **安装依赖**：
    ```bash
    make install  # 安装 backend + frontend 依赖

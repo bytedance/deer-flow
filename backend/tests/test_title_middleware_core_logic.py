@@ -94,7 +94,7 @@ class TestTitleMiddlewareCoreLogic:
         assert middleware._should_generate_title(state) is False
 
     def test_generate_title_uses_async_model_and_respects_max_chars(self, monkeypatch):
-        _set_test_title_config(max_chars=12, model_name=None)
+        _set_test_title_config(max_chars=12, model_name="title-model")
         middleware = TitleMiddleware()
         model = MagicMock()
         model.ainvoke = AsyncMock(return_value=AIMessage(content="短标题"))
@@ -110,7 +110,7 @@ class TestTitleMiddlewareCoreLogic:
         title = result["title"]
 
         assert title == "短标题"
-        title_middleware_module.create_chat_model.assert_called_once_with(thinking_enabled=False, attach_tracing=False)
+        title_middleware_module.create_chat_model.assert_called_once_with(name="title-model", thinking_enabled=False, attach_tracing=False)
         model.ainvoke.assert_awaited_once()
         assert model.ainvoke.await_args.kwargs["config"] == {
             "run_name": "title_agent",
@@ -160,7 +160,7 @@ class TestTitleMiddlewareCoreLogic:
         )
 
     def test_generate_title_normalizes_structured_message_content(self, monkeypatch):
-        _set_test_title_config(max_chars=20)
+        _set_test_title_config(max_chars=20, model_name="title-model")
         middleware = TitleMiddleware()
         model = MagicMock()
         model.ainvoke = AsyncMock(return_value=AIMessage(content="请帮我总结这段代码"))
@@ -179,7 +179,7 @@ class TestTitleMiddlewareCoreLogic:
         assert title == "请帮我总结这段代码"
 
     def test_generate_title_fallback_for_long_message(self, monkeypatch):
-        _set_test_title_config(max_chars=20)
+        _set_test_title_config(max_chars=20, model_name="title-model")
         middleware = TitleMiddleware()
         model = MagicMock()
         model.ainvoke = AsyncMock(side_effect=RuntimeError("model unavailable"))
@@ -199,6 +199,7 @@ class TestTitleMiddlewareCoreLogic:
         assert title.startswith("这是一个非常长的问题描述")
 
     def test_aafter_model_delegates_to_async_helper(self, monkeypatch):
+        _set_test_title_config(model_name="title-model")
         middleware = TitleMiddleware()
 
         monkeypatch.setattr(middleware, "_agenerate_title_result", AsyncMock(return_value={"title": "异步标题"}))
@@ -207,6 +208,78 @@ class TestTitleMiddlewareCoreLogic:
 
         monkeypatch.setattr(middleware, "_agenerate_title_result", AsyncMock(return_value=None))
         assert asyncio.run(middleware.aafter_model({"messages": []}, runtime=MagicMock())) is None
+
+    def test_aafter_model_uses_local_fallback_when_no_title_model_is_configured(self, monkeypatch):
+        """Default async path must not block stream completion on a second LLM call."""
+        _set_test_title_config(max_chars=20, model_name=None)
+        middleware = TitleMiddleware()
+        create_chat_model = MagicMock()
+        monkeypatch.setattr(title_middleware_module, "create_chat_model", create_chat_model)
+
+        state = {
+            "messages": [
+                HumanMessage(content="请帮我写测试"),
+                AIMessage(content="好的"),
+            ]
+        }
+        result = asyncio.run(middleware.aafter_model(state, runtime=MagicMock()))
+
+        assert result == {"title": "请帮我写测试"}
+        create_chat_model.assert_not_called()
+
+    def test_async_generate_title_result_uses_local_fallback_without_model_name(self, monkeypatch):
+        """The default async helper path avoids the hidden title-model LLM call."""
+        _set_test_title_config(max_chars=20, model_name=None)
+        middleware = TitleMiddleware()
+        create_chat_model = MagicMock()
+        monkeypatch.setattr(title_middleware_module, "create_chat_model", create_chat_model)
+
+        state = {
+            "messages": [
+                HumanMessage(content="流式回答结束后不要再等待标题模型"),
+                AIMessage(content="好的"),
+            ]
+        }
+        result = asyncio.run(middleware._agenerate_title_result(state))
+
+        assert result == {"title": "流式回答结束后不要再等待标题模型"}
+        create_chat_model.assert_not_called()
+
+    def test_async_local_fallback_does_not_format_unused_prompt_template(self, monkeypatch):
+        """Local fallback should not depend on the LLM prompt template."""
+        _set_test_title_config(max_chars=20, model_name=None, prompt_template="{missing_placeholder}")
+        middleware = TitleMiddleware()
+        create_chat_model = MagicMock()
+        monkeypatch.setattr(title_middleware_module, "create_chat_model", create_chat_model)
+
+        state = {
+            "messages": [
+                HumanMessage(content="默认标题路径不应读取模型 prompt"),
+                AIMessage(content="好的"),
+            ]
+        }
+        result = asyncio.run(middleware._agenerate_title_result(state))
+
+        assert result == {"title": "默认标题路径不应读取模型 prompt"}
+        create_chat_model.assert_not_called()
+
+    def test_async_title_model_falls_back_when_prompt_template_is_invalid(self, monkeypatch):
+        """Opt-in LLM title generation still degrades locally on template errors."""
+        _set_test_title_config(max_chars=20, model_name="title-model", prompt_template="{usr_msg}")
+        middleware = TitleMiddleware()
+        create_chat_model = MagicMock()
+        monkeypatch.setattr(title_middleware_module, "create_chat_model", create_chat_model)
+
+        state = {
+            "messages": [
+                HumanMessage(content="请帮我写测试"),
+                AIMessage(content="好的"),
+            ]
+        }
+        result = asyncio.run(middleware._agenerate_title_result(state))
+
+        assert result == {"title": "请帮我写测试"}
+        create_chat_model.assert_not_called()
 
     def test_after_model_sync_delegates_to_sync_helper(self, monkeypatch):
         middleware = TitleMiddleware()
@@ -296,7 +369,7 @@ class TestTitleMiddlewareCoreLogic:
 
     def test_generate_title_async_strips_think_tags_in_response(self, monkeypatch):
         """Async title generation strips <think> blocks from the model response."""
-        _set_test_title_config(max_chars=50)
+        _set_test_title_config(max_chars=50, model_name="title-model")
         middleware = TitleMiddleware()
         model = MagicMock()
         model.ainvoke = AsyncMock(return_value=AIMessage(content="<think>用户想研究贵阳。</think>贵阳发展研究"))
