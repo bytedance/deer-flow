@@ -229,3 +229,65 @@ def apply_units(wide: list[dict], headers: list[list[dict]]) -> list[dict]:
                     new_row[col_key] = v * factor
         out.append(new_row)
     return out
+
+
+# ---------- CLI entry ---------- #
+
+def main(argv: list[str] | None = None) -> int:
+    """CLI entry for ai-report unit_convert.
+
+    Subcommand: apply — Decimal-preserving unit conversion on wide rows.
+    Exit codes: 0 = success, 2 = arg error.
+    """
+    import argparse
+    import json
+    from pathlib import Path
+
+    parser = argparse.ArgumentParser(prog="unit_convert")
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    p_apply = sub.add_parser("apply")
+    p_apply.add_argument("--wide", required=True, help="wide rows JSON")
+    p_apply.add_argument("--headers", required=True,
+                         help="headers_2d JSON (parsed.json section or flat [[...]])")
+    p_apply.add_argument("--out", required=True, help="output wide JSON")
+
+    args = parser.parse_args(argv)
+
+    if args.cmd == "apply":
+        wide_rows = json.loads(Path(args.wide).read_text(encoding="utf-8"))
+        # Coerce string-typed numeric cells back to Decimal so apply_units'
+        # isinstance(v, Decimal) check sees Decimal (JSON decoded strings as str).
+        # Preserves precision through the round-trip.
+        for row in wide_rows:
+            for k, v in list(row.items()):
+                if isinstance(v, str):
+                    try:
+                        row[k] = Decimal(v)
+                    except (ValueError, ArithmeticError):
+                        pass
+        # headers JSON shape: {'sections': [{'reports': [{'headers': [[...]]}]}]}
+        # OR a flat [[...]] list. Accept both.
+        raw = json.loads(Path(args.headers).read_text(encoding="utf-8"))
+        if isinstance(raw, dict) and "sections" in raw:
+            headers_2d = []
+            for sec in raw["sections"]:
+                for rep in sec.get("reports", []):
+                    headers_2d.extend(rep.get("headers", []))
+        else:
+            headers_2d = raw
+        converted = apply_units(wide_rows, headers_2d)
+        out_path = Path(args.out)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        # Decimal → str so JSON serializes cleanly.
+        out_path.write_text(
+            json.dumps(converted, ensure_ascii=False, indent=2, default=str),
+            encoding="utf-8",
+        )
+        return 0
+
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
