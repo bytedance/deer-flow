@@ -17,7 +17,7 @@ The sandbox gives the Lead Agent a controlled environment where it can read file
 
 ## Sandbox modes
 
-DeerFlow supports three sandbox modes. Choose the one that fits your deployment:
+DeerFlow supports four sandbox modes. Choose the one that fits your deployment:
 
 ### LocalSandbox (default)
 
@@ -66,6 +66,61 @@ sandbox:
 ```
 
 Install: `cd backend && uv add 'deerflow-harness[aio-sandbox]'`
+
+### E2B Cloud Sandbox
+
+Commands run in an [E2B](https://e2b.dev) cloud micro-VM. Each thread is bound to its own sandbox via metadata, so the same DeerFlow thread keeps reaching the same e2b sandbox even across gateway restarts and across processes. The cloud VM is reaped automatically by e2b once the configured idle timeout elapses.
+
+- **Best for**: hosted/serverless deployments, teams that do not want to operate Docker or Kubernetes themselves, workloads that need a real Jupyter kernel out of the box.
+- **Trade-off**: requires network access to the e2b control plane and an API key. Mounts are **one-shot uploads** at sandbox start (host bind-mounts are not possible because the sandbox lives in the cloud).
+
+```yaml
+sandbox:
+  use: deerflow.community.e2b_sandbox:E2BSandboxProvider
+
+  # Required: e2b API key. Falls back to the E2B_API_KEY environment variable.
+  api_key: $E2B_API_KEY
+
+  # Optional: e2b sandbox template id (default: code-interpreter-v1)
+  template: code-interpreter-v1
+
+  # Optional: self-hosted e2b deployment domain
+  # domain: e2b.dev
+
+  # Optional: directory inside the sandbox that backs /mnt/user-data
+  # (default: /home/user)
+  home_dir: /home/user
+
+  # Optional: server-enforced idle timeout in seconds (default: 600, max 86400).
+  # The provider refreshes this on every release so warm sandboxes stay alive.
+  idle_timeout: 600
+
+  # Optional: max concurrent sandboxes per gateway process (default: 3).
+  # When exceeded, the least-recently-used warm sandbox is killed.
+  replicas: 3
+
+  # Optional: one-shot upload of host files into the sandbox at start.
+  # Read-only mounts are chmod'd to read-only after upload.
+  mounts:
+    - host_path: /path/on/host
+      container_path: /home/user/shared
+      read_only: false
+
+  # Optional: environment variables forwarded to the sandbox on create.
+  # Values starting with "$" are resolved from the host environment.
+  environment:
+    OPENAI_API_KEY: $OPENAI_API_KEY
+```
+
+Install: `e2b-code-interpreter` is already a core dependency of `deerflow-harness`, so no extra install step is needed — just provide your API key and switch the provider in `config.yaml`.
+
+Get an API key at [e2b.dev/dashboard](https://e2b.dev/dashboard) and either set `sandbox.api_key` directly in `config.yaml` or export `E2B_API_KEY` in your `.env`.
+
+<Callout type="info">
+  Because e2b is a remote sandbox, DeerFlow's `/mnt/user-data` virtual prefix is
+  remapped onto `home_dir` (default `/home/user`) inside the cloud VM. Tools
+  that read or write under `/mnt/user-data/...` continue to work transparently.
+</Callout>
 
 ### Provisioner-managed Sandbox (Kubernetes)
 

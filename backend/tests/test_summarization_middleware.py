@@ -7,13 +7,14 @@ from unittest.mock import MagicMock
 import pytest
 from langchain.agents import create_agent
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage, SystemMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from langgraph.constants import TAG_NOSTREAM
 
 from deerflow.agents.memory.summarization_hook import memory_flush_hook
 from deerflow.agents.middlewares.dynamic_context_middleware import _DYNAMIC_CONTEXT_REMINDER_KEY, DynamicContextMiddleware, is_dynamic_context_reminder
 from deerflow.agents.middlewares.summarization_middleware import DeerFlowSummarizationMiddleware, SummarizationEvent
+from deerflow.agents.thread_state import ThreadState
 from deerflow.config.memory_config import MemoryConfig
 
 
@@ -73,53 +74,17 @@ def _middleware(
     before_summarization=None,
     trigger=("messages", 4),
     keep=("messages", 2),
-    skill_file_read_tool_names=None,
-    preserve_recent_skill_count: int = 0,
-    preserve_recent_skill_tokens: int = 0,
-    preserve_recent_skill_tokens_per_skill: int = 0,
 ) -> DeerFlowSummarizationMiddleware:
     model = MagicMock()
     model.invoke.return_value = SimpleNamespace(text="compressed summary")
+    model.with_config.return_value = model
     return DeerFlowSummarizationMiddleware(
         model=model,
         trigger=trigger,
         keep=keep,
         token_counter=len,
         before_summarization=before_summarization,
-        skill_file_read_tool_names=skill_file_read_tool_names,
-        preserve_recent_skill_count=preserve_recent_skill_count,
-        preserve_recent_skill_tokens=preserve_recent_skill_tokens,
-        preserve_recent_skill_tokens_per_skill=preserve_recent_skill_tokens_per_skill,
     )
-
-
-def _skill_read_call(tool_id: str, skill: str) -> dict:
-    return {
-        "name": "read_file",
-        "id": tool_id,
-        "args": {"path": f"/mnt/skills/public/{skill}/SKILL.md"},
-    }
-
-
-def _skill_conversation() -> list:
-    return [
-        HumanMessage(content="u1"),
-        AIMessage(content="", tool_calls=[_skill_read_call("t1", "alpha")]),
-        ToolMessage(content="alpha skill body", tool_call_id="t1"),
-        HumanMessage(content="u2"),
-        AIMessage(content="", tool_calls=[_skill_read_call("t2", "beta")]),
-        ToolMessage(content="beta skill body", tool_call_id="t2"),
-        HumanMessage(content="u3"),
-        AIMessage(content="final"),
-    ]
-
-
-def _raw_tool_call(tool_id: str, name: str = "read_file") -> dict:
-    return {
-        "id": tool_id,
-        "type": "function",
-        "function": {"name": name, "arguments": "{}"},
-    }
 
 
 def test_before_summarization_hook_receives_messages_before_compression() -> None:
@@ -134,7 +99,8 @@ def test_before_summarization_hook_receives_messages_before_compression() -> Non
     assert captured[0].thread_id == "thread-1"
     assert captured[0].agent_name is None
     assert isinstance(result["messages"][0], RemoveMessage)
-    assert result["messages"][1].content.startswith("Here is a summary")
+    assert result["summary_text"] == "compressed summary"
+    assert [message.content for message in result["messages"][1:]] == ["user-2", "assistant-2"]
 
 
 def test_summarization_middleware_emits_frontend_update_key_in_agent_stream() -> None:
@@ -148,6 +114,7 @@ def test_summarization_middleware_emits_frontend_update_key_in_agent_stream() ->
         model=_StaticChatModel(text="done"),
         tools=[],
         middleware=[middleware],
+        state_schema=ThreadState,
     )
 
     chunks = list(agent.stream({"messages": _messages()}, stream_mode="updates"))
@@ -157,10 +124,10 @@ def test_summarization_middleware_emits_frontend_update_key_in_agent_stream() ->
     )
 
     assert update is not None
+    assert update["summary_text"] == "compressed summary"
     emitted = update["messages"]
     assert isinstance(emitted[0], RemoveMessage)
-    assert emitted[1].name == "summary"
-    assert emitted[1].content == ("Here is a summary of the conversation to date:\n\ncompressed summary")
+    assert all(not (isinstance(message, HumanMessage) and message.name == "summary") for message in emitted)
 
 
 def test_summary_model_is_tagged_nostream_to_avoid_stream_pollution() -> None:
@@ -192,7 +159,7 @@ def test_summary_model_is_tagged_nostream_to_avoid_stream_pollution() -> None:
     # untagged model so parent logic (profile / _get_ls_params) keeps working.
     assert tags_during_summary == [[TAG_NOSTREAM]]
     assert middleware.model is model
-    assert result["messages"][1].content.startswith("Here is a summary")
+    assert result["summary_text"] == "compressed summary"
 
 
 def test_summarization_does_not_mutate_shared_model_across_concurrent_runs() -> None:
@@ -300,8 +267,7 @@ def test_dynamic_context_reminder_is_preserved_across_summarization() -> None:
 
     emitted = result["messages"]
     assert isinstance(emitted[0], RemoveMessage)
-    assert emitted[1].name == "summary"
-    assert emitted[2] is reminder
+    assert emitted[1] is reminder
 
     followup_state = {"messages": [*emitted[1:], HumanMessage(content="Follow-up", id="msg-2")]}
     with mock.patch("deerflow.agents.middlewares.dynamic_context_middleware.datetime") as mock_dt:
@@ -420,372 +386,6 @@ def test_memory_flush_hook_enqueues_filtered_messages_and_flushes(monkeypatch: p
     assert add_kwargs["reinforcement_detected"] is False
 
 
-def test_skill_rescue_keeps_recent_skill_reads_out_of_summary() -> None:
-    captured: list[SummarizationEvent] = []
-    middleware = _middleware(
-        before_summarization=[captured.append],
-        trigger=("messages", 4),
-        keep=("messages", 2),
-        preserve_recent_skill_count=5,
-        preserve_recent_skill_tokens=10_000,
-        preserve_recent_skill_tokens_per_skill=10_000,
-    )
-
-    result = middleware.before_model({"messages": _skill_conversation()}, _runtime())
-
-    assert len(captured) == 1
-    summarized_ids = {id(m) for m in captured[0].messages_to_summarize}
-    preserved = captured[0].preserved_messages
-
-    # Both skill-read bundles should be rescued into preserved_messages,
-    # tool_call ↔ tool_result pairs stay intact.
-    assert any(isinstance(m, ToolMessage) and m.content == "alpha skill body" for m in preserved)
-    assert any(isinstance(m, ToolMessage) and m.content == "beta skill body" for m in preserved)
-    for m in preserved:
-        if isinstance(m, ToolMessage) and m.content in {"alpha skill body", "beta skill body"}:
-            assert id(m) not in summarized_ids
-
-    # Preserved output order: rescued bundles first, then the tail kept by parent cutoff.
-    contents = [getattr(m, "content", None) for m in preserved]
-    assert contents[-2:] == ["u3", "final"]
-
-    # The final emitted state should start with RemoveMessage + summary, then preserved messages.
-    emitted = result["messages"]
-    assert isinstance(emitted[0], RemoveMessage)
-    assert emitted[1].content.startswith("Here is a summary")
-    assert list(emitted[-2:]) == list(preserved[-2:])
-
-
-def test_skill_rescue_respects_count_budget() -> None:
-    captured: list[SummarizationEvent] = []
-    middleware = _middleware(
-        before_summarization=[captured.append],
-        trigger=("messages", 4),
-        keep=("messages", 2),
-        preserve_recent_skill_count=1,
-        preserve_recent_skill_tokens=10_000,
-        preserve_recent_skill_tokens_per_skill=10_000,
-    )
-
-    middleware.before_model({"messages": _skill_conversation()}, _runtime())
-
-    preserved = captured[0].preserved_messages
-    summarized = captured[0].messages_to_summarize
-    # Newest skill (beta) rescued; older skill (alpha) falls into summary.
-    assert any(isinstance(m, ToolMessage) and m.content == "beta skill body" for m in preserved)
-    assert not any(isinstance(m, ToolMessage) and m.content == "alpha skill body" for m in preserved)
-    assert any(isinstance(m, ToolMessage) and m.content == "alpha skill body" for m in summarized)
-
-
-def test_skill_rescue_uses_injected_skills_container_path() -> None:
-    captured: list[SummarizationEvent] = []
-    middleware = _middleware(
-        before_summarization=[captured.append],
-        trigger=("messages", 4),
-        keep=("messages", 2),
-        preserve_recent_skill_count=5,
-        preserve_recent_skill_tokens=10_000,
-        preserve_recent_skill_tokens_per_skill=10_000,
-    )
-    middleware._skills_container_path = "/custom/skills"
-    messages = [
-        HumanMessage(content="u1"),
-        AIMessage(content="", tool_calls=[{"name": "read_file", "id": "t1", "args": {"path": "/custom/skills/demo/SKILL.md"}}]),
-        ToolMessage(content="demo skill body", tool_call_id="t1"),
-        HumanMessage(content="u2"),
-        AIMessage(content="final"),
-    ]
-
-    middleware.before_model({"messages": messages}, _runtime())
-
-    preserved = captured[0].preserved_messages
-    assert any(isinstance(m, ToolMessage) and m.content == "demo skill body" for m in preserved)
-
-
-def test_skill_rescue_uses_configured_skill_read_tool_names() -> None:
-    captured: list[SummarizationEvent] = []
-    middleware = _middleware(
-        before_summarization=[captured.append],
-        trigger=("messages", 4),
-        keep=("messages", 2),
-        skill_file_read_tool_names=["custom_read"],
-        preserve_recent_skill_count=5,
-        preserve_recent_skill_tokens=10_000,
-        preserve_recent_skill_tokens_per_skill=10_000,
-    )
-    middleware._skills_container_path = "/custom/skills"
-    messages = [
-        HumanMessage(content="u1"),
-        AIMessage(content="", tool_calls=[{"name": "custom_read", "id": "t1", "args": {"path": "/custom/skills/demo/SKILL.md"}}]),
-        ToolMessage(content="demo skill body", tool_call_id="t1"),
-        HumanMessage(content="u2"),
-        AIMessage(content="final"),
-    ]
-
-    middleware.before_model({"messages": messages}, _runtime())
-
-    preserved = captured[0].preserved_messages
-    assert any(isinstance(m, ToolMessage) and m.content == "demo skill body" for m in preserved)
-
-
-def test_skill_rescue_respects_per_skill_token_cap() -> None:
-    captured: list[SummarizationEvent] = []
-    middleware = _middleware(
-        before_summarization=[captured.append],
-        trigger=("messages", 4),
-        keep=("messages", 2),
-        preserve_recent_skill_count=5,
-        preserve_recent_skill_tokens=10_000,
-        # token_counter=len counts one token per message; per-skill cap of 0 rejects every bundle.
-        preserve_recent_skill_tokens_per_skill=0,
-    )
-
-    middleware.before_model({"messages": _skill_conversation()}, _runtime())
-
-    preserved = captured[0].preserved_messages
-    assert not any(isinstance(m, ToolMessage) and m.content in {"alpha skill body", "beta skill body"} for m in preserved)
-
-
-def test_skill_rescue_disabled_when_count_zero() -> None:
-    captured: list[SummarizationEvent] = []
-    middleware = _middleware(
-        before_summarization=[captured.append],
-        trigger=("messages", 4),
-        keep=("messages", 2),
-        preserve_recent_skill_count=0,
-        preserve_recent_skill_tokens=10_000,
-        preserve_recent_skill_tokens_per_skill=10_000,
-    )
-
-    middleware.before_model({"messages": _skill_conversation()}, _runtime())
-
-    preserved = captured[0].preserved_messages
-    assert not any(isinstance(m, ToolMessage) for m in preserved)
-
-
-def test_skill_rescue_ignores_non_skill_tool_reads() -> None:
-    captured: list[SummarizationEvent] = []
-    middleware = _middleware(
-        before_summarization=[captured.append],
-        trigger=("messages", 4),
-        keep=("messages", 2),
-        preserve_recent_skill_count=5,
-        preserve_recent_skill_tokens=10_000,
-        preserve_recent_skill_tokens_per_skill=10_000,
-    )
-
-    messages = [
-        HumanMessage(content="u1"),
-        AIMessage(
-            content="",
-            tool_calls=[{"name": "read_file", "id": "t1", "args": {"path": "/mnt/user-data/workspace/notes.md"}}],
-        ),
-        ToolMessage(content="user notes", tool_call_id="t1"),
-        HumanMessage(content="u2"),
-        AIMessage(content="done"),
-    ]
-
-    middleware.before_model({"messages": messages}, _runtime())
-
-    preserved = captured[0].preserved_messages
-    assert not any(isinstance(m, ToolMessage) and m.content == "user notes" for m in preserved)
-
-
-def test_skill_rescue_does_not_preserve_non_skill_outputs_from_mixed_tool_calls() -> None:
-    captured: list[SummarizationEvent] = []
-    middleware = _middleware(
-        before_summarization=[captured.append],
-        trigger=("messages", 4),
-        keep=("messages", 2),
-        preserve_recent_skill_count=5,
-        preserve_recent_skill_tokens=10_000,
-        preserve_recent_skill_tokens_per_skill=10_000,
-    )
-
-    messages = [
-        HumanMessage(content="u1"),
-        AIMessage(
-            content="",
-            tool_calls=[
-                _skill_read_call("skill-1", "alpha"),
-                {"name": "read_file", "id": "file-1", "args": {"path": "/mnt/user-data/workspace/notes.md"}},
-            ],
-        ),
-        ToolMessage(content="alpha skill body", tool_call_id="skill-1"),
-        ToolMessage(content="user notes", tool_call_id="file-1"),
-        HumanMessage(content="u2"),
-        AIMessage(content="done"),
-    ]
-
-    middleware.before_model({"messages": messages}, _runtime())
-
-    preserved = captured[0].preserved_messages
-    summarized = captured[0].messages_to_summarize
-
-    preserved_ai = next(m for m in preserved if isinstance(m, AIMessage) and m.tool_calls)
-    summarized_ai = next(m for m in summarized if isinstance(m, AIMessage) and m.tool_calls)
-
-    assert [tc["id"] for tc in preserved_ai.tool_calls] == ["skill-1"]
-    assert [tc["id"] for tc in summarized_ai.tool_calls] == ["file-1"]
-    assert any(isinstance(m, ToolMessage) and m.content == "alpha skill body" for m in preserved)
-    assert not any(isinstance(m, ToolMessage) and m.content == "user notes" for m in preserved)
-    assert any(isinstance(m, ToolMessage) and m.content == "user notes" for m in summarized)
-
-
-def test_skill_rescue_syncs_raw_provider_tool_calls_on_split_ai_messages() -> None:
-    captured: list[SummarizationEvent] = []
-    middleware = _middleware(
-        before_summarization=[captured.append],
-        trigger=("messages", 4),
-        keep=("messages", 2),
-        preserve_recent_skill_count=5,
-        preserve_recent_skill_tokens=10_000,
-        preserve_recent_skill_tokens_per_skill=10_000,
-    )
-
-    messages = [
-        HumanMessage(content="u1"),
-        AIMessage(
-            content="reading skill and notes",
-            tool_calls=[
-                _skill_read_call("skill-1", "alpha"),
-                {"name": "read_file", "id": "file-1", "args": {"path": "/mnt/user-data/workspace/notes.md"}},
-            ],
-            additional_kwargs={"tool_calls": [_raw_tool_call("skill-1"), _raw_tool_call("file-1")]},
-        ),
-        ToolMessage(content="alpha skill body", tool_call_id="skill-1"),
-        ToolMessage(content="user notes", tool_call_id="file-1"),
-        HumanMessage(content="u2"),
-        AIMessage(content="done"),
-    ]
-
-    middleware.before_model({"messages": messages}, _runtime())
-
-    preserved = captured[0].preserved_messages
-    summarized = captured[0].messages_to_summarize
-
-    preserved_ai = next(m for m in preserved if isinstance(m, AIMessage) and m.tool_calls)
-    summarized_ai = next(m for m in summarized if isinstance(m, AIMessage) and m.tool_calls)
-
-    assert [tc["id"] for tc in preserved_ai.tool_calls] == ["skill-1"]
-    assert [tc["id"] for tc in preserved_ai.additional_kwargs["tool_calls"]] == ["skill-1"]
-    assert [tc["id"] for tc in summarized_ai.tool_calls] == ["file-1"]
-    assert [tc["id"] for tc in summarized_ai.additional_kwargs["tool_calls"]] == ["file-1"]
-
-
-def test_skill_rescue_clears_content_on_rescued_ai_clone() -> None:
-    captured: list[SummarizationEvent] = []
-    middleware = _middleware(
-        before_summarization=[captured.append],
-        trigger=("messages", 4),
-        keep=("messages", 2),
-        preserve_recent_skill_count=5,
-        preserve_recent_skill_tokens=10_000,
-        preserve_recent_skill_tokens_per_skill=10_000,
-    )
-
-    messages = [
-        HumanMessage(content="u1"),
-        AIMessage(
-            content="reading skill and notes",
-            tool_calls=[
-                _skill_read_call("skill-1", "alpha"),
-                {"name": "read_file", "id": "file-1", "args": {"path": "/mnt/user-data/workspace/notes.md"}},
-            ],
-        ),
-        ToolMessage(content="alpha skill body", tool_call_id="skill-1"),
-        ToolMessage(content="user notes", tool_call_id="file-1"),
-        HumanMessage(content="u2"),
-        AIMessage(content="done"),
-    ]
-
-    middleware.before_model({"messages": messages}, _runtime())
-
-    preserved = captured[0].preserved_messages
-    summarized = captured[0].messages_to_summarize
-
-    preserved_ai = next(m for m in preserved if isinstance(m, AIMessage) and m.tool_calls)
-    summarized_ai = next(m for m in summarized if isinstance(m, AIMessage) and m.tool_calls)
-
-    assert preserved_ai.content == ""
-    assert summarized_ai.content == "reading skill and notes"
-
-
-def test_skill_rescue_removes_raw_provider_tool_calls_from_content_only_summary_clone() -> None:
-    captured: list[SummarizationEvent] = []
-    middleware = _middleware(
-        before_summarization=[captured.append],
-        trigger=("messages", 4),
-        keep=("messages", 2),
-        preserve_recent_skill_count=5,
-        preserve_recent_skill_tokens=10_000,
-        preserve_recent_skill_tokens_per_skill=10_000,
-    )
-
-    messages = [
-        HumanMessage(content="u1"),
-        AIMessage(
-            content="reading skill",
-            tool_calls=[_skill_read_call("skill-1", "alpha")],
-            additional_kwargs={"tool_calls": [_raw_tool_call("skill-1")], "function_call": {"name": "read_file"}},
-            response_metadata={"finish_reason": "tool_calls"},
-        ),
-        ToolMessage(content="alpha skill body", tool_call_id="skill-1"),
-        HumanMessage(content="u2"),
-        AIMessage(content="done"),
-    ]
-
-    middleware.before_model({"messages": messages}, _runtime())
-
-    summarized = captured[0].messages_to_summarize
-    summarized_ai = next(m for m in summarized if isinstance(m, AIMessage))
-
-    assert summarized_ai.content == "reading skill"
-    assert summarized_ai.tool_calls == []
-    assert "tool_calls" not in summarized_ai.additional_kwargs
-    assert "function_call" not in summarized_ai.additional_kwargs
-    assert summarized_ai.response_metadata["finish_reason"] == "stop"
-
-
-def test_skill_rescue_only_preserves_skill_calls_with_matched_tool_results() -> None:
-    captured: list[SummarizationEvent] = []
-    middleware = _middleware(
-        before_summarization=[captured.append],
-        trigger=("messages", 4),
-        keep=("messages", 2),
-        preserve_recent_skill_count=5,
-        preserve_recent_skill_tokens=10_000,
-        preserve_recent_skill_tokens_per_skill=10_000,
-    )
-
-    messages = [
-        HumanMessage(content="u1"),
-        AIMessage(
-            content="",
-            tool_calls=[
-                _skill_read_call("skill-1", "alpha"),
-                _skill_read_call("skill-2", "beta"),
-            ],
-        ),
-        ToolMessage(content="alpha skill body", tool_call_id="skill-1"),
-        HumanMessage(content="u2"),
-        AIMessage(content="done"),
-    ]
-
-    middleware.before_model({"messages": messages}, _runtime())
-
-    preserved = captured[0].preserved_messages
-    summarized = captured[0].messages_to_summarize
-
-    preserved_ai = next(m for m in preserved if isinstance(m, AIMessage) and m.tool_calls)
-    summarized_ai = next(m for m in summarized if isinstance(m, AIMessage) and m.tool_calls)
-
-    assert [tc["id"] for tc in preserved_ai.tool_calls] == ["skill-1"]
-    assert [tc["id"] for tc in summarized_ai.tool_calls] == ["skill-2"]
-    assert any(isinstance(m, ToolMessage) and m.content == "alpha skill body" for m in preserved)
-    assert not any(isinstance(m, ToolMessage) and getattr(m, "tool_call_id", None) == "skill-2" for m in preserved)
-
-
 def test_memory_flush_hook_preserves_agent_scoped_memory(monkeypatch: pytest.MonkeyPatch) -> None:
     queue = MagicMock()
     monkeypatch.setattr("deerflow.agents.memory.summarization_hook.get_memory_config", lambda: MemoryConfig(enabled=True))
@@ -856,6 +456,7 @@ def test_id_swap_user_peer_is_preserved_across_summarization() -> None:
     result = middleware.before_model(
         {
             "messages": [
+                HumanMessage(content="older context"),
                 reminder_system,
                 memory_msg,
                 user_msg,
@@ -881,7 +482,7 @@ def test_id_swap_user_peer_is_preserved_across_summarization() -> None:
     emitted = result["messages"]
     assert isinstance(emitted[0], RemoveMessage)
     # Find the triplet members in the emitted messages
-    emitted_ids = [m.id for m in emitted[2:]]  # Skip RemoveMessage + summary
+    emitted_ids = [m.id for m in emitted[1:]]  # Skip RemoveMessage
     assert stable_id in emitted_ids
     assert f"{stable_id}__memory" in emitted_ids
     assert f"{stable_id}__user" in emitted_ids
@@ -906,6 +507,7 @@ def test_id_swap_user_peer_preserved_without_memory() -> None:
     middleware.before_model(
         {
             "messages": [
+                HumanMessage(content="older context"),
                 reminder_system,
                 user_msg,
                 AIMessage(content="I'm fine.", id="ai-2"),
