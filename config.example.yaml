@@ -519,6 +519,22 @@ models:
   #       chat_template_kwargs:
   #         enable_thinking: true
 
+  # Example: rvLLM (native Rust rvllm-server, OpenAI-compatible)
+  # rvLLM serves greedy models with server-side MTP speculative decoding; the
+  # provider defaults to deterministic decoding (temperature: 0) so agent runs
+  # stay reproducible. See https://github.com/m0at/rvllm
+  # - name: gemma-4-e4b-it-rvllm
+  #   display_name: Gemma 4 E4B (rvLLM)
+  #   use: deerflow.models.rvllm_provider:RvllmChatModel
+  #   model: gemma-4-e4b-it
+  #   api_key: $RVLLM_API_KEY
+  #   base_url: http://localhost:18086/v1
+  #   request_timeout: 600.0
+  #   max_retries: 2
+  #   max_tokens: 8192
+  #   temperature: 0
+  #   supports_vision: false
+
 
   # Example: Qwen3-Coder deployed on MindIE Engine
   # - name: Qwen3_Coder_480B_MindIE

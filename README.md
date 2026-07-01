@@ -154,6 +154,14 @@ That prompt is intended for coding agents. It tells the agent to clone the repo 
          extra_body:
            chat_template_kwargs:
              enable_thinking: true
+
+     - name: gemma-4-e4b-it-rvllm
+       display_name: Gemma 4 E4B (rvLLM)
+       use: deerflow.models.rvllm_provider:RvllmChatModel
+       model: gemma-4-e4b-it
+       api_key: $RVLLM_API_KEY
+       base_url: http://localhost:18086/v1
+       temperature: 0
    ```
 
    OpenRouter and similar OpenAI-compatible gateways should be configured with `langchain_openai:ChatOpenAI` plus `base_url`. If you prefer a provider-specific environment variable name, point `api_key` at that variable explicitly (for example `api_key: $OPENROUTER_API_KEY`).
@@ -161,6 +169,8 @@ That prompt is intended for coding agents. It tells the agent to clone the repo 
    To route OpenAI models through `/v1/responses`, keep using `langchain_openai:ChatOpenAI` and set `use_responses_api: true` with `output_version: responses/v1`.
 
    For vLLM 0.19.0, use `deerflow.models.vllm_provider:VllmChatModel`. For Qwen-style reasoning models, DeerFlow toggles reasoning with `extra_body.chat_template_kwargs.enable_thinking` and preserves vLLM's non-standard `reasoning` field across multi-turn tool-call conversations. Legacy `thinking` configs are normalized automatically for backward compatibility. Reasoning models may also require the server to be started with `--reasoning-parser ...`. If your local vLLM deployment accepts any non-empty API key, you can still set `VLLM_API_KEY` to a placeholder value.
+
+   For rvLLM, use `deerflow.models.rvllm_provider:RvllmChatModel`. rvLLM is a native Rust `rvllm-server` exposing an OpenAI-compatible API; it serves greedy models with server-side MTP speculative decoding, so the provider defaults to deterministic decoding (`temperature: 0`) to keep agent runs reproducible — set `temperature` explicitly to opt into sampling. As with vLLM, if your local rvllm-server accepts any non-empty API key you can set `RVLLM_API_KEY` to a placeholder value. See [m0at/rvllm](https://github.com/m0at/rvllm).
 
    CLI-backed provider examples:
 
