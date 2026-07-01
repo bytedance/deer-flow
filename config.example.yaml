@@ -1282,9 +1282,9 @@ skill_evolution:
 #                  UV_EXTRAS=postgres
 #              Multiple extras (`postgres,ollama`) supported here too — see
 #              docker/dev-entrypoint.sh.
-#   Docker img build-arg `UV_EXTRAS=postgres docker compose build` — single
-#              extra only at build time (backend/Dockerfile passes the value
-#              as one token to `--extra`).
+#   Docker img build-arg `UV_EXTRAS=postgres,discord docker compose build`
+#              supports comma- or whitespace-separated extras at build time
+#              (backend/Dockerfile expands them to repeated `--extra` flags).
 #
 # First-time bootstrap (before `make dev`):
 #   cd backend && uv sync --all-packages --extra postgres
