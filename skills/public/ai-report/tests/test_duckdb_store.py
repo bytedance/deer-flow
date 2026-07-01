@@ -142,13 +142,27 @@ def test_list_approved_tables_decodes_json_columns(tmp_path):
 def test_store_context_manager(tmp_path):
     db = str(tmp_path / "ctx.duckdb")
     with Store(db_path=db) as s:
-        s.init_schema()
         assert s.conn is not None
     # closed after exit
     s2 = Store(db_path=db)
     assert s2._conn is None
     s2.open()
     s2.close()
+
+
+def test_open_auto_inits_schema(tmp_path):
+    """Store.open() auto-runs init_schema via CREATE TABLE IF NOT EXISTS.
+    Callers shouldn't have to remember to call init_schema manually.
+    """
+    s = Store(db_path=str(tmp_path / "auto.duckdb"))
+    s.open()
+    # Tables should already exist — no manual init_schema() needed
+    rows = s._conn.execute(
+        "SELECT table_name FROM information_schema.tables WHERE table_schema='main' ORDER BY table_name"
+    ).fetchall()
+    names = [r[0] for r in rows]
+    assert names == ["approved_table_runs", "metric_facts", "report_sections", "report_tables", "reports"]
+    s.close()
 
 
 # ---- P1-1: TIMESTAMPTZ 列存在 ---- #

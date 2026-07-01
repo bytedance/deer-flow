@@ -38,6 +38,10 @@ class Store:
     def open(self) -> None:
         Path(self._db_path).parent.mkdir(parents=True, exist_ok=True)
         self._conn = duckdb.connect(self._db_path)
+        # CREATE TABLE IF NOT EXISTS is idempotent — auto-init on every open()
+        # keeps callers from having to remember init_schema(). Retained as a
+        # public method for ops scripts that want to re-run it explicitly.
+        self.init_schema()
 
     def close(self) -> None:
         if self._conn is not None:
@@ -184,10 +188,13 @@ def save_approved_run(
 ) -> None:
     """Atomically persist approved run: UPDATE parent + INSERT child under one write lock.
 
-    DuckDB 1.5.2 FK quirk: UPDATE on a parent row with existing children raises
-    FK violation even when the FK column is unchanged. So we update the parent
-    first (when no approved_run children exist yet), then insert the child.
-    The write_lock wraps both statements so concurrent callers can't interleave.
+    DuckDB 1.5.2 FK quirk: approved_table_runs has FK to report_tables. Once
+    a child row exists for a given table_id, an UPDATE on the parent raises
+    a FK violation ("key X is still referenced by a foreign key"). The
+    PRIMARY KEY on approved_table_runs is (run_id, table_id), so we can only
+    ever insert one approved_run per table_id — meaning the UPDATE is always
+    the FIRST mutation after upsert_table, before any child exists. The
+    write_lock wraps both statements so concurrent callers can't interleave.
     """
     with self._write_lock:
         self.conn.execute(
@@ -211,7 +218,7 @@ def save_approved_run(
 
 def list_approved_tables(self, report_id: str) -> list[dict]:
     rows = self.conn.execute(
-        """SELECT rt.table_id, rt.section_id, rt.table_order, rt.table_title,
+        """SELECT rt.table_id, rt.section_id, rt.table_order, rt.table_title, rt.parsed_payload,
                   rs.section_order, rs.section_title,
                   atr.run_id, atr.wide_table, atr.computed_columns, atr.descriptions,
                   atr.status, atr.sentinels, atr.runlog_markdown
@@ -229,6 +236,8 @@ def list_approved_tables(self, report_id: str) -> list[dict]:
         for jc in _JSON_COLUMNS:
             if jc in d and isinstance(d[jc], str):
                 d[jc] = _json.loads(d[jc])
+        if isinstance(d.get("parsed_payload"), str):
+            d["parsed_payload"] = _json.loads(d["parsed_payload"])
         out.append(d)
     return out
 
@@ -319,7 +328,14 @@ CREATE INDEX IF NOT EXISTS idx_report_tables_status ON report_tables(report_id, 
 CREATE TABLE IF NOT EXISTS metric_facts (
   run_id              TEXT NOT NULL,
   schema_version      INTEGER NOT NULL DEFAULT 1,
-  table_id            TEXT NOT NULL REFERENCES report_tables(table_id),
+  -- FK to report_tables dropped: DuckDB 1.5.2 raises FK violation on any
+  -- UPDATE of a parent row that has children, even when the FK column
+  -- isn't changing. Since design_pipeline always inserts metric_facts
+  -- BEFORE calling save_approved_run (which UPDATEs report_tables), the
+  -- FK would block every approval. Application-level integrity is
+  -- sufficient: all writes go through Store's write_lock, and the
+  -- run_id is unique.
+  table_id            TEXT NOT NULL,
   report_id           TEXT NOT NULL,
   branch_num          TEXT NOT NULL,
   branch_short_name   TEXT,

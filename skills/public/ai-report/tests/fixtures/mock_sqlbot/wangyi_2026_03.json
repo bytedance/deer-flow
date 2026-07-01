@@ -1,9 +1,23 @@
 {
+  "BAS_001@202602": {
+    "success": true,
+    "msg": "指标数据查询成功。",
+    "data": [
+      {"data_dt": "2026-02-28", "org_ecd": "wangyi_credit_union", "idx_name": "存款余额", "value": 1233500000.00}
+    ]
+  },
   "BAS_001@202603": {
     "success": true,
     "msg": "指标数据查询成功。",
     "data": [
       {"data_dt": "2026-03-31", "org_ecd": "wangyi_credit_union", "idx_name": "存款余额", "value": 1234567890.50}
+    ]
+  },
+  "BAS_010@202602": {
+    "success": true,
+    "msg": "指标数据查询成功。",
+    "data": [
+      {"data_dt": "2026-02-28", "org_ecd": "wangyi_credit_union", "idx_name": "贷款余额", "value": 985000000.00}
     ]
   },
   "BAS_010@202603": {
@@ -13,7 +27,32 @@
       {"data_dt": "2026-03-31", "org_ecd": "wangyi_credit_union", "idx_name": "贷款余额", "value": 987654321.00}
     ]
   },
-  "BAS_020@202603": {"success": true, "msg": "指标数据查询成功。", "data": [{"data_dt": "2026-03-31", "org_ecd": "wangyi_credit_union", "idx_name": "营业收入", "value": 50000000.00}]},
-  "BAS_026@202603": {"success": true, "msg": "指标数据查询成功。", "data": [{"data_dt": "2026-03-31", "org_ecd": "wangyi_credit_union", "idx_name": "利润总额", "value": 10000000.00}]},
-  "BAS_030@202603": {"success": true, "msg": "指标数据查询成功。", "data": [{"data_dt": "2026-03-31", "org_ecd": "wangyi_credit_union", "idx_name": "不良贷款率", "value": 0.0183}]}
+  "BAS_020@202603": {
+    "success": true,
+    "msg": "指标数据查询成功。",
+    "data": [
+      {"data_dt": "2026-03-31", "org_ecd": "wangyi_credit_union", "idx_name": "营业收入", "value": 50000000.00}
+    ]
+  },
+  "BAS_026@202603": {
+    "success": true,
+    "msg": "指标数据查询成功。",
+    "data": [
+      {"data_dt": "2026-03-31", "org_ecd": "wangyi_credit_union", "idx_name": "利润总额", "value": 10000000.00}
+    ]
+  },
+  "BAS_030@202603": {
+    "success": true,
+    "msg": "指标数据查询成功。",
+    "data": [
+      {"data_dt": "2026-03-31", "org_ecd": "wangyi_credit_union", "idx_name": "不良贷款率", "value": 0.0183}
+    ]
+  },
+  "BAS_040@202603": {
+    "success": true,
+    "msg": "指标数据查询成功。",
+    "data": [
+      {"data_dt": "2026-03-31", "org_ecd": "wangyi_credit_union", "idx_name": "流动性比例", "value": 0.5820}
+    ]
+  }
 }

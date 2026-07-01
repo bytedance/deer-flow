@@ -132,7 +132,9 @@ class _TheadCellCollector(HTMLParser):
             self._cur_cell = {
                 "text": "",
                 "is_indicator": False,
-                "is_computed": a.get("data-idx") is not None or a.get("data-computed") is not None,
+                # is_computed = formula column (computed at runtime from prompt).
+                # data-idx alone means indicator column (lookup idx_id@period) — orthogonal.
+                "is_computed": a.get("data-computed") is not None,
                 "idx_id": a.get("data-idx"),
                 "data_unit": a.get("data-unit"),
                 "period": a.get("data-period"),
@@ -182,12 +184,42 @@ def _parse_org_block(body: str) -> list[OrgContext]:
     return [OrgContext(**o) for o in json.loads(m.group(1))]
 
 
+def _parse_description_block(body: str) -> str | None:
+    """Parse optional `> 描述:` block, return prompt string or None.
+
+    Format (same multi-line `>` block as `> 机构:` / `> 时期:`):
+        > 描述:
+        >   请基于表格数据生成一段经营分析描述...
+        >   重点关注:
+        >   - 同比变化
+
+    Lines are joined with newlines; sibling blocks (`> 时期:` etc.) terminate
+    the block. Block content is passed to _llm_describe as a prompt hint.
+    """
+    desc_match = re.search(r"^>\s*描述:\s*$", body, re.MULTILINE)
+    if not desc_match:
+        return None
+    lines: list[str] = []
+    for raw in body[desc_match.end():].splitlines():
+        if not raw:
+            continue
+        if not raw.startswith(">"):
+            break
+        if re.match(r"^>\s?\S", raw) and not re.match(r"^>\s{2,}\S", raw):
+            break
+        line = raw.lstrip("> ").strip()
+        if line:
+            lines.append(line)
+    return "\n".join(lines) if lines else None
+
+
 def _parse_one_report(report_title: str, body: str) -> Report:
     org_contexts = _parse_org_block(body)
     time_match = re.search(r"^>\s*时期:\s*time_info\s*=\s*(\[.*?\])\s*$", body, re.MULTILINE)
     if not time_match:
         raise ValueError(f"report `{report_title}` missing `> 时期:`; run md_lint first")
     time_info = json.loads(time_match.group(1))
+    description_prompt = _parse_description_block(body)
 
     thead_match = re.search(r"<thead[^>]*>(.*?)</thead>", body, re.DOTALL | re.IGNORECASE)
     if not thead_match:
@@ -203,5 +235,5 @@ def _parse_one_report(report_title: str, body: str) -> Report:
         headers=headers_2d,
         data_rows=[],
         computed_specs=[],
-        description_prompt=None,
+        description_prompt=description_prompt,
     )
