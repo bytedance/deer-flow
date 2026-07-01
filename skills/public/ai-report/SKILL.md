@@ -86,23 +86,23 @@ approved 后再 runtime 出文件。运行时可以反复调(同 report_id 多�
 ## Pipeline 快速预览
 
 ```text
-DESIGN (per section)
-0 lint → 1.5 lint checkpoint
-→ 2 query (per-idx SQLBot) → 3.5 query checkpoint
-→ 4 assemble-wide → 5 extract-ir
-→ 6 codegen (LLM DuckDB SQL) → 7 validate → 8 evaluate → 9 apply-computed
-→ 10 unit_convert (Python Decimal) → 11 describe
-→ 8d.5 description checkpoint (only if `> 描述:` provided)
-→ 12 preview checkpoint → 14 save approved run
-→ 13 post-section checkpoint
-
-RUNTIME (per report)
-R-0 existence → R-1 list approved → R-2 build payload
-→ R-3 render md → R-4 render docx → R-5 中文回执 + status.json
+0 lint → 1 lint checkpoint
+→ 2 parse → 3 query → 3.5 query checkpoint
+→ 4 assemble-wide (DuckDB PIVOT + Decimal unit-convert)
+→ 6 extract-ir → 7 codegen (agent-turn-LLM) → 8a validate → 8b evaluate → 8c apply-computed
+→ 10 unit_convert (Python Decimal precision pass)
+→ 11 describe (agent-turn-LLM) → 11.5 description checkpoint
+→ 12 preview checkpoint → 13 save approved run → 13.5 post-section checkpoint
+→ 14 render markdown → 15 render docx → 16 status + 中文回执
 ```
 
-详细步骤、命令、retry budget、进度消息模板见
-`references/pipeline.md`。
+每个 step 就是一个 `bash` 可调用的 CLI 脚本;checkpoint 步骤(1 / 3.5 /
+11.5 / 12 / 13.5)由 lead agent 用 `ask_clarification` 在 CLIs 之间插入。
+步骤 7 和 11 是 `agent-turn-LLM`:lead agent 自己读 prompt + JSON 输入,
+调 `create_chat_model`,把产物写到指示路径。
+
+每步的精确命令、retry budget、进度消息模板见 `references/pipeline.md`。
+Checkpoint 问题与选项见 `references/checkpoints.md`。
 
 ## SQLBot 数据源(real / mock)
 
@@ -163,14 +163,12 @@ python scripts/sqlbot_client.py query \
 | 需要做的事 | 读哪个 |
 |---|---|
 | 看完整步骤表 / 命令 / 重试策略 / 进度消息 | `references/pipeline.md` |
-| checkpoint 1.5 / 3.5 / 8d.5 / 12 / 13 怎么问 | `references/checkpoints.md` |
-| runtime 5 步细节 / CLI 入参 / 失败模式 | `references/runtime.md` |
+| checkpoint 1 / 3.5 / 11.5 / 12 / 13.5 怎么问 | `references/checkpoints.md` |
 | 中文回执 / status.json schema / sentinel 汇总 | `references/status-output.md` |
 | DuckDB 表结构 / 数据形态转换 / Decimal 精度 | `references/data-flow.md` |
 
 正常 design 流程:必读 `pipeline.md` + `checkpoints.md` + `data-flow.md`,
-再读 `status-output.md`(出回执时)。`runtime.md` 只在用户要出 docx
-或 runtime 出错时读。
+再读 `status-output.md`(出回执时)。
 
 ## 关键契约(Phase 1 政策,不可违反)
 
@@ -216,7 +214,7 @@ python scripts/sqlbot_client.py query \
 ### 4. 6 个 checkpoint,全部走 `ask_clarification`
 
 - `clarification_type='risk_confirmation'`(固定)。
-- Checkpoint 0 / 1.5 / 3.5 / 8d.5 / 12 / 13。
+- Checkpoint 步骤编号:1 / 3.5 / 11.5 / 12 / 13.5。
 - 用户在 checkpoint 选 stop → section `approval_status='draft'`,
   不写 `approved_runs`,可 resume。
 - 3.5 总是触发,**即使 `ok == 0`**(fail-fast 2026-06-27 反转)。
@@ -277,19 +275,43 @@ partial 报告可审计。
 用户上传 `/mnt/user-data/uploads/wangyi_2026_03.md`(5 节经营分析样张,
 每节 1 张表,共 5 张,含 `data-idx` 和 `data-unit`)。
 
-最小运行流程:
+最小运行流程(全 step CLI,无 in-process Python 桥):
 
-1. **lint**:`python /mnt/skills/public/ai-report/scripts/md_lint.py
-   /mnt/user-data/uploads/wangyi_2026_03.md` → 输出 LintReport。
-2. **触发 checkpoint 1.5**(若 lint pass)或 stop(若有 errors)。
-3. **设计**:逐 section 调 `DesignPipeline.run_section(table_id)`,过
-   checkpoint 3.5 / 12 / 13。每通过一个 section 写一行 `approved_runs`。
-4. **出 docx**:`python /mnt/skills/public/ai-report/scripts/runtime_pipeline.py
-   --db-path /mnt/ai-report-data/duckdb --report-id wangyi_2026_03
-   --out-dir /mnt/ai-report-data`,产物 `<report_id>.report.md` +
-   `.report.docx` + `.status.json`,stdout 中文回执。
-5. **分享**:`report.md` 内容贴聊天(短)或总结(长);`report.docx`
-   给用户下载链接;`status.json` 不贴。
+```bash
+# Step 0 lint
+python /mnt/skills/public/ai-report/scripts/md_lint.py \
+  /mnt/user-data/uploads/wangyi_2026_03.md
+# Checkpoint 1: ask_clarification "继续 / 修改 lint 错误"
+
+# Step 2 parse
+python /mnt/skills/public/ai-report/scripts/parse_md.py \
+  --md /mnt/user-data/uploads/wangyi_2026_03.md \
+  --out /mnt/user-data/outputs/wangyi_2026_03.parsed.json
+
+# Step 3 query (mock)
+python /mnt/skills/public/ai-report/scripts/sqlbot_client.py query \
+  --parsed /mnt/user-data/outputs/wangyi_2026_03.parsed.json \
+  --mock --mock-fixture /mnt/skills/public/ai-report/tests/fixtures/mock_sqlbot/wangyi_2026_03.json \
+  --out /mnt/user-data/outputs/wangyi_2026_03.query.json
+# Checkpoint 3.5: ask_clarification "SQLBot 有 ⚠️QUERY_FAILED,继续 / 停止"
+
+# Step 4 assemble-wide (per section) → Steps 6/7/8a/8b/8c/10/11 跑 LLM
+# Step 13 save approved run → Step 13.5 post-section checkpoint
+# Step 14-16 render + 中文回执
+python /mnt/skills/public/ai-report/scripts/render_markdown.py \
+  --report-id wangyi_2026_03 --db-path /mnt/ai-report-data/duckdb \
+  --out-dir /mnt/ai-report-data
+python /mnt/skills/public/ai-report/scripts/render_docx.py \
+  --report-id wangyi_2026_03 --db-path /mnt/ai-report-data/duckdb \
+  --out-dir /mnt/ai-report-data
+python /mnt/skills/public/ai-report/scripts/assemble_status.py \
+  --report-id wangyi_2026_03 --db-path /mnt/ai-report-data/duckdb \
+  --out /mnt/ai-report-data/wangyi_2026_03.status.json
+```
+
+产物:`<report_id>.report.md` + `.report.docx` + `.status.json`,stdout
+中文回执。`.report.md` 内容贴聊天(短)或总结(长);`.report.docx`
+给用户下载链接;`.status.json` 不贴。
 
 如果 SQLBot 5 个指标里有 1 个 `BAS_040@202603` 失败:`approved_runs.sentinels
 = ["⚠️QUERY_FAILED"]`,`status='partial'`,回执含 `⚠️QUERY_FAILED × 1`,
