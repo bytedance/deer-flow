@@ -72,3 +72,38 @@ def get_original_user_content_text(content: Any, additional_kwargs: Mapping[str,
     if isinstance(original_content, str):
         return original_content
     return message_content_to_text(content)
+
+
+def restore_original_user_content_blocks(content: Any, original_text: str) -> list[dict]:
+    """Restore display content for a user message stamped with ``ORIGINAL_USER_CONTENT_KEY``.
+
+    Mirrors the merge shape produced by ``InputSanitizationMiddleware._rebuild_content``:
+    the first text block is replaced with the pre-wrap text, any subsequent text
+    blocks (already merged into the first by the middleware) are dropped, and
+    non-text blocks (images, files) stay in place. For string content (or any
+    non-list shape) a single text-block list is returned.
+
+    Without this, display surfaces that wholesale-replace ``content`` with a
+    single text block lose the image/file blocks of multimodal user messages.
+    """
+    if not isinstance(content, list):
+        return [{"type": "text", "text": original_text}]
+
+    result: list[dict] = []
+    text_replaced = False
+    for block in content:
+        if isinstance(block, Mapping) and block.get("type") == "text":
+            if not text_replaced:
+                result.append({"type": "text", "text": original_text})
+                text_replaced = True
+            # Subsequent text blocks were merged into the first by the
+            # middleware; drop them so the displayed text is not duplicated.
+            continue
+        result.append(block)
+
+    if not text_replaced:
+        # No text block in the persisted list — prepend the original text
+        # so the user's typed input still renders.
+        result.insert(0, {"type": "text", "text": original_text})
+
+    return result

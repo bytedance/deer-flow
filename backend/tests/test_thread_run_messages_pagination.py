@@ -315,3 +315,162 @@ def test_list_thread_messages_injects_turn_duration():
 
     assert "turn_duration" not in data[0].get("content", {}).get("additional_kwargs", {})
     assert data[1]["content"]["additional_kwargs"]["turn_duration"] == 5
+
+
+def test_list_thread_messages_unwraps_prompt_injection_boundary_markers():
+    """Human messages must show original text, not the model-facing wrapper (#3689)."""
+    from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
+
+    rows = [
+        {
+            "seq": 1,
+            "run_id": "run-1",
+            "event_type": "llm.human.input",
+            "category": "message",
+            "content": {
+                "type": "human",
+                "content": "--- BEGIN USER INPUT ---\ntest\n--- END USER INPUT ---",
+                "additional_kwargs": {ORIGINAL_USER_CONTENT_KEY: "test"},
+            },
+        },
+        {
+            "seq": 2,
+            "run_id": "run-1",
+            "event_type": "llm.ai.response",
+            "category": "message",
+            "content": {
+                "type": "ai",
+                "content": "Here is the answer.",
+                "additional_kwargs": {},
+            },
+        },
+    ]
+
+    event_store = MagicMock()
+    event_store.list_messages = AsyncMock(return_value=rows)
+
+    run_manager = AsyncMock()
+    run_manager.list_by_thread = AsyncMock(return_value=[])
+
+    feedback_repo = MagicMock()
+    feedback_repo.list_by_thread_grouped = AsyncMock(return_value={})
+
+    app = _make_app(event_store=event_store, run_manager=run_manager)
+    app.state.feedback_repo = feedback_repo
+
+    with TestClient(app) as client:
+        response = client.get("/api/threads/thread-1/messages")
+
+    assert response.status_code == 200
+    data = response.json()
+
+    # Human message unwrapped to original user text
+    human = data[0]["content"]
+    assert human["type"] == "human"
+    assert human["content"] == [{"type": "text", "text": "test"}]
+    # Boundary markers gone from the UI-facing content
+    assert "BEGIN USER INPUT" not in str(human["content"])
+
+    # AI message untouched
+    ai = data[1]["content"]
+    assert ai["type"] == "ai"
+    assert ai["content"] == "Here is the answer."
+
+
+def test_list_thread_messages_leaves_unstamped_human_messages_untouched():
+    """Human messages without ORIGINAL_USER_CONTENT_KEY pass through verbatim."""
+    rows = [
+        {
+            "seq": 1,
+            "run_id": "run-1",
+            "event_type": "llm.human.input",
+            "category": "message",
+            "content": {
+                "type": "human",
+                "content": "no middleware touched this",
+                "additional_kwargs": {},
+            },
+        },
+    ]
+
+    event_store = MagicMock()
+    event_store.list_messages = AsyncMock(return_value=rows)
+
+    run_manager = AsyncMock()
+    run_manager.list_by_thread = AsyncMock(return_value=[])
+
+    feedback_repo = MagicMock()
+    feedback_repo.list_by_thread_grouped = AsyncMock(return_value={})
+
+    app = _make_app(event_store=event_store, run_manager=run_manager)
+    app.state.feedback_repo = feedback_repo
+
+    with TestClient(app) as client:
+        response = client.get("/api/threads/thread-1/messages")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data[0]["content"]["content"] == "no middleware touched this"
+
+
+def test_list_thread_messages_unwraps_multimodal_message_preserving_non_text_blocks():
+    """Regression for #3689 review feedback: multimodal user messages must
+    keep their image/file blocks after the boundary wrapper is unwrapped.
+
+    The middleware's ``_rebuild_content`` persists the wrapped text as a single
+    merged text block alongside non-text blocks (image_url, files). The read
+    path must restore the original text in place without dropping the image —
+    otherwise an uploaded image disappears from history on reload.
+    """
+    from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
+
+    image_block = {"type": "image_url", "image_url": {"url": "data:image/png;base64,XYZ"}}
+    rows = [
+        {
+            "seq": 1,
+            "run_id": "run-1",
+            "event_type": "llm.human.input",
+            "category": "message",
+            "content": {
+                "type": "human",
+                # Persisted shape after InputSanitizationMiddleware._rebuild_content:
+                # [{text: wrapped}, {image_url: ...}] — text block first, non-text
+                # blocks preserved in place.
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "--- BEGIN USER INPUT ---\nlook\n--- END USER INPUT ---",
+                    },
+                    image_block,
+                ],
+                "additional_kwargs": {ORIGINAL_USER_CONTENT_KEY: "look"},
+            },
+        },
+    ]
+
+    event_store = MagicMock()
+    event_store.list_messages = AsyncMock(return_value=rows)
+
+    run_manager = AsyncMock()
+    run_manager.list_by_thread = AsyncMock(return_value=[])
+
+    feedback_repo = MagicMock()
+    feedback_repo.list_by_thread_grouped = AsyncMock(return_value={})
+
+    app = _make_app(event_store=event_store, run_manager=run_manager)
+    app.state.feedback_repo = feedback_repo
+
+    with TestClient(app) as client:
+        response = client.get("/api/threads/thread-1/messages")
+
+    assert response.status_code == 200
+    data = response.json()
+
+    human = data[0]["content"]
+    assert human["type"] == "human"
+    # Original text restored in the text block, image block preserved.
+    assert human["content"] == [
+        {"type": "text", "text": "look"},
+        image_block,
+    ]
+    assert "BEGIN USER INPUT" not in str(human["content"])
