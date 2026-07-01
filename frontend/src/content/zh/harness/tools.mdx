@@ -184,7 +184,7 @@ GroundRoute 是一个元搜索层：一个 API 接入六个搜索引擎（Serper
 
 ### 网页内容抓取
 
-<Tabs items={["Jina AI（默认）", "Exa", "GroundRoute"]}>
+<Tabs items={["Jina AI（默认）", "Browserless", "Exa", "GroundRoute"]}>
   <Tabs.Tab>
 ```yaml
 tools:
@@ -192,6 +192,17 @@ tools:
     api_key: $JINA_API_KEY # 可选；匿名使用有速率限制
 ```
 将网页转换为干净的 Markdown。无 API Key 也可使用，但有更严格的速率限制。
+  </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+tools:
+  - name: web_fetch
+    group: web
+    use: deerflow.community.browserless.tools:web_fetch_tool
+    base_url: http://localhost:3032
+    # token: $BROWSERLESS_TOKEN # Browserless Cloud 必需；自托管请删除此行（未设置的 $VAR 会导致启动失败）
+```
+使用无头 Chrome 渲染 JavaScript 较重的页面，再提取可读 Markdown。
   </Tabs.Tab>
   <Tabs.Tab>
 ```yaml
@@ -208,6 +219,27 @@ tools:
 ```
   </Tabs.Tab>
 </Tabs>
+
+### 网页截图
+
+```yaml
+tools:
+  - name: web_capture
+    group: web
+    use: deerflow.community.browserless.tools:web_capture_tool
+    base_url: http://localhost:3032
+    # token: $BROWSERLESS_TOKEN # Browserless Cloud 必需；自托管请删除此行（未设置的 $VAR 会导致启动失败）
+    output_format: png
+    full_page: true
+    viewport_width: 1280
+    viewport_height: 720
+    # allow_private_addresses: false # SSRF 防护；生产环境保持 false。仅在需要截取内网目标时设为 true。
+```
+
+使用 Browserless `/screenshot` 渲染网页并截图，然后通过 DeerFlow 的 artifact
+机制把图片呈现给用户。适合网页视觉证据、UI 检查，以及仅提取 Markdown 不够的
+JavaScript 页面。默认会拒绝解析到私网、回环或云元数据地址的 URL；仅在确实需要
+截取内网主机时才设置 `allow_private_addresses: true`。
 
 ### 图像搜索
 

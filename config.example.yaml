@@ -663,6 +663,29 @@ tools:
   #   # wait_for_timeout_ms: 2000        # Extra wait after page load in milliseconds
   #   # wait_for_selector: "article"     # CSS selector to wait for before returning
 
+  # Web capture tool (uses Browserless /screenshot to render a page as an artifact)
+  # Browserless captures JavaScript-heavy pages with a real headless Chrome and
+  # writes the screenshot into the current thread's outputs. It can run against
+  # a self-hosted Browserless instance without a token, or Browserless Cloud with
+  # BROWSERLESS_TOKEN. For Docker deployments, use the Docker service name instead
+  # of localhost.
+  # - name: web_capture
+  #   group: web
+  #   use: deerflow.community.browserless.tools:web_capture_tool
+  #   base_url: http://localhost:3032       # Browserless instance URL (Docker: http://browserless:3000)
+  #   # token: $BROWSERLESS_TOKEN           # Required for Browserless Cloud; optional for self-hosted
+  #   timeout_s: 30                         # Request timeout in seconds
+  #   output_format: png                    # png, jpeg, or webp
+  #   full_page: true                       # Capture entire page instead of viewport only
+  #   viewport_width: 1280
+  #   viewport_height: 720
+  #   # wait_for_selector: "main"           # CSS selector to wait for before capturing
+  #   # wait_for_selector_timeout_ms: 5000
+  #   # wait_for_timeout_ms: 1000           # Extra wait after navigation in milliseconds
+  #   # best_attempt: true                  # Continue with current page state if waits time out
+  #   # allow_private_addresses: false      # SSRF guard: keep false in production. Set true ONLY to
+  #   #                                     # capture internal/private targets (loopback, RFC1918, etc.)
+
   # Web fetch tool (uses Exa)
   # NOTE: Only one web_fetch provider can be active at a time.
   # Comment out the Jina AI web_fetch entry below before enabling this one.

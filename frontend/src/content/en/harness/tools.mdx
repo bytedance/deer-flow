@@ -190,7 +190,7 @@ Install: `cd backend && uv add 'deerflow-harness[groundroute]'`
 
 ### Web fetch (page content extraction)
 
-<Tabs items={["Jina AI (default)", "Exa", "InfoQuest", "Firecrawl", "GroundRoute"]}>
+<Tabs items={["Jina AI (default)", "Browserless", "Exa", "InfoQuest", "Firecrawl", "GroundRoute"]}>
   <Tabs.Tab>
 ```yaml
 tools:
@@ -199,6 +199,17 @@ tools:
 ```
 Converts web pages to clean Markdown. Works without an API key at reduced rate
 limits.
+  </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+tools:
+  - name: web_fetch
+    group: web
+    use: deerflow.community.browserless.tools:web_fetch_tool
+    base_url: http://localhost:3032
+    # token: $BROWSERLESS_TOKEN # required for Browserless Cloud; omit for self-hosted (a $VAR that is unset fails startup)
+```
+Renders JavaScript-heavy pages with headless Chrome, then extracts readable Markdown.
   </Tabs.Tab>
   <Tabs.Tab>
 ```yaml
@@ -229,6 +240,28 @@ tools:
 ```
   </Tabs.Tab>
 </Tabs>
+
+### Web capture (rendered screenshots)
+
+```yaml
+tools:
+  - name: web_capture
+    group: web
+    use: deerflow.community.browserless.tools:web_capture_tool
+    base_url: http://localhost:3032
+    # token: $BROWSERLESS_TOKEN # required for Browserless Cloud; omit for self-hosted (a $VAR that is unset fails startup)
+    output_format: png
+    full_page: true
+    viewport_width: 1280
+    viewport_height: 720
+    # allow_private_addresses: false # SSRF guard; keep false in production. Set true ONLY to capture internal targets.
+```
+
+Captures rendered web pages with Browserless `/screenshot` and presents the image
+through DeerFlow's artifact system. This is useful for visual evidence, UI checks,
+and JavaScript-heavy pages where Markdown extraction is not enough. By default it
+refuses URLs that resolve to private, loopback, or cloud-metadata addresses;
+set `allow_private_addresses: true` only when you intentionally target an internal host.
 
 ### Image search
 

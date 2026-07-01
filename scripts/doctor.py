@@ -482,12 +482,20 @@ def check_web_tool(config_path: Path, *, tool_name: str, label: str) -> CheckRes
                 "infoquest": "INFOQUEST_API_KEY",
                 "serper": "SERPER_API_KEY",
             },
+            "web_capture": {
+                "browserless": "BROWSERLESS_TOKEN",
+            },
+        }
+        key_fields = {
+            "web_capture": {
+                "browserless": "token",
+            },
         }
 
-        def _configured_key_detail(tool: dict, default_var: str) -> tuple[Status, str] | None:
-            api_key = tool.get("api_key")
-            if isinstance(api_key, str) and api_key.strip():
-                key = api_key.strip()
+        def _configured_key_detail(tool: dict, default_var: str, key_field: str = "api_key") -> tuple[Status, str] | None:
+            configured_key = tool.get(key_field)
+            if isinstance(configured_key, str) and configured_key.strip():
+                key = configured_key.strip()
                 if key.startswith("$"):
                     env_name = key[1:]
                     val = os.environ.get(env_name)
@@ -496,10 +504,14 @@ def check_web_tool(config_path: Path, *, tool_name: str, label: str) -> CheckRes
                     # The referenced var is unset; fall through to the default
                     # env var below, which tools use as a runtime fallback.
                 else:
-                    return ("warn", "literal api_key set in config")
+                    return ("warn", f"literal {key_field} set in config")
 
             val = os.environ.get(default_var)
             return ("ok", f"{default_var} set") if val and val.strip() else None
+
+        def _browserless_self_hosted(tool: dict) -> bool:
+            base_url = str(tool.get("base_url") or "http://localhost:3032").lower()
+            return "browserless.io" not in base_url
 
         for tool in tool_entries:
             use = tool.get("use", "")
@@ -511,7 +523,8 @@ def check_web_tool(config_path: Path, *, tool_name: str, label: str) -> CheckRes
             use = tool.get("use", "")
             for provider, var in key_providers.get(tool_name, {}).items():
                 if provider in use:
-                    key_status = _configured_key_detail(tool, var)
+                    key_field = key_fields.get(tool_name, {}).get(provider, "api_key")
+                    key_status = _configured_key_detail(tool, var, key_field=key_field)
                     if key_status:
                         status, detail = key_status
                         if status == "warn":
@@ -519,9 +532,11 @@ def check_web_tool(config_path: Path, *, tool_name: str, label: str) -> CheckRes
                                 label,
                                 "warn",
                                 f"{provider} ({detail})",
-                                fix=f"Move the API key to .env as {var}=<your-key> and reference it as ${var}",
+                                fix=f"Move the {key_field} to .env as {var}=<your-key> and reference it as ${var}",
                             )
                         return CheckResult(label, "ok", f"{provider} ({detail})")
+                    if tool_name == "web_capture" and provider == "browserless" and _browserless_self_hosted(tool):
+                        return CheckResult(label, "ok", "browserless (self-hosted, token optional)")
                     return CheckResult(
                         label,
                         "warn",
@@ -558,6 +573,10 @@ def check_web_tool(config_path: Path, *, tool_name: str, label: str) -> CheckRes
 
 def check_web_fetch(config_path: Path) -> CheckResult:
     return check_web_tool(config_path, tool_name="web_fetch", label="web fetch configured")
+
+
+def check_web_capture(config_path: Path) -> CheckResult:
+    return check_web_tool(config_path, tool_name="web_capture", label="web capture configured")
 
 
 def check_image_search(config_path: Path) -> CheckResult:
@@ -712,7 +731,12 @@ def main() -> int:
     sections.append(("LLM Provider", llm_checks))
 
     # ── Web Capabilities ─────────────────────────────────────────────────────
-    search_checks = [check_web_search(config_path), check_web_fetch(config_path), check_image_search(config_path)]
+    search_checks = [
+        check_web_search(config_path),
+        check_web_fetch(config_path),
+        check_web_capture(config_path),
+        check_image_search(config_path),
+    ]
     sections.append(("Web Capabilities", search_checks))
 
     # ── Sandbox ──────────────────────────────────────────────────────────────
