@@ -104,6 +104,46 @@ R-0 existence → R-1 list approved → R-2 build payload
 详细步骤、命令、retry budget、进度消息模板见
 `references/pipeline.md`。
 
+## SQLBot 数据源(real / mock)
+
+ai-report 走 chatbi-report 1:1 镜像的 SQLBot client 协议(per-idx 调用约定
+`org_info` + `index_info=[{"idx_id":...}]` + `time_info`,响应里
+`data[].{org_ecd, value, data_dt, idx_name}`)。同一份
+`scripts/sqlbot_client.py` 既能打真实 endpoint,也能读 mock fixture
+跑测试。OrgContext 字段是 ai-report 自己的 `org_ecd` / `org_name`(不是
+chatbi-report 的 `branch_num` / `branch_short_name`)。
+
+| 场景 | 用什么 | 触发方式 |
+|---|---|---|
+| 真实 SQLBot | `RealSQLBotClient` | 设 `SQLBOT_BASE_URL=http://...` 或 CLI `--base-url` |
+| Mock (默认 fixture) | `MockSQLBotClient` | CLI `--mock`(用 `tests/fixtures/mock_sqlbot/wangyi_2026_03.json`) |
+| Mock (指定 fixture) | `MockSQLBotClient` | CLI `--mock --mock-fixture /path/to.json` |
+
+`RealSQLBotClient` 走 `POST /api/v1/indicator/query-report-info`,无认证,
+transient HTTP 错(connection/timeout/5xx) 自动重试 3 次 (exponential,
+base 1s, max 8s);`SQLBotError`(业务级 code != 0) 不重试,降级为
+`metric_facts.status='query_failed'`。
+
+CLI 入口:
+
+```bash
+# real (走 SQLBOT_BASE_URL 环境变量)
+python scripts/sqlbot_client.py query \
+  --parsed /tmp/parsed.json --out /tmp/query.json
+
+# mock (默认 fixture)
+python scripts/sqlbot_client.py query \
+  --parsed /tmp/parsed.json --out /tmp/query.json --mock
+
+# mock (指定 fixture)
+python scripts/sqlbot_client.py query \
+  --parsed /tmp/parsed.json --out /tmp/query.json \
+  --mock --mock-fixture tests/fixtures/mock_sqlbot/wangyi_2026_03.json
+```
+
+测试和 E2E 一律用 mock;真实跑样张(用户部署环境)用 real,设
+`SQLBOT_BASE_URL` 即可,代码路径完全相同。
+
 ## Reference 加载(按需读,不要全读)
 
 | 需要做的事 | 读哪个 |
