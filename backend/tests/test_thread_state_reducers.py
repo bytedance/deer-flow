@@ -12,15 +12,17 @@ import pytest
 from deerflow.agents import thread_state as thread_state_module
 from deerflow.agents.thread_state import (
     _SKILL_CONTEXT_MAX_ENTRIES,
+    TERMINAL_STATUSES,
     SkillEntry,
     ThreadState,
     merge_artifacts,
-    merge_delegation_ledger,
+    merge_delegations,
     merge_sandbox,
     merge_skill_context,
     merge_todos,
     merge_viewed_images,
 )
+from deerflow.subagents.status_contract import SUBAGENT_STATUS_VALUES
 
 
 class TestMergeSandbox:
@@ -112,35 +114,45 @@ class TestMergeViewedImages:
         assert merge_viewed_images(existing, {}) == {}
 
 
-class TestMergeDelegationLedger:
+class TestMergeDelegations:
     """Reducer for completed subagent/task delegation records."""
+
+    def test_terminal_statuses_derived_from_status_contract(self):
+        assert TERMINAL_STATUSES == frozenset(SUBAGENT_STATUS_VALUES)
+        assert "in_progress" not in TERMINAL_STATUSES
 
     def test_none_new_preserves_existing(self):
         existing = [{"id": "a", "status": "completed"}]
-        assert merge_delegation_ledger(existing, None) == existing
+        assert merge_delegations(existing, None) == existing
 
     def test_none_existing_returns_new(self):
         new = [{"id": "a", "status": "completed"}]
-        assert merge_delegation_ledger(None, new) == new
+        assert merge_delegations(None, new) == new
 
     def test_append_new_id_preserves_order(self):
         existing = [{"id": "a", "status": "completed"}]
         new = [{"id": "b", "status": "completed"}]
-        out = merge_delegation_ledger(existing, new)
+        out = merge_delegations(existing, new)
         assert [entry["id"] for entry in out] == ["a", "b"]
 
     def test_same_id_latest_wins(self):
         existing = [{"id": "a", "status": "running"}]
         new = [{"id": "a", "status": "completed"}]
-        out = merge_delegation_ledger(existing, new)
+        out = merge_delegations(existing, new)
         assert out == [{"id": "a", "status": "completed"}]
         assert len(out) == 1
+
+    def test_same_id_terminal_status_is_not_downgraded(self):
+        existing = [{"id": "a", "status": "completed"}]
+        new = [{"id": "a", "status": "in_progress"}]
+        out = merge_delegations(existing, new)
+        assert out == [{"id": "a", "status": "completed"}]
 
     def test_same_id_preserves_original_created_at(self):
         existing = [{"id": "a", "status": "completed", "created_at": "first"}]
         new = [{"id": "a", "status": "completed", "created_at": "second", "result_sha256": "x"}]
 
-        out = merge_delegation_ledger(existing, new)
+        out = merge_delegations(existing, new)
 
         assert out == [{"id": "a", "status": "completed", "created_at": "first", "result_sha256": "x"}]
 
@@ -150,7 +162,7 @@ class TestMergeDelegationLedger:
         existing = [{"id": f"call_{i}", "status": "completed"} for i in range(cap)]
         new = [{"id": "call_new", "status": "completed"}]
 
-        out = merge_delegation_ledger(existing, new)
+        out = merge_delegations(existing, new)
 
         assert len(out) == cap
         assert out[0]["id"] == "call_1"
@@ -302,10 +314,10 @@ class TestThreadStateAnnotations:
         hints = get_type_hints(ThreadState, include_extras=True)
         assert merge_sandbox in hints["sandbox"].__metadata__
 
-    def test_delegation_ledger_field_is_wired_to_merge_delegation_ledger(self):
-        """ThreadState.delegation_ledger must merge completed task records by id."""
+    def test_delegations_field_is_wired_to_merge_delegations(self):
+        """ThreadState.delegations must merge task records by id."""
         hints = get_type_hints(ThreadState, include_extras=True)
-        assert merge_delegation_ledger in hints["delegation_ledger"].__metadata__
+        assert merge_delegations in hints["delegations"].__metadata__
 
     def test_summary_text_field_exists(self):
         """ThreadState.summary_text stores prose summary outside messages."""

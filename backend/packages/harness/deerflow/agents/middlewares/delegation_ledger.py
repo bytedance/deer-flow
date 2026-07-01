@@ -10,7 +10,7 @@ from typing import Any
 from langchain_core.messages import AIMessage, AnyMessage, ToolMessage
 
 from deerflow.agents.thread_state import DelegationEntry
-from deerflow.subagents.status_contract import extract_subagent_status
+from deerflow.subagents.status_contract import SUBAGENT_STATUS_KEY, extract_subagent_status
 
 _RESULT_BRIEF_CAP = 2000
 _DESCRIPTION_CAP = 200
@@ -41,9 +41,9 @@ def _bound_text(text: str, cap: int = _RESULT_BRIEF_CAP) -> str:
     return f"{text[:head]}{omitted_marker}{text[-tail:]}"
 
 
-def _parse_task_result(content: str) -> tuple[str, str] | None:
+def _parse_task_result(content: str, status: str | None = None) -> tuple[str, str] | None:
     text = (content if isinstance(content, str) else str(content)).strip()
-    status = extract_subagent_status(text)
+    status = status or extract_subagent_status(text)
     if status is None:
         return None
     if status == "completed" and text.startswith(_TASK_SUCCESS_PREFIX):
@@ -60,6 +60,8 @@ def _escape_context_text(value: object) -> str:
 
 
 def _status_guidance(status: str) -> str:
+    if status == "in_progress":
+        return "already delegated; do NOT delegate again; wait for or build on the result"
     if status == "completed":
         return "completed result; do NOT delegate again; reuse this result"
     if status == "failed":
@@ -94,8 +96,10 @@ def _tool_call_args(tool_call: dict[str, Any]) -> dict[str, Any]:
 
 
 def extract_delegations(messages: list[AnyMessage]) -> list[DelegationEntry]:
-    """Enumerate completed `task` delegations from AI tool calls and results."""
-    task_calls: dict[str, dict[str, str]] = {}
+    """Enumerate `task` delegations from AI tool calls and paired results."""
+    entries_by_id: dict[str, DelegationEntry] = {}
+    order: list[str] = []
+    now = _utc_now_iso()
     for message in messages:
         if not isinstance(message, AIMessage):
             continue
@@ -107,39 +111,39 @@ def extract_delegations(messages: list[AnyMessage]) -> list[DelegationEntry]:
                 continue
             args = _tool_call_args(tool_call)
             description = str(args.get("description") or args.get("prompt") or "")[:_DESCRIPTION_CAP]
-            task_calls[tool_call_id] = {
+            if tool_call_id not in entries_by_id:
+                order.append(tool_call_id)
+            entries_by_id[tool_call_id] = {
+                "id": tool_call_id,
                 "description": description,
                 "subagent_type": str(args.get("subagent_type") or ""),
+                "status": "in_progress",
+                "created_at": now,
             }
 
-    entries: list[DelegationEntry] = []
-    now = _utc_now_iso()
     for message in messages:
         if not isinstance(message, ToolMessage):
             continue
         tool_call_id = str(message.tool_call_id) if message.tool_call_id else ""
-        task_call = task_calls.get(tool_call_id)
-        if task_call is None:
+        entry = entries_by_id.get(tool_call_id)
+        if entry is None:
             continue
         content = message.content if isinstance(message.content, str) else str(message.content)
-        parsed = _parse_task_result(content)
+        status = message.additional_kwargs.get(SUBAGENT_STATUS_KEY)
+        parsed = _parse_task_result(content, status if isinstance(status, str) else None)
         if parsed is None:
             continue
         status, result_text = parsed
         result_ref = str(message.id or tool_call_id)
-        entries.append(
+        entry.update(
             {
-                "id": tool_call_id,
-                "description": task_call["description"],
-                "subagent_type": task_call["subagent_type"],
                 "status": status,
                 "result_brief": _bound_text(result_text),
                 "result_sha256": hashlib.sha256(result_text.encode("utf-8")).hexdigest(),
                 "result_ref": result_ref,
-                "created_at": now,
             }
         )
-    return entries
+    return [entries_by_id[tool_call_id] for tool_call_id in order]
 
 
 def _fits_budget(lines: list[str], candidate: str, max_chars: int) -> bool:
@@ -150,9 +154,12 @@ def _render_entry_line(entry: DelegationEntry) -> str:
     status = _escape_context_text(entry["status"])
     description = _escape_context_text(entry["description"])
     subagent_type = _escape_context_text(entry["subagent_type"])
-    result_brief = _escape_context_text(_bound_text(entry["result_brief"], _LEDGER_ENTRY_RESULT_RENDER_CAP))
     guidance = _status_guidance(entry["status"])
-    return f"- [{status}] {description} (via {subagent_type}; {guidance}) -> {result_brief}"
+    line = f"- [{status}] {description} (via {subagent_type}; {guidance})"
+    result_brief = entry.get("result_brief")
+    if result_brief:
+        line += f" -> {_escape_context_text(_bound_text(result_brief, _LEDGER_ENTRY_RESULT_RENDER_CAP))}"
+    return line
 
 
 def render_delegation_ledger(entries: list[DelegationEntry], *, max_chars: int = _LEDGER_RENDER_CHAR_BUDGET) -> str:
@@ -162,7 +169,7 @@ def render_delegation_ledger(entries: list[DelegationEntry], *, max_chars: int =
 
     lines = [
         "## Work already delegated",
-        "Newest entries are shown first. Completed entries are reusable results. Failed, cancelled, or timed-out entries are prior attempts.",
+        "Newest entries are shown first. In-progress entries are already delegated. Completed entries are reusable results. Failed, cancelled, or timed-out entries are prior attempts.",
     ]
     omitted = 0
     for index, entry in enumerate(reversed(entries)):

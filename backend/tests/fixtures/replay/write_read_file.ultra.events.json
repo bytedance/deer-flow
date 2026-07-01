@@ -13,7 +13,7 @@
       "event": "values",
       "keys": [
         "artifacts",
-        "delegation_ledger",
+        "delegations",
         "messages",
         "skill_context",
         "viewed_images"
@@ -23,18 +23,7 @@
       "event": "values",
       "keys": [
         "artifacts",
-        "delegation_ledger",
-        "messages",
-        "skill_context",
-        "thread_data",
-        "viewed_images"
-      ]
-    },
-    {
-      "event": "values",
-      "keys": [
-        "artifacts",
-        "delegation_ledger",
+        "delegations",
         "messages",
         "skill_context",
         "thread_data",
@@ -45,7 +34,7 @@
       "event": "values",
       "keys": [
         "artifacts",
-        "delegation_ledger",
+        "delegations",
         "messages",
         "skill_context",
         "thread_data",
@@ -56,11 +45,10 @@
       "event": "values",
       "keys": [
         "artifacts",
-        "delegation_ledger",
+        "delegations",
         "messages",
         "skill_context",
         "thread_data",
-        "title",
         "viewed_images"
       ]
     },
@@ -68,7 +56,7 @@
       "event": "values",
       "keys": [
         "artifacts",
-        "delegation_ledger",
+        "delegations",
         "messages",
         "skill_context",
         "thread_data",
@@ -80,7 +68,19 @@
       "event": "values",
       "keys": [
         "artifacts",
-        "delegation_ledger",
+        "delegations",
+        "messages",
+        "skill_context",
+        "thread_data",
+        "title",
+        "viewed_images"
+      ]
+    },
+    {
+      "event": "values",
+      "keys": [
+        "artifacts",
+        "delegations",
         "messages",
         "sandbox",
         "skill_context",
@@ -93,7 +93,7 @@
       "event": "values",
       "keys": [
         "artifacts",
-        "delegation_ledger",
+        "delegations",
         "messages",
         "sandbox",
         "skill_context",
@@ -106,7 +106,7 @@
       "event": "values",
       "keys": [
         "artifacts",
-        "delegation_ledger",
+        "delegations",
         "messages",
         "sandbox",
         "skill_context",
@@ -119,7 +119,7 @@
       "event": "values",
       "keys": [
         "artifacts",
-        "delegation_ledger",
+        "delegations",
         "messages",
         "sandbox",
         "skill_context",
@@ -132,7 +132,7 @@
       "event": "values",
       "keys": [
         "artifacts",
-        "delegation_ledger",
+        "delegations",
         "messages",
         "sandbox",
         "skill_context",
@@ -145,7 +145,7 @@
       "event": "values",
       "keys": [
         "artifacts",
-        "delegation_ledger",
+        "delegations",
         "messages",
         "sandbox",
         "skill_context",

@@ -57,7 +57,7 @@ class _RecordModelRequests(AgentMiddleware):
             "message_count": len(messages),
             "has_summary_message": any(getattr(message, "name", None) == "summary" for message in messages),
             "has_summary_text": bool(state.get("summary_text")),
-            "ledger_count": len(state.get("delegation_ledger") or []),
+            "ledger_count": len(state.get("delegations") or []),
             "skill_count": len(state.get("skill_context") or []),
         }
         self.before_model_states.append(snapshot)
@@ -245,7 +245,7 @@ def _summary_text(values: dict[str, Any]) -> str:
 
 
 def _ledger_entries(values: dict[str, Any]) -> list[dict[str, Any]]:
-    return list(values.get("delegation_ledger") or [])
+    return list(values.get("delegations") or [])
 
 
 def _skill_paths_in_state(values: dict[str, Any]) -> list[str]:
@@ -271,7 +271,7 @@ def _summary_visible_in_requests(requests: list[list[BaseMessage]], summary_text
     return False
 
 
-def test_live_summary_preserves_delegation_ledger_and_prevents_repeat(live_client):
+def test_live_summary_preserves_delegations_and_prevents_repeat(live_client):
     client, recorder = live_client
     thread_id = f"live-ledger-{uuid.uuid4().hex[:8]}"
 

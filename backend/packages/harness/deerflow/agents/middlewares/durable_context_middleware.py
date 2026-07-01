@@ -2,7 +2,7 @@
 
 Capture enumerates task delegations and loaded skill files into checkpointed
 state channels. Injection renders static authority rules as a SystemMessage and
-renders untrusted channel values (`summary_text`, `delegation_ledger`,
+renders untrusted channel values (`summary_text`, `delegations`,
 `skill_context`) as one hidden <durable_context_data> HumanMessage, never
 written back to state.
 """
@@ -22,7 +22,7 @@ from langgraph.runtime import Runtime
 
 from deerflow.agents.middlewares.delegation_ledger import extract_delegations, render_delegation_ledger
 from deerflow.agents.middlewares.skill_context import extract_skills, render_skill_context
-from deerflow.agents.thread_state import _DELEGATION_LEDGER_MAX_ENTRIES
+from deerflow.agents.thread_state import _DELEGATION_LEDGER_MAX_ENTRIES, TERMINAL_STATUSES
 
 _DEFAULT_SKILLS_ROOT = "/mnt/skills"
 _DEFAULT_SKILL_READ_TOOL_NAMES = frozenset({"read_file", "read", "view", "cat"})
@@ -106,6 +106,8 @@ def _filter_changed_delegations(delegations: list[dict], existing: list[dict]) -
         if previous is None:
             changed.append(entry)
             continue
+        if previous.get("status") in TERMINAL_STATUSES and entry.get("status") not in TERMINAL_STATUSES:
+            continue
         if any(previous.get(field) != entry.get(field) for field in _DELEGATION_STABLE_FIELDS):
             changed.append(entry)
     return changed
@@ -132,15 +134,29 @@ class DurableContextMiddleware(AgentMiddleware[AgentState]):
     async def abefore_model(self, state: AgentState, runtime: Runtime) -> dict | None:
         return self._capture(state)
 
+    @override
+    def after_model(self, state: AgentState, runtime: Runtime) -> dict | None:
+        return self._capture_delegations(state)
+
+    @override
+    async def aafter_model(self, state: AgentState, runtime: Runtime) -> dict | None:
+        return self._capture_delegations(state)
+
+    def _capture_delegations(self, state: AgentState) -> dict | None:
+        delegations = _filter_changed_delegations(
+            extract_delegations(state["messages"]),
+            state.get("delegations") or [],
+        )
+        if delegations:
+            return {"delegations": delegations}
+        return None
+
     def _capture(self, state: AgentState) -> dict | None:
         messages = state["messages"]
         updates: dict = {}
-        delegations = _filter_changed_delegations(
-            extract_delegations(messages),
-            state.get("delegation_ledger") or [],
-        )
-        if delegations:
-            updates["delegation_ledger"] = delegations
+        delegation_update = self._capture_delegations(state)
+        if delegation_update:
+            updates.update(delegation_update)
         skills = extract_skills(messages, skills_root=self._skills_root, read_tool_names=self._skill_read_tool_names)
         if skills:
             updates["skill_context"] = skills
@@ -150,7 +166,7 @@ class DurableContextMiddleware(AgentMiddleware[AgentState]):
         state = request.state or {}
         data_block = _render_durable_context_data(
             state.get("summary_text"),
-            state.get("delegation_ledger") or [],
+            state.get("delegations") or [],
             state.get("skill_context") or [],
         )
         if not data_block:

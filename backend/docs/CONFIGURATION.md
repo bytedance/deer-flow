@@ -274,6 +274,45 @@ When using Docker development (`make docker-start`), DeerFlow starts the `provis
 
 See [Provisioner Setup Guide](../../docker/provisioner/README.md) for detailed configuration, prerequisites, and troubleshooting.
 
+**E2B Cloud Sandbox** (runs sandbox code in [E2B](https://e2b.dev) cloud micro-VMs):
+
+```yaml
+sandbox:
+   use: deerflow.community.e2b_sandbox:E2BSandboxProvider
+   api_key: $E2B_API_KEY            # required; or set the E2B_API_KEY env var
+   template: code-interpreter-v1     # e2b sandbox template id
+   # domain: e2b.dev                # optional; for self-hosted e2b deployments
+   home_dir: /home/user             # /mnt/user-data is remapped under this directory
+   idle_timeout: 600                # forwarded to e2b's server-side set_timeout()
+   replicas: 3                      # max concurrent sandboxes per gateway process
+   mounts:                          # one-shot upload of host files at sandbox start
+     - host_path: /path/on/host
+       container_path: /home/user/shared
+       read_only: false
+   environment:                     # forwarded to the sandbox at create time
+     OPENAI_API_KEY: $OPENAI_API_KEY
+```
+
+`e2b-code-interpreter` is bundled as a core dependency of `deerflow-harness`,
+so no extra install step is needed; just supply your API key and switch the
+provider in `config.yaml`.
+
+Notes specific to `E2BSandboxProvider`:
+
+- Each DeerFlow thread is bound to its e2b sandbox via metadata
+  (`deer_flow_user`, `deer_flow_thread`), so the same thread reuses the same
+  sandbox across gateway restarts and across processes — no cross-process
+  file lock is needed because the e2b control plane is the source of truth.
+- Idle expiry is enforced server-side by e2b's `set_timeout()`. The provider
+  refreshes the timeout on every release so warm sandboxes stay alive long
+  enough for the next acquire.
+- `mounts` are uploaded once when the sandbox starts; e2b cannot host bind-mount
+  the gateway filesystem, so changes inside the sandbox are not reflected back
+  on disk automatically. Use the `download_file` tool or write outputs under
+  `/mnt/user-data/outputs/` (which is mapped to `home_dir/outputs/` inside the
+  sandbox and surfaced through the standard artifact pipeline) to ship files
+  back to the gateway.
+
 Choose between local execution or Docker-based isolation:
 
 **Option 1: Local Sandbox** (default, simpler setup):

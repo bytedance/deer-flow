@@ -40,7 +40,7 @@ import { Callout } from "nextra/components";
 17. `SafetyFinishReasonMiddleware` — provider 安全终止后抑制工具执行（如果启用）
 18. `ClarificationMiddleware` — 拦截澄清请求（始终最后）
 
-顺序很重要。Durable context 会在摘要压缩之前捕获已完成的委托结果和已加载的技能引用，确保它们不会随原始 transcript 压缩而丢失。澄清总是最后运行，这样它可以在所有其他中间件完成后拦截。
+顺序很重要。Durable context 会在摘要压缩之前捕获已委托任务的派发状态、终态结果和已加载的技能引用，确保它们不会随原始 transcript 压缩而丢失。澄清总是最后运行，这样它可以在所有其他中间件完成后拦截。
 
 ## 中间件参考
 
@@ -125,7 +125,7 @@ token_usage:
 
 ### DurableContextMiddleware
 
-在摘要压缩原始 transcript 之前，将长期运行事实捕获到明确的线程状态 channel 中。它记录压缩摘要、已完成的委托结果，以及已加载的 `SKILL.md` 引用，并在后续模型调用中作为隐藏 durable context 数据投影进去。
+在摘要压缩原始 transcript 之前，将长期运行事实捕获到明确的线程状态 channel 中。它记录压缩摘要、已委托任务的状态/结果，以及已加载的 `SKILL.md` 引用，并在后续模型调用中作为隐藏 durable context 数据投影进去。
 
 **配置**：内置。`summarization.skill_file_read_tool_names` 控制哪些读取工具会被视为技能引用读取；设为 `[]` 可关闭 durable 技能引用捕获。
 

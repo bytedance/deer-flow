@@ -40,7 +40,7 @@ The middleware chain is built once per agent invocation, based on the current co
 17. `SafetyFinishReasonMiddleware` — suppresses tool execution after safety-terminated responses (if enabled)
 18. `ClarificationMiddleware` — intercepts clarification requests (always last)
 
-The ordering is significant. Durable context capture runs before summarization so completed delegation results and loaded skill references survive compaction. Clarification always runs last so it can intercept after all other middlewares have had their turn.
+The ordering is significant. Durable context capture runs before summarization so delegated task dispatches, terminal delegation results, and loaded skill references survive compaction. Clarification always runs last so it can intercept after all other middlewares have had their turn.
 
 ## Middleware reference
 
@@ -133,7 +133,7 @@ Audits sandbox operations performed during the agent's execution. Provides a rec
 
 ### DurableContextMiddleware
 
-Captures long-lived runtime facts into explicit thread-state channels before summarization compacts the raw transcript. It records compressed summaries, completed delegation results, and loaded `SKILL.md` references, then projects them into later model calls as hidden durable context data.
+Captures long-lived runtime facts into explicit thread-state channels before summarization compacts the raw transcript. It records compressed summaries, delegated task state/results, and loaded `SKILL.md` references, then projects them into later model calls as hidden durable context data.
 
 **Configuration**: built in. `summarization.skill_file_read_tool_names` controls which read tools count as skill-reference reads; set it to `[]` to disable durable skill-reference capture.
 

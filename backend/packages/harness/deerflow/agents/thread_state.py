@@ -3,6 +3,8 @@ from typing import Annotated, NotRequired, TypedDict
 
 from langchain.agents import AgentState
 
+from deerflow.subagents.status_contract import SUBAGENT_STATUS_VALUES
+
 
 class SandboxState(TypedDict):
     sandbox_id: NotRequired[str | None]
@@ -109,26 +111,28 @@ def merge_promoted(existing: PromotedTools | None, new: PromotedTools | None) ->
     }
 
 
+TERMINAL_STATUSES: frozenset[str] = frozenset(SUBAGENT_STATUS_VALUES)
+_DELEGATION_LEDGER_MAX_ENTRIES = 50
+
+
 class DelegationEntry(TypedDict):
     id: str
     description: str
     subagent_type: str
     status: str
-    result_brief: str
-    result_sha256: str
-    result_ref: str
+    result_brief: NotRequired[str]
+    result_sha256: NotRequired[str]
+    result_ref: NotRequired[str]
     created_at: str
 
 
-_DELEGATION_LEDGER_MAX_ENTRIES = 50
-
-
-def merge_delegation_ledger(existing: list[DelegationEntry] | None, new: list[DelegationEntry] | None) -> list[DelegationEntry]:
+def merge_delegations(existing: list[DelegationEntry] | None, new: list[DelegationEntry] | None) -> list[DelegationEntry]:
     """Reducer for the delegation ledger.
 
     - new None/empty -> preserve existing.
     - append entries, replacing same id with the latest version while preserving
       first-seen order.
+    - terminal status is never overwritten by a non-terminal status.
     """
     if not new:
         return existing or []
@@ -137,10 +141,13 @@ def merge_delegation_ledger(existing: list[DelegationEntry] | None, new: list[De
     order: list[str] = []
     for entry in [*(existing or []), *new]:
         entry_id = entry["id"]
+        previous = by_id.get(entry_id)
+        if previous is not None and previous["status"] in TERMINAL_STATUSES and entry["status"] not in TERMINAL_STATUSES:
+            continue
         if entry_id not in by_id:
             order.append(entry_id)
-        elif by_id[entry_id].get("created_at"):
-            entry = {**entry, "created_at": by_id[entry_id]["created_at"]}
+        elif previous.get("created_at"):
+            entry = {**entry, "created_at": previous["created_at"]}
         by_id[entry_id] = entry
     merged = [by_id[entry_id] for entry_id in order]
     if len(merged) > _DELEGATION_LEDGER_MAX_ENTRIES:
@@ -214,6 +221,6 @@ class ThreadState(AgentState):
     uploaded_files: NotRequired[list[dict] | None]
     viewed_images: Annotated[dict[str, ViewedImageData], merge_viewed_images]  # image_path -> {base64, mime_type}
     promoted: Annotated[PromotedTools | None, merge_promoted]
-    delegation_ledger: Annotated[list[DelegationEntry], merge_delegation_ledger]
+    delegations: Annotated[list[DelegationEntry], merge_delegations]
     skill_context: Annotated[list[SkillEntry], merge_skill_context]
     summary_text: NotRequired[str | None]

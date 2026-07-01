@@ -291,9 +291,10 @@ The middleware intelligently preserves message context:
 
 ### Middleware Order
 
-Durable context capture runs before summarization so completed delegations and
+Durable context capture runs before summarization so task delegations and
 loaded skill references are recorded before their raw tool messages can be
-compacted. Summarization then reduces message history before downstream
+compacted. It records in-progress dispatches as well as terminal result
+summaries. Summarization then reduces message history before downstream
 middlewares such as title generation, memory queuing, and clarification:
 
 1. Runtime middlewares, including ThreadData and Sandbox initialization

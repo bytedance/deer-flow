@@ -40,11 +40,7 @@ _LEGACY_SUMMARY_MESSAGE_NAME = "summary"
 
 
 def _is_user_visible_human_message(message: BaseMessage) -> bool:
-    return (
-        isinstance(message, HumanMessage)
-        and message.name != _LEGACY_SUMMARY_MESSAGE_NAME
-        and message.additional_kwargs.get("hide_from_ui") is not True
-    )
+    return isinstance(message, HumanMessage) and message.name != _LEGACY_SUMMARY_MESSAGE_NAME and message.additional_kwargs.get("hide_from_ui") is not True
 
 
 class RunJournal(BaseCallbackHandler):
