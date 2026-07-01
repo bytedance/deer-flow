@@ -209,6 +209,70 @@ def test_build_run_config_with_overrides():
 
 
 # ---------------------------------------------------------------------------
+# recursion_limit clamping: the Gateway must not trust a client-supplied
+# recursion_limit verbatim (runaway LLM cost / DoS). See build_run_config.
+# ---------------------------------------------------------------------------
+
+
+def test_build_run_config_clamps_excessive_recursion_limit(_stub_app_config):
+    """A huge client recursion_limit is capped at the configured ceiling (default 1000)."""
+    from app.gateway.services import build_run_config
+
+    config = build_run_config("thread-1", {"recursion_limit": 100_000_000}, None)
+    assert config["recursion_limit"] == 1000
+
+
+def test_build_run_config_ceiling_is_configurable(_stub_app_config):
+    """The clamp ceiling comes from AppConfig.max_recursion_limit, not a hardcoded value."""
+    from app.gateway.services import build_run_config
+    from deerflow.config.app_config import AppConfig, reset_app_config, set_app_config
+
+    set_app_config(AppConfig.model_validate({"sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"}, "max_recursion_limit": 300}))
+    try:
+        config = build_run_config("thread-1", {"recursion_limit": 100_000_000}, None)
+        assert config["recursion_limit"] == 300
+    finally:
+        reset_app_config()
+
+
+def test_build_run_config_allows_recursion_limit_at_ceiling(_stub_app_config):
+    """A value at the configured ceiling is preserved unchanged."""
+    from app.gateway.services import build_run_config
+
+    config = build_run_config("thread-1", {"recursion_limit": 1000}, None)
+    assert config["recursion_limit"] == 1000
+
+
+def test_build_run_config_preserves_reasonable_recursion_limit(_stub_app_config):
+    """A modest client value below the ceiling is honoured as-is."""
+    from app.gateway.services import build_run_config
+
+    config = build_run_config("thread-1", {"recursion_limit": 250}, None)
+    assert config["recursion_limit"] == 250
+
+
+def test_build_run_config_rejects_invalid_recursion_limit(_stub_app_config):
+    """Non-positive / non-int / bool values fall back to the server default."""
+    from app.gateway.services import _DEFAULT_RECURSION_LIMIT, build_run_config
+
+    for bad in (0, -5, "1000", 3.5, True, None):
+        config = build_run_config("thread-1", {"recursion_limit": bad}, None)
+        assert config["recursion_limit"] == _DEFAULT_RECURSION_LIMIT, bad
+
+
+def test_build_run_config_clamps_recursion_limit_with_context(_stub_app_config):
+    """Clamping also applies on the LangGraph >= 0.6.0 context passthrough path."""
+    from app.gateway.services import build_run_config
+
+    config = build_run_config(
+        "thread-1",
+        {"context": {"thread_id": "thread-1"}, "recursion_limit": 999_999},
+        None,
+    )
+    assert config["recursion_limit"] == 1000
+
+
+# ---------------------------------------------------------------------------
 # Regression tests for issue #1644:
 # assistant_id not mapped to agent_name → custom agent SOUL.md never loaded
 # ---------------------------------------------------------------------------
