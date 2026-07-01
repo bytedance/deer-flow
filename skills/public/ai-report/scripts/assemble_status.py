@@ -45,3 +45,71 @@ def format_zh_receipt(status: dict) -> str:
         f"  - 未设计章节: {status['draft_sections']}\n"
         f"  - 生成路径: {status['report_md_path']} / {status['report_docx_path']}"
     )
+
+
+# ---------- CLI entry ---------- #
+
+def main(argv: list[str] | None = None) -> int:
+    """CLI entry: build status.json + 中文回执 from approved_runs in DuckDB.
+
+    Exit codes: 0 = success, 1 = report_id not found, 2 = arg error.
+    """
+    import argparse
+    import json
+    import sys
+    from pathlib import Path
+
+    parser = argparse.ArgumentParser(prog="assemble_status")
+    parser.add_argument("--report-id", required=True)
+    parser.add_argument("--db-path", required=True)
+    parser.add_argument("--out", required=True, help="Path to write <report_id>.status.json")
+    parser.add_argument(
+        "--design-md-path",
+        default=None,
+        help="Override design_md_path in status; default uses /mnt/ai-report-data/<id>.design.md",
+    )
+    args = parser.parse_args(argv)
+
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from duckdb_store import Store
+
+    store = Store(db_path=args.db_path)
+    store.open()
+    try:
+        meta = store.get_report_meta(args.report_id)
+        if not meta:
+            print(f"❌ report_id 不存在: {args.report_id}", file=sys.stderr)
+            return 1
+        rows = store.list_approved_tables(args.report_id)
+        sections = [
+            {
+                "section_title": r["section_title"],
+                "approval_status": "approved",
+                "sentinels": (
+                    json.loads(r["sentinels"])
+                    if isinstance(r.get("sentinels"), str)
+                    else (r.get("sentinels") or [])
+                ),
+                "computed_sentinels": {},
+            }
+            for r in rows
+        ]
+        design_md_path = (
+            args.design_md_path or f"/mnt/ai-report-data/{args.report_id}.design.md"
+        )
+        status = build_status(args.report_id, sections, design_md_path)
+    finally:
+        store.close()
+
+    out_path = Path(args.out)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(
+        json.dumps(status, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    print(format_zh_receipt(status), flush=True)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
