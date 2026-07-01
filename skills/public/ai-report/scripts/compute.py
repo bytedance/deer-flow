@@ -62,43 +62,26 @@ def _parse_example(tail: str) -> dict | None:
 
 
 def extract_ir(body: str) -> list[ComputeIR]:
-    """Parse `> 计算:` blocks. Two accepted forms (回退链):
+    """Parse the `> 计算:` block into a list of ComputeIR.
 
-    1. ai-report 原生单行 JSON-ish (used internally, 更机器友好):
-        > 计算: name = "X", prompt = "Y"[, examples = [...]]
-
-    2. chatbi-report 多行 (user-friendly, 与 input.md 一致):
+    Canonical ai-report form (single accepted form):
         > 计算:
         >   2023利润同比 = 2023年值减2022年值再除2022年值
+        >   2024利润同比 = 2024年值减2023年值再除2023年值
         >   2024利润同比.示例: BAS_0263[2024=1200, 2023=1000] -> 0.2
 
-       `name = prompt` 定义一个新计算列; `<name>.示例: ...` 追加示例
-       (解析为 {inputs: {...}, expected: "..."}).
+    `name = prompt` defines a computed column; `<name>.示例: ...` attaches
+    an example (parsed as {inputs: {...}, expected: "..."}) for validate's
+    example layer to check.
     """
-    irs: list[ComputeIR] = []
-
-    # Form 1: ai-report native single-line
-    pattern = re.compile(
-        r'>\s*计算:\s*name\s*=\s*"([^"]+)"\s*,\s*prompt\s*=\s*"([^"]+)"(?:\s*,\s*examples\s*=\s*(\[[^\]]*\]))?',
-    )
-    for m in pattern.finditer(body):
-        name, prompt, examples_raw = m.group(1), m.group(2), m.group(3)
-        import json as _json
-        examples = _json.loads(examples_raw) if examples_raw else []
-        irs.append(ComputeIR(name=name, prompt=prompt, examples=examples))
-    if irs:
-        return irs
-
-    # Form 2: chatbi-report multi-line `name = prompt` + `.示例: ...` lines
     compute_match = re.search(
         r"^>\s*计算:\s*\n(.*?)(?=^>[^ \n]|\Z)", body, re.MULTILINE | re.DOTALL
     )
     if not compute_match:
-        return irs
+        return []
     by_name: dict[str, ComputeIR] = {}
     for raw in compute_match.group(1).splitlines():
         # Block boundary: non-`>` line (e.g. <table>) ends the `> 计算:` block.
-        # Lines that look like `>   <name> = <prompt>` (or `.示例:`) are content.
         if not raw.lstrip().startswith(">"):
             break
         line = raw.lstrip("> ").strip()

@@ -125,11 +125,9 @@ chatbi-report 的 `branch_num` / `branch_short_name`)。
 
 注:profit_yoy.json 的 `org_ecd` 字段是中文简称(王益联社),不是 wangyi
 sample 的英文 ecd 代码;搭配时需在 example MD 的 `> 机构:` 块用
-`branch_short_name=王益联社` 等简称(ai-report 自动把 chatbi-report
-风格的 `branch_short_name` 映射到内部 `org_ecd`)。`example/profit_yoy.md`
-镜像了 chatbi-report `example/input.md` 的 MD 风格(`branch_num=X;
-branch_short_name=Y` + `name = prompt` 计算块 + `<name>.示例:` 例子),可
-直接与该 fixture 配对跑通。
+`branch_short_name=王益联社` 等简称(ai-report 自动把
+`branch_short_name` 映射到内部 `org_ecd`)。MD 风格样例见
+`example/input.md`(canonical)。
 
 | 场景 | 用什么 | 触发方式 |
 |---|---|---|

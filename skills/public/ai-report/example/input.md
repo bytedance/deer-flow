@@ -1,17 +1,15 @@
-# 王益联社 2022-2025 利润同比分析报告
+# 王益联社 2026 年 3 月经营分析报告
 
-## 一、利润总额年度趋势
+## 一、行社经营效益分析
 
 ### 1.1 整体利润分析
 
 > 机构:
 >   branch_num=27020199; branch_short_name=王益联社
 >   branch_num=27020100; branch_short_name=印台联社
->   branch_num=AVG_TONGCHUAN; branch_short_name=铜川平均值
->   branch_num=AVG_PROVINCE; branch_short_name=全省平均值
 > 时期: time_info=["2022", "2023", "2024", "2025"]
 > 描述:
->   请基于表格数据生成经营分析描述，重点关注利润总额年度变化、王益联社与印台联社的对比、与铜川平均值和全省平均值的差距，并给出盈利能力判断。
+>   请基于表格数据生成经营分析描述，重点关注利润总额同比变化、与铜川平均值和全省平均值的对比，并给出盈利能力判断。
 > 计算:
 >   2023利润同比 = 2023年值减2022年值再除2022年值
 >   2024利润同比 = 2024年值减2023年值再除2023年值
@@ -39,6 +37,6 @@
     <tr><td>王益</td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
     <tr><td>印台</td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
     <tr><td>铜川平均值</td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
-    <tr><td>全省平均值</td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
+    <tr><td>全省平均值</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
   </tbody>
 </table>

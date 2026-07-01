@@ -32,9 +32,12 @@ class SQLBotError(Exception):
 class OrgContext:
     """ai-report 的 org context 字段约定: org_ecd / org_name.
 
-    与 chatbi-report 的 branch_num / branch_short_name 不同 — 我们的 MD
-    样张 `> 机构: org_contexts = [{"org_ecd": ..., "org_name": ...}]` 用的
-    是这套字段。
+    MD 样张里走多行形式:
+        > 机构:
+        >   branch_num=27020199; branch_short_name=王益联社
+
+    parser 把 `branch_short_name` 映射到 `org_ecd`(`fixture` 的 `org_ecd`
+    字段是中文短名,如 王益联社),`org_name` 同样填 short_name。
     """
     org_ecd: str
     org_name: str

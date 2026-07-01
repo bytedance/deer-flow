@@ -179,7 +179,7 @@ def test_run_section_sentinels_stored_as_codes_on_compute_failed(env, monkeypatc
     """Bug B 修复: _llm_codegen 返回 invalid SQL → sentinels 含 ⚠️COMPUTE_FAILED."""
     rid, sid, tid = _make_section0_table_with_compute(
         env["store"], "example/wangyi_2026_03.md",
-        compute_md='> 计算: name = "利润率", prompt = "compute ratio"',
+        compute_md='> 计算:\n>   利润率 = compute ratio',
     )
     # LLM returns bad SQL → validate fails → failed_compute
     monkeypatch.setattr(
@@ -229,7 +229,7 @@ def test_run_section_llm_codegen_failure_marks_compute_failed(env, monkeypatch):
     """Issue 1 修复: _llm_codegen 抛 NotImplementedError → compute_failed (不冒泡)."""
     rid, sid, tid = _make_section0_table_with_compute(
         env["store"], "example/wangyi_2026_03.md",
-        compute_md='> 计算: name = "利润率", prompt = "compute ratio"',
+        compute_md='> 计算:\n>   利润率 = compute ratio',
     )
     def boom(ir, wide):
         raise NotImplementedError("LLM not wired (test)")
