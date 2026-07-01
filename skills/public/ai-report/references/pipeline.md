@@ -1,118 +1,79 @@
 # ai-report Pipeline Reference
 
-Read this when running the full `ai-report` workflow or changing its step
-contract. Two pipelines share one state: the design pipeline (lead agent +
-LLM, per-section) and the runtime pipeline (deterministic, per-report).
+Read this when running the full `ai-report` workflow or changing its step contract.
 
-## State machine — design (per section)
-
-Run forward only. Each `## N` H2 section is one full table block in the
-report MD.
+## State machine
 
 ```text
-0 lint → 1.5 lint checkpoint
-→ 2 query (per-idx SQLBot) → 3.5 query checkpoint
-→ 4 assemble-wide → 5 extract-ir
-→ 6 codegen → 7 validate → 8 evaluate → 9 apply-computed
-→ 10 unit_convert (Python) → 11 describe
-→ 11.5 description checkpoint (only if description_prompt provided)
-→ 12 preview → 10 (renamed 12) preview checkpoint
-→ 14 save approved run
-→ 11 (renamed 13) post-section checkpoint
+0 lint → 1 lint checkpoint
+→ 2 parse → 3 query → 3.5 query checkpoint
+→ 4 assemble-wide (DuckDB PIVOT + Decimal unit-convert)
+→ 6 extract-ir → 7 codegen (agent-turn-LLM) → 8a validate → 8b evaluate → 8c apply-computed
+→ 10 unit_convert (Python Decimal precision pass on aggregate values)
+→ 11 describe (agent-turn-LLM) → 11.5 description checkpoint
+→ 12 preview checkpoint → 13 save approved run → 13.5 post-section checkpoint
+→ 14 render markdown → 15 render docx → 16 status + 中文回执
 ```
 
-Step numbering follows the original 14-step design. The runtime CLI does
-NOT touch any step number; it only reads approved runs and renders.
-
-## State machine — runtime (per report)
-
-```text
-R-0 existence check → R-1 list approved tables
-→ R-2 build payload → R-3 render md
-→ R-4 render docx → R-5 中文回执 + status.json
-```
+Step numbers intentionally diverge from chatbi-report where ai-report needs
+extra steps. Step 10 (unit_convert) is separate from Step 4 (assemble-wide)
+because ai-report handles multi-row header inheritance of `data_unit` (parent
+→ leaf cells); Step 4 does the basic PIVOT in DECIMAL(38,10) precision and
+Step 10 does the post-PIVOT Python Decimal pass on aggregate / computed columns.
 
 ## Step types
 
 | Type | Meaning | Steps |
 |---|---|---|
-| `bash` | deterministic Python in sandbox | 1, 2, 4, 5, 7, 8, 9, 10, 14, R-0..R-5 |
-| `agent-turn-LLM` | lead agent calls LLM with prompt | 6 (codegen), 11 (describe) |
-| `agent-turn-checkpoint` | lead agent calls `ask_clarification` | 0/1.5, 3.5, 8d.5, 12, 13 |
+| `bash` | deterministic CLI in sandbox | 0, 2, 3, 4, 6, 8a, 8b, 8c, 10, 13, 14, 15, 16 |
+| `agent-turn-LLM` | lead agent writes files using LLM output | 7, 11 |
+| `agent-turn-checkpoint` | lead agent calls `ask_clarification` and waits for user | 1, 3.5, 11.5, 12, 13.5 |
 
 ## Step definitions
 
 | Step | Type | Command / owner | Output |
 |---|---|---|---|
-| 0 lint | bash | `python scripts/md_lint.py /mnt/ai-report-data/<file>.md` | LintReport (errors/warnings) |
-| 1.5 lint checkpoint | agent-turn-checkpoint | see `checkpoints.md` | user reply + runlog line |
-| 2 query | bash | `DesignPipeline._step_query_metrics` (per idx, per period) | rows in `metric_facts` table |
-| 3.5 query checkpoint | agent-turn-checkpoint | see `checkpoints.md` | user reply + runlog line |
-| 4 assemble-wide | bash | `compute.py assemble_wide` | `list[dict]` wide table |
-| 5 extract-ir | bash | `compute.py extract_ir` (parse `> 计算:` blocks) | `list[ComputeIR]` |
-| 6 codegen | agent-turn-LLM | `prompts/compute_codegen.md` + ComputeIR + wide sample | DuckDB SQL string |
-| 7 validate | bash | `compute.py validate` (EXPLAIN + RUN + EXAMPLE, 3 layers) | ValidationResult(passed, layer, msg) |
-| 8 evaluate | bash | `compute.py evaluate` (row count = wide rows) | (values, status) |
-| 9 apply-computed | bash | `compute.py apply_computed` | updated wide |
-| 10 unit_convert | bash | `unit_convert.py apply_units` (Python, Decimal precision) | updated wide |
-| 11 describe | agent-turn-LLM | `prompts/description_gen.md` + wide rows + title | Chinese paragraph |
-| 8d.5 description checkpoint | agent-turn-checkpoint | see `checkpoints.md` | user reply + runlog |
-| 12 preview checkpoint | agent-turn-checkpoint | see `checkpoints.md` | user reply → approve/modify/reject |
-| 13 post-section checkpoint | agent-turn-checkpoint | see `checkpoints.md` | continue / jump / preview / done |
-| 14 save approved run | bash | `Store.save_approved_run` (transactional) | row in `approved_runs` |
-| R-0 existence | bash | `Store.get_report_meta` | meta dict or None |
-| R-1 list approved | bash | `Store.list_approved_tables` | list[dict] of approved runs |
-| R-2 build payload | bash | `report_md.build_runtime_payload` | payload dict |
-| R-3 render md | bash | `render_markdown.py` | `<report_id>.report.md` |
-| R-4 render docx | bash | `render_docx.py` | `<report_id>.report.docx` |
-| R-5 中文回执 | bash | `assemble_status.py build_status + format_zh_receipt` | stdout receipt + status dict |
+| 0 lint | bash | `python /mnt/skills/public/ai-report/scripts/md_lint.py /mnt/user-data/uploads/<file>.md` | LintReport to stdout |
+| 1 lint checkpoint | agent-turn-checkpoint | see `checkpoints.md` | user reply |
+| 2 parse | bash | `python /mnt/skills/public/ai-report/scripts/parse_md.py --md /mnt/user-data/uploads/<file>.md --out /mnt/user-data/outputs/<stem>.parsed.json` | `<stem>.parsed.json` |
+| 3 query | bash | `python /mnt/skills/public/ai-report/scripts/sqlbot_client.py query --parsed /mnt/user-data/outputs/<stem>.parsed.json --mock\|--base-url ... --out /mnt/user-data/outputs/<stem>.query.json` | `<stem>.query.json` |
+| 3.5 query checkpoint | agent-turn-checkpoint | see `checkpoints.md` | user reply |
+| 4 assemble-wide | bash | `python /mnt/skills/public/ai-report/scripts/assemble_wide_duckdb.py --parsed <stem>.parsed.json --query <stem>.query.json --out /mnt/user-data/outputs/<stem>.wide.json` | `<stem>.wide.json` (DuckDB PIVOT, DECIMAL precision, failed cells = None) |
+| 6 extract-ir | bash | `python /mnt/skills/public/ai-report/scripts/compute.py extract-ir --parsed <stem>.parsed.json --out /mnt/user-data/outputs/<stem>.ir.json` | `<stem>.ir.json` |
+| 7 codegen | agent-turn-LLM | read `prompts/compute_codegen.md` + `<stem>.ir.json`; write `<stem>.compute.<slug>.sql` | DuckDB SQL files |
+| 8a validate | bash | `python /mnt/skills/public/ai-report/scripts/compute.py validate --sql <file> --wide <stem>.wide.json [--example-input ... --example-expected ...]` | exit 0/3 |
+| 8b evaluate | bash | `python /mnt/skills/public/ai-report/scripts/compute.py evaluate --sql <file> --wide <stem>.wide.json --name <col> --out <stem>.computed.<slug>.json` | computed JSON files |
+| 8c apply-computed | bash | `python /mnt/skills/public/ai-report/scripts/compute.py apply-computed --wide <stem>.wide.json --computed <stem>.computed.<slug>.json --out <stem>.wide.merged.json` | updated `<stem>.wide.json` |
+| 10 unit_convert | bash | `python /mnt/skills/public/ai-report/scripts/unit_convert.py apply --wide <stem>.wide.merged.json --headers <stem>.parsed.json --out <stem>.wide.final.json` | Decimal-converted `<stem>.wide.json` |
+| 11 describe | agent-turn-LLM | read `prompts/description_gen.md` + `<stem>.wide.final.json`; write `<stem>.description.<slug>.txt` | description text files |
+| 11.5 description checkpoint | agent-turn-checkpoint | see `checkpoints.md` | user reply |
+| 12 preview checkpoint | agent-turn-checkpoint | see `checkpoints.md` | user reply |
+| 13 save approved run | bash | `python /mnt/skills/public/ai-report/scripts/save_approved_run.py --input <stem>.approved.json --db-path /mnt/ai-report-data/duckdb` | `approved_runs` row |
+| 13.5 post-section checkpoint | agent-turn-checkpoint | see `checkpoints.md` | user reply |
+| 14 render markdown | bash | `python /mnt/skills/public/ai-report/scripts/render_markdown.py --report-id <id> --db-path /mnt/ai-report-data/duckdb --out-dir /mnt/ai-report-data` | `<report_id>.report.md` |
+| 15 render docx | bash | `python /mnt/skills/public/ai-report/scripts/render_docx.py --report-id <id> --db-path /mnt/ai-report-data/duckdb --out-dir /mnt/ai-report-data` | `<report_id>.report.docx` |
+| 16 status + 回执 | bash | `python /mnt/skills/public/ai-report/scripts/assemble_status.py --report-id <id> --db-path /mnt/ai-report-data/duckdb --out /mnt/ai-report-data/<id>.status.json` | `<report_id>.status.json` + 中文回执 |
 
 ## Retry budget
 
-| Step | Automatic retry | After limit |
+| Step | Automatic retry / repair limit | After limit |
 |---|---:|---|
 | 0 lint | 0 | stop, show lint errors and fixes |
-| 2 query | SQLBot client internal retry (3x) | failed fact → `query_failed` status; pipeline continues |
-| 6 codegen | 1 (lead agent regenerates once with validate/evaluate feedback) | second failure → `⚠️COMPUTE_FAILED` sentinel; continue |
-| 11 describe | 1 (runtime strips fences + reruns once) | second failure → description empty; sentinel `⚠️DESCRIPTION_FAILED` |
-| 12 preview | 0 | reject → `approval_status='draft'`; no row in `approved_runs` |
+| 2 parse | 0 | stop, show parse error and fix |
+| 3 query | SQLBot client internal retry only (3× exp) | failed cells become sentinels; pipeline continues after 3.5 user decision |
+| 4 assemble-wide | 0 | stop, show PIVOT error |
+| 6 extract-ir | 0 | stop, show regex mismatch |
+| 7 codegen | one initial draft per spec | 8a decides retry (max 1) |
+| 8a validate | one re-codegen per spec | failed column becomes `⚠️COMPUTE_FAILED`; continue |
+| 8b evaluate | 0 | eval errors → `⚠️COMPUTE_FAILED`; continue |
+| 10 unit_convert | 0 | stop, show Decimal parse error |
+| 11 describe | one regenerate per report | failed description file contains `⚠️DESCRIPTION_FAILED`; continue |
+| 13 save | 0 | stop, show DuckDB error |
+| 14-16 render | 0; if only description missing, rerun Step 11 once | stop on remaining failure |
 
-Checkpoints are not retry loops. If user stops, the section run ends with
-`USER_ABORTED` and no approved run is written.
+Checkpoint steps (1, 3.5, 11.5, 12, 13.5) are not retry loops. If user stops,
+the section ends with `USER_ABORTED`; user edits the source MD and reruns.
 
-Step 3.5 always triggers, even when `ok == 0` — fail-fast is disabled. The
-user picks between partial-with-sentinel and stop-and-investigate at every
-query checkpoint.
-
-## Progress messages
-
-Send one short Chinese progress update after every completed step.
-
-| Step | Template |
-|---|---|
-| 0 | `📋 Lint 完成：{n_err} 错误 / {n_warn} 警告` |
-| 1.5 | `🚦 Checkpoint 1.5：{n_err} 错误 / {n_warn} 警告，等用户确认` |
-| 2 | `🔍 SQLBot 查询：{ok}/{total} 指标成功{fail_detail}` |
-| 3.5 | `🚦 Checkpoint 3.5：{ok}/{total} 指标成功，等用户确认` |
-| 4 | `📐 宽表拼装：{rows} 行 × {cols} 列` |
-| 5 | `🧬 抽取 IR：{n} 个计算 spec` |
-| 6 | `🧠 正在为 {n} 个计算列生成 DuckDB SQL…` |
-| 7 | `✅ 校验 {ok}/{total} 通过` or `⚠️ 第 {i} 个失败：{err[:60]}` |
-| 8 | `🧮 evaluate：{ok}/{total} spec 成功` |
-| 9 | `📊 已合并 {n} 个计算列到宽表` |
-| 10 | `🔄 单位换算：{n_changed} 列已换算到目标单位` |
-| 11 | `📝 描述生成：{ok}/{total} 成功` |
-| 8d.5 | `🚦 Checkpoint 8d.5：描述 {ok}/{total} 成功，等用户确认` |
-| 12 | `🚦 Checkpoint 12：section preview 准备好，等用户确认` |
-| 13 | `🚦 Checkpoint 13：section approved，进入下一节？` |
-| 14 | `💾 approved_run 已写入 DuckDB` |
-| R-0..R-5 | `🎉 报表已生成：{report_id}.report.md / {report_id}.report.docx（{status}）` |
-
-## Do not
-
-- Add Step 6.5 IR preview. Compute review happens after Step 8c, where actual
-  values and failures are known.
-- Re-run an already-approved section unless the user changes the source MD
-  (hash mismatch in `reports.src_hash` triggers a fresh run automatically).
-- Mix runtime steps into the design pipeline. Runtime is read-only over
-  `approved_runs`.
+Step 3.5 always triggers, even when `ok == 0` — fail-fast disabled
+(per 2026-06-27 policy reversal). The user picks between partial-with-sentinel
+and stop-and-investigate at every query checkpoint.
