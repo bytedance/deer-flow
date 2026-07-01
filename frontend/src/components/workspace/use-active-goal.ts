@@ -51,8 +51,9 @@ export function useActiveGoal(
   );
   const previousThreadIdRef = useRef(threadId);
   const serverGoalProvided = serverGoal !== undefined;
-  const serverGoalKey =
-    serverGoalProvided ? goalReconciliationKey(serverGoal) : "missing";
+  const serverGoalKey = serverGoalProvided
+    ? goalReconciliationKey(serverGoal)
+    : "missing";
 
   useEffect(() => {
     const threadChanged = previousThreadIdRef.current !== threadId;
