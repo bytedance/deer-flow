@@ -22,6 +22,7 @@ import { isHiddenFromUIMessage } from "../messages/utils";
 import type { FileInMessage } from "../messages/utils";
 import type { LocalSettings } from "../settings";
 import { useUpdateSubtask } from "../tasks/context";
+import { messageToStep } from "../tasks/steps";
 import type { UploadedFileInfo } from "../uploads";
 import { promptInputFilePartToFile, uploadFiles } from "../uploads";
 
@@ -215,7 +216,13 @@ export function buildVisibleHistoryMessages(
     (message) => !supersededRunIds.has(message.run_id),
   );
   return dedupeMessagesByIdentity([
-    ...visibleRows.map((message) => message.content),
+    // Carry the owning run_id onto the content message so historical subtask
+    // cards can fetch their persisted step history on expand (#3779). run_id
+    // lives on the RunMessage wrapper and would otherwise be dropped here.
+    ...visibleRows.map((message) => ({
+      ...message.content,
+      run_id: message.run_id,
+    })),
     ...appendedMessages,
   ]);
 }
@@ -967,8 +974,16 @@ export function useThreadStream({
           type: "task_running";
           task_id: string;
           message: AIMessage;
+          message_index?: number;
         };
-        updateSubtask({ id: e.task_id, latestMessage: e.message });
+        // Accumulate the full step history instead of overwriting (#3779): keep
+        // latestMessage for the collapsed-header tool-call hint, and append the
+        // normalized step (assistant turn or tool output) to the timeline.
+        updateSubtask({
+          id: e.task_id,
+          latestMessage: e.message,
+          steps: [messageToStep(e.message, e.message_index ?? 0)],
+        });
         return;
       }
 

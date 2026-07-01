@@ -118,6 +118,65 @@ def _agent_factory_supports_app_config(agent_factory: Any) -> bool:
         return _compute_agent_factory_supports_app_config(agent_factory)
 
 
+class _SubagentEventBuffer:
+    """Buffer subagent ``task_*`` step events and flush them in one locked batch (#3779).
+
+    The live SSE bridge already forwards these events for real-time display; this
+    additionally writes them so the subtask card's step history survives a reload.
+
+    ``RunEventStore.put`` is documented as a low-frequency path — on Postgres each
+    call opens its own transaction and takes a per-thread advisory lock. A deep
+    subagent (``general-purpose`` runs up to ``max_turns=150``) emits hundreds of
+    ``task_running`` steps on the hot stream loop, so persisting each with
+    ``put()`` would serialize against the run's own message-batch writer. This
+    accumulates recognized subagent events and writes them with ``put_batch``,
+    which acquires the lock once per batch, honoring the store's contract.
+
+    Best-effort: a missing store (run_events not configured) or an unrecognized
+    chunk is a no-op, flush failures are logged but never propagate into the
+    stream loop, and terminal ``subagent.end`` events flush eagerly so a completed
+    subagent's step history is durable promptly rather than only at run end.
+    """
+
+    #: Flush once this many events are buffered, bounding memory and reload lag on
+    #: a single deep subagent without paying a per-step lock.
+    FLUSH_THRESHOLD = 25
+
+    def __init__(self, event_store: Any | None, thread_id: str, run_id: str) -> None:
+        self._event_store = event_store
+        self._thread_id = thread_id
+        self._run_id = run_id
+        self._pending: list[dict[str, Any]] = []
+
+    async def add(self, chunk: Any) -> None:
+        """Buffer one custom stream chunk; flush on a terminal event or threshold."""
+        if self._event_store is None:
+            return
+        # Lazy import: importing deerflow.subagents at module load triggers its
+        # package __init__ (executor → agents → tools → task_tool), which imports
+        # back from deerflow.subagents and deadlocks at gateway startup. Deferring
+        # it to call time (after all modules are loaded) breaks that cycle.
+        from deerflow.subagents.step_events import subagent_run_event
+
+        record = subagent_run_event(chunk)
+        if record is None:
+            return
+        self._pending.append({"thread_id": self._thread_id, "run_id": self._run_id, **record})
+        if record["event_type"] == "subagent.end" or len(self._pending) >= self.FLUSH_THRESHOLD:
+            await self.flush()
+
+    async def flush(self) -> None:
+        """Persist buffered events in one ``put_batch`` call; swallow store errors."""
+        if self._event_store is None or not self._pending:
+            return
+        batch = self._pending
+        self._pending = []
+        try:
+            await self._event_store.put_batch(batch)
+        except Exception:
+            logger.warning("Run %s: failed to persist %d subagent step event(s)", self._run_id, len(batch), exc_info=True)
+
+
 async def run_agent(
     bridge: StreamBridge,
     run_manager: RunManager,
@@ -150,6 +209,10 @@ async def run_agent(
     llm_error_fallback_message: str | None = None
 
     journal = None
+    # Buffers subagent step events for batched persistence (#3779); assigned once
+    # streaming starts and flushed in the finally block. Pre-bound to None so the
+    # finally is safe even if an exception fires before streaming begins.
+    subagent_events: _SubagentEventBuffer | None = None
 
     # Track whether "events" was requested but skipped
     if "events" in requested_modes:
@@ -304,6 +367,11 @@ async def run_agent(
 
         logger.info("Run %s: streaming with modes %s (requested: %s)", run_id, lg_modes, requested_modes)
 
+        # Buffer subagent step events and persist them in batches (#3779) instead
+        # of one low-frequency put() per step on the hot stream loop. Flushed in
+        # the finally block so buffered steps survive abort/exception paths too.
+        subagent_events = _SubagentEventBuffer(event_store, thread_id, run_id)
+
         # 7. Stream using graph.astream
         if len(lg_modes) == 1 and not stream_subgraphs:
             # Single mode, no subgraphs: astream yields raw chunks
@@ -315,6 +383,8 @@ async def run_agent(
                 llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(chunk)
                 sse_event = _lg_mode_to_sse_event(single_mode)
                 await bridge.publish(run_id, sse_event, serialize(chunk, mode=single_mode))
+                if single_mode == "custom":
+                    await subagent_events.add(chunk)
         else:
             # Multiple modes or subgraphs: astream yields tuples
             async for item in agent.astream(
@@ -334,6 +404,8 @@ async def run_agent(
                 llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(chunk)
                 sse_event = _lg_mode_to_sse_event(mode)
                 await bridge.publish(run_id, sse_event, serialize(chunk, mode=mode))
+                if mode == "custom":
+                    await subagent_events.add(chunk)
 
         # 8. Final status
         if record.abort_event.is_set():
@@ -399,6 +471,11 @@ async def run_agent(
         )
 
     finally:
+        # Persist any subagent step events still buffered (#3779) — including on
+        # abort/exception paths, where the stream loop broke before its own flush.
+        if subagent_events is not None:
+            await subagent_events.flush()
+
         # Flush any buffered journal events and persist completion data
         if journal is not None:
             try:
