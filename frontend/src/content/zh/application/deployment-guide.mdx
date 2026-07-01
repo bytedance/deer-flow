@@ -111,6 +111,7 @@ BETTER_AUTH_SECRET=your-secret-here-min-32-chars
 | -------------------------------------- | -------------------------- |
 | `LocalSandboxProvider`                 | 单用户、受信任的本地工作流 |
 | `AioSandboxProvider`（Docker）         | 多用户、中等隔离需求       |
+| `E2BSandboxProvider`（e2b 云）         | 托管/Serverless、无需运维 Docker/K8s、开箱即用 Jupyter |
 | `AioSandboxProvider` + K8s Provisioner | 生产环境、强隔离、多用户   |
 
 对于有多个并发用户的任何部署，使用基于容器的沙箱，防止用户之间的执行环境相互干扰。
