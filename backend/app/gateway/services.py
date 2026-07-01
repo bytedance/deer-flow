@@ -21,7 +21,12 @@ from langchain_core.messages.utils import convert_to_messages
 from langgraph.types import Command
 
 from app.gateway.deps import get_checkpointer, get_run_context, get_run_manager, get_stream_bridge
-from app.gateway.internal_auth import INTERNAL_SYSTEM_ROLE, get_trusted_internal_owner_user_id
+from app.gateway.internal_auth import (
+    INTERNAL_OWNER_USER_ID_HEADER_NAME,
+    INTERNAL_SYSTEM_ROLE,
+    get_internal_user,
+    get_trusted_internal_owner_user_id,
+)
 from app.gateway.utils import sanitize_log_param
 from deerflow.config.app_config import get_app_config
 from deerflow.runtime import (
@@ -500,6 +505,54 @@ async def start_run(
     finally:
         if owner_context_token is not None:
             reset_current_user(owner_context_token)
+
+
+async def launch_scheduled_thread_run(
+    *,
+    thread_id: str,
+    assistant_id: str | None,
+    prompt: str,
+    request: Request | None = None,
+    app: Any | None = None,
+    owner_user_id: str | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    if request is None:
+        if app is None:
+            raise ValueError("launch_scheduled_thread_run requires request or app")
+        request = SimpleNamespace(
+            app=app,
+            headers=({INTERNAL_OWNER_USER_ID_HEADER_NAME: owner_user_id} if owner_user_id else {}),
+            state=SimpleNamespace(
+                user=get_internal_user(),
+                auth_source="internal",
+            ),
+            cookies={},
+        )
+    body = SimpleNamespace(
+        assistant_id=assistant_id,
+        input={"messages": [{"role": "user", "content": prompt}]},
+        command=None,
+        metadata=metadata or {},
+        config=None,
+        context=None,
+        webhook=None,
+        checkpoint_id=None,
+        checkpoint=None,
+        interrupt_before=None,
+        interrupt_after=None,
+        stream_mode=None,
+        stream_subgraphs=False,
+        stream_resumable=None,
+        on_disconnect="continue",
+        on_completion="keep",
+        multitask_strategy="reject",
+        after_seconds=None,
+        if_not_exists="reject",
+        feedback_keys=None,
+    )
+    record = await start_run(body, thread_id, request)
+    return {"run_id": record.run_id, "thread_id": record.thread_id}
 
 
 async def sse_consumer(
