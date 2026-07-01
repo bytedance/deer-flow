@@ -6,6 +6,7 @@ import {
   createGoalRequestState,
   findSuggestionTemplatePlaceholder,
   finishGoalRequest,
+  getInputSubmitAction,
   getLeadingSlashSkillQuery,
   getMatchingSkillSuggestions,
   isAbortError,
@@ -58,6 +59,61 @@ describe("parseGoalCommand", () => {
     expect(parseGoalCommand("/goalkeeper do thing")).toBeNull();
     expect(parseGoalCommand("hello")).toBeNull();
     expect(parseGoalCommand("/new")).toBeNull();
+  });
+});
+
+describe("getInputSubmitAction", () => {
+  it("handles /goal commands before the streaming stop shortcut", () => {
+    expect(
+      getInputSubmitAction({
+        text: "/goal ",
+        fileCount: 0,
+        status: "streaming",
+      }),
+    ).toEqual({ kind: "goal", command: { kind: "status" } });
+  });
+
+  it("handles /goal set commands before the streaming stop shortcut", () => {
+    expect(
+      getInputSubmitAction({
+        text: "/goal finish the work",
+        fileCount: 0,
+        status: "streaming",
+      }),
+    ).toEqual({
+      kind: "goal",
+      command: { kind: "set", objective: "finish the work" },
+    });
+  });
+
+  it("keeps ordinary streaming submits as stop", () => {
+    expect(
+      getInputSubmitAction({
+        text: "hello",
+        fileCount: 0,
+        status: "streaming",
+      }),
+    ).toEqual({ kind: "stop" });
+  });
+
+  it("does not treat /goal text with attachments as a goal command", () => {
+    expect(
+      getInputSubmitAction({
+        text: "/goal ",
+        fileCount: 1,
+        status: "ready",
+      }),
+    ).toEqual({ kind: "message" });
+  });
+
+  it("ignores empty ready submits", () => {
+    expect(
+      getInputSubmitAction({
+        text: "   ",
+        fileCount: 0,
+        status: "ready",
+      }),
+    ).toEqual({ kind: "empty" });
   });
 });
 

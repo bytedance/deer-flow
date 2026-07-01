@@ -94,12 +94,12 @@ import {
   createGoalRequestState,
   findSuggestionTemplatePlaceholder,
   finishGoalRequest,
+  getInputSubmitAction,
   getLeadingSlashSkillQuery,
   getMatchingSkillSuggestions,
   type GoalCommand,
   isAbortError,
   isCurrentGoalRequest,
-  parseGoalCommand,
   readGoalResponseError,
   type SlashSuggestion,
 } from "./input-box-helpers";
@@ -514,29 +514,37 @@ export function InputBox({
 
   const handleSubmit = useCallback(
     async (message: PromptInputMessage) => {
-      if (status === "streaming") {
-        onStop?.();
-        return;
-      }
-      if (!message.text.trim() && message.files.length === 0) {
-        return;
-      }
-      const goalCommand = parseGoalCommand(message.text);
-      if (goalCommand && message.files.length === 0) {
+      const submitAction = getInputSubmitAction({
+        text: message.text,
+        fileCount: message.files.length,
+        status,
+      });
+      if (submitAction.kind === "goal") {
         promptHistoryIndexRef.current = null;
         promptHistoryDraftRef.current = "";
         setFollowups([]);
         setFollowupsHidden(false);
         setFollowupsLoading(false);
-        const saved = await handleGoalCommand(goalCommand);
+        const saved = await handleGoalCommand(submitAction.command);
         // Only start a run when a goal was actually saved; status/clear never run.
-        if (saved && goalCommand.kind === "set") {
+        if (
+          saved &&
+          submitAction.command.kind === "set" &&
+          status !== "streaming"
+        ) {
           return submitThreadMessage({
             ...message,
-            text: goalCommand.objective,
+            text: submitAction.command.objective,
             files: [],
           });
         }
+        return;
+      }
+      if (submitAction.kind === "stop") {
+        onStop?.();
+        return;
+      }
+      if (submitAction.kind === "empty") {
         return;
       }
       return submitThreadMessage(message);

@@ -16,6 +16,12 @@ export type GoalCommand =
   | { kind: "clear" }
   | { kind: "set"; objective: string };
 
+export type InputSubmitAction =
+  | { kind: "goal"; command: GoalCommand }
+  | { kind: "stop" }
+  | { kind: "empty" }
+  | { kind: "message" };
+
 export type GoalRequestState = {
   controller: AbortController | null;
   sequence: number;
@@ -181,6 +187,28 @@ export function parseGoalCommand(value: string): GoalCommand | null {
     return { kind: "clear" };
   }
   return { kind: "set", objective: args };
+}
+
+export function getInputSubmitAction({
+  text,
+  fileCount,
+  status,
+}: {
+  text: string;
+  fileCount: number;
+  status: string;
+}): InputSubmitAction {
+  const goalCommand = parseGoalCommand(text);
+  if (goalCommand && fileCount === 0) {
+    return { kind: "goal", command: goalCommand };
+  }
+  if (status === "streaming") {
+    return { kind: "stop" };
+  }
+  if (!text.trim() && fileCount === 0) {
+    return { kind: "empty" };
+  }
+  return { kind: "message" };
 }
 
 export async function readGoalResponseError(
