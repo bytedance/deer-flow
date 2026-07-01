@@ -237,3 +237,61 @@ def _parse_one_report(report_title: str, body: str) -> Report:
         computed_specs=[],
         description_prompt=description_prompt,
     )
+
+
+def main(argv: list[str] | None = None) -> int:
+    """CLI entry: parse MD → dump <stem>.parsed.json (chatbi-report-compatible schema).
+
+    Exit codes:
+      0 = success
+      2 = MD file not readable / parse error (after re-raise)
+    """
+    import argparse
+    from dataclasses import asdict
+    from pathlib import Path
+
+    parser = argparse.ArgumentParser(prog="parse_md")
+    parser.add_argument("--md", required=True, help="Path to MD 样张")
+    parser.add_argument("--out", required=True, help="Path to write parsed JSON")
+    args = parser.parse_args(argv)
+
+    md_path = Path(args.md)
+    md = md_path.read_text(encoding="utf-8")
+    doc = parse_markdown(md)
+
+    # Build chatbi-report-compatible JSON. Headers are 2-d list of dicts; data_rows
+    # is empty (chatbi-report populates it during assemble-wide, not parse).
+    payload = {
+        "title": doc.title,
+        "sections": [
+            {
+                "title": sec.title,
+                "reports": [
+                    {
+                        "title": rep.title,
+                        "org_contexts": [asdict(o) for o in rep.org_contexts],
+                        "time_info": list(rep.time_info),
+                        "headers": [[asdict(th) for th in row] for row in rep.headers],
+                        "data_rows": list(rep.data_rows),
+                        "computed_specs": list(rep.computed_specs),
+                        "description_prompt": rep.description_prompt,
+                    }
+                    for rep in sec.reports
+                ],
+            }
+            for sec in doc.sections
+        ],
+        "all_idx_ids": sorted(doc.all_idx_ids),
+    }
+
+    out_path = Path(args.out)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
