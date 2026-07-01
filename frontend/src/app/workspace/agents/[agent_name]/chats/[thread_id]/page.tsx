@@ -166,7 +166,7 @@ export default function AgentChatPage() {
   const hasTodos = (thread.values.todos?.length ?? 0) > 0;
   const { activeGoal, hasGoal, setLocalGoal } = useActiveGoal(
     threadId,
-    thread.values.goal ?? null,
+    thread.values.goal,
   );
 
   return (

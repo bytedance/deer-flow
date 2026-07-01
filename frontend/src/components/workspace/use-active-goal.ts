@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import type { GoalState } from "@/core/threads/types";
 
@@ -12,28 +12,56 @@ export type UseActiveGoalResult = {
   setLocalGoal: (goal: GoalState | null) => void;
 };
 
+export function resolveActiveGoal(
+  localGoal: GoalState | null | undefined,
+  serverGoal: GoalState | null | undefined,
+): GoalState | null {
+  return localGoal !== undefined ? localGoal : (serverGoal ?? null);
+}
+
+export function shouldResetLocalGoalOverride({
+  serverGoalProvided,
+  threadChanged,
+}: {
+  serverGoalProvided: boolean;
+  threadChanged: boolean;
+}): boolean {
+  if (threadChanged) {
+    return true;
+  }
+  return serverGoalProvided;
+}
+
 /**
  * Reconciles the optimistic `/goal`-command result with the server's goal state.
  *
  * A `/goal` command updates the UI immediately via `setLocalGoal`, but that
- * override is dropped as soon as the server goal changes — switching threads, or
- * the stream delivering a new `continuation_count` / a cleared goal — so the
- * agent's live continuation counter is always reflected instead of the frozen
- * optimistic copy. Shared by the workspace and agent chat pages.
+ * override is dropped as soon as the server explicitly reports goal state —
+ * switching threads, a new `continuation_count`, or a cleared goal. A stream
+ * chunk that omits the `goal` field is not treated as a clear, because
+ * clarification interrupts can publish partial values while the active goal is
+ * still present in the checkpoint.
  */
 export function useActiveGoal(
   threadId: string,
-  serverGoal: GoalState | null,
+  serverGoal: GoalState | null | undefined,
 ): UseActiveGoalResult {
   const [localGoal, setLocalGoal] = useState<GoalState | null | undefined>(
     undefined,
   );
-  const serverGoalKey = goalReconciliationKey(serverGoal);
+  const previousThreadIdRef = useRef(threadId);
+  const serverGoalProvided = serverGoal !== undefined;
+  const serverGoalKey =
+    serverGoalProvided ? goalReconciliationKey(serverGoal) : "missing";
 
   useEffect(() => {
-    setLocalGoal(undefined);
-  }, [threadId, serverGoalKey]);
+    const threadChanged = previousThreadIdRef.current !== threadId;
+    previousThreadIdRef.current = threadId;
+    if (shouldResetLocalGoalOverride({ serverGoalProvided, threadChanged })) {
+      setLocalGoal(undefined);
+    }
+  }, [serverGoalKey, serverGoalProvided, threadId]);
 
-  const activeGoal = localGoal !== undefined ? localGoal : serverGoal;
+  const activeGoal = resolveActiveGoal(localGoal, serverGoal);
   return { activeGoal, hasGoal: Boolean(activeGoal), setLocalGoal };
 }
