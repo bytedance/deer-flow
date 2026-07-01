@@ -57,8 +57,7 @@ def test_lint_failed_sentinel_from_md_lint():
     md = """# T
 ## S
 ### R
-> 机构:
->   branch_short_name=x
+> 机构: org_contexts = [{"org_ecd": "1", "org_name": "x"}]
 <table><thead><tr><th>机构</th></tr></thead></table>
 """
     rep = lint_markdown(md)

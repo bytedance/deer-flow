@@ -4,8 +4,7 @@
 
 ### 表1 无时期
 
-> 机构:
->   branch_short_name=x
+> 机构: org_contexts = [{"org_ecd":"x","org_name":"x"}]
 
 <table>
   <thead><tr><th data-idx="A">col</th></tr></thead>
@@ -15,8 +14,7 @@
 
 ### 表2 无thead
 
-> 机构:
->   branch_short_name=x
+> 机构: org_contexts = [{"org_ecd":"x","org_name":"x"}]
 > 时期: time_info = ["202603"]
 
 <table><tbody><tr><td>no header</td></tr></tbody></table>
@@ -25,8 +23,7 @@
 
 ### 表3 错单位
 
-> 机构:
->   branch_short_name=x
+> 机构: org_contexts = [{"org_ecd":"x","org_name":"x"}]
 > 时期: time_info = ["202603"]
 
 <table>

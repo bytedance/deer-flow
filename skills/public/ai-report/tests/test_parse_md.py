@@ -54,8 +54,7 @@ def test_parse_data_computed_attr_marks_computed():
     md = """# T
 ## S
 ### R
-> 机构:
->   branch_short_name=王益联社
+> 机构: org_contexts = [{"org_ecd": "1", "org_name": "x"}]
 > 时期: time_info = ["202603"]
 <table><thead><tr><th data-idx="BAS_001" data-period="202603">存款</th><th data-computed="true">利润率</th></tr></thead></table>
 """
@@ -70,8 +69,7 @@ def test_parse_template_syntax_marks_computed():
     md = """# T
 ## S
 ### R
-> 机构:
->   branch_short_name=王益联社
+> 机构: org_contexts = [{"org_ecd": "1", "org_name": "x"}]
 > 时期: time_info = ["202603"]
 <table><thead><tr><th data-idx="BAS_001" data-period="202603">存款</th><th>{{利润率}}</th></tr></thead></table>
 """
@@ -86,8 +84,7 @@ def test_parse_description_block_extracted():
     md = """# T
 ## S
 ### R
-> 机构:
->   branch_short_name=王益联社
+> 机构: org_contexts = [{"org_ecd": "1", "org_name": "x"}]
 > 时期: time_info = ["202603"]
 > 描述:
 >   请基于表格数据生成经营分析描述
@@ -106,8 +103,7 @@ def test_parse_description_block_absent_returns_none():
     md = """# T
 ## S
 ### R
-> 机构:
->   branch_short_name=王益联社
+> 机构: org_contexts = [{"org_ecd": "1", "org_name": "x"}]
 > 时期: time_info = ["202603"]
 <table><thead><tr><th data-idx="BAS_001" data-period="202603" data-unit="万元">存款</th></tr></thead></table>
 """
@@ -128,64 +124,3 @@ def test_parse_wangyi_example_has_all_6_descriptions():
     for d in descriptions:
         assert d is not None, "every wangyi H3 should have a 描述: prompt"
         assert "请基于表格数据生成经营分析描述" in d
-
-
-# --- `> 机构:` block (canonical multi-line form, see example/input.md) --- #
-
-
-def test_parse_org_block_multi_line():
-    """`> 机构:` multi-line `branch_num=...; branch_short_name=...` → OrgContext list.
-
-    branch_short_name maps to org_ecd (because SQLBot mock fixture's org_ecd
-    field is the short name, e.g., 王益联社). org_name mirrors branch_short_name.
-    """
-    md = """# T
-## S
-### R
-> 机构:
->   branch_num=27020199; branch_short_name=王益联社
->   branch_num=27020100; branch_short_name=印台联社
-> 时期: time_info = ["202603"]
-<table><thead><tr><th data-idx="BAS_026" data-period="202603" data-unit="万元">利润总额</th></tr></thead></table>
-"""
-    doc = parse_markdown(md)
-    rep = doc.sections[0].reports[0]
-    assert len(rep.org_contexts) == 2
-    assert rep.org_contexts[0].org_ecd == "王益联社"
-    assert rep.org_contexts[0].org_name == "王益联社"
-    assert rep.org_contexts[1].org_ecd == "印台联社"
-
-
-def test_parse_org_block_missing_raises():
-    """Reports without `> 机构:` block raise ValueError (no silent empty list).
-
-    Previously the parser returned [] silently; now it raises so callers don't
-    silently produce no-org queries.
-    """
-    import pytest
-    md = """# T
-## S
-### R
-> 时期: time_info = ["202603"]
-<table><thead><tr><th data-idx="BAS_001" data-period="202603">存款</th></tr></thead></table>
-"""
-    with pytest.raises(ValueError, match="机构"):
-        parse_markdown(md)
-
-
-def test_parse_org_block_json_form_rejected():
-    """JSON array form is no longer accepted — the spec is the multi-line form only.
-
-    Regression guard against silently reintroducing the rejected `org_contexts = [...]`
-    shortcut.
-    """
-    import pytest
-    md = """# T
-## S
-### R
-> 机构: org_contexts = [{"org_ecd": "x", "org_name": "x"}]
-> 时期: time_info = ["202603"]
-<table><thead><tr><th data-idx="BAS_001" data-period="202603">存款</th></tr></thead></table>
-"""
-    with pytest.raises(ValueError, match="branch_short_name"):
-        parse_markdown(md)

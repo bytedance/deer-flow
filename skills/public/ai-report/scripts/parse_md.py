@@ -178,48 +178,10 @@ def _cell_to_th(cell: dict) -> Th:
 
 
 def _parse_org_block(body: str) -> list[OrgContext]:
-    """Parse the `> 机构:` block into an OrgContext list.
-
-    Canonical ai-report form (single accepted form):
-        > 机构:
-        >   branch_num=27020199; branch_short_name=王益联社
-        >   branch_num=27020100; branch_short_name=印台联社
-
-    Field mapping: SQLBot mock fixture's `org_ecd` field is the short name
-    (e.g., 王益联社), so we map `branch_short_name` → `org_ecd` to make the
-    SQLBot query match. `org_name` is set to the same short name. `branch_num`
-    is read but not stored (OrgContext doesn't carry it).
-    """
-    org_match = re.search(r"^>\s*机构:\s*$", body, re.MULTILINE)
-    if not org_match:
-        raise ValueError(
-            "report missing `> 机构:` block; expected multi-line "
-            "`>   branch_num=...; branch_short_name=...` form"
-        )
-    out: list[OrgContext] = []
-    for raw in body[org_match.end():].splitlines():
-        if not raw:
-            continue
-        if not raw.startswith(">"):
-            break
-        line = raw.lstrip("> ").strip()
-        if not line:
-            continue
-        entry: dict[str, str] = {}
-        for kv in line.split(";"):
-            kv = kv.strip()
-            if "=" not in kv:
-                continue
-            k, v = (s.strip() for s in kv.split("=", 1))
-            entry[k] = v
-        short_name = entry.get("branch_short_name") or entry.get("org_ecd")
-        if short_name:
-            out.append(OrgContext(org_ecd=short_name, org_name=short_name))
-    if not out:
-        raise ValueError(
-            "`> 机构:` block has no `branch_short_name=...` entries"
-        )
-    return out
+    m = re.search(r"^>\s*机构:\s*org_contexts\s*=\s*(\[.*?\])", body, re.MULTILINE)
+    if not m:
+        return []
+    return [OrgContext(**o) for o in json.loads(m.group(1))]
 
 
 def _parse_description_block(body: str) -> str | None:

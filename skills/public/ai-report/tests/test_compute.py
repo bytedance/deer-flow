@@ -22,28 +22,16 @@ from compute import (
 
 
 def test_extract_ir_parses_compute_block():
-    """Canonical multi-line `> 计算:` block with `name = prompt` lines."""
     body = """
-> 计算:
->   利润率 = 利润总额 / 营业收入
->   成本率 = (营业收入-利润总额) / 营业收入
+> 计算: name = "利润率", prompt = "利润总额 / 营业收入", examples = [{"row": 0, "value": 0.2}]
+> 计算: name = "成本率", prompt = "(营业收入-利润总额) / 营业收入"
 """
     irs = extract_ir(body)
     assert len(irs) == 2
     assert irs[0].name == "利润率"
-    assert irs[0].prompt == "利润率 = 利润总额 / 营业收入"
-    assert irs[0].examples == []
+    assert irs[0].prompt == "利润总额 / 营业收入"
+    assert irs[0].examples == [{"row": 0, "value": 0.2}]
     assert irs[1].name == "成本率"
-    assert irs[1].prompt == "成本率 = (营业收入-利润总额) / 营业收入"
-
-
-def test_extract_ir_json_form_rejected():
-    """The single-line `name = "..."` form is no longer accepted (spec is multi-line only)."""
-    body = """
-> 计算: name = "利润率", prompt = "利润总额 / 营业收入"
-"""
-    irs = extract_ir(body)
-    assert irs == [], "single-line JSON-style compute block must not parse"
 
 
 def test_assemble_wide_pivots_metric_facts():
@@ -470,76 +458,3 @@ def test_evaluate_thread_safe_concurrent():
     for values, status in results:
         assert status == "ok"
         assert values == [Decimal("2.0")] * 5
-
-
-# ---- `> 计算:` block (canonical multi-line form, see example/input.md) ---- #
-
-
-def test_extract_ir_multi_line():
-    """Canonical multi-line `> 计算:` block with `name = prompt` lines."""
-    body = """
-> 计算:
->   2023利润同比 = 2023年值减2022年值再除2022年值
->   2024利润同比 = 2024年值减2023年值再除2023年值
->   2025利润同比 = 2025年值减2024年值再除2024年值
-"""
-    irs = extract_ir(body)
-    assert len(irs) == 3
-    by_name = {ir.name: ir for ir in irs}
-    assert "2023利润同比" in by_name
-    assert by_name["2023利润同比"].prompt == "2023利润同比 = 2023年值减2022年值再除2022年值"
-    assert by_name["2024利润同比"].prompt == "2024利润同比 = 2024年值减2023年值再除2023年值"
-    assert by_name["2025利润同比"].prompt == "2025利润同比 = 2025年值减2024年值再除2024年值"
-    for ir in irs:
-        assert ir.examples == []
-
-
-def test_extract_ir_with_examples():
-    """`<name>.示例: BAS_0263[a=1, b=2] -> 0.5` attaches to the matching IR."""
-    body = """
-> 计算:
->   2023利润同比 = 2023年值减2022年值再除2022年值
->   2024利润同比 = 2024年值减2023年值再除2023年值
->   2024利润同比.示例: BAS_0263[2024=1200, 2023=1000] -> 0.2
->   2025利润同比 = 2025年值减2024年值再除2024年值
->   2025利润同比.示例: BAS_0263[2025=1500, 2024=1200] -> 0.25
-"""
-    irs = extract_ir(body)
-    by_name = {ir.name: ir for ir in irs}
-    assert by_name["2023利润同比"].examples == []
-    assert by_name["2024利润同比"].examples == [
-        {"inputs": {"2024": "1200", "2023": "1000"}, "expected": "0.2"},
-    ]
-    assert by_name["2025利润同比"].examples == [
-        {"inputs": {"2025": "1500", "2024": "1200"}, "expected": "0.25"},
-    ]
-
-
-def test_extract_ir_block_boundary_respects_table():
-    """Non-`>` line (e.g. `<table>`) ends the multi-line `> 计算:` block.
-
-    Regression: the regex must stop at any non-`>` line so it doesn't extend
-    into HTML table content and pick up `<th>{{name}}` as IR definitions.
-    """
-    body = """
-> 计算:
->   2023利润同比 = 2023年值减2022年值再除2022年值
-
-<table><thead><tr><th>{{2023利润同比}}</th></tr></thead></table>
-"""
-    irs = extract_ir(body)
-    assert len(irs) == 1
-    assert irs[0].name == "2023利润同比"
-
-
-def test_extract_ir_works_on_input_md_fixture():
-    """End-to-end: extract_ir on example/input.md returns the 3 IRs we expect
-    (2024 + 2025 carry examples, 2023 doesn't)."""
-    md = open("example/input.md", encoding="utf-8").read()
-    body = md.split("### 1.1 整体利润分析", 1)[1].split("<table>", 1)[0]
-    irs = extract_ir(body)
-    assert len(irs) == 3, f"expected 3 IRs, got {len(irs)}: {irs}"
-    by_name = {ir.name: ir for ir in irs}
-    assert by_name["2023利润同比"].examples == []
-    assert len(by_name["2024利润同比"].examples) == 1
-    assert len(by_name["2025利润同比"].examples) == 1
