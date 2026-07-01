@@ -1,7 +1,7 @@
 # ai-report Checkpoints Reference
 
 Read this before running or editing any of the six checkpoints:
-`0/1.5`, `3.5`, `8d.5`, `12`, `13`.
+`1`, `3.5`, `11.5`, `12`, `13.5`.
 
 ## Common contract
 
@@ -71,7 +71,7 @@ User chooses stop / reject:
 - **Stop next action**: tell the user to check SQLBot endpoint /
   credentials / `org_contexts` and rerun.
 
-## Checkpoint 8d.5 (description done)
+## Checkpoint 11.5 (description done)
 
 - **Trigger**: when at least one report has `description_prompt` set
   (post-parse_md, stored in `report_tables.parsed_payload`).
@@ -85,7 +85,7 @@ User chooses stop / reject:
   - generated description text, or `⚠️DESCRIPTION_FAILED`
 - **Question**: `描述段落已生成：{ok}/{total} 成功。继续渲染最终报表？`
 - **Options**: `["continue", "stop"]`
-- **Runlog**: `Step 8d.5 description checkpoint：用户确认继续|用户选择停下，成功={ok}，总数={total}`
+- **Runlog**: `Step 11.5 description checkpoint：用户确认继续|用户选择停下，成功={ok}，总数={total}`
 - **Stop next action**: tell the user to edit the original `> 描述:` block
   and rerun.
 - **Do not** accept a new prompt in the same run, regenerate in-run, or
@@ -108,7 +108,7 @@ User chooses stop / reject:
 - **Stop next action on modify**: currently same as reject (modify is
   reserved for future in-pipeline regenerate-and-retry).
 
-## Checkpoint 13 (post-section)
+## Checkpoint 13.5 (post-section)
 
 - **Trigger**: always, after `save_approved_run` succeeds.
 - **Summary**: section N approved, status, sentinels.
@@ -119,16 +119,16 @@ User chooses stop / reject:
     bad data — runtime will render only approved ones).
   - `preview`: re-show the just-approved section's preview dict.
   - `done`: stop the design run; runtime can render whatever is approved.
-- **Runlog**: `Step 13 post-section checkpoint：用户 {reply}，section={n}`
+- **Runlog**: `Step 13.5 post-section checkpoint：用户 {reply}，section={n}`
 
 ## Scenario acceptance checklist
 
 - Checkpoint 0: errors present → ask; errors absent → skip silently.
 - Checkpoint 1.5: lint passed → ask once (informational).
 - Checkpoint 3.5: triggers on every section, `ok == 0` is not a skip.
-- Checkpoint 8d.5: skip when no `description_prompt` exists; never edit
+- Checkpoint 11.5: skip when no `description_prompt` exists; never edit
   the source MD to add one mid-run.
 - Checkpoint 12: reject writes no `approved_runs` row; resume picks up
   from this section on next design run.
-- Checkpoint 13: `done` does NOT throw; the design run exits cleanly and
+- Checkpoint 13.5: `done` does NOT throw; the design run exits cleanly and
   runtime CLI picks up whatever is approved so far.
