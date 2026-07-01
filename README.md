@@ -114,6 +114,17 @@ That prompt is intended for coding agents. It tells the agent to clone the repo 
    The wizard also lets you configure an optional web search provider, or skip it for now.
 
    Run `make doctor` at any time to verify your setup and get actionable fix hints.
+   If you are opening a GitHub issue about a local setup or runtime problem, run
+   `make support-bundle`. The command prints reporter next steps, writes a
+   `*-issue-summary.md` file to paste into the issue, a `*-issue-draft.md` file
+   for AI-assisted issue filing, and an optional evidence zip under
+   `.deer-flow/support-bundles/`. If an AI assistant files the issue, start from
+   the draft and replace every REQUIRED placeholder instead of inventing missing
+   facts. Attach the zip only if a maintainer asks for it, or if the summary
+   alone is not enough. Maintainers and AI triage tools can start with
+   `triage.json`; the bundle includes redacted diagnostics and file manifests
+   only, and does not include `.env`, raw conversation messages, or user file
+   contents.
 
    > **Advanced / manual configuration**: If you prefer to edit `config.yaml` directly, run `make config` instead to copy the full template. See `config.example.yaml` for the complete reference including CLI-backed providers (Codex CLI, Claude Code OAuth), OpenRouter, Responses API, and more.
 
