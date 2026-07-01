@@ -113,6 +113,20 @@ ai-report 走 chatbi-report 1:1 镜像的 SQLBot client 协议(per-idx 调用约
 跑测试。OrgContext 字段是 ai-report 自己的 `org_ecd` / `org_name`(不是
 chatbi-report 的 `branch_num` / `branch_short_name`)。
 
+仓库内自带两份 sample fixture(均覆盖 wide-wide `idx_id@period` / 简
+`idx_id` 两种 key 形式),都可用作 `--mock-fixture` 或直接喂给
+`MockSQLBotClient`:
+
+- `tests/fixtures/mock_sqlbot/wangyi_2026_03.json` — 6 个 BAS_xxx 指标 ×
+  202602/202603 两个时点,对应 `example/wangyi_2026_03.md` 样张(E2E 默认)
+- `example/mock_sqlbot/profit_yoy.json` — 1 个 `BAS_0263` × 2022-2025
+  四年 × 4 个 org(王益联社 / 印台联社 / 铜川平均值 / 全省平均值),从
+  chatbi-report 仓库直接 copy 过来,用于多 org / 多期对比场景
+
+注:profit_yoy.json 的 `org_ecd` 字段是中文简称(王益联社),不是 wangyi
+sample 的英文 ecd 代码;搭配时需在 example MD 的 `> 机构:` 块用
+`org_ecd=王益联社` 等简称。
+
 | 场景 | 用什么 | 触发方式 |
 |---|---|---|
 | 真实 SQLBot | `RealSQLBotClient` | 设 `SQLBOT_BASE_URL=http://...` 或 CLI `--base-url` |

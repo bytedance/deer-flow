@@ -197,3 +197,32 @@ def test_cli_query_writes_query_json(tmp_path):
     assert len(payload["results"]) == 1
     assert payload["results"][0]["idx_id"] == "BAS_001"
     assert payload["results"][0]["results"][0]["raw_value"] == "1234567890.5"
+
+
+def test_profit_yoy_fixture_round_trip():
+    """chatbi-report 的 example/mock_sqlbot/profit_yoy.json 也能被 ai-report 的
+    MockSQLBotClient + _rows_from_response 正确处理, 且 _rows_from_response
+    会按 org_ecd 严格过滤 — 用 王益联社 / 印台联社 拉 2023 数据应得到 2 行。"""
+    c = MockSQLBotClient(
+        fixture_path="example/mock_sqlbot/profit_yoy.json",
+    )
+    resp = c.query_report_info(
+        org_info=[{"org_ecd": "王益联社"}, {"org_ecd": "印台联社"}],
+        index_info=[{"idx_id": "BAS_0263"}],
+        time_info=["2023"],
+    )
+    elem = resp.data[0]
+    assert elem["success"] is True
+    # mock fixture has 4 rows for BAS_0263@2023 (王益联社, 印台联社, 铜川平均值, 全省平均值)
+    assert len(elem["data"]) == 4
+    # _rows_from_response filters to allowed org_ecd → 2 rows
+    rows = _rows_from_response(
+        resp, [{"org_ecd": "王益联社"}, {"org_ecd": "印台联社"}],
+    )
+    orgs = [r["org_ecd"] for r in rows]
+    assert orgs == ["王益联社", "印台联社"]
+    for r in rows:
+        assert r["success"] is True
+        # raw_value 是 str
+        assert isinstance(r["raw_value"], str)
+        assert float(r["raw_value"]) > 0
