@@ -42,8 +42,36 @@ esac
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
+ENV_FILE="$REPO_ROOT/.env"
 DOCKER_DIR="$REPO_ROOT/docker"
-COMPOSE_CMD=(docker compose -p deer-flow -f "$DOCKER_DIR/docker-compose.yaml")
+if [ -f "$ENV_FILE" ]; then
+    COMPOSE_CMD=(docker compose --env-file "$ENV_FILE" -p deer-flow -f "$DOCKER_DIR/docker-compose.yaml")
+else
+    COMPOSE_CMD=(docker compose -p deer-flow -f "$DOCKER_DIR/docker-compose.yaml")
+fi
+
+load_uv_extras_from_dotenv() {
+    local line=""
+    local value=""
+
+    [ -f "$ENV_FILE" ] || return 0
+    [ -z "${UV_EXTRAS+x}" ] || return 0
+
+    line="$(grep -E '^[[:space:]]*(export[[:space:]]+)?UV_EXTRAS[[:space:]]*=' "$ENV_FILE" | tail -n 1 || true)"
+    [ -n "$line" ] || return 0
+
+    value="${line#*=}"
+    value="${value%$'\r'}"
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+    case "$value" in
+        \"*\") value="${value#\"}"; value="${value%\"}" ;;
+        \'*\') value="${value#\'}"; value="${value%\'}" ;;
+    esac
+    export UV_EXTRAS="$value"
+}
+
+load_uv_extras_from_dotenv
 
 # ── Colors ────────────────────────────────────────────────────────────────────
 
@@ -169,6 +197,44 @@ if  [ "$CMD" != "down" ] && [ -z "$DEER_FLOW_INTERNAL_AUTH_TOKEN" ]; then
         echo "$DEER_FLOW_INTERNAL_AUTH_TOKEN" > "$_internal_auth_token_file"
         chmod 600 "$_internal_auth_token_file"
         echo -e "${GREEN}✓ DEER_FLOW_INTERNAL_AUTH_TOKEN generated → $_internal_auth_token_file${NC}"
+    fi
+fi
+
+# ── UV_EXTRAS auto-detection ─────────────────────────────────────────────────
+# The production Dockerfile accepts UV_EXTRAS as a single build-arg token and
+# adds the --extra prefix itself. Convert the detector's uv flag string
+# ("--extra postgres --extra discord") to a comma-joined name token.
+
+if [ "$CMD" != "down" ] && [ -z "$UV_EXTRAS" ]; then
+    _detect_python=""
+    for _python in python3 python; do
+        if command -v "$_python" >/dev/null 2>&1 && \
+            "$_python" -c 'import sys; sys.version_info >= (3, 6) or sys.exit(1)' >/dev/null 2>&1; then
+            _detect_python="$_python"
+            break
+        fi
+    done
+fi
+
+if [ "$CMD" != "down" ] && [ -z "$UV_EXTRAS" ] && [ -n "$_detect_python" ]; then
+    _uv_extras_flags="$("$_detect_python" "$REPO_ROOT/scripts/detect_uv_extras.py" 2>/dev/null || true)"
+    _uv_extras=""
+    set -- $_uv_extras_flags
+    while [ "$#" -gt 0 ]; do
+        if [ "$1" = "--extra" ] && [ "$#" -gt 1 ]; then
+            if [ -z "$_uv_extras" ]; then
+                _uv_extras="$2"
+            else
+                _uv_extras="$_uv_extras,$2"
+            fi
+            shift 2
+        else
+            shift
+        fi
+    done
+    if [ -n "$_uv_extras" ]; then
+        export UV_EXTRAS="$_uv_extras"
+        echo -e "${GREEN}✓ Auto-detected UV_EXTRAS=${UV_EXTRAS} from config.yaml${NC}"
     fi
 fi
 
