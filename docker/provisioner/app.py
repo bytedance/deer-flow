@@ -351,7 +351,12 @@ def _normalize_extra_mounts(extra_mounts: list[ExtraMountRequest] | None) -> lis
     return normalized
 
 
-def _build_volumes(thread_id: str, extra_mounts: list[ExtraMountRequest] | None = None) -> list[k8s_client.V1Volume]:
+def _build_volumes(
+    thread_id: str,
+    extra_mounts: list[ExtraMountRequest] | None = None,
+    *,
+    normalize_extra_mounts: bool = True,
+) -> list[k8s_client.V1Volume]:
     """Build volume list: PVC when configured, otherwise hostPath."""
     if SKILLS_PVC_NAME:
         skills_vol = k8s_client.V1Volume(
@@ -387,7 +392,12 @@ def _build_volumes(thread_id: str, extra_mounts: list[ExtraMountRequest] | None 
         )
 
     volumes = [skills_vol, userdata_vol]
-    for index, mount in enumerate(_normalize_extra_mounts(extra_mounts)):
+    prepared_extra_mounts = (
+        _normalize_extra_mounts(extra_mounts)
+        if normalize_extra_mounts
+        else extra_mounts or []
+    )
+    for index, mount in enumerate(prepared_extra_mounts):
         volumes.append(
             k8s_client.V1Volume(
                 name=f"extra-mount-{index}",
@@ -400,11 +410,13 @@ def _build_volumes(thread_id: str, extra_mounts: list[ExtraMountRequest] | None 
 
     return volumes
 
+
 def _build_volume_mounts(
     thread_id: str,
     extra_mounts: list[ExtraMountRequest] | None = None,
     *,
     user_id: str = DEFAULT_USER_ID,
+    normalize_extra_mounts: bool = True,
 ) -> list[k8s_client.V1VolumeMount]:
     """Build volume mount list, using subPath for PVC user-data."""
     userdata_mount = k8s_client.V1VolumeMount(
@@ -424,7 +436,12 @@ def _build_volume_mounts(
         userdata_mount,
     ]
 
-    for index, mount in enumerate(_normalize_extra_mounts(extra_mounts)):
+    prepared_extra_mounts = (
+        _normalize_extra_mounts(extra_mounts)
+        if normalize_extra_mounts
+        else extra_mounts or []
+    )
+    for index, mount in enumerate(prepared_extra_mounts):
         mounts.append(
             k8s_client.V1VolumeMount(
                 name=f"extra-mount-{index}",
@@ -441,10 +458,16 @@ def _build_pod(
     thread_id: str,
     user_id: str = DEFAULT_USER_ID,
     extra_mounts: list[ExtraMountRequest] | None = None,
+    *,
+    normalize_extra_mounts: bool = True,
 ) -> k8s_client.V1Pod:
     """Construct a Pod manifest for a single sandbox."""
     thread_id = _validate_thread_id(thread_id)
-    extra_mounts = _normalize_extra_mounts(extra_mounts)
+    prepared_extra_mounts = (
+        _normalize_extra_mounts(extra_mounts)
+        if normalize_extra_mounts
+        else extra_mounts or []
+    )
     return k8s_client.V1Pod(
         metadata=k8s_client.V1ObjectMeta(
             name=_pod_name(sandbox_id),
@@ -501,14 +524,23 @@ def _build_pod(
                             "ephemeral-storage": "500Mi",
                         },
                     ),
-                    volume_mounts=_build_volume_mounts(thread_id, user_id=user_id, extra_mounts=extra_mounts),
+                    volume_mounts=_build_volume_mounts(
+                        thread_id,
+                        extra_mounts=prepared_extra_mounts,
+                        user_id=user_id,
+                        normalize_extra_mounts=False,
+                    ),
                     security_context=k8s_client.V1SecurityContext(
                         privileged=False,
                         allow_privilege_escalation=True,
                     ),
                 )
             ],
-            volumes=_build_volumes(thread_id, extra_mounts),
+            volumes=_build_volumes(
+                thread_id,
+                extra_mounts=prepared_extra_mounts,
+                normalize_extra_mounts=False,
+            ),
             restart_policy="Always",
         ),
     )
@@ -610,7 +642,13 @@ async def create_sandbox(req: CreateSandboxRequest):
     try:
         core_v1.create_namespaced_pod(
             K8S_NAMESPACE,
-            _build_pod(sandbox_id, thread_id, user_id=user_id, extra_mounts=extra_mounts),
+            _build_pod(
+                sandbox_id,
+                thread_id,
+                user_id=user_id,
+                extra_mounts=extra_mounts,
+                normalize_extra_mounts=False,
+            ),
         )
         logger.info(f"Created Pod {_pod_name(sandbox_id)}")
     except ApiException as exc:

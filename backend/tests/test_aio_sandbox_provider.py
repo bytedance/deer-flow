@@ -56,6 +56,17 @@ def _make_provider(tmp_path):
     return provider
 
 
+def test_create_backend_provisioner_without_mounts_uses_empty_mounts(tmp_path):
+    """Provisioner mode should not require sandbox.mounts to be configured."""
+    provider = _make_provider(tmp_path)
+    provider._config = {"provisioner_url": "http://provisioner:8002"}
+
+    backend = provider._create_backend()
+
+    assert backend.provisioner_url == "http://provisioner:8002"
+    assert backend._serialize_extra_mounts() == []
+
+
 def test_get_thread_mounts_includes_acp_workspace(tmp_path, monkeypatch):
     """_get_thread_mounts must include /mnt/acp-workspace (read-only) for docker sandbox."""
     aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")

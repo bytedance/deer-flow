@@ -298,3 +298,30 @@ class TestBuildPodVolumes:
         assert pod.spec.volumes[2].name == "extra-mount-0"
         assert pod.spec.containers[0].volume_mounts[2].name == "extra-mount-0"
         assert pod.spec.containers[0].volume_mounts[2].mount_path == "/mnt/shared"
+
+    def test_pod_normalizes_extra_mounts_once(self, provisioner_module, monkeypatch):
+        """Pod creation should pass validated mounts to child builders unchanged."""
+        _allow_extra_mount_host_paths(provisioner_module, "/host")
+        original_normalize = provisioner_module._normalize_extra_mounts
+        call_count = 0
+
+        def spy_normalize(extra_mounts):
+            nonlocal call_count
+            call_count += 1
+            return original_normalize(extra_mounts)
+
+        monkeypatch.setattr(provisioner_module, "_normalize_extra_mounts", spy_normalize)
+
+        provisioner_module._build_pod(
+            "sandbox-1",
+            "thread-1",
+            extra_mounts=[
+                provisioner_module.ExtraMountRequest(
+                    host_path="/host/shared",
+                    container_path="/mnt/shared/",
+                    read_only=False,
+                )
+            ],
+        )
+
+        assert call_count == 1
