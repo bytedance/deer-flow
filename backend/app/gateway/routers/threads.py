@@ -26,7 +26,7 @@ from app.gateway.internal_auth import get_trusted_internal_owner_user_id
 from app.gateway.utils import sanitize_log_param
 from deerflow.config.paths import Paths, get_paths
 from deerflow.runtime import serialize_channel_values_for_api
-from deerflow.runtime.goal import DEFAULT_MAX_GOAL_CONTINUATIONS, build_goal_state, ensure_thread_checkpoint, read_thread_goal, write_thread_goal
+from deerflow.runtime.goal import DEFAULT_MAX_GOAL_CONTINUATIONS, build_goal_state, ensure_thread_checkpoint, goal_thread_lock, read_thread_goal, write_thread_goal
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.utils.time import coerce_iso, now_iso
 
@@ -515,7 +515,8 @@ async def set_thread_goal(thread_id: str, body: ThreadGoalRequest, request: Requ
     await _ensure_thread_for_goal(thread_id, request)
     try:
         goal = build_goal_state(body.objective, max_continuations=body.max_continuations)
-        await write_thread_goal(checkpointer, thread_id, goal, as_node="goal", create_if_missing=True)
+        async with goal_thread_lock(thread_id):
+            await write_thread_goal(checkpointer, thread_id, goal, as_node="goal", create_if_missing=True)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception:
@@ -530,7 +531,8 @@ async def clear_thread_goal(thread_id: str, request: Request) -> ThreadGoalRespo
     """Clear the active goal for a thread."""
     checkpointer = get_checkpointer(request)
     try:
-        await write_thread_goal(checkpointer, thread_id, None, as_node="goal")
+        async with goal_thread_lock(thread_id):
+            await write_thread_goal(checkpointer, thread_id, None, as_node="goal")
     except LookupError:
         return ThreadGoalResponse(goal=None)
     except Exception:

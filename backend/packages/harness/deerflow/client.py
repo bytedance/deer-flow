@@ -42,7 +42,7 @@ from deerflow.config.app_config import get_app_config, reload_app_config
 from deerflow.config.extensions_config import ExtensionsConfig, SkillStateConfig, get_extensions_config, reload_extensions_config
 from deerflow.config.paths import get_paths
 from deerflow.models import create_chat_model
-from deerflow.runtime.goal import DEFAULT_MAX_GOAL_CONTINUATIONS, build_goal_state, read_thread_goal, write_thread_goal
+from deerflow.runtime.goal import DEFAULT_MAX_GOAL_CONTINUATIONS, build_goal_state, goal_thread_lock, read_thread_goal, write_thread_goal
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.skills.storage import get_or_new_skill_storage
 from deerflow.tools.builtins.tool_search import assemble_deferred_tools
@@ -449,14 +449,24 @@ class DeerFlowClient:
         """Set or replace a thread-scoped goal."""
         checkpointer = self._get_thread_checkpointer()
         goal = build_goal_state(objective, max_continuations=max_continuations)
-        _run_async_from_sync(write_thread_goal(checkpointer, thread_id, goal, create_if_missing=True))
+
+        async def _set_goal() -> None:
+            async with goal_thread_lock(thread_id):
+                await write_thread_goal(checkpointer, thread_id, goal, create_if_missing=True)
+
+        _run_async_from_sync(_set_goal())
         return {"goal": goal}
 
     def clear_goal(self, thread_id: str) -> dict:
         """Clear the active goal for a thread."""
         checkpointer = self._get_thread_checkpointer()
+
+        async def _clear_goal() -> None:
+            async with goal_thread_lock(thread_id):
+                await write_thread_goal(checkpointer, thread_id, None)
+
         try:
-            _run_async_from_sync(write_thread_goal(checkpointer, thread_id, None))
+            _run_async_from_sync(_clear_goal())
         except LookupError:
             pass
         return {"goal": None}

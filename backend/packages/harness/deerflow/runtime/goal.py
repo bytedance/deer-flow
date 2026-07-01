@@ -13,6 +13,10 @@ import hashlib
 import inspect
 import json
 import logging
+import threading
+import weakref
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Any, Literal, NamedTuple
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -49,6 +53,31 @@ GOAL_CLEAR_ALIASES = frozenset({"clear", "reset", "off"})
 _extract_response_text = llm_text.extract_response_text
 _strip_markdown_code_fence = llm_text.strip_markdown_code_fence
 _strip_think_blocks = llm_text.strip_think_blocks
+
+_goal_locks_guard = threading.Lock()
+_goal_locks_by_loop: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, dict[str, asyncio.Lock]] = weakref.WeakKeyDictionary()
+
+
+class GoalWriteConflict(RuntimeError):
+    """Raised when a goal write is based on a stale checkpoint."""
+
+
+@asynccontextmanager
+async def goal_thread_lock(thread_id: str) -> AsyncIterator[None]:
+    """Serialize goal read-modify-write sequences within the current event loop."""
+    loop = asyncio.get_running_loop()
+    with _goal_locks_guard:
+        locks = _goal_locks_by_loop.get(loop)
+        if locks is None:
+            locks = {}
+            _goal_locks_by_loop[loop] = locks
+        lock = locks.get(thread_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            locks[thread_id] = lock
+
+    async with lock:
+        yield
 
 
 class GoalCommand(NamedTuple):
@@ -372,6 +401,18 @@ async def ensure_thread_checkpoint(checkpointer: Any, thread_id: str) -> None:
     await _call_checkpointer_method(checkpointer, "aput", "put", config, empty_checkpoint(), metadata, {})
 
 
+def _checkpoint_id_from_tuple(checkpoint_tuple: Any) -> str | None:
+    config = getattr(checkpoint_tuple, "config", {}) or {}
+    configurable = config.get("configurable", {}) if isinstance(config, dict) else {}
+    checkpoint_id = configurable.get("checkpoint_id") if isinstance(configurable, dict) else None
+    if isinstance(checkpoint_id, str):
+        return checkpoint_id
+    checkpoint = getattr(checkpoint_tuple, "checkpoint", {}) or {}
+    if isinstance(checkpoint, dict) and isinstance(checkpoint.get("id"), str):
+        return checkpoint["id"]
+    return None
+
+
 async def read_thread_goal(checkpointer: Any, thread_id: str) -> GoalState | None:
     """Read the latest thread goal from checkpoint state."""
     config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
@@ -391,6 +432,7 @@ async def write_thread_goal(
     *,
     as_node: str = "goal",
     create_if_missing: bool = False,
+    expected_checkpoint_id: str | None = None,
 ) -> dict[str, Any]:
     """Write a new checkpoint with the thread goal set or cleared.
 
@@ -408,6 +450,8 @@ async def write_thread_goal(
     checkpoint_tuple = await _call_checkpointer_method(checkpointer, "aget_tuple", "get_tuple", read_config)
     if checkpoint_tuple is None:
         raise LookupError(f"Thread {thread_id} checkpoint not found")
+    if expected_checkpoint_id is not None and _checkpoint_id_from_tuple(checkpoint_tuple) != expected_checkpoint_id:
+        raise GoalWriteConflict(f"Thread {thread_id} goal checkpoint changed while preparing write")
 
     checkpoint: dict[str, Any] = dict(getattr(checkpoint_tuple, "checkpoint", {}) or {})
     metadata: dict[str, Any] = dict(getattr(checkpoint_tuple, "metadata", {}) or {})
