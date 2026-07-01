@@ -235,13 +235,69 @@ tools:
 
 **Built-in Tools**:
 - `web_search` - Search the web (DuckDuckGo, Tavily, Brave, Exa, InfoQuest, Firecrawl, fastCRW, GroundRoute)
-- `web_fetch` - Fetch web pages (Jina AI, Exa, InfoQuest, Firecrawl, fastCRW, GroundRoute)
+- `web_fetch` - Fetch web pages (Jina AI, Exa, InfoQuest, Firecrawl, fastCRW, GroundRoute, Browserless)
+- `web_capture` - Capture rendered webpage screenshots as artifacts (Browserless)
 - `image_search` - Search for reference images (DuckDuckGo, InfoQuest, Serper)
 - `ls` - List directory contents
 - `read_file` - Read file contents
 - `write_file` - Write file contents
 - `str_replace` - String replacement in files
 - `bash` - Execute bash commands
+
+Browserless can be configured as an opt-in visual capture tool:
+
+```yaml
+tools:
+  - name: web_capture
+    group: web
+    use: deerflow.community.browserless.tools:web_capture_tool
+    base_url: http://localhost:3032
+    # token: $BROWSERLESS_TOKEN
+    output_format: png
+    full_page: true
+    viewport_width: 1280
+    viewport_height: 720
+    # allow_private_addresses: false  # SSRF guard; keep false in production
+```
+
+`web_capture` writes screenshots to the current thread's `/mnt/user-data/outputs`
+directory and presents the image path through the standard artifact mechanism. By
+default it refuses URLs that resolve to private, loopback, link-local, or
+cloud-metadata addresses; set `allow_private_addresses: true` only when you
+intentionally point the tool at an internal target.
+
+Both `web_fetch` (Browserless provider) and `web_capture` need a running
+Browserless instance. You can point `base_url` at [Browserless Cloud](https://www.browserless.io/)
+(set `BROWSERLESS_TOKEN`) or run one locally with Docker:
+
+```bash
+# Browserless listens on port 3000 inside the container; map it to 3032 to
+# match the default base_url (http://localhost:3032). Recent Browserless
+# images always require a token — if you don't pass one, a random token is
+# generated and requests without it are rejected — so set it explicitly.
+docker run -d --name browserless -p 3032:3000 -e "TOKEN=local-dev-token" ghcr.io/browserless/chromium
+```
+
+Then set the same token so the tool sends it (uncomment `token: $BROWSERLESS_TOKEN`
+in the config above):
+
+```bash
+export BROWSERLESS_TOKEN=local-dev-token
+```
+
+Verify the instance is reachable before enabling the tool:
+
+```bash
+curl -sS "http://localhost:3032/screenshot?token=local-dev-token" \
+  -H "Content-Type: application/json" \
+  -d '{"url": "https://example.com", "options": {"type": "png"}}' \
+  -o /tmp/browserless-check.png  # writes a PNG on success
+```
+
+For Docker Compose deployments, run Browserless as a service and point `base_url`
+at the service name (e.g. `http://browserless:3000`) instead of `localhost`. See
+the [Browserless project](https://github.com/browserless/browserless) for full
+deployment and configuration options.
 
 ### Sandbox
 
@@ -273,6 +329,45 @@ sandbox:
 When using Docker development (`make docker-start`), DeerFlow starts the `provisioner` service only if this provisioner mode is configured. In local or plain Docker sandbox modes, `provisioner` is skipped.
 
 See [Provisioner Setup Guide](../../docker/provisioner/README.md) for detailed configuration, prerequisites, and troubleshooting.
+
+**E2B Cloud Sandbox** (runs sandbox code in [E2B](https://e2b.dev) cloud micro-VMs):
+
+```yaml
+sandbox:
+   use: deerflow.community.e2b_sandbox:E2BSandboxProvider
+   api_key: $E2B_API_KEY            # required; or set the E2B_API_KEY env var
+   template: code-interpreter-v1     # e2b sandbox template id
+   # domain: e2b.dev                # optional; for self-hosted e2b deployments
+   home_dir: /home/user             # /mnt/user-data is remapped under this directory
+   idle_timeout: 600                # forwarded to e2b's server-side set_timeout()
+   replicas: 3                      # max concurrent sandboxes per gateway process
+   mounts:                          # one-shot upload of host files at sandbox start
+     - host_path: /path/on/host
+       container_path: /home/user/shared
+       read_only: false
+   environment:                     # forwarded to the sandbox at create time
+     OPENAI_API_KEY: $OPENAI_API_KEY
+```
+
+`e2b-code-interpreter` is bundled as a core dependency of `deerflow-harness`,
+so no extra install step is needed; just supply your API key and switch the
+provider in `config.yaml`.
+
+Notes specific to `E2BSandboxProvider`:
+
+- Each DeerFlow thread is bound to its e2b sandbox via metadata
+  (`deer_flow_user`, `deer_flow_thread`), so the same thread reuses the same
+  sandbox across gateway restarts and across processes — no cross-process
+  file lock is needed because the e2b control plane is the source of truth.
+- Idle expiry is enforced server-side by e2b's `set_timeout()`. The provider
+  refreshes the timeout on every release so warm sandboxes stay alive long
+  enough for the next acquire.
+- `mounts` are uploaded once when the sandbox starts; e2b cannot host bind-mount
+  the gateway filesystem, so changes inside the sandbox are not reflected back
+  on disk automatically. Use the `download_file` tool or write outputs under
+  `/mnt/user-data/outputs/` (which is mapped to `home_dir/outputs/` inside the
+  sandbox and surfaced through the standard artifact pipeline) to ship files
+  back to the gateway.
 
 Choose between local execution or Docker-based isolation:
 
@@ -417,6 +512,7 @@ models:
 - `BRAVE_SEARCH_API_KEY` - Brave Search API key
 - `SERPER_API_KEY` - Serper (Google Search/Images API) key for `web_search` and `image_search`
 - `GROUNDROUTE_API_KEY` - GroundRoute meta-search API key for `web_search` and `web_fetch` (routes across Serper, Brave, Exa, Tavily, Firecrawl, Perplexity with gain-share pricing)
+- `BROWSERLESS_TOKEN` - Browserless Cloud token for `web_capture` (optional for self-hosted Browserless)
 - `DEER_FLOW_PROJECT_ROOT` - Project root for relative runtime paths
 - `DEER_FLOW_CONFIG_PATH` - Custom config file path
 - `DEER_FLOW_EXTENSIONS_CONFIG_PATH` - Custom extensions config file path

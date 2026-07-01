@@ -16,7 +16,7 @@ import { Callout, Tabs } from "nextra/components";
 
 ## 沙箱模式
 
-DeerFlow 支持三种沙箱模式，选择适合你部署的一种：
+DeerFlow 支持四种沙箱模式，选择适合你部署的一种：
 
 ### LocalSandbox（默认）
 
@@ -58,6 +58,60 @@ sandbox:
 ```
 
 安装：`cd backend && uv add 'deerflow-harness[aio-sandbox]'`
+
+### E2B 云端沙箱
+
+命令在 [E2B](https://e2b.dev) 云端的 micro-VM 中执行。每个线程通过 metadata 绑定到一个独立的 e2b 沙箱，因此即使 Gateway 重启或在多进程之间，同一个 DeerFlow 线程也始终复用同一个 e2b 沙箱。当达到配置的空闲超时时，e2b 会自动回收云端 VM。
+
+- **适合**：托管/Serverless 部署、不想自行运维 Docker 或 Kubernetes 的团队、开箱即用需要真实 Jupyter 内核的工作流。
+- **取舍**：需要访问 e2b 控制面网络以及一个 API Key；挂载只能在沙箱启动时**一次性上传**（云端沙箱无法做主机 bind-mount）。
+
+```yaml
+sandbox:
+  use: deerflow.community.e2b_sandbox:E2BSandboxProvider
+
+  # 必填：e2b API Key。若不写则回退读取环境变量 E2B_API_KEY。
+  api_key: $E2B_API_KEY
+
+  # 可选：e2b 沙箱模板 id（默认：code-interpreter-v1）
+  template: code-interpreter-v1
+
+  # 可选：自部署 e2b 实例的 domain
+  # domain: e2b.dev
+
+  # 可选：沙箱内部 /mnt/user-data 实际指向的目录（默认：/home/user）
+  home_dir: /home/user
+
+  # 可选：服务端强制的空闲超时（秒，默认 600，最大 86400）。
+  # 每次 release 时 provider 会自动续期，让 warm 沙箱保持存活。
+  idle_timeout: 600
+
+  # 可选：单个 Gateway 进程内的最大并发沙箱数（默认：3）。
+  # 超出时按 LRU 回收 warm 沙箱。
+  replicas: 3
+
+  # 可选：启动时一次性把主机文件上传到沙箱。
+  # read_only 的目录在上传后会被 chmod 为只读。
+  mounts:
+    - host_path: /path/on/host
+      container_path: /home/user/shared
+      read_only: false
+
+  # 可选：创建沙箱时传入的环境变量。
+  # 以 "$" 开头的值会从主机环境变量解析。
+  environment:
+    OPENAI_API_KEY: $OPENAI_API_KEY
+```
+
+安装：`e2b-code-interpreter` 已经是 `deerflow-harness` 的核心依赖，无需额外安装 —— 只需配置 API Key，并在 `config.yaml` 中切换 provider 即可。
+
+在 [e2b.dev/dashboard](https://e2b.dev/dashboard) 申请 API Key，然后在 `config.yaml` 中直接配置 `sandbox.api_key`，或在 `.env` 中导出 `E2B_API_KEY`。
+
+<Callout type="info">
+  因为 e2b 是远程沙箱，DeerFlow 的虚拟前缀 `/mnt/user-data`
+  会被自动重映射到云端 VM 的 `home_dir`（默认 `/home/user`）。
+  原本读写 `/mnt/user-data/...` 的工具无需任何改动即可正常工作。
+</Callout>
 
 ### Provisioner 管理的沙箱（Kubernetes）
 

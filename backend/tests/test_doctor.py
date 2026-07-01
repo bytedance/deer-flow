@@ -340,6 +340,43 @@ class TestCheckWebFetch:
 
 
 # ---------------------------------------------------------------------------
+# check_web_capture
+# ---------------------------------------------------------------------------
+
+
+class TestCheckWebCapture:
+    def test_browserless_self_host_without_token_ok(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("BROWSERLESS_TOKEN", raising=False)
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: web_capture\n    use: deerflow.community.browserless.tools:web_capture_tool\n    base_url: http://localhost:3032\n")
+
+        result = doctor.check_web_capture(cfg)
+
+        assert result.status == "ok"
+        assert "self-hosted" in result.detail
+
+    def test_browserless_token_env_ref_ok(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("BROWSERLESS_TOKEN", "browserless-test")
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: web_capture\n    use: deerflow.community.browserless.tools:web_capture_tool\n    base_url: https://production-sfo.browserless.io\n    token: $BROWSERLESS_TOKEN\n")
+
+        result = doctor.check_web_capture(cfg)
+
+        assert result.status == "ok"
+        assert "BROWSERLESS_TOKEN set from config" in result.detail
+
+    def test_browserless_cloud_without_token_warns(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("BROWSERLESS_TOKEN", raising=False)
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: web_capture\n    use: deerflow.community.browserless.tools:web_capture_tool\n    base_url: https://production-sfo.browserless.io\n")
+
+        result = doctor.check_web_capture(cfg)
+
+        assert result.status == "warn"
+        assert "BROWSERLESS_TOKEN" in (result.fix or "")
+
+
+# ---------------------------------------------------------------------------
 # check_image_search
 # ---------------------------------------------------------------------------
 
