@@ -885,6 +885,21 @@ class TestChatModelStartHumanMessage:
         assert not any(e["event_type"] == "llm.human.input" for e in events)
 
     @pytest.mark.anyio
+    async def test_legacy_summary_message_is_not_captured_as_user_input(self, journal_setup):
+        """Legacy synthetic summaries are internal context even if hide_from_ui is absent."""
+        from langchain_core.messages import HumanMessage
+
+        j, store = journal_setup
+        legacy_summary = HumanMessage(content="Older compressed conversation state", name="summary")
+        j.on_chat_model_start({}, [[legacy_summary]], run_id=uuid4(), tags=["lead_agent"])
+        await j.flush()
+
+        assert j._first_human_msg is None
+        assert j.get_completion_data()["message_count"] == 0
+        events = await store.list_events("t1", "r1")
+        assert not any(e["event_type"] == "llm.human.input" for e in events)
+
+    @pytest.mark.anyio
     async def test_visible_human_message_after_hidden_only_prompt_is_captured(self, journal_setup):
         """Skipping an internal-only prompt does not block later user input."""
         from langchain_core.messages import HumanMessage

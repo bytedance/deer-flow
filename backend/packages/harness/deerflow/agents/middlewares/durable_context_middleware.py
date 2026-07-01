@@ -9,6 +9,7 @@ written back to state.
 
 from __future__ import annotations
 
+import posixpath
 from collections.abc import Awaitable, Callable, Collection
 from html import escape
 from typing import override
@@ -36,6 +37,10 @@ _AUTHORITY_CONTRACT = "\n".join(
     ]
 )
 _DELEGATION_STABLE_FIELDS = ("description", "subagent_type", "status", "result_brief", "result_sha256", "result_ref")
+
+
+def _normalize_skills_root(skills_container_path: str | None) -> str:
+    return posixpath.normpath(skills_container_path or _DEFAULT_SKILLS_ROOT)
 
 
 def _bound_text(text: str, cap: int) -> str:
@@ -116,7 +121,7 @@ class DurableContextMiddleware(AgentMiddleware[AgentState]):
         skill_file_read_tool_names: Collection[str] | None = None,
     ) -> None:
         super().__init__()
-        self._skills_root = (skills_container_path or _DEFAULT_SKILLS_ROOT).rstrip("/")
+        self._skills_root = _normalize_skills_root(skills_container_path)
         self._skill_read_tool_names = frozenset(_DEFAULT_SKILL_READ_TOOL_NAMES if skill_file_read_tool_names is None else skill_file_read_tool_names)
 
     @override

@@ -315,6 +315,10 @@ class TestSkillContextCapture:
 
         assert out is not None and out["skill_context"][0]["name"] == "x"
 
+    def test_slash_only_skills_root_is_preserved(self):
+        assert DurableContextMiddleware(skills_container_path="/")._skills_root == "/"
+        assert DurableContextMiddleware(skills_container_path="////")._skills_root == "/"
+
 
 class TestSkillContextInjection:
     def test_skill_reference_injected_not_body(self):
