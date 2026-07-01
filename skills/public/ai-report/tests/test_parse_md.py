@@ -124,3 +124,40 @@ def test_parse_wangyi_example_has_all_6_descriptions():
     for d in descriptions:
         assert d is not None, "every wangyi H3 should have a 描述: prompt"
         assert "请基于表格数据生成经营分析描述" in d
+
+
+# --- chatbi-report-style `> 机构:` block (multi-line branch_num + branch_short_name) --- #
+
+
+def test_parse_org_block_chatbi_style_multi_line():
+    """chatbi-report 风格 `> 机构:` 多行格式 → OrgContext list, branch_short_name
+    映射到 org_ecd (与 mock fixture 的 org_ecd 字段值匹配, 详见 profit_yoy.md)."""
+    md = """# T
+## S
+### R
+> 机构:
+>   branch_num=27020199; branch_short_name=王益联社
+>   branch_num=27020100; branch_short_name=印台联社
+> 时期: time_info = ["202603"]
+<table><thead><tr><th data-idx="BAS_026" data-period="202603" data-unit="万元">利润总额</th></tr></thead></table>
+"""
+    doc = parse_markdown(md)
+    rep = doc.sections[0].reports[0]
+    assert len(rep.org_contexts) == 2
+    assert rep.org_contexts[0].org_ecd == "王益联社"
+    assert rep.org_contexts[1].org_ecd == "印台联社"
+
+
+def test_parse_org_block_ai_style_still_works():
+    """ai-report 原生 JSON 数组风格依然有效 (回退链第一优先)."""
+    md = """# T
+## S
+### R
+> 机构: org_contexts = [{"org_ecd":"wangyi_credit_union","org_name":"王益联社"}]
+> 时期: time_info = ["202603"]
+<table><thead><tr><th data-idx="BAS_001" data-period="202603" data-unit="万元">存款</th></tr></thead></table>
+"""
+    doc = parse_markdown(md)
+    rep = doc.sections[0].reports[0]
+    assert rep.org_contexts[0].org_ecd == "wangyi_credit_union"
+    assert rep.org_contexts[0].org_name == "王益联社"

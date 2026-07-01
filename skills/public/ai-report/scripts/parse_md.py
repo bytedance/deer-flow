@@ -178,10 +178,58 @@ def _cell_to_th(cell: dict) -> Th:
 
 
 def _parse_org_block(body: str) -> list[OrgContext]:
+    """Parse `> 机构:` block. Two accepted forms (回退链):
+
+    1. ai-report 原生 JSON 数组 (单行):
+        > 机构: org_contexts = [{"org_ecd": "X", "org_name": "Y"}, ...]
+
+    2. chatbi-report 多行 `branch_num=...; branch_short_name=...`:
+        > 机构:
+        >   branch_num=27020199; branch_short_name=王益联社
+        >   branch_num=27020100; branch_short_name=印台联社
+
+       chatbi-report 用 `branch_num` + `branch_short_name` 两个 key, 我们的
+       OrgContext 用 `org_ecd` + `org_name` — 映射策略: SQLBot mock fixture
+       (如 profit_yoy.json) 的 `org_ecd` 字段填的是中文短名 (王益联社),
+       所以我们把 `branch_short_name` → `org_ecd` (让 SQLBot 查询匹配),
+       `branch_num` 保留到 `branch_num` 字段 (如果 OrgContext 未来扩展).
+       实际 OrgContext dataclass 只有 org_ecd + org_name, 所以这里
+       org_ecd = branch_short_name, org_name = branch_short_name (同名重复).
+    """
+    # Form 1: ai-report native JSON array
     m = re.search(r"^>\s*机构:\s*org_contexts\s*=\s*(\[.*?\])", body, re.MULTILINE)
-    if not m:
-        return []
-    return [OrgContext(**o) for o in json.loads(m.group(1))]
+    if m:
+        return [OrgContext(**o) for o in json.loads(m.group(1))]
+
+    # Form 2: chatbi-report multi-line branch_num/branch_short_name
+    org_match = re.search(r"^>\s*机构:\s*$", body, re.MULTILINE)
+    if org_match:
+        out: list[OrgContext] = []
+        for raw in body[org_match.end():].splitlines():
+            if not raw:
+                continue
+            if not raw.startswith(">"):
+                break
+            line = raw.lstrip("> ").strip()
+            if not line:
+                continue
+            entry: dict[str, str] = {}
+            for kv in line.split(";"):
+                kv = kv.strip()
+                if "=" not in kv:
+                    continue
+                k, v = (s.strip() for s in kv.split("=", 1))
+                entry[k] = v
+            # Map chatbi-report keys → ai-report OrgContext fields.
+            # OrgContext 只有 org_ecd + org_name 两个字段; 把
+            # branch_short_name 映射到 org_ecd (因为 mock fixture 的 org_ecd
+            # 字段填的是中文短名), org_name 也用 branch_short_name 同名.
+            short_name = entry.get("branch_short_name") or entry.get("org_ecd")
+            if short_name:
+                out.append(OrgContext(org_ecd=short_name, org_name=short_name))
+        return out
+
+    return []
 
 
 def _parse_description_block(body: str) -> str | None:

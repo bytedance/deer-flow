@@ -458,3 +458,85 @@ def test_evaluate_thread_safe_concurrent():
     for values, status in results:
         assert status == "ok"
         assert values == [Decimal("2.0")] * 5
+
+
+# ---- chatbi-report-style `> 计算:` block (Form 2 of extract_ir) ---- #
+
+
+def test_extract_ir_chatbi_style_multi_line():
+    """chatbi-report-style multi-line `> 计算:` block with `name = prompt` lines.
+
+    Used in example/profit_yoy.md (mirrors chatbi-report input.md). The native
+    ai-report single-line form is tried first; if no matches fall back to the
+    multi-line form.
+    """
+    body = """
+> 计算:
+>   2023利润同比 = 2023年值减2022年值再除2022年值
+>   2024利润同比 = 2024年值减2023年值再除2023年值
+>   2025利润同比 = 2025年值减2024年值再除2024年值
+"""
+    irs = extract_ir(body)
+    assert len(irs) == 3
+    by_name = {ir.name: ir for ir in irs}
+    assert "2023利润同比" in by_name
+    assert by_name["2023利润同比"].prompt == "2023利润同比 = 2023年值减2022年值再除2022年值"
+    assert by_name["2024利润同比"].prompt == "2024利润同比 = 2024年值减2023年值再除2023年值"
+    assert by_name["2025利润同比"].prompt == "2025利润同比 = 2025年值减2024年值再除2024年值"
+    # No examples attached yet
+    for ir in irs:
+        assert ir.examples == []
+
+
+def test_extract_ir_chatbi_style_with_examples():
+    """`<name>.示例: BAS_0263[a=1, b=2] -> 0.5` attaches to the matching IR."""
+    body = """
+> 计算:
+>   2023利润同比 = 2023年值减2022年值再除2022年值
+>   2024利润同比 = 2024年值减2023年值再除2023年值
+>   2024利润同比.示例: BAS_0263[2024=1200, 2023=1000] -> 0.2
+>   2025利润同比 = 2025年值减2024年值再除2024年值
+>   2025利润同比.示例: BAS_0263[2025=1500, 2024=1200] -> 0.25
+"""
+    irs = extract_ir(body)
+    by_name = {ir.name: ir for ir in irs}
+    assert by_name["2023利润同比"].examples == []
+    assert by_name["2024利润同比"].examples == [
+        {"inputs": {"2024": "1200", "2023": "1000"}, "expected": "0.2"},
+    ]
+    assert by_name["2025利润同比"].examples == [
+        {"inputs": {"2025": "1500", "2024": "1200"}, "expected": "0.25"},
+    ]
+
+
+def test_extract_ir_chatbi_style_block_boundary_respects_table():
+    """Non-`>` line (e.g. `<table>`) ends the multi-line `> 计算:` block.
+
+    Regression: previously the chatbi-report regex could extend past the block
+    into HTML table content. The boundary check (line must start with `>`)
+    prevents that.
+    """
+    body = """
+> 计算:
+>   2023利润同比 = 2023年值减2022年值再除2022年值
+
+<table><thead><tr><th>{{2023利润同比}}</th></tr></thead></table>
+"""
+    irs = extract_ir(body)
+    assert len(irs) == 1
+    assert irs[0].name == "2023利润同比"
+
+
+def test_extract_ir_chatbi_style_works_on_profit_yoy_fixture():
+    """End-to-end: extract_ir on the actual example/profit_yoy.md body returns
+    the 3 IRs we expect (with examples attached)."""
+    md = open("example/profit_yoy.md", encoding="utf-8").read()
+    # Pull the `> 计算:` block out of section 一 / report 1.1
+    body = md.split("### 1.1 整体利润分析", 1)[1].split("<table>", 1)[0]
+    irs = extract_ir(body)
+    assert len(irs) == 3, f"expected 3 IRs, got {len(irs)}: {irs}"
+    by_name = {ir.name: ir for ir in irs}
+    # 2023 has no example; 2024 and 2025 each have one
+    assert by_name["2023利润同比"].examples == []
+    assert len(by_name["2024利润同比"].examples) == 1
+    assert len(by_name["2025利润同比"].examples) == 1

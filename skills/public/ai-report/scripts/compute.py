@@ -46,12 +46,38 @@ class ComputeIR:
     examples: list[dict] = field(default_factory=list)
 
 
-def extract_ir(body: str) -> list[ComputeIR]:
-    """Parse `> 计算:` blocks from report MD body.
+def _parse_example(tail: str) -> dict | None:
+    """Parse `BAS_0263[current=1420, yoy_same=1200] -> 0.1833` into a dict.
 
-    Each block: `> 计算: name = "X", prompt = "Y"[, examples = [...]]`
+    Used by chatbi-report-style `> 计算:` blocks (with `.示例:` suffix).
+    """
+    m = re.match(r"^([A-Z]+_\d+)\s*\[(.*?)\]\s*->\s*(\S+)$", tail)
+    if not m:
+        return None
+    inputs_str = m.group(2)
+    inputs: dict[str, str] = {}
+    for kv in re.findall(r"(\w+)\s*=\s*([^,]+)", inputs_str):
+        inputs[kv[0].strip()] = kv[1].strip()
+    return {"inputs": inputs, "expected": m.group(3)}
+
+
+def extract_ir(body: str) -> list[ComputeIR]:
+    """Parse `> 计算:` blocks. Two accepted forms (回退链):
+
+    1. ai-report 原生单行 JSON-ish (used internally, 更机器友好):
+        > 计算: name = "X", prompt = "Y"[, examples = [...]]
+
+    2. chatbi-report 多行 (user-friendly, 与 input.md 一致):
+        > 计算:
+        >   2023利润同比 = 2023年值减2022年值再除2022年值
+        >   2024利润同比.示例: BAS_0263[2024=1200, 2023=1000] -> 0.2
+
+       `name = prompt` 定义一个新计算列; `<name>.示例: ...` 追加示例
+       (解析为 {inputs: {...}, expected: "..."}).
     """
     irs: list[ComputeIR] = []
+
+    # Form 1: ai-report native single-line
     pattern = re.compile(
         r'>\s*计算:\s*name\s*=\s*"([^"]+)"\s*,\s*prompt\s*=\s*"([^"]+)"(?:\s*,\s*examples\s*=\s*(\[[^\]]*\]))?',
     )
@@ -60,7 +86,38 @@ def extract_ir(body: str) -> list[ComputeIR]:
         import json as _json
         examples = _json.loads(examples_raw) if examples_raw else []
         irs.append(ComputeIR(name=name, prompt=prompt, examples=examples))
-    return irs
+    if irs:
+        return irs
+
+    # Form 2: chatbi-report multi-line `name = prompt` + `.示例: ...` lines
+    compute_match = re.search(
+        r"^>\s*计算:\s*\n(.*?)(?=^>[^ \n]|\Z)", body, re.MULTILINE | re.DOTALL
+    )
+    if not compute_match:
+        return irs
+    by_name: dict[str, ComputeIR] = {}
+    for raw in compute_match.group(1).splitlines():
+        # Block boundary: non-`>` line (e.g. <table>) ends the `> 计算:` block.
+        # Lines that look like `>   <name> = <prompt>` (or `.示例:`) are content.
+        if not raw.lstrip().startswith(">"):
+            break
+        line = raw.lstrip("> ").strip()
+        if not line:
+            continue
+        if ".示例:" in line:
+            head, _, tail = line.partition(".示例:")
+            name = head.strip()
+            ex = _parse_example(tail.strip())
+            if name in by_name and ex is not None:
+                by_name[name].examples.append(ex)
+            continue
+        if "=" not in line:
+            continue
+        name, expr = (s.strip() for s in line.split("=", 1))
+        by_name[name] = ComputeIR(
+            name=name, prompt=f"{name} = {expr}", examples=[],
+        )
+    return list(by_name.values())
 
 
 # ---------- assemble-wide ---------- #
