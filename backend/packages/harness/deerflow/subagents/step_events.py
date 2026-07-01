@@ -18,6 +18,7 @@ the streaming and persistence call sites share one definition of a "step".
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
@@ -74,6 +75,35 @@ def capture_step_message(
     return True
 
 
+def capture_new_step_messages(
+    messages: list[BaseMessage],
+    captured: list[dict[str, Any]],
+    seen_ids: set[str],
+    processed_count: int,
+) -> int:
+    """Capture every step message appended since ``processed_count`` (#3779).
+
+    ``stream_mode="values"`` re-yields the full message history on each chunk,
+    and a single LangGraph super-step can append several messages at once — most
+    importantly one ``ToolMessage`` per tool call when the model emits multiple
+    tool calls in one turn. Capturing only ``messages[-1]`` (the previous
+    behaviour) silently dropped all but the last tool output.
+
+    When the history grew, walk every newly-appended message. When it did not
+    grow, re-examine only the trailing message so an id-less in-place replacement
+    (same length, new content) is still captured — ``capture_step_message``'s
+    dedup makes an unchanged re-yield a no-op. Returns the new cursor.
+    """
+    total = len(messages)
+    if total > processed_count:
+        for message in messages[processed_count:total]:
+            capture_step_message(message, captured, seen_ids)
+        return total
+    if messages:
+        capture_step_message(messages[-1], captured, seen_ids)
+    return max(processed_count, total)
+
+
 def truncate_step_text(text: str, max_chars: int) -> tuple[str, bool]:
     """Return ``(text, truncated)``, clipping to ``max_chars`` when longer."""
     if max_chars >= 0 and len(text) > max_chars:
@@ -98,6 +128,24 @@ def _content_to_text(content: Any) -> str:
     return ""
 
 
+def _bounded_tool_call(call: dict[str, Any], max_chars: int) -> dict[str, Any]:
+    """Return ``{name, args}`` for a captured tool call, capping large args (#3779).
+
+    ``build_subagent_step`` caps the ``text`` field, but tool-call ``args`` were
+    copied verbatim, so a ``write_file``/``bash`` call carrying a big payload (full
+    file contents, a heredoc) produced an unbounded persisted ``subagent.step``
+    row and streamed frame. When the JSON-serialized args exceed ``max_chars`` we
+    replace the structured value with a truncated serialized preview and flag it
+    with ``args_truncated`` — small args stay structured for the card to inspect.
+    """
+    name = call.get("name")
+    args = call.get("args")
+    serialized = args if isinstance(args, str) else json.dumps(args, default=str, ensure_ascii=False)
+    if max_chars >= 0 and len(serialized) > max_chars:
+        return {"name": name, "args": serialized[:max_chars], "args_truncated": True}
+    return {"name": name, "args": args}
+
+
 def build_subagent_step(
     message: dict[str, Any],
     *,
@@ -108,9 +156,10 @@ def build_subagent_step(
     """Build the compact step payload from a captured subagent message dict.
 
     ``kind`` is ``"tool"`` for a ToolMessage (``type == "tool"``) and ``"ai"``
-    otherwise. AI steps carry their ``tool_calls`` (name + args only); tool
-    steps carry the originating ``tool_name``. ``text`` is truncated to
-    ``max_chars`` with the ``truncated`` flag set accordingly.
+    otherwise. AI steps carry their ``tool_calls`` (name + args only, with large
+    args capped to ``max_chars`` — see ``_bounded_tool_call``); tool steps carry
+    the originating ``tool_name``. ``text`` is truncated to ``max_chars`` with the
+    ``truncated`` flag set accordingly.
     """
     kind = "tool" if message.get("type") == "tool" else "ai"
     text, truncated = truncate_step_text(_content_to_text(message.get("content")), max_chars)
@@ -126,7 +175,7 @@ def build_subagent_step(
     if kind == "tool":
         step["tool_name"] = message.get("name")
     else:
-        step["tool_calls"] = [{"name": call.get("name"), "args": call.get("args")} for call in (message.get("tool_calls") or [])]
+        step["tool_calls"] = [_bounded_tool_call(call, max_chars) for call in (message.get("tool_calls") or [])]
 
     return step
 

@@ -15,6 +15,7 @@ from deerflow.subagents.step_events import (
     SUBAGENT_EVENT_CATEGORY,
     SUBAGENT_STEP_MAX_CHARS,
     build_subagent_step,
+    capture_new_step_messages,
     capture_step_message,
     subagent_run_event,
     truncate_step_text,
@@ -148,6 +149,88 @@ def test_capture_ignores_human_message():
 
     assert appended is False
     assert captured == []
+
+
+def test_ai_step_caps_large_tool_call_args():
+    # Regression for #3779: build_subagent_step capped `text` but copied
+    # `tool_calls[].args` verbatim, so a write_file/bash call carrying a big
+    # payload produced an unbounded persisted row. Args must now be capped too.
+    big_payload = "F" * (SUBAGENT_STEP_MAX_CHARS + 4096)
+    message = {
+        "type": "ai",
+        "content": "writing the file",
+        "tool_calls": [
+            {"name": "write_file", "args": {"path": "/mnt/out.txt", "content": big_payload}},
+        ],
+    }
+
+    step = build_subagent_step(message, task_id="t", message_index=1, max_chars=SUBAGENT_STEP_MAX_CHARS)
+
+    call = step["tool_calls"][0]
+    assert call["name"] == "write_file"
+    assert call["args_truncated"] is True
+    # The serialized args are bounded by the same cap the text field uses.
+    assert isinstance(call["args"], str)
+    assert len(call["args"]) == SUBAGENT_STEP_MAX_CHARS
+
+
+def test_ai_step_keeps_small_tool_call_args_structured():
+    message = {
+        "type": "ai",
+        "content": "searching",
+        "tool_calls": [{"name": "web_search", "args": {"query": "deerflow"}}],
+    }
+
+    step = build_subagent_step(message, task_id="t", message_index=1)
+
+    call = step["tool_calls"][0]
+    assert call["args"] == {"query": "deerflow"}
+    assert "args_truncated" not in call
+
+
+def test_capture_new_step_messages_captures_full_multi_tool_tail():
+    # Regression for #3779: a single super-step can append several ToolMessages
+    # (one per tool call in a multi-tool turn). Capturing only messages[-1]
+    # dropped all but the last; the tail walk must capture every new message.
+    captured: list[dict] = []
+    seen: set[str] = set()
+
+    # Chunk 1: human + one AIMessage requesting 3 tool calls.
+    chunk1 = [
+        HumanMessage(content="do work", id="h-1"),
+        AIMessage(content="running tools", id="ai-1"),
+    ]
+    processed = capture_new_step_messages(chunk1, captured, seen, 0)
+    assert processed == 2
+    assert [c["id"] for c in captured] == ["ai-1"]
+
+    # Chunk 2: values-mode re-yields the whole history plus 3 new ToolMessages
+    # appended in one super-step.
+    chunk2 = chunk1 + [
+        ToolMessage(content="r1", tool_call_id="c1", name="web_search", id="tool-1"),
+        ToolMessage(content="r2", tool_call_id="c2", name="read_file", id="tool-2"),
+        ToolMessage(content="r3", tool_call_id="c3", name="web_search", id="tool-3"),
+    ]
+    processed = capture_new_step_messages(chunk2, captured, seen, processed)
+
+    assert processed == 5
+    # All three tool outputs survive, not just the last.
+    assert [c["id"] for c in captured] == ["ai-1", "tool-1", "tool-2", "tool-3"]
+
+
+def test_capture_new_step_messages_is_noop_on_values_reyield():
+    # stream_mode="values" re-yields the same trailing message with unchanged
+    # length; re-processing must not duplicate captures.
+    captured: list[dict] = []
+    seen: set[str] = set()
+    messages = [AIMessage(content="hi", id="ai-1")]
+
+    processed = capture_new_step_messages(messages, captured, seen, 0)
+    assert processed == 1
+    # Same list handed back (no growth) — cursor already at the end.
+    processed = capture_new_step_messages(messages, captured, seen, processed)
+    assert processed == 1
+    assert len(captured) == 1
 
 
 def test_run_event_for_task_started():

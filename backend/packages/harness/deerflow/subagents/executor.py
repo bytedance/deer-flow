@@ -27,7 +27,7 @@ from deerflow.models import create_chat_model
 from deerflow.skills.tool_policy import filter_tools_by_skill_allowed_tools
 from deerflow.skills.types import Skill
 from deerflow.subagents.config import SubagentConfig, resolve_subagent_model_name
-from deerflow.subagents.step_events import capture_step_message
+from deerflow.subagents.step_events import capture_new_step_messages
 from deerflow.subagents.token_collector import SubagentTokenCollector
 from deerflow.tracing import build_tracing_callbacks, inject_langfuse_metadata
 
@@ -534,6 +534,9 @@ class SubagentExecutor:
         # rescanning the append-only ``ai_messages`` list (O(n) per chunk -> O(n^2)
         # over a run, which reaches max_turns=150 for deep-research subagents).
         seen_message_ids: set[str] = {mid for msg in ai_messages if (mid := msg.get("id"))}
+        # Cursor into the append-only message history so each ``values``-mode
+        # chunk only re-scans the newly-appended tail (see capture_new_step_messages).
+        processed_message_count = 0
 
         collector: SubagentTokenCollector | None = None
         try:
@@ -629,13 +632,16 @@ class SubagentExecutor:
 
                 final_state = chunk
 
-                # Capture the latest step message (assistant turn OR tool output)
-                # from the current state. Tool outputs are captured too (#3779) so
-                # the subtask card can show "what each step produced", not just the
-                # tool-call requests. Dedup/serialization live in capture_step_message.
+                # Capture every step message (assistant turns AND tool outputs)
+                # appended since the last chunk. A single super-step can append
+                # several ToolMessages when the model emits multiple tool calls in
+                # one turn, so capturing only messages[-1] would drop all but the
+                # last output (#3779). Dedup/serialization live in capture_step_message.
                 messages = chunk.get("messages", [])
-                if messages and capture_step_message(messages[-1], ai_messages, seen_message_ids):
-                    logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} captured step message #{len(ai_messages)}")
+                previous_count = len(ai_messages)
+                processed_message_count = capture_new_step_messages(messages, ai_messages, seen_message_ids, processed_message_count)
+                if len(ai_messages) > previous_count:
+                    logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} captured {len(ai_messages) - previous_count} step message(s); total #{len(ai_messages)}")
 
             logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} completed async execution")
             token_usage_records = collector.snapshot_records()
