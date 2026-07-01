@@ -65,8 +65,9 @@ The frontend is a stateful chat application. Users create **threads** (conversat
 
 1. User input → thread hooks (`core/threads/hooks.ts`) → LangGraph SDK streaming
 2. Stream events update thread state (messages, artifacts, todos)
-3. TanStack Query manages server state; localStorage stores user settings
-4. Components subscribe to thread state and render updates
+3. Stop actions call the LangGraph SDK stream stop path; `core/threads/hooks.ts` invalidates current-thread, token-usage, and sidebar/search caches immediately and schedules one follow-up refetch because SDK stop may finish via abort + fire-and-forget cancel before backend title finalization commits
+4. TanStack Query manages server state; localStorage stores user settings
+5. Components subscribe to thread state and render updates
 
 ### Key Patterns
 

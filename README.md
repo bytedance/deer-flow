@@ -606,6 +606,8 @@ Tools follow the same philosophy. DeerFlow comes with a core toolset — web sea
 
 Gateway-generated follow-up suggestions now normalize both plain-string model output and block/list-style rich content before parsing the JSON array response, so provider-specific content wrappers do not silently drop suggestions.
 
+Interrupted first-turn runs still persist a fallback conversation title, so stopping a streaming response does not leave the thread as "Untitled" after refresh.
+
 ```
 # Paths inside the sandbox container
 /mnt/skills/public
