@@ -354,3 +354,143 @@ def apply_computed(wide: list[dict], computed: dict[str, list]) -> list[dict]:
                 new_row[col_name] = col_values[i]
         out.append(new_row)
     return out
+
+
+# ---------- CLI entry ---------- #
+
+def main(argv: list[str] | None = None) -> int:
+    """CLI entry for ai-report compute subcommands.
+
+    Subcommands: extract-ir | validate | evaluate | apply-computed
+    Exit codes: 0 = success, 2 = subcommand/arg error, 3 = validate failure.
+    """
+    import argparse
+    import json
+    from pathlib import Path
+
+    parser = argparse.ArgumentParser(prog="compute")
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    p_ei = sub.add_parser("extract-ir")
+    p_ei.add_argument("--parsed", required=True)
+    p_ei.add_argument("--out", required=True)
+
+    p_v = sub.add_parser("validate")
+    p_v.add_argument("--sql", required=True)
+    p_v.add_argument("--wide", required=True)
+    p_v.add_argument("--expected-columns", default="",
+                     help="comma-separated expected output column names")
+    p_v.add_argument("--example-input", default=None)
+    p_v.add_argument("--example-expected", default=None)
+
+    p_ev = sub.add_parser("evaluate")
+    p_ev.add_argument("--sql", required=True)
+    p_ev.add_argument("--wide", required=True)
+    p_ev.add_argument("--name", required=True,
+                      help="output column name to extract from SQL result")
+    p_ev.add_argument("--out", required=True)
+
+    p_ac = sub.add_parser("apply-computed")
+    p_ac.add_argument("--wide", required=True)
+    p_ac.add_argument("--computed", required=True)
+    p_ac.add_argument("--out", required=True)
+
+    args = parser.parse_args(argv)
+
+    if args.cmd == "extract-ir":
+        parsed = json.loads(Path(args.parsed).read_text(encoding="utf-8"))
+        # Collect compute_block_md from all reports (single-section per ai-report v1).
+        body_parts: list[str] = []
+        for sec in parsed.get("sections", []):
+            for rep in sec.get("reports", []):
+                body_parts.append(rep.get("compute_block_md", ""))
+        body = "\n\n".join(p for p in body_parts if p)
+        irs = extract_ir(body)
+        out_payload = [
+            {"name": ir.name, "prompt": ir.prompt, "examples": list(ir.examples)}
+            for ir in irs
+        ]
+        out_path = Path(args.out)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(
+            json.dumps(out_payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        return 0
+
+    if args.cmd == "validate":
+        wide_rows = json.loads(Path(args.wide).read_text(encoding="utf-8"))
+        sql = Path(args.sql).read_text(encoding="utf-8")
+        # Per-call :memory: connection (Phase 1 invariant — DuckDB conn is not thread-safe).
+        conn = _new_conn()
+        try:
+            example_input = (
+                json.loads(Path(args.example_input).read_text(encoding="utf-8"))
+                if args.example_input else None
+            )
+            example_expected = (
+                json.loads(Path(args.example_expected).read_text(encoding="utf-8"))
+                if args.example_expected else None
+            )
+            expected_columns = (
+                [c.strip() for c in args.expected_columns.split(",") if c.strip()]
+                if args.expected_columns else []
+            )
+            # Coerce JSON-decoded numbers back to Decimal for Layer 3 precision check.
+            if isinstance(example_expected, (int, float)):
+                example_expected = Decimal(str(example_expected))
+            result = validate(
+                conn=conn, sql=sql, wide_sample_rows=wide_rows,
+                expected_columns=expected_columns,
+                example_input=example_input, example_expected=example_expected,
+            )
+        except Exception as e:
+            print(f"validate exception: {e}", flush=True)
+            return 3
+        finally:
+            conn.close()
+        if not result.passed:
+            print(f"validate failed at layer {result.layer}: {result.error}", flush=True)
+            return 3
+        return 0
+
+    if args.cmd == "evaluate":
+        wide_rows = json.loads(Path(args.wide).read_text(encoding="utf-8"))
+        sql = Path(args.sql).read_text(encoding="utf-8")
+        values, status = evaluate(sql=sql, wide_rows=wide_rows, column_name=args.name)
+        # Coerce Decimal → str for JSON cleanliness; preserves precision.
+        values_out = [str(v) if isinstance(v, Decimal) else v for v in values]
+        out_path = Path(args.out)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(
+            json.dumps(
+                {"name": args.name, "values": values_out, "status": status},
+                ensure_ascii=False, indent=2,
+            ),
+            encoding="utf-8",
+        )
+        return 0
+
+    if args.cmd == "apply-computed":
+        wide_rows = json.loads(Path(args.wide).read_text(encoding="utf-8"))
+        computed_raw = json.loads(Path(args.computed).read_text(encoding="utf-8"))
+        # computed_raw may be {"name", "values", "status"} (from evaluate) or
+        # a flat {"col_name": [...]} (legacy). Normalize to the flat shape.
+        if isinstance(computed_raw, dict) and "values" in computed_raw and "name" in computed_raw:
+            computed = {computed_raw["name"]: computed_raw["values"]}
+        else:
+            computed = computed_raw
+        updated = apply_computed(wide_rows, computed)
+        out_path = Path(args.out)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(
+            json.dumps(updated, ensure_ascii=False, indent=2, default=str),
+            encoding="utf-8",
+        )
+        return 0
+
+    return 2  # argparse should prevent this
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
