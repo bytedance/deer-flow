@@ -49,8 +49,15 @@ COPY backend ./backend
 # When UV_EXTRAS is set (comma- or whitespace-separated), installs optional dependencies.
 RUN --mount=type=cache,target=/root/.cache/uv \
     sh -c 'cd backend && \
+    set -f; \
     extras_flags=""; \
     for extra in $(printf "%s" "$UV_EXTRAS" | tr "," " "); do \
+        case "$extra" in \
+            [!A-Za-z]* | *[!A-Za-z0-9_-]*) \
+                echo "UV_EXTRAS entry $extra is invalid (must match [A-Za-z][A-Za-z0-9_-]*)" >&2; \
+                exit 1; \
+                ;; \
+        esac; \
         extras_flags="$extras_flags --extra $extra"; \
     done; \
     UV_INDEX_URL=${UV_INDEX_URL:-https://pypi.org/simple} uv sync $extras_flags'
