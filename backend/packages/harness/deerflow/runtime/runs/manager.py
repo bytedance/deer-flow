@@ -624,8 +624,6 @@ class RunManager:
 
             if multitask_strategy == "reject" and inflight:
                 raise ConflictError(f"Thread {thread_id} already has an active run")
-            if any(r.finalizing for r in inflight):
-                raise ConflictError(f"Thread {thread_id} already has an active run")
 
             if multitask_strategy in ("interrupt", "rollback") and inflight:
                 logger.info(
@@ -666,6 +664,8 @@ class RunManager:
 
             if multitask_strategy in ("interrupt", "rollback") and inflight:
                 for r in inflight:
+                    if r.finalizing:
+                        continue
                     r.abort_action = multitask_strategy
                     r.abort_event.set()
                     task_active = r.task is not None and not r.task.done()

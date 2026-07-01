@@ -817,6 +817,55 @@ async def test_interrupted_title_finalization_blocks_new_same_thread_run(monkeyp
 
 
 @pytest.mark.anyio
+async def test_finalizing_run_only_blocks_reject_strategy():
+    """A finalizing run must not break interrupt/rollback superseding semantics."""
+
+    async def _seed_finalizing_run():
+        run_manager = RunManager()
+        record = await run_manager.create("thread-1")
+        release_cleanup = asyncio.Event()
+        cleanup_cancelled = asyncio.Event()
+
+        async def _cleanup_task():
+            try:
+                await release_cleanup.wait()
+            except asyncio.CancelledError:
+                cleanup_cancelled.set()
+                raise
+
+        task = asyncio.create_task(_cleanup_task())
+        record.task = task
+        await run_manager.set_status(record.run_id, RunStatus.interrupted)
+        await run_manager.set_finalizing(record.run_id, True)
+        return run_manager, record, task, release_cleanup, cleanup_cancelled
+
+    for strategy in ("interrupt", "rollback"):
+        run_manager, record, task, release_cleanup, cleanup_cancelled = await _seed_finalizing_run()
+        try:
+            replacement = await run_manager.create_or_reject("thread-1", multitask_strategy=strategy)
+            await asyncio.sleep(0)
+
+            assert replacement.run_id != record.run_id
+            assert record.status == RunStatus.interrupted
+            assert record.finalizing is True
+            assert not cleanup_cancelled.is_set()
+            assert not task.done()
+        finally:
+            release_cleanup.set()
+            with suppress(asyncio.CancelledError):
+                await task
+
+    run_manager, _record, task, release_cleanup, _cleanup_cancelled = await _seed_finalizing_run()
+    try:
+        with pytest.raises(ConflictError, match="active run"):
+            await run_manager.create_or_reject("thread-1", multitask_strategy="reject")
+    finally:
+        release_cleanup.set()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.anyio
 async def test_interrupted_title_does_not_overwrite_checkpoint_from_admitted_replacement(monkeypatch):
     """A replacement run admitted by multitask interrupt must not lose its newer checkpoint."""
     from deerflow.agents.middlewares.title_middleware import TitleMiddleware
@@ -1110,6 +1159,39 @@ async def test_ensure_interrupted_title_bumps_channel_version_and_declares_it_in
     assert written_metadata["step"] == 8
     assert written_metadata["writes"] == {"runtime_interrupt_title": {"title": "Generated Title"}}
     assert write_config == {"configurable": {"thread_id": "thread-1", "checkpoint_ns": ""}}
+
+
+@pytest.mark.anyio
+async def test_ensure_interrupted_title_writes_graph_input_fallback_without_checkpoint(monkeypatch):
+    """When no checkpoint exists, graph_input should still seed the fallback title write."""
+    from deerflow.agents.middlewares.title_middleware import TitleMiddleware
+
+    captured_state: dict[str, Any] = {}
+
+    def _generate(self, state, allow_partial_exchange=False):
+        del self
+        captured_state.update(state)
+        assert allow_partial_exchange is True
+        return {"title": "Graph Input Title"}
+
+    monkeypatch.setattr(TitleMiddleware, "_generate_title_result", _generate)
+
+    checkpointer = _TitleCheckpointer(tuple_value=None)
+
+    title = await _ensure_interrupted_title(
+        checkpointer=checkpointer,
+        thread_id="thread-1",
+        app_config=None,
+        graph_input={"messages": [{"role": "user", "content": "Please name this thread"}]},
+    )
+
+    assert title == "Graph Input Title"
+    assert captured_state["messages"] == [{"role": "user", "content": "Please name this thread"}]
+    checkpointer.aput.assert_awaited_once()
+    _, written_checkpoint, written_metadata, new_versions = checkpointer.aput.await_args.args
+    assert written_checkpoint["channel_values"]["title"] == "Graph Input Title"
+    assert written_metadata["writes"] == {"runtime_interrupt_title": {"title": "Graph Input Title"}}
+    assert set(new_versions.keys()) == {"title"}
 
 
 @pytest.mark.anyio

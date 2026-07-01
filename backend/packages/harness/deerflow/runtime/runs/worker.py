@@ -668,11 +668,16 @@ async def _ensure_interrupted_title(*, checkpointer: Any, thread_id: str, app_co
         if not title:
             return None
 
-        base_identity = _checkpoint_identity(ckpt_tuple, checkpoint)
+        # ``empty_checkpoint()`` creates a fresh id every time; only real tuples
+        # carry an identity stable enough for the stale-snapshot comparison.
+        base_identity = _checkpoint_identity(ckpt_tuple, checkpoint) if ckpt_tuple is not None else None
         latest_tuple = await _call_checkpointer_method(checkpointer, "aget_tuple", "get_tuple", ckpt_config)
         latest_checkpoint = copy.deepcopy(getattr(latest_tuple, "checkpoint", {}) or {}) if latest_tuple is not None else empty_checkpoint()
-        latest_identity = _checkpoint_identity(latest_tuple, latest_checkpoint)
-        if latest_identity != base_identity:
+        latest_identity = _checkpoint_identity(latest_tuple, latest_checkpoint) if latest_tuple is not None else None
+        if base_identity is None:
+            if latest_identity is not None:
+                continue
+        elif latest_identity != base_identity:
             continue
 
         checkpoint = latest_checkpoint
