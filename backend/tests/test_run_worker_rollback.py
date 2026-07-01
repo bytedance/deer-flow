@@ -866,6 +866,106 @@ async def test_finalizing_run_only_blocks_reject_strategy():
 
 
 @pytest.mark.anyio
+async def test_admitted_pending_replacement_does_not_steal_interrupted_title_recovery(monkeypatch):
+    """The old run must still write the fallback title before releasing a serialized replacement."""
+    from deerflow.agents.middlewares.title_middleware import TitleMiddleware
+
+    monkeypatch.setattr(
+        TitleMiddleware,
+        "_generate_title_result",
+        lambda self, state, allow_partial_exchange=False: {"title": "Old Prompt"},
+    )
+
+    initial_checkpoint = {
+        "id": "ckpt-old",
+        "ts": "2026-06-29T00:00:00Z",
+        "channel_values": {"messages": [{"type": "human", "content": "Old prompt"}]},
+        "channel_versions": {"messages": 1},
+    }
+
+    run_manager = RunManager()
+    old_record = await run_manager.create("thread-1")
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+    checkpointer = _TitleCheckpointer(
+        tuple_value=_FakeCheckpointTuple(
+            checkpoint=initial_checkpoint,
+            metadata={"source": "loop", "step": 1},
+            config={
+                "configurable": {
+                    "thread_id": "thread-1",
+                    "checkpoint_ns": "",
+                    "checkpoint_id": "ckpt-old",
+                }
+            },
+        ),
+    )
+
+    old_title_gate_entered = asyncio.Event()
+    release_old_title_gate = asyncio.Event()
+    original_wait_for_prior_finalizing = run_manager.wait_for_prior_finalizing
+
+    async def _wait_for_prior_finalizing(thread_id, run_id, **kwargs):
+        if run_id == old_record.run_id and old_record.status == RunStatus.interrupted and old_record.finalizing:
+            old_title_gate_entered.set()
+            await release_old_title_gate.wait()
+        return await original_wait_for_prior_finalizing(thread_id, run_id, **kwargs)
+
+    run_manager.wait_for_prior_finalizing = _wait_for_prior_finalizing  # type: ignore[method-assign]
+
+    class _AbortingAgent:
+        metadata = {"model_name": "fake-test-model"}
+        checkpointer: Any | None = None
+        store: Any | None = None
+        interrupt_before_nodes = None
+        interrupt_after_nodes = None
+
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            del graph_input, config, stream_mode, subgraphs
+            old_record.abort_event.set()
+            if False:
+                yield  # pragma: no cover
+
+    def factory(*, config):
+        del config
+        return _AbortingAgent()
+
+    old_task = asyncio.create_task(
+        run_agent(
+            bridge,
+            run_manager,
+            old_record,
+            ctx=RunContext(checkpointer=checkpointer),
+            agent_factory=factory,
+            graph_input={"messages": [{"role": "user", "content": "Old prompt"}]},
+            config={},
+        )
+    )
+    old_record.task = old_task
+
+    try:
+        await asyncio.wait_for(old_title_gate_entered.wait(), timeout=1.0)
+        replacement_record = await run_manager.create_or_reject("thread-1", multitask_strategy="interrupt")
+        assert replacement_record.status == RunStatus.pending
+
+        release_old_title_gate.set()
+        await old_task
+    finally:
+        release_old_title_gate.set()
+        if not old_task.done():
+            old_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await old_task
+
+    checkpointer.aput.assert_awaited_once()
+    _, written_checkpoint, _, _ = checkpointer.aput.await_args.args
+    assert written_checkpoint["channel_values"]["title"] == "Old Prompt"
+
+
+@pytest.mark.anyio
 async def test_interrupted_title_does_not_overwrite_checkpoint_from_admitted_replacement(monkeypatch):
     """A replacement run admitted by multitask interrupt must not lose its newer checkpoint."""
     from deerflow.agents.middlewares.title_middleware import TitleMiddleware
@@ -977,6 +1077,7 @@ async def test_interrupted_title_does_not_overwrite_checkpoint_from_admitted_rep
         await asyncio.wait_for(old_agent_started.wait(), timeout=1.0)
         replacement_record = await run_manager.create_or_reject("thread-1", multitask_strategy="interrupt")
         assert replacement_record.run_id != old_record.run_id
+        await run_manager.set_status(replacement_record.run_id, RunStatus.running)
 
         with suppress(asyncio.TimeoutError):
             await asyncio.wait_for(checkpointer.title_write_started.wait(), timeout=0.25)

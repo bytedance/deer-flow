@@ -42,6 +42,9 @@ class _FakeRunManager:
     async def has_later_run(self, *_args, **_kwargs) -> bool:
         return False
 
+    async def has_later_started_run(self, *_args, **_kwargs) -> bool:
+        return False
+
     async def set_status(self, *_args, **_kwargs) -> None:
         return None
 

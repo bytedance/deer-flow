@@ -531,6 +531,18 @@ class RunManager:
                     return True
         return False
 
+    async def has_later_started_run(self, thread_id: str, run_id: str) -> bool:
+        """Return whether a newer same-thread run may have already advanced state."""
+        async with self._lock:
+            seen_current = False
+            for record in self._thread_records_locked(thread_id):
+                if record.run_id == run_id:
+                    seen_current = True
+                    continue
+                if seen_current and (record.status != RunStatus.pending or record.finalizing):
+                    return True
+        return False
+
     async def _persist_model_name(self, run_id: str, model_name: str | None) -> None:
         """Best-effort persist model_name update to the backing store."""
         if self._store is None:

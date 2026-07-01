@@ -416,7 +416,7 @@ async def run_agent(
         if checkpointer is not None and record.status == RunStatus.interrupted:
             try:
                 await run_manager.wait_for_prior_finalizing(thread_id, run_id)
-                if not await run_manager.has_later_run(thread_id, run_id):
+                if not await run_manager.has_later_started_run(thread_id, run_id):
                     await _ensure_interrupted_title(checkpointer=checkpointer, thread_id=thread_id, app_config=ctx.app_config, graph_input=graph_input)
             except Exception:
                 logger.debug("Failed to generate interrupted title for thread %s (non-fatal)", thread_id)

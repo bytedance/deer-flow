@@ -629,6 +629,21 @@ export function invalidateStoppedThreadCaches(
   });
 }
 
+export const STOP_THREAD_FINALIZATION_REFETCH_DELAY_MS = 1500;
+
+function scheduleStoppedThreadFinalizationRefetch(
+  queryClient: QueryClient,
+  threadId: string | null | undefined,
+  isMock = false,
+) {
+  if (isMock) {
+    return;
+  }
+  globalThis.setTimeout(() => {
+    invalidateStoppedThreadCaches(queryClient, threadId, isMock);
+  }, STOP_THREAD_FINALIZATION_REFETCH_DELAY_MS);
+}
+
 export async function stopThreadAndInvalidateCaches(
   queryClient: QueryClient,
   stop: () => Promise<void> | void,
@@ -639,6 +654,7 @@ export async function stopThreadAndInvalidateCaches(
     await stop();
   } finally {
     invalidateStoppedThreadCaches(queryClient, threadId, isMock);
+    scheduleStoppedThreadFinalizationRefetch(queryClient, threadId, isMock);
   }
 }
 
