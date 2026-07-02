@@ -59,6 +59,9 @@ STARTUP_ONLY_FIELDS: dict[str, str] = {
     "channel_connections": (
         "start_channel_service() wires the connection repository and channel workers once at startup, and the channel-connections router caches the merged provider config on app.state; channel_connections.* edits need a restart."
     ),
+    "modules": (
+        "create_app() and langgraph_runtime() mount optional routers and construct module stores once at startup; module gates need a restart."
+    ),
 }
 
 

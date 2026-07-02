@@ -38,6 +38,7 @@ from app.gateway.routers import runs
 from deerflow.config.app_config import AppConfig, reset_app_config, set_app_config
 from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
 from deerflow.runtime import ConflictError
+from deerflow.runtime.workflows.store.memory import MemoryWorkflowStore
 
 USER_A = User(email="owner-a@example.com", password_hash="x", system_role="user", id=uuid4())
 USER_B = User(email="intruder-b@example.com", password_hash="x", system_role="user", id=uuid4())
@@ -84,6 +85,7 @@ def _client(user):
     app.state.store = MagicMock()
     app.state.run_events_config = None
     app.state.run_event_store = MagicMock()
+    app.state.workflow_store = MemoryWorkflowStore()
     run_manager = MagicMock()
     run_manager.create_or_reject = AsyncMock(side_effect=ConflictError("sentinel: owner check passed"))
     app.state.run_manager = run_manager

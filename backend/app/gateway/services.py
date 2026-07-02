@@ -20,7 +20,7 @@ from langchain_core.messages import BaseMessage
 from langchain_core.messages.utils import convert_to_messages
 from langgraph.types import Command
 
-from app.gateway.deps import get_checkpointer, get_run_context, get_run_manager, get_stream_bridge
+from app.gateway.deps import get_checkpointer, get_run_context, get_run_manager, get_stream_bridge, get_workflow_store
 from app.gateway.internal_auth import INTERNAL_SYSTEM_ROLE, get_trusted_internal_owner_user_id
 from app.gateway.utils import sanitize_log_param
 from deerflow.config.app_config import get_app_config
@@ -353,6 +353,189 @@ async def apply_checkpoint_to_run_config(
 # ---------------------------------------------------------------------------
 
 
+def _request_workflow_idempotency_key(request: Request) -> str | None:
+    return request.headers.get("Idempotency-Key") or request.headers.get("X-Idempotency-Key")
+
+
+def _request_user_id(request: Request, owner_user_id: str | None) -> str | None:
+    if owner_user_id:
+        return owner_user_id
+    user = getattr(request.state, "user", None)
+    user_id = getattr(user, "id", None)
+    return str(user_id) if user_id is not None else None
+
+
+def _workflow_kind_for_run(body: Any) -> str:
+    command = getattr(body, "command", None)
+    if isinstance(command, Mapping) and command.get("resume") is not None:
+        return "resume"
+    return "message"
+
+
+def _auto_workflow_envelopes_enabled() -> bool:
+    modules = get_app_config().modules
+    return modules.durable_workflows.enabled and modules.durable_workflows.auto_envelope_for_runs
+
+
+async def _create_run_workflow(body: Any, thread_id: str, request: Request, *, owner_user_id: str | None) -> dict[str, Any]:
+    workflow_store = get_workflow_store(request)
+    idempotency_key = _request_workflow_idempotency_key(request)
+    external_message_ref = request.headers.get("X-External-Message-Ref")
+    route_path = str(getattr(getattr(request, "url", None), "path", None) or "/api/runs")
+    method = str(getattr(request, "method", None) or "POST")
+    workflow, created = await workflow_store.create_or_get(
+        workflow_kind=_workflow_kind_for_run(body),
+        source_type="api",
+        source=route_path,
+        idempotency_key=idempotency_key,
+        external_message_ref=external_message_ref,
+        conversation_ref=thread_id,
+        thread_ref=thread_id,
+        sender_ref=_request_user_id(request, owner_user_id),
+        user_id=_request_user_id(request, owner_user_id),
+        thread_id=thread_id,
+        status="received",
+        metadata={
+            "assistant_id": getattr(body, "assistant_id", None),
+            "route": route_path,
+            "method": method,
+        },
+    )
+    if not created and workflow.get("run_id"):
+        await workflow_store.append_event(
+            workflow["workflow_id"],
+            event_type="workflow.deduped",
+            idempotency_key=idempotency_key,
+            metadata={"existing_run_id": workflow.get("run_id")},
+        )
+        raise HTTPException(
+            status_code=409,
+            detail=f"Workflow {workflow['workflow_id']} is already bound to run {workflow['run_id']}",
+        )
+
+    await workflow_store.append_event(
+        workflow["workflow_id"],
+        event_type="workflow.received" if created else "workflow.deduped",
+        idempotency_key=idempotency_key,
+        content={"thread_id": thread_id, "source": route_path},
+    )
+    return workflow
+
+
+async def _mark_run_workflow_failed(request: Request, workflow_id: str, *, error: str) -> None:
+    workflow_store = get_workflow_store(request)
+    await workflow_store.update_status(workflow_id, "failed", error=error)
+    await workflow_store.append_event(workflow_id, event_type="workflow.failed", metadata={"error": error})
+
+
+async def _bind_run_workflow(
+    request: Request,
+    workflow_id: str,
+    *,
+    thread_id: str,
+    run_id: str,
+    checkpoint_ns: str | None,
+    checkpoint_id: str | None,
+) -> None:
+    workflow_store = get_workflow_store(request)
+    await workflow_store.bind_runtime(
+        workflow_id,
+        thread_id=thread_id,
+        run_id=run_id,
+        checkpoint_ns=checkpoint_ns,
+        checkpoint_id=checkpoint_id,
+        status="run_created",
+    )
+    await workflow_store.append_event(
+        workflow_id,
+        event_type="workflow.run_created",
+        category="runtime",
+        thread_id=thread_id,
+        run_id=run_id,
+        checkpoint_ns=checkpoint_ns,
+        checkpoint_id=checkpoint_id,
+    )
+
+
+def _workflow_status_for_run_status(status: RunStatus) -> tuple[str, str] | None:
+    if status == RunStatus.running:
+        return "running", "workflow.run_started"
+    if status == RunStatus.success:
+        return "succeeded", "workflow.succeeded"
+    if status in (RunStatus.error, RunStatus.timeout):
+        return "failed", "workflow.failed"
+    if status == RunStatus.interrupted:
+        return "cancelled", "workflow.cancelled"
+    return None
+
+
+async def _project_run_workflow_status(
+    request: Request,
+    workflow_id: str,
+    record: RunRecord,
+    *,
+    status: str,
+    event_type: str,
+    error: str | None = None,
+) -> None:
+    workflow_store = get_workflow_store(request)
+    metadata = {"run_status": record.status.value}
+    if error:
+        metadata["error"] = error
+    await workflow_store.update_status(workflow_id, status, error=error, metadata=metadata)
+    await workflow_store.append_event(
+        workflow_id,
+        event_type=event_type,
+        category="runtime",
+        thread_id=record.thread_id,
+        run_id=record.run_id,
+        metadata=metadata,
+    )
+
+
+async def _run_agent_with_workflow_projection(
+    request: Request,
+    workflow_id: str,
+    bridge: StreamBridge,
+    run_mgr: RunManager,
+    record: RunRecord,
+    **run_agent_kwargs: Any,
+) -> None:
+    await _project_run_workflow_status(
+        request,
+        workflow_id,
+        record,
+        status="running",
+        event_type="workflow.run_started",
+    )
+    escaped_error: BaseException | None = None
+    try:
+        await run_agent(bridge, run_mgr, record, **run_agent_kwargs)
+    except BaseException as exc:
+        escaped_error = exc
+        raise
+    finally:
+        projection = _workflow_status_for_run_status(record.status)
+        if escaped_error is not None and projection is None:
+            await _project_run_workflow_status(
+                request,
+                workflow_id,
+                record,
+                status="failed",
+                event_type="workflow.failed",
+                error=str(escaped_error),
+            )
+        elif projection is not None and projection[0] != "running":
+            await _project_run_workflow_status(
+                request,
+                workflow_id,
+                record,
+                status=projection[0],
+                event_type=projection[1],
+                error=record.error,
+            )
+
+
 async def start_run(
     body: Any,
     thread_id: str,
@@ -417,6 +600,11 @@ async def start_run(
         if not allowed:
             raise HTTPException(status_code=404, detail=f"Thread {thread_id} not found")
 
+    workflow_id: str | None = None
+    if _auto_workflow_envelopes_enabled():
+        workflow = await _create_run_workflow(body, thread_id, request, owner_user_id=owner_user_id)
+        workflow_id = workflow["workflow_id"]
+
     owner_context_token = set_current_user(SimpleNamespace(id=owner_user_id)) if owner_user_id else None
     try:
         try:
@@ -431,8 +619,12 @@ async def start_run(
                 user_id=owner_user_id,
             )
         except ConflictError as exc:
+            if workflow_id is not None:
+                await _mark_run_workflow_failed(request, workflow_id, error=str(exc))
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         except UnsupportedStrategyError as exc:
+            if workflow_id is not None:
+                await _mark_run_workflow_failed(request, workflow_id, error=str(exc))
             raise HTTPException(status_code=501, detail=str(exc)) from exc
 
         # Upsert thread metadata so the thread appears in /threads/search,
@@ -465,6 +657,16 @@ async def start_run(
             graph_input = normalize_input(body.input)
         config = build_run_config(thread_id, body.config, body.metadata, assistant_id=body.assistant_id)
         await apply_checkpoint_to_run_config(config, body=body, thread_id=thread_id, request=request)
+        configurable = config.get("configurable", {}) if isinstance(config, dict) else {}
+        if workflow_id is not None:
+            await _bind_run_workflow(
+                request,
+                workflow_id,
+                thread_id=thread_id,
+                run_id=record.run_id,
+                checkpoint_ns=str(configurable.get("checkpoint_ns")) if configurable.get("checkpoint_ns") is not None else None,
+                checkpoint_id=str(configurable.get("checkpoint_id")) if configurable.get("checkpoint_id") is not None else None,
+            )
 
         # Merge DeerFlow-specific context overrides into both ``configurable`` and ``context``.
         # The ``context`` field is a custom extension for the langgraph-compat layer
@@ -475,21 +677,36 @@ async def start_run(
 
         stream_modes = normalize_stream_modes(body.stream_mode)
 
-        task = asyncio.create_task(
-            run_agent(
-                bridge,
-                run_mgr,
-                record,
-                ctx=run_ctx,
-                agent_factory=agent_factory,
-                graph_input=graph_input,
-                config=config,
-                stream_modes=stream_modes,
-                stream_subgraphs=body.stream_subgraphs,
-                interrupt_before=body.interrupt_before,
-                interrupt_after=body.interrupt_after,
-            )
+        run_agent_kwargs = dict(
+            ctx=run_ctx,
+            agent_factory=agent_factory,
+            graph_input=graph_input,
+            config=config,
+            stream_modes=stream_modes,
+            stream_subgraphs=body.stream_subgraphs,
+            interrupt_before=body.interrupt_before,
+            interrupt_after=body.interrupt_after,
         )
+        if workflow_id is not None:
+            task = asyncio.create_task(
+                _run_agent_with_workflow_projection(
+                    request,
+                    workflow_id,
+                    bridge,
+                    run_mgr,
+                    record,
+                    **run_agent_kwargs,
+                )
+            )
+        else:
+            task = asyncio.create_task(
+                run_agent(
+                    bridge,
+                    run_mgr,
+                    record,
+                    **run_agent_kwargs,
+                )
+            )
         record.task = task
 
         # Title sync is handled by worker.py's finally block which reads the
