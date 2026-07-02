@@ -18,7 +18,7 @@
 | LLM 层：生成 section 描述 | lead agent in-turn | prompts/description_gen.md | `description.<slug>.txt` 写到 design.md |
 | 确定性层：lint / parse / sqlbot query / assemble-wide / extract-ir / validate / evaluate / apply-computed / unit_convert / render | `scripts/*.py` CLI（纯 bash 调用，零 LLM） | scripts/ | DuckDB 5 张表 + design.md 回填 + 整本 report.md / report.docx |
 
-**技术栈：** Python 3.12，`httpx`（HTTP 客户端），`duckdb`（数据层 + 计算列引擎），`python-docx`（DOCX 渲染），`decimal.Decimal`（单位运算），`json`/`dataclasses`/`re`/`html.parser`/`hashlib`/`uuid`（解析、校验、ID 生成），`pytest`（单元 + 集成测试，使用 `unittest.mock.patch` 隔离 HTTP）。`httpx` / `duckdb` / `python-docx` 通过 `pyproject.toml` 添加到 ai-report skill 的 `dependencies` 块（deerflow-harness 已有这些 transitive dependencies 的话也可复用）。`pathlib` / 标准库为主。**无 pandas**。
+**技术栈：** Python 3.12，`httpx`（HTTP 客户端），`duckdb`（数据层 + 计算列引擎），`python-docx`（DOCX 渲染），`decimal.Decimal`（单位运算），`json`/`dataclasses`/`re`/`html.parser`/`hashlib`/`uuid`（解析、校验、ID 生成），`pytest`（单元 + 集成测试，使用 `unittest.mock.patch` 隔离 HTTP）。`httpx` / `duckdb` / `python-docx` 沿用 deerflow-harness 已声明的 transitive dependencies，ai-report skill 直接复用，不另声明。`pathlib` / 标准库为主。**无 pandas**。
 
 **规格说明：** `docx/superpowers/specs/2026-06-30-ai-report-design.md`（5 章节 16 节 + 16 决策日志 + 12 non-goals）
 
@@ -1032,7 +1032,7 @@ git commit -m "feat(ai-report): add md_lint.py with per-section LintReport"
 
 **接口：**
 - 消费：`db_path: str`（默认 `/mnt/ai-report-data/duckdb/ai-report.duckdb`，测试用 `:memory:` 或 tmpdir）
-- 产出：`Store` 类，方法：`open()`, `init_schema()`, `upsert_report(report_id, title, source_md_path, source_md_hash)`, `upsert_section(report_id, section_order, section_title) -> section_id`, `upsert_table(report_id, section_id, table_order, table_title, source_md_snapshot, source_md_hash, parsed_payload) -> table_id`, `get_report_meta(report_id)`, `get_table(table_id)`, `insert_metric_facts(run_id, table_id, report_id, facts: list[dict])`, `get_metric_facts(run_id, table_id) -> list[dict]`, `save_approved_run(run_id, table_id, report_id, section_id, wide_table, computed_columns, descriptions, status, sentinels, runlog_markdown, design_md_path)`, `list_approved_tables(report_id) -> list[dict]`, `get_approved_run(table_id) -> dict | None`
+- 产出：`Store` 类，方法：`open()`, `init_schema()`, `upsert_report(report_id, title, source_md_path, source_md_hash)`, `upsert_section(report_id, section_order, section_title) -> section_id`, `upsert_table(report_id, section_id, table_order, table_title, source_md_snapshot, source_md_hash, parsed_payload) -> table_id`, `get_report_meta(report_id)`, `get_table(table_id)`, `insert_metric_facts(run_id, table_id, report_id, facts: list[dict])`, `get_metric_facts(run_id, table_id) -> list[dict]`, `save_approved_run(run_id, table_id, report_id, section_id, wide_table, computed_columns, descriptions, status, sentinels, runlog_markdown, design_md_path)`, `list_approved_tables(report_id) -> list[dict]`, `get_approved_run(table_id) -> dict | None`, `list_tables_by_section(section_id) -> list[dict]` (Phase 1 fix: 替代直接访问 `store.conn`，封装 FK 查询)
 
 `report_id` = `sha256(source_md_path)[:16]`；`run_id` = `uuid.uuid4().hex`；`section_id` = `f"{report_id}_s{section_order:02d}"`；`table_id` = `f"{section_id}_t{table_order:02d}"`。
 
@@ -1080,6 +1080,16 @@ def test_upsert_table_id_naming(store):
     sid = store.upsert_section(rid, 0, "s")
     tid = store.upsert_table(rid, sid, 0, "table", "md", "h", {"x": 1})
     assert tid == "rid_s00_t00"
+
+
+def test_list_tables_by_section_returns_ordered(store):
+    rid = store.upsert_report("rid", "t", "/x", "h")
+    sid = store.upsert_section(rid, 0, "s")
+    store.upsert_table(rid, sid, 0, "table0", "md", "h", {})
+    store.upsert_table(rid, sid, 1, "table1", "md", "h", {})
+    tables = store.list_tables_by_section(sid)
+    assert [t["table_id"] for t in tables] == ["rid_s00_t00", "rid_s00_t01"]
+    assert [t["table_order"] for t in tables] == [0, 1]
 
 
 def test_run_id_history_preserved(store):
@@ -1316,6 +1326,19 @@ def get_approved_run(self, table_id: str) -> dict | None:
     return dict(zip(cols, row))
 
 
+def list_tables_by_section(self, section_id: str) -> list[dict]:
+    """Return report_tables rows for a section, ordered by table_order.
+
+    Phase 1 fix: 封装 FK 查询, 替代 DesignPipeline.run_report 里直接 store.conn.execute(...) 的反模式.
+    """
+    rows = self.conn.execute(
+        "SELECT * FROM report_tables WHERE section_id=? ORDER BY table_order",
+        [section_id],
+    ).fetchall()
+    cols = [d[0] for d in self.conn.description]
+    return [dict(zip(cols, r)) for r in rows]
+
+
 # 把方法绑到 Store 类
 Store.upsert_report = upsert_report
 Store.upsert_section = upsert_section
@@ -1327,6 +1350,7 @@ Store.get_metric_facts = get_metric_facts
 Store.save_approved_run = save_approved_run
 Store.list_approved_tables = list_approved_tables
 Store.get_approved_run = get_approved_run
+Store.list_tables_by_section = list_tables_by_section
 
 
 _SCHEMA_SQL = """
@@ -1634,7 +1658,7 @@ git commit -m "feat(ai-report): add sqlbot_client.py with httpx + mock fixture"
 
 **接口：**
 - 消费：parsed_payload（`headers: list[list[Th]]`）+ wide_table（list of dicts with key=`idx_id@period`）
-- 产出：`generate_update_sql(parsed_headers, target_table='wide') -> str` 返回多行 `UPDATE wide SET <col> = <col> * 100 / 10000 / 100000000` SQL（按列拼, 基础列 vs 计算列语义不同）
+- 产出：`generate_update_sql(parsed_headers, target_table='wide') -> list[str]` 返回 `UPDATE <table> SET <col> = <col> * 100 / 10000 / 100000000` SQL 语句**列表**（每元素一句完整 UPDATE，含尾 `;`，按列拼，基础列 vs 计算列语义不同；Phase 1 fix: caller 不再 split）
 
 源单位 = 元固定。目标单位 ∈ {元, 万元, 亿元, %}。基础列换算:元→目标除以 10^N；计算列:目标=%,则 `* 100`(基础列不应用 % 换算)。
 
@@ -1665,40 +1689,40 @@ def _th(text, data_unit=None, is_computed=False, idx_id=None, period=None):
 
 def test_yuan_target_emits_no_update():
     headers = [[_th("col", data_unit="元", idx_id="A", period="202603")]]
-    sql = generate_update_sql(headers, target_table="wide")
-    assert sql.strip() == ""
+    sql = "\n".join(generate_update_sql(headers, target_table="wide"))
+    assert sql == ""
 
 
 def test_wan_target_emits_divide_10000():
     headers = [[_th("col", data_unit="万元", idx_id="A", period="202603")]]
-    sql = generate_update_sql(headers, target_table="wide")
+    sql = "\n".join(generate_update_sql(headers, target_table="wide"))
     assert "wide" in sql
     assert "/ 10000" in sql
 
 
 def test_yi_target_emits_divide_100000000():
     headers = [[_th("col", data_unit="亿元", idx_id="A", period="202603")]]
-    sql = generate_update_sql(headers, target_table="wide")
+    sql = "\n".join(generate_update_sql(headers, target_table="wide"))
     assert "/ 100000000" in sql
 
 
 def test_percent_target_on_computed_emits_multiply_100():
     headers = [[_th("ratio", data_unit="%", is_computed=True, idx_id=None, period="202603")]]
-    sql = generate_update_sql(headers, target_table="wide")
+    sql = "\n".join(generate_update_sql(headers, target_table="wide"))
     assert "* 100" in sql
 
 
 def test_percent_target_on_basic_emits_no_update():
     # 基础列不应用 % 换算 (Phase 1 政策)
     headers = [[_th("col", data_unit="%", is_computed=False, idx_id="A", period="202603")]]
-    sql = generate_update_sql(headers, target_table="wide")
-    assert sql.strip() == ""
+    sql = "\n".join(generate_update_sql(headers, target_table="wide"))
+    assert sql == ""
 
 
 def test_unknown_unit_emits_no_update():
     headers = [[_th("col", data_unit="千美元", idx_id="A", period="202603")]]
-    sql = generate_update_sql(headers, target_table="wide")
-    assert sql.strip() == ""
+    sql = "\n".join(generate_update_sql(headers, target_table="wide"))
+    assert sql == ""
 
 
 def test_mixed_columns_emits_multiple_updates():
@@ -1707,7 +1731,7 @@ def test_mixed_columns_emits_multiple_updates():
         [_th("b", data_unit="元", idx_id="B", period="202603")],
         [_th("c", data_unit="%", is_computed=True, idx_id=None)],
     ]
-    sql = generate_update_sql(headers, target_table="wide")
+    sql = "\n".join(generate_update_sql(headers, target_table="wide"))
     assert "/ 10000" in sql
     assert "* 100" in sql
     # 元 不出现在 SQL 中
@@ -1716,7 +1740,7 @@ def test_mixed_columns_emits_multiple_updates():
 
 def test_columns_keyed_by_idx_at_period():
     headers = [[_th("a", data_unit="万元", idx_id="BAS_001", period="202603")]]
-    sql = generate_update_sql(headers, target_table="wide")
+    sql = "\n".join(generate_update_sql(headers, target_table="wide"))
     # column key in wide table
     assert "BAS_001@202603" in sql
 ```
@@ -1744,11 +1768,13 @@ BASIC_FACTORS = {"万元": "/ 10000", "亿元": "/ 100000000"}
 COMPUTED_FACTORS = {"%": "* 100"}
 
 
-def generate_update_sql(headers: list[list], target_table: str = "wide") -> str:
+def generate_update_sql(headers: list[list], target_table: str = "wide") -> list[str]:
     """Generate DuckDB UPDATE statements for unit conversion.
 
     headers: list[list[Th]]; flatten unique (idx_id, period) per leaf column.
     Computed columns: key by Th.text.
+    Returns: list of SQL statements (one per column to convert); empty list if nothing.
+    Phase 1 fix: caller 拿到 list[str] 直接逐句 execute, 不再 split(";") (避免字符串字面量误切).
     """
     seen: set[str] = set()
     statements: list[str] = []
@@ -1773,7 +1799,7 @@ def generate_update_sql(headers: list[list], target_table: str = "wide") -> str:
             statements.append(
                 f"UPDATE {target_table} SET \"{col_key}\" = \"{col_key}\" {factor_expr};"
             )
-    return "\n".join(statements)
+    return statements
 ```
 
 - [ ] **步骤 4：跑测试，确认通过**
@@ -1967,29 +1993,41 @@ git commit -m "feat(ai-report): compute.py assemble-wide (DuckDB PIVOT) + extrac
 在 `test_compute.py` 追加：
 
 ```python
+import duckdb
+import pytest
+
 from compute import ValidationResult, validate
 
 
-def test_validate_explain_fails_on_broken_sql():
-    res = validate("SELECT * FORM wide", [], ["branch_num"], None, None)
+@pytest.fixture
+def conn():
+    """Phase 1 fix: validate() 不再自建 :memory: 连接, 测试用 fixture 注入."""
+    c = duckdb.connect(":memory:")
+    yield c
+    c.close()
+
+
+def test_validate_explain_fails_on_broken_sql(conn):
+    res = validate(conn, "SELECT * FORM wide", [], ["branch_num"], None, None)
     assert res.passed is False
     assert res.layer == "explain"
 
 
-def test_validate_from_wide_fails_when_no_from_wide():
-    res = validate("SELECT 1 AS x", [{"branch_num": "1"}], ["branch_num", "x"], None, None)
+def test_validate_from_wide_fails_when_no_from_wide(conn):
+    res = validate(conn, "SELECT 1 AS x", [{"branch_num": "1"}], ["branch_num", "x"], None, None)
     assert res.passed is False
     assert res.layer == "from_wide"
 
 
-def test_validate_branch_num_fails_when_no_branch_num():
-    res = validate("SELECT 1 AS x FROM wide", [{"branch_num": "1"}], ["x"], None, None)
+def test_validate_branch_num_fails_when_no_branch_num(conn):
+    res = validate(conn, "SELECT 1 AS x FROM wide", [{"branch_num": "1"}], ["x"], None, None)
     assert res.passed is False
     assert res.layer == "branch_num"
 
 
-def test_validate_smoke_passes_on_simple_select():
+def test_validate_smoke_passes_on_simple_select(conn):
     res = validate(
+        conn,
         "SELECT branch_num, 1 AS x FROM wide",
         [{"branch_num": "1"}, {"branch_num": "2"}, {"branch_num": "3"}],
         ["branch_num", "x"],
@@ -1999,8 +2037,9 @@ def test_validate_smoke_passes_on_simple_select():
     assert res.layer == "all"
 
 
-def test_validate_example_passes_when_close():
+def test_validate_example_passes_when_close(conn):
     res = validate(
+        conn,
         "SELECT branch_num, 2.0 AS x FROM wide",
         [{"branch_num": "1"}],
         ["branch_num", "x"],
@@ -2031,78 +2070,91 @@ class ValidationResult:
 
 
 def validate(
+    conn: duckdb.DuckDBPyConnection,
     sql: str,
     wide_sample_rows: list[dict],
     expected_columns: list[str],
     example_input: dict | None,
     example_expected: float | None,
 ) -> ValidationResult:
-    """5-layer validation. 无 keyword blacklist (Phase 1 政策)."""
-    conn = duckdb.connect(":memory:")
-    # 第 1 层: EXPLAIN
+    """5-layer validation. 无 keyword blacklist (Phase 1 政策).
+    conn: caller-provided DuckDB connection (typically Store.conn).
+    Phase 1 fix: 不再 duckdb.connect(":memory:") per call; sample rows 灌入 wide_validate TEMP TABLE,
+    执行时把 SQL 里的 'FROM wide' 替换为 'FROM wide_validate' 以隔离 caller schema (不和 run_section Step 10 的 'wide' 冲突).
+    """
     try:
-        conn.execute(f"EXPLAIN {sql}")
-    except Exception as e:
-        return ValidationResult(False, "explain", str(e))
-
-    # 第 2 层: FROM wide
-    upper = sql.upper()
-    if "FROM WIDE" not in upper:
-        return ValidationResult(False, "from_wide", "SQL must contain 'FROM wide'")
-
-    # 第 3 层: branch_num 输出
-    if "BRANCH_NUM" not in upper:
-        return ValidationResult(False, "branch_num", "SQL must SELECT branch_num")
-
-    # 建临时 wide 表, 灌入 sample rows
-    if wide_sample_rows:
-        cols = list(wide_sample_rows[0].keys())
-        col_defs = ", ".join(f'"{c}" VARCHAR' for c in cols)
-        conn.execute(f"CREATE TABLE wide ({col_defs})")
-        for row in wide_sample_rows:
-            conn.execute(
-                f"INSERT INTO wide VALUES ({', '.join(['?'] * len(cols))})",
-                [str(row.get(c, "")) for c in cols],
-            )
-    else:
-        conn.execute("CREATE TABLE wide (branch_num VARCHAR)")
-
-    # 第 4 层: smoke (SAMPLE 3 rows)
-    try:
-        smoke_sql = f"SELECT * FROM ({sql}) USING SAMPLE 3 ROWS"
-        result = conn.execute(smoke_sql).fetchall()
-        if not result:
-            return ValidationResult(False, "smoke", "SAMPLE 3 ROWS returned no rows")
-    except Exception as e:
-        return ValidationResult(False, "smoke", str(e))
-
-    # 第 4.5 层: 输出列 ⊇ expected_columns (excluding branch_num 在 index 0)
-    if expected_columns:
-        cols_returned = [d[0] for d in conn.description]
-        missing = [c for c in expected_columns[1:] if c not in cols_returned]
-        if missing:
-            return ValidationResult(False, "columns", f"missing output columns: {missing}")
-
-    # 第 5 层: example (math.isclose)
-    if example_input is not None and example_expected is not None:
+        # 第 1 层: EXPLAIN
         try:
-            target_branch = example_input.get("branch_num", "")
-            row = conn.execute(
-                f"SELECT * FROM ({sql}) WHERE branch_num=? LIMIT 1", [target_branch]
-            ).fetchone()
-            if not row:
-                return ValidationResult(False, "example", f"no row for branch_num={target_branch}")
-            # 找到 example_expected 对应的列: 期望 expected_columns 第二个 (index 1)
-            actual = row[1] if len(row) > 1 else None
-            if actual is None:
-                return ValidationResult(False, "example", "actual value is None")
-            import math
-            if not math.isclose(float(actual), float(example_expected), rel_tol=1e-3):
-                return ValidationResult(False, "example", f"expected {example_expected}, got {actual}")
+            conn.execute(f"EXPLAIN {sql}")
         except Exception as e:
-            return ValidationResult(False, "example", str(e))
+            return ValidationResult(False, "explain", str(e))
 
-    return ValidationResult(True, "all", None)
+        # 第 2 层: FROM wide (text check, 校验 LLM 输出含 wide 引用)
+        upper = sql.upper()
+        if "FROM WIDE" not in upper:
+            return ValidationResult(False, "from_wide", "SQL must contain 'FROM wide'")
+
+        # 第 3 层: branch_num 输出
+        if "BRANCH_NUM" not in upper:
+            return ValidationResult(False, "branch_num", "SQL must SELECT branch_num")
+
+        # 建 TEMP TABLE wide_validate, 灌入 sample rows
+        if wide_sample_rows:
+            cols = list(wide_sample_rows[0].keys())
+            col_defs = ", ".join(f'"{c}" VARCHAR' for c in cols)
+            conn.execute(f"CREATE TEMP TABLE wide_validate ({col_defs})")
+            for row in wide_sample_rows:
+                conn.execute(
+                    f"INSERT INTO wide_validate VALUES ({', '.join(['?'] * len(cols))})",
+                    [str(row.get(c, "")) for c in cols],
+                )
+        else:
+            conn.execute("CREATE TEMP TABLE wide_validate (branch_num VARCHAR)")
+
+        # 执行 SQL 用 wide_validate 替换 wide (隔离 caller 命名空间)
+        exec_sql = sql.replace("FROM wide", "FROM wide_validate").replace("from wide", "from wide_validate")
+
+        # 第 4 层: smoke (SAMPLE 3 rows)
+        try:
+            smoke_sql = f"SELECT * FROM ({exec_sql}) USING SAMPLE 3 ROWS"
+            result = conn.execute(smoke_sql).fetchall()
+            if not result:
+                return ValidationResult(False, "smoke", "SAMPLE 3 ROWS returned no rows")
+        except Exception as e:
+            return ValidationResult(False, "smoke", str(e))
+
+        # 第 4.5 层: 输出列 ⊇ expected_columns (excluding branch_num 在 index 0)
+        if expected_columns:
+            cols_returned = [d[0] for d in conn.description]
+            missing = [c for c in expected_columns[1:] if c not in cols_returned]
+            if missing:
+                return ValidationResult(False, "columns", f"missing output columns: {missing}")
+
+        # 第 5 层: example (math.isclose)
+        if example_input is not None and example_expected is not None:
+            try:
+                target_branch = example_input.get("branch_num", "")
+                row = conn.execute(
+                    f"SELECT * FROM ({exec_sql}) WHERE branch_num=? LIMIT 1", [target_branch]
+                ).fetchone()
+                if not row:
+                    return ValidationResult(False, "example", f"no row for branch_num={target_branch}")
+                actual = row[1] if len(row) > 1 else None
+                if actual is None:
+                    return ValidationResult(False, "example", "actual value is None")
+                import math
+                if not math.isclose(float(actual), float(example_expected), rel_tol=1e-3):
+                    return ValidationResult(False, "example", f"expected {example_expected}, got {actual}")
+            except Exception as e:
+                return ValidationResult(False, "example", str(e))
+
+        return ValidationResult(True, "all", None)
+    finally:
+        # 清理 TEMP TABLE (避免 store.conn 长生命周期泄漏)
+        try:
+            conn.execute("DROP TABLE IF EXISTS wide_validate")
+        except Exception:
+            pass
 ```
 
 - [ ] **步骤 4：跑测试，确认通过（5+3=8 个 test 全部 PASS）**
@@ -3140,7 +3192,7 @@ class DesignPipeline:
         computed: dict[str, list] = {}
         for ir in irs:
             sql = _llm_codegen(ir, wide[:3])
-            vr = validate(sql, wide, ["branch_num", ir.name],
+            vr = validate(self.store.conn, sql, wide, ["branch_num", ir.name],
                           example_input=ir.examples[0] if ir.examples else None,
                           example_expected=ir.examples[0].get("value") if ir.examples else None)
             if not vr.passed:
@@ -3150,24 +3202,51 @@ class DesignPipeline:
             computed[ir.name] = values
         wide = apply_computed(wide, computed)
 
-        # Step 10: unit_convert
+        # Step 10: unit_convert (Phase 1 fix: 复用 self.store.conn, 数值列 DECIMAL(38,10) 保证精度, list[str] 不 split)
         if wide and "compute_block_md" in parsed:
-            unit_sql = generate_update_sql(parsed.get("headers_2d", []))
-            if unit_sql:
-                import duckdb
-                conn = duckdb.connect(":memory:")
+            unit_stmts = generate_update_sql(parsed.get("headers_2d", []))
+            if unit_stmts:
                 cols = list(wide[0].keys())
-                conn.execute(f"CREATE TABLE wide ({', '.join(f'\"{c}\" VARCHAR' for c in cols)})")
+                # 推断列类型: 全数值 → DECIMAL(38,10), 含哨兵 → VARCHAR (后续读回时回填)
+                def _col_def(c: str) -> str:
+                    vals = [r.get(c) for r in wide if r.get(c) is not None]
+                    if vals and all(isinstance(v, (int, float)) for v in vals):
+                        return f'"{c}" DECIMAL(38,10)'
+                    return f'"{c}" VARCHAR'
+                self.store.conn.execute("DROP TABLE IF EXISTS wide")
+                self.store.conn.execute(
+                    f"CREATE TABLE wide ({', '.join(_col_def(c) for c in cols)})"
+                )
+                # 灌入, 哨兵 → NULL 保留位, 之后读回时回填
+                sentinel_map: dict[tuple, str] = {}
                 for r in wide:
-                    conn.execute(
+                    branch = r.get("branch_num")
+                    vals = []
+                    for c in cols:
+                        v = r.get(c)
+                        if isinstance(v, str):
+                            sentinel_map[(branch, c)] = v
+                            vals.append(None)
+                        else:
+                            vals.append(v)
+                    self.store.conn.execute(
                         f"INSERT INTO wide VALUES ({', '.join(['?'] * len(cols))})",
-                        [str(r.get(c, "")) for c in cols],
+                        vals,
                     )
-                for stmt in unit_sql.split(";"):
-                    if stmt.strip():
-                        conn.execute(stmt)
-                rows = conn.execute("SELECT * FROM wide").fetchall()
-                wide = [dict(zip(cols, r)) for r in rows]
+                # 应用每条 UPDATE (list[str], 不再 split, 避免字符串字面量误切)
+                for stmt in unit_stmts:
+                    self.store.conn.execute(stmt)
+                # 读回 (DECIMAL → str of decimal, 哨兵位回填原 sentinel 值)
+                rows = self.store.conn.execute("SELECT * FROM wide").fetchall()
+                new_cols = [d[0] for d in self.store.conn.description]
+                new_wide: list[dict] = []
+                for r in rows:
+                    row = dict(zip(new_cols, [str(v) if v is not None else None for v in r]))
+                    for (branch, col), sentinel in sentinel_map.items():
+                        if row.get("branch_num") == branch and row.get(col) is None:
+                            row[col] = sentinel
+                    new_wide.append(row)
+                wide = new_wide
 
         # Step 11: describe
         desc = _llm_describe(wide, parsed.get("title", ""))
@@ -3243,17 +3322,13 @@ def run_report(store: Store, sqlbot: Any, md_path: str) -> dict:
             },
         )
 
-    # 逐节 design
+    # 逐节 design (Phase 1 fix: 用 Store.list_tables_by_section 替代直接访问 store.conn)
     pipeline = DesignPipeline(store, sqlbot)
     results = []
     for sb in section_blocks:
         sec_id = make_section_id(report_id, sb.section_order)
-        tables = store.conn.execute(
-            "SELECT table_id FROM report_tables WHERE section_id=? ORDER BY table_order",
-            [sec_id],
-        ).fetchall()
-        for (tid,) in tables:
-            r = pipeline.run_section(tid)
+        for tbl in store.list_tables_by_section(sec_id):
+            r = pipeline.run_section(tbl["table_id"])
             results.append(r)
             # Checkpoint 11
             if r.get("approval_status") != "approved":
@@ -3982,7 +4057,7 @@ No type mismatches found.
 - **S2 (Task 14 build_runtime_payload)**: `headers` 不再硬编码 `[[]]`，从 `r["parsed_payload"].headers_2d` 反查（`list_approved_tables` 已 JOIN report_tables）。
 - **S4 (Task 15 run_report)**: `[vars(o) for o in ...]` / `[[vars(th) for th in row] ...]` 改为 `dataclasses.asdict`（递归展开稳），import 同步加 `from dataclasses import asdict`。
 - **M1 (Task 14 report_docx.py)**: `--style` 默认值从相对路径 `"scripts/report_style.json"` 改为 `Path(__file__).resolve().parent / "report_style.json"`，与 Task 16 runtime_pipeline 一致。
-- (S3 pyproject.toml: SKIP — 用户确认 httpx / duckdb / python-docx 已装，不另声明依赖。)
+- **P14 (技术栈 pyproject 表述)**: 计划 header 第 21 行不再提"通过 pyproject.toml 添加到 ai-report skill 的 dependencies 块"，统一表述为"沿用 deerflow-harness 已声明的 transitive dependencies，ai-report skill 直接复用，不另声明"。
 
 ---
 

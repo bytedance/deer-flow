@@ -13,7 +13,7 @@
 | LLM 层：从 `ComputeIR` 生成 `def compute_X(df: pd.DataFrame) -> pd.Series` 源码 | lead agent in-turn（已绑定 LangGraph 模型 + `prompts/compute_codegen.md`） | 不在脚本里 | `report.compute.<slug>.py` 写到 thread output |
 | 校验/执行层：AST 白名单 + 签名 + 烟雾 + 示例 + Decimal 列计算 + 单位换算 + 静态 IR 抽取 | `compute.py` / `unit_conversion.py` CLI（纯 bash 调用，零 LLM） | `scripts/compute.py {extract-ir,assemble-wide,validate,evaluate}` | `report.{ir,wide,computed.<slug>}.json` |
 
-**技术栈：** Python 3.12，`requests`（HTTP 客户端，真实 SQLBot 调用），`python-docx`（DOCX 渲染），`pandas`（计算列 DataFrame），`decimal.Decimal`（单位运算），`json`/`dataclasses`/`re`/`ast`（解析、校验），`pytest`（仅开发期测试，使用内置 `unittest.mock.patch` 隔离 HTTP，**不依赖 `pytest-httpx`**）。`requests`/`python-docx`/`pandas` 当前已通过现有 backend 依赖传递安装到 `uv` 环境（已用 `uv run python -c "import X"` 验证）；若未来 `uv.lock` 收紧导致缺失，则需 `cd backend && uv add requests python-docx pandas`。
+**技术栈：** Python 3.12，`requests`（HTTP 客户端，真实 SQLBot 调用），`python-docx`（DOCX 渲染），`pandas`（计算列 DataFrame），`decimal.Decimal`（单位运算），`json`/`dataclasses`/`re`/`ast`（解析、校验），`pytest`（仅开发期测试，使用内置 `unittest.mock.patch` 隔离 HTTP，**不依赖 `pytest-httpx`**）。`requests`/`python-docx`/`pandas` 当前已通过现有 backend 依赖传递安装到 `uv` 
 
 **规格说明：** `docx/chatbi-report/chatbi-report-data-agent-design.md`
 
@@ -26,7 +26,6 @@
 | 代码块 | 当前行数 | 重写原因 |
 |---|---|---|
 | `code-blocks.md` §5.5（test_compute.py） | 182 | 旧接口含 `llm_complete` monkeypatch，按新接口重写为零 mock 测试 |
-| `code-blocks.md` §5.7（compute.py） | 287 | 删除 `generate_pandas_function` + `llm_complete` 参数链；`run_smoke` 内补调 `validate_signature`（R3 修复）；新增 argparse CLI 入口 |
 | `code-blocks.md` §5.8（compute_codegen.md prompt） | 66 | 顶部加"由 lead agent 加载"注释；强调函数必须带 `: pd.DataFrame` 类型注解 |
 | `code-blocks.md` §9.1（SKILL.md 步骤 7/8 段） | 89 | 按"9 步分层契约表"重写 step 7（agent-turn）与 step 8a/8b（bash CLI） |
 
