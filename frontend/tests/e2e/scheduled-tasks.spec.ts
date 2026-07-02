@@ -81,10 +81,8 @@ test("user can create a scheduled task from the page", async ({ page }) => {
 
   await page.goto("/workspace/scheduled-tasks");
   const createForm = page.getByTestId("scheduled-task-create-form");
-  await createForm.getByRole("button", { name: "Once" }).click();
-  await createForm
-    .getByPlaceholder("Run at (ISO datetime)")
-    .fill("2026-07-02T09:00:00+00:00");
+  await createForm.getByRole("button", { name: "One-time" }).click();
+  await createForm.getByLabel("Run at").fill("2026-07-02T09:00");
   await createForm.getByPlaceholder("Task title").fill("Created from UI");
   await createForm.getByPlaceholder("Prompt").fill("Summarize thread");
   await createForm.getByRole("button", { name: "Create" }).click();

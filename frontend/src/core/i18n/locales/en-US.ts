@@ -180,6 +180,43 @@ export const enUS: Translations = {
     scheduledTasks: "Scheduled tasks",
   },
 
+  // Scheduled tasks
+  scheduledTasks: {
+    scheduleType: {
+      cron: "Recurring",
+      once: "One-time",
+    },
+    preset: {
+      label: "Repeat",
+      hourly: "Hourly",
+      daily: "Daily",
+      weekly: "Weekly",
+      monthly: "Monthly",
+      custom: "Custom cron",
+    },
+    fields: {
+      minute: "Minute",
+      time: "Time",
+      weekday: "On",
+      dayOfMonth: "Day of month",
+      cron: "Cron expression",
+      cronPlaceholder: "0 9 * * *",
+      runAt: "Run at",
+      timezone: "Timezone",
+    },
+    weekdays: {
+      mon: "Mon",
+      tue: "Tue",
+      wed: "Wed",
+      thu: "Thu",
+      fri: "Fri",
+      sat: "Sat",
+      sun: "Sun",
+    },
+    preview: "Preview",
+    cronHelp: "Open crontab.guru",
+  },
+
   // Agents
   agents: {
     title: "Agents",

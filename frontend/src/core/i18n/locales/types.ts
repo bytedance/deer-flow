@@ -123,6 +123,40 @@ export interface Translations {
     channels: string;
   };
 
+  // Scheduled tasks
+  scheduledTasks: {
+    scheduleType: { cron: string; once: string };
+    preset: {
+      label: string;
+      hourly: string;
+      daily: string;
+      weekly: string;
+      monthly: string;
+      custom: string;
+    };
+    fields: {
+      minute: string;
+      time: string;
+      weekday: string;
+      dayOfMonth: string;
+      cron: string;
+      cronPlaceholder: string;
+      runAt: string;
+      timezone: string;
+    };
+    weekdays: {
+      mon: string;
+      tue: string;
+      wed: string;
+      thu: string;
+      fri: string;
+      sat: string;
+      sun: string;
+    };
+    preview: string;
+    cronHelp: string;
+  };
+
   // Agents
   agents: {
     title: string;

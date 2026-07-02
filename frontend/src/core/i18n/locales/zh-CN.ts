@@ -173,6 +173,43 @@ export const zhCN: Translations = {
     scheduledTasks: "定时任务",
   },
 
+  // 定时任务
+  scheduledTasks: {
+    scheduleType: {
+      cron: "重复",
+      once: "单次",
+    },
+    preset: {
+      label: "重复方式",
+      hourly: "每小时",
+      daily: "每天",
+      weekly: "每周",
+      monthly: "每月",
+      custom: "自定义 cron",
+    },
+    fields: {
+      minute: "分钟",
+      time: "时间",
+      weekday: "在",
+      dayOfMonth: "几号",
+      cron: "cron 表达式",
+      cronPlaceholder: "0 9 * * *",
+      runAt: "运行时间",
+      timezone: "时区",
+    },
+    weekdays: {
+      mon: "周一",
+      tue: "周二",
+      wed: "周三",
+      thu: "周四",
+      fri: "周五",
+      sat: "周六",
+      sun: "周日",
+    },
+    preview: "预览",
+    cronHelp: "打开 crontab.guru",
+  },
+
   // Agents
   agents: {
     title: "智能体",

@@ -6,6 +6,10 @@ import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
+  ScheduledTaskScheduleInput,
+  type ScheduleValue,
+} from "@/components/workspace/scheduled-task-schedule-input";
+import {
   WorkspaceBody,
   WorkspaceContainer,
   WorkspaceHeader,
@@ -37,8 +41,11 @@ export default function ScheduledTasksPage() {
   const [targetThreadId, setTargetThreadId] = useState(threadId ?? "");
   const [title, setTitle] = useState("");
   const [prompt, setPrompt] = useState("");
-  const [scheduleType, setScheduleType] = useState<"once" | "cron">("cron");
-  const [scheduleValue, setScheduleValue] = useState("0 9 * * *");
+  const [createSchedule, setCreateSchedule] = useState<ScheduleValue>({
+    schedule_type: "cron",
+    schedule_spec: { cron: "0 9 * * *" },
+    timezone: "",
+  });
   const [statusFilter, setStatusFilter] = useState<
     "all" | "enabled" | "paused" | "running" | "completed" | "failed"
   >("all");
@@ -47,7 +54,11 @@ export default function ScheduledTasksPage() {
   const [editing, setEditing] = useState(false);
   const [editTitle, setEditTitle] = useState("");
   const [editPrompt, setEditPrompt] = useState("");
-  const [editScheduleValue, setEditScheduleValue] = useState("");
+  const [editSchedule, setEditSchedule] = useState<ScheduleValue>({
+    schedule_type: "cron",
+    schedule_spec: { cron: "0 9 * * *" },
+    timezone: "UTC",
+  });
   const filteredData = (data ?? []).filter((task) => {
     const statusPass = statusFilter === "all" || task.status === statusFilter;
     const typePass = typeFilter === "all" || task.schedule_type === typeFilter;
@@ -85,20 +96,24 @@ export default function ScheduledTasksPage() {
       setEditing(false);
       return;
     }
-    const cronValue =
-      typeof selectedTask.schedule_spec.cron === "string"
-        ? selectedTask.schedule_spec.cron
-        : "";
-    const runAtValue =
-      typeof selectedTask.schedule_spec.run_at === "string"
-        ? selectedTask.schedule_spec.run_at
-        : "";
     setEditTitle(selectedTask.title);
     setEditPrompt(selectedTask.prompt);
-    setEditScheduleValue(
-      selectedTask.schedule_type === "cron" ? cronValue : runAtValue,
-    );
-  }, [selectedTask]);
+    const spec = selectedTask.schedule_spec as {
+      cron?: string;
+      run_at?: string;
+    };
+    setEditSchedule({
+      schedule_type: selectedTask.schedule_type,
+      schedule_spec: {
+        cron: typeof spec.cron === "string" ? spec.cron : undefined,
+        run_at: typeof spec.run_at === "string" ? spec.run_at : undefined,
+      },
+      timezone: selectedTask.timezone || "UTC",
+    });
+    // Depend on id only so a background refetch (same task, new object reference)
+    // does not wipe edits in progress.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedTask?.id]);
 
   return (
     <WorkspaceContainer>
@@ -146,46 +161,22 @@ export default function ScheduledTasksPage() {
               onChange={(event) => setPrompt(event.target.value)}
               placeholder="Prompt"
             />
-            <div className="flex gap-2">
-              <Button
-                variant={scheduleType === "cron" ? "default" : "outline"}
-                size="sm"
-                onClick={() => {
-                  setScheduleType("cron");
-                  setScheduleValue("0 9 * * *");
-                }}
-              >
-                Cron
-              </Button>
-              <Button
-                variant={scheduleType === "once" ? "default" : "outline"}
-                size="sm"
-                onClick={() => {
-                  setScheduleType("once");
-                  setScheduleValue("2026-07-02T09:00:00+00:00");
-                }}
-              >
-                Once
-              </Button>
-            </div>
-            <Input
-              value={scheduleValue}
-              onChange={(event) => setScheduleValue(event.target.value)}
-              placeholder={
-                scheduleType === "cron"
-                  ? "Cron expression"
-                  : "Run at (ISO datetime)"
-              }
+            <ScheduledTaskScheduleInput
+              initial={createSchedule}
+              onChange={setCreateSchedule}
             />
             {formError && (
               <div className="text-destructive text-sm">{formError}</div>
             )}
             <Button
               onClick={() => {
+                const hasSchedule =
+                  Boolean(createSchedule.schedule_spec.cron) ||
+                  Boolean(createSchedule.schedule_spec.run_at);
                 if (
                   !title ||
                   !prompt ||
-                  !scheduleValue ||
+                  !hasSchedule ||
                   (contextMode === "reuse_thread" && !targetThreadId)
                 ) {
                   setFormError("Fill all required fields");
@@ -198,18 +189,16 @@ export default function ScheduledTasksPage() {
                     contextMode === "reuse_thread" ? targetThreadId : null,
                   title,
                   prompt,
-                  schedule_type: scheduleType,
-                  schedule_spec:
-                    scheduleType === "cron"
-                      ? { cron: scheduleValue }
-                      : { run_at: scheduleValue },
-                  timezone: "UTC",
+                  schedule_type: createSchedule.schedule_type,
+                  schedule_spec: createSchedule.schedule_spec,
+                  timezone: createSchedule.timezone || "UTC",
                 });
               }}
               disabled={
                 !title ||
                 !prompt ||
-                !scheduleValue ||
+                (!createSchedule.schedule_spec.cron &&
+                  !createSchedule.schedule_spec.run_at) ||
                 (contextMode === "reuse_thread" && !targetThreadId) ||
                 createTask.isPending
               }
@@ -344,12 +333,11 @@ export default function ScheduledTasksPage() {
                         onChange={(event) => setEditPrompt(event.target.value)}
                         placeholder="Edit prompt"
                       />
-                      <Input
-                        value={editScheduleValue}
-                        onChange={(event) =>
-                          setEditScheduleValue(event.target.value)
-                        }
-                        placeholder="Edit schedule"
+                      <ScheduledTaskScheduleInput
+                        key={selectedTask.id}
+                        initial={editSchedule}
+                        onChange={setEditSchedule}
+                        scheduleTypeLocked
                       />
                       <Button
                         size="sm"
@@ -357,10 +345,8 @@ export default function ScheduledTasksPage() {
                           updateTask.mutate({
                             title: editTitle,
                             prompt: editPrompt,
-                            schedule_spec:
-                              selectedTask.schedule_type === "cron"
-                                ? { cron: editScheduleValue }
-                                : { run_at: editScheduleValue },
+                            schedule_spec: editSchedule.schedule_spec,
+                            timezone: editSchedule.timezone || "UTC",
                           })
                         }
                         disabled={updateTask.isPending}
