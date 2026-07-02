@@ -220,12 +220,35 @@ is an "art of the possible" demo, not a productized integration — see
 
 ### Setup
 
-1. Clone the server: `git clone https://github.com/kurrent-io/mcp-server`.
-2. Copy the `kurrentdb` block from `extensions_config.example.json` (repo
-   root) into your `extensions_config.json`, set `args` to the real absolute
-   checkout path, and flip `enabled` to `true`.
-3. Make sure `KURRENTDB_CONNECTION_STRING` is set in your environment (same
-   variable used by `KurrentdbMemoryStorage` — see "Try it" above).
+The example entry in `extensions_config.example.json` ships **disabled** (like
+every example MCP server there) and with a placeholder path — you must enable
+it in your live `extensions_config.json` before the agent gets the tools:
+
+1. Prerequisite: [`uv`](https://docs.astral.sh/uv/) installed on the host —
+   the server is launched via `uv run`, which resolves its dependencies on
+   first start (see the server's own README).
+2. Clone the server: `git clone https://github.com/kurrent-io/mcp-server`.
+3. Enable the entry in `extensions_config.json` (created from the example by
+   `make config`). Either edit it by hand — copy the `kurrentdb` block from
+   `extensions_config.example.json`, set the second `args` element to your
+   absolute checkout path, and set `"enabled": true` — or run this from the
+   repo root:
+
+   ```bash
+   MCP_SERVER_PATH="$HOME/src/mcp-server" jq \
+     '.mcpServers.kurrentdb = (input.mcpServers.kurrentdb
+        | .enabled = true
+        | .args[1] = env.MCP_SERVER_PATH)' \
+     extensions_config.json extensions_config.example.json \
+     > extensions_config.json.tmp && mv extensions_config.json.tmp extensions_config.json
+   ```
+
+4. Make sure `KURRENTDB_CONNECTION_STRING` is set in the Gateway's
+   environment (same variable used by `KurrentdbMemoryStorage` — see "Try
+   it" above).
+
+**No restart needed**: the Gateway watches the config file's modification
+time and reloads MCP servers on the next message after an edit.
 
 **Enforcement nuance**: deer-flow's stdio command allowlist (`npx`, `uvx` by
 default) is enforced by the Gateway config API — direct edits to
