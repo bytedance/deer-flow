@@ -1,0 +1,36 @@
+# KurrentDB overlay for the event-sourced memory storage prototype
+# (deer-flow discussion #3796).
+#
+# Single-node insecure dev mode — evaluation only, no auth/ACLs.
+# Admin UI: http://localhost:2113
+#
+# Usage (with the main stack):
+#   docker compose -f docker/docker-compose.yaml -f docker/docker-compose.kurrentdb.yaml up
+# Or standalone while running `make dev` locally:
+#   docker compose -f docker/docker-compose.kurrentdb.yaml up
+#
+# Then set in your environment (or .env):
+#   KURRENTDB_CONNECTION_STRING=kurrentdb://localhost:2113?tls=false
+# and in config.yaml:
+#   memory:
+#     storage_class: deerflow.community.kurrentdb.memory_storage.KurrentdbMemoryStorage
+
+services:
+  kurrentdb:
+    image: docker.kurrent.io/kurrent-latest/kurrentdb:latest
+    container_name: deer-flow-kurrentdb
+    environment:
+      - KURRENTDB_CLUSTER_SIZE=1
+      - KURRENTDB_INSECURE=true
+      - KURRENTDB_RUN_PROJECTIONS=All
+      - KURRENTDB_START_STANDARD_PROJECTIONS=true
+    ports:
+      - "2113:2113"
+    volumes:
+      - kurrentdb-data:/var/lib/kurrentdb
+      - kurrentdb-logs:/var/log/kurrentdb
+    restart: unless-stopped
+
+volumes:
+  kurrentdb-data:
+  kurrentdb-logs:
