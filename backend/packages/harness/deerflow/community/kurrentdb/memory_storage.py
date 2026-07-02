@@ -91,11 +91,53 @@ class KurrentdbMemoryStorage(MemoryStorage):
                     self._client = self._client_factory()
         return self._client
 
+    def _read_latest(self, agent_name: str | None = None, *, user_id: str | None = None) -> dict[str, Any] | None:
+        """Read the newest memory snapshot from KurrentDB.
+
+        Returns the parsed memory dict, an empty structure when the stream
+        does not exist yet, or ``None`` on transport/decode errors so callers
+        can avoid caching failures (the next call retries).
+        """
+        from kurrentdbclient.exceptions import NotFoundError
+
+        stream_name = self._stream_name(agent_name, user_id=user_id)
+        try:
+            events = self._get_client().get_stream(stream_name, backwards=True, limit=1)
+        except NotFoundError:
+            return create_empty_memory()
+        except Exception as e:
+            logger.warning("Failed to read memory stream %s: %s", stream_name, e)
+            return None
+        if not events:
+            return create_empty_memory()
+        try:
+            return json.loads(events[0].data)
+        except (json.JSONDecodeError, UnicodeDecodeError) as e:
+            logger.warning("Failed to decode memory event from stream %s: %s", stream_name, e)
+            return None
+
     def load(self, agent_name: str | None = None, *, user_id: str | None = None) -> dict[str, Any]:
-        return create_empty_memory()
+        """Load memory data (cache-first; first miss reads from KurrentDB)."""
+        cache_key = (user_id, agent_name)
+        with self._cache_lock:
+            cached = self._memory_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        memory_data = self._read_latest(agent_name, user_id=user_id)
+        if memory_data is None:
+            return create_empty_memory()
+        with self._cache_lock:
+            self._memory_cache[cache_key] = memory_data
+        return memory_data
 
     def reload(self, agent_name: str | None = None, *, user_id: str | None = None) -> dict[str, Any]:
-        return create_empty_memory()
+        """Force a re-read from KurrentDB, refreshing the cache on success."""
+        memory_data = self._read_latest(agent_name, user_id=user_id)
+        if memory_data is None:
+            return create_empty_memory()
+        with self._cache_lock:
+            self._memory_cache[(user_id, agent_name)] = memory_data
+        return memory_data
 
     def save(self, memory_data: dict[str, Any], agent_name: str | None = None, *, user_id: str | None = None) -> bool:
         """Append the new memory snapshot as an immutable event."""

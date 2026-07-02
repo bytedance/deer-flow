@@ -112,3 +112,59 @@ class TestSave:
     def test_save_invalid_agent_name_raises(self, storage):
         with pytest.raises(ValueError, match="Invalid agent name"):
             storage.save({"version": "1.0"}, "bad/agent", user_id="alice")
+
+
+class TestLoadReload:
+    def test_load_missing_stream_returns_empty_memory(self, storage):
+        memory = storage.load(user_id="alice")
+        assert memory["version"] == "1.0"
+        assert memory["facts"] == []
+
+    def test_load_reads_newest_event_backwards(self, storage, fake_client):
+        storage.save({"version": "1.0", "facts": [{"id": "f1"}]}, user_id="alice")
+        storage.save({"version": "1.0", "facts": [{"id": "f1"}, {"id": "f2"}]}, user_id="alice")
+
+        # Fresh instance sharing the same client: no warm cache, must read from KurrentDB.
+        fresh = KurrentdbMemoryStorage(client_factory=lambda: fake_client)
+        memory = fresh.load(user_id="alice")
+
+        assert [f["id"] for f in memory["facts"]] == ["f1", "f2"]
+        assert fake_client.get_stream_calls[-1] == {"stream_name": f"{STREAM_PREFIX}-alice", "backwards": True, "limit": 1}
+
+    def test_load_is_cache_first_after_save(self, storage, fake_client):
+        storage.save({"version": "1.0", "facts": []}, user_id="alice")
+        storage.load(user_id="alice")
+        assert fake_client.get_stream_calls == []  # served from cache, no read
+
+    def test_reload_picks_up_external_append(self, storage, fake_client):
+        storage.save({"version": "1.0", "facts": []}, user_id="alice")
+        # Another writer (e.g. second gateway) appends a newer snapshot.
+        other = KurrentdbMemoryStorage(client_factory=lambda: fake_client)
+        other.save({"version": "1.0", "facts": [{"id": "external"}]}, user_id="alice")
+
+        assert storage.load(user_id="alice")["facts"] == []  # stale cache
+        assert storage.reload(user_id="alice")["facts"] == [{"id": "external"}]
+        assert storage.load(user_id="alice")["facts"] == [{"id": "external"}]  # cache refreshed
+
+    def test_load_transport_error_returns_empty_and_does_not_cache(self, fake_client):
+        calls = {"n": 0}
+        real_get_stream = fake_client.get_stream
+
+        def flaky_get_stream(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise ConnectionError("kurrentdb down")
+            return real_get_stream(*args, **kwargs)
+
+        fake_client.get_stream = flaky_get_stream
+        writer = KurrentdbMemoryStorage(client_factory=lambda: fake_client)
+        writer.save({"version": "1.0", "facts": [{"id": "f1"}]}, user_id="alice")
+
+        reader = KurrentdbMemoryStorage(client_factory=lambda: fake_client)
+        assert reader.load(user_id="alice")["facts"] == []  # error -> empty
+        assert reader.load(user_id="alice")["facts"] == [{"id": "f1"}]  # retried, not cached-empty
+
+    def test_corrupt_event_returns_empty_without_caching(self, fake_client):
+        fake_client.streams[f"{STREAM_PREFIX}-alice"] = [NewEvent(type=EVENT_TYPE, data=b"not json")]
+        storage = KurrentdbMemoryStorage(client_factory=lambda: fake_client)
+        assert storage.load(user_id="alice")["facts"] == []
