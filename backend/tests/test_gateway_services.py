@@ -623,6 +623,7 @@ async def _capture_start_run_graph_input(body):
     from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
     from deerflow.runtime import RunManager
     from deerflow.runtime.runs.store.memory import MemoryRunStore
+    from deerflow.runtime.workflows.store.memory import MemoryWorkflowStore
 
     run_manager = RunManager(store=MemoryRunStore())
     state = SimpleNamespace(
@@ -633,6 +634,7 @@ async def _capture_start_run_graph_input(body):
         run_event_store=SimpleNamespace(),
         run_events_config=None,
         thread_store=MemoryThreadMetaStore(InMemoryStore()),
+        workflow_store=MemoryWorkflowStore(),
     )
     request = SimpleNamespace(
         headers={},
@@ -709,6 +711,7 @@ def test_start_run_uses_internal_owner_header_for_persistence(_stub_app_config):
     from deerflow.runtime import RunManager
     from deerflow.runtime.runs.store.memory import MemoryRunStore
     from deerflow.runtime.user_context import get_effective_user_id
+    from deerflow.runtime.workflows.store.memory import MemoryWorkflowStore
 
     async def _scenario():
         run_store = MemoryRunStore()
@@ -723,6 +726,7 @@ def test_start_run_uses_internal_owner_header_for_persistence(_stub_app_config):
             run_event_store=SimpleNamespace(),
             run_events_config=None,
             thread_store=thread_store,
+            workflow_store=MemoryWorkflowStore(),
         )
         request = SimpleNamespace(
             headers={INTERNAL_OWNER_USER_ID_HEADER_NAME: "owner-1"},
@@ -770,6 +774,89 @@ def test_start_run_uses_internal_owner_header_for_persistence(_stub_app_config):
     assert owner_thread["metadata"] == {"legacy": True}
     assert default_thread is None
     assert task_context["user_id"] == "owner-1"
+
+
+def test_start_run_uses_workflow_intake_headers(_stub_app_config):
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from langgraph.checkpoint.memory import InMemorySaver
+    from langgraph.store.memory import InMemoryStore
+
+    from app.gateway.services import start_run
+    from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
+    from deerflow.runtime import RunManager
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+    from deerflow.runtime.workflows.store.memory import MemoryWorkflowStore
+
+    async def _scenario():
+        workflow_store = MemoryWorkflowStore()
+        run_manager = RunManager(store=MemoryRunStore())
+        state = SimpleNamespace(
+            stream_bridge=SimpleNamespace(),
+            run_manager=run_manager,
+            checkpointer=InMemorySaver(),
+            store=InMemoryStore(),
+            run_event_store=SimpleNamespace(),
+            run_events_config=None,
+            thread_store=MemoryThreadMetaStore(InMemoryStore()),
+            workflow_store=workflow_store,
+        )
+        request = SimpleNamespace(
+            headers={
+                "Idempotency-Key": "channel:slack:T123:C123:m-1",
+                "X-External-Message-Ref": "slack:T123:C123:m-1",
+                "X-DeerFlow-Workflow-Source-Type": "channel",
+                "X-DeerFlow-Workflow-Source": "slack",
+                "X-DeerFlow-Workflow-Conversation-Ref": "C123",
+                "X-DeerFlow-Workflow-Thread-Ref": "1710000000.000100",
+                "X-DeerFlow-Workflow-Sender-Ref": "U123",
+            },
+            state=SimpleNamespace(),
+            app=SimpleNamespace(state=state),
+            url=SimpleNamespace(path="/api/threads/thread-channel/runs/wait"),
+            method="POST",
+        )
+        body = SimpleNamespace(
+            assistant_id="lead_agent",
+            input={"messages": [{"role": "human", "content": "hi"}]},
+            metadata={},
+            config=None,
+            context=None,
+            on_disconnect="cancel",
+            multitask_strategy="reject",
+            stream_mode=None,
+            stream_subgraphs=False,
+            interrupt_before=None,
+            interrupt_after=None,
+        )
+
+        async def fake_run_agent(*args, **kwargs):
+            return None
+
+        with (
+            patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+            patch("app.gateway.services.run_agent", side_effect=fake_run_agent),
+        ):
+            record = await start_run(body, "thread-channel", request)
+            await record.task
+
+        rows = await workflow_store.list(run_id=record.run_id)
+        events = await workflow_store.list_events(rows[0]["workflow_id"])
+        return rows[0], events
+
+    workflow, events = asyncio.run(_scenario())
+
+    assert workflow["source_type"] == "channel"
+    assert workflow["source"] == "slack"
+    assert workflow["idempotency_key"] == "channel:slack:T123:C123:m-1"
+    assert workflow["external_message_ref"] == "slack:T123:C123:m-1"
+    assert workflow["conversation_ref"] == "C123"
+    assert workflow["thread_ref"] == "1710000000.000100"
+    assert workflow["sender_ref"] == "U123"
+    assert workflow["metadata"]["binding"]["status"] == "resolved"
+    assert "workflow.bound" in [event["event_type"] for event in events]
 
 
 # ---------------------------------------------------------------------------

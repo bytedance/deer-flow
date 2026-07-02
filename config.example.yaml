@@ -24,6 +24,17 @@ config_version: 16
 log_level: info
 
 # ============================================================================
+# Optional Modules
+# ============================================================================
+# These gates are startup-only: restart the gateway after changing them.
+# Durable workflows are the small runtime identity/trace layer.
+modules:
+  durable_workflows:
+    enabled: true
+    api_enabled: true
+    auto_envelope_for_runs: true
+
+# ============================================================================
 # Token Usage
 # ============================================================================
 # Enable token usage collection and display.
