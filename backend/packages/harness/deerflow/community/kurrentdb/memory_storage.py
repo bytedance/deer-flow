@@ -26,6 +26,7 @@ import functools
 import json
 import logging
 import os
+import re
 import threading
 from collections.abc import Callable
 from typing import Any
@@ -37,6 +38,7 @@ logger = logging.getLogger(__name__)
 
 STREAM_PREFIX = "deerflow.memory"
 EVENT_TYPE = "MemoryUpdated"
+_USER_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
 def _make_default_client(connection_string: str) -> Any:
@@ -71,6 +73,11 @@ class KurrentdbMemoryStorage(MemoryStorage):
         if not AGENT_NAME_PATTERN.match(agent_name):
             raise ValueError(f"Invalid agent name {agent_name!r}: names must match {AGENT_NAME_PATTERN.pattern}")
 
+    @staticmethod
+    def _validate_user_id(user_id: str) -> None:
+        if not _USER_ID_PATTERN.match(user_id) or user_id == "_global":
+            raise ValueError(f"Invalid user id {user_id!r}: only alphanumeric characters, hyphens, and underscores are allowed, and '_global' is reserved.")
+
     @classmethod
     def _stream_name(cls, agent_name: str | None = None, *, user_id: str | None = None) -> str:
         """Derive the stream for a memory owner.
@@ -78,6 +85,8 @@ class KurrentdbMemoryStorage(MemoryStorage):
         KurrentDB's ``$by_category`` projection splits at the first ``-``, so
         every memory stream lands in the ``deerflow.memory`` category.
         """
+        if user_id is not None:
+            cls._validate_user_id(user_id)
         owner = user_id if user_id is not None else "_global"
         if agent_name is not None:
             cls._validate_agent_name(agent_name)
@@ -110,8 +119,12 @@ class KurrentdbMemoryStorage(MemoryStorage):
             return None
         if not events:
             return create_empty_memory()
+        latest_event = events[0]
+        if latest_event.type != EVENT_TYPE:
+            logger.warning("Unexpected event type %r (expected %r) on memory stream %s", latest_event.type, EVENT_TYPE, stream_name)
+            return None
         try:
-            return json.loads(events[0].data)
+            return json.loads(latest_event.data)
         except (json.JSONDecodeError, UnicodeDecodeError) as e:
             logger.warning("Failed to decode memory event from stream %s: %s", stream_name, e)
             return None
@@ -148,12 +161,16 @@ class KurrentdbMemoryStorage(MemoryStorage):
         # mutated as a side-effect (mirrors FileMemoryStorage.save).
         memory_data = {**memory_data, "lastUpdated": utc_now_iso_z()}
         event_metadata = {"user_id": user_id, "agent_name": agent_name, "source": "deerflow-memory", "schema": "v0"}
+        # Serialization happens outside the try so a non-JSON-serializable
+        # memory dict raises (TypeError) to the caller instead of being
+        # masked as a transport failure -- mirrors FileMemoryStorage, which
+        # only catches OSError around the actual write.
+        event = NewEvent(
+            type=EVENT_TYPE,
+            data=json.dumps(memory_data, ensure_ascii=False).encode("utf-8"),
+            metadata=json.dumps(event_metadata, ensure_ascii=False).encode("utf-8"),
+        )
         try:
-            event = NewEvent(
-                type=EVENT_TYPE,
-                data=json.dumps(memory_data, ensure_ascii=False).encode("utf-8"),
-                metadata=json.dumps(event_metadata, ensure_ascii=False).encode("utf-8"),
-            )
             self._get_client().append_to_stream(stream_name, events=event, current_version=StreamState.ANY)
         except Exception as e:
             logger.error("Failed to append memory event to KurrentDB stream %s: %s", stream_name, e)

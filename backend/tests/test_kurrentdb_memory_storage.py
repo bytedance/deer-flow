@@ -78,6 +78,11 @@ class TestStreamName:
         with pytest.raises(ValueError, match="Invalid agent name|Agent name must be a non-empty string"):
             KurrentdbMemoryStorage._stream_name(invalid_name, user_id="alice")
 
+    @pytest.mark.parametrize("invalid_user_id", ["../etc", "_global"])
+    def test_invalid_user_id_raises(self, invalid_user_id):
+        with pytest.raises(ValueError, match="Invalid user id"):
+            KurrentdbMemoryStorage._stream_name(user_id=invalid_user_id)
+
 
 class TestSave:
     def test_appends_memory_updated_event(self, storage, fake_client):
@@ -168,6 +173,43 @@ class TestLoadReload:
         fake_client.streams[f"{STREAM_PREFIX}-alice"] = [NewEvent(type=EVENT_TYPE, data=b"not json")]
         storage = KurrentdbMemoryStorage(client_factory=lambda: fake_client)
         assert storage.load(user_id="alice")["facts"] == []
+
+    def test_agent_scoped_round_trip(self, storage, fake_client):
+        memory = {"version": "1.0", "facts": [{"id": "f1", "content": "prefers uv"}]}
+
+        assert storage.save(memory, "my-agent", user_id="alice") is True
+
+        # Fresh instance sharing the same client: no warm cache, must read from KurrentDB.
+        fresh = KurrentdbMemoryStorage(client_factory=lambda: fake_client)
+        loaded = fresh.load("my-agent", user_id="alice")
+
+        assert loaded["facts"] == memory["facts"]
+        assert fake_client.get_stream_calls[-1]["stream_name"] == f"{STREAM_PREFIX}-alice.agent.my-agent"
+
+    def test_global_stream_round_trip(self, storage, fake_client):
+        memory = {"version": "1.0", "facts": [{"id": "f1", "content": "global fact"}]}
+
+        assert storage.save(memory, user_id=None) is True
+
+        fresh = KurrentdbMemoryStorage(client_factory=lambda: fake_client)
+        loaded = fresh.load(user_id=None)
+
+        assert loaded["facts"] == memory["facts"]
+        assert fake_client.get_stream_calls[-1]["stream_name"] == f"{STREAM_PREFIX}-_global"
+
+    def test_wrong_event_type_returns_empty_and_does_not_cache(self, fake_client):
+        fake_client.streams[f"{STREAM_PREFIX}-alice"] = [NewEvent(type="SomethingElse", data=b"{}")]
+        storage = KurrentdbMemoryStorage(client_factory=lambda: fake_client)
+
+        assert storage.load(user_id="alice")["facts"] == []
+        # Not cached as empty: appending a proper event afterward is picked up on retry.
+        fake_client.streams[f"{STREAM_PREFIX}-alice"].append(NewEvent(type=EVENT_TYPE, data=json.dumps({"version": "1.0", "facts": [{"id": "f1"}]}).encode("utf-8")))
+        assert storage.load(user_id="alice")["facts"] == [{"id": "f1"}]
+
+    def test_non_serializable_save_raises_and_does_not_append(self, storage, fake_client):
+        with pytest.raises(TypeError):
+            storage.save({"bad": object()}, user_id="alice")
+        assert fake_client.append_calls == []
 
 
 class TestGetMemoryStorageIntegration:
