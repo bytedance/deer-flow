@@ -181,6 +181,12 @@ from deerflow.config import get_app_config
 # from app.gateway.routers.uploads import ...  # ← will fail CI
 ```
 
+Package import hygiene: the `deerflow.agents` and `deerflow.subagents` package
+roots expose heavyweight graph/executor entrypoints lazily. Internal modules
+that only need lightweight types, config, or registries should import the
+concrete submodule instead of adding eager package-root imports that pull in the
+tool graph or subagent executor during state/schema imports.
+
 ### Agent System
 
 **Lead Agent** (`packages/harness/deerflow/agents/lead_agent/agent.py`):
