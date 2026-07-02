@@ -75,6 +75,10 @@ async def init_engine(
     global _engine, _session_factory
 
     if backend == "memory":
+        if _engine is not None:
+            await _engine.dispose()
+        _engine = None
+        _session_factory = None
         logger.info("Persistence backend=memory -- ORM engine not initialized")
         return
 
