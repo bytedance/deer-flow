@@ -21,6 +21,7 @@ dependencies = [
     "bcrypt>=4.0.0",
     "pyjwt>=2.13.0",
     "email-validator>=2.0.0",
+    "e2b-code-interpreter>=2.8.1",
 ]
 
 [project.optional-dependencies]

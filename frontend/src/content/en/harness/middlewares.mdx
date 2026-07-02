@@ -22,19 +22,25 @@ This design keeps the agent core simple and stable while allowing rich, composab
 The middleware chain is built once per agent invocation, based on the current configuration and request parameters. The middlewares run in a defined order:
 
 1. Runtime middlewares (error handling, thread data, uploads, dangling tool call patching)
-2. `SummarizationMiddleware` — context compression (if enabled)
-3. `TodoMiddleware` — task list management (plan mode only)
-4. `TokenUsageMiddleware` — token tracking (if enabled)
-5. `TitleMiddleware` — automatic thread title generation
-6. `MemoryMiddleware` — cross-session memory injection and queuing
-7. `ViewImageMiddleware` — image details injection (if model supports vision)
-8. `DeferredToolFilterMiddleware` — hides deferred tool schemas (if tool search enabled)
-9. `SubagentLimitMiddleware` — limits parallel subagent calls (if subagents enabled)
-10. `LoopDetectionMiddleware` — breaks repetitive tool call loops
-11. Custom middlewares (if any)
-12. `ClarificationMiddleware` — intercepts clarification requests (always last)
+2. `DynamicContextMiddleware` — current date and optional memory context
+3. `SkillActivationMiddleware` — slash-skill activation
+4. `DurableContextMiddleware` — captures durable summary, delegation, and skill-reference state
+5. `SummarizationMiddleware` — context compression (if enabled)
+6. `TodoMiddleware` — task list management (plan mode only)
+7. `TokenUsageMiddleware` — token tracking (if enabled)
+8. `TitleMiddleware` — automatic thread title generation
+9. `MemoryMiddleware` — cross-session memory injection and queuing
+10. `ViewImageMiddleware` — image details injection (if model supports vision)
+11. `DeferredToolFilterMiddleware` — hides deferred tool schemas (if tool search enabled)
+12. `SystemMessageCoalescingMiddleware` — coalesces provider-facing system messages
+13. `SubagentLimitMiddleware` — limits parallel subagent calls (if subagents enabled)
+14. `LoopDetectionMiddleware` — breaks repetitive tool call loops
+15. `TokenBudgetMiddleware` — per-run token budget enforcement (if enabled)
+16. Custom middlewares (if any)
+17. `SafetyFinishReasonMiddleware` — suppresses tool execution after safety-terminated responses (if enabled)
+18. `ClarificationMiddleware` — intercepts clarification requests (always last)
 
-The ordering is significant. Summarization runs early to reduce context before other processing. Clarification always runs last so it can intercept after all other middlewares have had their turn.
+The ordering is significant. Durable context capture runs before summarization so delegated task dispatches, terminal delegation results, and loaded skill references survive compaction. Clarification always runs last so it can intercept after all other middlewares have had their turn.
 
 ## Middleware reference
 
@@ -125,9 +131,17 @@ Audits sandbox operations performed during the agent's execution. Provides a rec
 
 ---
 
+### DurableContextMiddleware
+
+Captures long-lived runtime facts into explicit thread-state channels before summarization compacts the raw transcript. It records compressed summaries, delegated task state/results, and loaded `SKILL.md` references, then projects them into later model calls as hidden durable context data.
+
+**Configuration**: built in. `summarization.skill_file_read_tool_names` controls which read tools count as skill-reference reads; set it to `[]` to disable durable skill-reference capture.
+
+---
+
 ### SummarizationMiddleware
 
-When the conversation grows long, summarizes older messages to reduce context size. The summary is injected back into the conversation in place of the original messages, preserving meaning without the full token cost.
+When the conversation grows long, summarizes older messages to reduce context size. The generated summary is stored in thread state and projected into later model calls as hidden durable context data, preserving meaning without keeping the original messages in the active transcript.
 
 **Configuration**: `summarization:` section in `config.yaml`. See detailed configuration below.
 

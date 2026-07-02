@@ -186,6 +186,12 @@ pytest
 2. LangGraph Platform 会自动持久化
 3. 检查数据库确认 checkpointer 工作正常
 
+### 中断首轮后仍显示默认标题？
+
+1. `runtime/runs/worker.py` 会在 interrupted-run cleanup 中保持 run 处于 finalizing 状态，避免同线程新 run 在 fallback title 写入期间覆盖 checkpoint
+2. 如果取消发生在可用 checkpoint 写入前，worker 会使用本次 `graph_input` 中的首条用户消息生成本地 fallback title
+3. fallback title 写入前会重新读取 latest checkpoint；如果同线程状态已经前进，只对最新 snapshot 做 title-only 更新，避免旧消息重新成为 latest
+
 ---
 
 ## 📊 性能影响

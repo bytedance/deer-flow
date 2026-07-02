@@ -68,6 +68,13 @@ import { useSkills } from "@/core/skills/hooks";
 import { useSuggestionsConfig } from "@/core/suggestions/hooks";
 import type { AgentThreadContext } from "@/core/threads";
 import { textOfMessage } from "@/core/threads/utils";
+import {
+  formatUploadSize,
+  useUploadLimits,
+  validateUploadLimits,
+  type UploadLimits,
+  type UploadLimitViolation,
+} from "@/core/uploads";
 import { isIMEComposing } from "@/lib/ime";
 import { cn } from "@/lib/utils";
 
@@ -216,8 +223,11 @@ export function InputBox({
   const [modelDialogOpen, setModelDialogOpen] = useState(false);
   const { models } = useModels();
   const { thread, isMock } = useThread();
-  const { textInput } = usePromptInputController();
+  const { attachments, textInput } = usePromptInputController();
+  const attachmentParts = attachments.files;
+  const removeAttachment = attachments.remove;
   const { skills } = useSkills();
+  const { data: uploadLimits } = useUploadLimits(threadId);
   const promptRootRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const promptHistoryIndexRef = useRef<number | null>(null);
@@ -241,6 +251,66 @@ export function InputBox({
   const [pendingSuggestion, setPendingSuggestion] = useState<string | null>(
     null,
   );
+
+  const reportUploadLimitViolations = useCallback(
+    (violations: UploadLimitViolation[]) => {
+      for (const violation of violations) {
+        if (violation.code === "max_file_size") {
+          toast.error(
+            t.uploads.filesTooLarge(
+              violation.files.map((file) => file.name).join(", "),
+              formatUploadSize(violation.limit),
+            ),
+          );
+        } else if (violation.code === "max_files") {
+          toast.error(
+            t.uploads.tooManyFiles(violation.files.length, violation.limit),
+          );
+        } else {
+          toast.error(
+            t.uploads.totalSizeTooLarge(
+              violation.files.length,
+              formatUploadSize(violation.limit),
+            ),
+          );
+        }
+      }
+    },
+    [t.uploads],
+  );
+
+  useEffect(() => {
+    if (!uploadLimits) {
+      return;
+    }
+
+    const attachmentEntries = attachmentParts.flatMap((attachment) =>
+      attachment.file instanceof File
+        ? [{ id: attachment.id, file: attachment.file }]
+        : [],
+    );
+    const validation = validateUploadLimits(
+      [],
+      attachmentEntries.map(({ file }) => file),
+      uploadLimits,
+    );
+    if (validation.rejected.length === 0) {
+      return;
+    }
+
+    const rejected = new Set(validation.rejected);
+    for (const entry of attachmentEntries) {
+      if (rejected.has(entry.file)) {
+        removeAttachment(entry.id);
+      }
+    }
+    reportUploadLimitViolations(validation.violations);
+  }, [
+    attachmentParts,
+    removeAttachment,
+    reportUploadLimitViolations,
+    uploadLimits,
+  ]);
 
   useEffect(() => {
     if (models.length === 0) {
@@ -374,6 +444,13 @@ export function InputBox({
       if (!message.text.trim() && message.files.length === 0) {
         return;
       }
+      const files = message.files.flatMap((file) =>
+        file.file instanceof File ? [file.file] : [],
+      );
+      const uploadValidation = validateUploadLimits([], files, uploadLimits);
+      if (uploadValidation.violations.length > 0) {
+        return Promise.reject(new Error("Attachment limits exceeded."));
+      }
       const placeholder = findSuggestionTemplatePlaceholder(message.text);
       if (placeholder) {
         toast.error(t.inputBox.suggestionPlaceholderRequired);
@@ -424,6 +501,7 @@ export function InputBox({
       selectedModel?.supports_thinking,
       status,
       t.inputBox.suggestionPlaceholderRequired,
+      uploadLimits,
     ],
   );
 
@@ -888,7 +966,10 @@ export function InputBox({
               />
             </PromptInputActionMenuContent>
           </PromptInputActionMenu> */}
-            <AddAttachmentsButton className="px-2!" />
+            <AddAttachmentsButton
+              className="px-2!"
+              uploadLimits={uploadLimits}
+            />
             <PromptInputActionMenu>
               <ModeHoverGuide
                 mode={
@@ -1330,13 +1411,28 @@ function SuggestionList({
   );
 }
 
-function AddAttachmentsButton({ className }: { className?: string }) {
+function AddAttachmentsButton({
+  className,
+  uploadLimits,
+}: {
+  className?: string;
+  uploadLimits?: UploadLimits;
+}) {
   const { t } = useI18n();
   const attachments = usePromptInputAttachments();
+  const tooltipContent = uploadLimits
+    ? t.uploads.limitsHint(
+        uploadLimits.max_files,
+        formatUploadSize(uploadLimits.max_file_size),
+        formatUploadSize(uploadLimits.max_total_size),
+      )
+    : t.inputBox.addAttachments;
   return (
-    <Tooltip content={t.inputBox.addAttachments}>
+    <Tooltip content={<span className="block max-w-80">{tooltipContent}</span>}>
       <PromptInputButton
+        aria-label={t.inputBox.addAttachments}
         className={cn("px-2!", className)}
+        data-testid="add-attachments-button"
         onClick={() => attachments.openFileDialog()}
       >
         <PaperclipIcon className="size-3" />

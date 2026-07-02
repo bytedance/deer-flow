@@ -367,6 +367,113 @@ class TestTitleMiddlewareCoreLogic:
         assert "<system-reminder>" not in prompt
         assert "User prefers Python" not in prompt
 
+    def test_should_generate_title_partial_exchange_allows_user_only(self):
+        """Interrupted-run path can produce a fallback from a lone human message."""
+        _set_test_title_config(enabled=True)
+        middleware = TitleMiddleware()
+        state = {"messages": [HumanMessage(content="只有人类消息，AI 还没回复")]}
+
+        assert middleware._should_generate_title(state) is False
+        assert middleware._should_generate_title(state, allow_partial_exchange=True) is True
+
+    def test_should_generate_title_partial_exchange_skips_when_titled(self):
+        """Existing title still wins, even on the interrupted-run path."""
+        _set_test_title_config(enabled=True)
+        middleware = TitleMiddleware()
+        state = {
+            "messages": [HumanMessage(content="问题")],
+            "title": "Already set",
+        }
+        assert middleware._should_generate_title(state, allow_partial_exchange=True) is False
+
+    def test_should_generate_title_handles_dict_messages(self):
+        """Checkpoint channel_values store messages as dicts; the middleware must accept them."""
+        _set_test_title_config(enabled=True)
+        middleware = TitleMiddleware()
+        state = {
+            "messages": [
+                {"type": "human", "content": "问"},
+                {"type": "ai", "content": "答"},
+            ]
+        }
+        assert middleware._should_generate_title(state) is True
+
+    def test_sync_generate_title_from_dict_messages(self):
+        """Sync fallback path can derive title text from dict-form messages."""
+        _set_test_title_config(max_chars=20)
+        middleware = TitleMiddleware()
+        state = {
+            "messages": [
+                {"role": "user", "content": "请帮我写测试"},
+                {"role": "assistant", "content": "好的"},
+            ]
+        }
+        assert middleware._generate_title_result(state) == {"title": "请帮我写测试"}
+
+    def test_should_generate_title_handles_none_messages_channel(self):
+        """A checkpoint with ``messages=None`` (partially-initialized state) must not crash."""
+        _set_test_title_config(enabled=True)
+        middleware = TitleMiddleware()
+        # ``messages`` key exists but is None — ``state.get("messages", [])`` would
+        # have returned ``None`` (default only applies on missing key), so this
+        # exercises the ``or []`` coercion the helper relies on.
+        state = {"messages": None}
+
+        assert middleware._should_generate_title(state) is False
+        assert middleware._should_generate_title(state, allow_partial_exchange=True) is False
+
+    def test_build_title_prompt_handles_none_messages_channel(self):
+        """``_build_title_prompt`` must also tolerate a None messages channel."""
+        _set_test_title_config(enabled=True)
+        middleware = TitleMiddleware()
+        state = {"messages": None}
+
+        prompt, user_msg = middleware._build_title_prompt(state)
+        assert user_msg == ""
+        # Prompt is still well-formed — just empty user/assistant slots.
+        assert "{user_msg}" not in prompt  # the template was formatted, not left raw
+
+    def test_should_generate_title_dict_messages_role_normalization(self):
+        """Dict-form messages may use either ``type`` or ``role``; both must map correctly."""
+        _set_test_title_config(enabled=True)
+        middleware = TitleMiddleware()
+        state = {
+            "messages": [
+                # ``role: user`` should be normalized to ``human``
+                {"role": "user", "content": "Q"},
+                # ``role: assistant`` should be normalized to ``ai``
+                {"role": "assistant", "content": "A"},
+            ]
+        }
+        assert middleware._should_generate_title(state) is True
+
+    def test_partial_exchange_with_dict_human_message(self):
+        """Interrupted-run path must accept a lone dict-form first-turn user message."""
+        _set_test_title_config(enabled=True, max_chars=20)
+        middleware = TitleMiddleware()
+        state = {"messages": [{"role": "user", "content": "请帮我写测试"}]}
+
+        result = middleware._generate_title_result(state, allow_partial_exchange=True)
+        assert result == {"title": "请帮我写测试"}
+
+    def test_partial_exchange_ignores_dict_dynamic_context_reminder(self):
+        """Checkpoint dicts can include hidden memory reminders that should not count as real user turns."""
+        _set_test_title_config(enabled=True, max_chars=20)
+        middleware = TitleMiddleware()
+        state = {
+            "messages": [
+                {
+                    "type": "human",
+                    "content": "<memory>User prefers concise titles.</memory>",
+                    "additional_kwargs": {"hide_from_ui": True, _DYNAMIC_CONTEXT_REMINDER_KEY: True},
+                },
+                {"type": "human", "content": "请帮我写测试", "additional_kwargs": {}},
+            ]
+        }
+
+        assert middleware._should_generate_title(state, allow_partial_exchange=True) is True
+        assert middleware._generate_title_result(state, allow_partial_exchange=True) == {"title": "请帮我写测试"}
+
     def test_generate_title_async_strips_think_tags_in_response(self, monkeypatch):
         """Async title generation strips <think> blocks from the model response."""
         _set_test_title_config(max_chars=50, model_name="title-model")

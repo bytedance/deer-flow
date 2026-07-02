@@ -653,6 +653,38 @@ def test_upload_files_overwrites_existing_regular_file(tmp_path):
     assert existing_file.stat().st_nlink == 1
 
 
+def test_upload_files_oversized_replacement_preserves_existing_regular_file(tmp_path):
+    thread_uploads_dir = tmp_path / "uploads"
+    thread_uploads_dir.mkdir(parents=True)
+    existing_file = thread_uploads_dir / "a.txt"
+    existing_file.write_bytes(b"original bytes")
+
+    provider = MagicMock()
+    provider.uses_thread_data_mounts = True
+
+    with (
+        patch.object(uploads, "get_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "ensure_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "get_sandbox_provider", return_value=provider),
+    ):
+        file = ChunkedUpload("a.txt", [b"tiny", b"x" * 8])
+
+        with pytest.raises(HTTPException) as exc_info:
+            asyncio.run(
+                call_unwrapped(
+                    uploads.upload_files,
+                    "thread-local",
+                    request=MagicMock(),
+                    files=[file],
+                    config=SimpleNamespace(uploads={"max_file_size": 10}),
+                )
+            )
+
+    assert exc_info.value.status_code == 413
+    assert existing_file.read_bytes() == b"original bytes"
+    assert [path.name for path in thread_uploads_dir.iterdir()] == ["a.txt"]
+
+
 def test_delete_uploaded_file_removes_generated_markdown_companion(tmp_path):
     thread_uploads_dir = tmp_path / "uploads"
     thread_uploads_dir.mkdir(parents=True)
