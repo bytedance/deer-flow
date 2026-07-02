@@ -21,10 +21,14 @@ comes for free.
   `memory.storage_class` reflection hook. **No deer-flow core changes.**
 - Stream per owner: `deerflow.memory-{user_id}` (global memory) and
   `deerflow.memory-{user_id}.agent.{agent_name}` (per-agent memory). The
-  `$by_category` projection groups them all under `deerflow.memory`.
+  `$by_category` projection groups them all under `deerflow.memory`
+  (`$by_category` is a KurrentDB system projection — the dev overlay enables
+  it via `KURRENTDB_START_STANDARD_PROJECTIONS=true`).
 - Each `save()` appends a `MemoryUpdated` event whose data is the full memory
   snapshot JSON (with `lastUpdated` stamped) and whose metadata carries
-  `{user_id, agent_name, source, schema}`.
+  `{user_id, agent_name, source, schema}`. `load()` only folds `MemoryUpdated`
+  events — a newest event of any other type is ignored with a warning
+  (sole-writer assumption, v0).
 - Reads are cache-first per `(user_id, agent_name)` — after the first load no
   gRPC call happens on the hot path. `reload()` (or
   `POST /api/memory/reload`) forces a re-read.
@@ -68,14 +72,17 @@ comes for free.
 - **First read per owner may hit gRPC on the event loop** (Gateway memory
   endpoints are `async def`). Follow-up: offload via `asyncio.to_thread` or
   an async storage path. Cache-first reads keep steady-state hot paths clean.
+  Writes have the same shape: every `/api/memory` mutation appends via gRPC
+  on the event loop (async handlers calling the sync `save()`).
 - **Snapshot-per-event (schema v0)** — each event carries the full memory
   JSON. Fact-level deltas (`FactAdded`/`FactRemoved`/`ContextUpdated`) and the
   [`kurrent-agent-schema`](https://github.com/kurrent-io/kurrent-agents)
   canonical vocabulary are the planned v1.
 - **`current_version=StreamState.ANY`** — no optimistic-concurrency guard;
   concurrent writers last-write-win, same as the file backend.
-- Multi-process deployments share streams but not caches; call `reload()` to
-  converge (same semantics as the file backend's per-process cache).
+- Multi-process deployments share streams but not caches — and unlike the
+  file backend's mtime-checked cache, external appends are not observed by
+  `load()` until `reload()` is called (or the process restarts).
 
 ## Tests
 
