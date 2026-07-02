@@ -358,6 +358,113 @@ test.describe("Chat workspace", () => {
     });
   });
 
+  test("shows gateway upload limits on the attachment entry point", async ({
+    page,
+  }) => {
+    await page.goto("/workspace/chats/new");
+
+    const addAttachments = page.getByTestId("add-attachments-button");
+    await expect(addAttachments).toBeVisible({ timeout: 15_000 });
+    await addAttachments.hover();
+
+    await expect(page.getByRole("tooltip")).toContainText("50 MiB");
+    await expect(page.getByRole("tooltip")).toContainText("100 MiB");
+  });
+
+  test("rejects an oversized attachment before upload", async ({ page }) => {
+    let uploadCalled = false;
+    await page.route("**/api/threads/*/uploads", (route) => {
+      if (route.request().method() === "POST") {
+        uploadCalled = true;
+      }
+      return route.fallback();
+    });
+    await page.route("**/api/threads/*/uploads/limits", (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          max_files: 10,
+          max_file_size: 5,
+          max_total_size: 20,
+        }),
+      }),
+    );
+
+    await page.goto("/workspace/chats/new");
+    const addAttachments = page.getByTestId("add-attachments-button");
+    await addAttachments.hover();
+    await expect(page.getByRole("tooltip")).toContainText("5 B");
+
+    await page.getByLabel("Upload files").setInputFiles({
+      name: "too-large.txt",
+      mimeType: "text/plain",
+      buffer: Buffer.from("123456"),
+    });
+
+    await expect(
+      page.locator("[data-sonner-toast]").filter({ hasText: "too-large.txt" }),
+    ).toBeVisible();
+    await expect(page.locator("form").getByText("too-large.txt")).toBeHidden();
+
+    const textarea = page.locator('textarea[name="message"]');
+    await textarea.fill("Continue without the rejected attachment");
+    await textarea.press("Enter");
+    await expect(page.getByText("Hello from DeerFlow!")).toBeVisible({
+      timeout: 10_000,
+    });
+    expect(uploadCalled).toBe(false);
+  });
+
+  test("keeps valid attachments in order when the total limit is exceeded", async ({
+    page,
+  }) => {
+    await page.route("**/api/threads/*/uploads/limits", (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          max_files: 3,
+          max_file_size: 10,
+          max_total_size: 5,
+        }),
+      }),
+    );
+
+    await page.goto("/workspace/chats/new");
+    const addAttachments = page.getByTestId("add-attachments-button");
+    await addAttachments.hover();
+    await expect(page.getByRole("tooltip")).toContainText("5 B");
+
+    await page.getByLabel("Upload files").setInputFiles([
+      {
+        name: "first.txt",
+        mimeType: "text/plain",
+        buffer: Buffer.from("1234"),
+      },
+      {
+        name: "over-total.txt",
+        mimeType: "text/plain",
+        buffer: Buffer.from("12"),
+      },
+      {
+        name: "second.txt",
+        mimeType: "text/plain",
+        buffer: Buffer.from("1"),
+      },
+    ]);
+
+    const promptForm = page.locator("form").filter({
+      has: page.locator('textarea[name="message"]'),
+    });
+    await expect(promptForm.getByText("first.txt")).toBeVisible();
+    await expect(promptForm.getByText("second.txt")).toBeVisible();
+    await expect(promptForm.getByText("over-total.txt")).toBeHidden();
+    await expect(
+      page.locator("[data-sonner-toast]").filter({ hasText: "5 B" }),
+    ).toBeVisible();
+  });
+
   test("keeps attachments visible while upload submit is pending", async ({
     page,
   }) => {

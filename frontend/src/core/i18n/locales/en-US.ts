@@ -331,6 +331,14 @@ export const enUS: Translations = {
   uploads: {
     uploading: "Uploading...",
     uploadingFiles: "Uploading files, please wait...",
+    limitsHint: (maxFiles: number, maxFileSize: string, maxTotalSize: string) =>
+      `Add attachments (up to ${maxFiles} files, ${maxFileSize} each, ${maxTotalSize} total). Most regular file types are supported; compress macOS .app bundles first.`,
+    filesTooLarge: (files: string, maxFileSize: string) =>
+      `Files exceeding the ${maxFileSize} per-file limit were not added: ${files}.`,
+    tooManyFiles: (count: number, maxFiles: number) =>
+      `${count} file${count === 1 ? " was" : "s were"} not added. You can attach up to ${maxFiles} files at once.`,
+    totalSizeTooLarge: (count: number, maxTotalSize: string) =>
+      `${count} file${count === 1 ? " was" : "s were"} not added. Attachments can total up to ${maxTotalSize}.`,
   },
 
   subtasks: {

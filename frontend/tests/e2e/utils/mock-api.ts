@@ -55,6 +55,11 @@ export type MockAPIOptions = {
   threads?: MockThread[];
   agents?: MockAgent[];
   skills?: MockSkill[];
+  uploadLimits?: {
+    max_files: number;
+    max_file_size: number;
+    max_total_size: number;
+  };
 };
 
 const DEFAULT_SKILLS: MockSkill[] = [
@@ -106,6 +111,11 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
   let threads = [...(options?.threads ?? [])];
   const agents = options?.agents ?? [];
   const skills = options?.skills ?? DEFAULT_SKILLS;
+  const uploadLimits = options?.uploadLimits ?? {
+    max_files: 10,
+    max_file_size: 50 * 1024 * 1024,
+    max_total_size: 100 * 1024 * 1024,
+  };
 
   const upsertThread = (thread: MockThread) => {
     threads = [
@@ -278,6 +288,17 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
     if (route.request().method() === "DELETE") {
       return route.fulfill({
         status: 204,
+      });
+    }
+    return route.fallback();
+  });
+
+  void page.route("**/api/threads/*/uploads/limits", (route) => {
+    if (route.request().method() === "GET") {
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(uploadLimits),
       });
     }
     return route.fallback();
