@@ -10,11 +10,18 @@ from _router_auth_helpers import make_authed_test_app
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from app.gateway.auth.models import User
 from app.gateway.deps import get_config
 from app.gateway.routers import skills as skills_router
 from app.gateway.routers import uploads as uploads_router
 from deerflow.skills.storage import get_or_new_skill_storage
 from deerflow.skills.types import Skill
+
+
+def _make_admin_user() -> User:
+    from uuid import uuid4
+
+    return User(email="admin-test@example.com", password_hash="x", system_role="admin", id=uuid4())
 
 
 def _skill_content(name: str, description: str = "Demo skill") -> str:
@@ -42,7 +49,7 @@ def _make_skill(name: str, *, enabled: bool) -> Skill:
 
 
 def _make_test_app(config) -> FastAPI:
-    app = FastAPI()
+    app = make_authed_test_app(user_factory=_make_admin_user)
     app.state.config = config  # kept for any startup-style reads
     app.dependency_overrides[get_config] = lambda: config
     app.include_router(skills_router.router)
@@ -141,7 +148,7 @@ def test_uploaded_skill_archive_installs_sandbox_readable_tree(monkeypatch, tmp_
     monkeypatch.setattr("deerflow.skills.installer.scan_skill_content", _scan)
     monkeypatch.setattr(skills_router, "refresh_skills_system_prompt_cache_async", _refresh)
 
-    app = make_authed_test_app()
+    app = make_authed_test_app(user_factory=_make_admin_user)
     app.state.config = config
     app.dependency_overrides[get_config] = lambda: config
     app.include_router(uploads_router.router)

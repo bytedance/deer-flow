@@ -126,19 +126,9 @@ def _create_summarization_middleware(*, app_config: AppConfig | None = None) -> 
     if resolved_app_config.memory.enabled:
         hooks.append(memory_flush_hook)
 
-    # The logic below relies on two assumptions holding true: this factory is
-    # the sole entry point for DeerFlowSummarizationMiddleware, and the runtime
-    # config is not expected to change after startup.
-    skills_container_path = resolved_app_config.skills.container_path or "/mnt/skills"
-
     return DeerFlowSummarizationMiddleware(
         **kwargs,
-        skills_container_path=skills_container_path,
-        skill_file_read_tool_names=config.skill_file_read_tool_names,
         before_summarization=hooks,
-        preserve_recent_skill_count=config.preserve_recent_skill_count,
-        preserve_recent_skill_tokens=config.preserve_recent_skill_tokens,
-        preserve_recent_skill_tokens_per_skill=config.preserve_recent_skill_tokens_per_skill,
     )
 
 
@@ -312,6 +302,18 @@ def build_middlewares(
 
     middlewares.append(SkillActivationMiddleware(available_skills=available_skills, app_config=resolved_app_config))
 
+    # Capture completed task delegations and loaded skill files before
+    # summarization can compact them, then inject durable context channels
+    # (summary + ledger + skills) into model calls.
+    from deerflow.agents.middlewares.durable_context_middleware import DurableContextMiddleware
+
+    middlewares.append(
+        DurableContextMiddleware(
+            skills_container_path=resolved_app_config.skills.container_path,
+            skill_file_read_tool_names=resolved_app_config.summarization.skill_file_read_tool_names,
+        )
+    )
+
     # Add summarization middleware if enabled
     summarization_middleware = _create_summarization_middleware(app_config=resolved_app_config)
     if summarization_middleware is not None:
@@ -348,6 +350,13 @@ def build_middlewares(
 
         middlewares.append(DeferredToolFilterMiddleware(deferred_setup.deferred_names, deferred_setup.catalog_hash))
 
+    # Coalesce every SystemMessage into a single leading one before the request
+    # reaches the provider. Strict backends (vLLM, SGLang, Qwen, Anthropic)
+    # reject non-leading SystemMessages. See system_message_coalescing_middleware.py.
+    from deerflow.agents.middlewares.system_message_coalescing_middleware import SystemMessageCoalescingMiddleware
+
+    middlewares.append(SystemMessageCoalescingMiddleware())
+
     # Add SubagentLimitMiddleware to truncate excess parallel task calls
     subagent_enabled = cfg.get("subagent_enabled", False)
     if subagent_enabled:
@@ -358,6 +367,13 @@ def build_middlewares(
     loop_detection_config = resolved_app_config.loop_detection
     if loop_detection_config.enabled:
         middlewares.append(LoopDetectionMiddleware.from_config(loop_detection_config))
+
+    # TokenBudgetMiddleware - enforce per-run token limits
+    token_budget_config = resolved_app_config.token_budget
+    if token_budget_config.enabled:
+        from deerflow.agents.middlewares.token_budget_middleware import TokenBudgetMiddleware
+
+        middlewares.append(TokenBudgetMiddleware.from_config(token_budget_config))
 
     # Inject custom middlewares before ClarificationMiddleware
     if custom_middlewares:

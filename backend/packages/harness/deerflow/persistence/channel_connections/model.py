@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from sqlalchemy import JSON, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import JSON, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from deerflow.persistence.base import Base
@@ -46,6 +46,20 @@ class ChannelConnectionRow(Base):
             name="uq_channel_connection_owner_provider_identity",
         ),
         Index("idx_channel_connections_event_lookup", "provider", "workspace_id", "bot_user_id"),
+        # Enforce the single-active-owner invariant at the database layer: at most
+        # one non-revoked row may exist per external identity. This makes ownership
+        # transfer race-safe (concurrent connects from different owners can no
+        # longer both commit a connected row). Partial unique indexes are
+        # supported by both SQLite (>= 3.8.0) and PostgreSQL.
+        Index(
+            "uq_channel_connection_active_identity",
+            "provider",
+            "external_account_id",
+            "workspace_id",
+            unique=True,
+            sqlite_where=text("status != 'revoked'"),
+            postgresql_where=text("status != 'revoked'"),
+        ),
     )
 
 

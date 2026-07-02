@@ -1,11 +1,14 @@
 import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
+import { resolve } from "node:path";
 
-import { describe, expect, it } from "vitest";
+import type { Message } from "@langchain/langgraph-sdk";
+import { describe, expect, it } from "@rstest/core";
 
 import {
   SUBAGENT_ERROR_KEY,
   SUBAGENT_STATUS_KEY,
+  derivePendingSubtaskStatus,
+  hasSubtaskToolResult,
   parseSubtaskResult,
 } from "@/core/tasks/subtask-result";
 
@@ -21,13 +24,9 @@ interface ContractFile {
   cases: ContractCase[];
 }
 
-// The frontend package is ESM (`"type": "module"`), so `__dirname` is not
-// defined. Resolve the cross-language fixture relative to this module URL.
-const CONTRACT_PATH = fileURLToPath(
-  new URL(
-    "../../../../../contracts/subagent_status_contract.json",
-    import.meta.url,
-  ),
+const CONTRACT_PATH = resolve(
+  __dirname,
+  "../../../../../contracts/subagent_status_contract.json",
 );
 const CONTRACT: ContractFile = JSON.parse(
   readFileSync(CONTRACT_PATH, "utf-8"),
@@ -139,6 +138,55 @@ describe("parseSubtaskResult", () => {
     const parsed = parseSubtaskResult("   Task Succeeded. Result: ok   ");
     expect(parsed.status).toBe("completed");
     expect(parsed.result).toBe("ok");
+  });
+});
+
+describe("hasSubtaskToolResult", () => {
+  it("matches a task tool call to its ToolMessage", () => {
+    const messages = [
+      { type: "ai" },
+      { type: "tool", tool_call_id: "call_task_1" },
+    ] as Message[];
+
+    expect(hasSubtaskToolResult("call_task_1", messages)).toBe(true);
+  });
+
+  it("returns false when a task tool call has no ToolMessage", () => {
+    const messages = [
+      { type: "ai" },
+      { type: "tool", tool_call_id: "call_other" },
+    ] as Message[];
+
+    expect(hasSubtaskToolResult("call_task_1", messages)).toBe(false);
+  });
+});
+
+describe("derivePendingSubtaskStatus", () => {
+  it("keeps a task in progress while its own assistant turn is loading", () => {
+    const messages = [{ type: "ai" }] as Message[];
+
+    expect(derivePendingSubtaskStatus("call_task_1", messages, true)).toBe(
+      "in_progress",
+    );
+  });
+
+  it("does not revive an earlier unfinished task during a later turn", () => {
+    const messages = [{ type: "ai" }] as Message[];
+
+    expect(derivePendingSubtaskStatus("call_task_1", messages, false)).toBe(
+      "failed",
+    );
+  });
+
+  it("leaves result parsing to the ToolMessage path when a result exists", () => {
+    const messages = [
+      { type: "ai" },
+      { type: "tool", tool_call_id: "call_task_1" },
+    ] as Message[];
+
+    expect(derivePendingSubtaskStatus("call_task_1", messages, false)).toBe(
+      "in_progress",
+    );
   });
 });
 

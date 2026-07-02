@@ -7,6 +7,7 @@ via :meth:`RunJournal.record_external_llm_usage_records`.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 from langchain_core.callbacks import BaseCallbackHandler
@@ -18,7 +19,7 @@ class SubagentTokenCollector(BaseCallbackHandler):
     def __init__(self, caller: str):
         super().__init__()
         self.caller = caller
-        self._records: list[dict[str, int | str]] = []
+        self._records: list[dict[str, int | str | None]] = []
         self._counted_run_ids: set[str] = set()
 
     def on_llm_end(
@@ -46,11 +47,19 @@ class SubagentTokenCollector(BaseCallbackHandler):
                     total_tk = input_tk + output_tk
                 if total_tk <= 0:
                     continue
+                # Capture the model that actually produced this response so the
+                # parent journal can bucket tokens by real model rather than the
+                # lead agent's resolved model
+                response_metadata = getattr(gen.message, "response_metadata", None) or {}
+                model_name: str | None = None
+                if isinstance(response_metadata, Mapping):
+                    model_name = response_metadata.get("model_name") or response_metadata.get("model")
                 self._counted_run_ids.add(rid)
                 self._records.append(
                     {
                         "source_run_id": rid,
                         "caller": self.caller,
+                        "model_name": model_name,
                         "input_tokens": input_tk,
                         "output_tokens": output_tk,
                         "total_tokens": total_tk,
@@ -58,6 +67,6 @@ class SubagentTokenCollector(BaseCallbackHandler):
                 )
                 return
 
-    def snapshot_records(self) -> list[dict[str, int | str]]:
+    def snapshot_records(self) -> list[dict[str, int | str | None]]:
         """Return a copy of the accumulated usage records."""
         return list(self._records)

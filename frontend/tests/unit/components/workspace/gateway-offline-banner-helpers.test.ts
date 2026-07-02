@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "@rstest/core";
 
 import {
   OFFLINE_BANNER_AUTH_FAILURE_THRESHOLD,

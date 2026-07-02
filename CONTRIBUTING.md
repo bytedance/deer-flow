@@ -338,6 +338,38 @@ Every pull request triggers the following CI workflows:
 - [Architecture Overview](backend/CLAUDE.md) - Technical architecture
 - [MCP Setup Guide](backend/docs/MCP_SERVER.md) - Model Context Protocol configuration
 
+## Troubleshooting Bundle
+
+For setup, configuration, sandbox, or runtime issues, generate a redacted support
+summary before filing:
+
+```bash
+make support-bundle
+```
+
+The command prints reporter next steps, writes a `*-issue-summary.md` file that
+you can paste into the issue, writes a `*-issue-draft.md` file for AI-assisted
+issue filing, and writes an optional evidence zip under
+`.deer-flow/support-bundles/`. The zip includes toolchain versions, sanitized
+`config.yaml` and `extensions_config.json` summaries, enabled tool/skill/MCP
+structure, git metadata, and redacted `make doctor` output.
+
+When filing the issue, paste the generated `*-issue-summary.md` into the issue
+body. If an AI assistant files the issue, start from `*-issue-draft.md` and
+replace every REQUIRED placeholder before filing; the draft intentionally does
+not invent reproduction steps, expected behavior, or a problem summary. Attach
+the zip only if a maintainer asks for the evidence bundle, or if the summary
+alone is not enough to diagnose the issue. Maintainers and AI-assisted triage
+should start with `triage.json`, which contains stable signals such as
+`config_missing`, `node_version_too_old`, `doctor_failed`, and suggested next
+steps. The other JSON files are evidence for follow-up inspection.
+
+It intentionally does **not** include `.env`, raw conversation messages, or the
+contents of files in thread workspaces/uploads/outputs. If you need to include a
+thread, run `cd backend && uv run python ../scripts/support_bundle.py --thread-id
+<thread-id> --include-doctor`; this adds file manifests only. Please still review
+the generated zip before attaching it to a public issue.
+
 ## Need Help?
 
 - Check existing [Issues](https://github.com/bytedance/deer-flow/issues)

@@ -50,6 +50,7 @@ export const enUS: Translations = {
     exportAsMarkdown: "Export as Markdown",
     exportAsJSON: "Export as JSON",
     exportSuccess: "Conversation exported",
+    regenerate: "Regenerate",
   },
 
   // Home
@@ -115,6 +116,8 @@ export const enUS: Translations = {
       "You already have text in the input. Choose how to send it.",
     followupConfirmAppend: "Append & send",
     followupConfirmReplace: "Replace & send",
+    suggestionPlaceholderRequired:
+      "Replace the suggestion placeholder before sending.",
     suggestions: [
       {
         suggestion: "Write",
@@ -174,6 +177,7 @@ export const enUS: Translations = {
     recentChats: "Recent chats",
     demoChats: "Demo chats",
     agents: "Agents",
+    agentsDisabledTooltip: "Feature not enabled",
   },
 
   // Agents
@@ -185,6 +189,9 @@ export const enUS: Translations = {
     emptyTitle: "No custom agents yet",
     emptyDescription:
       "Create your first custom agent with a specialized system prompt.",
+    featureDisabledTitle: "Agents feature is not enabled",
+    featureDisabledDescription:
+      "This feature is not enabled on this server. Please contact your administrator.",
     chat: "Chat",
     delete: "Delete",
     deleteConfirm:
@@ -328,6 +335,14 @@ export const enUS: Translations = {
   uploads: {
     uploading: "Uploading...",
     uploadingFiles: "Uploading files, please wait...",
+    limitsHint: (maxFiles: number, maxFileSize: string, maxTotalSize: string) =>
+      `Add attachments (up to ${maxFiles} files, ${maxFileSize} each, ${maxTotalSize} total). Most regular file types are supported; compress macOS .app bundles first.`,
+    filesTooLarge: (files: string, maxFileSize: string) =>
+      `Files exceeding the ${maxFileSize} per-file limit were not added: ${files}.`,
+    tooManyFiles: (count: number, maxFiles: number) =>
+      `${count} file${count === 1 ? " was" : "s were"} not added. You can attach up to ${maxFiles} files at once.`,
+    totalSizeTooLarge: (count: number, maxTotalSize: string) =>
+      `${count} file${count === 1 ? " was" : "s were"} not added. Attachments can total up to ${maxTotalSize}.`,
   },
 
   subtasks: {
@@ -514,6 +529,9 @@ export const enUS: Translations = {
       emptyDescription:
         "Put your agent skill folders under the `/skills/custom` folder under the root folder of DeerFlow.",
       emptyButton: "Create Your First Skill",
+      adminRequired: "Admin privileges are required to manage agent skills.",
+      installAdminRequired:
+        "Admin privileges are required to install agent skills.",
     },
     notification: {
       title: "Notification",
@@ -532,8 +550,12 @@ export const enUS: Translations = {
       profileTitle: "Profile",
       email: "Email",
       role: "Role",
+      ssoProvider: "SSO",
       changePasswordTitle: "Change Password",
       changePasswordDescription: "Update your account password.",
+      ssoPasswordDescription: "Password is managed by your SSO provider.",
+      ssoPasswordMessage:
+        "This account signs in with {provider}, so DeerFlow cannot manage or change its password here. Use your SSO provider's account settings instead.",
       currentPassword: "Current password",
       newPassword: "New password",
       confirmNewPassword: "Confirm new password",
@@ -548,6 +570,38 @@ export const enUS: Translations = {
     acknowledge: {
       emptyTitle: "Acknowledgements",
       emptyDescription: "Credits and acknowledgements will show here.",
+    },
+  },
+  login: {
+    signInTitle: "Sign in to your account",
+    createAccountTitle: "Create a new account",
+    email: "Email",
+    emailPlaceholder: "you@example.com",
+    password: "Password",
+    passwordPlaceholder: "•••••••",
+    pleaseWait: "Please wait...",
+    signIn: "Sign In",
+    createAccount: "Create Account",
+    createAdminAccount: "Create admin account",
+    adminSetupRequiredTitle: "Administrator setup is required",
+    adminSetupRequiredDescription:
+      "DeerFlow needs an administrator account before new regular accounts can be created.",
+    orContinueWith: "Or continue with",
+    ssoHint:
+      "If your account uses single sign-on, sign in with the option below instead.",
+    continueWith: (provider: string) => `Continue with ${provider}`,
+    noAccountSignUp: "Don't have an account? Sign up",
+    haveAccountSignIn: "Already have an account? Sign in",
+    backToHome: "← Back to home",
+    networkError: "Network error. Please try again.",
+    authFailed: "Authentication failed.",
+    errors: {
+      sso_failed: "SSO login failed. Please try again or use email login.",
+      sso_cancelled: "SSO login was cancelled.",
+      sso_account_exists:
+        "An account with this email already exists. Please sign in with your password or contact your administrator.",
+      sso_not_allowed:
+        "SSO login is not allowed for your account. Contact your administrator.",
     },
   },
 };

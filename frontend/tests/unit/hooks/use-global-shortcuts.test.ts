@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test, vi } from "vitest";
+import { afterEach, describe, expect, test, rs } from "@rstest/core";
 
 type KeydownHandler = (event: KeyboardEvent) => void;
 
@@ -6,23 +6,23 @@ async function loadHookWithCapturedHandler() {
   let cleanup: (() => void) | undefined;
   let keydownHandler: KeydownHandler | undefined;
 
-  const addEventListener = vi.fn(
+  const addEventListener = rs.fn(
     (type: string, listener: EventListenerOrEventListenerObject) => {
       if (type === "keydown" && typeof listener === "function") {
         keydownHandler = listener as KeydownHandler;
       }
     },
   );
-  const removeEventListener = vi.fn();
+  const removeEventListener = rs.fn();
 
-  vi.resetModules();
-  vi.doMock("react", () => ({
+  rs.resetModules();
+  rs.doMock("react", () => ({
     useEffect: (effect: () => void | (() => void)) => {
       const result = effect();
       cleanup = typeof result === "function" ? result : undefined;
     },
   }));
-  vi.stubGlobal("window", { addEventListener, removeEventListener });
+  rs.stubGlobal("window", { addEventListener, removeEventListener });
 
   const { useGlobalShortcuts } = await import("@/hooks/use-global-shortcuts");
 
@@ -34,14 +34,14 @@ async function loadHookWithCapturedHandler() {
 }
 
 afterEach(() => {
-  vi.doUnmock("react");
-  vi.unstubAllGlobals();
-  vi.resetModules();
+  rs.doUnmock("react");
+  rs.unstubAllGlobals();
+  rs.resetModules();
 });
 
 describe("useGlobalShortcuts", () => {
   test("ignores keydown events without a key", async () => {
-    const action = vi.fn();
+    const action = rs.fn();
     const { getKeydownHandler, useGlobalShortcuts } =
       await loadHookWithCapturedHandler();
 

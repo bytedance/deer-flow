@@ -61,6 +61,13 @@ def filter_messages_for_memory(messages: list[Any]) -> list[Any]:
         msg_type = getattr(msg, "type", None)
 
         if msg_type == "human":
+            # Middleware-injected hidden messages (e.g. TodoMiddleware.todo_reminder,
+            # ViewImageMiddleware, p0 DynamicContextMiddleware.__memory) carry
+            # hide_from_ui and must never reach the memory-updating LLM — otherwise
+            # framework-internal text pollutes long-term memory (and the p0 __memory
+            # payload could trigger a self-amplification loop).
+            if getattr(msg, "additional_kwargs", {}).get("hide_from_ui"):
+                continue
             content_str = extract_message_text(msg)
             if "<uploaded_files>" in content_str:
                 stripped = _UPLOAD_BLOCK_RE.sub("", content_str).strip()

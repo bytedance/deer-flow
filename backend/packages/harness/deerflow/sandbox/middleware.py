@@ -2,7 +2,7 @@ import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import replace as dc_replace
-from typing import Annotated, NotRequired, override
+from typing import NotRequired, override
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
@@ -11,27 +11,17 @@ from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.runtime import Runtime
 from langgraph.types import Command
 
-from deerflow.agents.thread_state import SandboxState, ThreadDataState, merge_sandbox
+from deerflow.agents.thread_state import SandboxStateField, ThreadDataState
+from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.sandbox import get_sandbox_provider
 
 logger = logging.getLogger(__name__)
 
 
 class SandboxMiddlewareState(AgentState):
-    """Compatible with the `ThreadState` schema.
+    """Compatible with the `ThreadState` schema."""
 
-    ``sandbox`` must carry the same ``merge_sandbox`` reducer binding as
-    ``ThreadState.sandbox``: langchain's ``create_agent`` calls
-    ``_resolve_schemas`` to merge every middleware's ``state_schema`` with
-    the user-supplied ``state_schema`` using last-write-wins semantics on
-    the field name. Declaring ``sandbox`` here without the reducer would
-    silently drop the ``ThreadState.sandbox`` reducer from the resolved
-    schema, and the runtime would build a ``LastValueChannel`` for the key
-    — concurrent tool-call sandbox writes then raise
-    ``INVALID_CONCURRENT_GRAPH_UPDATE``. See #3518 follow-up.
-    """
-
-    sandbox: Annotated[NotRequired[SandboxState | None], merge_sandbox]
+    sandbox: SandboxStateField
     thread_data: NotRequired[ThreadDataState | None]
 
 
@@ -59,15 +49,15 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
         super().__init__()
         self._lazy_init = lazy_init
 
-    def _acquire_sandbox(self, thread_id: str) -> str:
+    def _acquire_sandbox(self, thread_id: str, *, user_id: str) -> str:
         provider = get_sandbox_provider()
-        sandbox_id = provider.acquire(thread_id)
+        sandbox_id = provider.acquire(thread_id, user_id=user_id)
         logger.info(f"Acquiring sandbox {sandbox_id}")
         return sandbox_id
 
-    async def _acquire_sandbox_async(self, thread_id: str) -> str:
+    async def _acquire_sandbox_async(self, thread_id: str, *, user_id: str) -> str:
         provider = get_sandbox_provider()
-        sandbox_id = await provider.acquire_async(thread_id)
+        sandbox_id = await provider.acquire_async(thread_id, user_id=user_id)
         logger.info(f"Acquiring sandbox {sandbox_id}")
         return sandbox_id
 
@@ -85,7 +75,7 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
             thread_id = (runtime.context or {}).get("thread_id")
             if thread_id is None:
                 return super().before_agent(state, runtime)
-            sandbox_id = self._acquire_sandbox(thread_id)
+            sandbox_id = self._acquire_sandbox(thread_id, user_id=resolve_runtime_user_id(runtime))
             logger.info(f"Assigned sandbox {sandbox_id} to thread {thread_id}")
             return {"sandbox": {"sandbox_id": sandbox_id}}
         return super().before_agent(state, runtime)
@@ -102,7 +92,7 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
             thread_id = (runtime.context or {}).get("thread_id")
             if thread_id is None:
                 return await super().abefore_agent(state, runtime)
-            sandbox_id = await self._acquire_sandbox_async(thread_id)
+            sandbox_id = await self._acquire_sandbox_async(thread_id, user_id=resolve_runtime_user_id(runtime))
             logger.info(f"Assigned sandbox {sandbox_id} to thread {thread_id}")
             return {"sandbox": {"sandbox_id": sandbox_id}}
         return await super().abefore_agent(state, runtime)

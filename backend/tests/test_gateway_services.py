@@ -209,6 +209,70 @@ def test_build_run_config_with_overrides():
 
 
 # ---------------------------------------------------------------------------
+# recursion_limit clamping: the Gateway must not trust a client-supplied
+# recursion_limit verbatim (runaway LLM cost / DoS). See build_run_config.
+# ---------------------------------------------------------------------------
+
+
+def test_build_run_config_clamps_excessive_recursion_limit(_stub_app_config):
+    """A huge client recursion_limit is capped at the configured ceiling (default 1000)."""
+    from app.gateway.services import build_run_config
+
+    config = build_run_config("thread-1", {"recursion_limit": 100_000_000}, None)
+    assert config["recursion_limit"] == 1000
+
+
+def test_build_run_config_ceiling_is_configurable(_stub_app_config):
+    """The clamp ceiling comes from AppConfig.max_recursion_limit, not a hardcoded value."""
+    from app.gateway.services import build_run_config
+    from deerflow.config.app_config import AppConfig, reset_app_config, set_app_config
+
+    set_app_config(AppConfig.model_validate({"sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"}, "max_recursion_limit": 300}))
+    try:
+        config = build_run_config("thread-1", {"recursion_limit": 100_000_000}, None)
+        assert config["recursion_limit"] == 300
+    finally:
+        reset_app_config()
+
+
+def test_build_run_config_allows_recursion_limit_at_ceiling(_stub_app_config):
+    """A value at the configured ceiling is preserved unchanged."""
+    from app.gateway.services import build_run_config
+
+    config = build_run_config("thread-1", {"recursion_limit": 1000}, None)
+    assert config["recursion_limit"] == 1000
+
+
+def test_build_run_config_preserves_reasonable_recursion_limit(_stub_app_config):
+    """A modest client value below the ceiling is honoured as-is."""
+    from app.gateway.services import build_run_config
+
+    config = build_run_config("thread-1", {"recursion_limit": 250}, None)
+    assert config["recursion_limit"] == 250
+
+
+def test_build_run_config_rejects_invalid_recursion_limit(_stub_app_config):
+    """Non-positive / non-int / bool values fall back to the server default."""
+    from app.gateway.services import _DEFAULT_RECURSION_LIMIT, build_run_config
+
+    for bad in (0, -5, "1000", 3.5, True, None):
+        config = build_run_config("thread-1", {"recursion_limit": bad}, None)
+        assert config["recursion_limit"] == _DEFAULT_RECURSION_LIMIT, bad
+
+
+def test_build_run_config_clamps_recursion_limit_with_context(_stub_app_config):
+    """Clamping also applies on the LangGraph >= 0.6.0 context passthrough path."""
+    from app.gateway.services import build_run_config
+
+    config = build_run_config(
+        "thread-1",
+        {"context": {"thread_id": "thread-1"}, "recursion_limit": 999_999},
+        None,
+    )
+    assert config["recursion_limit"] == 1000
+
+
+# ---------------------------------------------------------------------------
 # Regression tests for issue #1644:
 # assistant_id not mapped to agent_name → custom agent SOUL.md never loaded
 # ---------------------------------------------------------------------------
@@ -371,6 +435,70 @@ def test_run_create_request_context_defaults_to_none():
 
     body = RunCreateRequest(input=None)
     assert body.context is None
+
+
+def test_apply_checkpoint_to_run_config_writes_checkpoint_fields():
+    import asyncio
+    from types import SimpleNamespace
+
+    from app.gateway.services import apply_checkpoint_to_run_config
+
+    class FakeCheckpointer:
+        def __init__(self):
+            self.seen_config = None
+
+        async def aget_tuple(self, config):
+            self.seen_config = config
+            return SimpleNamespace(config=config, checkpoint={"channel_values": {}})
+
+    checkpointer = FakeCheckpointer()
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(checkpointer=checkpointer)))
+    body = SimpleNamespace(
+        checkpoint={
+            "checkpoint_ns": "",
+            "checkpoint_id": "ckpt-1",
+            "checkpoint_map": {"": "ckpt-1"},
+        },
+        checkpoint_id=None,
+    )
+    config = {"configurable": {"thread_id": "thread-1"}}
+
+    asyncio.run(apply_checkpoint_to_run_config(config, body=body, thread_id="thread-1", request=request))
+
+    assert checkpointer.seen_config == {
+        "configurable": {
+            "thread_id": "thread-1",
+            "checkpoint_ns": "",
+            "checkpoint_id": "ckpt-1",
+            "checkpoint_map": {"": "ckpt-1"},
+        }
+    }
+    assert config["configurable"]["checkpoint_id"] == "ckpt-1"
+    assert config["configurable"]["checkpoint_ns"] == ""
+    assert config["configurable"]["checkpoint_map"] == {"": "ckpt-1"}
+
+
+def test_apply_checkpoint_to_run_config_rejects_missing_checkpoint():
+    import asyncio
+    from types import SimpleNamespace
+
+    from fastapi import HTTPException
+
+    from app.gateway.services import apply_checkpoint_to_run_config
+
+    class FakeCheckpointer:
+        async def aget_tuple(self, config):
+            return None
+
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(checkpointer=FakeCheckpointer())))
+    body = SimpleNamespace(checkpoint=None, checkpoint_id="missing")
+    config = {"configurable": {"thread_id": "thread-1"}}
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(apply_checkpoint_to_run_config(config, body=body, thread_id="thread-1", request=request))
+
+    assert exc.value.status_code == 404
+    assert "missing" in exc.value.detail
 
 
 def test_context_merges_into_configurable():
@@ -548,6 +676,89 @@ def test_inject_authenticated_user_context_skips_internal_role():
     assert config["context"]["user_id"] == "channel-user-7"
 
 
+async def _capture_start_run_graph_input(body):
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from langgraph.checkpoint.memory import InMemorySaver
+    from langgraph.store.memory import InMemoryStore
+
+    from app.gateway.services import start_run
+    from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
+    from deerflow.runtime import RunManager
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    run_manager = RunManager(store=MemoryRunStore())
+    state = SimpleNamespace(
+        stream_bridge=SimpleNamespace(),
+        run_manager=run_manager,
+        checkpointer=InMemorySaver(),
+        store=InMemoryStore(),
+        run_event_store=SimpleNamespace(),
+        run_events_config=None,
+        thread_store=MemoryThreadMetaStore(InMemoryStore()),
+    )
+    request = SimpleNamespace(
+        headers={},
+        state=SimpleNamespace(),
+        app=SimpleNamespace(state=state),
+    )
+    captured: dict[str, object] = {}
+
+    async def fake_run_agent(*args, **kwargs):
+        captured["graph_input"] = kwargs["graph_input"]
+
+    with (
+        patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+        patch("app.gateway.services.run_agent", side_effect=fake_run_agent),
+    ):
+        record = await start_run(body, "thread-command-test", request)
+        await record.task
+
+    return captured["graph_input"]
+
+
+def test_start_run_translates_resume_command_to_langgraph_command(_stub_app_config):
+    import asyncio
+
+    from langgraph.types import Command
+
+    from app.gateway.routers.thread_runs import RunCreateRequest
+
+    graph_input = asyncio.run(
+        _capture_start_run_graph_input(
+            RunCreateRequest(
+                input=None,
+                command={"resume": {"answer": "approved"}},
+            )
+        )
+    )
+
+    assert isinstance(graph_input, Command)
+    assert graph_input.resume == {"answer": "approved"}
+
+
+def test_start_run_uses_normalized_input_without_command(_stub_app_config):
+    import asyncio
+
+    from langchain_core.messages import HumanMessage
+
+    from app.gateway.routers.thread_runs import RunCreateRequest
+
+    graph_input = asyncio.run(
+        _capture_start_run_graph_input(
+            RunCreateRequest(
+                input={"messages": [{"role": "human", "content": "hi"}]},
+                command=None,
+            )
+        )
+    )
+
+    assert isinstance(graph_input, dict)
+    assert isinstance(graph_input["messages"][0], HumanMessage)
+    assert graph_input["messages"][0].content == "hi"
+
+
 def test_start_run_uses_internal_owner_header_for_persistence(_stub_app_config):
     import asyncio
     from types import SimpleNamespace
@@ -641,8 +852,24 @@ def test_build_run_config_with_context():
     )
     assert "context" in config
     assert config["context"]["user_id"] == "u-42"
+    assert config["context"]["thread_id"] == "thread-1"
     assert "configurable" not in config
     assert config["recursion_limit"] == 100
+
+
+def test_build_run_config_context_injects_thread_id():
+    from app.gateway.services import build_run_config
+
+    config = build_run_config(
+        "T-deadbeef-42",
+        {"context": {"user_id": "u-1", "thinking_enabled": True}},
+        None,
+    )
+
+    assert config["context"]["user_id"] == "u-1"
+    assert config["context"]["thinking_enabled"] is True
+    assert config["context"]["thread_id"] == "T-deadbeef-42"
+    assert "configurable" not in config
 
 
 def test_build_run_config_null_context_becomes_empty_context():
@@ -651,7 +878,7 @@ def test_build_run_config_null_context_becomes_empty_context():
 
     config = build_run_config("thread-1", {"context": None}, None)
 
-    assert config["context"] == {}
+    assert config["context"] == {"thread_id": "thread-1"}
     assert "configurable" not in config
 
 

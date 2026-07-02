@@ -9,6 +9,7 @@ from langchain_core.messages import AIMessage, ToolMessage
 from deerflow.agents.middlewares.token_usage_middleware import (
     TOKEN_USAGE_ATTRIBUTION_KEY,
     TokenUsageMiddleware,
+    _build_todo_actions,
 )
 
 
@@ -279,3 +280,20 @@ class TestTokenUsageMiddleware:
             "output_tokens": 12,
             "total_tokens": 42,
         }
+
+
+class TestBuildTodoActions:
+    def test_duplicate_content_emits_todo_remove(self):
+        """When next_todos has duplicate content entries that exhaust previous_by_content,
+        the positional fallback must not consume an unrelated previous todo as matched.
+        The unrelated previous entry should still produce a todo_remove action."""
+        previous = [
+            {"content": "A", "status": "pending"},
+            {"content": "B", "status": "pending"},
+        ]
+        next_todos = [
+            {"content": "A", "status": "in_progress"},
+            {"content": "A", "status": "completed"},
+        ]
+        actions = _build_todo_actions(previous, next_todos)
+        assert any(a.get("kind") == "todo_remove" and a.get("content") == "B" for a in actions), f"Expected todo_remove for B but got: {actions}"

@@ -38,11 +38,6 @@ _SYNC_MEMORY_UPDATER_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
 atexit.register(lambda: _SYNC_MEMORY_UPDATER_EXECUTOR.shutdown(wait=False))
 
 
-def _create_empty_memory() -> dict[str, Any]:
-    """Backward-compatible wrapper around the storage-layer empty-memory factory."""
-    return create_empty_memory()
-
-
 def _save_memory_to_file(memory_data: dict[str, Any], agent_name: str | None = None, *, user_id: str | None = None) -> bool:
     """Backward-compatible wrapper around the configured memory storage save path."""
     return get_memory_storage().save(memory_data, agent_name, user_id=user_id)
@@ -652,7 +647,12 @@ class MemoryUpdater:
                     continue
                 normalized_content = raw_content.strip()
                 fact_key = _fact_content_key(normalized_content)
-                if fact_key is not None and fact_key in existing_fact_keys:
+                if fact_key is None:
+                    # Empty / whitespace-only content: skip it the same way the
+                    # non-string guard above does, instead of appending a blank
+                    # fact that violates the non-empty-content invariant.
+                    continue
+                if fact_key in existing_fact_keys:
                     continue
 
                 fact_entry = {
