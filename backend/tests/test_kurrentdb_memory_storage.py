@@ -22,14 +22,14 @@ class FakeKurrentDBClient:
         self.append_calls: list[dict] = []
         self.get_stream_calls: list[dict] = []
 
-    def append_to_stream(self, stream_name, *, events, current_version):
+    def append_to_stream(self, stream_name, *, events, current_version, timeout=None):
         new_events = [events] if isinstance(events, NewEvent) else list(events)
-        self.append_calls.append({"stream_name": stream_name, "events": new_events, "current_version": current_version})
+        self.append_calls.append({"stream_name": stream_name, "events": new_events, "current_version": current_version, "timeout": timeout})
         self.streams.setdefault(stream_name, []).extend(new_events)
         return len(self.streams[stream_name]) - 1
 
     def get_stream(self, stream_name, *, backwards=False, limit=2**63 - 1, **kwargs):
-        self.get_stream_calls.append({"stream_name": stream_name, "backwards": backwards, "limit": limit})
+        self.get_stream_calls.append({"stream_name": stream_name, "backwards": backwards, "limit": limit, "timeout": kwargs.get("timeout")})
         if stream_name not in self.streams:
             raise NotFoundError(stream_name)
         events = list(self.streams[stream_name])
@@ -134,7 +134,7 @@ class TestLoadReload:
         memory = fresh.load(user_id="alice")
 
         assert [f["id"] for f in memory["facts"]] == ["f1", "f2"]
-        assert fake_client.get_stream_calls[-1] == {"stream_name": f"{STREAM_PREFIX}-alice", "backwards": True, "limit": 1}
+        assert fake_client.get_stream_calls[-1] == {"stream_name": f"{STREAM_PREFIX}-alice", "backwards": True, "limit": 1, "timeout": storage._timeout}
 
     def test_load_is_cache_first_after_save(self, storage, fake_client):
         storage.save({"version": "1.0", "facts": []}, user_id="alice")
@@ -295,6 +295,46 @@ class TestLoadCacheRace:
         assert result["facts"] == [{"id": "new"}]
         # Cache must retain the fresher concurrent value, not the stale read.
         assert reader._memory_cache[("alice", None)] == newer_written
+
+
+class TestTimeouts:
+    """Fix 3: bounded timeouts on all KurrentDB calls."""
+
+    def test_default_timeout_used_on_read_and_append(self, storage, fake_client):
+        from deerflow.community.kurrentdb.memory_storage import DEFAULT_TIMEOUT_SECONDS
+
+        storage.save({"version": "1.0", "facts": []}, user_id="alice")
+        storage.reload(user_id="alice")
+
+        assert fake_client.append_calls[-1]["timeout"] == DEFAULT_TIMEOUT_SECONDS
+        assert fake_client.get_stream_calls[-1]["timeout"] == DEFAULT_TIMEOUT_SECONDS
+
+    def test_env_override_respected(self, monkeypatch, fake_client):
+        monkeypatch.setenv("KURRENTDB_CONNECTION_STRING", "kurrentdb://localhost:2113?tls=false")
+        monkeypatch.setenv("KURRENTDB_MEMORY_TIMEOUT_SECONDS", "2.5")
+        storage = KurrentdbMemoryStorage(client_factory=lambda: fake_client)
+
+        assert storage._timeout == 2.5
+        storage.save({"version": "1.0", "facts": []}, user_id="alice")
+        assert fake_client.append_calls[-1]["timeout"] == 2.5
+
+    def test_invalid_env_value_falls_back_to_default(self, monkeypatch, fake_client):
+        from deerflow.community.kurrentdb.memory_storage import DEFAULT_TIMEOUT_SECONDS
+
+        monkeypatch.setenv("KURRENTDB_CONNECTION_STRING", "kurrentdb://localhost:2113?tls=false")
+        monkeypatch.setenv("KURRENTDB_MEMORY_TIMEOUT_SECONDS", "not-a-number")
+        storage = KurrentdbMemoryStorage(client_factory=lambda: fake_client)
+
+        assert storage._timeout == DEFAULT_TIMEOUT_SECONDS
+
+    def test_non_positive_env_value_falls_back_to_default(self, monkeypatch, fake_client):
+        from deerflow.community.kurrentdb.memory_storage import DEFAULT_TIMEOUT_SECONDS
+
+        monkeypatch.setenv("KURRENTDB_CONNECTION_STRING", "kurrentdb://localhost:2113?tls=false")
+        monkeypatch.setenv("KURRENTDB_MEMORY_TIMEOUT_SECONDS", "0")
+        storage = KurrentdbMemoryStorage(client_factory=lambda: fake_client)
+
+        assert storage._timeout == DEFAULT_TIMEOUT_SECONDS
 
 
 class TestGetMemoryStorageIntegration:

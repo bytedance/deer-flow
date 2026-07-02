@@ -39,6 +39,7 @@ logger = logging.getLogger(__name__)
 STREAM_PREFIX = "deerflow.memory"
 EVENT_TYPE = "MemoryUpdated"
 _USER_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
+DEFAULT_TIMEOUT_SECONDS = 10.0
 
 
 def _make_default_client(connection_string: str) -> Any:
@@ -71,6 +72,22 @@ class KurrentdbMemoryStorage(MemoryStorage):
         # otherwise append an empty-derived snapshot that supersedes the real
         # newest event on the stream. Cleared on any successful read.
         self._degraded_keys: set[tuple[str | None, str | None]] = set()
+        self._timeout = self._resolve_timeout()
+
+    @staticmethod
+    def _resolve_timeout() -> float:
+        raw = os.environ.get("KURRENTDB_MEMORY_TIMEOUT_SECONDS", "").strip()
+        if not raw:
+            return DEFAULT_TIMEOUT_SECONDS
+        try:
+            value = float(raw)
+        except ValueError:
+            logger.warning("Invalid KURRENTDB_MEMORY_TIMEOUT_SECONDS %r: not a number, using default %s", raw, DEFAULT_TIMEOUT_SECONDS)
+            return DEFAULT_TIMEOUT_SECONDS
+        if value <= 0:
+            logger.warning("Invalid KURRENTDB_MEMORY_TIMEOUT_SECONDS %r: must be positive, using default %s", raw, DEFAULT_TIMEOUT_SECONDS)
+            return DEFAULT_TIMEOUT_SECONDS
+        return value
 
     @staticmethod
     def _validate_agent_name(agent_name: str) -> None:
@@ -123,7 +140,7 @@ class KurrentdbMemoryStorage(MemoryStorage):
         cache_key = (user_id, agent_name)
         stream_name = self._stream_name(agent_name, user_id=user_id)
         try:
-            events = self._get_client().get_stream(stream_name, backwards=True, limit=1)
+            events = self._get_client().get_stream(stream_name, backwards=True, limit=1, timeout=self._timeout)
         except NotFoundError:
             self._clear_degraded(cache_key)
             return create_empty_memory()
@@ -210,7 +227,7 @@ class KurrentdbMemoryStorage(MemoryStorage):
             metadata=json.dumps(event_metadata, ensure_ascii=False).encode("utf-8"),
         )
         try:
-            self._get_client().append_to_stream(stream_name, events=event, current_version=StreamState.ANY)
+            self._get_client().append_to_stream(stream_name, events=event, current_version=StreamState.ANY, timeout=self._timeout)
         except Exception as e:
             logger.error("Failed to append memory event to KurrentDB stream %s: %s", stream_name, e)
             return False

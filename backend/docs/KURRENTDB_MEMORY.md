@@ -95,6 +95,11 @@ comes for free.
   that key clears the gate and saves resume normally. Reader-facing behavior
   is unchanged: `load()`/`reload()` still return empty memory on error and
   never raise.
+- **All KurrentDB calls use a bounded timeout** (`timeout=` on both
+  `get_stream` and `append_to_stream`) so a stalled server cannot pin a
+  request path indefinitely. Default is 10 seconds; override with the
+  `KURRENTDB_MEMORY_TIMEOUT_SECONDS` environment variable. An unset, invalid,
+  or non-positive value falls back to the default with a logged warning.
 
 ## Tests
 
