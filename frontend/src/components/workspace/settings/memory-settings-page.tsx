@@ -11,7 +11,6 @@ import Link from "next/link";
 import { useDeferredValue, useId, useRef, useState } from "react";
 import { toast } from "sonner";
 
-import { ClipboardSafeStreamdown } from "@/components/ai-elements/streamdown";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -39,6 +38,7 @@ import type {
   MemoryFactPatchInput,
   UserMemory,
 } from "@/core/memory/types";
+import { SafeStreamdown } from "@/core/streamdown/components";
 import { streamdownPlugins } from "@/core/streamdown/plugins";
 import { pathOfThread } from "@/core/threads/utils";
 import { formatTimeAgo } from "@/core/utils/datetime";
@@ -639,12 +639,12 @@ export function MemorySettingsPage() {
                 <div className="text-muted-foreground mb-4 text-sm">
                   {summaryReadOnly}
                 </div>
-                <ClipboardSafeStreamdown
+                <SafeStreamdown
                   className="size-full min-w-0 [overflow-wrap:anywhere] [&>*:first-child]:mt-0 [&>*:last-child]:mb-0"
                   {...streamdownPlugins}
                 >
                   {summariesToMarkdown(memory, filteredSectionGroups, t)}
-                </ClipboardSafeStreamdown>
+                </SafeStreamdown>
               </div>
             ) : null}
 

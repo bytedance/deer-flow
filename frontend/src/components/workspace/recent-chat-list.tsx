@@ -241,95 +241,91 @@ export function RecentChatList() {
                     className="group/side-menu-item"
                   >
                     <SidebarMenuButton isActive={isActive} asChild>
-                      <div>
-                        <Link
-                          className="text-muted-foreground flex min-w-0 items-center gap-1.5 pr-7 whitespace-nowrap group-hover/side-menu-item:overflow-hidden"
-                          href={pathOfThread(thread)}
-                        >
-                          <ThreadChannelIcon source={channelSource} />
-                          <span className="min-w-0 truncate">
-                            {titleOfThread(thread)}
-                          </span>
-                          {channelSource && (
-                            <span
-                              className="bg-muted text-muted-foreground ml-auto inline-flex h-5 max-w-14 shrink-0 items-center rounded-md px-1.5 text-[10px] font-medium"
-                              title={`${channelSource.label} channel`}
-                            >
-                              <span className="truncate">
-                                {channelSource.label}
-                              </span>
+                      <Link
+                        className="text-muted-foreground min-w-0 whitespace-nowrap group-hover/side-menu-item:overflow-hidden"
+                        href={pathOfThread(thread)}
+                      >
+                        <ThreadChannelIcon source={channelSource} />
+                        <span className="min-w-0 truncate">
+                          {titleOfThread(thread)}
+                        </span>
+                        {channelSource && (
+                          <span
+                            className="bg-muted text-muted-foreground ml-auto inline-flex h-5 max-w-14 shrink-0 items-center rounded-md px-1.5 text-[10px] font-medium"
+                            title={`${channelSource.label} channel`}
+                          >
+                            <span className="truncate">
+                              {channelSource.label}
                             </span>
-                          )}
-                        </Link>
-                        {env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY !== "true" && (
-                          <DropdownMenu>
-                            <DropdownMenuTrigger asChild>
-                              <SidebarMenuAction
-                                showOnHover
-                                className="bg-background/50 hover:bg-background"
-                              >
-                                <MoreHorizontal />
-                                <span className="sr-only">{t.common.more}</span>
-                              </SidebarMenuAction>
-                            </DropdownMenuTrigger>
-                            <DropdownMenuContent
-                              className="w-48 rounded-lg"
-                              side={"right"}
-                              align={"start"}
-                            >
+                          </span>
+                        )}
+                      </Link>
+                    </SidebarMenuButton>
+                    {env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY !== "true" && (
+                      <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                          <SidebarMenuAction
+                            showOnHover
+                            className="bg-background/50 hover:bg-background after:left-0!"
+                          >
+                            <MoreHorizontal />
+                            <span className="sr-only">{t.common.more}</span>
+                          </SidebarMenuAction>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent
+                          className="w-48 rounded-lg"
+                          side={"right"}
+                          align={"start"}
+                        >
+                          <DropdownMenuItem
+                            onSelect={() =>
+                              handleRenameClick(
+                                thread.thread_id,
+                                titleOfThread(thread),
+                              )
+                            }
+                          >
+                            <Pencil className="text-muted-foreground" />
+                            <span>{t.common.rename}</span>
+                          </DropdownMenuItem>
+                          <DropdownMenuItem
+                            onSelect={() => handleShare(thread)}
+                          >
+                            <Share2 className="text-muted-foreground" />
+                            <span>{t.common.share}</span>
+                          </DropdownMenuItem>
+                          <DropdownMenuSub>
+                            <DropdownMenuSubTrigger>
+                              <Download className="text-muted-foreground" />
+                              <span>{t.common.export}</span>
+                            </DropdownMenuSubTrigger>
+                            <DropdownMenuSubContent>
                               <DropdownMenuItem
                                 onSelect={() =>
-                                  handleRenameClick(
-                                    thread.thread_id,
-                                    titleOfThread(thread),
-                                  )
+                                  handleExport(thread, "markdown")
                                 }
                               >
-                                <Pencil className="text-muted-foreground" />
-                                <span>{t.common.rename}</span>
+                                <FileText className="text-muted-foreground" />
+                                <span>{t.common.exportAsMarkdown}</span>
                               </DropdownMenuItem>
                               <DropdownMenuItem
-                                onSelect={() => handleShare(thread)}
+                                onSelect={() => handleExport(thread, "json")}
                               >
-                                <Share2 className="text-muted-foreground" />
-                                <span>{t.common.share}</span>
+                                <FileJson className="text-muted-foreground" />
+                                <span>{t.common.exportAsJSON}</span>
                               </DropdownMenuItem>
-                              <DropdownMenuSub>
-                                <DropdownMenuSubTrigger>
-                                  <Download className="text-muted-foreground" />
-                                  <span>{t.common.export}</span>
-                                </DropdownMenuSubTrigger>
-                                <DropdownMenuSubContent>
-                                  <DropdownMenuItem
-                                    onSelect={() =>
-                                      handleExport(thread, "markdown")
-                                    }
-                                  >
-                                    <FileText className="text-muted-foreground" />
-                                    <span>{t.common.exportAsMarkdown}</span>
-                                  </DropdownMenuItem>
-                                  <DropdownMenuItem
-                                    onSelect={() =>
-                                      handleExport(thread, "json")
-                                    }
-                                  >
-                                    <FileJson className="text-muted-foreground" />
-                                    <span>{t.common.exportAsJSON}</span>
-                                  </DropdownMenuItem>
-                                </DropdownMenuSubContent>
-                              </DropdownMenuSub>
-                              <DropdownMenuSeparator />
-                              <DropdownMenuItem
-                                onSelect={() => handleDelete(thread)}
-                              >
-                                <Trash2 className="text-muted-foreground" />
-                                <span>{t.common.delete}</span>
-                              </DropdownMenuItem>
-                            </DropdownMenuContent>
-                          </DropdownMenu>
-                        )}
-                      </div>
-                    </SidebarMenuButton>
+                            </DropdownMenuSubContent>
+                          </DropdownMenuSub>
+                          <DropdownMenuSeparator />
+                          <DropdownMenuItem
+                            onSelect={() => handleDelete(thread)}
+                          >
+                            <Trash2 className="text-muted-foreground" />
+                            <span>{t.common.delete}</span>
+                          </DropdownMenuItem>
+                        </DropdownMenuContent>
+                      </DropdownMenu>
+                    )}
                   </SidebarMenuItem>
                 );
               })}

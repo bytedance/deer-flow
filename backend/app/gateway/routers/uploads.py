@@ -3,6 +3,8 @@
 import logging
 import os
 import stat
+import tempfile
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from pydantic import BaseModel, Field
@@ -14,6 +16,8 @@ from deerflow.config.paths import get_paths
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.sandbox.sandbox_provider import SandboxProvider, get_sandbox_provider
 from deerflow.uploads.manager import (
+    UPLOAD_STAGING_PREFIX,
+    UPLOAD_STAGING_SUFFIX,
     PathTraversalError,
     UnsafeUploadPathError,
     claim_unique_filename,
@@ -23,9 +27,9 @@ from deerflow.uploads.manager import (
     get_uploads_dir,
     list_files_in_dir,
     normalize_filename,
-    open_upload_file_no_symlink,
     upload_artifact_url,
     upload_virtual_path,
+    validate_upload_destination,
 )
 from deerflow.utils.file_conversion import CONVERTIBLE_EXTENSIONS, convert_file_to_markdown
 
@@ -173,7 +177,11 @@ async def _write_upload_file_with_limits(
     total_size: int,
 ) -> tuple[os.PathLike[str] | str, int, int]:
     file_size = 0
-    file_path, fh = open_upload_file_no_symlink(uploads_dir, display_filename)
+    uploads_dir_path = Path(uploads_dir)
+    file_path = validate_upload_destination(uploads_dir_path, display_filename)
+    temp_fd, temp_path_str = tempfile.mkstemp(prefix=UPLOAD_STAGING_PREFIX, suffix=UPLOAD_STAGING_SUFFIX, dir=uploads_dir_path)
+    temp_path = Path(temp_path_str)
+    fh = os.fdopen(temp_fd, "wb")
     try:
         while chunk := await file.read(UPLOAD_CHUNK_SIZE):
             file_size += len(chunk)
@@ -186,12 +194,20 @@ async def _write_upload_file_with_limits(
     except Exception:
         fh.close()
         try:
-            os.unlink(file_path)
+            os.unlink(temp_path)
         except FileNotFoundError:
             pass
         raise
     else:
         fh.close()
+        try:
+            os.replace(temp_path, file_path)
+        except Exception:
+            try:
+                os.unlink(temp_path)
+            except FileNotFoundError:
+                pass
+            raise
     return file_path, file_size, total_size
 
 
@@ -227,10 +243,11 @@ async def upload_files(
         raise HTTPException(status_code=413, detail=f"Too many files: maximum is {limits.max_files}")
 
     try:
-        uploads_dir = ensure_uploads_dir(thread_id)
+        effective_user_id = get_effective_user_id()
+        uploads_dir = ensure_uploads_dir(thread_id, user_id=effective_user_id)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    sandbox_uploads = get_paths().sandbox_uploads_dir(thread_id, user_id=get_effective_user_id())
+    sandbox_uploads = get_paths().sandbox_uploads_dir(thread_id, user_id=effective_user_id)
     uploaded_files = []
     written_paths = []
     sandbox_sync_targets = []
@@ -245,7 +262,7 @@ async def upload_files(
     sync_to_sandbox = not _uses_thread_data_mounts(sandbox_provider)
     sandbox = None
     if sync_to_sandbox:
-        sandbox_id = sandbox_provider.acquire(thread_id)
+        sandbox_id = sandbox_provider.acquire(thread_id, user_id=effective_user_id)
         sandbox = sandbox_provider.get(sandbox_id)
         if sandbox is None:
             raise HTTPException(status_code=500, detail="Failed to acquire sandbox")

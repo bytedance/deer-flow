@@ -170,6 +170,59 @@ def test_app_config_coerces_commented_out_list_sections(tmp_path, monkeypatch):
     assert config.tool_groups == []
 
 
+def test_app_config_coerces_commented_out_object_sections(tmp_path, monkeypatch):
+    """Commenting out every entry under an object key makes PyYAML parse it as None.
+
+    Same documented ``cp config.example.yaml config.yaml`` flow as the list
+    sections: object sections (memory, summarization, ...) must fall back to
+    their defaults instead of raising ``Input should be a valid dictionary``.
+    """
+    config_path = tmp_path / "config.yaml"
+    extensions_path = tmp_path / "extensions_config.json"
+    _write_extensions_config(extensions_path)
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"},
+                "memory": None,
+                "summarization": None,
+                "guardrails": None,
+                "tool_output": None,
+                "run_events": None,
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(extensions_path))
+
+    config = AppConfig.from_file(str(config_path))
+
+    # Each present-but-null object section falls back to a real default config
+    # object of the expected type (not merely non-None).
+    assert type(config.memory).__name__ == "MemoryConfig"
+    assert type(config.summarization).__name__ == "SummarizationConfig"
+    assert type(config.guardrails).__name__ == "GuardrailsConfig"
+    assert type(config.tool_output).__name__ == "ToolOutputConfig"
+    assert type(config.run_events).__name__ == "RunEventsConfig"
+
+
+def test_app_config_null_required_section_still_errors(tmp_path, monkeypatch):
+    """A present-but-null *required* section still errors.
+
+    ``sandbox`` has no default, so dropping a ``sandbox: null`` key leaves the
+    required field absent — there is nothing to fall back to (per
+    ``_drop_null_config_sections``), unlike the optional object sections above.
+    """
+    config_path = tmp_path / "config.yaml"
+    extensions_path = tmp_path / "extensions_config.json"
+    _write_extensions_config(extensions_path)
+    config_path.write_text(yaml.safe_dump({"sandbox": None}), encoding="utf-8")
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(extensions_path))
+
+    with pytest.raises(ValidationError):
+        AppConfig.from_file(str(config_path))
+
+
 def test_app_config_warns_when_no_models_configured(tmp_path, monkeypatch, caplog):
     config_path = tmp_path / "config.yaml"
     extensions_path = tmp_path / "extensions_config.json"
@@ -214,6 +267,45 @@ def test_get_app_config_reloads_when_file_changes(tmp_path, monkeypatch):
         assert reloaded is not initial
     finally:
         reset_app_config()
+
+
+def test_get_app_config_reloads_when_content_digest_changes_without_metadata(tmp_path, monkeypatch):
+    config_path = tmp_path / "config.yaml"
+    extensions_path = tmp_path / "extensions_config.json"
+    _write_extensions_config(extensions_path)
+    _write_config(config_path, model_name="model-a", supports_thinking=False)
+
+    monkeypatch.setenv("DEER_FLOW_CONFIG_PATH", str(config_path))
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(extensions_path))
+    _reset_config_singletons()
+
+    try:
+        initial = get_app_config()
+        initial_mtime = app_config_module._app_config_mtime
+        initial_signature = app_config_module._app_config_signature
+        assert initial.models[0].name == "model-a"
+        assert initial_signature is not None
+
+        _write_config(config_path, model_name="model-b", supports_thinking=False)
+
+        real_get_config_signature = app_config_module._get_config_signature
+
+        def stale_metadata_signature(path: Path):
+            current_signature = real_get_config_signature(path)
+            assert current_signature is not None
+            return (initial_signature[0], initial_signature[1], current_signature[2])
+
+        monkeypatch.setattr(app_config_module, "_get_config_mtime", lambda _path: initial_mtime)
+        monkeypatch.setattr(app_config_module, "_get_config_signature", stale_metadata_signature)
+
+        reloaded = get_app_config()
+        assert reloaded.models[0].name == "model-b"
+        assert reloaded is not initial
+        assert app_config_module._app_config_signature is not None
+        assert app_config_module._app_config_signature[:2] == initial_signature[:2]
+        assert app_config_module._app_config_signature[2] != initial_signature[2]
+    finally:
+        _reset_config_singletons()
 
 
 def test_get_app_config_reloads_when_config_path_changes(tmp_path, monkeypatch):
@@ -316,7 +408,7 @@ def test_get_app_config_resets_singleton_configs_when_sections_removed(tmp_path,
         assert get_title_config().enabled is True
         assert get_summarization_config().enabled is False
         assert get_memory_config().enabled is True
-        assert get_subagents_app_config().timeout_seconds == 900
+        assert get_subagents_app_config().timeout_seconds == 1800
         assert get_tool_search_config().enabled is False
         assert get_guardrails_config().enabled is False
         assert get_checkpointer_config() is None

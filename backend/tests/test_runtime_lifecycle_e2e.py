@@ -80,11 +80,15 @@ class _ScriptedAgent:
         title: str,
         answer: str,
         block_after_first_chunk: bool = False,
+        block_before_checkpoint: bool = False,
+        write_title: bool = True,
     ) -> None:
         self.controller = controller
         self.title = title
         self.answer = answer
         self.block_after_first_chunk = block_after_first_chunk
+        self.block_before_checkpoint = block_before_checkpoint
+        self.write_title = write_title
         self.checkpointer: Any | None = None
         self.store: Any | None = None
         self.metadata = {"model_name": "fake-test-model"}
@@ -98,10 +102,15 @@ class _ScriptedAgent:
 
         try:
             thread_id = _thread_id_from_config(config)
+            if self.block_before_checkpoint:
+                while not self.controller.release.is_set():
+                    await asyncio.sleep(0.05)
             human_text = _last_human_text(graph_input)
             human = HumanMessage(content=human_text)
             ai = await self.model.ainvoke([human], config=config)
-            state = {"messages": [human.model_dump(), ai.model_dump()], "title": self.title}
+            state = {"messages": [human.model_dump(), ai.model_dump()]}
+            if self.write_title:
+                state["title"] = self.title
 
             if self.checkpointer is not None:
                 await _write_checkpoint(self.checkpointer, thread_id=thread_id, state=state)
@@ -265,6 +274,25 @@ def isolated_app(isolated_deer_flow_home: Path, monkeypatch: pytest.MonkeyPatch)
     return create_app()
 
 
+@pytest.fixture
+def isolated_app_with_title(isolated_deer_flow_home: Path, monkeypatch: pytest.MonkeyPatch):
+    config_path = isolated_deer_flow_home.parent / "config-title-enabled.yaml"
+    config_path.write_text(_MINIMAL_CONFIG_YAML.replace("title:\n  enabled: false", "title:\n  enabled: true"), encoding="utf-8")
+    monkeypatch.setenv("DEER_FLOW_CONFIG_PATH", str(config_path))
+
+    _preserve_process_config_singletons(monkeypatch)
+    _reset_process_singletons(monkeypatch)
+
+    from deerflow.config import app_config as app_config_module
+
+    cfg = app_config_module.get_app_config()
+    cfg.database.sqlite_dir = str(isolated_deer_flow_home / "db")
+
+    from app.gateway.app import create_app
+
+    return create_app()
+
+
 def _register_user(client, *, email: str = "runtime-e2e@example.com") -> str:
     response = client.post(
         "/api/v1/auth/register",
@@ -377,6 +405,34 @@ def _wait_for_status(client, thread_id: str, run_id: str, status: str, *, timeou
             return last
         time.sleep(0.05)
     raise AssertionError(f"Run {run_id} did not reach {status!r}; last={last!r}")
+
+
+def _wait_for_thread_title(client, thread_id: str, expected_title: str, *, timeout: float = 5.0) -> dict:
+    deadline = time.monotonic() + timeout
+    last: dict | None = None
+    while time.monotonic() < deadline:
+        response = client.get(f"/api/threads/{thread_id}")
+        assert response.status_code == 200, response.text
+        last = response.json()
+        if last.get("values", {}).get("title") == expected_title:
+            return last
+        time.sleep(0.05)
+    raise AssertionError(f"Thread {thread_id} did not reach title {expected_title!r}; last={last!r}")
+
+
+def _wait_for_search_title(client, csrf_token: str, thread_id: str, expected_title: str, *, timeout: float = 5.0) -> dict:
+    deadline = time.monotonic() + timeout
+    last_match: dict | None = None
+    while time.monotonic() < deadline:
+        response = client.post("/api/threads/search", json={"limit": 20}, headers={"X-CSRF-Token": csrf_token})
+        assert response.status_code == 200, response.text
+        matching = [item for item in response.json() if item["thread_id"] == thread_id]
+        if matching:
+            last_match = matching[0]
+            if last_match.get("values", {}).get("title") == expected_title:
+                return last_match
+        time.sleep(0.05)
+    raise AssertionError(f"Search result for {thread_id} did not reach title {expected_title!r}; last={last_match!r}")
 
 
 def _thread_id_from_config(config: dict | None) -> str:
@@ -579,6 +635,99 @@ def test_cancel_interrupt_stops_running_background_run(isolated_app):
         thread = client.get(f"/api/threads/{thread_id}")
         assert thread.status_code == 200, thread.text
         assert thread.json()["status"] == "idle"
+
+
+def test_cancel_interrupt_generates_missing_title_from_checkpoint(isolated_app_with_title):
+    """Interrupted first-turn runs should still persist an automatic thread title."""
+    from starlette.testclient import TestClient
+
+    controller = _RunController()
+    factory = _make_agent_factory(
+        controller,
+        title="",
+        answer="This run should be interrupted before a title is written.",
+        block_after_first_chunk=True,
+        write_title=False,
+    )
+
+    with (
+        patch("app.gateway.services.resolve_agent_factory", return_value=factory),
+        TestClient(isolated_app_with_title) as client,
+    ):
+        csrf_token = _register_user(client, email="interrupt-title-e2e@example.com")
+        thread_id = _create_thread(client, csrf_token)
+
+        created = client.post(
+            f"/api/threads/{thread_id}/runs",
+            json=_run_body(),
+            headers={"X-CSRF-Token": csrf_token},
+        )
+        assert created.status_code == 200, created.text
+        run_id = created.json()["run_id"]
+        assert controller.checkpoint_written.wait(5), "fake agent never wrote checkpoint"
+
+        cancelled = client.post(
+            f"/api/threads/{thread_id}/runs/{run_id}/cancel?wait=true&action=interrupt",
+            headers={"X-CSRF-Token": csrf_token},
+        )
+        assert cancelled.status_code == 204, cancelled.text
+
+        thread = client.get(f"/api/threads/{thread_id}")
+        assert thread.status_code == 200, thread.text
+        assert thread.json()["values"]["title"] == "Run lifecycle E2E prompt"
+
+        search = client.post("/api/threads/search", json={"limit": 20}, headers={"X-CSRF-Token": csrf_token})
+        assert search.status_code == 200, search.text
+        matching = [item for item in search.json() if item["thread_id"] == thread_id]
+        assert matching[0]["values"]["title"] == "Run lifecycle E2E prompt"
+
+
+def test_cancel_wait_false_generates_title_from_graph_input_before_checkpoint(isolated_app_with_title):
+    """Fire-and-forget cancel should title early interruptions before checkpoint."""
+    from starlette.testclient import TestClient
+
+    controller = _RunController()
+    factory = _make_agent_factory(
+        controller,
+        title="",
+        answer="This answer should never be checkpointed.",
+        block_before_checkpoint=True,
+        write_title=False,
+    )
+
+    with (
+        patch("app.gateway.services.resolve_agent_factory", return_value=factory),
+        TestClient(isolated_app_with_title) as client,
+    ):
+        csrf_token = _register_user(client, email="interrupt-title-early-e2e@example.com")
+        thread_id = _create_thread(client, csrf_token)
+
+        created = client.post(
+            f"/api/threads/{thread_id}/runs",
+            json=_run_body(),
+            headers={"X-CSRF-Token": csrf_token},
+        )
+        assert created.status_code == 200, created.text
+        run_id = created.json()["run_id"]
+        assert controller.started.wait(5), "fake agent never started"
+        assert not controller.checkpoint_written.is_set()
+
+        cancelled = client.post(
+            f"/api/threads/{thread_id}/runs/{run_id}/cancel?wait=false&action=interrupt",
+            headers={"X-CSRF-Token": csrf_token},
+        )
+        assert cancelled.status_code == 202, cancelled.text
+        assert controller.cancelled.wait(5), "fake agent task was not cancelled"
+        assert not controller.checkpoint_written.is_set()
+
+        run = _wait_for_status(client, thread_id, run_id, "interrupted")
+        assert run["status"] == "interrupted"
+
+        thread = _wait_for_thread_title(client, thread_id, "Run lifecycle E2E prompt")
+        assert thread["values"]["title"] == "Run lifecycle E2E prompt"
+
+        matching = _wait_for_search_title(client, csrf_token, thread_id, "Run lifecycle E2E prompt")
+        assert matching["values"]["title"] == "Run lifecycle E2E prompt"
 
 
 @pytest.mark.anyio

@@ -1,8 +1,9 @@
 import type { Message } from "@langchain/langgraph-sdk";
-import { describe, expect, test } from "vitest";
+import { describe, expect, test } from "@rstest/core";
 
 import {
   extractContentFromMessage,
+  extractTextFromMessage,
   extractReasoningContentFromMessage,
   getAssistantTurnCopyData,
   getAssistantTurnUsageMessages,
@@ -78,6 +79,76 @@ test("aggregates token usage messages once per assistant turn", () => {
       (groupMessages) => groupMessages?.map((message) => message.id) ?? null,
     ),
   ).toEqual([null, null, ["ai-1", "ai-2"], null, ["ai-3"]]);
+});
+
+test("reasoning + content (no tool calls) yields a single assistant bubble, not a duplicate processing group", () => {
+  // Regression for #3868: in thinking/pro/ultra modes the final assistant
+  // message carries both reasoning_content and answer text. It must surface its
+  // reasoning exactly once — inside the assistant bubble's <Reasoning>
+  // collapsible. Routing the same message into a processing group as well makes
+  // the ChainOfThought panel above the bubble paint the identical reasoning a
+  // second time.
+  const messages = [
+    { id: "human-1", type: "human", content: "Why is the sky blue?" },
+    {
+      id: "ai-1",
+      type: "ai",
+      content: "Rayleigh scattering makes the sky blue.",
+      additional_kwargs: { reasoning_content: "Recall Rayleigh scattering." },
+    },
+  ] as Message[];
+
+  const groups = getMessageGroups(messages);
+
+  expect(groups.map((group) => group.type)).toEqual(["human", "assistant"]);
+
+  // The reasoning-bearing message lands in exactly one group, so turn-usage
+  // aggregation never double-counts it (see #2770).
+  const turnUsage = getAssistantTurnUsageMessages(groups);
+  expect(turnUsage.at(-1)?.map((message) => message.id)).toEqual(["ai-1"]);
+});
+
+test("keeps tool-call reasoning in the processing group while the final answer's reasoning rides its own bubble", () => {
+  // Companion to #3868: only the message that also becomes an assistant bubble
+  // (content, no tool calls) is pulled out of the processing group. Reasoning
+  // attached to an intermediate tool-calling step still belongs above, with its
+  // tool steps.
+  const messages = [
+    { id: "human-1", type: "human", content: "Search and summarize" },
+    {
+      id: "ai-1",
+      type: "ai",
+      content: "",
+      additional_kwargs: { reasoning_content: "I should search first." },
+      tool_calls: [{ id: "tool-1", name: "web_search", args: { query: "x" } }],
+    },
+    {
+      id: "tool-1-result",
+      type: "tool",
+      name: "web_search",
+      tool_call_id: "tool-1",
+      content: "[]",
+    },
+    {
+      id: "ai-2",
+      type: "ai",
+      content: "Here is the summary.",
+      additional_kwargs: { reasoning_content: "Synthesize the findings." },
+    },
+  ] as Message[];
+
+  const groups = getMessageGroups(messages);
+
+  expect(groups.map((group) => group.type)).toEqual([
+    "human",
+    "assistant:processing",
+    "assistant",
+  ]);
+  expect(groups[1]?.messages.map((message) => message.id)).toEqual([
+    "ai-1",
+    "tool-1-result",
+  ]);
+  expect(groups[2]?.messages.map((message) => message.id)).toEqual(["ai-2"]);
 });
 
 describe("inline <think> tag splitting", () => {
@@ -507,4 +578,134 @@ test("keeps streaming assistant hidden when a hidden control message follows it"
       ),
     ),
   ).toBe(true);
+});
+
+describe("multi-part content with bare-string continuations", () => {
+  // Gemini streams the first content block as a {type:"text"} object carrying
+  // the thinking signature, then emits continuation deltas as plain strings.
+  // LangChain's Python merge_content preserves these as bare-string elements,
+  // so the finalized message content is [{type:"text", ...}, "...rest..."].
+  const geminiMessage = {
+    id: "ai-1",
+    type: "ai",
+    content: [
+      {
+        type: "text",
+        text: "First block carrying the signature.",
+        extras: { signature: "abc123" },
+        index: 0,
+      },
+      "Continuation streamed as a bare string.",
+    ],
+  } as unknown as Message;
+
+  test("extractContentFromMessage includes the bare-string parts", () => {
+    expect(extractContentFromMessage(geminiMessage)).toBe(
+      "First block carrying the signature.\nContinuation streamed as a bare string.",
+    );
+  });
+
+  test("extractTextFromMessage includes the bare-string parts", () => {
+    expect(extractTextFromMessage(geminiMessage)).toBe(
+      "First block carrying the signature.\nContinuation streamed as a bare string.",
+    );
+  });
+});
+
+describe("orphan tool messages", () => {
+  // LangGraph stream-mode "messages-tuple" can emit tool-result events out of order or
+  // replayed from subagent state (e.g. bash subagent under LocalSandboxProvider with
+  // allow_host_bash). When that happens, the tool message arrives after a terminal
+  // assistant/human group, so getMessageGroups' lastOpenGroup() returns null.
+  //
+  // The previous behaviour was console.error + drop, which silently hid the tool
+  // result from the UI. The fix falls back to attaching the orphan tool to the most
+  // recent group so the user can still see what the agent did.
+
+  test("attaches orphan tool message to the most recent group instead of dropping it", () => {
+    const messages = [
+      { id: "h-1", type: "human", content: "Run something" },
+      {
+        id: "ai-1",
+        type: "ai",
+        content: "ok",
+        tool_calls: [{ id: "call-1", name: "bash", args: {} }],
+      },
+      {
+        id: "t-1",
+        type: "tool",
+        name: "bash",
+        tool_call_id: "call-1",
+        content: "output-1",
+      },
+      { id: "ai-2", type: "ai", content: "Done." }, // terminal assistant group
+      // Orphan tool: arrives after a terminal group, no preceding processing group
+      {
+        id: "t-2",
+        type: "tool",
+        name: "bash",
+        tool_call_id: "call-2",
+        content: "output-2",
+      },
+    ] as Message[];
+
+    const groups = getMessageGroups(messages);
+
+    // Expect groups: human, assistant:processing (ai-1 + t-1), assistant (ai-2), and
+    // t-2 should be attached to the last group (assistant), not dropped.
+    const types = groups.map((g) => g.type);
+    expect(types).toEqual(["human", "assistant:processing", "assistant"]);
+
+    // t-2 must be retrievable from one of the groups — must NOT be silently dropped
+    const allMessages = groups.flatMap((g) => g.messages);
+    const t2 = allMessages.find((m) => m.id === "t-2");
+    expect(t2).toBeDefined();
+    expect(t2?.type).toBe("tool");
+  });
+
+  test("replayed tool with same tool_call_id is not lost (duplicate stream events)", () => {
+    // LangGraph subagent state restoration can replay tool-result events. The
+    // frontend log shows the same tool_call_id arriving twice. Both occurrences
+    // should be visible in the UI, not just the first.
+    const messages = [
+      { id: "h-1", type: "human", content: "q" },
+      {
+        id: "ai-1",
+        type: "ai",
+        content: "",
+        tool_calls: [{ id: "call-x", name: "bash", args: {} }],
+      },
+      {
+        id: "t-1a",
+        type: "tool",
+        name: "bash",
+        tool_call_id: "call-x",
+        content: "first delivery",
+      },
+      // Terminal assistant group ends the turn and closes the processing group.
+      // Without this interleave the replayed t-1b would still take the
+      // unchanged happy path; with it, t-1b arrives when lastOpenGroup()
+      // returns null and must take the new fallback branch to be visible.
+      { id: "ai-2", type: "ai", content: "Done." },
+      // Replayed tool-result for the original tool_call — must reach the new
+      // else-if (groups.length > 0) branch instead of being dropped.
+      {
+        id: "t-1b",
+        type: "tool",
+        name: "bash",
+        tool_call_id: "call-x",
+        content: "first delivery",
+      },
+    ] as Message[];
+
+    const groups = getMessageGroups(messages);
+    const allMessages = groups.flatMap((g) => g.messages);
+
+    // Strict assertion: the replayed tool message must be reachable from a
+    // group (i.e. attached via the new fallback). Before the fix this was
+    // silently dropped by console.error.
+    const t1b = allMessages.find((m) => m.id === "t-1b");
+    expect(t1b).toBeDefined();
+    expect(t1b?.type).toBe("tool");
+  });
 });

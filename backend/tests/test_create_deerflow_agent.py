@@ -671,7 +671,7 @@ def test_loop_detection_custom_middleware(mock_create_agent):
     mw_types = [type(m).__name__ for m in middleware]
     # Default LoopDetectionMiddleware must not also appear.
     assert "LoopDetectionMiddleware" not in mw_types
-    # Custom replacement still sits immediately before ClarificationMiddleware.
+    # Custom replacement sits immediately before TokenBudgetMiddleware and ClarificationMiddleware.
     assert mw_types[-1] == "ClarificationMiddleware"
     assert mw_types[-2] == "MyLoopDetection"
 

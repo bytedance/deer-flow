@@ -1,6 +1,7 @@
 import asyncio
 import json
 import tempfile
+from io import BytesIO
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -150,6 +151,46 @@ def test_feishu_receive_file_replaces_placeholders_in_order():
         result = await channel.receive_file(msg, "thread_1")
 
         assert result.text == "before /mnt/user-data/uploads/a.png middle /mnt/user-data/uploads/b.pdf after"
+
+    _run(go())
+
+
+def test_feishu_receive_file_syncs_sandbox_with_explicit_user_id(tmp_path, monkeypatch):
+    async def go():
+        from deerflow.config.paths import Paths
+
+        bus = MessageBus()
+        channel = FeishuChannel(bus, {"app_id": "test", "app_secret": "test"})
+        channel._GetMessageResourceRequest = MagicMock()
+        builder = MagicMock()
+        builder.message_id.return_value = builder
+        builder.file_key.return_value = builder
+        builder.type.return_value = builder
+        builder.build.return_value = object()
+        channel._GetMessageResourceRequest.builder.return_value = builder
+
+        response = MagicMock()
+        response.success.return_value = True
+        response.file = BytesIO(b"file-bytes")
+        response.file_name = "report.md"
+        channel._api_client = MagicMock()
+        channel._api_client.im.v1.message_resource.get.return_value = response
+
+        provider = MagicMock()
+        provider.acquire.return_value = "aio-1"
+        sandbox = MagicMock()
+        provider.get.return_value = sandbox
+
+        monkeypatch.setattr("app.channels.feishu.get_paths", lambda: Paths(base_dir=tmp_path))
+        monkeypatch.setattr("app.channels.feishu.get_sandbox_provider", lambda: provider)
+        monkeypatch.setattr("app.channels.feishu.get_effective_user_id", lambda: "default")
+
+        virtual_path = await channel._receive_single_file("message-1", "file-key", "file", "thread-1", user_id="ou-user")
+
+        assert virtual_path == "/mnt/user-data/uploads/report.md"
+        assert (tmp_path / "users" / "ou-user" / "threads" / "thread-1" / "user-data" / "uploads" / "report.md").read_bytes() == b"file-bytes"
+        provider.acquire.assert_called_once_with("thread-1", user_id="ou-user")
+        sandbox.update_file.assert_called_once_with("/mnt/user-data/uploads/report.md", b"file-bytes")
 
     _run(go())
 

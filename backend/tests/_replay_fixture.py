@@ -82,7 +82,8 @@ tools:
     use: deerflow.sandbox.tools:write_file_tool
 # Memory + summarization make background / debounced model calls whose timing is
 # non-deterministic; disable them so record and replay see the same model-call
-# set. (Title stays — it is an in-graph, deterministic call we record.)
+# set. Title stays enabled, but the default title.model_name: null path is a
+# local state update rather than a recorded model call.
 memory:
   enabled: false
   injection_enabled: false

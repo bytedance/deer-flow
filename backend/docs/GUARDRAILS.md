@@ -232,6 +232,8 @@ class MyGuardrailProvider:
         return GuardrailDecision(allow=True, reasons=[GuardrailReason(code="oap.allowed")])
 
     async def aevaluate(self, request):
+        # This skeleton reuses the sync path. If policy evaluation performs
+        # async I/O, call and await the async evaluator here instead.
         return self.evaluate(request)
 ```
 
@@ -250,6 +252,185 @@ Make sure `my_guardrail.py` is on the Python path (e.g. in the backend directory
 2. Add the config
 3. Start DeerFlow and ask: "Use bash to delete test.txt"
 4. Your provider blocks it
+
+#### Optional: Runtime Attribution
+
+Runtime attribution fields are optional. Providers that need richer policy context or audit records can read them, while simple tool allow/deny providers can ignore them:
+
+| Field | Example use |
+|---|---|
+| `user_id` | Attach the authenticated DeerFlow user to a provider-side policy or audit record |
+| `user_role` | Apply simple role-based policy, such as allowing an admin-only tool. Sourced from the authenticated user's `system_role` (renamed for the guardrail-facing surface, not a separate field) |
+| `oauth_provider` | Link a decision to an external identity provider, when present |
+| `oauth_id` | Link a decision to the external provider's subject/user id, when present |
+| `thread_id` | Link a decision back to the conversation thread |
+| `run_id` | Link a decision back to one execution run |
+| `tool_call_id` | Identify the exact tool call that was allowed or denied |
+
+These fields are populated by the Gateway from server-side auth state (`inject_authenticated_user_context` writes `user_id`/`user_role`/`oauth_provider`/`oauth_id` from `request.state.user`; the run worker always sets `thread_id`/`run_id`), and propagated into subagent runs so delegated tool calls are evaluated with the same identity as the lead agent. Client-supplied values cannot override them — the server-side assignment wins.
+
+**Known limitation — IM / internal-auth runs.** `inject_authenticated_user_context` early-returns for the internal system role that IM channel workers (Slack, Discord, Telegram, Feishu, DingTalk) and other internal-auth callers are stamped with, so on those runs `user_role`/`oauth_provider`/`oauth_id` stay `None`. `user_id` still resolves (via the channel-bound owner), but role-based policy cannot be applied to channel-delivered work in this release. Web-authenticated runs are unaffected. Threaded alongside the owner `system_role` in a follow-up if channel-originated role policy is needed.
+
+For example, if your deployment has user-scoped policy requirements, you can opt into a context-aware provider that passes the runtime fields into an external policy file. This keeps business policy out of Python code and `config.yaml`; the provider only normalizes context, evaluates a configured policy, and maps the result back to `GuardrailDecision`.
+
+```python
+import asyncio
+import json
+from pathlib import Path
+
+from deerflow.guardrails.provider import GuardrailDecision, GuardrailReason
+
+
+class ContextAwareGuardrailProvider:
+    """Illustrative provider skeleton; policy loading/evaluation is provider-defined."""
+
+    name = "context-aware-example"
+
+    def __init__(self, *, policy_path, audit_path="./logs/guardrail-audit.jsonl", **kwargs):
+        self.policy_path = Path(policy_path)
+        self.audit_path = Path(audit_path)
+        # Load policy rules here. In a real deployment this could call an
+        # internal policy service, OPA/Cedar, AGT, or another rule engine.
+        self.policy = self._load_policy(self.policy_path)
+
+    def evaluate(self, request):
+        decision = self._decide(request)
+        self._write_audit(request, decision)
+        return decision
+
+    async def aevaluate(self, request):
+        # ``_decide`` is in-memory policy work; the audit write is blocking
+        # file I/O, so offload it off the event loop with ``asyncio.to_thread``
+        # (DeerFlow enforces a blocking-IO gate in CI). If your policy
+        # evaluation itself does blocking I/O — external policy service, file
+        # read per call — move that behind ``asyncio.to_thread`` too, or
+        # implement a native async evaluator and await it here.
+        decision = self._decide(request)
+        await asyncio.to_thread(self._write_audit, request, decision)
+        return decision
+
+    def _decide(self, request):
+        # 1. Normalize DeerFlow request data into policy context.
+        context = {
+            "tool_name": request.tool_name,
+            "tool_input": request.tool_input,
+            "user_id": request.user_id,
+            "user_role": request.user_role,
+            "oauth_provider": request.oauth_provider,
+            "oauth_id": request.oauth_id,
+            "thread_id": request.thread_id,
+            "run_id": request.run_id,
+            "tool_call_id": request.tool_call_id,
+            "agent_id": request.agent_id,
+            "timestamp": request.timestamp,
+            # Derived fields make simple rule engines handle multi-field checks.
+            # Example policy: allow bash only for admin users.
+            "role_tool_key": f"{request.user_role or ''}:{request.tool_name}",
+            "command": request.tool_input.get("command", ""),
+            "message": json.dumps(request.tool_input, ensure_ascii=False, default=str),
+        }
+
+        # 2. Evaluate the provider-defined policy schema.
+        result = self._evaluate_policy(self.policy, context)
+
+        # 3. Convert the policy result back to DeerFlow's decision object.
+        return GuardrailDecision(
+            allow=result["allow"],
+            reasons=[
+                GuardrailReason(
+                    code=result["code"],
+                    message=result["message"],
+                )
+            ],
+            policy_id=result.get("policy_id"),
+            metadata={
+                "user_id": request.user_id,
+                "user_role": request.user_role,
+                "oauth_provider": request.oauth_provider,
+                "oauth_id": request.oauth_id,
+                "thread_id": request.thread_id,
+                "run_id": request.run_id,
+                "tool_call_id": request.tool_call_id,
+            },
+        )
+
+    def _write_audit(self, request, decision):
+        event = {
+            "decision": "allow" if decision.allow else "deny",
+            "reason": decision.reasons[0].message if decision.reasons else "",
+            "policy_id": decision.policy_id,
+            "tool_name": request.tool_name,
+            "user_id": request.user_id,
+            "user_role": request.user_role,
+            "oauth_provider": request.oauth_provider,
+            "oauth_id": request.oauth_id,
+            "thread_id": request.thread_id,
+            "run_id": request.run_id,
+            "tool_call_id": request.tool_call_id,
+            "agent_id": request.agent_id,
+            "timestamp": request.timestamp,
+        }
+        self.audit_path.parent.mkdir(parents=True, exist_ok=True)
+        with self.audit_path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(event, ensure_ascii=False) + "\n")
+
+    def _load_policy(self, path):
+        # Load your provider-defined policy file.
+        raise NotImplementedError
+
+    def _evaluate_policy(self, policy, context):
+        # Evaluate ordered rules and return:
+        # {"allow": bool, "code": str, "message": str, "policy_id": str | None}
+        raise NotImplementedError
+```
+
+**config.yaml:**
+```yaml
+guardrails:
+  enabled: true
+  provider:
+    use: my_guardrail:ContextAwareGuardrailProvider
+    config:
+      policy_path: ./policies/guardrail-policy.yml
+      audit_path: ./logs/guardrail-audit.jsonl
+```
+
+Many policy engines use a similar shape: normalize request context, evaluate ordered rules, and return an allow/deny decision. The exact schema is provider-defined; the YAML below is illustrative:
+
+```yaml
+# policies/guardrail-policy.yml
+version: "1.0"
+rules:
+  - name: allow-admin-bash
+    condition:
+      field: role_tool_key
+      operator: eq
+      value: admin:bash
+    action: allow
+    priority: 300
+    message: Admin users may execute bash
+
+  - name: deny-bash-for-other-roles
+    condition:
+      field: tool_name
+      operator: eq
+      value: bash
+    action: deny
+    priority: 200
+    message: bash is restricted to admin users
+
+  - name: deny-dangerous-command
+    condition:
+      field: message
+      operator: matches
+      value: "\\brm\\s+-rf\\b"
+    action: deny
+    priority: 100
+    message: Dangerous shell command detected
+
+defaults:
+  action: allow
+```
 
 ## Implementing a Provider
 
@@ -277,8 +458,14 @@ Make sure `my_guardrail.py` is on the Python path (e.g. in the backend directory
 │  thread_id: str | None    │    │  metadata: dict           │
 │  is_subagent: bool        │    │                           │
 │  timestamp: str           │    │  GuardrailReason:         │
-│                           │    │    code: str              │
-└──────────────────────────┘    │    message: str           │
+│  user_id: str | None      │    │    code: str              │
+│  user_role: str | None    │    │    message: str           │
+│  oauth_provider: str | None│   │                           │
+│  oauth_id: str | None     │    │                           │
+│  run_id: str | None       │    │                           │
+│  tool_call_id: str | None │    │                           │
+│                           │    │                           │
+└──────────────────────────┘    │                           │
                                 └──────────────────────────┘
 ```
 

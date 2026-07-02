@@ -334,3 +334,73 @@ async def test_make_stream_bridge_defaults():
     """make_stream_bridge() with no config yields a MemoryStreamBridge."""
     async with make_stream_bridge() as bridge:
         assert isinstance(bridge, MemoryStreamBridge)
+
+
+# ---------------------------------------------------------------------------
+# _resolve_start_offset: O(1) seq-indexed resolution (parity with linear scan)
+# ---------------------------------------------------------------------------
+
+
+def _linear_resolve(stream, last_event_id):
+    """The original linear-scan resolver, kept as a parity reference."""
+    if last_event_id is None:
+        return stream.start_offset
+    for index, entry in enumerate(stream.events):
+        if entry.id == last_event_id:
+            return stream.start_offset + index + 1
+    return stream.start_offset
+
+
+@pytest.mark.parametrize(
+    "event_id,expected",
+    [
+        ("1718000000000-0", 0),
+        ("1718000000000-42", 42),
+        ("garbage", None),  # no separator
+        ("1718000000000-x", None),  # non-integer seq
+        ("", None),
+    ],
+)
+def test_parse_event_seq(event_id, expected):
+    assert MemoryStreamBridge._parse_event_seq(event_id) == expected
+
+
+@pytest.mark.anyio
+async def test_resolve_start_offset_matches_linear_scan():
+    """The seq-indexed resolver must return exactly what the linear scan returned,
+    across retained, evicted, foreign (same seq / wrong ts), malformed, and None ids."""
+    bridge = MemoryStreamBridge(queue_maxsize=4)
+    run_id = "run-parity"
+    ids = []
+    for i in range(10):
+        await bridge.publish(run_id, f"e{i}", {"i": i})
+        ids.append(bridge._streams[run_id].events[-1].id)  # includes ids that later evict
+    stream = bridge._streams[run_id]
+    assert stream.start_offset == 6  # 10 published, buffer of 4 retains seq 6..9
+
+    # A foreign id: a retained event's seq but a different timestamp -> must NOT match.
+    ts, _, seq_text = stream.events[0].id.rpartition("-")
+    foreign_id = f"{int(ts) + 1}-{seq_text}"
+
+    candidates = [None, "garbage", "1718000000000-x", "999999-999999", foreign_id, *ids]
+    for eid in candidates:
+        assert bridge._resolve_start_offset(stream, eid) == _linear_resolve(stream, eid), eid
+
+
+@pytest.mark.anyio
+async def test_subscribe_with_unknown_last_event_id_replays_from_earliest():
+    """A foreign/garbage Last-Event-ID falls back to replaying retained events."""
+    bridge = MemoryStreamBridge(queue_maxsize=10)
+    run_id = "run-unknown-id"
+    await bridge.publish(run_id, "first", {})
+    await bridge.publish(run_id, "second", {})
+    await bridge.publish_end(run_id)
+
+    received = []
+    async for entry in bridge.subscribe(run_id, last_event_id="not-a-real-id", heartbeat_interval=1.0):
+        received.append(entry)
+        if entry is END_SENTINEL:
+            break
+
+    assert [entry.event for entry in received[:-1]] == ["first", "second"]
+    assert received[-1] is END_SENTINEL

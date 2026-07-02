@@ -52,7 +52,6 @@ class TelegramChannel(Channel):
         # stream_key ("chat_id:thread_ts") -> state of the in-flight streamed
         # bot message being edited in place: {"message_id", "last_edit_at", "last_text"}
         self._stream_messages: dict[str, dict[str, Any]] = {}
-        self._connection_repo = config.get("connection_repo")
 
     @property
     def supports_streaming(self) -> bool:
@@ -239,29 +238,17 @@ class TelegramChannel(Channel):
             kwargs["reply_to_message_id"] = reply_to
 
         bot = self._application.bot
-        last_exc: Exception | None = None
-        for attempt in range(_max_retries):
-            try:
-                sent = await bot.send_message(**kwargs)
-                self._last_bot_message[chat_key] = sent.message_id
-                return sent.message_id
-            except Exception as exc:
-                last_exc = exc
-                if attempt < _max_retries - 1:
-                    delay = 2**attempt  # 1s, 2s
-                    logger.warning(
-                        "[Telegram] send failed (attempt %d/%d), retrying in %ds: %s",
-                        attempt + 1,
-                        _max_retries,
-                        delay,
-                        exc,
-                    )
-                    await asyncio.sleep(delay)
 
-        logger.error("[Telegram] send failed after %d attempts: %s", _max_retries, last_exc)
-        if last_exc is None:
-            raise RuntimeError("Telegram send failed without an exception from any attempt")
-        raise last_exc
+        async def send_message() -> int:
+            sent = await bot.send_message(**kwargs)
+            self._last_bot_message[chat_key] = sent.message_id
+            return sent.message_id
+
+        return await self._send_with_retry(
+            send_message,
+            max_retries=_max_retries,
+            log_prefix="[Telegram]",
+        )
 
     async def send_file(self, msg: OutboundMessage, attachment: ResolvedAttachment) -> bool:
         if not self._application:
@@ -367,16 +354,6 @@ class TelegramChannel(Channel):
             logger.info("[Telegram] 'Working on it...' reply sent in chat=%s", chat_id)
         except Exception:
             logger.exception("[Telegram] failed to send running reply in chat=%s", chat_id)
-
-    # -- internal ----------------------------------------------------------
-    @staticmethod
-    def _log_future_error(fut, name: str, msg_id: str):
-        try:
-            exc = fut.exception()
-            if exc:
-                logger.error("[Telegram] %s failed for msg_id=%s: %s", name, msg_id, exc)
-        except Exception:
-            logger.exception("[Telegram] Failed to inspect future for %s (msg_id=%s)", name, msg_id)
 
     def _run_polling(self) -> None:
         """Run telegram polling in a dedicated thread."""
@@ -485,13 +462,15 @@ class TelegramChannel(Channel):
 
     async def _cmd_start(self, update, context) -> None:
         """Handle /start command."""
-        if not self._check_user(update.effective_user.id):
-            return
         args = getattr(context, "args", []) if context is not None else []
         if args:
+            # Handle the deep-link bind token before applying allowed_users so a
+            # browser-initiated bind can bootstrap a new external identity.
             handled = await self._bind_connection_from_start_token(update, str(args[0]))
             if handled:
                 return
+        if not self._check_user(update.effective_user.id):
+            return
         await update.message.reply_text("Welcome to DeerFlow! Send me a message to start a conversation.\nType /help for available commands.")
 
     async def _process_incoming_with_reply(self, chat_id: str, msg_id: int, inbound: InboundMessage) -> None:
@@ -525,6 +504,7 @@ class TelegramChannel(Channel):
             text=text,
             msg_type=InboundMessageType.COMMAND,
             thread_ts=msg_id,
+            metadata={"message_id": msg_id},
         )
         inbound.topic_id = topic_id
         inbound = await self._attach_connection_identity(inbound)
@@ -568,6 +548,7 @@ class TelegramChannel(Channel):
             text=text,
             msg_type=InboundMessageType.CHAT,
             thread_ts=msg_id,
+            metadata={"message_id": msg_id},
         )
         inbound.topic_id = topic_id
         inbound = await self._attach_connection_identity(inbound)
