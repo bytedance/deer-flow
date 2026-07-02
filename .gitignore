@@ -40,6 +40,9 @@ coverage/
 .claude/
 .planning/
 skills/custom/*
+
+# Local echart skill (vendored binary, not for commit)
+skills/public/echart-skill/
 logs/
 log/
 debug.log
