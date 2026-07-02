@@ -177,6 +177,7 @@ export const enUS: Translations = {
     recentChats: "Recent chats",
     demoChats: "Demo chats",
     agents: "Agents",
+    agentsDisabledTooltip: "Feature not enabled",
   },
 
   // Agents
@@ -188,6 +189,9 @@ export const enUS: Translations = {
     emptyTitle: "No custom agents yet",
     emptyDescription:
       "Create your first custom agent with a specialized system prompt.",
+    featureDisabledTitle: "Agents feature is not enabled",
+    featureDisabledDescription:
+      "This feature is not enabled on this server. Please contact your administrator.",
     chat: "Chat",
     delete: "Delete",
     deleteConfirm:
