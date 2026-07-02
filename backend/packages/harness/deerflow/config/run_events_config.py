@@ -9,6 +9,9 @@ Backends:
   Suitable for production deployments.
 - jsonl: Append-only JSONL files. Lightweight alternative for
   single-node deployments that need persistence without a database.
+- kurrent: Community prototype. Appends run events to per-thread KurrentDB
+  streams (deerflow.community.kurrentdb.run_event_store.KurrentRunEventStore);
+  requires the kurrentdbclient extra and KURRENTDB_CONNECTION_STRING.
 """
 
 from __future__ import annotations
@@ -19,9 +22,12 @@ from pydantic import BaseModel, Field
 
 
 class RunEventsConfig(BaseModel):
-    backend: Literal["memory", "db", "jsonl"] = Field(
+    backend: Literal["memory", "db", "jsonl", "kurrent"] = Field(
         default="memory",
-        description="Storage backend for run events. 'memory' for development (no persistence), 'db' for production (SQL queries), 'jsonl' for lightweight single-node persistence.",
+        description=(
+            "Storage backend for run events. 'memory' for development (no persistence), 'db' for production (SQL queries), "
+            "'jsonl' for lightweight single-node persistence, 'kurrent' for the community KurrentDB-backed prototype (requires KURRENTDB_CONNECTION_STRING)."
+        ),
     )
     max_trace_content: int = Field(
         default=10240,
