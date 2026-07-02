@@ -14,6 +14,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp
 
+from app.gateway.auth.config import get_auth_config
 from app.gateway.auth_disabled import is_auth_disabled
 
 CSRF_COOKIE_NAME = "csrf_token"
@@ -220,6 +221,12 @@ class CSRFMiddleware(BaseHTTPMiddleware):
                 httponly=False,  # Must be JS-readable for Double Submit Cookie pattern
                 secure=is_https,
                 samesite="strict",
+                # Match the access_token cookie's lifetime (auth.py::_set_session_cookie)
+                # so the double-submit pair never diverges. A session-only csrf_token is
+                # evicted when iOS Safari terminates a home-screen PWA while the persistent
+                # access_token survives — leaving the user "logged in" but unable to make
+                # any state-changing request (403 "CSRF token missing").
+                max_age=get_auth_config().token_expiry_days * 24 * 3600 if is_https else None,
             )
 
         return response

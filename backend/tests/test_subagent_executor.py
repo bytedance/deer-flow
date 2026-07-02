@@ -79,7 +79,7 @@ def _setup_executor_classes():
     sys.modules["deerflow.skills.storage"] = storage_module
 
     # Import real classes inside fixture
-    from langchain_core.messages import AIMessage, HumanMessage
+    from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
     from deerflow.subagents.config import SubagentConfig
     from deerflow.subagents.executor import (
@@ -100,6 +100,7 @@ def _setup_executor_classes():
     classes = {
         "AIMessage": AIMessage,
         "HumanMessage": HumanMessage,
+        "ToolMessage": ToolMessage,
         "SubagentConfig": SubagentConfig,
         "SubagentExecutor": SubagentExecutor,
         "SubagentResult": SubagentResult,
@@ -225,6 +226,12 @@ class _MsgHelper:
 
     def ai(self, content, msg_id=None):
         msg = self.classes["AIMessage"](content=content)
+        if msg_id:
+            msg.id = msg_id
+        return msg
+
+    def tool(self, content, tool_call_id, name=None, msg_id=None):
+        msg = self.classes["ToolMessage"](content=content, tool_call_id=tool_call_id, name=name)
         if msg_id:
             msg.id = msg_id
         return msg
@@ -804,6 +811,34 @@ class TestAsyncExecutionPath:
             result = await executor._aexecute("Task")
 
         assert [m["content"] for m in result.ai_messages] == ["same", "different"]
+
+    @pytest.mark.anyio
+    async def test_aexecute_captures_all_tool_outputs_from_one_super_step(self, classes, base_config, mock_agent, msg):
+        """Regression for #3779: when the model emits several tool calls in one
+        turn, LangGraph's ToolNode appends all their ToolMessages in a single
+        ``values`` super-step. Capturing only ``messages[-1]`` dropped every tool
+        output but the last; all three must now survive in ``ai_messages``."""
+        SubagentExecutor = classes["SubagentExecutor"]
+
+        human = msg.human("Task")
+        ai_turn = msg.ai("running three tools", "ai-1")
+        t1 = msg.tool("result 1", "call_1", name="web_search", msg_id="tool-1")
+        t2 = msg.tool("result 2", "call_2", name="read_file", msg_id="tool-2")
+        t3 = msg.tool("result 3", "call_3", name="web_search", msg_id="tool-3")
+        final = msg.ai("done", "ai-2")
+        chunks = [
+            {"messages": [human, ai_turn]},
+            # One super-step appends all three ToolMessages at once.
+            {"messages": [human, ai_turn, t1, t2, t3]},
+            {"messages": [human, ai_turn, t1, t2, t3, final]},
+        ]
+        mock_agent.astream = lambda *args, **kwargs: async_iterator(chunks)
+
+        executor = SubagentExecutor(config=base_config, tools=[], thread_id="test-thread")
+        with patch.object(executor, "_create_agent", return_value=mock_agent):
+            result = await executor._aexecute("Task")
+
+        assert [m["id"] for m in result.ai_messages] == ["ai-1", "tool-1", "tool-2", "tool-3", "ai-2"]
 
     @pytest.mark.anyio
     async def test_aexecute_handles_list_content(self, classes, base_config, mock_agent, msg):
