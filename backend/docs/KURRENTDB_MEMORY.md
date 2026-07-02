@@ -117,7 +117,28 @@ comes for free.
   request path indefinitely. Default is 10 seconds; override with the
   `KURRENTDB_MEMORY_TIMEOUT_SECONDS` environment variable. An unset, invalid,
   non-positive, or non-finite (`inf`/`nan`) value falls back to the default
-  with a logged warning.
+  with a logged warning. The sibling run-events backend
+  (`deerflow.community.kurrentdb.run_event_store.KurrentRunEventStore`, see
+  below) uses the same `resolve_timeout_seconds` helper with its own
+  `KURRENTDB_RUN_EVENTS_TIMEOUT_SECONDS` override (same default and same
+  fallback behavior), so the two KurrentDB integrations can be tuned
+  independently even though they share `KURRENTDB_CONNECTION_STRING`.
+
+### Sibling: run events on KurrentDB (`KurrentRunEventStore`)
+
+`deerflow.community.kurrentdb.run_event_store.KurrentRunEventStore` is a
+second, independent community backend in the same package: instead of
+memory snapshots, it stores run events (messages + execution traces) as one
+KurrentDB stream per thread (`deerflow.runs-{thread_id}`). Enable it via
+`run_events.backend: kurrent` in `config.yaml` (see the commented example in
+`config.example.yaml`). It reuses `KURRENTDB_CONNECTION_STRING` and has its
+own `KURRENTDB_RUN_EVENTS_TIMEOUT_SECONDS` override as noted above. Every
+event is stamped with a stable per-record id (reused across `RunJournal`
+retries) so seq attribution and read results stay correct under concurrent
+writers and retried appends; `run-redacted` markers (from `delete_by_run`)
+must parse and carry `run_id` or every read path raises
+`KurrentRunEventReadError` rather than silently un-redacting. See the module
+docstring in `run_event_store.py` for the full design notes.
 
 ## Canonical schema events (kurrent-agents)
 

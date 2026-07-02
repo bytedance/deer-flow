@@ -668,6 +668,57 @@ class TestReadFailureSemantics:
 
 
 # ---------------------------------------------------------------------------
+# Malformed redaction marker must raise, not silently un-redact (finding 6)
+# ---------------------------------------------------------------------------
+
+
+class TestMalformedRedactionMarker:
+    @pytest.mark.anyio
+    async def test_unparseable_marker_payload_raises_on_read(self, store, fake_client):
+        from kurrentdbclient import NewEvent
+
+        from deerflow.community.kurrentdb.run_event_store import REDACTION_EVENT_TYPE, KurrentRunEventReadError
+
+        await store.put(thread_id="t1", run_id="r1", event_type="human_message", category="message")
+
+        client = await store._get_client()
+        bad_marker = NewEvent(type=REDACTION_EVENT_TYPE, data=b"not json")
+        await client.append_to_stream("deerflow.runs-t1", events=bad_marker, current_version=None, timeout=None)
+
+        with pytest.raises(KurrentRunEventReadError):
+            await store.list_messages("t1")
+
+    @pytest.mark.anyio
+    async def test_marker_missing_run_id_raises_on_read(self, store, fake_client):
+        from kurrentdbclient import NewEvent
+
+        from deerflow.community.kurrentdb.run_event_store import REDACTION_EVENT_TYPE
+
+        await store.put(thread_id="t1", run_id="r1", event_type="human_message", category="message")
+
+        client = await store._get_client()
+        bad_marker = NewEvent(type=REDACTION_EVENT_TYPE, data=json.dumps({"not_run_id": "r1"}).encode("utf-8"))
+        await client.append_to_stream("deerflow.runs-t1", events=bad_marker, current_version=None, timeout=None)
+
+        from deerflow.community.kurrentdb.run_event_store import KurrentRunEventReadError
+
+        with pytest.raises(KurrentRunEventReadError):
+            await store.list_events("t1", "r1")
+
+    @pytest.mark.anyio
+    async def test_valid_marker_still_redacts_normally(self, store):
+        """Sanity check: the new raise-on-malformed behavior must not break
+        the existing well-formed redaction path."""
+        await store.put(thread_id="t1", run_id="r1", event_type="human_message", category="message")
+        await store.put(thread_id="t1", run_id="r2", event_type="human_message", category="message")
+        count = await store.delete_by_run("t1", "r2")
+        assert count == 1
+        messages = await store.list_messages("t1")
+        assert len(messages) == 1
+        assert messages[0]["run_id"] == "r1"
+
+
+# ---------------------------------------------------------------------------
 # Canonical dual-write (best-effort, messages only)
 # ---------------------------------------------------------------------------
 
@@ -710,6 +761,51 @@ class TestCanonicalDualWrite:
     @pytest.mark.anyio
     async def test_unmappable_message_event_type_skipped(self, store, fake_client):
         await store.put(thread_id="t1", run_id="r1", event_type="some_other_message_kind", category="message", content="?")
+        canonical_stream = "AgentSession-t1"
+        assert all(c["stream_name"] != canonical_stream for c in fake_client.append_calls)
+
+    @pytest.mark.anyio
+    async def test_real_run_journal_human_event_type_maps(self, store, fake_client):
+        """RunJournal actually emits ``llm.human.input`` (not ``human_message``)
+        for the first human message of a run -- see
+        deerflow/runtime/journal.py::on_chat_model_start."""
+        from kurrent_agent_schema import UserMessageReceived, from_json
+
+        await store.put(thread_id="t1", run_id="r1", event_type="llm.human.input", category="message", content="hi")
+        canonical_stream = "AgentSession-t1"
+        calls = [c for c in fake_client.append_calls if c["stream_name"] == canonical_stream]
+        assert len(calls) == 1
+        decoded = calls[0]["events"][0].data.decode("utf-8")
+        assert from_json(UserMessageReceived, decoded).content == "hi"
+
+    @pytest.mark.anyio
+    async def test_real_run_journal_ai_event_type_maps(self, store, fake_client):
+        """RunJournal actually emits ``llm.ai.response`` (not ``ai_message``)
+        for LLM responses -- see deerflow/runtime/journal.py::on_llm_end."""
+        from kurrent_agent_schema import AssistantTextGenerated, from_json
+
+        await store.put(thread_id="t1", run_id="r1", event_type="llm.ai.response", category="message", content="hi back")
+        canonical_stream = "AgentSession-t1"
+        calls = [c for c in fake_client.append_calls if c["stream_name"] == canonical_stream]
+        assert len(calls) == 1
+        decoded = calls[0]["events"][0].data.decode("utf-8")
+        assert from_json(AssistantTextGenerated, decoded).content == "hi back"
+
+    @pytest.mark.anyio
+    async def test_substring_match_no_longer_used_for_mapping(self, store, fake_client):
+        """Regression for the substring-heuristic bug: an event_type that
+        merely *contains* 'human' or 'ai' as a substring (but isn't an exact
+        allowlisted type) must NOT be mapped to a canonical event."""
+        await store.put(thread_id="t1", run_id="r1", event_type="human_evaluation_flag", category="message", content="x")
+        await store.put(thread_id="t1", run_id="r1", event_type="maintenance_note", category="message", content="y")
+        canonical_stream = "AgentSession-t1"
+        assert all(c["stream_name"] != canonical_stream for c in fake_client.append_calls)
+
+    @pytest.mark.anyio
+    async def test_llm_tool_result_not_mapped_to_canonical(self, store, fake_client):
+        """``llm.tool.result`` (RunJournal's tool-message category=message
+        event) is not a user/assistant text event and must not map."""
+        await store.put(thread_id="t1", run_id="r1", event_type="llm.tool.result", category="message", content="tool output")
         canonical_stream = "AgentSession-t1"
         assert all(c["stream_name"] != canonical_stream for c in fake_client.append_calls)
 

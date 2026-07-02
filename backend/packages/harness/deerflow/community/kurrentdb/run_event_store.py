@@ -66,12 +66,20 @@ Design notes (see the ``RunEventStore`` ABC for the behavioral contract):
   and the markers themselves, so redaction is observably a deletion from
   every read path even though the underlying log is untouched. This mirrors
   how an event-sourced system actually handles "delete a run": tombstone,
-  don't rewrite history.
+  don't rewrite history. Redaction markers consume a seq slot like any
+  other event, so seq gaps around a redacted run are expected.
+- **A malformed redaction marker raises rather than being silently
+  ignored.** Un-redacting a privacy deletion by accident (by treating a
+  corrupt marker as "no-op") is the worst failure mode for this feature, so
+  a ``run-redacted`` event whose payload cannot be parsed or lacks
+  ``run_id`` raises ``KurrentRunEventReadError`` from every read path
+  instead of being logged and skipped. Ordinary corrupt non-marker events
+  are still skipped-with-a-warning, unchanged.
 - **Canonical dual-write (best-effort, messages only).** After a successful
-  ``put``/``put_batch``, records with ``category == "message"`` are
-  heuristically mapped to canonical ``kurrent-agent-schema`` events
-  (``UserMessageReceived`` / ``AssistantTextGenerated``) and appended to the
-  canonical ``AgentSession-{thread_id}`` stream (via
+  ``put``/``put_batch``, records with ``category == "message"`` are mapped
+  via an exact event-type allowlist to canonical ``kurrent-agent-schema``
+  events (``UserMessageReceived`` / ``AssistantTextGenerated``) and appended
+  to the canonical ``AgentSession-{thread_id}`` stream (via
   ``agent_session_stream``), mirroring ``memory_storage.py``'s canonical
   ``FactRetained`` dual-write. Any failure (missing optional dependency,
   transport error, unmappable event) is logged and swallowed -- it never
@@ -110,6 +118,20 @@ _EVENT_ID_KEY = "_kurrent_event_id"
 _canonical_schema_warned = False
 
 
+class KurrentRunEventReadError(RuntimeError):
+    """Raised when a run-redacted marker on the stream cannot be trusted.
+
+    Mirrors ``KurrentdbMemoryReadError``'s philosophy in ``memory_storage.py``:
+    an unreadable/corrupt event must never be silently treated as "not
+    there". This matters especially for ``run-redacted`` markers -- a
+    marker whose payload can't be parsed or lacks ``run_id`` must not be
+    skipped, because skipping it would silently un-redact a privacy
+    deletion (the redacted run's events would reappear in every read path).
+    Ordinary corrupt non-marker events are unaffected by this class and
+    remain skip-with-a-warning, since they don't carry deletion semantics.
+    """
+
+
 def _make_default_client(connection_string: str) -> Any:
     from kurrentdbclient import AsyncKurrentDBClient
 
@@ -129,6 +151,16 @@ class KurrentRunEventStore(RunEventStore):
     ``deerflow-harness[kurrentdb]`` extra) and the
     ``KURRENTDB_CONNECTION_STRING`` environment variable, matching
     ``KurrentdbMemoryStorage``.
+
+    Notes:
+    - Every read (``list_messages``, ``list_events``, ``list_messages_by_run``,
+      ``count_messages``) loads the *entire* stream for the thread and
+      filters in Python -- there is no bounded/paginated read path, so this
+      is not appropriate for very high-volume threads without a future
+      projection-based rework.
+    - ``run-redacted`` markers (from ``delete_by_run``) consume a seq slot
+      like any other event, so seq gaps around a redacted run are expected
+      and not a sign of data loss.
     """
 
     def __init__(self, client_factory: Callable[[], Any] | None = None):
@@ -179,13 +211,21 @@ class KurrentRunEventStore(RunEventStore):
     def _decode_and_filter(self, recorded: tuple[Any, ...]) -> list[dict]:
         """Decode RecordedEvents into records with seq filled in, dropping redacted runs, markers, and duplicates.
 
-        Also applies id-based dedup (keep-first / lowest stream_position): a
-        retry after a read-back failure can physically re-append the same
-        logical record (see ``_append_records``'s docstring). KurrentDB's
-        own same-id idempotence under ``StreamState.ANY`` is best-effort
-        only and must not be relied on for correctness, so this method
-        independently drops any event whose id was already seen at a lower
-        stream_position.
+        Two independent safety nets are applied before category/run
+        filtering happens in the higher-level ``list_*`` methods:
+
+        - **id-based dedup (keep-first / lowest stream_position):** a retry
+          after a read-back failure can physically re-append the same
+          logical record (see ``_append_records``'s docstring). KurrentDB's
+          own same-id idempotence under ``StreamState.ANY`` is best-effort
+          only and must not be relied on for correctness, so this method
+          independently drops any event whose id was already seen at a
+          lower stream_position.
+        - **malformed ``run-redacted`` marker -> raise:** a marker that
+          can't be parsed or lacks ``run_id`` must never be treated as a
+          no-op, since that would silently un-redact a privacy deletion.
+          Ordinary corrupt non-marker events are still skipped with a
+          warning (unchanged behavior).
         """
         raw: list[tuple[int, dict | None, str]] = []
         redacted_run_ids: set[str] = set()
@@ -202,9 +242,10 @@ class KurrentRunEventStore(RunEventStore):
             if event.type == REDACTION_EVENT_TYPE:
                 try:
                     marker = json.loads(event.data)
-                    redacted_run_ids.add(marker["run_id"])
-                except (json.JSONDecodeError, UnicodeDecodeError, KeyError, TypeError):
-                    logger.warning("Skipping malformed %s marker at seq=%d on stream", REDACTION_EVENT_TYPE, seq)
+                    run_id = marker["run_id"]
+                except (json.JSONDecodeError, UnicodeDecodeError, KeyError, TypeError) as e:
+                    raise KurrentRunEventReadError(f"Malformed {REDACTION_EVENT_TYPE} marker at seq={seq} on stream: {e}") from e
+                redacted_run_ids.add(run_id)
                 raw.append((seq, None, event.type))
                 continue
             try:
@@ -467,8 +508,20 @@ class KurrentRunEventStore(RunEventStore):
         except Exception as e:
             logger.warning("Best-effort canonical kurrent-agents session event emission failed: %s", e)
 
-    @staticmethod
-    def _map_to_canonical(record: dict) -> Any | None:
+    # Exact event_type allowlists for canonical mapping -- deliberately NOT a
+    # substring/heuristic match (a substring check like `"human" in
+    # event_type` would also match e.g. "human_evaluation_flag", which is
+    # not a chat message at all). Includes both the real values RunJournal
+    # emits for category="message" (`llm.human.input` / `llm.ai.response`;
+    # see runtime/journal.py's on_chat_model_start / on_llm_end) and the
+    # generic `human_message` / `ai_message` event_type convention used by
+    # other RunEventStore callers/tests. `llm.tool.result` (tool output) is
+    # intentionally excluded -- it is not user/assistant chat text.
+    _USER_MESSAGE_EVENT_TYPES = frozenset({"llm.human.input", "human_message"})
+    _ASSISTANT_MESSAGE_EVENT_TYPES = frozenset({"llm.ai.response", "ai_message"})
+
+    @classmethod
+    def _map_to_canonical(cls, record: dict) -> Any | None:
         """Map a deer-flow message record to a canonical kurrent-agent-schema event, or None if unmappable."""
         from kurrent_agent_schema import AssistantTextGenerated, UserMessageReceived
 
@@ -476,9 +529,9 @@ class KurrentRunEventStore(RunEventStore):
         if not isinstance(content, str) or not content:
             return None
         event_type = record.get("event_type", "")
-        if "human" in event_type or "user" in event_type:
+        if event_type in cls._USER_MESSAGE_EVENT_TYPES:
             return UserMessageReceived(content=content)
-        if "ai" in event_type or "assistant" in event_type:
+        if event_type in cls._ASSISTANT_MESSAGE_EVENT_TYPES:
             return AssistantTextGenerated(content=content)
         return None
 
