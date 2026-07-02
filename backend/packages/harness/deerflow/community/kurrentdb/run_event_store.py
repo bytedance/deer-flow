@@ -19,16 +19,43 @@ Design notes (see the ``RunEventStore`` ABC for the behavioral contract):
   API. So each event is stored WITHOUT a ``seq`` field in its JSON payload;
   ``seq`` is reconstructed on every read from each ``RecordedEvent``'s
   ``stream_position`` (0-indexed) as ``stream_position + 1``. ``put()``
-  performs one ``append_to_stream`` call followed by one ``get_stream``
-  call (backwards, small limit) to recover the assigned revision(s) before
-  returning the complete record(s) -- an extra round trip versus a client
-  that exposed ``current_revision`` directly, acceptable for this POC.
+  performs one ``append_to_stream`` call followed by a backwards, ID-correlated
+  ``get_stream`` read to recover the assigned revision(s) before returning
+  the complete record(s) -- an extra round trip versus a client that exposed
+  ``current_revision`` directly, acceptable for this POC.
+- **Stable per-record event IDs, correlated on read-back (not positional
+  zip).** Each record is stamped with a ``_kurrent_event_id`` (uuid4) before
+  append and that id becomes the ``NewEvent(id=...)``. The post-append
+  read-back pages backwards through the stream collecting
+  ``RecordedEvent``s whose ``id`` is in this call's id set, and assigns each
+  record the ``stream_position`` of its *own* matched event. This is
+  correct even when another writer's append lands on the same thread stream
+  between this call's append and its read-back (naive positional zip against
+  the tail is not: a concurrent interleaving shifts which physical events
+  the backwards slice returns, misattributing seq to the wrong records).
+- **Retry-safe by construction.** ``RunJournal`` (``runtime/journal.py``)
+  buffers failed ``put_batch`` calls and retries with the *same* record
+  dicts (`self._buffer = batch + self._buffer`). Because the id is stamped
+  onto the dict once and reused on retry, a retried append after a
+  transport failure on the read-back (append already committed, read-back
+  or the caller raised) reuses the same event ids. Combined with read-side
+  dedup (below), a retry can duplicate physical events on the stream but
+  never duplicates what any read path returns.
 - **Reads filter in Python.** KurrentDB has no server-side predicate query
   over a stream's events, so ``list_messages`` / ``list_events`` /
   ``list_messages_by_run`` / ``count_messages`` read the whole stream (or a
   bounded backwards slice for the common "latest N" case) and filter by
   category / run_id / event_types / seq bounds in Python. Fine for the POC;
-  a production version would want a category/run projection instead.
+  a production version would want a category/run projection instead. Reads
+  always load the full stream per call -- there is no bounded/paginated
+  read path for high-volume threads yet.
+- **Read-side dedup by event id (keep-first/lowest stream_position).**
+  KurrentDB's own same-id idempotence under ``StreamState.ANY`` is
+  best-effort only (it is not a strict dedup guarantee across arbitrary
+  retry timing) -- do not rely on it. ``_decode_and_filter`` independently
+  drops any event whose id was already seen at a lower stream_position, so
+  a retried append that physically duplicated events on the stream still
+  reads back as a single logical event.
 - **delete_by_thread is a real (soft) stream delete** via
   ``delete_stream(current_version=StreamState.ANY)``. The event count is
   read before deleting so the return value matches the ABC contract.
@@ -58,6 +85,7 @@ import json
 import logging
 import os
 import re
+import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
@@ -71,6 +99,11 @@ STREAM_PREFIX = "deerflow.runs"
 REDACTION_EVENT_TYPE = "run-redacted"
 _ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
 DEFAULT_TIMEOUT_SECONDS = 10.0
+
+# Internal-only key stamped onto record dicts to give each logical event a
+# stable identity across retries. Never persisted to the JSON payload and
+# never present on returned records -- see ``_append_records``.
+_EVENT_ID_KEY = "_kurrent_event_id"
 
 # kurrent-agents canonical session stream builder input; deer-flow's thread_id
 # is used directly as the canonical session id.
@@ -144,11 +177,28 @@ class KurrentRunEventStore(RunEventStore):
         return self._decode_and_filter(recorded)
 
     def _decode_and_filter(self, recorded: tuple[Any, ...]) -> list[dict]:
-        """Decode RecordedEvents into records with seq filled in, dropping redacted runs and markers."""
+        """Decode RecordedEvents into records with seq filled in, dropping redacted runs, markers, and duplicates.
+
+        Also applies id-based dedup (keep-first / lowest stream_position): a
+        retry after a read-back failure can physically re-append the same
+        logical record (see ``_append_records``'s docstring). KurrentDB's
+        own same-id idempotence under ``StreamState.ANY`` is best-effort
+        only and must not be relied on for correctness, so this method
+        independently drops any event whose id was already seen at a lower
+        stream_position.
+        """
         raw: list[tuple[int, dict | None, str]] = []
         redacted_run_ids: set[str] = set()
+        seen_event_ids: set[Any] = set()
         for event in recorded:
             seq = event.stream_position + 1
+            event_id = getattr(event, "id", None)
+            if event_id is not None:
+                if event_id in seen_event_ids:
+                    # Duplicate physical event from a retried append -- keep
+                    # only the first (lowest stream_position) occurrence.
+                    continue
+                seen_event_ids.add(event_id)
             if event.type == REDACTION_EVENT_TYPE:
                 try:
                     marker = json.loads(event.data)
@@ -163,6 +213,7 @@ class KurrentRunEventStore(RunEventStore):
                 logger.warning("Skipping malformed event data at seq=%d (type=%s)", seq, event.type)
                 raw.append((seq, None, event.type))
                 continue
+            record.pop(_EVENT_ID_KEY, None)
             record["seq"] = seq
             record["event_type"] = event.type
             raw.append((seq, record, event.type))
@@ -202,6 +253,15 @@ class KurrentRunEventStore(RunEventStore):
         metadata=None,
         created_at=None,
     ):
+        """Append a single event; return the complete record with seq assigned.
+
+        Builds a fresh record dict from the keyword args and stamps it with
+        a ``_kurrent_event_id`` (uuid4 hex) -- see ``put_batch``'s docstring
+        for why this id exists (retry-stability via id-correlated
+        read-back). ``put()`` itself has no caller-owned dict to mutate
+        across a retry (callers pass plain keyword args, not a shared dict
+        object), so there is nothing to preserve here beyond this one call.
+        """
         record = self._record_payload(
             thread_id=thread_id,
             run_id=run_id,
@@ -211,18 +271,37 @@ class KurrentRunEventStore(RunEventStore):
             metadata=metadata,
             created_at=created_at,
         )
+        record[_EVENT_ID_KEY] = uuid.uuid4().hex
         results = await self._append_records(thread_id, [record])
         return results[0]
 
     async def put_batch(self, events: list[dict]) -> list[dict]:
+        """Batch-append ``events``; return complete records with seq assigned.
+
+        Deliberately mutates the caller's dicts: each dict in ``events`` is
+        stamped with a ``_kurrent_event_id`` key (uuid4 hex) if one is not
+        already present. This is the retry-stability mechanism -- when
+        ``RunJournal._flush_async`` catches an exception from this method it
+        pushes the *same* dict objects back onto its buffer and re-sends
+        them on the next flush (`self._buffer = batch + self._buffer`).
+        Because the id was already stamped onto those objects, the retried
+        append reuses the same event ids instead of minting new ones, which
+        is what lets read-side dedup (``_decode_and_filter``) collapse a
+        retried append back down to the original logical events.
+        """
         if not events:
             return []
         thread_ids = {ev["thread_id"] for ev in events}
         if len(thread_ids) > 1:
             raise ValueError(f"put_batch requires all events to share the same thread_id, got: {sorted(thread_ids)}")
         thread_id = next(iter(thread_ids))
-        records = [
-            self._record_payload(
+        records = []
+        for ev in events:
+            event_id = ev.get(_EVENT_ID_KEY)
+            if not event_id:
+                event_id = uuid.uuid4().hex
+                ev[_EVENT_ID_KEY] = event_id
+            record = self._record_payload(
                 thread_id=ev["thread_id"],
                 run_id=ev["run_id"],
                 event_type=ev["event_type"],
@@ -231,32 +310,82 @@ class KurrentRunEventStore(RunEventStore):
                 metadata=ev.get("metadata"),
                 created_at=ev.get("created_at"),
             )
-            for ev in events
-        ]
+            record[_EVENT_ID_KEY] = event_id
+            records.append(record)
         return await self._append_records(thread_id, records)
 
     async def _append_records(self, thread_id: str, records: list[dict]) -> list[dict]:
-        """Append ``records`` (without seq) in one call; return complete records with seq derived from stream revision."""
+        """Append ``records`` (each carrying a stable ``_kurrent_event_id``) in one call.
+
+        Returns complete records (``_kurrent_event_id`` stripped) with seq
+        derived from each record's *own* recorded event, correlated by id --
+        not by positionally zipping the backwards tail read against
+        ``records``. A positional zip is wrong under interleaving: if
+        another writer appends to the same thread stream between this
+        call's append and its read-back, the backwards slice this call reads
+        can contain a mix of this call's events and the other writer's, and
+        positional zip would attribute seq from the wrong physical event.
+        Correlating by id is correct regardless of what else lands on the
+        stream in between.
+        """
         from kurrentdbclient import NewEvent, StreamState
         from kurrentdbclient.exceptions import NotFoundError
 
         client = await self._get_client()
         stream_name = self._stream_name(thread_id)
-        new_events = [NewEvent(type=r["event_type"], data=json.dumps(r, default=str, ensure_ascii=False).encode("utf-8")) for r in records]
+
+        record_ids: dict[uuid.UUID, dict] = {}
+        new_events = []
+        for r in records:
+            event_id = uuid.UUID(r[_EVENT_ID_KEY])
+            payload = {k: v for k, v in r.items() if k != _EVENT_ID_KEY}
+            new_events.append(NewEvent(id=event_id, type=r["event_type"], data=json.dumps(payload, default=str, ensure_ascii=False).encode("utf-8")))
+            record_ids[event_id] = r
         await client.append_to_stream(stream_name, events=new_events, current_version=StreamState.ANY, timeout=self._timeout)
 
         # append_to_stream's return value is a global commit position, not
-        # the per-stream revision -- read the tail back to recover the
-        # revision(s) actually assigned to the events we just wrote.
+        # the per-stream revision -- page backwards through the stream,
+        # correlating by event id, to recover the revision(s) actually
+        # assigned to the events we just wrote. Page size grows with n so
+        # small appends still cost one round trip in the common case.
         n = len(records)
-        try:
-            tail = await client.get_stream(stream_name, backwards=True, limit=n, timeout=self._timeout)
-        except NotFoundError:  # pragma: no cover - defensive, stream must exist right after append
-            raise RuntimeError(f"Stream {stream_name!r} not found immediately after append") from None
-        tail_ascending = list(reversed(tail))[-n:]
+        page_size = max(n * 2, 64)
+        found: dict[uuid.UUID, Any] = {}
+        stream_position: int | None = None
+        while len(found) < n:
+            try:
+                page = await client.get_stream(stream_name, backwards=True, stream_position=stream_position, limit=page_size, timeout=self._timeout)
+            except NotFoundError:  # pragma: no cover - defensive, stream must exist right after append
+                raise RuntimeError(f"Stream {stream_name!r} not found immediately after append") from None
+            if not page:
+                break
+            for event in page:
+                event_id = getattr(event, "id", None)
+                if event_id in record_ids and event_id not in found:
+                    # Paging runs newest -> oldest, so the first match seen
+                    # for a given id is the event *this* append call just
+                    # wrote (highest stream_position for that id). If a
+                    # prior retry attempt already duplicated this id earlier
+                    # in the stream, that older copy is intentionally not
+                    # preferred here -- this call reports the position its
+                    # own append produced. Read-side dedup
+                    # (`_decode_and_filter`, keep-first-by-lowest-position)
+                    # is the source of truth for what every other read path
+                    # shows once both copies exist on the stream.
+                    found[event_id] = event
+            oldest_position = page[-1].stream_position
+            if oldest_position == 0:
+                break
+            stream_position = oldest_position - 1
+
+        missing = record_ids.keys() - found.keys()
+        if missing:
+            raise RuntimeError(f"Stream {stream_name!r}: could not find {len(missing)} of {n} just-appended event(s) by id after paging back to the start of the stream -- this should be impossible")
+
         results = []
-        for record, event in zip(records, tail_ascending, strict=True):
-            complete = dict(record)
+        for event_id, event in sorted(found.items(), key=lambda kv: kv[1].stream_position):
+            record = record_ids[event_id]
+            complete = {k: v for k, v in record.items() if k != _EVENT_ID_KEY}
             complete["seq"] = event.stream_position + 1
             results.append(complete)
 
