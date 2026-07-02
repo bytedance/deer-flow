@@ -19,6 +19,14 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
+    bind = op.get_bind()
+    inspector = sa.inspect(bind)
+    if inspector.has_table("scheduled_tasks"):
+        # Idempotent: a DB whose full-metadata create_all already provisioned
+        # both scheduled-task tables (e.g. legacy test seeds) must not have them
+        # re-created here. Column-shape revisions 0004/0005 stay safe via their
+        # own _helpers.py guards.
+        return
     op.create_table(
         "scheduled_tasks",
         sa.Column("id", sa.String(length=64), nullable=False),

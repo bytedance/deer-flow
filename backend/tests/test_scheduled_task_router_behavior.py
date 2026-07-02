@@ -92,7 +92,7 @@ async def test_create_scheduled_task_uses_repo():
         title="Daily summary",
         prompt="Summarize thread",
         schedule_type="once",
-        schedule_spec={"run_at": "2026-07-02T01:00:00+00:00"},
+        schedule_spec={"run_at": "2027-01-01T01:00:00+00:00"},
         timezone="UTC",
     )
 
@@ -122,7 +122,7 @@ async def test_create_scheduled_task_uses_repo():
 
     assert created["title"] == "Daily summary"
     assert created["user_id"] == "user-1"
-    assert created["next_run_at"] == datetime(2026, 7, 2, 1, 0, tzinfo=UTC)
+    assert created["next_run_at"] == datetime(2027, 1, 1, 1, 0, tzinfo=UTC)
 
 
 @pytest.mark.asyncio
