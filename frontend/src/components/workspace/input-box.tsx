@@ -969,12 +969,12 @@ export function InputBox({
     threadId,
   ]);
 
-  const onSelectPlaceholder = useCallback(() => {
-    const textarea = textareaRef.current;
-    if (!textarea) return;
-    const placeholder = findSuggestionTemplatePlaceholder(textarea.value);
+  const onSelectPlaceholder = useCallback((newText: string) => {
+    const placeholder = findSuggestionTemplatePlaceholder(newText);
     if (placeholder) {
       requestAnimationFrame(() => {
+        const textarea = textareaRef.current;
+        if (!textarea) return;
         textarea.focus();
         textarea.setSelectionRange(placeholder.start, placeholder.end);
       });
@@ -1493,7 +1493,7 @@ export function InputBox({
 function SuggestionList({
   onSelectPlaceholder,
 }: {
-  onSelectPlaceholder: () => void;
+  onSelectPlaceholder: (newText: string) => void;
 }) {
   const { t } = useI18n();
   const { textInput } = usePromptInputController();
@@ -1501,7 +1501,7 @@ function SuggestionList({
     (prompt: string | undefined) => {
       if (!prompt) return;
       textInput.setInput(prompt);
-      onSelectPlaceholder();
+      onSelectPlaceholder(prompt);
     },
     [textInput, onSelectPlaceholder],
   );
