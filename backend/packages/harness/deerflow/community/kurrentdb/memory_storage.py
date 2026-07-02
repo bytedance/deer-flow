@@ -42,6 +42,15 @@ EVENT_TYPE = "MemoryUpdated"
 _USER_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
 DEFAULT_TIMEOUT_SECONDS = 10.0
 
+# kurrent-agents canonical app identifier for deer-flow (github.com/kurrent-io/kurrent-agents).
+# Used to build the canonical AgentMemory-deerflow-{user_id} stream name.
+CANONICAL_APP_NAME = "deerflow"
+
+# Emitted once per process if kurrent_agent_schema is not installed, instead
+# of logging a warning on every save() (the package is optional even when
+# the kurrentdbclient-backed storage itself is in use).
+_canonical_schema_warned = False
+
 
 class KurrentdbMemoryReadError(RuntimeError):
     """Raised when the newest memory snapshot could not be read from KurrentDB.
@@ -62,6 +71,60 @@ def _make_default_client(connection_string: str) -> Any:
     from kurrentdbclient import KurrentDBClient
 
     return KurrentDBClient(uri=connection_string)
+
+
+def _fact_identity(fact: dict[str, Any]) -> tuple[str, str] | None:
+    """Identity key for a fact dict: ``id`` when present, else normalized content.
+
+    Returns ``None`` for facts that have neither a usable ``id`` nor
+    ``content`` -- such facts cannot be matched against a previous basis and
+    are treated as always-new by the caller's set-difference logic (they
+    simply never appear in the "previous" identity set).
+    """
+    fact_id = fact.get("id") if isinstance(fact, dict) else None
+    if isinstance(fact_id, str) and fact_id:
+        return ("id", fact_id)
+    content = fact.get("content") if isinstance(fact, dict) else None
+    if isinstance(content, str) and content.strip():
+        return ("content", content.strip())
+    return None
+
+
+def _parse_fact_created_at(created_at: Any) -> Any:
+    """Parse a fact's ``createdAt`` (e.g. ``utc_now_iso_z()`` output) to a datetime.
+
+    Falls back to the current UTC time when ``created_at`` is missing or not
+    a parseable ISO-8601 string, per the contract: "the fact's createdAt when
+    parseable else now".
+    """
+    import datetime as _dt
+
+    if isinstance(created_at, str) and created_at:
+        try:
+            return _dt.datetime.fromisoformat(created_at)
+        except ValueError:
+            pass
+    return _dt.datetime.now(_dt.UTC)
+
+
+def _new_facts(previous_facts: list[Any], current_facts: list[Any]) -> list[dict[str, Any]]:
+    """Facts present in ``current_facts`` whose identity is not in ``previous_facts``.
+
+    Identity is the fact's ``id`` when present, else its normalized
+    ``content`` (see ``_fact_identity``). Facts without a stable identity
+    are always considered new since they cannot be matched against the
+    previous basis.
+    """
+    previous_identities = {identity for f in previous_facts if isinstance(f, dict) and (identity := _fact_identity(f)) is not None}
+    new_facts = []
+    for fact in current_facts:
+        if not isinstance(fact, dict):
+            continue
+        identity = _fact_identity(fact)
+        if identity is not None and identity in previous_identities:
+            continue
+        new_facts.append(fact)
+    return new_facts
 
 
 class KurrentdbMemoryStorage(MemoryStorage):
@@ -224,7 +287,71 @@ class KurrentdbMemoryStorage(MemoryStorage):
         except Exception as e:
             logger.error("Failed to append memory event to KurrentDB stream %s: %s", stream_name, e)
             return False
+        cache_key = (user_id, agent_name)
         with self._cache_lock:
-            self._memory_cache[(user_id, agent_name)] = memory_data
+            # Captured before the cache update so the delta below compares
+            # against the basis this save() was actually applied on top of,
+            # not the snapshot we are about to write.
+            previous_basis = self._memory_cache.get(cache_key)
+            self._memory_cache[cache_key] = memory_data
         logger.info("Memory appended to KurrentDB stream %s", stream_name)
+        self._emit_canonical_fact_events(memory_data, previous_basis, user_id=user_id)
         return True
+
+    def _emit_canonical_fact_events(self, memory_data: dict[str, Any], previous_basis: dict[str, Any] | None, *, user_id: str | None) -> None:
+        """Best-effort dual-write of new facts as canonical kurrent-agents events.
+
+        Emits one ``FactRetained`` event per NEW fact (identity not present
+        in ``previous_basis``) to the canonical stream
+        ``AgentMemory-deerflow-{user_id}`` so any other kurrent-agents
+        integration (github.com/kurrent-io/kurrent-agents) can read
+        deer-flow's retained facts. This is entirely best-effort: the
+        snapshot stream (already appended by the time this runs) remains the
+        single source of truth, and any failure here -- import error,
+        connection error, serialization error -- is logged and swallowed. It
+        never changes save()'s return value or raises.
+
+        Skipped (no canonical append, by design):
+        - Cold save (no previous basis): avoids re-emitting the entire fact
+          list as "new" after every process restart, since the in-memory
+          cache -- not the canonical stream -- is the delta basis.
+        - ``user_id is None``: the canonical v1 schema scopes AgentMemory
+          streams per-app-per-user only; there is no global-memory stream.
+        - Empty delta (no new facts): nothing to append.
+        """
+        if previous_basis is None or user_id is None:
+            return
+        new_facts = _new_facts(previous_basis.get("facts") or [], memory_data.get("facts") or [])
+        if not new_facts:
+            return
+        try:
+            self._append_canonical_fact_events(new_facts, user_id=user_id)
+        except Exception as e:
+            logger.warning("Best-effort canonical kurrent-agents FactRetained emission failed: %s", e)
+
+    def _append_canonical_fact_events(self, new_facts: list[dict[str, Any]], *, user_id: str) -> None:
+        global _canonical_schema_warned
+        try:
+            from kurrent_agent_schema import EVENT_TYPE_NAMES, SCHEMA_VERSION, FactRetained, agent_memory_stream, to_json
+        except ImportError as e:
+            if not _canonical_schema_warned:
+                logger.warning("kurrent_agent_schema is not installed; skipping canonical FactRetained emission (install the deerflow-harness[kurrentdb] extra): %s", e)
+                _canonical_schema_warned = True
+            return
+        from kurrentdbclient import NewEvent, StreamState
+
+        canonical_stream = agent_memory_stream(CANONICAL_APP_NAME, user_id)
+        event_type_name = EVENT_TYPE_NAMES[FactRetained]
+        canonical_events = []
+        for fact in new_facts:
+            retained_at = _parse_fact_created_at(fact.get("createdAt"))
+            fact_event = FactRetained(fact=str(fact.get("content", "")), retained_at=retained_at)
+            canonical_events.append(
+                NewEvent(
+                    type=event_type_name,
+                    data=to_json(fact_event).encode("utf-8"),
+                    metadata=json.dumps({"schema_version": SCHEMA_VERSION}, ensure_ascii=False).encode("utf-8"),
+                )
+            )
+        self._get_client().append_to_stream(canonical_stream, events=canonical_events, current_version=StreamState.ANY, timeout=self._timeout)
+        logger.info("Emitted %d canonical FactRetained event(s) to %s", len(canonical_events), canonical_stream)

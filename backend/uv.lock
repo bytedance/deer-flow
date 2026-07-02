@@ -788,6 +788,7 @@ postgres = [
 [package.dev-dependencies]
 dev = [
     { name = "blockbuster" },
+    { name = "kurrent-agent-schema" },
     { name = "kurrentdbclient" },
     { name = "prompt-toolkit" },
     { name = "pytest" },
@@ -822,6 +823,7 @@ provides-extras = ["postgres", "discord"]
 [package.metadata.requires-dev]
 dev = [
     { name = "blockbuster", specifier = ">=1.5.26,<1.6" },
+    { name = "kurrent-agent-schema", specifier = ">=0.4,<1" },
     { name = "kurrentdbclient", specifier = ">=1.3,<2" },
     { name = "prompt-toolkit", specifier = ">=3.0.0" },
     { name = "pytest", specifier = ">=9.0.3" },
@@ -872,6 +874,7 @@ dependencies = [
 
 [package.optional-dependencies]
 kurrentdb = [
+    { name = "kurrent-agent-schema" },
     { name = "kurrentdbclient" },
 ]
 ollama = [
@@ -905,6 +908,7 @@ requires-dist = [
     { name = "firecrawl-py", specifier = ">=1.15.0" },
     { name = "httpx", specifier = ">=0.28.0" },
     { name = "kubernetes", specifier = ">=30.0.0" },
+    { name = "kurrent-agent-schema", marker = "extra == 'kurrentdb'", specifier = ">=0.4,<1" },
     { name = "kurrentdbclient", marker = "extra == 'kurrentdb'", specifier = ">=1.3,<2" },
     { name = "langchain", specifier = ">=1.2.15" },
     { name = "langchain-anthropic", specifier = ">=1.4.1" },
@@ -1760,6 +1764,18 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/2c/8f/85bf51ad4150f64e8c665daf0d9dfe9787ae92005efb9a4d1cba592bd79d/kubernetes-35.0.0.tar.gz", hash = "sha256:3d00d344944239821458b9efd484d6df9f011da367ecb155dadf9513f05f09ee", size = 1094642, upload-time = "2026-01-16T01:05:27.76Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/0c/70/05b685ea2dffcb2adbf3cdcea5d8865b7bc66f67249084cf845012a0ff13/kubernetes-35.0.0-py2.py3-none-any.whl", hash = "sha256:39e2b33b46e5834ef6c3985ebfe2047ab39135d41de51ce7641a7ca5b372a13d", size = 2017602, upload-time = "2026-01-16T01:05:25.991Z" },
+]
+
+[[package]]
+name = "kurrent-agent-schema"
+version = "0.4.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "protobuf" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/bf/fc/1b5ca2cf600813bc4ab4045aadad9e9c0f6e27fe0ac88400e45579f7496c/kurrent_agent_schema-0.4.0.tar.gz", hash = "sha256:cbfa373ff15dcaae246c2d61c318e7e5e37b7a7c66f5971da3625c5fdf72d809", size = 19398, upload-time = "2026-05-03T20:36:18.229Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/1c/a1/e03a38fa28bf45e1d44681be723295ef8a97f96155c474ac530be83db717/kurrent_agent_schema-0.4.0-py3-none-any.whl", hash = "sha256:66d53ee5f6039e26d0cace55ff2722b75a1236715fe75b09781311ea1b30e531", size = 17203, upload-time = "2026-05-03T20:36:17.08Z" },
 ]
 
 [[package]]

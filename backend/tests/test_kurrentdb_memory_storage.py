@@ -3,6 +3,7 @@
 import json
 
 import pytest
+from kurrent_agent_schema import FactRetained, agent_memory_stream, from_json
 from kurrentdbclient import NewEvent
 from kurrentdbclient.exceptions import NotFoundError
 
@@ -405,3 +406,89 @@ class TestGetMemoryStorageIntegration:
         monkeypatch.delenv("KURRENTDB_CONNECTION_STRING", raising=False)
         with self._patch_config(monkeypatch):
             assert isinstance(get_memory_storage(), FileMemoryStorage)
+
+
+class TestCanonicalFactEvents:
+    """Best-effort dual-write of canonical kurrent-agents FactRetained events.
+
+    On every successful save() with a warm previous basis, NEW facts (by id,
+    or by normalized content when either side lacks an id) are additionally
+    emitted as canonical FactRetained events to the spec's canonical stream
+    ``AgentMemory-deerflow-{user_id}``, so any other kurrent-agents
+    integration can read deer-flow's retained facts.
+    """
+
+    FACT_A = {"id": "f1", "content": "prefers uv", "createdAt": "2026-01-01T00:00:00.000000Z"}
+    FACT_B = {"id": "f2", "content": "likes rust", "createdAt": "2026-01-02T00:00:00.000000Z"}
+
+    def test_new_fact_emits_one_canonical_event(self, storage, fake_client):
+        # Warm the previous basis with fact A only.
+        storage.save({"version": "1.0", "facts": [self.FACT_A]}, user_id="alice")
+
+        # New save adds fact B alongside existing fact A.
+        storage.save({"version": "1.0", "facts": [self.FACT_A, self.FACT_B]}, user_id="alice")
+
+        canonical_stream = agent_memory_stream("deerflow", "alice")
+        canonical_events = [c for c in fake_client.append_calls if c["stream_name"] == canonical_stream]
+        assert len(canonical_events) == 1
+        assert len(canonical_events[0]["events"]) == 1
+        event = canonical_events[0]["events"][0]
+
+        from kurrent_agent_schema import EVENT_TYPE_NAMES
+
+        assert event.type == EVENT_TYPE_NAMES[FactRetained]
+
+        decoded = event.data.decode("utf-8") if isinstance(event.data, bytes) else event.data
+        fact_event = from_json(FactRetained, decoded)
+        assert fact_event.fact == self.FACT_B["content"]
+
+    def test_cold_save_skips_canonical_emission(self, storage, fake_client):
+        # No previous basis (first ever save for this key) -- cold save.
+        storage.save({"version": "1.0", "facts": [self.FACT_A]}, user_id="alice")
+
+        canonical_stream = agent_memory_stream("deerflow", "alice")
+        assert all(c["stream_name"] != canonical_stream for c in fake_client.append_calls)
+        # Only the snapshot append happened.
+        assert len(fake_client.append_calls) == 1
+
+    def test_user_id_none_skips_canonical_emission(self, storage, fake_client):
+        storage.save({"version": "1.0", "facts": [self.FACT_A]}, user_id=None)
+        storage.save({"version": "1.0", "facts": [self.FACT_A, self.FACT_B]}, user_id=None)
+
+        assert all(not c["stream_name"].startswith("AgentMemory-") for c in fake_client.append_calls)
+
+    def test_unchanged_facts_skip_canonical_emission(self, storage, fake_client):
+        storage.save({"version": "1.0", "facts": [self.FACT_A]}, user_id="alice")
+        storage.save({"version": "1.0", "facts": [self.FACT_A]}, user_id="alice")
+
+        canonical_stream = agent_memory_stream("deerflow", "alice")
+        assert all(c["stream_name"] != canonical_stream for c in fake_client.append_calls)
+
+    def test_canonical_append_failure_is_isolated(self, storage, fake_client):
+        storage.save({"version": "1.0", "facts": [self.FACT_A]}, user_id="alice")
+
+        canonical_stream = agent_memory_stream("deerflow", "alice")
+        real_append = fake_client.append_to_stream
+
+        def flaky_append(stream_name, *, events, current_version, timeout=None):
+            if stream_name == canonical_stream:
+                raise ConnectionError("kurrentdb down")
+            return real_append(stream_name, events=events, current_version=current_version, timeout=timeout)
+
+        fake_client.append_to_stream = flaky_append
+
+        new_memory = {"version": "1.0", "facts": [self.FACT_A, self.FACT_B]}
+        result = storage.save(new_memory, user_id="alice")
+
+        assert result is True
+        snapshot_stream = KurrentdbMemoryStorage._stream_name(user_id="alice")
+        snapshot_calls = [c for c in fake_client.append_calls if c["stream_name"] == snapshot_stream]
+        assert len(snapshot_calls) == 2  # cold save + this save
+        assert storage._memory_cache[("alice", None)]["facts"] == [self.FACT_A, self.FACT_B]
+
+    def test_stream_name_uses_package_builder(self, storage, fake_client):
+        storage.save({"version": "1.0", "facts": [self.FACT_A]}, user_id="alice")
+        storage.save({"version": "1.0", "facts": [self.FACT_A, self.FACT_B]}, user_id="alice")
+
+        expected_stream = agent_memory_stream("deerflow", "alice")
+        assert any(c["stream_name"] == expected_stream for c in fake_client.append_calls)
