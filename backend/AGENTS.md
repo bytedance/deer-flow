@@ -250,6 +250,12 @@ Setup: Copy `config.example.yaml` to `config.yaml` in the **project root** direc
 
 Infrastructure fields are **restart-required**. The authoritative list lives in `packages/harness/deerflow/config/reload_boundary.py::STARTUP_ONLY_FIELDS` and is mirrored by the standardised `"startup-only:"` prefix on the corresponding `Field(description=...)` in `AppConfig`, so IDE hover on those fields surfaces the reason inline (no need to context-switch into this table). Currently registered: `database`, `checkpointer`, `run_events`, `stream_bridge`, `sandbox`, `log_level`, `channels`, `channel_connections`. Adding a new restart-required field requires updating the registry; drift is pinned by `tests/test_reload_boundary.py`.
 
+**Persistence backend resolution**: the unified `database` section selects the
+Gateway's LangGraph checkpointer, LangGraph Store, and DeerFlow SQL repositories.
+The deprecated `checkpointer` section remains backward compatible and, when
+present, overrides `database` for the LangGraph checkpointer and Store only;
+application repositories continue to use `database`.
+
 Configuration priority:
 1. Explicit `config_path` argument
 2. `DEER_FLOW_CONFIG_PATH` environment variable

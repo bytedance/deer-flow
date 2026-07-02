@@ -1299,12 +1299,12 @@ skill_evolution:
 # Checkpointer Configuration (DEPRECATED — use `database` instead)
 # ============================================================================
 # Legacy standalone checkpointer config. Kept for backward compatibility.
-# Prefer the unified `database` section below, which drives BOTH the
-# LangGraph checkpointer AND DeerFlow application data (runs, feedback,
-# events) from a single backend setting.
+# Prefer the unified `database` section below, which drives the LangGraph
+# checkpointer, LangGraph Store, and DeerFlow application data (runs,
+# feedback, events) from a single backend setting.
 #
 # If both `checkpointer` and `database` are present, `checkpointer`
-# takes precedence for LangGraph state persistence only.
+# takes precedence for the LangGraph checkpointer and Store only.
 #
 # checkpointer:
 #   type: sqlite
@@ -1317,8 +1317,8 @@ skill_evolution:
 # ============================================================================
 # Database
 # ============================================================================
-# Unified storage backend for LangGraph checkpointer and DeerFlow
-# application data (runs, threads metadata, feedback, etc.).
+# Unified storage backend for the LangGraph checkpointer, LangGraph Store,
+# and DeerFlow application data (runs, threads metadata, feedback, etc.).
 #
 # backend: memory  -- No persistence, data lost on restart
 # backend: sqlite  -- Single-node deployment, files in sqlite_dir
@@ -1329,7 +1329,7 @@ skill_evolution:
 #   sqlite_dir: .deer-flow/data
 #
 # SQLite mode uses a single deerflow.db file with WAL journal mode
-# for both checkpointer and application data.
+# for the checkpointer, Store, and application data.
 #
 # Postgres mode: put your connection URL in .env as DATABASE_URL,
 # then reference it here with $DATABASE_URL.
@@ -1354,7 +1354,8 @@ skill_evolution:
 #   (--all-packages propagates the extra into workspace members — see PR #2584)
 #
 # NOTE: When both `checkpointer` and `database` are configured,
-# `checkpointer` takes precedence for LangGraph state persistence.
+# `checkpointer` takes precedence for the LangGraph checkpointer and Store;
+# `database` still controls DeerFlow application data.
 # If you use `database`, you can remove the `checkpointer` section.
 # database:
 #   backend: sqlite
