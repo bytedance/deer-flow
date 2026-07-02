@@ -459,7 +459,7 @@ def check_web_tool(config_path: Path, *, tool_name: str, label: str) -> CheckRes
 
         free_providers = {
             "web_search": {"ddg_search": "DuckDuckGo (no key needed)"},
-            "web_fetch": {"jina_ai": "Jina AI Reader (no key needed)"},
+            "web_fetch": {"jina_ai": "Jina AI Reader (no key needed)", "crawl4ai": "Crawl4AI (self-hosted, no key needed)"},
             "image_search": {"deerflow.community.image_search.tools": "DuckDuckGo Images (no key needed)"},
         }
         key_providers = {

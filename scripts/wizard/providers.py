@@ -587,4 +587,13 @@ WEB_FETCH_PROVIDERS: list[WebProvider] = [
         env_var="CRW_API_KEY",
         tool_name="web_fetch",
     ),
+    WebProvider(
+        name="crawl4ai",
+        display_name="Crawl4AI",
+        description="Self-hosted headless Chromium with markdown output, no API key required",
+        use="deerflow.community.crawl4ai.tools:web_fetch_tool",
+        env_var=None,
+        tool_name="web_fetch",
+        extra_config={"base_url": "http://localhost:11235", "timeout": 30},
+    ),
 ]

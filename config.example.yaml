@@ -663,6 +663,21 @@ tools:
   #   # wait_for_timeout_ms: 2000        # Extra wait after page load in milliseconds
   #   # wait_for_selector: "article"     # CSS selector to wait for before returning
 
+  # Web fetch tool (uses Crawl4AI - self-hosted headless Chromium, no API key)
+  # Crawl4AI returns server-cleaned "fit" markdown directly (no readability step needed),
+  # ideal for JavaScript-heavy sites. Self-host (JWT auth is off by default, no key):
+  #   docker run -d -p 11235:11235 --shm-size=1g unclecode/crawl4ai:0.8.6
+  # For Docker deployments, use the Docker service name instead of localhost.
+  # NOTE: Only one web_fetch provider can be active at a time.
+  # Comment out the Jina AI web_fetch entry below before enabling this one.
+  # - name: web_fetch
+  #   group: web
+  #   use: deerflow.community.crawl4ai.tools:web_fetch_tool
+  #   base_url: http://localhost:11235   # Crawl4AI server URL (Docker: http://crawl4ai:11235)
+  #   timeout: 30                         # Request timeout in seconds
+  #   # filter: fit                       # Markdown filter: fit (default) | raw | bm25 | llm
+  #   # token: $CRAWL4AI_TOKEN            # Bearer token (only if the server has JWT auth enabled)
+
   # Web capture tool (uses Browserless /screenshot to render a page as an artifact)
   # Browserless captures JavaScript-heavy pages with a real headless Chrome and
   # writes the screenshot into the current thread's outputs. It can run against
