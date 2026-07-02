@@ -153,6 +153,21 @@ def test_build_subagent_runtime_middlewares_threads_app_config_to_llm_middleware
     assert isinstance(middlewares[-1], SafetyFinishReasonMiddleware)
 
 
+def test_lead_runtime_middlewares_thread_app_config_to_tool_error_handling(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setitem(
+        sys.modules,
+        "deerflow.agents.middlewares.input_sanitization_middleware",
+        _module("deerflow.agents.middlewares.input_sanitization_middleware", InputSanitizationMiddleware=object),
+    )
+    app_config = _make_app_config()
+    _stub_runtime_middleware_imports(monkeypatch)
+
+    middlewares = build_lead_runtime_middlewares(app_config=app_config)
+
+    tool_middleware = next(mw for mw in middlewares if isinstance(mw, ToolErrorHandlingMiddleware))
+    assert tool_middleware._app_config is app_config
+
+
 def test_build_lead_runtime_middlewares_orders_thread_data_before_uploads():
     """ThreadDataMiddleware must run before UploadsMiddleware so the uploads
     directory is guaranteed to exist when UploadsMiddleware scans it under
@@ -228,6 +243,61 @@ def test_wrap_tool_call_passthrough_on_success():
     result = middleware.wrap_tool_call(req, lambda _req: expected)
 
     assert result is expected
+
+
+def test_read_file_skill_read_stamps_compact_skill_metadata():
+    app_config = _make_app_config()
+    app_config.skills.container_path = "/mnt/skills"
+    app_config.summarization.skill_file_read_tool_names = ["read_file"]
+    middleware = ToolErrorHandlingMiddleware(app_config=app_config)
+    req = _request(name="read_file", tool_call_id="read-1")
+    req.tool_call["args"] = {"path": "/mnt/skills/public/data-analysis/SKILL.md"}
+
+    result = middleware.wrap_tool_call(
+        req,
+        lambda _req: ToolMessage(
+            content="---\nname: data-analysis\ndescription: Analyze data.\n---\nBODY",
+            tool_call_id="read-1",
+            name="read_file",
+        ),
+    )
+
+    assert result.additional_kwargs["skill_context_entry"] == {
+        "name": "data-analysis",
+        "path": "/mnt/skills/public/data-analysis/SKILL.md",
+        "description": "Analyze data.",
+    }
+
+
+def test_skill_metadata_respects_custom_skills_root():
+    app_config = _make_app_config()
+    app_config.skills.container_path = "/custom/skills"
+    app_config.summarization.skill_file_read_tool_names = ["read_file"]
+    middleware = ToolErrorHandlingMiddleware(app_config=app_config)
+    req = _request(name="read_file", tool_call_id="read-1")
+    req.tool_call["args"] = {"path": "/custom/skills/public/x/SKILL.md"}
+
+    result = middleware.wrap_tool_call(
+        req,
+        lambda _req: ToolMessage("---\ndescription: X\n---\nBody", tool_call_id="read-1", name="read_file"),
+    )
+
+    assert result.additional_kwargs["skill_context_entry"]["path"] == "/custom/skills/public/x/SKILL.md"
+
+
+def test_skill_metadata_disabled_when_read_tool_names_empty():
+    app_config = _make_app_config()
+    app_config.summarization.skill_file_read_tool_names = []
+    middleware = ToolErrorHandlingMiddleware(app_config=app_config)
+    req = _request(name="read_file", tool_call_id="read-1")
+    req.tool_call["args"] = {"path": "/mnt/skills/public/x/SKILL.md"}
+
+    result = middleware.wrap_tool_call(
+        req,
+        lambda _req: ToolMessage("---\ndescription: X\n---\nBody", tool_call_id="read-1", name="read_file"),
+    )
+
+    assert "skill_context_entry" not in result.additional_kwargs
 
 
 def test_wrap_tool_call_returns_error_tool_message_on_exception():

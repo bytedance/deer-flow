@@ -11,9 +11,12 @@ from langgraph.errors import GraphBubbleUp
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
 
+from deerflow.agents.middlewares.skill_context import (
+    SKILL_CONTEXT_ENTRY_KEY,
+    build_skill_entry_metadata_from_read,
+)
 from deerflow.config.app_config import AppConfig
 from deerflow.subagents.status_contract import (
-    extract_subagent_status,
     make_subagent_additional_kwargs,
 )
 
@@ -26,38 +29,22 @@ _MISSING_TOOL_CALL_ID = "missing_tool_call_id"
 _TASK_TOOL_NAME = "task"
 
 
-def _stamp_task_subagent_status(message: ToolMessage, *, tool_name: str, error: str | None = None) -> ToolMessage:
-    """Centralised stamping of ``additional_kwargs.subagent_status``.
-
-    Bytedance/deer-flow issue #3146: the frontend now reads the subagent
-    status from a structured field instead of parsing the leading text of
-    the task tool's return string. That contract is enforced here, in the
-    one place every task tool result flows through, rather than at the 5
-    normal-return + 3 ``Error:`` pre-execution branches inside
-    ``task_tool.py``. Centralisation prevents the "added a new return
-    path, forgot the stamp" drift mode.
-
-    For non-``task`` tools this is a no-op so other tools' additional_kwargs
-    conventions are untouched.
-    """
+def _stamp_task_exception_status(message: ToolMessage, *, tool_name: str, error: str) -> ToolMessage:
+    """Stamp failed metadata on task exception wrappers produced here."""
     if tool_name != _TASK_TOOL_NAME:
         return message
-    content = message.content if isinstance(message.content, str) else ""
-    status = extract_subagent_status(content)
-    if status is None:
-        # Non-terminal streaming chunks or unrecognised shapes leave the
-        # field unset so the frontend can keep the card on its in-progress
-        # placeholder until a real terminal frame arrives.
-        return message
-    stamp = make_subagent_additional_kwargs(status, error=error)
     existing = dict(message.additional_kwargs or {})
-    existing.update(stamp)
+    existing.update(make_subagent_additional_kwargs("failed", error=error))
     message.additional_kwargs = existing
     return message
 
 
 class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
     """Convert tool exceptions into error ToolMessages so the run can continue."""
+
+    def __init__(self, *, app_config: AppConfig | None = None) -> None:
+        super().__init__()
+        self._app_config = app_config
 
     def _build_error_message(self, request: ToolCallRequest, exc: Exception) -> ToolMessage:
         tool_name = str(request.tool_call.get("name") or "unknown_tool")
@@ -73,25 +60,56 @@ class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
             name=tool_name,
             status="error",
         )
-        # Stamp the structured subagent status on the wrapper too: the
-        # frontend would otherwise have to fall back to prefix-matching
-        # ``Error: Tool 'task' failed ...`` on the wire. The ``subagent_error``
-        # carries the same ``ExcClass: detail`` shape the wrapper string
-        # uses so debugging artifacts stay aligned.
+        # This middleware is the producer for exception wrappers, so task
+        # failures raised before task_tool can build its own Command still
+        # carry the same structured metadata.
         structured_error = f"{exc.__class__.__name__}: {detail}"
-        return _stamp_task_subagent_status(message, tool_name=tool_name, error=structured_error)
+        return _stamp_task_exception_status(message, tool_name=tool_name, error=structured_error)
 
-    @staticmethod
-    def _maybe_stamp(result: ToolMessage | Command, request: ToolCallRequest) -> ToolMessage | Command:
-        """Apply the subagent stamp to successful task tool returns.
+    def _skill_read_tool_names(self) -> frozenset[str]:
+        if self._app_config is None:
+            return frozenset({"read_file", "read", "view", "cat"})
+        return frozenset(self._app_config.summarization.skill_file_read_tool_names)
 
-        ``Command`` results bypass the stamp — they encode LangGraph
-        control flow rather than user-facing tool output.
-        """
+    def _skills_root(self) -> str:
+        if self._app_config is None:
+            return "/mnt/skills"
+        return self._app_config.skills.container_path
+
+    def _stamp_skill_read_metadata(
+        self,
+        message: ToolMessage,
+        request: ToolCallRequest,
+        *,
+        tool_name: str,
+    ) -> ToolMessage:
+        if tool_name not in self._skill_read_tool_names():
+            return message
+        if getattr(message, "status", "success") == "error":
+            return message
+        content = message.content if isinstance(message.content, str) else None
+        if content is None:
+            return message
+        args = request.tool_call.get("args")
+        if not isinstance(args, dict):
+            return message
+        path = next((args[key] for key in ("path", "file_path", "filepath") if isinstance(args.get(key), str) and args.get(key)), None)
+        if path is None:
+            return message
+        entry = build_skill_entry_metadata_from_read(path, content, skills_root=self._skills_root())
+        if entry is None:
+            return message
+        existing = dict(message.additional_kwargs or {})
+        existing[SKILL_CONTEXT_ENTRY_KEY] = dict(entry)
+        message.additional_kwargs = existing
+        return message
+
+    def _maybe_stamp(self, result: ToolMessage | Command, request: ToolCallRequest) -> ToolMessage | Command:
+        """Apply producer-bound metadata for tool results that need it."""
         if not isinstance(result, ToolMessage):
             return result
         tool_name = str(request.tool_call.get("name") or "")
-        return _stamp_task_subagent_status(result, tool_name=tool_name)
+        return self._stamp_skill_read_metadata(result, request, tool_name=tool_name)
 
     @override
     def wrap_tool_call(
@@ -192,7 +210,7 @@ def _build_runtime_middlewares(
     from deerflow.agents.middlewares.sandbox_audit_middleware import SandboxAuditMiddleware
 
     tail.append(SandboxAuditMiddleware())
-    tail.append(ToolErrorHandlingMiddleware())
+    tail.append(ToolErrorHandlingMiddleware(app_config=app_config))
 
     return [*outer_wrappers, *thread_hooks, *tail]
 
