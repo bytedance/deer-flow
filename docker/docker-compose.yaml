@@ -156,7 +156,7 @@ services:
       - ../backend/app:/app/backend/app
       - ../backend/packages/harness:/app/backend/packages/harness
       - ../backend/.tiktoken_cache:/root/.tiktoken_cache:ro
-      - ${DEER_FLOW_HOME}/persistent:/app/persistent
+      - ${DEER_FLOW_HOME}/persistent:/mnt/persistent
       - ../offline-claude:/root/offline-claude
     working_dir: /app
     environment:

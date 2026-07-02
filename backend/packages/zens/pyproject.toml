@@ -15,6 +15,7 @@ dependencies = [
     "matplotlib>=3.7.0",
     "seaborn>=0.12.0",
     "plotly>=5.18.0",
+    "pyecharts>=2.1.0",
     "openpyxl>=3.1.0",
     "psycopg>=3.2.0",
     "asyncpg>=0.29.0",
