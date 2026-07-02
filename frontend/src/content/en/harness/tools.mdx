@@ -265,7 +265,7 @@ set `allow_private_addresses: true` only when you intentionally target an intern
 
 ### Image search
 
-<Tabs items={["DuckDuckGo (default)", "InfoQuest", "Serper"]}>
+<Tabs items={["DuckDuckGo (default)", "InfoQuest", "Serper", "Brave"]}>
   <Tabs.Tab>
 ```yaml
 tools:
@@ -288,6 +288,14 @@ tools:
     api_key: $SERPER_API_KEY
 ```
 Google Images results via Serper. Requires a [Serper](https://serper.dev) API key. Reuses `SERPER_API_KEY` with the Serper `web_search` tool.
+  </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+tools:
+  - use: deerflow.community.brave.tools:image_search_tool
+    api_key: $BRAVE_SEARCH_API_KEY
+```
+Independent image results via Brave Image Search. Requires a [Brave Search API](https://brave.com/search/api/) key. Reuses `BRAVE_SEARCH_API_KEY` with the Brave `web_search` tool.
   </Tabs.Tab>
 </Tabs>
 

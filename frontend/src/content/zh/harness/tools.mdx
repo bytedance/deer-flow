@@ -243,7 +243,7 @@ JavaScript 页面。默认会拒绝解析到私网、回环或云元数据地址
 
 ### 图像搜索
 
-<Tabs items={["DuckDuckGo（默认）", "InfoQuest", "Serper"]}>
+<Tabs items={["DuckDuckGo（默认）", "InfoQuest", "Serper", "Brave"]}>
   <Tabs.Tab>
 ```yaml
 tools:
@@ -266,6 +266,14 @@ tools:
     api_key: $SERPER_API_KEY
 ```
 通过 Serper 获取 Google 图片结果。需要 [Serper](https://serper.dev) API Key，与 Serper `web_search` 工具复用同一个 `SERPER_API_KEY`。
+  </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+tools:
+  - use: deerflow.community.brave.tools:image_search_tool
+    api_key: $BRAVE_SEARCH_API_KEY
+```
+通过 Brave Image Search 获取独立图片结果。需要 [Brave Search API](https://brave.com/search/api/) Key，与 Brave `web_search` 工具复用同一个 `BRAVE_SEARCH_API_KEY`。
   </Tabs.Tab>
 </Tabs>
 

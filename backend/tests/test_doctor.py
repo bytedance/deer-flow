@@ -422,6 +422,31 @@ class TestCheckImageSearch:
         assert result.status == "warn"
         assert "SERPER_API_KEY" in (result.fix or "")
 
+    def test_brave_image_search_with_key_ok(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("BRAVE_SEARCH_API_KEY", "bsa-test")
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: image_search\n    use: deerflow.community.brave.tools:image_search_tool\n")
+        result = doctor.check_image_search(cfg)
+        assert result.status == "ok"
+        assert "brave" in result.detail
+
+    def test_brave_image_search_without_key_warns(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("BRAVE_SEARCH_API_KEY", raising=False)
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: image_search\n    use: deerflow.community.brave.tools:image_search_tool\n")
+        result = doctor.check_image_search(cfg)
+        assert result.status == "warn"
+        assert "BRAVE_SEARCH_API_KEY" in (result.fix or "")
+
+    def test_brave_image_search_inline_api_key_warns(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("BRAVE_SEARCH_API_KEY", raising=False)
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: image_search\n    use: deerflow.community.brave.tools:image_search_tool\n    api_key: inline-key\n")
+        result = doctor.check_image_search(cfg)
+        assert result.status == "warn"
+        assert "literal api_key set in config" in result.detail
+        assert "BRAVE_SEARCH_API_KEY" in (result.fix or "")
+
     def test_infoquest_with_key_ok(self, tmp_path, monkeypatch):
         monkeypatch.setenv("INFOQUEST_API_KEY", "test-key")
         cfg = tmp_path / "config.yaml"

@@ -479,6 +479,7 @@ def check_web_tool(config_path: Path, *, tool_name: str, label: str) -> CheckRes
                 "fastcrw": "CRW_API_KEY",
             },
             "image_search": {
+                "brave": "BRAVE_SEARCH_API_KEY",
                 "infoquest": "INFOQUEST_API_KEY",
                 "serper": "SERPER_API_KEY",
             },
