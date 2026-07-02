@@ -459,6 +459,8 @@ The cached value is reused for both the blocking (`runs.wait`) and streaming (`_
 - `prompt.py` - Prompt templates for memory updates
 - `storage.py` - File-based storage with per-user isolation; cache keyed by `(user_id, agent_name)` tuple
 
+**Storage backends**: `memory.storage_class` reflection-loads any `MemoryStorage` subclass (`get_memory_storage()`; unimportable/misconfigured classes log an error and fall back to `FileMemoryStorage`). Built-in: `FileMemoryStorage` (default, per-user `memory.json`). Community prototype: `deerflow.community.kurrentdb.memory_storage.KurrentdbMemoryStorage` — event-sourced storage appending `MemoryUpdated` events to per-user KurrentDB streams (`deerflow.memory-{user_id}[.agent.{agent}]`), cache-first reads, sync `kurrentdbclient` (optional `deerflow-harness[kurrentdb]` extra + `KURRENTDB_CONNECTION_STRING`), dev instance via `docker/docker-compose.kurrentdb.yaml`. See [docs/KURRENTDB_MEMORY.md](docs/KURRENTDB_MEMORY.md).
+
 **Per-User Isolation**:
 - Memory is stored per-user at `{base_dir}/users/{user_id}/memory.json`
 - Per-agent per-user memory at `{base_dir}/users/{user_id}/agents/{agent_name}/memory.json`

@@ -38,6 +38,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
   events. ([#2882])
 - **memory:** Add `memory.token_counting` config to opt out of tiktoken for
   network-restricted deployments. ([#3465])
+- **memory:** Add optional event-sourced memory storage prototype backed by KurrentDB streams (`KurrentdbMemoryStorage`, `deerflow-harness[kurrentdb]` extra, `docker/docker-compose.kurrentdb.yaml`) ([#3796]).
 - **suggest:** Make AI follow-up question suggestions optional. ([#3591])
 
 #### Models & integrations
@@ -518,3 +519,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#3654]: https://github.com/bytedance/deer-flow/pull/3654
 [#3657]: https://github.com/bytedance/deer-flow/pull/3657
 [#3658]: https://github.com/bytedance/deer-flow/pull/3658
+[#3796]: https://github.com/bytedance/deer-flow/discussions/3796
