@@ -23,6 +23,7 @@ from app.gateway.routers import (
     memory,
     models,
     runs,
+    scheduled_jobs,
     skills,
     suggestions,
     thread_runs,
@@ -231,8 +232,36 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             logger.info("Channel service started: %s", channel_service.get_status())
         except Exception:
             logger.exception("No IM channels configured or channel service failed to start")
+            channel_service = None
+
+        # Start the scheduled-jobs scheduler. Wire the running channel
+        # service's MessageBus so IM deliveries route through the existing
+        # channels (zero-footprint — no edits to app.channels).
+        try:
+            from app.scheduled_jobs import start_scheduler
+
+            bus = getattr(channel_service, "bus", None) if channel_service else None
+            await start_scheduler(app, bus=bus)
+        except Exception:
+            logger.exception("Scheduled jobs scheduler failed to start")
 
         yield
+
+        # Stop the scheduler first so in-flight jobs drain before channels tear down.
+        try:
+            from app.scheduled_jobs import stop_scheduler
+
+            await asyncio.wait_for(
+                stop_scheduler(),
+                timeout=_SHUTDOWN_HOOK_TIMEOUT_SECONDS,
+            )
+        except TimeoutError:
+            logger.warning(
+                "Scheduler shutdown exceeded %.1fs; proceeding with worker exit.",
+                _SHUTDOWN_HOOK_TIMEOUT_SECONDS,
+            )
+        except Exception:
+            logger.exception("Failed to stop scheduled jobs scheduler")
 
         try:
             await auth.close_oidc_service()
@@ -400,6 +429,7 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
 
     # User-facing IM channel connection API is mounted at /api/channels
     app.include_router(channel_connections.router)
+    app.include_router(scheduled_jobs.router)
 
     # Channels API is mounted at /api/channels
     app.include_router(channels.router)

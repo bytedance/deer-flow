@@ -550,6 +550,7 @@ tool_groups:
   - name: file:read
   - name: file:write
   - name: bash
+  - name: scheduled_tasks
 
 # ============================================================================
 # Tools Configuration
@@ -799,6 +800,12 @@ tools:
   - name: bash
     group: bash
     use: deerflow.sandbox.tools:bash_tool
+
+  # Scheduled task management — create/list/delete user-owned scheduled jobs
+  # from chat; executed by the in-process scheduler (see app.scheduled_jobs).
+  - name: scheduled_task
+    group: scheduled_tasks
+    use: deerflow.tools.builtins.scheduled_task_tool:scheduled_task
 
 # ============================================================================
 # Tool Search Configuration (Deferred Tool Loading)

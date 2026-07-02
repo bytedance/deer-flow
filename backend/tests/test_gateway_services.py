@@ -582,6 +582,17 @@ def test_merge_run_context_overrides_propagates_user_id():
     assert config["context"]["user_id"] == "channel-user-7"
 
 
+def test_merge_run_context_overrides_propagates_source_channel():
+    """IM-created scheduled tasks need ``source_channel`` on ToolRuntime.context."""
+    from app.gateway.services import build_run_config, merge_run_context_overrides
+
+    config = build_run_config("thread-1", None, None)
+    merge_run_context_overrides(config, {"source_channel": "im:feishu:chat:oc_123"})
+
+    assert config["context"]["source_channel"] == "im:feishu:chat:oc_123"
+    assert config["configurable"]["source_channel"] == "im:feishu:chat:oc_123"
+
+
 def test_merge_run_context_overrides_does_not_clobber_existing_user_id():
     """``merge_run_context_overrides`` must not override an already-stamped
     authenticated ``context.user_id`` with the client-supplied value.

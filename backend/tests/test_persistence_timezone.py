@@ -11,6 +11,8 @@ threads by the local UTC offset.
 """
 
 import re
+from datetime import UTC, datetime
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -102,5 +104,33 @@ async def test_run_event_store_emits_tz_aware_timestamps(tmp_path):
         events = await store.list_events("t-tz", "r-tz", user_id=None)
         assert events, "expected at least one event"
         _assert_tz_aware(events[0]["created_at"], context="run_event.list.created_at")
+    finally:
+        await _cleanup()
+
+
+@pytest.mark.anyio
+async def test_scheduled_job_repository_stores_next_run_in_utc(tmp_path):
+    from deerflow.persistence.scheduled_jobs import ScheduledJobRepository
+
+    repo = ScheduledJobRepository(await _init_sqlite(tmp_path))
+    try:
+        next_run_shanghai = datetime(2026, 6, 21, 20, 6, tzinfo=ZoneInfo("Asia/Shanghai"))
+        row = await repo.create_job(
+            name="sleep reminder",
+            description="remind me to sleep",
+            trigger_type="cron",
+            trigger_data={"kind": "cron", "expr": "6 20 * * *", "tz": "Asia/Shanghai"},
+            next_run_at=next_run_shanghai,
+            user_id="u1",
+        )
+
+        assert row["next_run_at"].startswith("2026-06-21T12:06:00")
+        assert row["next_run_at"].endswith("+00:00")
+
+        not_due = await repo.list_due_jobs(now=datetime(2026, 6, 21, 12, 5, 59, tzinfo=UTC))
+        assert not_due == []
+
+        due = await repo.list_due_jobs(now=datetime(2026, 6, 21, 12, 6, tzinfo=UTC))
+        assert [job["id"] for job in due] == [row["id"]]
     finally:
         await _cleanup()

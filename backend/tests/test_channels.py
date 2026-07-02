@@ -2826,6 +2826,31 @@ class TestResolveRunParamsUserId:
 
         assert run_context["user_id"] == "123456"
         assert run_context["channel_user_id"] == "123456"
+        assert run_context["source_channel"] == "im:telegram:chat:c"
+
+    def test_feishu_source_channel_reaches_run_context(self, monkeypatch):
+        manager = self._manager()
+        monkeypatch.delenv("DEER_FLOW_AUTH_DISABLED", raising=False)
+        msg = InboundMessage(channel_name="feishu", chat_id="oc_123", user_id="ou_456", text="hi")
+
+        _, _, run_context = manager._resolve_run_params(msg, "thread-1")
+
+        assert run_context["source_channel"] == "im:feishu:chat:oc_123"
+
+    def test_dingtalk_group_source_channel_reaches_run_context(self, monkeypatch):
+        manager = self._manager()
+        monkeypatch.delenv("DEER_FLOW_AUTH_DISABLED", raising=False)
+        msg = InboundMessage(
+            channel_name="dingtalk",
+            chat_id="cid_group",
+            user_id="staff_1",
+            text="hi",
+            metadata={"conversation_type": "2"},
+        )
+
+        _, _, run_context = manager._resolve_run_params(msg, "thread-1")
+
+        assert run_context["source_channel"] == "im:dingtalk:group:cid_group"
 
     @pytest.mark.parametrize(
         "kwargs",

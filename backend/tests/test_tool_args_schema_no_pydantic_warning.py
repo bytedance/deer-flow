@@ -28,6 +28,7 @@ from deerflow.sandbox.tools import (
     write_file_tool,
 )
 from deerflow.tools.builtins.present_file_tool import present_file_tool
+from deerflow.tools.builtins.scheduled_task_tool import scheduled_task
 from deerflow.tools.builtins.setup_agent_tool import setup_agent
 from deerflow.tools.builtins.task_tool import task_tool
 from deerflow.tools.builtins.update_agent_tool import update_agent
@@ -58,6 +59,7 @@ _TOOL_CASES = [
     (present_file_tool, {"filepaths": ["/tmp/x"], "tool_call_id": "call-1"}),
     (view_image_tool, {"image_path": "/tmp/img.png", "tool_call_id": "call-1"}),
     (task_tool, {"description": "do", "prompt": "go", "subagent_type": "general-purpose", "tool_call_id": "call-1"}),
+    (scheduled_task, {"action": "list"}),
     (skill_manage_tool, {"action": "list", "name": "demo"}),
     (setup_agent, {"soul": "s", "description": "d"}),
     (update_agent, {}),

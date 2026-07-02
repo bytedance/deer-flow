@@ -554,6 +554,17 @@ def _channel_storage_user_id(msg: InboundMessage) -> str | None:
     return None
 
 
+def _source_channel_for_run(msg: InboundMessage) -> str:
+    """Encode the inbound channel so scheduled tasks can deliver back to it."""
+    conv_type = "chat"
+    if msg.channel_name == "dingtalk":
+        raw = str(msg.metadata.get("conversation_type") or "").strip()
+        conv_type = "group" if raw == "2" else "p2p"
+    elif msg.channel_name in {"discord", "slack"}:
+        conv_type = "channel"
+    return f"im:{msg.channel_name}:{conv_type}:{msg.chat_id}"
+
+
 def _resolve_slash_skill_command(
     text: str,
     available_skills: set[str] | None = None,
@@ -875,6 +886,7 @@ class ChannelManager:
             run_context_identity["user_id"] = run_user_id
         if msg.user_id:
             run_context_identity["channel_user_id"] = msg.user_id
+        run_context_identity["source_channel"] = _source_channel_for_run(msg)
 
         run_context = _merge_dicts(
             DEFAULT_RUN_CONTEXT,

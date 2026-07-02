@@ -17,7 +17,7 @@ from __future__ import annotations
 import re
 from datetime import UTC, datetime
 
-__all__ = ["coerce_iso", "now_iso"]
+__all__ = ["coerce_datetime", "coerce_iso", "now_iso"]
 
 _UNIX_TIMESTAMP_PATTERN = re.compile(r"^\d{10}(?:\.\d+)?$")
 """Matches the unix-timestamp string shape historically written by
@@ -73,3 +73,24 @@ def coerce_iso(value: object) -> str:
                 return value
         return value
     return str(value)
+
+
+def coerce_datetime(value: object) -> datetime | None:
+    """Best-effort coerce a stored timestamp to a timezone-aware UTC datetime.
+
+    Companion to :func:`coerce_iso`: same input handling (``datetime``,
+    ISO 8601 strings, legacy unix-timestamp strings, ``None`` / empty),
+    but returns a :class:`~datetime.datetime` (or ``None``) instead of a
+    string. Aware values are normalised to UTC; tz-naive values are
+    assumed UTC. Unparseable inputs return ``None``.
+    """
+    iso = coerce_iso(value)
+    if not iso:
+        return None
+    try:
+        parsed = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
