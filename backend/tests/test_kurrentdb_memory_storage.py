@@ -10,6 +10,7 @@ from deerflow.agents.memory.storage import MemoryStorage
 from deerflow.community.kurrentdb.memory_storage import (
     EVENT_TYPE,
     STREAM_PREFIX,
+    KurrentdbMemoryReadError,
     KurrentdbMemoryStorage,
 )
 
@@ -151,7 +152,7 @@ class TestLoadReload:
         assert storage.reload(user_id="alice")["facts"] == [{"id": "external"}]
         assert storage.load(user_id="alice")["facts"] == [{"id": "external"}]  # cache refreshed
 
-    def test_load_transport_error_returns_empty_and_does_not_cache(self, fake_client):
+    def test_load_transport_error_raises_and_does_not_cache(self, fake_client):
         calls = {"n": 0}
         real_get_stream = fake_client.get_stream
 
@@ -166,13 +167,15 @@ class TestLoadReload:
         writer.save({"version": "1.0", "facts": [{"id": "f1"}]}, user_id="alice")
 
         reader = KurrentdbMemoryStorage(client_factory=lambda: fake_client)
-        assert reader.load(user_id="alice")["facts"] == []  # error -> empty
-        assert reader.load(user_id="alice")["facts"] == [{"id": "f1"}]  # retried, not cached-empty
+        with pytest.raises(KurrentdbMemoryReadError):
+            reader.load(user_id="alice")  # error -> raises, nothing cached
+        assert reader.load(user_id="alice")["facts"] == [{"id": "f1"}]  # retried, real data, not failure-polluted
 
-    def test_corrupt_event_returns_empty_without_caching(self, fake_client):
+    def test_corrupt_event_raises_without_caching(self, fake_client):
         fake_client.streams[f"{STREAM_PREFIX}-alice"] = [NewEvent(type=EVENT_TYPE, data=b"not json")]
         storage = KurrentdbMemoryStorage(client_factory=lambda: fake_client)
-        assert storage.load(user_id="alice")["facts"] == []
+        with pytest.raises(KurrentdbMemoryReadError):
+            storage.load(user_id="alice")
 
     def test_agent_scoped_round_trip(self, storage, fake_client):
         memory = {"version": "1.0", "facts": [{"id": "f1", "content": "prefers uv"}]}
@@ -197,12 +200,13 @@ class TestLoadReload:
         assert loaded["facts"] == memory["facts"]
         assert fake_client.get_stream_calls[-1]["stream_name"] == f"{STREAM_PREFIX}-_global"
 
-    def test_wrong_event_type_returns_empty_and_does_not_cache(self, fake_client):
+    def test_wrong_event_type_raises_and_does_not_cache(self, fake_client):
         fake_client.streams[f"{STREAM_PREFIX}-alice"] = [NewEvent(type="SomethingElse", data=b"{}")]
         storage = KurrentdbMemoryStorage(client_factory=lambda: fake_client)
 
-        assert storage.load(user_id="alice")["facts"] == []
-        # Not cached as empty: appending a proper event afterward is picked up on retry.
+        with pytest.raises(KurrentdbMemoryReadError):
+            storage.load(user_id="alice")
+        # Not cached as a failure: appending a proper event afterward is picked up on retry.
         fake_client.streams[f"{STREAM_PREFIX}-alice"].append(NewEvent(type=EVENT_TYPE, data=json.dumps({"version": "1.0", "facts": [{"id": "f1"}]}).encode("utf-8")))
         assert storage.load(user_id="alice")["facts"] == [{"id": "f1"}]
 
@@ -212,61 +216,71 @@ class TestLoadReload:
         assert fake_client.append_calls == []
 
 
-class TestDegradedSaveGate:
-    """Fix 1: save() must refuse to persist after a failed read (fail-closed).
+class TestRaiseOnReadFailure:
+    """Reads raise KurrentdbMemoryReadError instead of gating save().
 
-    Read-modify-write callers do load() -> mutate -> save(). If a transient
-    read error silently returns empty-derived memory, the following save()
-    would append that empty snapshot as the new newest event, clobbering the
-    real data. save() must instead refuse until a successful reload()/load().
+    Read-modify-write callers do load() -> mutate -> save(). Silently
+    returning empty-derived memory on a transient read error let the
+    following save() append that empty snapshot as the new newest event,
+    clobbering the real data (the reviewer's surviving scenario: a slow
+    load -> LLM call -> save race with a concurrent successful reload()
+    elsewhere). Instead, a failed read must raise so the RMW caller never
+    obtains a basis to save at all.
     """
 
-    def test_save_refused_after_failed_load(self, fake_client):
+    def test_repair_path_save_succeeds_despite_permanently_broken_reads(self, fake_client):
+        """save() (import/clear flows) never reads, so it remains available
+        as the repair path even while every read is broken."""
+        real_get_stream = fake_client.get_stream
+
         def broken_get_stream(*args, **kwargs):
             raise ConnectionError("kurrentdb down")
 
         fake_client.get_stream = broken_get_stream
         storage = KurrentdbMemoryStorage(client_factory=lambda: fake_client)
 
-        # Transient read error -> reader gets empty memory back (unchanged contract).
-        assert storage.load(user_id="alice")["facts"] == []
+        with pytest.raises(KurrentdbMemoryReadError):
+            storage.load(user_id="alice")
 
-        # But save() must be gated: refuse to persist derived-from-empty state.
-        assert storage.save({"version": "1.0", "facts": []}, user_id="alice") is False
-        assert fake_client.append_calls == []
+        # save() never reads -- it can still repair the stream by appending.
+        assert storage.save({"version": "1.0", "facts": [{"id": "repaired"}]}, user_id="alice") is True
+        assert len(fake_client.append_calls) == 1
 
-    def test_reload_heals_the_gate_and_save_succeeds(self, fake_client):
-        calls = {"n": 0}
-        real_get_stream = fake_client.get_stream
+        # Once reads are healed, the repaired snapshot is what comes back.
+        fake_client.get_stream = real_get_stream
+        healed = KurrentdbMemoryStorage(client_factory=lambda: fake_client)
+        assert healed.load(user_id="alice")["facts"] == [{"id": "repaired"}]
 
-        def flaky_get_stream(*args, **kwargs):
-            calls["n"] += 1
-            if calls["n"] == 1:
-                raise ConnectionError("kurrentdb down")
-            return real_get_stream(*args, **kwargs)
+    def test_rmw_abort_pin_load_raises_instead_of_returning_empty_basis(self, fake_client):
+        """Regression pin for the reviewer's clobber scenario: seed real
+        data, make the next read raise, and assert the caller never gets an
+        empty basis it could go on to save() over the real snapshot."""
+        seed = KurrentdbMemoryStorage(client_factory=lambda: fake_client)
+        seed.save({"version": "1.0", "facts": [{"id": "real"}]}, user_id="alice")
 
-        fake_client.get_stream = flaky_get_stream
+        def broken_get_stream(*args, **kwargs):
+            raise ConnectionError("kurrentdb down")
+
+        fake_client.get_stream = broken_get_stream
+        rmw_caller = KurrentdbMemoryStorage(client_factory=lambda: fake_client)
+
+        with pytest.raises(KurrentdbMemoryReadError):
+            rmw_caller.load(user_id="alice")
+
+        # The real snapshot on the stream must be untouched -- no empty-derived
+        # save() ever happened because load() never returned a basis.
+        assert len(fake_client.append_calls) == 1
+        assert json.loads(fake_client.append_calls[0]["events"][0].data)["facts"] == [{"id": "real"}]
+
+    def test_reload_also_raises_on_read_failure(self, fake_client):
+        def broken_get_stream(*args, **kwargs):
+            raise ConnectionError("kurrentdb down")
+
+        fake_client.get_stream = broken_get_stream
         storage = KurrentdbMemoryStorage(client_factory=lambda: fake_client)
 
-        assert storage.load(user_id="alice")["facts"] == []  # fails, gates the key
-        assert storage.save({"version": "1.0", "facts": []}, user_id="alice") is False
-        assert fake_client.append_calls == []
-
-        # Fake has healed; a successful reload() clears the gate.
-        assert storage.reload(user_id="alice")["facts"] == []
-        assert storage.save({"version": "1.0", "facts": [{"id": "f1"}]}, user_id="alice") is True
-        assert len(fake_client.append_calls) == 1
-
-    def test_save_without_prior_read_failure_is_unaffected(self, storage, fake_client):
-        # Fresh storage, no prior load() at all -- must not be gated.
-        assert storage.save({"version": "1.0", "facts": []}, user_id="alice") is True
-        assert len(fake_client.append_calls) == 1
-
-    def test_save_after_successful_load_is_unaffected(self, storage, fake_client):
-        # A successful load (NotFound/empty case) must not gate subsequent saves.
-        assert storage.load(user_id="alice")["facts"] == []
-        assert storage.save({"version": "1.0", "facts": []}, user_id="alice") is True
-        assert len(fake_client.append_calls) == 1
+        with pytest.raises(KurrentdbMemoryReadError):
+            storage.reload(user_id="alice")
 
 
 class TestLoadCacheRace:
@@ -342,6 +356,16 @@ class TestTimeouts:
 
         monkeypatch.setenv("KURRENTDB_CONNECTION_STRING", "kurrentdb://localhost:2113?tls=false")
         monkeypatch.setenv("KURRENTDB_MEMORY_TIMEOUT_SECONDS", "0")
+        storage = KurrentdbMemoryStorage(client_factory=lambda: fake_client)
+
+        assert storage._timeout == DEFAULT_TIMEOUT_SECONDS
+
+    @pytest.mark.parametrize("non_finite", ["inf", "nan"])
+    def test_non_finite_env_timeout_falls_back(self, monkeypatch, fake_client, non_finite):
+        from deerflow.community.kurrentdb.memory_storage import DEFAULT_TIMEOUT_SECONDS
+
+        monkeypatch.setenv("KURRENTDB_CONNECTION_STRING", "kurrentdb://localhost:2113?tls=false")
+        monkeypatch.setenv("KURRENTDB_MEMORY_TIMEOUT_SECONDS", non_finite)
         storage = KurrentdbMemoryStorage(client_factory=lambda: fake_client)
 
         assert storage._timeout == DEFAULT_TIMEOUT_SECONDS
