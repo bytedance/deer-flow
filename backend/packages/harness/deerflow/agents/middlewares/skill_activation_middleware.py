@@ -269,7 +269,16 @@ Follow this skill before choosing a general workflow. Load supporting resources 
         """
         runtime = getattr(request, "runtime", None)
         context = getattr(runtime, "context", None)
-        if not isinstance(context, dict) or not activation.required_secrets:
+        if not isinstance(context, dict):
+            return
+        # Unconditionally clear any active-secret set a previous activation in
+        # the same run may have written, before this turn's resolution decides
+        # what (if anything) to install. Otherwise a later skill that declares
+        # no secrets, or whose required secrets the caller did not supply, would
+        # inherit the previous skill's injection set and the bash tool would
+        # inject those values into a subprocess that never declared them (#3861).
+        context.pop(ACTIVE_SECRETS_CONTEXT_KEY, None)
+        if not activation.required_secrets:
             return
 
         request_secrets = extract_request_secrets(context)

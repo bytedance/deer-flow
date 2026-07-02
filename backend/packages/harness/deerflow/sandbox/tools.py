@@ -1312,6 +1312,14 @@ def ensure_thread_directories_exist(runtime: Runtime | None) -> None:
 
 _SECRET_REDACTION = "[redacted]"
 
+# Values shorter than this are not redacted from bash output. A short secret
+# value (a 2-char region code, a numeric id, a PIN) would otherwise shred
+# unrelated bytes of tool output — exit codes, timestamps, sizes, paths —
+# corrupting the result the model reads back. The redaction of a value this
+# short is more likely noise than genuine leak protection; the secret is still
+# injected into the subprocess, only the output mask skips it.
+_MIN_MASK_LENGTH = 8
+
 
 def mask_secret_values(output: str, injected_env: dict[str, str] | None) -> str:
     """Redact injected secret values from bash output before it re-enters context.
@@ -1322,11 +1330,13 @@ def mask_secret_values(output: str, injected_env: dict[str, str] | None) -> str:
     the skill-specific fifth leak surface (the bash tool returns subprocess stdout,
     unlike MCP tools). Replace each non-empty secret value with a redaction marker.
     Longest values first so a value that is a substring of another is not partially
-    revealed.
+    revealed. Values shorter than ``_MIN_MASK_LENGTH`` are skipped — a redacted
+    3-char token is more likely to corrupt unrelated output than to protect a
+    real secret.
     """
     if not injected_env or not output:
         return output
-    for value in sorted((v for v in injected_env.values() if v), key=len, reverse=True):
+    for value in sorted((v for v in injected_env.values() if v and len(v) >= _MIN_MASK_LENGTH), key=len, reverse=True):
         output = output.replace(value, _SECRET_REDACTION)
     return output
 

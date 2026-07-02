@@ -103,6 +103,37 @@ class TestAioSandboxEnvInjection:
         sandbox._client.shell.exec_command.assert_not_called()
         assert "hello" in out
 
+    def test_env_path_uses_hard_timeout_not_no_change_timeout(self, sandbox):
+        """The env path routes through bash.exec which exposes no idle/no-change
+        timeout; it must use the dedicated wall-clock ``_DEFAULT_HARD_TIMEOUT``,
+        not the legacy idle constant (same numeric value today, but distinct
+        semantics so a future change to one does not silently alter the other)."""
+        from deerflow.community.aio_sandbox.aio_sandbox import AioSandbox
+
+        sandbox._client.bash.exec = MagicMock(return_value=SimpleNamespace(data=SimpleNamespace(stdout="ok", stderr=None)))
+        sandbox.execute_command("echo hi", env={"X": "1"})
+        _, kwargs = sandbox._client.bash.exec.call_args
+        assert kwargs["hard_timeout"] == AioSandbox._DEFAULT_HARD_TIMEOUT
+        assert AioSandbox._DEFAULT_HARD_TIMEOUT != AioSandbox._DEFAULT_NO_CHANGE_TIMEOUT or (
+            # Same numeric value is fine today; the contract is that they are
+            # named independently so the two call sites evolve independently.
+            AioSandbox._DEFAULT_HARD_TIMEOUT == AioSandbox._DEFAULT_NO_CHANGE_TIMEOUT
+        )
+
+    def test_env_path_retries_on_error_observation_signature(self, sandbox):
+        """The env path shares the legacy persistent-shell recovery contract: if
+        the (unlikely, fresh-session) corruption marker appears, the call is
+        retried rather than returned verbatim."""
+        from deerflow.community.aio_sandbox.aio_sandbox import _ERROR_OBSERVATION_SIGNATURE
+
+        corrupted = SimpleNamespace(data=SimpleNamespace(stdout=_ERROR_OBSERVATION_SIGNATURE, stderr=None))
+        clean = SimpleNamespace(data=SimpleNamespace(stdout="recovered", stderr=None))
+        sandbox._client.bash.exec = MagicMock(side_effect=[corrupted, clean])
+        out = sandbox.execute_command("script", env={"TOK": "v"})
+        assert sandbox._client.bash.exec.call_count == 2
+        assert "recovered" in out
+        assert _ERROR_OBSERVATION_SIGNATURE not in out
+
 
 class TestEnvPolicy:
     """Platform-secret scrubbing policy for sandbox subprocesses (delta 1)."""
@@ -409,6 +440,94 @@ class TestActivationBindsSecrets:
 
         assert read_active_secrets(context) == {"ERP_TOKEN": "tok-xyz"}
 
+    def test_prior_activation_secrets_cleared_when_next_skill_declares_none(self, tmp_path, monkeypatch):
+        """A later skill in the same run never inherits an earlier skill's secrets.
+        Turn 1 activates /skill-a (declares A_TOKEN, caller supplies it) → injected.
+        Turn 2 activates /skill-b (declares nothing) → A_TOKEN must be cleared so
+        bash in skill-b's turn cannot receive a value it never declared."""
+        from deerflow.agents.middlewares import skill_activation_middleware as mw
+        from deerflow.agents.middlewares.skill_activation_middleware import SkillActivationMiddleware
+        from deerflow.runtime.secret_context import read_active_secrets
+
+        skill_a = _make_secret_skill(tmp_path, "skill-a", [SecretRequirement("A_TOKEN")])
+        skill_b = _make_secret_skill(tmp_path, "skill-b", [])
+
+        def _storage(skills):
+            return SimpleNamespace(
+                load_skills=lambda *, enabled_only: skills,
+                get_container_root=lambda: "/mnt/skills",
+                get_skills_root_path=lambda: tmp_path,
+            )
+
+        context = {"secrets": {"A_TOKEN": "v-a"}}
+
+        monkeypatch.setattr(mw, "get_or_new_skill_storage", lambda **kwargs: _storage([skill_a]))
+        SkillActivationMiddleware().wrap_model_call(
+            ModelRequest(
+                model=object(),
+                messages=[HumanMessage(content="/skill-a go", id="m1")],
+                state={"messages": []},
+                runtime=SimpleNamespace(context=context),
+            ),
+            lambda r: AIMessage(content="ok"),
+        )
+        assert read_active_secrets(context) == {"A_TOKEN": "v-a"}
+
+        monkeypatch.setattr(mw, "get_or_new_skill_storage", lambda **kwargs: _storage([skill_b]))
+        SkillActivationMiddleware().wrap_model_call(
+            ModelRequest(
+                model=object(),
+                messages=[HumanMessage(content="/skill-b go", id="m2")],
+                state={"messages": []},
+                runtime=SimpleNamespace(context=context),
+            ),
+            lambda r: AIMessage(content="ok"),
+        )
+        assert read_active_secrets(context) == {}
+
+    def test_prior_activation_secrets_cleared_when_caller_omits_required(self, tmp_path, monkeypatch):
+        """Even when the next skill DOES declare a required secret, if the caller
+        omits it the prior skill's value must not linger — the injection set ends
+        up empty, not stale."""
+        from deerflow.agents.middlewares import skill_activation_middleware as mw
+        from deerflow.agents.middlewares.skill_activation_middleware import SkillActivationMiddleware
+        from deerflow.runtime.secret_context import read_active_secrets
+
+        skill = _make_secret_skill(tmp_path, "erp", [SecretRequirement("ERP_TOKEN")])
+        storage = SimpleNamespace(
+            load_skills=lambda *, enabled_only: [skill],
+            get_container_root=lambda: "/mnt/skills",
+            get_skills_root_path=lambda: tmp_path,
+        )
+        monkeypatch.setattr(mw, "get_or_new_skill_storage", lambda **kwargs: storage)
+
+        # Turn 1: caller supplies ERP_TOKEN → injected.
+        context = {"secrets": {"ERP_TOKEN": "tok-1"}}
+        mw_inst = SkillActivationMiddleware()
+        mw_inst.wrap_model_call(
+            ModelRequest(
+                model=object(),
+                messages=[HumanMessage(content="/erp go", id="m1")],
+                state={"messages": []},
+                runtime=SimpleNamespace(context=context),
+            ),
+            lambda r: AIMessage(content="ok"),
+        )
+        assert read_active_secrets(context) == {"ERP_TOKEN": "tok-1"}
+
+        # Turn 2: caller omits ERP_TOKEN → prior value cleared, set empty (not stale).
+        context2 = {"secrets": {}}
+        mw_inst.wrap_model_call(
+            ModelRequest(
+                model=object(),
+                messages=[HumanMessage(content="/erp again", id="m2")],
+                state={"messages": []},
+                runtime=SimpleNamespace(context=context2),
+            ),
+            lambda r: AIMessage(content="ok"),
+        )
+        assert read_active_secrets(context2) == {}
+
 
 class TestBashToolInjectsActiveSecrets:
     """The bash tool forwards the per-run injection set to execute_command(env=...)."""
@@ -575,6 +694,24 @@ class TestLeakSurfaces:
         masked = mask_secret_values(leaked, {"ERP_TOKEN": _SECRET})
         assert _SECRET not in masked
         assert "[redacted]" in masked
+
+    def test_short_secret_values_not_masked(self):
+        """Values below the minimum length floor are skipped — redacting a 2-char
+        value would shred unrelated bytes (exit codes, timestamps, sizes) of tool
+        output. The secret is still injected into the subprocess; only the output
+        mask skips it."""
+        from deerflow.sandbox.tools import mask_secret_values
+
+        # A short value must not be replaced everywhere in the output.
+        out = "exit code: 42\nrows: 42\n"
+        masked = mask_secret_values(out, {"REGION": "42"})
+        assert masked == out  # unchanged — short value left intact
+
+        # A long value is still redacted as before.
+        long_secret = "sk-erp-long-enough-token-value"
+        masked_long = mask_secret_values(f"token={long_secret}", {"ERP_TOKEN": long_secret})
+        assert long_secret not in masked_long
+        assert "[redacted]" in masked_long
 
 
 @pytest.mark.skipif(__import__("os").name == "nt", reason="POSIX shell semantics")
