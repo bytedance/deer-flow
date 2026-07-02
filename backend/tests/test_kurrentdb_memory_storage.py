@@ -168,3 +168,39 @@ class TestLoadReload:
         fake_client.streams[f"{STREAM_PREFIX}-alice"] = [NewEvent(type=EVENT_TYPE, data=b"not json")]
         storage = KurrentdbMemoryStorage(client_factory=lambda: fake_client)
         assert storage.load(user_id="alice")["facts"] == []
+
+
+class TestGetMemoryStorageIntegration:
+    STORAGE_CLASS_PATH = "deerflow.community.kurrentdb.memory_storage.KurrentdbMemoryStorage"
+
+    @pytest.fixture(autouse=True)
+    def reset_storage_singleton(self):
+        import deerflow.agents.memory.storage as storage_module
+
+        storage_module._storage_instance = None
+        yield
+        storage_module._storage_instance = None
+
+    def _patch_config(self, monkeypatch):
+        from unittest.mock import patch
+
+        from deerflow.config.memory_config import MemoryConfig
+
+        return patch(
+            "deerflow.agents.memory.storage.get_memory_config",
+            return_value=MemoryConfig(storage_class=self.STORAGE_CLASS_PATH),
+        )
+
+    def test_reflection_loads_kurrentdb_storage(self, monkeypatch):
+        from deerflow.agents.memory.storage import get_memory_storage
+
+        monkeypatch.setenv("KURRENTDB_CONNECTION_STRING", "kurrentdb://localhost:2113?tls=false")
+        with self._patch_config(monkeypatch):
+            assert isinstance(get_memory_storage(), KurrentdbMemoryStorage)
+
+    def test_missing_env_falls_back_to_file_storage(self, monkeypatch):
+        from deerflow.agents.memory.storage import FileMemoryStorage, get_memory_storage
+
+        monkeypatch.delenv("KURRENTDB_CONNECTION_STRING", raising=False)
+        with self._patch_config(monkeypatch):
+            assert isinstance(get_memory_storage(), FileMemoryStorage)
