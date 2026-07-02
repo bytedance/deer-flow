@@ -251,3 +251,38 @@ class TestAsyncPaths:
 
         result = asyncio.run(mw.awrap_tool_call(request, handler))
         assert result.status != "error"
+
+
+def _wiring_app_config(**overrides):
+    from deerflow.config.app_config import AppConfig
+    from deerflow.config.sandbox_config import SandboxConfig
+
+    return AppConfig(sandbox=SandboxConfig(use="test"), **overrides)
+
+
+class TestChainWiring:
+    def test_enabled_by_default_in_runtime_chain(self):
+        from deerflow.agents.middlewares.read_before_write_middleware import ReadBeforeWriteMiddleware
+        from deerflow.agents.middlewares.sandbox_audit_middleware import SandboxAuditMiddleware
+        from deerflow.agents.middlewares.tool_error_handling_middleware import ToolErrorHandlingMiddleware, build_lead_runtime_middlewares
+
+        middlewares = build_lead_runtime_middlewares(app_config=_wiring_app_config())
+        types = [type(m) for m in middlewares]
+        assert ReadBeforeWriteMiddleware in types
+        assert types.index(SandboxAuditMiddleware) < types.index(ReadBeforeWriteMiddleware) < types.index(ToolErrorHandlingMiddleware)
+
+    def test_disabled_removes_middleware(self):
+        from deerflow.agents.middlewares.read_before_write_middleware import ReadBeforeWriteMiddleware
+        from deerflow.agents.middlewares.tool_error_handling_middleware import build_lead_runtime_middlewares
+        from deerflow.config.read_before_write_config import ReadBeforeWriteConfig
+
+        app_config = _wiring_app_config(read_before_write=ReadBeforeWriteConfig(enabled=False))
+        middlewares = build_lead_runtime_middlewares(app_config=app_config)
+        assert ReadBeforeWriteMiddleware not in [type(m) for m in middlewares]
+
+    def test_subagents_get_the_gate_too(self):
+        from deerflow.agents.middlewares.read_before_write_middleware import ReadBeforeWriteMiddleware
+        from deerflow.agents.middlewares.tool_error_handling_middleware import build_subagent_runtime_middlewares
+
+        middlewares = build_subagent_runtime_middlewares(app_config=_wiring_app_config())
+        assert ReadBeforeWriteMiddleware in [type(m) for m in middlewares]
