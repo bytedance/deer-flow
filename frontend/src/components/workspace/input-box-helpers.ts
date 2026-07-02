@@ -131,6 +131,9 @@ export function getMatchingSkillSuggestions(
   builtinCommands: SlashSuggestion[],
 ): SlashSuggestion[] {
   const normalizedQuery = query.toLowerCase();
+  const builtinCommandNames = new Set(
+    builtinCommands.map(({ name }) => name.toLowerCase()),
+  );
 
   const builtinMatches = builtinCommands.filter(({ name, description }) => {
     if (!normalizedQuery) {
@@ -150,6 +153,9 @@ export function getMatchingSkillSuggestions(
     }))
     .filter(({ skill, name }) => {
       if (!skill.enabled) {
+        return false;
+      }
+      if (builtinCommandNames.has(name)) {
         return false;
       }
       return !normalizedQuery || name.includes(normalizedQuery);

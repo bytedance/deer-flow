@@ -155,6 +155,19 @@ describe("getMatchingSkillSuggestions", () => {
     expect(result.map((s) => s.name)).toContain("goal");
   });
 
+  it("excludes skills that collide with builtin command names", () => {
+    const result = getMatchingSkillSuggestions(
+      [makeSkill("goal"), makeSkill("goal-helper")],
+      "goal",
+      builtins,
+    );
+
+    expect(result.map((s) => `${s.kind}:${s.name}`)).toEqual([
+      "skill:goal-helper",
+      "builtin:goal",
+    ]);
+  });
+
   it("caps the number of suggestions", () => {
     const skills = Array.from({ length: 10 }, (_, i) =>
       makeSkill(`skill-${i}`),

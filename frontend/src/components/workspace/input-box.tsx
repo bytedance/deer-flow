@@ -947,7 +947,7 @@ export function InputBox({
                       ? "bg-accent text-accent-foreground"
                       : "text-popover-foreground hover:bg-accent/70 hover:text-accent-foreground",
                   )}
-                  key={suggestion.name}
+                  key={`${suggestion.kind}:${suggestion.name}`}
                   onClick={() => applySkillSuggestion(suggestion)}
                   onMouseDown={(event) => event.preventDefault()}
                   onMouseEnter={() => setSkillSuggestionIndex(index)}
