@@ -83,23 +83,36 @@ comes for free.
 - Multi-process deployments share streams but not caches — and unlike the
   file backend's mtime-checked cache, external appends are not observed by
   `load()` until `reload()` is called (or the process restarts).
-- **Writes are fail-closed after a failed read.** Read-modify-write callers
-  (`create_memory_fact` and friends in `agents/memory/updater.py`) do
-  `load()` → mutate → `save()`. If a transport or decode error is silently
-  swallowed, the mutated (empty-derived) state would otherwise be appended as
-  the new newest event, clobbering the real snapshot. To prevent this, a
-  failed `_read_latest()` (transport/decode error, not the legitimate
-  "stream does not exist yet" case) marks that `(user_id, agent_name)` key as
-  degraded; `save()` refuses to persist and returns `False` while the key is
-  degraded, logging why. A subsequent successful `reload()` (or `load()`) for
-  that key clears the gate and saves resume normally. Reader-facing behavior
-  is unchanged: `load()`/`reload()` still return empty memory on error and
-  never raise.
+- **Reads raise on failure instead of masquerading as empty.** A transport
+  error, an unexpected event type, or a corrupt (non-JSON/non-UTF-8) event on
+  the memory stream makes `load()`/`reload()` raise
+  `KurrentdbMemoryReadError` (defined in `memory_storage.py`, exported from
+  `deerflow.community.kurrentdb`) instead of returning `create_empty_memory()`.
+  A missing stream is still a clean, legitimate empty answer and does not
+  raise. This intentionally diverges from `FileMemoryStorage`, which returns
+  empty memory on read errors: for a network store, "unreadable" must not be
+  indistinguishable from "empty" — a stale/failed reader that thinks the
+  store is genuinely empty can go on to overwrite real data.
+  Read-modify-write flows (`load()` → mutate → `save()`, e.g. the memory
+  updater's fact extraction) therefore abort before ever obtaining a basis to
+  save: the updater's sync and async update paths both wrap the whole
+  operation in `try/except Exception` and log-and-skip on failure (no write
+  happens), and `GET /api/memory` / `POST /api/memory/reload` let the
+  exception surface as a Gateway 500 rather than silently rendering empty
+  memory. The prompt-injection path (`lead_agent/prompt.py`) is unaffected —
+  DeerFlow already wraps that memory-context load in a broad
+  `except Exception` and degrades gracefully to no injected memory, same as
+  any other injection failure. Explicit overwrite flows — import and clear —
+  never read before they write, so they remain available as the repair path
+  for a stream with a corrupt or unreadable newest event: `save()` appends
+  unconditionally (module-level validation and serialization still apply),
+  and a subsequent healed read returns the repaired snapshot.
 - **All KurrentDB calls use a bounded timeout** (`timeout=` on both
   `get_stream` and `append_to_stream`) so a stalled server cannot pin a
   request path indefinitely. Default is 10 seconds; override with the
   `KURRENTDB_MEMORY_TIMEOUT_SECONDS` environment variable. An unset, invalid,
-  or non-positive value falls back to the default with a logged warning.
+  non-positive, or non-finite (`inf`/`nan`) value falls back to the default
+  with a logged warning.
 
 ## Tests
 
