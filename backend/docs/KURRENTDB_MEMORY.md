@@ -74,10 +74,15 @@ comes for free.
   an async storage path. Cache-first reads keep steady-state hot paths clean.
   Writes have the same shape: every `/api/memory` mutation appends via gRPC
   on the event loop (async handlers calling the sync `save()`).
-- **Snapshot-per-event (schema v0)** — each event carries the full memory
-  JSON. Fact-level deltas (`FactAdded`/`FactRemoved`/`ContextUpdated`) and the
+- **Snapshot-per-event (schema v0)** — each event on the primary
+  `deerflow.memory-*` stream still carries the full memory JSON; deer-flow's
+  own `load()`/`reload()` only ever fold this snapshot stream. A best-effort,
+  write-only side-channel now additionally emits canonical
   [`kurrent-agent-schema`](https://github.com/kurrent-io/kurrent-agents)
-  canonical vocabulary are the planned v1.
+  `FactRetained` events for new facts (see "Canonical schema events" below)
+  for cross-framework readers — but deer-flow does not yet read them back.
+  Full canonical adoption (reading and folding state from canonical events)
+  is the planned v1.
 - **`current_version=StreamState.ANY`** — no optimistic-concurrency guard;
   concurrent writers last-write-win, same as the file backend.
 - Multi-process deployments share streams but not caches — and unlike the
@@ -114,7 +119,98 @@ comes for free.
   non-positive, or non-finite (`inf`/`nan`) value falls back to the default
   with a logged warning.
 
+## Canonical schema events (kurrent-agents)
+
+deer-flow is the first LangGraph-family writer of the
+[kurrent-agents](https://github.com/kurrent-io/kurrent-agents) canonical
+schema. On every successful `save()`, NEW facts are additionally emitted as
+canonical `FactRetained` events, so any other kurrent-agents integration
+(Microsoft Agent Framework, Google ADK, Strands, OpenAI Agents, Claude Agent
+SDK) can read deer-flow's retained facts without knowing anything about
+deer-flow's own `MemoryUpdated` snapshot format.
+
+- **What's emitted**: one canonical `FactRetained` event per fact that is new
+  relative to the in-process basis (see "Delta computation" below). Identity
+  is the fact's `id` when both the previous and current fact have one, else
+  normalized `content`. `retained_at` is the fact's `createdAt` when
+  parseable, else the current time. The event type is the
+  `kurrent_agent_schema` registry's name for `FactRetained`; the payload is
+  the package's own canonical JSON (`to_json`); metadata carries
+  `{"schema_version": SCHEMA_VERSION}` since the wire payload itself does not
+  embed a version.
+- **The stream**: `AgentMemory-deerflow-{user_id}`, built via the package's
+  own `agent_memory_stream("deerflow", user_id)` — never a hand-built string.
+  It is discoverable in the KurrentDB Admin UI via the `$ce-AgentMemory`
+  category projection alongside every other kurrent-agents-compliant writer.
+- **Cross-framework readability**: because the stream name, event type, and
+  payload shape all follow the published
+  [kurrent-agents spec](https://github.com/kurrent-io/kurrent-agents), any
+  other integration that reads canonical `AgentMemory-*` streams can consume
+  deer-flow's retained facts with zero deer-flow-specific code.
+
+### Delta computation and skip rules
+
+The delta is computed against the **in-process memory cache**, i.e. the value
+`self._memory_cache` held for `(user_id, agent_name)` immediately before this
+`save()` call updated it — not a read of the canonical stream and not a read
+of the snapshot stream. Three cases intentionally skip canonical emission:
+
+- **Cold save** (no previous basis in the cache — e.g. the first save after a
+  process restart): skipped entirely. Without this, every restart would
+  replay the entire current fact list as "new" the first time `save()` runs,
+  since the cache starts empty. The snapshot stream is unaffected — the
+  cache-cold case only gates the canonical dual-write.
+- **`user_id is None`**: skipped. The canonical v1 schema scopes
+  `AgentMemory` streams per-app-per-user only; there is no canonical
+  global-memory stream to target.
+- **Empty delta** (no facts changed since the basis): skipped — no append
+  call is made at all.
+
+### Honest limits
+
+- **Dual-write is not atomic.** The snapshot append (to
+  `deerflow.memory-{user_id}[.agent.{agent}]`) is the authoritative write and
+  already completed by the time canonical emission runs. Canonical emission
+  is a second, independent `append_to_stream` call: it can fail (network,
+  serialization, missing `kurrent_agent_schema` package) without affecting
+  `save()`'s return value, the snapshot stream, or the cache. A failed
+  canonical append is not retried and is not queued — it is simply lost,
+  logged as a warning. There is no reconciliation job today; a restart plus a
+  fresh cold save will not "catch up" the canonical stream for facts that
+  were already present before the failure (see delta computation above).
+- **The delta basis is the in-process cache, not a durable cursor.** Two
+  processes/instances writing the same `(user_id, agent_name)` do not share a
+  canonical-emission basis, so both may (correctly, from their own
+  perspective) treat the same fact as "new" the first time they see it after
+  a restart — except cold saves are skipped entirely, so in practice a
+  restarted instance emits nothing for facts already known before the
+  restart, and starts computing deltas only from its next warm save onward.
+- **This is schema v0 snapshot storage plus a v1-shaped side-channel, not
+  full canonical adoption.** deer-flow's own reads (`load()`/`reload()`)
+  never touch the canonical stream — they still fold only `MemoryUpdated`
+  snapshot events, completely untouched by this feature. Full canonical
+  adoption (reading and folding state from canonical events instead of the
+  proprietary snapshot) is the planned v1; today the canonical stream is
+  write-only from deer-flow's perspective, intended purely for external
+  consumers.
+
+### Try it
+
+Requires the `kurrent-agent-schema` package (declared alongside
+`kurrentdbclient` in the `deerflow-harness[kurrentdb]` extra and the backend
+dev group — `uv sync` installs both). If it is not importable, the storage
+still works normally: canonical emission logs one warning per process and
+skips silently on every subsequent `save()`.
+
+After a save with new facts, open the Admin UI → Stream Browser and either
+browse `AgentMemory-deerflow-{user_id}` directly or the `$ce-AgentMemory`
+category to see every canonical `AgentMemory-*` stream across writers.
+
 ## Tests
 
 `backend/tests/test_kurrentdb_memory_storage.py` — pure unit tests against a
 fake client (no KurrentDB required), plus reflection/fallback contract pins.
+`TestCanonicalFactEvents` covers the canonical dual-write: new-fact emission,
+cold-save/`user_id=None`/unchanged-fact skips, best-effort isolation on
+canonical-append failure, and that the stream name always comes from the
+package's own `agent_memory_stream()` builder.
