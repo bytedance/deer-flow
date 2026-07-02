@@ -277,6 +277,93 @@ promote the KurrentDB tools by searching for them.
 - Stdio sessions are pooled per (user, thread), so each new thread pays
   subprocess startup.
 
+## Pairing with Kurrent's agent skills
+
+[kurrent-io/skills](https://github.com/kurrent-io/skills) is Kurrent's skills
+marketplace for AI coding assistants — six `SKILL.md`-format skills covering
+everyday KurrentDB work. deer-flow's own skills system consumes the same
+`SKILL.md` format (drop into `skills/custom/` or install via
+`POST /api/skills/install`), so these can give the deer-flow agent KurrentDB
+*knowledge* to pair with the MCP server's *hands* above.
+
+| Skill | Purpose |
+|-------|---------|
+| `kurrent-docs` | Everyday router for SDK/server/cloud work |
+| `kurrentdb-connection` | gRPC client configuration across all six SDKs |
+| `kurrentdb-client-detection` | Inventories the client surface in a codebase |
+| `kurrentdb-server-detection` | Inventories a deployed server |
+| `kurrent-upgrade` | Legacy-client migration and EventStoreDB→KurrentDB rebranding |
+| `kurrent-capacitor-cli` | Operating the kcap session-recording CLI |
+
+**Not bundled here, on purpose.** These six skills are currently packaged for
+coding assistants (Claude Code, Cursor, Codex), not for deer-flow. **If this
+integration is accepted, Kurrent will provide stripped-down versions packaged
+for deer-flow** — frontmatter adapted to deer-flow's validated set,
+coding-agent-specific tool references removed — pushed and properly
+integrated into the skills system. They are deliberately NOT bundled in this
+PR to keep its footprint minimal.
+
+## Derived observability (projections over the memory streams)
+
+This is observability the Kurrent way: derived from the event log deer-flow
+already writes, not a second telemetry pipeline bolted alongside it. The dev
+overlay already runs with projections enabled
+(`KURRENTDB_RUN_PROJECTIONS=All`, set in
+`docker/docker-compose.kurrentdb.yaml`), so user-defined continuous
+projections work out of the box, not just the standard `$by_category`/`$ce-`
+projections used elsewhere in this doc.
+
+Because every memory update and every retained fact is already an event,
+observability views are just server-side projections over the existing
+streams — nothing new is instrumented, and nothing new is shipped.
+
+### Worked example: fact retention over time, across all users
+
+Canonical `FactRetained` events live in category `AgentMemory` (streams
+`AgentMemory-deerflow-{user_id}`), with data JSON shaped
+`{"fact": "...", "retained_at": "2026-07-02T18:12:27.166131Z"}` (snake_case,
+ISO-8601 `Z`) — see "Canonical schema events" above. A continuous projection
+folding that category gives total fact-retention counts, a per-day
+breakdown, and a rolling window of recent facts, across every user:
+
+```js
+fromCategory('AgentMemory')
+  .when({
+    $init: () => ({ total: 0, byDay: {}, recentFacts: [] }),
+    FactRetained: (state, event) => {
+      state.total += 1;
+      const day = (event.data.retained_at || '').slice(0, 10);
+      state.byDay[day] = (state.byDay[day] || 0) + 1;
+      state.recentFacts = state.recentFacts.concat(event.data.fact).slice(-10);
+      return state;
+    }
+  })
+  .outputState();
+```
+
+**Register it, two ways:**
+
+- **Admin UI**: [http://localhost:2113](http://localhost:2113) → Projections
+  → New Projection (continuous), paste the JS above, then read the result
+  from the projection's State view.
+- **Conversationally, via the MCP server demo above**: "Using the KurrentDB
+  tools, create a continuous projection named `memory-fact-activity` over the
+  `AgentMemory` category that counts FactRetained events per day, then query
+  its state and summarize my memory activity." — the same MCP server's
+  projection-prototyping capability, no Admin UI required.
+
+**Variants**: swap `fromCategory('AgentMemory')` for
+`fromCategory('AgentMemory').foreachStream()` to get independent per-user
+state instead of one combined total. The same pattern over category
+`deerflow.memory` counting `MemoryUpdated` events gives memory-churn-per-day
+for the snapshot streams instead of fact-retention-per-day for the canonical
+ones.
+
+**Honest scope**: these are demo projections over the POC's memory streams.
+Run-level observability (token usage, tool latency, error rates) belongs to
+the run-event streams, not the memory streams — that is the planned next
+phase, not something this PR addresses.
+
 ## Tests
 
 `backend/tests/test_kurrentdb_memory_storage.py` — pure unit tests against a
