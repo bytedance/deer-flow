@@ -26,9 +26,17 @@ import {
   useTriggerScheduledTask,
   useThreadScheduledTasks,
 } from "@/core/scheduled-tasks/hooks";
+import { RECIPES, type Recipe } from "@/core/scheduled-tasks/recipes";
+import type {
+  ScheduledTask,
+  ScheduledTaskRun,
+} from "@/core/scheduled-tasks/types";
+
+const NONE = "—";
 
 export default function ScheduledTasksPage() {
   const { t } = useI18n();
+  const st = t.scheduledTasks;
   const searchParams = useSearchParams();
   const threadId = searchParams.get("thread_id");
   const allTasksQuery = useScheduledTasks();
@@ -59,6 +67,7 @@ export default function ScheduledTasksPage() {
     schedule_spec: { cron: "0 9 * * *" },
     timezone: "UTC",
   });
+  const [createNonce, setCreateNonce] = useState(0);
   const filteredData = (data ?? []).filter((task) => {
     const statusPass = statusFilter === "all" || task.status === statusFilter;
     const typePass = typeFilter === "all" || task.schedule_type === typeFilter;
@@ -73,6 +82,37 @@ export default function ScheduledTasksPage() {
   const resumeTask = useResumeScheduledTask();
   const triggerTask = useTriggerScheduledTask();
   const deleteTask = useDeleteScheduledTask();
+
+  const scheduleTypeLabel = (v: string) =>
+    v === "cron"
+      ? st.scheduleType.cron
+      : v === "once"
+        ? st.scheduleType.once
+        : v;
+  const statusLabel = (v: string) =>
+    (st.status as Record<string, string>)[v] ?? v;
+  const contextModeLabel = (v: string) =>
+    v === "fresh_thread_per_run"
+      ? st.context.fresh
+      : v === "reuse_thread"
+        ? st.context.reuse
+        : v;
+  const runTriggerLabel = (v: string) =>
+    (st.runTrigger as Record<string, string>)[v] ?? v;
+  const runStatusLabel = (v: string) =>
+    (st.runStatus as Record<string, string>)[v] ?? v;
+  const taskSummary = (task: ScheduledTask) =>
+    `${scheduleTypeLabel(task.schedule_type)} · ${statusLabel(task.status)}`;
+  const runSummary = (run: ScheduledTaskRun) =>
+    `${runTriggerLabel(run.trigger)} · ${runStatusLabel(run.status)}`;
+  const applyRecipe = (recipe: Recipe) => {
+    const labels = st.recipes[recipe.titleKey];
+    setTitle(labels.title);
+    setPrompt(recipe.prompt);
+    setCreateSchedule(recipe.schedule);
+    setContextMode("fresh_thread_per_run");
+    setCreateNonce((n) => n + 1);
+  };
 
   useEffect(() => {
     document.title = `${t.sidebar.scheduledTasks} - ${t.pages.appName}`;
@@ -125,7 +165,26 @@ export default function ScheduledTasksPage() {
             className="grid gap-2 rounded-lg border p-4"
             data-testid="scheduled-task-create-form"
           >
-            <div className="font-medium">Create scheduled task</div>
+            <div className="font-medium">{st.create.title}</div>
+            <div
+              className="flex flex-wrap items-center gap-1"
+              data-testid="schedule-recipes"
+            >
+              <span className="text-muted-foreground text-sm">
+                {st.recipes.label}:
+              </span>
+              {RECIPES.map((recipe) => (
+                <Button
+                  key={recipe.id}
+                  variant="outline"
+                  size="sm"
+                  onClick={() => applyRecipe(recipe)}
+                >
+                  <span aria-hidden>{recipe.icon}</span>
+                  {st.recipes[recipe.titleKey].title}
+                </Button>
+              ))}
+            </div>
             <div className="flex gap-2">
               <Button
                 variant={
@@ -134,34 +193,35 @@ export default function ScheduledTasksPage() {
                 size="sm"
                 onClick={() => setContextMode("fresh_thread_per_run")}
               >
-                Fresh thread
+                {st.context.fresh}
               </Button>
               <Button
                 variant={contextMode === "reuse_thread" ? "default" : "outline"}
                 size="sm"
                 onClick={() => setContextMode("reuse_thread")}
               >
-                Reuse thread
+                {st.context.reuse}
               </Button>
             </div>
             {contextMode === "reuse_thread" && (
               <Input
                 value={targetThreadId}
                 onChange={(event) => setTargetThreadId(event.target.value)}
-                placeholder="Thread ID"
+                placeholder={st.context.threadIdPlaceholder}
               />
             )}
             <Input
               value={title}
               onChange={(event) => setTitle(event.target.value)}
-              placeholder="Task title"
+              placeholder={st.create.taskTitle}
             />
             <Input
               value={prompt}
               onChange={(event) => setPrompt(event.target.value)}
-              placeholder="Prompt"
+              placeholder={st.create.prompt}
             />
             <ScheduledTaskScheduleInput
+              key={createNonce}
               initial={createSchedule}
               onChange={setCreateSchedule}
             />
@@ -179,7 +239,7 @@ export default function ScheduledTasksPage() {
                   !hasSchedule ||
                   (contextMode === "reuse_thread" && !targetThreadId)
                 ) {
-                  setFormError("Fill all required fields");
+                  setFormError(st.create.fillRequired);
                   return;
                 }
                 setFormError(null);
@@ -203,12 +263,12 @@ export default function ScheduledTasksPage() {
                 createTask.isPending
               }
             >
-              Create
+              {st.create.submit}
             </Button>
           </div>
           {threadId && (
             <div className="text-muted-foreground text-sm">
-              Filtered by thread: {threadId}
+              {st.detail.filteredByThread.replace("{id}", threadId)}
             </div>
           )}
           <div className="flex flex-wrap gap-2">
@@ -217,42 +277,42 @@ export default function ScheduledTasksPage() {
               size="sm"
               onClick={() => setStatusFilter("all")}
             >
-              All statuses
+              {st.filters.allStatuses}
             </Button>
             <Button
               variant={statusFilter === "enabled" ? "default" : "outline"}
               size="sm"
               onClick={() => setStatusFilter("enabled")}
             >
-              Enabled
+              {st.filters.enabled}
             </Button>
             <Button
               variant={statusFilter === "paused" ? "default" : "outline"}
               size="sm"
               onClick={() => setStatusFilter("paused")}
             >
-              Paused
+              {st.filters.paused}
             </Button>
             <Button
               variant={typeFilter === "all" ? "default" : "outline"}
               size="sm"
               onClick={() => setTypeFilter("all")}
             >
-              All types
+              {st.filters.allTypes}
             </Button>
             <Button
               variant={typeFilter === "cron" ? "default" : "outline"}
               size="sm"
               onClick={() => setTypeFilter("cron")}
             >
-              Cron
+              {st.filters.cron}
             </Button>
             <Button
               variant={typeFilter === "once" ? "default" : "outline"}
               size="sm"
               onClick={() => setTypeFilter("once")}
             >
-              Once
+              {st.filters.once}
             </Button>
           </div>
           <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_320px]">
@@ -274,7 +334,7 @@ export default function ScheduledTasksPage() {
                   >
                     <div className="font-medium">{task.title}</div>
                     <div className="text-muted-foreground text-sm">
-                      {task.schedule_type} · {task.status}
+                      {taskSummary(task)}
                     </div>
                   </button>
                 );
@@ -295,43 +355,45 @@ export default function ScheduledTasksPage() {
                       size="sm"
                       onClick={() => setEditing((value) => !value)}
                     >
-                      {editing ? "Cancel edit" : "Edit"}
+                      {editing ? st.actions.cancelEdit : st.actions.edit}
                     </Button>
                   </div>
                   <div className="text-muted-foreground text-sm">
-                    Context mode: {selectedTask.context_mode}
+                    {st.detail.contextMode}:{" "}
+                    {contextModeLabel(selectedTask.context_mode)}
                   </div>
                   <div className="text-muted-foreground text-sm">
                     {selectedTask.context_mode === "reuse_thread"
-                      ? `Thread: ${selectedTask.thread_id ?? "None"}`
-                      : `Last thread: ${selectedTask.last_thread_id ?? "None"}`}
+                      ? `${st.detail.thread}: ${selectedTask.thread_id ?? NONE}`
+                      : `${st.detail.lastThread}: ${selectedTask.last_thread_id ?? NONE}`}
                   </div>
                   <div className="text-muted-foreground text-sm">
-                    Schedule: {selectedTask.schedule_type}
+                    {st.detail.schedule}:{" "}
+                    {scheduleTypeLabel(selectedTask.schedule_type)}
                   </div>
                   <div className="text-muted-foreground text-sm">
-                    Next run: {selectedTask.next_run_at ?? "None"}
+                    {st.detail.nextRun}: {selectedTask.next_run_at ?? NONE}
                   </div>
                   <div className="text-muted-foreground text-sm">
-                    Last run: {selectedTask.last_run_at ?? "None"}
+                    {st.detail.lastRun}: {selectedTask.last_run_at ?? NONE}
                   </div>
                   <div className="text-muted-foreground text-sm">
-                    Last run id: {selectedTask.last_run_id ?? "None"}
+                    {st.detail.lastRunId}: {selectedTask.last_run_id ?? NONE}
                   </div>
                   <div className="text-muted-foreground text-sm">
-                    Last error: {selectedTask.last_error ?? "None"}
+                    {st.detail.lastError}: {selectedTask.last_error ?? NONE}
                   </div>
                   {editing ? (
                     <div className="flex flex-col gap-2 rounded-lg border p-3">
                       <Input
                         value={editTitle}
                         onChange={(event) => setEditTitle(event.target.value)}
-                        placeholder="Edit title"
+                        placeholder={st.edit.titlePlaceholder}
                       />
                       <Input
                         value={editPrompt}
                         onChange={(event) => setEditPrompt(event.target.value)}
-                        placeholder="Edit prompt"
+                        placeholder={st.edit.promptPlaceholder}
                       />
                       <ScheduledTaskScheduleInput
                         key={selectedTask.id}
@@ -351,7 +413,7 @@ export default function ScheduledTasksPage() {
                         }
                         disabled={updateTask.isPending}
                       >
-                        Save edit
+                        {st.edit.submit}
                       </Button>
                     </div>
                   ) : (
@@ -367,25 +429,30 @@ export default function ScheduledTasksPage() {
                           : pauseTask.mutate(selectedTask.id)
                       }
                     >
-                      {selectedTask.status === "paused" ? "Resume" : "Pause"}
+                      {selectedTask.status === "paused"
+                        ? st.actions.resume
+                        : st.actions.pause}
                     </Button>
                     <Button
                       variant="outline"
                       size="sm"
                       onClick={() => triggerTask.mutate(selectedTask.id)}
                     >
-                      Trigger now
+                      {st.actions.trigger}
                     </Button>
                     <Button
                       variant="destructive"
                       size="sm"
                       onClick={() => deleteTask.mutate(selectedTask.id)}
                     >
-                      Delete
+                      {st.actions.delete}
                     </Button>
                   </div>
                   <div data-testid="scheduled-task-runs">
-                    {(taskRunsQuery.data ?? []).length} runs
+                    {st.detail.runsCount.replace(
+                      "{count}",
+                      String((taskRunsQuery.data ?? []).length),
+                    )}
                   </div>
                   <div
                     className="flex flex-col gap-2"
@@ -397,27 +464,27 @@ export default function ScheduledTasksPage() {
                           key={run.id}
                           className="rounded-md border p-3 text-sm"
                         >
-                          <div className="font-medium">
-                            {run.trigger} · {run.status}
+                          <div className="font-medium">{runSummary(run)}</div>
+                          <div className="text-muted-foreground text-xs">
+                            {run.run_id ?? NONE}
                           </div>
-                          <div className="text-muted-foreground">
-                            Run ID: {run.run_id ?? "None"}
-                          </div>
-                          <div className="text-muted-foreground">
-                            Error: {run.error ?? "None"}
-                          </div>
+                          {run.error && (
+                            <div className="text-destructive text-xs">
+                              {run.error}
+                            </div>
+                          )}
                         </div>
                       ))
                     ) : (
                       <div className="text-muted-foreground text-sm">
-                        No runs yet
+                        {st.detail.noRuns}
                       </div>
                     )}
                   </div>
                 </div>
               ) : (
                 <div className="text-muted-foreground text-sm">
-                  No scheduled task selected
+                  {st.detail.noSelection}
                 </div>
               )}
             </div>

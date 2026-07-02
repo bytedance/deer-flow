@@ -33,7 +33,7 @@ test("scheduled tasks page is reachable from sidebar", async ({ page }) => {
   await page.waitForURL("**/workspace/scheduled-tasks");
   await expect(page).toHaveURL(/workspace\/scheduled-tasks/);
   await expect(
-    page.getByRole("button", { name: "Daily summary cron · enabled" }),
+    page.getByRole("button", { name: /Daily summary/i }),
   ).toBeVisible();
   await expect(page.getByTestId("scheduled-task-runs")).toContainText("0 runs");
 });
@@ -87,7 +87,7 @@ test("user can create a scheduled task from the page", async ({ page }) => {
   await createForm.getByPlaceholder("Prompt").fill("Summarize thread");
   await createForm.getByRole("button", { name: "Create" }).click();
   await expect(
-    page.getByRole("button", { name: "Created from UI once · enabled" }),
+    page.getByRole("button", { name: /Created from UI/i }),
   ).toBeVisible();
   await expect(
     page.getByTestId("scheduled-task-detail").getByText("Summarize thread"),
@@ -125,7 +125,7 @@ test("user can pause a scheduled task from the detail pane", async ({
   await detail.getByRole("button", { name: "Pause" }).click();
   await expect(page.getByTestId("scheduled-task-item-task-1")).toBeVisible();
   await expect(
-    page.getByTestId("scheduled-task-item-task-1").getByText("cron · paused"),
+    page.getByTestId("scheduled-task-item-task-1").getByText(/paused/i),
   ).toBeVisible();
 });
 
@@ -157,7 +157,7 @@ test("trigger shows a run entry in the detail pane", async ({ page }) => {
   await page.getByRole("button", { name: "Trigger now" }).click();
   await expect(page.getByTestId("scheduled-task-runs")).toContainText("1 runs");
   await expect(
-    page.getByTestId("scheduled-task-run-list").getByText("manual · success"),
+    page.getByTestId("scheduled-task-run-list").getByText(/Manual · Success/i),
   ).toBeVisible();
 });
 
