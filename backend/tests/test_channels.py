@@ -1288,6 +1288,48 @@ class TestChannelManager:
 
         _run(go())
 
+    def test_handle_chat_forwards_workflow_intake_headers(self):
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+            outbound_received = []
+
+            async def capture_outbound(msg):
+                outbound_received.append(msg)
+
+            bus.subscribe_outbound(capture_outbound)
+
+            mock_client = _make_mock_langgraph_client()
+            manager._client = mock_client
+
+            await manager.start()
+
+            inbound = InboundMessage(
+                channel_name="slack",
+                chat_id="C123",
+                user_id="U123",
+                text="hi",
+                topic_id="1710000000.000100",
+                metadata={"team_id": "T123", "message_id": "m-1"},
+            )
+            await bus.publish_inbound(inbound)
+            await _wait_for(lambda: len(outbound_received) >= 1)
+            await manager.stop()
+
+            headers = mock_client.runs.wait.call_args.kwargs["headers"]
+            assert headers["X-DeerFlow-Workflow-Source-Type"] == "channel"
+            assert headers["X-DeerFlow-Workflow-Source"] == "slack"
+            assert headers["X-DeerFlow-Workflow-Conversation-Ref"] == "C123"
+            assert headers["X-DeerFlow-Workflow-Thread-Ref"] == "1710000000.000100"
+            assert headers["X-DeerFlow-Workflow-Sender-Ref"] == "U123"
+            assert headers["X-External-Message-Ref"] == "slack:T123:C123:m-1"
+            assert headers["Idempotency-Key"] == "channel:slack:T123:C123:m-1"
+
+        _run(go())
+
     def test_clarification_follow_up_preserves_history(self, monkeypatch):
         """Conversation should continue after ask_clarification instead of resetting history."""
         from app.channels.manager import ChannelManager

@@ -31,6 +31,7 @@ from deerflow.persistence.feedback import FeedbackRepository
 from deerflow.runtime import RunContext, RunManager, StreamBridge
 from deerflow.runtime.events.store.base import RunEventStore
 from deerflow.runtime.runs.store.base import RunStore
+from deerflow.runtime.workflows.store.base import WorkflowStore
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +81,14 @@ if TYPE_CHECKING:
 
 T = TypeVar("T")
 
+_WORKFLOW_ORPHAN_ACTIVE_STATUSES = frozenset({"claimed", "run_created", "running", "waiting"})
+
+
+def _durable_workflows_enabled(config: AppConfig) -> bool:
+    modules = getattr(config, "modules", None)
+    durable_workflows = getattr(modules, "durable_workflows", None)
+    return bool(getattr(durable_workflows, "enabled", False))
+
 
 async def _mark_latest_recovered_threads_error(
     run_manager: RunManager,
@@ -103,6 +112,55 @@ async def _mark_latest_recovered_threads_error(
             await thread_store.update_status(thread_id, "error", user_id=None)
         except Exception:
             logger.warning("Failed to mark thread %s as error during run reconciliation", thread_id, exc_info=True)
+
+
+async def _mark_recovered_workflows_orphaned(
+    workflow_store: WorkflowStore | None,
+    recovered_runs: list[RunRecord],
+    *,
+    error: str,
+) -> int:
+    """Mark workflow envelopes bound to recovered orphan runs as orphaned."""
+    if workflow_store is None or not recovered_runs:
+        return 0
+
+    marked = 0
+    for record in recovered_runs:
+        try:
+            workflows = await workflow_store.list(thread_id=record.thread_id, run_id=record.run_id, limit=100)
+        except Exception:
+            logger.warning("Failed to list workflows for recovered run %s", record.run_id, exc_info=True)
+            continue
+
+        for workflow in workflows:
+            workflow_id = workflow.get("workflow_id")
+            if not workflow_id or workflow.get("status") not in _WORKFLOW_ORPHAN_ACTIVE_STATUSES:
+                continue
+            metadata = {
+                "recovery": "gateway_restart_orphan",
+                "run_id": record.run_id,
+                "run_status": "error",
+            }
+            try:
+                updated = await workflow_store.mark_orphaned(str(workflow_id), error=error, metadata=metadata)
+                if not updated:
+                    continue
+                await workflow_store.append_event(
+                    str(workflow_id),
+                    event_type="workflow.orphaned",
+                    category="recovery",
+                    thread_id=record.thread_id,
+                    run_id=record.run_id,
+                    content={"reason": "gateway_restart_orphan"},
+                    metadata=metadata,
+                )
+                marked += 1
+            except Exception:
+                logger.warning("Failed to mark workflow %s orphaned during run reconciliation", workflow_id, exc_info=True)
+
+    if marked:
+        logger.warning("Recovered %d workflow(s) as orphaned after gateway restart", marked)
+    return marked
 
 
 def get_config() -> AppConfig:
@@ -190,11 +248,19 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
             from deerflow.persistence.run import RunRepository
 
             app.state.run_store = RunRepository(sf)
+            if _durable_workflows_enabled(config):
+                from deerflow.persistence.workflow import WorkflowRepository
+
+                app.state.workflow_store = WorkflowRepository(sf)
             app.state.feedback_repo = FeedbackRepository(sf)
         else:
             from deerflow.runtime.runs.store.memory import MemoryRunStore
 
             app.state.run_store = MemoryRunStore()
+            if _durable_workflows_enabled(config):
+                from deerflow.runtime.workflows.store.memory import MemoryWorkflowStore
+
+                app.state.workflow_store = MemoryWorkflowStore()
             app.state.feedback_repo = None
 
         from deerflow.persistence.thread_meta import make_thread_store
@@ -214,13 +280,15 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         if getattr(config.database, "backend", None) == "sqlite":
             from deerflow.utils.time import now_iso
 
+            orphan_error = "Gateway restarted before this run reached a durable final state."
             # Startup-only recovery: clean shutdowns return no active rows and
             # the thread-status update below becomes a no-op.
             recovered_runs = await app.state.run_manager.reconcile_orphaned_inflight_runs(
-                error="Gateway restarted before this run reached a durable final state.",
+                error=orphan_error,
                 before=now_iso(),
             )
             await _mark_latest_recovered_threads_error(app.state.run_manager, app.state.thread_store, recovered_runs)
+            await _mark_recovered_workflows_orphaned(getattr(app.state, "workflow_store", None), recovered_runs, error=orphan_error)
 
         try:
             yield
@@ -260,6 +328,7 @@ get_checkpointer: Callable[[Request], Checkpointer] = _require("checkpointer", "
 get_run_event_store: Callable[[Request], RunEventStore] = _require("run_event_store", "Run event store")
 get_feedback_repo: Callable[[Request], FeedbackRepository] = _require("feedback_repo", "Feedback")
 get_run_store: Callable[[Request], RunStore] = _require("run_store", "Run store")
+get_workflow_store: Callable[[Request], WorkflowStore] = _require("workflow_store", "Workflow store")
 
 
 def get_store(request: Request):

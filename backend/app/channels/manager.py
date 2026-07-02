@@ -516,6 +516,53 @@ def _owner_headers(msg: InboundMessage) -> dict[str, str] | None:
     return create_internal_auth_headers(owner_user_id=owner_user_id)
 
 
+def _inbound_message_id(msg: InboundMessage) -> str | None:
+    metadata = msg.metadata or {}
+    for key in INBOUND_DEDUPE_METADATA_KEYS:
+        value = metadata.get(key)
+        if value:
+            return str(value)
+    raw_message = metadata.get("raw_message")
+    if isinstance(raw_message, Mapping):
+        for key in INBOUND_DEDUPE_METADATA_KEYS:
+            value = raw_message.get(key)
+            if value:
+                return str(value)
+    return None
+
+
+def _inbound_workspace_id(msg: InboundMessage) -> str | None:
+    metadata = msg.metadata or {}
+    workspace_id = msg.workspace_id or metadata.get("workspace_id") or metadata.get("team_id") or metadata.get("guild_id") or metadata.get("aibotid")
+    return str(workspace_id) if workspace_id else None
+
+
+def _workflow_intake_headers(msg: InboundMessage) -> dict[str, str]:
+    headers = {
+        "X-DeerFlow-Workflow-Source-Type": "channel",
+        "X-DeerFlow-Workflow-Source": msg.channel_name,
+        "X-DeerFlow-Workflow-Conversation-Ref": msg.chat_id,
+        "X-DeerFlow-Workflow-Thread-Ref": msg.topic_id or msg.thread_ts or msg.chat_id,
+        "X-DeerFlow-Workflow-Sender-Ref": msg.user_id,
+    }
+    message_id = _inbound_message_id(msg)
+    workspace_id = _inbound_workspace_id(msg)
+    if message_id:
+        external_ref = f"{msg.channel_name}:{workspace_id or ''}:{msg.chat_id}:{message_id}"
+        headers["X-External-Message-Ref"] = external_ref
+        if workspace_id:
+            headers["Idempotency-Key"] = f"channel:{external_ref}"
+    return headers
+
+
+def _run_headers(msg: InboundMessage) -> dict[str, str]:
+    headers: dict[str, str] = {}
+    if owner_headers := _owner_headers(msg):
+        headers.update(owner_headers)
+    headers.update(_workflow_intake_headers(msg))
+    return headers
+
+
 def _safe_user_id_for_run(raw_user_id: str) -> str:
     from deerflow.config.paths import get_paths
 
@@ -986,28 +1033,14 @@ class ChannelManager:
 
     @staticmethod
     def _inbound_dedupe_key(msg: InboundMessage) -> tuple[str, str, str, str] | None:
-        metadata = msg.metadata or {}
-        message_id = None
-        for key in INBOUND_DEDUPE_METADATA_KEYS:
-            value = metadata.get(key)
-            if value:
-                message_id = str(value)
-                break
-        if message_id is None:
-            raw_message = metadata.get("raw_message")
-            if isinstance(raw_message, Mapping):
-                for key in INBOUND_DEDUPE_METADATA_KEYS:
-                    value = raw_message.get(key)
-                    if value:
-                        message_id = str(value)
-                        break
+        message_id = _inbound_message_id(msg)
         if message_id is None:
             return None
 
         # Fail closed: without a workspace/team/guild identifier we cannot tell two
         # workspaces apart (e.g. Slack channel ids are not globally unique), so
         # skip dedupe rather than risk collapsing distinct workspaces' messages.
-        workspace_id = msg.workspace_id or metadata.get("workspace_id") or metadata.get("team_id") or metadata.get("guild_id") or metadata.get("aibotid")
+        workspace_id = _inbound_workspace_id(msg)
         if not workspace_id:
             return None
         return (msg.channel_name, str(workspace_id), msg.chat_id, message_id)
@@ -1333,8 +1366,7 @@ class ChannelManager:
             "context": run_context,
             "multitask_strategy": "reject",
         }
-        if owner_headers := _owner_headers(msg):
-            run_kwargs["headers"] = owner_headers
+        run_kwargs["headers"] = _run_headers(msg)
         try:
             result = await client.runs.wait(
                 thread_id,
@@ -1414,8 +1446,7 @@ class ChannelManager:
             "stream_mode": list(STREAM_MODES),
             "multitask_strategy": "reject",
         }
-        if owner_headers := _owner_headers(msg):
-            stream_kwargs["headers"] = owner_headers
+        stream_kwargs["headers"] = _run_headers(msg)
 
         try:
             async for chunk in client.runs.stream(

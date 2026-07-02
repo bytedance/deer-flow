@@ -47,7 +47,7 @@ from deerflow.persistence.migrations._helpers import _normalize_default
 asyncio_test = pytest.mark.asyncio
 
 
-HEAD = "0002_runs_token_usage"
+HEAD = _get_head_revision()
 BASELINE = "0001_baseline"
 
 
