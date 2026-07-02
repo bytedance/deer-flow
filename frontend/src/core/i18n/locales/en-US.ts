@@ -525,6 +525,9 @@ export const enUS: Translations = {
       emptyDescription:
         "Put your agent skill folders under the `/skills/custom` folder under the root folder of DeerFlow.",
       emptyButton: "Create Your First Skill",
+      adminRequired: "Admin privileges are required to manage agent skills.",
+      installAdminRequired:
+        "Admin privileges are required to install agent skills.",
     },
     notification: {
       title: "Notification",
