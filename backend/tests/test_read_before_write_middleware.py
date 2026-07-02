@@ -210,3 +210,44 @@ class TestWriteGate:
         result = mw.wrap_tool_call(request, handler)
         handler.assert_called_once()
         assert result.status != "error"
+
+
+class TestAsyncPaths:
+    PATH = "/mnt/user-data/outputs/report.md"
+
+    def test_async_block(self):
+        import asyncio
+
+        mw = _middleware({self.PATH: "v1"})
+        request = _make_request("write_file", {"description": "d", "path": self.PATH, "content": "v2"})
+
+        async def handler(_request):
+            raise AssertionError("handler must not run when blocked")
+
+        result = asyncio.run(mw.awrap_tool_call(request, handler))
+        assert result.status == "error"
+
+    def test_async_read_stamps_mark(self):
+        import asyncio
+
+        mw = _middleware({self.PATH: "v1"})
+        request = _make_request("read_file", {"description": "d", "path": self.PATH})
+
+        async def handler(_request):
+            return ToolMessage(content="v1", tool_call_id="call-1", name="read_file")
+
+        result = asyncio.run(mw.awrap_tool_call(request, handler))
+        assert result.additional_kwargs["deerflow_read_mark"]["hash"] == _sha("v1")
+
+    def test_async_allowed_write_calls_handler(self):
+        import asyncio
+
+        mw = _middleware({self.PATH: "v1"})
+        messages = [_read_marked_message(self.PATH, "v1")]
+        request = _make_request("write_file", {"description": "d", "path": self.PATH, "content": "v2"}, messages)
+
+        async def handler(_request):
+            return ToolMessage(content="OK", tool_call_id="call-1", name="write_file")
+
+        result = asyncio.run(mw.awrap_tool_call(request, handler))
+        assert result.status != "error"
