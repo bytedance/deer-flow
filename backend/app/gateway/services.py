@@ -37,6 +37,7 @@ from deerflow.runtime import (
     run_agent,
 )
 from deerflow.runtime.runs.naming import resolve_root_run_name
+from deerflow.runtime.secret_context import redact_config_secrets
 from deerflow.runtime.user_context import reset_current_user, set_current_user
 
 logger = logging.getLogger(__name__)
@@ -290,6 +291,12 @@ def build_run_config(
                 raise ValueError("request config 'context' must be a mapping or null.")
             context["thread_id"] = thread_id
             config["context"] = context
+            # The checkpointer always scopes state by configurable["thread_id"],
+            # regardless of whether the caller drives the run via context (e.g.
+            # request-scoped secrets, #3861). thread_id comes from the URL path,
+            # not caller config, so mirror it here while keeping secret-bearing
+            # context keys out of configurable.
+            config["configurable"] = {"thread_id": thread_id}
         else:
             configurable = {"thread_id": thread_id}
             configurable.update(request_config.get("configurable", {}))
@@ -476,7 +483,11 @@ async def start_run(
                 body.assistant_id,
                 on_disconnect=disconnect,
                 metadata=body.metadata or {},
-                kwargs={"input": body.input, "config": body.config},
+                # Persist a secret-redacted copy of the config: the run record is
+                # written to runs.kwargs_json and echoed by the run API, so a
+                # request-scoped secret (#3861) must not ride along. The live
+                # config built below keeps the secrets for the actual run.
+                kwargs={"input": body.input, "config": redact_config_secrets(body.config)},
                 multitask_strategy=body.multitask_strategy,
                 model_name=model_name,
                 user_id=owner_user_id,

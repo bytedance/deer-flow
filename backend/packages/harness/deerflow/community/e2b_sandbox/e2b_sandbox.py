@@ -118,12 +118,25 @@ class E2BSandbox(Sandbox):
             return f"{self._home_dir}/{tail}".rstrip("/") if tail else self._home_dir
         return normalised
 
-    def execute_command(self, command: str) -> str:
+    def execute_command(
+        self,
+        command: str,
+        env: dict[str, str] | None = None,
+        timeout: float | None = None,
+    ) -> str:
         """Execute a shell command via ``sandbox.commands.run``.
 
         Returns the combined stdout/stderr.
         The lock serialises concurrent calls on the same instance
         because the e2b SDK shares a single HTTP/2 connection per sandbox.
+
+        Args:
+            command: The command to execute.
+            env: Optional per-call environment variables (request-scoped secrets,
+                issue #3861). Passed through to e2b as ``envs``, which are scoped
+                to this command only and never placed in the command string.
+            timeout: Optional per-call command timeout in seconds. ``None`` keeps
+                the e2b SDK default (60s).
         """
         with self._lock:
             client = self._client
@@ -132,7 +145,12 @@ class E2BSandbox(Sandbox):
             if self._dead:
                 return "Error: e2b sandbox has been reaped by the control plane (idle timeout or explicit pause). The provider will rebuild a fresh sandbox on the next tool call."
             try:
-                result = client.commands.run(command)
+                kwargs: dict[str, object] = {}
+                if env is not None:
+                    kwargs["envs"] = env
+                if timeout is not None:
+                    kwargs["timeout"] = timeout
+                result = client.commands.run(command, **kwargs)
                 stdout = getattr(result, "stdout", "") or ""
                 stderr = getattr(result, "stderr", "") or ""
                 exit_code = getattr(result, "exit_code", 0)

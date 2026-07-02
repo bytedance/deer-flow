@@ -7,6 +7,7 @@ import threading
 from collections import OrderedDict
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import MagicMock
 
 from deerflow.config.paths import Paths
 
@@ -255,6 +256,42 @@ def test_execute_command_does_not_mark_dead_on_unrelated_error():
     out = sb.execute_command("echo hi")
     assert "Error" in out
     assert sb.is_dead is False
+
+
+def test_execute_command_forwards_env_and_timeout_to_commands_run():
+    """execute_command(env=..., timeout=...) routes env as ``envs`` and the
+    timeout through to ``commands.run`` so request-scoped secrets (#3861) reach
+    the e2b subprocess without entering the command string. Regression for the
+    signature mismatch that broke bash for every e2b user."""
+    commands = MagicMock()
+    commands.run.return_value = SimpleNamespace(stdout="ok\n", stderr="", exit_code=0)
+    client = FakeClient(commands=commands)
+    sb = _make_sandbox(client)
+
+    out = sb.execute_command("echo $TOK", env={"TOK": "secret-v"}, timeout=120)
+
+    assert out.rstrip() == "ok"
+    args, kwargs = commands.run.call_args
+    assert args == ("echo $TOK",)
+    assert kwargs["envs"] == {"TOK": "secret-v"}
+    assert kwargs["timeout"] == 120
+    # The secret must not be smuggled into the command string.
+    assert "secret-v" not in args[0]
+
+
+def test_execute_command_env_none_passes_no_envs_kwarg():
+    """env=None is fully backward-compatible — ``commands.run`` is called with no
+    ``envs``/``timeout`` kwargs, so existing (non-secret) callers are unaffected."""
+    commands = MagicMock()
+    commands.run.return_value = SimpleNamespace(stdout="ok\n", stderr="", exit_code=0)
+    client = FakeClient(commands=commands)
+    sb = _make_sandbox(client)
+
+    sb.execute_command("echo hi")
+
+    _, kwargs = commands.run.call_args
+    assert "envs" not in kwargs
+    assert "timeout" not in kwargs
 
 
 def test_ping_returns_false_when_sandbox_gone():

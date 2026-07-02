@@ -208,6 +208,21 @@ def test_build_run_config_with_overrides():
     assert config["metadata"]["user"] == "alice"
 
 
+def test_build_run_config_context_path_still_sets_configurable_thread_id(_stub_app_config):
+    """A caller-supplied context (e.g. request-scoped secrets, #3861) must not
+    deprive the checkpointer of configurable.thread_id, which it always needs to
+    scope checkpoints. Secrets stay in context; thread_id is mirrored into
+    configurable for the checkpointer."""
+    from app.gateway.services import build_run_config
+
+    config = build_run_config("thread-1", {"context": {"secrets": {"ERP_TOKEN": "v"}}}, None)
+    assert config["context"]["secrets"] == {"ERP_TOKEN": "v"}
+    assert config["context"]["thread_id"] == "thread-1"
+    assert config["configurable"]["thread_id"] == "thread-1"
+    # Secrets must NOT be mirrored into configurable.
+    assert "secrets" not in config["configurable"]
+
+
 # ---------------------------------------------------------------------------
 # recursion_limit clamping: the Gateway must not trust a client-supplied
 # recursion_limit verbatim (runaway LLM cost / DoS). See build_run_config.
@@ -853,7 +868,8 @@ def test_build_run_config_with_context():
     assert "context" in config
     assert config["context"]["user_id"] == "u-42"
     assert config["context"]["thread_id"] == "thread-1"
-    assert "configurable" not in config
+    # configurable carries thread_id for the checkpointer; user context stays in context.
+    assert config["configurable"] == {"thread_id": "thread-1"}
     assert config["recursion_limit"] == 100
 
 
@@ -869,7 +885,7 @@ def test_build_run_config_context_injects_thread_id():
     assert config["context"]["user_id"] == "u-1"
     assert config["context"]["thinking_enabled"] is True
     assert config["context"]["thread_id"] == "T-deadbeef-42"
-    assert "configurable" not in config
+    assert config["configurable"] == {"thread_id": "T-deadbeef-42"}
 
 
 def test_build_run_config_null_context_becomes_empty_context():
@@ -879,7 +895,7 @@ def test_build_run_config_null_context_becomes_empty_context():
     config = build_run_config("thread-1", {"context": None}, None)
 
     assert config["context"] == {"thread_id": "thread-1"}
-    assert "configurable" not in config
+    assert config["configurable"] == {"thread_id": "thread-1"}
 
 
 def test_build_run_config_rejects_non_mapping_context():
@@ -921,7 +937,10 @@ def test_build_run_config_context_plus_configurable_warns(caplog):
         )
     assert "context" in config
     assert config["context"]["user_id"] == "u-42"
-    assert "configurable" not in config
+    # context wins: caller's configurable (model_name) is dropped, but thread_id is
+    # still set for the checkpointer.
+    assert config["configurable"] == {"thread_id": "thread-1"}
+    assert "model_name" not in config["configurable"]
     assert any("both 'context' and 'configurable'" in r.message for r in caplog.records)
 
 
@@ -935,7 +954,7 @@ def test_build_run_config_context_passthrough_other_keys():
         None,
     )
     assert config["context"]["thread_id"] == "thread-1"
-    assert "configurable" not in config
+    assert config["configurable"] == {"thread_id": "thread-1"}
     assert config["tags"] == ["prod"]
 
 

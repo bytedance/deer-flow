@@ -110,7 +110,22 @@ class AioSandbox(Sandbox):
     # default.
     _DEFAULT_NO_CHANGE_TIMEOUT = 600
 
-    def execute_command(self, command: str) -> str:
+    # Wall-clock hard timeout for env-bearing commands routed through bash.exec.
+    # The bash.exec API exposes no idle/no-change timeout (unlike
+    # shell.exec_command's ``no_change_timeout`` on the legacy path), so
+    # env-bearing commands are bounded by total elapsed wall-clock time, not
+    # time-since-last-output. Kept at the same numeric value as the legacy idle
+    # budget so the two paths broadly agree on how long a single command may
+    # run; a future SDK that exposes an idle timeout on bash.exec should switch
+    # this call site to it.
+    _DEFAULT_HARD_TIMEOUT = 600.0
+
+    def execute_command(
+        self,
+        command: str,
+        env: dict[str, str] | None = None,
+        timeout: float | None = None,
+    ) -> str:
         """Execute a shell command in the sandbox.
 
         Uses a lock to serialize concurrent requests. The AIO sandbox
@@ -122,10 +137,23 @@ class AioSandbox(Sandbox):
 
         Args:
             command: The command to execute.
+            env: Optional per-call environment variables (request-scoped secrets,
+                issue #3861). When provided, the command runs via the ``bash.exec``
+                API (which supports per-command env) on a fresh auto-created session
+                so the secrets are scoped to this single command and never persist;
+                secret values travel in the structured ``env`` field, never in the
+                command string. When ``None`` the legacy persistent-shell path runs
+                unchanged.
+            timeout: Optional per-call timeout. The current sandbox SDK does not
+                expose a command-level timeout distinct from its client/request
+                timeout, so DeerFlow keeps using the backend's default here.
 
         Returns:
             The output of the command.
         """
+        del timeout
+        if env:
+            return self._execute_with_env(command, env)
         with self._lock:
             try:
                 result = self._client.shell.exec_command(command=command, no_change_timeout=self._DEFAULT_NO_CHANGE_TIMEOUT)
@@ -152,6 +180,57 @@ class AioSandbox(Sandbox):
                 return output if output else "(no output)"
             except Exception as e:
                 logger.error(f"Failed to execute command in sandbox: {e}")
+                return f"Error: {e}"
+
+    def _execute_with_env(self, command: str, env: dict[str, str]) -> str:
+        """Execute a command with per-call environment variables injected.
+
+        The persistent-shell ``shell.exec_command`` API has no env parameter, so
+        injected commands use the ``bash.exec`` API which accepts per-command env.
+        Each call lets the sandbox auto-create a fresh session (no ``session_id``),
+        so injected request-scoped secrets are scoped to this command and never
+        persist across calls. Secret values travel in the structured ``env`` field,
+        never in the command string.
+
+        Trade-off of the fresh-session choice: consecutive env-bearing bash calls
+        within the same skill do not share session state (cwd, sourced venv,
+        exported variables). This mirrors the LocalSandbox model (each call is a
+        fresh subprocess) and is intentional — a shared session_id would let
+        request-scoped secrets ride the session env into later commands, which the
+        SDK does not contractually forbid. Skills that need setup must fold it into
+        a single command (e.g. ``cd /mnt/user-data/workspace && source .venv/bin/activate && python run.py``).
+
+        The ``_ERROR_OBSERVATION_SIGNATURE`` recovery contract is shared with the
+        legacy persistent-shell path: if the (unlikely, since each call is a fresh
+        session) corruption marker shows up, the call is retried on another fresh
+        session rather than returned verbatim.
+        """
+        output = self._run_bash_exec(command, env)
+        if output and _ERROR_OBSERVATION_SIGNATURE in output:
+            logger.warning("ErrorObservation detected in bash.exec output, retrying on a fresh session")
+            retried = self._run_bash_exec(command, env)
+            if retried and _ERROR_OBSERVATION_SIGNATURE not in retried:
+                return retried
+        return output
+
+    def _run_bash_exec(self, command: str, env: dict[str, str]) -> str:
+        """Single bash.exec invocation with injected env (one fresh session)."""
+        with self._lock:
+            try:
+                result = self._client.bash.exec(
+                    command=command,
+                    env=env,
+                    hard_timeout=self._DEFAULT_HARD_TIMEOUT,
+                )
+                data = result.data if result else None
+                stdout = (data.stdout or "") if data else ""
+                stderr = (data.stderr or "") if data else ""
+                output = stdout
+                if stderr:
+                    output += f"\nStd Error:\n{stderr}" if output else stderr
+                return output if output else "(no output)"
+            except Exception as e:
+                logger.error(f"Failed to execute command with injected env in sandbox: {e}")
                 return f"Error: {e}"
 
     def read_file(self, path: str) -> str:

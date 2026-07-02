@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 
@@ -16,6 +16,19 @@ class SkillCategory(StrEnum):
     CUSTOM = "custom"
 
 
+@dataclass(frozen=True)
+class SecretRequirement:
+    """A request-scoped secret a skill declares it needs (issue #3861).
+
+    ``name`` is both the key looked up in the request's ``context.secrets`` and
+    the environment variable name injected into the skill's sandbox subprocess
+    when the skill is activated.
+    """
+
+    name: str
+    optional: bool = False
+
+
 @dataclass
 class Skill:
     """Represents a skill with its metadata and file path"""
@@ -29,6 +42,7 @@ class Skill:
     category: SkillCategory  # 'public' or 'custom'
     allowed_tools: list[str] | None = None
     enabled: bool = False  # Whether this skill is enabled
+    required_secrets: list[SecretRequirement] = field(default_factory=list)
 
     @property
     def skill_path(self) -> str:
