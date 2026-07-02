@@ -23,17 +23,15 @@ the sync ``KurrentDBClient``. Reads are cache-first: after the first load per
 """
 
 import functools
+import json
 import logging
 import os
 import threading
 from collections.abc import Callable
 from typing import Any
 
-from deerflow.agents.memory.storage import MemoryStorage, create_empty_memory
+from deerflow.agents.memory.storage import MemoryStorage, create_empty_memory, utc_now_iso_z
 from deerflow.config.agents_config import AGENT_NAME_PATTERN
-
-# NOTE: `import json` and `utc_now_iso_z` are added in Task 3 where first used —
-# every task's commit must be ruff-clean (F401).
 
 logger = logging.getLogger(__name__)
 
@@ -100,4 +98,25 @@ class KurrentdbMemoryStorage(MemoryStorage):
         return create_empty_memory()
 
     def save(self, memory_data: dict[str, Any], agent_name: str | None = None, *, user_id: str | None = None) -> bool:
-        return False
+        """Append the new memory snapshot as an immutable event."""
+        from kurrentdbclient import NewEvent, StreamState
+
+        stream_name = self._stream_name(agent_name, user_id=user_id)
+        # Shallow-copy before stamping lastUpdated so the caller's dict is not
+        # mutated as a side-effect (mirrors FileMemoryStorage.save).
+        memory_data = {**memory_data, "lastUpdated": utc_now_iso_z()}
+        event_metadata = {"user_id": user_id, "agent_name": agent_name, "source": "deerflow-memory", "schema": "v0"}
+        try:
+            event = NewEvent(
+                type=EVENT_TYPE,
+                data=json.dumps(memory_data, ensure_ascii=False).encode("utf-8"),
+                metadata=json.dumps(event_metadata, ensure_ascii=False).encode("utf-8"),
+            )
+            self._get_client().append_to_stream(stream_name, events=event, current_version=StreamState.ANY)
+        except Exception as e:
+            logger.error("Failed to append memory event to KurrentDB stream %s: %s", stream_name, e)
+            return False
+        with self._cache_lock:
+            self._memory_cache[(user_id, agent_name)] = memory_data
+        logger.info("Memory appended to KurrentDB stream %s", stream_name)
+        return True

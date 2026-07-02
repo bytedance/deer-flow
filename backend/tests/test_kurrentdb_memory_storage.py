@@ -1,17 +1,17 @@
 """Tests for the event-sourced KurrentDB memory storage prototype (#3796)."""
 
+import json
+
 import pytest
 from kurrentdbclient import NewEvent
 from kurrentdbclient.exceptions import NotFoundError
 
 from deerflow.agents.memory.storage import MemoryStorage
 from deerflow.community.kurrentdb.memory_storage import (
+    EVENT_TYPE,
     STREAM_PREFIX,
     KurrentdbMemoryStorage,
 )
-
-# NOTE: `import json` and `EVENT_TYPE` are added to this import block in Task 3,
-# where they are first used — every task's commit must be ruff-clean (F401).
 
 
 class FakeKurrentDBClient:
@@ -77,3 +77,38 @@ class TestStreamName:
     def test_invalid_agent_name_raises(self, invalid_name):
         with pytest.raises(ValueError, match="Invalid agent name|Agent name must be a non-empty string"):
             KurrentdbMemoryStorage._stream_name(invalid_name, user_id="alice")
+
+
+class TestSave:
+    def test_appends_memory_updated_event(self, storage, fake_client):
+        memory = {"version": "1.0", "facts": [{"id": "f1", "content": "prefers uv"}]}
+
+        assert storage.save(memory, user_id="alice") is True
+
+        assert len(fake_client.append_calls) == 1
+        call = fake_client.append_calls[0]
+        assert call["stream_name"] == f"{STREAM_PREFIX}-alice"
+        event = call["events"][0]
+        assert event.type == EVENT_TYPE
+        stored = json.loads(event.data)
+        assert stored["facts"] == memory["facts"]
+        assert stored["lastUpdated"]  # stamped on save, mirrors FileMemoryStorage
+        metadata = json.loads(event.metadata)
+        assert metadata == {"user_id": "alice", "agent_name": None, "source": "deerflow-memory", "schema": "v0"}
+
+    def test_save_does_not_mutate_caller_dict(self, storage):
+        memory = {"version": "1.0", "facts": []}
+        storage.save(memory, user_id="alice")
+        assert "lastUpdated" not in memory
+
+    def test_save_failure_returns_false(self, fake_client):
+        def broken_append(*args, **kwargs):
+            raise ConnectionError("kurrentdb down")
+
+        fake_client.append_to_stream = broken_append
+        storage = KurrentdbMemoryStorage(client_factory=lambda: fake_client)
+        assert storage.save({"version": "1.0"}, user_id="alice") is False
+
+    def test_save_invalid_agent_name_raises(self, storage):
+        with pytest.raises(ValueError, match="Invalid agent name"):
+            storage.save({"version": "1.0"}, "bad/agent", user_id="alice")
