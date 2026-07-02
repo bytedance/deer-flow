@@ -42,6 +42,14 @@ class TestReplaceVirtualPathsWindows:
         result = replace_virtual_paths_in_command(cmd, _WIN_THREAD_DATA)
         assert "\\" not in result, f"Backslash in: {result}"
 
+    @patch("deerflow.sandbox.tools._resolve_acp_workspace_path", return_value=r"C:\Users\admin\deer-flow\acp-workspace\data.json")
+    @patch("deerflow.sandbox.tools._get_acp_workspace_host_path", return_value=r"C:\Users\admin\deer-flow\acp-workspace")
+    def test_acp_workspace_no_backslash(self, _mock_acp_host, _mock_resolve_acp) -> None:
+        cmd = "cat /mnt/acp-workspace/data.json"
+        result = replace_virtual_paths_in_command(cmd, _WIN_THREAD_DATA)
+        assert "\\" not in result, f"Backslash in: {result}"
+        assert "C:/Users/admin/deer-flow/acp-workspace/data.json" in result
+
 
 class TestLocalSandboxResolvePathsInCommandWindows:
     """LocalSandbox._resolve_paths_in_command must normalize backslashes."""
@@ -68,3 +76,4 @@ class TestLocalSandboxResolvePathsInCommandWindows:
         cmd = "ls /mnt/user-data/workspace/file.txt"
         result = sandbox._resolve_paths_in_command(cmd)
         assert "\\" not in result, f"Backslash in: {result}"
+        assert "C:/Users/admin/data/workspace/file.txt" in result
