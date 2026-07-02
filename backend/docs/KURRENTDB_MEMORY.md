@@ -206,6 +206,54 @@ After a save with new facts, open the Admin UI → Stream Browser and either
 browse `AgentMemory-deerflow-{user_id}` directly or the `$ce-AgentMemory`
 category to see every canonical `AgentMemory-*` stream across writers.
 
+## Demo: ask the agent about its own memory (KurrentDB MCP server)
+
+The [KurrentDB MCP server](https://github.com/kurrent-io/mcp-server) is a
+separate, stdio-based Python MCP server for exploring KurrentDB streams. It
+has no special knowledge of deer-flow — it just reads whatever streams the
+connection string can see. Wired in as an MCP tool, it lets the agent read
+its own memory event streams back: both the `deerflow.memory-*` snapshot
+streams this backend writes on `save()` and the canonical
+`AgentMemory-deerflow-{user_id}` `FactRetained` streams described above. This
+is an "art of the possible" demo, not a productized integration — see
+"Demo scope" below for the caveats.
+
+### Setup
+
+1. Clone the server: `git clone https://github.com/kurrent-io/mcp-server`.
+2. Copy the `kurrentdb` block from `extensions_config.example.json` (repo
+   root) into your `extensions_config.json`, set `args` to the real absolute
+   checkout path, and flip `enabled` to `true`.
+3. Make sure `KURRENTDB_CONNECTION_STRING` is set in your environment (same
+   variable used by `KurrentdbMemoryStorage` — see "Try it" above).
+
+**Enforcement nuance**: deer-flow's stdio command allowlist (`npx`, `uvx` by
+default) is enforced by the Gateway config API — direct edits to
+`extensions_config.json` load without it, but enabling/editing this server
+through the web UI or `PUT /api/mcp/config` requires
+`DEER_FLOW_MCP_STDIO_COMMAND_ALLOWLIST=npx,uvx,uv`.
+
+### Demo prompts
+
+- "Using the KurrentDB tools, list the streams in the `deerflow.memory`
+  category and summarize how my memory has changed over time."
+- "Read the `AgentMemory-deerflow-default` stream — which facts have you
+  retained about me, and when was each retained?"
+
+If `tool_search` (deferred tools) is enabled, the agent may first need to
+promote the KurrentDB tools by searching for them.
+
+### Demo scope — to be solved if productized
+
+- The MCP server holds the full connection string and can read every
+  stream, including other users' memory — acceptable in single-user dev
+  mode (`default`), but per-user scoping is a product decision for a real
+  integration.
+- The server is currently unpublished (clone + absolute path) — publishing
+  it to PyPI would make it a `uvx` one-liner needing no allowlist change.
+- Stdio sessions are pooled per (user, thread), so each new thread pays
+  subprocess startup.
+
 ## Tests
 
 `backend/tests/test_kurrentdb_memory_storage.py` — pure unit tests against a
