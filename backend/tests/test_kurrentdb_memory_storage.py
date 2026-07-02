@@ -273,28 +273,38 @@ class TestLoadCacheRace:
     """Fix 2: load() must not clobber a fresher concurrent save() with a stale read."""
 
     def test_load_returns_fresher_value_written_during_in_flight_read(self, fake_client):
+        # Single storage instance with a cold cache.
         storage = KurrentdbMemoryStorage(client_factory=lambda: fake_client)
         storage.save({"version": "1.0", "facts": [{"id": "old"}]}, user_id="alice")
+        # Clear the instance cache so the next load is cold and will call get_stream.
+        storage._memory_cache.clear()
 
-        # Reader with a cold cache (fresh instance, same client/stream).
-        reader = KurrentdbMemoryStorage(client_factory=lambda: fake_client)
         real_get_stream = fake_client.get_stream
-        newer_written = {}
+        wrapper_installed = {"is_active": True}
 
         def interleaved_get_stream(*args, **kwargs):
-            # Simulate a concurrent save() landing while our read is in flight.
-            storage.save({"version": "1.0", "facts": [{"id": "new"}]}, user_id="alice")
-            newer_written.update(storage._memory_cache[("alice", None)])
-            return real_get_stream(*args, **kwargs)
+            # Capture the current (old) events from the real client first.
+            old_events = real_get_stream(*args, **kwargs)
+
+            # Only interleave the save on the first call (uninstall after first use).
+            if wrapper_installed["is_active"]:
+                wrapper_installed["is_active"] = False
+                # Append a newer memory snapshot to the SAME instance's cache
+                # while the stale read is in flight (before we return old_events).
+                storage.save({"version": "1.0", "facts": [{"id": "newer"}]}, user_id="alice")
+
+            # Return the previously-captured old events (simulating a read that was
+            # already in flight when the save landed).
+            return old_events
 
         fake_client.get_stream = interleaved_get_stream
 
-        result = reader.load(user_id="alice")
+        result = storage.load(user_id="alice")
 
-        assert result == newer_written
-        assert result["facts"] == [{"id": "new"}]
-        # Cache must retain the fresher concurrent value, not the stale read.
-        assert reader._memory_cache[("alice", None)] == newer_written
+        # The fresher cached value (from the concurrent save) must win,
+        # not the stale in-flight read.
+        assert result["facts"] == [{"id": "newer"}]
+        assert storage._memory_cache[("alice", None)]["facts"] == [{"id": "newer"}]
 
 
 class TestTimeouts:
