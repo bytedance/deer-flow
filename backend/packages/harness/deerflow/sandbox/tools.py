@@ -1775,6 +1775,12 @@ def write_file_tool(
 ) -> str:
     """Write text content to a file. By default this overwrites the target file; set append=True to add content to the end without replacing existing content.
 
+    READ-BEFORE-WRITE (issue #3857): if the target file already exists (including
+    append=True), you must have read its CURRENT version with read_file first.
+    Any write invalidates earlier reads, so re-read between consecutive
+    modifications — a ranged read of the relevant section is enough. Writes
+    that fail this check are rejected with an error.
+
     SIZE POLICY (issue #3189):
     A single non-append write_file call must not exceed 80 KB of UTF-8 content.
     Oversized single-shot writes correlate with LLM streaming chunk-gap
@@ -1869,6 +1875,9 @@ def str_replace_tool(
 ) -> str:
     """Replace a substring in a file with another substring.
     If `replace_all` is False (default), the substring to replace must appear **exactly once** in the file.
+
+    READ-BEFORE-WRITE (issue #3857): you must have read the file's CURRENT
+    version with read_file first; any write invalidates earlier reads.
 
     Args:
         description: Explain why you are replacing the substring in short words. ALWAYS PROVIDE THIS PARAMETER FIRST.
