@@ -25,7 +25,6 @@ the sync ``KurrentDBClient``. Reads are cache-first: after the first load per
 import functools
 import json
 import logging
-import math
 import os
 import re
 import threading
@@ -33,6 +32,7 @@ from collections.abc import Callable
 from typing import Any
 
 from deerflow.agents.memory.storage import MemoryStorage, create_empty_memory, utc_now_iso_z
+from deerflow.community.kurrentdb._config import resolve_timeout_seconds
 from deerflow.config.agents_config import AGENT_NAME_PATTERN
 
 logger = logging.getLogger(__name__)
@@ -149,18 +149,7 @@ class KurrentdbMemoryStorage(MemoryStorage):
 
     @staticmethod
     def _resolve_timeout() -> float:
-        raw = os.environ.get("KURRENTDB_MEMORY_TIMEOUT_SECONDS", "").strip()
-        if not raw:
-            return DEFAULT_TIMEOUT_SECONDS
-        try:
-            value = float(raw)
-        except ValueError:
-            logger.warning("Invalid KURRENTDB_MEMORY_TIMEOUT_SECONDS %r: not a number, using default %s", raw, DEFAULT_TIMEOUT_SECONDS)
-            return DEFAULT_TIMEOUT_SECONDS
-        if not math.isfinite(value) or value <= 0:
-            logger.warning("Invalid KURRENTDB_MEMORY_TIMEOUT_SECONDS %r: must be a positive finite number, using default %s", raw, DEFAULT_TIMEOUT_SECONDS)
-            return DEFAULT_TIMEOUT_SECONDS
-        return value
+        return resolve_timeout_seconds("KURRENTDB_MEMORY_TIMEOUT_SECONDS", DEFAULT_TIMEOUT_SECONDS)
 
     @staticmethod
     def _validate_agent_name(agent_name: str) -> None:
