@@ -83,6 +83,18 @@ comes for free.
 - Multi-process deployments share streams but not caches — and unlike the
   file backend's mtime-checked cache, external appends are not observed by
   `load()` until `reload()` is called (or the process restarts).
+- **Writes are fail-closed after a failed read.** Read-modify-write callers
+  (`create_memory_fact` and friends in `agents/memory/updater.py`) do
+  `load()` → mutate → `save()`. If a transport or decode error is silently
+  swallowed, the mutated (empty-derived) state would otherwise be appended as
+  the new newest event, clobbering the real snapshot. To prevent this, a
+  failed `_read_latest()` (transport/decode error, not the legitimate
+  "stream does not exist yet" case) marks that `(user_id, agent_name)` key as
+  degraded; `save()` refuses to persist and returns `False` while the key is
+  degraded, logging why. A subsequent successful `reload()` (or `load()`) for
+  that key clears the gate and saves resume normally. Reader-facing behavior
+  is unchanged: `load()`/`reload()` still return empty memory on error and
+  never raise.
 
 ## Tests
 

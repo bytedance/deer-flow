@@ -65,6 +65,12 @@ class KurrentdbMemoryStorage(MemoryStorage):
         # FileMemoryStorage. Cache-first reads keep gRPC off hot paths.
         self._memory_cache: dict[tuple[str | None, str | None], dict[str, Any]] = {}
         self._cache_lock = threading.Lock()
+        # Keys whose last _read_latest() failed (transport/decode error, not
+        # NotFoundError). While a key is degraded, save() refuses to persist:
+        # read-modify-write callers (load() -> mutate -> save()) would
+        # otherwise append an empty-derived snapshot that supersedes the real
+        # newest event on the stream. Cleared on any successful read.
+        self._degraded_keys: set[tuple[str | None, str | None]] = set()
 
     @staticmethod
     def _validate_agent_name(agent_name: str) -> None:
@@ -106,28 +112,49 @@ class KurrentdbMemoryStorage(MemoryStorage):
         Returns the parsed memory dict, an empty structure when the stream
         does not exist yet, or ``None`` on transport/decode errors so callers
         can avoid caching failures (the next call retries).
+
+        Also maintains ``self._degraded_keys``: a transport/decode error
+        (``None`` return, not ``NotFoundError``) marks ``(user_id,
+        agent_name)`` as degraded so ``save()`` refuses to persist derived
+        state until a subsequent successful read clears the key.
         """
         from kurrentdbclient.exceptions import NotFoundError
 
+        cache_key = (user_id, agent_name)
         stream_name = self._stream_name(agent_name, user_id=user_id)
         try:
             events = self._get_client().get_stream(stream_name, backwards=True, limit=1)
         except NotFoundError:
+            self._clear_degraded(cache_key)
             return create_empty_memory()
         except Exception as e:
             logger.warning("Failed to read memory stream %s: %s", stream_name, e)
+            self._mark_degraded(cache_key)
             return None
         if not events:
+            self._clear_degraded(cache_key)
             return create_empty_memory()
         latest_event = events[0]
         if latest_event.type != EVENT_TYPE:
             logger.warning("Unexpected event type %r (expected %r) on memory stream %s", latest_event.type, EVENT_TYPE, stream_name)
+            self._mark_degraded(cache_key)
             return None
         try:
-            return json.loads(latest_event.data)
+            memory_data = json.loads(latest_event.data)
         except (json.JSONDecodeError, UnicodeDecodeError) as e:
             logger.warning("Failed to decode memory event from stream %s: %s", stream_name, e)
+            self._mark_degraded(cache_key)
             return None
+        self._clear_degraded(cache_key)
+        return memory_data
+
+    def _mark_degraded(self, cache_key: tuple[str | None, str | None]) -> None:
+        with self._cache_lock:
+            self._degraded_keys.add(cache_key)
+
+    def _clear_degraded(self, cache_key: tuple[str | None, str | None]) -> None:
+        with self._cache_lock:
+            self._degraded_keys.discard(cache_key)
 
     def load(self, agent_name: str | None = None, *, user_id: str | None = None) -> dict[str, Any]:
         """Load memory data (cache-first; first miss reads from KurrentDB)."""
@@ -140,8 +167,12 @@ class KurrentdbMemoryStorage(MemoryStorage):
         if memory_data is None:
             return create_empty_memory()
         with self._cache_lock:
-            self._memory_cache[cache_key] = memory_data
-        return memory_data
+            # Populate-only-if-absent: a concurrent save() may have already
+            # written a fresher value while this read was in flight. That
+            # value is newer than what we just read, so keep it and return
+            # it instead of clobbering the cache with our stale read.
+            self._memory_cache.setdefault(cache_key, memory_data)
+            return self._memory_cache[cache_key]
 
     def reload(self, agent_name: str | None = None, *, user_id: str | None = None) -> dict[str, Any]:
         """Force a re-read from KurrentDB, refreshing the cache on success."""
@@ -157,6 +188,14 @@ class KurrentdbMemoryStorage(MemoryStorage):
         from kurrentdbclient import NewEvent, StreamState
 
         stream_name = self._stream_name(agent_name, user_id=user_id)
+        cache_key = (user_id, agent_name)
+        with self._cache_lock:
+            if cache_key in self._degraded_keys:
+                logger.error(
+                    "Refusing to save memory for stream %s: the last read failed, so the current in-memory state may be derived from an empty snapshot instead of the real newest event. Call reload() to re-sync before saving.",
+                    stream_name,
+                )
+                return False
         # Shallow-copy before stamping lastUpdated so the caller's dict is not
         # mutated as a side-effect (mirrors FileMemoryStorage.save).
         memory_data = {**memory_data, "lastUpdated": utc_now_iso_z()}

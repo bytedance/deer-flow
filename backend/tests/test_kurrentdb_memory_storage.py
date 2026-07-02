@@ -212,6 +212,91 @@ class TestLoadReload:
         assert fake_client.append_calls == []
 
 
+class TestDegradedSaveGate:
+    """Fix 1: save() must refuse to persist after a failed read (fail-closed).
+
+    Read-modify-write callers do load() -> mutate -> save(). If a transient
+    read error silently returns empty-derived memory, the following save()
+    would append that empty snapshot as the new newest event, clobbering the
+    real data. save() must instead refuse until a successful reload()/load().
+    """
+
+    def test_save_refused_after_failed_load(self, fake_client):
+        def broken_get_stream(*args, **kwargs):
+            raise ConnectionError("kurrentdb down")
+
+        fake_client.get_stream = broken_get_stream
+        storage = KurrentdbMemoryStorage(client_factory=lambda: fake_client)
+
+        # Transient read error -> reader gets empty memory back (unchanged contract).
+        assert storage.load(user_id="alice")["facts"] == []
+
+        # But save() must be gated: refuse to persist derived-from-empty state.
+        assert storage.save({"version": "1.0", "facts": []}, user_id="alice") is False
+        assert fake_client.append_calls == []
+
+    def test_reload_heals_the_gate_and_save_succeeds(self, fake_client):
+        calls = {"n": 0}
+        real_get_stream = fake_client.get_stream
+
+        def flaky_get_stream(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise ConnectionError("kurrentdb down")
+            return real_get_stream(*args, **kwargs)
+
+        fake_client.get_stream = flaky_get_stream
+        storage = KurrentdbMemoryStorage(client_factory=lambda: fake_client)
+
+        assert storage.load(user_id="alice")["facts"] == []  # fails, gates the key
+        assert storage.save({"version": "1.0", "facts": []}, user_id="alice") is False
+        assert fake_client.append_calls == []
+
+        # Fake has healed; a successful reload() clears the gate.
+        assert storage.reload(user_id="alice")["facts"] == []
+        assert storage.save({"version": "1.0", "facts": [{"id": "f1"}]}, user_id="alice") is True
+        assert len(fake_client.append_calls) == 1
+
+    def test_save_without_prior_read_failure_is_unaffected(self, storage, fake_client):
+        # Fresh storage, no prior load() at all -- must not be gated.
+        assert storage.save({"version": "1.0", "facts": []}, user_id="alice") is True
+        assert len(fake_client.append_calls) == 1
+
+    def test_save_after_successful_load_is_unaffected(self, storage, fake_client):
+        # A successful load (NotFound/empty case) must not gate subsequent saves.
+        assert storage.load(user_id="alice")["facts"] == []
+        assert storage.save({"version": "1.0", "facts": []}, user_id="alice") is True
+        assert len(fake_client.append_calls) == 1
+
+
+class TestLoadCacheRace:
+    """Fix 2: load() must not clobber a fresher concurrent save() with a stale read."""
+
+    def test_load_returns_fresher_value_written_during_in_flight_read(self, fake_client):
+        storage = KurrentdbMemoryStorage(client_factory=lambda: fake_client)
+        storage.save({"version": "1.0", "facts": [{"id": "old"}]}, user_id="alice")
+
+        # Reader with a cold cache (fresh instance, same client/stream).
+        reader = KurrentdbMemoryStorage(client_factory=lambda: fake_client)
+        real_get_stream = fake_client.get_stream
+        newer_written = {}
+
+        def interleaved_get_stream(*args, **kwargs):
+            # Simulate a concurrent save() landing while our read is in flight.
+            storage.save({"version": "1.0", "facts": [{"id": "new"}]}, user_id="alice")
+            newer_written.update(storage._memory_cache[("alice", None)])
+            return real_get_stream(*args, **kwargs)
+
+        fake_client.get_stream = interleaved_get_stream
+
+        result = reader.load(user_id="alice")
+
+        assert result == newer_written
+        assert result["facts"] == [{"id": "new"}]
+        # Cache must retain the fresher concurrent value, not the stale read.
+        assert reader._memory_cache[("alice", None)] == newer_written
+
+
 class TestGetMemoryStorageIntegration:
     STORAGE_CLASS_PATH = "deerflow.community.kurrentdb.memory_storage.KurrentdbMemoryStorage"
 
