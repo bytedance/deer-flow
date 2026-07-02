@@ -559,6 +559,10 @@ def _set_csrf_cookie(response: Response, request: Request) -> None:
         httponly=False,  # Must be JS-readable for Double Submit Cookie pattern
         secure=is_https,
         samesite="strict",
+        # Persist for the same lifetime as the access_token (see _set_session_cookie)
+        # so the double-submit pair is evicted together, never leaving a logged-in
+        # session whose csrf_token was dropped (e.g. iOS Safari PWA termination).
+        max_age=get_auth_config().token_expiry_days * 24 * 3600 if is_https else None,
     )
 
 

@@ -126,19 +126,9 @@ def _create_summarization_middleware(*, app_config: AppConfig | None = None) -> 
     if resolved_app_config.memory.enabled:
         hooks.append(memory_flush_hook)
 
-    # The logic below relies on two assumptions holding true: this factory is
-    # the sole entry point for DeerFlowSummarizationMiddleware, and the runtime
-    # config is not expected to change after startup.
-    skills_container_path = resolved_app_config.skills.container_path or "/mnt/skills"
-
     return DeerFlowSummarizationMiddleware(
         **kwargs,
-        skills_container_path=skills_container_path,
-        skill_file_read_tool_names=config.skill_file_read_tool_names,
         before_summarization=hooks,
-        preserve_recent_skill_count=config.preserve_recent_skill_count,
-        preserve_recent_skill_tokens=config.preserve_recent_skill_tokens,
-        preserve_recent_skill_tokens_per_skill=config.preserve_recent_skill_tokens_per_skill,
     )
 
 
@@ -311,6 +301,18 @@ def build_middlewares(
     from deerflow.agents.middlewares.skill_activation_middleware import SkillActivationMiddleware
 
     middlewares.append(SkillActivationMiddleware(available_skills=available_skills, app_config=resolved_app_config))
+
+    # Capture completed task delegations and loaded skill files before
+    # summarization can compact them, then inject durable context channels
+    # (summary + ledger + skills) into model calls.
+    from deerflow.agents.middlewares.durable_context_middleware import DurableContextMiddleware
+
+    middlewares.append(
+        DurableContextMiddleware(
+            skills_container_path=resolved_app_config.skills.container_path,
+            skill_file_read_tool_names=resolved_app_config.summarization.skill_file_read_tool_names,
+        )
+    )
 
     # Add summarization middleware if enabled
     summarization_middleware = _create_summarization_middleware(app_config=resolved_app_config)

@@ -177,6 +177,7 @@ export const enUS: Translations = {
     recentChats: "Recent chats",
     demoChats: "Demo chats",
     agents: "Agents",
+    agentsDisabledTooltip: "Feature not enabled",
   },
 
   // Agents
@@ -188,6 +189,9 @@ export const enUS: Translations = {
     emptyTitle: "No custom agents yet",
     emptyDescription:
       "Create your first custom agent with a specialized system prompt.",
+    featureDisabledTitle: "Agents feature is not enabled",
+    featureDisabledDescription:
+      "This feature is not enabled on this server. Please contact your administrator.",
     chat: "Chat",
     delete: "Delete",
     deleteConfirm:
@@ -331,6 +335,14 @@ export const enUS: Translations = {
   uploads: {
     uploading: "Uploading...",
     uploadingFiles: "Uploading files, please wait...",
+    limitsHint: (maxFiles: number, maxFileSize: string, maxTotalSize: string) =>
+      `Add attachments (up to ${maxFiles} files, ${maxFileSize} each, ${maxTotalSize} total). Most regular file types are supported; compress macOS .app bundles first.`,
+    filesTooLarge: (files: string, maxFileSize: string) =>
+      `Files exceeding the ${maxFileSize} per-file limit were not added: ${files}.`,
+    tooManyFiles: (count: number, maxFiles: number) =>
+      `${count} file${count === 1 ? " was" : "s were"} not added. You can attach up to ${maxFiles} files at once.`,
+    totalSizeTooLarge: (count: number, maxTotalSize: string) =>
+      `${count} file${count === 1 ? " was" : "s were"} not added. Attachments can total up to ${maxTotalSize}.`,
   },
 
   subtasks: {
@@ -517,6 +529,9 @@ export const enUS: Translations = {
       emptyDescription:
         "Put your agent skill folders under the `/skills/custom` folder under the root folder of DeerFlow.",
       emptyButton: "Create Your First Skill",
+      adminRequired: "Admin privileges are required to manage agent skills.",
+      installAdminRequired:
+        "Admin privileges are required to install agent skills.",
     },
     notification: {
       title: "Notification",

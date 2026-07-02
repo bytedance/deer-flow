@@ -119,6 +119,7 @@ export interface Translations {
     chats: string;
     demoChats: string;
     agents: string;
+    agentsDisabledTooltip: string;
     channels: string;
   };
 
@@ -129,6 +130,8 @@ export interface Translations {
     newAgent: string;
     emptyTitle: string;
     emptyDescription: string;
+    featureDisabledTitle: string;
+    featureDisabledDescription: string;
     chat: string;
     delete: string;
     deleteConfirm: string;
@@ -251,6 +254,14 @@ export interface Translations {
   uploads: {
     uploading: string;
     uploadingFiles: string;
+    limitsHint: (
+      maxFiles: number,
+      maxFileSize: string,
+      maxTotalSize: string,
+    ) => string;
+    filesTooLarge: (files: string, maxFileSize: string) => string;
+    tooManyFiles: (count: number, maxFiles: number) => string;
+    totalSizeTooLarge: (count: number, maxTotalSize: string) => string;
   };
 
   // Subtasks
@@ -423,6 +434,8 @@ export interface Translations {
       emptyTitle: string;
       emptyDescription: string;
       emptyButton: string;
+      adminRequired: string;
+      installAdminRequired: string;
     };
     notification: {
       title: string;

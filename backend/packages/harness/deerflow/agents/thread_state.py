@@ -1,6 +1,9 @@
+from collections.abc import Mapping
 from typing import Annotated, NotRequired, TypedDict
 
 from langchain.agents import AgentState
+
+from deerflow.subagents.status_contract import SUBAGENT_STATUS_VALUES
 
 
 class SandboxState(TypedDict):
@@ -108,6 +111,107 @@ def merge_promoted(existing: PromotedTools | None, new: PromotedTools | None) ->
     }
 
 
+TERMINAL_STATUSES: frozenset[str] = frozenset(SUBAGENT_STATUS_VALUES)
+_DELEGATION_LEDGER_MAX_ENTRIES = 50
+
+
+class DelegationEntry(TypedDict):
+    id: str
+    description: str
+    subagent_type: str
+    status: str
+    result_brief: NotRequired[str]
+    result_sha256: NotRequired[str]
+    result_ref: NotRequired[str]
+    created_at: str
+
+
+def merge_delegations(existing: list[DelegationEntry] | None, new: list[DelegationEntry] | None) -> list[DelegationEntry]:
+    """Reducer for the delegation ledger.
+
+    - new None/empty -> preserve existing.
+    - append entries, replacing same id with the latest version while preserving
+      first-seen order.
+    - terminal status is never overwritten by a non-terminal status.
+    """
+    if not new:
+        return existing or []
+
+    by_id: dict[str, DelegationEntry] = {}
+    order: list[str] = []
+    for entry in [*(existing or []), *new]:
+        entry_id = entry["id"]
+        previous = by_id.get(entry_id)
+        if previous is not None and previous["status"] in TERMINAL_STATUSES and entry["status"] not in TERMINAL_STATUSES:
+            continue
+        if entry_id not in by_id:
+            order.append(entry_id)
+        elif previous.get("created_at"):
+            entry = {**entry, "created_at": previous["created_at"]}
+        by_id[entry_id] = entry
+    merged = [by_id[entry_id] for entry_id in order]
+    if len(merged) > _DELEGATION_LEDGER_MAX_ENTRIES:
+        merged = merged[-_DELEGATION_LEDGER_MAX_ENTRIES:]
+    return merged
+
+
+_SKILL_CONTEXT_MAX_ENTRIES = 8
+_SKILL_DESCRIPTION_MAX_CHARS = 500
+
+
+class SkillEntry(TypedDict):
+    name: str
+    path: str
+    description: str
+    loaded_at: int
+
+
+def _normalize_skill_entry(entry: Mapping[str, object]) -> SkillEntry:
+    """Drop legacy payload keys before storing skill_context back to state."""
+    description = entry.get("description")
+    loaded_at = entry.get("loaded_at")
+    return {
+        "name": str(entry.get("name") or ""),
+        "path": str(entry["path"]),
+        "description": " ".join(description.split())[:_SKILL_DESCRIPTION_MAX_CHARS] if isinstance(description, str) else "",
+        "loaded_at": loaded_at if isinstance(loaded_at, int) else 0,
+    }
+
+
+def merge_skill_context(existing: list[SkillEntry] | None, new: list[SkillEntry] | None) -> list[SkillEntry]:
+    """Reducer for the skill-context channel.
+
+    - new None/empty -> preserve existing.
+    - legacy entries are normalized to references; verbatim body keys are dropped.
+    - dedup by ``path``; later reads refresh recency and replace the reference.
+    - cap by keeping the most recently read entries. ``loaded_at`` is
+      observational only because message indices reset after compaction.
+    """
+    normalized_existing = [_normalize_skill_entry(entry) for entry in existing or []]
+    if not new:
+        return normalized_existing
+
+    by_path: dict[str, SkillEntry] = {}
+    order: list[str] = []
+    for entry in normalized_existing:
+        path = entry["path"]
+        if path not in by_path:
+            order.append(path)
+        by_path[path] = entry
+
+    for entry in (_normalize_skill_entry(entry) for entry in new):
+        path = entry["path"]
+        if path in by_path:
+            order.remove(path)
+        order.append(path)
+        by_path[path] = entry
+
+    merged = [by_path[path] for path in order]
+    if len(merged) > _SKILL_CONTEXT_MAX_ENTRIES:
+        merged = merged[-_SKILL_CONTEXT_MAX_ENTRIES:]
+    return merged
+
+
 class ThreadState(AgentState):
     sandbox: SandboxStateField
     thread_data: NotRequired[ThreadDataState | None]
@@ -117,3 +221,6 @@ class ThreadState(AgentState):
     uploaded_files: NotRequired[list[dict] | None]
     viewed_images: Annotated[dict[str, ViewedImageData], merge_viewed_images]  # image_path -> {base64, mime_type}
     promoted: Annotated[PromotedTools | None, merge_promoted]
+    delegations: Annotated[list[DelegationEntry], merge_delegations]
+    skill_context: Annotated[list[SkillEntry], merge_skill_context]
+    summary_text: NotRequired[str | None]

@@ -22,6 +22,7 @@ import { isHiddenFromUIMessage } from "../messages/utils";
 import type { FileInMessage } from "../messages/utils";
 import type { LocalSettings } from "../settings";
 import { useUpdateSubtask } from "../tasks/context";
+import { messageToStep } from "../tasks/steps";
 import type { UploadedFileInfo } from "../uploads";
 import { promptInputFilePartToFile, uploadFiles } from "../uploads";
 
@@ -215,7 +216,13 @@ export function buildVisibleHistoryMessages(
     (message) => !supersededRunIds.has(message.run_id),
   );
   return dedupeMessagesByIdentity([
-    ...visibleRows.map((message) => message.content),
+    // Carry the owning run_id onto the content message so historical subtask
+    // cards can fetch their persisted step history on expand (#3779). run_id
+    // lives on the RunMessage wrapper and would otherwise be dropped here.
+    ...visibleRows.map((message) => ({
+      ...message.content,
+      run_id: message.run_id,
+    })),
     ...appendedMessages,
   ]);
 }
@@ -606,6 +613,58 @@ export function upsertThreadInInfiniteCache(
   );
 }
 
+export function invalidateStoppedThreadCaches(
+  queryClient: QueryClient,
+  threadId: string | null | undefined,
+  isMock = false,
+) {
+  void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
+  void queryClient.invalidateQueries({
+    queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
+  });
+
+  if (!threadId || isMock) {
+    return;
+  }
+
+  void queryClient.invalidateQueries({ queryKey: ["thread", threadId] });
+  void queryClient.invalidateQueries({
+    queryKey: ["thread", "metadata", threadId, isMock],
+  });
+  void queryClient.invalidateQueries({
+    queryKey: threadTokenUsageQueryKey(threadId),
+  });
+}
+
+export const STOP_THREAD_FINALIZATION_REFETCH_DELAY_MS = 1500;
+
+function scheduleStoppedThreadFinalizationRefetch(
+  queryClient: QueryClient,
+  threadId: string | null | undefined,
+  isMock = false,
+) {
+  if (isMock) {
+    return;
+  }
+  globalThis.setTimeout(() => {
+    invalidateStoppedThreadCaches(queryClient, threadId, isMock);
+  }, STOP_THREAD_FINALIZATION_REFETCH_DELAY_MS);
+}
+
+export async function stopThreadAndInvalidateCaches(
+  queryClient: QueryClient,
+  stop: () => Promise<void> | void,
+  threadId: string | null | undefined,
+  isMock = false,
+) {
+  try {
+    await stop();
+  } finally {
+    invalidateStoppedThreadCaches(queryClient, threadId, isMock);
+    scheduleStoppedThreadFinalizationRefetch(queryClient, threadId, isMock);
+  }
+}
+
 function getStreamErrorMessage(error: unknown): string {
   if (typeof error === "string" && error.trim()) {
     return error;
@@ -831,6 +890,9 @@ export function useThreadStream({
       const _messages = getSummarizationMiddlewareMessages(data);
       if (_messages && _messages.length >= 2) {
         for (const m of _messages) {
+          // Backward-compat shim: pre-PR2 threads may still carry a synthetic
+          // HumanMessage(name="summary") from the old summarization path. New
+          // threads keep the summary in ThreadState.summary_text instead.
           if (m.name === "summary" && m.type === "human") {
             summarizedRef.current?.add(m.id ?? "");
           }
@@ -912,8 +974,16 @@ export function useThreadStream({
           type: "task_running";
           task_id: string;
           message: AIMessage;
+          message_index?: number;
         };
-        updateSubtask({ id: e.task_id, latestMessage: e.message });
+        // Accumulate the full step history instead of overwriting (#3779): keep
+        // latestMessage for the collapsed-header tool-call hint, and append the
+        // normalized step (assistant turn or tool output) to the timeline.
+        updateSubtask({
+          id: e.task_id,
+          latestMessage: e.message,
+          steps: [messageToStep(e.message, e.message_index ?? 0)],
+        });
         return;
       }
 
@@ -955,20 +1025,20 @@ export function useThreadStream({
           .map(messageIdentity)
           .filter((id): id is string => Boolean(id)),
       );
-      void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
-      void queryClient.invalidateQueries({
-        queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
-      });
-      if (threadIdRef.current && !isMock) {
-        void queryClient.invalidateQueries({
-          queryKey: ["thread", threadIdRef.current],
-        });
-        void queryClient.invalidateQueries({
-          queryKey: threadTokenUsageQueryKey(threadIdRef.current),
-        });
-      }
+      invalidateStoppedThreadCaches(queryClient, threadIdRef.current, isMock);
     },
   });
+
+  const stopThread = useCallback(async () => {
+    const stoppedThreadId =
+      threadIdRef.current ?? displayThreadId ?? threadId ?? null;
+    await stopThreadAndInvalidateCaches(
+      queryClient,
+      () => thread.stop(),
+      stoppedThreadId,
+      isMock,
+    );
+  }, [displayThreadId, isMock, queryClient, thread, threadId]);
 
   const hasVisibleStreamState =
     Boolean(threadId) || liveMessagesThreadId === currentViewThreadId;
@@ -1440,6 +1510,7 @@ export function useThreadStream({
   // History messages may overlap with thread.messages; thread.messages take precedence
   const mergedThread = {
     ...thread,
+    stop: stopThread,
     values: hasVisibleStreamState ? thread.values : EMPTY_THREAD_VALUES,
     messages: mergedMessages,
   } as typeof thread;

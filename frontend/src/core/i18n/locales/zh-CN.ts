@@ -170,6 +170,7 @@ export const zhCN: Translations = {
     recentChats: "最近的对话",
     demoChats: "演示对话",
     agents: "智能体",
+    agentsDisabledTooltip: "功能未启用",
   },
 
   // Agents
@@ -179,6 +180,8 @@ export const zhCN: Translations = {
     newAgent: "新建智能体",
     emptyTitle: "还没有自定义智能体",
     emptyDescription: "创建你的第一个自定义智能体，设置专属系统提示词。",
+    featureDisabledTitle: "智能体功能未启用",
+    featureDisabledDescription: "该功能未在此服务器上启用，请联系管理员。",
     chat: "对话",
     delete: "删除",
     deleteConfirm: "确定要删除该智能体吗？此操作不可撤销。",
@@ -316,6 +319,14 @@ export const zhCN: Translations = {
   uploads: {
     uploading: "上传中...",
     uploadingFiles: "文件上传中，请稍候...",
+    limitsHint: (maxFiles: number, maxFileSize: string, maxTotalSize: string) =>
+      `添加附件（最多 ${maxFiles} 个，单文件不超过 ${maxFileSize}，总计不超过 ${maxTotalSize}）。支持常规文件类型；macOS .app 应先压缩。`,
+    filesTooLarge: (files: string, maxFileSize: string) =>
+      `${files} 超过单文件 ${maxFileSize} 的限制，未被添加。`,
+    tooManyFiles: (count: number, maxFiles: number) =>
+      `有 ${count} 个文件未被添加；一次最多添加 ${maxFiles} 个文件。`,
+    totalSizeTooLarge: (count: number, maxTotalSize: string) =>
+      `有 ${count} 个文件未被添加；附件总大小不能超过 ${maxTotalSize}。`,
   },
 
   subtasks: {
@@ -495,6 +506,8 @@ export const zhCN: Translations = {
       emptyDescription:
         "将你的 Agent Skill 文件夹放在 DeerFlow 根目录下的 `/skills/custom` 文件夹中。",
       emptyButton: "创建你的第一个技能",
+      adminRequired: "需要管理员权限才能管理 Agent Skill。",
+      installAdminRequired: "需要管理员权限才能安装 Agent Skill。",
     },
     notification: {
       title: "通知",

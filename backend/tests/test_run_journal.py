@@ -841,20 +841,6 @@ class TestChatModelStartHumanMessage:
         assert human_events[0]["content"]["content"] == "What is AI?"
 
     @pytest.mark.anyio
-    async def test_skips_summary_named_human_messages(self, journal_setup):
-        """HumanMessages with name='summary' are skipped."""
-        from langchain_core.messages import HumanMessage
-
-        j, store = journal_setup
-        messages_batch = [
-            [HumanMessage(content="Summarized context", name="summary"), HumanMessage(content="Real question")],
-        ]
-        j.on_chat_model_start({}, messages_batch, run_id=uuid4(), tags=["lead_agent"])
-        await j.flush()
-
-        assert j._first_human_msg == "Real question"
-
-    @pytest.mark.anyio
     async def test_skips_hidden_human_messages(self, journal_setup):
         """HumanMessages hidden from the UI are internal context, not user input."""
         from langchain_core.messages import HumanMessage
@@ -891,6 +877,21 @@ class TestChatModelStartHumanMessage:
             additional_kwargs={"hide_from_ui": True},
         )
         j.on_chat_model_start({}, [[hidden_message]], run_id=uuid4(), tags=["lead_agent"])
+        await j.flush()
+
+        assert j._first_human_msg is None
+        assert j.get_completion_data()["message_count"] == 0
+        events = await store.list_events("t1", "r1")
+        assert not any(e["event_type"] == "llm.human.input" for e in events)
+
+    @pytest.mark.anyio
+    async def test_legacy_summary_message_is_not_captured_as_user_input(self, journal_setup):
+        """Legacy synthetic summaries are internal context even if hide_from_ui is absent."""
+        from langchain_core.messages import HumanMessage
+
+        j, store = journal_setup
+        legacy_summary = HumanMessage(content="Older compressed conversation state", name="summary")
+        j.on_chat_model_start({}, [[legacy_summary]], run_id=uuid4(), tags=["lead_agent"])
         await j.flush()
 
         assert j._first_human_msg is None

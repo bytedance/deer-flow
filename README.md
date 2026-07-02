@@ -114,6 +114,17 @@ That prompt is intended for coding agents. It tells the agent to clone the repo 
    The wizard also lets you configure an optional web search provider, or skip it for now.
 
    Run `make doctor` at any time to verify your setup and get actionable fix hints.
+   If you are opening a GitHub issue about a local setup or runtime problem, run
+   `make support-bundle`. The command prints reporter next steps, writes a
+   `*-issue-summary.md` file to paste into the issue, a `*-issue-draft.md` file
+   for AI-assisted issue filing, and an optional evidence zip under
+   `.deer-flow/support-bundles/`. If an AI assistant files the issue, start from
+   the draft and replace every REQUIRED placeholder instead of inventing missing
+   facts. Attach the zip only if a maintainer asks for it, or if the summary
+   alone is not enough. Maintainers and AI triage tools can start with
+   `triage.json`; the bundle includes redacted diagnostics and file manifests
+   only, and does not include `.env`, raw conversation messages, or user file
+   contents.
 
    > **Advanced / manual configuration**: If you prefer to edit `config.yaml` directly, run `make config` instead to copy the full template. See `config.example.yaml` for the complete reference including CLI-backed providers (Codex CLI, Claude Code OAuth), OpenRouter, Responses API, and more.
 
@@ -591,9 +602,11 @@ Users can explicitly activate an enabled skill for a single turn by starting the
 
 When you install `.skill` archives through the Gateway, DeerFlow accepts standard optional frontmatter metadata such as `version`, `author`, and `compatibility` instead of rejecting otherwise valid external skills.
 
-Tools follow the same philosophy. DeerFlow comes with a core toolset — web search, web fetch, file operations, bash execution — and supports custom tools via MCP servers and Python functions. Swap anything. Add anything.
+Tools follow the same philosophy. DeerFlow comes with a core toolset — web search, web fetch, rendered web capture, file operations, bash execution — and supports custom tools via MCP servers and Python functions. Swap anything. Add anything.
 
 Gateway-generated follow-up suggestions now normalize both plain-string model output and block/list-style rich content before parsing the JSON array response, so provider-specific content wrappers do not silently drop suggestions.
+
+Interrupted first-turn runs still persist a fallback conversation title, so stopping a streaming response does not leave the thread as "Untitled" after refresh.
 
 ```
 # Paths inside the sandbox container
@@ -651,7 +664,7 @@ DeerFlow doesn't just *talk* about doing things. It has its own computer.
 
 Each task gets its own execution environment with a full filesystem view — skills, workspace, uploads, outputs. The agent reads, writes, and edits files. It can view images and, when configured safely, execute shell commands.
 
-With `AioSandboxProvider`, shell execution runs inside isolated containers. With `LocalSandboxProvider`, file tools still map to per-thread directories on the host, but host `bash` is disabled by default because it is not a secure isolation boundary. Re-enable host bash only for fully trusted local workflows.
+With `AioSandboxProvider`, shell execution runs inside isolated containers. With `LocalSandboxProvider`, file tools still map to per-thread directories on the host, but host `bash` is disabled by default because it is not a secure isolation boundary. Re-enable host bash only for fully trusted local workflows. Host bash commands have a wall-clock timeout, and long-lived processes should be started in the background with output redirected to a workspace log.
 
 This is the difference between a chatbot with tool access and an agent with an actual execution environment.
 

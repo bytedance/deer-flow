@@ -453,10 +453,27 @@ test("buildVisibleHistoryMessages filters superseded runs but keeps regenerated 
     },
   ];
 
+  // run_id is carried onto each content message (#3779) so historical subtask
+  // cards can fetch their persisted step history on expand.
   expect(buildVisibleHistoryMessages(rows, new Set(["run-old"]), [])).toEqual([
-    newHuman,
-    newAi,
+    { ...newHuman, run_id: "run-new" },
+    { ...newAi, run_id: "run-new" },
   ]);
+});
+
+test("buildVisibleHistoryMessages attaches run_id to each content message (#3779)", () => {
+  const rows: RunMessage[] = [
+    {
+      run_id: "run-1",
+      content: { id: "ai-1", type: "ai", content: "answer" } as Message,
+      metadata: { caller: "lead_agent" },
+      created_at: "2026-06-26T00:00:00Z",
+    },
+  ];
+
+  const result = buildVisibleHistoryMessages(rows, new Set(), []);
+
+  expect((result[0] as { run_id?: string }).run_id).toBe("run-1");
 });
 
 test("loading runs in newest-first order and prepending pages yields chronological messages (regression for #3352)", () => {
