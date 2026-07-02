@@ -51,6 +51,9 @@ tui = ["textual>=0.80"]
 # install command resolves cleanly without an "unknown extra" warning.
 groundroute = []
 ollama = ["langchain-ollama>=0.3.0"]
+# Event-sourced memory storage prototype backed by KurrentDB (deer-flow
+# discussion #3796). Optional so the core harness install stays lean.
+kurrentdb = ["kurrentdbclient>=1.3,<2"]
 postgres = [
     "asyncpg>=0.29",
     "langgraph-checkpoint-postgres>=3.0.5",

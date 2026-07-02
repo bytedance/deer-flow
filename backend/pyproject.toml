@@ -37,6 +37,10 @@ dev = [
     # TUI runtime dep (also declared as the deerflow-harness[tui] extra); kept in
     # the dev group so the terminal workbench can be run and tested locally / in CI.
     "textual>=0.80",
+    # KurrentDB memory-storage prototype dep (also declared as the
+    # deerflow-harness[kurrentdb] extra); in the dev group so its unit
+    # tests run locally and in CI.
+    "kurrentdbclient>=1.3,<2",
 ]
 
 [tool.pytest.ini_options]
