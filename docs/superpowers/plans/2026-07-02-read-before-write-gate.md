@@ -14,9 +14,9 @@
 - Tools stay stateless — all gate state derives from messages (issue #3857 requirement).
 - Fail-open on unexpected gate errors (only a missing/stale mark blocks); blocked-tool errors must not leak backend config keys/paths.
 - Async hooks must not run blocking IO on the event loop (`asyncio.to_thread` / `ensure_sandbox_initialized_async` pattern, see `_run_sync_tool_after_async_sandbox_init` in `sandbox/tools.py`).
-- Default enabled (`read_before_write.enabled: true`); config schema change ⇒ bump `config_version` in `config.example.yaml` (15 → 16).
+- Default enabled (`read_before_write.enabled: true`); config schema change ⇒ bump `config_version` in `config.example.yaml` (15 → 16 at planning time; landed as 16 → 17 after merging upstream/main, where 16 was taken by `max_recursion_limit`).
 - Backend TDD is mandatory; run `cd backend && make format` before finishing.
-- All backend commands run from `/home/nan/c_project/deer-flow/backend` with `PYTHONPATH=. uv run pytest ...`.
+- All backend commands run from the repo's `backend/` directory with `PYTHONPATH=. uv run pytest ...`.
 
 ---
 
@@ -598,7 +598,7 @@ git commit -m "test(middlewares): pin async read-before-write gate paths (#3857)
 - Create: `backend/packages/harness/deerflow/config/read_before_write_config.py`
 - Modify: `backend/packages/harness/deerflow/config/app_config.py` (imports at top; field after `loop_detection` at ~line 133)
 - Modify: `backend/packages/harness/deerflow/agents/middlewares/tool_error_handling_middleware.py:192-197` (tail layer)
-- Modify: `config.example.yaml` (`config_version: 15` → `16` at line 18; new section near `loop_detection:` at ~line 836)
+- Modify: `config.example.yaml` (bump `config_version` — 16 → 17 as landed; new section near `loop_detection:` at ~line 836)
 - Modify: `backend/tests/test_tool_error_handling_middleware.py:178-218` (chain-order pin test)
 - Test: `backend/tests/test_read_before_write_middleware.py`
 
@@ -702,7 +702,7 @@ from deerflow.config.read_before_write_config import ReadBeforeWriteConfig
     tail.append(ToolErrorHandlingMiddleware())
 ```
 
-`config.example.yaml` — bump `config_version: 15` → `config_version: 16`; add next to the `loop_detection:` section:
+`config.example.yaml` — bump `config_version` by one (landed as 17); add next to the `loop_detection:` section:
 
 ```yaml
 # Read-before-write file gate (issue #3857).
