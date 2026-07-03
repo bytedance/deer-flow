@@ -1417,6 +1417,39 @@ def _truncate_ls_output(output: str, max_chars: int) -> str:
     return f"{output[:kept]}{marker}"
 
 
+# Fixed env var exposing the IM-channel platform user id (Feishu open_id,
+# Slack Uxxx, ...) to sandbox commands, so skills can act on the current end
+# user's channel identity (#3914). An identifier, not a secret.
+CHANNEL_USER_ID_ENV = "DEERFLOW_CHANNEL_USER_ID"
+
+_CHANNEL_USER_ID_CONTEXT_KEY = "channel_user_id"
+
+
+def _is_windows() -> bool:
+    return os.name == "nt"
+
+
+def _channel_identity_prefix(runtime: Runtime) -> str | None:
+    """Build the ``export`` prefix carrying the channel user id, or ``None``.
+
+    The id deliberately rides the command string instead of the
+    ``execute_command(env=...)`` channel: a non-empty ``env`` switches
+    ``AioSandbox`` to the ``bash.exec`` API (fresh session per call, image
+    >= 1.9.3 required), which is reserved for request-scoped secrets. A plain
+    ``export`` prefix keeps the legacy persistent-shell path, is visible in
+    audit logs (fine — it is an identifier, not a secret), and gives per-call
+    correctness in group chats where one thread/sandbox is shared by senders
+    with different platform ids.
+    """
+    context = getattr(runtime, "context", None)
+    if not isinstance(context, dict):
+        return None
+    channel_user_id = context.get(_CHANNEL_USER_ID_CONTEXT_KEY)
+    if not isinstance(channel_user_id, str) or not channel_user_id:
+        return None
+    return f"export {CHANNEL_USER_ID_ENV}={shlex.quote(channel_user_id)}; "
+
+
 @tool("bash", parse_docstring=True)
 def bash_tool(runtime: Runtime, description: str, command: str) -> str:
     """Execute a bash command in a Linux environment.
@@ -1439,6 +1472,7 @@ def bash_tool(runtime: Runtime, description: str, command: str) -> str:
         # Request-scoped secrets resolved for the active skill (#3861); injected as
         # per-call env into the subprocess, never placed in the command string.
         injected_env = read_active_secrets(getattr(runtime, "context", None)) or None
+        identity_prefix = _channel_identity_prefix(runtime)
         if is_local_sandbox(runtime):
             if not is_host_bash_allowed():
                 return f"Error: {LOCAL_HOST_BASH_DISABLED_MESSAGE}"
@@ -1447,6 +1481,10 @@ def bash_tool(runtime: Runtime, description: str, command: str) -> str:
             validate_local_bash_command_paths(command, thread_data)
             command = replace_virtual_paths_in_command(command, thread_data)
             command = _apply_cwd_prefix(command, thread_data)
+            # POSIX-only: the Windows local sandbox may execute via
+            # PowerShell/cmd.exe where `export` is not valid syntax.
+            if identity_prefix and not _is_windows():
+                command = identity_prefix + command
             try:
                 from deerflow.config.app_config import get_app_config
 
@@ -1462,6 +1500,8 @@ def bash_tool(runtime: Runtime, description: str, command: str) -> str:
                 max_chars,
             )
         ensure_thread_directories_exist(runtime)
+        if identity_prefix:
+            command = identity_prefix + command
         try:
             from deerflow.config.app_config import get_app_config
 
