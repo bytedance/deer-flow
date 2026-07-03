@@ -18,6 +18,7 @@ from app.gateway.routers import (
     auth,
     channel_connections,
     channels,
+    features,
     feedback,
     mcp,
     memory,
@@ -29,8 +30,10 @@ from app.gateway.routers import (
     threads,
     uploads,
 )
+from app.gateway.trace_middleware import TraceMiddleware, resolve_trace_enabled
 from deerflow.config import app_config as deerflow_app_config
-from deerflow.config.app_config import apply_logging_level
+from deerflow.logging_config import DEFAULT_LOG_DATE_FORMAT, DEFAULT_LOG_FORMAT, configure_logging
+from deerflow.uploads.manager import cleanup_stale_upload_staging_files
 
 AppConfig = deerflow_app_config.AppConfig
 get_app_config = deerflow_app_config.get_app_config
@@ -38,8 +41,8 @@ get_app_config = deerflow_app_config.get_app_config
 # Default logging; lifespan overrides from config.yaml log_level.
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
+    format=DEFAULT_LOG_FORMAT,
+    datefmt=DEFAULT_LOG_DATE_FORMAT,
 )
 
 logger = logging.getLogger(__name__)
@@ -172,7 +175,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # snapshot on `app.state` to keep that contract enforceable.
     try:
         startup_config = get_app_config()
-        apply_logging_level(startup_config.log_level)
+        configure_logging(startup_config)
         logger.info("Configuration loaded successfully")
         warn_if_auth_disabled_enabled()
     except Exception as e:
@@ -206,6 +209,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             logger.warning("tiktoken encoding cache warm-up timed out; token counting will use character-based fallback until tiktoken loads successfully")
         except Exception:
             logger.warning("tiktoken warm-up skipped", exc_info=True)
+
+    try:
+        removed_upload_staging_files = await asyncio.to_thread(cleanup_stale_upload_staging_files)
+        if removed_upload_staging_files:
+            logger.info("Removed %d stale upload staging file(s)", removed_upload_staging_files)
+    except Exception:
+        logger.warning("Upload staging file cleanup skipped", exc_info=True)
 
     # Initialize LangGraph runtime components (StreamBridge, RunManager, checkpointer, store)
     async with langgraph_runtime(app, startup_config):
@@ -362,9 +372,20 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
             allow_headers=["*"],
         )
 
+    # Request trace correlation: when logging.enhance.enabled=true, bind one
+    # trace id per Gateway HTTP request and write it to response start headers.
+    # `logging` is registered as restart-required (see reload_boundary.py) so we
+    # snapshot the flag from the startup AppConfig instead of reading live; a
+    # runtime toggle would otherwise leave the log formatter (installed once by
+    # configure_logging() at lifespan startup) out of sync with the middleware.
+    app.add_middleware(TraceMiddleware, enabled=_resolve_trace_enabled_for_app_construction())
+
     # Include routers
     # Models API is mounted at /api/models
     app.include_router(models.router)
+
+    # Features API is mounted at /api/features
+    app.include_router(features.router)
 
     # MCP API is mounted at /api/mcp
     app.include_router(mcp.router)
@@ -421,6 +442,16 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
         return {"status": "healthy", "service": "deer-flow-gateway"}
 
     return app
+
+
+def _resolve_trace_enabled_for_app_construction() -> bool:
+    """Resolve the trace middleware flag without making imports require config.yaml."""
+    try:
+        return resolve_trace_enabled(get_app_config())
+    except FileNotFoundError:
+        # Startup lifespan still performs strict config loading before serving.
+        logger.debug("config.yaml not found while constructing Gateway app; TraceMiddleware disabled for this app instance")
+        return False
 
 
 # Create app instance for uvicorn

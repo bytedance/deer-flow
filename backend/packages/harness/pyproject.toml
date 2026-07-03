@@ -37,6 +37,7 @@ dependencies = [
     "aiosqlite>=0.19",
     "alembic>=1.13",
     "cryptography>=48.0.1",
+    "e2b-code-interpreter>=2.8.0",
 ]
 
 [project.scripts]

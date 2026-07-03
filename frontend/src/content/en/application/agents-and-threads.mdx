@@ -82,38 +82,37 @@ Each user message triggers an agent run. The run streams tokens and tool calls b
 
 #### Checkpoint
 
-If a checkpointer is configured, the thread state is persisted after each turn. This means the conversation survives process restarts.
+The configured persistence backend stores thread state after each turn. This means the conversation survives process restarts when a persistent backend is used.
 
 #### Resume
 
-Opening a thread from the sidebar loads its full history from the checkpointer. The agent picks up from where it left off.
+Opening a thread from the sidebar loads its full history from persisted state. The agent picks up from where it left off.
 
 </Steps>
 
-### Checkpointer configuration
+### Thread persistence configuration
 
-The checkpointer controls how thread state is persisted:
+The `database` section controls the default persistence backend for thread state and application data:
 
 ```yaml
-# In-memory (default if omitted — state lost on restart)
-# checkpointer:
-#   type: memory
+# SQLite (local development and single-user deployments)
+database:
+  backend: sqlite
+  sqlite_dir: .deer-flow/data
 
-# SQLite (survives restarts, single-process)
-checkpointer:
-  type: sqlite
-  connection_string: checkpoints.db
-
-# PostgreSQL (multi-process, production)
-# checkpointer:
-#   type: postgres
-#   connection_string: postgresql://user:password@localhost:5432/deerflow
+# Postgres (production and multi-user deployments)
+# database:
+#   backend: postgres
+#   postgres_url: $DATABASE_URL
+#
+# run_events:
+#   backend: db
 ```
 
 <Callout type="info">
-  The Gateway embedded runtime uses the <code>checkpointer</code> setting in
-  <code>config.yaml</code>. The same setting is also used by
-  <code>DeerFlowClient</code> in direct Python integrations.
+  The legacy <code>checkpointer</code> section is still accepted for LangGraph
+  state compatibility and takes precedence when configured. Prefer{" "}
+  <code>database</code> for new deployments.
 </Callout>
 
 ### Thread data storage

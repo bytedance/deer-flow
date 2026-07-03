@@ -27,7 +27,9 @@ from deerflow.models import create_chat_model
 from deerflow.skills.tool_policy import filter_tools_by_skill_allowed_tools
 from deerflow.skills.types import Skill
 from deerflow.subagents.config import SubagentConfig, resolve_subagent_model_name
+from deerflow.subagents.step_events import capture_new_step_messages
 from deerflow.subagents.token_collector import SubagentTokenCollector
+from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY
 from deerflow.tracing import build_tracing_callbacks, inject_langfuse_metadata
 
 if TYPE_CHECKING:
@@ -293,6 +295,7 @@ class SubagentExecutor:
         oauth_provider: str | None = None,
         oauth_id: str | None = None,
         run_id: str | None = None,
+        deerflow_trace_id: str | None = None,
     ):
         """Initialize the executor.
 
@@ -315,6 +318,8 @@ class SubagentExecutor:
             oauth_id: Subject id at the external identity provider.
             run_id: Parent run id, so delegated guardrail decisions attribute to
                 the same run as the lead agent.
+            deerflow_trace_id: DeerFlow request-level correlation id propagated
+                from the parent run for Langfuse metadata correlation.
         """
         self.config = config
         self.app_config = app_config
@@ -337,6 +342,7 @@ class SubagentExecutor:
         self.oauth_provider = oauth_provider
         self.oauth_id = oauth_id
         self.run_id = run_id
+        self.deerflow_trace_id = deerflow_trace_id
 
         self._base_tools = _filter_tools(
             tools,
@@ -533,6 +539,9 @@ class SubagentExecutor:
         # rescanning the append-only ``ai_messages`` list (O(n) per chunk -> O(n^2)
         # over a run, which reaches max_turns=150 for deep-research subagents).
         seen_message_ids: set[str] = {mid for msg in ai_messages if (mid := msg.get("id"))}
+        # Cursor into the append-only message history so each ``values``-mode
+        # chunk only re-scans the newly-appended tail (see capture_new_step_messages).
+        processed_message_count = 0
 
         collector: SubagentTokenCollector | None = None
         try:
@@ -577,6 +586,7 @@ class SubagentExecutor:
                 assistant_id=assistant_id,
                 model_name=self.model_name,
                 environment=os.environ.get("DEER_FLOW_ENV") or os.environ.get("ENVIRONMENT"),
+                deerflow_trace_id=self.deerflow_trace_id,
             )
 
             context: dict[str, Any] = {}
@@ -594,6 +604,8 @@ class SubagentExecutor:
             context["oauth_provider"] = self.oauth_provider
             context["oauth_id"] = self.oauth_id
             context["run_id"] = self.run_id
+            if self.deerflow_trace_id:
+                context[DEERFLOW_TRACE_METADATA_KEY] = self.deerflow_trace_id
             context["is_subagent"] = True
 
             logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} starting async execution with max_turns={self.config.max_turns}")
@@ -628,28 +640,16 @@ class SubagentExecutor:
 
                 final_state = chunk
 
-                # Extract AI messages from the current state
+                # Capture every step message (assistant turns AND tool outputs)
+                # appended since the last chunk. A single super-step can append
+                # several ToolMessages when the model emits multiple tool calls in
+                # one turn, so capturing only messages[-1] would drop all but the
+                # last output (#3779). Dedup/serialization live in capture_step_message.
                 messages = chunk.get("messages", [])
-                if messages:
-                    last_message = messages[-1]
-                    # Check if this is a new AI message
-                    if isinstance(last_message, AIMessage):
-                        # Convert message to dict for serialization
-                        message_dict = last_message.model_dump()
-                        # Only add if it's not already in the list (avoid duplicates)
-                        # Check by comparing message IDs if available, otherwise compare full dict
-                        message_id = message_dict.get("id")
-                        if message_id:
-                            is_duplicate = message_id in seen_message_ids
-                        else:
-                            # id-less messages can't be keyed; fall back to a full-dict compare
-                            is_duplicate = message_dict in ai_messages
-
-                        if not is_duplicate:
-                            ai_messages.append(message_dict)
-                            if message_id:
-                                seen_message_ids.add(message_id)
-                            logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} captured AI message #{len(ai_messages)}")
+                previous_count = len(ai_messages)
+                processed_message_count = capture_new_step_messages(messages, ai_messages, seen_message_ids, processed_message_count)
+                if len(ai_messages) > previous_count:
+                    logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} captured {len(ai_messages) - previous_count} step message(s); total #{len(ai_messages)}")
 
             logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} completed async execution")
             token_usage_records = collector.snapshot_records()

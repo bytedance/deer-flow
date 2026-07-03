@@ -101,7 +101,7 @@ LLM-powered persistent context retention across conversations:
 |----------|-------|
 | **Sandbox** | `bash`, `ls`, `read_file`, `write_file`, `str_replace` |
 | **Built-in** | `present_files`, `ask_clarification`, `view_image`, `task` (subagent) |
-| **Community** | Tavily (web search), Jina AI (web fetch), Firecrawl (scraping), fastCRW (scraping), DuckDuckGo (image search) |
+| **Community** | Tavily (web search), Jina AI (web fetch), Crawl4AI (web fetch), Firecrawl (scraping), fastCRW (scraping), DuckDuckGo (image search) |
 | **MCP** | Any Model Context Protocol server (stdio, SSE, HTTP transports) |
 | **Skills** | Domain-specific workflows injected via system prompt |
 
@@ -221,32 +221,41 @@ Sessions opened in the TUI appear in the Web UI sidebar (it writes the shared
 
 ```
 backend/
-├── src/
-│   ├── agents/                  # Agent system
-│   │   ├── lead_agent/         # Main agent (factory, prompts)
-│   │   ├── middlewares/        # 9 middleware components
-│   │   ├── memory/             # Memory extraction & storage
-│   │   └── thread_state.py    # ThreadState schema
-│   ├── gateway/                # FastAPI Gateway API
-│   │   ├── app.py             # Application setup
-│   │   └── routers/           # 6 route modules
-│   ├── sandbox/                # Sandbox execution
-│   │   ├── local/             # Local filesystem provider
-│   │   ├── sandbox.py         # Abstract interface
-│   │   ├── tools.py           # bash, ls, read/write/str_replace
-│   │   └── middleware.py      # Sandbox lifecycle
-│   ├── subagents/              # Subagent delegation
-│   │   ├── builtins/          # general-purpose, bash agents
-│   │   ├── executor.py        # Background execution engine
-│   │   └── registry.py        # Agent registry
-│   ├── tools/builtins/         # Built-in tools
-│   ├── mcp/                    # MCP protocol integration
-│   ├── models/                 # Model factory
-│   ├── skills/                 # Skill discovery & loading
-│   ├── config/                 # Configuration system
-│   ├── community/              # Community tools & providers
-│   ├── reflection/             # Dynamic module loading
-│   └── utils/                  # Utilities
+├── packages/harness/           # deerflow-harness package (import: deerflow.*)
+│   └── deerflow/
+│       ├── agents/             # Agent system
+│       │   ├── lead_agent/     # Main agent (factory, prompts)
+│       │   ├── middlewares/    # Middleware components
+│       │   ├── memory/         # Memory extraction & storage
+│       │   └── thread_state.py # ThreadState schema
+│       ├── sandbox/            # Sandbox execution
+│       │   ├── local/          # Local filesystem provider
+│       │   ├── sandbox.py      # Abstract interface
+│       │   ├── tools.py        # bash, ls, read/write/str_replace
+│       │   └── middleware.py   # Sandbox lifecycle
+│       ├── subagents/          # Subagent delegation
+│       │   ├── builtins/       # general-purpose, bash agents
+│       │   ├── executor.py     # Background execution engine
+│       │   └── registry.py     # Agent registry
+│       ├── tools/builtins/     # Built-in tools
+│       ├── mcp/                # MCP protocol integration
+│       ├── models/             # Model factory
+│       ├── skills/             # Skill discovery & loading
+│       ├── config/             # Configuration system
+│       ├── runtime/            # Embedded run execution (RunManager, StreamBridge)
+│       ├── persistence/        # Checkpointer/store engines & schema migrations
+│       ├── guardrails/         # Pre-tool-call authorization providers
+│       ├── tracing/            # Tracer factory & trace metadata
+│       ├── uploads/            # Uploads manager
+│       ├── tui/                # Terminal UI (`deerflow` console script)
+│       ├── community/          # Community tools & providers
+│       ├── reflection/         # Dynamic module loading
+│       └── utils/              # Utilities
+├── app/                        # FastAPI Gateway + IM channels (import: app.*)
+│   ├── gateway/                # Gateway API
+│   │   ├── app.py              # Application setup
+│   │   └── routers/            # Route modules
+│   └── channels/               # IM channel integrations
 ├── docs/                       # Documentation
 ├── tests/                      # Test suite
 ├── langgraph.json              # LangGraph graph registry for tooling/Studio compatibility

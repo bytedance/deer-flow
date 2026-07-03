@@ -146,6 +146,11 @@ class TestFilesFromKwargs:
         assert result is not None
         assert result[0]["size"] == 0
 
+    def test_skips_upload_staging_filenames(self, tmp_path):
+        mw = _middleware(tmp_path)
+        msg = _human("hi", files=[{"filename": ".upload-active.part", "size": 5, "path": "/mnt/user-data/uploads/.upload-active.part"}])
+        assert mw._files_from_kwargs(msg) is None
+
 
 # ---------------------------------------------------------------------------
 # _create_files_message
@@ -361,6 +366,22 @@ class TestBeforeAgent:
         assert "new.txt" in content
         assert "previous messages" in content
         assert "old.txt" in content
+
+    def test_historical_files_ignore_upload_staging_files(self, tmp_path):
+        mw = _middleware(tmp_path)
+        uploads_dir = _uploads_dir(tmp_path)
+        (uploads_dir / "old.txt").write_bytes(b"old")
+        (uploads_dir / ".upload-active.part").write_bytes(b"partial")
+        (uploads_dir / ".env").write_bytes(b"intentional")
+
+        msg = _human("go")
+        result = mw.before_agent(self._state(msg), _runtime())
+
+        assert result is not None
+        content = result["messages"][-1].content
+        assert "old.txt" in content
+        assert ".env" in content
+        assert ".upload-active.part" not in content
 
     def test_no_historical_section_when_upload_dir_is_empty(self, tmp_path):
         mw = _middleware(tmp_path)

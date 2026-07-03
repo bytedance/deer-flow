@@ -26,6 +26,7 @@ from app.gateway.internal_auth import get_trusted_internal_owner_user_id
 from app.gateway.utils import sanitize_log_param
 from deerflow.config.paths import Paths, get_paths
 from deerflow.runtime import serialize_channel_values_for_api
+from deerflow.runtime.goal import DEFAULT_MAX_GOAL_CONTINUATIONS, build_goal_state, ensure_thread_checkpoint, goal_thread_lock, read_thread_goal, write_thread_goal
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.utils.time import coerce_iso, now_iso
 
@@ -144,6 +145,24 @@ class ThreadStateUpdateRequest(BaseModel):
     as_node: str | None = Field(default=None, description="Node identity for the update")
 
 
+class ThreadGoalRequest(BaseModel):
+    """Request body for setting a thread-scoped goal."""
+
+    objective: str = Field(..., min_length=1, max_length=4000, description="Completion condition for the agent to keep pursuing")
+    max_continuations: int = Field(
+        default=DEFAULT_MAX_GOAL_CONTINUATIONS,
+        ge=0,
+        le=DEFAULT_MAX_GOAL_CONTINUATIONS,
+        description="Maximum automatic hidden continuation turns before stopping",
+    )
+
+
+class ThreadGoalResponse(BaseModel):
+    """Response model for a thread goal."""
+
+    goal: dict[str, Any] | None = Field(default=None, description="Current goal state, or null when no goal is active")
+
+
 class HistoryEntry(BaseModel):
     """Single checkpoint history entry."""
 
@@ -203,6 +222,36 @@ def _derive_thread_status(checkpoint_tuple) -> str:
         return "interrupted"
 
     return "idle"
+
+
+async def _ensure_thread_for_goal(thread_id: str, request: Request) -> None:
+    """Ensure a thread_meta row and root checkpoint exist for goal commands."""
+    from app.gateway.deps import get_thread_store
+
+    thread_store = get_thread_store(request)
+    checkpointer = get_checkpointer(request)
+    thread_owner_user_id = get_trusted_internal_owner_user_id(request)
+    thread_owner_kwargs = {"user_id": thread_owner_user_id} if thread_owner_user_id else {}
+
+    record = await thread_store.get(thread_id, **thread_owner_kwargs)
+    if record is None and thread_owner_user_id:
+        unscoped_record = await thread_store.get(thread_id, user_id=None)
+        if unscoped_record is not None:
+            if unscoped_record.get("user_id") != thread_owner_user_id:
+                await thread_store.update_owner(thread_id, thread_owner_user_id, user_id=None)
+            record = await thread_store.get(thread_id, **thread_owner_kwargs)
+    if record is None:
+        try:
+            await thread_store.create(thread_id, metadata={}, **thread_owner_kwargs)
+        except Exception:
+            logger.exception("Failed to create thread_meta for goal thread %s", sanitize_log_param(thread_id))
+            raise HTTPException(status_code=500, detail="Failed to create thread") from None
+
+    try:
+        await ensure_thread_checkpoint(checkpointer, thread_id)
+    except Exception:
+        logger.exception("Failed to create goal checkpoint for thread %s", sanitize_log_param(thread_id))
+        raise HTTPException(status_code=500, detail="Failed to create thread checkpoint") from None
 
 
 # ---------------------------------------------------------------------------
@@ -439,6 +488,57 @@ async def get_thread(thread_id: str, request: Request) -> ThreadResponse:
         metadata=record.get("metadata", {}),
         values=serialize_channel_values_for_api(channel_values),
     )
+
+
+@router.get("/{thread_id}/goal", response_model=ThreadGoalResponse)
+@require_permission("threads", "read", owner_check=True)
+async def get_thread_goal(thread_id: str, request: Request) -> ThreadGoalResponse:
+    """Return the active Claude-style goal for a thread, if any."""
+    checkpointer = get_checkpointer(request)
+    try:
+        goal = await read_thread_goal(checkpointer, thread_id)
+    except Exception:
+        logger.exception("Failed to read goal for thread %s", sanitize_log_param(thread_id))
+        raise HTTPException(status_code=500, detail="Failed to read thread goal") from None
+    return ThreadGoalResponse(goal=goal)
+
+
+@router.put("/{thread_id}/goal", response_model=ThreadGoalResponse)
+@require_permission("threads", "write", owner_check=True)
+async def set_thread_goal(thread_id: str, body: ThreadGoalRequest, request: Request) -> ThreadGoalResponse:
+    """Set or replace the active goal for a thread.
+
+    ``/chats/new`` pages already hold a generated UUID before the first run, so
+    this endpoint creates the missing thread checkpoint on demand.
+    """
+    checkpointer = get_checkpointer(request)
+    await _ensure_thread_for_goal(thread_id, request)
+    try:
+        goal = build_goal_state(body.objective, max_continuations=body.max_continuations)
+        async with goal_thread_lock(thread_id):
+            await write_thread_goal(checkpointer, thread_id, goal, as_node="goal", create_if_missing=True)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception:
+        logger.exception("Failed to set goal for thread %s", sanitize_log_param(thread_id))
+        raise HTTPException(status_code=500, detail="Failed to set thread goal") from None
+    return ThreadGoalResponse(goal=goal)
+
+
+@router.delete("/{thread_id}/goal", response_model=ThreadGoalResponse)
+@require_permission("threads", "write", owner_check=True)
+async def clear_thread_goal(thread_id: str, request: Request) -> ThreadGoalResponse:
+    """Clear the active goal for a thread."""
+    checkpointer = get_checkpointer(request)
+    try:
+        async with goal_thread_lock(thread_id):
+            await write_thread_goal(checkpointer, thread_id, None, as_node="goal")
+    except LookupError:
+        return ThreadGoalResponse(goal=None)
+    except Exception:
+        logger.exception("Failed to clear goal for thread %s", sanitize_log_param(thread_id))
+        raise HTTPException(status_code=500, detail="Failed to clear thread goal") from None
+    return ThreadGoalResponse(goal=None)
 
 
 # ---------------------------------------------------------------------------

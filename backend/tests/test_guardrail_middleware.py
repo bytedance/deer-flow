@@ -15,10 +15,33 @@ from deerflow.guardrails.provider import GuardrailDecision, GuardrailReason, Gua
 # --- Helpers ---
 
 
-def _make_tool_call_request(name: str = "bash", args: dict | None = None, call_id: str = "call_1"):
+class _FakeRuntime:
+    def __init__(self, context: dict | None = None):
+        self.context = context or {}
+
+
+class _FakeJournal:
+    def __init__(self, *, fail: bool = False):
+        self.fail = fail
+        self.calls: list[dict] = []
+
+    def record_middleware(self, **kwargs):
+        if self.fail:
+            raise RuntimeError("journal unavailable")
+        self.calls.append(kwargs)
+
+
+def _make_tool_call_request(
+    name: str = "bash",
+    args: dict | None = None,
+    call_id: str = "call_1",
+    *,
+    context: dict | None = None,
+):
     """Create a mock ToolCallRequest."""
     req = MagicMock()
     req.tool_call = {"name": name, "args": args or {}, "id": call_id}
+    req.runtime = _FakeRuntime(context)
     return req
 
 
@@ -298,6 +321,170 @@ class TestGuardrailMiddleware:
 
         with pytest.raises(GraphBubbleUp):
             asyncio.run(run())
+
+    # Journal: a denied tool call records the complete guardrail audit event.
+    def test_denied_tool_records_guardrail_event(self):
+        journal = _FakeJournal()
+        mw = GuardrailMiddleware(_DenyAllProvider(), passport="agent_id")
+        req = _make_tool_call_request(
+            "bash",
+            args={"command": "cat secret.txt"},
+            call_id="tool_call_1",
+            context={
+                "__run_journal": journal,
+                "user_role": "user",
+            },
+        )
+        result = mw.wrap_tool_call(req, MagicMock())
+
+        assert result.status == "error"
+        assert len(journal.calls) == 1
+        event = journal.calls[0]
+        assert event["tag"] == "guardrail"
+        assert event["name"] == "GuardrailMiddleware"
+        assert event["hook"] == "wrap_tool_call"
+        assert event["action"] == "deny_tool_call"
+        changes = event["changes"]
+        assert changes["tool_name"] == "bash"
+        assert changes["tool_call_id"] == "tool_call_1"
+        assert changes["agent_id"] == "agent_id"
+        assert changes["is_subagent"] is False
+        assert changes["user_role"] == "user"
+        assert changes["allow"] is False
+        assert changes["policy_id"] == "test.deny.v1"
+        assert changes["reason_codes"] == ["oap.denied"]
+        assert changes["reason_messages"] == ["all tools blocked"]
+        assert changes["fail_closed"] is True
+        assert changes["provider_error"] is False
+        assert "tool_input" not in changes
+        assert "args" not in changes
+        assert "command" not in changes
+        assert "user_id" not in changes
+        assert "oauth_provider" not in changes
+        assert "oauth_id" not in changes
+
+    # Journal: a fail-closed provider error is recorded as a denied tool call.
+    def test_fail_closed_provider_error_records_guardrail_event(self):
+        journal = _FakeJournal()
+        mw = GuardrailMiddleware(_ExplodingProvider(), fail_closed=True)
+        req = _make_tool_call_request("bash", context={"__run_journal": journal})
+        handler = MagicMock()
+
+        result = mw.wrap_tool_call(req, handler)
+
+        handler.assert_not_called()
+        assert result.status == "error"
+        assert len(journal.calls) == 1
+        event = journal.calls[0]
+        assert event["action"] == "deny_tool_call"
+        changes = event["changes"]
+        assert changes["allow"] is False
+        assert changes["reason_codes"] == ["oap.evaluator_error"]
+        assert changes["provider_error"] is True
+        assert changes["fail_closed"] is True
+
+    # Journal: a fail-open provider error is recorded without blocking the tool.
+    def test_fail_open_provider_error_records_guardrail_event_and_allows_handler(self):
+        journal = _FakeJournal()
+        mw = GuardrailMiddleware(_ExplodingProvider(), fail_closed=False)
+        req = _make_tool_call_request("bash", context={"__run_journal": journal})
+        expected = MagicMock()
+        handler = MagicMock(return_value=expected)
+
+        result = mw.wrap_tool_call(req, handler)
+
+        handler.assert_called_once_with(req)
+        assert result is expected
+        assert len(journal.calls) == 1
+        event = journal.calls[0]
+        assert event["action"] == "allow_tool_call_after_provider_error"
+        changes = event["changes"]
+        assert changes["allow"] is True
+        assert changes["reason_codes"] == ["oap.evaluator_error"]
+        assert changes["provider_error"] is True
+        assert changes["fail_closed"] is False
+
+    # Journal: ordinary allowed decisions do not create guardrail audit events.
+    def test_allowed_tool_does_not_record_guardrail_event(self):
+        journal = _FakeJournal()
+        mw = GuardrailMiddleware(_AllowAllProvider())
+        req = _make_tool_call_request("web_search", context={"__run_journal": journal})
+        expected = MagicMock()
+        handler = MagicMock(return_value=expected)
+
+        result = mw.wrap_tool_call(req, handler)
+
+        assert result is expected
+        assert journal.calls == []
+
+    # Journal: a recording failure must not alter the guardrail denial outcome.
+    def test_guardrail_event_recording_failure_does_not_change_denial(self):
+        journal = _FakeJournal(fail=True)
+        mw = GuardrailMiddleware(_DenyAllProvider())
+        req = _make_tool_call_request("bash", context={"__run_journal": journal})
+        handler = MagicMock()
+
+        result = mw.wrap_tool_call(req, handler)
+
+        handler.assert_not_called()
+        assert result.status == "error"
+        assert "oap.denied" in result.content
+
+    # Journal: the async denial path records the same guardrail audit event.
+    def test_async_denied_tool_records_guardrail_event(self):
+        journal = _FakeJournal()
+        mw = GuardrailMiddleware(_DenyAllProvider(), passport="agent_id")
+        req = _make_tool_call_request(
+            "bash",
+            call_id="async_call_1",
+            context={"__run_journal": journal},
+        )
+
+        async def handler(r):
+            return MagicMock()
+
+        async def run():
+            return await mw.awrap_tool_call(req, handler)
+
+        result = asyncio.run(run())
+
+        assert result.status == "error"
+        assert len(journal.calls) == 1
+        event = journal.calls[0]
+        assert event["tag"] == "guardrail"
+        assert event["hook"] == "wrap_tool_call"
+        assert event["action"] == "deny_tool_call"
+        changes = event["changes"]
+        assert changes["tool_name"] == "bash"
+        assert changes["tool_call_id"] == "async_call_1"
+        assert changes["agent_id"] == "agent_id"
+        assert changes["is_subagent"] is False
+        assert changes["allow"] is False
+        assert changes["provider_error"] is False
+
+    # Journal: the async fail-open path records the error and still runs the tool.
+    def test_async_fail_open_provider_error_records_guardrail_event_and_allows_handler(self):
+        journal = _FakeJournal()
+        mw = GuardrailMiddleware(_ExplodingProvider(), fail_closed=False)
+        req = _make_tool_call_request("bash", context={"__run_journal": journal})
+        expected = MagicMock()
+
+        async def handler(r):
+            return expected
+
+        async def run():
+            return await mw.awrap_tool_call(req, handler)
+
+        result = asyncio.run(run())
+
+        assert result is expected
+        assert len(journal.calls) == 1
+        event = journal.calls[0]
+        assert event["action"] == "allow_tool_call_after_provider_error"
+        changes = event["changes"]
+        assert changes["allow"] is True
+        assert changes["provider_error"] is True
+        assert changes["fail_closed"] is False
 
 
 class TestGuardrailRequestAttribution:

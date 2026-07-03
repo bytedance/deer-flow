@@ -5,11 +5,8 @@ Order of resolution:
 1. `UV_EXTRAS` env var. Comma- or whitespace-separated names so multiple
    extras can be layered (e.g. ``UV_EXTRAS=postgres,ollama``). The same
    parsing semantics apply in the Docker dev container via
-   ``docker/dev-entrypoint.sh``. The Docker image-build path
-   (``backend/Dockerfile``) still treats `UV_EXTRAS` as a single token, so
-   ``UV_EXTRAS=postgres,ollama`` would only install ``postgres,ollama`` as
-   one (invalid) extra at build time — author build-time values as a
-   single name.
+   ``docker/dev-entrypoint.sh`` and in the production Docker image build via
+   ``backend/Dockerfile``.
 2. Auto-detection from config.yaml — currently maps:
    - database.backend == postgres        -> postgres
    - checkpointer.type == postgres       -> postgres

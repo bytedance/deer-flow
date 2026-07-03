@@ -728,12 +728,18 @@ async def list_run_events(
     run_id: str,
     request: Request,
     event_types: str | None = Query(default=None),
+    task_id: str | None = Query(default=None),
     limit: int = Query(default=500, le=2000),
+    after_seq: int | None = Query(default=None),
 ) -> list[dict]:
-    """Return the full event stream for a run (debug/audit)."""
+    """Return the full event stream for a run (debug/audit).
+
+    ``task_id`` + ``after_seq`` let the subtask card page through one subagent
+    task's persisted steps without the run-wide ``limit`` truncating the tail (#3779).
+    """
     event_store = get_run_event_store(request)
     types = event_types.split(",") if event_types else None
-    return await event_store.list_events(thread_id, run_id, event_types=types, limit=limit)
+    return await event_store.list_events(thread_id, run_id, event_types=types, task_id=task_id, limit=limit, after_seq=after_seq)
 
 
 @router.get("/{thread_id}/token-usage", response_model=ThreadTokenUsageResponse)
