@@ -6,6 +6,7 @@ import asyncio
 import logging
 import re
 from collections.abc import Iterable, Mapping
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
@@ -414,6 +415,7 @@ def _make_session_pool_tool(
     server_name: str,
     connection: dict[str, Any],
     tool_interceptors: list[Any] | None = None,
+    tool_call_timeout: float | None = None,
 ) -> BaseTool:
     """Wrap an MCP tool so it reuses a persistent session from the pool.
 
@@ -478,19 +480,29 @@ def _make_session_pool_tool(
             session_connection["env"] = session_env
         session = await pool.get_session(server_name, scope_key, session_connection)
 
+        # Build common call_tool kwargs once — only add keys when needed so
+        # existing call-sites that assert on exact arguments are not affected.
+        call_kwargs: dict[str, Any] = {}
+        if tool_call_timeout:
+            call_kwargs["read_timeout_seconds"] = timedelta(seconds=tool_call_timeout)
+
         if tool_interceptors:
             from langchain_mcp_adapters.interceptors import MCPToolCallRequest
 
             async def base_handler(request: MCPToolCallRequest) -> Any:
                 # Preserve interceptor-injected headers for stdio MCP calls by
                 # forwarding them through MCP call meta.
-                call_kwargs: dict[str, Any] = {}
+                kwargs = dict(call_kwargs)
                 if request.headers:
                     if isinstance(request.headers, Mapping):
-                        call_kwargs["meta"] = {"headers": dict(request.headers)}
+                        kwargs["meta"] = {"headers": dict(request.headers)}
                     else:
                         logger.warning("Ignoring MCP interceptor headers with unsupported type: %s", type(request.headers).__name__)
-                return await session.call_tool(request.name, request.args, **call_kwargs)
+                return await session.call_tool(
+                    request.name,
+                    request.args,
+                    **kwargs,
+                )
 
             handler = base_handler
             for interceptor in reversed(tool_interceptors):
@@ -509,7 +521,11 @@ def _make_session_pool_tool(
             )
             call_tool_result = await handler(request)
         else:
-            call_tool_result = await session.call_tool(original_name, arguments)
+            call_tool_result = await session.call_tool(
+                original_name,
+                arguments,
+                **call_kwargs,
+            )
 
         # The after-call snapshot diff only feeds bare-filename correlation in
         # free text, so skip the second recursive walk when there is no text
@@ -646,8 +662,17 @@ async def get_mcp_tools() -> list[BaseTool]:
             if tool_server is not None:
                 transport = servers_config[tool_server].get("transport", "stdio")
                 if transport == "stdio":
-                    wrapped_tools.append(_make_session_pool_tool(tool, tool_server, servers_config[tool_server], tool_interceptors))
+                    server_cfg = extensions_config.mcp_servers.get(tool_server)
+                    _timeout = server_cfg.tool_call_timeout if server_cfg else None
+                    wrapped_tools.append(_make_session_pool_tool(tool, tool_server, servers_config[tool_server], tool_interceptors, tool_call_timeout=_timeout))
                 else:
+                    server_cfg = extensions_config.mcp_servers.get(tool_server)
+                    if server_cfg and server_cfg.tool_call_timeout is not None:
+                        logger.warning(
+                            "Ignoring tool_call_timeout for MCP server '%s' because transport '%s' is not stdio; configure HTTP/SSE transport-level timeouts instead.",
+                            tool_server,
+                            transport,
+                        )
                     wrapped_tools.append(tool)
             else:
                 wrapped_tools.append(tool)
