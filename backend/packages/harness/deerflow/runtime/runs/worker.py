@@ -26,11 +26,33 @@ from typing import Any, Literal, cast
 
 from langgraph.checkpoint.base import empty_checkpoint
 
+from deerflow.agents.goal_state import GoalEvaluation, GoalState
 from deerflow.config.app_config import AppConfig
+from deerflow.runtime.goal import (
+    DEFAULT_MAX_GOAL_CONTINUATIONS,
+    DEFAULT_MAX_NO_PROGRESS_CONTINUATIONS,
+    GoalWriteConflict,
+    _call_checkpointer_method,
+    _is_visible_message,
+    _message_type,
+    attach_goal_evaluation,
+    compute_no_progress_count,
+    create_goal_evaluator_model,
+    evaluate_goal_completion,
+    goal_thread_lock,
+    latest_visible_assistant_signature,
+    make_goal_continuation_message,
+    read_thread_goal,
+    should_continue_goal,
+    visible_conversation_signature,
+    write_thread_goal,
+)
 from deerflow.runtime.serialization import serialize
 from deerflow.runtime.stream_bridge import StreamBridge
 from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, get_current_trace_id, normalize_trace_id
 from deerflow.tracing import inject_langfuse_metadata
+from deerflow.utils.messages import message_to_text
 
 from .manager import RunManager, RunRecord
 from .naming import resolve_root_run_name
@@ -91,6 +113,8 @@ def _install_runtime_context(config: dict, runtime_context: dict[str, Any]) -> N
     if isinstance(existing_context, dict):
         existing_context.setdefault("thread_id", runtime_context["thread_id"])
         existing_context.setdefault("run_id", runtime_context["run_id"])
+        if DEERFLOW_TRACE_METADATA_KEY in runtime_context:
+            existing_context.setdefault(DEERFLOW_TRACE_METADATA_KEY, runtime_context[DEERFLOW_TRACE_METADATA_KEY])
         if "app_config" in runtime_context:
             existing_context["app_config"] = runtime_context["app_config"]
         return
@@ -281,6 +305,10 @@ async def run_agent(
         # manually here because we drive the graph through ``agent.astream(config=...)``
         # without passing the official ``context=`` parameter.
         runtime_ctx = _build_runtime_context(thread_id, run_id, config.get("context"), ctx.app_config)
+        incoming_metadata = config.get("metadata") if isinstance(config.get("metadata"), dict) else {}
+        deerflow_trace_id = normalize_trace_id(incoming_metadata.get(DEERFLOW_TRACE_METADATA_KEY)) or get_current_trace_id()
+        if deerflow_trace_id:
+            runtime_ctx[DEERFLOW_TRACE_METADATA_KEY] = deerflow_trace_id
         # Expose the run-scoped journal under a sentinel key so middleware can
         # write audit events (e.g. SafetyFinishReasonMiddleware recording
         # suppressed tool calls). Double-underscore prefix marks it as a
@@ -307,16 +335,27 @@ async def run_agent(
             assistant_id=record.assistant_id,
             model_name=record.model_name,
             environment=os.environ.get("DEER_FLOW_ENV") or os.environ.get("ENVIRONMENT"),
+            deerflow_trace_id=deerflow_trace_id,
         )
 
         # Resolve after runtime context installation so context/configurable reflect
         # the agent name that this run will actually execute.
         config.setdefault("run_name", resolve_root_run_name(config, record.assistant_id))
-        runnable_config = RunnableConfig(**config)
+        initial_runnable_config = RunnableConfig(**config)
+
+        def _continuation_runnable_config() -> RunnableConfig:
+            continuation_config = dict(config)
+            configurable = dict(continuation_config.get("configurable", {}) or {})
+            configurable["checkpoint_ns"] = ""
+            configurable.pop("checkpoint_id", None)
+            configurable.pop("checkpoint_map", None)
+            continuation_config["configurable"] = configurable
+            return RunnableConfig(**continuation_config)
+
         if ctx.app_config is not None and _agent_factory_supports_app_config(agent_factory):
-            agent = agent_factory(config=runnable_config, app_config=ctx.app_config)
+            agent = agent_factory(config=initial_runnable_config, app_config=ctx.app_config)
         else:
-            agent = agent_factory(config=runnable_config)
+            agent = agent_factory(config=initial_runnable_config)
 
         # Capture the effective (resolved) model name from the agent's metadata.
         # _resolve_model_name in agent.py may return the default model if the
@@ -372,24 +411,37 @@ async def run_agent(
         # the finally block so buffered steps survive abort/exception paths too.
         subagent_events = _SubagentEventBuffer(event_store, thread_id, run_id)
 
-        # 7. Stream using graph.astream
-        if len(lg_modes) == 1 and not stream_subgraphs:
-            # Single mode, no subgraphs: astream yields raw chunks
-            single_mode = lg_modes[0]
-            async for chunk in agent.astream(graph_input, config=runnable_config, stream_mode=single_mode):
-                if record.abort_event.is_set():
-                    logger.info("Run %s abort requested — stopping", run_id)
-                    break
-                llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(chunk)
-                sse_event = _lg_mode_to_sse_event(single_mode)
-                await bridge.publish(run_id, sse_event, serialize(chunk, mode=single_mode))
-                if single_mode == "custom":
-                    await subagent_events.add(chunk)
-        else:
+        goal_evaluator_model: Any | None = None
+
+        def _get_goal_evaluator_model() -> Any:
+            nonlocal goal_evaluator_model
+            if goal_evaluator_model is None:
+                goal_evaluator_model = create_goal_evaluator_model(
+                    model_name=record.model_name,
+                    app_config=ctx.app_config,
+                )
+            return goal_evaluator_model
+
+        async def _stream_once(input_payload: Any, stream_config: RunnableConfig) -> None:
+            nonlocal llm_error_fallback_message
+            if len(lg_modes) == 1 and not stream_subgraphs:
+                # Single mode, no subgraphs: astream yields raw chunks
+                single_mode = lg_modes[0]
+                async for chunk in agent.astream(input_payload, config=stream_config, stream_mode=single_mode):
+                    if record.abort_event.is_set():
+                        logger.info("Run %s abort requested — stopping", run_id)
+                        break
+                    llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(chunk)
+                    sse_event = _lg_mode_to_sse_event(single_mode)
+                    await bridge.publish(run_id, sse_event, serialize(chunk, mode=single_mode))
+                    if single_mode == "custom":
+                        await subagent_events.add(chunk)
+                return
+
             # Multiple modes or subgraphs: astream yields tuples
             async for item in agent.astream(
-                graph_input,
-                config=runnable_config,
+                input_payload,
+                config=stream_config,
                 stream_mode=lg_modes,
                 subgraphs=stream_subgraphs,
             ):
@@ -406,6 +458,23 @@ async def run_agent(
                 await bridge.publish(run_id, sse_event, serialize(chunk, mode=mode))
                 if mode == "custom":
                     await subagent_events.add(chunk)
+
+        # 7. Stream the requested turn, then optionally continue hidden goal turns.
+        await _stream_once(graph_input, initial_runnable_config)
+        while not record.abort_event.is_set() and not llm_error_fallback_message and (journal is None or not journal.had_llm_error_fallback):
+            continuation_input = await _prepare_goal_continuation_input(
+                bridge=bridge,
+                checkpointer=checkpointer,
+                thread_id=thread_id,
+                run_id=run_id,
+                model_name=record.model_name,
+                app_config=ctx.app_config,
+                evaluator_model_factory=_get_goal_evaluator_model,
+                abort_event=record.abort_event,
+            )
+            if continuation_input is None or record.abort_event.is_set():
+                break
+            await _stream_once(continuation_input, _continuation_runnable_config())
 
         # 8. Final status
         if record.abort_event.is_set():
@@ -531,15 +600,317 @@ async def run_agent(
 # ---------------------------------------------------------------------------
 
 
-async def _call_checkpointer_method(checkpointer: Any, async_name: str, sync_name: str, *args: Any, **kwargs: Any) -> Any:
-    """Call a checkpointer method, supporting async and sync variants."""
-    method = getattr(checkpointer, async_name, None) or getattr(checkpointer, sync_name, None)
-    if method is None:
-        raise AttributeError(f"Missing checkpointer method: {async_name}/{sync_name}")
-    result = method(*args, **kwargs)
-    if inspect.isawaitable(result):
-        return await result
-    return result
+def _checkpoint_id(checkpoint_tuple: Any) -> str | None:
+    config = getattr(checkpoint_tuple, "config", {}) or {}
+    configurable = config.get("configurable", {}) if isinstance(config, dict) else {}
+    checkpoint_id = configurable.get("checkpoint_id") if isinstance(configurable, dict) else None
+    if isinstance(checkpoint_id, str):
+        return checkpoint_id
+    checkpoint = getattr(checkpoint_tuple, "checkpoint", {}) or {}
+    if isinstance(checkpoint, dict) and isinstance(checkpoint.get("id"), str):
+        return checkpoint["id"]
+    return None
+
+
+def _goal_instance_matches(left: GoalState | None, right: GoalState | None) -> bool:
+    if not left or not right:
+        return False
+    same_status = left.get("status") == right.get("status") == "active"
+    same_objective = left.get("objective") == right.get("objective")
+    same_created_at = left.get("created_at") == right.get("created_at")
+    return same_status and same_objective and same_created_at
+
+
+def _read_checkpoint_messages(checkpoint_tuple: Any) -> list[Any]:
+    checkpoint = getattr(checkpoint_tuple, "checkpoint", {}) or {}
+    channel_values = checkpoint.get("channel_values", {}) if isinstance(checkpoint, dict) else {}
+    messages = channel_values.get("messages", []) if isinstance(channel_values, dict) else []
+    return messages if isinstance(messages, list) else []
+
+
+def _read_checkpoint_goal(checkpoint_tuple: Any) -> GoalState | None:
+    checkpoint = getattr(checkpoint_tuple, "checkpoint", {}) or {}
+    channel_values = checkpoint.get("channel_values", {}) if isinstance(checkpoint, dict) else {}
+    raw_goal = channel_values.get("goal") if isinstance(channel_values, dict) else None
+    return copy.deepcopy(raw_goal) if isinstance(raw_goal, dict) else None
+
+
+def _has_durable_goal_turn_receipt(checkpoint_tuple: Any, messages: list[Any]) -> bool:
+    """Return true when a completed visible assistant turn is safely checkpointed.
+
+    ``pending_writes`` is the durability signal: a ``CheckpointTuple`` carries no
+    ``tasks`` field (those live on a ``StateSnapshot``), so the presence of any
+    queued writes is what tells us the turn is still in flight.
+    """
+    if _checkpoint_id(checkpoint_tuple) is None:
+        return False
+    if getattr(checkpoint_tuple, "pending_writes", None):
+        return False
+    visible_messages = []
+    for message in messages:
+        if _is_visible_message(message) and message_to_text(message).strip():
+            visible_messages.append(message)
+    if not visible_messages:
+        return False
+    return _message_type(visible_messages[-1]) == "ai"
+
+
+def _stand_down_reason(goal: GoalState, evaluation: GoalEvaluation, no_progress_count: int) -> str | None:
+    if evaluation["satisfied"]:
+        return None
+    if evaluation["blocker"] != "goal_not_met_yet":
+        return f"blocked:{evaluation['blocker']}"
+    # Default caps mirror should_continue_goal so the two gate functions agree on
+    # a goal dict that is missing these fields.
+    if int(goal.get("continuation_count", 0)) >= int(goal.get("max_continuations", DEFAULT_MAX_GOAL_CONTINUATIONS)):
+        return "max_continuations_reached"
+    if no_progress_count >= int(goal.get("max_no_progress_continuations", DEFAULT_MAX_NO_PROGRESS_CONTINUATIONS)):
+        return "no_progress_detected"
+    return None
+
+
+async def _persist_goal_evaluation(
+    *,
+    bridge: StreamBridge,
+    checkpointer: Any,
+    thread_id: str,
+    run_id: str,
+    goal: GoalState,
+    evaluation: GoalEvaluation,
+    no_progress_count: int,
+    continuation_count: int | None = None,
+    stand_down_reason: str | None = None,
+    evidence_signature: str = "",
+) -> GoalState | None:
+    try:
+        async with goal_thread_lock(thread_id):
+            checkpoint_tuple = await _call_checkpointer_method(
+                checkpointer,
+                "aget_tuple",
+                "get_tuple",
+                {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}},
+            )
+            if checkpoint_tuple is None:
+                return None
+            current_goal = _read_checkpoint_goal(checkpoint_tuple)
+            if current_goal is None or not _goal_instance_matches(goal, current_goal):
+                return None
+            expected_checkpoint_id = _checkpoint_id(checkpoint_tuple)
+            updated_goal = attach_goal_evaluation(
+                current_goal,
+                evaluation,
+                run_id=run_id,
+                continuation_count=continuation_count,
+                no_progress_count=no_progress_count,
+                stand_down_reason=stand_down_reason,
+                evidence_signature=evidence_signature,
+            )
+            values = await write_thread_goal(
+                checkpointer,
+                thread_id,
+                updated_goal,
+                as_node="goal_evaluator",
+                expected_checkpoint_id=expected_checkpoint_id,
+            )
+        await bridge.publish(run_id, "values", serialize(values, mode="values"))
+        return updated_goal
+    except GoalWriteConflict:
+        return None
+    except Exception:
+        logger.warning("Could not persist goal evaluation for thread %s", thread_id, exc_info=True)
+        return None
+
+
+async def _reread_goal_and_checkpoint(checkpointer: Any, thread_id: str) -> tuple[GoalState | None, Any]:
+    """Re-read the goal and latest checkpoint together for a concurrency re-check."""
+    goal = await read_thread_goal(checkpointer, thread_id)
+    checkpoint_tuple = await _call_checkpointer_method(
+        checkpointer,
+        "aget_tuple",
+        "get_tuple",
+        {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}},
+    )
+    return goal, checkpoint_tuple
+
+
+async def _prepare_goal_continuation_input(
+    *,
+    bridge: StreamBridge,
+    checkpointer: Any,
+    thread_id: str,
+    run_id: str,
+    model_name: str | None,
+    app_config: AppConfig | None,
+    evaluator_model_factory: Any | None = None,
+    abort_event: asyncio.Event | None = None,
+) -> dict[str, Any] | None:
+    """Evaluate the active goal and return a hidden continuation input if needed.
+
+    NOTE: The re-reads below catch a racing user message or ``/goal clear``
+    before we queue a continuation. Goal writes then serialize per thread and
+    pass the checkpoint id they read from, so stale evaluator writes stand down
+    instead of clobbering a newer goal change.
+    """
+    if checkpointer is None:
+        return None
+    if abort_event is not None and abort_event.is_set():
+        return None
+
+    try:
+        goal = await read_thread_goal(checkpointer, thread_id)
+    except Exception:
+        logger.warning("Could not read goal for thread %s after run %s", thread_id, run_id, exc_info=True)
+        return None
+    if not goal or goal.get("status") != "active":
+        return None
+
+    async def _persist(
+        goal: GoalState,
+        evaluation: GoalEvaluation,
+        no_progress_count: int,
+        *,
+        stand_down_reason: str | None = None,
+        continuation_count: int | None = None,
+    ) -> GoalState | None:
+        """Record the evaluation against the still-current goal instance."""
+        return await _persist_goal_evaluation(
+            bridge=bridge,
+            checkpointer=checkpointer,
+            thread_id=thread_id,
+            run_id=run_id,
+            goal=goal,
+            evaluation=evaluation,
+            no_progress_count=no_progress_count,
+            continuation_count=continuation_count,
+            stand_down_reason=stand_down_reason,
+            evidence_signature=evidence_signature,
+        )
+
+    try:
+        checkpoint_tuple = await _call_checkpointer_method(
+            checkpointer,
+            "aget_tuple",
+            "get_tuple",
+            {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}},
+        )
+        if checkpoint_tuple is None:
+            return None
+        checkpoint_id_before = _checkpoint_id(checkpoint_tuple)
+        messages = _read_checkpoint_messages(checkpoint_tuple)
+        conversation_signature_before = visible_conversation_signature(messages)
+        evidence_signature = latest_visible_assistant_signature(messages)
+
+        if not _has_durable_goal_turn_receipt(checkpoint_tuple, messages):
+            evaluation = GoalEvaluation(
+                satisfied=False,
+                blocker="run_failed",
+                reason="No durable assistant end-of-turn receipt was available.",
+                evidence_summary="",
+            )
+            no_progress_count = compute_no_progress_count(goal, evaluation, evidence_signature=evidence_signature)
+            await _persist(goal, evaluation, no_progress_count, stand_down_reason="no_durable_end_of_turn")
+            return None
+
+        if abort_event is not None and abort_event.is_set():
+            return None
+        evaluator_model = evaluator_model_factory() if evaluator_model_factory is not None else None
+        evaluation = await evaluate_goal_completion(
+            goal,
+            messages,
+            model=evaluator_model,
+            model_name=model_name,
+            app_config=app_config,
+        )
+        if abort_event is not None and abort_event.is_set():
+            return None
+    except Exception:
+        logger.warning("Goal evaluator failed for thread %s after run %s", thread_id, run_id, exc_info=True)
+        return None
+
+    no_progress_count = compute_no_progress_count(goal, evaluation, evidence_signature=evidence_signature)
+
+    # Re-check that neither the goal nor the visible conversation changed while the
+    # evaluator ran — a user message or /goal clear racing the evaluation must win.
+    try:
+        current_goal, current_checkpoint_tuple = await _reread_goal_and_checkpoint(checkpointer, thread_id)
+    except Exception:
+        logger.warning("Could not re-check goal state for thread %s after evaluation", thread_id, exc_info=True)
+        return None
+
+    if not _goal_instance_matches(goal, current_goal) or current_checkpoint_tuple is None:
+        return None
+
+    checkpoint_changed = _checkpoint_id(current_checkpoint_tuple) != checkpoint_id_before
+    messages_changed = visible_conversation_signature(_read_checkpoint_messages(current_checkpoint_tuple)) != conversation_signature_before
+    if checkpoint_changed or messages_changed:
+        await _persist(current_goal, evaluation, no_progress_count, stand_down_reason="thread_changed_after_evaluation")
+        return None
+
+    if evaluation["satisfied"]:
+        try:
+            async with goal_thread_lock(thread_id):
+                latest_checkpoint_tuple = await _call_checkpointer_method(
+                    checkpointer,
+                    "aget_tuple",
+                    "get_tuple",
+                    {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}},
+                )
+                if latest_checkpoint_tuple is None:
+                    return None
+                latest_goal = _read_checkpoint_goal(latest_checkpoint_tuple)
+                if latest_goal is None or not _goal_instance_matches(goal, latest_goal):
+                    return None
+                values = await write_thread_goal(
+                    checkpointer,
+                    thread_id,
+                    None,
+                    as_node="goal_evaluator",
+                    expected_checkpoint_id=_checkpoint_id(latest_checkpoint_tuple),
+                )
+            await bridge.publish(run_id, "values", serialize(values, mode="values"))
+        except GoalWriteConflict:
+            return None
+        except Exception:
+            logger.warning("Could not clear satisfied goal for thread %s", thread_id, exc_info=True)
+        return None
+
+    stand_down_reason = _stand_down_reason(goal, evaluation, no_progress_count)
+    if stand_down_reason is not None or not should_continue_goal(goal, evaluation, no_progress_count=no_progress_count):
+        await _persist(goal, evaluation, no_progress_count, stand_down_reason=stand_down_reason)
+        return None
+
+    next_count = int(goal.get("continuation_count", 0)) + 1
+    updated_goal = await _persist(goal, evaluation, no_progress_count, continuation_count=next_count)
+    if updated_goal is None:
+        return None
+
+    # Final guard: the persist above bumped the checkpoint id, so only the visible
+    # conversation signature is meaningful for detecting a racing user turn here.
+    try:
+        latest_goal, latest_checkpoint_tuple = await _reread_goal_and_checkpoint(checkpointer, thread_id)
+    except Exception:
+        logger.warning("Could not verify queued goal continuation for thread %s", thread_id, exc_info=True)
+        return None
+    if not _goal_instance_matches(updated_goal, latest_goal) or latest_checkpoint_tuple is None:
+        return None
+    if visible_conversation_signature(_read_checkpoint_messages(latest_checkpoint_tuple)) != conversation_signature_before:
+        await _persist(
+            latest_goal,
+            evaluation,
+            no_progress_count,
+            continuation_count=next_count,
+            stand_down_reason="thread_changed_before_continuation",
+        )
+        return None
+
+    logger.info(
+        "Run %s continuing thread %s for active goal (%d/%d)",
+        run_id,
+        thread_id,
+        updated_goal.get("continuation_count", next_count),
+        updated_goal.get("max_continuations", 0),
+    )
+    return {"messages": [make_goal_continuation_message(updated_goal, evaluation)]}
 
 
 async def _rollback_to_pre_run_checkpoint(

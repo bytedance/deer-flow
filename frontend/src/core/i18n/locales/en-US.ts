@@ -118,6 +118,16 @@ export const enUS: Translations = {
     followupConfirmReplace: "Replace & send",
     suggestionPlaceholderRequired:
       "Replace the suggestion placeholder before sending.",
+    goalCommandDescription: "Set, show, or clear an active goal",
+    goalLabel: "Goal",
+    goalContinuing: "Continuing {count}/{max}",
+    goalContinuationTooltip:
+      "Auto-continued {count}/{max} times toward the goal; stops at the limit.",
+    goalSet: "Goal set.",
+    goalCleared: "Goal cleared.",
+    goalNone: "No active goal.",
+    goalActive: "Active goal: {goal}",
+    goalFailed: "Goal command failed.",
     suggestions: [
       {
         suggestion: "Write",

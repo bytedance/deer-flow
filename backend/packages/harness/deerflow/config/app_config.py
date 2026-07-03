@@ -4,7 +4,7 @@ import os
 from collections.abc import Mapping
 from contextvars import ContextVar
 from pathlib import Path
-from typing import Any, Self
+from typing import Any, Literal, Self
 
 import yaml
 from dotenv import load_dotenv
@@ -57,6 +57,35 @@ class CircuitBreakerConfig(BaseModel):
     recovery_timeout_sec: int = Field(default=60, description="Time in seconds before attempting to recover the circuit")
 
 
+class LoggingEnhanceConfig(BaseModel):
+    """Request trace logging enhancement settings."""
+
+    enabled: bool = Field(default=False, description="Enable request-level trace ids in Gateway response headers and log records.")
+    format: Literal["text", "json"] = Field(default="text", description="Enhanced log output format.")
+
+
+class LoggingConfig(BaseModel):
+    """Logging configuration."""
+
+    enhance: LoggingEnhanceConfig = Field(default_factory=LoggingEnhanceConfig, description="Request trace correlation logging settings.")
+
+
+def is_trace_correlation_enabled(config: Any) -> bool:
+    """Return ``True`` when ``logging.enhance.enabled`` is set on *config*.
+
+    Single source of truth for the request-trace-correlation gate, shared by
+    the Gateway ``TraceMiddleware`` and the embedded ``DeerFlowClient`` so
+    the two entry points cannot drift on when ``deerflow_trace_id`` is
+    emitted (Langfuse metadata) and when a request-level trace id is bound
+    at all. Accepts any object exposing ``logging.enhance.enabled`` via
+    ``getattr`` chains (``AppConfig``, ``SimpleNamespace`` fixtures, etc.);
+    missing intermediate attributes silently degrade to ``False``.
+    """
+    logging_config = getattr(config, "logging", None)
+    enhance = getattr(logging_config, "enhance", None)
+    return bool(getattr(enhance, "enabled", False))
+
+
 def _legacy_config_candidates() -> tuple[Path, ...]:
     """Return source-tree config.yaml locations for monorepo compatibility."""
     backend_dir = Path(__file__).resolve().parents[4]
@@ -96,6 +125,13 @@ class AppConfig(BaseModel):
         description=format_field_description(
             "log_level",
             field_doc="Logging level for deerflow and app modules (debug/info/warning/error); third-party libraries are not affected.",
+        ),
+    )
+    logging: LoggingConfig = Field(
+        default_factory=LoggingConfig,
+        description=format_field_description(
+            "logging",
+            field_doc="Structured logging and request trace correlation settings.",
         ),
     )
     token_usage: TokenUsageConfig = Field(default_factory=TokenUsageConfig, description="Token usage tracking configuration")

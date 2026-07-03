@@ -16,10 +16,11 @@ from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.middleware.types import ModelRequest, ModelResponse
 from langchain_core.messages import AIMessage, HumanMessage
 
+from deerflow.runtime.secret_context import ACTIVE_SECRETS_CONTEXT_KEY, extract_request_secrets
 from deerflow.skills.slash import parse_slash_skill_reference, resolve_slash_skill
 from deerflow.skills.storage import get_or_new_skill_storage, get_or_new_user_skill_storage
 from deerflow.skills.storage.skill_storage import SkillStorage
-from deerflow.skills.types import SKILL_MD_FILE, SkillCategory
+from deerflow.skills.types import SKILL_MD_FILE, SecretRequirement, SkillCategory
 from deerflow.utils.messages import get_original_user_content_text
 
 if TYPE_CHECKING:
@@ -41,6 +42,7 @@ class _Activation:
     content_hash: str
     remaining_text: str
     editable: bool
+    required_secrets: tuple[SecretRequirement, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,7 +95,9 @@ class SkillActivationMiddleware(AgentMiddleware):
         # Use the storage's path validation if available — UserScopedSkillStorage
         # stores custom skills in a per-user directory that is not a sub-path of
         # the global skills root, so the simple relative_to check would reject them.
-        if storage is not None:
+        # Fall back to the relative_to check when the storage is a mock (e.g. tests)
+        # that doesn't implement validate_skill_file_path.
+        if storage is not None and hasattr(storage, "validate_skill_file_path"):
             resolved_file = storage.validate_skill_file_path(skill_file)
         else:
             resolved_file = skill_file.resolve()
@@ -148,6 +152,7 @@ class SkillActivationMiddleware(AgentMiddleware):
                 content_hash=content_hash,
                 remaining_text=resolved.remaining_text,
                 editable=editable,
+                required_secrets=tuple(resolved.skill.required_secrets or ()),
             )
         )
 
@@ -257,10 +262,59 @@ Follow this skill before choosing a general workflow. Load supporting resources 
             activation.content_hash,
         )
         self._record_activation(request, activation, hook=hook)
+        self._apply_skill_secrets(request, activation)
         activation_msg = self._make_activation_message(target, self._build_activation_reminder(activation))
         messages = list(request.messages)
         messages.insert(target_index, activation_msg)
         return request.override(messages=messages)
+
+    @staticmethod
+    def _apply_skill_secrets(request: ModelRequest, activation: _Activation) -> None:
+        """Resolve the activated skill's declared secrets into the per-run injection
+        set (binding point A, issue #3861).
+
+        For each declared secret present in the request's ``context.secrets``,
+        record its value in the injection set stored under
+        ``ACTIVE_SECRETS_CONTEXT_KEY`` on the shared run context, so the bash tool
+        can build the subprocess env for this turn. The injected value always comes
+        from the caller's request — never from the host environment, which is
+        scrubbed of secret-looking names by ``env_policy.build_sandbox_env`` before
+        injection. A skill can therefore never harvest a host platform credential
+        (it only ever receives what the caller explicitly supplied), so a declared
+        name that also exists in the host env is fine: the caller's value wins and
+        the host value is dropped. Secret *values* are never logged.
+        """
+        runtime = getattr(request, "runtime", None)
+        context = getattr(runtime, "context", None)
+        if not isinstance(context, dict):
+            return
+        # Unconditionally clear any active-secret set a previous activation in
+        # the same run may have written, before this turn's resolution decides
+        # what (if anything) to install. Otherwise a later skill that declares
+        # no secrets, or whose required secrets the caller did not supply, would
+        # inherit the previous skill's injection set and the bash tool would
+        # inject those values into a subprocess that never declared them (#3861).
+        context.pop(ACTIVE_SECRETS_CONTEXT_KEY, None)
+        if not activation.required_secrets:
+            return
+
+        request_secrets = extract_request_secrets(context)
+        injected: dict[str, str] = {}
+        missing: list[str] = []
+        for req in activation.required_secrets:
+            if req.name in request_secrets:
+                injected[req.name] = request_secrets[req.name]
+            elif not req.optional:
+                missing.append(req.name)
+
+        if injected:
+            context[ACTIVE_SECRETS_CONTEXT_KEY] = injected
+        if missing:
+            logger.warning(
+                "Skill %s activated but required secrets are missing from the request context: %s",
+                activation.skill_name,
+                ", ".join(sorted(missing)),
+            )
 
     @staticmethod
     def _make_activation_message(target: HumanMessage, activation_content: str) -> HumanMessage:

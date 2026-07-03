@@ -33,8 +33,9 @@ async def _run_lifespan_with_hanging_stop() -> float:
         await asyncio.sleep(3600)
 
     app = FastAPI()
-    startup_config = SimpleNamespace(log_level="INFO", memory=SimpleNamespace(token_counting="char"))
-
+    startup_config = MagicMock()
+    startup_config.log_level = "INFO"
+    startup_config.memory.token_counting = "char"
     fake_service = MagicMock()
     fake_service.get_status = MagicMock(return_value={})
 
