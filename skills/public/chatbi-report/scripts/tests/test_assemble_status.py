@@ -94,3 +94,55 @@ def test_write_status_partial_when_description_fails(tmp_path):
     assert data["status"] == "partial"
     assert data["metrics"]["descriptions_generated"] == 1
     assert data["metrics"]["description_failures"] == 1
+
+
+# ---------- chart manifest metrics (Task 8) ---------- #
+
+def test_status_partial_when_chart_failures(tmp_path):
+    manifest_path = tmp_path / "input.charts.json"
+    manifest_path.write_text(json.dumps({
+        "reports": [{"section_idx": 0, "report_idx": 0, "charts": [
+            {"title": "A", "type": "line", "status": "ok", "path": "x.png", "relative_path": "x.png", "warnings": []},
+            {"title": "B", "type": "bar", "status": "failed", "path": "", "relative_path": "", "error": "boom"},
+        ]}],
+        "summary": {"ok": 1, "failed": 1, "skipped": 0, "status": "CHART_PARTIAL"},
+    }), encoding="utf-8")
+    status_path = tmp_path / "status.json"
+    import assemble_status as ast
+    ast.write_status(
+        str(status_path),
+        exit_step="9",
+        error_class=None,
+        error_detail="",
+        outputs={"report_md": "x.md", "report_docx": "x.docx"},
+        metrics={
+            "queried_count": 1, "query_failures": 0,
+            "computed_count": 0, "compute_validation_failures": 0,
+            "descriptions_generated": 0, "description_failures": 0,
+            "llm_calls": 0, "duration_seconds": 0.0,
+        },
+        charts_manifest=str(manifest_path),
+    )
+    payload = json.loads(status_path.read_text(encoding="utf-8"))
+    assert payload["status"] == "partial"
+    assert payload["metrics"]["charts_declared"] == 2
+    assert payload["metrics"]["charts_generated"] == 1
+    assert payload["metrics"]["chart_failures"] == 1
+    assert payload["outputs"]["charts_manifest"] == str(manifest_path)
+
+
+def test_status_success_when_no_chart_manifest(tmp_path):
+    status_path = tmp_path / "status.json"
+    import assemble_status as ast
+    ast.write_status(
+        str(status_path),
+        exit_step="9",
+        error_class=None,
+        error_detail="",
+        outputs={"report_md": "x.md", "report_docx": "x.docx"},
+        metrics={"queried_count": 1, "query_failures": 0, "llm_calls": 0, "duration_seconds": 0.0},
+    )
+    payload = json.loads(status_path.read_text(encoding="utf-8"))
+    assert payload["status"] == "success"
+    assert payload["metrics"]["charts_declared"] == 0
+    assert payload["metrics"]["chart_failures"] == 0
