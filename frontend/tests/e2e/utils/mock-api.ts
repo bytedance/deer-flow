@@ -57,7 +57,9 @@ export type MockAPIOptions = {
   skills?: MockSkill[];
   scheduledTasks?: Array<{
     id: string;
-    thread_id: string;
+    thread_id: string | null;
+    context_mode?: "fresh_thread_per_run" | "reuse_thread";
+    last_thread_id?: string | null;
     title: string;
     prompt: string;
     schedule_type: "once" | "cron";
@@ -141,7 +143,7 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
     Array<{
       id: string;
       task_id: string;
-      thread_id: string;
+      thread_id: string | null;
       run_id: string | null;
       scheduled_for: string;
       trigger: "scheduled" | "manual";
@@ -245,7 +247,14 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
       return route.fulfill({
         status: 200,
         contentType: "application/json",
-        body: JSON.stringify(mutableScheduledTasks),
+        body: JSON.stringify(
+          mutableScheduledTasks.map((task) => ({
+            context_mode: "fresh_thread_per_run",
+            last_thread_id: null,
+            ...task,
+            thread_id: task.thread_id ?? null,
+          })),
+        ),
       });
     }
     if (route.request().method() === "POST") {
@@ -258,7 +267,11 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
         typeof payload.timezone === "string" ? payload.timezone : "UTC";
       const created = {
         id: "task-created",
-        thread_id: threadId,
+        thread_id: threadId || null,
+        context_mode:
+          (payload.context_mode as "fresh_thread_per_run" | "reuse_thread") ??
+          "fresh_thread_per_run",
+        last_thread_id: null,
         title,
         prompt,
         schedule_type: payload.schedule_type as "once" | "cron",
@@ -392,7 +405,14 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
         status: 200,
         contentType: "application/json",
         body: JSON.stringify(
-          mutableScheduledTasks.filter((task) => task.thread_id === threadId),
+          mutableScheduledTasks
+            .filter((task) => task.thread_id === threadId)
+            .map((task) => ({
+              context_mode: "fresh_thread_per_run",
+              last_thread_id: null,
+              ...task,
+              thread_id: task.thread_id ?? null,
+            })),
         ),
       });
     }

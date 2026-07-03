@@ -258,7 +258,7 @@ async def trigger_scheduled_task(task_id: str, request: Request):
     if result["outcome"] == "conflict":
         raise HTTPException(status_code=409, detail=result["error"] or "Scheduled task trigger conflicted with an active run")
     if result["outcome"] == "failed":
-        raise HTTPException(status_code=409, detail=result["error"] or "Scheduled task trigger failed")
+        raise HTTPException(status_code=502, detail=result["error"] or "Scheduled task trigger failed")
     return {"id": task_id, "triggered": True}
 
 

@@ -218,6 +218,7 @@ tool_groups:
   - name: file:read    # Read-only file operations
   - name: file:write   # Write file operations
   - name: bash         # Shell command execution
+```
 
 ### Scheduler
 
@@ -239,7 +240,6 @@ Notes:
 - The MVP supports only `once` and `cron`.
 - Manual trigger uses the same scheduled-task resource and run lifecycle.
 - Scheduled task definitions and task-run history are persisted in the application database.
-```
 
 ### Tools
 

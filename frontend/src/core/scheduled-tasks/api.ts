@@ -34,6 +34,12 @@ export async function fetchThreadScheduledTasks(
   const response = await fetch(
     `${getBackendBaseURL()}/api/threads/${encodeURIComponent(threadId)}/scheduled-tasks`,
   );
+  if (!response.ok) {
+    await throwScheduledTaskApiError(
+      response,
+      `Failed to load thread scheduled tasks: ${response.statusText}`,
+    );
+  }
   return response.json();
 }
 
