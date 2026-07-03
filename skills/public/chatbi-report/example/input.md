@@ -8,6 +8,22 @@
 >   branch_num=27020199; branch_short_name=王益联社
 >   branch_num=27020100; branch_short_name=印台联社
 > 时期: time_info=["2022", "2023", "2024", "2025"]
+> 图表:
+>   标题: 利润总额趋势
+>   类型: line
+>   x轴: 时期
+>   y轴: 利润总额
+>   系列: 行社
+>   单位: 万元
+>   输出: profit-trend
+>
+> 图表:
+>   标题: 2025年利润同比对比
+>   类型: bar
+>   x轴: 行社
+>   y轴: 2025利润同比
+>   单位: %
+>   输出: profit-yoy-2025
 > 描述:
 >   请基于表格数据生成经营分析描述，重点关注利润总额同比变化、与铜川平均值和全省平均值的对比，并给出盈利能力判断。
 > 计算:
@@ -38,5 +54,96 @@
     <tr><td>印台</td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
     <tr><td>铜川平均值</td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
     <tr><td>全省平均值</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
+  </tbody>
+</table>
+
+### 1.2 贷款质量分析
+
+> 机构:
+>   branch_num=27020199; branch_short_name=王益联社
+>   branch_num=27020100; branch_short_name=印台联社
+>   branch_num=27020101; branch_short_name=耀州联社
+>   branch_num=27020102; branch_short_name=宜君联社
+>   branch_num=99999901; branch_short_name=市平均
+>   branch_num=99999902; branch_short_name=省平均
+> 时期: time_info=["2025"]
+> 图表:
+>   标题: 贷款余额与不良率
+>   类型: bar_line
+>   x轴: 行社
+>   y轴左: 贷款余额
+>   y轴右: 不良率
+>   左轴单位: 万元
+>   右轴单位: %
+>   条形配色: #3498db
+>   折线配色: #e74c3c
+>   输出: loan-npl-combo
+
+<table>
+  <thead>
+    <tr>
+      <th rowspan="2">行社</th>
+      <th data-unit="万元">贷款余额</th>
+      <th data-unit="%">不良率</th>
+    </tr>
+    <tr>
+      <th data-idx="BAS_0128" data-period="2025" data-unit="万元">2025年</th>
+      <th data-idx="BAS_0129" data-period="2025" data-unit="%">2025年</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr><td>王益</td><td></td><td></td></tr>
+    <tr><td>印台</td><td></td><td></td></tr>
+    <tr><td>耀州</td><td></td><td></td></tr>
+    <tr><td>宜君</td><td></td><td></td></tr>
+    <tr><td>市平均</td><td></td><td></td></tr>
+    <tr><td>省平均</td><td></td><td></td></tr>
+  </tbody>
+</table>
+
+### 1.3 贷款多指标综合分析
+
+> 机构:
+>   branch_num=27020199; branch_short_name=王益联社
+>   branch_num=27020100; branch_short_name=印台联社
+>   branch_num=27020101; branch_short_name=耀州联社
+>   branch_num=27020102; branch_short_name=宜君联社
+>   branch_num=99999901; branch_short_name=市平均
+>   branch_num=99999902; branch_short_name=省平均
+> 时期: time_info=["2025"]
+> 图表:
+>   标题: 贷款余额与不良率综合分析
+>   类型: bar_line
+>   x轴: 行社
+>   y轴左: 贷款余额, 单位存款日均净增
+>   y轴右: 不良率, 占比
+>   系列: 指标
+>   左轴单位: 万元
+>   右轴单位: %
+>   条形配色: #3498db, #2ecc71
+>   折线配色: #e74c3c, #f39c12
+>   输出: loan-multi-combo
+
+<table>
+  <thead>
+    <tr>
+      <th rowspan="2">行社</th>
+      <th colspan="2" data-unit="万元">资产规模</th>
+      <th colspan="2" data-unit="%">风险指标</th>
+    </tr>
+    <tr>
+      <th data-idx="BAS_0128" data-period="2025" data-unit="万元">贷款余额</th>
+      <th data-idx="BAS_0130" data-period="2025" data-unit="万元">存款日均净增</th>
+      <th data-idx="BAS_0129" data-period="2025" data-unit="%">不良率</th>
+      <th data-idx="BAS_0131" data-period="2025" data-unit="%">占比</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr><td>王益</td><td></td><td></td><td></td><td></td></tr>
+    <tr><td>印台</td><td></td><td></td><td></td><td></td></tr>
+    <tr><td>耀州</td><td></td><td></td><td></td><td></td></tr>
+    <tr><td>宜君</td><td></td><td></td><td></td><td></td></tr>
+    <tr><td>市平均</td><td></td><td></td><td></td><td></td></tr>
+    <tr><td>省平均</td><td></td><td></td><td></td><td></td></tr>
   </tbody>
 </table>

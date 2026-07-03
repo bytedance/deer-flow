@@ -65,6 +65,51 @@ class ComputedSpec:
 
 
 @dataclass
+class ChartSpec:
+    title: str
+    type: str
+    x: str
+    y: str | None = None
+    y_left: list[str] | None = None
+    y_right: list[str] | None = None
+    series: str | None = None
+    unit: str | None = None
+    left_unit: str | None = None
+    right_unit: str | None = None
+    bar_colors: list[str] | None = None
+    line_colors: list[str] | None = None
+    output: str | None = None
+
+    def to_dict(self) -> dict:
+        d: dict[str, Any] = {
+            "title": self.title,
+            "type": self.type,
+            "x": self.x,
+        }
+        if self.y is not None:
+            d["y"] = self.y
+        if self.y_left is not None:
+            d["y_left"] = list(self.y_left)
+        if self.y_right is not None:
+            d["y_right"] = list(self.y_right)
+        if self.series is not None:
+            d["series"] = self.series
+        if self.unit is not None:
+            d["unit"] = self.unit
+        if self.left_unit is not None:
+            d["left_unit"] = self.left_unit
+        if self.right_unit is not None:
+            d["right_unit"] = self.right_unit
+        if self.bar_colors is not None:
+            d["bar_colors"] = list(self.bar_colors)
+        if self.line_colors is not None:
+            d["line_colors"] = list(self.line_colors)
+        if self.output is not None:
+            d["output"] = self.output
+        return d
+
+
+@dataclass
 class OrgContext:
     branch_num: str
     branch_short_name: str
@@ -79,9 +124,10 @@ class Report:
     data_rows: list[dict] = field(default_factory=list)
     computed_specs: list[ComputedSpec] = field(default_factory=list)
     description_prompt: str | None = None  # `> 描述:` 块内容；step 8c 消费
+    chart_specs: list[ChartSpec] = field(default_factory=list)  # `> 图表:` 块；step 8c.5 消费
 
     def to_dict(self) -> dict:
-        return {
+        d: dict[str, Any] = {
             "title": self.title,
             "org_contexts": [{"branch_num": o.branch_num,
                               "branch_short_name": o.branch_short_name}
@@ -93,9 +139,11 @@ class Report:
                 {"name": s.name, "prompt": s.prompt, "examples": s.examples}
                 for s in self.computed_specs
             ],
-            **({"description_prompt": self.description_prompt}
-               if self.description_prompt is not None else {}),
+            "chart_specs": [s.to_dict() for s in self.chart_specs],
         }
+        if self.description_prompt is not None:
+            d["description_prompt"] = self.description_prompt
+        return d
 
 
 @dataclass
@@ -284,6 +332,93 @@ def _parse_org_block(body: str) -> list[OrgContext]:
     return out
 
 
+# ---------- `> 图表:` 块 ---------- #
+
+_CHART_KEY_MAP = {
+    "标题": "title",
+    "类型": "type",
+    "x轴": "x",
+    "y轴": "y",
+    "y轴左": "y_left",
+    "y轴右": "y_right",
+    "系列": "series",
+    "单位": "unit",
+    "左轴单位": "left_unit",
+    "右轴单位": "right_unit",
+    "条形配色": "bar_colors",
+    "折线配色": "line_colors",
+    "输出": "output",
+}
+
+_REQUIRED_CHART_FIELDS = {"title", "type", "x"}
+_ALLOWED_SERIES_VALUES = {"行社", "指标"}
+
+_COLOR_HEX_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
+_COLOR_RGB_RE = re.compile(r"^rgb\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})\s*\)$")
+
+
+def _is_valid_color(value: str) -> bool:
+    if _COLOR_HEX_RE.match(value):
+        return True
+    m = _COLOR_RGB_RE.match(value)
+    if m:
+        return all(0 <= int(g) <= 255 for g in m.groups())
+    return False
+
+
+def _parse_chart_blocks(body: str) -> list[ChartSpec]:
+    """解析 0..N 个 `> 图表:` 块。无块返回空列表。"""
+    out: list[ChartSpec] = []
+    for match in re.finditer(r"^>\s*图表:\s*$", body, re.MULTILINE):
+        fields: dict[str, str] = {}
+        for raw in body[match.end():].splitlines():
+            if not raw:
+                continue
+            if not raw.startswith(">"):
+                break
+            # 兄弟块（`> 时期:` 等）跳出：仅 0/1 空格缩进的 `> <非空>` 即视为新块
+            if re.match(r"^>\s?\S", raw) and not re.match(r"^>\s{2,}\S", raw):
+                break
+            line = raw.lstrip("> ").strip()
+            if not line:
+                continue
+            if ":" not in line:
+                continue
+            key, value = (s.strip() for s in line.split(":", 1))
+            en_key = _CHART_KEY_MAP.get(key)
+            if en_key:
+                fields[en_key] = value
+        missing = _REQUIRED_CHART_FIELDS - set(fields.keys())
+        if missing:
+            raise ValueError(f"chart block missing required fields: {sorted(missing)}")
+        chart_type = fields.get("type")
+        if chart_type == "bar_line":
+            if "y" in fields:
+                raise ValueError("bar_line chart must use `y轴左`/`y轴右`, not `y轴`")
+            if "y_left" not in fields or "y_right" not in fields:
+                raise ValueError("bar_line chart requires both `y轴左` and `y轴右`")
+            fields["y_left"] = [v.strip() for v in fields["y_left"].split(",") if v.strip()]
+            fields["y_right"] = [v.strip() for v in fields["y_right"].split(",") if v.strip()]
+            if not fields["y_left"] or not fields["y_right"]:
+                raise ValueError("bar_line chart `y轴左` and `y轴右` must have at least one value each")
+            for color_key in ("bar_colors", "line_colors"):
+                if color_key in fields:
+                    fields[color_key] = [v.strip() for v in fields[color_key].split(",") if v.strip()]
+                    for c in fields[color_key]:
+                        if not _is_valid_color(c):
+                            raise ValueError(f"invalid color format: {c!r}")
+        else:
+            if "y" not in fields:
+                raise ValueError(f"chart type `{chart_type}` requires `y轴`")
+        series_val = fields.get("series")
+        if series_val is not None and series_val not in _ALLOWED_SERIES_VALUES:
+            raise ValueError(
+                f"unsupported series `{series_val}`; must be one of {sorted(_ALLOWED_SERIES_VALUES)}"
+            )
+        out.append(ChartSpec(**fields))  # type: ignore[arg-type]
+    return out
+
+
 def _parse_one_report(report_title: str, body: str) -> Report:
     org_contexts = _parse_org_block(body)
     time_match = re.search(r"^>\s*时期:\s*time_info\s*=\s*(\[.*?\])\s*$", body, re.MULTILINE)
@@ -317,6 +452,7 @@ def _parse_one_report(report_title: str, body: str) -> Report:
     computed_specs = [s for s in computed_specs if s.name in header_computed_names]
 
     description_prompt = _parse_description_block(body)
+    chart_specs = _parse_chart_blocks(body)
 
     return Report(
         title=report_title,
@@ -326,6 +462,7 @@ def _parse_one_report(report_title: str, body: str) -> Report:
         data_rows=data_rows,
         computed_specs=computed_specs,
         description_prompt=description_prompt,
+        chart_specs=chart_specs,
     )
 
 

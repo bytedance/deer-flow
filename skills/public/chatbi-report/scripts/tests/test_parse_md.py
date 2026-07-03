@@ -129,3 +129,87 @@ def test_parse_description_block_to_dict(tmp_path):
     rep = doc.sections[0].reports[0]
     assert rep.description_prompt == "请生成经营分析描述。\n重点关注同比变化。"
     assert doc.to_dict()["sections"][0]["reports"][0]["description_prompt"] == rep.description_prompt
+
+
+def test_parse_chart_block(tmp_path):
+    md = tmp_path / "with_chart.md"
+    md.write_text(
+        "# T\n\n## S\n\n### R\n\n"
+        "> 机构:\n"
+        ">   branch_num=A; branch_short_name=机构A\n"
+        "> 时期: time_info=[\"2025\"]\n"
+        "> 图表:\n"
+        ">   标题: 利润趋势\n"
+        ">   类型: line\n"
+        ">   x轴: 时期\n"
+        ">   y轴: 利润总额\n"
+        ">   系列: 行社\n"
+        ">   单位: 万元\n"
+        ">   输出: profit-trend\n"
+        "<table><thead><tr>"
+        "<th data-idx=\"BAS_0263\" data-unit=\"万元\">利润总额</th>"
+        "</tr></thead>"
+        "<tbody><tr><td></td></tr></tbody></table>\n",
+        encoding="utf-8",
+    )
+    doc = pm.parse_file(str(md))
+    rep = doc.sections[0].reports[0]
+    assert len(rep.chart_specs) == 1
+    spec = rep.chart_specs[0]
+    assert spec.title == "利润趋势"
+    assert spec.type == "line"
+    assert spec.x == "时期"
+    assert spec.y == "利润总额"
+    assert spec.series == "行社"
+    assert spec.unit == "万元"
+    assert spec.output == "profit-trend"
+    d = doc.to_dict()
+    assert d["sections"][0]["reports"][0]["chart_specs"] == [spec.to_dict()]
+
+
+def test_parse_multiple_chart_blocks(tmp_path):
+    md = tmp_path / "multi_chart.md"
+    md.write_text(
+        "# T\n\n## S\n\n### R\n\n"
+        "> 图表:\n"
+        ">   标题: A\n"
+        ">   类型: line\n"
+        ">   x轴: 时期\n"
+        ">   y轴: 利润\n"
+        "> 图表:\n"
+        ">   标题: B\n"
+        ">   类型: bar\n"
+        ">   x轴: 行社\n"
+        ">   y轴: 同比\n"
+        "> 机构:\n"
+        ">   branch_num=A; branch_short_name=机构A\n"
+        "> 时期: time_info=[\"2025\"]\n"
+        "<table><thead><tr>"
+        "<th data-idx=\"BAS_0263\">X</th>"
+        "</tr></thead><tbody><tr><td></td></tr></tbody></table>\n",
+        encoding="utf-8",
+    )
+    doc = pm.parse_file(str(md))
+    rep = doc.sections[0].reports[0]
+    assert len(rep.chart_specs) == 2
+    assert rep.chart_specs[0].title == "A"
+    assert rep.chart_specs[1].title == "B"
+
+
+def test_parse_chart_block_missing_required_raises(tmp_path):
+    md = tmp_path / "bad_chart.md"
+    md.write_text(
+        "# T\n\n## S\n\n### R\n\n"
+        "> 图表:\n"
+        ">   标题: A\n"
+        ">   x轴: 时期\n"
+        "> 机构:\n"
+        ">   branch_num=A; branch_short_name=机构A\n"
+        "> 时期: time_info=[\"2025\"]\n"
+        "<table><thead><tr>"
+        "<th data-idx=\"BAS_0263\">X</th>"
+        "</tr></thead><tbody><tr><td></td></tr></tbody></table>\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="missing required fields"):
+        pm.parse_file(str(md))
