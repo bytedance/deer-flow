@@ -63,6 +63,7 @@ DeerFlow has newly integrated the intelligent search and crawling toolset indepe
   - [Core Features](#core-features)
     - [Skills \& Tools](#skills--tools)
       - [Claude Code Integration](#claude-code-integration)
+    - [Session Goals](#session-goals)
     - [Sub-Agents](#sub-agents)
     - [Sandbox \& File System](#sandbox--file-system)
     - [Context Engineering](#context-engineering)
@@ -669,6 +670,22 @@ DEERFLOW_LANGGRAPH_URL=http://localhost:2026/api/langgraph  # LangGraph API
 
 See [`skills/public/claude-to-deerflow/SKILL.md`](skills/public/claude-to-deerflow/SKILL.md) for the full API reference.
 
+### Session Goals
+
+Use `/goal <completion condition>` to attach one active completion condition to the current thread. The goal is thread-scoped state, not a skill activation, so it stays active across turns until DeerFlow determines it has been satisfied or you clear it.
+
+Supported commands:
+
+```text
+/goal finish the implementation and make all tests pass
+/goal              # show the active goal
+/goal clear        # clear it
+```
+
+After each Gateway-backed run, DeerFlow evaluates the visible conversation against the active goal with a non-thinking evaluator model. The evaluator must return a typed blocker (`missing_evidence`, `needs_user_input`, `run_failed`, `external_wait`, or `goal_not_met_yet`) plus visible evidence. DeerFlow only injects a hidden continuation when the latest assistant turn is durably checkpointed, the blocker is `goal_not_met_yet`, the thread did not change during evaluation, and the no-progress breaker has not fired. The safety cap defaults to 8 hidden continuations, and repeated identical non-progress evaluations stop after 2 attempts. `/goal clear` and any user-authored new input win over queued continuations. When the goal is satisfied, DeerFlow clears it automatically and publishes the updated thread state.
+
+The Web UI shows the active goal above the composer. The same command is available from the TUI and supported IM channels. In the Web UI and supported IM channels, setting `/goal <completion condition>` also starts a run with the condition as the task; status and clear commands only manage goal state.
+
 ### Sub-Agents
 
 Complex tasks rarely fit in a single pass. DeerFlow decomposes them.
@@ -742,6 +759,9 @@ models = client.list_models()        # {"models": [...]}
 skills = client.list_skills()        # {"skills": [...]}
 client.update_skill("web-search", enabled=True)
 client.upload_files("thread-1", ["./report.pdf"])  # {"success": True, "files": [...]}
+client.set_goal("thread-1", "finish the implementation and make all tests pass")
+client.get_goal("thread-1")       # {"goal": {...}} or {"goal": None}
+client.clear_goal("thread-1")
 ```
 
 All dict-returning methods are validated against Gateway Pydantic response models in CI (`TestGatewayConformance`), ensuring the embedded client stays in sync with the HTTP API schemas. See `backend/packages/harness/deerflow/client.py` for full API documentation.
@@ -762,7 +782,7 @@ deerflow --print "summarize this repo"        # headless one-shot answer to stdo
 deerflow --json  "hello"                       # headless newline-delimited StreamEvents
 ```
 
-A keyboard-driven chat surface with a streaming transcript (Markdown-rendered answers), compact tool-activity cards, a `/` slash-command palette, `/model` and `/threads` pickers, input history, and `Esc` / `Ctrl+C` interrupt. Sessions opened in the TUI also appear in the Web UI sidebar — it writes the shared thread store under the local default user, so terminal and web stay in sync **without running the Gateway**.
+A keyboard-driven chat surface with a streaming transcript (Markdown-rendered answers), compact tool-activity cards, a `/` slash-command palette, `/goal` goal management, `/model` and `/threads` pickers, input history, and `Esc` / `Ctrl+C` interrupt. Sessions opened in the TUI also appear in the Web UI sidebar — it writes the shared thread store under the local default user, so terminal and web stay in sync **without running the Gateway**.
 
 See [backend/docs/TUI.md](backend/docs/TUI.md) for the full guide.
 

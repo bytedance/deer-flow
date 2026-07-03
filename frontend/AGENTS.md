@@ -42,7 +42,7 @@ Frontend (Next.js) ──▶ LangGraph SDK ──▶ LangGraph Backend (lead_age
                                               └── Tools & Skills
 ```
 
-The frontend is a stateful chat application. Users create **threads** (conversations), send messages, and receive streamed AI responses. The backend orchestrates agents that can produce **artifacts** (files/code) and **todos**.
+The frontend is a stateful chat application. Users create **threads** (conversations), send messages, set thread-scoped `/goal` completion conditions, and receive streamed AI responses. The backend orchestrates agents that can produce **artifacts** (files/code), **todos**, and goal state updates.
 
 ### Source Layout (`src/`)
 
@@ -64,10 +64,12 @@ The frontend is a stateful chat application. Users create **threads** (conversat
 ### Data Flow
 
 1. User input → thread hooks (`core/threads/hooks.ts`) → LangGraph SDK streaming
-2. Stream events update thread state (messages, artifacts, todos)
+2. Stream events update thread state (messages, artifacts, todos, goal)
 3. Stop actions call the LangGraph SDK stream stop path; `core/threads/hooks.ts` invalidates current-thread, token-usage, and sidebar/search caches immediately and schedules one follow-up refetch because SDK stop may finish via abort + fire-and-forget cancel before backend title finalization commits
 4. TanStack Query manages server state; localStorage stores user settings
 5. Components subscribe to thread state and render updates
+
+`/goal` is a built-in composer command, not a skill activation. `src/components/workspace/input-box.tsx` intercepts `/goal`, `/goal clear`, and `/goal <condition>` before normal chat submission, calling Gateway `GET/PUT/DELETE /api/threads/{thread_id}/goal`. Setting `/goal <condition>` also submits the condition text as the next user task so the agent starts running immediately; status and clear do not start a run. Goal requests are tied to the current `threadId` with an `AbortController`, so switching threads or unmounting the composer aborts in-flight goal requests and stale responses cannot update the new thread's goal state. The chat pages render `GoalStatus` above the composer from `AgentThreadState.goal`, with local optimistic state until the next stream `values` update arrives.
 
 ### Key Patterns
 
@@ -80,6 +82,7 @@ The frontend is a stateful chat application. Users create **threads** (conversat
 ### Interaction Ownership
 
 - `src/app/workspace/chats/[thread_id]/page.tsx` owns composer busy-state wiring.
+- `src/app/workspace/chats/[thread_id]/page.tsx` and `src/app/workspace/agents/[agent_name]/chats/[thread_id]/page.tsx` own active-goal display state for their composer overlays.
 - `src/core/threads/hooks.ts` owns pre-submit upload state and thread submission.
 
 ## Code Style
