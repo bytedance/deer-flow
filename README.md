@@ -536,6 +536,19 @@ Once a channel is connected, you can interact with DeerFlow directly from the ch
 
 > Messages without a command prefix are treated as regular chat — DeerFlow creates a thread and responds conversationally.
 
+#### Request Trace Correlation
+
+Gateway request trace correlation is disabled by default so existing HTTP responses and log formats stay unchanged. To enable it, set:
+
+```yaml
+logging:
+  enhance:
+    enabled: true
+    format: text
+```
+
+When enabled, every Gateway HTTP response includes `X-Trace-Id`, logs include `trace_id`, and Langfuse traces created by that request include `metadata.deerflow_trace_id` with the same value.
+
 #### LangSmith Tracing
 
 DeerFlow has built-in [LangSmith](https://smith.langchain.com) integration for observability. When enabled, all LLM calls, agent runs, and tool executions are traced and visible in the LangSmith dashboard.
@@ -570,6 +583,7 @@ If you are using a self-hosted Langfuse instance, set `LANGFUSE_BASE_URL` to you
 - `user_id` = effective user from `get_effective_user_id()` (falls back to `default` in no-auth mode)
 - `trace_name` = assistant id (defaults to `lead-agent`)
 - `tags` = `[env:<DEER_FLOW_ENV>, model:<model_name>]` (omitted when not set)
+- `metadata.deerflow_trace_id` = DeerFlow request correlation id, matching `X-Trace-Id` when request trace correlation is enabled
 
 These are injected into `RunnableConfig.metadata` at the graph invocation root for both the gateway path (`runtime/runs/worker.py::run_agent`) and the embedded path (`client.py::DeerFlowClient.stream`), so any LangChain-compatible callback can read them. Set `DEER_FLOW_ENV` (or `ENVIRONMENT`) to tag traces by deployment environment.
 

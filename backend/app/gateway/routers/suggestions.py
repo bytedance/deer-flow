@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 import re
 
 from fastapi import APIRouter, Depends, Request
@@ -10,6 +11,8 @@ from app.gateway.authz import require_permission
 from app.gateway.deps import get_config
 from deerflow.config.app_config import AppConfig
 from deerflow.models import create_chat_model
+from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.tracing import inject_langfuse_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -175,7 +178,16 @@ async def generate_suggestions(
 
     try:
         model = create_chat_model(name=body.model_name, thinking_enabled=False, app_config=config)
-        response = await model.ainvoke([SystemMessage(content=system_instruction), HumanMessage(content=user_content)], config={"run_name": "suggest_agent"})
+        invoke_config: dict = {"run_name": "suggest_agent"}
+        inject_langfuse_metadata(
+            invoke_config,
+            thread_id=thread_id,
+            user_id=get_effective_user_id(),
+            assistant_id="suggest_agent",
+            model_name=body.model_name,
+            environment=os.environ.get("DEER_FLOW_ENV") or os.environ.get("ENVIRONMENT"),
+        )
+        response = await model.ainvoke([SystemMessage(content=system_instruction), HumanMessage(content=user_content)], config=invoke_config)
         raw = _extract_response_text(response.content)
         suggestions = _parse_json_string_list(raw) or []
         cleaned = [s.replace("\n", " ").strip() for s in suggestions if s.strip()]

@@ -30,6 +30,7 @@ from deerflow.config.app_config import AppConfig
 from deerflow.runtime.serialization import serialize
 from deerflow.runtime.stream_bridge import StreamBridge
 from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, get_current_trace_id, normalize_trace_id
 from deerflow.tracing import inject_langfuse_metadata
 
 from .manager import RunManager, RunRecord
@@ -91,6 +92,8 @@ def _install_runtime_context(config: dict, runtime_context: dict[str, Any]) -> N
     if isinstance(existing_context, dict):
         existing_context.setdefault("thread_id", runtime_context["thread_id"])
         existing_context.setdefault("run_id", runtime_context["run_id"])
+        if DEERFLOW_TRACE_METADATA_KEY in runtime_context:
+            existing_context.setdefault(DEERFLOW_TRACE_METADATA_KEY, runtime_context[DEERFLOW_TRACE_METADATA_KEY])
         if "app_config" in runtime_context:
             existing_context["app_config"] = runtime_context["app_config"]
         return
@@ -281,6 +284,10 @@ async def run_agent(
         # manually here because we drive the graph through ``agent.astream(config=...)``
         # without passing the official ``context=`` parameter.
         runtime_ctx = _build_runtime_context(thread_id, run_id, config.get("context"), ctx.app_config)
+        incoming_metadata = config.get("metadata") if isinstance(config.get("metadata"), dict) else {}
+        deerflow_trace_id = normalize_trace_id(incoming_metadata.get(DEERFLOW_TRACE_METADATA_KEY)) or get_current_trace_id()
+        if deerflow_trace_id:
+            runtime_ctx[DEERFLOW_TRACE_METADATA_KEY] = deerflow_trace_id
         # Expose the run-scoped journal under a sentinel key so middleware can
         # write audit events (e.g. SafetyFinishReasonMiddleware recording
         # suppressed tool calls). Double-underscore prefix marks it as a
@@ -307,6 +314,7 @@ async def run_agent(
             assistant_id=record.assistant_id,
             model_name=record.model_name,
             environment=os.environ.get("DEER_FLOW_ENV") or os.environ.get("ENVIRONMENT"),
+            deerflow_trace_id=deerflow_trace_id,
         )
 
         # Resolve after runtime context installation so context/configurable reflect

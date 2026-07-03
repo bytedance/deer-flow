@@ -37,13 +37,14 @@ from deerflow.agents.lead_agent.agent import build_middlewares
 from deerflow.agents.lead_agent.prompt import apply_prompt_template
 from deerflow.agents.thread_state import ThreadState
 from deerflow.config.agents_config import AGENT_NAME_PATTERN
-from deerflow.config.app_config import get_app_config, reload_app_config
+from deerflow.config.app_config import get_app_config, is_trace_correlation_enabled, reload_app_config
 from deerflow.config.extensions_config import ExtensionsConfig, SkillStateConfig, get_extensions_config, reload_extensions_config
 from deerflow.config.paths import get_paths
 from deerflow.models import create_chat_model
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.skills.storage import get_or_new_skill_storage
 from deerflow.tools.builtins.tool_search import assemble_deferred_tools
+from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, generate_trace_id, get_current_trace_id, reset_current_trace_id, set_current_trace_id
 from deerflow.tracing import build_tracing_callbacks, inject_langfuse_metadata
 from deerflow.uploads.manager import (
     claim_unique_filename,
@@ -519,6 +520,61 @@ class DeerFlowClient:
         thread_id: str | None = None,
         **kwargs,
     ) -> Generator[StreamEvent, None, None]:
+        """Stream a conversation turn with a DeerFlow request trace context.
+
+        Mirrors the Gateway ``TraceMiddleware`` gate: when
+        ``logging.enhance.enabled`` is off the embedded client does **not**
+        create a fresh request-level trace id, so Langfuse traces from
+        embedded / TUI / CLI callers keep their pre-enhancement schema and
+        do not gain a ``metadata.deerflow_trace_id`` key by default. A
+        caller that explicitly binds its own trace via
+        :func:`deerflow.trace_context.request_trace_context` still opts in:
+        the inner ``get_current_trace_id()`` read propagates that value
+        into Langfuse metadata regardless of the flag.
+        """
+        if not is_trace_correlation_enabled(self._app_config):
+            yield from self._stream_without_trace_context(message, thread_id=thread_id, **kwargs)
+            return
+
+        # Resolve the trace id once, without mutating the caller's context.
+        # Inherits an ambient id if the caller opted in via
+        # ``request_trace_context``; otherwise mints a fresh one.
+        trace_id = get_current_trace_id() or generate_trace_id()
+
+        # Bind the trace id only around each ``next()`` step, never across a
+        # ``yield``. ``stream()`` is a sync generator, which shares the
+        # caller's context — a ``with ensure_trace_context(): yield from ...``
+        # would (1) leak the id into the caller's context between yields and
+        # (2) risk ``ValueError: Token was created in a different Context``
+        # when GC finalizes an abandoned generator in a different context.
+        # Per-step set/reset keeps LangGraph node execution and its log
+        # records inside the binding while returning control to the caller
+        # with the ContextVar restored.
+        inner = self._stream_without_trace_context(message, thread_id=thread_id, **kwargs)
+        _EXHAUSTED = object()
+        try:
+            while True:
+                token = set_current_trace_id(trace_id)
+                try:
+                    try:
+                        event = next(inner)
+                    except StopIteration:
+                        event = _EXHAUSTED
+                finally:
+                    reset_current_trace_id(token)
+                if event is _EXHAUSTED:
+                    break
+                yield event
+        finally:
+            inner.close()
+
+    def _stream_without_trace_context(
+        self,
+        message: str,
+        *,
+        thread_id: str | None = None,
+        **kwargs,
+    ) -> Generator[StreamEvent, None, None]:
         """Stream a conversation turn, yielding events incrementally.
 
         Each call sends one user message and yields events until the agent
@@ -610,6 +666,7 @@ class DeerFlowClient:
             config["callbacks"] = [*existing_callbacks, *tracing_callbacks]
 
         configurable = config.get("configurable") or {}
+        deerflow_trace_id = get_current_trace_id()
         inject_langfuse_metadata(
             config,
             thread_id=thread_id,
@@ -617,12 +674,15 @@ class DeerFlowClient:
             assistant_id=self._agent_name or "lead-agent",
             model_name=configurable.get("model_name") or self._model_name,
             environment=self._environment or os.environ.get("DEER_FLOW_ENV") or os.environ.get("ENVIRONMENT"),
+            deerflow_trace_id=deerflow_trace_id,
         )
 
         self._ensure_agent(config)
 
         state: dict[str, Any] = {"messages": [HumanMessage(content=message)]}
         context = {"thread_id": thread_id}
+        if deerflow_trace_id:
+            context[DEERFLOW_TRACE_METADATA_KEY] = deerflow_trace_id
         if self._agent_name:
             context["agent_name"] = self._agent_name
 

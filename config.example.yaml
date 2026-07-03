@@ -15,13 +15,20 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 16
+config_version: 17
 
 # ============================================================================
 # Logging
 # ============================================================================
 # Log level for deerflow modules (debug/info/warning/error)
 log_level: info
+
+# Request trace correlation for Gateway logs, HTTP response headers, and
+# Langfuse metadata. Disabled by default to preserve existing HTTP/log output.
+logging:
+  enhance:
+    enabled: false
+    format: text
 
 # ============================================================================
 # Token Usage
