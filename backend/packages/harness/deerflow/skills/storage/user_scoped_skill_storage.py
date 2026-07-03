@@ -107,10 +107,34 @@ class UserScopedSkillStorage(LocalSkillStorage):
         return {}
 
     def _write_skill_states(self, states: dict[str, dict[str, bool]]) -> None:
-        """Persist per-user skill enabled states to ``_skill_states.json``."""
+        """Persist per-user skill enabled states to ``_skill_states.json``.
+
+        Atomic write via a temp file in the same directory followed by
+        ``Path.replace`` (POSIX-atomic on the same filesystem). Without this,
+        a crash/SIGTERM/disk-full mid-write would leave the file truncated
+        or empty; ``_read_skill_states`` would then return ``{}`` and
+        ``get_skill_enabled_state`` would silently re-enable every skill
+        the user had disabled. Mirrors the pattern used by
+        ``LocalSkillStorage.write_custom_skill`` in this same module.
+        """
         self._user_skills_root.mkdir(parents=True, exist_ok=True)
-        with open(self._skill_states_file, "w", encoding="utf-8") as f:
-            json.dump(states, f, indent=2)
+        fd, tmp_path_str = tempfile.mkstemp(
+            dir=str(self._user_skills_root),
+            prefix=".skill_states_",
+            suffix=".json.tmp",
+        )
+        tmp_path = Path(tmp_path_str)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(states, f, indent=2)
+            tmp_path.replace(self._skill_states_file)
+        except Exception:
+            # Best-effort cleanup of the temp file on failure.
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
 
     def get_skill_enabled_state(self, skill_name: str) -> bool:
         """Return the enabled state for a custom/legacy skill.
@@ -170,11 +194,22 @@ class UserScopedSkillStorage(LocalSkillStorage):
         # _user_custom_root and legacy reads to _global_custom_root.
         skills = super().load_skills(enabled_only=False)
 
-        # Override enabled state for CUSTOM / LEGACY with per-user state.
-        # PUBLIC skill state remains as-is (from global extensions_config).
+        # Override enabled state for CUSTOM / LEGACY with per-user state,
+        # ANDed with the global extensions_config default. This preserves a
+        # pre-upgrade global disable of a shared custom/legacy skill from
+        # being silently re-enabled by an absent per-user entry, while still
+        # letting the per-user state override the global default when both
+        # are present. PUBLIC skill state remains governed solely by
+        # extensions_config (handled by ``super().load_skills`` above).
+        from deerflow.config.extensions_config import get_extensions_config
+
+        extensions_config = get_extensions_config()
         for skill in skills:
-            if skill.category != SkillCategory.PUBLIC:
-                skill.enabled = self.get_skill_enabled_state(skill.name)
+            category = skill.category.value if hasattr(skill.category, "value") else skill.category
+            if category != SkillCategory.PUBLIC.value:
+                per_user_state = self.get_skill_enabled_state(skill.name)
+                global_state = extensions_config.is_skill_enabled(skill.name, category)
+                skill.enabled = per_user_state and global_state
 
         if enabled_only:
             skills = [s for s in skills if s.enabled]

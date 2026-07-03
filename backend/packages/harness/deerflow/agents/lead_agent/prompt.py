@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+from collections import OrderedDict
 from functools import lru_cache
 from typing import TYPE_CHECKING
 
@@ -17,10 +18,20 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# LRU cap on the per-(app_config, user_id) enabled-skills cache.
+# Without this, a long-running multi-user process leaks one entry per
+# distinct user (and per app_config injection), bounded only by the
+# number of distinct identities the process has ever seen. 256 is
+# generous for realistic traffic and matches the cap used for
+# ``_user_scoped_storages`` in ``deerflow.skills.storage``; the
+# least-recently-used entry is evicted on overflow and re-computed on
+# the next miss.
+_ENABLED_SKILLS_BY_CONFIG_CACHE_MAXSIZE = 256
+
 _ENABLED_SKILLS_REFRESH_WAIT_TIMEOUT_SECONDS = 5.0
 _enabled_skills_lock = threading.Lock()
 _enabled_skills_cache: list[Skill] | None = None
-_enabled_skills_by_config_cache: dict[int, tuple[object, list[Skill]]] = {}
+_enabled_skills_by_config_cache: "OrderedDict[tuple[int, str], tuple[object, list[Skill]]]" = OrderedDict()  # noqa: UP037
 _enabled_skills_refresh_active = False
 _enabled_skills_refresh_version = 0
 _enabled_skills_refresh_event = threading.Event()
@@ -149,6 +160,9 @@ def get_enabled_skills_for_config(app_config: AppConfig | None = None, user_id: 
         if cached is not None:
             cached_config, cached_skills = cached
             if cached_config is app_config:
+                # LRU touch: move the entry to the end so it survives the
+                # next eviction cycle.
+                _enabled_skills_by_config_cache.move_to_end(cache_key)
                 return list(cached_skills)
 
     if user_id:
@@ -157,6 +171,11 @@ def get_enabled_skills_for_config(app_config: AppConfig | None = None, user_id: 
         skills = list(get_or_new_skill_storage(app_config=app_config).load_skills(enabled_only=True))
     with _enabled_skills_lock:
         _enabled_skills_by_config_cache[cache_key] = (app_config, skills)
+        # Evict the least-recently-used entries when we exceed the cap.
+        # The cap is intentionally small (256) so a long-running process
+        # cannot leak one entry per distinct (config, user) pair seen.
+        while len(_enabled_skills_by_config_cache) > _ENABLED_SKILLS_BY_CONFIG_CACHE_MAXSIZE:
+            _enabled_skills_by_config_cache.popitem(last=False)
     return list(skills)
 
 

@@ -478,23 +478,62 @@ def test_update_skill_refreshes_prompt_cache_before_return(monkeypatch, tmp_path
     config_path = tmp_path / "extensions_config.json"
     enabled_state = {"value": True}
     refresh_calls = []
+    per_user_writes: list[tuple[str, bool]] = []
 
     def _load_skills(*, enabled_only: bool):
-        skill = _make_skill("demo-skill", enabled=enabled_state["value"])
+        # Use a CUSTOM skill so the router takes the per-user cache invalidation
+        # branch (PUBLIC skills clear the cache for all users via
+        # ``clear_skills_system_prompt_cache`` — see
+        # ``test_public_skill_toggle_clears_all_users_cache``).
+        skill = Skill(
+            name="demo-skill",
+            description="Description for demo-skill",
+            license="MIT",
+            skill_dir=Path("/tmp/demo-skill"),
+            skill_file=Path("/tmp/demo-skill/SKILL.md"),
+            relative_path=Path("demo-skill"),
+            category="custom",
+            enabled=enabled_state["value"],
+        )
         if enabled_only and not skill.enabled:
             return []
         return [skill]
 
+    def _set_skill_enabled_state(name: str, enabled: bool) -> None:
+        per_user_writes.append((name, enabled))
+        enabled_state["value"] = enabled
+
     async def _refresh(user_id: str):
         refresh_calls.append(("refresh", user_id))
-        enabled_state["value"] = False
 
-    mock_storage = SimpleNamespace(load_skills=_load_skills)
+    # Mock storage must be a UserScopedSkillStorage instance so the
+    # router takes the per-user ``set_skill_enabled_state`` branch.
+    # We patch the symbol on the storage module because the router
+    # function imports ``UserScopedSkillStorage`` lazily from there.
+    from deerflow.skills.storage import user_scoped_skill_storage as uss_module
+
+    class _FakeUserScopedStorage:
+        def __init__(self, *args, **kwargs) -> None:
+            self._load = _load_skills
+            self._write = _set_skill_enabled_state
+
+        def load_skills(self, *, enabled_only: bool = False):
+            return self._load(enabled_only=enabled_only)
+
+        def set_skill_enabled_state(self, name: str, enabled: bool) -> None:
+            self._write(name, enabled)
+
+    monkeypatch.setattr(uss_module, "UserScopedSkillStorage", _FakeUserScopedStorage)
+    # The router also calls ``isinstance(storage, UserScopedSkillStorage)``
+    # against the symbol it imported; monkeypatch the symbol on the
+    # storage module so the isinstance check accepts our mock.
+    monkeypatch.setattr("deerflow.skills.storage.user_scoped_skill_storage.UserScopedSkillStorage", _FakeUserScopedStorage)
+    mock_storage = _FakeUserScopedStorage()
     monkeypatch.setattr(skills_router, "_get_user_skill_storage", lambda cfg: mock_storage)
     monkeypatch.setattr(skills_router, "get_effective_user_id", lambda: "default")
     monkeypatch.setattr("app.gateway.routers.skills.get_extensions_config", lambda: SimpleNamespace(mcp_servers={}, skills={}))
     monkeypatch.setattr("app.gateway.routers.skills.reload_extensions_config", lambda: None)
-    monkeypatch.setattr(skills_router.ExtensionsConfig, "resolve_config_path", staticmethod(lambda: config_path))
+    monkeypatch.setattr(skills_router.ExtensionsConfig, "resolve_config_path", staticmethod(lambda config_path=None: config_path))
     monkeypatch.setattr("app.gateway.routers.skills.refresh_user_skills_system_prompt_cache_async", _refresh)
 
     app = _make_test_app(SimpleNamespace())
@@ -505,7 +544,88 @@ def test_update_skill_refreshes_prompt_cache_before_return(monkeypatch, tmp_path
     assert response.status_code == 200
     assert response.json()["enabled"] is False
     assert refresh_calls == [("refresh", "default")]
-    assert json.loads(config_path.read_text(encoding="utf-8")) == {"mcpServers": {}, "skills": {"demo-skill": {"enabled": False}}}
+    # CUSTOM skills write to per-user state (not extensions_config.json).
+    assert per_user_writes == [("demo-skill", False)]
+    assert not config_path.exists() or json.loads(config_path.read_text(encoding="utf-8")) == {"mcpServers": {}, "skills": {}}
+
+
+def test_public_skill_toggle_clears_all_users_cache(monkeypatch, tmp_path):
+    """P2-5: toggling a PUBLIC skill must invalidate the prompt cache for
+    every user, because PUBLIC state lives in the global
+    ``extensions_config.json`` and a per-user ``refresh_*`` call would
+    leave the other users' cached enabled state stale.
+    """
+    config_path = tmp_path / "extensions_config.json"
+    config_path.write_text(json.dumps({"mcpServers": {}, "skills": {"public-skill": {"enabled": True}}}), encoding="utf-8")
+    clear_calls = []
+    refresh_calls = []
+    load_calls = {"n": 0}
+
+    def _load_skills(*, enabled_only: bool):
+        from deerflow.config.extensions_config import ExtensionsConfig
+        from deerflow.skills.types import Skill
+
+        # The router re-loads after the toggle so the response reflects
+        # the new state. The second call therefore reads the on-disk
+        # JSON, which the PUBLIC branch has just rewritten.
+        load_calls["n"] += 1
+        if load_calls["n"] >= 2:
+            on_disk = ExtensionsConfig.from_file(config_path)
+            current_enabled = on_disk.skills["public-skill"].enabled
+        else:
+            current_enabled = True
+
+        skill = Skill(
+            name="public-skill",
+            description="Description for public-skill",
+            license="MIT",
+            skill_dir=Path("/tmp/public-skill"),
+            skill_file=Path("/tmp/public-skill/SKILL.md"),
+            relative_path=Path("public-skill"),
+            category="public",
+            enabled=current_enabled,
+        )
+        if enabled_only and not skill.enabled:
+            return []
+        return [skill]
+
+    def _clear():
+        clear_calls.append("clear")
+
+    async def _refresh(user_id: str):
+        refresh_calls.append(("refresh", user_id))
+
+    monkeypatch.setattr(skills_router, "_get_user_skill_storage", lambda cfg: SimpleNamespace(load_skills=_load_skills))
+    monkeypatch.setattr(skills_router, "get_effective_user_id", lambda: "default")
+    # ``resolve_config_path()`` is called with no args inside the router
+    # to discover where to write; point it at the temp file.
+    monkeypatch.setattr(skills_router.ExtensionsConfig, "resolve_config_path", staticmethod(lambda config_path=None: config_path if config_path is not None else config_path))
+
+    # Re-bind the staticmethod to actually default to config_path when
+    # called with no args. ``staticmethod`` is a descriptor, so we wrap
+    # with a callable that always returns the test path.
+    def _resolve(_config_path=None):
+        return config_path
+
+    monkeypatch.setattr(skills_router.ExtensionsConfig, "resolve_config_path", staticmethod(_resolve))
+    monkeypatch.setattr("app.gateway.routers.skills.get_extensions_config", lambda: __import__("deerflow.config.extensions_config", fromlist=["ExtensionsConfig"]).ExtensionsConfig.from_file(config_path))
+    monkeypatch.setattr("app.gateway.routers.skills.reload_extensions_config", lambda: None)
+    monkeypatch.setattr("app.gateway.routers.skills.clear_skills_system_prompt_cache", _clear)
+    monkeypatch.setattr("app.gateway.routers.skills.refresh_user_skills_system_prompt_cache_async", _refresh)
+
+    app = _make_test_app(SimpleNamespace())
+
+    with TestClient(app) as client:
+        response = client.put("/api/skills/public-skill", json={"enabled": False})
+
+    assert response.status_code == 200, response.text
+    assert response.json()["enabled"] is False
+    # PUBLIC skills must hit the global cache-clear branch, not per-user refresh.
+    assert clear_calls == ["clear"]
+    assert refresh_calls == []
+    # The global state file must reflect the toggle.
+    persisted = json.loads(config_path.read_text(encoding="utf-8"))
+    assert persisted["skills"]["public-skill"]["enabled"] is False
 
 
 class TestMultiUserSkillIsolation:

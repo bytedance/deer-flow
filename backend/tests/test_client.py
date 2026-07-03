@@ -1299,8 +1299,15 @@ class TestSkillsManagement:
             # Pre-set agent to verify it gets invalidated
             client._agent = MagicMock()
 
+            # ``update_skill`` reads the skill list twice (find + reload) and
+            # ``UserScopedSkillStorage.load_skills`` internally calls
+            # ``super().load_skills()`` once per outer call, so the patched
+            # method is invoked 4 times: provide 4 return values.
             with (
-                patch("deerflow.skills.storage.local_skill_storage.LocalSkillStorage.load_skills", side_effect=[[skill], [updated_skill]]),
+                patch(
+                    "deerflow.skills.storage.local_skill_storage.LocalSkillStorage.load_skills",
+                    side_effect=[[skill], [skill], [updated_skill], [updated_skill]],
+                ),
                 patch("deerflow.client.ExtensionsConfig.resolve_config_path", return_value=tmp_path),
                 patch("deerflow.client.get_extensions_config", return_value=ext_config),
                 patch("deerflow.client.reload_extensions_config"),

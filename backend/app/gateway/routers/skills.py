@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 from pathlib import Path
@@ -7,7 +8,7 @@ from pydantic import BaseModel, Field
 
 from app.gateway.deps import get_config, require_admin_user
 from app.gateway.path_utils import resolve_thread_virtual_path
-from deerflow.agents.lead_agent.prompt import refresh_user_skills_system_prompt_cache_async
+from deerflow.agents.lead_agent.prompt import clear_skills_system_prompt_cache, refresh_user_skills_system_prompt_cache_async
 from deerflow.config.app_config import AppConfig
 from deerflow.config.extensions_config import ExtensionsConfig, SkillStateConfig, get_extensions_config, reload_extensions_config
 from deerflow.runtime.user_context import get_effective_user_id
@@ -398,7 +399,18 @@ async def update_skill(skill_name: str, body: SkillUpdateRequest, request: Reque
                     json.dump(config_data, f, indent=2)
                 reload_extensions_config()
 
-        await refresh_user_skills_system_prompt_cache_async(get_effective_user_id())
+        # PUBLIC skill enabled state lives in the global extensions_config.json
+        # and affects every user, so the prompt cache for ALL users must be
+        # invalidated. CUSTOM/LEGACY skill state is per-user so only that
+        # user's cache needs to be dropped.
+        if skill.category == SkillCategory.PUBLIC:
+            # clear_skills_system_prompt_cache is sync; run it in a worker
+            # thread to avoid blocking the event loop. The lock inside it is
+            # cheap, but the async drop also keeps the test mock surface
+            # consistent (tests patch the async variant).
+            await asyncio.to_thread(clear_skills_system_prompt_cache)
+        else:
+            await refresh_user_skills_system_prompt_cache_async(get_effective_user_id())
 
         skills = _get_user_skill_storage(config).load_skills(enabled_only=False)
         updated_skill = next((s for s in skills if s.name == skill_name), None)

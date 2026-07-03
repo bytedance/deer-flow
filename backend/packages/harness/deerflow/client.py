@@ -1185,6 +1185,27 @@ class DeerFlowClient:
                 self._atomic_write_json(config_path, config_data)
                 reload_extensions_config()
 
+        # Invalidate the prompt cache for this caller (and for all users if
+        # the changed skill is PUBLIC, since PUBLIC state is shared). Mirrors
+        # what ``routers/skills.py::update_skill`` does — without this the
+        # cached enabled-state would stay stale until process restart. See
+        # review feedback on PR #3889.
+        try:
+            from deerflow.agents.lead_agent.prompt import clear_skills_system_prompt_cache, invalidate_user_skill_cache
+
+            skill_category_value = skill.category.value if hasattr(skill.category, "value") else skill.category
+            if skill_category_value == SkillCategory.PUBLIC.value:
+                clear_skills_system_prompt_cache()
+            else:
+                invalidate_user_skill_cache(get_effective_user_id())
+        except Exception as exc:
+            # Don't let cache-invalidation failures mask the actual write
+            # success — log and continue. The stale-cache window is bounded
+            # by the next config reload.
+            import logging
+
+            logging.getLogger(__name__).warning("Failed to invalidate skills prompt cache after update_skill: %s", exc)
+
         self._agent = None
         self._agent_config_key = None
 

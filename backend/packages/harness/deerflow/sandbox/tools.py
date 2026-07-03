@@ -1,4 +1,6 @@
 import asyncio
+import json
+import logging
 import os
 import posixpath
 import re
@@ -25,6 +27,8 @@ from deerflow.sandbox.sandbox_provider import get_sandbox_provider
 from deerflow.sandbox.search import GrepMatch
 from deerflow.sandbox.security import LOCAL_HOST_BASH_DISABLED_MESSAGE, is_host_bash_allowed
 from deerflow.tools.types import Runtime
+
+logger = logging.getLogger(__name__)
 
 _ABSOLUTE_PATH_PATTERN = re.compile(r"(?<![:\w])(?<!:/)/(?:[^\s\"'`;&|<>()]+)")
 # A ``{...}`` block holding a single identifier-like placeholder (e.g. ``{id}``
@@ -224,9 +228,13 @@ def _is_disabled_skill_path(path: str, *, user_id: str | None = None) -> bool:
             effective_uid = user_id or get_effective_user_id()
             storage = get_or_new_user_skill_storage(effective_uid)
             return not storage.get_skill_enabled_state(skill_name)
-    except Exception:
-        # If we can't determine the enabled state, allow access (fail-open)
-        return False
+    except (OSError, ValueError, KeyError, json.JSONDecodeError) as exc:
+        # Access-control check must fail closed: when we can't determine the
+        # enabled state (corrupt _skill_states.json, mid-write race, missing
+        # config), refuse access rather than silently serving a disabled
+        # skill's files. See review feedback on PR #3889.
+        logger.warning("Failed to determine enabled state, denying access: %s", exc)
+        return True
 
 
 def _resolve_skills_path(path: str) -> str:

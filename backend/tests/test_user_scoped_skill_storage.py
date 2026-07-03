@@ -374,3 +374,200 @@ class TestSkillToggleIsolation:
 
                     # Complementary: Alice's skill path IS disabled
                     assert _is_disabled_skill_path("/mnt/skills/custom/report-gen/SKILL.md", user_id="alice") is True
+
+
+class TestSkillStateAtomicWrite:
+    """P2-2: ``_write_skill_states`` must be atomic so a crash mid-write
+    cannot silently re-enable every skill the user had disabled.
+    """
+
+    def test_writes_via_tempfile_then_replace(self, user_storage: UserScopedSkillStorage, base_dir: Path) -> None:
+        states = {"report-gen": {"enabled": False}}
+        user_storage._write_skill_states(states)
+
+        target = user_storage._skill_states_file
+        assert target.exists()
+        # No leftover .tmp files in the directory.
+        leftovers = [p for p in base_dir.glob("users/*/skills/.skill_states_*.json.tmp") if p.exists()]
+        assert not leftovers, f"temp file left behind: {leftovers}"
+        import json as _json
+
+        assert _json.loads(target.read_text(encoding="utf-8")) == states
+
+    def test_failed_write_does_not_truncate_existing_file(self, user_storage: UserScopedSkillStorage) -> None:
+        import json as _json
+
+        # Seed a valid state file.
+        target = user_storage._skill_states_file
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(_json.dumps({"old-skill": {"enabled": False}}), encoding="utf-8")
+
+        # Force the inner write to fail; ensure the existing file is intact.
+        with patch("pathlib.Path.replace", side_effect=OSError("boom")):
+            with pytest.raises(OSError):
+                user_storage._write_skill_states({"new-skill": {"enabled": True}})
+
+        # Pre-existing content must survive the failed replacement.
+        assert target.exists()
+        assert _json.loads(target.read_text(encoding="utf-8")) == {"old-skill": {"enabled": False}}
+
+        # And no orphan temp file should be left around in the user skills dir.
+        leftovers = list(target.parent.glob(".skill_states_*.json.tmp"))
+        assert not leftovers, f"temp file leaked: {leftovers}"
+
+
+class TestSkillStateFailClosed:
+    """P1-2: ``_is_disabled_skill_path`` must fail CLOSED (return True)
+    when the enabled state cannot be determined, so a corrupt
+    ``_skill_states.json`` or mid-write race never lets the agent read a
+    disabled skill's files.
+    """
+
+    def test_returns_true_when_state_lookup_raises(self) -> None:
+        from deerflow.sandbox.tools import _is_disabled_skill_path
+
+        def _boom(_skill_name: str) -> bool:
+            raise OSError("storage unavailable")
+
+        with patch("deerflow.skills.storage.user_scoped_skill_storage.UserScopedSkillStorage.get_skill_enabled_state", side_effect=_boom):
+            assert _is_disabled_skill_path("/mnt/skills/custom/report-gen/SKILL.md", user_id="default") is True
+
+    def test_returns_true_when_public_extensions_config_raises(self) -> None:
+        from deerflow.sandbox.tools import _is_disabled_skill_path
+
+        def _boom() -> bool:
+            raise OSError("extensions_config.json unreadable")
+
+        with patch("deerflow.config.extensions_config.ExtensionsConfig.from_file", side_effect=_boom):
+            assert _is_disabled_skill_path("/mnt/skills/public/bootstrap/SKILL.md", user_id="default") is True
+
+
+class TestSkillLoadingRespectsGlobalDisable:
+    """P2-1: when the global ``extensions_config.json`` disables a
+    CUSTOM/LEGACY skill, ``load_skills`` must still report it as
+    disabled even if the per-user state has no entry (defaulting to
+    enabled otherwise). Without the AND, an admin's global "off" for a
+    shared skill would be silently flipped to "on" the moment a new
+    user touches the per-user storage.
+    """
+
+    def test_global_disable_wins_when_per_user_state_missing(self, tmp_path: Path) -> None:
+        from types import SimpleNamespace
+
+        from deerflow.config.paths import Paths
+        from deerflow.skills.storage import get_or_new_user_skill_storage
+        from deerflow.skills.types import SkillCategory
+
+        base = tmp_path
+        skills_root = base / "skills"
+        skills_root.mkdir()
+        (skills_root / "custom").mkdir()
+        (skills_root / "custom" / "shared-skill").mkdir()
+        (skills_root / "custom" / "shared-skill" / "SKILL.md").write_text(
+            _skill_content("shared-skill"),
+            encoding="utf-8",
+        )
+
+        # Per-user state is empty (no per-user override for "shared-skill").
+        with patch("deerflow.config.paths.get_paths", return_value=Paths(base_dir=base)):
+            with patch("deerflow.config.paths._paths", None):
+                cfg = SimpleNamespace(
+                    skills=SimpleNamespace(
+                        get_skills_path=lambda: skills_root,
+                        container_path="/mnt/skills",
+                        use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage",
+                    ),
+                )
+                with patch("deerflow.config.get_app_config", return_value=cfg):
+                    # Global extensions_config reports the shared skill as disabled.
+                    ext_cfg = SimpleNamespace(
+                        skills={"shared-skill": SimpleNamespace(enabled=False)},
+                        is_skill_enabled=lambda name, _cat: not (name == "shared-skill"),
+                    )
+                    # The function inside ``load_skills`` does a
+                    # function-local ``from deerflow.config.extensions_config
+                    # import get_extensions_config``, so patch the
+                    # extension_config module symbol.
+                    with patch("deerflow.config.extensions_config.get_extensions_config", return_value=ext_cfg):
+                        storage = get_or_new_user_skill_storage("alice", app_config=cfg)
+                        loaded = storage.load_skills(enabled_only=False)
+                        shared = [s for s in loaded if s.name == "shared-skill" and s.category == SkillCategory.LEGACY]
+                        assert len(shared) == 1
+                        # AND-merge: per-user default True AND global False → False
+                        assert shared[0].enabled is False
+
+
+class TestEnabledSkillsByConfigCacheBounded:
+    """P2-4: ``_enabled_skills_by_config_cache`` must be bounded so a
+    long-running process cannot leak one entry per distinct
+    (app_config, user_id) pair ever seen.
+    """
+
+    def test_evicts_least_recently_used_above_maxsize(self, monkeypatch) -> None:
+        from collections import OrderedDict
+
+        from deerflow.agents.lead_agent import prompt as prompt_module
+
+        # Shrink the cap so the test stays fast.
+        monkeypatch.setattr(prompt_module, "_ENABLED_SKILLS_BY_CONFIG_CACHE_MAXSIZE", 4)
+        prompt_module._enabled_skills_by_config_cache = OrderedDict()
+
+        class FakeConfig:
+            def __init__(self, name: str) -> None:
+                self.name = name
+
+        class FakeStorage:
+            def __init__(self) -> None:
+                self.load_calls = 0
+
+            def load_skills(self, *, enabled_only: bool = False):
+                self.load_calls += 1
+                return []
+
+        configs = [FakeConfig(f"cfg-{i}") for i in range(6)]
+        storages = [FakeStorage() for _ in range(6)]
+        # Index by cfg id so the lookups below are deterministic.
+        cfg_to_storage = {id(c): s for c, s in zip(configs, storages)}
+
+        def _user_storage(user_id, *, app_config=None):
+            return cfg_to_storage[id(app_config)]
+
+        def _global_storage(*, app_config=None):
+            return cfg_to_storage[id(app_config)]
+
+        # Patch the *already-imported* references inside the prompt
+        # module. ``from ... import`` binds the name at import time, so
+        # patching the storage module has no effect.
+        with patch.object(prompt_module, "get_or_new_user_skill_storage", side_effect=_user_storage), patch.object(prompt_module, "get_or_new_skill_storage", side_effect=_global_storage):
+            for i, cfg in enumerate(configs):
+                prompt_module.get_enabled_skills_for_config(app_config=cfg, user_id=f"user-{i}")
+
+        # After 6 distinct (cfg, user) inserts with a cap of 4, the cache
+        # must hold exactly the 4 most-recently-touched entries.
+        assert len(prompt_module._enabled_skills_by_config_cache) == 4
+        kept_keys = set(prompt_module._enabled_skills_by_config_cache.keys())
+        # The two oldest (cfg-0/user-0, cfg-1/user-1) should have been evicted.
+        assert (id(configs[0]), "user-0") not in kept_keys
+        assert (id(configs[1]), "user-1") not in kept_keys
+        # And the four newest must still be there.
+        for i in range(2, 6):
+            assert (id(configs[i]), f"user-{i}") in kept_keys
+
+        # Touching an older key bumps it to MRU. ``configs[0]`` is no
+        # longer in the cache, so this re-loads it; this also re-loads
+        # ``storages[0]`` from disk (so its load_calls goes from 0 to 1).
+        with patch.object(prompt_module, "get_or_new_user_skill_storage", side_effect=_user_storage), patch.object(prompt_module, "get_or_new_skill_storage", side_effect=_global_storage):
+            prompt_module.get_enabled_skills_for_config(app_config=configs[0], user_id="user-0")
+        # Now configs[0] is MRU. Insert a new (cfg-new, user-new) entry:
+        # the LRU is configs[2] and must be evicted.
+        new_cfg = FakeConfig("cfg-new")
+        new_storage = FakeStorage()
+        cfg_to_storage[id(new_cfg)] = new_storage
+        with patch.object(prompt_module, "get_or_new_user_skill_storage", side_effect=_user_storage), patch.object(prompt_module, "get_or_new_skill_storage", side_effect=_global_storage):
+            prompt_module.get_enabled_skills_for_config(app_config=new_cfg, user_id="user-new")
+
+        kept = set(prompt_module._enabled_skills_by_config_cache.keys())
+        assert (id(configs[0]), "user-0") in kept, "MRU touch should keep configs[0]"
+        assert (id(new_cfg), "user-new") in kept
+        assert (id(configs[2]), "user-2") not in kept, "LRU should have been evicted"
+        assert len(prompt_module._enabled_skills_by_config_cache) == 4

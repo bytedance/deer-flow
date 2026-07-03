@@ -7,6 +7,7 @@ import secrets
 from types import SimpleNamespace
 from typing import Any
 
+from deerflow.config.paths import make_safe_user_id
 from deerflow.runtime.user_context import DEFAULT_USER_ID
 
 INTERNAL_AUTH_HEADER_NAME = "X-DeerFlow-Internal-Token"
@@ -48,8 +49,21 @@ def get_internal_user(owner_user_id: str | None = None):
     filesystem-path resolution (per-user custom skills, memory, thread
     data) use the correct identity for IM channel messages instead of
     falling back to ``"default"``.
+
+    The owner id is normalized through :func:`make_safe_user_id` so that
+    IM channel ids containing characters outside ``[A-Za-z0-9_-]`` (e.g.
+    Feishu ``open_id`` prefixed with ``ou_`` and containing underscores
+    that the rest of the system may treat as path separators, or
+    Telegram chat ids like ``-1001234567890``) cannot be used to escape
+    the per-user storage bucket or impersonate a different user via
+    header value tricks (e.g. trailing slashes, ``..`` segments). The
+    normalization is lossy but deterministic: two distinct raw inputs
+    never share a safe id, so cross-user bleed is impossible.
     """
-    effective_id = owner_user_id or DEFAULT_USER_ID
+    if owner_user_id:
+        effective_id = make_safe_user_id(owner_user_id)
+    else:
+        effective_id = DEFAULT_USER_ID
     return SimpleNamespace(id=effective_id, system_role=INTERNAL_SYSTEM_ROLE)
 
 

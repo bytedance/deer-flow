@@ -114,20 +114,15 @@ class LocalSandboxProvider(SandboxProvider):
                     )
                 )
 
-            # Legacy skills: global custom (pre-migration), read-only —
-            # static, shared by all threads. These are visible as
-            # SkillCategory.LEGACY to users who have no per-user custom
-            # skills yet, and mounted at /mnt/skills/legacy/<name>/ so
-            # their supporting files are accessible in the sandbox.
-            legacy_skills_path = skills_path / "custom"
-            if legacy_skills_path.exists() and any((legacy_skills_path / d / "SKILL.md").exists() for d in legacy_skills_path.iterdir() if d.is_dir() and not d.name.startswith(".")):
-                mappings.append(
-                    PathMapping(
-                        container_path=f"{container_path}/legacy",
-                        local_path=str(legacy_skills_path),
-                        read_only=True,
-                    )
-                )
+            # NOTE: Legacy skills mount is NOT included here because it must
+            # only be exposed to users who have no per-user custom skills yet
+            # (mirroring ``UserScopedSkillStorage._iter_skill_files`` which only
+            # surfaces SkillCategory.LEGACY to such users). Including it for
+            # every user would let users with per-user custom skills still
+            # ``read_file("/mnt/skills/legacy/<name>/SKILL.md")`` and read
+            # content the listing layer told them doesn't exist. See review
+            # feedback on PR #3889 — the legacy mount is now built in
+            # ``_build_thread_path_mappings`` after we know the user_id.
 
             # NOTE: Custom skills mount is NOT included here because it is
             # per-user and must be built dynamically per-thread inside
@@ -302,6 +297,30 @@ class LocalSandboxProvider(SandboxProvider):
             )
         except Exception as exc:
             logger.warning("Could not setup per-thread custom skills mount: %s", exc, exc_info=True)
+
+        # Legacy (pre-migration global-custom) skills: only mount for users
+        # who have no per-user custom skills yet, mirroring the
+        # ``UserScopedSkillStorage._iter_skill_files`` visibility rule. Users
+        # with their own per-user custom skills cannot see LEGACY in the
+        # listing/prompt and must not be able to read it via the sandbox
+        # either — otherwise the listing layer and the sandbox layer disagree
+        # about visibility, and the sandbox layer is the more permissive one.
+        try:
+            config = get_app_config()
+            skills_container_path = config.skills.container_path
+            user_custom_path = paths.user_custom_skills_dir(effective_user_id)
+            legacy_skills_path = config.skills.get_skills_path() / "custom"
+            user_has_no_custom_skills = not any(p.is_dir() and not p.name.startswith(".") for p in user_custom_path.iterdir()) if user_custom_path.exists() else True
+            if user_has_no_custom_skills and legacy_skills_path.exists() and any((legacy_skills_path / d / "SKILL.md").exists() for d in legacy_skills_path.iterdir() if d.is_dir() and not d.name.startswith(".")):
+                mappings.append(
+                    PathMapping(
+                        container_path=f"{skills_container_path}/legacy",
+                        local_path=str(legacy_skills_path),
+                        read_only=True,
+                    )
+                )
+        except Exception as exc:
+            logger.warning("Could not setup per-thread legacy skills mount: %s", exc, exc_info=True)
 
         return mappings
 
