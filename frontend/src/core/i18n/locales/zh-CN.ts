@@ -78,6 +78,14 @@ export const zhCN: Translations = {
     linkCopied: "链接已复制到剪贴板",
   },
 
+  // Citations
+  citations: {
+    sourcesSummary: (count) => `使用了 ${count} 个来源`,
+    citeCount: (count) => `${count} 次引用`,
+    copyReference: (title) => `复制 ${title} 引用`,
+    copiedReference: (title) => `已复制 ${title} 引用`,
+  },
+
   // Input Box
   inputBox: {
     placeholder: "今天我能为你做些什么？",

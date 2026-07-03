@@ -78,6 +78,15 @@ export const enUS: Translations = {
     linkCopied: "Link copied to clipboard",
   },
 
+  // Citations
+  citations: {
+    sourcesSummary: (count) =>
+      `Used ${count} ${count === 1 ? "source" : "sources"}`,
+    citeCount: (count) => `${count} ${count === 1 ? "cite" : "cites"}`,
+    copyReference: (title) => `Copy ${title} reference`,
+    copiedReference: (title) => `Copied ${title} reference`,
+  },
+
   // Input Box
   inputBox: {
     placeholder: "How can I assist you today?",
