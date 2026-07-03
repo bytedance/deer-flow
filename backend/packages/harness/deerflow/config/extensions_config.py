@@ -47,7 +47,7 @@ class McpServerConfig(BaseModel):
     description: str = Field(default="", description="Human-readable description of what this MCP server provides")
     tool_call_timeout: float | None = Field(
         default=None,
-        description="Timeout in seconds for individual MCP tool calls. Uses the SDK's read_timeout_seconds to avoid cross-task cancellation. None means no timeout.",
+        description="Timeout in seconds for individual stdio MCP tool calls. HTTP/SSE servers use transport-level timeouts. None means no timeout.",
     )
     model_config = ConfigDict(extra="allow")
 

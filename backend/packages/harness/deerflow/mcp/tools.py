@@ -666,6 +666,13 @@ async def get_mcp_tools() -> list[BaseTool]:
                     _timeout = server_cfg.tool_call_timeout if server_cfg else None
                     wrapped_tools.append(_make_session_pool_tool(tool, tool_server, servers_config[tool_server], tool_interceptors, tool_call_timeout=_timeout))
                 else:
+                    server_cfg = extensions_config.mcp_servers.get(tool_server)
+                    if server_cfg and server_cfg.tool_call_timeout is not None:
+                        logger.warning(
+                            "Ignoring tool_call_timeout for MCP server '%s' because transport '%s' is not stdio; configure HTTP/SSE transport-level timeouts instead.",
+                            tool_server,
+                            transport,
+                        )
                     wrapped_tools.append(tool)
             else:
                 wrapped_tools.append(tool)

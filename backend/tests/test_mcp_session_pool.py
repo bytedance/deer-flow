@@ -1,6 +1,7 @@
 """Tests for the MCP persistent-session pool."""
 
 import asyncio
+import logging
 import stat
 import threading
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -914,6 +915,57 @@ async def test_http_transport_tools_not_pooled():
     stdio_tools = [t for t in tools if t.name == "playwright_navigate"]
     assert len(stdio_tools) == 1
     assert stdio_tools[0].coroutine is not stdio_tool.coroutine
+
+
+@pytest.mark.asyncio
+async def test_non_stdio_tool_call_timeout_warns_that_it_is_ignored(caplog):
+    """HTTP/SSE servers should not silently ignore stdio-only tool_call_timeout."""
+    from langchain_core.tools import StructuredTool
+    from pydantic import BaseModel, Field
+
+    from deerflow.config.extensions_config import McpServerConfig
+    from deerflow.mcp.tools import get_mcp_tools
+
+    class Args(BaseModel):
+        query: str = Field(..., description="query")
+
+    http_tool = StructuredTool(
+        name="remote_search",
+        description="Search tool",
+        args_schema=Args,
+        coroutine=AsyncMock(),
+        response_format="content_and_artifact",
+    )
+
+    server_cfg = McpServerConfig(
+        type="http",
+        url="https://example.com/mcp",
+        tool_call_timeout=30.0,
+    )
+    extensions_config = MagicMock()
+    extensions_config.get_enabled_mcp_servers.return_value = {"remote": server_cfg}
+    extensions_config.mcp_servers = {"remote": server_cfg}
+    extensions_config.model_extra = {}
+
+    servers_config = {
+        "remote": {"transport": "http", "url": "https://example.com/mcp"},
+    }
+
+    with (
+        patch("deerflow.mcp.tools.ExtensionsConfig.from_file", return_value=extensions_config),
+        patch("deerflow.mcp.tools.build_servers_config", return_value=servers_config),
+        patch("deerflow.mcp.tools.get_initial_oauth_headers", return_value={}),
+        patch("deerflow.mcp.tools.build_oauth_tool_interceptor", return_value=None),
+        patch("langchain_mcp_adapters.client.MultiServerMCPClient") as MockClient,
+        caplog.at_level(logging.WARNING, logger="deerflow.mcp.tools"),
+    ):
+        mock_client_instance = MockClient.return_value
+        mock_client_instance.get_tools = AsyncMock(return_value=[http_tool])
+
+        tools = await get_mcp_tools()
+
+    assert tools == [http_tool]
+    assert any(record.levelno == logging.WARNING and "remote" in record.getMessage() and "tool_call_timeout" in record.getMessage() and "stdio" in record.getMessage() for record in caplog.records)
 
 
 # ---------------------------------------------------------------------------
