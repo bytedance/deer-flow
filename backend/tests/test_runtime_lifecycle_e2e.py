@@ -274,6 +274,15 @@ def isolated_app(isolated_deer_flow_home: Path, monkeypatch: pytest.MonkeyPatch)
     return create_app()
 
 
+def test_lifespan_uses_sqlite_store_from_database_config(isolated_app):
+    """Gateway startup must bind LangGraph Store to the unified database backend."""
+    from langgraph.store.sqlite.aio import AsyncSqliteStore
+    from starlette.testclient import TestClient
+
+    with TestClient(isolated_app):
+        assert isinstance(isolated_app.state.store, AsyncSqliteStore)
+
+
 @pytest.fixture
 def isolated_app_with_title(isolated_deer_flow_home: Path, monkeypatch: pytest.MonkeyPatch):
     config_path = isolated_deer_flow_home.parent / "config-title-enabled.yaml"

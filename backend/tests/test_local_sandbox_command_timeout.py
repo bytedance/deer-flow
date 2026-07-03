@@ -77,7 +77,7 @@ def test_foreground_blocking_command_times_out_with_notice():
 
 def test_timeout_notice_formats_fractional_and_singular_timeouts(monkeypatch):
     monkeypatch.setattr(LocalSandbox, "_get_shell", lambda self: "/bin/sh")
-    monkeypatch.setattr(LocalSandbox, "_run_posix_command", staticmethod(lambda args, timeout: ("", "", 0, True)))
+    monkeypatch.setattr(LocalSandbox, "_run_posix_command", staticmethod(lambda args, timeout, env=None: ("", "", 0, True)))
 
     assert "after 1.5 seconds" in LocalSandbox("t").execute_command("wait", timeout=1.5)
     assert "after 1 second" in LocalSandbox("t").execute_command("wait", timeout=1)

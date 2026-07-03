@@ -14,6 +14,7 @@ import pytest
 from deerflow.runtime.runs.manager import RunRecord
 from deerflow.runtime.runs.schemas import DisconnectMode, RunStatus
 from deerflow.runtime.runs.worker import RunContext, run_agent
+from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, request_trace_context
 
 
 class _FakeAgent:
@@ -105,15 +106,16 @@ async def test_run_agent_injects_langfuse_metadata(monkeypatch):
     record.abort_event = asyncio.Event()
     ctx = RunContext(checkpointer=None)
 
-    await run_agent(
-        _FakeBridge(),
-        _FakeRunManager(),
-        record,
-        ctx=ctx,
-        agent_factory=agent_factory,
-        graph_input={"messages": []},
-        config={"configurable": {"thread_id": "thread-xyz"}},
-    )
+    with request_trace_context("gateway-trace-1"):
+        await run_agent(
+            _FakeBridge(),
+            _FakeRunManager(),
+            record,
+            ctx=ctx,
+            agent_factory=agent_factory,
+            graph_input={"messages": []},
+            config={"configurable": {"thread_id": "thread-xyz"}},
+        )
 
     assert fake_agent.captured_config is not None, "astream was not invoked"
     metadata = fake_agent.captured_config.get("metadata") or {}
@@ -123,6 +125,8 @@ async def test_run_agent_injects_langfuse_metadata(monkeypatch):
     user_id = metadata.get("langfuse_user_id")
     assert user_id == "test-user-autouse", f"expected test-user-autouse, got {user_id}"
     assert metadata.get("langfuse_trace_name") == "lead-agent"
+    assert metadata.get(DEERFLOW_TRACE_METADATA_KEY) == "gateway-trace-1"
+    assert fake_agent.captured_config.get("context", {}).get(DEERFLOW_TRACE_METADATA_KEY) == "gateway-trace-1"
     tags = metadata.get("langfuse_tags") or []
     assert "model:gpt-4o" in tags
 
@@ -210,6 +214,7 @@ async def test_run_agent_preserves_caller_metadata_overrides(monkeypatch):
         config={
             "configurable": {"thread_id": "thread-default"},
             "metadata": {
+                DEERFLOW_TRACE_METADATA_KEY: "explicit-deerflow-trace",
                 "langfuse_session_id": "custom-session-id",
                 "langfuse_user_id": "explicit-user",
             },
@@ -220,6 +225,8 @@ async def test_run_agent_preserves_caller_metadata_overrides(monkeypatch):
     # Caller-supplied keys win.
     assert metadata["langfuse_session_id"] == "custom-session-id"
     assert metadata["langfuse_user_id"] == "explicit-user"
+    assert metadata[DEERFLOW_TRACE_METADATA_KEY] == "explicit-deerflow-trace"
+    assert fake_agent.captured_config.get("context", {}).get(DEERFLOW_TRACE_METADATA_KEY) == "explicit-deerflow-trace"
     # Worker still fills in keys that the caller didn't set.
     assert metadata["langfuse_trace_name"] == "lead-agent"
 
