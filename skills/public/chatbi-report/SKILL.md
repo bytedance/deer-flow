@@ -61,6 +61,7 @@ Do not trigger for:
 | compute source/result | `/mnt/user-data/outputs/<stem>.compute.<slug>.py`, `/mnt/user-data/outputs/<stem>.computed.<slug>.json` |
 | description text | `/mnt/user-data/outputs/<stem>.description.report-<idx>.txt` |
 | final report | `/mnt/user-data/outputs/<stem>.report.md`, `/mnt/user-data/outputs/<stem>.report.docx` |
+| charts | `/mnt/user-data/outputs/<stem>.charts.json`, `/mnt/user-data/outputs/<stem>.charts/*.png` |
 | final status | `/mnt/user-data/outputs/<stem>.status.json` |
 | scripts | `/mnt/skills/public/chatbi-report/scripts/*.py` |
 | prompts | `/mnt/skills/public/chatbi-report/prompts/{compute_codegen.md,description_gen.md}` |
@@ -90,6 +91,7 @@ parse, SQLBot, compute, description, or DOCX issues need explanation.
 1 lint → 1.5 lint checkpoint → 2 parse → 3 query → 3.5 query checkpoint
 → 4 assemble-wide → 6 extract-ir
 → 7 codegen → 8a validate → 8b evaluate → 8c apply-computed
+→ 8c.5 chart-gen
 → 8d describe → 8d.5 description checkpoint
 → 9 render/status
 ```
