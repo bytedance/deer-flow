@@ -24,6 +24,7 @@ class LLMProvider:
     # provider-level extra_config holds the default (default_model) capability.
     model_vision_overrides: dict[str, bool] = field(default_factory=dict)
     auth_hint: str | None = None
+    ask_supports_thinking: bool = False
     base_url_prompt: str | None = None
     model_prompt: str | None = None
 
@@ -371,6 +372,7 @@ LLM_PROVIDERS: list[LLMProvider] = [
             "max_tokens": 8192,
             "temperature": 0.7,
         },
+        ask_supports_thinking=True,
     ),
     LLMProvider(
         name="vllm",
@@ -403,6 +405,7 @@ LLM_PROVIDERS: list[LLMProvider] = [
                 }
             },
         },
+        ask_supports_thinking=True,
     ),
     LLMProvider(
         name="mindie",
@@ -425,6 +428,7 @@ LLM_PROVIDERS: list[LLMProvider] = [
             "write_timeout": 60.0,
             "pool_timeout": 30.0,
         },
+        ask_supports_thinking=True,
     ),
     LLMProvider(
         name="codex",
@@ -460,6 +464,7 @@ LLM_PROVIDERS: list[LLMProvider] = [
         default_model="gpt-4o",
         env_var="OPENAI_API_KEY",
         package="langchain-openai",
+        ask_supports_thinking=True,
         base_url_prompt="Base URL (e.g. https://api.openai.com/v1)",
         model_prompt="Model name",
     ),
