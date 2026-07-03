@@ -2,6 +2,7 @@
 
 import asyncio
 import importlib
+import inspect
 from enum import Enum
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -98,6 +99,66 @@ def _task_tool_message(result: str | Command) -> ToolMessage:
     return message
 
 
+def test_task_result_command_derives_content_from_status_payload():
+    signature = inspect.signature(task_tool_module._task_result_command)
+    assert "content" not in signature.parameters
+
+    completed = _task_tool_message(
+        task_tool_module._task_result_command(
+            tool_call_id="tc-completed",
+            status="completed",
+            result="done",
+        )
+    )
+    assert completed.content == "Task Succeeded. Result: done"
+    assert completed.additional_kwargs[SUBAGENT_STATUS_KEY] == "completed"
+    assert completed.additional_kwargs[SUBAGENT_RESULT_BRIEF_KEY] == "done"
+
+    failed = _task_tool_message(
+        task_tool_module._task_result_command(
+            tool_call_id="tc-failed",
+            status="failed",
+            error="boom",
+        )
+    )
+    assert failed.content == "Task failed. Error: boom"
+    assert failed.additional_kwargs[SUBAGENT_STATUS_KEY] == "failed"
+    assert failed.additional_kwargs[SUBAGENT_ERROR_KEY] == "boom"
+
+    failed_without_detail = _task_tool_message(
+        task_tool_module._task_result_command(
+            tool_call_id="tc-failed-empty",
+            status="failed",
+            error=None,
+        )
+    )
+    assert failed_without_detail.content == "Task failed."
+    assert failed_without_detail.additional_kwargs[SUBAGENT_STATUS_KEY] == "failed"
+    assert failed_without_detail.additional_kwargs[SUBAGENT_ERROR_KEY] == "Task failed."
+
+    cancelled = _task_tool_message(
+        task_tool_module._task_result_command(
+            tool_call_id="tc-cancelled",
+            status="cancelled",
+            error=None,
+        )
+    )
+    assert cancelled.content == "Task cancelled by user."
+    assert cancelled.additional_kwargs[SUBAGENT_STATUS_KEY] == "cancelled"
+    assert cancelled.additional_kwargs[SUBAGENT_ERROR_KEY] == "Task cancelled by user."
+
+    timed_out_without_detail = _task_tool_message(
+        task_tool_module._task_result_command(
+            tool_call_id="tc-timeout-empty",
+            status="timed_out",
+            error="",
+        )
+    )
+    assert timed_out_without_detail.content == "Task timed out."
+    assert timed_out_without_detail.additional_kwargs[SUBAGENT_STATUS_KEY] == "timed_out"
+    assert timed_out_without_detail.additional_kwargs[SUBAGENT_ERROR_KEY] == "Task timed out."
+
+
 async def _no_sleep(_: float) -> None:
     return None
 
@@ -120,7 +181,7 @@ def test_task_tool_returns_error_for_unknown_subagent(monkeypatch):
     )
 
     message = _task_tool_message(result)
-    assert message.content == "Error: Unknown subagent type 'general-purpose'. Available: general-purpose"
+    assert message.content == "Task failed. Error: Unknown subagent type 'general-purpose'. Available: general-purpose"
     assert message.additional_kwargs[SUBAGENT_STATUS_KEY] == "failed"
     assert message.additional_kwargs[SUBAGENT_ERROR_KEY] == "Unknown subagent type 'general-purpose'. Available: general-purpose"
 
@@ -139,7 +200,7 @@ def test_task_tool_rejects_bash_subagent_when_host_bash_disabled(monkeypatch):
 
     message = _task_tool_message(result)
     assert isinstance(message.content, str)
-    assert message.content.startswith("Error: Bash subagent is disabled")
+    assert message.content.startswith("Task failed. Error: Bash subagent is disabled")
     assert message.additional_kwargs[SUBAGENT_STATUS_KEY] == "failed"
     assert message.additional_kwargs[SUBAGENT_ERROR_KEY] == LOCAL_BASH_SUBAGENT_DISABLED_MESSAGE
 
@@ -1118,7 +1179,7 @@ def test_task_tool_returns_cancelled_message(monkeypatch):
     )
 
     message = _task_tool_message(output)
-    assert message.content == "Task cancelled by user."
+    assert message.content == "Task cancelled by user. Error: Cancelled by user"
     assert message.additional_kwargs[SUBAGENT_STATUS_KEY] == "cancelled"
     assert message.additional_kwargs[SUBAGENT_ERROR_KEY] == "Cancelled by user"
     assert any(e.get("type") == "task_cancelled" for e in events)
@@ -1184,7 +1245,7 @@ def test_task_tool_emits_disappeared_task_metadata(monkeypatch):
         )
     )
 
-    assert message.content == "Error: Task tc-missing disappeared from background tasks"
+    assert message.content == "Task failed. Error: Task tc-missing disappeared from background tasks"
     assert message.additional_kwargs[SUBAGENT_STATUS_KEY] == "failed"
     assert message.additional_kwargs[SUBAGENT_ERROR_KEY] == "Task tc-missing disappeared from background tasks"
     assert events[-1]["type"] == "task_failed"

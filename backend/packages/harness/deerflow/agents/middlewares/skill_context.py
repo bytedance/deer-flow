@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import posixpath
 import re
 from collections.abc import Collection, Mapping
@@ -16,10 +17,10 @@ from deerflow.agents.thread_state import _SKILL_DESCRIPTION_MAX_CHARS, SkillEntr
 _SKILL_FILE_NAME = "SKILL.md"
 _FRONT_MATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
 SKILL_CONTEXT_ENTRY_KEY = "skill_context_entry"
+logger = logging.getLogger(__name__)
 
 
 class SkillEntryMetadata(TypedDict):
-    name: str
     path: str
     description: str
 
@@ -98,7 +99,6 @@ def build_skill_entry_metadata_from_read(
     if normalized_path is None or not _is_skill_file(normalized_path) or _is_tool_error_text(content):
         return None
     return {
-        "name": _skill_name_from_path(normalized_path),
         "path": normalized_path,
         "description": _parse_description(content),
     }
@@ -110,13 +110,11 @@ def read_skill_entry_metadata(additional_kwargs: Mapping[str, object] | None) ->
     raw = additional_kwargs.get(SKILL_CONTEXT_ENTRY_KEY)
     if not isinstance(raw, Mapping):
         return None
-    name = raw.get("name")
     path = raw.get("path")
     description = raw.get("description")
-    if not isinstance(name, str) or not isinstance(path, str):
+    if not isinstance(path, str):
         return None
     return {
-        "name": name,
         "path": path,
         "description": " ".join(description.split())[:_SKILL_DESCRIPTION_MAX_CHARS] if isinstance(description, str) else "",
     }
@@ -160,7 +158,18 @@ def extract_skills(
         if expected_path is None:
             continue
         metadata = read_skill_entry_metadata(message.additional_kwargs)
-        if metadata is None or metadata["path"] != expected_path:
+        if metadata is None:
+            content = message.content if isinstance(message.content, str) else ""
+            if not _is_tool_error_text(content):
+                logger.warning("missing skill read metadata: tool_call_id=%s path=%s", tool_call_id, expected_path)
+            continue
+        if metadata["path"] != expected_path:
+            logger.warning(
+                "mismatched skill read metadata: tool_call_id=%s expected_path=%s metadata_path=%s",
+                tool_call_id,
+                expected_path,
+                metadata["path"],
+            )
             continue
         entries.append(
             {

@@ -11,10 +11,12 @@ from deerflow.agents.middlewares.tool_error_handling_middleware import (
     build_subagent_runtime_middlewares,
 )
 from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
+from deerflow.config import summarization_config
 from deerflow.config.app_config import AppConfig, CircuitBreakerConfig
 from deerflow.config.guardrails_config import GuardrailsConfig
 from deerflow.config.model_config import ModelConfig
 from deerflow.config.sandbox_config import SandboxConfig
+from deerflow.subagents.status_contract import SUBAGENT_ERROR_KEY, SUBAGENT_STATUS_KEY
 
 
 def _request(name: str = "web_search", tool_call_id: str | None = "tc-1"):
@@ -263,10 +265,18 @@ def test_read_file_skill_read_stamps_compact_skill_metadata():
     )
 
     assert result.additional_kwargs["skill_context_entry"] == {
-        "name": "data-analysis",
         "path": "/mnt/skills/public/data-analysis/SKILL.md",
         "description": "Analyze data.",
     }
+
+
+def test_skill_read_config_is_cached_on_middleware_instance():
+    middleware = ToolErrorHandlingMiddleware()
+    default_names = getattr(summarization_config, "DEFAULT_SKILL_FILE_READ_TOOL_NAMES", None)
+
+    assert default_names is not None
+    assert middleware._skill_read_tool_names == frozenset(default_names)
+    assert middleware._skills_root == "/mnt/skills"
 
 
 def test_skill_metadata_respects_custom_skills_root():
@@ -315,6 +325,24 @@ def test_wrap_tool_call_returns_error_tool_message_on_exception():
     assert result.status == "error"
     assert "Tool 'web_search' failed" in result.text
     assert "network down" in result.text
+
+
+def test_task_exception_wrapper_uses_subagent_result_formatter():
+    middleware = ToolErrorHandlingMiddleware()
+    req = _request(name="task", tool_call_id="tc-task")
+
+    def _boom(_req):
+        raise RuntimeError("network down")
+
+    result = middleware.wrap_tool_call(req, _boom)
+
+    assert isinstance(result, ToolMessage)
+    assert result.tool_call_id == "tc-task"
+    assert result.name == "task"
+    assert result.status == "error"
+    assert result.content == "Task failed. Error: RuntimeError: network down"
+    assert result.additional_kwargs[SUBAGENT_STATUS_KEY] == "failed"
+    assert result.additional_kwargs[SUBAGENT_ERROR_KEY] == "RuntimeError: network down"
 
 
 def test_wrap_tool_call_uses_fallback_tool_call_id_when_missing():

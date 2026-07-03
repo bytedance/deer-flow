@@ -12,6 +12,7 @@ from deerflow.subagents.status_contract import (
     SUBAGENT_RESULT_SHA256_KEY,
     SUBAGENT_STATUS_KEY,
     SUBAGENT_STATUS_VALUES,
+    _bound_metadata_text,
     make_subagent_additional_kwargs,
     read_subagent_result_metadata,
 )
@@ -58,6 +59,14 @@ def test_make_subagent_additional_kwargs_bounds_large_result_metadata():
     assert len(kwargs[SUBAGENT_RESULT_BRIEF_KEY]) <= SUBAGENT_METADATA_TEXT_MAX_CHARS
     assert kwargs[SUBAGENT_RESULT_BRIEF_KEY] != huge
     assert len(kwargs[SUBAGENT_RESULT_SHA256_KEY]) == 64
+
+
+def test_bound_metadata_text_respects_small_caps():
+    text = "A" * 100
+
+    assert _bound_metadata_text(text, cap=0) == ""
+    assert _bound_metadata_text(text, cap=1) == "A"
+    assert len(_bound_metadata_text(text, cap=15)) <= 15
 
 
 def test_make_subagent_additional_kwargs_omits_blank_error():

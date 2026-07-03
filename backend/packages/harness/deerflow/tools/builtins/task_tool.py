@@ -25,6 +25,7 @@ from deerflow.subagents.executor import (
 )
 from deerflow.subagents.status_contract import (
     SubagentStatusValue,
+    format_subagent_result_message,
     make_subagent_additional_kwargs,
 )
 from deerflow.tools.types import Runtime
@@ -194,11 +195,11 @@ def _merge_skill_allowlists(parent: list[str] | None, child: list[str] | None) -
 def _task_result_command(
     *,
     tool_call_id: str,
-    content: str,
     status: SubagentStatusValue,
     result: str | None = None,
     error: str | None = None,
 ) -> Command:
+    content, metadata_error = format_subagent_result_message(status, result=result, error=error)
     return Command(
         update={
             "messages": [
@@ -206,7 +207,7 @@ def _task_result_command(
                     content=content,
                     tool_call_id=tool_call_id,
                     name="task",
-                    additional_kwargs=make_subagent_additional_kwargs(status, result=result, error=error),
+                    additional_kwargs=make_subagent_additional_kwargs(status, result=result, error=metadata_error),
                 )
             ]
         }
@@ -267,7 +268,6 @@ async def task_tool(
         error = f"Unknown subagent type '{subagent_type}'. Available: {available}"
         return _task_result_command(
             tool_call_id=tool_call_id,
-            content=f"Error: {error}",
             status="failed",
             error=error,
         )
@@ -276,7 +276,6 @@ async def task_tool(
         if not host_bash_allowed:
             return _task_result_command(
                 tool_call_id=tool_call_id,
-                content=f"Error: {LOCAL_BASH_SUBAGENT_DISABLED_MESSAGE}",
                 status="failed",
                 error=LOCAL_BASH_SUBAGENT_DISABLED_MESSAGE,
             )
@@ -406,7 +405,6 @@ async def task_tool(
                 error = f"Task {task_id} disappeared from background tasks"
                 return _task_result_command(
                     tool_call_id=tool_call_id,
-                    content=f"Error: {error}",
                     status="failed",
                     error=error,
                 )
@@ -443,10 +441,8 @@ async def task_tool(
                 writer({"type": "task_completed", "task_id": task_id, "result": result.result, "usage": usage})
                 logger.info(f"[trace={trace_id}] Task {task_id} completed after {poll_count} polls")
                 cleanup_background_task(task_id)
-                content = f"Task Succeeded. Result: {result.result}"
                 return _task_result_command(
                     tool_call_id=tool_call_id,
-                    content=content,
                     status="completed",
                     result=result.result,
                 )
@@ -456,10 +452,8 @@ async def task_tool(
                 writer({"type": "task_failed", "task_id": task_id, "error": result.error, "usage": usage})
                 logger.error(f"[trace={trace_id}] Task {task_id} failed: {result.error}")
                 cleanup_background_task(task_id)
-                content = f"Task failed. Error: {result.error}"
                 return _task_result_command(
                     tool_call_id=tool_call_id,
-                    content=content,
                     status="failed",
                     error=result.error,
                 )
@@ -471,7 +465,6 @@ async def task_tool(
                 cleanup_background_task(task_id)
                 return _task_result_command(
                     tool_call_id=tool_call_id,
-                    content="Task cancelled by user.",
                     status="cancelled",
                     error=result.error,
                 )
@@ -481,10 +474,8 @@ async def task_tool(
                 writer({"type": "task_timed_out", "task_id": task_id, "error": result.error, "usage": usage})
                 logger.warning(f"[trace={trace_id}] Task {task_id} timed out: {result.error}")
                 cleanup_background_task(task_id)
-                content = f"Task timed out. Error: {result.error}"
                 return _task_result_command(
                     tool_call_id=tool_call_id,
-                    content=content,
                     status="timed_out",
                     error=result.error,
                 )
@@ -511,7 +502,6 @@ async def task_tool(
                 message = f"Task polling timed out after {timeout_minutes} minutes. This may indicate the background task is stuck. Status: {result.status.value}"
                 return _task_result_command(
                     tool_call_id=tool_call_id,
-                    content=message,
                     status="polling_timed_out",
                     error=message,
                 )

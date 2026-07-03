@@ -13,10 +13,14 @@ from langgraph.types import Command
 
 from deerflow.agents.middlewares.skill_context import (
     SKILL_CONTEXT_ENTRY_KEY,
+    _tool_call_path,
     build_skill_entry_metadata_from_read,
 )
 from deerflow.config.app_config import AppConfig
+from deerflow.config.summarization_config import DEFAULT_SKILL_FILE_READ_TOOL_NAMES
+from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
 from deerflow.subagents.status_contract import (
+    format_subagent_result_message,
     make_subagent_additional_kwargs,
 )
 
@@ -33,8 +37,10 @@ def _stamp_task_exception_status(message: ToolMessage, *, tool_name: str, error:
     """Stamp failed metadata on task exception wrappers produced here."""
     if tool_name != _TASK_TOOL_NAME:
         return message
+    content, metadata_error = format_subagent_result_message("failed", error=error)
+    message.content = content
     existing = dict(message.additional_kwargs or {})
-    existing.update(make_subagent_additional_kwargs("failed", error=error))
+    existing.update(make_subagent_additional_kwargs("failed", error=metadata_error))
     message.additional_kwargs = existing
     return message
 
@@ -45,6 +51,12 @@ class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
     def __init__(self, *, app_config: AppConfig | None = None) -> None:
         super().__init__()
         self._app_config = app_config
+        if app_config is None:
+            self._skill_read_tool_names = frozenset(DEFAULT_SKILL_FILE_READ_TOOL_NAMES)
+            self._skills_root = DEFAULT_SKILLS_CONTAINER_PATH
+        else:
+            self._skill_read_tool_names = frozenset(app_config.summarization.skill_file_read_tool_names)
+            self._skills_root = app_config.skills.container_path
 
     def _build_error_message(self, request: ToolCallRequest, exc: Exception) -> ToolMessage:
         tool_name = str(request.tool_call.get("name") or "unknown_tool")
@@ -66,16 +78,6 @@ class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         structured_error = f"{exc.__class__.__name__}: {detail}"
         return _stamp_task_exception_status(message, tool_name=tool_name, error=structured_error)
 
-    def _skill_read_tool_names(self) -> frozenset[str]:
-        if self._app_config is None:
-            return frozenset({"read_file", "read", "view", "cat"})
-        return frozenset(self._app_config.summarization.skill_file_read_tool_names)
-
-    def _skills_root(self) -> str:
-        if self._app_config is None:
-            return "/mnt/skills"
-        return self._app_config.skills.container_path
-
     def _stamp_skill_read_metadata(
         self,
         message: ToolMessage,
@@ -83,20 +85,17 @@ class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         *,
         tool_name: str,
     ) -> ToolMessage:
-        if tool_name not in self._skill_read_tool_names():
+        if tool_name not in self._skill_read_tool_names:
             return message
         if getattr(message, "status", "success") == "error":
             return message
         content = message.content if isinstance(message.content, str) else None
         if content is None:
             return message
-        args = request.tool_call.get("args")
-        if not isinstance(args, dict):
-            return message
-        path = next((args[key] for key in ("path", "file_path", "filepath") if isinstance(args.get(key), str) and args.get(key)), None)
+        path = _tool_call_path(request.tool_call)
         if path is None:
             return message
-        entry = build_skill_entry_metadata_from_read(path, content, skills_root=self._skills_root())
+        entry = build_skill_entry_metadata_from_read(path, content, skills_root=self._skills_root)
         if entry is None:
             return message
         existing = dict(message.additional_kwargs or {})

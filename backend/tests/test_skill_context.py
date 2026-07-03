@@ -52,7 +52,6 @@ class TestExtractSkills:
             skills_root=_ROOT,
         )
         assert entry == {
-            "name": "data-analysis",
             "path": "/mnt/skills/public/data-analysis/SKILL.md",
             "description": "Analyze data with pandas and charts.",
         }
@@ -104,12 +103,18 @@ class TestExtractSkills:
         out = extract_skills(msgs, skills_root=_ROOT, read_tool_names=_READ)
         assert out and out[0]["description"] == ""
 
-    def test_missing_metadata_is_not_recovered_from_content(self):
+    def test_missing_metadata_logs_warning_without_recovering_from_content(self, caplog):
         msgs = [
             _ai_read("r1", "/mnt/skills/public/x/SKILL.md"),
             ToolMessage(content=_SKILL_BODY, tool_call_id="r1", id="tm1"),
         ]
-        assert extract_skills(msgs, skills_root=_ROOT, read_tool_names=_READ) == []
+
+        with caplog.at_level("WARNING", logger="deerflow.agents.middlewares.skill_context"):
+            assert extract_skills(msgs, skills_root=_ROOT, read_tool_names=_READ) == []
+
+        assert "missing skill read metadata" in caplog.text
+        assert "tool_call_id=r1" in caplog.text
+        assert "/mnt/skills/public/x/SKILL.md" in caplog.text
 
     def test_normalizes_dot_segments_under_skills_root(self):
         msgs = [
@@ -253,6 +258,30 @@ class TestExtractSkills:
         out = extract_skills(msgs, skills_root=_ROOT, read_tool_names=_READ)
 
         assert out == []
+
+    def test_extract_skills_warns_on_metadata_path_mismatch(self, caplog):
+        msgs = [
+            _ai_read("r1", "/mnt/skills/public/data-analysis/SKILL.md"),
+            ToolMessage(
+                content=_SKILL_BODY,
+                tool_call_id="r1",
+                id="tm1",
+                additional_kwargs={
+                    "skill_context_entry": {
+                        "name": "other",
+                        "path": "/mnt/skills/public/other/SKILL.md",
+                        "description": "Wrong metadata.",
+                    }
+                },
+            ),
+        ]
+
+        with caplog.at_level("WARNING", logger="deerflow.agents.middlewares.skill_context"):
+            assert extract_skills(msgs, skills_root=_ROOT, read_tool_names=_READ) == []
+
+        assert "mismatched skill read metadata" in caplog.text
+        assert "expected_path=/mnt/skills/public/data-analysis/SKILL.md" in caplog.text
+        assert "metadata_path=/mnt/skills/public/other/SKILL.md" in caplog.text
 
     def test_extract_skills_rebuilds_name_from_validated_read_path(self):
         msgs = [

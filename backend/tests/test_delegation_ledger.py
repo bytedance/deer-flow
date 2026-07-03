@@ -128,6 +128,19 @@ class TestExtractDelegations:
         assert out[0]["status"] == "completed"
         assert "result_brief" not in out[0]
 
+    def test_status_only_cancelled_metadata_keeps_terminal_detail_without_parsing_content(self):
+        msgs = [
+            _ai_task_call("call_cancelled", "stop task"),
+            ToolMessage(content="misleading content", tool_call_id="call_cancelled", id="tm_cancelled", additional_kwargs={"subagent_status": "cancelled"}),
+        ]
+
+        out = extract_delegations(msgs)
+
+        assert out[0]["status"] == "cancelled"
+        assert out[0]["result_brief"] == "Task cancelled by user."
+        assert out[0]["result_ref"] == "tm_cancelled"
+        assert len(out[0]["result_sha256"]) == 64
+
     def test_structured_result_metadata_wins_over_misleading_content(self):
         msgs = [
             _ai_task_call("call_1", "research auth"),

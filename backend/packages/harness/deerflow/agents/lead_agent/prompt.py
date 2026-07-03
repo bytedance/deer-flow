@@ -7,6 +7,7 @@ from functools import lru_cache
 from typing import TYPE_CHECKING
 
 from deerflow.config.agents_config import load_agent_soul
+from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
 from deerflow.skills.storage import get_or_new_skill_storage
 from deerflow.skills.types import Skill, SkillCategory
 from deerflow.subagents import get_available_subagent_names
@@ -675,7 +676,7 @@ def get_skills_prompt_section(available_skills: set[str] | None = None, *, app_c
             container_base_path = config.skills.container_path
             skill_evolution_enabled = config.skill_evolution.enabled
         except Exception:
-            container_base_path = "/mnt/skills"
+            container_base_path = DEFAULT_SKILLS_CONTAINER_PATH
             skill_evolution_enabled = False
     else:
         config = app_config

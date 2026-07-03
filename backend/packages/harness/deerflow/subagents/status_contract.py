@@ -62,6 +62,8 @@ def _bound_metadata_text(text: str, cap: int = SUBAGENT_METADATA_TEXT_MAX_CHARS)
         return cleaned[:cap]
     head = cap * 2 // 3
     tail = cap - head - len(marker)
+    if tail <= 0:
+        return cleaned[:cap]
     return f"{cleaned[:head]}{marker}{cleaned[-tail:]}"
 
 
@@ -91,6 +93,41 @@ def make_subagent_additional_kwargs(
     if status != "completed" and isinstance(error, str) and error.strip():
         payload[SUBAGENT_ERROR_KEY] = _bound_metadata_text(error)
     return payload
+
+
+def format_subagent_result_message(
+    status: SubagentStatusValue,
+    *,
+    result: str | None = None,
+    error: str | None = None,
+) -> tuple[str, str | None]:
+    """Return model-visible task content plus normalized metadata error."""
+    result_text = "" if result is None else str(result)
+    error_text = str(error).strip() if isinstance(error, str) else ""
+
+    if status == "completed":
+        return f"Task Succeeded. Result: {result_text}", None
+
+    if status == "cancelled":
+        detail = error_text or "Task cancelled by user."
+        if detail == "Task cancelled by user.":
+            return detail, detail
+        return f"Task cancelled by user. Error: {detail}", detail
+
+    if status == "timed_out":
+        detail = error_text or "Task timed out."
+        if detail == "Task timed out.":
+            return detail, detail
+        return f"Task timed out. Error: {detail}", detail
+
+    if status == "polling_timed_out":
+        detail = error_text or "Task polling timed out."
+        return detail, detail
+
+    detail = error_text or "Task failed."
+    if detail == "Task failed.":
+        return detail, detail
+    return f"Task failed. Error: {detail}", detail
 
 
 def read_subagent_result_metadata(

@@ -18,6 +18,12 @@ _RESULT_BRIEF_CAP = 2000
 _DESCRIPTION_CAP = 200
 _LEDGER_RENDER_CHAR_BUDGET = 6000
 _LEDGER_ENTRY_RESULT_RENDER_CAP = 120
+_STATUS_ONLY_RESULT_BRIEFS = {
+    "failed": "Task failed.",
+    "cancelled": "Task cancelled by user.",
+    "timed_out": "Task timed out.",
+    "polling_timed_out": "Task polling timed out.",
+}
 
 
 def _utc_now_iso() -> str:
@@ -117,7 +123,7 @@ def extract_delegations(messages: list[AnyMessage]) -> list[DelegationEntry]:
         if structured is None:
             continue
         entry["status"] = structured["status"]
-        result_text = structured.get("result_brief") or structured.get("error")
+        result_text = structured.get("result_brief") or structured.get("error") or _STATUS_ONLY_RESULT_BRIEFS.get(structured["status"])
         if result_text:
             result_sha256 = structured.get("result_sha256") or hashlib.sha256(result_text.encode("utf-8")).hexdigest()
             entry.update(
