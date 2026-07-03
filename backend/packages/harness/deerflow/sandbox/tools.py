@@ -1424,6 +1424,11 @@ CHANNEL_USER_ID_ENV = "DEERFLOW_CHANNEL_USER_ID"
 
 _CHANNEL_USER_ID_CONTEXT_KEY = "channel_user_id"
 
+# body.context is client-writable on web requests, so bound the value: real
+# platform ids are tens of chars; anything past this is hostile or corrupt and
+# must not bloat every command string sent to the sandbox.
+_CHANNEL_USER_ID_MAX_LEN = 256
+
 
 def _is_windows() -> bool:
     return os.name == "nt"
@@ -1446,6 +1451,8 @@ def _channel_identity_prefix(runtime: Runtime) -> str | None:
         return None
     channel_user_id = context.get(_CHANNEL_USER_ID_CONTEXT_KEY)
     if not isinstance(channel_user_id, str) or not channel_user_id:
+        return None
+    if len(channel_user_id) > _CHANNEL_USER_ID_MAX_LEN:
         return None
     return f"export {CHANNEL_USER_ID_ENV}={shlex.quote(channel_user_id)}; "
 

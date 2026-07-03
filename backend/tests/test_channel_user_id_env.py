@@ -140,6 +140,12 @@ class TestBashToolChannelIdentityPrefix:
         assert _channel_identity_prefix(SimpleNamespace(context={"channel_user_id": 123})) is None
         assert _channel_identity_prefix(SimpleNamespace(context=None)) is None
 
+    def test_overlong_value_is_ignored(self):
+        """body.context is client-writable on web requests; a pathological value
+        must not bloat every command sent to the sandbox. Real platform ids are
+        well under the cap."""
+        assert _channel_identity_prefix(SimpleNamespace(context={"channel_user_id": "x" * 5000})) is None
+
     def test_windows_local_sandbox_skips_prefix(self, monkeypatch):
         """On Windows the local sandbox may execute via PowerShell/cmd.exe where
         POSIX ``export`` is not valid syntax — skip injection rather than break
