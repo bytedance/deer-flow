@@ -235,7 +235,18 @@ def test_make_lead_agent_filters_tools_from_available_skills(monkeypatch):
 
     agent_kwargs = lead_agent_module.make_lead_agent({"configurable": {"agent_name": "test"}})
 
-    assert [tool.name for tool in agent_kwargs["tools"]] == ["read_file"]
+    assert [tool.name for tool in agent_kwargs["tools"]] == ["read_file", "web_search"]
+
+
+def test_skill_allowed_tools_default_does_not_preserve_read_file_for_subagents():
+    from deerflow.skills.tool_policy import filter_tools_by_skill_allowed_tools
+
+    tools = [NamedTool("read_file"), NamedTool("dataagent_query"), NamedTool("bash")]
+    skills = [_make_skill("data-query", ["dataagent_query"])]
+
+    filtered = filter_tools_by_skill_allowed_tools(tools, skills)
+
+    assert [tool.name for tool in filtered] == ["dataagent_query"]
 
 
 def test_make_lead_agent_all_legacy_skills_preserve_all_tools(monkeypatch):
