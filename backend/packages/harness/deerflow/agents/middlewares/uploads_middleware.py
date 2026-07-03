@@ -16,7 +16,7 @@ from deerflow.config.paths import Paths, get_paths
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.uploads.manager import is_upload_staging_file
 from deerflow.utils.file_conversion import extract_outline
-from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, message_content_to_text
+from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, get_original_user_content_text, message_content_to_text
 
 logger = logging.getLogger(__name__)
 
@@ -37,10 +37,10 @@ def _format_omitted_file_types(files: list[dict]) -> str:
     return ", ".join(parts)
 
 
-def _file_matches_query(file: dict, query_text: str) -> bool:
+def _query_match_strength(file: dict, query_text: str) -> int:
     query = query_text.lower()
     if not query:
-        return False
+        return 0
 
     filename = str(file.get("filename") or "").lower()
     stem = Path(filename).stem
@@ -48,16 +48,21 @@ def _file_matches_query(file: dict, query_text: str) -> bool:
     extension = extension_label[1:] if extension_label.startswith(".") else ""
 
     if filename and filename in query:
-        return True
+        return 3
     if len(stem) >= 3 and stem in query:
-        return True
-    if extension and re.search(rf"\b{re.escape(extension)}s?\b", query):
-        return True
+        return 3
 
+    token_match = False
     for token in _QUERY_TOKEN_RE.findall(stem):
         if len(token) >= 3 and token in query:
-            return True
-    return False
+            token_match = True
+            break
+    if token_match:
+        return 2
+
+    if extension and re.search(rf"\b{re.escape(extension)}s?\b", query):
+        return 1
+    return 0
 
 
 def _extract_outline_for_file(file_path: Path) -> tuple[list[dict], list[str]]:
@@ -170,14 +175,15 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
         ranked: list[tuple[tuple, dict]] = []
         for index, file in enumerate(files):
             selected_file = dict(file)
-            query_match = _file_matches_query(selected_file, query_text)
+            match_strength = _query_match_strength(selected_file, query_text)
+            query_match = match_strength > 0
             if query_match:
                 selected_file["selection_reason"] = "query_match"
 
             if recency_key:
-                sort_key = (0 if query_match else 1, -float(selected_file.get(recency_key) or 0), selected_file["filename"])
+                sort_key = (-match_strength, -float(selected_file.get(recency_key) or 0), selected_file["filename"])
             else:
-                sort_key = (0 if query_match else 1, index)
+                sort_key = (-match_strength, index)
             ranked.append((sort_key, selected_file))
 
         ranked.sort(key=lambda item: item[0])
@@ -324,7 +330,7 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
                 pass  # get_config() raises outside a runnable context (e.g. unit tests)
         uploads_dir = self._paths.sandbox_uploads_dir(thread_id, user_id=get_effective_user_id()) if thread_id else None
 
-        query_text = message_content_to_text(last_message.content)
+        query_text = get_original_user_content_text(last_message.content, last_message.additional_kwargs)
 
         # Get newly uploaded files from the current message's additional_kwargs.files
         new_files = self._files_from_kwargs(last_message, uploads_dir) or []
