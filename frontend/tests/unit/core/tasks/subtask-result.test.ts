@@ -6,6 +6,7 @@ import { describe, expect, it } from "@rstest/core";
 
 import {
   SUBAGENT_ERROR_KEY,
+  SUBAGENT_RESULT_BRIEF_KEY,
   SUBAGENT_STATUS_KEY,
   derivePendingSubtaskStatus,
   hasSubtaskToolResult,
@@ -25,20 +26,58 @@ const CONTRACT: ContractFile = JSON.parse(
 ) as ContractFile;
 
 describe("parseSubtaskResult", () => {
-  it("does not infer terminal state from task result text without structured metadata", () => {
-    for (const text of [
-      "Task Succeeded. Result: investigated and produced a 3-page report",
-      "Task failed. Error: underlying tool raised RuntimeError",
-      "Task cancelled by user.",
-      "Task timed out. Error: 900 seconds",
-      "Task polling timed out after 15 minutes. Status: RUNNING",
-      "Error: Tool 'task' failed with TypeError: boom",
-    ]) {
-      const parsed = parseSubtaskResult(text);
-      expect(parsed.status).toBe("in_progress");
-      expect(parsed.error).toBeUndefined();
-      expect(parsed.result).toBeUndefined();
-    }
+  it("uses legacy task result text when structured metadata is absent", () => {
+    expect(
+      parseSubtaskResult(
+        "Task Succeeded. Result: investigated and produced a 3-page report",
+      ),
+    ).toEqual({
+      status: "completed",
+      result: "investigated and produced a 3-page report",
+    });
+
+    expect(
+      parseSubtaskResult(
+        "Task failed. Error: underlying tool raised RuntimeError",
+      ),
+    ).toEqual({
+      status: "failed",
+      error: "Error: underlying tool raised RuntimeError",
+    });
+
+    expect(parseSubtaskResult("Task cancelled by user.")).toEqual({
+      status: "failed",
+      error: "Task cancelled by user.",
+    });
+
+    expect(parseSubtaskResult("Task timed out. Error: 900 seconds")).toEqual({
+      status: "failed",
+      error: "Task timed out. Error: 900 seconds",
+    });
+
+    expect(
+      parseSubtaskResult(
+        "Task polling timed out after 15 minutes. Status: RUNNING",
+      ),
+    ).toEqual({
+      status: "failed",
+      error: "Task polling timed out after 15 minutes. Status: RUNNING",
+    });
+
+    expect(
+      parseSubtaskResult("Error: Tool 'task' failed with TypeError: boom"),
+    ).toEqual({
+      status: "failed",
+      error: "Error: Tool 'task' failed with TypeError: boom",
+    });
+  });
+
+  it("keeps unknown content-only task results in progress", () => {
+    const parsed = parseSubtaskResult("partial streaming chunk");
+
+    expect(parsed.status).toBe("in_progress");
+    expect(parsed.error).toBeUndefined();
+    expect(parsed.result).toBeUndefined();
   });
 });
 
@@ -137,9 +176,9 @@ describe("parseSubtaskResult — structured additional_kwargs (preferred path)",
     expect(parsed.error).toBeUndefined();
   });
 
-  it("ignores terminal-looking content when the structured status is missing", () => {
+  it("ignores terminal-looking content when partial structured metadata is present", () => {
     const parsed = parseSubtaskResult("Task Succeeded. Result: foo", {
-      other_field: "irrelevant",
+      [SUBAGENT_RESULT_BRIEF_KEY]: "structured result without status",
     });
     expect(parsed.status).toBe("in_progress");
     expect(parsed.result).toBeUndefined();

@@ -28,6 +28,19 @@ export const SUBAGENT_STATUS_KEY = "subagent_status";
 export const SUBAGENT_ERROR_KEY = "subagent_error";
 export const SUBAGENT_RESULT_BRIEF_KEY = "subagent_result_brief";
 export const SUBAGENT_RESULT_SHA256_KEY = "subagent_result_sha256";
+const STRUCTURED_SUBAGENT_KEYS = [
+  SUBAGENT_STATUS_KEY,
+  SUBAGENT_ERROR_KEY,
+  SUBAGENT_RESULT_BRIEF_KEY,
+  SUBAGENT_RESULT_SHA256_KEY,
+];
+
+const SUCCESS_PREFIX = "Task Succeeded. Result:";
+const FAILURE_PREFIX = "Task failed.";
+const TIMEOUT_PREFIX = "Task timed out";
+const CANCELLED_PREFIX = "Task cancelled by user.";
+const POLLING_TIMEOUT_PREFIX = "Task polling timed out";
+const ERROR_WRAPPER_PATTERN = /^Error\b/i;
 
 /**
  * Map from the backend ``subagent_status`` value to the frontend
@@ -61,11 +74,14 @@ const STRUCTURED_STATUS_TO_SUBTASK: Record<string, SubtaskStatus> = {
  * terminal-failed would mask the drift.
  */
 export function parseSubtaskResult(
-  _text: string,
+  text: string,
   additionalKwargs?: Record<string, unknown> | null,
 ): SubtaskResultUpdate {
   const structured = readStructuredStatus(additionalKwargs);
   if (!structured) {
+    if (!hasStructuredSubagentMetadata(additionalKwargs)) {
+      return parseLegacyTaskResult(text.trim());
+    }
     return { status: "in_progress" };
   }
 
@@ -78,6 +94,40 @@ export function parseSubtaskResult(
     update.result = structuredResult;
   }
   return update;
+}
+
+function parseLegacyTaskResult(trimmed: string): SubtaskResultUpdate {
+  if (trimmed.startsWith(SUCCESS_PREFIX)) {
+    return {
+      status: "completed",
+      result: trimmed.slice(SUCCESS_PREFIX.length).trim(),
+    };
+  }
+
+  if (trimmed.startsWith(FAILURE_PREFIX)) {
+    return {
+      status: "failed",
+      error: trimmed.slice(FAILURE_PREFIX.length).trim(),
+    };
+  }
+
+  if (trimmed.startsWith(TIMEOUT_PREFIX)) {
+    return { status: "failed", error: trimmed };
+  }
+
+  if (trimmed.startsWith(CANCELLED_PREFIX)) {
+    return { status: "failed", error: trimmed };
+  }
+
+  if (trimmed.startsWith(POLLING_TIMEOUT_PREFIX)) {
+    return { status: "failed", error: trimmed };
+  }
+
+  if (ERROR_WRAPPER_PATTERN.test(trimmed)) {
+    return { status: "failed", error: trimmed };
+  }
+
+  return { status: "in_progress" };
 }
 
 export function hasSubtaskToolResult(
@@ -124,6 +174,15 @@ function readStructuredStatus(
     result.error = rawError;
   }
   return result;
+}
+
+function hasStructuredSubagentMetadata(
+  additionalKwargs: Record<string, unknown> | null | undefined,
+): boolean {
+  if (!additionalKwargs) return false;
+  return STRUCTURED_SUBAGENT_KEYS.some((key) =>
+    Object.prototype.hasOwnProperty.call(additionalKwargs, key),
+  );
 }
 
 function readStructuredResultBrief(
