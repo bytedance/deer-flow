@@ -47,7 +47,7 @@ from deerflow.persistence.migrations._helpers import _normalize_default
 asyncio_test = pytest.mark.asyncio
 
 
-HEAD = "0005_scheduled_task_thread_nullable"
+HEAD = "0003_scheduled_tasks"
 BASELINE = "0001_baseline"
 
 

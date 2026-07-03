@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import or_, select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.persistence.scheduled_tasks.model import ScheduledTaskRow
@@ -118,17 +118,29 @@ class ScheduledTaskRepository:
         stmt = (
             select(ScheduledTaskRow)
             .where(
-                ScheduledTaskRow.status == "enabled",
                 ScheduledTaskRow.next_run_at.is_not(None),
                 ScheduledTaskRow.next_run_at <= now,
                 or_(
-                    ScheduledTaskRow.lease_expires_at.is_(None),
-                    ScheduledTaskRow.lease_expires_at < now,
+                    and_(
+                        ScheduledTaskRow.status == "enabled",
+                        or_(
+                            ScheduledTaskRow.lease_expires_at.is_(None),
+                            ScheduledTaskRow.lease_expires_at < now,
+                        ),
+                    ),
+                    # A task stuck in "running" with an expired lease means the
+                    # claiming process died between claim and dispatch; it must
+                    # stay reclaimable or the task is dead forever.
+                    and_(
+                        ScheduledTaskRow.status == "running",
+                        ScheduledTaskRow.lease_expires_at.is_not(None),
+                        ScheduledTaskRow.lease_expires_at < now,
+                    ),
                 ),
             )
             .order_by(ScheduledTaskRow.next_run_at.asc(), ScheduledTaskRow.id.asc())
             .limit(limit)
-            .with_for_update()
+            .with_for_update(skip_locked=True)
         )
         async with self._sf() as session:
             result = await session.execute(stmt)
@@ -140,18 +152,6 @@ class ScheduledTaskRepository:
                 row.updated_at = datetime.now(UTC)
             await session.commit()
             return [self._row_to_dict(row) for row in rows]
-
-    async def release_lease(self, task_id: str, *, user_id: str | None = None) -> None:
-        async with self._sf() as session:
-            row = await session.get(ScheduledTaskRow, task_id)
-            if row is None:
-                return
-            if user_id is not None and row.user_id != user_id:
-                return
-            row.lease_owner = None
-            row.lease_expires_at = None
-            row.updated_at = datetime.now(UTC)
-            await session.commit()
 
     async def update_after_launch(
         self,

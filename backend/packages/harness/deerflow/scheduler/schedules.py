@@ -38,7 +38,9 @@ def next_run_at(
             raise ValueError("once schedule requires run_at")
         run_at = datetime.fromisoformat(run_at_raw)
         if run_at.tzinfo is None:
-            run_at = run_at.replace(tzinfo=UTC)
+            # A naive run_at means "wall-clock time in the task's declared
+            # timezone", matching how cron schedules interpret it.
+            run_at = run_at.replace(tzinfo=ZoneInfo(timezone_name))
         return run_at if run_at > now else None
 
     if schedule_type == "cron":

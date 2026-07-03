@@ -592,6 +592,9 @@ async def launch_scheduled_thread_run(
             ),
             cookies={},
         )
+    # SimpleNamespace stands in for the Pydantic run-request body that the
+    # HTTP path parses. If start_run gains a new body.* attribute that it reads
+    # directly, add the matching field here so the scheduler path stays in sync.
     body = SimpleNamespace(
         assistant_id=assistant_id,
         input={"messages": [{"role": "user", "content": prompt}]},

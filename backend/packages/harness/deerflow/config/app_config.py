@@ -192,7 +192,10 @@ class AppConfig(BaseModel):
     )
     scheduler: SchedulerConfig = Field(
         default_factory=SchedulerConfig,
-        description="Scheduled task runtime configuration",
+        description=format_field_description(
+            "scheduler",
+            field_doc="Scheduled task runtime configuration (background poller for one-time and cron agent runs).",
+        ),
     )
     checkpointer: CheckpointerConfig | None = Field(
         default=None,

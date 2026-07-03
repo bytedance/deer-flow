@@ -181,6 +181,8 @@ export interface Translations {
       allStatuses: string;
       enabled: string;
       paused: string;
+      completed: string;
+      failed: string;
       allTypes: string;
       cron: string;
       once: string;
@@ -195,13 +197,24 @@ export interface Translations {
       lastRunId: string;
       lastError: string;
       runsCount: string;
+      runsCountOne: string;
       noRuns: string;
       noSelection: string;
       filteredByThread: string;
+      loadFailed: string;
     };
     actions: {
       edit: string;
       cancelEdit: string;
+      pause: string;
+      resume: string;
+      trigger: string;
+      delete: string;
+    };
+    deleteConfirm: string;
+    errors: {
+      create: string;
+      update: string;
       pause: string;
       resume: string;
       trigger: string;

@@ -64,6 +64,10 @@ STARTUP_ONLY_FIELDS: dict[str, str] = {
     "channel_connections": (
         "start_channel_service() wires the connection repository and channel workers once at startup, and the channel-connections router caches the merged provider config on app.state; channel_connections.* edits need a restart."
     ),
+    "scheduler": (
+        "ScheduledTaskService is constructed and started once during Gateway lifespan startup; enabled, poll_interval_seconds, lease_seconds, "
+        "and max_concurrent_runs are captured into the service instance and the background poller task is not rebuilt on config.yaml edits."
+    ),
 }
 
 

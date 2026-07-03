@@ -379,9 +379,46 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
   });
 
   void page.route("**/api/scheduled-tasks/*", (route) => {
-    if (route.request().method() === "DELETE") {
+    const request = route.request();
+    if (request.method() === "PATCH") {
       const taskId = decodeURIComponent(
-        new URL(route.request().url()).pathname.split("/").at(-1) ?? "",
+        new URL(request.url()).pathname.split("/").at(-1) ?? "",
+      );
+      const payload = request.postDataJSON() as Record<string, unknown>;
+      let updated: (typeof mutableScheduledTasks)[number] | undefined;
+      mutableScheduledTasks = mutableScheduledTasks.map((task) => {
+        if (task.id !== taskId) {
+          return task;
+        }
+        updated = {
+          ...task,
+          ...(typeof payload.title === "string"
+            ? { title: payload.title }
+            : {}),
+          ...(typeof payload.prompt === "string"
+            ? { prompt: payload.prompt }
+            : {}),
+          ...(payload.schedule_spec
+            ? {
+                schedule_spec: payload.schedule_spec as Record<string, unknown>,
+              }
+            : {}),
+          ...(typeof payload.timezone === "string"
+            ? { timezone: payload.timezone }
+            : {}),
+          updated_at: "2026-07-01T00:00:00+00:00",
+        };
+        return updated;
+      });
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(updated ?? {}),
+      });
+    }
+    if (request.method() === "DELETE") {
+      const taskId = decodeURIComponent(
+        new URL(request.url()).pathname.split("/").at(-1) ?? "",
       );
       mutableScheduledTasks = mutableScheduledTasks.filter(
         (task) => task.id !== taskId,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import socket
 import uuid
 from datetime import UTC, datetime
@@ -10,6 +11,8 @@ from fastapi import HTTPException
 
 from deerflow.runtime import ConflictError, RunRecord
 from deerflow.scheduler.schedules import next_run_at
+
+logger = logging.getLogger(__name__)
 
 
 class ScheduledTaskService:
@@ -51,8 +54,11 @@ class ScheduledTaskService:
 
     @staticmethod
     def _task_status_for_failure(task: dict[str, Any], *, trigger: str) -> str:
-        if trigger == "manual" and task.get("status") == "paused":
-            return "paused"
+        if trigger == "manual":
+            # A failed manual trigger must not consume the task's scheduled
+            # future: a `once` task with run_at still ahead would otherwise be
+            # flipped to "failed" and never claimed again.
+            return task.get("status") or "enabled"
         if task["schedule_type"] == "once":
             return "failed"
         return "enabled"
@@ -60,7 +66,9 @@ class ScheduledTaskService:
     @staticmethod
     def _task_status_for_skip(task: dict[str, Any]) -> str:
         if task["schedule_type"] == "once":
-            return "completed"
+            # The single occurrence was lost to an overlapping run; "completed"
+            # would claim an execution that never happened.
+            return "failed"
         return "enabled"
 
     async def dispatch_task(
@@ -151,7 +159,7 @@ class ScheduledTaskService:
                     last_run_at=task.get("last_run_at"),
                     last_run_id=task.get("last_run_id"),
                     last_thread_id=task.get("last_thread_id"),
-                    last_error=None,
+                    last_error=str(exc) if task["schedule_type"] == "once" else None,
                     increment_run_count=False,
                 )
                 return {
@@ -229,6 +237,12 @@ class ScheduledTaskService:
     async def start(self) -> None:
         if self._task is not None:
             return
+        try:
+            stale = await self._task_run_repo.mark_stale_active_runs(error="interrupted: gateway restarted before the run reached a terminal state")
+            if stale:
+                logger.warning("Marked %d stale scheduled task run(s) as failed after restart", stale)
+        except Exception:
+            logger.exception("Failed to sweep stale scheduled task runs at startup")
         self._stop.clear()
         self._task = asyncio.create_task(self._run_loop())
 
@@ -241,7 +255,12 @@ class ScheduledTaskService:
 
     async def _run_loop(self) -> None:
         while not self._stop.is_set():
-            await self.run_once(now=datetime.now(UTC))
+            try:
+                await self.run_once(now=datetime.now(UTC))
+            except Exception:
+                # A transient DB error (e.g. SQLite "database is locked") must
+                # not kill the poller task for the rest of the process life.
+                logger.exception("Scheduled task poll failed; retrying next interval")
             try:
                 await asyncio.wait_for(
                     self._stop.wait(),

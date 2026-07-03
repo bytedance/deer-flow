@@ -83,6 +83,25 @@ class ScheduledTaskRunRepository:
                 row.finished_at = finished_at
             await session.commit()
 
+    async def mark_stale_active_runs(self, *, error: str) -> int:
+        """Fail-fast bookkeeping for runs orphaned by a process crash.
+
+        Agent runs execute in-process, so any ``queued``/``running`` row found
+        at scheduler startup belongs to a run whose process is gone. Only valid
+        under the MVP's single-scheduler-instance assumption.
+        """
+        stmt = select(ScheduledTaskRunRow).where(ScheduledTaskRunRow.status.in_(("queued", "running")))
+        now = datetime.now(UTC)
+        async with self._sf() as session:
+            result = await session.execute(stmt)
+            rows = list(result.scalars())
+            for row in rows:
+                row.status = "failed"
+                row.error = error
+                row.finished_at = now
+            await session.commit()
+            return len(rows)
+
     async def update_by_run_id(
         self,
         run_id: str,

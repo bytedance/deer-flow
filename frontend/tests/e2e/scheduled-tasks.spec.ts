@@ -155,7 +155,7 @@ test("trigger shows a run entry in the detail pane", async ({ page }) => {
 
   await page.goto("/workspace/scheduled-tasks");
   await page.getByRole("button", { name: "Trigger now" }).click();
-  await expect(page.getByTestId("scheduled-task-runs")).toContainText("1 runs");
+  await expect(page.getByTestId("scheduled-task-runs")).toContainText("1 run");
   await expect(
     page.getByTestId("scheduled-task-run-list").getByText(/Manual · Success/i),
   ).toBeVisible();

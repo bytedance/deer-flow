@@ -242,6 +242,8 @@ export const enUS: Translations = {
       allStatuses: "All statuses",
       enabled: "Enabled",
       paused: "Paused",
+      completed: "Completed",
+      failed: "Failed",
       allTypes: "All types",
       cron: "Cron",
       once: "Once",
@@ -256,9 +258,11 @@ export const enUS: Translations = {
       lastRunId: "Last run id",
       lastError: "Last error",
       runsCount: "{count} runs",
+      runsCountOne: "{count} run",
       noRuns: "No runs yet",
       noSelection: "No scheduled task selected",
       filteredByThread: "Filtered by thread: {id}",
+      loadFailed: "Failed to load scheduled tasks",
     },
     actions: {
       edit: "Edit",
@@ -267,6 +271,16 @@ export const enUS: Translations = {
       resume: "Resume",
       trigger: "Trigger now",
       delete: "Delete",
+    },
+    deleteConfirm:
+      "Are you sure you want to delete this scheduled task? This action cannot be undone.",
+    errors: {
+      create: "Failed to create scheduled task",
+      update: "Failed to update scheduled task",
+      pause: "Failed to pause scheduled task",
+      resume: "Failed to resume scheduled task",
+      trigger: "Failed to trigger scheduled task",
+      delete: "Failed to delete scheduled task",
     },
     edit: {
       titlePlaceholder: "Edit title",

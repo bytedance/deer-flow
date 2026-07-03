@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -112,13 +112,20 @@ export function ScheduledTaskScheduleInput({
     initial.timezone || detectBrowserTimezone(),
   );
 
+  // Hold the latest onChange in a ref so the effect below does not depend on
+  // it. This avoids a re-render loop: if the parent passes an inline
+  // onChange (new reference each render), depending on it directly would
+  // re-fire the effect every render and call onChange again, looping.
+  const onChangeRef = useRef(onChange);
+  onChangeRef.current = onChange;
+
   // Emit on every change including mount. On mount this syncs the parent with
   // the browser-detected timezone and the canonicalized cron, so the submitted
   // value always matches what the user sees in the preview.
   useEffect(() => {
     if (scheduleType === "once") {
       const runAt = runAtLocal ? zonedLocalToUtcIso(runAtLocal, timezone) : "";
-      onChange({
+      onChangeRef.current({
         schedule_type: "once",
         schedule_spec: runAt ? { run_at: runAt } : {},
         timezone,
@@ -127,12 +134,12 @@ export function ScheduledTaskScheduleInput({
     }
     const cron =
       preset === "custom" ? (parts.raw ?? "") : serializeCron(preset, parts);
-    onChange({
+    onChangeRef.current({
       schedule_type: "cron",
       schedule_spec: cron ? { cron } : {},
       timezone,
     });
-  }, [scheduleType, preset, parts, runAtLocal, timezone, onChange]);
+  }, [scheduleType, preset, parts, runAtLocal, timezone]);
 
   function updateParts(patch: Partial<CronParts>) {
     setParts((prev) => ({ ...prev, ...patch }));

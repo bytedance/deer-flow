@@ -4,7 +4,16 @@ import { useSearchParams } from "next/navigation";
 import { useEffect, useState } from "react";
 
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import {
   ScheduledTaskScheduleInput,
   type ScheduleValue,
@@ -31,17 +40,40 @@ import type {
   ScheduledTask,
   ScheduledTaskRun,
 } from "@/core/scheduled-tasks/types";
+import { cn } from "@/lib/utils";
 
 const NONE = "—";
 
+function formatTimestamp(value: string | null, locale: string): string {
+  if (!value) {
+    return NONE;
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+  // Use a locale-aware short format like "2026-07-03 09:00". Future timestamps
+  // (next_run_at) render as an absolute time, not a relative "ago" string.
+  const intlLocale = locale === "zh-CN" ? "zh-CN" : "en-US";
+  return new Intl.DateTimeFormat(intlLocale, {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(date);
+}
+
 export default function ScheduledTasksPage() {
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
   const st = t.scheduledTasks;
   const searchParams = useSearchParams();
   const threadId = searchParams.get("thread_id");
   const allTasksQuery = useScheduledTasks();
   const threadTasksQuery = useThreadScheduledTasks(threadId);
   const data = threadId ? threadTasksQuery.data : allTasksQuery.data;
+  const queryError = threadId ? threadTasksQuery.error : allTasksQuery.error;
+  const [deleteOpen, setDeleteOpen] = useState(false);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [contextMode, setContextMode] = useState<
     "fresh_thread_per_run" | "reuse_thread"
@@ -215,7 +247,8 @@ export default function ScheduledTasksPage() {
               onChange={(event) => setTitle(event.target.value)}
               placeholder={st.create.taskTitle}
             />
-            <Input
+            <Textarea
+              rows={4}
               value={prompt}
               onChange={(event) => setPrompt(event.target.value)}
               placeholder={st.create.prompt}
@@ -243,16 +276,33 @@ export default function ScheduledTasksPage() {
                   return;
                 }
                 setFormError(null);
-                createTask.mutate({
-                  context_mode: contextMode,
-                  thread_id:
-                    contextMode === "reuse_thread" ? targetThreadId : null,
-                  title,
-                  prompt,
-                  schedule_type: createSchedule.schedule_type,
-                  schedule_spec: createSchedule.schedule_spec,
-                  timezone: createSchedule.timezone || "UTC",
-                });
+                createTask.mutate(
+                  {
+                    context_mode: contextMode,
+                    thread_id:
+                      contextMode === "reuse_thread" ? targetThreadId : null,
+                    title,
+                    prompt,
+                    schedule_type: createSchedule.schedule_type,
+                    schedule_spec: createSchedule.schedule_spec,
+                    timezone: createSchedule.timezone || "UTC",
+                  },
+                  {
+                    onSuccess: () => {
+                      // Clear the form so a follow-up task starts fresh.
+                      setTitle("");
+                      setPrompt("");
+                      setTargetThreadId("");
+                      setContextMode("fresh_thread_per_run");
+                      setCreateSchedule({
+                        schedule_type: "cron",
+                        schedule_spec: { cron: "0 9 * * *" },
+                        timezone: "",
+                      });
+                      setCreateNonce((n) => n + 1);
+                    },
+                  },
+                );
               }}
               disabled={
                 !title ||
@@ -271,6 +321,14 @@ export default function ScheduledTasksPage() {
               {st.detail.filteredByThread.replace("{id}", threadId)}
             </div>
           )}
+          {queryError ? (
+            <div
+              className="text-destructive text-sm"
+              data-testid="scheduled-task-load-error"
+            >
+              {st.detail.loadFailed}: {queryError.message}
+            </div>
+          ) : null}
           <div className="flex flex-wrap gap-2">
             <Button
               variant={statusFilter === "all" ? "default" : "outline"}
@@ -292,6 +350,20 @@ export default function ScheduledTasksPage() {
               onClick={() => setStatusFilter("paused")}
             >
               {st.filters.paused}
+            </Button>
+            <Button
+              variant={statusFilter === "completed" ? "default" : "outline"}
+              size="sm"
+              onClick={() => setStatusFilter("completed")}
+            >
+              {st.filters.completed}
+            </Button>
+            <Button
+              variant={statusFilter === "failed" ? "default" : "outline"}
+              size="sm"
+              onClick={() => setStatusFilter("failed")}
+            >
+              {st.filters.failed}
             </Button>
             <Button
               variant={typeFilter === "all" ? "default" : "outline"}
@@ -328,9 +400,10 @@ export default function ScheduledTasksPage() {
                     key={task.id}
                     onClick={() => setSelectedTaskId(task.id)}
                     data-testid={`scheduled-task-item-${task.id}`}
-                    className={`rounded-lg border p-4 text-left ${
-                      isSelected ? "border-foreground" : "border-border"
-                    }`}
+                    className={cn(
+                      "rounded-lg border p-4 text-left",
+                      isSelected ? "border-foreground" : "border-border",
+                    )}
                   >
                     <div className="font-medium">{task.title}</div>
                     <div className="text-muted-foreground text-sm">
@@ -372,10 +445,12 @@ export default function ScheduledTasksPage() {
                     {scheduleTypeLabel(selectedTask.schedule_type)}
                   </div>
                   <div className="text-muted-foreground text-sm">
-                    {st.detail.nextRun}: {selectedTask.next_run_at ?? NONE}
+                    {st.detail.nextRun}:{" "}
+                    {formatTimestamp(selectedTask.next_run_at, locale)}
                   </div>
                   <div className="text-muted-foreground text-sm">
-                    {st.detail.lastRun}: {selectedTask.last_run_at ?? NONE}
+                    {st.detail.lastRun}:{" "}
+                    {formatTimestamp(selectedTask.last_run_at, locale)}
                   </div>
                   <div className="text-muted-foreground text-sm">
                     {st.detail.lastRunId}: {selectedTask.last_run_id ?? NONE}
@@ -390,7 +465,8 @@ export default function ScheduledTasksPage() {
                         onChange={(event) => setEditTitle(event.target.value)}
                         placeholder={st.edit.titlePlaceholder}
                       />
-                      <Input
+                      <Textarea
+                        rows={4}
                         value={editPrompt}
                         onChange={(event) => setEditPrompt(event.target.value)}
                         placeholder={st.edit.promptPlaceholder}
@@ -443,16 +519,21 @@ export default function ScheduledTasksPage() {
                     <Button
                       variant="destructive"
                       size="sm"
-                      onClick={() => deleteTask.mutate(selectedTask.id)}
+                      onClick={() => setDeleteOpen(true)}
                     >
                       {st.actions.delete}
                     </Button>
                   </div>
                   <div data-testid="scheduled-task-runs">
-                    {st.detail.runsCount.replace(
-                      "{count}",
-                      String((taskRunsQuery.data ?? []).length),
-                    )}
+                    {(taskRunsQuery.data ?? []).length === 1
+                      ? st.detail.runsCountOne.replace(
+                          "{count}",
+                          String((taskRunsQuery.data ?? []).length),
+                        )
+                      : st.detail.runsCount.replace(
+                          "{count}",
+                          String((taskRunsQuery.data ?? []).length),
+                        )}
                   </div>
                   <div
                     className="flex flex-col gap-2"
@@ -467,6 +548,9 @@ export default function ScheduledTasksPage() {
                           <div className="font-medium">{runSummary(run)}</div>
                           <div className="text-muted-foreground text-xs">
                             {run.run_id ?? NONE}
+                          </div>
+                          <div className="text-muted-foreground text-xs">
+                            {formatTimestamp(run.scheduled_for, locale)}
                           </div>
                           {run.error && (
                             <div className="text-destructive text-xs">
@@ -491,6 +575,38 @@ export default function ScheduledTasksPage() {
           </div>
         </div>
       </WorkspaceBody>
+
+      {/* Delete confirm — follows the agent-card confirm pattern. */}
+      <Dialog open={deleteOpen} onOpenChange={setDeleteOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{st.actions.delete}</DialogTitle>
+            <DialogDescription>{st.deleteConfirm}</DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setDeleteOpen(false)}
+              disabled={deleteTask.isPending}
+            >
+              {t.common.cancel}
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={() => {
+                if (selectedTask) {
+                  deleteTask.mutate(selectedTask.id, {
+                    onSuccess: () => setDeleteOpen(false),
+                  });
+                }
+              }}
+              disabled={deleteTask.isPending}
+            >
+              {deleteTask.isPending ? t.common.loading : st.actions.delete}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </WorkspaceContainer>
   );
 }

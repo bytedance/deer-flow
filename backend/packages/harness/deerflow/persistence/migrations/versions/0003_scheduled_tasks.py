@@ -24,8 +24,7 @@ def upgrade() -> None:
     if inspector.has_table("scheduled_tasks"):
         # Idempotent: a DB whose full-metadata create_all already provisioned
         # both scheduled-task tables (e.g. legacy test seeds) must not have them
-        # re-created here. Column-shape revisions 0004/0005 stay safe via their
-        # own _helpers.py guards.
+        # re-created here.
         return
     op.create_table(
         "scheduled_tasks",
@@ -41,7 +40,6 @@ def upgrade() -> None:
         sa.Column("timezone", sa.String(length=64), nullable=False),
         sa.Column("status", sa.String(length=16), nullable=False),
         sa.Column("overlap_policy", sa.String(length=16), nullable=False),
-        sa.Column("misfire_policy", sa.String(length=16), nullable=False),
         sa.Column("next_run_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("last_run_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("last_run_id", sa.String(length=64), nullable=True),
@@ -50,7 +48,6 @@ def upgrade() -> None:
         sa.Column("lease_owner", sa.String(length=128), nullable=True),
         sa.Column("lease_expires_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("run_count", sa.Integer(), nullable=False),
-        sa.Column("max_runs", sa.Integer(), nullable=True),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
         sa.PrimaryKeyConstraint("id"),

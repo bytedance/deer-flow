@@ -23,7 +23,6 @@ class ScheduledTaskRow(Base):
     timezone: Mapped[str] = mapped_column(String(64))
     status: Mapped[str] = mapped_column(String(16), default="enabled", index=True)
     overlap_policy: Mapped[str] = mapped_column(String(16), default="skip")
-    misfire_policy: Mapped[str] = mapped_column(String(16), default="run_once")
     next_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True, nullable=True)
     last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_run_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
@@ -32,7 +31,6 @@ class ScheduledTaskRow(Base):
     lease_owner: Mapped[str | None] = mapped_column(String(128), nullable=True)
     lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     run_count: Mapped[int] = mapped_column(Integer, default=0)
-    max_runs: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
