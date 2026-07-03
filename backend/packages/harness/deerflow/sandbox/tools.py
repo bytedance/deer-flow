@@ -1049,7 +1049,7 @@ def replace_virtual_paths_in_command(command: str, thread_data: ThreadDataState 
         skills_pattern = re.compile(rf"{re.escape(skills_container)}(/[^\s\"';&|<>()]*)?")
 
         def replace_skills_match(match: re.Match) -> str:
-            return _resolve_skills_path(match.group(0))
+            return _resolve_skills_path(match.group(0)).replace("\\", "/")
 
         result = skills_pattern.sub(replace_skills_match, result)
 
@@ -1060,7 +1060,7 @@ def replace_virtual_paths_in_command(command: str, thread_data: ThreadDataState 
         acp_pattern = re.compile(rf"{re.escape(_ACP_WORKSPACE_VIRTUAL_PATH)}(/[^\s\"';&|<>()]*)?")
 
         def replace_acp_match(match: re.Match, _tid: str | None = _thread_id) -> str:
-            return _resolve_acp_workspace_path(match.group(0), _tid)
+            return _resolve_acp_workspace_path(match.group(0), _tid).replace("\\", "/")
 
         result = acp_pattern.sub(replace_acp_match, result)
 
@@ -1071,7 +1071,7 @@ def replace_virtual_paths_in_command(command: str, thread_data: ThreadDataState 
         pattern = re.compile(rf"{re.escape(VIRTUAL_PATH_PREFIX)}(/[^\s\"';&|<>()]*)?")
 
         def replace_user_data_match(match: re.Match) -> str:
-            return replace_virtual_path(match.group(0), thread_data)
+            return replace_virtual_path(match.group(0), thread_data).replace("\\", "/")
 
         result = pattern.sub(replace_user_data_match, result)
 
