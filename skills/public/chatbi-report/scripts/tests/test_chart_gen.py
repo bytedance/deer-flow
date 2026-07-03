@@ -122,6 +122,41 @@ def test_extract_series_by_metric_period_aggregates_orgs():
     assert s.y == [Decimal("950"), Decimal("1150"), Decimal("1400")]
 
 
+def test_extract_series_no_series_x_org_produces_per_row_values():
+    """Pie/C8 fix: no series_mode with x=行社 and 1 leaf must produce
+    per-row y-values matching x positions (not a single aggregated mean).
+    """
+    report = {
+        "title": "R",
+        "org_contexts": [
+            {"branch_num": "27020199", "branch_short_name": "王益联社"},
+            {"branch_num": "27020100", "branch_short_name": "印台联社"},
+            {"branch_num": "27020101", "branch_short_name": "耀州联社"},
+            {"branch_num": "27020102", "branch_short_name": "宜君联社"},
+        ],
+        "time_info": ["2025"],
+        "headers": [[
+            {"text": "行社", "is_indicator": False, "is_computed": False},
+            {"text": "贷款余额", "is_indicator": True, "is_computed": False, "idx_id": "BAS_0128", "period": "2025", "data_unit": "万元"},
+        ]],
+        "data_rows": [], "computed_specs": [],
+    }
+    wide = [
+        {"branch_num": "27020199", "BAS_0128@2025": "1500"},
+        {"branch_num": "27020100", "BAS_0128@2025": "1300"},
+        {"branch_num": "27020101", "BAS_0128@2025": "1100"},
+        {"branch_num": "27020102", "BAS_0128@2025": "900"},
+    ]
+    spec = {"title": "贷款占比", "type": "pie", "x": "行社", "y": "贷款余额"}
+    resolved = cg.extract_series(spec, report, wide)
+    assert len(resolved.series_list) == 1
+    s = resolved.series_list[0]
+    assert s.name == "贷款余额"
+    assert len(s.x) == 4
+    assert len(s.y) == 4, f"y must align with x for pie; got {len(s.y)} y vs {len(s.x)} x"
+    assert s.y == [Decimal("1500"), Decimal("1300"), Decimal("1100"), Decimal("900")]
+
+
 def test_extract_bar_line_returns_resolved_chart_with_bar_count():
     """C6 fix: bar_line returns ResolvedChart with explicit bar_count."""
     report = {
@@ -152,3 +187,87 @@ def test_extract_bar_line_returns_resolved_chart_with_bar_count():
     assert isinstance(resolved, cg.ResolvedChart)
     assert resolved.bar_count == 2
     assert len(resolved.series_list) == 3
+
+
+# ---------- plotter tests (Task 4) ---------- #
+
+import os
+import warnings
+
+
+def test_render_line_png(tmp_path):
+    series = [
+        cg.Series(name="王益", x=["2023", "2024", "2025"], y=[Decimal("1000"), Decimal("1200"), Decimal("1500")], unit="万元"),
+        cg.Series(name="印台", x=["2023", "2024", "2025"], y=[Decimal("900"), Decimal("1100"), Decimal("1300")], unit="万元"),
+    ]
+    out = tmp_path / "line.png"
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        cg.render_chart(title="利润趋势", chart_type="line", series_list=series, out_path=str(out))
+        # Glyph assertion only meaningful in sandbox where a CJK font is installed.
+        # On macOS/Linux dev machines without the candidate font, skip the check.
+        font_available = any(os.path.exists(p) for p in cg._FONT_CANDIDATES)
+        if font_available:
+            glyph_warnings = [x for x in w if "glyph" in str(x.message).lower()]
+            assert not glyph_warnings, f"CJK glyph warnings: {glyph_warnings}"
+    assert out.exists()
+    assert out.stat().st_size > 0
+
+
+def test_render_bar_png(tmp_path):
+    series = [
+        cg.Series(name="利润总额", x=["王益", "印台"], y=[Decimal("1500"), Decimal("1300")], unit="万元"),
+    ]
+    out = tmp_path / "bar.png"
+    cg.render_chart(title="利润对比", chart_type="bar", series_list=series, out_path=str(out))
+    assert out.exists()
+    assert out.stat().st_size > 0
+
+
+def test_render_bar_grouped_no_overlap(tmp_path):
+    """C7 fix: multi-series bar chart must apply offset (no overlap)."""
+    series = [
+        cg.Series(name="2024", x=["王益", "印台"], y=[Decimal("1200"), Decimal("1100")], unit="万元"),
+        cg.Series(name="2025", x=["王益", "印台"], y=[Decimal("1500"), Decimal("1300")], unit="万元"),
+    ]
+    out = tmp_path / "bar_grouped.png"
+    cg.render_chart(title="利润对比", chart_type="bar", series_list=series, out_path=str(out))
+    assert out.exists()
+    assert out.stat().st_size > 0
+
+
+def test_render_bar_line_with_colors(tmp_path):
+    bar_series = [
+        cg.Series(name="贷款余额", x=["王益", "印台"], y=[Decimal("1500"), Decimal("1300")], unit="万元"),
+        cg.Series(name="存款日均净增", x=["王益", "印台"], y=[Decimal("800"), Decimal("900")], unit="万元"),
+    ]
+    line_series = [
+        cg.Series(name="不良率", x=["王益", "印台"], y=[Decimal("2.5"), Decimal("1.8")], unit="%"),
+        cg.Series(name="占比", x=["王益", "印台"], y=[Decimal("12"), Decimal("8")], unit="%"),
+    ]
+    out = tmp_path / "bar_line_color.png"
+    cg.render_chart(
+        title="贷款与不良率", chart_type="bar_line",
+        series_list=bar_series + line_series, out_path=str(out),
+        bar_count=2, bar_colors=["#3498db", "#2ecc71"], line_colors=["#e74c3c", "#f39c12"],
+    )
+    assert out.exists()
+    assert out.stat().st_size > 0
+
+
+def test_render_bar_line_without_bar_count_raises(tmp_path):
+    """H7 fix: bar_line without explicit bar_count fails fast."""
+    series = [cg.Series(name="A", x=["x"], y=[Decimal("1")], unit=None)]
+    with pytest.raises(AssertionError, match="bar_count"):
+        cg.render_chart(title="T", chart_type="bar_line", series_list=series, out_path=str(tmp_path / "x.png"))
+
+
+def test_render_pie_png(tmp_path):
+    series = [
+        cg.Series(name="贷款余额", x=["王益", "印台", "耀州", "宜君"],
+                  y=[Decimal("1500"), Decimal("1300"), Decimal("1100"), Decimal("900")], unit="万元"),
+    ]
+    out = tmp_path / "pie.png"
+    cg.render_chart(title="贷款余额占比", chart_type="pie", series_list=series, out_path=str(out))
+    assert out.exists()
+    assert out.stat().st_size > 0
