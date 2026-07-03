@@ -1186,7 +1186,7 @@ def replace_virtual_paths_in_command(command: str, thread_data: ThreadDataState 
         pattern = re.compile(rf"{re.escape(VIRTUAL_PATH_PREFIX)}(/[^\s\"';&|<>()]*)?")
 
         def replace_user_data_match(match: re.Match) -> str:
-            return replace_virtual_path(match.group(0), thread_data)
+            return replace_virtual_path(match.group(0), thread_data).replace("\\", "/")
 
         result = pattern.sub(replace_user_data_match, result)
 
