@@ -20,6 +20,8 @@ logger = logging.getLogger(__name__)
 
 _PROMPT_INPUT_DIRS = {"references", "templates"}
 _PROMPT_INPUT_SUFFIXES = frozenset({".json", ".markdown", ".md", ".rst", ".txt", ".yaml", ".yml"})
+_CODE_SUFFIXES = frozenset({".bash", ".cjs", ".js", ".mjs", ".php", ".pl", ".ps1", ".py", ".rb", ".sh", ".ts", ".zsh"})
+_EXECUTABLE_MAGIC_PREFIXES = (b"\x7fELF", b"MZ", b"\xfe\xed\xfa", b"\xcf\xfa\xed\xfe", b"\xca\xfe\xba\xbe")
 
 
 class SkillAlreadyExistsError(ValueError):
@@ -52,6 +54,11 @@ def is_symlink_member(info: zipfile.ZipInfo) -> bool:
     """Detect symlinks based on the external attributes stored in the ZipInfo."""
     mode = info.external_attr >> 16
     return stat.S_ISLNK(mode)
+
+
+def is_executable_binary_prefix(prefix: bytes) -> bool:
+    """Detect ELF, PE, and Mach-O executables by magic bytes."""
+    return prefix.startswith(_EXECUTABLE_MAGIC_PREFIXES)
 
 
 def should_ignore_archive_entry(path: Path) -> bool:
@@ -89,9 +96,10 @@ def safe_extract_skill_archive(
     - Reject absolute paths and directory traversal (..).
     - Skip symlink entries instead of materialising them.
     - Enforce a hard limit on total uncompressed size (zip bomb defence).
+    - Reject executable binaries (ELF/PE/Mach-O) by magic bytes.
 
     Raises:
-        ValueError: If unsafe members or size limit exceeded.
+        ValueError: If unsafe members, executable binaries, or size limit exceeded.
     """
     dest_root = dest_path.resolve()
     total_written = 0
@@ -115,7 +123,11 @@ def safe_extract_skill_archive(
             continue
 
         with zip_ref.open(info) as src, member_path.open("wb") as dst:
+            first_chunk = True
             while chunk := src.read(65536):
+                if first_chunk and is_executable_binary_prefix(chunk):
+                    raise ValueError(f"Archive contains executable binary member: {info.filename!r}")
+                first_chunk = False
                 total_written += len(chunk)
                 if total_written > max_total_size:
                     raise ValueError("Skill archive is too large or appears highly compressed.")
@@ -130,6 +142,23 @@ def _should_scan_support_file(rel_path: Path) -> bool:
     if _is_script_support_file(rel_path):
         return True
     return bool(rel_path.parts) and rel_path.parts[0] in _PROMPT_INPUT_DIRS and rel_path.suffix.lower() in _PROMPT_INPUT_SUFFIXES
+
+
+def _has_shebang(path: Path) -> bool:
+    try:
+        with path.open("rb") as f:
+            return f.read(2) == b"#!"
+    except OSError:
+        return False
+
+
+def _is_code_file(path: Path, rel_path: Path) -> bool:
+    """Classify code files anywhere in the tree for the executable scan policy (blocking; run off the event loop)."""
+    if _is_script_support_file(rel_path):
+        return True
+    if rel_path.suffix.lower() in _CODE_SUFFIXES:
+        return True
+    return not rel_path.suffix and _has_shebang(path)
 
 
 def _move_staged_skill_into_reserved_target(staging_target: Path, target: Path) -> None:
@@ -190,10 +219,10 @@ async def _scan_skill_archive_contents_or_raise(skill_dir: Path, skill_name: str
             continue
         if path.name == "SKILL.md":
             raise SkillSecurityScanError(f"Security scan failed for skill '{skill_name}': nested SKILL.md is not allowed at {skill_name}/{rel_path.as_posix()}")
-        if not _should_scan_support_file(rel_path):
-            continue
-
-        await _scan_skill_file_or_raise(skill_dir, path, skill_name, executable=_is_script_support_file(rel_path))
+        if await asyncio.to_thread(_is_code_file, path, rel_path):
+            await _scan_skill_file_or_raise(skill_dir, path, skill_name, executable=True)
+        elif _should_scan_support_file(rel_path):
+            await _scan_skill_file_or_raise(skill_dir, path, skill_name, executable=False)
 
 
 def _run_async_install(coro):
