@@ -78,6 +78,15 @@ export const enUS: Translations = {
     linkCopied: "Link copied to clipboard",
   },
 
+  // Citations
+  citations: {
+    sourcesSummary: (count) =>
+      `Used ${count} ${count === 1 ? "source" : "sources"}`,
+    citeCount: (count) => `${count} ${count === 1 ? "cite" : "cites"}`,
+    copyReference: (title) => `Copy ${title} reference`,
+    copiedReference: (title) => `Copied ${title} reference`,
+  },
+
   // Input Box
   inputBox: {
     placeholder: "How can I assist you today?",
@@ -252,10 +261,10 @@ export const enUS: Translations = {
   // Workspace
   workspace: {
     officialWebsite: "DeerFlow's official website",
-    githubTooltip: "DeerFlow on Github",
+    githubTooltip: "DeerFlow on GitHub",
     settingsAndMore: "Settings and more",
     visitGithub: "DeerFlow on GitHub",
-    reportIssue: "Report a issue",
+    reportIssue: "Report an issue",
     contactUs: "Contact us",
     about: "About DeerFlow",
     logout: "Log out",

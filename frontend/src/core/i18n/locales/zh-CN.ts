@@ -78,6 +78,14 @@ export const zhCN: Translations = {
     linkCopied: "链接已复制到剪贴板",
   },
 
+  // Citations
+  citations: {
+    sourcesSummary: (count) => `使用了 ${count} 个来源`,
+    citeCount: (count) => `${count} 次引用`,
+    copyReference: (title) => `复制 ${title} 引用`,
+    copiedReference: (title) => `已复制 ${title} 引用`,
+  },
+
   // Input Box
   inputBox: {
     placeholder: "今天我能为你做些什么？",
@@ -238,9 +246,9 @@ export const zhCN: Translations = {
   // Workspace
   workspace: {
     officialWebsite: "访问 DeerFlow 官方网站",
-    githubTooltip: "访问 DeerFlow 的 Github 仓库",
+    githubTooltip: "访问 DeerFlow 的 GitHub 仓库",
     settingsAndMore: "设置和更多",
-    visitGithub: "在 Github 上查看 DeerFlow",
+    visitGithub: "在 GitHub 上查看 DeerFlow",
     reportIssue: "报告问题",
     contactUs: "联系我们",
     about: "关于 DeerFlow",

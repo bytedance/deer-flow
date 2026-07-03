@@ -39,6 +39,7 @@ import {
 } from "@/core/artifacts/preview";
 import { urlOfArtifact } from "@/core/artifacts/utils";
 import { useAuth } from "@/core/auth/AuthProvider";
+import { extractCitationSources } from "@/core/citations/sources";
 import { writeTextToClipboard } from "@/core/clipboard";
 import { useI18n } from "@/core/i18n/hooks";
 import { findToolCallResult } from "@/core/messages/utils";
@@ -55,6 +56,7 @@ import { env } from "@/env";
 import { cn } from "@/lib/utils";
 
 import { ArtifactLink } from "../citations/artifact-link";
+import { CitationSourcesPanel } from "../citations/citation-sources-panel";
 import { useThread } from "../messages/context";
 import { Tooltip } from "../tooltip";
 
@@ -436,6 +438,11 @@ export function ArtifactFilePreview({
     [scrollKey],
   );
   const [htmlPreviewUrl, setHtmlPreviewUrl] = useState<string>();
+  const citationSources = useMemo(
+    () =>
+      language === "markdown" ? extractCitationSources(content ?? "") : [],
+    [content, language],
+  );
 
   useEffect(() => {
     scrollPositionRef.current = { x: 0, y: 0 };
@@ -503,14 +510,15 @@ export function ArtifactFilePreview({
 
   if (language === "markdown") {
     return (
-      <div className="size-full px-4">
+      <div className="size-full overflow-auto px-4 py-3">
         <SafeStreamdown
-          className="size-full"
+          className="min-w-0"
           {...artifactMarkdownPlugins}
           components={{ a: ArtifactLink }}
         >
           {content ?? ""}
         </SafeStreamdown>
+        <CitationSourcesPanel sources={citationSources} className="mb-4" />
       </div>
     );
   }

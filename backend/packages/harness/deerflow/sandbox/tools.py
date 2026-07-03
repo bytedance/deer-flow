@@ -176,6 +176,9 @@ def _extract_skill_name_from_skills_path(path: str) -> str | None:
     parts = relative.split("/")
     if len(parts) >= 2 and parts[0] in ("public", "custom", "legacy"):
         return parts[1]
+    if len(parts) == 1 and parts[0] in ("public", "custom", "legacy"):
+        # Category root like /mnt/skills/custom — not a skill path.
+        return None
     if len(parts) >= 1:
         # Direct path like /mnt/skills/my-skill/SKILL.md
         return parts[0]
@@ -1837,6 +1840,29 @@ async def _grep_tool_async(
 grep_tool.coroutine = _grep_tool_async
 
 
+def read_current_file_content(runtime: Runtime | None, path: str) -> str:
+    """Read the full current content of ``path`` using read_file's resolution rules.
+
+    Shared by ``read_file_tool`` and ``ReadBeforeWriteMiddleware`` (issue #3857)
+    so the gate hashes exactly the bytes the read tool would see. Raises
+    ``FileNotFoundError`` when the file does not exist; other sandbox errors
+    propagate to the caller.
+    """
+    sandbox = ensure_sandbox_initialized(runtime)
+    ensure_thread_directories_exist(runtime)
+    if is_local_sandbox(runtime):
+        thread_data = get_thread_data(runtime)
+        validate_local_tool_path(path, thread_data, read_only=True)
+        if _is_skills_path(path):
+            path = _resolve_skills_path(path)
+        elif _is_acp_workspace_path(path):
+            path = _resolve_acp_workspace_path(path, _extract_thread_id_from_thread_data(thread_data))
+        elif not _is_custom_mount_path(path):
+            path = _resolve_and_validate_user_data_path(path, thread_data)
+        # Custom mount paths are resolved by LocalSandbox._resolve_path()
+    return sandbox.read_file(path)
+
+
 @tool("read_file", parse_docstring=True)
 def read_file_tool(
     runtime: Runtime,
@@ -1858,23 +1884,8 @@ def read_file_tool(
         if _is_disabled_skill_path(path, user_id=resolve_runtime_user_id(runtime)):
             skill_name = _extract_skill_name_from_skills_path(path) or "unknown"
             return f"Error: Skill '{skill_name}' is disabled. Access to its files is blocked. Enable the skill in settings before using it."
-        sandbox = ensure_sandbox_initialized(runtime)
-        ensure_thread_directories_exist(runtime)
         requested_path = path
-        if is_local_sandbox(runtime):
-            thread_data = get_thread_data(runtime)
-            validate_local_tool_path(path, thread_data, read_only=True)
-            if _is_skills_path(path) or _is_acp_workspace_path(path):
-                # Skills and ACP workspace paths are resolved by the sandbox's
-                # PathMapping (which uses the user_id from acquire time), not
-                # by _resolve_skills_path / _resolve_acp_workspace_path (which
-                # use get_effective_user_id() from contextvar and may differ
-                # from the sandbox mapping's user_id).
-                pass
-            elif not _is_custom_mount_path(path):
-                path = _resolve_and_validate_user_data_path(path, thread_data)
-            # Custom mount paths and skills/ACP paths are resolved by LocalSandbox._resolve_path()
-        content = sandbox.read_file(path)
+        content = read_current_file_content(runtime, path)
         if not content:
             return "(empty)"
         if start_line is not None and end_line is not None:
@@ -1944,6 +1955,12 @@ def write_file_tool(
     append: bool = False,
 ) -> str:
     """Write text content to a file. By default this overwrites the target file; set append=True to add content to the end without replacing existing content.
+
+    READ-BEFORE-WRITE (issue #3857): if the target file already exists (including
+    append=True), you must have read its CURRENT version with read_file first.
+    Any write invalidates earlier reads, so re-read between consecutive
+    modifications — a ranged read of the relevant section is enough. Writes
+    that fail this check are rejected with an error.
 
     SIZE POLICY (issue #3189):
     A single non-append write_file call must not exceed 80 KB of UTF-8 content.
@@ -2039,6 +2056,9 @@ def str_replace_tool(
 ) -> str:
     """Replace a substring in a file with another substring.
     If `replace_all` is False (default), the substring to replace must appear **exactly once** in the file.
+
+    READ-BEFORE-WRITE (issue #3857): you must have read the file's CURRENT
+    version with read_file first; any write invalidates earlier reads.
 
     Args:
         description: Explain why you are replacing the substring in short words. ALWAYS PROVIDE THIS PARAMETER FIRST.

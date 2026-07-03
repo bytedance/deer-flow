@@ -14,6 +14,7 @@
       "env": {
         "GITHUB_TOKEN": "$GITHUB_TOKEN"
       },
+      "tool_call_timeout": 60,
       "description": "GitHub MCP server for repository operations"
     },
     "postgres": {
