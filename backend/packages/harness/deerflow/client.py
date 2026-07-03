@@ -1151,10 +1151,19 @@ class DeerFlowClient:
         extensions_config = get_extensions_config()
         extensions_config.skills[name] = SkillStateConfig(enabled=enabled)
 
-        config_data = {
-            "mcpServers": {n: s.model_dump() for n, s in extensions_config.mcp_servers.items()},
-            "skills": {n: {"enabled": sc.enabled} for n, sc in extensions_config.skills.items()},
-        }
+        raw_servers: dict | None = None
+        raw_other_keys: dict = {}
+        if config_path.exists():
+            with open(config_path, encoding="utf-8") as f:
+                raw_data = json.load(f)
+            raw_servers = raw_data.get("mcpServers", {})
+            for key, value in raw_data.items():
+                if key not in ("mcpServers", "skills"):
+                    raw_other_keys[key] = value
+
+        config_data = dict(raw_other_keys)
+        config_data["mcpServers"] = raw_servers if raw_servers is not None else {n: s.model_dump() for n, s in extensions_config.mcp_servers.items()}
+        config_data["skills"] = {n: {"enabled": sc.enabled} for n, sc in extensions_config.skills.items()}
 
         self._atomic_write_json(config_path, config_data)
 

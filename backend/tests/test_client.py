@@ -1308,6 +1308,60 @@ class TestSkillsManagement:
         finally:
             tmp_path.unlink()
 
+    def test_update_skill_preserves_extension_top_level_keys(self, client):
+        skill = self._make_skill(enabled=True)
+        updated_skill = self._make_skill(enabled=False)
+
+        ext_config = MagicMock()
+        resolved_server = MagicMock()
+        resolved_server.model_dump.return_value = {
+            "enabled": False,
+            "type": "stdio",
+            "command": "echo",
+            "args": ["demo-a"],
+            "env": {"DEMO_TOKEN": "resolved-token"},
+        }
+        ext_config.mcp_servers = {"demo-a": resolved_server}
+        ext_config.skills = {}
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            json.dump(
+                {
+                    "mcpInterceptors": ["demo.module:builder"],
+                    "customExtension": {"enabled": True},
+                    "mcpServers": {
+                        "demo-a": {
+                            "enabled": False,
+                            "type": "stdio",
+                            "command": "echo",
+                            "args": ["demo-a"],
+                            "env": {"DEMO_TOKEN": "$DEMO_TOKEN"},
+                        }
+                    },
+                    "skills": {},
+                },
+                f,
+            )
+            tmp_path = Path(f.name)
+
+        try:
+            with (
+                patch("deerflow.skills.storage.local_skill_storage.LocalSkillStorage.load_skills", side_effect=[[skill], [updated_skill]]),
+                patch("deerflow.client.ExtensionsConfig.resolve_config_path", return_value=tmp_path),
+                patch("deerflow.client.get_extensions_config", return_value=ext_config),
+                patch("deerflow.client.reload_extensions_config"),
+            ):
+                result = client.update_skill("test-skill", enabled=False)
+
+            assert result["enabled"] is False
+            saved = json.loads(tmp_path.read_text(encoding="utf-8"))
+            assert saved["mcpInterceptors"] == ["demo.module:builder"]
+            assert saved["customExtension"] == {"enabled": True}
+            assert saved["mcpServers"]["demo-a"]["env"] == {"DEMO_TOKEN": "$DEMO_TOKEN"}
+            assert saved["skills"] == {"test-skill": {"enabled": False}}
+        finally:
+            tmp_path.unlink()
+
     def test_update_skill_not_found(self, client):
         with patch("deerflow.skills.storage.local_skill_storage.LocalSkillStorage.load_skills", return_value=[]):
             with pytest.raises(ValueError, match="not found"):

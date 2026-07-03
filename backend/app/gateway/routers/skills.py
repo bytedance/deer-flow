@@ -342,10 +342,19 @@ async def update_skill(skill_name: str, body: SkillUpdateRequest, request: Reque
         extensions_config = get_extensions_config()
         extensions_config.skills[skill_name] = SkillStateConfig(enabled=body.enabled)
 
-        config_data = {
-            "mcpServers": {name: server.model_dump() for name, server in extensions_config.mcp_servers.items()},
-            "skills": {name: {"enabled": skill_config.enabled} for name, skill_config in extensions_config.skills.items()},
-        }
+        raw_servers: dict | None = None
+        raw_other_keys: dict = {}
+        if config_path.exists():
+            with open(config_path, encoding="utf-8") as f:
+                raw_data = json.load(f)
+            raw_servers = raw_data.get("mcpServers", {})
+            for key, value in raw_data.items():
+                if key not in ("mcpServers", "skills"):
+                    raw_other_keys[key] = value
+
+        config_data = dict(raw_other_keys)
+        config_data["mcpServers"] = raw_servers if raw_servers is not None else {name: server.model_dump() for name, server in extensions_config.mcp_servers.items()}
+        config_data["skills"] = {name: {"enabled": skill_config.enabled} for name, skill_config in extensions_config.skills.items()}
 
         with open(config_path, "w", encoding="utf-8") as f:
             json.dump(config_data, f, indent=2)
