@@ -4972,7 +4972,7 @@ class TestChannelService:
         service._start_channel = mock_start_channel
 
         async def go():
-            await service.restart_channel("feishu")
+            await service.restart_channel("feishu", reload_config=False)
 
         _run(go())
 
@@ -6321,5 +6321,190 @@ class TestTelegramStreaming:
             assert bot.edited[0]["text"] == "a" * 4096
             assert [m["text"] for m in bot.sent] == ["Working on it...", "b" * 10]
             assert ch._last_bot_message["12345"] == 101
+
+        _run(go())
+
+
+class TestHandleGoalCommand:
+    """Covers the IM-channel ``/goal`` handler (get/set/clear via the Gateway)."""
+
+    @staticmethod
+    def _install_mock_httpx(monkeypatch, calls, *, goal_payload=None, fail_method=None):
+        class MockResponse:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"goal": goal_payload}
+
+        class MockAsyncClient:
+            def __init__(self, *args, **kwargs):
+                return None
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return None
+
+            async def _record(self, method, url, **kwargs):
+                calls.append({"method": method, "url": url, **kwargs})
+                if fail_method == method:
+                    raise RuntimeError("gateway down")
+                return MockResponse()
+
+            async def get(self, url, **kwargs):
+                return await self._record("get", url, **kwargs)
+
+            async def put(self, url, **kwargs):
+                return await self._record("put", url, **kwargs)
+
+            async def delete(self, url, **kwargs):
+                return await self._record("delete", url, **kwargs)
+
+        monkeypatch.setattr("app.channels.manager.httpx.AsyncClient", MockAsyncClient)
+
+    @staticmethod
+    def _make_manager(monkeypatch, *, thread_id):
+        from app.channels.manager import ChannelManager
+
+        bus = MessageBus()
+        store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+        manager = ChannelManager(bus=bus, store=store, gateway_url="http://gateway:8001")
+
+        async def _lookup(msg):
+            return thread_id
+
+        monkeypatch.setattr(manager, "_lookup_thread_id", _lookup)
+        return manager
+
+    @staticmethod
+    def _msg(text):
+        return InboundMessage(
+            channel_name="slack",
+            chat_id="C1",
+            user_id="U1",
+            text=text,
+            msg_type=InboundMessageType.COMMAND,
+        )
+
+    def test_status_without_thread_reports_no_active_goal(self, monkeypatch):
+        calls = []
+        self._install_mock_httpx(monkeypatch, calls)
+
+        async def go():
+            manager = self._make_manager(monkeypatch, thread_id=None)
+            reply = await manager._handle_goal_command(self._msg("/goal"), "")
+            assert reply == "No active goal."
+            assert calls == []  # no thread -> no gateway round-trip
+
+        _run(go())
+
+    def test_status_with_active_goal_reports_objective(self, monkeypatch):
+        calls = []
+        self._install_mock_httpx(monkeypatch, calls, goal_payload={"objective": "ship it"})
+
+        async def go():
+            manager = self._make_manager(monkeypatch, thread_id="t-1")
+            reply = await manager._handle_goal_command(self._msg("/goal"), "")
+            assert reply == "Goal: ship it"
+            assert calls[0]["method"] == "get"
+            assert calls[0]["url"].endswith("/api/threads/t-1/goal")
+
+        _run(go())
+
+    def test_status_with_no_goal_reports_none(self, monkeypatch):
+        calls = []
+        self._install_mock_httpx(monkeypatch, calls, goal_payload=None)
+
+        async def go():
+            manager = self._make_manager(monkeypatch, thread_id="t-1")
+            reply = await manager._handle_goal_command(self._msg("/goal"), "")
+            assert reply == "No active goal."
+
+        _run(go())
+
+    def test_clear_with_thread_calls_delete(self, monkeypatch):
+        calls = []
+        self._install_mock_httpx(monkeypatch, calls)
+
+        async def go():
+            manager = self._make_manager(monkeypatch, thread_id="t-1")
+            reply = await manager._handle_goal_command(self._msg("/goal clear"), "clear")
+            assert reply == "Goal cleared."
+            assert calls[0]["method"] == "delete"
+
+        _run(go())
+
+    def test_clear_without_thread_is_noop(self, monkeypatch):
+        calls = []
+        self._install_mock_httpx(monkeypatch, calls)
+
+        async def go():
+            manager = self._make_manager(monkeypatch, thread_id=None)
+            reply = await manager._handle_goal_command(self._msg("/goal reset"), "reset")
+            assert reply == "Goal cleared."
+            assert calls == []
+
+        _run(go())
+
+    def test_set_with_existing_thread_puts_objective(self, monkeypatch):
+        calls = []
+        self._install_mock_httpx(monkeypatch, calls, goal_payload={"objective": "finish the work"})
+
+        async def go():
+            manager = self._make_manager(monkeypatch, thread_id="t-1")
+            chats = []
+
+            async def _handle_chat(msg, **kwargs):
+                chats.append((msg, kwargs))
+
+            monkeypatch.setattr(manager, "_handle_chat", _handle_chat)
+
+            reply = await manager._handle_goal_command(self._msg("/goal finish the work"), "finish the work")
+            assert reply is None
+            assert calls[0]["method"] == "put"
+            assert calls[0]["json"] == {"objective": "finish the work"}
+            assert chats[0][0].text == "finish the work"
+            assert chats[0][0].msg_type == InboundMessageType.CHAT
+            assert chats[0][1] == {"bound_identity_checked": True}
+
+        _run(go())
+
+    def test_set_without_thread_creates_one(self, monkeypatch):
+        calls = []
+        self._install_mock_httpx(monkeypatch, calls, goal_payload={"objective": "do X"})
+
+        async def go():
+            manager = self._make_manager(monkeypatch, thread_id=None)
+            chats = []
+
+            async def _create(client, msg):
+                return "new-thread"
+
+            async def _handle_chat(msg, **kwargs):
+                chats.append((msg, kwargs))
+
+            monkeypatch.setattr(manager, "_create_thread", _create)
+            monkeypatch.setattr(manager, "_get_client", lambda: object())
+            monkeypatch.setattr(manager, "_handle_chat", _handle_chat)
+
+            reply = await manager._handle_goal_command(self._msg("/goal do X"), "do X")
+            assert reply is None
+            assert calls[0]["method"] == "put"
+            assert calls[0]["url"].endswith("/api/threads/new-thread/goal")
+            assert chats[0][0].text == "do X"
+            assert chats[0][0].msg_type == InboundMessageType.CHAT
+
+        _run(go())
+
+    def test_set_failure_returns_error_message(self, monkeypatch):
+        calls = []
+        self._install_mock_httpx(monkeypatch, calls, fail_method="put")
+
+        async def go():
+            manager = self._make_manager(monkeypatch, thread_id="t-1")
+            reply = await manager._handle_goal_command(self._msg("/goal do X"), "do X")
+            assert reply == "Failed to set goal."
 
         _run(go())

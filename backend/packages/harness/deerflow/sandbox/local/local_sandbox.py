@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
+from deerflow.sandbox.env_policy import build_sandbox_env
 from deerflow.sandbox.local.list_dir import list_dir
 from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.search import GrepMatch, find_glob_matches, find_grep_matches
@@ -375,7 +376,9 @@ class LocalSandbox(Sandbox):
 
         def replace_match(match: re.Match) -> str:
             matched_path = match.group(0)
-            return self._resolve_path(matched_path)
+            # Normalize to forward slashes so bash doesn't interpret Windows
+            # backslash sequences (\\U, \\a, \\d, \\s, \\n, \\t) as escapes.
+            return self._resolve_path(matched_path).replace("\\", "/")
 
         return pattern.sub(replace_match, command)
 
@@ -433,16 +436,24 @@ class LocalSandbox(Sandbox):
 
         raise RuntimeError("No suitable shell executable found. Tried /bin/zsh, /bin/bash, /bin/sh, and `sh` on PATH.")
 
-    def execute_command(self, command: str, timeout: float | None = None) -> str:
+    def execute_command(
+        self,
+        command: str,
+        env: dict[str, str] | None = None,
+        timeout: float | None = None,
+    ) -> str:
         # Resolve container paths in command before execution
         resolved_command = self._resolve_paths_in_command(command)
         shell = self._get_shell()
         if timeout is None:
             timeout = DEFAULT_COMMAND_TIMEOUT_SECONDS
 
+        # Inherit os.environ minus platform secrets, then layer any injected
+        # request-scoped secrets on top (#3861). An explicit env is always passed
+        # so platform credentials never leak into skill subprocesses.
+        sandbox_env = build_sandbox_env(env)
         timed_out = False
         if os.name == "nt":
-            env = None
             if self._is_powershell(shell):
                 args = [shell, "-NoProfile", "-Command", resolved_command]
             elif self._is_cmd_shell(shell):
@@ -450,8 +461,8 @@ class LocalSandbox(Sandbox):
             else:
                 args = [shell, "-c", resolved_command]
                 if self._is_msys_shell(shell):
-                    env = {
-                        **os.environ,
+                    sandbox_env = {
+                        **sandbox_env,
                         "MSYS_NO_PATHCONV": "1",
                         "MSYS2_ARG_CONV_EXCL": "*",
                     }
@@ -463,7 +474,7 @@ class LocalSandbox(Sandbox):
                     capture_output=True,
                     text=True,
                     timeout=timeout,
-                    env=env,
+                    env=sandbox_env,
                 )
                 stdout, stderr, returncode = result.stdout, result.stderr, result.returncode
             except subprocess.TimeoutExpired as exc:
@@ -473,7 +484,7 @@ class LocalSandbox(Sandbox):
                 returncode = 0
         else:
             args = [shell, "-c", resolved_command]
-            stdout, stderr, returncode, timed_out = self._run_posix_command(args, timeout)
+            stdout, stderr, returncode, timed_out = self._run_posix_command(args, timeout, sandbox_env)
 
         output = stdout
         if stderr:
@@ -489,7 +500,11 @@ class LocalSandbox(Sandbox):
         return self._reverse_resolve_paths_in_output(final_output)
 
     @staticmethod
-    def _run_posix_command(args: list[str], timeout: float) -> tuple[str, str, int, bool]:
+    def _run_posix_command(
+        args: list[str],
+        timeout: float,
+        env: dict[str, str] | None = None,
+    ) -> tuple[str, str, int, bool]:
         """Run a command on POSIX with bounded pipe capture.
 
         ``subprocess.communicate()`` cannot be used here: a backgrounded
@@ -517,6 +532,7 @@ class LocalSandbox(Sandbox):
                 stdout=stdout_write_fd,
                 stderr=stderr_write_fd,
                 start_new_session=True,
+                env=env,
             )
         except Exception:
             for fd in (stdout_read_fd, stdout_write_fd, stderr_read_fd, stderr_write_fd):

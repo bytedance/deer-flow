@@ -73,7 +73,7 @@ def test_parse_slash_skill_reference_rejects_invalid_names():
 
 
 def test_resolve_slash_skill_ignores_reserved_control_commands(tmp_path):
-    for command in ["bootstrap", "help", "memory", "models", "new", "status"]:
+    for command in ["bootstrap", "goal", "help", "memory", "models", "new", "status"]:
         skill = _make_skill(tmp_path, command)
 
         assert resolve_slash_skill(f"/{command} create an agent", [skill]) is None
