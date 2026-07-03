@@ -921,6 +921,17 @@ loop_detection:
   #     hard_limit: 300
 
 # ============================================================================
+# Read-Before-Write File Gate (issue #3857)
+# ============================================================================
+# Blocks write_file (append / overwrite of an existing file) and str_replace
+# unless the agent has read the file's current version first; any write
+# invalidates earlier reads, forcing a re-read between consecutive edits.
+# Deterministic guardrail against blind duplicate appends in long tasks.
+
+read_before_write:
+  enabled: true
+
+# ============================================================================
 # Provider Safety Termination Configuration
 # ============================================================================
 # Intercept AIMessages where the provider stopped generation for safety reasons

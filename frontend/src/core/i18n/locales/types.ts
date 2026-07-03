@@ -63,6 +63,14 @@ export interface Translations {
     linkCopied: string;
   };
 
+  // Citations
+  citations: {
+    sourcesSummary: (count: number) => string;
+    citeCount: (count: number) => string;
+    copyReference: (title: string) => string;
+    copiedReference: (title: string) => string;
+  };
+
   // Input Box
   inputBox: {
     placeholder: string;
