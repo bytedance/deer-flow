@@ -52,6 +52,12 @@ tui = ["textual>=0.80"]
 # install command resolves cleanly without an "unknown extra" warning.
 groundroute = []
 ollama = ["langchain-ollama>=0.3.0"]
+# Event-sourced memory storage prototype backed by KurrentDB (deer-flow
+# discussion #3796). Optional so the core harness install stays lean.
+# kurrent-agent-schema is the canonical kurrent-agents cross-framework schema
+# (github.com/kurrent-io/kurrent-agents) used for the best-effort dual-write
+# of FactRetained events on save().
+kurrentdb = ["kurrentdbclient>=1.3,<2", "kurrent-agent-schema>=0.4,<1"]
 postgres = [
     "asyncpg>=0.29",
     "langgraph-checkpoint-postgres>=3.0.5",

@@ -27,6 +27,16 @@
       ],
       "env": {},
       "description": "PostgreSQL database access"
+    },
+    "kurrentdb": {
+      "enabled": false,
+      "type": "stdio",
+      "command": "uv",
+      "args": ["--directory", "/absolute/path/to/kurrent-io/mcp-server", "run", "server.py"],
+      "env": {
+        "KURRENTDB_CONNECTION_STRING": "$KURRENTDB_CONNECTION_STRING"
+      },
+      "description": "KurrentDB stream exploration — lets the agent read its own memory event streams (see backend/docs/KURRENTDB_MEMORY.md)"
     }
   },
   "skills": {}

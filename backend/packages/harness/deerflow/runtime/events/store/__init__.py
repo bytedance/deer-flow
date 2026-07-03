@@ -20,6 +20,10 @@ def make_run_event_store(config=None) -> RunEventStore:
         from deerflow.runtime.events.store.jsonl import JsonlRunEventStore
 
         return JsonlRunEventStore()
+    if config.backend == "kurrent":
+        from deerflow.community.kurrentdb.run_event_store import KurrentRunEventStore
+
+        return KurrentRunEventStore()
     raise ValueError(f"Unknown run_events backend: {config.backend!r}")
 
 

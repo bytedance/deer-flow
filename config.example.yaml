@@ -1256,6 +1256,11 @@ summarization:
 memory:
   enabled: true
   storage_path: memory.json # Path relative to backend directory
+  # storage_class: fully-qualified MemoryStorage subclass (reflection-loaded).
+  # Default is the file-backed store. For the event-sourced KurrentDB
+  # prototype (requires the deerflow-harness[kurrentdb] extra and
+  # KURRENTDB_CONNECTION_STRING; see docker/docker-compose.kurrentdb.yaml):
+  # storage_class: deerflow.community.kurrentdb.memory_storage.KurrentdbMemoryStorage
   debounce_seconds: 30 # Wait time before processing queued updates
   model_name: null # Use default model
   max_facts: 100 # Maximum number of facts to store
@@ -1383,6 +1388,13 @@ database:
 # backend: memory  -- No persistence, data lost on restart (default)
 # backend: db      -- SQL database via ORM, full query capability (production)
 # backend: jsonl   -- Append-only JSONL files (lightweight single-node persistence)
+# backend: kurrent -- Community prototype: run events as KurrentDB streams
+#                     (deerflow.community.kurrentdb.run_event_store.KurrentRunEventStore).
+#                     Requires the kurrentdbclient extra and the
+#                     KURRENTDB_CONNECTION_STRING environment variable (see
+#                     backend/docs/KURRENTDB_MEMORY.md for the sibling memory
+#                     integration -- same connection string, optional
+#                     separate KURRENTDB_RUN_EVENTS_TIMEOUT_SECONDS override).
 #
 # run_events:
 #   backend: memory
