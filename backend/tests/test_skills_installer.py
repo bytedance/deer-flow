@@ -1,7 +1,6 @@
 """Tests for deerflow.skills.installer — shared skill installation logic."""
 
 import asyncio
-import json
 import shutil
 import stat
 import threading
@@ -202,7 +201,7 @@ class TestInstallSkillFromArchive:
         assert result["skill_name"] == "test-skill"
         assert (skills_root / "custom" / "test-skill" / "SKILL.md").exists()
 
-    def test_install_records_skillscan_metadata_sidecar(self, tmp_path, monkeypatch):
+    def test_install_with_warning_findings_succeeds_and_writes_only_the_skill(self, tmp_path, monkeypatch):
         monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path / "runtime-home"))
         zip_path = tmp_path / "warning-skill.skill"
         with zipfile.ZipFile(zip_path, "w") as zf:
@@ -215,14 +214,9 @@ class TestInstallSkillFromArchive:
 
         result = get_or_new_skill_storage(skills_path=skills_root).install_skill_from_archive(zip_path)
 
-        metadata_path = tmp_path / "runtime-home" / "skillscan" / "installed" / "warning-skill.json"
-        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
         assert result["skill_name"] == "warning-skill"
-        assert metadata["skill_name"] == "warning-skill"
-        assert metadata["scanner_version"] == "1"
-        assert metadata["rules_version"] == "1"
-        assert metadata["entrypoint"] == "archive_install"
-        assert metadata["warning_fingerprints"]
+        assert (skills_root / "custom" / "warning-skill" / "SKILL.md").exists()
+        assert not (tmp_path / "runtime-home" / "skillscan").exists()
         assert not (skills_root / "custom" / "warning-skill" / ".skillscan.json").exists()
 
     def test_installed_skill_tree_is_readable_by_sandbox_mount(self, tmp_path):
@@ -251,7 +245,7 @@ class TestInstallSkillFromArchive:
         skills_root.mkdir()
         calls = []
 
-        async def _scan(content, *, executable, location):
+        async def _scan(content, *, executable, location, static_findings=None):
             calls.append({"content": content, "executable": executable, "location": location})
             return ScanResult(decision="allow", reason="ok")
 
@@ -281,7 +275,7 @@ class TestInstallSkillFromArchive:
         skills_root.mkdir()
         calls = []
 
-        async def _scan(content, *, executable, location):
+        async def _scan(content, *, executable, location, static_findings=None):
             calls.append({"content": content, "executable": executable, "location": location})
             return ScanResult(decision="allow", reason="ok")
 
@@ -394,7 +388,7 @@ class TestInstallSkillFromArchive:
         skills_root.mkdir()
         llm_calls = []
 
-        def _broken_static_scan(skill_dir, *, skill_name=None):
+        def _broken_static_scan(skill_dir, *, skill_name=None, app_config=None):
             raise StaticScannerError("native scanner unavailable")
 
         async def _scan(*args, **kwargs):
@@ -419,7 +413,7 @@ class TestInstallSkillFromArchive:
         loop_thread_id = threading.get_ident()
         static_thread_ids = []
 
-        def _static_scan(skill_dir, *, skill_name=None):
+        def _static_scan(skill_dir, *, skill_name=None, app_config=None):
             static_thread_ids.append(threading.get_ident())
             return []
 
@@ -442,7 +436,7 @@ class TestInstallSkillFromArchive:
         zip_path = self._make_skill_zip(tmp_path)
         skills_root = tmp_path / "skills"
         skills_root.mkdir()
-        monkeypatch.setattr("deerflow.skills.installer.enforce_static_scan", lambda skill_dir, *, skill_name=None: [])
+        monkeypatch.setattr("deerflow.skills.installer.enforce_static_scan", lambda skill_dir, *, skill_name=None, app_config=None: [])
 
         def _copytree(src, dst):
             partial = Path(dst)
@@ -465,7 +459,7 @@ class TestInstallSkillFromArchive:
         skills_root.mkdir()
         target = skills_root / "custom" / "test-skill"
         original_copytree = shutil.copytree
-        monkeypatch.setattr("deerflow.skills.installer.enforce_static_scan", lambda skill_dir, *, skill_name=None: [])
+        monkeypatch.setattr("deerflow.skills.installer.enforce_static_scan", lambda skill_dir, *, skill_name=None, app_config=None: [])
 
         def _copytree(src, dst):
             target.mkdir(parents=True)

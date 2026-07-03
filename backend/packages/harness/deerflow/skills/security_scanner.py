@@ -76,9 +76,7 @@ def _format_static_findings_context(static_findings: list[dict[str, Any]]) -> st
         finding_location = finding.get("file") or "<unknown>"
         if finding.get("line") is not None:
             finding_location = f"{finding_location}:{finding['line']}"
-        lines.append(
-            f"- {finding.get('rule_id')} ({finding.get('severity')}, {finding.get('category')}): {finding.get('message')} at {finding_location}. Evidence: {finding.get('evidence') or '<none>'}. Remediation: {finding.get('remediation')}"
-        )
+        lines.append(f"- {finding.get('rule_id')} ({finding.get('severity')}): {finding.get('message')} at {finding_location}. Evidence: {finding.get('evidence') or '<none>'}. Remediation: {finding.get('remediation')}")
     return "\n".join(lines)
 
 

@@ -1,9 +1,17 @@
-"""Native deterministic scanning for DeerFlow skills."""
+"""Native deterministic scanning for DeerFlow skills.
+
+``scan_archive_preflight()`` and ``scan_skill_dir()`` are synchronous pure
+functions of their inputs; async callers must dispatch them off the event
+loop. Policy is one code constant — ``CRITICAL`` blocks, everything else is a
+warning — applied by ``enforce_static_scan()``, which also honours the
+``skill_scan.enabled`` kill switch. Rule specs live next to the analyzers
+that match them so a rule is authored, read, and tested in one place.
+"""
 
 from __future__ import annotations
 
 import ast
-import hashlib
+import io
 import logging
 import posixpath
 import re
@@ -14,20 +22,61 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 from deerflow.skills.skillscan.models import (
-    DEFAULT_SKILLSCAN_POLICY,
-    ScanContext,
+    FindingSeverity,
+    RuleSpec,
     ScanResult,
     SecurityFinding,
-    SkillScanPolicy,
     StaticScanBlockedError,
     StaticScannerError,
 )
-from deerflow.skills.skillscan.rules import get_rule
 
 logger = logging.getLogger(__name__)
 
 MAX_TOTAL_ARCHIVE_BYTES = 512 * 1024 * 1024
 MAX_FILE_BYTES = 64 * 1024 * 1024
+
+_BLOCK_SEVERITY = "CRITICAL"
+_NESTED_ZIP_PEEK_MEMBER_LIMIT = 256
+
+_SPECS = [
+    RuleSpec("package-path-traversal", "CRITICAL", "Archive member path traverses outside the skill root.", "Remove parent-directory traversal from the package path."),
+    RuleSpec("package-absolute-path", "CRITICAL", "Archive member path is absolute.", "Use relative paths inside the skill archive."),
+    RuleSpec("package-symlink", "HIGH", "Package contains a symlink entry.", "Remove symlinks from the skill package."),
+    RuleSpec("package-nested-skill-md", "CRITICAL", "Package contains a nested SKILL.md file.", "Keep exactly one SKILL.md at the skill root."),
+    RuleSpec("package-oversized-total", "CRITICAL", "Package total uncompressed size exceeds the limit.", "Remove large files or split assets out of the skill package."),
+    RuleSpec("package-oversized-file", "CRITICAL", "Package contains a file that exceeds the per-file size limit.", "Remove or shrink the oversized file."),
+    RuleSpec("package-executable-binary", "CRITICAL", "Package contains an executable binary.", "Remove binary executables from the skill package."),
+    RuleSpec("package-nested-archive", "HIGH", "Package contains a nested archive file.", "Unpack and review nested archives before packaging the skill."),
+    RuleSpec("package-hidden-sensitive-file", "HIGH", "Package contains a hidden sensitive file.", "Remove hidden credential or package-manager config files."),
+    RuleSpec("package-git-directory", "MEDIUM", "Package contains a .git directory.", "Package only source files needed by the skill, excluding repository metadata."),
+    RuleSpec("secret-private-key", "CRITICAL", "Private key material is embedded in skill content.", "Move private keys to a managed secret store and remove them from the skill."),
+    RuleSpec("secret-cloud-token", "CRITICAL", "High-confidence cloud or API token is embedded in skill content.", "Move tokens to environment variables or a secret store."),
+    RuleSpec("secret-env-assignment", "HIGH", "Secret-like assignment contains a non-placeholder value.", "Replace hardcoded credentials with documented runtime configuration."),
+    RuleSpec("declaration-prompt-override", "HIGH", "SKILL.md contains a prompt override phrase.", "Rephrase examples so they describe unsafe text instead of instructing the agent to follow it."),
+    RuleSpec("declaration-sensitive-capability", "HIGH", "SKILL.md declares a sensitive capability.", "Make the capability explicit, narrow, and justified, or remove it."),
+    RuleSpec("declaration-sensitive-path", "HIGH", "SKILL.md references sensitive host or credential paths.", "Remove references to sensitive host paths unless they are harmless documentation."),
+    RuleSpec("declaration-external-endpoint", "MEDIUM", "SKILL.md declares an external network endpoint.", "Document why the endpoint is needed and prefer HTTPS."),
+    RuleSpec("python-dynamic-exec", "CRITICAL", "Python dynamic code execution primitive is used in a skill file.", "Remove dynamic execution and replace it with explicit typed logic."),
+    RuleSpec("python-shell-exec", "CRITICAL", "Python shell execution primitive is used in a skill file.", "Use subprocess with a fixed argument list and shell=False, or remove shell execution."),
+    RuleSpec("python-sensitive-exfil", "CRITICAL", "Python code reads a sensitive path and uses an outbound network sink in the same file.", "Remove the sensitive read or network sink, and keep credential access outside skills."),
+    RuleSpec("python-env-dump-exfil", "CRITICAL", "Python code reads the process environment in bulk and uses an outbound network sink in the same file.", "Avoid bulk environment reads and never send environment data over the network."),
+    RuleSpec("python-reverse-shell", "CRITICAL", "Python code matches a reverse-shell shape.", "Remove reverse-shell behavior from the skill."),
+    RuleSpec("python-dynamic-import", "HIGH", "Python dynamically imports a non-literal module.", "Use explicit imports or a constrained allowlist."),
+    RuleSpec("python-subprocess", "HIGH", "Python invokes subprocess without shell=True.", "Review subprocess usage and keep arguments fixed and minimal."),
+    RuleSpec("python-sensitive-path-read", "HIGH", "Python reads a sensitive path.", "Remove sensitive host-path access from the skill."),
+    RuleSpec("python-unsafe-deserialization", "MEDIUM", "Python uses unsafe deserialization.", "Use safe loaders or trusted typed formats."),
+    RuleSpec("shell-reverse-shell", "CRITICAL", "Shell script contains a reverse-shell idiom.", "Remove reverse-shell behavior from the skill."),
+    RuleSpec("shell-sensitive-exfil", "CRITICAL", "Shell script reads sensitive paths and sends data over the network.", "Remove sensitive reads or outbound transfer commands."),
+    RuleSpec("shell-curl-pipe-shell", "HIGH", "Shell script pipes remote content into a shell.", "Download, verify, and execute reviewed code explicitly instead."),
+    RuleSpec("shell-destructive-command", "HIGH", "Shell script contains an unmistakably destructive command.", "Remove destructive commands from skill scripts."),
+    RuleSpec("shell-env-dump", "MEDIUM", "Shell script dumps the environment.", "Avoid bulk environment dumps in skills."),
+    RuleSpec("network-cloud-metadata", "CRITICAL", "Skill content references a cloud metadata service.", "Remove cloud metadata access from the skill."),
+    RuleSpec("resource-fork-bomb", "CRITICAL", "Skill content contains a fork-bomb pattern.", "Remove resource-exhaustion payloads."),
+    RuleSpec("network-cleartext-http", "MEDIUM", "Skill content references a non-local cleartext HTTP endpoint.", "Use HTTPS or document why cleartext local development is required."),
+    RuleSpec("network-local-http", "LOW", "Skill content references a local HTTP endpoint.", "Confirm the local endpoint is expected for this skill."),
+]
+
+RULES: dict[str, RuleSpec] = {spec.rule_id: spec for spec in _SPECS}
 
 _ARCHIVE_SUFFIXES = (
     ".zip",
@@ -73,20 +122,7 @@ _URL_RE = re.compile(r"https?://[^\s)'\"<>]+")
 _LOCAL_HTTP_HOSTS = {"localhost", "127.0.0.1", "0.0.0.0", "::1"}
 
 
-def _default_context(skill_dir: Path | None = None, *, entrypoint: str = "ci", skill_name: str | None = None) -> ScanContext:
-    return {
-        "entrypoint": entrypoint,  # type: ignore[typeddict-item]
-        "skill_name": skill_name,
-        "skill_root": str(skill_dir) if skill_dir else None,
-        "existing_skill": False,
-        "strict": False,
-    }
-
-
-def _policy_from_app_config(app_config: Any | None, policy: SkillScanPolicy | None = None) -> SkillScanPolicy:
-    merged: SkillScanPolicy = {**DEFAULT_SKILLSCAN_POLICY}
-    if policy:
-        merged.update(policy)
+def skill_scan_enabled(app_config: Any | None = None) -> bool:
     if app_config is None:
         try:
             from deerflow.config import get_app_config
@@ -96,12 +132,8 @@ def _policy_from_app_config(app_config: Any | None, policy: SkillScanPolicy | No
             app_config = None
     skill_scan_config = getattr(app_config, "skill_scan", None)
     if skill_scan_config is not None and hasattr(skill_scan_config, "enabled"):
-        merged["enabled"] = bool(skill_scan_config.enabled)
-    return merged
-
-
-def static_findings_to_dicts(findings: list[SecurityFinding]) -> list[SecurityFinding]:
-    return [dict(finding) for finding in findings]  # type: ignore[list-item]
+        return bool(skill_scan_config.enabled)
+    return True
 
 
 def format_static_findings(findings: list[SecurityFinding]) -> str:
@@ -114,25 +146,17 @@ def format_static_findings(findings: list[SecurityFinding]) -> str:
     return "; ".join(parts)
 
 
-def run_static_scan(skill_dir: Path, *, context: ScanContext | None = None, policy: SkillScanPolicy | None = None, app_config: Any | None = None) -> list[SecurityFinding]:
-    return scan_skill_dir(skill_dir, context=context, policy=policy, app_config=app_config)["findings"]
-
-
 def enforce_static_scan(
     skill_dir: Path,
     *,
     skill_name: str | None = None,
-    context: ScanContext | None = None,
-    policy: SkillScanPolicy | None = None,
     app_config: Any | None = None,
 ) -> list[SecurityFinding]:
-    effective_policy = _policy_from_app_config(app_config, policy)
-    if not effective_policy["enabled"]:
+    if not skill_scan_enabled(app_config):
         return []
 
-    scan_context = context or _default_context(Path(skill_dir), skill_name=skill_name)
-    result = scan_skill_dir(Path(skill_dir), context=scan_context, policy=effective_policy, app_config=app_config)
-    blocked = [finding for finding in result["findings"] if finding["severity"] in effective_policy["block_severities"]]
+    result = scan_skill_dir(Path(skill_dir))
+    blocked = [finding for finding in result["findings"] if finding["severity"] == _BLOCK_SEVERITY]
     if blocked:
         raise StaticScanBlockedError(
             blocked,
@@ -141,22 +165,13 @@ def enforce_static_scan(
         )
     if result["scanner_errors"]:
         logger.warning("SkillScan analyzer errors for %s: %s", skill_name or skill_dir, "; ".join(result["scanner_errors"]))
-    if result["warnings"]:
-        logger.warning("SkillScan warning findings for %s: %s", skill_name or skill_dir, format_static_findings(result["warnings"]))
-    return static_findings_to_dicts(result["findings"])
+    warnings = [finding for finding in result["findings"] if finding["severity"] != _BLOCK_SEVERITY]
+    if warnings:
+        logger.warning("SkillScan warning findings for %s: %s", skill_name or skill_dir, format_static_findings(warnings))
+    return [dict(finding) for finding in result["findings"]]  # type: ignore[misc]
 
 
-def scan_archive_preflight(
-    archive_path: Path,
-    *,
-    context: ScanContext | None = None,
-    policy: SkillScanPolicy | None = None,
-    app_config: Any | None = None,
-) -> ScanResult:
-    effective_policy = _policy_from_app_config(app_config, policy)
-    if not effective_policy["enabled"]:
-        return _scan_result([], [], effective_policy)
-
+def scan_archive_preflight(archive_path: Path) -> ScanResult:
     findings: list[SecurityFinding] = []
     scanner_errors: list[str] = []
     total_size = 0
@@ -170,40 +185,31 @@ def scan_archive_preflight(
                 total_size += max(info.file_size, 0)
                 if info.file_size > MAX_FILE_BYTES:
                     findings.append(_finding("package-oversized-file", file=normalized, evidence=f"{info.file_size} bytes"))
-                if _is_nested_archive_name(normalized):
-                    findings.append(_finding("package-nested-archive", file=normalized, evidence=Path(normalized).name))
                 if _is_hidden_sensitive_path(normalized):
                     findings.append(_finding("package-hidden-sensitive-file", file=normalized, evidence=Path(normalized).name))
                 if ".git" in PurePosixPath(normalized).parts:
                     findings.append(_finding("package-git-directory", file=normalized, evidence=".git"))
-                if not _is_symlink_member(info):
-                    try:
-                        with zf.open(info) as member:
-                            prefix = member.read(8)
-                    except Exception as e:
-                        scanner_errors.append(f"{normalized}: failed to read archive member prefix: {e}")
-                    else:
-                        if _is_executable_binary(prefix):
-                            findings.append(_finding("package-executable-binary", file=normalized, evidence=_binary_magic_evidence(prefix)))
+                if _is_symlink_member(info):
+                    continue
+                try:
+                    with zf.open(info) as member:
+                        prefix = member.read(8)
+                except Exception as e:
+                    scanner_errors.append(f"{normalized}: failed to read archive member prefix: {e}")
+                    continue
+                if _is_executable_binary(prefix):
+                    findings.append(_finding("package-executable-binary", file=normalized, evidence=_binary_magic_evidence(prefix)))
+                if _is_nested_archive_name(normalized) or _looks_like_archive(prefix):
+                    findings.append(_nested_archive_finding(normalized, prefix, lambda: _read_archive_member(zf, info), scanner_errors))
             if total_size > MAX_TOTAL_ARCHIVE_BYTES:
                 findings.append(_finding("package-oversized-total", file=None, evidence=f"{total_size} bytes"))
     except (zipfile.BadZipFile, OSError) as e:
         raise StaticScannerError(f"failed to read skill archive: {e}") from e
 
-    return _scan_result(_dedupe(findings), scanner_errors, effective_policy)
+    return _scan_result(_dedupe(findings), scanner_errors)
 
 
-def scan_skill_dir(
-    skill_dir: Path,
-    *,
-    context: ScanContext | None = None,
-    policy: SkillScanPolicy | None = None,
-    app_config: Any | None = None,
-) -> ScanResult:
-    effective_policy = _policy_from_app_config(app_config, policy)
-    if not effective_policy["enabled"]:
-        return _scan_result([], [], effective_policy)
-
+def scan_skill_dir(skill_dir: Path) -> ScanResult:
     root = Path(skill_dir)
     if not root.is_dir():
         raise StaticScannerError(f"skill_dir is not a directory: {root}")
@@ -229,27 +235,7 @@ def scan_skill_dir(
             scanner_errors.append(f"{rel_path}: analyzer failed: {e}")
             logger.warning("SkillScan analyzer failed for %s", rel_path, exc_info=True)
 
-    return _scan_result(_dedupe(findings), scanner_errors, effective_policy)
-
-
-def scan_file_content(
-    content: str | bytes,
-    *,
-    relative_path: str,
-    context: ScanContext | None = None,
-    policy: SkillScanPolicy | None = None,
-    app_config: Any | None = None,
-) -> ScanResult:
-    effective_policy = _policy_from_app_config(app_config, policy)
-    if not effective_policy["enabled"]:
-        return _scan_result([], [], effective_policy)
-    if isinstance(content, bytes):
-        text = _decode_text_for_analysis(relative_path, content)
-        if text is None:
-            return _scan_result(_scan_file_package_properties(relative_path, content, len(content)), [], effective_policy)
-    else:
-        text = content
-    return _scan_result(_dedupe([*_scan_file_package_properties(relative_path, text.encode("utf-8"), len(text.encode("utf-8"))), *_scan_text_file(relative_path, text)]), [], effective_policy)
+    return _scan_result(_dedupe(findings), scanner_errors)
 
 
 def _scan_archive_member_metadata(info: zipfile.ZipInfo, normalized: str) -> list[SecurityFinding]:
@@ -278,7 +264,7 @@ def _scan_file_package_properties(rel_path: str, file_bytes: bytes, file_size: i
     if ".git" in path.parts:
         findings.append(_finding("package-git-directory", file=rel_path, evidence=".git"))
     if _is_nested_archive_name(rel_path) or _looks_like_archive(file_bytes):
-        findings.append(_finding("package-nested-archive", file=rel_path, evidence=path.name))
+        findings.append(_nested_archive_finding(rel_path, file_bytes[:8], lambda: file_bytes, []))
     if _is_executable_binary(file_bytes[:8]):
         findings.append(_finding("package-executable-binary", file=rel_path, evidence=_binary_magic_evidence(file_bytes[:8])))
     return findings
@@ -361,8 +347,6 @@ def _scan_python(rel_path: str, text: str) -> list[SecurityFinding]:
     env_node: ast.AST | None = None
     network_node: ast.AST | None = None
 
-    if "169.254.169.254" in text:
-        findings.append(_finding_for_text("python-cloud-metadata-access", rel_path, text, "169.254.169.254"))
     if "socket" in text and "dup2" in text and "subprocess" in text:
         findings.append(_finding_for_text("python-reverse-shell", rel_path, text, "dup2"))
 
@@ -440,56 +424,85 @@ def _scan_network_and_resource(rel_path: str, text: str) -> list[SecurityFinding
     return findings
 
 
-def _finding(rule_id: str, *, file: str | None, evidence: str | None, line: int | None = None, column: int | None = None, metadata: dict[str, str] | None = None) -> SecurityFinding:
-    spec = get_rule(rule_id)
-    normalized_evidence = _normalize_evidence(evidence or spec.message)
-    path_for_hash = file or ""
-    fingerprint = "sha256:" + hashlib.sha256(f"{rule_id}\0{path_for_hash}\0{normalized_evidence}".encode()).hexdigest()
+def _finding(rule_id: str, *, file: str | None, evidence: str | None, line: int | None = None, severity: FindingSeverity | None = None) -> SecurityFinding:
+    spec = RULES[rule_id]
+    if evidence is not None and rule_id.startswith("secret-"):
+        evidence = _redact_secret_evidence(evidence)
     return {
         "rule_id": rule_id,
-        "category": spec.category,
-        "severity": spec.severity,
-        "confidence": spec.confidence,
+        "severity": severity or spec.severity,
         "file": file,
         "line": line,
-        "column": column,
         "message": spec.message,
         "remediation": spec.remediation,
         "evidence": evidence,
-        "fingerprint": fingerprint,
-        "analyzer": spec.analyzer,
-        "metadata": metadata or {},
     }
 
 
 def _finding_from_match(rule_id: str, rel_path: str, text: str, match: re.Match[str]) -> SecurityFinding:
-    line, column = _line_column(text, match.start())
-    return _finding(rule_id, file=rel_path, line=line, column=column, evidence=match.group(0))
+    return _finding(rule_id, file=rel_path, line=_line_number(text, match.start()), evidence=match.group(0))
 
 
 def _finding_for_text(rule_id: str, rel_path: str, text: str, evidence: str) -> SecurityFinding:
     index = text.find(evidence)
-    line, column = _line_column(text, index if index >= 0 else 0)
-    return _finding(rule_id, file=rel_path, line=line, column=column, evidence=evidence)
+    return _finding(rule_id, file=rel_path, line=_line_number(text, index if index >= 0 else 0), evidence=evidence)
 
 
 def _finding_for_node(rule_id: str, rel_path: str, node: ast.AST | None, evidence: str) -> SecurityFinding:
-    return _finding(rule_id, file=rel_path, line=getattr(node, "lineno", 1), column=(getattr(node, "col_offset", 0) + 1 if node is not None else 1), evidence=evidence)
+    return _finding(rule_id, file=rel_path, line=getattr(node, "lineno", 1), evidence=evidence)
 
 
-def _scan_result(findings: list[SecurityFinding], scanner_errors: list[str], policy: SkillScanPolicy) -> ScanResult:
-    warnings = [finding for finding in findings if finding["severity"] in policy["warn_severities"]]
-    blocked = any(finding["severity"] in policy["block_severities"] for finding in findings)
-    if scanner_errors and policy["fail_on_scanner_error"]:
-        blocked = True
-    return {"findings": findings, "blocked": blocked, "warnings": warnings, "scanner_errors": scanner_errors}
+def _nested_archive_finding(rel_path: str, prefix: bytes, read_data, scanner_errors: list[str]) -> SecurityFinding:
+    name = PurePosixPath(rel_path).name
+    if prefix.startswith(b"PK\x03\x04"):
+        try:
+            data = read_data()
+        except Exception as e:
+            scanner_errors.append(f"{rel_path}: failed to read nested archive for inspection: {e}")
+        else:
+            if data is not None and _nested_zip_contains_executable(data):
+                return _finding("package-nested-archive", file=rel_path, evidence=f"{name}: contains an executable binary member", severity="CRITICAL")
+    return _finding("package-nested-archive", file=rel_path, evidence=name)
+
+
+def _nested_zip_contains_executable(data: bytes) -> bool:
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as nested:
+            for info in nested.infolist()[:_NESTED_ZIP_PEEK_MEMBER_LIMIT]:
+                if info.is_dir():
+                    continue
+                try:
+                    with nested.open(info) as member:
+                        if _is_executable_binary(member.read(8)):
+                            return True
+                except Exception:
+                    continue
+    except (zipfile.BadZipFile, OSError):
+        return False
+    return False
+
+
+def _read_archive_member(zf: zipfile.ZipFile, info: zipfile.ZipInfo) -> bytes | None:
+    if info.file_size > MAX_FILE_BYTES:
+        return None
+    with zf.open(info) as member:
+        return member.read(MAX_FILE_BYTES + 1)
+
+
+def _redact_secret_evidence(value: str) -> str:
+    return f"{value[:6]}…[redacted]"
+
+
+def _scan_result(findings: list[SecurityFinding], scanner_errors: list[str]) -> ScanResult:
+    blocked = any(finding["severity"] == _BLOCK_SEVERITY for finding in findings)
+    return {"findings": findings, "blocked": blocked, "scanner_errors": scanner_errors}
 
 
 def _dedupe(findings: Iterable[SecurityFinding]) -> list[SecurityFinding]:
-    seen: set[str] = set()
+    seen: set[tuple[str, str | None, int | None]] = set()
     deduped: list[SecurityFinding] = []
     for finding in findings:
-        key = finding["fingerprint"]
+        key = (finding["rule_id"], finding["file"], finding["line"])
         if key in seen:
             continue
         seen.add(key)
@@ -497,16 +510,8 @@ def _dedupe(findings: Iterable[SecurityFinding]) -> list[SecurityFinding]:
     return deduped
 
 
-def _normalize_evidence(value: str) -> str:
-    return " ".join(value.split())
-
-
-def _line_column(text: str, index: int) -> tuple[int, int]:
-    prefix = text[: max(index, 0)]
-    line = prefix.count("\n") + 1
-    last_newline = prefix.rfind("\n")
-    column = len(prefix) + 1 if last_newline == -1 else len(prefix) - last_newline
-    return line, column
+def _line_number(text: str, index: int) -> int:
+    return text[: max(index, 0)].count("\n") + 1
 
 
 def _normalize_archive_name(name: str) -> str:

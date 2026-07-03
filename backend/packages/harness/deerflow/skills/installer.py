@@ -21,7 +21,7 @@ from deerflow.skills.security_static_scanner import (
     StaticScannerError,
     enforce_static_scan,
     scan_archive_preflight,
-    static_findings_to_dicts,
+    skill_scan_enabled,
 )
 
 logger = logging.getLogger(__name__)
@@ -42,7 +42,7 @@ class SkillSecurityScanError(ValueError):
 
     def __init__(self, message: str, *, findings: list[StaticFinding] | None = None, skill_name: str | None = None) -> None:
         super().__init__(message)
-        self.findings = static_findings_to_dicts(findings or [])
+        self.findings = [dict(finding) for finding in (findings or [])]
         self.skill_name = skill_name
 
 
@@ -169,15 +169,6 @@ def _findings_for_file(findings: list[StaticFinding], rel_path: str) -> list[Sta
     return [finding for finding in findings if finding.get("file") in {rel_path, None}]
 
 
-async def _scan_skill_content_with_context(content: str, *, executable: bool, location: str, static_findings: list[StaticFinding]) -> object:
-    try:
-        return await scan_skill_content(content, executable=executable, location=location, static_findings=static_findings)
-    except TypeError as e:
-        if "static_findings" not in str(e):
-            raise
-        return await scan_skill_content(content, executable=executable, location=location)
-
-
 async def _scan_skill_file_or_raise(skill_dir: Path, path: Path, skill_name: str, *, executable: bool, static_findings: list[StaticFinding] | None = None) -> None:
     rel_path = path.relative_to(skill_dir).as_posix()
     location = f"{skill_name}/{rel_path}"
@@ -187,7 +178,7 @@ async def _scan_skill_file_or_raise(skill_dir: Path, path: Path, skill_name: str
         raise SkillSecurityScanError(f"Security scan failed for skill '{skill_name}': {location} must be valid UTF-8") from e
 
     try:
-        result = await _scan_skill_content_with_context(content, executable=executable, location=location, static_findings=static_findings or [])
+        result = await scan_skill_content(content, executable=executable, location=location, static_findings=static_findings or [])
     except Exception as e:
         raise SkillSecurityScanError(f"Security scan failed for {location}: {e}") from e
 
@@ -203,22 +194,10 @@ async def _scan_skill_file_or_raise(skill_dir: Path, path: Path, skill_name: str
         raise SkillSecurityScanError(f"Security scan failed for {location}: invalid scanner decision {decision!r}")
 
 
-def _static_scan_context(entrypoint: str, skill_dir: Path | None, skill_name: str | None, *, existing_skill: bool = False) -> dict:
-    return {
-        "entrypoint": entrypoint,
-        "skill_name": skill_name,
-        "skill_root": str(skill_dir) if skill_dir is not None else None,
-        "existing_skill": existing_skill,
-        "strict": False,
-    }
-
-
 def scan_archive_preflight_or_raise(archive_path: Path, *, app_config=None) -> None:
-    result = scan_archive_preflight(
-        archive_path,
-        context=_static_scan_context("archive_install", None, None),
-        app_config=app_config,
-    )
+    if not skill_scan_enabled(app_config):
+        return
+    result = scan_archive_preflight(archive_path)
     if result["blocked"]:
         critical = [finding for finding in result["findings"] if finding["severity"] == "CRITICAL"]
         raise SkillSecurityScanError(
@@ -233,21 +212,8 @@ def format_static_archive_findings(findings: list[StaticFinding]) -> str:
 
 
 async def _scan_static_skill_archive_or_raise(skill_dir: Path, skill_name: str, *, app_config=None) -> list[StaticFinding]:
-    def _scan() -> list[StaticFinding]:
-        try:
-            return enforce_static_scan(
-                skill_dir,
-                skill_name=skill_name,
-                context=_static_scan_context("archive_install", skill_dir, skill_name),
-                app_config=app_config,
-            )
-        except TypeError as e:
-            if "context" not in str(e) and "app_config" not in str(e):
-                raise
-            return enforce_static_scan(skill_dir, skill_name=skill_name)
-
     try:
-        return await asyncio.to_thread(_scan)
+        return await asyncio.to_thread(enforce_static_scan, skill_dir, skill_name=skill_name, app_config=app_config)
     except StaticScanBlockedError as e:
         raise SkillSecurityScanError(str(e), findings=e.findings, skill_name=e.skill_name) from e
     except StaticScannerError as e:

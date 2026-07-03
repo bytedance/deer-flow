@@ -109,12 +109,7 @@ async def _scan_static_skill_markdown_or_raise(skill_name: str, content: str, *,
             skill_dir = Path(tmp) / skill_name
             skill_dir.mkdir(parents=True)
             (skill_dir / SKILL_MD_FILE).write_text(content, encoding="utf-8")
-            try:
-                return enforce_static_scan(skill_dir, skill_name=skill_name, app_config=app_config)
-            except TypeError as e:
-                if "app_config" not in str(e):
-                    raise
-                return enforce_static_scan(skill_dir, skill_name=skill_name)
+            return enforce_static_scan(skill_dir, skill_name=skill_name, app_config=app_config)
 
     try:
         return await asyncio.to_thread(_scan_markdown)

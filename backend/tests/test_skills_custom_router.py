@@ -81,7 +81,7 @@ def test_install_skill_archive_runs_security_scan(monkeypatch, tmp_path):
     scan_calls = []
     refresh_calls = []
 
-    async def _scan(content, *, executable, location, app_config=None):
+    async def _scan(content, *, executable, location, app_config=None, static_findings=None):
         from deerflow.skills.security_scanner import ScanResult
 
         scan_calls.append({"content": content, "executable": executable, "location": location})
@@ -335,7 +335,7 @@ def test_custom_skill_update_static_scan_failure_blocks_edit_before_llm(monkeypa
         llm_calls.append({"args": args, "kwargs": kwargs})
         return await _async_scan("allow", "ok")
 
-    def _broken_static_scan(skill_dir, *, skill_name=None):
+    def _broken_static_scan(skill_dir, *, skill_name=None, app_config=None):
         raise StaticScannerError("native scanner unavailable")
 
     monkeypatch.setattr("app.gateway.routers.skills.refresh_skills_system_prompt_cache_async", _refresh)

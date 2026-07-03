@@ -13,9 +13,8 @@ from collections.abc import Iterable
 from datetime import UTC, datetime
 from pathlib import Path
 
-from deerflow.config.runtime_paths import resolve_path, runtime_home
+from deerflow.config.runtime_paths import resolve_path
 from deerflow.skills.permissions import make_skill_written_path_sandbox_readable
-from deerflow.skills.skillscan import SecurityFinding
 from deerflow.skills.storage.skill_storage import SKILL_MD_FILE, SkillStorage
 from deerflow.skills.types import SkillCategory
 
@@ -114,9 +113,9 @@ class LocalSkillStorage(SkillStorage):
         try:
             skill_dir, skill_name, target = await asyncio.to_thread(self._prepare_skill_archive, path, Path(tmp), custom_dir, archive_path)
 
-            static_findings = await _scan_skill_archive_contents_or_raise(skill_dir, skill_name, app_config=self._app_config)
+            await _scan_skill_archive_contents_or_raise(skill_dir, skill_name, app_config=self._app_config)
 
-            await asyncio.to_thread(self._commit_skill_install, skill_dir, skill_name, custom_dir, target, static_findings)
+            await asyncio.to_thread(self._commit_skill_install, skill_dir, skill_name, custom_dir, target)
             logger.info("Skill %r installed to %s", skill_name, target)
         finally:
             try:
@@ -187,7 +186,7 @@ class LocalSkillStorage(SkillStorage):
 
         return skill_dir, skill_name, target
 
-    def _commit_skill_install(self, skill_dir: Path, skill_name: str, custom_dir: Path, target: Path, static_findings: list[SecurityFinding]) -> None:
+    def _commit_skill_install(self, skill_dir: Path, skill_name: str, custom_dir: Path, target: Path) -> None:
         """Stage and move the validated skill into place (blocking; runs off the event loop)."""
         from deerflow.skills.installer import _move_staged_skill_into_reserved_target
 
@@ -195,21 +194,6 @@ class LocalSkillStorage(SkillStorage):
             staging_target = Path(staging_root) / skill_name
             shutil.copytree(skill_dir, staging_target)
             _move_staged_skill_into_reserved_target(staging_target, target)
-        self._write_skillscan_metadata(skill_name, static_findings)
-
-    def _write_skillscan_metadata(self, skill_name: str, static_findings: list[SecurityFinding]) -> None:
-        metadata_dir = runtime_home() / "skillscan" / "installed"
-        metadata_dir.mkdir(parents=True, exist_ok=True)
-        warnings = [finding for finding in static_findings if finding["severity"] != "CRITICAL"]
-        payload = {
-            "skill_name": skill_name,
-            "scanner_version": "1",
-            "rules_version": "1",
-            "scanned_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
-            "entrypoint": "archive_install",
-            "warning_fingerprints": [finding["fingerprint"] for finding in warnings],
-        }
-        (metadata_dir / f"{skill_name}.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
     def delete_custom_skill(self, name: str, *, history_meta: dict | None = None) -> None:
         self.validate_skill_name(name)

@@ -8,11 +8,9 @@ from deerflow.skills.skillscan import (
     StaticScannerError,
     enforce_static_scan,
     format_static_findings,
-    run_static_scan,
     scan_archive_preflight,
-    scan_file_content,
     scan_skill_dir,
-    static_findings_to_dicts,
+    skill_scan_enabled,
 )
 
 __all__ = [
@@ -21,9 +19,7 @@ __all__ = [
     "StaticScannerError",
     "enforce_static_scan",
     "format_static_findings",
-    "run_static_scan",
     "scan_archive_preflight",
-    "scan_file_content",
     "scan_skill_dir",
-    "static_findings_to_dicts",
+    "skill_scan_enabled",
 ]
