@@ -42,6 +42,7 @@ DeerFlow intègre désormais le toolkit de recherche et de crawling intelligent 
 
 - [🦌 DeerFlow - 2.0](#-deerflow---20)
   - [Site officiel](#site-officiel)
+  - [Coding Plan de ByteDance Volcengine](#coding-plan-de-bytedance-volcengine)
   - [InfoQuest](#infoquest)
   - [Table des matières](#table-des-matières)
   - [Installation en une phrase pour un coding agent](#installation-en-une-phrase-pour-un-coding-agent)
@@ -94,35 +95,46 @@ Ce prompt est destiné aux coding agents. Il leur demande de cloner le dépôt s
    cd deer-flow
    ```
 
-2. **Générer les fichiers de configuration locaux**
+2. **Lancer l'assistant de configuration (recommandé)**
 
    Depuis le répertoire racine du projet (`deer-flow/`), exécutez :
 
    ```bash
-   make config
+   make setup
    ```
 
-   Cette commande crée les fichiers de configuration locaux à partir des templates fournis.
+   Cette commande lance un assistant interactif qui vous guide dans le choix d'un fournisseur LLM, d'une recherche web optionnelle et des préférences d'exécution/sécurité (mode sandbox, accès bash, outils d'écriture de fichiers). Il génère un `config.yaml` minimal et écrit vos clés dans `.env`. Comptez environ 2 minutes.
 
-3. **Configurer le(s) modèle(s) de votre choix**
+   Exécutez `make doctor` à tout moment pour vérifier votre configuration et obtenir des pistes de correction concrètes.
+   Si vous ouvrez une issue GitHub à propos d'un problème de configuration ou d'exécution en local, exécutez
+   `make support-bundle`. La commande affiche les prochaines étapes pour le rapporteur, écrit un fichier
+   `*-issue-summary.md` à coller dans l'issue, un fichier `*-issue-draft.md` destiné au dépôt d'issue
+   assisté par IA, ainsi qu'un zip de preuves optionnel sous
+   `.deer-flow/support-bundles/`. Si un assistant IA dépose l'issue, partez du brouillon et remplacez
+   chaque placeholder REQUIRED au lieu d'inventer les informations manquantes. N'attachez le zip que si
+   un mainteneur le demande, ou si le résumé seul ne suffit pas. Les mainteneurs et les outils de triage
+   IA peuvent commencer par `triage.json` ; le bundle ne contient que des diagnostics expurgés et des
+   manifestes de fichiers, et n'inclut ni `.env`, ni les messages bruts des conversations, ni le contenu
+   des fichiers de l'utilisateur.
 
-   Éditez `config.yaml` et définissez au moins un modèle :
+   > **Configuration avancée / manuelle** : si vous préférez éditer `config.yaml` directement, exécutez plutôt `make config` pour copier le template complet. Voir `config.example.yaml` pour la référence complète, y compris les providers basés sur un CLI (Codex CLI, Claude Code OAuth), OpenRouter, l'API Responses, et plus encore.
+
+   <details>
+   <summary>Exemples de configuration manuelle des modèles</summary>
 
    ```yaml
    models:
-     - name: gpt-4                       # Internal identifier
-       display_name: GPT-4               # Human-readable name
-       use: langchain_openai:ChatOpenAI  # LangChain class path
-       model: gpt-4                      # Model identifier for API
-       api_key: $OPENAI_API_KEY          # API key (recommended: use env var)
-       max_tokens: 4096                  # Maximum tokens per request
-       temperature: 0.7                  # Sampling temperature
+     - name: gpt-4o
+       display_name: GPT-4o
+       use: langchain_openai:ChatOpenAI
+       model: gpt-4o
+       api_key: $OPENAI_API_KEY
 
      - name: openrouter-gemini-2.5-flash
        display_name: Gemini 2.5 Flash (OpenRouter)
        use: langchain_openai:ChatOpenAI
        model: google/gemini-2.5-flash-preview
-       api_key: $OPENAI_API_KEY          # OpenRouter still uses the OpenAI-compatible field name here
+       api_key: $OPENROUTER_API_KEY
        base_url: https://openrouter.ai/api/v1
 
      - name: gpt-5-responses
@@ -132,11 +144,25 @@ Ce prompt est destiné aux coding agents. Il leur demande de cloner le dépôt s
        api_key: $OPENAI_API_KEY
        use_responses_api: true
        output_version: responses/v1
+
+     - name: qwen3-32b-vllm
+       display_name: Qwen3 32B (vLLM)
+       use: deerflow.models.vllm_provider:VllmChatModel
+       model: Qwen/Qwen3-32B
+       api_key: $VLLM_API_KEY
+       base_url: http://localhost:8000/v1
+       supports_thinking: true
+       when_thinking_enabled:
+         extra_body:
+           chat_template_kwargs:
+             enable_thinking: true
    ```
 
    OpenRouter et les passerelles compatibles OpenAI similaires doivent être configurés avec `langchain_openai:ChatOpenAI` et `base_url`. Si vous préférez utiliser un nom de variable d'environnement propre au fournisseur, pointez `api_key` vers cette variable explicitement (par exemple `api_key: $OPENROUTER_API_KEY`).
 
    Pour router les modèles OpenAI via `/v1/responses`, continuez d'utiliser `langchain_openai:ChatOpenAI` et définissez `use_responses_api: true` avec `output_version: responses/v1`.
+
+   Pour vLLM 0.19.0, utilisez `deerflow.models.vllm_provider:VllmChatModel`. Pour les modèles de raisonnement de type Qwen, DeerFlow active le raisonnement via `extra_body.chat_template_kwargs.enable_thinking` et préserve le champ non standard `reasoning` de vLLM au fil des conversations multi-tours avec appels d'outils. Les anciennes configurations `thinking` sont normalisées automatiquement pour assurer la rétrocompatibilité. Les modèles de raisonnement peuvent aussi exiger que le serveur soit démarré avec `--reasoning-parser ...`. Si votre déploiement vLLM local accepte n'importe quelle clé API non vide, vous pouvez tout de même définir `VLLM_API_KEY` avec une valeur factice.
 
    Exemples de providers basés sur un CLI :
 
@@ -158,46 +184,22 @@ Ce prompt est destiné aux coding agents. Il leur demande de cloner le dépôt s
    ```
 
    - Codex CLI lit `~/.codex/auth.json`
-   - L'endpoint Responses de Codex rejette actuellement `max_tokens` et `max_output_tokens`, donc `CodexChatModel` n'expose pas de limite de tokens par requête
-   - Claude Code accepte `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR`, `CLAUDE_CODE_CREDENTIALS_PATH`, ou en clair `~/.claude/.credentials.json`
-   - Sur macOS, DeerFlow ne sonde pas le Keychain automatiquement. Exportez l'auth Claude Code explicitement si nécessaire :
+   - Claude Code accepte `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_CREDENTIALS_PATH`, ou `~/.claude/.credentials.json`
+   - Les entrées d'agents ACP sont distinctes des providers de modèles — si vous configurez `acp_agents.codex`, pointez-le vers un adaptateur Codex ACP tel que `npx -y @zed-industries/codex-acp`
+   - Sur macOS, exportez l'auth Claude Code explicitement si nécessaire :
 
    ```bash
    eval "$(python3 scripts/export_claude_code_oauth.py --print-export)"
    ```
 
-4. **Définir les clés API pour le(s) modèle(s) configuré(s)**
-
-   Choisissez l'une des méthodes suivantes :
-
-- Option A : Éditer le fichier `.env` à la racine du projet (recommandé)
-
+   Les clés API peuvent aussi être définies manuellement dans `.env` (recommandé) ou exportées dans votre shell :
 
    ```bash
-   TAVILY_API_KEY=your-tavily-api-key
    OPENAI_API_KEY=your-openai-api-key
-   # OpenRouter also uses OPENAI_API_KEY when your config uses langchain_openai:ChatOpenAI + base_url.
-   # Add other provider keys as needed
-   INFOQUEST_API_KEY=your-infoquest-api-key
+   TAVILY_API_KEY=your-tavily-api-key
    ```
 
-- Option B : Exporter les variables d'environnement dans votre shell
-
-   ```bash
-   export OPENAI_API_KEY=your-openai-api-key
-   ```
-
-   Pour les providers basés sur un CLI :
-   - Codex CLI : `~/.codex/auth.json`
-   - Claude Code OAuth : handoff explicite via env/fichier ou `~/.claude/.credentials.json`
-
-- Option C : Éditer `config.yaml` directement (non recommandé en production)
-
-   ```yaml
-   models:
-     - name: gpt-4
-       api_key: your-actual-api-key-here  # Replace placeholder
-   ```
+   </details>
 
 ### Lancer l'application
 
@@ -234,7 +236,8 @@ Voir [CONTRIBUTING.md](CONTRIBUTING.md) pour le guide complet de développement 
 
 Si vous préférez lancer les services en local :
 
-Prérequis : complétez d'abord les étapes de « Configuration » ci-dessus (`make config` et clés API des modèles). `make dev` nécessite un fichier de configuration valide (par défaut `config.yaml` à la racine du projet ; modifiable via `DEER_FLOW_CONFIG_PATH`).
+Prérequis : complétez d'abord les étapes de « Configuration » ci-dessus (`make setup`). `make dev` nécessite un fichier `config.yaml` valide à la racine du projet. Définissez `DEER_FLOW_PROJECT_ROOT` pour indiquer explicitement cette racine, ou `DEER_FLOW_CONFIG_PATH` pour pointer vers un fichier de configuration précis. L'état d'exécution est écrit par défaut dans `.deer-flow` sous la racine du projet et peut être déplacé avec `DEER_FLOW_HOME` ; les skills sont lus par défaut depuis `skills/` sous la racine du projet et peuvent être déplacés avec `DEER_FLOW_SKILLS_PATH`. Exécutez `make doctor` pour vérifier votre configuration avant de démarrer.
+Sous Windows, exécutez le flux de développement local depuis Git Bash. Les shells natifs `cmd.exe` et PowerShell ne sont pas pris en charge pour les scripts de service basés sur bash, et WSL n'est pas garanti car certains scripts dépendent d'utilitaires de Git for Windows comme `cygpath`.
 
 1. **Vérifier les prérequis** :
    ```bash

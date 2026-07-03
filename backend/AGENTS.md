@@ -360,17 +360,16 @@ Proxied through nginx: `/api/langgraph/*` → Gateway LangGraph-compatible runti
 - `tavily/` - Web search (5 results default) and web fetch (4KB limit)
 - `jina_ai/` - Web fetch via Jina reader API with readability extraction
 - `firecrawl/` - Web scraping via Firecrawl API
-- `image_search/` - Image search
+- `image_search/` - Image search via DuckDuckGo
 - `aio_sandbox/` - Docker-based isolation (`AioSandboxProvider`)
 
-Additional providers also live here (`brave`, `browserless`, `crawl4ai`, `ddg_search`, `exa`, `fastcrw`, `groundroute`, `infoquest`, `searxng`, `serper`); see each subpackage for specifics.
+Additional providers also live here (`brave`, `browserless`, `crawl4ai`, `ddg_search`, `e2b_sandbox`, `exa`, `fastcrw`, `groundroute`, `infoquest`, `searxng`, `serper`); see each subpackage for specifics.
 
 **ACP agent tools**:
 - `invoke_acp_agent` - Invokes external ACP-compatible agents from `config.yaml`
 - ACP launchers must be real ACP adapters. The standard `codex` CLI is not ACP-compatible by itself; configure a wrapper such as `npx -y @zed-industries/codex-acp` or an installed `codex-acp` binary
 - Missing ACP executables now return an actionable error message instead of a raw `[Errno 2]`
 - Each ACP agent uses a per-thread workspace at `{base_dir}/users/{user_id}/threads/{thread_id}/acp-workspace/`. The workspace is accessible to the lead agent via the virtual path `/mnt/acp-workspace/` (read-only). In docker sandbox mode, the directory is volume-mounted into the container at `/mnt/acp-workspace` (read-only); in local sandbox mode, path translation is handled by `tools.py`
-- `image_search/` - Image search via DuckDuckGo
 
 ### MCP System (`packages/harness/deerflow/mcp/`)
 
