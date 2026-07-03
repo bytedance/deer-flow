@@ -163,6 +163,32 @@ sandbox:
   `/mnt/skills`, `/mnt/acp-workspace`, or `/mnt/user-data`.
 </Callout>
 
+When `LocalSandboxProvider` runs under production Docker (`make up`), the
+provider runs inside the `deer-flow-gateway` container. In that mode,
+`host_path` is resolved from the gateway container's filesystem, not directly
+from your Docker host. Bind the host directory into the gateway service first,
+then use the in-container path in `config.yaml`:
+
+```yaml
+# docker/docker-compose.yaml or an override file
+services:
+  gateway:
+    volumes:
+      - ${DEER_FLOW_REPO_ROOT}/.deer-flow/knowledge:/app/.deer-flow/knowledge:ro
+```
+
+```yaml
+sandbox:
+  use: deerflow.sandbox.local:LocalSandboxProvider
+  mounts:
+    - host_path: /app/.deer-flow/knowledge
+      container_path: /mnt/knowledge
+      read_only: true
+```
+
+If the configured `host_path` is not visible to the gateway process, DeerFlow
+logs an error and ignores that mount.
+
 ## Output truncation
 
 The sandbox tools limit output size to keep the agent's context manageable. These limits are configurable:
