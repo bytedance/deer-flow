@@ -1521,8 +1521,20 @@ async def test_mcp_tools_routed_to_source_server_with_prefix_overlap():
     class Args(BaseModel):
         query: str = Field(..., description="query")
 
-    web_tool = StructuredTool(name="web_open", description="d", args_schema=Args, coroutine=AsyncMock(), response_format="content_and_artifact")
-    scraper_tool = StructuredTool(name="web_scraper_search", description="d", args_schema=Args, coroutine=AsyncMock(), response_format="content_and_artifact")
+    web_tool = StructuredTool(
+        name="web_open",
+        description="d",
+        args_schema=Args,
+        coroutine=AsyncMock(),
+        response_format="content_and_artifact",
+    )
+    scraper_tool = StructuredTool(
+        name="web_scraper_search",
+        description="d",
+        args_schema=Args,
+        coroutine=AsyncMock(),
+        response_format="content_and_artifact",
+    )
 
     extensions_config = MagicMock()
     extensions_config.model_extra = {}

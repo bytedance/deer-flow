@@ -643,7 +643,7 @@ async def get_mcp_tools() -> list[BaseTool]:
         # "web_") matches "web" first), which pools the tool under the wrong server. Using the
         # source grouping makes routing exact; the prefix guard preserves the previous
         # behavior of leaving unprefixed tools unwrapped.
-        for source_name, server_tools in zip(servers_config, tools_by_server):
+        for source_name, server_tools in zip(servers_config.keys(), tools_by_server, strict=True):
             transport = servers_config[source_name].get("transport", "stdio")
             for tool in server_tools:
                 if tool.name.startswith(f"{source_name}_") and transport == "stdio":
