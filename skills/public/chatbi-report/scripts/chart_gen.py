@@ -1,4 +1,4 @@
-"""chart_gen.py — resolve chart specs against wide.json and (in later tasks) render PNGs.
+"""chart_gen.py — resolve chart specs against wide.json, render PNGs, write manifest.
 
 Step 8c.5 chart generation pipeline:
   1. parse_md produces parsed.json with `chart_specs` per report.
@@ -7,13 +7,16 @@ Step 8c.5 chart generation pipeline:
      extracts series from wide rows, and (Task 4) renders PNG via matplotlib.
   4. chart_gen writes <stem>.charts.json manifest (Task 5).
 
-This module's public surface (Task 3): build_header_leaves, resolve_x_axis,
-resolve_y_axis, extract_series. The matplotlib plotter (Task 4) and CLI
-(Task 5) are added in subsequent commits.
+Public surface: build_header_leaves, resolve_x_axis, resolve_y_axis,
+extract_series, render_chart, generate_charts, main.
 """
 from __future__ import annotations
 
+import argparse
+import json
 import os
+import re
+import sys
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
@@ -490,3 +493,135 @@ def render_chart(
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, dpi=150, bbox_inches="tight", facecolor="white")
     plt.close(fig)
+
+
+# ---------- Manifest + CLI (Task 5) ---------- #
+
+_SAFE_SLUG_RE = re.compile(r"^[a-zA-Z0-9._-]+$")
+
+
+def _safe_filename(slug: str) -> str:
+    """Validate a chart output slug. Rejects anything that could escape the out_dir."""
+    if not slug or not _SAFE_SLUG_RE.match(slug):
+        raise ValueError(
+            f"invalid output slug: {slug!r}; allowed chars: alphanumerics, dot, dash, underscore"
+        )
+    return slug
+
+
+def _filter_wide_by_report(wide: list[dict], section_idx: int, report_idx: int) -> list[dict]:
+    """Filter global wide rows down to a single (section_idx, report_idx)."""
+    return [
+        r for r in wide
+        if r.get("section_idx") == section_idx and r.get("report_idx") == report_idx
+    ]
+
+
+def generate_charts(
+    parsed: dict,
+    wide: list[dict],
+    out_dir: str,
+    manifest_path: str,
+    *,
+    stem: str | None = None,
+) -> dict:
+    """Render every chart in parsed.json to PNG and write the manifest.
+
+    Business-level failures (spec resolves no series, ambiguous y-axis, etc.)
+    write a failed manifest entry and the function returns normally — the CLI
+    exit code stays 0 so the pipeline can keep going. System-level failures
+    (bad slug, IOError creating the directory) propagate as exceptions.
+    """
+    Path(out_dir).mkdir(parents=True, exist_ok=True)
+    if stem is None:
+        stem = Path(manifest_path).name.removesuffix(".charts.json")
+
+    reports_out: list[dict] = []
+    ok = failed = 0
+    for section_idx, sec in enumerate(parsed.get("sections", [])):
+        for report_idx, report in enumerate(sec.get("reports", [])):
+            report_entry: dict = {"section_idx": section_idx, "report_idx": report_idx, "charts": []}
+            wide_rows = _filter_wide_by_report(wide, section_idx, report_idx)
+            chart_idx = 0
+            for spec in report.get("chart_specs", []):
+                slug = spec.get("output") or f"report-{section_idx}-{report_idx}-{chart_idx}"
+                slug = _safe_filename(slug)
+                png_path = Path(out_dir) / f"{slug}.png"
+                rel_path = f"{stem}.charts/{slug}.png"
+                try:
+                    resolved = extract_series(spec, report, wide_rows)
+                    if not resolved.series_list:
+                        raise ValueError("no series extracted")
+                    render_chart(
+                        title=spec["title"],
+                        chart_type=spec["type"],
+                        series_list=resolved.series_list,
+                        out_path=str(png_path),
+                        bar_count=resolved.bar_count,
+                        bar_colors=spec.get("bar_colors"),
+                        line_colors=spec.get("line_colors"),
+                    )
+                    report_entry["charts"].append({
+                        "title": spec["title"],
+                        "type": spec["type"],
+                        "status": "ok",
+                        "path": str(png_path),
+                        "relative_path": rel_path,
+                        "warnings": [],
+                    })
+                    ok += 1
+                except Exception as exc:
+                    report_entry["charts"].append({
+                        "title": spec.get("title", ""),
+                        "type": spec.get("type", ""),
+                        "status": "failed",
+                        "path": "",
+                        "relative_path": "",
+                        "error": str(exc),
+                    })
+                    failed += 1
+                chart_idx += 1
+            reports_out.append(report_entry)
+
+    total_declared = ok + failed
+    if total_declared == 0:
+        status = "NO_CHARTS"
+    elif failed == 0:
+        status = "OK"
+    else:
+        status = "CHART_PARTIAL"
+    manifest = {
+        "reports": reports_out,
+        "summary": {"ok": ok, "failed": failed, "skipped": 0, "status": status},
+    }
+    Path(manifest_path).write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    return manifest
+
+
+def main(argv: list[str] | None = None) -> int:
+    """CLI entry point. System-level failures exit 1; business failures exit 0."""
+    parser = argparse.ArgumentParser(prog="chart_gen", description="Generate chart PNGs from chatbi-report data.")
+    parser.add_argument("--parsed", required=True)
+    parser.add_argument("--wide", required=True)
+    parser.add_argument("--out-dir", required=True)
+    parser.add_argument("--manifest", required=True)
+    parser.add_argument("--stem", default=None)
+    args = parser.parse_args(argv)
+    try:
+        parsed = json.loads(Path(args.parsed).read_text(encoding="utf-8"))
+        wide = json.loads(Path(args.wide).read_text(encoding="utf-8"))
+        if not isinstance(wide, list):
+            raise ValueError("wide.json must be a list")
+        manifest = generate_charts(parsed, wide, args.out_dir, args.manifest, stem=args.stem)
+    except Exception as exc:
+        print(f"FAIL: {exc}", file=sys.stderr)
+        return 1
+    summary = manifest.get("summary", {})
+    print(f"OK: status={summary.get('status')} ok={summary.get('ok')} failed={summary.get('failed')}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

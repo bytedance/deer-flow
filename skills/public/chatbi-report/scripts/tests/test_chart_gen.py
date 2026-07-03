@@ -271,3 +271,88 @@ def test_render_pie_png(tmp_path):
     cg.render_chart(title="贷款余额占比", chart_type="pie", series_list=series, out_path=str(out))
     assert out.exists()
     assert out.stat().st_size > 0
+
+
+# ---------- generate_charts / manifest (Task 5) ---------- #
+
+import json
+
+
+def test_generate_charts_writes_manifest(tmp_path):
+    parsed = {
+        "title": "T",
+        "sections": [
+            {
+                "title": "S",
+                "reports": [
+                    {
+                        "title": "R",
+                        "org_contexts": [
+                            {"branch_num": "27020199", "branch_short_name": "王益"},
+                            {"branch_num": "27020100", "branch_short_name": "印台"},
+                        ],
+                        "time_info": ["2023", "2024", "2025"],
+                        "headers": [
+                            [
+                                {"text": "行社", "is_indicator": False, "is_computed": False},
+                                {"text": "利润总额", "is_indicator": False, "is_computed": False, "colspan": 3, "data_unit": "万元"},
+                            ],
+                            [
+                                {"text": "2023年", "is_indicator": True, "is_computed": False, "idx_id": "BAS_0263", "period": "2023", "data_unit": "万元"},
+                                {"text": "2024年", "is_indicator": True, "is_computed": False, "idx_id": "BAS_0263", "period": "2024", "data_unit": "万元"},
+                                {"text": "2025年", "is_indicator": True, "is_computed": False, "idx_id": "BAS_0263", "period": "2025", "data_unit": "万元"},
+                            ],
+                        ],
+                        "data_rows": [],
+                        "computed_specs": [],
+                        "chart_specs": [
+                            {"title": "利润趋势", "type": "line", "x": "时期", "y": "利润总额", "series": "行社", "unit": "万元", "output": "profit-trend"}
+                        ],
+                    }
+                ],
+            }
+        ],
+    }
+    wide = [
+        {"branch_num": "27020199", "section_idx": 0, "report_idx": 0, "BAS_0263@2023": "1000", "BAS_0263@2024": "1200", "BAS_0263@2025": "1500"},
+        {"branch_num": "27020100", "section_idx": 0, "report_idx": 0, "BAS_0263@2023": "900", "BAS_0263@2024": "1100", "BAS_0263@2025": "1300"},
+    ]
+    out_dir = tmp_path / "input.charts"
+    manifest_path = tmp_path / "input.charts.json"
+    import warnings as _w
+    with _w.catch_warnings():
+        _w.simplefilter("ignore")
+        manifest = cg.generate_charts(parsed, wide, str(out_dir), str(manifest_path))
+    assert (out_dir / "profit-trend.png").exists()
+    assert manifest["summary"]["status"] == "OK"
+    assert manifest["summary"]["ok"] == 1
+    assert manifest["reports"][0]["charts"][0]["relative_path"] == "input.charts/profit-trend.png"
+
+
+def test_generate_charts_no_specs_writes_no_charts(tmp_path):
+    parsed = {"title": "T", "sections": [{"title": "S", "reports": [{"title": "R", "chart_specs": []}]}]}
+    wide = []
+    out_dir = tmp_path / "input.charts"
+    manifest_path = tmp_path / "input.charts.json"
+    manifest = cg.generate_charts(parsed, wide, str(out_dir), str(manifest_path))
+    assert manifest["summary"]["status"] == "NO_CHARTS"
+
+
+def test_generate_charts_business_failure_exits_zero(tmp_path):
+    parsed = {
+        "title": "T",
+        "sections": [{"title": "S", "reports": [{
+            "title": "R", "org_contexts": [], "time_info": [],
+            "headers": [], "data_rows": [], "computed_specs": [],
+            "chart_specs": [{"title": "T", "type": "line", "x": "时期", "y": "不存在的列"}],
+        }]}],
+    }
+    wide = [{"branch_num": "x", "section_idx": 0, "report_idx": 0}]
+    out_dir = tmp_path / "input.charts"
+    manifest_path = tmp_path / "input.charts.json"
+    manifest = cg.generate_charts(parsed, wide, str(out_dir), str(manifest_path))
+    assert manifest["summary"]["status"] == "CHART_PARTIAL"
+    assert manifest["summary"]["failed"] == 1
+    assert manifest["summary"]["ok"] == 0
+    assert manifest["reports"][0]["charts"][0]["status"] == "failed"
+    assert "error" in manifest["reports"][0]["charts"][0]
