@@ -315,3 +315,39 @@ describe("utcToZonedLocalInput", () => {
     expect(utcToZonedLocalInput(iso, "Asia/Shanghai")).toBe("2026-07-02T09:00");
   });
 });
+
+describe("zonedLocalToUtcIso DST transitions", () => {
+  // US spring-forward 2026: clocks jump 02:00 -> 03:00 EST->EDT on 2026-03-08.
+  test("New_York wall time after spring-forward uses the post-transition offset", () => {
+    // 03:30 EDT (-4) is 07:30Z; the stale pre-transition offset (-5) would say 08:30Z.
+    expect(zonedLocalToUtcIso("2026-03-08T03:30", "America/New_York")).toBe(
+      "2026-03-08T07:30:00+00:00",
+    );
+  });
+
+  test("New_York wall time before spring-forward keeps the EST offset", () => {
+    expect(zonedLocalToUtcIso("2026-03-08T01:30", "America/New_York")).toBe(
+      "2026-03-08T06:30:00+00:00",
+    );
+  });
+
+  // US fall-back 2026: clocks repeat 01:00-02:00 EDT->EST on 2026-11-01.
+  test("New_York ambiguous fall-back wall time resolves deterministically", () => {
+    expect(zonedLocalToUtcIso("2026-11-01T01:30", "America/New_York")).toBe(
+      "2026-11-01T05:30:00+00:00",
+    );
+  });
+
+  test("create -> edit round-trip survives spring-forward", () => {
+    const iso = zonedLocalToUtcIso("2026-03-08T03:30", "America/New_York");
+    expect(utcToZonedLocalInput(iso, "America/New_York")).toBe(
+      "2026-03-08T03:30",
+    );
+  });
+
+  test("no-DST timezone is unaffected", () => {
+    expect(zonedLocalToUtcIso("2026-03-08T03:30", "Asia/Shanghai")).toBe(
+      "2026-03-07T19:30:00+00:00",
+    );
+  });
+});

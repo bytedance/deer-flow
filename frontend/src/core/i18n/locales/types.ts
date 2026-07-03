@@ -240,6 +240,7 @@ export interface Translations {
       success: string;
       failed: string;
       skipped: string;
+      interrupted: string;
     };
     recipes: {
       label: string;

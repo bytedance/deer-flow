@@ -181,3 +181,29 @@ class ScheduledTaskRepository:
             row.lease_expires_at = None
             row.updated_at = datetime.now(UTC)
             await session.commit()
+
+    async def cancel_stuck_once_tasks(self, *, error: str) -> int:
+        """Reconcile ``once`` tasks orphaned in ``running`` by a process crash.
+
+        A launched ``once`` task stays ``running`` until the in-process
+        completion hook moves it to a terminal status; its lease was cleared at
+        launch, so the claim query's expired-lease reclaim branch never sees
+        it. After a crash the hook is gone and the task would be stuck forever.
+        Tasks still holding a lease are left alone — they were claimed but not
+        launched, and expired-lease reclaim recovers them safely.
+        """
+        stmt = select(ScheduledTaskRow).where(
+            ScheduledTaskRow.schedule_type == "once",
+            ScheduledTaskRow.status == "running",
+            ScheduledTaskRow.lease_expires_at.is_(None),
+        )
+        async with self._sf() as session:
+            result = await session.execute(stmt)
+            rows = list(result.scalars())
+            now = datetime.now(UTC)
+            for row in rows:
+                row.status = "cancelled"
+                row.last_error = error
+                row.updated_at = now
+            await session.commit()
+            return len(rows)

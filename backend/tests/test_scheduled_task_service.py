@@ -13,6 +13,11 @@ class DummyTaskRepo:
         self.rows = rows
         self.claimed = False
         self.updated = None
+        self.cancelled_stuck_once = None
+
+    async def cancel_stuck_once_tasks(self, *, error):
+        self.cancelled_stuck_once = error
+        return 0
 
     async def claim_due_tasks(self, **_kwargs):
         if self.claimed:
@@ -36,9 +41,11 @@ class DummyTaskRepo:
 
 
 class DummyRunRepo:
-    def __init__(self):
+    def __init__(self, *, active=False):
         self.created = None
         self.updated = []
+        self.active = active
+        self.stale_marked = None
 
     async def create(self, **kwargs):
         self.created = kwargs
@@ -46,6 +53,13 @@ class DummyRunRepo:
 
     async def update_status(self, run_record_id, **kwargs):
         self.updated.append((run_record_id, kwargs))
+
+    async def has_active_runs(self, task_id):
+        return self.active
+
+    async def mark_stale_active_runs(self, *, error):
+        self.stale_marked = error
+        return 0
 
 
 @pytest.mark.asyncio
@@ -85,6 +99,9 @@ async def test_service_claims_and_dispatches_due_task():
 
     assert run_repo.created["task_id"] == "task-1"
     assert run_repo.updated[0][1]["status"] == "running"
+    assert run_repo.updated[0][1]["protect_terminal"] is True
+    # `once` terminal status is owned by handle_run_completion, not the launch.
+    assert task_repo.updated[1]["status"] == "running"
 
 
 @pytest.mark.asyncio
@@ -303,3 +320,143 @@ async def test_handle_run_completion_persists_success():
     assert run_repo.updated[-1][0] == "task-run-6"
     assert run_repo.updated[-1][1]["status"] == "success"
     assert task_repo.rows[0]["last_error"] is None
+
+
+def _make_service(task_repo, run_repo):
+    return ScheduledTaskService(
+        task_repo=task_repo,
+        task_run_repo=run_repo,
+        launch_run=lambda **_kwargs: None,
+        poll_interval_seconds=5,
+        lease_seconds=120,
+        max_concurrent_runs=3,
+    )
+
+
+def _once_task_row(task_id="task-once", status="running"):
+    return {
+        "id": task_id,
+        "user_id": "user-1",
+        "thread_id": None,
+        "context_mode": "fresh_thread_per_run",
+        "assistant_id": "lead_agent",
+        "prompt": "Summarize thread",
+        "schedule_type": "once",
+        "schedule_spec": {"run_at": "2026-07-02T01:00:00+00:00"},
+        "timezone": "UTC",
+        "status": status,
+    }
+
+
+def _completion_record(status, *, task_id="task-once", error=None):
+    return RunRecord(
+        run_id="run-x",
+        thread_id="thread-x",
+        assistant_id="lead_agent",
+        status=status,
+        on_disconnect=DisconnectMode.continue_,
+        metadata={
+            "scheduled_task_id": task_id,
+            "scheduled_task_run_id": "task-run-x",
+        },
+        user_id="user-1",
+        error=error,
+    )
+
+
+@pytest.mark.asyncio
+async def test_once_task_completes_only_via_completion_hook():
+    task_repo = DummyTaskRepo([_once_task_row()])
+    run_repo = DummyRunRepo()
+    service = _make_service(task_repo, run_repo)
+
+    await service.handle_run_completion(_completion_record(RunStatus.success))
+
+    assert run_repo.updated[-1][1]["status"] == "success"
+    assert task_repo.rows[0]["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_once_task_failed_run_marks_task_failed():
+    task_repo = DummyTaskRepo([_once_task_row()])
+    run_repo = DummyRunRepo()
+    service = _make_service(task_repo, run_repo)
+
+    await service.handle_run_completion(_completion_record(RunStatus.error, error="boom"))
+
+    assert run_repo.updated[-1][1]["status"] == "failed"
+    assert run_repo.updated[-1][1]["error"] == "boom"
+    assert task_repo.rows[0]["status"] == "failed"
+    assert task_repo.rows[0]["last_error"] == "boom"
+
+
+@pytest.mark.asyncio
+async def test_interrupted_run_is_distinct_and_cancels_once_task():
+    task_repo = DummyTaskRepo([_once_task_row()])
+    run_repo = DummyRunRepo()
+    service = _make_service(task_repo, run_repo)
+
+    await service.handle_run_completion(_completion_record(RunStatus.interrupted))
+
+    run_update = run_repo.updated[-1][1]
+    assert run_update["status"] == "interrupted"
+    assert run_update["error"] == "run was interrupted before completion"
+    assert task_repo.rows[0]["status"] == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_interrupted_cron_run_keeps_task_enabled():
+    row = _once_task_row(task_id="task-cron")
+    row.update({"schedule_type": "cron", "schedule_spec": {"cron": "0 9 * * *"}, "status": "enabled"})
+    task_repo = DummyTaskRepo([row])
+    run_repo = DummyRunRepo()
+    service = _make_service(task_repo, run_repo)
+
+    await service.handle_run_completion(_completion_record(RunStatus.interrupted, task_id="task-cron"))
+
+    assert run_repo.updated[-1][1]["status"] == "interrupted"
+    assert task_repo.rows[0]["status"] == "enabled"
+
+
+@pytest.mark.asyncio
+async def test_skip_policy_applies_to_fresh_thread_runs():
+    launched = []
+
+    async def fake_launch(**kwargs):
+        launched.append(kwargs)
+        return {"run_id": "run-9", "thread_id": kwargs["thread_id"]}
+
+    row = _once_task_row(task_id="task-9")
+    row.update({"schedule_type": "cron", "schedule_spec": {"cron": "* * * * *"}, "status": "running", "overlap_policy": "skip"})
+    task_repo = DummyTaskRepo([row])
+    run_repo = DummyRunRepo(active=True)
+    service = ScheduledTaskService(
+        task_repo=task_repo,
+        task_run_repo=run_repo,
+        launch_run=fake_launch,
+        poll_interval_seconds=5,
+        lease_seconds=120,
+        max_concurrent_runs=3,
+    )
+
+    result = await service.dispatch_task(row, now=datetime.now(UTC), trigger="scheduled")
+
+    assert result["outcome"] == "skipped"
+    assert launched == []
+    assert run_repo.created["status"] == "queued"
+    assert run_repo.updated[-1][1]["status"] == "skipped"
+    assert task_repo.updated[1]["status"] == "enabled"
+    assert task_repo.updated[1]["increment_run_count"] is False
+
+
+@pytest.mark.asyncio
+async def test_startup_sweep_reconciles_stale_runs_and_stuck_once_tasks():
+    task_repo = DummyTaskRepo([])
+    run_repo = DummyRunRepo()
+    service = _make_service(task_repo, run_repo)
+
+    await service.start()
+    await service.stop()
+
+    assert run_repo.stale_marked is not None
+    assert task_repo.cancelled_stuck_once == run_repo.stale_marked

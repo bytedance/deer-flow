@@ -262,8 +262,19 @@ export function zonedLocalToUtcIso(
   const [y, mo, d] = (date ?? "").split("-").map(Number);
   const [h, mi] = (time ?? "00:00").split(":").map(Number);
   const refMs = Date.UTC(y ?? 1970, (mo ?? 1) - 1, d ?? 1, h ?? 0, mi ?? 0);
-  const offsetMs = tzOffsetMs(timezone, new Date(refMs));
-  const utcMs = refMs - offsetMs;
+  // The offset at the wall-time-as-UTC instant is stale when a DST transition
+  // sits between that instant and the real one (e.g. "03:30" the morning of
+  // spring-forward resolves with the pre-transition offset, firing an hour
+  // late and breaking the round-trip with `utcToZonedLocalInput`). Resolve
+  // once, then re-derive the offset at the candidate instant; one correction
+  // converges for real timezones.
+  let offsetMs = tzOffsetMs(timezone, new Date(refMs));
+  let utcMs = refMs - offsetMs;
+  const correctedOffsetMs = tzOffsetMs(timezone, new Date(utcMs));
+  if (correctedOffsetMs !== offsetMs) {
+    offsetMs = correctedOffsetMs;
+    utcMs = refMs - offsetMs;
+  }
   const utc = new Date(utcMs);
   return `${utc.getUTCFullYear()}-${pad2(utc.getUTCMonth() + 1)}-${pad2(
     utc.getUTCDate(),

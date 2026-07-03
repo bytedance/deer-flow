@@ -31,7 +31,13 @@ export type ScheduledTaskRun = {
   run_id: string | null;
   scheduled_for: string;
   trigger: "scheduled" | "manual";
-  status: "queued" | "running" | "success" | "failed" | "skipped";
+  status:
+    | "queued"
+    | "running"
+    | "success"
+    | "failed"
+    | "skipped"
+    | "interrupted";
   error: string | null;
   started_at: string | null;
   finished_at: string | null;

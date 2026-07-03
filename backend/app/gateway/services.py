@@ -20,6 +20,7 @@ from langchain_core.messages import BaseMessage
 from langchain_core.messages.utils import convert_to_messages
 from langgraph.types import Command
 
+from app.gateway.auth_disabled import AUTH_SOURCE_INTERNAL
 from app.gateway.deps import get_checkpointer, get_run_context, get_run_manager, get_stream_bridge
 from app.gateway.internal_auth import (
     INTERNAL_OWNER_USER_ID_HEADER_NAME,
@@ -142,12 +143,16 @@ _CONTEXT_CONFIGURABLE_KEYS: frozenset[str] = frozenset(
         "max_concurrent_subagents",
         "agent_name",
         "is_bootstrap",
-        "non_interactive",
     }
 )
 
+# Keys honored only for internally-authenticated callers (the scheduler path).
+# ``non_interactive`` strips ``ask_clarification`` from the lead-agent toolset;
+# arbitrary HTTP/IM clients must not be able to force autonomous execution.
+_INTERNAL_ONLY_CONTEXT_KEYS: frozenset[str] = frozenset({"non_interactive"})
 
-def merge_run_context_overrides(config: dict[str, Any], context: Mapping[str, Any] | None) -> None:
+
+def merge_run_context_overrides(config: dict[str, Any], context: Mapping[str, Any] | None, *, internal: bool = False) -> None:
     """Merge whitelisted keys from ``body.context`` into both ``config['configurable']``
     and ``config['context']`` so they are visible to legacy configurable readers and
     to LangGraph ``ToolRuntime.context`` consumers (e.g. the ``setup_agent`` tool —
@@ -158,12 +163,18 @@ def merge_run_context_overrides(config: dict[str, Any], context: Mapping[str, An
     ``body.context`` keep it on ``ToolRuntime.context``. It is merged with
     ``setdefault`` so a server-authenticated id stamped by
     :func:`inject_authenticated_user_context` always wins over the client-supplied one.
+
+    ``internal=True`` (the request authenticated as the process-internal user,
+    e.g. the scheduler's ``launch_scheduled_thread_run``) additionally honors
+    :data:`_INTERNAL_ONLY_CONTEXT_KEYS`; those keys are dropped from client
+    requests.
     """
     if not context:
         return
     configurable = config.setdefault("configurable", {})
     runtime_context = config.setdefault("context", {})
-    for key in _CONTEXT_CONFIGURABLE_KEYS:
+    keys = _CONTEXT_CONFIGURABLE_KEYS | _INTERNAL_ONLY_CONTEXT_KEYS if internal else _CONTEXT_CONFIGURABLE_KEYS
+    for key in keys:
         if key in context:
             if isinstance(configurable, dict):
                 configurable.setdefault(key, context[key])
@@ -538,7 +549,8 @@ async def start_run(
         # The ``context`` field is a custom extension for the langgraph-compat layer
         # that carries agent configuration (model_name, thinking_enabled, etc.).
         # Only agent-relevant keys are forwarded; unknown keys (e.g. thread_id) are ignored.
-        merge_run_context_overrides(config, getattr(body, "context", None))
+        is_internal_caller = getattr(getattr(request, "state", None), "auth_source", None) == AUTH_SOURCE_INTERNAL
+        merge_run_context_overrides(config, getattr(body, "context", None), internal=is_internal_caller)
         inject_authenticated_user_context(config, request)
 
         stream_modes = normalize_stream_modes(body.stream_mode)
@@ -588,7 +600,7 @@ async def launch_scheduled_thread_run(
             headers=({INTERNAL_OWNER_USER_ID_HEADER_NAME: owner_user_id} if owner_user_id else {}),
             state=SimpleNamespace(
                 user=get_internal_user(),
-                auth_source="internal",
+                auth_source=AUTH_SOURCE_INTERNAL,
             ),
             cookies={},
         )

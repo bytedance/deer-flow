@@ -294,6 +294,7 @@ export const zhCN: Translations = {
       success: "成功",
       failed: "失败",
       skipped: "跳过",
+      interrupted: "已中断",
     },
     recipes: {
       label: "快速创建",

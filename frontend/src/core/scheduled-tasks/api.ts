@@ -1,3 +1,4 @@
+import { throwGatewayApiError } from "@/core/api/errors";
 import { fetch } from "@/core/api/fetcher";
 import { getBackendBaseURL } from "@/core/config";
 
@@ -7,20 +8,10 @@ function scheduledTasksUrl(path: string): string {
   return `${getBackendBaseURL()}/api/scheduled-tasks${path}`;
 }
 
-async function throwScheduledTaskApiError(
-  response: Response,
-  fallback: string,
-): Promise<never> {
-  const body = (await response.json().catch(() => ({}))) as {
-    detail?: unknown;
-  };
-  throw new Error(typeof body.detail === "string" ? body.detail : fallback);
-}
-
 export async function fetchScheduledTasks(): Promise<ScheduledTask[]> {
   const response = await fetch(scheduledTasksUrl(""));
   if (!response.ok) {
-    await throwScheduledTaskApiError(
+    await throwGatewayApiError(
       response,
       `Failed to load scheduled tasks: ${response.statusText}`,
     );
@@ -35,7 +26,7 @@ export async function fetchThreadScheduledTasks(
     `${getBackendBaseURL()}/api/threads/${encodeURIComponent(threadId)}/scheduled-tasks`,
   );
   if (!response.ok) {
-    await throwScheduledTaskApiError(
+    await throwGatewayApiError(
       response,
       `Failed to load thread scheduled tasks: ${response.statusText}`,
     );
@@ -50,7 +41,7 @@ export async function fetchScheduledTaskRuns(
     scheduledTasksUrl(`/${encodeURIComponent(taskId)}/runs`),
   );
   if (!response.ok) {
-    await throwScheduledTaskApiError(
+    await throwGatewayApiError(
       response,
       `Failed to load scheduled task runs: ${response.statusText}`,
     );
@@ -77,7 +68,7 @@ export async function createScheduledTask(
     body: JSON.stringify(payload),
   });
   if (!response.ok) {
-    await throwScheduledTaskApiError(
+    await throwGatewayApiError(
       response,
       `Failed to create scheduled task: ${response.statusText}`,
     );
@@ -98,7 +89,7 @@ export async function updateScheduledTask(
     },
   );
   if (!response.ok) {
-    await throwScheduledTaskApiError(
+    await throwGatewayApiError(
       response,
       `Failed to update scheduled task: ${response.statusText}`,
     );
@@ -114,7 +105,7 @@ export async function pauseScheduledTask(
     { method: "POST" },
   );
   if (!response.ok) {
-    await throwScheduledTaskApiError(
+    await throwGatewayApiError(
       response,
       `Failed to pause scheduled task: ${response.statusText}`,
     );
@@ -130,7 +121,7 @@ export async function resumeScheduledTask(
     { method: "POST" },
   );
   if (!response.ok) {
-    await throwScheduledTaskApiError(
+    await throwGatewayApiError(
       response,
       `Failed to resume scheduled task: ${response.statusText}`,
     );
@@ -146,7 +137,7 @@ export async function triggerScheduledTask(
     { method: "POST" },
   );
   if (!response.ok) {
-    await throwScheduledTaskApiError(
+    await throwGatewayApiError(
       response,
       `Failed to trigger scheduled task: ${response.statusText}`,
     );
@@ -164,7 +155,7 @@ export async function deleteScheduledTask(
     },
   );
   if (!response.ok) {
-    await throwScheduledTaskApiError(
+    await throwGatewayApiError(
       response,
       `Failed to delete scheduled task: ${response.statusText}`,
     );

@@ -302,6 +302,7 @@ export const enUS: Translations = {
       success: "Success",
       failed: "Failed",
       skipped: "Skipped",
+      interrupted: "Interrupted",
     },
     recipes: {
       label: "Quick create",

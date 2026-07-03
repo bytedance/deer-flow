@@ -416,14 +416,27 @@ def test_build_run_config_dual_write_matches_merge_run_context_overrides_shape()
     assert via_assistant_id["context"]["agent_name"] == via_context["context"]["agent_name"]
 
 
-def test_build_run_config_accepts_non_interactive_context_override():
+def test_non_interactive_context_override_is_internal_only():
+    """Client-supplied ``non_interactive`` must be dropped: it strips the
+    ``ask_clarification`` tool, so only the internal scheduler path may set it."""
     from app.gateway.services import build_run_config, merge_run_context_overrides
 
     config = build_run_config("thread-1", None, None)
     merge_run_context_overrides(config, {"non_interactive": True})
 
+    assert "non_interactive" not in config["configurable"]
+    assert "non_interactive" not in config["context"]
+
+
+def test_non_interactive_context_override_honored_for_internal_caller():
+    from app.gateway.services import build_run_config, merge_run_context_overrides
+
+    config = build_run_config("thread-1", None, None)
+    merge_run_context_overrides(config, {"non_interactive": True, "model_name": "gpt"}, internal=True)
+
     assert config["configurable"]["non_interactive"] is True
     assert config["context"]["non_interactive"] is True
+    assert config["configurable"]["model_name"] == "gpt"
 
 
 # ---------------------------------------------------------------------------
