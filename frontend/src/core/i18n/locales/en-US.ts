@@ -252,10 +252,10 @@ export const enUS: Translations = {
   // Workspace
   workspace: {
     officialWebsite: "DeerFlow's official website",
-    githubTooltip: "DeerFlow on Github",
+    githubTooltip: "DeerFlow on GitHub",
     settingsAndMore: "Settings and more",
     visitGithub: "DeerFlow on GitHub",
-    reportIssue: "Report a issue",
+    reportIssue: "Report an issue",
     contactUs: "Contact us",
     about: "About DeerFlow",
     logout: "Log out",

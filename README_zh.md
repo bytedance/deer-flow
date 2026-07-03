@@ -26,10 +26,21 @@ https://github.com/user-attachments/assets/a8bcadc4-e040-4cf2-8fda-dd768b999c18
 - [现在就加入 Coding Plan](https://www.volcengine.com/activity/codingplan?utm_campaign=deer_flow&utm_content=deer_flow&utm_medium=devrel&utm_source=OWO&utm_term=deer_flow)
 - [海外地区的开发者请点击这里](https://www.byteplus.com/en/activity/codingplan?utm_campaign=deer_flow&utm_content=deer_flow&utm_medium=devrel&utm_source=OWO&utm_term=deer_flow)
 
+## InfoQuest
+
+DeerFlow 新近集成了 BytePlus 自研的智能搜索与抓取工具集——[InfoQuest（支持免费在线体验）](https://docs.byteplus.com/en/docs/InfoQuest/What_is_Info_Quest)
+
+<a href="https://docs.byteplus.com/en/docs/InfoQuest/What_is_Info_Quest" target="_blank">
+  <img
+    src="https://sf16-sg.tiktokcdn.com/obj/eden-sg/hubseh7bsbps/20251208-160108.png"   alt="InfoQuest_banner"
+  />
+</a>
+
 ## 目录
 
 - [🦌 DeerFlow - 2.0](#-deerflow---20)
   - [官网](#官网)
+  - [字节跳动火山引擎方舟 Coding Plan](#字节跳动火山引擎方舟-coding-plan)
   - [InfoQuest](#infoquest)
   - [目录](#目录)
   - [一句话交给 Coding Agent 安装](#一句话交给-coding-agent-安装)
@@ -84,67 +95,110 @@ https://github.com/user-attachments/assets/a8bcadc4-e040-4cf2-8fda-dd768b999c18
    cd deer-flow
    ```
 
-2. **生成本地配置文件**
+2. **运行安装向导（推荐）**
 
    在项目根目录（`deer-flow/`）执行：
 
    ```bash
-   make config
+   make setup
    ```
 
-   这个命令会基于示例模板生成本地配置文件。
+   这会启动一个交互式向导，引导你选择 LLM provider、可选的 web 搜索工具，以及 sandbox 模式、bash 权限、文件写入等执行/安全偏好。它会生成一份最小化的 `config.yaml`，并把 API key 写入 `.env`，大约 2 分钟完成。
 
-3. **配置你要使用的模型**
+   随时可以运行 `make doctor` 检查配置和系统环境，并获得可执行的修复建议。
+   如果你要提交本地安装、配置或运行问题，可以执行 `make support-bundle`。
+   命令会直接打印 reporter 下一步建议，并在 `.deer-flow/support-bundles/` 下生成
+   `*-issue-summary.md`、面向 AI 辅助提 issue 的 `*-issue-draft.md`，以及可选证据
+   zip。提交 GitHub issue 时，先把 `*-issue-summary.md` 粘贴到 issue 正文；如果由
+   AI 助手代填 issue，就从 `*-issue-draft.md` 开始，并先替换所有 REQUIRED 占位符，
+   不要编造未知事实。只有维护者要求证据包，或摘要不足以诊断时，再附上 zip。维护者
+   或 AI 辅助 triage 可以优先读取 `triage.json`；bundle 只包含脱敏后的诊断信息和
+   文件 manifest，不包含 `.env`、原始对话消息或用户文件内容；提交前仍建议自己快速
+   检查一遍。
 
-   编辑 `config.yaml`，至少定义一个模型：
+   > **进阶 / 手动配置**：如果你更想直接编辑 `config.yaml`，可以改用 `make config` 复制完整的示例模板。完整参考见 `config.example.yaml`，其中包含 CLI-backed provider（Codex CLI、Claude Code OAuth）、OpenRouter、Responses API 等更多配置。
+
+   <details>
+   <summary>手动模型配置示例</summary>
 
    ```yaml
    models:
-     - name: gpt-4                       # 内部标识
-       display_name: GPT-4               # 展示名称
-       use: langchain_openai:ChatOpenAI  # LangChain 类路径
-       model: gpt-4                      # API 使用的模型标识
-       api_key: $OPENAI_API_KEY          # API key（推荐使用环境变量）
-       max_tokens: 4096                  # 单次请求最大 tokens
-       temperature: 0.7                  # 采样温度
+     - name: gpt-4o
+       display_name: GPT-4o
+       use: langchain_openai:ChatOpenAI
+       model: gpt-4o
+       api_key: $OPENAI_API_KEY
 
      - name: openrouter-gemini-2.5-flash
        display_name: Gemini 2.5 Flash (OpenRouter)
        use: langchain_openai:ChatOpenAI
        model: google/gemini-2.5-flash-preview
-       api_key: $OPENAI_API_KEY          # 这里 OpenRouter 依然沿用 OpenAI 兼容字段名
+       api_key: $OPENROUTER_API_KEY
        base_url: https://openrouter.ai/api/v1
+
+     - name: gpt-5-responses
+       display_name: GPT-5 (Responses API)
+       use: langchain_openai:ChatOpenAI
+       model: gpt-5
+       api_key: $OPENAI_API_KEY
+       use_responses_api: true
+       output_version: responses/v1
+
+     - name: qwen3-32b-vllm
+       display_name: Qwen3 32B (vLLM)
+       use: deerflow.models.vllm_provider:VllmChatModel
+       model: Qwen/Qwen3-32B
+       api_key: $VLLM_API_KEY
+       base_url: http://localhost:8000/v1
+       supports_thinking: true
+       when_thinking_enabled:
+         extra_body:
+           chat_template_kwargs:
+             enable_thinking: true
    ```
 
    OpenRouter 以及类似的 OpenAI 兼容网关，建议通过 `langchain_openai:ChatOpenAI` 配合 `base_url` 来配置。如果你更想用 provider 自己的环境变量名，也可以直接把 `api_key` 指向对应变量，例如 `api_key: $OPENROUTER_API_KEY`。
 
-4. **为已配置的模型设置 API key**
+   如果要让 OpenAI 模型走 `/v1/responses`，继续使用 `langchain_openai:ChatOpenAI`，并设置 `use_responses_api: true` 和 `output_version: responses/v1`。
 
-   可任选以下一种方式：
+   对于 vLLM 0.19.0，请使用 `deerflow.models.vllm_provider:VllmChatModel`。对于 Qwen 风格的推理模型，DeerFlow 通过 `extra_body.chat_template_kwargs.enable_thinking` 开关推理，并在多轮 tool-call 对话中保留 vLLM 非标准的 `reasoning` 字段。旧版 `thinking` 配置会自动规范化以保持向后兼容。推理模型可能还需要在启动 vLLM 服务时加上 `--reasoning-parser ...` 参数。如果你的本地 vLLM 部署接受任意非空 API key，可以把 `VLLM_API_KEY` 设为一个占位值。
 
-- 方式 A：编辑项目根目录下的 `.env` 文件（推荐）
-
-   ```bash
-   TAVILY_API_KEY=your-tavily-api-key
-   OPENAI_API_KEY=your-openai-api-key
-   # 如果配置使用的是 langchain_openai:ChatOpenAI + base_url，OpenRouter 也会读取 OPENAI_API_KEY
-   # 其他 provider 的 key 按需补充
-   INFOQUEST_API_KEY=your-infoquest-api-key
-   ```
-
-- 方式 B：在 shell 中导出环境变量
-
-   ```bash
-   export OPENAI_API_KEY=your-openai-api-key
-   ```
-
-- 方式 C：直接编辑 `config.yaml`（不建议用于生产环境）
+   CLI-backed provider 配置示例：
 
    ```yaml
    models:
-     - name: gpt-4
-       api_key: your-actual-api-key-here  # 替换为真实 key
+     - name: gpt-5.4
+       display_name: GPT-5.4 (Codex CLI)
+       use: deerflow.models.openai_codex_provider:CodexChatModel
+       model: gpt-5.4
+       supports_thinking: true
+       supports_reasoning_effort: true
+
+     - name: claude-sonnet-4.6
+       display_name: Claude Sonnet 4.6 (Claude Code OAuth)
+       use: deerflow.models.claude_provider:ClaudeChatModel
+       model: claude-sonnet-4-6
+       max_tokens: 4096
+       supports_thinking: true
    ```
+
+   - Codex CLI 会读取 `~/.codex/auth.json`
+   - Claude Code 支持 `CLAUDE_CODE_OAUTH_TOKEN`、`ANTHROPIC_AUTH_TOKEN`、`CLAUDE_CODE_CREDENTIALS_PATH`，或 `~/.claude/.credentials.json`
+   - ACP agent 条目与 model provider 是分开配置的——如果你配置了 `acp_agents.codex`，请把它指向一个 Codex ACP 适配器，例如 `npx -y @zed-industries/codex-acp`
+   - 在 macOS 上，如有需要可显式导出 Claude Code 的认证信息：
+
+   ```bash
+   eval "$(python3 scripts/export_claude_code_oauth.py --print-export)"
+   ```
+
+   API key 也可以手动写入 `.env` 文件（推荐）或在 shell 中导出：
+
+   ```bash
+   OPENAI_API_KEY=your-openai-api-key
+   TAVILY_API_KEY=your-tavily-api-key
+   ```
+
+   </details>
 
 ### 运行应用
 
@@ -191,28 +245,13 @@ make down   # 停止并移除容器
 
 如果你更希望直接在本地启动各个服务：
 
-前提：先完成上面的“配置”步骤（`make config` 和模型 API key 配置）。`make dev` 需要有效配置文件，默认读取项目根目录下的 `config.yaml`。可以用 `DEER_FLOW_PROJECT_ROOT` 显式指定项目根目录，也可以用 `DEER_FLOW_CONFIG_PATH` 指向某个具体配置文件。运行期状态默认写到项目根目录下的 `.deer-flow`，可用 `DEER_FLOW_HOME` 覆盖；skills 默认读取项目根目录下的 `skills/`，可用 `DEER_FLOW_SKILLS_PATH` 覆盖。
+前提：先完成上面的“配置”步骤（`make setup`）。`make dev` 需要有效配置文件，默认读取项目根目录下的 `config.yaml`。可以用 `DEER_FLOW_PROJECT_ROOT` 显式指定项目根目录，也可以用 `DEER_FLOW_CONFIG_PATH` 指向某个具体配置文件。运行期状态默认写到项目根目录下的 `.deer-flow`，可用 `DEER_FLOW_HOME` 覆盖；skills 默认读取项目根目录下的 `skills/`，可用 `DEER_FLOW_SKILLS_PATH` 覆盖。启动前先运行 `make doctor` 校验配置。
 在 Windows 上，请使用 Git Bash 运行本地开发流程。基于 bash 的服务脚本不支持直接在原生 `cmd.exe` 或 PowerShell 中执行，且 WSL 也不保证可用，因为部分脚本依赖 Git for Windows 的 `cygpath` 等工具。
 
 1. **检查依赖环境**：
    ```bash
    make check  # 校验 Node.js 22+、pnpm、uv、nginx
    ```
-
-   如果你要提交本地安装、配置或运行问题，可以执行：
-
-   ```bash
-   make support-bundle
-   ```
-
-   命令会直接打印 reporter 下一步建议，并在 `.deer-flow/support-bundles/` 下生成
-   `*-issue-summary.md`、面向 AI 辅助提 issue 的 `*-issue-draft.md`，以及可选证据
-   zip。提交 GitHub issue 时，先把 `*-issue-summary.md` 粘贴到 issue 正文；如果由
-   AI 助手代填 issue，就从 `*-issue-draft.md` 开始，并先替换所有 REQUIRED 占位符，
-   不要编造未知事实。只有维护者要求证据包，或摘要不足以诊断时，再附上 zip。维护者
-   或 AI 辅助 triage 可以优先读取 `triage.json`；bundle 只包含脱敏后的诊断信息和
-   文件 manifest，不包含 `.env`、原始对话消息或用户文件内容；提交前仍建议自己快速
-   检查一遍。
 
 2. **安装依赖**：
    ```bash
