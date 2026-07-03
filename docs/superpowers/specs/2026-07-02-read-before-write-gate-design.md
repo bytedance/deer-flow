@@ -23,7 +23,12 @@
 **失败语义**：
 
 - 闸自身读文件/求 hash 出现意外错误（非 FileNotFoundError，如二进制 UnicodeDecodeError、沙箱瞬时故障）→ fail-open 放行并记日志。护栏不应把 agent 砖死。
+- 非本地沙箱（AIO/E2B）的 `read_file` 把读失败（含文件不存在）吞成 `"Error: ..."` 字符串而不抛异常：闸读到以 `Error:` 开头的内容按"无法检视"处理 → fail-open 放行、不打标记。新建文件因此在这类沙箱上正常放行；已存在文件的正常读写不受影响（#3912 review 修复）。
 - 拦截返回 `ToolMessage(status="error")`，措辞引导恢复路径，不暴露后端配置细节。
+
+**并发语义（#3912 review 修复）**：
+
+- LangGraph 会并发执行同一条 AIMessage 里的多个 tool_calls。中间件对每个 (thread, 规范化路径) 持有独立锁，把"闸校验 + 写入执行"以及"读取执行 + 打标"分别放进同一临界区：同轮第二个同路径写必须等第一个完成后再校验（hash 已变 → 确定性拦截）；读的标记保证 hash 的是模型实际看到的那个版本。该锁与工具内部的 `file_operation_lock` 分属不同命名空间，无嵌套获取，不会死锁。
 
 ## 实现结构
 
@@ -39,7 +44,7 @@
 
 - 语义重复仍可能发生（读了现状仍决定再追加同一节）——ShenAC-SAC 评论指出的产物状态/终稿校验属后续项。
 - `bash` 修改文件不走闸；但它改变 hash，会使后续 `write_file`/`str_replace` 被逼重读，方向一致。
-- 闸校验与实际写入之间存在极窄的 TOCTOU 窗口（并行工具调用），`file_operation_lock` 只串行化写本身；作为护栏可接受。
+- ~~闸校验与实际写入之间存在极窄的 TOCTOU 窗口（并行工具调用），作为护栏可接受。~~ 该窗口已按 #3912 review 意见通过 per-path 临界区消除（见"并发语义"）——同轮并行重复写正是 Case 2 的变体，不应写掉。
 
 ## 测试（TDD，`backend/tests/test_read_before_write_middleware.py`）
 
