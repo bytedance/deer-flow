@@ -39,6 +39,7 @@ export interface Translations {
     exportAsMarkdown: string;
     exportAsJSON: string;
     exportSuccess: string;
+    regenerate: string;
   };
 
   home: {
@@ -93,6 +94,16 @@ export interface Translations {
     followupConfirmDescription: string;
     followupConfirmAppend: string;
     followupConfirmReplace: string;
+    suggestionPlaceholderRequired: string;
+    goalCommandDescription: string;
+    goalLabel: string;
+    goalContinuing: string;
+    goalContinuationTooltip: string;
+    goalSet: string;
+    goalCleared: string;
+    goalNone: string;
+    goalActive: string;
+    goalFailed: string;
     suggestions: {
       suggestion: string;
       prompt: string;
@@ -117,6 +128,8 @@ export interface Translations {
     chats: string;
     demoChats: string;
     agents: string;
+    agentsDisabledTooltip: string;
+    channels: string;
   };
 
   // Agents
@@ -126,6 +139,8 @@ export interface Translations {
     newAgent: string;
     emptyTitle: string;
     emptyDescription: string;
+    featureDisabledTitle: string;
+    featureDisabledDescription: string;
     chat: string;
     delete: string;
     deleteConfirm: string;
@@ -141,6 +156,7 @@ export interface Translations {
     nameStepAlreadyExistsError: string;
     nameStepNetworkError: string;
     nameStepCheckError: string;
+    nameStepCheckErrorWithDetail: string;
     nameStepApiDisabledError: string;
     nameStepBootstrapMessage: string;
     save: string;
@@ -171,6 +187,8 @@ export interface Translations {
     contactUs: string;
     about: string;
     logout: string;
+    gatewayUnavailable: string;
+    gatewayUnavailableRetrying: string;
   };
 
   // Conversation
@@ -182,6 +200,33 @@ export interface Translations {
   // Chats
   chats: {
     searchChats: string;
+    loadMoreToSearch: string;
+    loadingMore: string;
+    loadOlderChats: string;
+  };
+
+  // Channels
+  channels: {
+    title: string;
+    connect: string;
+    modify: string;
+    reconnect: string;
+    disconnect: string;
+    connected: string;
+    notConnected: string;
+    pending: string;
+    revoked: string;
+    disabled: string;
+    unconfigured: string;
+    unavailable: string;
+    unavailableShort: string;
+    setupTitle: (name: string) => string;
+    setupEditTitle: (name: string) => string;
+    setupDescription: string;
+    saveAndConnect: string;
+    saveChanges: string;
+    descriptions: Record<string, string>;
+    connectedAs: (name: string) => string;
   };
 
   // Page titles (document title)
@@ -218,6 +263,14 @@ export interface Translations {
   uploads: {
     uploading: string;
     uploadingFiles: string;
+    limitsHint: (
+      maxFiles: number,
+      maxFileSize: string,
+      maxTotalSize: string,
+    ) => string;
+    filesTooLarge: (files: string, maxFileSize: string) => string;
+    tooManyFiles: (count: number, maxFiles: number) => string;
+    totalSizeTooLarge: (count: number, maxTotalSize: string) => string;
   };
 
   // Subtasks
@@ -280,6 +333,7 @@ export interface Translations {
     sections: {
       account: string;
       appearance: string;
+      channels: string;
       memory: string;
       tools: string;
       skills: string;
@@ -374,6 +428,13 @@ export interface Translations {
     tools: {
       title: string;
       description: string;
+      adminRequired: string;
+      empty: string;
+    };
+    channels: {
+      title: string;
+      description: string;
+      disabled: string;
     };
     skills: {
       title: string;
@@ -382,6 +443,8 @@ export interface Translations {
       emptyTitle: string;
       emptyDescription: string;
       emptyButton: string;
+      adminRequired: string;
+      installAdminRequired: string;
     };
     notification: {
       title: string;
@@ -400,6 +463,9 @@ export interface Translations {
       role: string;
       changePasswordTitle: string;
       changePasswordDescription: string;
+      ssoProvider: string;
+      ssoPasswordDescription: string;
+      ssoPasswordMessage: string;
       currentPassword: string;
       newPassword: string;
       confirmNewPassword: string;
@@ -414,6 +480,36 @@ export interface Translations {
     acknowledge: {
       emptyTitle: string;
       emptyDescription: string;
+    };
+  };
+
+  // Login / Auth
+  login: {
+    signInTitle: string;
+    createAccountTitle: string;
+    email: string;
+    emailPlaceholder: string;
+    password: string;
+    passwordPlaceholder: string;
+    pleaseWait: string;
+    signIn: string;
+    createAccount: string;
+    createAdminAccount: string;
+    adminSetupRequiredTitle: string;
+    adminSetupRequiredDescription: string;
+    orContinueWith: string;
+    ssoHint: string;
+    continueWith: (provider: string) => string;
+    noAccountSignUp: string;
+    haveAccountSignIn: string;
+    backToHome: string;
+    networkError: string;
+    authFailed: string;
+    errors: {
+      sso_failed: string;
+      sso_cancelled: string;
+      sso_account_exists: string;
+      sso_not_allowed: string;
     };
   };
 }

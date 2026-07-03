@@ -18,13 +18,9 @@ https://github.com/user-attachments/assets/a8bcadc4-e040-4cf2-8fda-dd768b999c18
 
 ## 官网
 
-[<img width="2880" height="1600" alt="image" src="https://github.com/user-attachments/assets/a598c49f-3b2f-41ea-a052-05e21349188a" />](https://deerflow.tech)
-
 想了解更多，或者直接看**真实演示**，可以访问[**官网**](https://deerflow.tech)。
 
 ## 字节跳动火山引擎方舟 Coding Plan
-
-[<img width="4808" height="2400" alt="codingplan -banner 素材" src="https://github.com/user-attachments/assets/d30dae52-84f2-4021-b32f-6d281252b9ea" />](https://www.volcengine.com/activity/codingplan?utm_campaign=deer_flow&utm_content=deer_flow&utm_medium=devrel&utm_source=OWO&utm_term=deer_flow)
 
 - 我们推荐使用 Doubao-Seed-2.0-Code、DeepSeek v3.2 和 Kimi 2.5 运行 DeerFlow
 - [现在就加入 Coding Plan](https://www.volcengine.com/activity/codingplan?utm_campaign=deer_flow&utm_content=deer_flow&utm_medium=devrel&utm_source=OWO&utm_term=deer_flow)
@@ -58,6 +54,7 @@ https://github.com/user-attachments/assets/a8bcadc4-e040-4cf2-8fda-dd768b999c18
     - [长期记忆](#长期记忆)
   - [推荐模型](#推荐模型)
   - [内嵌 Python Client](#内嵌-python-client)
+  - [终端工作台 (TUI)](#终端工作台-tui)
   - [文档](#文档)
   - [⚠️ 安全使用](#️-安全使用)
   - [参与贡献](#参与贡献)
@@ -201,6 +198,21 @@ make down   # 停止并移除容器
    ```bash
    make check  # 校验 Node.js 22+、pnpm、uv、nginx
    ```
+
+   如果你要提交本地安装、配置或运行问题，可以执行：
+
+   ```bash
+   make support-bundle
+   ```
+
+   命令会直接打印 reporter 下一步建议，并在 `.deer-flow/support-bundles/` 下生成
+   `*-issue-summary.md`、面向 AI 辅助提 issue 的 `*-issue-draft.md`，以及可选证据
+   zip。提交 GitHub issue 时，先把 `*-issue-summary.md` 粘贴到 issue 正文；如果由
+   AI 助手代填 issue，就从 `*-issue-draft.md` 开始，并先替换所有 REQUIRED 占位符，
+   不要编造未知事实。只有维护者要求证据包，或摘要不足以诊断时，再附上 zip。维护者
+   或 AI 辅助 triage 可以优先读取 `triage.json`；bundle 只包含脱敏后的诊断信息和
+   文件 manifest，不包含 `.env`、原始对话消息或用户文件内容；提交前仍建议自己快速
+   检查一遍。
 
 2. **安装依赖**：
    ```bash
@@ -429,7 +441,7 @@ Skills 采用按需渐进加载，不会一次性把所有内容都塞进上下�
 
 通过 Gateway 安装 `.skill` 压缩包时，DeerFlow 会接受标准的可选 frontmatter 元数据，比如 `version`、`author`、`compatibility`，不会把本来合法的外部 skill 拒之门外。
 
-Tools 也是同样的思路。DeerFlow 自带一组核心工具：网页搜索、网页抓取、文件操作、bash 执行；同时也支持通过 MCP Server 和 Python 函数扩展自定义工具。你可以替换任何一项，也可以继续往里加。
+Tools 也是同样的思路。DeerFlow 自带一组核心工具：网页搜索、网页抓取、网页渲染截图、文件操作、bash 执行；同时也支持通过 MCP Server 和 Python 函数扩展自定义工具。你可以替换任何一项，也可以继续往里加。
 
 Gateway 生成后续建议时，现在会先把普通字符串输出和 block/list 风格的富文本内容统一归一化，再去解析 JSON 数组响应，因此不同 provider 的内容包装方式不会再悄悄把建议吞掉。
 
@@ -545,6 +557,26 @@ client.upload_files("thread-1", ["./report.pdf"])  # {"success": True, "files": 
 ```
 
 所有返回 dict 的方法都会在 CI 中通过 Gateway 的 Pydantic 响应模型校验（`TestGatewayConformance`），以确保内嵌 client 始终和 HTTP API schema 保持同步。完整 API 说明见 `backend/packages/harness/deerflow/client.py`。
+
+## 终端工作台 (TUI)
+
+`deerflow` 是一个面向终端用户的工作台，**内嵌**运行在 `DeerFlowClient` 之上——无需启动 Gateway、前端、nginx 或 Docker，同时沿用与 DeerFlow 其它部分相同的 `config.yaml`、checkpointer、技能、记忆、MCP 和沙箱配置。
+
+![DeerFlow TUI](docs/tui/tui-preview.svg)
+
+```bash
+uv pip install 'deerflow-harness[tui]'        # 可选的 'textual' 依赖
+
+deerflow                                      # 启动终端 UI（需要 TTY）
+deerflow --continue                           # 恢复最近一次会话
+deerflow --resume THREAD                      # 按 id 恢复指定会话
+deerflow --print "总结一下这个仓库"             # 无头模式，结果打印到 stdout
+deerflow --json  "hello"                       # 无头模式，输出按行分隔的 StreamEvent
+```
+
+键盘驱动的对话界面：流式渲染的对话区（回答按 Markdown 渲染）、紧凑的工具活动卡片、`/` 斜杠命令面板、`/model` 与 `/threads` 选择器、输入历史，以及 `Esc` / `Ctrl+C` 打断。在 TUI 里开启的会话也会出现在 Web UI 侧边栏——它会以本地默认用户身份写入共享的会话存储，因此终端与网页保持同步，**无需运行 Gateway**。
+
+完整说明见 [backend/docs/TUI.md](backend/docs/TUI.md)。
 
 ## 文档
 

@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from deerflow.config.runtime_paths import existing_project_file
 
@@ -46,6 +46,24 @@ class McpServerConfig(BaseModel):
     oauth: McpOAuthConfig | None = Field(default=None, description="OAuth configuration (for sse or http type)")
     description: str = Field(default="", description="Human-readable description of what this MCP server provides")
     model_config = ConfigDict(extra="allow")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_transport_alias(cls, data: Any) -> Any:
+        """Accept the MCP-spec ``transport`` field as an alias for ``type``.
+
+        The official MCP configuration schema uses ``transport`` to indicate
+        the transport mechanism (``stdio``/``sse``/``http``). Earlier versions
+        of this project only honored ``type``, which caused remote SSE/HTTP
+        servers configured with just ``transport`` to be incorrectly treated as
+        ``stdio`` (the default). This validator normalizes the two so either
+        spelling works, with ``type`` taking precedence when both are provided.
+        """
+        if isinstance(data, dict):
+            transport = data.get("transport")
+            if transport and not data.get("type"):
+                data = {**data, "type": transport}
+        return data
 
 
 class SkillStateConfig(BaseModel):
@@ -141,7 +159,7 @@ class ExtensionsConfig(BaseModel):
         try:
             with open(resolved_path, encoding="utf-8") as f:
                 config_data = json.load(f)
-            cls.resolve_env_variables(config_data)
+            config_data = cls.resolve_env_variables(config_data)
             return cls.model_validate(config_data)
         except json.JSONDecodeError as e:
             raise ValueError(f"Extensions config file at {resolved_path} is not valid JSON: {e}") from e
@@ -149,7 +167,7 @@ class ExtensionsConfig(BaseModel):
             raise RuntimeError(f"Failed to load extensions config from {resolved_path}: {e}") from e
 
     @classmethod
-    def resolve_env_variables(cls, config: dict[str, Any]) -> dict[str, Any]:
+    def resolve_env_variables(cls, config: Any) -> Any:
         """Recursively resolve environment variables in the config.
 
         Environment variables are resolved using the `os.getenv` function. Example: $OPENAI_API_KEY
@@ -160,23 +178,26 @@ class ExtensionsConfig(BaseModel):
         Returns:
             The config with environment variables resolved.
         """
-        for key, value in config.items():
-            if isinstance(value, str):
-                if value.startswith("$"):
-                    env_value = os.getenv(value[1:])
-                    if env_value is None:
-                        # Unresolved placeholder — store empty string so downstream
-                        # consumers (e.g. MCP servers) don't receive the literal "$VAR"
-                        # token as an actual environment value.
-                        config[key] = ""
-                    else:
-                        config[key] = env_value
-                else:
-                    config[key] = value
-            elif isinstance(value, dict):
-                config[key] = cls.resolve_env_variables(value)
-            elif isinstance(value, list):
-                config[key] = [cls.resolve_env_variables(item) if isinstance(item, dict) else item for item in value]
+        if isinstance(config, str):
+            if not config.startswith("$"):
+                return config
+            env_value = os.getenv(config[1:])
+            if env_value is None:
+                # Unresolved placeholder — store empty string so downstream
+                # consumers (e.g. MCP servers) don't receive the literal "$VAR"
+                # token as an actual environment value.
+                return ""
+            return env_value
+
+        if isinstance(config, dict):
+            return {key: cls.resolve_env_variables(value) for key, value in config.items()}
+
+        if isinstance(config, list):
+            return [cls.resolve_env_variables(item) for item in config]
+
+        if isinstance(config, tuple):
+            return tuple(cls.resolve_env_variables(item) for item in config)
+
         return config
 
     def get_enabled_mcp_servers(self) -> dict[str, McpServerConfig]:

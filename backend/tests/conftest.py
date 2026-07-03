@@ -13,15 +13,10 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
-from support.detectors.blocking_io import BlockingIOProbe, detect_blocking_io
 
 # Make 'app' and 'deerflow' importable from any working directory
 sys.path.insert(0, str(Path(__file__).parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
-
-_BACKEND_ROOT = Path(__file__).resolve().parents[1]
-_blocking_io_probe = BlockingIOProbe(_BACKEND_ROOT)
-_BLOCKING_IO_DETECTOR_ATTR = "_blocking_io_detector"
 
 # Break the circular import chain that exists in production code:
 #   deerflow.subagents.__init__
@@ -63,92 +58,6 @@ def provisioner_module():
     return module
 
 
-@pytest.fixture()
-def blocking_io_detector():
-    """Fail a focused test if blocking calls run on the event loop thread."""
-    with detect_blocking_io(fail_on_exit=True) as detector:
-        yield detector
-
-
-def pytest_addoption(parser: pytest.Parser) -> None:
-    group = parser.getgroup("blocking-io")
-    group.addoption(
-        "--detect-blocking-io",
-        action="store_true",
-        default=False,
-        help="Collect blocking calls made while an asyncio event loop is running and report a summary.",
-    )
-    group.addoption(
-        "--detect-blocking-io-fail",
-        action="store_true",
-        default=False,
-        help="Set a failing exit status when --detect-blocking-io records violations.",
-    )
-
-
-def pytest_configure(config: pytest.Config) -> None:
-    config.addinivalue_line("markers", "no_blocking_io_probe: skip the optional blocking IO probe")
-
-
-def pytest_sessionstart(session: pytest.Session) -> None:
-    if _blocking_io_probe_enabled(session.config):
-        _blocking_io_probe.clear()
-
-
-@pytest.hookimpl(hookwrapper=True)
-def pytest_runtest_call(item: pytest.Item):
-    if not _blocking_io_probe_enabled(item.config) or _blocking_io_probe_skipped(item):
-        yield
-        return
-
-    detector = detect_blocking_io(fail_on_exit=False, stack_limit=18)
-    detector.__enter__()
-    setattr(item, _BLOCKING_IO_DETECTOR_ATTR, detector)
-    yield
-
-
-@pytest.hookimpl(hookwrapper=True)
-def pytest_runtest_teardown(item: pytest.Item):
-    yield
-
-    detector = getattr(item, _BLOCKING_IO_DETECTOR_ATTR, None)
-    if detector is None:
-        return
-
-    try:
-        detector.__exit__(None, None, None)
-        _blocking_io_probe.record(item.nodeid, detector.violations)
-    finally:
-        delattr(item, _BLOCKING_IO_DETECTOR_ATTR)
-
-
-def pytest_sessionfinish(session: pytest.Session) -> None:
-    if _blocking_io_fail_enabled(session.config) and _blocking_io_probe.violation_count and session.exitstatus == pytest.ExitCode.OK:
-        session.exitstatus = pytest.ExitCode.TESTS_FAILED
-
-
-def pytest_terminal_summary(terminalreporter: pytest.TerminalReporter) -> None:
-    if not _blocking_io_probe_enabled(terminalreporter.config):
-        return
-
-    header, *details = _blocking_io_probe.format_summary().splitlines()
-    terminalreporter.write_sep("=", header)
-    for line in details:
-        terminalreporter.write_line(line)
-
-
-def _blocking_io_probe_enabled(config: pytest.Config) -> bool:
-    return bool(config.getoption("--detect-blocking-io") or config.getoption("--detect-blocking-io-fail"))
-
-
-def _blocking_io_fail_enabled(config: pytest.Config) -> bool:
-    return bool(config.getoption("--detect-blocking-io-fail"))
-
-
-def _blocking_io_probe_skipped(item: pytest.Item) -> bool:
-    return item.path.name == "test_blocking_io_detector.py" or item.get_closest_marker("no_blocking_io_probe") is not None
-
-
 # ---------------------------------------------------------------------------
 # Auto-set user context for every test unless marked no_auto_user
 # ---------------------------------------------------------------------------
@@ -174,6 +83,31 @@ def _reset_skill_storage_singleton():
         yield
     finally:
         reset_skill_storage()
+
+
+@pytest.fixture(autouse=True)
+def _restore_title_config_singleton():
+    """Reset ``_title_config`` to its pristine default after every test.
+
+    ``AppConfig.from_file()`` writes the on-disk ``title`` block into the
+    module-level singleton (``config/app_config.py`` calls
+    ``load_title_config_from_dict``). Any test that loads the real
+    ``config.yaml`` therefore leaves the singleton in a state that
+    ``test_title_middleware_core_logic.py`` does not expect; that suite
+    relies on the pristine ``TitleConfig()`` default (``enabled=True``).
+    We restore the default after every test so test files stay
+    independent regardless of order.
+    """
+    try:
+        from deerflow.config.title_config import reset_title_config
+    except ImportError:
+        yield
+        return
+
+    try:
+        yield
+    finally:
+        reset_title_config()
 
 
 @pytest.fixture(autouse=True)

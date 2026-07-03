@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from abc import ABC, abstractmethod
 
+import httpx
 import requests
 
 from .sandbox_info import SandboxInfo
@@ -35,6 +37,34 @@ def wait_for_sandbox_ready(sandbox_url: str, timeout: int = 30) -> bool:
     return False
 
 
+async def wait_for_sandbox_ready_async(sandbox_url: str, timeout: int = 30, poll_interval: float = 1.0) -> bool:
+    """Async variant of sandbox readiness polling.
+
+    Use this from async runtime paths so sandbox startup waits do not block the
+    event loop. The synchronous ``wait_for_sandbox_ready`` function remains for
+    existing synchronous backend/provider call sites.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+
+    async with httpx.AsyncClient(timeout=5) as client:
+        while True:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                break
+            try:
+                response = await client.get(f"{sandbox_url}/v1/sandbox", timeout=min(5.0, remaining))
+                if response.status_code == 200:
+                    return True
+            except httpx.RequestError:
+                pass
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                break
+            await asyncio.sleep(min(poll_interval, remaining))
+    return False
+
+
 class SandboxBackend(ABC):
     """Abstract base for sandbox provisioning backends.
 
@@ -44,7 +74,14 @@ class SandboxBackend(ABC):
     """
 
     @abstractmethod
-    def create(self, thread_id: str, sandbox_id: str, extra_mounts: list[tuple[str, str, bool]] | None = None) -> SandboxInfo:
+    def create(
+        self,
+        thread_id: str | None,
+        sandbox_id: str,
+        extra_mounts: list[tuple[str, str, bool]] | None = None,
+        *,
+        user_id: str | None = None,
+    ) -> SandboxInfo:
         """Create/provision a new sandbox.
 
         Args:
@@ -52,6 +89,7 @@ class SandboxBackend(ABC):
             sandbox_id: Deterministic sandbox identifier.
             extra_mounts: Additional volume mounts as (host_path, container_path, read_only) tuples.
                 Ignored by backends that don't manage containers (e.g., remote).
+            user_id: User bucket that the sandbox should mount or provision for.
 
         Returns:
             SandboxInfo with connection details.

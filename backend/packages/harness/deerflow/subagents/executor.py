@@ -3,6 +3,7 @@
 import asyncio
 import atexit
 import logging
+import os
 import threading
 import uuid
 from collections.abc import Callable, Coroutine
@@ -12,7 +13,7 @@ from contextvars import Context, copy_context
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from langchain.agents import create_agent
 from langchain.tools import BaseTool
@@ -26,7 +27,17 @@ from deerflow.models import create_chat_model
 from deerflow.skills.tool_policy import filter_tools_by_skill_allowed_tools
 from deerflow.skills.types import Skill
 from deerflow.subagents.config import SubagentConfig, resolve_subagent_model_name
+from deerflow.subagents.step_events import capture_new_step_messages
 from deerflow.subagents.token_collector import SubagentTokenCollector
+from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY
+from deerflow.tracing import build_tracing_callbacks, inject_langfuse_metadata
+
+if TYPE_CHECKING:
+    # Imported lazily at runtime inside _build_initial_state: importing
+    # tool_search eagerly would run tools/builtins/__init__ -> task_tool ->
+    # `from deerflow.subagents import SubagentExecutor`, which re-enters this
+    # still-initializing package. Type-only here keeps the annotation precise.
+    from deerflow.tools.builtins.tool_search import DeferredToolSetup
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +57,15 @@ class SubagentStatus(Enum):
     FAILED = "failed"
     CANCELLED = "cancelled"
     TIMED_OUT = "timed_out"
+
+    @property
+    def is_terminal(self) -> bool:
+        return self in {
+            type(self).COMPLETED,
+            type(self).FAILED,
+            type(self).CANCELLED,
+            type(self).TIMED_OUT,
+        }
 
 
 @dataclass
@@ -71,14 +91,50 @@ class SubagentResult:
     started_at: datetime | None = None
     completed_at: datetime | None = None
     ai_messages: list[dict[str, Any]] | None = None
-    token_usage_records: list[dict[str, int | str]] = field(default_factory=list)
+    token_usage_records: list[dict[str, int | str | None]] = field(default_factory=list)
     usage_reported: bool = False
     cancel_event: threading.Event = field(default_factory=threading.Event, repr=False)
+    _state_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
 
     def __post_init__(self):
         """Initialize mutable defaults."""
         if self.ai_messages is None:
             self.ai_messages = []
+
+    def try_set_terminal(
+        self,
+        status: SubagentStatus,
+        *,
+        result: str | None = None,
+        error: str | None = None,
+        completed_at: datetime | None = None,
+        ai_messages: list[dict[str, Any]] | None = None,
+        token_usage_records: list[dict[str, int | str | None]] | None = None,
+    ) -> bool:
+        """Set a terminal status exactly once.
+
+        Background timeout/cancellation and the execution worker can race on the
+        same result holder.  The first terminal transition wins; late terminal
+        writes must not change status or payload fields.
+        """
+        if not status.is_terminal:
+            raise ValueError(f"Status {status} is not terminal")
+
+        with self._state_lock:
+            if self.status.is_terminal:
+                return False
+
+            if result is not None:
+                self.result = result
+            if error is not None:
+                self.error = error
+            if ai_messages is not None:
+                self.ai_messages = ai_messages
+            if token_usage_records is not None:
+                self.token_usage_records = token_usage_records
+            self.completed_at = completed_at or datetime.now()
+            self.status = status
+            return True
 
 
 # Global storage for background task results
@@ -234,6 +290,12 @@ class SubagentExecutor:
         thread_data: ThreadDataState | None = None,
         thread_id: str | None = None,
         trace_id: str | None = None,
+        user_id: str | None = None,
+        user_role: str | None = None,
+        oauth_provider: str | None = None,
+        oauth_id: str | None = None,
+        run_id: str | None = None,
+        deerflow_trace_id: str | None = None,
     ):
         """Initialize the executor.
 
@@ -248,6 +310,16 @@ class SubagentExecutor:
             thread_data: Thread data from parent agent.
             thread_id: Thread ID for sandbox operations.
             trace_id: Trace ID from parent for distributed tracing.
+            user_id: User ID captured from the parent tool's runtime context.
+                When None, the tracing layer falls back to DEFAULT_USER_ID.
+            user_role: Authenticated user's role, propagated so GuardrailMiddleware
+                on the subagent can apply role-aware policy to delegated calls.
+            oauth_provider: External identity provider, when authenticated via SSO.
+            oauth_id: Subject id at the external identity provider.
+            run_id: Parent run id, so delegated guardrail decisions attribute to
+                the same run as the lead agent.
+            deerflow_trace_id: DeerFlow request-level correlation id propagated
+                from the parent run for Langfuse metadata correlation.
         """
         self.config = config
         self.app_config = app_config
@@ -264,6 +336,13 @@ class SubagentExecutor:
         self.thread_id = thread_id
         # Generate trace_id if not provided (for top-level calls)
         self.trace_id = trace_id or str(uuid.uuid4())[:8]
+        self.user_id = user_id
+        # Guardrail attribution propagated from the parent runtime context.
+        self.user_role = user_role
+        self.oauth_provider = oauth_provider
+        self.oauth_id = oauth_id
+        self.run_id = run_id
+        self.deerflow_trace_id = deerflow_trace_id
 
         self._base_tools = _filter_tools(
             tools,
@@ -274,17 +353,22 @@ class SubagentExecutor:
 
         logger.info(f"[trace={self.trace_id}] SubagentExecutor initialized: {config.name} with {len(self.tools)} tools")
 
-    def _create_agent(self, tools: list[BaseTool] | None = None):
-        """Create the agent instance."""
+    def _create_agent(self, tools: list[BaseTool] | None = None, *, deferred_setup: "DeferredToolSetup | None" = None):
+        """Create the agent instance.
+
+        ``deferred_setup`` (assembled in ``_build_initial_state``) carries the
+        deferred MCP tool names + catalog hash so the subagent gets the same
+        DeferredToolFilterMiddleware the lead agent has. ``None`` is a no-op.
+        """
         app_config = self.app_config or get_app_config()
         if self.model_name is None:
             self.model_name = resolve_subagent_model_name(self.config, self.parent_model, app_config=app_config)
-        model = create_chat_model(name=self.model_name, thinking_enabled=False, app_config=app_config)
+        model = create_chat_model(name=self.model_name, thinking_enabled=False, app_config=app_config, attach_tracing=False)
 
         from deerflow.agents.middlewares.tool_error_handling_middleware import build_subagent_runtime_middlewares
 
         # Reuse shared middleware composition with lead agent.
-        middlewares = build_subagent_runtime_middlewares(app_config=app_config, model_name=self.model_name, lazy_init=True)
+        middlewares = build_subagent_runtime_middlewares(app_config=app_config, model_name=self.model_name, lazy_init=True, deferred_setup=deferred_setup)
 
         # system_prompt is included in initial state messages (see _build_initial_state)
         # to avoid multiple SystemMessages which some LLM APIs don't support.
@@ -294,6 +378,7 @@ class SubagentExecutor:
             middleware=middlewares,
             system_prompt=None,
             state_schema=ThreadState,
+            checkpointer=False,
         )
 
     async def _load_skills(self) -> list[Skill]:
@@ -358,19 +443,35 @@ class SubagentExecutor:
 
         return messages
 
-    async def _build_initial_state(self, task: str) -> tuple[dict[str, Any], list[BaseTool]]:
+    async def _build_initial_state(self, task: str) -> tuple[dict[str, Any], list[BaseTool], "DeferredToolSetup"]:
         """Build the initial state for agent execution.
 
         Args:
             task: The task description.
 
         Returns:
-            Initial state dictionary and tools filtered by loaded skill metadata.
+            ``(state, final_tools, deferred_setup)``. ``final_tools`` is the
+            policy-filtered tool list with the ``tool_search`` tool appended when
+            deferral applies; ``deferred_setup`` is consumed by ``_create_agent``
+            so the agent build and the injected ``<available-deferred-tools>``
+            section share one catalog/hash.
         """
+        # Lazy import: see the TYPE_CHECKING note at the top of this module -
+        # importing tool_search runs tools/builtins/__init__, which would
+        # re-enter this package during its own initialization.
+        from deerflow.tools.builtins.tool_search import assemble_deferred_tools, get_deferred_tools_prompt_section
 
         # Load skills as conversation items (Codex pattern)
         skills = await self._load_skills()
         filtered_tools = self._apply_skill_allowed_tools(skills)
+        # Assemble deferred tool_search AFTER policy filtering (fail-closed),
+        # mirroring the lead path so subagents stop binding full MCP schemas.
+        # The generated tool_search helper is intentionally not subject to the
+        # subagent's name-level allow/deny (config.tools / disallowed_tools):
+        # its catalog is built from the already-filtered list, so it can never
+        # surface a tool the policy denied. This matches the lead agent.
+        enabled = (self.app_config or get_app_config()).tool_search.enabled
+        final_tools, deferred_setup = assemble_deferred_tools(filtered_tools, enabled=enabled)
         skill_messages = await self._load_skill_messages(skills)
 
         # Combine system_prompt and skills into a single SystemMessage.
@@ -381,6 +482,11 @@ class SubagentExecutor:
             system_parts.append(self.config.system_prompt)
         for skill_msg in skill_messages:
             system_parts.append(skill_msg.content)
+        # Name the deferred MCP tools in the prompt; their schemas stay withheld
+        # until tool_search promotes them. Empty set -> "" -> appends nothing.
+        deferred_section = get_deferred_tools_prompt_section(deferred_names=deferred_setup.deferred_names)
+        if deferred_section:
+            system_parts.append(deferred_section)
 
         messages: list[Any] = []
         if system_parts:
@@ -399,7 +505,7 @@ class SubagentExecutor:
         if self.thread_data is not None:
             state["thread_data"] = self.thread_data
 
-        return state, filtered_tools
+        return state, final_tools, deferred_setup
 
     async def _aexecute(self, task: str, result_holder: SubagentResult | None = None) -> SubagentResult:
         """Execute a task asynchronously.
@@ -427,11 +533,20 @@ class SubagentExecutor:
         if ai_messages is None:
             ai_messages = []
             result.ai_messages = ai_messages
+        # O(1) duplicate detection for streamed AI messages. ``stream_mode="values"``
+        # re-yields the full state every super-step, so the same trailing message is
+        # re-examined on each chunk; an id-keyed set keeps that check O(1) instead of
+        # rescanning the append-only ``ai_messages`` list (O(n) per chunk -> O(n^2)
+        # over a run, which reaches max_turns=150 for deep-research subagents).
+        seen_message_ids: set[str] = {mid for msg in ai_messages if (mid := msg.get("id"))}
+        # Cursor into the append-only message history so each ``values``-mode
+        # chunk only re-scans the newly-appended tail (see capture_new_step_messages).
+        processed_message_count = 0
 
         collector: SubagentTokenCollector | None = None
         try:
-            state, filtered_tools = await self._build_initial_state(task)
-            agent = self._create_agent(filtered_tools)
+            state, final_tools, deferred_setup = await self._build_initial_state(task)
+            agent = self._create_agent(final_tools, deferred_setup=deferred_setup)
 
             # Token collector for subagent LLM calls
             collector_caller = f"subagent:{self.config.name}"
@@ -443,12 +558,55 @@ class SubagentExecutor:
                 "callbacks": [collector],
                 "tags": [collector_caller],
             }
+
+            # Inject tracing callbacks at the graph level so a single subagent run
+            # produces one trace with all node / LLM / tool calls as child spans.
+            # This mirrors the lead agent pattern: graph-level tracing paired with
+            # attach_tracing=False on the model avoids double-counted traces.
+            tracing_callbacks = build_tracing_callbacks()
+            if tracing_callbacks:
+                existing_callbacks = list(run_config.get("callbacks") or [])
+                run_config["callbacks"] = [*existing_callbacks, *tracing_callbacks]
+
+            # Normalize subagent name for tracing so it matches the lead-agent
+            # naming shape (lowercase, hyphens only). Inline because there is no
+            # shared helper — runtime/runs/naming.py only handles lead-agent runs.
+            if self.config.name:
+                normalized_name = self.config.name.strip().lower().replace("_", "-")
+                assistant_id = f"subagent:{normalized_name}"
+            else:
+                assistant_id = "subagent"
+
+            # Inject Langfuse trace-attribute metadata so the subagent trace
+            # links to the parent thread and carries the correct session/user IDs.
+            inject_langfuse_metadata(
+                run_config,
+                thread_id=self.thread_id,
+                user_id=self.user_id,
+                assistant_id=assistant_id,
+                model_name=self.model_name,
+                environment=os.environ.get("DEER_FLOW_ENV") or os.environ.get("ENVIRONMENT"),
+                deerflow_trace_id=self.deerflow_trace_id,
+            )
+
             context: dict[str, Any] = {}
             if self.thread_id:
                 run_config["configurable"] = {"thread_id": self.thread_id}
                 context["thread_id"] = self.thread_id
             if self.app_config is not None:
                 context["app_config"] = self.app_config
+            # Propagate guardrail attribution so delegated tool calls are
+            # evaluated with the parent run's identity (role-aware policy,
+            # audit). user_id reuses the resolved tracing id; on every
+            # authenticated/IM path this equals the parent context value.
+            context["user_id"] = self.user_id
+            context["user_role"] = self.user_role
+            context["oauth_provider"] = self.oauth_provider
+            context["oauth_id"] = self.oauth_id
+            context["run_id"] = self.run_id
+            if self.deerflow_trace_id:
+                context[DEERFLOW_TRACE_METADATA_KEY] = self.deerflow_trace_id
+            context["is_subagent"] = True
 
             logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} starting async execution with max_turns={self.config.max_turns}")
 
@@ -459,13 +617,11 @@ class SubagentExecutor:
             # Pre-check: bail out immediately if already cancelled before streaming starts
             if result.cancel_event.is_set():
                 logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} cancelled before streaming")
-                with _background_tasks_lock:
-                    if result.status == SubagentStatus.RUNNING:
-                        result.status = SubagentStatus.CANCELLED
-                        result.error = "Cancelled by user"
-                        result.completed_at = datetime.now()
-                if collector is not None:
-                    result.token_usage_records = collector.snapshot_records()
+                result.try_set_terminal(
+                    SubagentStatus.CANCELLED,
+                    error="Cancelled by user",
+                    token_usage_records=collector.snapshot_records(),
+                )
                 return result
 
             async for chunk in agent.astream(state, config=run_config, context=context, stream_mode="values"):  # type: ignore[arg-type]
@@ -475,43 +631,33 @@ class SubagentExecutor:
                 # interrupted until the next chunk is yielded.
                 if result.cancel_event.is_set():
                     logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} cancelled by parent")
-                    with _background_tasks_lock:
-                        if result.status == SubagentStatus.RUNNING:
-                            result.status = SubagentStatus.CANCELLED
-                            result.error = "Cancelled by user"
-                            result.completed_at = datetime.now()
-                    result.token_usage_records = collector.snapshot_records()
+                    result.try_set_terminal(
+                        SubagentStatus.CANCELLED,
+                        error="Cancelled by user",
+                        token_usage_records=collector.snapshot_records(),
+                    )
                     return result
 
                 final_state = chunk
 
-                # Extract AI messages from the current state
+                # Capture every step message (assistant turns AND tool outputs)
+                # appended since the last chunk. A single super-step can append
+                # several ToolMessages when the model emits multiple tool calls in
+                # one turn, so capturing only messages[-1] would drop all but the
+                # last output (#3779). Dedup/serialization live in capture_step_message.
                 messages = chunk.get("messages", [])
-                if messages:
-                    last_message = messages[-1]
-                    # Check if this is a new AI message
-                    if isinstance(last_message, AIMessage):
-                        # Convert message to dict for serialization
-                        message_dict = last_message.model_dump()
-                        # Only add if it's not already in the list (avoid duplicates)
-                        # Check by comparing message IDs if available, otherwise compare full dict
-                        message_id = message_dict.get("id")
-                        is_duplicate = False
-                        if message_id:
-                            is_duplicate = any(msg.get("id") == message_id for msg in ai_messages)
-                        else:
-                            is_duplicate = message_dict in ai_messages
-
-                        if not is_duplicate:
-                            ai_messages.append(message_dict)
-                            logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} captured AI message #{len(ai_messages)}")
+                previous_count = len(ai_messages)
+                processed_message_count = capture_new_step_messages(messages, ai_messages, seen_message_ids, processed_message_count)
+                if len(ai_messages) > previous_count:
+                    logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} captured {len(ai_messages) - previous_count} step message(s); total #{len(ai_messages)}")
 
             logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} completed async execution")
-            result.token_usage_records = collector.snapshot_records()
+            token_usage_records = collector.snapshot_records()
+            final_result: str | None = None
 
             if final_state is None:
                 logger.warning(f"[trace={self.trace_id}] Subagent {self.config.name} no final state")
-                result.result = "No response generated"
+                final_result = "No response generated"
             else:
                 # Extract the final message - find the last AIMessage
                 messages = final_state.get("messages", [])
@@ -528,7 +674,7 @@ class SubagentExecutor:
                     content = last_ai_message.content
                     # Handle both str and list content types for the final result
                     if isinstance(content, str):
-                        result.result = content
+                        final_result = content
                     elif isinstance(content, list):
                         # Extract text from list of content blocks for final result only.
                         # Concatenate raw string chunks directly, but preserve separation
@@ -547,16 +693,16 @@ class SubagentExecutor:
                                     text_parts.append(text_val)
                         if pending_str_parts:
                             text_parts.append("".join(pending_str_parts))
-                        result.result = "\n".join(text_parts) if text_parts else "No text content in response"
+                        final_result = "\n".join(text_parts) if text_parts else "No text content in response"
                     else:
-                        result.result = str(content)
+                        final_result = str(content)
                 elif messages:
                     # Fallback: use the last message if no AIMessage found
                     last_message = messages[-1]
                     logger.warning(f"[trace={self.trace_id}] Subagent {self.config.name} no AIMessage found, using last message: {type(last_message)}")
                     raw_content = last_message.content if hasattr(last_message, "content") else str(last_message)
                     if isinstance(raw_content, str):
-                        result.result = raw_content
+                        final_result = raw_content
                     elif isinstance(raw_content, list):
                         parts = []
                         pending_str_parts = []
@@ -572,23 +718,29 @@ class SubagentExecutor:
                                     parts.append(text_val)
                         if pending_str_parts:
                             parts.append("".join(pending_str_parts))
-                        result.result = "\n".join(parts) if parts else "No text content in response"
+                        final_result = "\n".join(parts) if parts else "No text content in response"
                     else:
-                        result.result = str(raw_content)
+                        final_result = str(raw_content)
                 else:
                     logger.warning(f"[trace={self.trace_id}] Subagent {self.config.name} no messages in final state")
-                    result.result = "No response generated"
+                    final_result = "No response generated"
 
-            result.status = SubagentStatus.COMPLETED
-            result.completed_at = datetime.now()
+            if final_result is None:
+                final_result = "No response generated"
+
+            result.try_set_terminal(
+                SubagentStatus.COMPLETED,
+                result=final_result,
+                token_usage_records=token_usage_records,
+            )
 
         except Exception as e:
             logger.exception(f"[trace={self.trace_id}] Subagent {self.config.name} async execution failed")
-            result.status = SubagentStatus.FAILED
-            result.error = str(e)
-            result.completed_at = datetime.now()
-            if collector is not None:
-                result.token_usage_records = collector.snapshot_records()
+            result.try_set_terminal(
+                SubagentStatus.FAILED,
+                error=str(e),
+                token_usage_records=collector.snapshot_records() if collector is not None else None,
+            )
 
         return result
 
@@ -667,11 +819,9 @@ class SubagentExecutor:
                 result = SubagentResult(
                     task_id=str(uuid.uuid4())[:8],
                     trace_id=self.trace_id,
-                    status=SubagentStatus.FAILED,
+                    status=SubagentStatus.RUNNING,
                 )
-            result.status = SubagentStatus.FAILED
-            result.error = str(e)
-            result.completed_at = datetime.now()
+            result.try_set_terminal(SubagentStatus.FAILED, error=str(e))
             return result
 
     def execute_async(self, task: str, task_id: str | None = None) -> str:
@@ -718,29 +868,21 @@ class SubagentExecutor:
                 )
                 try:
                     # Wait for execution with timeout
-                    exec_result = execution_future.result(timeout=self.config.timeout_seconds)
-                    with _background_tasks_lock:
-                        _background_tasks[task_id].status = exec_result.status
-                        _background_tasks[task_id].result = exec_result.result
-                        _background_tasks[task_id].error = exec_result.error
-                        _background_tasks[task_id].completed_at = datetime.now()
-                        _background_tasks[task_id].ai_messages = exec_result.ai_messages
+                    execution_future.result(timeout=self.config.timeout_seconds)
                 except FuturesTimeoutError:
                     logger.error(f"[trace={self.trace_id}] Subagent {self.config.name} execution timed out after {self.config.timeout_seconds}s")
-                    with _background_tasks_lock:
-                        if _background_tasks[task_id].status == SubagentStatus.RUNNING:
-                            _background_tasks[task_id].status = SubagentStatus.TIMED_OUT
-                            _background_tasks[task_id].error = f"Execution timed out after {self.config.timeout_seconds} seconds"
-                            _background_tasks[task_id].completed_at = datetime.now()
                     # Signal cooperative cancellation and cancel the future
                     result_holder.cancel_event.set()
+                    result_holder.try_set_terminal(
+                        SubagentStatus.TIMED_OUT,
+                        error=f"Execution timed out after {self.config.timeout_seconds} seconds",
+                    )
                     execution_future.cancel()
             except Exception as e:
                 logger.exception(f"[trace={self.trace_id}] Subagent {self.config.name} async execution failed")
                 with _background_tasks_lock:
-                    _background_tasks[task_id].status = SubagentStatus.FAILED
-                    _background_tasks[task_id].error = str(e)
-                    _background_tasks[task_id].completed_at = datetime.now()
+                    task_result = _background_tasks[task_id]
+                task_result.try_set_terminal(SubagentStatus.FAILED, error=str(e))
 
         _scheduler_pool.submit(run_task)
         return task_id
@@ -811,13 +953,7 @@ def cleanup_background_task(task_id: str) -> None:
 
         # Only clean up tasks that are in a terminal state to avoid races with
         # the background executor still updating the task entry.
-        is_terminal_status = result.status in {
-            SubagentStatus.COMPLETED,
-            SubagentStatus.FAILED,
-            SubagentStatus.CANCELLED,
-            SubagentStatus.TIMED_OUT,
-        }
-        if is_terminal_status or result.completed_at is not None:
+        if result.status.is_terminal or result.completed_at is not None:
             del _background_tasks[task_id]
             logger.debug("Cleaned up background task: %s", task_id)
         else:

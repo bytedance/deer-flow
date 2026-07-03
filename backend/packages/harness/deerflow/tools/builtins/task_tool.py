@@ -7,9 +7,11 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, Annotated, Any, cast
 
 from langchain.tools import InjectedToolCallId, tool
+from langchain_core.callbacks import BaseCallbackManager
 from langgraph.config import get_stream_writer
 
 from deerflow.config import get_app_config
+from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.sandbox.security import LOCAL_BASH_SUBAGENT_DISABLED_MESSAGE, is_host_bash_allowed
 from deerflow.subagents import SubagentExecutor, get_available_subagent_names, get_subagent_config
 from deerflow.subagents.config import resolve_subagent_model_name
@@ -20,6 +22,7 @@ from deerflow.subagents.executor import (
     request_cancel_background_task,
 )
 from deerflow.tools.types import Runtime
+from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, get_current_trace_id, normalize_trace_id
 
 if TYPE_CHECKING:
     from deerflow.config.app_config import AppConfig
@@ -99,14 +102,30 @@ def _schedule_deferred_subagent_cleanup(task_id: str, trace_id: str, max_polls: 
 
 
 def _find_usage_recorder(runtime: Any) -> Any | None:
-    """Find a callback handler with ``record_external_llm_usage_records`` in the runtime config."""
+    """Find a callback handler with ``record_external_llm_usage_records`` in the runtime config.
+
+    LangChain may pass ``config["callbacks"]`` in three different shapes:
+
+    - ``None`` (no callbacks registered): no recorder.
+    - A plain ``list[BaseCallbackHandler]``: iterate it directly.
+    - A ``BaseCallbackManager`` instance (e.g. ``AsyncCallbackManager`` on async
+      tool runs): managers are not iterable, so we unwrap ``.handlers`` first.
+
+    Any other shape (e.g. a single handler object accidentally passed without a
+    list wrapper) cannot be iterated safely; treat it as "no recorder" rather
+    than raise.
+    """
     if runtime is None:
         return None
     config = getattr(runtime, "config", None)
     if not isinstance(config, dict):
         return None
-    callbacks = config.get("callbacks", [])
+    callbacks = config.get("callbacks")
+    if isinstance(callbacks, BaseCallbackManager):
+        callbacks = callbacks.handlers
     if not callbacks:
+        return None
+    if not isinstance(callbacks, list):
         return None
     for cb in callbacks:
         if hasattr(cb, "record_external_llm_usage_records"):
@@ -236,6 +255,8 @@ async def task_tool(
     thread_id = None
     parent_model = None
     trace_id = None
+    user_id = None
+    deerflow_trace_id = None
     metadata: dict = {}
 
     if runtime is not None:
@@ -251,6 +272,24 @@ async def task_tool(
 
         # Get or generate trace_id for distributed tracing
         trace_id = metadata.get("trace_id") or str(uuid.uuid4())[:8]
+
+    # Get user_id for tracing (uses standard resolution order)
+    user_id = resolve_runtime_user_id(runtime)
+
+    # Propagate the authenticated runtime context so delegated tool calls are
+    # evaluated by GuardrailMiddleware with the same identity/attribution as
+    # the lead agent. Sourced from the server-side context written by
+    # inject_authenticated_user_context (and run_id by the run worker); stays
+    # None when absent (e.g. internal-auth runs) so guardrail behavior is
+    # unchanged. Without this, role-aware policy silently mis-attributes any
+    # tool call delegated to a subagent (user_role=None).
+    parent_context = runtime.context if runtime is not None else None
+    parent_context = parent_context if isinstance(parent_context, dict) else {}
+    user_role = parent_context.get("user_role")
+    oauth_provider = parent_context.get("oauth_provider")
+    oauth_id = parent_context.get("oauth_id")
+    run_id = parent_context.get("run_id")
+    deerflow_trace_id = normalize_trace_id(parent_context.get(DEERFLOW_TRACE_METADATA_KEY)) or normalize_trace_id(metadata.get(DEERFLOW_TRACE_METADATA_KEY)) or get_current_trace_id()
 
     parent_available_skills = metadata.get("available_skills")
     if parent_available_skills is not None:
@@ -289,6 +328,12 @@ async def task_tool(
         "thread_data": thread_data,
         "thread_id": thread_id,
         "trace_id": trace_id,
+        "user_id": user_id,
+        "user_role": user_role,
+        "oauth_provider": oauth_provider,
+        "oauth_id": oauth_id,
+        "run_id": run_id,
+        "deerflow_trace_id": deerflow_trace_id,
     }
     if resolved_app_config is not None:
         executor_kwargs["app_config"] = resolved_app_config
@@ -383,9 +428,6 @@ async def task_tool(
             # Polling timeout as a safety net (in case thread pool timeout doesn't work)
             # Set to execution timeout + 60s buffer, in 5s poll intervals
             # This catches edge cases where the background task gets stuck
-            # Note: We don't call cleanup_background_task here because the task may
-            # still be running in the background. The cleanup will happen when the
-            # executor completes and sets a terminal status.
             if poll_count > max_poll_count:
                 timeout_minutes = config.timeout_seconds // 60
                 logger.error(f"[trace={trace_id}] Task {task_id} polling timed out after {poll_count} polls (should have been caught by thread pool timeout)")
@@ -393,6 +435,11 @@ async def task_tool(
                 usage = _summarize_usage(getattr(result, "token_usage_records", None))
                 _cache_subagent_usage(tool_call_id, usage, enabled=cache_token_usage)
                 writer({"type": "task_timed_out", "task_id": task_id, "usage": usage})
+                # The task may still be running in the background. Signal cooperative
+                # cancellation and schedule deferred cleanup to remove the entry from
+                # _background_tasks once the background thread reaches a terminal state.
+                request_cancel_background_task(task_id)
+                _schedule_deferred_subagent_cleanup(task_id, trace_id, max_poll_count)
                 return f"Task polling timed out after {timeout_minutes} minutes. This may indicate the background task is stuck. Status: {result.status.value}"
     except asyncio.CancelledError:
         # Signal the background subagent thread to stop cooperatively.

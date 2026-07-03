@@ -1,4 +1,5 @@
 import base64
+import errno
 import logging
 import shlex
 import threading
@@ -6,10 +7,13 @@ import uuid
 
 from agent_sandbox import Sandbox as AioSandboxClient
 
+from deerflow.config.paths import VIRTUAL_PATH_PREFIX
 from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.search import GrepMatch, path_matches, should_ignore_path, truncate_line
 
 logger = logging.getLogger(__name__)
+
+_MAX_DOWNLOAD_SIZE = 100 * 1024 * 1024  # 100 MB
 
 _ERROR_OBSERVATION_SIGNATURE = "'ErrorObservation' object has no attribute 'exit_code'"
 
@@ -35,10 +39,62 @@ class AioSandbox(Sandbox):
         self._client = AioSandboxClient(base_url=base_url, timeout=600)
         self._home_dir = home_dir
         self._lock = threading.Lock()
+        self._closed = False
 
     @property
     def base_url(self) -> str:
         return self._base_url
+
+    def close(self) -> None:
+        """Best-effort close of the host-side HTTP client owned by this sandbox.
+
+        The agent_sandbox SDK is Fern-generated and exposes no ``close()`` /
+        ``__exit__``, so we reach the socket-owning ``httpx.Client`` explicitly
+        through its attribute chain::
+
+            Sandbox._client_wrapper        -> SyncClientWrapper
+                .httpx_client              -> Fern HttpClient (a wrapper, NOT httpx.Client)
+                    .httpx_client          -> httpx.Client     <- the real socket owner
+
+        Closing it releases pooled sockets so long-running provider lifecycles
+        do not accumulate unreclaimed host-side resources (#2872).
+
+        Resolution is most-specific-first with graceful degradation: if a future
+        SDK adds a top-level ``Sandbox.close()`` it is picked up automatically
+        without changing this code. Idempotent, thread-safe, and non-fatal:
+        failures during teardown are logged and swallowed so provider/backend
+        cleanup is never blocked.
+        """
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            client = self._client
+            # Drop the reference under the lock for use-after-close safety: any
+            # later command on this instance fails loudly instead of reusing a
+            # half-closed client.
+            self._client = None
+
+        if client is None:
+            return
+
+        # Walk from the real httpx.Client up to the top-level client, picking the
+        # first object that actually exposes close().
+        wrapper = getattr(client, "_client_wrapper", None)
+        fern_http = getattr(wrapper, "httpx_client", None)
+        real_httpx = getattr(fern_http, "httpx_client", None)
+        target = next(
+            (c for c in (real_httpx, fern_http, client) if c is not None and hasattr(c, "close")),
+            None,
+        )
+        if target is None:
+            logger.debug("AioSandbox %s: no closable client found, nothing to release", self.id)
+            return
+
+        try:
+            target.close()
+        except Exception as e:
+            logger.warning(f"Error closing AioSandbox client for {self.id}: {e}")
 
     @property
     def home_dir(self) -> str:
@@ -54,7 +110,22 @@ class AioSandbox(Sandbox):
     # default.
     _DEFAULT_NO_CHANGE_TIMEOUT = 600
 
-    def execute_command(self, command: str) -> str:
+    # Wall-clock hard timeout for env-bearing commands routed through bash.exec.
+    # The bash.exec API exposes no idle/no-change timeout (unlike
+    # shell.exec_command's ``no_change_timeout`` on the legacy path), so
+    # env-bearing commands are bounded by total elapsed wall-clock time, not
+    # time-since-last-output. Kept at the same numeric value as the legacy idle
+    # budget so the two paths broadly agree on how long a single command may
+    # run; a future SDK that exposes an idle timeout on bash.exec should switch
+    # this call site to it.
+    _DEFAULT_HARD_TIMEOUT = 600.0
+
+    def execute_command(
+        self,
+        command: str,
+        env: dict[str, str] | None = None,
+        timeout: float | None = None,
+    ) -> str:
         """Execute a shell command in the sandbox.
 
         Uses a lock to serialize concurrent requests. The AIO sandbox
@@ -66,24 +137,100 @@ class AioSandbox(Sandbox):
 
         Args:
             command: The command to execute.
+            env: Optional per-call environment variables (request-scoped secrets,
+                issue #3861). When provided, the command runs via the ``bash.exec``
+                API (which supports per-command env) on a fresh auto-created session
+                so the secrets are scoped to this single command and never persist;
+                secret values travel in the structured ``env`` field, never in the
+                command string. When ``None`` the legacy persistent-shell path runs
+                unchanged.
+            timeout: Optional per-call timeout. The current sandbox SDK does not
+                expose a command-level timeout distinct from its client/request
+                timeout, so DeerFlow keeps using the backend's default here.
 
         Returns:
             The output of the command.
         """
+        del timeout
+        if env:
+            return self._execute_with_env(command, env)
         with self._lock:
             try:
                 result = self._client.shell.exec_command(command=command, no_change_timeout=self._DEFAULT_NO_CHANGE_TIMEOUT)
                 output = result.data.output if result.data else ""
 
                 if output and _ERROR_OBSERVATION_SIGNATURE in output:
-                    logger.warning("ErrorObservation detected in sandbox output, retrying with a fresh session")
+                    logger.warning("ErrorObservation detected in sandbox output, retrying on a fresh session")
+                    # exec_command only auto-creates a session when called with
+                    # no id, so the recovery session must be created explicitly
+                    # before we target it on retry.
                     fresh_id = str(uuid.uuid4())
-                    result = self._client.shell.exec_command(command=command, id=fresh_id, no_change_timeout=self._DEFAULT_NO_CHANGE_TIMEOUT)
-                    output = result.data.output if result.data else ""
+                    self._client.shell.create_session(id=fresh_id)
+                    try:
+                        result = self._client.shell.exec_command(command=command, id=fresh_id, no_change_timeout=self._DEFAULT_NO_CHANGE_TIMEOUT)
+                        output = result.data.output if result.data else ""
+                    finally:
+                        # Release the one-shot recovery session, best-effort, so
+                        # repeated corruption can't accumulate sessions.
+                        try:
+                            self._client.shell.cleanup_session(fresh_id)
+                        except Exception as cleanup_error:
+                            logger.warning(f"Failed to release recovery session {fresh_id}: {cleanup_error}")
 
                 return output if output else "(no output)"
             except Exception as e:
                 logger.error(f"Failed to execute command in sandbox: {e}")
+                return f"Error: {e}"
+
+    def _execute_with_env(self, command: str, env: dict[str, str]) -> str:
+        """Execute a command with per-call environment variables injected.
+
+        The persistent-shell ``shell.exec_command`` API has no env parameter, so
+        injected commands use the ``bash.exec`` API which accepts per-command env.
+        Each call lets the sandbox auto-create a fresh session (no ``session_id``),
+        so injected request-scoped secrets are scoped to this command and never
+        persist across calls. Secret values travel in the structured ``env`` field,
+        never in the command string.
+
+        Trade-off of the fresh-session choice: consecutive env-bearing bash calls
+        within the same skill do not share session state (cwd, sourced venv,
+        exported variables). This mirrors the LocalSandbox model (each call is a
+        fresh subprocess) and is intentional — a shared session_id would let
+        request-scoped secrets ride the session env into later commands, which the
+        SDK does not contractually forbid. Skills that need setup must fold it into
+        a single command (e.g. ``cd /mnt/user-data/workspace && source .venv/bin/activate && python run.py``).
+
+        The ``_ERROR_OBSERVATION_SIGNATURE`` recovery contract is shared with the
+        legacy persistent-shell path: if the (unlikely, since each call is a fresh
+        session) corruption marker shows up, the call is retried on another fresh
+        session rather than returned verbatim.
+        """
+        output = self._run_bash_exec(command, env)
+        if output and _ERROR_OBSERVATION_SIGNATURE in output:
+            logger.warning("ErrorObservation detected in bash.exec output, retrying on a fresh session")
+            retried = self._run_bash_exec(command, env)
+            if retried and _ERROR_OBSERVATION_SIGNATURE not in retried:
+                return retried
+        return output
+
+    def _run_bash_exec(self, command: str, env: dict[str, str]) -> str:
+        """Single bash.exec invocation with injected env (one fresh session)."""
+        with self._lock:
+            try:
+                result = self._client.bash.exec(
+                    command=command,
+                    env=env,
+                    hard_timeout=self._DEFAULT_HARD_TIMEOUT,
+                )
+                data = result.data if result else None
+                stdout = (data.stdout or "") if data else ""
+                stderr = (data.stderr or "") if data else ""
+                output = stdout
+                if stderr:
+                    output += f"\nStd Error:\n{stderr}" if output else stderr
+                return output if output else "(no output)"
+            except Exception as e:
+                logger.error(f"Failed to execute command with injected env in sandbox: {e}")
                 return f"Error: {e}"
 
     def read_file(self, path: str) -> str:
@@ -101,6 +248,49 @@ class AioSandbox(Sandbox):
         except Exception as e:
             logger.error(f"Failed to read file in sandbox: {e}")
             return f"Error: {e}"
+
+    def download_file(self, path: str) -> bytes:
+        """Download file bytes from the sandbox.
+
+        Raises:
+            PermissionError: If the path contains '..' traversal segments or is
+                outside ``VIRTUAL_PATH_PREFIX``.
+            OSError: If the file cannot be retrieved from the sandbox.
+        """
+        # Reject path traversal before sending to the container API.
+        # LocalSandbox gets this implicitly via _resolve_path;
+        # here the path is forwarded verbatim so we must check explicitly.
+        normalised = path.replace("\\", "/")
+        for segment in normalised.split("/"):
+            if segment == "..":
+                logger.error(f"Refused download due to path traversal: {path}")
+                raise PermissionError(f"Access denied: path traversal detected in '{path}'")
+
+        stripped_path = normalised.lstrip("/")
+        allowed_prefix = VIRTUAL_PATH_PREFIX.lstrip("/")
+        if stripped_path != allowed_prefix and not stripped_path.startswith(f"{allowed_prefix}/"):
+            logger.error("Refused download outside allowed directory: path=%s, allowed_prefix=%s", path, VIRTUAL_PATH_PREFIX)
+            raise PermissionError(f"Access denied: path must be under '{VIRTUAL_PATH_PREFIX}': '{path}'")
+
+        with self._lock:
+            try:
+                chunks: list[bytes] = []
+                total = 0
+                for chunk in self._client.file.download_file(path=path):
+                    total += len(chunk)
+                    if total > _MAX_DOWNLOAD_SIZE:
+                        raise OSError(
+                            errno.EFBIG,
+                            f"File exceeds maximum download size of {_MAX_DOWNLOAD_SIZE} bytes",
+                            path,
+                        )
+                    chunks.append(chunk)
+                return b"".join(chunks)
+            except OSError:
+                raise
+            except Exception as e:
+                logger.error(f"Failed to download file in sandbox: {e}")
+                raise OSError(f"Failed to download file '{path}' from sandbox: {e}") from e
 
     def list_dir(self, path: str, max_depth: int = 2) -> list[str]:
         """List the contents of a directory in the sandbox.

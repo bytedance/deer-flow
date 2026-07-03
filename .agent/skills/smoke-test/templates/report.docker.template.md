@@ -78,7 +78,7 @@
 - [x] Container status - {{status_containers}}
 - [x] Frontend service - {{status_frontend}}
 - [x] API Gateway - {{status_api_gateway}}
-- [x] LangGraph service - {{status_langgraph}}
+- [x] LangGraph-compatible Gateway API - {{status_langgraph}}
 
 **Phase Status**: {{stage5_status}}
 
@@ -147,7 +147,6 @@ Commit Message: {{git_commit_message}}
 | deer-flow-nginx | {{nginx_status}} | {{nginx_uptime}} |
 | deer-flow-frontend | {{frontend_status}} | {{frontend_uptime}} |
 | deer-flow-gateway | {{gateway_status}} | {{gateway_uptime}} |
-| deer-flow-langgraph | {{langgraph_status}} | {{langgraph_uptime}} |
 
 ---
 

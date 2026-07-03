@@ -11,12 +11,13 @@ import json
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import func, select, update
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.persistence.run.model import RunRow
 from deerflow.runtime.runs.store.base import RunStore
 from deerflow.runtime.user_context import AUTO, _AutoSentinel, resolve_user_id
+from deerflow.utils.time import coerce_iso
 
 
 class RunRepository(RunStore):
@@ -68,11 +69,13 @@ class RunRepository(RunStore):
         # Remap JSON columns to match RunStore interface
         d["metadata"] = d.pop("metadata_json", {})
         d["kwargs"] = d.pop("kwargs_json", {})
-        # Convert datetime to ISO string for consistency with MemoryRunStore
+        # Convert datetime to ISO string for consistency with MemoryRunStore.
+        # SQLite drops tzinfo on read despite ``DateTime(timezone=True)`` —
+        # ``coerce_iso`` normalizes naive datetimes as UTC.
         for key in ("created_at", "updated_at"):
             val = d.get(key)
             if isinstance(val, datetime):
-                d[key] = val.isoformat()
+                d[key] = coerce_iso(val)
         return d
 
     async def put(
@@ -91,25 +94,35 @@ class RunRepository(RunStore):
         created_at=None,
         follow_up_to_run_id=None,
     ):
+        """Insert or update a run row.
+
+        ``RunManager`` retries ``put`` after transient SQLite failures.  Making
+        this operation idempotent prevents a successful-but-unacknowledged first
+        commit from turning the retry into a primary-key failure.
+        """
         resolved_user_id = resolve_user_id(user_id, method_name="RunRepository.put")
         now = datetime.now(UTC)
-        row = RunRow(
-            run_id=run_id,
-            thread_id=thread_id,
-            assistant_id=assistant_id,
-            user_id=resolved_user_id,
-            model_name=self._normalize_model_name(model_name),
-            status=status,
-            multitask_strategy=multitask_strategy,
-            metadata_json=self._safe_json(metadata) or {},
-            kwargs_json=self._safe_json(kwargs) or {},
-            error=error,
-            follow_up_to_run_id=follow_up_to_run_id,
-            created_at=datetime.fromisoformat(created_at) if created_at else now,
-            updated_at=now,
-        )
+        created = datetime.fromisoformat(created_at) if created_at else now
+        values = {
+            "thread_id": thread_id,
+            "assistant_id": assistant_id,
+            "user_id": resolved_user_id,
+            "model_name": self._normalize_model_name(model_name),
+            "status": status,
+            "multitask_strategy": multitask_strategy,
+            "metadata_json": self._safe_json(metadata) or {},
+            "kwargs_json": self._safe_json(kwargs) or {},
+            "error": error,
+            "follow_up_to_run_id": follow_up_to_run_id,
+            "updated_at": now,
+        }
         async with self._sf() as session:
-            session.add(row)
+            row = await session.get(RunRow, run_id)
+            if row is None:
+                session.add(RunRow(run_id=run_id, created_at=created, **values))
+            else:
+                for key, value in values.items():
+                    setattr(row, key, value)
             await session.commit()
 
     async def get(
@@ -143,12 +156,18 @@ class RunRepository(RunStore):
             result = await session.execute(stmt)
             return [self._row_to_dict(r) for r in result.scalars()]
 
-    async def update_status(self, run_id, status, *, error=None):
+    async def update_status(self, run_id, status, *, error=None) -> bool:
         values: dict[str, Any] = {"status": status, "updated_at": datetime.now(UTC)}
         if error is not None:
             values["error"] = error
         async with self._sf() as session:
-            await session.execute(update(RunRow).where(RunRow.run_id == run_id).values(**values))
+            result = await session.execute(update(RunRow).where(RunRow.run_id == run_id).values(**values))
+            await session.commit()
+            return result.rowcount != 0
+
+    async def update_model_name(self, run_id, model_name):
+        async with self._sf() as session:
+            await session.execute(update(RunRow).where(RunRow.run_id == run_id).values(model_name=self._normalize_model_name(model_name), updated_at=datetime.now(UTC)))
             await session.commit()
 
     async def delete(
@@ -179,6 +198,26 @@ class RunRepository(RunStore):
             result = await session.execute(stmt)
             return [self._row_to_dict(r) for r in result.scalars()]
 
+    async def list_inflight(self, *, before=None):
+        """Return persisted active runs for startup recovery."""
+        if before is None:
+            before_dt = datetime.now(UTC)
+        elif isinstance(before, datetime):
+            before_dt = before
+        else:
+            before_dt = datetime.fromisoformat(before)
+        stmt = (
+            select(RunRow)
+            .where(
+                RunRow.status.in_(("pending", "running")),
+                RunRow.created_at <= before_dt,
+            )
+            .order_by(RunRow.created_at.asc())
+        )
+        async with self._sf() as session:
+            result = await session.execute(stmt)
+            return [self._row_to_dict(r) for r in result.scalars()]
+
     async def update_run_completion(
         self,
         run_id: str,
@@ -191,12 +230,16 @@ class RunRepository(RunStore):
         lead_agent_tokens: int = 0,
         subagent_tokens: int = 0,
         middleware_tokens: int = 0,
+        token_usage_by_model: dict[str, dict[str, int]] | None = None,
         message_count: int = 0,
         last_ai_message: str | None = None,
         first_human_message: str | None = None,
         error: str | None = None,
-    ) -> None:
-        """Update status + token usage + convenience fields on run completion."""
+    ) -> bool:
+        """Update status + token usage + convenience fields on run completion.
+
+        Returns ``False`` when no run row matched the requested ``run_id``.
+        """
         values: dict[str, Any] = {
             "status": status,
             "total_input_tokens": total_input_tokens,
@@ -206,6 +249,7 @@ class RunRepository(RunStore):
             "lead_agent_tokens": lead_agent_tokens,
             "subagent_tokens": subagent_tokens,
             "middleware_tokens": middleware_tokens,
+            "token_usage_by_model": self._safe_json(token_usage_by_model) or {},
             "message_count": message_count,
             "updated_at": datetime.now(UTC),
         }
@@ -216,29 +260,79 @@ class RunRepository(RunStore):
         if error is not None:
             values["error"] = error
         async with self._sf() as session:
-            await session.execute(update(RunRow).where(RunRow.run_id == run_id).values(**values))
+            result = await session.execute(update(RunRow).where(RunRow.run_id == run_id).values(**values))
+            await session.commit()
+            return result.rowcount != 0
+
+    async def update_run_progress(
+        self,
+        run_id: str,
+        *,
+        total_input_tokens: int | None = None,
+        total_output_tokens: int | None = None,
+        total_tokens: int | None = None,
+        llm_call_count: int | None = None,
+        lead_agent_tokens: int | None = None,
+        subagent_tokens: int | None = None,
+        middleware_tokens: int | None = None,
+        token_usage_by_model: dict[str, dict[str, int]] | None = None,
+        message_count: int | None = None,
+        last_ai_message: str | None = None,
+        first_human_message: str | None = None,
+    ) -> None:
+        """Update token usage + convenience fields while a run is still active."""
+        values: dict[str, Any] = {"updated_at": datetime.now(UTC)}
+        optional_counters = {
+            "total_input_tokens": total_input_tokens,
+            "total_output_tokens": total_output_tokens,
+            "total_tokens": total_tokens,
+            "llm_call_count": llm_call_count,
+            "lead_agent_tokens": lead_agent_tokens,
+            "subagent_tokens": subagent_tokens,
+            "middleware_tokens": middleware_tokens,
+            "message_count": message_count,
+        }
+        for key, value in optional_counters.items():
+            if value is not None:
+                values[key] = value
+        if token_usage_by_model is not None:
+            values["token_usage_by_model"] = self._safe_json(token_usage_by_model) or {}
+        if last_ai_message is not None:
+            values["last_ai_message"] = last_ai_message[:2000]
+        if first_human_message is not None:
+            values["first_human_message"] = first_human_message[:2000]
+        async with self._sf() as session:
+            await session.execute(update(RunRow).where(RunRow.run_id == run_id, RunRow.status == "running").values(**values))
             await session.commit()
 
-    async def aggregate_tokens_by_thread(self, thread_id: str) -> dict[str, Any]:
-        """Aggregate token usage via a single SQL GROUP BY query."""
-        _completed = RunRow.status.in_(("success", "error"))
-        _thread = RunRow.thread_id == thread_id
-        model_name = func.coalesce(RunRow.model_name, "unknown")
+    async def aggregate_tokens_by_thread(self, thread_id: str, *, include_active: bool = False) -> dict[str, Any]:
+        """Aggregate token usage for a thread.
 
-        stmt = (
-            select(
-                model_name.label("model"),
-                func.count().label("runs"),
-                func.coalesce(func.sum(RunRow.total_tokens), 0).label("total_tokens"),
-                func.coalesce(func.sum(RunRow.total_input_tokens), 0).label("total_input_tokens"),
-                func.coalesce(func.sum(RunRow.total_output_tokens), 0).label("total_output_tokens"),
-                func.coalesce(func.sum(RunRow.lead_agent_tokens), 0).label("lead_agent"),
-                func.coalesce(func.sum(RunRow.subagent_tokens), 0).label("subagent"),
-                func.coalesce(func.sum(RunRow.middleware_tokens), 0).label("middleware"),
-            )
-            .where(_thread, _completed)
-            .group_by(model_name)
-        )
+        ``by_model`` is reduced in Python from each row's ``token_usage_by_model``
+        JSON column so subagent / middleware tokens land on the model that
+        actually produced them (issue #3645). Rows written before that column
+        existed fall back to ``RunRow.model_name`` + ``RunRow.total_tokens``,
+        preserving the legacy lead-only behavior instead of dropping the data.
+
+        Headline totals (``total_tokens``, ``total_input_tokens``,
+        ``total_output_tokens``) and the ``by_caller`` bucket are summed from
+        their own columns and are therefore unaffected by the JSON column being
+        empty.
+        """
+        statuses = ("success", "error", "running") if include_active else ("success", "error")
+        _completed = RunRow.status.in_(statuses)
+        _thread = RunRow.thread_id == thread_id
+
+        stmt = select(
+            RunRow.model_name,
+            RunRow.total_tokens,
+            RunRow.total_input_tokens,
+            RunRow.total_output_tokens,
+            RunRow.lead_agent_tokens,
+            RunRow.subagent_tokens,
+            RunRow.middleware_tokens,
+            RunRow.token_usage_by_model,
+        ).where(_thread, _completed)
 
         async with self._sf() as session:
             rows = (await session.execute(stmt)).all()
@@ -247,14 +341,28 @@ class RunRepository(RunStore):
         lead_agent = subagent = middleware = 0
         by_model: dict[str, dict] = {}
         for r in rows:
-            by_model[r.model] = {"tokens": r.total_tokens, "runs": r.runs}
+            total_runs += 1
             total_tokens += r.total_tokens
             total_input += r.total_input_tokens
             total_output += r.total_output_tokens
-            total_runs += r.runs
-            lead_agent += r.lead_agent
-            subagent += r.subagent
-            middleware += r.middleware
+            lead_agent += r.lead_agent_tokens
+            subagent += r.subagent_tokens
+            middleware += r.middleware_tokens
+
+            # ``or {}`` covers rows written before ``token_usage_by_model``
+            # existed (the column is NULL on a manual ALTER ADD COLUMN without
+            # backfill); fresh rows always carry the journal-produced dict.
+            usage_by_model = r.token_usage_by_model or {}
+            if usage_by_model:
+                for model, usage in usage_by_model.items():
+                    entry = by_model.setdefault(model, {"tokens": 0, "runs": 0})
+                    entry["tokens"] += usage.get("total_tokens", 0)
+                    entry["runs"] += 1
+            else:
+                model = r.model_name or "unknown"
+                entry = by_model.setdefault(model, {"tokens": 0, "runs": 0})
+                entry["tokens"] += r.total_tokens
+                entry["runs"] += 1
 
         return {
             "total_tokens": total_tokens,

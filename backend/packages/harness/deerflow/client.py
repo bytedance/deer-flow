@@ -16,9 +16,11 @@ Usage:
 """
 
 import asyncio
+import concurrent.futures
 import json
 import logging
 import mimetypes
+import os
 import shutil
 import tempfile
 import uuid
@@ -32,16 +34,20 @@ from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 
-from deerflow.agents.lead_agent.agent import _build_middlewares
+from deerflow.agents.lead_agent.agent import build_middlewares
 from deerflow.agents.lead_agent.prompt import apply_prompt_template
 from deerflow.agents.thread_state import ThreadState
 from deerflow.config.agents_config import AGENT_NAME_PATTERN
-from deerflow.config.app_config import get_app_config, reload_app_config
+from deerflow.config.app_config import get_app_config, is_trace_correlation_enabled, reload_app_config
 from deerflow.config.extensions_config import ExtensionsConfig, SkillStateConfig, get_extensions_config, reload_extensions_config
 from deerflow.config.paths import get_paths
 from deerflow.models import create_chat_model
+from deerflow.runtime.goal import DEFAULT_MAX_GOAL_CONTINUATIONS, build_goal_state, goal_thread_lock, read_thread_goal, write_thread_goal
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.skills.storage import get_or_new_skill_storage
+from deerflow.tools.builtins.tool_search import assemble_deferred_tools
+from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, generate_trace_id, get_current_trace_id, reset_current_trace_id, set_current_trace_id
+from deerflow.tracing import build_tracing_callbacks, inject_langfuse_metadata
 from deerflow.uploads.manager import (
     claim_unique_filename,
     delete_file_safe,
@@ -54,6 +60,19 @@ from deerflow.uploads.manager import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _run_async_from_sync(coro):
+    """Run an async helper from this synchronous client API."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop is not None and loop.is_running():
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            return executor.submit(asyncio.run, coro).result()
+    return asyncio.run(coro)
 
 
 StreamEventType = Literal["values", "messages-tuple", "custom", "end"]
@@ -123,6 +142,7 @@ class DeerFlowClient:
         agent_name: str | None = None,
         available_skills: set[str] | None = None,
         middlewares: Sequence[AgentMiddleware] | None = None,
+        environment: str | None = None,
     ):
         """Initialize the client.
 
@@ -140,6 +160,12 @@ class DeerFlowClient:
             agent_name: Name of the agent to use.
             available_skills: Optional set of skill names to make available. If None (default), all scanned skills are available.
             middlewares: Optional list of custom middlewares to inject into the agent.
+            environment: Deployment environment label that ends up in
+                ``langfuse_tags`` (e.g. ``"production"`` / ``"staging"``).
+                When ``None`` the worker/client falls back to the
+                ``DEER_FLOW_ENV`` or ``ENVIRONMENT`` env vars. Pass an
+                explicit value for programmatic callers that do not want
+                env-var coupling.
         """
         if config_path is not None:
             reload_app_config(config_path)
@@ -156,6 +182,7 @@ class DeerFlowClient:
         self._agent_name = agent_name
         self._available_skills = set(available_skills) if available_skills is not None else None
         self._middlewares = list(middlewares) if middlewares else []
+        self._environment = environment
 
         # Lazy agent — created on first call, recreated when config changes.
         self._agent = None
@@ -227,15 +254,30 @@ class DeerFlowClient:
         subagent_enabled = cfg.get("subagent_enabled", False)
         max_concurrent_subagents = cfg.get("max_concurrent_subagents", 3)
 
+        tools = self._get_tools(model_name=model_name, subagent_enabled=subagent_enabled)
+        final_tools, deferred_setup = assemble_deferred_tools(tools, enabled=self._app_config.tool_search.enabled)
         kwargs: dict[str, Any] = {
-            "model": create_chat_model(name=model_name, thinking_enabled=thinking_enabled),
-            "tools": self._get_tools(model_name=model_name, subagent_enabled=subagent_enabled),
-            "middleware": _build_middlewares(config, model_name=model_name, agent_name=self._agent_name, custom_middlewares=self._middlewares),
+            # attach_tracing=False because ``stream()`` injects tracing
+            # callbacks at the graph invocation root so a single embedded run
+            # produces one trace with correct session_id / user_id propagation.
+            # Attaching them again on the model would emit duplicate spans.
+            "model": create_chat_model(name=model_name, thinking_enabled=thinking_enabled, attach_tracing=False),
+            "tools": final_tools,
+            "middleware": build_middlewares(
+                config,
+                model_name=model_name,
+                agent_name=self._agent_name,
+                available_skills=self._available_skills,
+                custom_middlewares=self._middlewares,
+                app_config=self._app_config,
+                deferred_setup=deferred_setup,
+            ),
             "system_prompt": apply_prompt_template(
                 subagent_enabled=subagent_enabled,
                 max_concurrent_subagents=max_concurrent_subagents,
                 agent_name=self._agent_name,
                 available_skills=self._available_skills,
+                deferred_names=deferred_setup.deferred_names,
             ),
             "state_schema": ThreadState,
         }
@@ -384,6 +426,52 @@ class DeerFlowClient:
     # Public API — threads
     # ------------------------------------------------------------------
 
+    def _get_thread_checkpointer(self):
+        checkpointer = self._checkpointer
+        if checkpointer is None:
+            from deerflow.runtime.checkpointer.provider import get_checkpointer
+
+            checkpointer = get_checkpointer()
+        return checkpointer
+
+    def get_goal(self, thread_id: str) -> dict:
+        """Return the active goal for a thread, if any."""
+        checkpointer = self._get_thread_checkpointer()
+        goal = _run_async_from_sync(read_thread_goal(checkpointer, thread_id))
+        return {"goal": goal}
+
+    def set_goal(
+        self,
+        thread_id: str,
+        objective: str,
+        *,
+        max_continuations: int = DEFAULT_MAX_GOAL_CONTINUATIONS,
+    ) -> dict:
+        """Set or replace a thread-scoped goal."""
+        checkpointer = self._get_thread_checkpointer()
+        goal = build_goal_state(objective, max_continuations=max_continuations)
+
+        async def _set_goal() -> None:
+            async with goal_thread_lock(thread_id):
+                await write_thread_goal(checkpointer, thread_id, goal, create_if_missing=True)
+
+        _run_async_from_sync(_set_goal())
+        return {"goal": goal}
+
+    def clear_goal(self, thread_id: str) -> dict:
+        """Clear the active goal for a thread."""
+        checkpointer = self._get_thread_checkpointer()
+
+        async def _clear_goal() -> None:
+            async with goal_thread_lock(thread_id):
+                await write_thread_goal(checkpointer, thread_id, None)
+
+        try:
+            _run_async_from_sync(_clear_goal())
+        except LookupError:
+            pass
+        return {"goal": None}
+
     def list_threads(self, limit: int = 10) -> dict:
         """List the recent N threads.
 
@@ -394,11 +482,7 @@ class DeerFlowClient:
             Dict with "thread_list" key containing list of thread info dicts,
             sorted by thread creation time descending.
         """
-        checkpointer = self._checkpointer
-        if checkpointer is None:
-            from deerflow.runtime.checkpointer.provider import get_checkpointer
-
-            checkpointer = get_checkpointer()
+        checkpointer = self._get_thread_checkpointer()
 
         thread_info_map = {}
 
@@ -449,11 +533,7 @@ class DeerFlowClient:
         Returns:
             Dict containing the thread's full checkpoint history.
         """
-        checkpointer = self._checkpointer
-        if checkpointer is None:
-            from deerflow.runtime.checkpointer.provider import get_checkpointer
-
-            checkpointer = get_checkpointer()
+        checkpointer = self._get_thread_checkpointer()
 
         config = {"configurable": {"thread_id": thread_id}}
         checkpoints = []
@@ -487,6 +567,61 @@ class DeerFlowClient:
     # ------------------------------------------------------------------
 
     def stream(
+        self,
+        message: str,
+        *,
+        thread_id: str | None = None,
+        **kwargs,
+    ) -> Generator[StreamEvent, None, None]:
+        """Stream a conversation turn with a DeerFlow request trace context.
+
+        Mirrors the Gateway ``TraceMiddleware`` gate: when
+        ``logging.enhance.enabled`` is off the embedded client does **not**
+        create a fresh request-level trace id, so Langfuse traces from
+        embedded / TUI / CLI callers keep their pre-enhancement schema and
+        do not gain a ``metadata.deerflow_trace_id`` key by default. A
+        caller that explicitly binds its own trace via
+        :func:`deerflow.trace_context.request_trace_context` still opts in:
+        the inner ``get_current_trace_id()`` read propagates that value
+        into Langfuse metadata regardless of the flag.
+        """
+        if not is_trace_correlation_enabled(self._app_config):
+            yield from self._stream_without_trace_context(message, thread_id=thread_id, **kwargs)
+            return
+
+        # Resolve the trace id once, without mutating the caller's context.
+        # Inherits an ambient id if the caller opted in via
+        # ``request_trace_context``; otherwise mints a fresh one.
+        trace_id = get_current_trace_id() or generate_trace_id()
+
+        # Bind the trace id only around each ``next()`` step, never across a
+        # ``yield``. ``stream()`` is a sync generator, which shares the
+        # caller's context — a ``with ensure_trace_context(): yield from ...``
+        # would (1) leak the id into the caller's context between yields and
+        # (2) risk ``ValueError: Token was created in a different Context``
+        # when GC finalizes an abandoned generator in a different context.
+        # Per-step set/reset keeps LangGraph node execution and its log
+        # records inside the binding while returning control to the caller
+        # with the ContextVar restored.
+        inner = self._stream_without_trace_context(message, thread_id=thread_id, **kwargs)
+        _EXHAUSTED = object()
+        try:
+            while True:
+                token = set_current_trace_id(trace_id)
+                try:
+                    try:
+                        event = next(inner)
+                    except StopIteration:
+                        event = _EXHAUSTED
+                finally:
+                    reset_current_trace_id(token)
+                if event is _EXHAUSTED:
+                    break
+                yield event
+        finally:
+            inner.close()
+
+    def _stream_without_trace_context(
         self,
         message: str,
         *,
@@ -571,10 +706,36 @@ class DeerFlowClient:
             thread_id = str(uuid.uuid4())
 
         config = self._get_runnable_config(thread_id, **kwargs)
+
+        # Inject tracing callbacks and Langfuse trace metadata at the graph
+        # invocation root so the embedded client matches the gateway worker's
+        # behaviour: a single ``stream()`` produces one trace with all node /
+        # LLM / tool calls nested under it, and the trace carries the reserved
+        # ``langfuse_session_id`` / ``langfuse_user_id`` keys that the Langfuse
+        # CallbackHandler lifts onto the root trace's ``sessionId`` / ``userId``.
+        tracing_callbacks = build_tracing_callbacks()
+        if tracing_callbacks:
+            existing_callbacks = list(config.get("callbacks") or [])
+            config["callbacks"] = [*existing_callbacks, *tracing_callbacks]
+
+        configurable = config.get("configurable") or {}
+        deerflow_trace_id = get_current_trace_id()
+        inject_langfuse_metadata(
+            config,
+            thread_id=thread_id,
+            user_id=get_effective_user_id(),
+            assistant_id=self._agent_name or "lead-agent",
+            model_name=configurable.get("model_name") or self._model_name,
+            environment=self._environment or os.environ.get("DEER_FLOW_ENV") or os.environ.get("ENVIRONMENT"),
+            deerflow_trace_id=deerflow_trace_id,
+        )
+
         self._ensure_agent(config)
 
         state: dict[str, Any] = {"messages": [HumanMessage(content=message)]}
         context = {"thread_id": thread_id}
+        if deerflow_trace_id:
+            context[DEERFLOW_TRACE_METADATA_KEY] = deerflow_trace_id
         if self._agent_name:
             context["agent_name"] = self._agent_name
 
@@ -1093,6 +1254,9 @@ class DeerFlowClient:
             "fact_confidence_threshold": config.fact_confidence_threshold,
             "injection_enabled": config.injection_enabled,
             "max_injection_tokens": config.max_injection_tokens,
+            "token_counting": config.token_counting,
+            "guaranteed_categories": config.guaranteed_categories,
+            "guaranteed_token_budget": config.guaranteed_token_budget,
         }
 
     def get_memory_status(self) -> dict:
@@ -1170,7 +1334,7 @@ class DeerFlowClient:
 
                 info: dict[str, Any] = {
                     "filename": dest_name,
-                    "size": str(dest.stat().st_size),
+                    "size": dest.stat().st_size,
                     "path": str(dest),
                     "virtual_path": upload_virtual_path(dest_name),
                     "artifact_url": upload_artifact_url(thread_id, dest_name),

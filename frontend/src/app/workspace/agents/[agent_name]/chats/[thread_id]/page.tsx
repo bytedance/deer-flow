@@ -6,10 +6,12 @@ import { useCallback, useEffect, useState } from "react";
 
 import type { PromptInputMessage } from "@/components/ai-elements/prompt-input";
 import { Button } from "@/components/ui/button";
+import { SidebarTrigger } from "@/components/ui/sidebar";
 import { AgentWelcome } from "@/components/workspace/agent-welcome";
 import { ArtifactTrigger } from "@/components/workspace/artifacts";
 import { ChatBox, useThreadChat } from "@/components/workspace/chats";
 import { ExportTrigger } from "@/components/workspace/export-trigger";
+import { GoalStatus } from "@/components/workspace/goal-status";
 import { InputBox } from "@/components/workspace/input-box";
 import {
   MessageList,
@@ -20,12 +22,17 @@ import { ThreadTitle } from "@/components/workspace/thread-title";
 import { TodoList } from "@/components/workspace/todo-list";
 import { TokenUsageIndicator } from "@/components/workspace/token-usage-indicator";
 import { Tooltip } from "@/components/workspace/tooltip";
+import { useActiveGoal } from "@/components/workspace/use-active-goal";
 import { useAgent } from "@/core/agents";
 import { useI18n } from "@/core/i18n/hooks";
 import { useModels } from "@/core/models/hooks";
 import { useNotification } from "@/core/notification/hooks";
 import { useLocalSettings, useThreadSettings } from "@/core/settings";
-import { useThreadStream, useThreadTokenUsage } from "@/core/threads/hooks";
+import {
+  useThreadMetadata,
+  useThreadStream,
+  useThreadTokenUsage,
+} from "@/core/threads/hooks";
 import { threadTokenUsageToTokenUsage } from "@/core/threads/token-usage";
 import { textOfMessage } from "@/core/threads/utils";
 import { env } from "@/env";
@@ -54,6 +61,10 @@ export default function AgentChatPage() {
     isNewThread || isMock ? undefined : threadId,
     { enabled: tokenUsageEnabled && !isMock },
   );
+  const threadMetadata = useThreadMetadata(threadId, {
+    enabled: !isNewThread && !isMock,
+    isMock,
+  });
   const backendTokenUsage = threadTokenUsageToTokenUsage(threadTokenUsage.data);
 
   const { showNotification } = useNotification();
@@ -72,20 +83,21 @@ export default function AgentChatPage() {
     loadMoreHistory,
   } = useThreadStream({
     threadId: isNewThread ? undefined : threadId,
+    displayThreadId: threadId,
     context: { ...settings.context, agent_name: agent_name },
     isMock,
     onSend: () => {
       setIsWelcomeMode(false);
     },
     onStart: (createdThreadId) => {
-      setThreadId(createdThreadId);
-      setIsNewThread(false);
       // ! Important: Never use next.js router for navigation in this case, otherwise it will cause the thread to re-mount and lose all states. Use native history API instead.
       history.replaceState(
         null,
         "",
         `/workspace/agents/${agent_name}/chats/${createdThreadId}`,
       );
+      setThreadId(createdThreadId);
+      setIsNewThread(false);
     },
     onFinish: (state) => {
       if (document.hidden || !document.hasFocus()) {
@@ -104,6 +116,34 @@ export default function AgentChatPage() {
       }
     },
   });
+
+  const hasThreadMessages = thread.messages.length > 0;
+
+  useEffect(() => {
+    if (
+      !isNewThread &&
+      !isMock &&
+      threadMetadata.data === null &&
+      !threadMetadata.isLoading &&
+      !threadMetadata.isFetching &&
+      !isHistoryLoading &&
+      !hasMoreHistory &&
+      !hasThreadMessages
+    ) {
+      router.replace(`/workspace/agents/${agent_name}/chats/new`);
+    }
+  }, [
+    agent_name,
+    hasMoreHistory,
+    hasThreadMessages,
+    isHistoryLoading,
+    isMock,
+    isNewThread,
+    router,
+    threadMetadata.data,
+    threadMetadata.isFetching,
+    threadMetadata.isLoading,
+  ]);
 
   const handleSubmit = useCallback(
     (message: PromptInputMessage) => {
@@ -124,6 +164,10 @@ export default function AgentChatPage() {
     ? localSettings.tokenUsage.inlineMode
     : "off";
   const hasTodos = (thread.values.todos?.length ?? 0) > 0;
+  const { activeGoal, hasGoal, setLocalGoal } = useActiveGoal(
+    threadId,
+    thread.values.goal,
+  );
 
   return (
     <ThreadContext.Provider value={{ thread }}>
@@ -131,33 +175,36 @@ export default function AgentChatPage() {
         <div className="relative flex size-full min-h-0 justify-between">
           <header
             className={cn(
-              "absolute top-0 right-0 left-0 z-30 flex h-12 shrink-0 items-center gap-2 px-4",
+              "absolute top-0 right-0 left-0 z-30 flex h-12 shrink-0 items-center gap-2 px-2 sm:px-4",
               isWelcomeMode
                 ? "bg-background/0 backdrop-blur-none"
                 : "bg-background/80 shadow-xs backdrop-blur",
             )}
           >
+            <SidebarTrigger className="md:hidden" />
             {/* Agent badge */}
-            <div className="flex shrink-0 items-center gap-1.5 rounded-md border px-2 py-1">
+            <div className="flex min-w-0 shrink-0 items-center gap-1.5 rounded-md border px-2 py-1">
               <BotIcon className="text-primary h-3.5 w-3.5" />
-              <span className="text-xs font-medium">
+              <span className="hidden max-w-24 truncate text-xs font-medium sm:inline sm:max-w-none">
                 {agent?.name ?? agent_name}
               </span>
             </div>
 
-            <div className="flex w-full items-center text-sm font-medium">
+            <div className="flex min-w-0 flex-1 items-center text-sm font-medium">
               <ThreadTitle threadId={threadId} thread={thread} />
             </div>
-            <div className="mr-4 flex items-center">
+            <div className="flex shrink-0 items-center sm:mr-4">
               <Tooltip content={t.agents.newChat}>
                 <Button
+                  className="px-2 sm:px-3"
                   size="sm"
                   variant="secondary"
                   onClick={() => {
                     router.push(`/workspace/agents/${agent_name}/chats/new`);
                   }}
                 >
-                  <PlusSquare /> {t.agents.newChat}
+                  <PlusSquare />
+                  <span className="hidden sm:inline">{t.agents.newChat}</span>
                 </Button>
               </Tooltip>
               <TokenUsageIndicator
@@ -192,20 +239,21 @@ export default function AgentChatPage() {
 
             <div
               className={cn(
-                "right-0 bottom-0 left-0 z-30 flex justify-center px-4",
+                "right-0 bottom-0 left-0 z-30 flex justify-center px-3 sm:px-4",
                 isWelcomeMode ? "absolute" : "relative shrink-0 pb-4",
               )}
             >
               <div
                 className={cn(
                   "relative w-full",
-                  isWelcomeMode && "-translate-y-[calc(50vh-96px)]",
+                  isWelcomeMode &&
+                    "-translate-y-[calc(50vh-48px)] sm:-translate-y-[calc(50vh-96px)]",
                   isWelcomeMode
                     ? "max-w-(--container-width-sm)"
                     : "max-w-(--container-width-md)",
                 )}
               >
-                {hasTodos && (
+                {(hasGoal || hasTodos) && (
                   <div
                     className={cn(
                       "right-0 left-0 z-0",
@@ -214,15 +262,18 @@ export default function AgentChatPage() {
                   >
                     <div
                       className={cn(
-                        "right-0 bottom-0 left-0",
+                        "right-0 bottom-0 left-0 flex flex-col",
                         isWelcomeMode ? "absolute" : "relative",
                       )}
                     >
-                      <TodoList
-                        className="bg-background/5"
-                        todos={thread.values.todos ?? []}
-                        hidden={false}
-                      />
+                      {activeGoal && <GoalStatus goal={activeGoal} />}
+                      {hasTodos && (
+                        <TodoList
+                          className="bg-background/5"
+                          todos={thread.values.todos ?? []}
+                          hidden={false}
+                        />
+                      )}
                     </div>
                   </div>
                 )}
@@ -230,7 +281,7 @@ export default function AgentChatPage() {
                 <InputBox
                   className={cn(
                     "bg-background/5 w-full",
-                    isWelcomeMode && "-translate-y-4",
+                    isWelcomeMode && "-translate-y-2 sm:-translate-y-4",
                   )}
                   isWelcomeMode={isWelcomeMode}
                   threadId={threadId}
@@ -244,7 +295,9 @@ export default function AgentChatPage() {
                   }
                   context={settings.context}
                   extraHeader={
-                    isWelcomeMode && (
+                    isWelcomeMode &&
+                    !hasGoal &&
+                    !hasTodos && (
                       <AgentWelcome agent={agent} agentName={agent_name} />
                     )
                   }
@@ -253,6 +306,7 @@ export default function AgentChatPage() {
                     isUploading
                   }
                   onContextChange={(context) => setSettings("context", context)}
+                  onGoalChange={setLocalGoal}
                   onSubmit={handleSubmit}
                   onStop={handleStop}
                 />

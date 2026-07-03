@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.gateway.auth_disabled import warn_if_auth_disabled_enabled
 from app.gateway.auth_middleware import AuthMiddleware
 from app.gateway.config import get_gateway_config
 from app.gateway.csrf_middleware import CSRFMiddleware, get_configured_cors_origins
@@ -15,7 +16,9 @@ from app.gateway.routers import (
     artifacts,
     assistants_compat,
     auth,
+    channel_connections,
     channels,
+    features,
     feedback,
     mcp,
     memory,
@@ -27,8 +30,10 @@ from app.gateway.routers import (
     threads,
     uploads,
 )
+from app.gateway.trace_middleware import TraceMiddleware, resolve_trace_enabled
 from deerflow.config import app_config as deerflow_app_config
-from deerflow.config.app_config import apply_logging_level
+from deerflow.logging_config import DEFAULT_LOG_DATE_FORMAT, DEFAULT_LOG_FORMAT, configure_logging
+from deerflow.uploads.manager import cleanup_stale_upload_staging_files
 
 AppConfig = deerflow_app_config.AppConfig
 get_app_config = deerflow_app_config.get_app_config
@@ -36,8 +41,8 @@ get_app_config = deerflow_app_config.get_app_config
 # Default logging; lifespan overrides from config.yaml log_level.
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
+    format=DEFAULT_LOG_FORMAT,
+    datefmt=DEFAULT_LOG_DATE_FORMAT,
 )
 
 logger = logging.getLogger(__name__)
@@ -161,11 +166,18 @@ async def _migrate_orphaned_threads(store, admin_user_id: str) -> int:
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Application lifespan handler."""
 
-    # Load config and check necessary environment variables at startup
+    # Load config and check necessary environment variables at startup.
+    # `startup_config` is a local snapshot used only for one-shot bootstrap
+    # work (logging level, langgraph_runtime engines, channels). Request-time
+    # config resolution always routes through `get_app_config()` in
+    # `app/gateway/deps.py::get_config()` so `config.yaml` edits become
+    # visible without a process restart. We deliberately do NOT cache this
+    # snapshot on `app.state` to keep that contract enforceable.
     try:
-        app.state.config = get_app_config()
-        apply_logging_level(app.state.config.log_level)
+        startup_config = get_app_config()
+        configure_logging(startup_config)
         logger.info("Configuration loaded successfully")
+        warn_if_auth_disabled_enabled()
     except Exception as e:
         error_msg = f"Failed to load configuration during gateway startup: {e}"
         logger.exception(error_msg)
@@ -173,8 +185,40 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     config = get_gateway_config()
     logger.info(f"Starting API Gateway on {config.host}:{config.port}")
 
+    # Pre-warm tiktoken encoding cache so the first memory-injection request
+    # never blocks on the BPE data download (which hits an OpenAI/Azure URL
+    # that may be unreachable in restricted networks — see issue #3402).
+    # When memory.token_counting is "char", token counting never touches
+    # tiktoken, so skip the warm-up entirely (avoids even the 5s probe in
+    # network-restricted deployments — see issue #3429).
+    if startup_config.memory.token_counting == "char":
+        logger.info("memory.token_counting='char'; skipping tiktoken warm-up (network-free token estimation)")
+    else:
+        try:
+            from deerflow.agents.memory.prompt import warm_tiktoken_cache
+
+            warmed = await asyncio.wait_for(
+                asyncio.to_thread(warm_tiktoken_cache),
+                timeout=5,
+            )
+            if warmed:
+                logger.info("tiktoken encoding cache warmed successfully")
+            else:
+                logger.warning("tiktoken encoding cache warm-up failed; token counting will use character-based fallback until tiktoken loads successfully")
+        except TimeoutError:
+            logger.warning("tiktoken encoding cache warm-up timed out; token counting will use character-based fallback until tiktoken loads successfully")
+        except Exception:
+            logger.warning("tiktoken warm-up skipped", exc_info=True)
+
+    try:
+        removed_upload_staging_files = await asyncio.to_thread(cleanup_stale_upload_staging_files)
+        if removed_upload_staging_files:
+            logger.info("Removed %d stale upload staging file(s)", removed_upload_staging_files)
+    except Exception:
+        logger.warning("Upload staging file cleanup skipped", exc_info=True)
+
     # Initialize LangGraph runtime components (StreamBridge, RunManager, checkpointer, store)
-    async with langgraph_runtime(app):
+    async with langgraph_runtime(app, startup_config):
         logger.info("LangGraph runtime initialised")
 
         # Check admin bootstrap state and migrate orphan threads after admin exists.
@@ -185,12 +229,17 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         try:
             from app.channels.service import start_channel_service
 
-            channel_service = await start_channel_service(app.state.config)
+            channel_service = await start_channel_service(startup_config)
             logger.info("Channel service started: %s", channel_service.get_status())
         except Exception:
             logger.exception("No IM channels configured or channel service failed to start")
 
         yield
+
+        try:
+            await auth.close_oidc_service()
+        except Exception:
+            logger.exception("Failed to close OIDC service")
 
         # Stop channel service on shutdown (bounded to prevent worker hang)
         try:
@@ -323,9 +372,20 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
             allow_headers=["*"],
         )
 
+    # Request trace correlation: when logging.enhance.enabled=true, bind one
+    # trace id per Gateway HTTP request and write it to response start headers.
+    # `logging` is registered as restart-required (see reload_boundary.py) so we
+    # snapshot the flag from the startup AppConfig instead of reading live; a
+    # runtime toggle would otherwise leave the log formatter (installed once by
+    # configure_logging() at lifespan startup) out of sync with the middleware.
+    app.add_middleware(TraceMiddleware, enabled=_resolve_trace_enabled_for_app_construction())
+
     # Include routers
     # Models API is mounted at /api/models
     app.include_router(models.router)
+
+    # Features API is mounted at /api/features
+    app.include_router(features.router)
 
     # MCP API is mounted at /api/mcp
     app.include_router(mcp.router)
@@ -350,6 +410,9 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
 
     # Suggestions API is mounted at /api/threads/{thread_id}/suggestions
     app.include_router(suggestions.router)
+
+    # User-facing IM channel connection API is mounted at /api/channels
+    app.include_router(channel_connections.router)
 
     # Channels API is mounted at /api/channels
     app.include_router(channels.router)
@@ -379,6 +442,16 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
         return {"status": "healthy", "service": "deer-flow-gateway"}
 
     return app
+
+
+def _resolve_trace_enabled_for_app_construction() -> bool:
+    """Resolve the trace middleware flag without making imports require config.yaml."""
+    try:
+        return resolve_trace_enabled(get_app_config())
+    except FileNotFoundError:
+        # Startup lifespan still performs strict config loading before serving.
+        logger.debug("config.yaml not found while constructing Gateway app; TraceMiddleware disabled for this app instance")
+        return False
 
 
 # Create app instance for uvicorn

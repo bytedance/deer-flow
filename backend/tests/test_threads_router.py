@@ -1,4 +1,5 @@
 import re
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -216,6 +217,110 @@ def test_create_thread_returns_iso_timestamps() -> None:
     assert _ISO_TIMESTAMP_RE.match(body["created_at"]), body["created_at"]
     assert _ISO_TIMESTAMP_RE.match(body["updated_at"]), body["updated_at"]
     assert body["created_at"] == body["updated_at"]
+
+
+def test_put_goal_creates_missing_thread_checkpoint_and_returns_goal() -> None:
+    app, _store, _checkpointer = _build_thread_app()
+
+    with TestClient(app) as client:
+        response = client.put(
+            "/api/threads/goal-thread/goal",
+            json={"objective": "Finish the feature and make all tests pass"},
+        )
+        state_response = client.get("/api/threads/goal-thread/state")
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["goal"]["objective"] == "Finish the feature and make all tests pass"
+    assert body["goal"]["status"] == "active"
+    assert body["goal"]["continuation_count"] == 0
+    assert body["goal"]["max_continuations"] == 8
+    assert state_response.status_code == 200, state_response.text
+    assert state_response.json()["values"]["goal"]["objective"] == "Finish the feature and make all tests pass"
+
+
+def test_goal_status_and_clear_round_trip() -> None:
+    app, _store, _checkpointer = _build_thread_app()
+
+    with TestClient(app) as client:
+        set_response = client.put(
+            "/api/threads/goal-thread/goal",
+            json={"objective": "Ship it", "max_continuations": 3},
+        )
+        get_response = client.get("/api/threads/goal-thread/goal")
+        clear_response = client.delete("/api/threads/goal-thread/goal")
+        after_clear_response = client.get("/api/threads/goal-thread/goal")
+        state_response = client.get("/api/threads/goal-thread/state")
+
+    assert set_response.status_code == 200, set_response.text
+    assert get_response.status_code == 200, get_response.text
+    assert get_response.json()["goal"]["objective"] == "Ship it"
+    assert get_response.json()["goal"]["max_continuations"] == 3
+    assert clear_response.status_code == 200, clear_response.text
+    assert clear_response.json()["goal"] is None
+    assert after_clear_response.status_code == 200, after_clear_response.text
+    assert after_clear_response.json()["goal"] is None
+    assert "goal" not in state_response.json()["values"]
+
+
+def test_internal_owner_header_assigns_thread_to_owner() -> None:
+    import asyncio
+
+    from app.gateway.internal_auth import INTERNAL_OWNER_USER_ID_HEADER_NAME, INTERNAL_SYSTEM_ROLE
+
+    store = InMemoryStore()
+    checkpointer = InMemorySaver()
+    thread_store = MemoryThreadMetaStore(store)
+    request = SimpleNamespace(
+        headers={INTERNAL_OWNER_USER_ID_HEADER_NAME: "owner-1"},
+        state=SimpleNamespace(user=SimpleNamespace(id="default", system_role=INTERNAL_SYSTEM_ROLE)),
+        app=SimpleNamespace(state=SimpleNamespace(checkpointer=checkpointer, thread_store=thread_store)),
+    )
+
+    async def _scenario():
+        response = await threads.create_thread(
+            threads.ThreadCreateRequest(thread_id="channel-thread", metadata={}),
+            request,
+        )
+        owner_row = await thread_store.get("channel-thread", user_id="owner-1")
+        internal_row = await thread_store.get("channel-thread", user_id="default")
+        return response, owner_row, internal_row
+
+    response, owner_row, internal_row = asyncio.run(_scenario())
+
+    assert response.thread_id == "channel-thread"
+    assert owner_row is not None
+    assert owner_row["user_id"] == "owner-1"
+    assert internal_row is None
+
+
+def test_goal_thread_creation_uses_internal_owner_header() -> None:
+    import asyncio
+
+    from app.gateway.internal_auth import INTERNAL_OWNER_USER_ID_HEADER_NAME, INTERNAL_SYSTEM_ROLE
+
+    store = InMemoryStore()
+    checkpointer = InMemorySaver()
+    thread_store = MemoryThreadMetaStore(store)
+    request = SimpleNamespace(
+        headers={INTERNAL_OWNER_USER_ID_HEADER_NAME: "owner-1"},
+        state=SimpleNamespace(user=SimpleNamespace(id="default", system_role=INTERNAL_SYSTEM_ROLE)),
+        app=SimpleNamespace(state=SimpleNamespace(checkpointer=checkpointer, thread_store=thread_store)),
+    )
+
+    async def _scenario():
+        await threads._ensure_thread_for_goal("channel-goal-thread", request)
+        owner_row = await thread_store.get("channel-goal-thread", user_id="owner-1")
+        internal_row = await thread_store.get("channel-goal-thread", user_id="default")
+        owner_threads = await thread_store.search(user_id="owner-1")
+        return owner_row, internal_row, owner_threads
+
+    owner_row, internal_row, owner_threads = asyncio.run(_scenario())
+
+    assert owner_row is not None
+    assert owner_row["user_id"] == "owner-1"
+    assert internal_row is None
+    assert [thread["thread_id"] for thread in owner_threads] == ["channel-goal-thread"]
 
 
 def test_get_thread_returns_iso_for_legacy_unix_record() -> None:
@@ -485,3 +590,52 @@ def test_search_threads_succeeds_with_valid_metadata() -> None:
         response = client.post("/api/threads/search", json={"metadata": {"env": "prod"}})
 
     assert response.status_code == 200
+
+
+# ── update_thread_state: each call inserts a new checkpoint (regression) ───────
+
+
+def test_update_thread_state_inserts_new_checkpoint_each_call() -> None:
+    """Each ``POST /state`` must INSERT a distinct, time-ordered checkpoint.
+
+    Regression for the in-place REPLACE bug: before the fix the new
+    checkpoint reused the previous checkpoint["id"], so InMemorySaver/SQLite
+    overwrote the existing row and history never grew. The fix assigns a
+    fresh uuid6 to checkpoint["id"] before aput.
+    """
+    app, _store, checkpointer = _build_thread_app()
+
+    with TestClient(app) as client:
+        created = client.post("/api/threads", json={"metadata": {}})
+        assert created.status_code == 200, created.text
+        thread_id = created.json()["thread_id"]
+
+        r1 = client.post(f"/api/threads/{thread_id}/state", json={"values": {"title": "First"}})
+        assert r1.status_code == 200, r1.text
+        r2 = client.post(f"/api/threads/{thread_id}/state", json={"values": {"title": "Second"}})
+        assert r2.status_code == 200, r2.text
+
+    import asyncio
+
+    async def _collect():
+        return [cp async for cp in checkpointer.alist({"configurable": {"thread_id": thread_id}})]
+
+    history = asyncio.run(_collect())
+
+    # 1 empty checkpoint from create_thread + 1 per update call.
+    assert len(history) >= 3, f"expected >=3 checkpoints, got {len(history)}"
+
+    ids = [cp.config["configurable"]["checkpoint_id"] for cp in history]
+    assert len(ids) == len(set(ids)), f"duplicate checkpoint ids: {ids}"
+    # alist() returns newest-first; uuid6 is time-ordered so newest > oldest.
+    assert ids[0] > ids[-1], f"checkpoint ids not time-ordered (uuid4 instead of uuid6?): {ids}"
+
+    # aput must PRESERVE the endpoint-assigned checkpoint["id"], not mint its own
+    # and discard the payload's. If it generated a fresh id internally the fix
+    # would be a no-op (the bug would never have existed). Assert the id returned
+    # in each response round-tripped into the persisted history, and that the two
+    # update writes kept the endpoint's uuid6 time-ordering through aput.
+    resp_ids = [r1.json()["checkpoint_id"], r2.json()["checkpoint_id"]]
+    assert all(cid is not None for cid in resp_ids), f"response missing checkpoint_id: {resp_ids}"
+    assert set(resp_ids) <= set(ids), f"aput discarded endpoint-assigned id: returned {resp_ids}, stored {ids}"
+    assert resp_ids[1] > resp_ids[0], f"endpoint-assigned uuid6 not preserved/ordered through aput: {resp_ids}"

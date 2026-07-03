@@ -1,6 +1,6 @@
 [project]
 name = "deerflow-harness"
-version = "0.1.0"
+version = "2.1.0"
 description = "DeerFlow agent harness framework"
 requires-python = ">=3.12"
 dependencies = [
@@ -37,9 +37,21 @@ dependencies = [
     "aiosqlite>=0.19",
     "alembic>=1.13",
     "semgrep>=1.161.0",
+    "cryptography>=48.0.1",
+    "e2b-code-interpreter>=2.8.0",
 ]
 
+[project.scripts]
+deerflow = "deerflow.tui.cli:main"
+
 [project.optional-dependencies]
+# Terminal workbench (TUI). Kept optional so the core harness install stays lean;
+# the `deerflow` console script degrades to headless help when textual is absent.
+tui = ["textual>=0.80"]
+# GroundRoute needs no extra packages (httpx is already a core dependency). This
+# empty extra exists so the documented `uv add 'deerflow-harness[groundroute]'`
+# install command resolves cleanly without an "unknown extra" warning.
+groundroute = []
 ollama = ["langchain-ollama>=0.3.0"]
 postgres = [
     "asyncpg>=0.29",

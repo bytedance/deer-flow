@@ -3,11 +3,12 @@
 import { useMemo } from "react";
 import type { AnchorHTMLAttributes } from "react";
 
+import { type ClipboardSafeStreamdownProps } from "@/components/ai-elements/streamdown";
 import {
-  MessageResponse,
-  type MessageResponseProps,
-} from "@/components/ai-elements/message";
-import { streamdownPlugins } from "@/core/streamdown";
+  preprocessStreamdownMarkdown,
+  streamdownPluginsWithoutRawHtml,
+} from "@/core/streamdown";
+import { SafeMessageResponse } from "@/core/streamdown/components";
 import { cn } from "@/lib/utils";
 
 import { CitationLink } from "../citations/citation-link";
@@ -19,20 +20,30 @@ function isExternalUrl(href: string | undefined): boolean {
 export type MarkdownContentProps = {
   content: string;
   isLoading: boolean;
-  rehypePlugins: MessageResponseProps["rehypePlugins"];
+  rehypePlugins?: ClipboardSafeStreamdownProps["rehypePlugins"];
   className?: string;
-  remarkPlugins?: MessageResponseProps["remarkPlugins"];
-  components?: MessageResponseProps["components"];
+  remarkPlugins?: ClipboardSafeStreamdownProps["remarkPlugins"];
+  components?: ClipboardSafeStreamdownProps["components"];
 };
 
 /** Renders markdown content. */
 export function MarkdownContent({
   content,
+  isLoading,
   rehypePlugins,
   className,
-  remarkPlugins = streamdownPlugins.remarkPlugins,
+  remarkPlugins = streamdownPluginsWithoutRawHtml.remarkPlugins,
   components: componentsFromProps,
 }: MarkdownContentProps) {
+  const normalizedContent = useMemo(
+    () => preprocessStreamdownMarkdown(content),
+    [content],
+  );
+  const effectiveRehypePlugins = useMemo(() => {
+    const base = streamdownPluginsWithoutRawHtml.rehypePlugins ?? [];
+    const extra = rehypePlugins ?? [];
+    return [...base, ...extra] as ClipboardSafeStreamdownProps["rehypePlugins"];
+  }, [rehypePlugins]);
   const components = useMemo(() => {
     return {
       a: (props: AnchorHTMLAttributes<HTMLAnchorElement>) => {
@@ -64,13 +75,14 @@ export function MarkdownContent({
   if (!content) return null;
 
   return (
-    <MessageResponse
+    <SafeMessageResponse
       className={className}
       remarkPlugins={remarkPlugins}
-      rehypePlugins={rehypePlugins}
+      rehypePlugins={effectiveRehypePlugins}
       components={components}
+      parseIncompleteMarkdown={isLoading}
     >
-      {content}
-    </MessageResponse>
+      {normalizedContent}
+    </SafeMessageResponse>
   );
 }

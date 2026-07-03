@@ -13,6 +13,7 @@ from deerflow.persistence.json_compat import json_match
 from deerflow.persistence.thread_meta.base import InvalidMetadataFilterError, ThreadMetaStore
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
 from deerflow.runtime.user_context import AUTO, _AutoSentinel, resolve_user_id
+from deerflow.utils.time import coerce_iso
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +29,9 @@ class ThreadMetaRepository(ThreadMetaStore):
         for key in ("created_at", "updated_at"):
             val = d.get(key)
             if isinstance(val, datetime):
-                d[key] = val.isoformat()
+                # SQLite drops tzinfo despite ``DateTime(timezone=True)``;
+                # ``coerce_iso`` normalizes naive values as UTC so the wire format always carries tz.
+                d[key] = coerce_iso(val)
         return d
 
     async def create(
@@ -206,6 +209,21 @@ class ThreadMetaRepository(ThreadMetaStore):
             merged.update(metadata)
             row.metadata_json = merged
             row.updated_at = datetime.now(UTC)
+            await session.commit()
+
+    async def update_owner(
+        self,
+        thread_id: str,
+        owner_user_id: str,
+        *,
+        user_id: str | None | _AutoSentinel = AUTO,
+    ) -> None:
+        """Move a thread metadata row to ``owner_user_id``."""
+        resolved_user_id = resolve_user_id(user_id, method_name="ThreadMetaRepository.update_owner")
+        async with self._sf() as session:
+            if not await self._check_ownership(session, thread_id, resolved_user_id):
+                return
+            await session.execute(update(ThreadMetaRow).where(ThreadMetaRow.thread_id == thread_id).values(user_id=owner_user_id, updated_at=datetime.now(UTC)))
             await session.commit()
 
     async def delete(

@@ -179,15 +179,16 @@ class TestLifecycleCallbacks:
         assert "run.end" in types
 
     @pytest.mark.anyio
-    async def test_nested_chain_no_run_start(self, journal_setup):
-        """Nested chains (parent_run_id set) should NOT produce run.start."""
+    async def test_nested_chain_no_run_lifecycle_events(self, journal_setup):
+        """Nested chains (parent_run_id set) should NOT produce root run lifecycle events."""
         j, store = journal_setup
         parent_id = uuid4()
         j.on_chain_start({}, {}, run_id=uuid4(), parent_run_id=parent_id)
-        j.on_chain_end({}, run_id=uuid4())
+        j.on_chain_end({}, run_id=uuid4(), parent_run_id=parent_id)
         await j.flush()
         events = await store.list_events("t1", "r1")
         assert not any(e["event_type"] == "run.start" for e in events)
+        assert not any(e["event_type"] == "run.end" for e in events)
 
 
 class TestToolCallbacks:
@@ -714,6 +715,110 @@ class TestExternalUsageRecords:
         assert j._subagent_tokens == 0
 
 
+class TestProgressSnapshots:
+    @pytest.mark.anyio
+    async def test_on_llm_end_reports_progress_snapshot(self):
+        snapshots: list[dict] = []
+
+        async def reporter(snapshot: dict) -> None:
+            snapshots.append(snapshot)
+
+        store = MemoryRunEventStore()
+        j = RunJournal(
+            "r1",
+            "t1",
+            store,
+            flush_threshold=100,
+            progress_reporter=reporter,
+            progress_flush_interval=0,
+        )
+        usage = {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15}
+        j.on_llm_end(_make_llm_response("Answer", usage=usage), run_id=uuid4(), parent_run_id=None, tags=["lead_agent"])
+        await j.flush()
+
+        assert snapshots
+        assert snapshots[-1]["total_tokens"] == 15
+        assert snapshots[-1]["llm_call_count"] == 1
+        assert snapshots[-1]["message_count"] == 1
+        assert snapshots[-1]["last_ai_message"] == "Answer"
+
+    @pytest.mark.anyio
+    async def test_throttled_progress_flush_emits_trailing_snapshot(self):
+        snapshots: list[dict] = []
+        trailing_seen = asyncio.Event()
+
+        async def reporter(snapshot: dict) -> None:
+            snapshots.append(snapshot)
+            if snapshot["total_tokens"] == 45:
+                trailing_seen.set()
+
+        store = MemoryRunEventStore()
+        j = RunJournal(
+            "r1",
+            "t1",
+            store,
+            flush_threshold=100,
+            progress_reporter=reporter,
+            progress_flush_interval=0.01,
+        )
+        j.on_llm_end(
+            _make_llm_response("First", usage={"input_tokens": 10, "output_tokens": 5, "total_tokens": 15}),
+            run_id=uuid4(),
+            parent_run_id=None,
+            tags=["lead_agent"],
+        )
+        j.on_llm_end(
+            _make_llm_response("Second", usage={"input_tokens": 20, "output_tokens": 10, "total_tokens": 30}),
+            run_id=uuid4(),
+            parent_run_id=None,
+            tags=["lead_agent"],
+        )
+        await asyncio.wait_for(trailing_seen.wait(), timeout=1.0)
+        await j.flush()
+
+        assert len(snapshots) >= 2
+        assert snapshots[-1]["total_tokens"] == 45
+        assert snapshots[-1]["llm_call_count"] == 2
+        assert snapshots[-1]["last_ai_message"] == "Second"
+
+    @pytest.mark.anyio
+    async def test_flush_cancels_delayed_progress_without_final_progress_write(self):
+        snapshots: list[dict] = []
+
+        async def reporter(snapshot: dict) -> None:
+            snapshots.append(snapshot)
+
+        store = MemoryRunEventStore()
+        j = RunJournal(
+            "r1",
+            "t1",
+            store,
+            flush_threshold=100,
+            progress_reporter=reporter,
+            progress_flush_interval=10.0,
+        )
+        j.on_llm_end(
+            _make_llm_response("First", usage={"input_tokens": 10, "output_tokens": 5, "total_tokens": 15}),
+            run_id=uuid4(),
+            parent_run_id=None,
+            tags=["lead_agent"],
+        )
+        await asyncio.sleep(0)
+        assert snapshots[-1]["total_tokens"] == 15
+        j.on_llm_end(
+            _make_llm_response("Second", usage={"input_tokens": 20, "output_tokens": 10, "total_tokens": 30}),
+            run_id=uuid4(),
+            parent_run_id=None,
+            tags=["lead_agent"],
+        )
+
+        await asyncio.wait_for(j.flush(), timeout=0.2)
+
+        assert snapshots[-1]["total_tokens"] == 15
+        assert snapshots[-1]["llm_call_count"] == 1
+        assert snapshots[-1]["last_ai_message"] == "First"
+
+
 class TestChatModelStartHumanMessage:
     """Tests for on_chat_model_start extracting the first human message."""
 
@@ -736,18 +841,140 @@ class TestChatModelStartHumanMessage:
         assert human_events[0]["content"]["content"] == "What is AI?"
 
     @pytest.mark.anyio
-    async def test_skips_summary_named_human_messages(self, journal_setup):
-        """HumanMessages with name='summary' are skipped."""
+    async def test_skips_hidden_human_messages(self, journal_setup):
+        """HumanMessages hidden from the UI are internal context, not user input."""
         from langchain_core.messages import HumanMessage
 
         j, store = journal_setup
         messages_batch = [
-            [HumanMessage(content="Summarized context", name="summary"), HumanMessage(content="Real question")],
+            [
+                HumanMessage(content="What is the weather today?"),
+                HumanMessage(
+                    content="Your todo list from earlier...",
+                    name="todo_reminder",
+                    additional_kwargs={"hide_from_ui": True},
+                ),
+            ],
         ]
         j.on_chat_model_start({}, messages_batch, run_id=uuid4(), tags=["lead_agent"])
         await j.flush()
 
+        assert j._first_human_msg == "What is the weather today?"
+        assert j.get_completion_data()["message_count"] == 1
+        events = await store.list_events("t1", "r1")
+        human_events = [e for e in events if e["event_type"] == "llm.human.input"]
+        assert len(human_events) == 1
+        assert human_events[0]["content"]["content"] == "What is the weather today?"
+
+    @pytest.mark.anyio
+    async def test_only_hidden_human_messages_are_not_captured(self, journal_setup):
+        """A prompt containing only internal HumanMessages has no user input."""
+        from langchain_core.messages import HumanMessage
+
+        j, store = journal_setup
+        hidden_message = HumanMessage(
+            content="Internal context",
+            additional_kwargs={"hide_from_ui": True},
+        )
+        j.on_chat_model_start({}, [[hidden_message]], run_id=uuid4(), tags=["lead_agent"])
+        await j.flush()
+
+        assert j._first_human_msg is None
+        assert j.get_completion_data()["message_count"] == 0
+        events = await store.list_events("t1", "r1")
+        assert not any(e["event_type"] == "llm.human.input" for e in events)
+
+    @pytest.mark.anyio
+    async def test_legacy_summary_message_is_not_captured_as_user_input(self, journal_setup):
+        """Legacy synthetic summaries are internal context even if hide_from_ui is absent."""
+        from langchain_core.messages import HumanMessage
+
+        j, store = journal_setup
+        legacy_summary = HumanMessage(content="Older compressed conversation state", name="summary")
+        j.on_chat_model_start({}, [[legacy_summary]], run_id=uuid4(), tags=["lead_agent"])
+        await j.flush()
+
+        assert j._first_human_msg is None
+        assert j.get_completion_data()["message_count"] == 0
+        events = await store.list_events("t1", "r1")
+        assert not any(e["event_type"] == "llm.human.input" for e in events)
+
+    @pytest.mark.anyio
+    async def test_visible_human_message_after_hidden_only_prompt_is_captured(self, journal_setup):
+        """Skipping an internal-only prompt does not block later user input."""
+        from langchain_core.messages import HumanMessage
+
+        j, store = journal_setup
+        hidden_message = HumanMessage(
+            content="Internal context",
+            additional_kwargs={"hide_from_ui": True},
+        )
+        j.on_chat_model_start({}, [[hidden_message]], run_id=uuid4(), tags=["lead_agent"])
+        j.on_chat_model_start(
+            {},
+            [[HumanMessage(content="Real question")]],
+            run_id=uuid4(),
+            tags=["lead_agent"],
+        )
+        await j.flush()
+
         assert j._first_human_msg == "Real question"
+        assert j.get_completion_data()["message_count"] == 1
+        events = await store.list_events("t1", "r1")
+        human_events = [e for e in events if e["event_type"] == "llm.human.input"]
+        assert len(human_events) == 1
+        assert human_events[0]["content"]["content"] == "Real question"
+
+    @pytest.mark.anyio
+    async def test_summarization_prompt_does_not_capture_first_human_message(self, journal_setup):
+        """Internal summarization prompts must not replace the run's real user input."""
+        from langchain_core.messages import HumanMessage
+
+        j, store = journal_setup
+        summarization_prompt = HumanMessage(
+            content="<role>\nContext Extraction Assistant\n</role>\n\n<primary_objective>\nExtract context...",
+        )
+        j.on_chat_model_start(
+            {},
+            [[summarization_prompt]],
+            run_id=uuid4(),
+            tags=["middleware:summarize"],
+        )
+        j.on_chat_model_start(
+            {},
+            [[HumanMessage(content="Real user follow-up")]],
+            run_id=uuid4(),
+            tags=["lead_agent"],
+        )
+        await j.flush()
+
+        assert j._first_human_msg == "Real user follow-up"
+        assert j.get_completion_data()["message_count"] == 1
+        events = await store.list_events("t1", "r1")
+        human_events = [e for e in events if e["event_type"] == "llm.human.input"]
+        assert len(human_events) == 1
+        assert human_events[0]["content"]["content"] == "Real user follow-up"
+        assert human_events[0]["metadata"]["caller"] == "lead_agent"
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize("tags", [["middleware:summarize"], ["subagent:research"]])
+    async def test_non_lead_human_prompts_are_not_captured_as_user_input(self, journal_setup, tags):
+        """Only lead-agent LLM starts create UI-facing human input events."""
+        from langchain_core.messages import HumanMessage
+
+        j, store = journal_setup
+        j.on_chat_model_start(
+            {},
+            [[HumanMessage(content="Internal prompt")]],
+            run_id=uuid4(),
+            tags=tags,
+        )
+        await j.flush()
+
+        assert j._first_human_msg is None
+        assert j.get_completion_data()["message_count"] == 0
+        events = await store.list_events("t1", "r1")
+        assert not any(e["event_type"] == "llm.human.input" for e in events)
 
     @pytest.mark.anyio
     async def test_only_first_human_message_captured(self, journal_setup):

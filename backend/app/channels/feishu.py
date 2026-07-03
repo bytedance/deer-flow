@@ -7,22 +7,31 @@ import json
 import logging
 import re
 import threading
+import time
 from typing import Any, Literal
 
 from app.channels.base import Channel
-from app.channels.commands import KNOWN_CHANNEL_COMMANDS
-from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
+from app.channels.commands import is_known_channel_command
+from app.channels.connection_identity import attach_connection_identity
+from app.channels.message_bus import (
+    PENDING_CLARIFICATION_METADATA_KEY,
+    RESOLVED_FROM_PENDING_CLARIFICATION_METADATA_KEY,
+    InboundMessage,
+    InboundMessageType,
+    MessageBus,
+    OutboundMessage,
+    ResolvedAttachment,
+)
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX, get_paths
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.sandbox.sandbox_provider import get_sandbox_provider
 
 logger = logging.getLogger(__name__)
+PENDING_CLARIFICATION_TTL_SECONDS = 30 * 60
 
 
 def _is_feishu_command(text: str) -> bool:
-    if not text.startswith("/"):
-        return False
-    return text.split(maxsplit=1)[0].lower() in KNOWN_CHANNEL_COMMANDS
+    return is_known_channel_command(text)
 
 
 class FeishuChannel(Channel):
@@ -37,9 +46,9 @@ class FeishuChannel(Channel):
 
     Message flow:
         1. User sends a message → bot adds "OK" emoji reaction
-        2. Bot replies in thread: "Working on it......"
+        2. Bot replies with a card: "Working on it......"
         3. Agent processes the message and returns a result
-        4. Bot replies in thread with the result
+        4. Bot updates the card with the result
         5. Bot adds "DONE" emoji reaction to the original message
     """
 
@@ -56,6 +65,7 @@ class FeishuChannel(Channel):
         self._background_tasks: set[asyncio.Task] = set()
         self._running_card_ids: dict[str, str] = {}
         self._running_card_tasks: dict[str, asyncio.Task] = {}
+        self._pending_clarifications: dict[tuple[str, str], list[dict[str, Any]]] = {}
         self._CreateFileRequest = None
         self._CreateFileRequestBody = None
         self._CreateImageRequest = None
@@ -63,9 +73,36 @@ class FeishuChannel(Channel):
         self._GetMessageResourceRequest = None
         self._thread_lock = threading.Lock()
 
+    @staticmethod
+    def _non_empty_str(value: Any) -> str | None:
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        return None
+
+    @staticmethod
+    def _pending_key(chat_id: str, user_id: str) -> tuple[str, str]:
+        return (chat_id, user_id)
+
     @property
     def supports_streaming(self) -> bool:
         return True
+
+    @property
+    def is_running(self) -> bool:
+        if not self._running:
+            return False
+        return self._thread is not None and self._thread.is_alive()
+
+    def _build_event_handler(self, lark):
+        return (
+            lark.EventDispatcherHandler.builder("", "")
+            .register_p2_im_message_receive_v1(self._on_message)
+            .register_p2_im_message_message_read_v1(self._on_ignored_message_event)
+            .register_p2_im_message_reaction_created_v1(self._on_ignored_message_event)
+            .register_p2_im_message_reaction_deleted_v1(self._on_ignored_message_event)
+            .register_p2_im_message_recalled_v1(self._on_ignored_message_event)
+            .build()
+        )
 
     async def start(self) -> None:
         if self._running:
@@ -160,7 +197,7 @@ class FeishuChannel(Channel):
             # thread's uvloop.
             _ws_client_mod.loop = loop
 
-            event_handler = lark.EventDispatcherHandler.builder("", "").register_p2_im_message_receive_v1(self._on_message).build()
+            event_handler = self._build_event_handler(lark)
             ws_client = lark.ws.Client(
                 app_id=app_id,
                 app_secret=app_secret,
@@ -172,6 +209,10 @@ class FeishuChannel(Channel):
         except Exception:
             if self._running:
                 logger.exception("Feishu WebSocket error")
+            self._running = False
+
+    def _on_ignored_message_event(self, event) -> None:
+        logger.debug("[Feishu] ignoring non-content message event: %s", type(event).__name__)
 
     async def stop(self) -> None:
         self._running = False
@@ -199,28 +240,11 @@ class FeishuChannel(Channel):
             len(msg.text),
         )
 
-        last_exc: Exception | None = None
-        for attempt in range(_max_retries):
-            try:
-                await self._send_card_message(msg)
-                return  # success
-            except Exception as exc:
-                last_exc = exc
-                if attempt < _max_retries - 1:
-                    delay = 2**attempt  # 1s, 2s
-                    logger.warning(
-                        "[Feishu] send failed (attempt %d/%d), retrying in %ds: %s",
-                        attempt + 1,
-                        _max_retries,
-                        delay,
-                        exc,
-                    )
-                    await asyncio.sleep(delay)
-
-        logger.error("[Feishu] send failed after %d attempts: %s", _max_retries, last_exc)
-        if last_exc is None:
-            raise RuntimeError("Feishu send failed without an exception from any attempt")
-        raise last_exc
+        await self._send_with_retry(
+            lambda: self._send_card_message(msg),
+            max_retries=_max_retries,
+            log_prefix="[Feishu]",
+        )
 
     async def send_file(self, msg: OutboundMessage, attachment: ResolvedAttachment) -> bool:
         if not self._api_client:
@@ -245,7 +269,7 @@ class FeishuChannel(Channel):
                 content = json.dumps({"file_key": file_key})
 
             if msg.thread_ts:
-                request = self._ReplyMessageRequest.builder().message_id(msg.thread_ts).request_body(self._ReplyMessageRequestBody.builder().msg_type(msg_type).content(content).reply_in_thread(True).build()).build()
+                request = self._ReplyMessageRequest.builder().message_id(msg.thread_ts).request_body(self._ReplyMessageRequestBody.builder().msg_type(msg_type).content(content).build()).build()
                 await asyncio.to_thread(self._api_client.im.v1.message.reply, request)
             else:
                 request = self._CreateMessageRequest.builder().receive_id_type("chat_id").request_body(self._CreateMessageRequestBody.builder().receive_id(msg.chat_id).msg_type(msg_type).content(content).build()).build()
@@ -287,7 +311,7 @@ class FeishuChannel(Channel):
             raise RuntimeError(f"Feishu file upload failed: code={response.code}, msg={response.msg}")
         return response.data.file_key
 
-    async def receive_file(self, msg: InboundMessage, thread_id: str) -> InboundMessage:
+    async def receive_file(self, msg: InboundMessage, thread_id: str, *, user_id: str | None = None) -> InboundMessage:
         """Download a Feishu file into the thread uploads directory.
 
         Returns the sandbox virtual path when the image is persisted successfully.
@@ -302,15 +326,23 @@ class FeishuChannel(Channel):
         text = msg.text
         for file in files:
             if file.get("image_key"):
-                virtual_path = await self._receive_single_file(msg.thread_ts, file["image_key"], "image", thread_id)
+                virtual_path = await self._receive_single_file(msg.thread_ts, file["image_key"], "image", thread_id, user_id=user_id)
                 text = text.replace("[image]", virtual_path, 1)
             elif file.get("file_key"):
-                virtual_path = await self._receive_single_file(msg.thread_ts, file["file_key"], "file", thread_id)
+                virtual_path = await self._receive_single_file(msg.thread_ts, file["file_key"], "file", thread_id, user_id=user_id)
                 text = text.replace("[file]", virtual_path, 1)
         msg.text = text
         return msg
 
-    async def _receive_single_file(self, message_id: str, file_key: str, type: Literal["image", "file"], thread_id: str) -> str:
+    async def _receive_single_file(
+        self,
+        message_id: str,
+        file_key: str,
+        type: Literal["image", "file"],
+        thread_id: str,
+        *,
+        user_id: str | None = None,
+    ) -> str:
         request = self._GetMessageResourceRequest.builder().message_id(message_id).file_key(file_key).type(type).build()
 
         def inner():
@@ -349,9 +381,9 @@ class FeishuChannel(Channel):
             return f"Failed to obtain the [{type}]"
 
         paths = get_paths()
-        user_id = get_effective_user_id()
-        paths.ensure_thread_dirs(thread_id, user_id=user_id)
-        uploads_dir = paths.sandbox_uploads_dir(thread_id, user_id=user_id).resolve()
+        effective_user_id = user_id or get_effective_user_id()
+        paths.ensure_thread_dirs(thread_id, user_id=effective_user_id)
+        uploads_dir = paths.sandbox_uploads_dir(thread_id, user_id=effective_user_id).resolve()
 
         ext = "png" if type == "image" else "bin"
         raw_filename = getattr(response, "file_name", "") or f"feishu_{file_key[-12:]}.{ext}"
@@ -380,7 +412,7 @@ class FeishuChannel(Channel):
 
         try:
             sandbox_provider = get_sandbox_provider()
-            sandbox_id = sandbox_provider.acquire(thread_id)
+            sandbox_id = sandbox_provider.acquire(thread_id, user_id=effective_user_id)
             if sandbox_id != "local":
                 sandbox = sandbox_provider.get(sandbox_id)
                 if sandbox is None:
@@ -428,7 +460,7 @@ class FeishuChannel(Channel):
             return None
 
         content = self._build_card_content(text)
-        request = self._ReplyMessageRequest.builder().message_id(message_id).request_body(self._ReplyMessageRequestBody.builder().msg_type("interactive").content(content).reply_in_thread(True).build()).build()
+        request = self._ReplyMessageRequest.builder().message_id(message_id).request_body(self._ReplyMessageRequestBody.builder().msg_type("interactive").content(content).build()).build()
         response = await asyncio.to_thread(self._api_client.im.v1.message.reply, request)
         response_data = getattr(response, "data", None)
         return getattr(response_data, "message_id", None)
@@ -470,7 +502,7 @@ class FeishuChannel(Channel):
             logger.warning("[Feishu] running card creation returned no message_id for source=%s, subsequent updates will fall back to new replies", source_message_id)
         return running_card_id
 
-    def _ensure_running_card_started(self, source_message_id: str, text: str = "Working on it...") -> asyncio.Task | None:
+    def _ensure_running_card_started(self, source_message_id: str, text: str = "thinking...") -> asyncio.Task | None:
         """Start running-card creation once per source message."""
         running_card_id = self._running_card_ids.get(source_message_id)
         if running_card_id:
@@ -490,7 +522,7 @@ class FeishuChannel(Channel):
             self._running_card_tasks.pop(source_message_id, None)
         self._log_task_error(task, "create_running_card", source_message_id)
 
-    async def _ensure_running_card(self, source_message_id: str, text: str = "Working on it...") -> str | None:
+    async def _ensure_running_card(self, source_message_id: str, text: str = "thinking...") -> str | None:
         """Ensure the in-thread running card exists and track its message ID."""
         running_card_id = self._running_card_ids.get(source_message_id)
         if running_card_id:
@@ -531,18 +563,25 @@ class FeishuChannel(Channel):
                         "[Feishu] failed to patch running card %s, falling back to final reply",
                         running_card_id,
                     )
-                    await self._reply_card(source_message_id, msg.text)
+                    fallback_card_id = await self._reply_card(source_message_id, msg.text)
+                    self._remember_thread_mapping(msg, source_message_id, fallback_card_id)
+                    self._remember_pending_clarification(msg, fallback_card_id)
                 else:
+                    self._remember_thread_mapping(msg, source_message_id, running_card_id)
+                    self._remember_pending_clarification(msg, running_card_id)
                     logger.info("[Feishu] running card updated: source=%s card=%s", source_message_id, running_card_id)
             elif msg.is_final:
-                await self._reply_card(source_message_id, msg.text)
+                final_card_id = await self._reply_card(source_message_id, msg.text)
+                self._remember_thread_mapping(msg, source_message_id, final_card_id)
+                self._remember_pending_clarification(msg, final_card_id)
             elif awaited_running_card_task:
                 logger.warning(
                     "[Feishu] running card task finished without message_id for source=%s, skipping duplicate non-final creation",
                     source_message_id,
                 )
             else:
-                await self._ensure_running_card(source_message_id, msg.text)
+                created_card_id = await self._ensure_running_card(source_message_id, msg.text)
+                self._remember_thread_mapping(msg, source_message_id, created_card_id)
 
             if msg.is_final:
                 self._running_card_ids.pop(source_message_id, None)
@@ -553,15 +592,128 @@ class FeishuChannel(Channel):
 
     # -- internal ----------------------------------------------------------
 
-    @staticmethod
-    def _log_future_error(fut, name: str, msg_id: str) -> None:
-        """Callback for run_coroutine_threadsafe futures to surface errors."""
+    def _remember_thread_mapping(self, msg: OutboundMessage, *topic_ids: str | None) -> None:
+        store = self.config.get("channel_store")
+        if store is None or not msg.thread_id:
+            return
+
+        metadata_topic_ids = [
+            msg.metadata.get("message_id"),
+            msg.metadata.get("root_id"),
+            msg.metadata.get("parent_id"),
+            msg.metadata.get("thread_id"),
+            msg.metadata.get("topic_id"),
+        ]
+        user_id = ""
+        raw_user_id = msg.metadata.get("user_id")
+        if isinstance(raw_user_id, str):
+            user_id = raw_user_id
+
+        seen: set[str] = set()
+        for topic_id in [*topic_ids, *metadata_topic_ids]:
+            topic_id = self._non_empty_str(topic_id)
+            if not topic_id or topic_id in seen:
+                continue
+            seen.add(topic_id)
+            try:
+                store.set_thread_id(
+                    self.name,
+                    msg.chat_id,
+                    msg.thread_id,
+                    topic_id=topic_id,
+                    user_id=user_id,
+                )
+            except Exception:
+                logger.exception("[Feishu] failed to remember thread mapping for topic_id=%s", topic_id)
+
+    def _remember_pending_clarification(self, msg: OutboundMessage, card_message_id: str | None) -> None:
+        if not msg.is_final or msg.metadata.get(PENDING_CLARIFICATION_METADATA_KEY) is not True:
+            return
+
+        user_id = self._non_empty_str(msg.metadata.get("user_id"))
+        topic_id = self._non_empty_str(msg.metadata.get("topic_id"))
+        source_message_id = self._non_empty_str(msg.thread_ts) or self._non_empty_str(msg.metadata.get("message_id"))
+        if not (user_id and topic_id and msg.thread_id and source_message_id and card_message_id):
+            return
+
+        key = self._pending_key(msg.chat_id, user_id)
+        pending = {
+            "thread_id": msg.thread_id,
+            "topic_id": topic_id,
+            "source_message_id": source_message_id,
+            "card_message_id": card_message_id,
+            "created_at": time.time(),
+        }
+        with self._thread_lock:
+            # Plain-message clarification continuity is a short-lived in-memory
+            # hint; explicit Feishu replies are still covered by persisted
+            # message-id mappings.
+            self._pending_clarifications.setdefault(key, []).append(pending)
+        logger.info(
+            "[Feishu] pending clarification remembered: chat_id=%s user_id=%s topic_id=%s thread_id=%s",
+            msg.chat_id,
+            user_id,
+            topic_id,
+            msg.thread_id,
+        )
+
+    def _consume_pending_clarification(self, chat_id: str, user_id: str) -> dict[str, Any] | None:
+        key = self._pending_key(chat_id, user_id)
+        with self._thread_lock:
+            pending_items = self._pending_clarifications.get(key)
+            if not pending_items:
+                return None
+
+            now = time.time()
+            while pending_items:
+                pending = pending_items.pop(0)
+                created_at = pending.get("created_at")
+                if isinstance(created_at, (int, float)) and now - created_at <= PENDING_CLARIFICATION_TTL_SECONDS:
+                    if pending_items:
+                        self._pending_clarifications[key] = pending_items
+                    else:
+                        self._pending_clarifications.pop(key, None)
+                    return pending
+                logger.info("[Feishu] pending clarification expired: chat_id=%s user_id=%s", chat_id, user_id)
+
+            self._pending_clarifications.pop(key, None)
+            return None
+
+    def _ensure_pending_thread_mapping(self, chat_id: str, user_id: str, pending: dict[str, Any]) -> None:
+        store = self.config.get("channel_store")
+        topic_id = self._non_empty_str(pending.get("topic_id"))
+        thread_id = self._non_empty_str(pending.get("thread_id"))
+        if store is None or not topic_id or not thread_id:
+            return
         try:
-            exc = fut.exception()
-            if exc:
-                logger.error("[Feishu] %s failed for msg_id=%s: %s", name, msg_id, exc)
+            store.set_thread_id(self.name, chat_id, thread_id, topic_id=topic_id, user_id=user_id)
         except Exception:
-            pass
+            logger.exception("[Feishu] failed to restore pending clarification mapping for topic_id=%s", topic_id)
+
+    def _resolve_topic_id(
+        self,
+        chat_id: str,
+        msg_id: str,
+        *,
+        root_id: str | None,
+        parent_id: str | None,
+        thread_id: str | None,
+    ) -> tuple[str, bool]:
+        store = self.config.get("channel_store")
+        candidates = [root_id, parent_id, thread_id]
+
+        if store is not None:
+            for candidate in candidates:
+                candidate = self._non_empty_str(candidate)
+                if not candidate:
+                    continue
+                try:
+                    if store.get_thread_id(self.name, chat_id, topic_id=candidate):
+                        return candidate, True
+                except Exception:
+                    logger.exception("[Feishu] failed to resolve stored topic mapping for topic_id=%s", candidate)
+
+        return root_id or msg_id, False
 
     @staticmethod
     def _log_task_error(task: asyncio.Task, name: str, msg_id: str) -> None:
@@ -577,10 +729,46 @@ class FeishuChannel(Channel):
 
     async def _prepare_inbound(self, msg_id: str, inbound) -> None:
         """Kick off Feishu side effects without delaying inbound dispatch."""
+        inbound = await self._attach_connection_identity(inbound)
         reaction_task = asyncio.create_task(self._add_reaction(msg_id, "OK"))
         self._track_background_task(reaction_task, name="add_reaction", msg_id=msg_id)
         self._ensure_running_card_started(msg_id)
         await self.bus.publish_inbound(inbound)
+
+    async def _attach_connection_identity(self, inbound: InboundMessage) -> InboundMessage:
+        return await attach_connection_identity(
+            inbound,
+            repo=self._connection_repo,
+            provider="feishu",
+            workspace_id=inbound.chat_id,
+        )
+
+    async def _bind_connection_from_connect_code(self, *, message_id: str, chat_id: str, user_id: str, code: str) -> bool:
+        if self._connection_repo is None or not code:
+            return False
+
+        state = await self._connection_repo.consume_oauth_state(provider="feishu", state=code)
+        if state is None:
+            await self._reply_card(message_id, "Feishu connection code is invalid or expired.")
+            return True
+
+        if not user_id or not chat_id:
+            await self._reply_card(message_id, "Feishu connection could not be completed from this message.")
+            return True
+
+        await self._connection_repo.upsert_connection(
+            owner_user_id=state["owner_user_id"],
+            provider="feishu",
+            external_account_id=user_id,
+            workspace_id=chat_id,
+            metadata={
+                "chat_id": chat_id,
+                "message_id": message_id,
+            },
+            status="connected",
+        )
+        await self._reply_card(message_id, "Feishu connected to DeerFlow.")
+        return True
 
     def _on_message(self, event) -> None:
         """Called by lark-oapi when a message is received (runs in lark thread)."""
@@ -591,9 +779,10 @@ class FeishuChannel(Channel):
             msg_id = message.message_id
             sender_id = event.event.sender.sender_id.open_id
 
-            # root_id is set when the message is a reply within a Feishu thread.
-            # Use it as topic_id so all replies share the same DeerFlow thread.
             root_id = getattr(message, "root_id", None) or None
+            chat_type = getattr(message, "chat_type", None)
+            parent_id = self._non_empty_str(getattr(message, "parent_id", None))
+            feishu_thread_id = self._non_empty_str(getattr(message, "thread_id", None))
 
             # Parse message content
             content = json.loads(message.content)
@@ -654,16 +843,36 @@ class FeishuChannel(Channel):
             text = text.strip()
 
             logger.info(
-                "[Feishu] parsed message: chat_id=%s, msg_id=%s, root_id=%s, sender=%s, text=%r",
+                "[Feishu] parsed message: chat_id=%s, msg_id=%s, root_id=%s, parent_id=%s, thread_id=%s, chat_type=%s, sender=%s, text_len=%d",
                 chat_id,
                 msg_id,
                 root_id,
+                parent_id,
+                feishu_thread_id,
+                chat_type,
                 sender_id,
-                text[:100] if text else "",
+                len(text or ""),
             )
 
             if not (text or files_list):
                 logger.info("[Feishu] empty text, ignoring message")
+                return
+
+            connect_code = self._pending_connect_code(text)
+            if connect_code:
+                if self._main_loop and self._main_loop.is_running():
+                    fut = asyncio.run_coroutine_threadsafe(
+                        self._bind_connection_from_connect_code(
+                            message_id=msg_id,
+                            chat_id=chat_id,
+                            user_id=sender_id,
+                            code=connect_code,
+                        ),
+                        self._main_loop,
+                    )
+                    fut.add_done_callback(lambda f, mid=msg_id: self._log_future_error(f, "bind_connection", mid))
+                else:
+                    logger.warning("[Feishu] main loop not running, cannot bind channel connection")
                 return
 
             # Only treat known slash commands as commands; absolute paths and
@@ -673,8 +882,26 @@ class FeishuChannel(Channel):
             else:
                 msg_type = InboundMessageType.CHAT
 
-            # topic_id: use root_id for replies (same topic), msg_id for new messages (new topic)
-            topic_id = root_id or msg_id
+            # topic_id determines which LangGraph thread the message maps to.
+            # P2P chats: topic_id=None so all messages share one thread (like Telegram DMs).
+            # But check stored mappings first for backward compatibility with pre-upgrade P2P threads.
+            topic_id, resolved_from_stored_mapping = self._resolve_topic_id(
+                chat_id,
+                msg_id,
+                root_id=root_id,
+                parent_id=parent_id,
+                thread_id=feishu_thread_id,
+            )
+            if chat_type == "p2p" and not resolved_from_stored_mapping:
+                topic_id = None
+            resolved_from_pending = False
+            if msg_type == InboundMessageType.CHAT and not resolved_from_stored_mapping:
+                pending = self._consume_pending_clarification(chat_id, sender_id)
+                pending_topic_id = self._non_empty_str(pending.get("topic_id")) if pending else None
+                if pending_topic_id:
+                    topic_id = pending_topic_id
+                    self._ensure_pending_thread_mapping(chat_id, sender_id, pending)
+                    resolved_from_pending = True
 
             inbound = self._make_inbound(
                 chat_id=chat_id,
@@ -683,7 +910,15 @@ class FeishuChannel(Channel):
                 msg_type=msg_type,
                 thread_ts=msg_id,
                 files=files_list,
-                metadata={"message_id": msg_id, "root_id": root_id},
+                metadata={
+                    "message_id": msg_id,
+                    "root_id": root_id,
+                    "parent_id": parent_id,
+                    "thread_id": feishu_thread_id,
+                    "topic_id": topic_id,
+                    "user_id": sender_id,
+                    RESOLVED_FROM_PENDING_CLARIFICATION_METADATA_KEY: resolved_from_pending,
+                },
             )
             inbound.topic_id = topic_id
 

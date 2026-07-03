@@ -24,6 +24,26 @@ def test_build_server_params_stdio_success():
     }
 
 
+def test_extensions_config_resolves_env_variables_inside_nested_collections(monkeypatch):
+    monkeypatch.setenv("MCP_TOKEN", "secret")
+    monkeypatch.delenv("MISSING_TOKEN", raising=False)
+    raw_config = {
+        "args": ["--token", "$MCP_TOKEN", {"nested": ["$MCP_TOKEN", "$MISSING_TOKEN"]}],
+        "tuple_args": ("$MCP_TOKEN", "$MISSING_TOKEN"),
+        "env": {"API_KEY": "$MCP_TOKEN"},
+        "enabled": True,
+        "timeout": 30,
+    }
+
+    resolved = ExtensionsConfig.resolve_env_variables(raw_config)
+
+    assert resolved["args"] == ["--token", "secret", {"nested": ["secret", ""]}]
+    assert resolved["tuple_args"] == ("secret", "")
+    assert resolved["env"] == {"API_KEY": "secret"}
+    assert resolved["enabled"] is True
+    assert resolved["timeout"] == 30
+
+
 def test_build_server_params_stdio_requires_command():
     config = McpServerConfig(type="stdio", command=None)
 
@@ -61,6 +81,41 @@ def test_build_server_params_rejects_unsupported_transport():
 
     with pytest.raises(ValueError, match="unsupported transport type"):
         build_server_params("bad-transport", config)
+
+
+@pytest.mark.parametrize("transport", ["sse", "http"])
+def test_mcp_server_config_accepts_transport_alias(transport: str):
+    """The MCP-spec ``transport`` field should be accepted as an alias for ``type``.
+
+    Regression test for https://github.com/bytedance/deer-flow/issues/3238 — a
+    remote MCP server configured with only ``transport: sse`` was previously
+    misidentified as ``stdio`` (the default for ``type``).
+    """
+    config = McpServerConfig.model_validate(
+        {
+            "transport": transport,
+            "url": "https://example.com/mcp",
+        }
+    )
+
+    assert config.type == transport
+
+    params = build_server_params("aliased-server", config)
+    assert params["transport"] == transport
+    assert params["url"] == "https://example.com/mcp"
+
+
+def test_mcp_server_config_type_takes_precedence_over_transport():
+    """When both ``type`` and ``transport`` are provided, ``type`` wins."""
+    config = McpServerConfig.model_validate(
+        {
+            "type": "http",
+            "transport": "sse",
+            "url": "https://example.com/mcp",
+        }
+    )
+
+    assert config.type == "http"
 
 
 def test_build_servers_config_returns_empty_when_no_enabled_servers():

@@ -114,6 +114,8 @@ backend/src/
 │   ├── tavily/             # Tavily web search
 │   ├── jina/               # Jina web fetch
 │   ├── firecrawl/          # Firecrawl scraping
+│   ├── fastcrw/            # fastCRW scraping (Firecrawl-compatible)
+│   ├── crawl4ai/           # Crawl4AI web fetch (self-hosted, no key)
 │   └── aio_sandbox/        # Docker sandbox
 │
 ├── reflection/              # Dynamic loading

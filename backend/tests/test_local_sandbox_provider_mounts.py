@@ -204,6 +204,26 @@ class TestSymlinkEscapes:
 
         assert exc_info.value.errno == errno.EACCES
 
+    def test_download_file_blocks_symlink_escape_from_mount(self, tmp_path):
+        mount_dir = tmp_path / "mount"
+        mount_dir.mkdir()
+        outside_dir = tmp_path / "outside"
+        outside_dir.mkdir()
+        (outside_dir / "secret.bin").write_bytes(b"\x00secret")
+        _symlink_to(outside_dir, mount_dir / "escape", target_is_directory=True)
+
+        sandbox = LocalSandbox(
+            "test",
+            [
+                PathMapping(container_path="/mnt/user-data", local_path=str(mount_dir), read_only=False),
+            ],
+        )
+
+        with pytest.raises(PermissionError) as exc_info:
+            sandbox.download_file("/mnt/user-data/escape/secret.bin")
+
+        assert exc_info.value.errno == errno.EACCES
+
     def test_write_file_blocks_symlink_escape_from_mount(self, tmp_path):
         mount_dir = tmp_path / "mount"
         mount_dir.mkdir()
@@ -334,6 +354,74 @@ class TestSymlinkEscapes:
         assert existing.read_bytes() == b"original"
 
 
+class TestDownloadFileMappings:
+    """download_file must use _resolve_path_with_mapping so path resolution, symlink
+    containment, and read-only awareness are consistent with read_file."""
+
+    def test_resolves_container_path_via_mapping(self, tmp_path):
+        """download_file should resolve container paths through path mappings."""
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+        (data_dir / "asset.bin").write_bytes(b"\x01\x02\x03")
+
+        sandbox = LocalSandbox(
+            "test",
+            [PathMapping(container_path="/mnt/user-data", local_path=str(data_dir))],
+        )
+
+        result = sandbox.download_file("/mnt/user-data/asset.bin")
+
+        assert result == b"\x01\x02\x03"
+
+    def test_raises_oserror_with_original_path_when_missing(self, tmp_path):
+        """OSError filename should show the container path, not the resolved host path."""
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+
+        sandbox = LocalSandbox(
+            "test",
+            [PathMapping(container_path="/mnt/user-data", local_path=str(data_dir))],
+        )
+
+        with pytest.raises(OSError) as exc_info:
+            sandbox.download_file("/mnt/user-data/missing.bin")
+
+        assert exc_info.value.filename == "/mnt/user-data/missing.bin"
+
+    def test_rejects_path_outside_virtual_prefix_and_logs_error(self, tmp_path, caplog):
+        """download_file must reject paths outside /mnt/user-data and log the reason."""
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+        (data_dir / "model.bin").write_bytes(b"weights")
+
+        sandbox = LocalSandbox(
+            "test",
+            [PathMapping(container_path="/mnt/user-data", local_path=str(data_dir), read_only=True)],
+        )
+
+        with caplog.at_level("ERROR"):
+            with pytest.raises(PermissionError) as exc_info:
+                sandbox.download_file("/mnt/skills/model.bin")
+
+        assert exc_info.value.errno == errno.EACCES
+        assert "outside allowed directory" in caplog.text
+
+    def test_readable_from_read_only_mount(self, tmp_path):
+        """Read-only mounts must not block download_file — read-only only restricts writes."""
+        skills_dir = tmp_path / "skills"
+        skills_dir.mkdir()
+        (skills_dir / "model.bin").write_bytes(b"weights")
+
+        sandbox = LocalSandbox(
+            "test",
+            [PathMapping(container_path="/mnt/user-data", local_path=str(skills_dir), read_only=True)],
+        )
+
+        result = sandbox.download_file("/mnt/user-data/model.bin")
+
+        assert result == b"weights"
+
+
 class TestMultipleMounts:
     def test_multiple_read_write_mounts(self, tmp_path):
         skills_dir = tmp_path / "skills"
@@ -400,16 +488,18 @@ class TestMultipleMounts:
             ],
         )
 
-        # Mock subprocess to capture the resolved command
+        # Mock subprocess to capture the resolved command. The POSIX path runs
+        # commands via subprocess.Popen, so wrap that and still execute the real
+        # command.
         captured = {}
-        original_run = __import__("subprocess").run
+        original_popen = __import__("subprocess").Popen
 
-        def mock_run(*args, **kwargs):
+        def mock_popen(*args, **kwargs):
             if len(args) > 0:
                 captured["command"] = args[0]
-            return original_run(*args, **kwargs)
+            return original_popen(*args, **kwargs)
 
-        monkeypatch.setattr("deerflow.sandbox.local.local_sandbox.subprocess.run", mock_run)
+        monkeypatch.setattr("deerflow.sandbox.local.local_sandbox.subprocess.Popen", mock_popen)
         monkeypatch.setattr("deerflow.sandbox.local.local_sandbox.LocalSandbox._get_shell", lambda self: "/bin/sh")
 
         sandbox.execute_command("cat /mnt/data/test.txt")
@@ -523,6 +613,54 @@ class TestLocalSandboxProviderMounts:
             provider = LocalSandboxProvider()
 
         assert [m.container_path for m in provider._path_mappings] == ["/mnt/skills"]
+
+    def test_setup_path_mappings_logs_actionable_error_for_missing_host_path(self, tmp_path, caplog):
+        """Regression for #3244.
+
+        When ``sandbox.mounts[].host_path`` is absent from the gateway process's
+        filesystem (the typical symptom in Docker production mode: host_path is a
+        host machine path that is not bind-mounted into the gateway container),
+        the mount is still skipped — but the failure must be a hard-to-miss ERROR
+        log with explicit, actionable guidance about Docker bind mounts, not the
+        old DEBUG/WARNING that buried the silent failure.
+        """
+        skills_dir = tmp_path / "skills"
+        skills_dir.mkdir()
+        missing_host_path = tmp_path / "does-not-exist"
+
+        from deerflow.config.sandbox_config import SandboxConfig, VolumeMountConfig
+
+        sandbox_config = SandboxConfig(
+            use="deerflow.sandbox.local:LocalSandboxProvider",
+            mounts=[
+                VolumeMountConfig(host_path=str(missing_host_path), container_path="/mnt/knowledge", read_only=True),
+            ],
+        )
+        config = SimpleNamespace(
+            skills=SimpleNamespace(container_path="/mnt/skills", get_skills_path=lambda: skills_dir, use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage"),
+            sandbox=sandbox_config,
+        )
+
+        with caplog.at_level("ERROR", logger="deerflow.sandbox.local.local_sandbox_provider"):
+            with patch("deerflow.config.get_app_config", return_value=config):
+                provider = LocalSandboxProvider()
+
+        # Silent-skip behaviour is preserved (no breaking change for existing deployments).
+        assert [m.container_path for m in provider._path_mappings] == ["/mnt/skills"]
+
+        # The failure must be observable at ERROR level and reference the offending paths.
+        error_records = [r for r in caplog.records if r.levelname == "ERROR"]
+        assert error_records, "expected an ERROR log when host_path is missing"
+        message = "\n".join(r.getMessage() for r in error_records)
+        assert str(missing_host_path) in message
+        assert "/mnt/knowledge" in message
+
+        # And it must include actionable Docker guidance so users don't lose hours
+        # to a silent empty-mount failure in production.
+        lowered = message.lower()
+        assert "docker" in lowered
+        assert "gateway" in lowered
+        assert "docker-compose" in lowered
 
     def test_write_file_resolves_container_paths_in_content(self, tmp_path):
         """write_file should replace container paths in file content with local paths."""

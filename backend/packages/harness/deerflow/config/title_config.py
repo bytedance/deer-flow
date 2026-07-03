@@ -24,11 +24,11 @@ class TitleConfig(BaseModel):
     )
     model_name: str | None = Field(
         default=None,
-        description="Model name to use for title generation (None = use default model)",
+        description="Model name to use for LLM title generation (None = use local fallback title)",
     )
     prompt_template: str = Field(
         default=("Generate a concise title (max {max_words} words) for this conversation.\nUser: {user_msg}\nAssistant: {assistant_msg}\n\nReturn ONLY the title, no quotes, no explanation."),
-        description="Prompt template for title generation",
+        description="Prompt template for LLM title generation when model_name is set",
     )
 
 
@@ -51,3 +51,16 @@ def load_title_config_from_dict(config_dict: dict) -> None:
     """Load title configuration from a dictionary."""
     global _title_config
     _title_config = TitleConfig(**config_dict)
+
+
+def reset_title_config() -> None:
+    """Restore the title configuration to its pristine ``TitleConfig()`` default.
+
+    Public API so that tests do not have to reach into the private
+    ``_title_config`` module attribute. ``AppConfig.from_file()`` calls
+    :func:`load_title_config_from_dict`, which permanently mutates the
+    singleton; tests that need a clean slate between cases should call
+    this between tests.
+    """
+    global _title_config
+    _title_config = TitleConfig()

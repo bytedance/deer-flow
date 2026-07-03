@@ -20,7 +20,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, cast
 from uuid import UUID
@@ -29,10 +29,18 @@ from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import AIMessage, AnyMessage, BaseMessage, HumanMessage, ToolMessage
 from langgraph.types import Command
 
+from deerflow.utils.messages import message_to_text
+
 if TYPE_CHECKING:
     from deerflow.runtime.events.store.base import RunEventStore
 
 logger = logging.getLogger(__name__)
+
+_LEGACY_SUMMARY_MESSAGE_NAME = "summary"
+
+
+def _is_user_visible_human_message(message: BaseMessage) -> bool:
+    return isinstance(message, HumanMessage) and message.name != _LEGACY_SUMMARY_MESSAGE_NAME and message.additional_kwargs.get("hide_from_ui") is not True
 
 
 class RunJournal(BaseCallbackHandler):
@@ -46,6 +54,8 @@ class RunJournal(BaseCallbackHandler):
         *,
         track_token_usage: bool = True,
         flush_threshold: int = 20,
+        progress_reporter: Callable[[dict], Awaitable[None]] | None = None,
+        progress_flush_interval: float = 5.0,
     ):
         super().__init__()
         self.run_id = run_id
@@ -53,10 +63,16 @@ class RunJournal(BaseCallbackHandler):
         self._store = event_store
         self._track_tokens = track_token_usage
         self._flush_threshold = flush_threshold
+        self._progress_reporter = progress_reporter
+        self._progress_flush_interval = progress_flush_interval
 
         # Write buffer
         self._buffer: list[dict] = []
         self._pending_flush_tasks: set[asyncio.Task[None]] = set()
+        self._pending_progress_task: asyncio.Task[None] | None = None
+        self._pending_progress_delayed = False
+        self._progress_dirty = False
+        self._last_progress_flush = 0.0
 
         # Token accumulators
         self._total_input_tokens = 0
@@ -69,6 +85,9 @@ class RunJournal(BaseCallbackHandler):
         self._subagent_tokens = 0
         self._middleware_tokens = 0
 
+        # Per-model token accumulator
+        self._tokens_by_model: dict[str, dict[str, int]] = {}
+
         # Dedup: LangChain may fire on_llm_end multiple times for the same run_id
         self._counted_llm_run_ids: set[str] = set()
         self._counted_external_source_ids: set[str] = set()
@@ -78,6 +97,8 @@ class RunJournal(BaseCallbackHandler):
         self._last_ai_msg: str | None = None
         self._first_human_msg: str | None = None
         self._msg_count = 0
+        self._had_llm_error_fallback = False
+        self._llm_error_fallback_message: str | None = None
 
         # Latency tracking
         self._llm_start_times: dict[str, float] = {}  # langchain run_id -> start time
@@ -91,33 +112,7 @@ class RunJournal(BaseCallbackHandler):
     @staticmethod
     def _message_text(message: BaseMessage) -> str:
         """Extract displayable text from a message's mixed content shape."""
-        content = getattr(message, "content", None)
-        if isinstance(content, str):
-            return content
-        if isinstance(content, list):
-            parts: list[str] = []
-            for block in content:
-                if isinstance(block, str):
-                    parts.append(block)
-                elif isinstance(block, Mapping):
-                    text = block.get("text")
-                    if isinstance(text, str):
-                        parts.append(text)
-                    else:
-                        nested = block.get("content")
-                        if isinstance(nested, str):
-                            parts.append(nested)
-            return "".join(parts)
-        if isinstance(content, Mapping):
-            for key in ("text", "content"):
-                value = content.get(key)
-                if isinstance(value, str):
-                    return value
-
-        text = getattr(message, "text", None)
-        if isinstance(text, str):
-            return text
-        return ""
+        return message_to_text(message, text_attribute_fallback=True)
 
     def _record_message_summary(self, message: BaseMessage, *, caller: str | None = None) -> None:
         """Update run-level convenience fields for persisted run rows."""
@@ -154,7 +149,18 @@ class RunJournal(BaseCallbackHandler):
                 metadata={"caller": caller, **(metadata or {})},
             )
 
-    def on_chain_end(self, outputs: Any, *, run_id: UUID, **kwargs: Any) -> None:
+    def on_chain_end(
+        self,
+        outputs: Any,
+        *,
+        run_id: UUID,
+        parent_run_id: UUID | None = None,
+        **kwargs: Any,
+    ) -> None:
+        # Nested chain ends fire for internal graph nodes; only the root chain
+        # represents the user-visible run lifecycle.
+        if parent_run_id is not None:
+            return
         self._put(event_type="run.end", category="outputs", content=outputs, metadata={"status": "success"})
         self._flush_sync()
 
@@ -197,12 +203,12 @@ class RunJournal(BaseCallbackHandler):
             [len(batch) for batch in messages],
         )
 
-        # Capture the first human message sent to any LLM in this run.
-        if not self._first_human_msg and messages:
+        # Capture the first user message sent to the lead agent in this run.
+        caller = self._identify_caller(tags)
+        if caller == "lead_agent" and not self._first_human_msg and messages:
             for batch in reversed(messages):
                 for m in reversed(batch):
-                    if isinstance(m, HumanMessage) and m.name != "summary":
-                        caller = self._identify_caller(tags)
+                    if _is_user_visible_human_message(m):
                         self.set_first_human_message(m.text)
                         self._put(
                             event_type="llm.human.input",
@@ -248,6 +254,18 @@ class RunJournal(BaseCallbackHandler):
             # Token usage from message
             usage = getattr(message, "usage_metadata", None)
             usage_dict = dict(usage) if usage else {}
+            additional_kwargs = getattr(message, "additional_kwargs", None) or {}
+            if isinstance(additional_kwargs, dict) and additional_kwargs.get("deerflow_error_fallback"):
+                self._had_llm_error_fallback = True
+                detail = additional_kwargs.get("error_detail")
+                reason = additional_kwargs.get("error_reason")
+                fallback_text = self._message_text(message).strip()
+                if isinstance(detail, str) and detail.strip():
+                    self._llm_error_fallback_message = detail.strip()
+                elif isinstance(reason, str) and reason.strip():
+                    self._llm_error_fallback_message = reason.strip()
+                elif fallback_text:
+                    self._llm_error_fallback_message = fallback_text[:2000]
 
             # Resolve call index
             call_index = self._llm_call_index
@@ -293,6 +311,15 @@ class RunJournal(BaseCallbackHandler):
                         self._middleware_tokens += total_tk
                     else:
                         self._lead_agent_tokens += total_tk
+
+                    # Per-model bucket
+                    response_metadata = getattr(message, "response_metadata", None) or {}
+                    per_call_model: str | None = None
+                    if isinstance(response_metadata, Mapping):
+                        per_call_model = response_metadata.get("model_name") or response_metadata.get("model")
+                    self._record_model_usage(per_call_model, input_tk, output_tk, total_tk)
+
+                    self._schedule_progress_flush()
 
         if messages:
             self._counted_message_llm_run_ids.add(str(run_id))
@@ -400,17 +427,42 @@ class RunJournal(BaseCallbackHandler):
         # themselves.
         return "lead_agent"
 
+    def _record_model_usage(
+        self,
+        model_name: str | None,
+        input_tokens: int,
+        output_tokens: int,
+        total_tokens: int,
+    ) -> None:
+        """Add a single LLM call's token usage to the per-model accumulator.
+
+        Missing / empty ``model_name`` collapses into a shared ``"unknown"``
+        bucket so the breakdown stays usable when a provider doesn't surface
+        ``response_metadata.model_name``.
+        """
+        if total_tokens <= 0:
+            return
+        bucket = self._tokens_by_model.setdefault(
+            model_name or "unknown",
+            {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+        )
+        bucket["input_tokens"] += int(input_tokens or 0)
+        bucket["output_tokens"] += int(output_tokens or 0)
+        bucket["total_tokens"] += int(total_tokens)
+
     # -- Public methods (called by worker) --
 
     def record_external_llm_usage_records(
         self,
-        records: list[dict[str, int | str]],
+        records: list[dict[str, int | str | None]],
     ) -> None:
         """Record token usage from external sources (e.g., subagents).
 
         Each record should contain:
             source_run_id: Unique identifier to prevent double-counting
             caller: Caller tag (e.g. "subagent:general-purpose")
+            model_name: Real per-call model name (str or None; falls back to
+                ``"unknown"`` bucket when missing)
             input_tokens: Input token count
             output_tokens: Output token count
             total_tokens: Total token count (computed from input+output if 0/missing)
@@ -432,9 +484,12 @@ class RunJournal(BaseCallbackHandler):
             if total_tk <= 0:
                 continue
 
+            input_tk = record.get("input_tokens", 0) or 0
+            output_tk = record.get("output_tokens", 0) or 0
+
             self._counted_external_source_ids.add(source_id)
-            self._total_input_tokens += record.get("input_tokens", 0) or 0
-            self._total_output_tokens += record.get("output_tokens", 0) or 0
+            self._total_input_tokens += input_tk
+            self._total_output_tokens += output_tk
             self._total_tokens += total_tk
 
             caller = str(record.get("caller", ""))
@@ -444,6 +499,10 @@ class RunJournal(BaseCallbackHandler):
                 self._middleware_tokens += total_tk
             else:
                 self._lead_agent_tokens += total_tk
+
+            self._record_model_usage(record.get("model_name"), input_tk, output_tk, total_tk)
+
+            self._schedule_progress_flush()
 
     def set_first_human_message(self, content: str) -> None:
         """Record the first human message for convenience fields."""
@@ -474,6 +533,14 @@ class RunJournal(BaseCallbackHandler):
         """Force flush remaining buffer. Called in worker's finally block."""
         if self._pending_flush_tasks:
             await asyncio.gather(*tuple(self._pending_flush_tasks), return_exceptions=True)
+        while self._pending_progress_task is not None and not self._pending_progress_task.done():
+            if self._pending_progress_delayed:
+                self._pending_progress_task.cancel()
+                await asyncio.gather(self._pending_progress_task, return_exceptions=True)
+                self._progress_dirty = False
+                self._pending_progress_delayed = False
+                break
+            await asyncio.gather(self._pending_progress_task, return_exceptions=True)
 
         while self._buffer:
             batch = self._buffer[: self._flush_threshold]
@@ -483,6 +550,57 @@ class RunJournal(BaseCallbackHandler):
             except Exception:
                 self._buffer = batch + self._buffer
                 raise
+
+    def _schedule_progress_flush(self) -> None:
+        """Best-effort throttled progress snapshot for active run visibility."""
+        if self._progress_reporter is None:
+            return
+        now = time.monotonic()
+        elapsed = now - self._last_progress_flush
+        if elapsed < self._progress_flush_interval:
+            self._progress_dirty = True
+            self._schedule_delayed_progress_flush(self._progress_flush_interval - elapsed)
+            return
+        if self._pending_progress_task is not None and not self._pending_progress_task.done():
+            self._progress_dirty = True
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self._progress_dirty = False
+        self._pending_progress_task = loop.create_task(self._flush_progress_async(snapshot=self.get_completion_data()))
+
+    def _schedule_delayed_progress_flush(self, delay: float) -> None:
+        if self._pending_progress_task is not None and not self._pending_progress_task.done():
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        delay = max(0.0, delay)
+        self._pending_progress_delayed = delay > 0
+        self._pending_progress_task = loop.create_task(self._flush_progress_async(delay=delay))
+
+    async def _flush_progress_async(self, *, snapshot: dict | None = None, delay: float = 0.0) -> None:
+        if self._progress_reporter is None:
+            return
+        if delay > 0:
+            self._pending_progress_delayed = True
+            await asyncio.sleep(delay)
+            self._pending_progress_delayed = False
+        dirty_before_write = self._progress_dirty
+        self._progress_dirty = False
+        snapshot_to_write = snapshot or self.get_completion_data()
+        try:
+            await self._progress_reporter(snapshot_to_write)
+            self._last_progress_flush = time.monotonic()
+        except Exception:
+            logger.warning("Failed to persist progress snapshot for run %s", self.run_id, exc_info=True)
+        if dirty_before_write or self._progress_dirty:
+            self._progress_dirty = False
+            self._pending_progress_task = None
+            self._schedule_delayed_progress_flush(self._progress_flush_interval)
 
     def get_completion_data(self) -> dict:
         """Return accumulated token and message data for run completion."""
@@ -494,7 +612,16 @@ class RunJournal(BaseCallbackHandler):
             "lead_agent_tokens": self._lead_agent_tokens,
             "subagent_tokens": self._subagent_tokens,
             "middleware_tokens": self._middleware_tokens,
+            "token_usage_by_model": {model: dict(usage) for model, usage in self._tokens_by_model.items()},
             "message_count": self._msg_count,
             "last_ai_message": self._last_ai_msg,
             "first_human_message": self._first_human_msg,
         }
+
+    @property
+    def had_llm_error_fallback(self) -> bool:
+        return self._had_llm_error_fallback
+
+    @property
+    def llm_error_fallback_message(self) -> str | None:
+        return self._llm_error_fallback_message

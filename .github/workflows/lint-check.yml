@@ -2,7 +2,7 @@ name: Lint Check
 
 on:
   push:
-    branches: [ 'main' ]
+    branches: [ 'main', '2.0.x-dev' ]
   pull_request:
     branches: [ '*' ]
 
@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 jobs:
-  lint:
+  lint-backend:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -22,6 +22,10 @@ jobs:
 
       - name: Install uv
         uses: astral-sh/setup-uv@v7
+
+      - name: Check uv.lock is in sync
+        working-directory: backend
+        run: uv lock --check
 
       - name: Install dependencies
         working-directory: backend

@@ -1,14 +1,18 @@
 import json
 import logging
+import os
 
 from fastapi import APIRouter, Depends, Request
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
+import deerflow.utils.llm_text as llm_text
 from app.gateway.authz import require_permission
 from app.gateway.deps import get_config
 from deerflow.config.app_config import AppConfig
 from deerflow.models import create_chat_model
+from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.tracing import inject_langfuse_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -30,18 +34,18 @@ class SuggestionsResponse(BaseModel):
     suggestions: list[str] = Field(default_factory=list, description="Suggested follow-up questions")
 
 
-def _strip_markdown_code_fence(text: str) -> str:
-    stripped = text.strip()
-    if not stripped.startswith("```"):
-        return stripped
-    lines = stripped.splitlines()
-    if len(lines) >= 3 and lines[0].startswith("```") and lines[-1].startswith("```"):
-        return "\n".join(lines[1:-1]).strip()
-    return stripped
+class SuggestionsConfigResponse(BaseModel):
+    enabled: bool = Field(..., description="Whether follow-up suggestions are enabled globally")
+
+
+_extract_response_text = llm_text.extract_response_text
+_strip_markdown_code_fence = llm_text.strip_markdown_code_fence
+_strip_think_blocks = llm_text.strip_think_blocks
 
 
 def _parse_json_string_list(text: str) -> list[str] | None:
-    candidate = _strip_markdown_code_fence(text)
+    candidate = _strip_think_blocks(text)
+    candidate = _strip_markdown_code_fence(candidate)
     start = candidate.find("[")
     end = candidate.rfind("]")
     if start == -1 or end == -1 or end <= start:
@@ -64,24 +68,6 @@ def _parse_json_string_list(text: str) -> list[str] | None:
     return out
 
 
-def _extract_response_text(content: object) -> str:
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts: list[str] = []
-        for block in content:
-            if isinstance(block, str):
-                parts.append(block)
-            elif isinstance(block, dict) and block.get("type") in {"text", "output_text"}:
-                text = block.get("text")
-                if isinstance(text, str):
-                    parts.append(text)
-        return "\n".join(parts) if parts else ""
-    if content is None:
-        return ""
-    return str(content)
-
-
 def _format_conversation(messages: list[SuggestionMessage]) -> str:
     parts: list[str] = []
     for m in messages:
@@ -93,6 +79,18 @@ def _format_conversation(messages: list[SuggestionMessage]) -> str:
         else:
             parts.append(f"{m.role}: {m.content.strip()}")
     return "\n".join(parts).strip()
+
+
+@router.get(
+    "/suggestions/config",
+    response_model=SuggestionsConfigResponse,
+    summary="Get Suggestions Configuration",
+    description="Returns the global configuration for follow-up suggestions.",
+)
+async def get_suggestions_config(
+    config: AppConfig = Depends(get_config),
+) -> SuggestionsConfigResponse:
+    return SuggestionsConfigResponse(enabled=config.suggestions.enabled)
 
 
 @router.post(
@@ -108,6 +106,8 @@ async def generate_suggestions(
     request: Request,
     config: AppConfig = Depends(get_config),
 ) -> SuggestionsResponse:
+    if not config.suggestions.enabled:
+        return SuggestionsResponse(suggestions=[])
     if not body.messages:
         return SuggestionsResponse(suggestions=[])
 
@@ -130,7 +130,16 @@ async def generate_suggestions(
 
     try:
         model = create_chat_model(name=body.model_name, thinking_enabled=False, app_config=config)
-        response = await model.ainvoke([SystemMessage(content=system_instruction), HumanMessage(content=user_content)], config={"run_name": "suggest_agent"})
+        invoke_config: dict = {"run_name": "suggest_agent"}
+        inject_langfuse_metadata(
+            invoke_config,
+            thread_id=thread_id,
+            user_id=get_effective_user_id(),
+            assistant_id="suggest_agent",
+            model_name=body.model_name,
+            environment=os.environ.get("DEER_FLOW_ENV") or os.environ.get("ENVIRONMENT"),
+        )
+        response = await model.ainvoke([SystemMessage(content=system_instruction), HumanMessage(content=user_content)], config=invoke_config)
         raw = _extract_response_text(response.content)
         suggestions = _parse_json_string_list(raw) or []
         cleaned = [s.replace("\n", " ").strip() for s in suggestions if s.strip()]

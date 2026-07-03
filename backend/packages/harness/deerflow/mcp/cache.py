@@ -87,8 +87,7 @@ def get_cached_mcp_tools() -> list[BaseTool]:
 
     Also checks if the config file has been modified since last initialization,
     and re-initializes if needed. This ensures that changes made through the
-    Gateway API (which runs in a separate process) are reflected in the
-    LangGraph Server.
+    Gateway API are reflected in the Gateway-embedded LangGraph runtime.
 
     Returns:
         List of cached MCP tools.
@@ -134,9 +133,34 @@ def reset_mcp_tools_cache() -> None:
     """Reset the MCP tools cache.
 
     This is useful for testing or when you want to reload MCP tools.
+    Also closes all persistent MCP sessions so they are recreated on
+    the next tool load.
     """
     global _mcp_tools_cache, _cache_initialized, _config_mtime
     _mcp_tools_cache = None
     _cache_initialized = False
     _config_mtime = None
+
+    # Close persistent sessions – they will be recreated by the next
+    # get_mcp_tools() call with the (possibly updated) connection config.
+    #
+    # close_all_sync() already picks the correct strategy per owning loop:
+    #   * sessions owned by the *current* running loop are only *signalled*
+    #     (their owner task runs __aexit__ once the loop regains control –
+    #     this is correct and leak-free, since the loop keeps the task alive),
+    #   * sessions on other threads' loops are torn down deterministically,
+    #   * idle/closed loops are handled or skipped.
+    # We deliberately do NOT try to synchronously wait for the current running
+    # loop to finish teardown here: that is a self-deadlock (the loop can only
+    # run the teardown after this synchronous call returns control to it).
+    try:
+        from deerflow.mcp.session_pool import get_session_pool
+
+        get_session_pool().close_all_sync()
+    except Exception:
+        logger.debug("Could not close MCP session pool on cache reset", exc_info=True)
+
+    from deerflow.mcp.session_pool import reset_session_pool
+
+    reset_session_pool()
     logger.info("MCP tools cache reset")

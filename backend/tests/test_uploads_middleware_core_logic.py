@@ -14,6 +14,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 
 from deerflow.agents.middlewares.uploads_middleware import UploadsMiddleware
 from deerflow.config.paths import Paths
+from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
 
 THREAD_ID = "thread-abc123"
 
@@ -145,6 +146,11 @@ class TestFilesFromKwargs:
         assert result is not None
         assert result[0]["size"] == 0
 
+    def test_skips_upload_staging_filenames(self, tmp_path):
+        mw = _middleware(tmp_path)
+        msg = _human("hi", files=[{"filename": ".upload-active.part", "size": 5, "path": "/mnt/user-data/uploads/.upload-active.part"}])
+        assert mw._files_from_kwargs(msg) is None
+
 
 # ---------------------------------------------------------------------------
 # _create_files_message
@@ -263,6 +269,22 @@ class TestBeforeAgent:
         assert "<uploaded_files>" in combined_text
         assert "analyse this" in combined_text
 
+    def test_list_content_preserves_original_slash_skill_text(self, tmp_path):
+        mw = _middleware(tmp_path)
+        uploads_dir = _uploads_dir(tmp_path)
+        (uploads_dir / "data.csv").write_bytes(b"a,b")
+
+        msg = _human(
+            [{"type": "text", "text": "/data-analysis analyze data.csv"}],
+            files=[{"filename": "data.csv", "size": 3, "path": "/mnt/user-data/uploads/data.csv"}],
+        )
+        result = mw.before_agent(self._state(msg), _runtime())
+
+        assert result is not None
+        updated_msg = result["messages"][-1]
+        assert isinstance(updated_msg.content, list)
+        assert updated_msg.additional_kwargs[ORIGINAL_USER_CONTENT_KEY] == "/data-analysis analyze data.csv"
+
     def test_preserves_additional_kwargs_on_updated_message(self, tmp_path):
         mw = _middleware(tmp_path)
         uploads_dir = _uploads_dir(tmp_path)
@@ -277,6 +299,37 @@ class TestBeforeAgent:
         updated_kwargs = result["messages"][-1].additional_kwargs
         assert updated_kwargs.get("files") == files_meta
         assert updated_kwargs.get("element") == "task"
+
+    def test_preserves_original_user_content_before_upload_context(self, tmp_path):
+        mw = _middleware(tmp_path)
+        uploads_dir = _uploads_dir(tmp_path)
+        (uploads_dir / "report.pdf").write_bytes(b"pdf")
+
+        msg = _human(
+            "/data-analysis 分析这个文档",
+            files=[{"filename": "report.pdf", "size": 3, "path": "/mnt/user-data/uploads/report.pdf"}],
+        )
+        result = mw.before_agent(self._state(msg), _runtime())
+
+        assert result is not None
+        updated_msg = result["messages"][-1]
+        assert updated_msg.content.startswith("<uploaded_files>")
+        assert updated_msg.additional_kwargs[ORIGINAL_USER_CONTENT_KEY] == "/data-analysis 分析这个文档"
+
+    def test_preserves_existing_original_user_content_marker(self, tmp_path):
+        mw = _middleware(tmp_path)
+        uploads_dir = _uploads_dir(tmp_path)
+        (uploads_dir / "report.pdf").write_bytes(b"pdf")
+
+        msg = _human(
+            "<uploaded_files>\nold\n</uploaded_files>\n\n/data-analysis run",
+            files=[{"filename": "report.pdf", "size": 3, "path": "/mnt/user-data/uploads/report.pdf"}],
+            **{ORIGINAL_USER_CONTENT_KEY: "/data-analysis run"},
+        )
+        result = mw.before_agent(self._state(msg), _runtime())
+
+        assert result is not None
+        assert result["messages"][-1].additional_kwargs[ORIGINAL_USER_CONTENT_KEY] == "/data-analysis run"
 
     def test_uploaded_files_returned_in_state_update(self, tmp_path):
         mw = _middleware(tmp_path)
@@ -313,6 +366,22 @@ class TestBeforeAgent:
         assert "new.txt" in content
         assert "previous messages" in content
         assert "old.txt" in content
+
+    def test_historical_files_ignore_upload_staging_files(self, tmp_path):
+        mw = _middleware(tmp_path)
+        uploads_dir = _uploads_dir(tmp_path)
+        (uploads_dir / "old.txt").write_bytes(b"old")
+        (uploads_dir / ".upload-active.part").write_bytes(b"partial")
+        (uploads_dir / ".env").write_bytes(b"intentional")
+
+        msg = _human("go")
+        result = mw.before_agent(self._state(msg), _runtime())
+
+        assert result is not None
+        content = result["messages"][-1].content
+        assert "old.txt" in content
+        assert ".env" in content
+        assert ".upload-active.part" not in content
 
     def test_no_historical_section_when_upload_dir_is_empty(self, tmp_path):
         mw = _middleware(tmp_path)

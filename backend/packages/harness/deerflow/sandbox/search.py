@@ -43,6 +43,7 @@ IGNORE_PATTERNS = [
     "*.log",
     "*.tmp",
     "*.temp",
+    ".upload-*.part",
     "*.bak",
     "*.cache",
     ".cache",
@@ -67,11 +68,22 @@ class GrepMatch:
     line: str
 
 
+# ``should_ignore_name`` runs once per directory entry during glob/grep tree
+# walks, so we avoid ~50 ``fnmatch`` calls per name. Most ignore patterns are
+# literal names (O(1) set lookup after normcase); the few glob patterns are
+# pre-translated into a single combined regex. ``os.path.normcase`` keeps the
+# same case behavior ``fnmatch`` applies (case-sensitive on POSIX, folded on
+# Windows).
+_EXACT_IGNORE_NAMES = frozenset(os.path.normcase(p) for p in IGNORE_PATTERNS if not any(c in p for c in "*?["))
+_GLOB_IGNORE_PATTERNS = [p for p in IGNORE_PATTERNS if any(c in p for c in "*?[")]
+_GLOB_IGNORE_RE = re.compile("|".join(fnmatch.translate(os.path.normcase(p)) for p in _GLOB_IGNORE_PATTERNS)) if _GLOB_IGNORE_PATTERNS else None
+
+
 def should_ignore_name(name: str) -> bool:
-    for pattern in IGNORE_PATTERNS:
-        if fnmatch.fnmatch(name, pattern):
-            return True
-    return False
+    normalized = os.path.normcase(name)
+    if normalized in _EXACT_IGNORE_NAMES:
+        return True
+    return _GLOB_IGNORE_RE is not None and _GLOB_IGNORE_RE.match(normalized) is not None
 
 
 def should_ignore_path(path: str) -> bool:

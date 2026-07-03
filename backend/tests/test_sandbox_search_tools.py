@@ -459,3 +459,23 @@ def test_ls_tool_returns_empty_for_empty_directory(tmp_path, monkeypatch) -> Non
     )
 
     assert result == "(empty)"
+
+
+def test_ls_tool_filters_upload_staging_files(tmp_path, monkeypatch) -> None:
+    runtime = _make_runtime(tmp_path)
+    uploads = tmp_path / "uploads"
+    (uploads / "report.txt").write_text("ready\n", encoding="utf-8")
+    (uploads / ".upload-active.part").write_text("partial\n", encoding="utf-8")
+    (uploads / ".upload-note.txt").write_text("intentional\n", encoding="utf-8")
+
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: LocalSandbox(id="local"))
+
+    result = ls_tool.func(
+        runtime=runtime,
+        description="list uploads",
+        path="/mnt/user-data/uploads",
+    )
+
+    assert "/mnt/user-data/uploads/report.txt" in result
+    assert "/mnt/user-data/uploads/.upload-note.txt" in result
+    assert ".upload-active.part" not in result

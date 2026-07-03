@@ -4,7 +4,20 @@ from pydantic import BaseModel, ConfigDict, Field
 class VolumeMountConfig(BaseModel):
     """Configuration for a volume mount."""
 
-    host_path: str = Field(..., description="Path on the host machine")
+    host_path: str = Field(
+        ...,
+        description=(
+            "Source path for the mount. Resolution depends on the active provider: "
+            "``LocalSandboxProvider`` checks this path from the gateway process — in "
+            "``make dev`` that is the host machine, but in Docker deployments "
+            "(``make up`` / docker-compose) it is the path *inside* the "
+            "``deer-flow-gateway`` container, so the host directory must also be "
+            "bind-mounted into the gateway service for the mount to take effect. "
+            "``AioSandboxProvider`` (DooD) passes this value straight to ``docker -v`` "
+            "for the sandbox container, where it is resolved by the host Docker daemon "
+            "from the host machine's perspective."
+        ),
+    )
     container_path: str = Field(..., description="Path inside the container")
     read_only: bool = Field(default=False, description="Whether the mount is read-only")
 
@@ -78,6 +91,14 @@ class SandboxConfig(BaseModel):
         default=20000,
         ge=0,
         description="Maximum characters to keep from ls tool output. Output exceeding this limit is head-truncated. Set to 0 to disable truncation.",
+    )
+    bash_command_timeout: int = Field(
+        default=600,
+        gt=0,
+        description=(
+            "Maximum wall-clock seconds a host bash command may run before it is terminated, process group and all (LocalSandboxProvider). "
+            "Keeps a blocking foreground command (e.g. an un-backgrounded server) from hanging the turn; background `&` processes return immediately."
+        ),
     )
 
     model_config = ConfigDict(extra="allow")

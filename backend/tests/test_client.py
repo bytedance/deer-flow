@@ -16,6 +16,7 @@ from app.gateway.routers.mcp import McpConfigResponse
 from app.gateway.routers.memory import MemoryConfigResponse, MemoryStatusResponse
 from app.gateway.routers.models import ModelResponse, ModelsListResponse
 from app.gateway.routers.skills import SkillInstallResponse, SkillResponse, SkillsListResponse
+from app.gateway.routers.threads import ThreadGoalResponse
 from app.gateway.routers.uploads import UploadResponse
 from deerflow.client import DeerFlowClient
 from deerflow.config.paths import Paths
@@ -910,7 +911,7 @@ class TestEnsureAgent:
         with (
             patch("deerflow.client.create_chat_model"),
             patch("deerflow.client.create_agent", return_value=mock_agent),
-            patch("deerflow.client._build_middlewares", return_value=[]) as mock_build_middlewares,
+            patch("deerflow.client.build_middlewares", return_value=[]) as mock_build_middlewares,
             patch("deerflow.client.apply_prompt_template", return_value="prompt") as mock_apply_prompt,
             patch.object(client, "_get_tools", return_value=[]),
             patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=MagicMock()),
@@ -935,7 +936,7 @@ class TestEnsureAgent:
         with (
             patch("deerflow.client.create_chat_model"),
             patch("deerflow.client.create_agent", return_value=mock_agent) as mock_create_agent,
-            patch("deerflow.client._build_middlewares", return_value=[]),
+            patch("deerflow.client.build_middlewares", return_value=[]),
             patch("deerflow.client.apply_prompt_template", return_value="prompt"),
             patch.object(client, "_get_tools", return_value=[]),
             patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=mock_checkpointer),
@@ -960,7 +961,7 @@ class TestEnsureAgent:
         with (
             patch("deerflow.client.create_chat_model"),
             patch("deerflow.client.create_agent", return_value=mock_agent) as mock_create_agent,
-            patch("deerflow.client._build_middlewares", side_effect=fake_build_middlewares),
+            patch("deerflow.client.build_middlewares", side_effect=fake_build_middlewares),
             patch("deerflow.client.apply_prompt_template", return_value="prompt"),
             patch.object(client, "_get_tools", return_value=[]),
             patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=MagicMock()),
@@ -979,7 +980,7 @@ class TestEnsureAgent:
         with (
             patch("deerflow.client.create_chat_model"),
             patch("deerflow.client.create_agent", return_value=mock_agent) as mock_create_agent,
-            patch("deerflow.client._build_middlewares", return_value=[]),
+            patch("deerflow.client.build_middlewares", return_value=[]),
             patch("deerflow.client.apply_prompt_template", return_value="prompt"),
             patch.object(client, "_get_tools", return_value=[]),
             patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=None),
@@ -1171,6 +1172,29 @@ class TestThreadQueries:
         assert result["thread_id"] == "t99"
         assert result["checkpoints"] == []
         mock_checkpointer.list.assert_called_once_with({"configurable": {"thread_id": "t99"}})
+
+
+# ---------------------------------------------------------------------------
+# Goal management
+# ---------------------------------------------------------------------------
+
+
+class TestGoalManagement:
+    def test_goal_round_trip_uses_checkpoint(self, client):
+        from langgraph.checkpoint.memory import InMemorySaver
+
+        client._checkpointer = InMemorySaver()
+
+        set_result = client.set_goal("goal-thread", "finish all tests", max_continuations=3)
+        get_result = client.get_goal("goal-thread")
+        clear_result = client.clear_goal("goal-thread")
+        after_clear = client.get_goal("goal-thread")
+
+        assert set_result["goal"]["objective"] == "finish all tests"
+        assert set_result["goal"]["max_continuations"] == 3
+        assert get_result["goal"]["objective"] == "finish all tests"
+        assert clear_result == {"goal": None}
+        assert after_clear == {"goal": None}
 
 
 # ---------------------------------------------------------------------------
@@ -1472,6 +1496,7 @@ class TestUploads:
             assert result["success"] is True
             assert len(result["files"]) == 1
             assert result["files"][0]["filename"] == "test.txt"
+            assert result["files"][0]["size"] == len("hello")
             assert "artifact_url" in result["files"][0]
             assert "message" in result
             assert (uploads_dir / "test.txt").exists()
@@ -1551,6 +1576,8 @@ class TestUploads:
             assert len(result["files"]) == 2
             names = {f["filename"] for f in result["files"]}
             assert names == {"a.txt", "b.txt"}
+            sizes = {f["filename"]: f["size"] for f in result["files"]}
+            assert sizes == {"a.txt": 1, "b.txt": 2}
             # Verify artifact_url is present
             for f in result["files"]:
                 assert "artifact_url" in f
@@ -1954,7 +1981,7 @@ class TestScenarioAgentRecreation:
         with (
             patch("deerflow.client.create_chat_model"),
             patch("deerflow.client.create_agent", side_effect=fake_create_agent),
-            patch("deerflow.client._build_middlewares", return_value=[]),
+            patch("deerflow.client.build_middlewares", return_value=[]),
             patch("deerflow.client.apply_prompt_template", return_value="prompt"),
             patch.object(client, "_get_tools", return_value=[]),
             patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=MagicMock()),
@@ -1982,7 +2009,7 @@ class TestScenarioAgentRecreation:
         with (
             patch("deerflow.client.create_chat_model"),
             patch("deerflow.client.create_agent", side_effect=fake_create_agent),
-            patch("deerflow.client._build_middlewares", return_value=[]),
+            patch("deerflow.client.build_middlewares", return_value=[]),
             patch("deerflow.client.apply_prompt_template", return_value="prompt"),
             patch.object(client, "_get_tools", return_value=[]),
             patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=MagicMock()),
@@ -2007,7 +2034,7 @@ class TestScenarioAgentRecreation:
         with (
             patch("deerflow.client.create_chat_model"),
             patch("deerflow.client.create_agent", side_effect=fake_create_agent),
-            patch("deerflow.client._build_middlewares", return_value=[]),
+            patch("deerflow.client.build_middlewares", return_value=[]),
             patch("deerflow.client.apply_prompt_template", return_value="prompt"),
             patch.object(client, "_get_tools", return_value=[]),
             patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=MagicMock()),
@@ -2458,6 +2485,19 @@ class TestGatewayConformance:
         parsed = UploadResponse(**result)
         assert parsed.success is True
         assert len(parsed.files) == 1
+        assert parsed.files[0].size == len("hello")
+
+    def test_goal_methods(self, client):
+        from langgraph.checkpoint.memory import InMemorySaver
+
+        client._checkpointer = InMemorySaver()
+
+        result = client.set_goal("t-goal", "ship it")
+
+        parsed = ThreadGoalResponse(**result)
+        assert parsed.goal is not None
+        assert parsed.goal["objective"] == "ship it"
+        assert ThreadGoalResponse(**client.clear_goal("t-goal")).goal is None
 
     def test_get_memory_config(self, client):
         mem_cfg = MagicMock()
@@ -2468,6 +2508,7 @@ class TestGatewayConformance:
         mem_cfg.fact_confidence_threshold = 0.7
         mem_cfg.injection_enabled = True
         mem_cfg.max_injection_tokens = 2000
+        mem_cfg.token_counting = "tiktoken"
 
         with patch("deerflow.config.memory_config.get_memory_config", return_value=mem_cfg):
             result = client.get_memory_config()
@@ -2475,6 +2516,7 @@ class TestGatewayConformance:
         parsed = MemoryConfigResponse(**result)
         assert parsed.enabled is True
         assert parsed.max_facts == 100
+        assert parsed.token_counting == "tiktoken"
 
     def test_get_memory_status(self, client):
         mem_cfg = MagicMock()
@@ -2485,6 +2527,7 @@ class TestGatewayConformance:
         mem_cfg.fact_confidence_threshold = 0.7
         mem_cfg.injection_enabled = True
         mem_cfg.max_injection_tokens = 2000
+        mem_cfg.token_counting = "tiktoken"
 
         memory_data = {
             "version": "1.0",
@@ -2510,6 +2553,7 @@ class TestGatewayConformance:
 
         parsed = MemoryStatusResponse(**result)
         assert parsed.config.enabled is True
+        assert parsed.config.token_counting == "tiktoken"
         assert parsed.data.version == "1.0"
 
 

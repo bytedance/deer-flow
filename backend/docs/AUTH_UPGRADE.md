@@ -124,8 +124,8 @@ python -c "import secrets; print(secrets.token_urlsafe(32))"
 
 ## 兼容性
 
-- **标准模式**（`make dev`）：完全兼容；无 admin 时访问 `/setup` 初始化
-- **Gateway 模式**（`make dev-pro`）：完全兼容
+- **本地开发**（`make dev`）：Gateway embedded runtime 完全兼容；无 admin 时访问 `/setup` 初始化
+- **Gateway embedded runtime**：标准脚本、Docker dev 和生产部署均通过 Gateway 提供认证与 LangGraph-compatible API
 - **Docker 部署**：完全兼容，`.deer-flow/data/deerflow.db` 需持久化卷挂载
 - **IM 渠道**（Feishu/Slack/Telegram）：通过 Gateway 内部认证通信，使用 `default` 用户桶
 - **DeerFlowClient**（嵌入式）：不经过 HTTP，不受认证影响

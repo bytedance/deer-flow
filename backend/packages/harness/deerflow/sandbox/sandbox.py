@@ -16,11 +16,27 @@ class Sandbox(ABC):
         return self._id
 
     @abstractmethod
-    def execute_command(self, command: str) -> str:
+    def execute_command(
+        self,
+        command: str,
+        env: dict[str, str] | None = None,
+        timeout: float | None = None,
+    ) -> str:
         """Execute bash command in sandbox.
 
         Args:
             command: The command to execute.
+            env: Optional per-call environment variables to inject into the
+                command's process. Used to pass request-scoped secrets (e.g. a
+                short-lived end-user token) to skill scripts without placing them
+                in the prompt, tool arguments, or the command string (issue #3861).
+                When ``None`` the sandbox uses its default environment.
+            timeout: Optional per-call wall-clock timeout in seconds. Local
+                sandboxes use this to bound host bash commands so long-lived
+                foreground processes cannot hang a turn indefinitely. Remote/AIO
+                implementations may ignore it when their backend does not expose
+                an equivalent command-timeout control separate from its own API
+                timeouts.
 
         Returns:
             The standard or error output of the command.
@@ -36,6 +52,25 @@ class Sandbox(ABC):
 
         Returns:
             The content of the file.
+        """
+        pass
+
+    @abstractmethod
+    def download_file(self, path: str) -> bytes:
+        """Download the binary content of a file.
+
+        Args:
+            path: The absolute path of the file to download.
+
+        Returns:
+            Raw file bytes.
+
+        Raises:
+            PermissionError: If path traversal is detected or the path is outside
+                the allowed virtual prefix.
+            OSError: If the file cannot be read or does not exist.  Both local
+                and remote implementations must raise ``OSError`` so callers
+                have a single exception type to handle.
         """
         pass
 
