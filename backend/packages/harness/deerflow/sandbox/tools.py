@@ -12,6 +12,7 @@ from langchain.tools import tool
 from deerflow.agents.thread_state import ThreadDataState
 from deerflow.config import get_app_config
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
+from deerflow.runtime.secret_context import read_active_secrets
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.sandbox.exceptions import (
     SandboxError,
@@ -1048,7 +1049,7 @@ def replace_virtual_paths_in_command(command: str, thread_data: ThreadDataState 
         skills_pattern = re.compile(rf"{re.escape(skills_container)}(/[^\s\"';&|<>()]*)?")
 
         def replace_skills_match(match: re.Match) -> str:
-            return _resolve_skills_path(match.group(0))
+            return _resolve_skills_path(match.group(0)).replace("\\", "/")
 
         result = skills_pattern.sub(replace_skills_match, result)
 
@@ -1059,7 +1060,7 @@ def replace_virtual_paths_in_command(command: str, thread_data: ThreadDataState 
         acp_pattern = re.compile(rf"{re.escape(_ACP_WORKSPACE_VIRTUAL_PATH)}(/[^\s\"';&|<>()]*)?")
 
         def replace_acp_match(match: re.Match, _tid: str | None = _thread_id) -> str:
-            return _resolve_acp_workspace_path(match.group(0), _tid)
+            return _resolve_acp_workspace_path(match.group(0), _tid).replace("\\", "/")
 
         result = acp_pattern.sub(replace_acp_match, result)
 
@@ -1070,7 +1071,7 @@ def replace_virtual_paths_in_command(command: str, thread_data: ThreadDataState 
         pattern = re.compile(rf"{re.escape(VIRTUAL_PATH_PREFIX)}(/[^\s\"';&|<>()]*)?")
 
         def replace_user_data_match(match: re.Match) -> str:
-            return replace_virtual_path(match.group(0), thread_data)
+            return replace_virtual_path(match.group(0), thread_data).replace("\\", "/")
 
         result = pattern.sub(replace_user_data_match, result)
 
@@ -1309,6 +1310,37 @@ def ensure_thread_directories_exist(runtime: Runtime | None) -> None:
     runtime.state["thread_directories_created"] = True
 
 
+_SECRET_REDACTION = "[redacted]"
+
+# Values shorter than this are not redacted from bash output. A short secret
+# value (a 2-char region code, a numeric id, a PIN) would otherwise shred
+# unrelated bytes of tool output — exit codes, timestamps, sizes, paths —
+# corrupting the result the model reads back. The redaction of a value this
+# short is more likely noise than genuine leak protection; the secret is still
+# injected into the subprocess, only the output mask skips it.
+_MIN_MASK_LENGTH = 8
+
+
+def mask_secret_values(output: str, injected_env: dict[str, str] | None) -> str:
+    """Redact injected secret values from bash output before it re-enters context.
+
+    Skill scripts receive request-scoped secrets as env vars (#3861). If a script
+    echoes one (debugging, ``set -x``, an error dump), the value would otherwise
+    flow into the tool result — and thus into the prompt and the trace. This is
+    the skill-specific fifth leak surface (the bash tool returns subprocess stdout,
+    unlike MCP tools). Replace each non-empty secret value with a redaction marker.
+    Longest values first so a value that is a substring of another is not partially
+    revealed. Values shorter than ``_MIN_MASK_LENGTH`` are skipped — a redacted
+    3-char token is more likely to corrupt unrelated output than to protect a
+    real secret.
+    """
+    if not injected_env or not output:
+        return output
+    for value in sorted((v for v in injected_env.values() if v and len(v) >= _MIN_MASK_LENGTH), key=len, reverse=True):
+        output = output.replace(value, _SECRET_REDACTION)
+    return output
+
+
 def _truncate_bash_output(output: str, max_chars: int) -> str:
     """Middle-truncate bash output, preserving head and tail (50/50 split).
 
@@ -1393,6 +1425,10 @@ def bash_tool(runtime: Runtime, description: str, command: str) -> str:
     - Use `python` to run Python code.
     - Prefer a thread-local virtual environment in `/mnt/user-data/workspace/.venv`.
     - Use `python -m pip` (inside the virtual environment) to install Python packages.
+    - To start a long-lived process such as a web server, ALWAYS run it in the background with its
+      output redirected, e.g. `your-command > /mnt/user-data/workspace/server.log 2>&1 &`, then check
+      the log file or poll the port. A long-lived process run in the foreground blocks the turn until
+      it is killed at the command timeout.
 
     Args:
         description: Explain why you are running this command in short words. ALWAYS PROVIDE THIS PARAMETER FIRST.
@@ -1400,6 +1436,9 @@ def bash_tool(runtime: Runtime, description: str, command: str) -> str:
     """
     try:
         sandbox = ensure_sandbox_initialized(runtime)
+        # Request-scoped secrets resolved for the active skill (#3861); injected as
+        # per-call env into the subprocess, never placed in the command string.
+        injected_env = read_active_secrets(getattr(runtime, "context", None)) or None
         if is_local_sandbox(runtime):
             if not is_host_bash_allowed():
                 return f"Error: {LOCAL_HOST_BASH_DISABLED_MESSAGE}"
@@ -1408,15 +1447,20 @@ def bash_tool(runtime: Runtime, description: str, command: str) -> str:
             validate_local_bash_command_paths(command, thread_data)
             command = replace_virtual_paths_in_command(command, thread_data)
             command = _apply_cwd_prefix(command, thread_data)
-            output = sandbox.execute_command(command)
             try:
                 from deerflow.config.app_config import get_app_config
 
                 sandbox_cfg = get_app_config().sandbox
                 max_chars = sandbox_cfg.bash_output_max_chars if sandbox_cfg else 20000
+                command_timeout = sandbox_cfg.bash_command_timeout if sandbox_cfg else None
             except Exception:
                 max_chars = 20000
-            return _truncate_bash_output(mask_local_paths_in_output(output, thread_data), max_chars)
+                command_timeout = None
+            output = sandbox.execute_command(command, env=injected_env, timeout=command_timeout)
+            return _truncate_bash_output(
+                mask_secret_values(mask_local_paths_in_output(output, thread_data), injected_env),
+                max_chars,
+            )
         ensure_thread_directories_exist(runtime)
         try:
             from deerflow.config.app_config import get_app_config
@@ -1425,7 +1469,7 @@ def bash_tool(runtime: Runtime, description: str, command: str) -> str:
             max_chars = sandbox_cfg.bash_output_max_chars if sandbox_cfg else 20000
         except Exception:
             max_chars = 20000
-        return _truncate_bash_output(sandbox.execute_command(command), max_chars)
+        return _truncate_bash_output(mask_secret_values(sandbox.execute_command(command, env=injected_env), injected_env), max_chars)
     except SandboxError as e:
         return f"Error: {e}"
     except PermissionError as e:
@@ -1663,6 +1707,29 @@ async def _grep_tool_async(
 grep_tool.coroutine = _grep_tool_async
 
 
+def read_current_file_content(runtime: Runtime | None, path: str) -> str:
+    """Read the full current content of ``path`` using read_file's resolution rules.
+
+    Shared by ``read_file_tool`` and ``ReadBeforeWriteMiddleware`` (issue #3857)
+    so the gate hashes exactly the bytes the read tool would see. Raises
+    ``FileNotFoundError`` when the file does not exist; other sandbox errors
+    propagate to the caller.
+    """
+    sandbox = ensure_sandbox_initialized(runtime)
+    ensure_thread_directories_exist(runtime)
+    if is_local_sandbox(runtime):
+        thread_data = get_thread_data(runtime)
+        validate_local_tool_path(path, thread_data, read_only=True)
+        if _is_skills_path(path):
+            path = _resolve_skills_path(path)
+        elif _is_acp_workspace_path(path):
+            path = _resolve_acp_workspace_path(path, _extract_thread_id_from_thread_data(thread_data))
+        elif not _is_custom_mount_path(path):
+            path = _resolve_and_validate_user_data_path(path, thread_data)
+        # Custom mount paths are resolved by LocalSandbox._resolve_path()
+    return sandbox.read_file(path)
+
+
 @tool("read_file", parse_docstring=True)
 def read_file_tool(
     runtime: Runtime,
@@ -1680,20 +1747,8 @@ def read_file_tool(
         end_line: Optional ending line number (1-indexed, inclusive). Use with start_line to read a specific range.
     """
     try:
-        sandbox = ensure_sandbox_initialized(runtime)
-        ensure_thread_directories_exist(runtime)
         requested_path = path
-        if is_local_sandbox(runtime):
-            thread_data = get_thread_data(runtime)
-            validate_local_tool_path(path, thread_data, read_only=True)
-            if _is_skills_path(path):
-                path = _resolve_skills_path(path)
-            elif _is_acp_workspace_path(path):
-                path = _resolve_acp_workspace_path(path, _extract_thread_id_from_thread_data(thread_data))
-            elif not _is_custom_mount_path(path):
-                path = _resolve_and_validate_user_data_path(path, thread_data)
-            # Custom mount paths are resolved by LocalSandbox._resolve_path()
-        content = sandbox.read_file(path)
+        content = read_current_file_content(runtime, path)
         if not content:
             return "(empty)"
         if start_line is not None and end_line is not None:
@@ -1763,6 +1818,12 @@ def write_file_tool(
     append: bool = False,
 ) -> str:
     """Write text content to a file. By default this overwrites the target file; set append=True to add content to the end without replacing existing content.
+
+    READ-BEFORE-WRITE (issue #3857): if the target file already exists (including
+    append=True), you must have read its CURRENT version with read_file first.
+    Any write invalidates earlier reads, so re-read between consecutive
+    modifications — a ranged read of the relevant section is enough. Writes
+    that fail this check are rejected with an error.
 
     SIZE POLICY (issue #3189):
     A single non-append write_file call must not exceed 80 KB of UTF-8 content.
@@ -1858,6 +1919,9 @@ def str_replace_tool(
 ) -> str:
     """Replace a substring in a file with another substring.
     If `replace_all` is False (default), the substring to replace must appear **exactly once** in the file.
+
+    READ-BEFORE-WRITE (issue #3857): you must have read the file's CURRENT
+    version with read_file first; any write invalidates earlier reads.
 
     Args:
         description: Explain why you are replacing the substring in short words. ALWAYS PROVIDE THIS PARAMETER FIRST.

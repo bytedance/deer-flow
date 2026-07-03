@@ -12,6 +12,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 from langgraph_sdk.errors import ConflictError
@@ -30,6 +31,7 @@ from app.gateway.csrf_middleware import CSRF_COOKIE_NAME, CSRF_HEADER_NAME, gene
 from app.gateway.internal_auth import create_internal_auth_headers
 from deerflow.config.agents_config import load_agent_config
 from deerflow.config.paths import make_safe_user_id
+from deerflow.runtime.goal import parse_goal_command
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.skills.slash import parse_slash_skill_reference
 from deerflow.skills.storage import get_or_new_skill_storage
@@ -1564,10 +1566,15 @@ class ChannelManager:
             reply = await self._fetch_gateway("/api/models", "models", msg=msg)
         elif reply is None and command == "memory":
             reply = await self._fetch_gateway("/api/memory", "memory", msg=msg)
+        elif reply is None and command == "goal":
+            reply = await self._handle_goal_command(msg, parts[1] if len(parts) > 1 else "")
+            if reply is None:
+                return
         elif reply is None and command == "help":
             reply = (
                 "Available commands:\n"
                 "/bootstrap — Start a bootstrap session (enables agent setup)\n"
+                "/goal [condition|clear] — Set, show, or clear an active goal\n"
                 "/new — Start a new conversation\n"
                 "/status — Show current thread info\n"
                 "/models — List available models\n"
@@ -1605,6 +1612,63 @@ class ChannelManager:
             metadata=_slim_metadata(msg.metadata),
         )
         await self.bus.publish_outbound(outbound)
+
+    async def _goal_request(
+        self,
+        method: str,
+        thread_id: str,
+        *,
+        headers: dict[str, str],
+        json: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        async with httpx.AsyncClient() as http:
+            request = getattr(http, method.lower())
+            kwargs: dict[str, Any] = {"timeout": 10, "headers": headers}
+            if json is not None:
+                kwargs["json"] = json
+            response = await request(f"{self._gateway_url}/api/threads/{quote(thread_id, safe='')}/goal", **kwargs)
+            response.raise_for_status()
+            return response.json() or {}
+
+    async def _handle_goal_command(self, msg: InboundMessage, args: str) -> str | None:
+        command = parse_goal_command(args)
+        thread_id = await self._lookup_thread_id(msg)
+        headers = _owner_headers(msg) or create_internal_auth_headers()
+
+        if command.kind == "status":
+            if not thread_id:
+                return "No active goal."
+            try:
+                goal = (await self._goal_request("get", thread_id, headers=headers)).get("goal")
+            except Exception:
+                logger.exception("Failed to fetch goal from gateway")
+                return "Failed to fetch goal information."
+            return f"Goal: {goal.get('objective')}" if goal else "No active goal."
+
+        if command.kind == "clear":
+            if not thread_id:
+                return "Goal cleared."
+            try:
+                await self._goal_request("delete", thread_id, headers=headers)
+            except Exception:
+                logger.exception("Failed to clear goal through gateway")
+                return "Failed to clear goal."
+            return "Goal cleared."
+
+        if not thread_id:
+            thread_id = await self._create_thread(self._get_client(), msg)
+
+        try:
+            await self._goal_request("put", thread_id, headers=headers, json={"objective": command.objective})
+        except Exception:
+            logger.exception("Failed to set goal through gateway")
+            return "Failed to set goal."
+
+        from dataclasses import replace as _dc_replace
+
+        chat_msg = _dc_replace(msg, text=command.objective, msg_type=InboundMessageType.CHAT)
+        await self._handle_chat(chat_msg, bound_identity_checked=True)
+        return None
 
     async def _fetch_gateway(self, path: str, kind: str, *, msg: InboundMessage | None = None) -> str:
         """Fetch data from the Gateway API for command responses."""

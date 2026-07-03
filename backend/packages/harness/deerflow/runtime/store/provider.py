@@ -3,8 +3,9 @@
 Provides a **sync singleton** and a **sync context manager** for CLI tools
 and the embedded :class:`~deerflow.client.DeerFlowClient`.
 
-The backend mirrors the configured checkpointer so that both always use the
-same persistence technology.  Supported backends: memory, sqlite, postgres.
+The deprecated ``checkpointer`` section takes precedence when present;
+otherwise Store follows the unified ``database`` section. Supported backends:
+memory, sqlite, postgres.
 
 Usage::
 
@@ -27,8 +28,8 @@ from collections.abc import Iterator
 
 from langgraph.store.base import BaseStore
 
-from deerflow.config.app_config import get_app_config
-from deerflow.config.checkpointer_config import ensure_config_loaded
+from deerflow.config.app_config import AppConfig, get_app_config
+from deerflow.config.checkpointer_config import CheckpointerConfig, ensure_config_loaded, get_checkpointer_config
 from deerflow.runtime.store._sqlite_utils import ensure_sqlite_parent_dir, resolve_sqlite_conn_str
 
 logger = logging.getLogger(__name__)
@@ -42,6 +43,44 @@ POSTGRES_STORE_INSTALL = (
     "langgraph-checkpoint-postgres is required for the PostgreSQL store. Install the package extra with: pip install 'deerflow-harness[postgres]' (or use: uv sync --all-packages --extra postgres when developing locally)"
 )
 POSTGRES_CONN_REQUIRED = "checkpointer.connection_string is required for the postgres backend"
+
+
+def _resolve_store_config(app_config: AppConfig) -> CheckpointerConfig:
+    """Resolve the Store backend from legacy or unified application config.
+
+    The legacy ``checkpointer`` section remains authoritative when present so
+    Store and Checkpointer continue to use the same backend. Otherwise the
+    unified ``database`` section drives the Store as documented.
+    """
+    if app_config.checkpointer is not None:
+        return app_config.checkpointer
+
+    database = app_config.database
+    if database.backend == "memory":
+        return CheckpointerConfig(type="memory")
+    if database.backend == "sqlite":
+        return CheckpointerConfig(type="sqlite", connection_string=database.checkpointer_sqlite_path)
+    if database.backend == "postgres":
+        if not database.postgres_url:
+            raise ValueError("database.postgres_url is required for the postgres backend")
+        return CheckpointerConfig(type="postgres", connection_string=database.postgres_url)
+    raise ValueError(f"Unknown database backend: {database.backend!r}")
+
+
+def _get_store_config() -> CheckpointerConfig:
+    """Load Store config without holding the provider singleton lock."""
+    ensure_config_loaded()
+
+    # Preserve callers that initialise the legacy config singleton directly.
+    legacy_config = get_checkpointer_config()
+    if legacy_config is not None:
+        return legacy_config
+    try:
+        app_config = get_app_config()
+    except FileNotFoundError:
+        return CheckpointerConfig(type="memory")
+    return _resolve_store_config(app_config)
+
 
 # ---------------------------------------------------------------------------
 # Sync factory
@@ -108,35 +147,24 @@ _store_lock = threading.Lock()
 def get_store() -> BaseStore:
     """Return the global sync Store singleton, creating it on first call.
 
-    Returns an :class:`~langgraph.store.memory.InMemoryStore` when no
-    checkpointer is configured in *config.yaml* (emits a WARNING in that case).
+    The legacy ``checkpointer`` section takes precedence when configured;
+    otherwise the unified ``database`` section selects the backend.
 
     Raises:
         ImportError: If the required package for the configured backend is not installed.
-        ValueError: If ``connection_string`` is missing for a backend that requires it.
+        ValueError: If the selected backend is missing its required connection value.
     """
     global _store, _store_ctx
 
     if _store is not None:
         return _store
 
-    # Config loading can reset both persistence singletons. Keep it outside
-    # this provider lock to avoid cross-provider lock-order inversion.
-    ensure_config_loaded()
+    # Config loading can reset both persistence singletons. Resolve the full
+    # config outside this provider lock to avoid lock-order inversion.
+    config = _get_store_config()
 
     with _store_lock:
         if _store is not None:
-            return _store
-
-        from deerflow.config.checkpointer_config import get_checkpointer_config
-
-        config = get_checkpointer_config()
-
-        if config is None:
-            from langgraph.store.memory import InMemoryStore
-
-            logger.warning("No 'checkpointer' section in config.yaml — using InMemoryStore for the store. Thread list will be lost on server restart. Configure a sqlite or postgres backend for persistence.")
-            _store = InMemoryStore()
             return _store
 
         store_ctx = _sync_store_cm(config)
@@ -179,16 +207,9 @@ def store_context() -> Iterator[BaseStore]:
         with store_context() as store:
             store.put(("threads",), thread_id, {...})
 
-    Yields an :class:`~langgraph.store.memory.InMemoryStore` when no
-    checkpointer is configured in *config.yaml*.
+    The legacy ``checkpointer`` section takes precedence when configured;
+    otherwise the unified ``database`` section selects the backend.
     """
-    config = get_app_config()
-    if config.checkpointer is None:
-        from langgraph.store.memory import InMemoryStore
-
-        logger.warning("No 'checkpointer' section in config.yaml — using InMemoryStore for the store. Thread list will be lost on server restart. Configure a sqlite or postgres backend for persistence.")
-        yield InMemoryStore()
-        return
-
-    with _sync_store_cm(config.checkpointer) as store:
+    config = _resolve_store_config(get_app_config())
+    with _sync_store_cm(config) as store:
         yield store
