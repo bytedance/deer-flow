@@ -595,7 +595,7 @@ export function InputBox({
   const handleSubmit = useCallback(
     async (message: PromptInputMessage) => {
       if (status === "streaming") {
-        toast.info("Please wait for the current response to finish.");
+        toast.info(t.inputBox.pleaseWaitStreaming);
         return Promise.reject(new Error("streaming"));
       }
       const submitAction = getInputSubmitAction({
