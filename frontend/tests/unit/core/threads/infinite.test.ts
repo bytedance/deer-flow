@@ -1,12 +1,19 @@
-import { describe, expect, test } from "@rstest/core";
-import { QueryClient, type InfiniteData } from "@tanstack/react-query";
+import { describe, expect, rs, test } from "@rstest/core";
+import {
+  QueryClient,
+  QueryObserver,
+  type InfiniteData,
+} from "@tanstack/react-query";
 
 import {
   filterInfiniteThreadsCache,
   getInfiniteThreadsNextPageParam,
   INFINITE_THREADS_PAGE_SIZE,
   INFINITE_THREADS_QUERY_KEY_PREFIX,
+  invalidateStoppedThreadCaches,
   mapInfiniteThreadsCache,
+  STOP_THREAD_FINALIZATION_REFETCH_DELAY_MS,
+  stopThreadAndInvalidateCaches,
   upsertThreadInInfiniteCache,
 } from "@/core/threads/hooks";
 import type { AgentThread } from "@/core/threads/types";
@@ -224,5 +231,185 @@ describe("upsertThreadInInfiniteCache", () => {
     const ids = cache?.pages[0]?.map((t) => t.thread_id);
     expect(ids).toEqual(["a", "b"]);
     expect(cache?.pages[0]?.[0]?.values.title).toBe("Old title");
+  });
+});
+
+describe("invalidateStoppedThreadCaches", () => {
+  function invalidatedQueryKeys(client: QueryClient) {
+    const invalidate = rs.spyOn(client, "invalidateQueries");
+    return {
+      invalidate,
+      queryKeys: () =>
+        invalidate.mock.calls.map(([filters]) => filters?.queryKey),
+    };
+  }
+
+  test("refreshes current thread and sidebar caches after fire-and-forget stop", () => {
+    const client = new QueryClient();
+    const { queryKeys } = invalidatedQueryKeys(client);
+
+    invalidateStoppedThreadCaches(client, "thread-1", false);
+
+    expect(queryKeys()).toContainEqual(["threads", "search"]);
+    expect(queryKeys()).toContainEqual(INFINITE_THREADS_QUERY_KEY_PREFIX);
+    expect(queryKeys()).toContainEqual(["thread", "thread-1"]);
+    expect(queryKeys()).toContainEqual([
+      "thread",
+      "metadata",
+      "thread-1",
+      false,
+    ]);
+    expect(queryKeys()).toContainEqual(["thread-token-usage", "thread-1"]);
+  });
+
+  test("does not refresh per-thread API caches for mock threads", () => {
+    const client = new QueryClient();
+    const { queryKeys } = invalidatedQueryKeys(client);
+
+    invalidateStoppedThreadCaches(client, "thread-1", true);
+
+    expect(queryKeys()).toContainEqual(["threads", "search"]);
+    expect(queryKeys()).toContainEqual(INFINITE_THREADS_QUERY_KEY_PREFIX);
+    expect(queryKeys()).not.toContainEqual(["thread", "thread-1"]);
+    expect(queryKeys()).not.toContainEqual([
+      "thread",
+      "metadata",
+      "thread-1",
+      true,
+    ]);
+    expect(queryKeys()).not.toContainEqual(["thread-token-usage", "thread-1"]);
+  });
+
+  test("wraps SDK stop and refreshes caches after it resolves", async () => {
+    const client = new QueryClient();
+    const stop = rs.fn(() => Promise.resolve());
+    const { queryKeys } = invalidatedQueryKeys(client);
+
+    await stopThreadAndInvalidateCaches(client, stop, "thread-1", false);
+
+    expect(stop).toHaveBeenCalledTimes(1);
+    expect(queryKeys()).toContainEqual([
+      "thread",
+      "metadata",
+      "thread-1",
+      false,
+    ]);
+  });
+
+  test("still refreshes caches when SDK stop rejects", async () => {
+    const client = new QueryClient();
+    const stop = rs.fn(async () => {
+      throw new Error("cancel failed");
+    });
+    const { queryKeys } = invalidatedQueryKeys(client);
+
+    await expect(
+      stopThreadAndInvalidateCaches(client, stop, "thread-1", false),
+    ).rejects.toThrow("cancel failed");
+
+    expect(queryKeys()).toContainEqual(["threads", "search"]);
+    expect(queryKeys()).toContainEqual([
+      "thread",
+      "metadata",
+      "thread-1",
+      false,
+    ]);
+  });
+
+  test("schedules sidebar refetch even if stopped thread id is not known", async () => {
+    rs.useFakeTimers();
+
+    const client = new QueryClient();
+    const { queryKeys } = invalidatedQueryKeys(client);
+
+    try {
+      await stopThreadAndInvalidateCaches(
+        client,
+        () => Promise.resolve(),
+        null,
+        false,
+      );
+
+      const countSearchInvalidations = () =>
+        queryKeys().filter(
+          (queryKey) =>
+            queryKey?.length === 2 &&
+            queryKey[0] === "threads" &&
+            queryKey[1] === "search",
+        ).length;
+
+      expect(countSearchInvalidations()).toBe(1);
+
+      await rs.advanceTimersByTimeAsync(
+        STOP_THREAD_FINALIZATION_REFETCH_DELAY_MS,
+      );
+
+      expect(countSearchInvalidations()).toBe(2);
+      expect(queryKeys()).not.toContainEqual(["thread", null]);
+    } finally {
+      client.clear();
+      rs.useRealTimers();
+    }
+  });
+
+  test("scheduled refetch lets sidebar receive delayed backend title finalization", async () => {
+    rs.useFakeTimers();
+
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    let finalized = false;
+    let fetchCount = 0;
+    const observer = new QueryObserver<AgentThread[]>(client, {
+      queryKey: ["threads", "search"],
+      queryFn: async () => {
+        fetchCount += 1;
+        return [
+          makeThread(
+            "thread-1",
+            finalized ? "Generated Title" : "New Conversation",
+          ),
+        ];
+      },
+    });
+    const unsubscribe = observer.subscribe((result) => {
+      void result.status;
+    });
+
+    try {
+      await observer.refetch();
+      expect(
+        client.getQueryData<AgentThread[]>(["threads", "search"])?.[0]?.values
+          ?.title,
+      ).toBe("New Conversation");
+
+      await stopThreadAndInvalidateCaches(
+        client,
+        () => Promise.resolve(),
+        "thread-1",
+        false,
+      );
+      await Promise.resolve();
+
+      expect(
+        client.getQueryData<AgentThread[]>(["threads", "search"])?.[0]?.values
+          ?.title,
+      ).toBe("New Conversation");
+
+      finalized = true;
+      await rs.advanceTimersByTimeAsync(
+        STOP_THREAD_FINALIZATION_REFETCH_DELAY_MS,
+      );
+
+      expect(
+        client.getQueryData<AgentThread[]>(["threads", "search"])?.[0]?.values
+          ?.title,
+      ).toBe("Generated Title");
+      expect(fetchCount).toBeGreaterThanOrEqual(3);
+    } finally {
+      unsubscribe();
+      client.clear();
+      rs.useRealTimers();
+    }
   });
 });

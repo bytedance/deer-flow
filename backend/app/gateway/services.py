@@ -37,6 +37,7 @@ from deerflow.runtime import (
     run_agent,
 )
 from deerflow.runtime.runs.naming import resolve_root_run_name
+from deerflow.runtime.secret_context import redact_config_secrets
 from deerflow.runtime.user_context import reset_current_user, set_current_user
 
 logger = logging.getLogger(__name__)
@@ -204,6 +205,41 @@ def resolve_agent_factory(assistant_id: str | None):
     return make_lead_agent
 
 
+# Lead-agent recursion budget bounds. The Gateway must NOT trust a
+# client-supplied ``recursion_limit`` verbatim: an arbitrarily large value lets
+# a single run execute unbounded LangGraph super-steps (each at least one LLM
+# call), enabling runaway API cost / DoS. ``_DEFAULT_RECURSION_LIMIT`` is the
+# server default when the client sends nothing; the hard ceiling any client
+# value is clamped to is configurable via ``AppConfig.max_recursion_limit``.
+_DEFAULT_RECURSION_LIMIT = 100
+_DEFAULT_MAX_RECURSION_LIMIT = 1000
+
+
+def _resolve_max_recursion_limit() -> int:
+    """Resolve the clamp ceiling from ``AppConfig.max_recursion_limit``.
+
+    Falls back to ``_DEFAULT_MAX_RECURSION_LIMIT`` when the app config cannot be
+    loaded (e.g. no ``config.yaml`` in a bare unit-test environment) so that the
+    clamp still applies rather than crashing the run-config assembly.
+    """
+    try:
+        return get_app_config().max_recursion_limit
+    except Exception:
+        return _DEFAULT_MAX_RECURSION_LIMIT
+
+
+def _clamp_recursion_limit(value: Any, max_limit: int) -> int:
+    """Clamp a client-supplied ``recursion_limit`` into a safe server range.
+
+    Non-integer values (including ``bool``, an ``int`` subclass) and non-positive
+    values fall back to ``_DEFAULT_RECURSION_LIMIT``; valid positive integers are
+    capped at ``max_limit`` (from ``AppConfig.max_recursion_limit``).
+    """
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        return _DEFAULT_RECURSION_LIMIT
+    return min(value, max_limit)
+
+
 def build_run_config(
     thread_id: str,
     request_config: dict[str, Any] | None,
@@ -233,7 +269,7 @@ def build_run_config(
     # subagent inside ONE lead tools-node step, and subagents enforce their own
     # limit via `subagents.max_turns`. Do not conflate this 100 with the
     # general-purpose subagent's max_turns.
-    config: dict[str, Any] = {"recursion_limit": 100}
+    config: dict[str, Any] = {"recursion_limit": _DEFAULT_RECURSION_LIMIT}
     if request_config:
         # LangGraph >= 0.6.0 introduced ``context`` as the preferred way to
         # pass thread-level data and rejects requests that include both
@@ -255,6 +291,12 @@ def build_run_config(
                 raise ValueError("request config 'context' must be a mapping or null.")
             context["thread_id"] = thread_id
             config["context"] = context
+            # The checkpointer always scopes state by configurable["thread_id"],
+            # regardless of whether the caller drives the run via context (e.g.
+            # request-scoped secrets, #3861). thread_id comes from the URL path,
+            # not caller config, so mirror it here while keeping secret-bearing
+            # context keys out of configurable.
+            config["configurable"] = {"thread_id": thread_id}
         else:
             configurable = {"thread_id": thread_id}
             configurable.update(request_config.get("configurable", {}))
@@ -262,6 +304,22 @@ def build_run_config(
         for k, v in request_config.items():
             if k not in ("configurable", "context"):
                 config[k] = v
+        # Never trust a client-supplied recursion_limit verbatim: clamp it to a
+        # safe server range so a single run cannot execute unbounded LangGraph
+        # super-steps (runaway LLM cost / DoS). Applied after the passthrough so
+        # it overrides whatever the client sent.
+        if "recursion_limit" in request_config:
+            max_limit = _resolve_max_recursion_limit()
+            clamped = _clamp_recursion_limit(request_config["recursion_limit"], max_limit)
+            if clamped != request_config["recursion_limit"]:
+                logger.warning(
+                    "build_run_config: clamped client recursion_limit %r -> %d (max %d). thread_id=%s",
+                    request_config["recursion_limit"],
+                    clamped,
+                    max_limit,
+                    thread_id,
+                )
+            config["recursion_limit"] = clamped
     else:
         config["configurable"] = {"thread_id": thread_id}
 
@@ -425,7 +483,11 @@ async def start_run(
                 body.assistant_id,
                 on_disconnect=disconnect,
                 metadata=body.metadata or {},
-                kwargs={"input": body.input, "config": body.config},
+                # Persist a secret-redacted copy of the config: the run record is
+                # written to runs.kwargs_json and echoed by the run API, so a
+                # request-scoped secret (#3861) must not ride along. The live
+                # config built below keeps the secrets for the actual run.
+                kwargs={"input": body.input, "config": redact_config_secrets(body.config)},
                 multitask_strategy=body.multitask_strategy,
                 model_name=model_name,
                 user_id=owner_user_id,

@@ -92,5 +92,13 @@ class SandboxConfig(BaseModel):
         ge=0,
         description="Maximum characters to keep from ls tool output. Output exceeding this limit is head-truncated. Set to 0 to disable truncation.",
     )
+    bash_command_timeout: int = Field(
+        default=600,
+        gt=0,
+        description=(
+            "Maximum wall-clock seconds a host bash command may run before it is terminated, process group and all (LocalSandboxProvider). "
+            "Keeps a blocking foreground command (e.g. an un-backgrounded server) from hanging the turn; background `&` processes return immediately."
+        ),
+    )
 
     model_config = ConfigDict(extra="allow")

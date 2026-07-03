@@ -488,16 +488,18 @@ class TestMultipleMounts:
             ],
         )
 
-        # Mock subprocess to capture the resolved command
+        # Mock subprocess to capture the resolved command. The POSIX path runs
+        # commands via subprocess.Popen, so wrap that and still execute the real
+        # command.
         captured = {}
-        original_run = __import__("subprocess").run
+        original_popen = __import__("subprocess").Popen
 
-        def mock_run(*args, **kwargs):
+        def mock_popen(*args, **kwargs):
             if len(args) > 0:
                 captured["command"] = args[0]
-            return original_run(*args, **kwargs)
+            return original_popen(*args, **kwargs)
 
-        monkeypatch.setattr("deerflow.sandbox.local.local_sandbox.subprocess.run", mock_run)
+        monkeypatch.setattr("deerflow.sandbox.local.local_sandbox.subprocess.Popen", mock_popen)
         monkeypatch.setattr("deerflow.sandbox.local.local_sandbox.LocalSandbox._get_shell", lambda self: "/bin/sh")
 
         sandbox.execute_command("cat /mnt/data/test.txt")

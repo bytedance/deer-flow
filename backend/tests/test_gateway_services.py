@@ -208,6 +208,85 @@ def test_build_run_config_with_overrides():
     assert config["metadata"]["user"] == "alice"
 
 
+def test_build_run_config_context_path_still_sets_configurable_thread_id(_stub_app_config):
+    """A caller-supplied context (e.g. request-scoped secrets, #3861) must not
+    deprive the checkpointer of configurable.thread_id, which it always needs to
+    scope checkpoints. Secrets stay in context; thread_id is mirrored into
+    configurable for the checkpointer."""
+    from app.gateway.services import build_run_config
+
+    config = build_run_config("thread-1", {"context": {"secrets": {"ERP_TOKEN": "v"}}}, None)
+    assert config["context"]["secrets"] == {"ERP_TOKEN": "v"}
+    assert config["context"]["thread_id"] == "thread-1"
+    assert config["configurable"]["thread_id"] == "thread-1"
+    # Secrets must NOT be mirrored into configurable.
+    assert "secrets" not in config["configurable"]
+
+
+# ---------------------------------------------------------------------------
+# recursion_limit clamping: the Gateway must not trust a client-supplied
+# recursion_limit verbatim (runaway LLM cost / DoS). See build_run_config.
+# ---------------------------------------------------------------------------
+
+
+def test_build_run_config_clamps_excessive_recursion_limit(_stub_app_config):
+    """A huge client recursion_limit is capped at the configured ceiling (default 1000)."""
+    from app.gateway.services import build_run_config
+
+    config = build_run_config("thread-1", {"recursion_limit": 100_000_000}, None)
+    assert config["recursion_limit"] == 1000
+
+
+def test_build_run_config_ceiling_is_configurable(_stub_app_config):
+    """The clamp ceiling comes from AppConfig.max_recursion_limit, not a hardcoded value."""
+    from app.gateway.services import build_run_config
+    from deerflow.config.app_config import AppConfig, reset_app_config, set_app_config
+
+    set_app_config(AppConfig.model_validate({"sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"}, "max_recursion_limit": 300}))
+    try:
+        config = build_run_config("thread-1", {"recursion_limit": 100_000_000}, None)
+        assert config["recursion_limit"] == 300
+    finally:
+        reset_app_config()
+
+
+def test_build_run_config_allows_recursion_limit_at_ceiling(_stub_app_config):
+    """A value at the configured ceiling is preserved unchanged."""
+    from app.gateway.services import build_run_config
+
+    config = build_run_config("thread-1", {"recursion_limit": 1000}, None)
+    assert config["recursion_limit"] == 1000
+
+
+def test_build_run_config_preserves_reasonable_recursion_limit(_stub_app_config):
+    """A modest client value below the ceiling is honoured as-is."""
+    from app.gateway.services import build_run_config
+
+    config = build_run_config("thread-1", {"recursion_limit": 250}, None)
+    assert config["recursion_limit"] == 250
+
+
+def test_build_run_config_rejects_invalid_recursion_limit(_stub_app_config):
+    """Non-positive / non-int / bool values fall back to the server default."""
+    from app.gateway.services import _DEFAULT_RECURSION_LIMIT, build_run_config
+
+    for bad in (0, -5, "1000", 3.5, True, None):
+        config = build_run_config("thread-1", {"recursion_limit": bad}, None)
+        assert config["recursion_limit"] == _DEFAULT_RECURSION_LIMIT, bad
+
+
+def test_build_run_config_clamps_recursion_limit_with_context(_stub_app_config):
+    """Clamping also applies on the LangGraph >= 0.6.0 context passthrough path."""
+    from app.gateway.services import build_run_config
+
+    config = build_run_config(
+        "thread-1",
+        {"context": {"thread_id": "thread-1"}, "recursion_limit": 999_999},
+        None,
+    )
+    assert config["recursion_limit"] == 1000
+
+
 # ---------------------------------------------------------------------------
 # Regression tests for issue #1644:
 # assistant_id not mapped to agent_name → custom agent SOUL.md never loaded
@@ -789,7 +868,8 @@ def test_build_run_config_with_context():
     assert "context" in config
     assert config["context"]["user_id"] == "u-42"
     assert config["context"]["thread_id"] == "thread-1"
-    assert "configurable" not in config
+    # configurable carries thread_id for the checkpointer; user context stays in context.
+    assert config["configurable"] == {"thread_id": "thread-1"}
     assert config["recursion_limit"] == 100
 
 
@@ -805,7 +885,7 @@ def test_build_run_config_context_injects_thread_id():
     assert config["context"]["user_id"] == "u-1"
     assert config["context"]["thinking_enabled"] is True
     assert config["context"]["thread_id"] == "T-deadbeef-42"
-    assert "configurable" not in config
+    assert config["configurable"] == {"thread_id": "T-deadbeef-42"}
 
 
 def test_build_run_config_null_context_becomes_empty_context():
@@ -815,7 +895,7 @@ def test_build_run_config_null_context_becomes_empty_context():
     config = build_run_config("thread-1", {"context": None}, None)
 
     assert config["context"] == {"thread_id": "thread-1"}
-    assert "configurable" not in config
+    assert config["configurable"] == {"thread_id": "thread-1"}
 
 
 def test_build_run_config_rejects_non_mapping_context():
@@ -857,7 +937,10 @@ def test_build_run_config_context_plus_configurable_warns(caplog):
         )
     assert "context" in config
     assert config["context"]["user_id"] == "u-42"
-    assert "configurable" not in config
+    # context wins: caller's configurable (model_name) is dropped, but thread_id is
+    # still set for the checkpointer.
+    assert config["configurable"] == {"thread_id": "thread-1"}
+    assert "model_name" not in config["configurable"]
     assert any("both 'context' and 'configurable'" in r.message for r in caplog.records)
 
 
@@ -871,7 +954,7 @@ def test_build_run_config_context_passthrough_other_keys():
         None,
     )
     assert config["context"]["thread_id"] == "thread-1"
-    assert "configurable" not in config
+    assert config["configurable"] == {"thread_id": "thread-1"}
     assert config["tags"] == ["prod"]
 
 

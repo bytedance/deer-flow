@@ -43,7 +43,7 @@ from deerflow.agents.thread_state import ThreadState
 from deerflow.config.agents_config import load_agent_config, validate_agent_name
 from deerflow.config.app_config import AppConfig, get_app_config
 from deerflow.models import create_chat_model
-from deerflow.skills.tool_policy import filter_tools_by_skill_allowed_tools
+from deerflow.skills.tool_policy import SKILL_LOADING_TOOL_NAMES, filter_tools_by_skill_allowed_tools
 from deerflow.skills.types import Skill
 from deerflow.tracing import build_tracing_callbacks
 
@@ -126,19 +126,9 @@ def _create_summarization_middleware(*, app_config: AppConfig | None = None) -> 
     if resolved_app_config.memory.enabled:
         hooks.append(memory_flush_hook)
 
-    # The logic below relies on two assumptions holding true: this factory is
-    # the sole entry point for DeerFlowSummarizationMiddleware, and the runtime
-    # config is not expected to change after startup.
-    skills_container_path = resolved_app_config.skills.container_path or "/mnt/skills"
-
     return DeerFlowSummarizationMiddleware(
         **kwargs,
-        skills_container_path=skills_container_path,
-        skill_file_read_tool_names=config.skill_file_read_tool_names,
         before_summarization=hooks,
-        preserve_recent_skill_count=config.preserve_recent_skill_count,
-        preserve_recent_skill_tokens=config.preserve_recent_skill_tokens,
-        preserve_recent_skill_tokens_per_skill=config.preserve_recent_skill_tokens_per_skill,
     )
 
 
@@ -311,6 +301,18 @@ def build_middlewares(
     from deerflow.agents.middlewares.skill_activation_middleware import SkillActivationMiddleware
 
     middlewares.append(SkillActivationMiddleware(available_skills=available_skills, app_config=resolved_app_config))
+
+    # Capture completed task delegations and loaded skill files before
+    # summarization can compact them, then inject durable context channels
+    # (summary + ledger + skills) into model calls.
+    from deerflow.agents.middlewares.durable_context_middleware import DurableContextMiddleware
+
+    middlewares.append(
+        DurableContextMiddleware(
+            skills_container_path=resolved_app_config.skills.container_path,
+            skill_file_read_tool_names=resolved_app_config.summarization.skill_file_read_tool_names,
+        )
+    )
 
     # Add summarization middleware if enabled
     summarization_middleware = _create_summarization_middleware(app_config=resolved_app_config)
@@ -502,7 +504,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
         # Keep the bootstrap skill set intentionally narrow so agent creation
         # remains deterministic before the custom agent's own config exists.
         raw_tools = get_available_tools(model_name=model_name, subagent_enabled=subagent_enabled, app_config=resolved_app_config) + [setup_agent]
-        filtered = filter_tools_by_skill_allowed_tools(raw_tools, skills_for_tool_policy)
+        filtered = filter_tools_by_skill_allowed_tools(raw_tools, skills_for_tool_policy, always_allowed_tool_names=SKILL_LOADING_TOOL_NAMES)
         final_tools, setup = assemble_deferred_tools(filtered, enabled=resolved_app_config.tool_search.enabled)
         return create_agent(
             model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, app_config=resolved_app_config, attach_tracing=False),
@@ -529,7 +531,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
     extra_tools = [update_agent] if agent_name else []
     # Default lead agent (unchanged behavior)
     raw_tools = get_available_tools(model_name=model_name, groups=agent_config.tool_groups if agent_config else None, subagent_enabled=subagent_enabled, app_config=resolved_app_config)
-    filtered = filter_tools_by_skill_allowed_tools(raw_tools + extra_tools, skills_for_tool_policy)
+    filtered = filter_tools_by_skill_allowed_tools(raw_tools + extra_tools, skills_for_tool_policy, always_allowed_tool_names=SKILL_LOADING_TOOL_NAMES)
     final_tools, setup = assemble_deferred_tools(filtered, enabled=resolved_app_config.tool_search.enabled)
     return create_agent(
         model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, reasoning_effort=reasoning_effort, app_config=resolved_app_config, attach_tracing=False),

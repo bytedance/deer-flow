@@ -3,8 +3,10 @@
 import sys
 import tomllib
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from pathlib import Path
 from threading import Barrier, Event, Lock
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -17,6 +19,7 @@ from deerflow.config.checkpointer_config import (
     load_checkpointer_config_from_dict,
     set_checkpointer_config,
 )
+from deerflow.config.database_config import DatabaseConfig
 from deerflow.runtime.checkpointer import get_checkpointer, reset_checkpointer
 from deerflow.runtime.checkpointer.provider import POSTGRES_INSTALL
 from deerflow.runtime.store import get_store, reset_store
@@ -700,6 +703,156 @@ class TestAsyncCheckpointer:
         assert called_db_config is db_config
         mock_saver_cls.from_conn_string.assert_called_once_with("/tmp/data/deerflow.db")
         mock_saver.setup.assert_awaited_once()
+
+
+class TestStoreDatabaseConfig:
+    def test_sync_store_falls_back_to_memory_when_config_file_is_missing(self):
+        """The sync Store keeps its no-config fallback for embedded callers."""
+        from langgraph.store.memory import InMemoryStore
+
+        with (
+            patch("deerflow.runtime.store.provider.ensure_config_loaded"),
+            patch("deerflow.runtime.store.provider.get_checkpointer_config", return_value=None),
+            patch("deerflow.runtime.store.provider.get_app_config", side_effect=FileNotFoundError),
+        ):
+            assert isinstance(get_store(), InMemoryStore)
+
+    @pytest.mark.anyio
+    async def test_async_postgres_store_uses_database_config(self, caplog):
+        """Unified database postgres config must not fall back to InMemoryStore."""
+        from deerflow.runtime.store.async_provider import make_store
+
+        caplog.set_level("WARNING", logger="deerflow.runtime.store.async_provider")
+        app_config = SimpleNamespace(
+            checkpointer=None,
+            database=DatabaseConfig(backend="postgres", postgres_url="postgresql://localhost/db"),
+        )
+        mock_store = AsyncMock()
+        mock_cm = AsyncMock()
+        mock_cm.__aenter__.return_value = mock_store
+        mock_cm.__aexit__.return_value = False
+        mock_store_cls = MagicMock()
+        mock_store_cls.from_conn_string.return_value = mock_cm
+        mock_module = MagicMock(AsyncPostgresStore=mock_store_cls)
+
+        with patch.dict(sys.modules, {"langgraph.store.postgres.aio": mock_module}):
+            async with make_store(app_config) as store:
+                assert store is mock_store
+
+        mock_store_cls.from_conn_string.assert_called_once_with("postgresql://localhost/db")
+        mock_store.setup.assert_awaited_once()
+        assert "No 'checkpointer' section" not in caplog.text
+
+    @pytest.mark.anyio
+    async def test_async_sqlite_store_uses_unified_database_path(self, tmp_path):
+        """Unified database SQLite config must use the shared deerflow.db path."""
+        from deerflow.runtime.store.async_provider import make_store
+        from deerflow.runtime.store.provider import ensure_sqlite_parent_dir
+
+        db_config = DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path))
+        app_config = SimpleNamespace(checkpointer=None, database=db_config)
+        mock_store = AsyncMock()
+        mock_cm = AsyncMock()
+        mock_cm.__aenter__.return_value = mock_store
+        mock_cm.__aexit__.return_value = False
+        mock_store_cls = MagicMock()
+        mock_store_cls.from_conn_string.return_value = mock_cm
+        mock_module = MagicMock(AsyncSqliteStore=mock_store_cls)
+
+        with (
+            patch.dict(sys.modules, {"langgraph.store.sqlite.aio": mock_module}),
+            patch(
+                "deerflow.runtime.store.async_provider.asyncio.to_thread",
+                new_callable=AsyncMock,
+            ) as mock_to_thread,
+        ):
+            async with make_store(app_config) as store:
+                assert store is mock_store
+
+        mock_to_thread.assert_awaited_once()
+        called_fn, called_path = mock_to_thread.await_args.args
+        assert called_fn is ensure_sqlite_parent_dir
+        assert called_path == db_config.checkpointer_sqlite_path
+        mock_store_cls.from_conn_string.assert_called_once_with(db_config.checkpointer_sqlite_path)
+        mock_store.setup.assert_awaited_once()
+
+    def test_sync_store_context_uses_database_config(self):
+        """The one-shot sync Store factory must follow unified database config."""
+        from deerflow.runtime.store.provider import store_context
+
+        app_config = SimpleNamespace(
+            checkpointer=None,
+            database=DatabaseConfig(backend="postgres", postgres_url="postgresql://localhost/db"),
+        )
+        expected_store = object()
+        factory = MagicMock(return_value=nullcontext(expected_store))
+
+        with (
+            patch("deerflow.runtime.store.provider.get_app_config", return_value=app_config),
+            patch("deerflow.runtime.store.provider._sync_store_cm", factory),
+            store_context() as store,
+        ):
+            assert store is expected_store
+
+        resolved = factory.call_args.args[0]
+        assert resolved.type == "postgres"
+        assert resolved.connection_string == "postgresql://localhost/db"
+
+    def test_sync_store_singleton_uses_database_config(self):
+        """The cached sync Store factory must resolve database config before locking."""
+        app_config = SimpleNamespace(
+            checkpointer=None,
+            database=DatabaseConfig(backend="postgres", postgres_url="postgresql://localhost/db"),
+        )
+        expected_store = object()
+        factory = MagicMock(return_value=nullcontext(expected_store))
+
+        with (
+            patch("deerflow.runtime.store.provider.ensure_config_loaded"),
+            patch("deerflow.runtime.store.provider.get_app_config", return_value=app_config),
+            patch("deerflow.runtime.store.provider._sync_store_cm", factory),
+        ):
+            assert get_store() is expected_store
+
+        resolved = factory.call_args.args[0]
+        assert resolved.type == "postgres"
+        assert resolved.connection_string == "postgresql://localhost/db"
+
+    def test_legacy_checkpointer_config_takes_precedence_for_store(self):
+        """Backward-compatible checkpointer config must override database for Store."""
+        from deerflow.runtime.store.provider import store_context
+
+        app_config = SimpleNamespace(
+            checkpointer=CheckpointerConfig(type="memory"),
+            database=DatabaseConfig(backend="postgres", postgres_url="postgresql://localhost/db"),
+        )
+        expected_store = object()
+        factory = MagicMock(return_value=nullcontext(expected_store))
+
+        with (
+            patch("deerflow.runtime.store.provider.get_app_config", return_value=app_config),
+            patch("deerflow.runtime.store.provider._sync_store_cm", factory),
+            store_context() as store,
+        ):
+            assert store is expected_store
+
+        resolved = factory.call_args.args[0]
+        assert resolved.type == "memory"
+        assert resolved.connection_string is None
+
+    def test_explicit_memory_database_uses_in_memory_store(self):
+        """Explicit memory mode remains an intentional non-persistent Store."""
+        from langgraph.store.memory import InMemoryStore
+
+        from deerflow.runtime.store.provider import store_context
+
+        app_config = SimpleNamespace(
+            checkpointer=None,
+            database=DatabaseConfig(backend="memory"),
+        )
+        with patch("deerflow.runtime.store.provider.get_app_config", return_value=app_config):
+            with store_context() as store:
+                assert isinstance(store, InMemoryStore)
 
 
 # ---------------------------------------------------------------------------

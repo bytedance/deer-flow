@@ -35,6 +35,7 @@ export type MockThread = {
   metadata?: Record<string, unknown>;
   messages?: unknown[];
   artifacts?: string[];
+  goal?: Record<string, unknown> | null;
 };
 
 export type MockAgent = {
@@ -55,6 +56,11 @@ export type MockAPIOptions = {
   threads?: MockThread[];
   agents?: MockAgent[];
   skills?: MockSkill[];
+  uploadLimits?: {
+    max_files: number;
+    max_file_size: number;
+    max_total_size: number;
+  };
 };
 
 const DEFAULT_SKILLS: MockSkill[] = [
@@ -106,6 +112,11 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
   let threads = [...(options?.threads ?? [])];
   const agents = options?.agents ?? [];
   const skills = options?.skills ?? DEFAULT_SKILLS;
+  const uploadLimits = options?.uploadLimits ?? {
+    max_files: 10,
+    max_file_size: 50 * 1024 * 1024,
+    max_total_size: 100 * 1024 * 1024,
+  };
 
   const upsertThread = (thread: MockThread) => {
     threads = [
@@ -123,7 +134,7 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
       ...(thread.agent_name ? { agent_name: thread.agent_name } : {}),
     },
     status: "idle",
-    values: { title: thread.title ?? "Untitled" },
+    values: { title: thread.title ?? "Untitled", goal: thread.goal ?? null },
   });
 
   // Auth — keep workspace tests independent from a real gateway session.
@@ -283,6 +294,74 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
     return route.fallback();
   });
 
+  void page.route(/\/api\/threads\/[^/]+\/goal$/, async (route) => {
+    const threadId = decodeURIComponent(
+      new URL(route.request().url()).pathname.split("/").at(-2) ?? "",
+    );
+    let matchingThread = threads.find(
+      (thread) => thread.thread_id === threadId,
+    );
+
+    if (route.request().method() === "GET") {
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ goal: matchingThread?.goal ?? null }),
+      });
+    }
+
+    if (route.request().method() === "DELETE") {
+      if (matchingThread) {
+        matchingThread.goal = null;
+      }
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ goal: null }),
+      });
+    }
+
+    if (route.request().method() === "PUT") {
+      const payload = route.request().postDataJSON() as {
+        objective?: string;
+      };
+      const goal = {
+        objective: payload.objective ?? "",
+        status: "active",
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+        continuation_count: 0,
+        max_continuations: 8,
+        no_progress_count: 0,
+        max_no_progress_continuations: 2,
+      };
+      matchingThread ??= {
+        thread_id: threadId,
+        title: "New Chat",
+        updated_at: new Date().toISOString(),
+      };
+      upsertThread({ ...matchingThread, goal });
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ goal }),
+      });
+    }
+
+    return route.fallback();
+  });
+
+  void page.route("**/api/threads/*/uploads/limits", (route) => {
+    if (route.request().method() === "GET") {
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(uploadLimits),
+      });
+    }
+    return route.fallback();
+  });
+
   // Thread history — useStream fetches state history on mount
   void page.route("**/api/langgraph/threads/*/history", (route) => {
     const url = route.request().url();
@@ -297,6 +376,7 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
           {
             values: {
               title: matchingThread.title ?? "Untitled",
+              goal: matchingThread.goal ?? null,
               messages: matchingThread.messages ?? [
                 {
                   type: "human",
@@ -339,6 +419,7 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
         body: JSON.stringify({
           values: {
             title: matchingThread?.title ?? "Untitled",
+            goal: matchingThread?.goal ?? null,
             messages: matchingThread
               ? (matchingThread.messages ?? [
                   {
@@ -424,13 +505,20 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
 
   // Run stream — returns a minimal SSE response with an AI message
   const handleMockRunStream = (route: Route) => {
+    const requestUrl = route.request().url();
+    const matchingThread = threads.find((thread) =>
+      requestUrl.includes(encodeURIComponent(thread.thread_id)),
+    );
+    const fallbackGoal = threads.find((thread) => thread.goal)?.goal ?? null;
+    const goal = matchingThread?.goal ?? fallbackGoal;
     upsertThread({
       thread_id: MOCK_THREAD_ID,
       title: "New Chat",
       updated_at: new Date().toISOString(),
+      goal,
       messages: mockStreamMessages(),
     });
-    return handleRunStream(route);
+    return handleRunStream(route, { goal });
   };
 
   void page.route("**/api/langgraph/runs/stream", handleMockRunStream);
@@ -449,6 +537,20 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
           models: [],
           token_usage: { enabled: false },
         }),
+      });
+    }
+    return route.fallback();
+  });
+
+  // Feature flags — frontend gates UI (e.g. agents) on these. Default to
+  // enabled so existing tests exercise the normal path; tests that need the
+  // disabled state override this route after calling mockLangGraphAPI.
+  void page.route("**/api/features", (route) => {
+    if (route.request().method() === "GET") {
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ agents_api: { enabled: true } }),
       });
     }
     return route.fallback();
@@ -519,7 +621,10 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
  * Build a minimal SSE stream that the LangGraph SDK can parse.
  * The stream returns a single AI message: "Hello from DeerFlow!".
  */
-export function handleRunStream(route: Route) {
+export function handleRunStream(
+  route: Route,
+  values: Record<string, unknown> = {},
+) {
   const events = [
     {
       event: "metadata",
@@ -528,6 +633,7 @@ export function handleRunStream(route: Route) {
     {
       event: "values",
       data: {
+        ...values,
         messages: mockStreamMessages(),
       },
     },

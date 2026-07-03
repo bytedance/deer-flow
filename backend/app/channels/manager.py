@@ -12,6 +12,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 from langgraph_sdk.errors import ConflictError
@@ -30,6 +31,7 @@ from app.gateway.csrf_middleware import CSRF_COOKIE_NAME, CSRF_HEADER_NAME, gene
 from app.gateway.internal_auth import create_internal_auth_headers
 from deerflow.config.agents_config import load_agent_config
 from deerflow.config.paths import make_safe_user_id
+from deerflow.runtime.goal import parse_goal_command
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.skills.slash import parse_slash_skill_reference
 from deerflow.skills.storage import get_or_new_skill_storage
@@ -54,7 +56,8 @@ DEFAULT_RUN_CONTEXT: dict[str, Any] = {
     "is_plan_mode": False,
     "subagent_enabled": False,
 }
-STREAM_UPDATE_MIN_INTERVAL_SECONDS = 0.35
+STREAM_UPDATE_MIN_INTERVAL_SECONDS = 1.0
+STREAM_UPDATE_MIN_CHARS = 60  # flush immediately when this many chars accumulate
 # Stream modes requested from the runtime, and the SSE event names under which
 # the message-tuple stream may arrive: the embedded runtime (and LangGraph
 # Platform) deliver the requested "messages-tuple" mode as event "messages".
@@ -1403,6 +1406,7 @@ class ChannelManager:
         current_message_id: str | None = None
         latest_text = ""
         last_published_text = ""
+        last_published_len = 0
         last_publish_at = 0.0
         stream_error: BaseException | None = None
         stream_kwargs: dict[str, Any] = {
@@ -1430,23 +1434,30 @@ class ChannelManager:
                         latest_text = accumulated_text
                 elif event == "values" and isinstance(data, (dict, list)):
                     last_values = data
-                    snapshot_text = _extract_response_text(data)
-                    if snapshot_text:
-                        latest_text = snapshot_text
+                    # Clarification text is only in the values snapshot;
+                    # publish it so the user sees the question mid-stream.
+                    if _has_current_turn_clarification(data):
+                        clarification_text = _extract_response_text(data)
+                        if clarification_text and clarification_text != latest_text:
+                            latest_text = clarification_text
 
                 if not latest_text or latest_text == last_published_text:
                     continue
 
                 now = time.monotonic()
-                if last_published_text and now - last_publish_at < STREAM_UPDATE_MIN_INTERVAL_SECONDS:
-                    continue
+                new_chars = len(latest_text) - last_published_len
+                # OR logic: flush when interval elapsed OR enough chars accumulated
+                if last_published_text:
+                    if now - last_publish_at < STREAM_UPDATE_MIN_INTERVAL_SECONDS and new_chars < STREAM_UPDATE_MIN_CHARS:
+                        continue
 
+                display_text = latest_text + " ▉"
                 await self.bus.publish_outbound(
                     OutboundMessage(
                         channel_name=msg.channel_name,
                         chat_id=msg.chat_id,
                         thread_id=thread_id,
-                        text=latest_text,
+                        text=display_text,
                         is_final=False,
                         thread_ts=msg.thread_ts,
                         connection_id=msg.connection_id,
@@ -1455,6 +1466,7 @@ class ChannelManager:
                     )
                 )
                 last_published_text = latest_text
+                last_published_len = len(latest_text)
                 last_publish_at = now
         except Exception as exc:
             stream_error = exc
@@ -1554,10 +1566,15 @@ class ChannelManager:
             reply = await self._fetch_gateway("/api/models", "models", msg=msg)
         elif reply is None and command == "memory":
             reply = await self._fetch_gateway("/api/memory", "memory", msg=msg)
+        elif reply is None and command == "goal":
+            reply = await self._handle_goal_command(msg, parts[1] if len(parts) > 1 else "")
+            if reply is None:
+                return
         elif reply is None and command == "help":
             reply = (
                 "Available commands:\n"
                 "/bootstrap — Start a bootstrap session (enables agent setup)\n"
+                "/goal [condition|clear] — Set, show, or clear an active goal\n"
                 "/new — Start a new conversation\n"
                 "/status — Show current thread info\n"
                 "/models — List available models\n"
@@ -1595,6 +1612,63 @@ class ChannelManager:
             metadata=_slim_metadata(msg.metadata),
         )
         await self.bus.publish_outbound(outbound)
+
+    async def _goal_request(
+        self,
+        method: str,
+        thread_id: str,
+        *,
+        headers: dict[str, str],
+        json: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        async with httpx.AsyncClient() as http:
+            request = getattr(http, method.lower())
+            kwargs: dict[str, Any] = {"timeout": 10, "headers": headers}
+            if json is not None:
+                kwargs["json"] = json
+            response = await request(f"{self._gateway_url}/api/threads/{quote(thread_id, safe='')}/goal", **kwargs)
+            response.raise_for_status()
+            return response.json() or {}
+
+    async def _handle_goal_command(self, msg: InboundMessage, args: str) -> str | None:
+        command = parse_goal_command(args)
+        thread_id = await self._lookup_thread_id(msg)
+        headers = _owner_headers(msg) or create_internal_auth_headers()
+
+        if command.kind == "status":
+            if not thread_id:
+                return "No active goal."
+            try:
+                goal = (await self._goal_request("get", thread_id, headers=headers)).get("goal")
+            except Exception:
+                logger.exception("Failed to fetch goal from gateway")
+                return "Failed to fetch goal information."
+            return f"Goal: {goal.get('objective')}" if goal else "No active goal."
+
+        if command.kind == "clear":
+            if not thread_id:
+                return "Goal cleared."
+            try:
+                await self._goal_request("delete", thread_id, headers=headers)
+            except Exception:
+                logger.exception("Failed to clear goal through gateway")
+                return "Failed to clear goal."
+            return "Goal cleared."
+
+        if not thread_id:
+            thread_id = await self._create_thread(self._get_client(), msg)
+
+        try:
+            await self._goal_request("put", thread_id, headers=headers, json={"objective": command.objective})
+        except Exception:
+            logger.exception("Failed to set goal through gateway")
+            return "Failed to set goal."
+
+        from dataclasses import replace as _dc_replace
+
+        chat_msg = _dc_replace(msg, text=command.objective, msg_type=InboundMessageType.CHAT)
+        await self._handle_chat(chat_msg, bound_identity_checked=True)
+        return None
 
     async def _fetch_gateway(self, path: str, kind: str, *, msg: InboundMessage | None = None) -> str:
         """Fetch data from the Gateway API for command responses."""

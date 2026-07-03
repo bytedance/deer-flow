@@ -22,6 +22,7 @@ from deerflow.subagents.executor import (
     request_cancel_background_task,
 )
 from deerflow.tools.types import Runtime
+from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, get_current_trace_id, normalize_trace_id
 
 if TYPE_CHECKING:
     from deerflow.config.app_config import AppConfig
@@ -255,6 +256,7 @@ async def task_tool(
     parent_model = None
     trace_id = None
     user_id = None
+    deerflow_trace_id = None
     metadata: dict = {}
 
     if runtime is not None:
@@ -287,6 +289,7 @@ async def task_tool(
     oauth_provider = parent_context.get("oauth_provider")
     oauth_id = parent_context.get("oauth_id")
     run_id = parent_context.get("run_id")
+    deerflow_trace_id = normalize_trace_id(parent_context.get(DEERFLOW_TRACE_METADATA_KEY)) or normalize_trace_id(metadata.get(DEERFLOW_TRACE_METADATA_KEY)) or get_current_trace_id()
 
     parent_available_skills = metadata.get("available_skills")
     if parent_available_skills is not None:
@@ -330,6 +333,7 @@ async def task_tool(
         "oauth_provider": oauth_provider,
         "oauth_id": oauth_id,
         "run_id": run_id,
+        "deerflow_trace_id": deerflow_trace_id,
     }
     if resolved_app_config is not None:
         executor_kwargs["app_config"] = resolved_app_config
