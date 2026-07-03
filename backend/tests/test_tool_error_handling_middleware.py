@@ -142,11 +142,12 @@ def test_build_subagent_runtime_middlewares_threads_app_config_to_llm_middleware
     assert captured["app_config"] is app_config
     # 8 baseline (InputSanitization, ToolOutputBudget, ThreadData, Sandbox,
     # DanglingToolCall, LLMErrorHandling, SandboxAudit, ToolErrorHandling)
-    # + 1 SafetyFinishReasonMiddleware (enabled by default).
+    # + 1 ReadBeforeWriteMiddleware + 1 SafetyFinishReasonMiddleware (both
+    # enabled by default).
     from deerflow.agents.middlewares.safety_finish_reason_middleware import SafetyFinishReasonMiddleware
     from deerflow.agents.middlewares.tool_output_budget_middleware import ToolOutputBudgetMiddleware
 
-    assert len(middlewares) == 9
+    assert len(middlewares) == 10
     assert isinstance(middlewares[0], FakeMiddleware)  # InputSanitizationMiddleware stub
     assert isinstance(middlewares[1], ToolOutputBudgetMiddleware)
     assert any(isinstance(m, ToolErrorHandlingMiddleware) for m in middlewares)
@@ -187,6 +188,7 @@ def test_build_lead_runtime_middlewares_chain_order_matches_agents_md():
     from deerflow.agents.middlewares.dangling_tool_call_middleware import DanglingToolCallMiddleware
     from deerflow.agents.middlewares.input_sanitization_middleware import InputSanitizationMiddleware
     from deerflow.agents.middlewares.llm_error_handling_middleware import LLMErrorHandlingMiddleware
+    from deerflow.agents.middlewares.read_before_write_middleware import ReadBeforeWriteMiddleware
     from deerflow.agents.middlewares.sandbox_audit_middleware import SandboxAuditMiddleware
     from deerflow.agents.middlewares.thread_data_middleware import ThreadDataMiddleware
     from deerflow.agents.middlewares.tool_output_budget_middleware import ToolOutputBudgetMiddleware
@@ -212,6 +214,7 @@ def test_build_lead_runtime_middlewares_chain_order_matches_agents_md():
         ("DanglingToolCallMiddleware", DanglingToolCallMiddleware),
         ("LLMErrorHandlingMiddleware", LLMErrorHandlingMiddleware),
         ("SandboxAuditMiddleware", SandboxAuditMiddleware),
+        ("ReadBeforeWriteMiddleware", ReadBeforeWriteMiddleware),
         ("ToolErrorHandlingMiddleware", ToolErrorHandlingMiddleware),
     ]
     actual = [(label, idx_of(cls, label=label)) for label, cls in expected_order]
