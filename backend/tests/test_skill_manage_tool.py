@@ -237,7 +237,7 @@ def test_skill_manage_static_scan_failure_blocks_create_before_llm(monkeypatch, 
         return await _async_result("allow", "ok")
 
     def _broken_static_scan(skill_dir, *, skill_name=None):
-        raise StaticScannerError("semgrep unavailable")
+        raise StaticScannerError("native scanner unavailable")
 
     monkeypatch.setattr(skill_manage_module, "refresh_skills_system_prompt_cache_async", _refresh)
     monkeypatch.setattr(skill_manage_module, "scan_skill_content", _scan)
@@ -245,7 +245,7 @@ def test_skill_manage_static_scan_failure_blocks_create_before_llm(monkeypatch, 
 
     runtime = SimpleNamespace(context={"thread_id": "thread-1"}, config={"configurable": {"thread_id": "thread-1"}})
 
-    with pytest.raises(ValueError, match="Static security scan failed.*semgrep unavailable"):
+    with pytest.raises(ValueError, match="Static security scan failed.*native scanner unavailable"):
         anyio.run(
             skill_manage_module.skill_manage_tool.coroutine,
             runtime,

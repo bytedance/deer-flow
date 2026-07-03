@@ -60,8 +60,8 @@ def _history_record(*, action: str, file_path: str, prev_content: str | None, ne
     }
 
 
-async def _scan_or_raise(content: str, *, executable: bool, location: str) -> dict[str, Any]:
-    result = await scan_skill_content(content, executable=executable, location=location)
+async def _scan_or_raise(content: str, *, executable: bool, location: str, static_findings: list[StaticFinding] | None = None) -> dict[str, Any]:
+    result = await scan_skill_content(content, executable=executable, location=location, static_findings=static_findings or [])
     if result.decision == "block":
         raise ValueError(f"Security scan blocked the write: {result.reason}")
     if executable and result.decision != "allow":
@@ -141,7 +141,7 @@ async def _skill_manage_impl(
                 raise ValueError("content is required for create.")
             await _to_thread(skill_storage.validate_skill_markdown_content, name, content)
             static_findings = await _scan_static_candidate_or_raise(name, {SKILL_MD_FILE: content})
-            scan = await _scan_or_raise(content, executable=False, location=f"{name}/{SKILL_MD_FILE}")
+            scan = await _scan_or_raise(content, executable=False, location=f"{name}/{SKILL_MD_FILE}", static_findings=static_findings)
             scan["static_findings"] = static_findings
             await _to_thread(skill_storage.write_custom_skill, name, SKILL_MD_FILE, content)
             await _to_thread(
@@ -158,7 +158,7 @@ async def _skill_manage_impl(
                 raise ValueError("content is required for edit.")
             await _to_thread(skill_storage.validate_skill_markdown_content, name, content)
             static_findings = await _scan_static_candidate_or_raise(name, {SKILL_MD_FILE: content})
-            scan = await _scan_or_raise(content, executable=False, location=f"{name}/{SKILL_MD_FILE}")
+            scan = await _scan_or_raise(content, executable=False, location=f"{name}/{SKILL_MD_FILE}", static_findings=static_findings)
             scan["static_findings"] = static_findings
             skill_file = skill_storage.get_custom_skill_file(name)
             prev_content = await _to_thread(skill_file.read_text, encoding="utf-8")
@@ -186,7 +186,7 @@ async def _skill_manage_impl(
             new_content = prev_content.replace(find, replace, replacement_count)
             await _to_thread(skill_storage.validate_skill_markdown_content, name, new_content)
             static_findings = await _scan_static_candidate_or_raise(name, {SKILL_MD_FILE: new_content})
-            scan = await _scan_or_raise(new_content, executable=False, location=f"{name}/{SKILL_MD_FILE}")
+            scan = await _scan_or_raise(new_content, executable=False, location=f"{name}/{SKILL_MD_FILE}", static_findings=static_findings)
             scan["static_findings"] = static_findings
             await _to_thread(skill_storage.write_custom_skill, name, SKILL_MD_FILE, new_content)
             await _to_thread(
@@ -222,7 +222,7 @@ async def _skill_manage_impl(
             prev_content = await _to_thread(target.read_text, encoding="utf-8") if exists else None
             executable = "scripts/" in path or path.startswith("scripts/")
             static_findings = await _scan_static_candidate_or_raise(name, {path: content}, skill_storage)
-            scan = await _scan_or_raise(content, executable=executable, location=f"{name}/{path}")
+            scan = await _scan_or_raise(content, executable=executable, location=f"{name}/{path}", static_findings=static_findings)
             scan["static_findings"] = static_findings
             await _to_thread(skill_storage.write_custom_skill, name, path, content)
             await _to_thread(

@@ -391,6 +391,7 @@ Additional providers also live here (`brave`, `browserless`, `crawl4ai`, `ddg_se
 - **Injection**: Enabled skills listed in agent system prompt with container paths
 - **Slash activation**: `/skill-name task` loads that enabled skill's `SKILL.md` for the current model call only. The resolver rejects leading whitespace, missing separators, reserved channel commands (`/new`, `/help`, `/bootstrap`, `/status`, `/models`, `/memory`, `/goal`), disabled skills, and skills outside a custom agent's whitelist.
 - **Installation**: `POST /api/skills/install` extracts .skill ZIP archive to custom/ directory
+- **SkillScan**: `packages/harness/deerflow/skills/skillscan/` is the native deterministic scanner for `.skill` archives and agent-managed skill writes. It runs offline before the LLM scanner, emits structured findings, blocks `CRITICAL`, passes warning findings into `scan_skill_content()`, and records successful install metadata under `runtime_home()/skillscan/installed/`. Do not add Semgrep/OpenGrep or YAML rule-engine dependencies to the core path; Phase 1 rules live in Python constants under `skillscan/rules/`.
 
 #### Request-Scoped Secrets (`required-secrets`)
 

@@ -20,6 +20,7 @@ from deerflow.skills.security_static_scanner import (
     StaticScanBlockedError,
     StaticScannerError,
     enforce_static_scan,
+    scan_archive_preflight,
     static_findings_to_dicts,
 )
 
@@ -164,7 +165,20 @@ def _move_staged_skill_into_reserved_target(staging_target: Path, target: Path) 
             shutil.rmtree(target)
 
 
-async def _scan_skill_file_or_raise(skill_dir: Path, path: Path, skill_name: str, *, executable: bool) -> None:
+def _findings_for_file(findings: list[StaticFinding], rel_path: str) -> list[StaticFinding]:
+    return [finding for finding in findings if finding.get("file") in {rel_path, None}]
+
+
+async def _scan_skill_content_with_context(content: str, *, executable: bool, location: str, static_findings: list[StaticFinding]) -> object:
+    try:
+        return await scan_skill_content(content, executable=executable, location=location, static_findings=static_findings)
+    except TypeError as e:
+        if "static_findings" not in str(e):
+            raise
+        return await scan_skill_content(content, executable=executable, location=location)
+
+
+async def _scan_skill_file_or_raise(skill_dir: Path, path: Path, skill_name: str, *, executable: bool, static_findings: list[StaticFinding] | None = None) -> None:
     rel_path = path.relative_to(skill_dir).as_posix()
     location = f"{skill_name}/{rel_path}"
     try:
@@ -173,7 +187,7 @@ async def _scan_skill_file_or_raise(skill_dir: Path, path: Path, skill_name: str
         raise SkillSecurityScanError(f"Security scan failed for skill '{skill_name}': {location} must be valid UTF-8") from e
 
     try:
-        result = await scan_skill_content(content, executable=executable, location=location)
+        result = await _scan_skill_content_with_context(content, executable=executable, location=location, static_findings=static_findings or [])
     except Exception as e:
         raise SkillSecurityScanError(f"Security scan failed for {location}: {e}") from e
 
@@ -189,9 +203,51 @@ async def _scan_skill_file_or_raise(skill_dir: Path, path: Path, skill_name: str
         raise SkillSecurityScanError(f"Security scan failed for {location}: invalid scanner decision {decision!r}")
 
 
-async def _scan_static_skill_archive_or_raise(skill_dir: Path, skill_name: str) -> None:
+def _static_scan_context(entrypoint: str, skill_dir: Path | None, skill_name: str | None, *, existing_skill: bool = False) -> dict:
+    return {
+        "entrypoint": entrypoint,
+        "skill_name": skill_name,
+        "skill_root": str(skill_dir) if skill_dir is not None else None,
+        "existing_skill": existing_skill,
+        "strict": False,
+    }
+
+
+def scan_archive_preflight_or_raise(archive_path: Path, *, app_config=None) -> None:
+    result = scan_archive_preflight(
+        archive_path,
+        context=_static_scan_context("archive_install", None, None),
+        app_config=app_config,
+    )
+    if result["blocked"]:
+        critical = [finding for finding in result["findings"] if finding["severity"] == "CRITICAL"]
+        raise SkillSecurityScanError(
+            f"Static security scan blocked unsafe skill archive: {format_static_archive_findings(critical)}",
+            findings=critical,
+            skill_name=None,
+        )
+
+
+def format_static_archive_findings(findings: list[StaticFinding]) -> str:
+    return "; ".join(f"{finding['rule_id']} ({finding['severity']}) at {finding.get('file') or '<archive>'}: {finding['message']}" for finding in findings)
+
+
+async def _scan_static_skill_archive_or_raise(skill_dir: Path, skill_name: str, *, app_config=None) -> list[StaticFinding]:
+    def _scan() -> list[StaticFinding]:
+        try:
+            return enforce_static_scan(
+                skill_dir,
+                skill_name=skill_name,
+                context=_static_scan_context("archive_install", skill_dir, skill_name),
+                app_config=app_config,
+            )
+        except TypeError as e:
+            if "context" not in str(e) and "app_config" not in str(e):
+                raise
+            return enforce_static_scan(skill_dir, skill_name=skill_name)
+
     try:
-        await asyncio.to_thread(enforce_static_scan, skill_dir, skill_name=skill_name)
+        return await asyncio.to_thread(_scan)
     except StaticScanBlockedError as e:
         raise SkillSecurityScanError(str(e), findings=e.findings, skill_name=e.skill_name) from e
     except StaticScannerError as e:
@@ -203,12 +259,12 @@ def _collect_scannable_files(skill_dir: Path) -> list[Path]:
     return [candidate for candidate in sorted(skill_dir.rglob("*")) if candidate.is_file()]
 
 
-async def _scan_skill_archive_contents_or_raise(skill_dir: Path, skill_name: str) -> None:
+async def _scan_skill_archive_contents_or_raise(skill_dir: Path, skill_name: str, *, app_config=None) -> list[StaticFinding]:
     """Run the skill security scanner against all installable text and script files."""
-    await _scan_static_skill_archive_or_raise(skill_dir, skill_name)
+    static_findings = await _scan_static_skill_archive_or_raise(skill_dir, skill_name, app_config=app_config)
 
     skill_md = skill_dir / "SKILL.md"
-    await _scan_skill_file_or_raise(skill_dir, skill_md, skill_name, executable=False)
+    await _scan_skill_file_or_raise(skill_dir, skill_md, skill_name, executable=False, static_findings=_findings_for_file(static_findings, "SKILL.md"))
 
     for path in await asyncio.to_thread(_collect_scannable_files, skill_dir):
         rel_path = path.relative_to(skill_dir)
@@ -219,7 +275,15 @@ async def _scan_skill_archive_contents_or_raise(skill_dir: Path, skill_name: str
         if not _should_scan_support_file(rel_path):
             continue
 
-        await _scan_skill_file_or_raise(skill_dir, path, skill_name, executable=_is_script_support_file(rel_path))
+        rel_path_posix = rel_path.as_posix()
+        await _scan_skill_file_or_raise(
+            skill_dir,
+            path,
+            skill_name,
+            executable=_is_script_support_file(rel_path),
+            static_findings=_findings_for_file(static_findings, rel_path_posix),
+        )
+    return static_findings
 
 
 def _run_async_install(coro):

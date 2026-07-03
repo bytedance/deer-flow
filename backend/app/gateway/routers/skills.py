@@ -103,13 +103,18 @@ def _static_scan_http_detail(error: StaticScanBlockedError) -> dict:
     }
 
 
-async def _scan_static_skill_markdown_or_raise(skill_name: str, content: str) -> list[StaticFinding]:
+async def _scan_static_skill_markdown_or_raise(skill_name: str, content: str, *, app_config: AppConfig) -> list[StaticFinding]:
     def _scan_markdown() -> list[StaticFinding]:
         with tempfile.TemporaryDirectory() as tmp:
             skill_dir = Path(tmp) / skill_name
             skill_dir.mkdir(parents=True)
             (skill_dir / SKILL_MD_FILE).write_text(content, encoding="utf-8")
-            return enforce_static_scan(skill_dir, skill_name=skill_name)
+            try:
+                return enforce_static_scan(skill_dir, skill_name=skill_name, app_config=app_config)
+            except TypeError as e:
+                if "app_config" not in str(e):
+                    raise
+                return enforce_static_scan(skill_dir, skill_name=skill_name)
 
     try:
         return await asyncio.to_thread(_scan_markdown)
@@ -211,8 +216,8 @@ async def update_custom_skill(skill_name: str, body: CustomSkillUpdateRequest, r
         storage = get_or_new_skill_storage(app_config=config)
         storage.ensure_custom_skill_is_editable(skill_name)
         storage.validate_skill_markdown_content(skill_name, body.content)
-        static_findings = await _scan_static_skill_markdown_or_raise(skill_name, body.content)
-        scan = await scan_skill_content(body.content, executable=False, location=f"{skill_name}/{SKILL_MD_FILE}", app_config=config)
+        static_findings = await _scan_static_skill_markdown_or_raise(skill_name, body.content, app_config=config)
+        scan = await scan_skill_content(body.content, executable=False, location=f"{skill_name}/{SKILL_MD_FILE}", app_config=config, static_findings=static_findings)
         if scan.decision == "block":
             raise HTTPException(status_code=400, detail=f"Security scan blocked the edit: {scan.reason}")
         prev_content = storage.read_custom_skill(skill_name)
@@ -302,8 +307,8 @@ async def rollback_custom_skill(skill_name: str, body: SkillRollbackRequest, req
         if target_content is None:
             raise HTTPException(status_code=400, detail="Selected history entry has no previous content to roll back to")
         storage.validate_skill_markdown_content(skill_name, target_content)
-        static_findings = await _scan_static_skill_markdown_or_raise(skill_name, target_content)
-        scan = await scan_skill_content(target_content, executable=False, location=f"{skill_name}/{SKILL_MD_FILE}", app_config=config)
+        static_findings = await _scan_static_skill_markdown_or_raise(skill_name, target_content, app_config=config)
+        scan = await scan_skill_content(target_content, executable=False, location=f"{skill_name}/{SKILL_MD_FILE}", app_config=config, static_findings=static_findings)
         skill_file = storage.get_custom_skill_file(skill_name)
         current_content = skill_file.read_text(encoding="utf-8") if skill_file.exists() else None
         history_entry = {

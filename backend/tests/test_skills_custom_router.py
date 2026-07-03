@@ -336,7 +336,7 @@ def test_custom_skill_update_static_scan_failure_blocks_edit_before_llm(monkeypa
         return await _async_scan("allow", "ok")
 
     def _broken_static_scan(skill_dir, *, skill_name=None):
-        raise StaticScannerError("semgrep unavailable")
+        raise StaticScannerError("native scanner unavailable")
 
     monkeypatch.setattr("app.gateway.routers.skills.refresh_skills_system_prompt_cache_async", _refresh)
     monkeypatch.setattr("app.gateway.routers.skills.scan_skill_content", _scan)
@@ -352,7 +352,7 @@ def test_custom_skill_update_static_scan_failure_blocks_edit_before_llm(monkeypa
 
     assert response.status_code == 400
     assert "Static security scan failed" in response.json()["detail"]
-    assert "semgrep unavailable" in response.json()["detail"]
+    assert "native scanner unavailable" in response.json()["detail"]
     assert llm_calls == []
     assert refresh_calls == []
     assert (custom_dir / "SKILL.md").read_text(encoding="utf-8") == original_content
