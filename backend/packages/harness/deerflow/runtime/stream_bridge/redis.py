@@ -173,7 +173,7 @@ class RedisStreamBridge(StreamBridge):
                 consecutive_errors += 1
                 if consecutive_errors > _MAX_SUBSCRIBE_RETRIES:
                     raise
-                delay = min(2 ** consecutive_errors, heartbeat_interval)
+                delay = min(2**consecutive_errors, heartbeat_interval)
                 logger.warning(
                     "Transient Redis error in stream bridge subscriber (retry %d/%d); backing off %.1fs",
                     consecutive_errors,

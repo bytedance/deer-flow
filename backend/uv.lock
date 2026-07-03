@@ -898,6 +898,7 @@ pymupdf = [
 ]
 redis = [
     { name = "redis" },
+]
 tui = [
     { name = "textual" },
 ]
