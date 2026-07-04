@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import html
 import logging
+import posixpath
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -320,24 +321,27 @@ Follow this skill before choosing a general workflow. Load supporting resources 
         if not isinstance(context, dict):
             return
 
+        # The slash source records only the canonical container path of the
+        # activated skill — never its declared secrets. Both sources resolve the
+        # live registry skill by path on read, so a caller-forged source (the
+        # context is caller-mergeable) can never inject secrets a real, enabled,
+        # allowlisted skill did not declare (#3938).
         if activation is not None:
-            context[_SLASH_SECRET_SOURCE_KEY] = {
-                "skill_name": activation.skill_name,
-                "requirements": [(req.name, req.optional) for req in activation.required_secrets],
-            }
+            context[_SLASH_SECRET_SOURCE_KEY] = {"path": activation.container_file_path}
 
         request_secrets = extract_request_secrets(context)
         sources: list[tuple[str, tuple[SecretRequirement, ...]]] = []
-        slash_source = context.get(_SLASH_SECRET_SOURCE_KEY)
-        if isinstance(slash_source, dict) and slash_source.get("requirements"):
-            sources.append(
-                (
-                    str(slash_source.get("skill_name") or ""),
-                    tuple(SecretRequirement(name=name, optional=optional) for name, optional in slash_source["requirements"]),
-                )
-            )
         if request_secrets:
-            sources.extend(self._in_context_secret_sources(request))
+            registry = self._load_skill_registry_by_path()
+            if registry is not None:
+                # Slash source: exempt from the ``secrets-autonomous`` opt-out
+                # (explicit ceremony), but still enabled + allowlist checked.
+                slash_source = context.get(_SLASH_SECRET_SOURCE_KEY)
+                slash_path = slash_source.get("path") if isinstance(slash_source, dict) else None
+                slash_skill = self._resolve_registry_skill(registry, slash_path, require_autonomous=False)
+                if slash_skill is not None:
+                    sources.append((slash_skill.name, tuple(slash_skill.required_secrets)))
+                sources.extend(self._in_context_secret_sources(request, registry))
 
         injected: dict[str, str] = {}
         bound_skills: set[str] = set()
@@ -374,12 +378,64 @@ Follow this skill before choosing a general workflow. Load supporting resources 
             )
         self._record_secret_binding(context, audit_state, hook=hook)
 
-    def _in_context_secret_sources(self, request: ModelRequest) -> list[tuple[str, tuple[SecretRequirement, ...]]]:
+    def _load_skill_registry_by_path(self) -> dict[str, Skill] | None:
+        """Load the live skill registry keyed by normalized container file path.
+
+        Reloaded every call on purpose (not cached): load_skills re-reads the
+        enabled state from extensions_config so an operator disabling a skill
+        revokes its secret binding on the very next model call. A cache keyed on
+        file mtimes would miss enable/disable toggles (which do not touch
+        SKILL.md) and keep injecting after a disable — trading the
+        immediate-revocation security property for speed. The cost is gated: the
+        only caller runs this only when the caller supplied secrets.
+
+        Paths are normalized so a non-canonical ``container_path`` config (e.g. a
+        trailing slash) still matches the canonical path captured in
+        ``skill_context`` (#3938). Returns ``None`` if the registry can't load.
+        """
+        try:
+            storage = self._storage()
+            skills = storage.load_skills(enabled_only=False)
+            container_root = storage.get_container_root()
+        except Exception:
+            logger.exception("Failed to load skills while resolving secret bindings")
+            return None
+        return {posixpath.normpath(skill.get_container_file_path(container_root)): skill for skill in skills}
+
+    def _resolve_registry_skill(self, registry: dict[str, Skill], path: object, *, require_autonomous: bool) -> Skill | None:
+        """Resolve a container path to a live registry skill eligible for secret
+        binding, or ``None``.
+
+        Match strictly by normalized container file path — never by name. A
+        by-name fallback would be a confused deputy: DeerFlow lets a custom skill
+        shadow a same-named public/legacy one (load_skills de-dupes by name,
+        custom wins), so a reference to public/foo could bind the custom foo's
+        secrets. A path that does not resolve simply binds nothing (the safe
+        direction), which also fails closed on a caller-forged path (#3938).
+
+        Gates: the skill must be enabled, declare secrets, and be allowlisted for
+        this agent. ``require_autonomous`` additionally enforces the
+        ``secrets-autonomous`` opt-out for the in-context path; the slash path
+        passes ``False`` because explicit activation is the ceremony that opt-out
+        is meant to preserve.
+        """
+        if not isinstance(path, str) or not path:
+            return None
+        skill = registry.get(posixpath.normpath(path))
+        if skill is None or not skill.enabled or not skill.required_secrets:
+            return None
+        if require_autonomous and not skill.secrets_autonomous:
+            return None
+        if self._available_skills is not None and skill.name not in self._available_skills:
+            return None
+        return skill
+
+    def _in_context_secret_sources(self, request: ModelRequest, registry: dict[str, Skill]) -> list[tuple[str, tuple[SecretRequirement, ...]]]:
         """Map ``ThreadState.skill_context`` entries to declared-secret sources.
 
-        Entries are references (name/path) to skills the model actually loaded
-        in this thread. Each is re-validated against the live registry so a
-        skill that was disabled, uninstalled, or removed from the agent's
+        Entries are references to skills the model actually loaded in this
+        thread. Each is re-validated against the live registry so a skill that
+        was disabled, uninstalled, opted out, or removed from the agent's
         allowlist after being read stops binding immediately.
         """
         state = getattr(request, "state", None) or {}
@@ -387,51 +443,16 @@ Follow this skill before choosing a general workflow. Load supporting resources 
             entries = state.get("skill_context") or []
         except AttributeError:
             return []
-        if not entries:
-            return []
-
-        # Reloaded every call on purpose (not cached): load_skills re-reads the
-        # enabled state from extensions_config so an operator disabling a skill
-        # revokes its in-context binding on the very next model call. A cache
-        # keyed on file mtimes would miss enable/disable toggles (which do not
-        # touch SKILL.md) and keep injecting after a disable — trading the
-        # immediate-revocation security property for speed. The cost is gated:
-        # this runs only when the caller supplied secrets AND a skill is in
-        # context, i.e. only while the feature is actively in use.
-        try:
-            storage = self._storage()
-            skills = storage.load_skills(enabled_only=False)
-            container_root = storage.get_container_root()
-        except Exception:
-            logger.exception("Failed to load skills while resolving in-context secret bindings")
-            return []
-
-        # Match strictly by container file path — never by name. skill_context
-        # entries carry the exact path the model read (path-validated at capture),
-        # and it equals the registry's own get_container_file_path. A by-name
-        # fallback would be a confused deputy: DeerFlow lets a custom skill shadow
-        # a same-named public/legacy one (load_skills de-dupes by name, custom
-        # wins), so a thread that read public/foo could bind the *custom* foo's
-        # declared secrets even though the custom skill was never loaded. A path
-        # that no longer resolves (e.g. the skill was moved/removed) simply does
-        # not bind — the safe direction.
-        by_path: dict[str, Skill] = {}
-        for skill in skills:
-            by_path[skill.get_container_file_path(container_root)] = skill
 
         sources: list[tuple[str, tuple[SecretRequirement, ...]]] = []
         seen: set[str] = set()
         for entry in entries:
             if not isinstance(entry, dict):
                 continue
-            skill = by_path.get(entry.get("path"))
+            skill = self._resolve_registry_skill(registry, entry.get("path"), require_autonomous=True)
             if skill is None or skill.name in seen:
                 continue
             seen.add(skill.name)
-            if not skill.enabled or not skill.required_secrets or not skill.secrets_autonomous:
-                continue
-            if self._available_skills is not None and skill.name not in self._available_skills:
-                continue
             sources.append((skill.name, tuple(skill.required_secrets)))
         return sources
 
