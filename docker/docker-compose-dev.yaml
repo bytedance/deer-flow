@@ -5,6 +5,7 @@
 #   - nginx: Reverse proxy (port 2026)
 #   - frontend: Frontend Next.js dev server (port 3000)
 #   - gateway: Backend Gateway API + agent runtime (port 8001)
+#   - redis: Redis Streams backend for cross-worker SSE stream bridge
 #   - provisioner (optional): Sandbox provisioner (creates Pods in host Kubernetes)
 #
 # Prerequisites:
@@ -13,6 +14,22 @@
 # Access: http://localhost:2026
 
 services:
+  # ── Redis Stream Bridge ────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: deer-flow-redis
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - deer-flow-dev
+    restart: unless-stopped
+
   # ── Sandbox Provisioner ────────────────────────────────────────────────
   # Manages per-sandbox Pod + Service lifecycle in the host Kubernetes
   # cluster via the K8s API.
@@ -161,6 +178,7 @@ services:
       - CI=true
       - DEER_FLOW_PROJECT_ROOT=/app
       - DEER_FLOW_HOME=/app/backend/.deer-flow
+      - DEER_FLOW_STREAM_BRIDGE_REDIS_URL=${DEER_FLOW_STREAM_BRIDGE_REDIS_URL:-redis://redis:6379/0}
       - DEER_FLOW_CHANNELS_LANGGRAPH_URL=${DEER_FLOW_CHANNELS_LANGGRAPH_URL:-http://gateway:8001/api}
       - DEER_FLOW_CHANNELS_GATEWAY_URL=${DEER_FLOW_CHANNELS_GATEWAY_URL:-http://gateway:8001}
       - DEER_FLOW_INTERNAL_AUTH_TOKEN=${DEER_FLOW_INTERNAL_AUTH_TOKEN:-}
@@ -176,6 +194,9 @@ services:
     extra_hosts:
       # For Linux: map host.docker.internal to host gateway
       - "host.docker.internal:host-gateway"
+    depends_on:
+      redis:
+        condition: service_healthy
     networks:
       - deer-flow-dev
     restart: unless-stopped
@@ -185,6 +206,7 @@ volumes:
   # image build are not shadowed by the host backend/ directory mount.
   gateway-venv:
   gateway-uv-cache:
+  redis-data:
 
 networks:
   deer-flow-dev:

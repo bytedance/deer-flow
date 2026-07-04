@@ -58,6 +58,10 @@ postgres = [
     "psycopg[binary]>=3.3.3",
     "psycopg-pool>=3.3.0",
 ]
+# Cross-process SSE stream bridge (stream_bridge.type: redis). Optional so
+# single-process / memory-bridge installs do not pull redis. The Docker image
+# always installs this extra because Docker defaults to the redis bridge.
+redis = ["redis>=5.0.0"]
 pymupdf = ["pymupdf4llm>=0.0.17"]
 
 [build-system]

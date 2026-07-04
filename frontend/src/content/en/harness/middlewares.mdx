@@ -135,6 +135,8 @@ Audits sandbox operations performed during the agent's execution. Provides a rec
 
 Captures long-lived runtime facts into explicit thread-state channels before summarization compacts the raw transcript. It records compressed summaries, delegated task state/results, and loaded `SKILL.md` references, then projects them into later model calls as hidden durable context data.
 
+The backend stamps bounded structured task-result and skill-read metadata before durable context capture. The frontend task card reads the structured task status/result fields; task result text remains display content and is not parsed as the wire protocol.
+
 **Configuration**: built in. `summarization.skill_file_read_tool_names` controls which read tools count as skill-reference reads; set it to `[]` to disable durable skill-reference capture.
 
 ---

@@ -324,7 +324,7 @@ echo -e "${BLUE}Sandbox mode: $sandbox_mode${NC}"
 
 echo -e "${BLUE}Runtime: Gateway embedded agent runtime${NC}"
 
-services="frontend gateway nginx"
+services="redis frontend gateway nginx"
 
 if [ "$sandbox_mode" = "provisioner" ]; then
     services="$services provisioner"

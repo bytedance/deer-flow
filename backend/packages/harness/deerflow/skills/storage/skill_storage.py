@@ -8,6 +8,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Iterable
 from pathlib import Path
 
+from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
 from deerflow.skills.types import SKILL_MD_FILE, Skill, SkillCategory  # noqa: F401
 
 logger = logging.getLogger(__name__)
@@ -24,7 +25,7 @@ class SkillStorage(ABC):
     compose them with protocol-level helpers.
     """
 
-    def __init__(self, container_path: str = "/mnt/skills") -> None:
+    def __init__(self, container_path: str = DEFAULT_SKILLS_CONTAINER_PATH) -> None:
         self._container_root = container_path
 
     # ------------------------------------------------------------------

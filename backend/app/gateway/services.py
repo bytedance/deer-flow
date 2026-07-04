@@ -42,6 +42,13 @@ from deerflow.runtime.user_context import reset_current_user, set_current_user
 
 logger = logging.getLogger(__name__)
 
+_TERMINAL_RUN_STATUSES = {
+    RunStatus.success,
+    RunStatus.error,
+    RunStatus.timeout,
+    RunStatus.interrupted,
+}
+
 
 # ---------------------------------------------------------------------------
 # SSE formatting
@@ -62,6 +69,28 @@ def format_sse(event: str, data: Any, *, event_id: str | None = None) -> str:
     parts.append("")
     parts.append("")
     return "\n".join(parts)
+
+
+def _run_is_terminal(record: RunRecord) -> bool:
+    return record.status in _TERMINAL_RUN_STATUSES
+
+
+async def _terminal_record_stream_missing(bridge: StreamBridge, record: RunRecord) -> bool:
+    """True when a terminal run has no retained stream on bridges that can tell."""
+    if not _run_is_terminal(record):
+        return False
+    stream_exists = getattr(bridge, "stream_exists", None)
+    if stream_exists is None:
+        return False
+    try:
+        return not bool(await stream_exists(record.run_id))
+    except Exception:
+        logger.debug(
+            "Failed to probe stream existence for terminal run %s",
+            sanitize_log_param(record.run_id),
+            exc_info=True,
+        )
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -577,12 +606,19 @@ async def sse_consumer(
     - ``continue``: let the task run; events are discarded.
     """
     last_event_id = request.headers.get("Last-Event-ID")
+    if await _terminal_record_stream_missing(bridge, record):
+        yield format_sse("end", None)
+        return
+
     try:
         async for entry in bridge.subscribe(record.run_id, last_event_id=last_event_id):
             if await request.is_disconnected():
                 break
 
             if entry is HEARTBEAT_SENTINEL:
+                if await _terminal_record_stream_missing(bridge, record):
+                    yield format_sse("end", None)
+                    return
                 yield ": heartbeat\n\n"
                 continue
 
@@ -593,7 +629,11 @@ async def sse_consumer(
             yield format_sse(entry.event, entry.data, event_id=entry.id or None)
 
     finally:
-        if record.status in (RunStatus.pending, RunStatus.running):
+        # store_only records are cross-worker runs hydrated from the RunStore; this
+        # worker holds no in-memory task/abort state for them, so run_mgr.cancel()
+        # cannot stop the task (it would 409). Skip on_disconnect cancellation for
+        # those and only act on runs this worker actually owns.
+        if not record.store_only and record.status in (RunStatus.pending, RunStatus.running):
             if record.on_disconnect == DisconnectMode.cancel:
                 await run_mgr.cancel(record.run_id)
 
@@ -628,12 +668,18 @@ async def wait_for_run_completion(
         response.
     """
     completed = False
+    if await _terminal_record_stream_missing(bridge, record):
+        return True
+
     try:
         async for entry in bridge.subscribe(record.run_id):
             # END_SENTINEL means the run reached a terminal state; honour it
             # even if the client just disconnected so the caller still serializes
             # the real final checkpoint.
             if entry is END_SENTINEL:
+                completed = True
+                return True
+            if entry is HEARTBEAT_SENTINEL and await _terminal_record_stream_missing(bridge, record):
                 completed = True
                 return True
             if await request.is_disconnected():
