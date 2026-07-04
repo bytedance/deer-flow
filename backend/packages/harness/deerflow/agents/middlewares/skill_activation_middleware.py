@@ -16,7 +16,12 @@ from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.middleware.types import ModelRequest, ModelResponse
 from langchain_core.messages import AIMessage, HumanMessage
 
-from deerflow.runtime.secret_context import ACTIVE_SECRETS_CONTEXT_KEY, extract_request_secrets
+from deerflow.runtime.secret_context import (
+    _SECRETS_BINDING_AUDIT_KEY,
+    _SLASH_SECRET_SOURCE_KEY,
+    ACTIVE_SECRETS_CONTEXT_KEY,
+    extract_request_secrets,
+)
 from deerflow.skills.slash import parse_slash_skill_reference, resolve_slash_skill
 from deerflow.skills.storage import get_or_new_skill_storage
 from deerflow.skills.storage.skill_storage import SkillStorage
@@ -32,16 +37,14 @@ _SLASH_SKILL_ACTIVATION_KEY = "slash_skill_activation"
 _SLASH_SKILL_ACTIVATION_TARGET_ID_KEY = "slash_skill_activation_target_id"
 _SUMMARY_MESSAGE_NAME = "summary"
 
-# Private run-context key recording the last audited binding (skill and secret
-# names only, never values) so unchanged bindings are not re-recorded each call.
-_SECRETS_BINDING_AUDIT_KEY = "__skill_secrets_binding_audit"
-
-# Private run-context key persisting the latest slash activation as a secret
-# source (skill name + declared requirement names/optionality, never values):
-# the injection set is recomputed every model call, but a slash-activated skill
-# must stay bound for the rest of the run — the model's tool loop issues many
-# model calls after the single activation call (#3861 semantics).
-_SLASH_SECRET_SOURCE_KEY = "__slash_skill_secret_source"
+# _SECRETS_BINDING_AUDIT_KEY: last audited binding (skill and secret names only,
+# never values) so unchanged bindings are not re-recorded each call.
+# _SLASH_SECRET_SOURCE_KEY: latest slash activation as a secret source (skill
+# name + declared requirement names/optionality, never values). The injection
+# set is recomputed every model call, but a slash-activated skill must stay
+# bound for the rest of the run — the model's tool loop issues many model calls
+# after the single activation call (#3861 semantics). Both live in
+# secret_context so they are covered by REDACTED_CONTEXT_KEYS in one place.
 
 
 @dataclass(frozen=True, slots=True)
@@ -370,6 +373,14 @@ Follow this skill before choosing a general workflow. Load supporting resources 
         if not entries:
             return []
 
+        # Reloaded every call on purpose (not cached): load_skills re-reads the
+        # enabled state from extensions_config so an operator disabling a skill
+        # revokes its in-context binding on the very next model call. A cache
+        # keyed on file mtimes would miss enable/disable toggles (which do not
+        # touch SKILL.md) and keep injecting after a disable — trading the
+        # immediate-revocation security property for speed. The cost is gated:
+        # this runs only when the caller supplied secrets AND a skill is in
+        # context, i.e. only while the feature is actively in use.
         try:
             storage = self._storage()
             skills = storage.load_skills(enabled_only=False)
