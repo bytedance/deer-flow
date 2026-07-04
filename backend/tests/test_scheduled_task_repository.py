@@ -212,3 +212,107 @@ async def test_cancel_stuck_once_tasks_reconciles_orphaned_running(tmp_path):
     assert by_id["task-once-leased"]["status"] == "running"
 
     await close_engine()
+
+
+@pytest.mark.asyncio
+async def test_update_after_launch_protect_terminal_keeps_hook_result(tmp_path):
+    """The launch-path bookkeeping write must not clobber a terminal task
+    status committed first by the completion hook (fast-failing run)."""
+    await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
+    sf = get_session_factory()
+    assert sf is not None
+
+    repo = ScheduledTaskRepository(sf)
+    await repo.create(
+        task_id="task-race",
+        user_id="user-1",
+        thread_id=None,
+        context_mode="fresh_thread_per_run",
+        assistant_id="lead_agent",
+        title="task-race",
+        prompt="p",
+        schedule_type="once",
+        schedule_spec={"run_at": "2026-07-02T01:00:00+00:00"},
+        timezone="UTC",
+        next_run_at=datetime(2026, 7, 2, 1, 0, tzinfo=UTC),
+    )
+    # Completion hook wins the race: task finalized as failed.
+    await repo.update("task-race", user_id="user-1", updates={"status": "failed", "last_error": "boom"})
+    # Late launch-path write with protection keeps the hook's outcome.
+    await repo.update_after_launch(
+        "task-race",
+        status="running",
+        next_run_at=None,
+        last_run_at=datetime(2026, 7, 2, 1, 0, tzinfo=UTC),
+        last_run_id="run-1",
+        last_thread_id="thread-1",
+        last_error=None,
+        increment_run_count=True,
+        protect_terminal=True,
+    )
+
+    task = await repo.get("task-race", user_id="user-1")
+    assert task is not None
+    assert task["status"] == "failed"
+    assert task["last_error"] == "boom"
+    # Launch bookkeeping still recorded.
+    assert task["last_run_id"] == "run-1"
+    assert task["run_count"] == 1
+
+    await close_engine()
+
+
+@pytest.mark.asyncio
+async def test_list_by_task_paginates(tmp_path):
+    await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
+    sf = get_session_factory()
+    assert sf is not None
+
+    repo = ScheduledTaskRunRepository(sf)
+    for i in range(5):
+        await repo.create(
+            run_record_id=f"task-run-{i}",
+            task_id="task-1",
+            thread_id="thread-1",
+            scheduled_for=datetime(2026, 7, 2, 1, i, tzinfo=UTC),
+            trigger="scheduled",
+            status="success",
+        )
+
+    assert await repo.count_active_runs() == 0
+    page1 = await repo.list_by_task("task-1", limit=2)
+    page2 = await repo.list_by_task("task-1", limit=2, offset=2)
+    assert len(page1) == 2
+    assert len(page2) == 2
+    assert {e["id"] for e in page1}.isdisjoint({e["id"] for e in page2})
+
+    await close_engine()
+
+
+@pytest.mark.asyncio
+async def test_list_by_user_and_thread_filters_in_sql(tmp_path):
+    await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
+    sf = get_session_factory()
+    assert sf is not None
+
+    repo = ScheduledTaskRepository(sf)
+    for task_id, thread_id in (("task-a", "thread-1"), ("task-b", "thread-2"), ("task-c", "thread-1")):
+        await repo.create(
+            task_id=task_id,
+            user_id="user-1",
+            thread_id=thread_id,
+            context_mode="reuse_thread",
+            assistant_id="lead_agent",
+            title=task_id,
+            prompt="p",
+            schedule_type="cron",
+            schedule_spec={"cron": "0 9 * * *"},
+            timezone="UTC",
+            next_run_at=None,
+        )
+
+    listed = await repo.list_by_user_and_thread("user-1", "thread-1")
+    assert sorted(t["id"] for t in listed) == ["task-a", "task-c"]
+    assert await repo.list_by_user_and_thread("user-2", "thread-1") == []
+
+    await close_engine()

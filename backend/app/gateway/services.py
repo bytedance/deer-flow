@@ -181,6 +181,21 @@ _CONTEXT_CONFIGURABLE_KEYS: frozenset[str] = frozenset(
 _INTERNAL_ONLY_CONTEXT_KEYS: frozenset[str] = frozenset({"non_interactive"})
 
 
+def strip_internal_context_keys(config: dict[str, Any]) -> None:
+    """Drop internal-only keys a non-internal caller smuggled into the run config.
+
+    Gating :func:`merge_run_context_overrides` is not enough on its own:
+    ``build_run_config`` copies a client-supplied ``body.config['context']`` /
+    ``body.config['configurable']`` verbatim, so the same keys must be scrubbed
+    from both sections after the config is assembled.
+    """
+    for section in ("context", "configurable"):
+        value = config.get(section)
+        if isinstance(value, dict):
+            for key in _INTERNAL_ONLY_CONTEXT_KEYS:
+                value.pop(key, None)
+
+
 def merge_run_context_overrides(config: dict[str, Any], context: Mapping[str, Any] | None, *, internal: bool = False) -> None:
     """Merge whitelisted keys from ``body.context`` into both ``config['configurable']``
     and ``config['context']`` so they are visible to legacy configurable readers and
@@ -580,6 +595,10 @@ async def start_run(
         # Only agent-relevant keys are forwarded; unknown keys (e.g. thread_id) are ignored.
         is_internal_caller = getattr(getattr(request, "state", None), "auth_source", None) == AUTH_SOURCE_INTERNAL
         merge_run_context_overrides(config, getattr(body, "context", None), internal=is_internal_caller)
+        if not is_internal_caller:
+            # ``body.config`` is free-form and copied verbatim by
+            # ``build_run_config``; scrub internal-only keys smuggled there.
+            strip_internal_context_keys(config)
         inject_authenticated_user_context(config, request)
 
         stream_modes = normalize_stream_modes(body.stream_mode)
@@ -642,7 +661,11 @@ async def launch_scheduled_thread_run(
         command=None,
         metadata=metadata or {},
         config=None,
-        context={"non_interactive": True},
+        # ``user_id`` mirrors what IM channels put in ``body.context`` so
+        # runtime-context consumers without a ContextVar fallback (e.g.
+        # user-scoped GuardrailMiddleware providers) see the owning user;
+        # ``inject_authenticated_user_context`` skips the internal user.
+        context=({"non_interactive": True, "user_id": owner_user_id} if owner_user_id else {"non_interactive": True}),
         webhook=None,
         checkpoint_id=None,
         checkpoint=None,

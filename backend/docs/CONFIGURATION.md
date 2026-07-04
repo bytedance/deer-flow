@@ -236,6 +236,7 @@ scheduler:
 Notes:
 
 - `enabled: false` keeps background polling off by default.
+- `max_concurrent_runs` is a global cap on active scheduled runs (queued/running run rows); each poll cycle claims only into the remaining budget, so long runs accumulating across cycles cannot exceed it.
 - All scheduler fields are restart-required; edits need a Gateway restart.
 - Multi-worker deployments (`GATEWAY_WORKERS > 1`) must use the Postgres database backend. SQLite silently ignores row-level locks, so multiple workers can double-fire the same task.
 - The MVP supports thread reuse and fresh-thread-per-run execution modes.

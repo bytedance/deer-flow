@@ -904,7 +904,7 @@ def test_launch_scheduled_thread_run_marks_context_non_interactive(_stub_app_con
     captured, result = asyncio.run(_scenario())
 
     assert captured["thread_id"] == "thread-scheduled"
-    assert captured["context"] == {"non_interactive": True}
+    assert captured["context"] == {"non_interactive": True, "user_id": "user-1"}
     assert captured["metadata"] == {"scheduled_task_id": "task-1"}
     assert result == {"run_id": "run-1", "thread_id": "thread-scheduled"}
 
@@ -1023,3 +1023,19 @@ def test_build_run_config_no_request_config():
     config = build_run_config("thread-abc", None, None)
     assert config["configurable"] == {"thread_id": "thread-abc"}
     assert "context" not in config
+
+
+def test_strip_internal_context_keys_scrubs_config_smuggled_non_interactive():
+    """A non-internal client must not force ``non_interactive`` via the free-form
+    ``body.config`` either — ``build_run_config`` copies ``config.context`` and
+    ``config.configurable`` verbatim, so the assembled config gets scrubbed."""
+    from app.gateway.services import build_run_config, strip_internal_context_keys
+
+    via_context = build_run_config("thread-1", {"context": {"non_interactive": True, "model_name": "gpt"}}, None)
+    strip_internal_context_keys(via_context)
+    assert "non_interactive" not in via_context["context"]
+    assert via_context["context"]["model_name"] == "gpt"
+
+    via_configurable = build_run_config("thread-1", {"configurable": {"non_interactive": True}}, None)
+    strip_internal_context_keys(via_configurable)
+    assert "non_interactive" not in via_configurable["configurable"]

@@ -1419,7 +1419,7 @@ run_events:
 #   enabled: false               # Master switch for the background poller
 #   poll_interval_seconds: 5     # How often to scan for due tasks
 #   lease_seconds: 120           # Claim lease; a crashed process's task becomes reclaimable after this
-#   max_concurrent_runs: 3       # Max tasks claimed per poll cycle
+#   max_concurrent_runs: 3       # Global cap on active scheduled runs; each poll claims only into the remaining budget
 #   min_once_delay_seconds: 60   # Minimum future offset for one-time tasks at creation time
 scheduler:
   enabled: false

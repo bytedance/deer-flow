@@ -15,6 +15,9 @@ class _Repo:
     async def list_by_user(self, user_id: str):
         return [item for item in self.items.values() if item["user_id"] == user_id]
 
+    async def list_by_user_and_thread(self, user_id: str, thread_id: str):
+        return [item for item in self.items.values() if item["user_id"] == user_id and item["thread_id"] == thread_id]
+
     async def create(self, **kwargs):
         item = {
             "id": kwargs["task_id"],
@@ -601,3 +604,49 @@ async def test_create_once_task_enforces_minimum_delay():
         scheduled_tasks.get_optional_user_from_request = old_user
 
     assert "once schedule must be at least" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_update_terminal_once_task_with_future_run_at_rearms_it():
+    """PATCHing a fresh future run_at onto a completed/failed/cancelled once
+    task must reset status to enabled — claim_due_tasks only admits enabled
+    rows, so keeping the terminal status returns a next_run_at that never fires."""
+    repo = _Repo()
+    task = await repo.create(
+        task_id="task-terminal",
+        user_id="user-1",
+        thread_id=None,
+        context_mode="fresh_thread_per_run",
+        assistant_id="lead_agent",
+        title="Once done",
+        prompt="p",
+        schedule_type="once",
+        schedule_spec={"run_at": "2026-07-01T00:00:00+00:00"},
+        timezone="UTC",
+        next_run_at=None,
+    )
+    task["status"] = "completed"
+    future_run_at = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+    request = SimpleNamespace()
+    user = SimpleNamespace(id="user-1")
+
+    old_repo = scheduled_tasks.get_scheduled_task_repo
+    old_config = scheduled_tasks.get_config
+    old_user = scheduled_tasks.get_optional_user_from_request
+    try:
+        scheduled_tasks.get_scheduled_task_repo = lambda _request: repo
+        scheduled_tasks.get_config = lambda: _Config()
+        scheduled_tasks.get_optional_user_from_request = AsyncMock(return_value=user)
+
+        result = await scheduled_tasks.update_scheduled_task.__wrapped__(
+            task_id=task["id"],
+            request=request,
+            body=scheduled_tasks.ScheduledTaskUpdateRequest(schedule_spec={"run_at": future_run_at}),
+        )
+    finally:
+        scheduled_tasks.get_scheduled_task_repo = old_repo
+        scheduled_tasks.get_config = old_config
+        scheduled_tasks.get_optional_user_from_request = old_user
+
+    assert result["status"] == "enabled"
+    assert result["next_run_at"] is not None

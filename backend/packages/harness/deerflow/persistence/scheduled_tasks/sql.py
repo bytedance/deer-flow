@@ -9,6 +9,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from deerflow.persistence.scheduled_tasks.model import ScheduledTaskRow
 from deerflow.utils.time import coerce_iso
 
+TERMINAL_TASK_STATUSES: frozenset[str] = frozenset({"completed", "failed", "cancelled"})
+
 
 class ScheduledTaskRepository:
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
@@ -164,23 +166,44 @@ class ScheduledTaskRepository:
         last_thread_id: str | None,
         last_error: str | None,
         increment_run_count: bool,
+        protect_terminal: bool = False,
     ) -> None:
         async with self._sf() as session:
             row = await session.get(ScheduledTaskRow, task_id)
             if row is None:
                 return
-            row.status = status
+            if protect_terminal and row.status in TERMINAL_TASK_STATUSES:
+                # A fast-failing run can reach handle_run_completion (which
+                # finalizes a `once` task) before this launch-path write
+                # commits; keep the hook's status/error and only record the
+                # launch bookkeeping.
+                pass
+            else:
+                row.status = status
+                row.last_error = last_error
             row.next_run_at = next_run_at
             row.last_run_at = last_run_at
             row.last_run_id = last_run_id
             row.last_thread_id = last_thread_id
-            row.last_error = last_error
             if increment_run_count:
                 row.run_count += 1
             row.lease_owner = None
             row.lease_expires_at = None
             row.updated_at = datetime.now(UTC)
             await session.commit()
+
+    async def list_by_user_and_thread(self, user_id: str, thread_id: str) -> list[dict[str, Any]]:
+        stmt = (
+            select(ScheduledTaskRow)
+            .where(
+                ScheduledTaskRow.user_id == user_id,
+                ScheduledTaskRow.thread_id == thread_id,
+            )
+            .order_by(ScheduledTaskRow.created_at.desc(), ScheduledTaskRow.id.desc())
+        )
+        async with self._sf() as session:
+            result = await session.execute(stmt)
+            return [self._row_to_dict(row) for row in result.scalars()]
 
     async def cancel_stuck_once_tasks(self, *, error: str) -> int:
         """Reconcile ``once`` tasks orphaned in ``running`` by a process crash.

@@ -37,11 +37,18 @@ class ScheduledTaskService:
         self._stop = asyncio.Event()
 
     async def run_once(self, *, now: datetime) -> None:
+        # ``max_concurrent_runs`` is a global cap on active scheduled runs, not
+        # just a per-poll claim batch: long runs accumulate across poll cycles,
+        # so each cycle only claims into the remaining budget.
+        active = await self._task_run_repo.count_active_runs()
+        budget = self._max_concurrent_runs - active
+        if budget <= 0:
+            return
         claimed = await self._task_repo.claim_due_tasks(
             now=now,
             lease_owner=self._lease_owner,
             lease_seconds=self._lease_seconds,
-            limit=self._max_concurrent_runs,
+            limit=budget,
         )
         for task in claimed:
             await self.dispatch_task(task, now=now, trigger="scheduled")
@@ -84,9 +91,19 @@ class ScheduledTaskService:
         # "skip" must hold for fresh-thread runs too, where every run gets a new
         # thread and the same-thread multitask ConflictError below can never
         # fire. Checked before creating this dispatch's own run row so the row
-        # does not count itself as the active run.
+        # does not count itself as the active run. A manual trigger against an
+        # active run is rejected outright (409 at the router) instead of being
+        # recorded as a skipped occurrence — nothing was scheduled to happen.
         skip_error: str | None = None
-        if trigger == "scheduled" and task.get("overlap_policy", "skip") == "skip" and await self._task_run_repo.has_active_runs(task["id"]):
+        if task.get("overlap_policy", "skip") == "skip" and await self._task_run_repo.has_active_runs(task["id"]):
+            if trigger == "manual":
+                return {
+                    "outcome": "conflict",
+                    "task_run_id": None,
+                    "run_id": None,
+                    "thread_id": execution_thread_id,
+                    "error": "task already has an active run",
+                }
             skip_error = "skipped: a previous run of this task is still active"
         task_run_id = f"task-run-{uuid.uuid4().hex}"
         await self._task_run_repo.create(
@@ -145,6 +162,9 @@ class ScheduledTaskService:
                 last_thread_id=result["thread_id"],
                 last_error=None,
                 increment_run_count=True,
+                # Same race as the run-row write above: a fast-failing run's
+                # completion hook may have already finalized a `once` task.
+                protect_terminal=True,
             )
             return {
                 "outcome": "launched",

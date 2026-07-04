@@ -4,7 +4,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from app.gateway.authz import require_permission
@@ -200,6 +200,12 @@ async def update_scheduled_task(task_id: str, request: Request, body: ScheduledT
             )
         updates["schedule_spec"] = schedule_spec
         updates["next_run_at"] = next_run_at
+        # A terminal task (completed/failed/cancelled) whose schedule was just
+        # pushed into the future must be re-armed: claim_due_tasks only admits
+        # "enabled" rows, so leaving the terminal status would return 200 with
+        # a next_run_at that silently never fires.
+        if next_run_at is not None and existing["status"] in {"completed", "failed", "cancelled"}:
+            updates["status"] = "enabled"
 
     updated = await repo.update(
         task_id,
@@ -277,7 +283,12 @@ async def delete_scheduled_task(task_id: str, request: Request):
 
 @router.get("/scheduled-tasks/{task_id}/runs")
 @require_permission("threads", "read")
-async def list_scheduled_task_runs(task_id: str, request: Request):
+async def list_scheduled_task_runs(
+    task_id: str,
+    request: Request,
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+):
     task_repo = get_scheduled_task_repo(request)
     run_repo = get_scheduled_task_run_repo(request)
     user = await get_optional_user_from_request(request)
@@ -286,7 +297,7 @@ async def list_scheduled_task_runs(task_id: str, request: Request):
     task = await task_repo.get(task_id, user_id=str(user.id))
     if task is None:
         raise HTTPException(status_code=404, detail="Scheduled task not found")
-    return await run_repo.list_by_task(task_id)
+    return await run_repo.list_by_task(task_id, limit=limit, offset=offset)
 
 
 @router.get("/threads/{thread_id}/scheduled-tasks")
@@ -296,5 +307,4 @@ async def list_thread_scheduled_tasks(thread_id: str, request: Request):
     user = await get_optional_user_from_request(request)
     if user is None:
         raise HTTPException(status_code=401, detail="Authentication required")
-    tasks = await repo.list_by_user(str(user.id))
-    return [task for task in tasks if task["thread_id"] == thread_id]
+    return await repo.list_by_user_and_thread(str(user.id), thread_id)

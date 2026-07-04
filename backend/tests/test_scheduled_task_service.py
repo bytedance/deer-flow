@@ -41,11 +41,15 @@ class DummyTaskRepo:
 
 
 class DummyRunRepo:
-    def __init__(self, *, active=False):
+    def __init__(self, *, active=False, active_count=0):
         self.created = None
         self.updated = []
         self.active = active
+        self.active_count = active_count
         self.stale_marked = None
+
+    async def count_active_runs(self):
+        return self.active_count
 
     async def create(self, **kwargs):
         self.created = kwargs
@@ -460,3 +464,76 @@ async def test_startup_sweep_reconciles_stale_runs_and_stuck_once_tasks():
 
     assert run_repo.stale_marked is not None
     assert task_repo.cancelled_stuck_once == run_repo.stale_marked
+
+
+@pytest.mark.asyncio
+async def test_manual_trigger_with_active_run_returns_conflict_without_launching():
+    launched = []
+
+    async def fake_launch(**kwargs):
+        launched.append(kwargs)
+        return {"run_id": "run-x", "thread_id": kwargs["thread_id"]}
+
+    row = _once_task_row(task_id="task-manual-busy")
+    row.update({"schedule_type": "cron", "schedule_spec": {"cron": "* * * * *"}, "status": "enabled", "overlap_policy": "skip"})
+    task_repo = DummyTaskRepo([row])
+    run_repo = DummyRunRepo(active=True)
+    service = ScheduledTaskService(
+        task_repo=task_repo,
+        task_run_repo=run_repo,
+        launch_run=fake_launch,
+        poll_interval_seconds=5,
+        lease_seconds=120,
+        max_concurrent_runs=3,
+    )
+
+    result = await service.dispatch_task(row, now=datetime.now(UTC), trigger="manual")
+
+    assert result["outcome"] == "conflict"
+    assert launched == []
+    # Nothing was scheduled to happen, so no run-history row is recorded.
+    assert run_repo.created is None
+    assert result["task_run_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_run_once_claims_only_into_remaining_global_budget():
+    claim_limits = []
+
+    class BudgetTaskRepo(DummyTaskRepo):
+        async def claim_due_tasks(self, **kwargs):
+            claim_limits.append(kwargs["limit"])
+            return []
+
+    task_repo = BudgetTaskRepo([])
+    run_repo = DummyRunRepo(active_count=2)
+    service = _make_service(task_repo, run_repo)
+
+    await service.run_once(now=datetime.now(UTC))
+    assert claim_limits == [1]
+
+    run_repo.active_count = 3
+    await service.run_once(now=datetime.now(UTC))
+    # Budget exhausted: no claim at all this cycle.
+    assert claim_limits == [1]
+
+
+@pytest.mark.asyncio
+async def test_launch_bookkeeping_passes_protect_terminal():
+    async def fake_launch(**kwargs):
+        return {"run_id": "run-pt", "thread_id": kwargs["thread_id"]}
+
+    task_repo = DummyTaskRepo([_once_task_row(task_id="task-pt", status="enabled")])
+    run_repo = DummyRunRepo()
+    service = ScheduledTaskService(
+        task_repo=task_repo,
+        task_run_repo=run_repo,
+        launch_run=fake_launch,
+        poll_interval_seconds=5,
+        lease_seconds=120,
+        max_concurrent_runs=3,
+    )
+
+    await service.dispatch_task(task_repo.rows[0], now=datetime.now(UTC), trigger="scheduled")
+
+    assert task_repo.updated[1]["protect_terminal"] is True

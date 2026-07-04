@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
@@ -50,7 +50,7 @@ class ScheduledTaskRunRepository:
             await session.refresh(row)
             return self._row_to_dict(row)
 
-    async def list_by_task(self, task_id: str) -> list[dict[str, Any]]:
+    async def list_by_task(self, task_id: str, *, limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
         stmt = (
             select(ScheduledTaskRunRow)
             .where(ScheduledTaskRunRow.task_id == task_id)
@@ -58,10 +58,19 @@ class ScheduledTaskRunRepository:
                 ScheduledTaskRunRow.created_at.desc(),
                 ScheduledTaskRunRow.id.desc(),
             )
+            .limit(limit)
+            .offset(offset)
         )
         async with self._sf() as session:
             result = await session.execute(stmt)
             return [self._row_to_dict(row) for row in result.scalars()]
+
+    async def count_active_runs(self) -> int:
+        """Global count of queued/running rows, used to bound cross-task concurrency."""
+        stmt = select(func.count()).select_from(ScheduledTaskRunRow).where(ScheduledTaskRunRow.status.in_(ACTIVE_RUN_STATUSES))
+        async with self._sf() as session:
+            result = await session.execute(stmt)
+            return int(result.scalar() or 0)
 
     async def update_status(
         self,
