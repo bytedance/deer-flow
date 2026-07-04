@@ -12,6 +12,7 @@ from langchain.tools import tool
 from deerflow.agents.thread_state import ThreadDataState
 from deerflow.config import get_app_config
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
+from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
 from deerflow.runtime.secret_context import read_active_secrets
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.sandbox.exceptions import (
@@ -45,7 +46,7 @@ _LOCAL_BASH_SYSTEM_PATH_PREFIXES = (
     "/dev/",
 )
 
-_DEFAULT_SKILLS_CONTAINER_PATH = "/mnt/skills"
+_DEFAULT_SKILLS_CONTAINER_PATH = DEFAULT_SKILLS_CONTAINER_PATH
 _ACP_WORKSPACE_VIRTUAL_PATH = "/mnt/acp-workspace"
 _DEFAULT_GLOB_MAX_RESULTS = 200
 _MAX_GLOB_MAX_RESULTS = 1000
