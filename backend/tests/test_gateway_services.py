@@ -277,6 +277,27 @@ def test_merge_run_context_overrides_propagates_to_runtime_context():
     assert "thread_id" not in config["context"]
 
 
+def test_merge_run_context_overrides_forwards_clarification_enabled():
+    """Regression: headless API callers (e.g. AlphaFRS) send
+    ``clarification_enabled: False`` in ``body.context`` so the clarification
+    middleware auto-responds instead of interrupting. The key was missing from
+    ``_CONTEXT_CONFIGURABLE_KEYS``, so ``make_lead_agent`` never saw it and
+    constructed the middleware with the default ``enabled=True`` — a headless
+    run that asked for clarification interrupted to END and was recorded as
+    "success" with no report."""
+    from app.gateway.services import build_run_config, merge_run_context_overrides
+
+    config = build_run_config("thread-1", {"recursion_limit": 120}, None)
+    merge_run_context_overrides(
+        config,
+        {"clarification_enabled": False, "thinking_enabled": False, "subagent_enabled": False},
+    )
+
+    # make_lead_agent reads config["configurable"]["clarification_enabled"].
+    assert config["configurable"]["clarification_enabled"] is False
+    assert config["context"]["clarification_enabled"] is False
+
+
 def test_merge_run_context_overrides_noop_for_empty_context():
     from app.gateway.services import build_run_config, merge_run_context_overrides
 

@@ -109,6 +109,7 @@ _CONTEXT_CONFIGURABLE_KEYS: frozenset[str] = frozenset(
         "model_name",
         "mode",
         "thinking_enabled",
+        "clarification_enabled",
         "reasoning_effort",
         "is_plan_mode",
         "subagent_enabled",
