@@ -104,6 +104,14 @@ def test_read_subagent_result_metadata_rejects_unknown_status():
     assert read_subagent_result_metadata({SUBAGENT_STATUS_KEY: "future"}) is None
 
 
+def test_read_subagent_result_metadata_rejects_non_hex_sha256():
+    """A 64-char value that is not a lowercase hex digest must be dropped."""
+    base = {SUBAGENT_STATUS_KEY: "completed", SUBAGENT_RESULT_BRIEF_KEY: "structured"}
+    for bad_hash in ("z" * 64, "A" * 64, "a" * 63, "a" * 65, ("a" * 63) + " "):
+        parsed = read_subagent_result_metadata({**base, SUBAGENT_RESULT_SHA256_KEY: bad_hash})
+        assert parsed == {"status": "completed", "result_brief": "structured"}, bad_hash
+
+
 def test_make_subagent_additional_kwargs_rejects_unknown_status():
     import pytest
 

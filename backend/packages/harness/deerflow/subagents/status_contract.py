@@ -17,6 +17,7 @@ the enum values across Python and TypeScript.
 from __future__ import annotations
 
 import hashlib
+import re
 from collections.abc import Mapping
 from typing import Literal, NotRequired, TypedDict
 
@@ -25,6 +26,11 @@ SUBAGENT_ERROR_KEY = "subagent_error"
 SUBAGENT_RESULT_BRIEF_KEY = "subagent_result_brief"
 SUBAGENT_RESULT_SHA256_KEY = "subagent_result_sha256"
 SUBAGENT_METADATA_TEXT_MAX_CHARS = 2000
+
+#: The producer always emits ``hashlib.sha256(...).hexdigest()`` — 64
+#: lowercase hex chars. Readers enforce the same shape so a corrupted
+#: relay value cannot masquerade as a digest.
+_SHA256_HEX_RE = re.compile(r"[0-9a-f]{64}")
 
 SubagentStatusValue = Literal[
     "completed",
@@ -145,7 +151,7 @@ def read_subagent_result_metadata(
     raw_error = additional_kwargs.get(SUBAGENT_ERROR_KEY)
     if status == "completed" and isinstance(raw_result, str) and raw_result.strip():
         payload["result_brief"] = _bound_metadata_text(raw_result)
-        if isinstance(raw_hash, str) and len(raw_hash) == 64:
+        if isinstance(raw_hash, str) and _SHA256_HEX_RE.fullmatch(raw_hash):
             payload["result_sha256"] = raw_hash
     if status != "completed" and isinstance(raw_error, str) and raw_error.strip():
         payload["error"] = _bound_metadata_text(raw_error)
