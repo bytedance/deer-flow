@@ -52,6 +52,14 @@ logger = logging.getLogger(__name__)
 _BOOTSTRAP_SKILL_NAMES = {"bootstrap"}
 _NON_INTERACTIVE_DISABLED_TOOL_NAMES = frozenset({"ask_clarification"})
 
+# Channels whose inbound messages originate from untrusted external
+# commenters (anyone on a GitHub repo, etc.) and whose run context is
+# therefore unsafe for admin-shaped tools like ``update_agent``. The
+# corresponding gate lives in :func:`_make_lead_agent`; the channel name
+# itself is plumbed into ``run_context`` by
+# ``ChannelManager._resolve_run_params``.
+_WEBHOOK_CHANNELS: frozenset[str] = frozenset({"github"})
+
 
 def _get_runtime_config(config: RunnableConfig) -> dict:
     """Merge legacy configurable options with LangGraph runtime context."""
@@ -545,7 +553,22 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
 
     # Custom agents can update their own SOUL.md / config via update_agent.
     # The default agent (no agent_name) does not see this tool.
-    extra_tools = [update_agent] if agent_name else []
+    #
+    # Withhold ``update_agent`` from runs triggered by webhook channels
+    # (currently only ``github``). Webhook prompts come from arbitrary
+    # external commenters — anyone who can post on a configured repo and
+    # types ``@<bot>`` clears the trigger gate. Exposing the tool there
+    # gives that commenter a path to mutate the agent's ``tool_groups``
+    # / ``SOUL.md`` / ``model``, and the change persists for every
+    # subsequent run. Self-mutation belongs in operator-trusted surfaces
+    # (the chat UI, the HTTP API), not in webhook fan-out.
+    #
+    # The channel name is plumbed into ``run_context`` by
+    # ``ChannelManager._resolve_run_params``; bootstrap and direct invocations
+    # leave it unset, so ``update_agent`` remains available there.
+    channel_name = cfg.get("channel_name")
+    is_webhook_channel = channel_name in _WEBHOOK_CHANNELS
+    extra_tools = [update_agent] if agent_name and not is_webhook_channel else []
     # Default lead agent (unchanged behavior)
     raw_tools = get_available_tools(model_name=model_name, groups=agent_config.tool_groups if agent_config else None, subagent_enabled=subagent_enabled, app_config=resolved_app_config)
     filtered = filter_tools_by_skill_allowed_tools(raw_tools + extra_tools, skills_for_tool_policy, always_allowed_tool_names=SKILL_LOADING_TOOL_NAMES)

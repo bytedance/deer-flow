@@ -232,6 +232,11 @@ async def run_agent(
     pre_run_snapshot: dict[str, Any] | None = None
     snapshot_capture_failed = False
     llm_error_fallback_message: str | None = None
+    # Message ids checkpointed *before* this run started. The stream loop uses
+    # this set to mask out ``deerflow_error_fallback`` markers that belong to
+    # earlier runs on the same thread — without it, one stale fallback in
+    # history would mark every subsequent run on this thread as ``error``.
+    pre_existing_message_ids: set[str] = set()
 
     journal = None
     # Buffers subagent step events for batched persistence (#3779); assigned once
@@ -283,6 +288,7 @@ async def run_agent(
                         "metadata": copy.deepcopy(getattr(ckpt_tuple, "metadata", {})),
                         "pending_writes": copy.deepcopy(getattr(ckpt_tuple, "pending_writes", []) or []),
                     }
+                    pre_existing_message_ids = _collect_pre_existing_message_ids(pre_run_snapshot)
             except Exception:
                 snapshot_capture_failed = True
                 logger.warning("Could not capture pre-run checkpoint snapshot for run %s", run_id, exc_info=True)
@@ -432,13 +438,12 @@ async def run_agent(
                     if record.abort_event.is_set():
                         logger.info("Run %s abort requested — stopping", run_id)
                         break
-                    llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(chunk)
+                    llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(chunk, pre_existing_message_ids)
                     sse_event = _lg_mode_to_sse_event(single_mode)
                     await bridge.publish(run_id, sse_event, serialize(chunk, mode=single_mode))
                     if single_mode == "custom":
                         await subagent_events.add(chunk)
                 return
-
             # Multiple modes or subgraphs: astream yields tuples
             async for item in agent.astream(
                 input_payload,
@@ -454,7 +459,7 @@ async def run_agent(
                 if mode is None:
                     continue
 
-                llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(chunk)
+                llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(chunk, pre_existing_message_ids)
                 sse_event = _lg_mode_to_sse_event(mode)
                 await bridge.publish(run_id, sse_event, serialize(chunk, mode=mode))
                 if mode == "custom":
@@ -1202,8 +1207,33 @@ def _error_fallback_message_from_metadata(metadata: dict[str, Any], content: Any
     return "LLM provider failed after retries"
 
 
-def _try_extract_from_message(obj: Any) -> str | None:
-    """Try to extract fallback marker from a single message object or dict."""
+def _message_id(obj: Any) -> str | None:
+    """Best-effort extraction of a stable message id from a message-like object."""
+    msg_id = getattr(obj, "id", None)
+    if isinstance(msg_id, str) and msg_id:
+        return msg_id
+    if isinstance(obj, dict):
+        raw = obj.get("id")
+        if isinstance(raw, str) and raw:
+            return raw
+    return None
+
+
+def _try_extract_from_message(obj: Any, pre_existing_ids: set[str] | None = None) -> str | None:
+    """Try to extract fallback marker from a single message object or dict.
+
+    Messages whose id appears in ``pre_existing_ids`` are skipped — those are
+    history checkpointed by a *prior* run on this thread and any fallback
+    marker on them was already accounted for when that earlier run finished.
+    Without this filter, a single past run that ended with a fallback marker
+    would mark every subsequent run on the same thread as ``error``, because
+    LangGraph replays the full message history through ``stream_mode="values"``.
+    """
+    if pre_existing_ids:
+        msg_id = _message_id(obj)
+        if msg_id is not None and msg_id in pre_existing_ids:
+            return None
+
     additional_kwargs = getattr(obj, "additional_kwargs", None)
     if isinstance(additional_kwargs, dict) and additional_kwargs.get("deerflow_error_fallback"):
         return _error_fallback_message_from_metadata(additional_kwargs, getattr(obj, "content", None))
@@ -1215,11 +1245,16 @@ def _try_extract_from_message(obj: Any) -> str | None:
     return None
 
 
-def _extract_llm_error_fallback_message(value: Any) -> str | None:
+def _extract_llm_error_fallback_message(value: Any, pre_existing_ids: set[str] | None = None) -> str | None:
     """Find LLM fallback markers in streamed LangGraph chunks.
 
     Error fallback messages returned by model-call middleware are not guaranteed
     to pass through LLM end callbacks, but they do appear in graph state chunks.
+
+    Messages whose id appears in ``pre_existing_ids`` are ignored — they are
+    history from prior runs on the same thread (LangGraph replays the full
+    messages channel in ``stream_mode="values"`` chunks), and any error
+    fallback in that history was already resolved when its run finished.
     """
     # Fast path: large state chunks produced by stream_mode="values" have a
     # top-level "messages" list. Scanning only that list avoids expensive deep
@@ -1228,7 +1263,7 @@ def _extract_llm_error_fallback_message(value: Any) -> str | None:
         messages = value.get("messages")
         if isinstance(messages, (list, tuple)):
             for msg in messages:
-                result = _try_extract_from_message(msg)
+                result = _try_extract_from_message(msg, pre_existing_ids)
                 if result is not None:
                     return result
             # Fallback marker is attached to an AI message in the messages
@@ -1248,7 +1283,7 @@ def _extract_llm_error_fallback_message(value: Any) -> str | None:
             return None
         seen.add(oid)
 
-        result = _try_extract_from_message(obj)
+        result = _try_extract_from_message(obj, pre_existing_ids)
         if result is not None:
             return result
 
@@ -1267,6 +1302,33 @@ def _extract_llm_error_fallback_message(value: Any) -> str | None:
         return None
 
     return walk(value)
+
+
+def _collect_pre_existing_message_ids(snapshot: dict[str, Any] | None) -> set[str]:
+    """Pull stable message ids out of a pre-run checkpoint snapshot.
+
+    Used by :func:`run_agent` to mask stale ``deerflow_error_fallback`` markers
+    on history messages so they don't trip the current run's failure path. A
+    missing or malformed snapshot yields an empty set (best-effort — we
+    intentionally never raise from this helper).
+    """
+    if not isinstance(snapshot, dict):
+        return set()
+    checkpoint = snapshot.get("checkpoint")
+    if not isinstance(checkpoint, dict):
+        return set()
+    channel_values = checkpoint.get("channel_values")
+    if not isinstance(channel_values, dict):
+        return set()
+    messages = channel_values.get("messages")
+    if not isinstance(messages, (list, tuple)):
+        return set()
+    ids: set[str] = set()
+    for msg in messages:
+        msg_id = _message_id(msg)
+        if msg_id is not None:
+            ids.add(msg_id)
+    return ids
 
 
 def _unpack_stream_item(

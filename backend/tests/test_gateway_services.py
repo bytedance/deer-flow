@@ -619,6 +619,52 @@ def test_merge_run_context_overrides_noop_for_empty_context():
     assert config == before
 
 
+def test_merge_run_context_overrides_forwards_context_only_keys():
+    """``github_token`` and ``disable_clarification`` must reach ``config['context']``
+    (runtime context → ``runtime.context``) so the bash tool and ClarificationMiddleware
+    can read them. They must NOT be written to ``config['configurable']`` — that dict is
+    persisted in checkpoints, and ``github_token`` is a (short-lived) secret.
+
+    Regression for the GitHub channel: without this, the installation token minted by
+    ``ChannelManager._apply_channel_policy`` was silently dropped here, so ``gh``
+    fell back to the host's stored keyring creds and authored issues/PRs as the host
+    user instead of the App bot.
+    """
+    from app.gateway.services import build_run_config, merge_run_context_overrides
+
+    config = build_run_config("thread-1", None, None)
+    merge_run_context_overrides(
+        config,
+        {
+            "github_token": "ghs_installation_token",
+            "disable_clarification": True,
+            "agent_name": "coding-llm-gateway",
+        },
+    )
+
+    # Forwarded into runtime context — what tools/middlewares read.
+    assert config["context"]["github_token"] == "ghs_installation_token"
+    assert config["context"]["disable_clarification"] is True
+    assert config["context"]["agent_name"] == "coding-llm-gateway"
+
+    # NOT written into configurable (checkpoint-persisted).
+    assert "github_token" not in config.get("configurable", {})
+    assert "disable_clarification" not in config.get("configurable", {})
+
+
+def test_merge_run_context_overrides_context_only_keys_do_not_override_existing():
+    """A token already in ``config['context']`` must not be clobbered by a
+    client-supplied one (defense in depth — the manager is the only legitimate
+    source, but ``setdefault`` keeps the contract explicit)."""
+    from app.gateway.services import build_run_config, merge_run_context_overrides
+
+    config = build_run_config("thread-1", None, None)
+    config["context"] = {"github_token": "pre-existing"}
+    merge_run_context_overrides(config, {"github_token": "attacker-supplied"})
+
+    assert config["context"]["github_token"] == "pre-existing"
+
+
 def test_context_does_not_override_existing_configurable():
     """Values already in config.configurable must NOT be overridden by context."""
     from app.gateway.services import build_run_config
