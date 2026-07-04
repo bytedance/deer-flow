@@ -16,13 +16,13 @@ from __future__ import annotations
 import asyncio
 import atexit
 import logging
-import os
 import threading
 from collections.abc import Awaitable
 from typing import TYPE_CHECKING, Any, TypeVar
 
 from deerflow.config import get_app_config
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
+from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
 from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.sandbox_provider import SandboxProvider
 
@@ -42,7 +42,7 @@ _VIRTUAL_DIRS = (
     f"{VIRTUAL_PATH_PREFIX}/workspace",
     f"{VIRTUAL_PATH_PREFIX}/uploads",
     f"{VIRTUAL_PATH_PREFIX}/outputs",
-    "/mnt/skills",
+    DEFAULT_SKILLS_CONTAINER_PATH,
 )
 
 
@@ -106,22 +106,14 @@ class BoxliteProvider(SandboxProvider):
         def _opt(name: str, default: Any = None) -> Any:
             return getattr(sandbox_config, name, default)
 
+        # $VARS in config.yaml are already resolved by AppConfig.resolve_env_variables
+        # (which raises on a missing var), so the environment dict is used as-is.
         return {
             "image": _opt("image") or DEFAULT_IMAGE,
             "memory_mib": _opt("memory_mib"),
             "cpus": _opt("cpus"),
-            "environment": self._resolve_env_vars(_opt("environment") or {}),
+            "environment": dict(_opt("environment") or {}),
         }
-
-    @staticmethod
-    def _resolve_env_vars(env_config: dict[str, str]) -> dict[str, str]:
-        resolved: dict[str, str] = {}
-        for key, value in env_config.items():
-            if isinstance(value, str) and value.startswith("$"):
-                resolved[key] = os.environ.get(value[1:], "")
-            else:
-                resolved[key] = "" if value is None else str(value)
-        return resolved
 
     @staticmethod
     def _thread_key(thread_id: str, user_id: str | None) -> tuple[str, str]:

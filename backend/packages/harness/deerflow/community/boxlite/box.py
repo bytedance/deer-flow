@@ -25,7 +25,7 @@ import threading
 from typing import TYPE_CHECKING, TypeVar
 
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
-from deerflow.sandbox.sandbox import Sandbox
+from deerflow.sandbox.sandbox import Sandbox, _validate_extra_env
 from deerflow.sandbox.search import GrepMatch, path_matches, should_ignore_path, truncate_line
 
 if TYPE_CHECKING:
@@ -125,6 +125,7 @@ class BoxliteBox(Sandbox):
         it runs through ``sh -lc``. Per-call ``env`` is layered over the static
         config environment and scoped to this command only.
         """
+        _validate_extra_env(env)  # POSIX env-var key rule; raises ValueError on a bad key
         merged_env = {**self._default_env, **(env or {})} or None
         with self._lock:
             if self._closed:
@@ -261,9 +262,11 @@ class BoxliteBox(Sandbox):
         case_sensitive: bool = False,
         max_results: int = 100,
     ) -> tuple[list[GrepMatch], bool]:
-        # Validate the regex up front (raises re.error on a bad pattern).
-        regex_source = re.escape(pattern) if literal else pattern
-        re.compile(regex_source, 0 if case_sensitive else re.IGNORECASE)
+        # Sanity-check a regex pattern as a Python regex at the boundary (grep uses
+        # POSIX ERE, but this catches gross errors); a literal needs no validation.
+        # grep receives the RAW pattern: -F matches it literally, -E as a regex.
+        if not literal:
+            re.compile(pattern, 0 if case_sensitive else re.IGNORECASE)
 
         resolved = self._resolve_path(path)
         # busybox+GNU-portable flags: -r recursive (also prints the filename),
@@ -275,7 +278,7 @@ class BoxliteBox(Sandbox):
             flags.append("-i")
         flags.append("-F" if literal else "-E")
         total_cap = max(max_results * 4, max_results + 50)
-        cmd = "grep " + " ".join(flags) + f" -e {shlex.quote(regex_source)} {shlex.quote(resolved)} 2>/dev/null | head -{total_cap}"
+        cmd = "grep " + " ".join(flags) + f" -e {shlex.quote(pattern)} {shlex.quote(resolved)} 2>/dev/null | head -{total_cap}"
         r = self._sh(cmd)
 
         include = glob.split("/")[-1] if glob else None
