@@ -49,7 +49,7 @@ from deerflow.runtime.goal import (
 )
 from deerflow.runtime.serialization import serialize
 from deerflow.runtime.stream_bridge import StreamBridge
-from deerflow.runtime.user_context import get_effective_user_id, resolve_runtime_user_id
+from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, get_current_trace_id, normalize_trace_id
 from deerflow.tracing import inject_langfuse_metadata
 from deerflow.utils.messages import message_to_text
