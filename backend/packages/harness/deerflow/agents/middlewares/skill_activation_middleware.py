@@ -40,11 +40,12 @@ _SUMMARY_MESSAGE_NAME = "summary"
 
 # _SECRETS_BINDING_AUDIT_KEY: last audited binding (skill and secret names only,
 # never values) so unchanged bindings are not re-recorded each call.
-# _SLASH_SECRET_SOURCE_KEY: latest slash activation as a secret source (skill
-# name + declared requirement names/optionality, never values). The injection
-# set is recomputed every model call, but a slash-activated skill must stay
-# bound for the rest of the run — the model's tool loop issues many model calls
-# after the single activation call (#3861 semantics). Both live in
+# _SLASH_SECRET_SOURCE_KEY: latest slash activation as a secret source, holding
+# ONLY the activated skill's canonical container path (never its declared
+# secrets — those are read from the live registry on each call, #3938). The
+# injection set is recomputed every model call, but a slash-activated skill must
+# stay bound for the rest of the run — the model's tool loop issues many model
+# calls after the single activation call (#3861 semantics). Both live in
 # secret_context so they are covered by REDACTED_CONTEXT_KEYS in one place.
 
 
@@ -391,7 +392,11 @@ Follow this skill before choosing a general workflow. Load supporting resources 
 
         Paths are normalized so a non-canonical ``container_path`` config (e.g. a
         trailing slash) still matches the canonical path captured in
-        ``skill_context`` (#3938). Returns ``None`` if the registry can't load.
+        ``skill_context`` (#3938). Returns ``None`` if the registry can't load —
+        both the slash and in-context sources then bind nothing for that call
+        (fail closed). This is a deliberate availability-for-security trade-off:
+        a transient registry read failure mid-run drops the injection for that
+        call rather than trusting stale caller-supplied data.
         """
         try:
             storage = self._storage()
