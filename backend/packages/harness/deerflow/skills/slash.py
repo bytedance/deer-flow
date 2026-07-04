@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
 from deerflow.skills.types import Skill
 
 RESERVED_SLASH_SKILL_NAMES = frozenset({"bootstrap", "goal", "help", "memory", "models", "new", "status"})
@@ -45,7 +46,7 @@ def resolve_slash_skill(
     skills: list[Skill],
     *,
     available_skills: set[str] | None = None,
-    container_base_path: str = "/mnt/skills",
+    container_base_path: str = DEFAULT_SKILLS_CONTAINER_PATH,
 ) -> ResolvedSlashSkill | None:
     """Resolve text into an enabled, whitelisted skill activation if possible."""
     reference = parse_slash_skill_reference(text)

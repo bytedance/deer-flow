@@ -5,6 +5,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 ContextSizeType = Literal["fraction", "tokens", "messages"]
+DEFAULT_SKILL_FILE_READ_TOOL_NAMES: tuple[str, ...] = ("read_file", "read", "view", "cat")
 
 
 class ContextSize(BaseModel):
@@ -52,7 +53,7 @@ class SummarizationConfig(BaseModel):
         description="Custom prompt template for generating summaries. If not provided, uses the default LangChain prompt.",
     )
     skill_file_read_tool_names: list[str] = Field(
-        default_factory=lambda: ["read_file", "read", "view", "cat"],
+        default_factory=lambda: list(DEFAULT_SKILL_FILE_READ_TOOL_NAMES),
         description="Tool names treated as skill-file reads when capturing loaded skills into the durable skill_context channel.",
     )
 

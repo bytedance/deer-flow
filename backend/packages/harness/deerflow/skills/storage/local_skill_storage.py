@@ -14,13 +14,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from deerflow.config.runtime_paths import resolve_path
+from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
 from deerflow.skills.permissions import make_skill_written_path_sandbox_readable
 from deerflow.skills.storage.skill_storage import SKILL_MD_FILE, SkillStorage
 from deerflow.skills.types import SkillCategory
 
 logger = logging.getLogger(__name__)
-
-DEFAULT_SKILLS_CONTAINER_PATH = "/mnt/skills"
 
 # Bound for the best-effort temp-dir cleanup so a stalled filesystem (e.g. NFS)
 # cannot hold back the install outcome propagating out of the finally block.
