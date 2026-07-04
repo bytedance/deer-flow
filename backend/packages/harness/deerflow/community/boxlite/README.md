@@ -1,21 +1,18 @@
-# BoxLite sandbox provider
+# BoxLite backend
 
 Runs each DeerFlow sandbox as a [BoxLite](https://github.com/boxlite-ai/boxlite)
 micro-VM — a daemonless, OCI-native VM with its own kernel (libkrun/KVM on Linux,
 Hypervisor.framework on macOS). Motivated by the resource/cold-start pain with
 the default AIO Docker sandbox in
 [#3439](https://github.com/bytedance/deer-flow/issues/3439) and
-[#3213](https://github.com/bytedance/deer-flow/issues/3213).
-
-> **Status: scaffold / RFC — [#3936](https://github.com/bytedance/deer-flow/issues/3936).**
-> `execute_command` (bash) is wired end to end; the other `Sandbox` methods are
-> stubbed. Opened to align on approach before hardening. Not yet benchmarked.
+[#3213](https://github.com/bytedance/deer-flow/issues/3213); discussion in
+[#3936](https://github.com/bytedance/deer-flow/issues/3936).
 
 ## Configuration
 
 ```yaml
 sandbox:
-  use: deerflow.community.boxlite_sandbox:BoxliteSandboxProvider
+  use: deerflow.community.boxlite:BoxliteProvider
   image: python:3.12-slim   # any OCI image, run unchanged (default: python:3.12-slim)
   memory_mib: 1024          # per-box memory cap (optional)
   cpus: 2                   # per-box vCPUs (optional)
@@ -28,7 +25,7 @@ pip install boxlite   # an optional `[boxlite]` extra + uv.lock update will foll
 ```
 
 **Host requirement:** BoxLite boots micro-VMs, so a Linux host needs KVM — i.e.
-nested virtualization when DeerFlow itself runs inside a cloud VM. macOS uses
+nested virtualization when DeerFlow runs inside a cloud VM. macOS uses
 Hypervisor.framework. This is the main deployment constraint to weigh vs. the
 container-based providers.
 
@@ -44,21 +41,28 @@ context and is thread-affine.
 
 | File | Role |
 | --- | --- |
-| `boxlite_provider.py` | `SandboxProvider` lifecycle + the private-loop bridge |
-| `boxlite_sandbox.py`  | `Sandbox` adapter; `execute_command` via `sh -lc` |
+| `provider.py` | `SandboxProvider` lifecycle + the private-loop bridge |
+| `box.py`      | `Sandbox` adapter; `execute_command` + file ops |
 
-## What's implemented vs. open
+## Contract coverage
 
-- **Done:** provider lifecycle (`acquire`/`get`/`release`/`shutdown`), per-thread
-  reuse, `execute_command`, optional-dependency wiring.
-- **Stubbed (raise `NotImplementedError`):** `read_file`, `write_file`,
-  `download_file`, `update_file`, `list_dir`, `glob`, `grep`. The plan is to map
-  the `/mnt/user-data` virtual prefix into the box and implement these via `exec`
-  (`cat`/`tee`/`base64`) plus `deerflow.sandbox.search`, mirroring `e2b_sandbox`.
-- **Out of scope for this pass:** warm pooling, idle reaping, mount syncing,
-  remote/provisioner modes.
+The full `Sandbox` surface is implemented. File operations run as shell commands
+inside the box and reuse `deerflow.sandbox.search`, mirroring `e2b_sandbox`:
 
-Open questions for maintainers are tracked in
-[#3936](https://github.com/bytedance/deer-flow/issues/3936): host/KVM
-acceptability, tool-surface parity with the AIO image, and in-tree vs. external
-packaging.
+- `execute_command` — `sh -lc`, with per-call env and timeout.
+- `read_file` / `write_file` / `update_file` — `cat` and chunked `base64` (binary-safe, no arg-size limit).
+- `download_file` — 100 MB cap, restricted to the `/mnt/user-data` prefix.
+- `list_dir` / `glob` / `grep` — `find` / `grep` with busybox-portable flags; results filtered/capped in Python.
+
+The provider creates `/mnt/user-data/{workspace,uploads,outputs}` and
+`/mnt/skills` on box start so those virtual paths resolve natively.
+
+**Out of scope for this pass** (follow-ups): warm pooling, idle reaping, mount
+syncing, and remote/provisioner modes.
+
+## Status
+
+Verified end-to-end against a live box (provider resolution → `execute_command`
+→ file ops) on macOS/HVF. Linux/KVM validation and benchmarks vs. the AIO
+sandbox are tracked in
+[#3936](https://github.com/bytedance/deer-flow/issues/3936).

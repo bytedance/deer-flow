@@ -371,7 +371,7 @@ Proxied through nginx: `/api/langgraph/*` → Gateway LangGraph-compatible runti
 - `image_search/` - Image search via DuckDuckGo
 - `aio_sandbox/` - Docker-based isolation (`AioSandboxProvider`)
 
-Additional providers also live here (`boxlite_sandbox`, `brave`, `browserless`, `crawl4ai`, `ddg_search`, `e2b_sandbox`, `exa`, `fastcrw`, `groundroute`, `infoquest`, `searxng`, `serper`); see each subpackage for specifics.
+Additional providers also live here (`boxlite`, `brave`, `browserless`, `crawl4ai`, `ddg_search`, `e2b_sandbox`, `exa`, `fastcrw`, `groundroute`, `infoquest`, `searxng`, `serper`); see each subpackage for specifics.
 
 **ACP agent tools**:
 - `invoke_acp_agent` - Invokes external ACP-compatible agents from `config.yaml`
