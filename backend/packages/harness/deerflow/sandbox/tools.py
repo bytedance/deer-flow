@@ -1885,12 +1885,33 @@ def read_file_tool(
         if _is_disabled_skill_path(path, user_id=resolve_runtime_user_id(runtime)):
             skill_name = _extract_skill_name_from_skills_path(path) or "unknown"
             return f"Error: Skill '{skill_name}' is disabled. Access to its files is blocked. Enable the skill in settings before using it."
+        if (start_line is None) != (end_line is None):
+            return "Error: start_line and end_line must be provided together."
+        if start_line is not None and start_line <= 0:
+            return "Error: start_line must be a positive integer."
+        if end_line is not None and end_line < start_line:
+            return "Error: end_line must be greater than or equal to start_line."
+
         requested_path = path
-        content = read_current_file_content(runtime, path)
+        sandbox = ensure_sandbox_initialized(runtime)
+        ensure_thread_directories_exist(runtime)
+        use_bounded_line_read = start_line is not None and end_line is not None
+        if use_bounded_line_read:
+            if is_local_sandbox(runtime):
+                thread_data = get_thread_data(runtime)
+                validate_local_tool_path(path, thread_data, read_only=True)
+                if _is_skills_path(path):
+                    path = _resolve_skills_path(path)
+                elif _is_acp_workspace_path(path):
+                    path = _resolve_acp_workspace_path(path, _extract_thread_id_from_thread_data(thread_data))
+                elif not _is_custom_mount_path(path):
+                    path = _resolve_and_validate_user_data_path(path, thread_data)
+                # Custom mount paths are resolved by LocalSandbox._resolve_path()
+            content = sandbox.read_file(path, start_line=start_line, end_line=end_line)
+        else:
+            content = read_current_file_content(runtime, path)
         if not content:
             return "(empty)"
-        if start_line is not None and end_line is not None:
-            content = "\n".join(content.splitlines()[start_line - 1 : end_line])
         try:
             from deerflow.config.app_config import get_app_config
 
