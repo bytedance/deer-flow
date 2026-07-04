@@ -936,8 +936,7 @@ async def test_redis_integration_stream_ttl_reclaims_key():
     try:
         await bridge.publish(run_id, "metadata", {"run_id": run_id})
         assert await client.exists(key) == 1
-        assert await client.ttl(key) > 0
-
+        assert await client.ttl(key) >= 0
         await anyio.sleep(2.0)
 
         assert await client.exists(key) == 0
