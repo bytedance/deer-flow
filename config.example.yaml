@@ -15,7 +15,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 17
+config_version: 18
 
 # ============================================================================
 # Logging
@@ -1403,6 +1403,30 @@ run_events:
   backend: memory
   max_trace_content: 10240
   track_token_usage: true
+
+# ============================================================================
+# Scheduled Tasks Configuration
+# ============================================================================
+# Background scheduler for one-time and recurring (cron) agent runs.
+# All fields are restart-required (captured at Gateway lifespan startup).
+#
+# Multi-worker note: the scheduler runs once per uvicorn worker. SQLite silently
+# ignores row-level locks, so multiple workers can double-fire the same task.
+# For multi-worker deployments (GATEWAY_WORKERS > 1), use the Postgres database
+# backend, where FOR UPDATE SKIP LOCKED serializes claims correctly.
+#
+# scheduler:
+#   enabled: false               # Master switch for the background poller
+#   poll_interval_seconds: 5     # How often to scan for due tasks
+#   lease_seconds: 120           # Claim lease; a crashed process's task becomes reclaimable after this
+#   max_concurrent_runs: 3       # Global cap on active scheduled runs; each poll claims only into the remaining budget
+#   min_once_delay_seconds: 60   # Minimum future offset for one-time tasks at creation time
+scheduler:
+  enabled: false
+  poll_interval_seconds: 5
+  lease_seconds: 120
+  max_concurrent_runs: 3
+  min_once_delay_seconds: 60
 
 # ============================================================================
 # Stream Bridge Configuration

@@ -416,6 +416,29 @@ def test_build_run_config_dual_write_matches_merge_run_context_overrides_shape()
     assert via_assistant_id["context"]["agent_name"] == via_context["context"]["agent_name"]
 
 
+def test_non_interactive_context_override_is_internal_only():
+    """Client-supplied ``non_interactive`` must be dropped: it strips the
+    ``ask_clarification`` tool, so only the internal scheduler path may set it."""
+    from app.gateway.services import build_run_config, merge_run_context_overrides
+
+    config = build_run_config("thread-1", None, None)
+    merge_run_context_overrides(config, {"non_interactive": True})
+
+    assert "non_interactive" not in config["configurable"]
+    assert "non_interactive" not in config["context"]
+
+
+def test_non_interactive_context_override_honored_for_internal_caller():
+    from app.gateway.services import build_run_config, merge_run_context_overrides
+
+    config = build_run_config("thread-1", None, None)
+    merge_run_context_overrides(config, {"non_interactive": True, "model_name": "gpt"}, internal=True)
+
+    assert config["configurable"]["non_interactive"] is True
+    assert config["context"]["non_interactive"] is True
+    assert config["configurable"]["model_name"] == "gpt"
+
+
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
@@ -851,6 +874,41 @@ def test_start_run_uses_internal_owner_header_for_persistence(_stub_app_config):
     assert task_context["user_id"] == "owner-1"
 
 
+def test_launch_scheduled_thread_run_marks_context_non_interactive(_stub_app_config):
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from app.gateway.services import launch_scheduled_thread_run
+
+    async def _scenario():
+        captured: dict[str, object] = {}
+
+        async def fake_start_run(body, thread_id, request):
+            captured["thread_id"] = thread_id
+            captured["context"] = body.context
+            captured["metadata"] = body.metadata
+            return SimpleNamespace(run_id="run-1", thread_id=thread_id)
+
+        with patch("app.gateway.services.start_run", side_effect=fake_start_run):
+            result = await launch_scheduled_thread_run(
+                thread_id="thread-scheduled",
+                assistant_id="lead_agent",
+                prompt="Run in background",
+                app=SimpleNamespace(state=SimpleNamespace()),
+                owner_user_id="user-1",
+                metadata={"scheduled_task_id": "task-1"},
+            )
+        return captured, result
+
+    captured, result = asyncio.run(_scenario())
+
+    assert captured["thread_id"] == "thread-scheduled"
+    assert captured["context"] == {"non_interactive": True, "user_id": "user-1"}
+    assert captured["metadata"] == {"scheduled_task_id": "task-1"}
+    assert result == {"run_id": "run-1", "thread_id": "thread-scheduled"}
+
+
 # ---------------------------------------------------------------------------
 # build_run_config — context / configurable precedence (LangGraph >= 0.6.0)
 # ---------------------------------------------------------------------------
@@ -965,3 +1023,19 @@ def test_build_run_config_no_request_config():
     config = build_run_config("thread-abc", None, None)
     assert config["configurable"] == {"thread_id": "thread-abc"}
     assert "context" not in config
+
+
+def test_strip_internal_context_keys_scrubs_config_smuggled_non_interactive():
+    """A non-internal client must not force ``non_interactive`` via the free-form
+    ``body.config`` either — ``build_run_config`` copies ``config.context`` and
+    ``config.configurable`` verbatim, so the assembled config gets scrubbed."""
+    from app.gateway.services import build_run_config, strip_internal_context_keys
+
+    via_context = build_run_config("thread-1", {"context": {"non_interactive": True, "model_name": "gpt"}}, None)
+    strip_internal_context_keys(via_context)
+    assert "non_interactive" not in via_context["context"]
+    assert via_context["context"]["model_name"] == "gpt"
+
+    via_configurable = build_run_config("thread-1", {"configurable": {"non_interactive": True}}, None)
+    strip_internal_context_keys(via_configurable)
+    assert "non_interactive" not in via_configurable["configurable"]

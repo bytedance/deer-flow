@@ -106,6 +106,7 @@ class RunContext:
     run_events_config: Any | None = field(default=None)
     thread_store: Any | None = field(default=None)
     app_config: AppConfig | None = field(default=None)
+    on_run_completed: Any | None = field(default=None)
 
 
 def _install_runtime_context(config: dict, runtime_context: dict[str, Any]) -> None:
@@ -588,6 +589,11 @@ async def run_agent(
             except Exception:
                 logger.debug("Failed to update thread_meta status for %s (non-fatal)", thread_id)
 
+        if ctx.on_run_completed is not None:
+            try:
+                await ctx.on_run_completed(record)
+            except Exception:
+                logger.warning("Run completion hook failed for %s (non-fatal)", run_id, exc_info=True)
         if record.finalizing:
             await run_manager.set_finalizing(run_id, False)
 
