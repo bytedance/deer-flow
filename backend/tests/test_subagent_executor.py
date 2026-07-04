@@ -165,7 +165,7 @@ def _skill(name: str, allowed_tools: list[str] | None) -> Skill:
         skill_file=skill_dir / "SKILL.md",
         relative_path=Path(name),
         category="custom",
-        allowed_tools=allowed_tools,
+        allowed_tools=tuple(allowed_tools) if allowed_tools is not None else None,
         enabled=True,
     )
 

@@ -228,7 +228,7 @@ class TestRequiredSecretsParsing:
         skill_file = self._write_skill(tmp_path, "name: erp-report\ndescription: Pull an ERP report")
         skill = parse_skill_file(skill_file, SkillCategory.CUSTOM)
         assert skill is not None
-        assert skill.required_secrets == []
+        assert skill.required_secrets == ()
 
     def test_string_list_form(self, tmp_path):
         from deerflow.skills.parser import parse_skill_file

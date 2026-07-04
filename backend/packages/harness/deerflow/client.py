@@ -35,7 +35,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 from langchain_core.runnables import RunnableConfig
 
 from deerflow.agents.lead_agent.agent import build_middlewares
-from deerflow.agents.lead_agent.prompt import apply_prompt_template
+from deerflow.agents.lead_agent.prompt import apply_prompt_template, get_enabled_skills_for_config
 from deerflow.agents.thread_state import ThreadState
 from deerflow.config.agents_config import AGENT_NAME_PATTERN
 from deerflow.config.app_config import get_app_config, is_trace_correlation_enabled, reload_app_config
@@ -44,6 +44,7 @@ from deerflow.config.paths import get_paths
 from deerflow.models import create_chat_model
 from deerflow.runtime.goal import DEFAULT_MAX_GOAL_CONTINUATIONS, build_goal_state, goal_thread_lock, read_thread_goal, write_thread_goal
 from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.skills.describe import build_skill_search_setup
 from deerflow.skills.storage import get_or_new_user_skill_storage
 from deerflow.tools.builtins.tool_search import assemble_deferred_tools
 from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, generate_trace_id, get_current_trace_id, reset_current_trace_id, set_current_trace_id
@@ -256,6 +257,19 @@ class DeerFlowClient:
 
         tools = self._get_tools(model_name=model_name, subagent_enabled=subagent_enabled)
         final_tools, deferred_setup = assemble_deferred_tools(tools, enabled=self._app_config.tool_search.enabled)
+
+        # Wire deferred skill discovery — mirrors agent.py so config flag works on both paths.
+        skills_list = get_enabled_skills_for_config(self._app_config)
+        if self._available_skills is not None:
+            skills_list = [s for s in skills_list if s.name in self._available_skills]
+        skill_setup = build_skill_search_setup(
+            skills_list,
+            enabled=self._app_config.skills.deferred_discovery,
+            container_base_path=self._app_config.skills.container_path,
+        )
+        if skill_setup.describe_skill_tool:
+            final_tools.append(skill_setup.describe_skill_tool)
+
         kwargs: dict[str, Any] = {
             # attach_tracing=False because ``stream()`` injects tracing
             # callbacks at the graph invocation root so a single embedded run
@@ -281,6 +295,7 @@ class DeerFlowClient:
                 app_config=self._app_config,
                 deferred_names=deferred_setup.deferred_names,
                 user_id=get_effective_user_id(),
+                skill_names=skill_setup.skill_names or None,
             ),
             "state_schema": ThreadState,
         }
