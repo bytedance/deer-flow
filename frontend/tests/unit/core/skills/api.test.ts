@@ -72,15 +72,18 @@ describe("skills api", () => {
       success: true,
       skill_name: "data-analysis",
     });
-    expect(mockedFetch).toHaveBeenCalledWith("/backend/api/skills/data-analysis", {
-      method: "PUT",
-      headers: {
-        "Content-Type": "application/json",
+    expect(mockedFetch).toHaveBeenCalledWith(
+      "/backend/api/skills/data-analysis",
+      {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          enabled: false,
+        }),
       },
-      body: JSON.stringify({
-        enabled: false,
-      }),
-    });
+    );
   });
 
   test("throws backend detail when updating a skill fails", async () => {
