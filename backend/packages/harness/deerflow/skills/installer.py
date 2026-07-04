@@ -21,15 +21,19 @@ logger = logging.getLogger(__name__)
 _PROMPT_INPUT_DIRS = {"references", "templates"}
 _PROMPT_INPUT_SUFFIXES = frozenset({".json", ".markdown", ".md", ".rst", ".txt", ".yaml", ".yml"})
 _CODE_SUFFIXES = frozenset({".bash", ".cjs", ".js", ".mjs", ".php", ".pl", ".ps1", ".py", ".rb", ".sh", ".ts", ".zsh"})
+# Full magics per variant — a shorter shared prefix would also match
+# non-executable data files.
 _EXECUTABLE_MAGIC_PREFIXES = (
-    b"\x7fELF",
-    b"MZ",
-    b"\xfe\xed\xfa\xce",
-    b"\xfe\xed\xfa\xcf",
-    b"\xce\xfa\xed\xfe",
-    b"\xcf\xfa\xed\xfe",
-    b"\xca\xfe\xba\xbe",
-    b"\xbe\xba\xfe\xca",
+    b"\x7fELF",  # ELF
+    b"MZ",  # PE/DOS
+    b"\xfe\xed\xfa\xce",  # Mach-O 32-bit big-endian
+    b"\xfe\xed\xfa\xcf",  # Mach-O 64-bit big-endian
+    b"\xce\xfa\xed\xfe",  # Mach-O 32-bit little-endian
+    b"\xcf\xfa\xed\xfe",  # Mach-O 64-bit little-endian
+    b"\xca\xfe\xba\xbe",  # Mach-O fat binary big-endian
+    b"\xbe\xba\xfe\xca",  # Mach-O fat binary little-endian
+    b"\xca\xfe\xba\xbf",  # Mach-O fat64 binary big-endian
+    b"\xbf\xba\xfe\xca",  # Mach-O fat64 binary little-endian
 )
 
 
@@ -161,13 +165,22 @@ def _has_shebang(path: Path) -> bool:
         return False
 
 
-def _is_code_file(path: Path, rel_path: Path) -> bool:
-    """Classify code files anywhere in the tree for the executable scan policy (blocking; run off the event loop)."""
+def _is_code_file_by_name(rel_path: Path) -> bool:
+    """Pure name-based code classification: scripts/ members and code suffixes."""
     if _is_script_support_file(rel_path):
         return True
-    if rel_path.suffix.lower() in _CODE_SUFFIXES:
+    return rel_path.suffix.lower() in _CODE_SUFFIXES
+
+
+async def _is_code_file(path: Path, rel_path: Path) -> bool:
+    """Classify code files anywhere in the tree for the executable scan policy.
+
+    Name checks are pure and stay on the event loop; only the shebang
+    sniff for extensionless files reads the file and is offloaded.
+    """
+    if _is_code_file_by_name(rel_path):
         return True
-    return not rel_path.suffix and _has_shebang(path)
+    return not rel_path.suffix and await asyncio.to_thread(_has_shebang, path)
 
 
 def _move_staged_skill_into_reserved_target(staging_target: Path, target: Path) -> None:
@@ -228,10 +241,7 @@ async def _scan_skill_archive_contents_or_raise(skill_dir: Path, skill_name: str
             continue
         if path.name == "SKILL.md":
             raise SkillSecurityScanError(f"Security scan failed for skill '{skill_name}': nested SKILL.md is not allowed at {skill_name}/{rel_path.as_posix()}")
-        is_code = _is_script_support_file(rel_path) or rel_path.suffix.lower() in _CODE_SUFFIXES
-        if not is_code and not rel_path.suffix:
-            is_code = await asyncio.to_thread(_has_shebang, path)
-        if is_code:
+        if await _is_code_file(path, rel_path):
             await _scan_skill_file_or_raise(skill_dir, path, skill_name, executable=True)
         elif _should_scan_support_file(rel_path):
             await _scan_skill_file_or_raise(skill_dir, path, skill_name, executable=False)

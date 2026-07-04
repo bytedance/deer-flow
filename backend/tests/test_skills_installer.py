@@ -170,7 +170,14 @@ class TestSafeExtract:
         [
             pytest.param(b"\x7fELF\x02\x01\x01\x00", id="elf"),
             pytest.param(b"MZ\x90\x00\x03\x00\x00\x00", id="pe"),
-            pytest.param(b"\xcf\xfa\xed\xfe\x07\x00\x00\x01", id="mach-o"),
+            pytest.param(b"\xfe\xed\xfa\xce\x00\x00\x00\x0c", id="mach-o-32-be"),
+            pytest.param(b"\xfe\xed\xfa\xcf\x00\x00\x00\x0c", id="mach-o-64-be"),
+            pytest.param(b"\xce\xfa\xed\xfe\x0c\x00\x00\x00", id="mach-o-32-le"),
+            pytest.param(b"\xcf\xfa\xed\xfe\x07\x00\x00\x01", id="mach-o-64-le"),
+            pytest.param(b"\xca\xfe\xba\xbe\x00\x00\x00\x02", id="mach-o-fat-be"),
+            pytest.param(b"\xbe\xba\xfe\xca\x02\x00\x00\x00", id="mach-o-fat-le"),
+            pytest.param(b"\xca\xfe\xba\xbf\x00\x00\x00\x02", id="mach-o-fat64-be"),
+            pytest.param(b"\xbf\xba\xfe\xca\x02\x00\x00\x00", id="mach-o-fat64-le"),
         ],
     )
     def test_rejects_executable_binary(self, tmp_path, magic):
@@ -200,6 +207,21 @@ class TestSafeExtract:
         with zipfile.ZipFile(zip_path) as zf:
             safe_extract_skill_archive(zf, dest)
         assert (dest / "my-skill" / "assets" / "logo.png").exists()
+
+    def test_allows_asset_sharing_a_partial_magic_prefix(self, tmp_path):
+        """Only full 4-byte magics are executable; \\xfe\\xed\\xfa + other byte is data."""
+        zip_path = self._make_zip(
+            tmp_path,
+            {
+                "my-skill/SKILL.md": "---\nname: test\ndescription: x\n---\n# Test",
+                "my-skill/assets/blob.bin": b"\xfe\xed\xfa\x00" + b"\x00" * 32,
+            },
+        )
+        dest = tmp_path / "out"
+        dest.mkdir()
+        with zipfile.ZipFile(zip_path) as zf:
+            safe_extract_skill_archive(zf, dest)
+        assert (dest / "my-skill" / "assets" / "blob.bin").exists()
 
 
 # ---------------------------------------------------------------------------
@@ -349,6 +371,32 @@ class TestInstallSkillFromArchive:
         scanned_locations = {call["location"] for call in calls}
         assert "test-skill/assets/logo.png" not in scanned_locations
         assert "test-skill/assets/data.txt" not in scanned_locations
+
+    def test_shebang_sniff_only_reads_extensionless_files(self, tmp_path, monkeypatch):
+        """Suffix/scripts classification is name-based; only extensionless files are opened."""
+        import deerflow.skills.installer as installer_module
+
+        zip_path = tmp_path / "test-skill.skill"
+        with zipfile.ZipFile(zip_path, "w") as zf:
+            zf.writestr("test-skill/SKILL.md", "---\nname: test-skill\ndescription: A test skill\n---\n\n# test-skill\n")
+            zf.writestr("test-skill/helper.py", "print('code')\n")
+            zf.writestr("test-skill/scripts/run.sh", "#!/bin/sh\necho ok\n")
+            zf.writestr("test-skill/bin/tool", "#!/usr/bin/env python3\nprint('extensionless')\n")
+            zf.writestr("test-skill/assets/data.txt", "just data\n")
+        skills_root = tmp_path / "skills"
+        skills_root.mkdir()
+        sniffed = []
+        original_has_shebang = installer_module._has_shebang
+
+        def _tracking_has_shebang(path):
+            sniffed.append(path.name)
+            return original_has_shebang(path)
+
+        monkeypatch.setattr(installer_module, "_has_shebang", _tracking_has_shebang)
+
+        get_or_new_skill_storage(skills_path=skills_root).install_skill_from_archive(zip_path)
+
+        assert sniffed == ["tool"]
 
     def test_code_file_outside_scripts_warn_prevents_install(self, tmp_path, monkeypatch):
         zip_path = tmp_path / "test-skill.skill"
