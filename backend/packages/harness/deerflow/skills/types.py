@@ -45,6 +45,10 @@ class Skill:
     allowed_tools: list[str] | None = None
     enabled: bool = False  # Whether this skill is enabled
     required_secrets: list[SecretRequirement] = field(default_factory=list)
+    # Whether declared secrets may bind when the skill is in-context via an
+    # autonomous model load (skill_context), or only on explicit /slash
+    # activation. Frontmatter: ``secrets-autonomous`` (default true).
+    secrets_autonomous: bool = True
 
     @property
     def skill_path(self) -> str:

@@ -529,6 +529,222 @@ class TestActivationBindsSecrets:
         assert read_active_secrets(context2) == {}
 
 
+def _skill_context_entry(skill) -> dict:
+    return {
+        "name": skill.name,
+        "path": f"/mnt/skills/{skill.category}/{skill.name}/SKILL.md",
+        "description": skill.description,
+        "loaded_at": 0,
+    }
+
+
+class TestInContextBindsSecrets:
+    """Binding point A+ (issue #3914 gap 1): a skill the model loaded earlier in
+    the thread (tracked by ``ThreadState.skill_context``) keeps receiving its
+    declared secrets on later turns — without a fresh ``/slash`` — as long as
+    the caller supplies the values on the current request. Authorization stays
+    three-gated regardless of activation style: skill enabled by the operator,
+    values supplied per-request by the caller, names declared in frontmatter.
+    """
+
+    def _run_call(self, tmp_path, monkeypatch, skills, *, context, skill_context=None, message="continue the report", available_skills=None, middleware=None):
+        from deerflow.agents.middlewares import skill_activation_middleware as mw
+        from deerflow.agents.middlewares.skill_activation_middleware import SkillActivationMiddleware
+
+        storage = SimpleNamespace(
+            load_skills=lambda *, enabled_only: list(skills),
+            get_container_root=lambda: "/mnt/skills",
+            get_skills_root_path=lambda: tmp_path,
+        )
+        monkeypatch.setattr(mw, "get_or_new_skill_storage", lambda **kwargs: storage)
+        mw_inst = middleware or SkillActivationMiddleware(available_skills=available_skills)
+        mw_inst.wrap_model_call(
+            ModelRequest(
+                model=object(),
+                messages=[HumanMessage(content=message, id="m1")],
+                state={"messages": [], "skill_context": skill_context or []},
+                runtime=SimpleNamespace(context=context),
+            ),
+            lambda r: AIMessage(content="ok"),
+        )
+        return mw_inst
+
+    def test_in_context_skill_binds_secrets_without_slash(self, tmp_path, monkeypatch):
+        from deerflow.runtime.secret_context import read_active_secrets
+
+        skill = _make_secret_skill(tmp_path, "erp-report", [SecretRequirement("ERP_TOKEN")])
+        context = {"secrets": {"ERP_TOKEN": "tok-123", "UNRELATED": "x"}}
+        self._run_call(tmp_path, monkeypatch, [skill], context=context, skill_context=[_skill_context_entry(skill)])
+
+        assert read_active_secrets(context) == {"ERP_TOKEN": "tok-123"}
+
+    def test_binding_clears_when_skill_evicted_from_context(self, tmp_path, monkeypatch):
+        """Long-lived binding follows skill_context membership exactly: once the
+        entry is evicted (capacity) the injection disappears on the next call."""
+        from deerflow.runtime.secret_context import read_active_secrets
+
+        skill = _make_secret_skill(tmp_path, "erp-report", [SecretRequirement("ERP_TOKEN")])
+        context = {"secrets": {"ERP_TOKEN": "tok-123"}}
+        mw_inst = self._run_call(tmp_path, monkeypatch, [skill], context=context, skill_context=[_skill_context_entry(skill)])
+        assert read_active_secrets(context) == {"ERP_TOKEN": "tok-123"}
+
+        self._run_call(tmp_path, monkeypatch, [skill], context=context, skill_context=[], middleware=mw_inst)
+        assert read_active_secrets(context) == {}
+
+    def test_disabled_skill_in_context_not_bound(self, tmp_path, monkeypatch):
+        from deerflow.runtime.secret_context import read_active_secrets
+
+        skill = _make_secret_skill(tmp_path, "erp-report", [SecretRequirement("ERP_TOKEN")])
+        skill.enabled = False
+        context = {"secrets": {"ERP_TOKEN": "tok-123"}}
+        self._run_call(tmp_path, monkeypatch, [skill], context=context, skill_context=[_skill_context_entry(skill)])
+
+        assert read_active_secrets(context) == {}
+
+    def test_skill_outside_agent_allowlist_not_bound(self, tmp_path, monkeypatch):
+        from deerflow.runtime.secret_context import read_active_secrets
+
+        skill = _make_secret_skill(tmp_path, "erp-report", [SecretRequirement("ERP_TOKEN")])
+        context = {"secrets": {"ERP_TOKEN": "tok-123"}}
+        self._run_call(
+            tmp_path,
+            monkeypatch,
+            [skill],
+            context=context,
+            skill_context=[_skill_context_entry(skill)],
+            available_skills={"some-other-skill"},
+        )
+
+        assert read_active_secrets(context) == {}
+
+    def test_secrets_autonomous_false_blocks_in_context_but_not_slash(self, tmp_path, monkeypatch):
+        """The per-skill opt-out keeps explicit-activation ceremony available for
+        high-sensitivity skills: in-context binding is refused, slash still works."""
+        from deerflow.runtime.secret_context import read_active_secrets
+
+        skill = _make_secret_skill(tmp_path, "erp-report", [SecretRequirement("ERP_TOKEN")])
+        skill.secrets_autonomous = False
+
+        context = {"secrets": {"ERP_TOKEN": "tok-123"}}
+        self._run_call(tmp_path, monkeypatch, [skill], context=context, skill_context=[_skill_context_entry(skill)])
+        assert read_active_secrets(context) == {}
+
+        slash_context = {"secrets": {"ERP_TOKEN": "tok-123"}}
+        self._run_call(tmp_path, monkeypatch, [skill], context=slash_context, message="/erp-report go")
+        assert read_active_secrets(slash_context) == {"ERP_TOKEN": "tok-123"}
+
+    def test_slash_and_in_context_sources_merge(self, tmp_path, monkeypatch):
+        from deerflow.runtime.secret_context import read_active_secrets
+
+        loaded = _make_secret_skill(tmp_path, "erp-report", [SecretRequirement("ERP_TOKEN")])
+        slashed = _make_secret_skill(tmp_path, "crm-sync", [SecretRequirement("CRM_TOKEN")])
+        context = {"secrets": {"ERP_TOKEN": "tok-erp", "CRM_TOKEN": "tok-crm"}}
+        self._run_call(
+            tmp_path,
+            monkeypatch,
+            [loaded, slashed],
+            context=context,
+            skill_context=[_skill_context_entry(loaded)],
+            message="/crm-sync push the numbers",
+        )
+
+        assert read_active_secrets(context) == {"ERP_TOKEN": "tok-erp", "CRM_TOKEN": "tok-crm"}
+
+    def test_no_caller_secrets_means_no_binding(self, tmp_path, monkeypatch):
+        """The supply gate: without caller-provided values on THIS request there
+        is nothing to inject, no matter what is in skill_context."""
+        from deerflow.runtime.secret_context import read_active_secrets
+
+        skill = _make_secret_skill(tmp_path, "erp-report", [SecretRequirement("ERP_TOKEN")])
+        context = {"secrets": {}}
+        self._run_call(tmp_path, monkeypatch, [skill], context=context, skill_context=[_skill_context_entry(skill)])
+
+        assert read_active_secrets(context) == {}
+
+    def test_binding_change_recorded_in_audit_journal_names_only(self, tmp_path, monkeypatch):
+        skill = _make_secret_skill(tmp_path, "erp-report", [SecretRequirement("ERP_TOKEN")])
+        journal = MagicMock()
+        context = {"secrets": {"ERP_TOKEN": "tok-secret-value"}, "__run_journal": journal}
+        self._run_call(tmp_path, monkeypatch, [skill], context=context, skill_context=[_skill_context_entry(skill)])
+
+        bind_calls = [call for call in journal.record_middleware.call_args_list if call.kwargs.get("action") == "bind_secrets"]
+        assert len(bind_calls) == 1
+        changes = bind_calls[0].kwargs["changes"]
+        assert changes["skills"] == ["erp-report"]
+        assert changes["secrets"] == ["ERP_TOKEN"]
+        # Values must never reach the audit journal.
+        assert "tok-secret-value" not in str(bind_calls[0])
+
+    def test_slash_binding_persists_across_model_calls_in_same_run(self, tmp_path, monkeypatch):
+        """#3861 semantics preserved under per-call recompute: after the single
+        activation call, the tool loop issues more model calls without a fresh
+        slash — the binding must survive on the shared run context."""
+        from deerflow.runtime.secret_context import read_active_secrets
+
+        skill = _make_secret_skill(tmp_path, "erp-report", [SecretRequirement("ERP_TOKEN")])
+        context = {"secrets": {"ERP_TOKEN": "tok-123"}}
+        mw_inst = self._run_call(tmp_path, monkeypatch, [skill], context=context, message="/erp-report go")
+        assert read_active_secrets(context) == {"ERP_TOKEN": "tok-123"}
+
+        # Later model call in the SAME run (same context object): no slash in the
+        # latest message, skill never entered skill_context (slash injects the
+        # body directly, no read_file happens).
+        self._run_call(tmp_path, monkeypatch, [skill], context=context, message="tool loop continues", middleware=mw_inst)
+        assert read_active_secrets(context) == {"ERP_TOKEN": "tok-123"}
+
+    def test_unchanged_binding_not_re_recorded(self, tmp_path, monkeypatch):
+        skill = _make_secret_skill(tmp_path, "erp-report", [SecretRequirement("ERP_TOKEN")])
+        journal = MagicMock()
+        context = {"secrets": {"ERP_TOKEN": "tok-1"}, "__run_journal": journal}
+        mw_inst = self._run_call(tmp_path, monkeypatch, [skill], context=context, skill_context=[_skill_context_entry(skill)])
+        self._run_call(tmp_path, monkeypatch, [skill], context=context, skill_context=[_skill_context_entry(skill)], middleware=mw_inst)
+
+        bind_calls = [call for call in journal.record_middleware.call_args_list if call.kwargs.get("action") == "bind_secrets"]
+        assert len(bind_calls) == 1
+
+
+class TestSecretsAutonomousParsing:
+    """Frontmatter ``secrets-autonomous`` controls in-context (autonomous) binding."""
+
+    def _parse(self, tmp_path, frontmatter_extra: str):
+        from deerflow.skills.parser import parse_skill_file
+        from deerflow.skills.types import SkillCategory
+
+        skill_dir = tmp_path / "erp-report"
+        skill_dir.mkdir()
+        skill_file = skill_dir / "SKILL.md"
+        skill_file.write_text(
+            f"""---
+name: erp-report
+description: Pull an ERP report.
+required-secrets:
+  - ERP_TOKEN
+{frontmatter_extra}---
+
+Body.
+""",
+            encoding="utf-8",
+        )
+        return parse_skill_file(skill_file, SkillCategory.CUSTOM)
+
+    def test_defaults_to_true(self, tmp_path):
+        skill = self._parse(tmp_path, "")
+        assert skill is not None
+        assert skill.secrets_autonomous is True
+
+    def test_explicit_false(self, tmp_path):
+        skill = self._parse(tmp_path, "secrets-autonomous: false\n")
+        assert skill is not None
+        assert skill.secrets_autonomous is False
+
+    def test_malformed_value_fails_closed(self, tmp_path, caplog):
+        """A non-boolean value disables autonomous binding (the safer direction)
+        instead of silently enabling it."""
+        skill = self._parse(tmp_path, 'secrets-autonomous: "yes please"\n')
+        assert skill is not None
+        assert skill.secrets_autonomous is False
+
+
 class TestBashToolInjectsActiveSecrets:
     """The bash tool forwards the per-run injection set to execute_command(env=...)."""
 
