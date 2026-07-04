@@ -896,12 +896,17 @@ class TestClientCheckpointerFallback:
         config_mock.get_model_config.return_value = MagicMock(supports_vision=False)
         config_mock.checkpointer = None
 
+        config_mock.skills.deferred_discovery = False
+        config_mock.skills.container_path = "/mnt/skills"
+        config_mock.tool_search.enabled = False
+
         with (
             patch("deerflow.client.get_app_config", return_value=config_mock),
             patch("deerflow.client.create_agent", side_effect=fake_create_agent),
             patch("deerflow.client.create_chat_model", return_value=MagicMock()),
             patch("deerflow.client.build_middlewares", return_value=[]),
             patch("deerflow.client.apply_prompt_template", return_value=""),
+            patch("deerflow.client.get_enabled_skills_for_config", return_value=[]),
             patch("deerflow.client.DeerFlowClient._get_tools", return_value=[]),
         ):
             client = DeerFlowClient(checkpointer=None)
@@ -930,12 +935,17 @@ class TestClientCheckpointerFallback:
         config_mock.get_model_config.return_value = MagicMock(supports_vision=False)
         config_mock.checkpointer = None
 
+        config_mock.skills.deferred_discovery = False
+        config_mock.skills.container_path = "/mnt/skills"
+        config_mock.tool_search.enabled = False
+
         with (
             patch("deerflow.client.get_app_config", return_value=config_mock),
             patch("deerflow.client.create_agent", side_effect=fake_create_agent),
             patch("deerflow.client.create_chat_model", return_value=MagicMock()),
             patch("deerflow.client.build_middlewares", return_value=[]),
             patch("deerflow.client.apply_prompt_template", return_value=""),
+            patch("deerflow.client.get_enabled_skills_for_config", return_value=[]),
             patch("deerflow.client.DeerFlowClient._get_tools", return_value=[]),
         ):
             client = DeerFlowClient(checkpointer=explicit_cp)

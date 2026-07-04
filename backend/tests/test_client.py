@@ -41,6 +41,9 @@ def mock_app_config():
     config = MagicMock()
     config.models = [model]
     config.token_usage.enabled = False
+    config.skills.deferred_discovery = False
+    config.skills.container_path = "/mnt/skills"
+    config.tool_search.enabled = False
     return config
 
 
@@ -916,6 +919,7 @@ class TestEnsureAgent:
             patch("deerflow.client.create_agent", return_value=mock_agent),
             patch("deerflow.client.build_middlewares", return_value=[]) as mock_build_middlewares,
             patch("deerflow.client.apply_prompt_template", return_value="prompt") as mock_apply_prompt,
+            patch("deerflow.client.get_enabled_skills_for_config", return_value=[]),
             patch.object(client, "_get_tools", return_value=[]),
             patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=MagicMock()),
         ):
@@ -941,6 +945,7 @@ class TestEnsureAgent:
             patch("deerflow.client.create_agent", return_value=mock_agent) as mock_create_agent,
             patch("deerflow.client.build_middlewares", return_value=[]),
             patch("deerflow.client.apply_prompt_template", return_value="prompt"),
+            patch("deerflow.client.get_enabled_skills_for_config", return_value=[]),
             patch.object(client, "_get_tools", return_value=[]),
             patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=mock_checkpointer),
         ):
@@ -966,6 +971,7 @@ class TestEnsureAgent:
             patch("deerflow.client.create_agent", return_value=mock_agent) as mock_create_agent,
             patch("deerflow.client.build_middlewares", side_effect=fake_build_middlewares),
             patch("deerflow.client.apply_prompt_template", return_value="prompt"),
+            patch("deerflow.client.get_enabled_skills_for_config", return_value=[]),
             patch.object(client, "_get_tools", return_value=[]),
             patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=MagicMock()),
         ):
@@ -985,6 +991,7 @@ class TestEnsureAgent:
             patch("deerflow.client.create_agent", return_value=mock_agent) as mock_create_agent,
             patch("deerflow.client.build_middlewares", return_value=[]),
             patch("deerflow.client.apply_prompt_template", return_value="prompt"),
+            patch("deerflow.client.get_enabled_skills_for_config", return_value=[]),
             patch.object(client, "_get_tools", return_value=[]),
             patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=None),
         ):
@@ -1003,6 +1010,82 @@ class TestEnsureAgent:
 
         # Should still be the same mock — no recreation
         assert client._agent is mock_agent
+
+    def test_deferred_skill_discovery_wired_when_enabled(self, client, mock_app_config):
+        """When skills.deferred_discovery=True, skill_names reaches apply_prompt_template
+        (parity with agent.py — config flag must not be a silent no-op on the embedded path)."""
+        from pathlib import Path
+
+        from deerflow.skills.types import Skill, SkillCategory
+
+        fake_skill = Skill(
+            name="deep-research",
+            description="Multi-source research",
+            license=None,
+            skill_dir=Path("/mnt/skills/public/deep-research"),
+            skill_file=Path("/mnt/skills/public/deep-research/SKILL.md"),
+            relative_path=Path("deep-research"),
+            category=SkillCategory.PUBLIC,
+            enabled=True,
+        )
+
+        mock_app_config.skills.deferred_discovery = True
+        mock_app_config.skills.container_path = "/mnt/skills"
+        mock_app_config.tool_search.enabled = False
+        client._app_config = mock_app_config
+        config = client._get_runnable_config("t1")
+
+        with (
+            patch("deerflow.client.create_chat_model"),
+            patch("deerflow.client.create_agent", return_value=MagicMock()),
+            patch("deerflow.client.build_middlewares", return_value=[]),
+            patch("deerflow.client.apply_prompt_template", return_value="prompt") as mock_apply_prompt,
+            patch.object(client, "_get_tools", return_value=[]),
+            patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=None),
+            patch("deerflow.client.get_enabled_skills_for_config", return_value=[fake_skill]),
+        ):
+            client._ensure_agent(config)
+
+        skill_names_arg = mock_apply_prompt.call_args.kwargs.get("skill_names")
+        assert skill_names_arg is not None, "skill_names must be passed when deferred_discovery=True"
+        assert "deep-research" in skill_names_arg
+
+    def test_deferred_skill_discovery_not_wired_when_disabled(self, client, mock_app_config):
+        """When skills.deferred_discovery=False, skill_names is None so the legacy prompt path runs."""
+        from pathlib import Path
+
+        from deerflow.skills.types import Skill, SkillCategory
+
+        fake_skill = Skill(
+            name="deep-research",
+            description="Multi-source research",
+            license=None,
+            skill_dir=Path("/mnt/skills/public/deep-research"),
+            skill_file=Path("/mnt/skills/public/deep-research/SKILL.md"),
+            relative_path=Path("deep-research"),
+            category=SkillCategory.PUBLIC,
+            enabled=True,
+        )
+
+        mock_app_config.skills.deferred_discovery = False
+        mock_app_config.skills.container_path = "/mnt/skills"
+        mock_app_config.tool_search.enabled = False
+        client._app_config = mock_app_config
+        config = client._get_runnable_config("t1")
+
+        with (
+            patch("deerflow.client.create_chat_model"),
+            patch("deerflow.client.create_agent", return_value=MagicMock()),
+            patch("deerflow.client.build_middlewares", return_value=[]),
+            patch("deerflow.client.apply_prompt_template", return_value="prompt") as mock_apply_prompt,
+            patch.object(client, "_get_tools", return_value=[]),
+            patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=None),
+            patch("deerflow.client.get_enabled_skills_for_config", return_value=[fake_skill]),
+        ):
+            client._ensure_agent(config)
+
+        skill_names_arg = mock_apply_prompt.call_args.kwargs.get("skill_names")
+        assert skill_names_arg is None, "skill_names must be None when deferred_discovery=False"
 
 
 # ---------------------------------------------------------------------------
@@ -1997,6 +2080,7 @@ class TestScenarioAgentRecreation:
             patch("deerflow.client.create_agent", side_effect=fake_create_agent),
             patch("deerflow.client.build_middlewares", return_value=[]),
             patch("deerflow.client.apply_prompt_template", return_value="prompt"),
+            patch("deerflow.client.get_enabled_skills_for_config", return_value=[]),
             patch.object(client, "_get_tools", return_value=[]),
             patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=MagicMock()),
         ):
@@ -2025,6 +2109,7 @@ class TestScenarioAgentRecreation:
             patch("deerflow.client.create_agent", side_effect=fake_create_agent),
             patch("deerflow.client.build_middlewares", return_value=[]),
             patch("deerflow.client.apply_prompt_template", return_value="prompt"),
+            patch("deerflow.client.get_enabled_skills_for_config", return_value=[]),
             patch.object(client, "_get_tools", return_value=[]),
             patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=MagicMock()),
         ):
@@ -2050,6 +2135,7 @@ class TestScenarioAgentRecreation:
             patch("deerflow.client.create_agent", side_effect=fake_create_agent),
             patch("deerflow.client.build_middlewares", return_value=[]),
             patch("deerflow.client.apply_prompt_template", return_value="prompt"),
+            patch("deerflow.client.get_enabled_skills_for_config", return_value=[]),
             patch.object(client, "_get_tools", return_value=[]),
             patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=MagicMock()),
         ):

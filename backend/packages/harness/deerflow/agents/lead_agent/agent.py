@@ -520,15 +520,30 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
 
     skills_for_tool_policy = _load_enabled_skills_for_tool_policy(available_skills, app_config=resolved_app_config, user_id=resolved_user_id)
 
+    # Build skill search setup (deferred skill discovery).
+    # Controlled by skills.deferred_discovery — independent from tool_search.enabled.
+    from deerflow.skills.describe import build_skill_search_setup
+
+    skill_search_enabled = resolved_app_config.skills.deferred_discovery
+    container_base_path = resolved_app_config.skills.container_path
+
     if is_bootstrap:
         # Special bootstrap agent with minimal prompt for initial custom agent creation flow
         # Keep the bootstrap skill set intentionally narrow so agent creation
         # remains deterministic before the custom agent's own config exists.
+        bootstrap_skills = [s for s in skills_for_tool_policy if s.name in _BOOTSTRAP_SKILL_NAMES]
+        skill_setup = build_skill_search_setup(
+            bootstrap_skills,
+            enabled=skill_search_enabled,
+            container_base_path=container_base_path,
+        )
         raw_tools = get_available_tools(model_name=model_name, subagent_enabled=subagent_enabled, app_config=resolved_app_config) + [setup_agent]
         filtered = filter_tools_by_skill_allowed_tools(raw_tools, skills_for_tool_policy, always_allowed_tool_names=SKILL_LOADING_TOOL_NAMES)
         if non_interactive:
             filtered = [tool for tool in filtered if tool.name not in _NON_INTERACTIVE_DISABLED_TOOL_NAMES]
         final_tools, setup = assemble_deferred_tools(filtered, enabled=resolved_app_config.tool_search.enabled)
+        if skill_setup.describe_skill_tool:
+            final_tools.append(skill_setup.describe_skill_tool)
         return create_agent(
             model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, app_config=resolved_app_config, attach_tracing=False),
             tools=final_tools,
@@ -547,12 +562,20 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
                 app_config=resolved_app_config,
                 deferred_names=setup.deferred_names,
                 user_id=resolved_user_id,
+                skill_names=skill_setup.skill_names or None,
             ),
             state_schema=ThreadState,
         )
 
     # Custom agents can update their own SOUL.md / config via update_agent.
     # The default agent (no agent_name) does not see this tool.
+    # Build skill search setup from policy-filtered skills (same list used for
+    # tool-policy filtering), so describe_skill only exposes allowed skills.
+    skill_setup = build_skill_search_setup(
+        skills_for_tool_policy,
+        enabled=skill_search_enabled,
+        container_base_path=container_base_path,
+    )
     #
     # Withhold ``update_agent`` from runs triggered by webhook channels
     # (currently only ``github``). Webhook prompts come from arbitrary
@@ -575,6 +598,8 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
     if non_interactive:
         filtered = [tool for tool in filtered if tool.name not in _NON_INTERACTIVE_DISABLED_TOOL_NAMES]
     final_tools, setup = assemble_deferred_tools(filtered, enabled=resolved_app_config.tool_search.enabled)
+    if skill_setup.describe_skill_tool:
+        final_tools.append(skill_setup.describe_skill_tool)
     return create_agent(
         model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, reasoning_effort=reasoning_effort, app_config=resolved_app_config, attach_tracing=False),
         tools=final_tools,
@@ -595,6 +620,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
             app_config=resolved_app_config,
             deferred_names=setup.deferred_names,
             user_id=resolved_user_id,
+            skill_names=skill_setup.skill_names or None,
         ),
         state_schema=ThreadState,
     )
