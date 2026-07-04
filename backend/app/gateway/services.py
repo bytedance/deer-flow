@@ -194,6 +194,11 @@ def merge_run_context_overrides(config: dict[str, Any], context: Mapping[str, An
                 runtime_context.setdefault(key, context[key])
     if "user_id" in context and isinstance(runtime_context, dict):
         runtime_context.setdefault("user_id", context["user_id"])
+    # The raw platform user id from IM channels (Feishu open_id, Slack Uxxx, ...)
+    # follows the same runtime-context-only rule as user_id: tools may read it,
+    # but it never enters ``configurable`` (checkpointed with the thread).
+    if "channel_user_id" in context and isinstance(runtime_context, dict):
+        runtime_context.setdefault("channel_user_id", context["channel_user_id"])
 
 
 def inject_authenticated_user_context(config: dict[str, Any], request: Request) -> None:
