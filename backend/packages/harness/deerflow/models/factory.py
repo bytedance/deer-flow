@@ -121,6 +121,10 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
             "when_thinking_disabled",
             "thinking",
             "supports_vision",
+            # Presentation-only metadata (consumed by the console's cost
+            # display) — must never reach the provider client, which would
+            # forward unknown kwargs into the completion request payload.
+            "pricing",
         },
     )
     # Compute effective when_thinking_enabled by merging in the `thinking` shortcut field.

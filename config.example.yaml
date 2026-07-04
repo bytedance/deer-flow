@@ -70,6 +70,17 @@ max_recursion_limit: 1000
 # Models Configuration
 # ============================================================================
 # Configure available LLM models for the agent to use
+#
+# Optional per-model pricing (powers the real-cost display on the workspace
+# console). Add a `pricing` block to any model entry; use ONE currency across
+# all models. Prices are per one million tokens.
+#
+#   pricing:
+#     currency: CNY                    # ISO code shown in the console (CNY, USD, ...)
+#     input_per_million: 8.0           # price per 1M input tokens (cache miss)
+#     output_per_million: 32.0         # price per 1M output tokens
+#     input_cache_hit_per_million: 0.8 # price per 1M cache-hit input tokens
+#                                      # (optional; omit → hits billed at miss price)
 
 models:
   # Example: Volcengine (Doubao) model
