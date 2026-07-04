@@ -272,6 +272,26 @@ def build_subagent_runtime_middlewares(
 
         middlewares.append(DeferredToolFilterMiddleware(deferred_setup.deferred_names, deferred_setup.catalog_hash))
 
+    # LoopDetectionMiddleware — subagents inherit none of the lead's runaway
+    # guards today (see #3875): with no loop detection a degenerate subagent tool
+    # loop runs unchecked until ``max_turns``, re-sending a growing context each
+    # turn (the reported 4.4M-token burn). Mirror the lead chain so the loop is
+    # detected and broken. Subagents disallow ``task``, so only the tool-loop
+    # heuristic can fire here — no recursive-delegation path to false-positive on.
+    # Registered before SafetyFinishReasonMiddleware (earlier in the list).
+    # LangChain dispatches after_model hooks in REVERSE registration order, so
+    # SafetyFinishReasonMiddleware (appended below) executes first and strips
+    # safety-terminated tool_calls; LoopDetectionMiddleware then accounts on the
+    # cleaned message. This is the placement SafetyFinishReasonMiddleware's
+    # docstring requires ("register after LoopDetection") and mirrors the lead
+    # chain (``lead_agent/agent.py``). Phase 1 of #3875; a deterministic
+    # turn/token budget with lead-visible stop reason is Phase 2.
+    loop_detection_config = app_config.loop_detection
+    if loop_detection_config.enabled:
+        from deerflow.agents.middlewares.loop_detection_middleware import LoopDetectionMiddleware
+
+        middlewares.append(LoopDetectionMiddleware.from_config(loop_detection_config))
+
     # Same provider safety-termination guard the lead agent uses — subagents
     # are equally exposed to truncated tool_calls returned with
     # finish_reason=content_filter (and friends), and the bad call would then

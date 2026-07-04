@@ -30,6 +30,7 @@ class _FakeRedis:
         self.conditions = defaultdict(asyncio.Condition)
         self.counters = defaultdict(int)
         self.deleted = []
+        self.expirations = []
         self.closed = False
 
     async def xadd(self, name, fields, maxlen=None, approximate=True):
@@ -65,8 +66,46 @@ class _FakeRedis:
     async def exists(self, name):
         return 1 if name in self.streams else 0
 
+    async def expire(self, name, seconds):
+        self.expirations.append((name, seconds))
+        return True
+
+    def pipeline(self, *, transaction=True):
+        return _FakeRedisPipeline(self)
+
     async def aclose(self):
         self.closed = True
+
+
+class _FakeRedisPipeline:
+    def __init__(self, redis: _FakeRedis) -> None:
+        self.redis = redis
+        self.ops = []
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return None
+
+    def xadd(self, name, fields, maxlen=None, approximate=True):
+        self.ops.append(("xadd", name, fields, maxlen, approximate))
+        return self
+
+    def expire(self, name, seconds):
+        self.ops.append(("expire", name, seconds))
+        return self
+
+    async def execute(self):
+        results = []
+        for op in self.ops:
+            if op[0] == "xadd":
+                _, name, fields, maxlen, approximate = op
+                results.append(await self.redis.xadd(name, fields, maxlen=maxlen, approximate=approximate))
+            elif op[0] == "expire":
+                _, name, seconds = op
+                results.append(await self.redis.expire(name, seconds))
+        return results
 
 
 # ---------------------------------------------------------------------------
@@ -488,6 +527,43 @@ async def test_redis_cleanup_deletes_stream(redis_bridge: RedisStreamBridge):
 
 
 @pytest.mark.anyio
+async def test_redis_publish_refreshes_stream_ttl():
+    """Redis stream TTL should be rolling on publish and publish_end."""
+    fake = _FakeRedis()
+    bridge = RedisStreamBridge(
+        redis_url="redis://fake",
+        queue_maxsize=2,
+        stream_ttl_seconds=42,
+        client=fake,
+    )
+    run_id = "redis-run-ttl"
+    key = "deerflow:stream_bridge:redis-run-ttl"
+
+    await bridge.publish(run_id, "event-1", {"n": 1})
+    await bridge.publish(run_id, "event-2", {"n": 2})
+    await bridge.publish_end(run_id)
+
+    assert fake.expirations == [(key, 42), (key, 42), (key, 42)]
+
+
+@pytest.mark.anyio
+async def test_redis_stream_ttl_can_be_disabled():
+    """A zero TTL disables the Redis leak safety net for installations that need it."""
+    fake = _FakeRedis()
+    bridge = RedisStreamBridge(
+        redis_url="redis://fake",
+        queue_maxsize=2,
+        stream_ttl_seconds=0,
+        client=fake,
+    )
+
+    await bridge.publish("redis-run-no-ttl", "event", {})
+    await bridge.publish_end("redis-run-no-ttl")
+
+    assert fake.expirations == []
+
+
+@pytest.mark.anyio
 async def test_redis_subscribe_waits_for_first_publish(redis_bridge: RedisStreamBridge):
     """A subscriber that starts before the first XADD must not receive END."""
     run_id = "redis-run-first-publish"
@@ -673,8 +749,8 @@ async def test_make_stream_bridge_uses_docker_redis_env(monkeypatch):
 
 
 @pytest.mark.anyio
-async def test_make_stream_bridge_passes_max_connections(monkeypatch):
-    """max_connections from config should be forwarded to Redis.from_url."""
+async def test_make_stream_bridge_passes_redis_options(monkeypatch):
+    """Redis options from config should be forwarded to Redis bridge setup."""
     import deerflow.runtime.stream_bridge.redis as redis_module
 
     captured: dict = {}
@@ -685,10 +761,18 @@ async def test_make_stream_bridge_passes_max_connections(monkeypatch):
         return _FakeRedis()
 
     monkeypatch.setattr(redis_module.Redis, "from_url", staticmethod(fake_from_url))
-    set_stream_bridge_config(StreamBridgeConfig(type="redis", redis_url="redis://fake:6379/0", max_connections=50))
+    set_stream_bridge_config(
+        StreamBridgeConfig(
+            type="redis",
+            redis_url="redis://fake:6379/0",
+            max_connections=50,
+            stream_ttl_seconds=42,
+        )
+    )
     try:
         async with make_stream_bridge() as bridge:
             assert isinstance(bridge, RedisStreamBridge)
+            assert bridge._stream_ttl_seconds == 42
         assert captured["max_connections"] == 50
         assert captured["decode_responses"] is True
     finally:
@@ -829,3 +913,34 @@ async def test_redis_integration_maxlen_trims_history(real_redis_bridge):
     key = real_redis_bridge._stream_key(run_id)
     length = await real_redis_bridge._redis.xlen(key)
     assert length == 2
+
+
+@pytest.mark.integration
+@requires_redis
+@pytest.mark.anyio
+async def test_redis_integration_stream_ttl_reclaims_key():
+    """Redis should reclaim retained stream data when cleanup never runs."""
+    from redis.asyncio import Redis
+
+    client = Redis.from_url(REDIS_TEST_URL, decode_responses=True)
+    key_prefix = f"deerflow:test:{uuid.uuid4().hex}"
+    bridge = RedisStreamBridge(
+        redis_url=REDIS_TEST_URL,
+        queue_maxsize=2,
+        key_prefix=key_prefix,
+        stream_ttl_seconds=1,
+        client=client,
+    )
+    run_id = "integ-ttl"
+    key = bridge._stream_key(run_id)
+    try:
+        await bridge.publish(run_id, "metadata", {"run_id": run_id})
+        assert await client.exists(key) == 1
+        assert await client.ttl(key) >= 0
+        await anyio.sleep(2.0)
+
+        assert await client.exists(key) == 0
+    finally:
+        async for existing_key in client.scan_iter(f"{key_prefix}:*"):
+            await client.delete(existing_key)
+        await client.aclose()

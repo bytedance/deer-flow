@@ -189,6 +189,7 @@ class LocalSkillStorage(SkillStorage):
             staging_target = Path(staging_root) / skill_name
             shutil.copytree(skill_dir, staging_target)
             _move_staged_skill_into_reserved_target(staging_target, target)
+        make_skill_written_path_sandbox_readable(custom_dir, target)
 
     def delete_custom_skill(self, name: str, *, history_meta: dict | None = None) -> None:
         self.validate_skill_name(name)

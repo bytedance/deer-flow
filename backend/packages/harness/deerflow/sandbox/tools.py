@@ -1,4 +1,6 @@
 import asyncio
+import json
+import logging
 import os
 import posixpath
 import re
@@ -26,6 +28,8 @@ from deerflow.sandbox.sandbox_provider import get_sandbox_provider
 from deerflow.sandbox.search import GrepMatch
 from deerflow.sandbox.security import LOCAL_HOST_BASH_DISABLED_MESSAGE, is_host_bash_allowed
 from deerflow.tools.types import Runtime
+
+logger = logging.getLogger(__name__)
 
 _ABSOLUTE_PATH_PATTERN = re.compile(r"(?<![:\w])(?<!:/)/(?:[^\s\"'`;&|<>()]+)")
 # A ``{...}`` block holding a single identifier-like placeholder (e.g. ``{id}``
@@ -152,8 +156,101 @@ def _is_skills_path(path: str) -> bool:
     return path == skills_prefix or path.startswith(f"{skills_prefix}/")
 
 
+def _extract_skill_name_from_skills_path(path: str) -> str | None:
+    """Extract a skill name from a virtual skills path.
+
+    /mnt/skills/public/bootstrap/SKILL.md → "bootstrap"
+    /mnt/skills/custom/my-skill/SKILL.md → "my-skill"
+    /mnt/skills/legacy/my-skill/references/... → "my-skill"
+    /mnt/skills/public/bootstrap/ → "bootstrap"
+    Returns None if the path doesn't contain a recognizable skill name pattern.
+    """
+    skills_prefix = _get_skills_container_path()
+    if not _is_skills_path(path):
+        return None
+    # Strip the skills prefix, e.g. "/mnt/skills/"
+    relative = path[len(skills_prefix) :].lstrip("/")
+    if not relative:
+        return None
+    # Expected patterns: "public/<name>/...", "custom/<name>/...", "legacy/<name>/..."
+    # or "<name>/..." (direct skill access)
+    parts = relative.split("/")
+    if len(parts) >= 2 and parts[0] in ("public", "custom", "legacy"):
+        return parts[1]
+    if len(parts) == 1 and parts[0] in ("public", "custom", "legacy"):
+        # Category root like /mnt/skills/custom — not a skill path.
+        return None
+    if len(parts) >= 1:
+        # Direct path like /mnt/skills/my-skill/SKILL.md
+        return parts[0]
+    return None
+
+
+def _is_disabled_skill_path(path: str, *, user_id: str | None = None) -> bool:
+    """Check if a path belongs to a disabled skill.
+
+    PUBLIC skill enabled state is read from the global
+    ``extensions_config.json``.  CUSTOM / LEGACY skill enabled state is
+    read from the per-user ``_skill_states.json`` so that two users with
+    same-named custom skills can toggle independently.
+
+    Returns False for non-skills paths or paths whose skill is enabled.
+    """
+    skill_name = _extract_skill_name_from_skills_path(path)
+    if skill_name is None:
+        return False
+    try:
+        from deerflow.runtime.user_context import get_effective_user_id
+        from deerflow.skills.storage import get_or_new_user_skill_storage
+
+        # Determine the category from the path
+        skills_prefix = _get_skills_container_path()
+        relative = path[len(skills_prefix) :].lstrip("/")
+        if relative.startswith("public/"):
+            category = "public"
+        elif relative.startswith("custom/"):
+            category = "custom"
+        elif relative.startswith("legacy/"):
+            category = "legacy"
+        else:
+            # Try to infer from storage
+            effective_uid = user_id or get_effective_user_id()
+            storage = get_or_new_user_skill_storage(effective_uid)
+            all_skills = storage.load_skills(enabled_only=False)
+            matching = next((s for s in all_skills if s.name == skill_name), None)
+            if matching is None:
+                return False  # Skill doesn't exist, not a disabled skill path
+            category = matching.category.value
+
+        if category == "public":
+            from deerflow.config.extensions_config import ExtensionsConfig
+
+            ext_config = ExtensionsConfig.from_file()
+            return not ext_config.is_skill_enabled(skill_name, category)
+        else:
+            # CUSTOM / LEGACY: use per-user state
+            effective_uid = user_id or get_effective_user_id()
+            storage = get_or_new_user_skill_storage(effective_uid)
+            return not storage.get_skill_enabled_state(skill_name)
+    except (OSError, ValueError, KeyError, json.JSONDecodeError) as exc:
+        # Access-control check must fail closed: when we can't determine the
+        # enabled state (corrupt _skill_states.json, mid-write race, missing
+        # config), refuse access rather than silently serving a disabled
+        # skill's files. See review feedback on PR #3889.
+        logger.warning("Failed to determine enabled state, denying access: %s", exc)
+        return True
+
+
 def _resolve_skills_path(path: str) -> str:
     """Resolve a virtual skills path to a host filesystem path.
+
+    WARNING: For per-user custom skills (``/mnt/skills/custom/...``), this
+    function uses ``get_effective_user_id()`` from the contextvar, which may
+    differ from the sandbox PathMapping's user_id (set during acquire via
+    ``resolve_runtime_user_id``). In local sandbox mode, skills paths should
+    be resolved by the sandbox's PathMapping instead of this function. This
+    function is retained for output masking (``mask_local_paths_in_output``)
+    and non-sandbox code paths.
 
     Args:
         path: Virtual skills path (e.g. /mnt/skills/public/bootstrap/SKILL.md)
@@ -173,6 +270,27 @@ def _resolve_skills_path(path: str) -> str:
         return skills_host
 
     relative = path[len(skills_container) :].lstrip("/")
+
+    # Per-user custom skills: resolve to user-specific directory.
+    # ``skill_manage_tool`` writes custom skills to the per-user directory,
+    # and ``LocalSandboxProvider._build_thread_path_mappings`` mounts
+    # ``/mnt/skills/custom`` to that same per-user dir.  Without this
+    # branch, ``_resolve_skills_path("/mnt/skills/custom")`` would map to
+    # the global ``{skills_host}/custom/`` which is the repository-level
+    # ``skills/custom/`` — an entirely different directory that may be
+    # empty or contain legacy skills only.
+    if relative == "custom" or relative.startswith("custom/"):
+        from deerflow.config.paths import get_paths
+        from deerflow.runtime.user_context import get_effective_user_id
+
+        user_id = get_effective_user_id()
+        paths = get_paths()
+        user_custom_dir = paths.user_custom_skills_dir(user_id)
+        custom_relative = relative[len("custom") :].lstrip("/")
+        if custom_relative:
+            return str(user_custom_dir / custom_relative)
+        return str(user_custom_dir)
+
     return _join_path_preserving_style(skills_host, relative)
 
 
@@ -392,10 +510,13 @@ def _resolve_max_results(name: str, requested: int, *, default: int, upper_bound
 
 def _resolve_local_read_path(path: str, thread_data: ThreadDataState) -> str:
     validate_local_tool_path(path, thread_data, read_only=True)
-    if _is_skills_path(path):
-        return _resolve_skills_path(path)
-    if _is_acp_workspace_path(path):
-        return _resolve_acp_workspace_path(path, _extract_thread_id_from_thread_data(thread_data))
+    if _is_skills_path(path) or _is_acp_workspace_path(path):
+        # Skills and ACP workspace paths are resolved by the sandbox's
+        # PathMapping (which uses the user_id from acquire time), not
+        # by _resolve_skills_path / _resolve_acp_workspace_path (which
+        # use get_effective_user_id() from contextvar and may differ
+        # from the sandbox mapping's user_id).
+        return path
     return _resolve_and_validate_user_data_path(path, thread_data)
 
 
@@ -591,17 +712,36 @@ def _compiled_mask_patterns(sources: tuple[tuple[str, str], ...]) -> tuple[tuple
 def mask_local_paths_in_output(output: str, thread_data: ThreadDataState | None) -> str:
     """Mask host absolute paths from local sandbox output using virtual paths.
 
-    Handles user-data paths (per-thread), skills paths, and ACP workspace paths (global).
+    Handles user-data paths (per-thread), skills paths (global + per-user
+    custom), and ACP workspace paths (per-thread).
     """
     # Build the ordered (host_base, virtual_base) source list. Order is
-    # preserved from the original implementation: skills, then ACP workspace,
-    # then user-data mappings (longest host path first). Custom mount host
-    # paths are masked by LocalSandbox._reverse_resolve_paths_in_output().
+    # preserved from the original implementation: skills, then per-user
+    # custom skills, then ACP workspace, then user-data mappings (longest
+    # host path first). Custom mount host paths are masked by
+    # LocalSandbox._reverse_resolve_paths_in_output().
     sources: list[tuple[str, str]] = []
 
     skills_host = _get_skills_host_path()
     if skills_host:
         sources.append((skills_host, _get_skills_container_path()))
+
+    # Per-user custom skills: mask host paths under the user's custom
+    # skills directory back to /mnt/skills/custom. The sandbox's
+    # _reverse_resolve_path handles this for its own operations, but
+    # mask_local_paths_in_output serves as a safety net for edge cases
+    # where host paths appear in output that bypassed sandbox resolution.
+    try:
+        from deerflow.config.paths import get_paths
+        from deerflow.runtime.user_context import get_effective_user_id
+
+        user_id = get_effective_user_id()
+        user_custom_dir = get_paths().user_custom_skills_dir(user_id)
+        if user_custom_dir.exists():
+            skills_container = _get_skills_container_path()
+            sources.append((str(user_custom_dir), f"{skills_container}/custom"))
+    except Exception:
+        pass
 
     acp_host = _get_acp_workspace_host_path(_extract_thread_id_from_thread_data(thread_data))
     if acp_host:
@@ -1032,40 +1172,26 @@ def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState
 
 
 def replace_virtual_paths_in_command(command: str, thread_data: ThreadDataState | None) -> str:
-    """Replace all virtual paths (/mnt/user-data, /mnt/skills, /mnt/acp-workspace) in a command string.
+    """Replace /mnt/user-data virtual paths in a command string for local sandbox.
+
+    Skills paths (/mnt/skills) and ACP workspace paths (/mnt/acp-workspace)
+    are NOT replaced here — LocalSandbox._resolve_paths_in_command() resolves
+    them via PathMapping at execution time, which uses the correct user_id
+    from sandbox acquire. Pre-resolving with _resolve_skills_path /
+    _resolve_acp_workspace_path uses get_effective_user_id() from contextvar
+    which may differ from the sandbox mapping's user_id.
 
     Args:
         command: The command string that may contain virtual paths.
         thread_data: The thread data containing actual paths.
 
     Returns:
-        The command with all virtual paths replaced.
+        The command with user-data virtual paths replaced.
     """
     result = command
 
-    # Replace skills paths
-    skills_container = _get_skills_container_path()
-    skills_host = _get_skills_host_path()
-    if skills_host and skills_container in result:
-        skills_pattern = re.compile(rf"{re.escape(skills_container)}(/[^\s\"';&|<>()]*)?")
-
-        def replace_skills_match(match: re.Match) -> str:
-            return _resolve_skills_path(match.group(0)).replace("\\", "/")
-
-        result = skills_pattern.sub(replace_skills_match, result)
-
-    # Replace ACP workspace paths
-    _thread_id = _extract_thread_id_from_thread_data(thread_data)
-    acp_host = _get_acp_workspace_host_path(_thread_id)
-    if acp_host and _ACP_WORKSPACE_VIRTUAL_PATH in result:
-        acp_pattern = re.compile(rf"{re.escape(_ACP_WORKSPACE_VIRTUAL_PATH)}(/[^\s\"';&|<>()]*)?")
-
-        def replace_acp_match(match: re.Match, _tid: str | None = _thread_id) -> str:
-            return _resolve_acp_workspace_path(match.group(0), _tid).replace("\\", "/")
-
-        result = acp_pattern.sub(replace_acp_match, result)
-
-    # Custom mount paths are resolved by LocalSandbox._resolve_paths_in_command()
+    # Skills, ACP workspace, and custom mount paths are resolved by
+    # LocalSandbox._resolve_paths_in_command() via PathMapping.
 
     # Replace user-data paths
     if VIRTUAL_PATH_PREFIX in result and thread_data is not None:
@@ -1495,6 +1621,10 @@ def ls_tool(runtime: Runtime, description: str, path: str) -> str:
         path: The **absolute** path to the directory to list.
     """
     try:
+        # Block access to disabled skill directories
+        if _is_disabled_skill_path(path, user_id=resolve_runtime_user_id(runtime)):
+            skill_name = _extract_skill_name_from_skills_path(path) or "unknown"
+            return f"Error: Skill '{skill_name}' is disabled. Access to its files is blocked. Enable the skill in settings before using it."
         sandbox = ensure_sandbox_initialized(runtime)
         ensure_thread_directories_exist(runtime)
         requested_path = path
@@ -1502,13 +1632,16 @@ def ls_tool(runtime: Runtime, description: str, path: str) -> str:
         if is_local_sandbox(runtime):
             thread_data = get_thread_data(runtime)
             validate_local_tool_path(path, thread_data, read_only=True)
-            if _is_skills_path(path):
-                path = _resolve_skills_path(path)
-            elif _is_acp_workspace_path(path):
-                path = _resolve_acp_workspace_path(path, _extract_thread_id_from_thread_data(thread_data))
+            if _is_skills_path(path) or _is_acp_workspace_path(path):
+                # Skills and ACP workspace paths are resolved by the sandbox's
+                # PathMapping (which uses the user_id from acquire time), not
+                # by _resolve_skills_path / _resolve_acp_workspace_path (which
+                # use get_effective_user_id() from contextvar and may differ
+                # from the sandbox mapping's user_id).
+                pass
             elif not _is_custom_mount_path(path):
                 path = _resolve_and_validate_user_data_path(path, thread_data)
-            # Custom mount paths are resolved by LocalSandbox._resolve_path()
+            # Custom mount paths and skills/ACP paths are resolved by LocalSandbox._resolve_path()
         children = sandbox.list_dir(path)
         if not children:
             return "(empty)"
@@ -1748,6 +1881,10 @@ def read_file_tool(
         end_line: Optional ending line number (1-indexed, inclusive). Use with start_line to read a specific range.
     """
     try:
+        # Block access to disabled skill files
+        if _is_disabled_skill_path(path, user_id=resolve_runtime_user_id(runtime)):
+            skill_name = _extract_skill_name_from_skills_path(path) or "unknown"
+            return f"Error: Skill '{skill_name}' is disabled. Access to its files is blocked. Enable the skill in settings before using it."
         requested_path = path
         content = read_current_file_content(runtime, path)
         if not content:

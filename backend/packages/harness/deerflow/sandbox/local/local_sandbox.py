@@ -608,7 +608,31 @@ class LocalSandbox(Sandbox):
             is_dir = entry.endswith(("/", "\\"))
             reversed_entry = self._reverse_resolve_path(entry.rstrip("/\\")) if is_dir else self._reverse_resolve_path(entry)
             result.append(f"{reversed_entry}/" if is_dir and not reversed_entry.endswith("/") else reversed_entry)
-        return result
+
+        # Virtual sub-directory overlay: when a container path like /mnt/skills
+        # has child mappings (public, custom, legacy) whose local_path targets
+        # are outside the resolved host directory (symlinks or bind-mount style),
+        # the ``list_dir`` utility skips them for security. We patch those
+        # missing virtual children back in so the agent can discover them via
+        # ``ls /mnt/skills``.
+        container_path = path.rstrip("/")
+        existing_dirs = {e.rstrip("/") for e in result if e.endswith("/")}
+        for mapping in self.path_mappings:
+            # A mapping is a virtual child if:
+            # 1. Its container_path is a direct child of the requested path
+            # 2. It is NOT already present in the result (was skipped by list_dir)
+            if mapping.container_path.startswith(container_path + "/"):
+                child_rel = mapping.container_path[len(container_path) + 1 :]
+                # Only direct children (no further slashes), e.g. "public", "custom"
+                if "/" not in child_rel and child_rel not in existing_dirs:
+                    # Verify the host path exists so we don't add phantom entries
+                    try:
+                        if Path(mapping.local_path).resolve().is_dir():
+                            result.append(f"{mapping.container_path}/")
+                    except OSError:
+                        pass
+
+        return sorted(result)
 
     def read_file(self, path: str) -> str:
         resolved_path = self._resolve_path(path)

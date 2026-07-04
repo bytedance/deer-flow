@@ -83,10 +83,11 @@ class LocalSandboxProvider(SandboxProvider):
         """
         Setup static path mappings shared by every sandbox this provider yields.
 
-        Static mappings cover the skills directory and any custom mounts from
-        ``config.yaml`` — both are process-wide and identical for every thread.
-        Per-thread ``/mnt/user-data/...`` and ``/mnt/acp-workspace`` mappings
-        are appended inside :meth:`acquire` because they depend on
+        Static mappings cover the **public** skills directory and any custom
+        mounts from ``config.yaml`` — both are process-wide and identical for
+        every thread.  Per-thread ``/mnt/user-data/...``, ``/mnt/acp-workspace``
+        and ``/mnt/skills/custom`` mappings are appended inside
+        :meth:`_build_thread_path_mappings` because they depend on
         ``thread_id`` and the effective ``user_id``.
 
         Returns:
@@ -94,7 +95,7 @@ class LocalSandboxProvider(SandboxProvider):
         """
         mappings: list[PathMapping] = []
 
-        # Map skills container path to local skills directory
+        # Map skills: split mount for public + legacy + custom
         try:
             from deerflow.config import get_app_config
 
@@ -102,19 +103,39 @@ class LocalSandboxProvider(SandboxProvider):
             skills_path = config.skills.get_skills_path()
             container_path = config.skills.container_path
 
-            # Only add mapping if skills directory exists
-            if skills_path.exists():
+            # Public skills: global, read-only — static, shared by all threads
+            public_skills_path = skills_path / "public"
+            if public_skills_path.exists():
                 mappings.append(
                     PathMapping(
-                        container_path=container_path,
-                        local_path=str(skills_path),
-                        read_only=True,  # Skills directory is always read-only
+                        container_path=f"{container_path}/public",
+                        local_path=str(public_skills_path),
+                        read_only=True,
                     )
                 )
 
+            # NOTE: Legacy skills mount is NOT included here because it must
+            # only be exposed to users who have no per-user custom skills yet
+            # (mirroring ``UserScopedSkillStorage._iter_skill_files`` which only
+            # surfaces SkillCategory.LEGACY to such users). Including it for
+            # every user would let users with per-user custom skills still
+            # ``read_file("/mnt/skills/legacy/<name>/SKILL.md")`` and read
+            # content the listing layer told them doesn't exist. See review
+            # feedback on PR #3889 — the legacy mount is now built in
+            # ``_build_thread_path_mappings`` after we know the user_id.
+
+            # NOTE: Custom skills mount is NOT included here because it is
+            # per-user and must be built dynamically per-thread inside
+            # ``_build_thread_path_mappings``.  The static mount that previously
+            # bound ``get_effective_user_id()`` at init time was incorrect:
+            # every subsequent user's sandbox would resolve
+            # ``/mnt/skills/custom`` to the init-time user's directory.
+
             # Map custom mounts from sandbox config
             _RESERVED_CONTAINER_PREFIXES = [
-                container_path,
+                f"{container_path}/public",
+                f"{container_path}/custom",
+                f"{container_path}/legacy",
                 _ACP_WORKSPACE_VIRTUAL_PREFIX,
                 _USER_DATA_VIRTUAL_PREFIX,
             ]
@@ -210,18 +231,22 @@ class LocalSandboxProvider(SandboxProvider):
 
     @staticmethod
     def _build_thread_path_mappings(thread_id: str, *, user_id: str | None = None) -> list[PathMapping]:
-        """Build per-thread path mappings for /mnt/user-data and /mnt/acp-workspace.
+        """Build per-thread path mappings for /mnt/user-data, /mnt/acp-workspace,
+        and /mnt/skills/custom.
 
         Uses the explicitly resolved user id when provided, falling back to
-        :func:`get_effective_user_id` for legacy callers.
+        :func:`get_effective_user_id` for legacy callers.  Custom skills are
+        mounted per-user (read-only) because agent writes custom skills via
+        ``skill_manage_tool`` on the host filesystem, not inside the sandbox.
         """
+        from deerflow.config import get_app_config
         from deerflow.config.paths import get_paths
 
         paths = get_paths()
         effective_user_id = LocalSandboxProvider._effective_acquire_user_id(user_id)
         paths.ensure_thread_dirs(thread_id, user_id=effective_user_id)
 
-        return [
+        mappings = [
             # Aggregate parent mapping so ``ls /mnt/user-data`` and other
             # parent-level operations behave the same as inside AIO (where the
             # parent directory is real and contains the three subdirs). Longer
@@ -253,6 +278,51 @@ class LocalSandboxProvider(SandboxProvider):
                 read_only=False,
             ),
         ]
+
+        # Per-user custom skills mount (read-only).  This must be per-thread
+        # because ``/mnt/skills/custom`` resolves to different host directories
+        # for different users.
+        try:
+            config = get_app_config()
+            skills_container_path = config.skills.container_path
+            user_custom_path = paths.user_custom_skills_dir(effective_user_id)
+            user_custom_path.mkdir(parents=True, exist_ok=True)
+
+            mappings.append(
+                PathMapping(
+                    container_path=f"{skills_container_path}/custom",
+                    local_path=str(user_custom_path),
+                    read_only=True,
+                )
+            )
+        except Exception as exc:
+            logger.warning("Could not setup per-thread custom skills mount: %s", exc, exc_info=True)
+
+        # Legacy (pre-migration global-custom) skills: only mount for users
+        # who have no per-user custom skills yet, mirroring the
+        # ``UserScopedSkillStorage._iter_skill_files`` visibility rule. Users
+        # with their own per-user custom skills cannot see LEGACY in the
+        # listing/prompt and must not be able to read it via the sandbox
+        # either — otherwise the listing layer and the sandbox layer disagree
+        # about visibility, and the sandbox layer is the more permissive one.
+        try:
+            config = get_app_config()
+            skills_container_path = config.skills.container_path
+            user_custom_path = paths.user_custom_skills_dir(effective_user_id)
+            legacy_skills_path = config.skills.get_skills_path() / "custom"
+            user_has_no_custom_skills = not any(p.is_dir() and not p.name.startswith(".") for p in user_custom_path.iterdir()) if user_custom_path.exists() else True
+            if user_has_no_custom_skills and legacy_skills_path.exists() and any((legacy_skills_path / d / "SKILL.md").exists() for d in legacy_skills_path.iterdir() if d.is_dir() and not d.name.startswith(".")):
+                mappings.append(
+                    PathMapping(
+                        container_path=f"{skills_container_path}/legacy",
+                        local_path=str(legacy_skills_path),
+                        read_only=True,
+                    )
+                )
+        except Exception as exc:
+            logger.warning("Could not setup per-thread legacy skills mount: %s", exc, exc_info=True)
+
+        return mappings
 
     def acquire(self, thread_id: str | None = None, *, user_id: str | None = None) -> str:
         """Return a sandbox id scoped to *thread_id* (or the generic singleton).
@@ -358,7 +428,7 @@ class LocalSandboxProvider(SandboxProvider):
         ``reset_sandbox_provider()`` calls this to ensure config / mount
         changes take effect on the next ``acquire()``. We also reset the
         module-level ``_singleton`` alias so older callers/tests that reach
-        into it see a fresh state.
+        # into it see a fresh state.
         """
         global _singleton
         with self._lock:

@@ -144,12 +144,12 @@ def test_build_subagent_runtime_middlewares_threads_app_config_to_llm_middleware
     assert captured["app_config"] is app_config
     # 8 baseline (InputSanitization, ToolOutputBudget, ThreadData, Sandbox,
     # DanglingToolCall, LLMErrorHandling, SandboxAudit, ToolErrorHandling)
-    # + 1 ReadBeforeWriteMiddleware + 1 SafetyFinishReasonMiddleware (both
-    # enabled by default).
+    # + 1 ReadBeforeWriteMiddleware + 1 LoopDetectionMiddleware
+    # + 1 SafetyFinishReasonMiddleware (all enabled by default).
     from deerflow.agents.middlewares.safety_finish_reason_middleware import SafetyFinishReasonMiddleware
     from deerflow.agents.middlewares.tool_output_budget_middleware import ToolOutputBudgetMiddleware
 
-    assert len(middlewares) == 10
+    assert len(middlewares) == 11
     assert isinstance(middlewares[0], FakeMiddleware)  # InputSanitizationMiddleware stub
     assert isinstance(middlewares[1], ToolOutputBudgetMiddleware)
     assert any(isinstance(m, ToolErrorHandlingMiddleware) for m in middlewares)
@@ -470,6 +470,56 @@ def test_subagent_runtime_middlewares_skip_deferred_filter_without_names(monkeyp
     for setup in (None, DeferredToolSetup(None, frozenset(), None)):
         middlewares = build_subagent_runtime_middlewares(app_config=app_config, deferred_setup=setup)
         assert not any(isinstance(m, DeferredToolFilterMiddleware) for m in middlewares)
+
+
+def test_subagent_runtime_middlewares_attach_loop_detection_when_enabled(monkeypatch):
+    """Subagents must inherit the lead's LoopDetectionMiddleware so a degenerate
+    tool loop is broken instead of burning tokens until ``max_turns`` (#3875).
+    ``loop_detection.enabled`` defaults to True, so the default subagent chain
+    carries the guard. Phase 1 of #3875."""
+    from deerflow.agents.middlewares.loop_detection_middleware import LoopDetectionMiddleware
+
+    app_config = _make_app_config()
+    _stub_runtime_middleware_imports(monkeypatch)
+
+    middlewares = build_subagent_runtime_middlewares(app_config=app_config, model_name="test-model")
+
+    loop = [m for m in middlewares if isinstance(m, LoopDetectionMiddleware)]
+    assert len(loop) == 1
+
+
+def test_subagent_runtime_middlewares_omit_loop_detection_when_disabled(monkeypatch):
+    """``loop_detection.enabled=False`` must drop the guard from the subagent
+    chain, mirroring the lead's gate (``lead_agent/agent.py``)."""
+    from deerflow.agents.middlewares.loop_detection_middleware import LoopDetectionMiddleware
+    from deerflow.config.loop_detection_config import LoopDetectionConfig
+
+    app_config = _make_app_config().model_copy(update={"loop_detection": LoopDetectionConfig(enabled=False)})
+    _stub_runtime_middleware_imports(monkeypatch)
+
+    middlewares = build_subagent_runtime_middlewares(app_config=app_config, model_name="test-model")
+
+    assert not any(isinstance(m, LoopDetectionMiddleware) for m in middlewares)
+
+
+def test_subagent_runtime_middlewares_place_loop_detection_before_safety_finish(monkeypatch):
+    """LoopDetectionMiddleware must be registered before SafetyFinishReasonMiddleware
+    (earlier in the middleware list). LangChain dispatches after_model hooks in
+    reverse registration order, so SafetyFinishReasonMiddleware (registered
+    later) executes first — the placement its docstring requires and the lead
+    chain (``lead_agent/agent.py``) uses. The assertion pins registration order,
+    not execution order."""
+    from deerflow.agents.middlewares.loop_detection_middleware import LoopDetectionMiddleware
+    from deerflow.agents.middlewares.safety_finish_reason_middleware import SafetyFinishReasonMiddleware
+
+    app_config = _make_app_config()
+    _stub_runtime_middleware_imports(monkeypatch)
+
+    middlewares = build_subagent_runtime_middlewares(app_config=app_config, model_name="test-model")
+
+    loop_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, LoopDetectionMiddleware))
+    safety_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, SafetyFinishReasonMiddleware))
+    assert loop_idx < safety_idx
 
 
 def test_lead_runtime_chain_finds_historical_uploads_under_lazy_init_false(tmp_path, monkeypatch):
