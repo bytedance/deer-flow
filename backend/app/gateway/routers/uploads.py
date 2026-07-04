@@ -4,7 +4,9 @@ import logging
 import os
 import stat
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
+from typing import BinaryIO
 
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from pydantic import BaseModel, Field
@@ -32,6 +34,7 @@ from deerflow.uploads.manager import (
     validate_upload_destination,
 )
 from deerflow.utils.file_conversion import CONVERTIBLE_EXTENSIONS, convert_file_to_markdown
+from deerflow.utils.file_io import run_file_io
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +44,13 @@ UPLOAD_CHUNK_SIZE = 8192
 DEFAULT_MAX_FILES = 10
 DEFAULT_MAX_FILE_SIZE = 50 * 1024 * 1024
 DEFAULT_MAX_TOTAL_SIZE = 100 * 1024 * 1024
+
+
+@dataclass(slots=True)
+class _UploadTempFile:
+    file_path: Path
+    temp_path: Path
+    handle: BinaryIO
 
 
 class UploadedFileInfo(BaseModel):
@@ -167,6 +177,78 @@ def _cleanup_uploaded_paths(paths: list[os.PathLike[str] | str]) -> None:
             logger.warning("Failed to clean up upload path after rejected request: %s", path, exc_info=True)
 
 
+def _prepare_upload_destination(uploads_dir: os.PathLike[str] | str, display_filename: str) -> _UploadTempFile:
+    uploads_dir_path = Path(uploads_dir)
+    file_path = validate_upload_destination(uploads_dir_path, display_filename)
+    temp_fd, temp_path_str = tempfile.mkstemp(prefix=UPLOAD_STAGING_PREFIX, suffix=UPLOAD_STAGING_SUFFIX, dir=uploads_dir_path)
+    temp_path = Path(temp_path_str)
+    try:
+        handle = os.fdopen(temp_fd, "wb")
+    except Exception:
+        try:
+            os.close(temp_fd)
+        except OSError:
+            pass
+        try:
+            os.unlink(temp_path)
+        except FileNotFoundError:
+            pass
+        raise
+    return _UploadTempFile(file_path=file_path, temp_path=temp_path, handle=handle)
+
+
+def _write_upload_chunk(upload_temp: _UploadTempFile, chunk: bytes) -> None:
+    upload_temp.handle.write(chunk)
+
+
+def _abort_upload_temp(upload_temp: _UploadTempFile) -> None:
+    try:
+        upload_temp.handle.close()
+    finally:
+        try:
+            os.unlink(upload_temp.temp_path)
+        except FileNotFoundError:
+            pass
+
+
+def _commit_upload_temp(upload_temp: _UploadTempFile) -> None:
+    upload_temp.handle.close()
+    try:
+        os.replace(upload_temp.temp_path, upload_temp.file_path)
+    except Exception:
+        try:
+            os.unlink(upload_temp.temp_path)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def _make_uploaded_paths_sandbox_readable(paths: list[os.PathLike[str] | str]) -> None:
+    for file_path in paths:
+        _make_file_sandbox_readable(file_path)
+
+
+def _sync_upload_to_sandbox(sandbox, file_path: os.PathLike[str] | str, virtual_path: str) -> None:
+    _make_file_sandbox_writable(file_path)
+    sandbox.update_file(virtual_path, Path(file_path).read_bytes())
+
+
+def _list_uploaded_files_for_thread(thread_id: str, user_id: str) -> dict:
+    uploads_dir = get_uploads_dir(thread_id, user_id=user_id)
+    result = list_files_in_dir(uploads_dir)
+    enrich_file_listing(result, thread_id)
+
+    sandbox_uploads = get_paths().sandbox_uploads_dir(thread_id, user_id=user_id)
+    for f in result["files"]:
+        f["path"] = str(sandbox_uploads / f["filename"])
+    return result
+
+
+def _delete_uploaded_file_for_thread(thread_id: str, filename: str, user_id: str) -> dict:
+    uploads_dir = get_uploads_dir(thread_id, user_id=user_id)
+    return delete_file_safe(uploads_dir, filename, convertible_extensions=CONVERTIBLE_EXTENSIONS)
+
+
 async def _write_upload_file_with_limits(
     file: UploadFile,
     *,
@@ -177,12 +259,9 @@ async def _write_upload_file_with_limits(
     total_size: int,
 ) -> tuple[os.PathLike[str] | str, int, int]:
     file_size = 0
-    uploads_dir_path = Path(uploads_dir)
-    file_path = validate_upload_destination(uploads_dir_path, display_filename)
-    temp_fd, temp_path_str = tempfile.mkstemp(prefix=UPLOAD_STAGING_PREFIX, suffix=UPLOAD_STAGING_SUFFIX, dir=uploads_dir_path)
-    temp_path = Path(temp_path_str)
-    fh = os.fdopen(temp_fd, "wb")
+    upload_temp: _UploadTempFile | None = None
     try:
+        upload_temp = await run_file_io(_prepare_upload_destination, uploads_dir, display_filename)
         while chunk := await file.read(UPLOAD_CHUNK_SIZE):
             file_size += len(chunk)
             total_size += len(chunk)
@@ -190,24 +269,15 @@ async def _write_upload_file_with_limits(
                 raise HTTPException(status_code=413, detail=f"File too large: {display_filename}")
             if total_size > max_total_size:
                 raise HTTPException(status_code=413, detail="Total upload size too large")
-            fh.write(chunk)
+            await run_file_io(_write_upload_chunk, upload_temp, chunk)
+
+        await run_file_io(_commit_upload_temp, upload_temp)
+        file_path = upload_temp.file_path
+        upload_temp = None
     except Exception:
-        fh.close()
-        try:
-            os.unlink(temp_path)
-        except FileNotFoundError:
-            pass
+        if upload_temp is not None:
+            await run_file_io(_abort_upload_temp, upload_temp)
         raise
-    else:
-        fh.close()
-        try:
-            os.replace(temp_path, file_path)
-        except Exception:
-            try:
-                os.unlink(temp_path)
-            except FileNotFoundError:
-                pass
-            raise
     return file_path, file_size, total_size
 
 
@@ -244,10 +314,10 @@ async def upload_files(
 
     try:
         effective_user_id = get_effective_user_id()
-        uploads_dir = ensure_uploads_dir(thread_id, user_id=effective_user_id)
+        uploads_dir = await run_file_io(ensure_uploads_dir, thread_id, user_id=effective_user_id)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    sandbox_uploads = get_paths().sandbox_uploads_dir(thread_id, user_id=effective_user_id)
+    sandbox_uploads = uploads_dir
     uploaded_files = []
     written_paths = []
     sandbox_sync_targets = []
@@ -262,7 +332,7 @@ async def upload_files(
     sync_to_sandbox = not _uses_thread_data_mounts(sandbox_provider)
     sandbox = None
     if sync_to_sandbox:
-        sandbox_id = sandbox_provider.acquire(thread_id, user_id=effective_user_id)
+        sandbox_id = await sandbox_provider.acquire_async(thread_id, user_id=effective_user_id)
         sandbox = sandbox_provider.get(sandbox_id)
         if sandbox is None:
             raise HTTPException(status_code=500, detail="Failed to acquire sandbox")
@@ -325,7 +395,7 @@ async def upload_files(
             uploaded_files.append(file_info)
 
         except HTTPException as e:
-            _cleanup_uploaded_paths(written_paths)
+            await run_file_io(_cleanup_uploaded_paths, written_paths)
             raise e
         except UnsafeUploadPathError as e:
             logger.warning("Skipping upload with unsafe destination %s: %s", file.filename, e)
@@ -333,7 +403,7 @@ async def upload_files(
             continue
         except Exception as e:
             logger.error(f"Failed to upload {file.filename}: {e}")
-            _cleanup_uploaded_paths(written_paths)
+            await run_file_io(_cleanup_uploaded_paths, written_paths)
             raise HTTPException(status_code=500, detail=f"Failed to upload {file.filename}: {str(e)}")
 
     # Uploaded files are created with 0o600 permissions (owner read/write only).
@@ -343,13 +413,11 @@ async def upload_files(
     # directory is bind-mounted into the container or synced via
     # sandbox.update_file.  Always add group/other read bits so every sandbox
     # configuration can read the uploaded content.
-    for file_path in written_paths:
-        _make_file_sandbox_readable(file_path)
+    await run_file_io(_make_uploaded_paths_sandbox_readable, written_paths)
 
     if sync_to_sandbox:
         for file_path, virtual_path in sandbox_sync_targets:
-            _make_file_sandbox_writable(file_path)
-            sandbox.update_file(virtual_path, file_path.read_bytes())
+            await run_file_io(_sync_upload_to_sandbox, sandbox, file_path, virtual_path)
 
     message = f"Successfully uploaded {len(uploaded_files)} file(s)"
     if skipped_files:
@@ -379,16 +447,9 @@ async def get_upload_limits(
 async def list_uploaded_files(thread_id: str, request: Request) -> UploadListResponse:
     """List all files in a thread's uploads directory."""
     try:
-        uploads_dir = get_uploads_dir(thread_id)
+        result = await run_file_io(_list_uploaded_files_for_thread, thread_id, get_effective_user_id())
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    result = list_files_in_dir(uploads_dir)
-    enrich_file_listing(result, thread_id)
-
-    # Gateway additionally includes the sandbox-relative path.
-    sandbox_uploads = get_paths().sandbox_uploads_dir(thread_id, user_id=get_effective_user_id())
-    for f in result["files"]:
-        f["path"] = str(sandbox_uploads / f["filename"])
 
     return UploadListResponse(**result)
 
@@ -398,15 +459,13 @@ async def list_uploaded_files(thread_id: str, request: Request) -> UploadListRes
 async def delete_uploaded_file(thread_id: str, filename: str, request: Request) -> dict:
     """Delete a file from a thread's uploads directory."""
     try:
-        uploads_dir = get_uploads_dir(thread_id)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    try:
-        return delete_file_safe(uploads_dir, filename, convertible_extensions=CONVERTIBLE_EXTENSIONS)
+        return await run_file_io(_delete_uploaded_file_for_thread, thread_id, filename, get_effective_user_id())
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail=f"File not found: {filename}")
     except PathTraversalError:
         raise HTTPException(status_code=400, detail="Invalid path")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error(f"Failed to delete {filename}: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to delete {filename}: {str(e)}")

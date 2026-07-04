@@ -50,6 +50,15 @@ from deerflow.tracing import build_tracing_callbacks
 logger = logging.getLogger(__name__)
 
 _BOOTSTRAP_SKILL_NAMES = {"bootstrap"}
+_NON_INTERACTIVE_DISABLED_TOOL_NAMES = frozenset({"ask_clarification"})
+
+# Channels whose inbound messages originate from untrusted external
+# commenters (anyone on a GitHub repo, etc.) and whose run context is
+# therefore unsafe for admin-shaped tools like ``update_agent``. The
+# corresponding gate lives in :func:`_make_lead_agent`; the channel name
+# itself is plumbed into ``run_context`` by
+# ``ChannelManager._resolve_run_params``.
+_WEBHOOK_CHANNELS: frozenset[str] = frozenset({"github"})
 
 
 def _get_runtime_config(config: RunnableConfig) -> dict:
@@ -449,6 +458,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
     subagent_enabled = cfg.get("subagent_enabled", False)
     max_concurrent_subagents = cfg.get("max_concurrent_subagents", 3)
     is_bootstrap = cfg.get("is_bootstrap", False)
+    non_interactive = bool(cfg.get("non_interactive", False))
     agent_name = validate_agent_name(cfg.get("agent_name"))
 
     agent_config = load_agent_config(agent_name) if not is_bootstrap else None
@@ -510,13 +520,30 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
 
     skills_for_tool_policy = _load_enabled_skills_for_tool_policy(available_skills, app_config=resolved_app_config, user_id=resolved_user_id)
 
+    # Build skill search setup (deferred skill discovery).
+    # Controlled by skills.deferred_discovery — independent from tool_search.enabled.
+    from deerflow.skills.describe import build_skill_search_setup
+
+    skill_search_enabled = resolved_app_config.skills.deferred_discovery
+    container_base_path = resolved_app_config.skills.container_path
+
     if is_bootstrap:
         # Special bootstrap agent with minimal prompt for initial custom agent creation flow
         # Keep the bootstrap skill set intentionally narrow so agent creation
         # remains deterministic before the custom agent's own config exists.
+        bootstrap_skills = [s for s in skills_for_tool_policy if s.name in _BOOTSTRAP_SKILL_NAMES]
+        skill_setup = build_skill_search_setup(
+            bootstrap_skills,
+            enabled=skill_search_enabled,
+            container_base_path=container_base_path,
+        )
         raw_tools = get_available_tools(model_name=model_name, subagent_enabled=subagent_enabled, app_config=resolved_app_config) + [setup_agent]
         filtered = filter_tools_by_skill_allowed_tools(raw_tools, skills_for_tool_policy, always_allowed_tool_names=SKILL_LOADING_TOOL_NAMES)
+        if non_interactive:
+            filtered = [tool for tool in filtered if tool.name not in _NON_INTERACTIVE_DISABLED_TOOL_NAMES]
         final_tools, setup = assemble_deferred_tools(filtered, enabled=resolved_app_config.tool_search.enabled)
+        if skill_setup.describe_skill_tool:
+            final_tools.append(skill_setup.describe_skill_tool)
         return create_agent(
             model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, app_config=resolved_app_config, attach_tracing=False),
             tools=final_tools,
@@ -535,17 +562,44 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
                 app_config=resolved_app_config,
                 deferred_names=setup.deferred_names,
                 user_id=resolved_user_id,
+                skill_names=skill_setup.skill_names or None,
             ),
             state_schema=ThreadState,
         )
 
     # Custom agents can update their own SOUL.md / config via update_agent.
     # The default agent (no agent_name) does not see this tool.
-    extra_tools = [update_agent] if agent_name else []
+    # Build skill search setup from policy-filtered skills (same list used for
+    # tool-policy filtering), so describe_skill only exposes allowed skills.
+    skill_setup = build_skill_search_setup(
+        skills_for_tool_policy,
+        enabled=skill_search_enabled,
+        container_base_path=container_base_path,
+    )
+    #
+    # Withhold ``update_agent`` from runs triggered by webhook channels
+    # (currently only ``github``). Webhook prompts come from arbitrary
+    # external commenters — anyone who can post on a configured repo and
+    # types ``@<bot>`` clears the trigger gate. Exposing the tool there
+    # gives that commenter a path to mutate the agent's ``tool_groups``
+    # / ``SOUL.md`` / ``model``, and the change persists for every
+    # subsequent run. Self-mutation belongs in operator-trusted surfaces
+    # (the chat UI, the HTTP API), not in webhook fan-out.
+    #
+    # The channel name is plumbed into ``run_context`` by
+    # ``ChannelManager._resolve_run_params``; bootstrap and direct invocations
+    # leave it unset, so ``update_agent`` remains available there.
+    channel_name = cfg.get("channel_name")
+    is_webhook_channel = channel_name in _WEBHOOK_CHANNELS
+    extra_tools = [update_agent] if agent_name and not is_webhook_channel else []
     # Default lead agent (unchanged behavior)
     raw_tools = get_available_tools(model_name=model_name, groups=agent_config.tool_groups if agent_config else None, subagent_enabled=subagent_enabled, app_config=resolved_app_config)
     filtered = filter_tools_by_skill_allowed_tools(raw_tools + extra_tools, skills_for_tool_policy, always_allowed_tool_names=SKILL_LOADING_TOOL_NAMES)
+    if non_interactive:
+        filtered = [tool for tool in filtered if tool.name not in _NON_INTERACTIVE_DISABLED_TOOL_NAMES]
     final_tools, setup = assemble_deferred_tools(filtered, enabled=resolved_app_config.tool_search.enabled)
+    if skill_setup.describe_skill_tool:
+        final_tools.append(skill_setup.describe_skill_tool)
     return create_agent(
         model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, reasoning_effort=reasoning_effort, app_config=resolved_app_config, attach_tracing=False),
         tools=final_tools,
@@ -566,6 +620,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
             app_config=resolved_app_config,
             deferred_names=setup.deferred_names,
             user_id=resolved_user_id,
+            skill_names=skill_setup.skill_names or None,
         ),
         state_schema=ThreadState,
     )

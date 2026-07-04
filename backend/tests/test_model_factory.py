@@ -103,6 +103,23 @@ def test_raises_when_model_not_found(monkeypatch):
         factory_module.create_chat_model(name="ghost-model")
 
 
+def test_pricing_metadata_never_reaches_the_provider_client(monkeypatch):
+    """`models[*].pricing` is console-only metadata (issue: ChatOpenAI forwards
+    unknown kwargs into the completion request payload, so an un-stripped
+    `pricing` block breaks every live LLM call with
+    ``Completions.create() got an unexpected keyword argument 'pricing'``)."""
+    model = _make_model("priced")
+    # ModelConfig is extra="allow" — pricing rides along as an extra field.
+    model.pricing = {"currency": "CNY", "input_per_million": 8, "output_per_million": 32, "input_cache_hit_per_million": 0.8}
+    cfg = _make_app_config([model])
+    _patch_factory(monkeypatch, cfg)
+
+    FakeChatModel.captured_kwargs = {}
+    factory_module.create_chat_model(name="priced")
+
+    assert "pricing" not in FakeChatModel.captured_kwargs
+
+
 def test_appends_all_tracing_callbacks(monkeypatch):
     cfg = _make_app_config([_make_model("alpha")])
     _patch_factory(monkeypatch, cfg)

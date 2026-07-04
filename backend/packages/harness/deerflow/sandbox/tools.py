@@ -1592,6 +1592,51 @@ def _channel_identity_prefix(runtime: Runtime) -> str | None:
     return f"unset {CHANNEL_USER_ID_ENV}; "
 
 
+def _github_env_from_runtime(runtime: Runtime) -> dict[str, str] | None:
+    """Build a per-call env overlay carrying a GitHub App installation token.
+
+    The GitHub channel mints a short-lived installation token in the
+    ``ChannelManager`` (app layer) and threads it through ``run_context``
+    so it lands in ``runtime.context["github_token"]``. We expose it to
+    the agent's bash as both ``GH_TOKEN`` (what the ``gh`` CLI reads) and
+    ``GITHUB_TOKEN`` (the conventional name). Returning ``None`` when no
+    token is present keeps non-GitHub runs identical to before.
+
+    The value at ``runtime.context["github_token"]`` may be either:
+
+    * a ``str`` — the captured token, the simple shape used by tests and
+      by older code paths that don't need refresh; or
+    * a zero-arg sync callable returning ``str`` — a provider that re-mints
+      transparently when the underlying installation token's 1h TTL is
+      nearing expiry. The provider's cache logic lives app-side (see
+      ``app.gateway.github.app_auth.mint_installation_token`` for the
+      cache + leeway semantics); the harness just calls it.
+
+    The callable path is what lets long autonomous runs survive past the
+    60-minute installation-token life: every bash invocation re-asks the
+    provider, which returns the cached token until ~55 min, then mints a
+    fresh one. Without this, a coder agent doing a multi-hour refactor
+    would do most of the work and then 401 on the final ``git push``.
+
+    The token still crosses the harness/app boundary as opaque data — the
+    harness never imports the app-layer minting code, preserving the
+    dependency firewall enforced by ``tests/test_harness_boundary.py``.
+    """
+    context = runtime.context if runtime.context is not None else None
+    value = context.get("github_token") if context else None
+    if callable(value):
+        try:
+            token = value()
+        except Exception:
+            logger.warning("github_token provider raised; skipping env overlay", exc_info=True)
+            return None
+    else:
+        token = value
+    if not isinstance(token, str) or not token:
+        return None
+    return {"GH_TOKEN": token, "GITHUB_TOKEN": token}
+
+
 @tool("bash", parse_docstring=True)
 def bash_tool(runtime: Runtime, description: str, command: str) -> str:
     """Execute a bash command in a Linux environment.
@@ -1611,10 +1656,15 @@ def bash_tool(runtime: Runtime, description: str, command: str) -> str:
     """
     try:
         sandbox = ensure_sandbox_initialized(runtime)
-        # Request-scoped secrets resolved for the active skill (#3861); injected as
-        # per-call env into the subprocess, never placed in the command string.
+        # Request-scoped secrets resolved for the active skill (#3861), plus a
+        # short-lived GitHub App installation token threaded through by the
+        # GitHub channel. Both are injected as per-call env into the subprocess,
+        # never placed in the command string.
         injected_env = read_active_secrets(getattr(runtime, "context", None)) or None
         identity_prefix = _channel_identity_prefix(runtime)
+        github_env = _github_env_from_runtime(runtime)
+        if github_env:
+            injected_env = {**(injected_env or {}), **github_env}
         if is_local_sandbox(runtime):
             if not is_host_bash_allowed():
                 return f"Error: {LOCAL_HOST_BASH_DISABLED_MESSAGE}"
