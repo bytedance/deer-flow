@@ -319,9 +319,7 @@ class TestNoChangeTimeout:
 
 class TestReadFile:
     def test_read_file_forwards_requested_line_range(self, sandbox):
-        sandbox._client.file.read_file = MagicMock(
-            return_value=SimpleNamespace(data=SimpleNamespace(content="line 1\nline 2"))
-        )
+        sandbox._client.file.read_file = MagicMock(return_value=SimpleNamespace(data=SimpleNamespace(content="line 1\nline 2")))
 
         result = sandbox.read_file("/mnt/user-data/workspace/huge.log", start_line=1, end_line=10)
 
