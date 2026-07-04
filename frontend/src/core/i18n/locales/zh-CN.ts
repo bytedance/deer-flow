@@ -1,4 +1,4 @@
-﻿import {
+import {
   CompassIcon,
   GraduationCapIcon,
   ImageIcon,
@@ -404,6 +404,28 @@ export const zhCN: Translations = {
     loadMoreToSearch: "加载更多以搜索更早的对话",
     loadingMore: "正在加载...",
     loadOlderChats: "加载更早的对话",
+  },
+
+  // Sidecar
+  sidecar: {
+    title: "侧边对话",
+    open: "打开侧边对话",
+    close: "关闭侧边对话",
+    addToConversation: "添加到对话",
+    askInSideChat: "在侧边聊天中提问",
+    reference: "引用",
+    selectedTextFragment: "{count} 个已选文本片段",
+    selectedTextFragments: "{count} 个已选文本片段",
+    clearReferences: "清除已选引用",
+    emptyTitle: "继续深入追问",
+    emptyDescription: "基于引用内容单独追问。",
+    placeholder: "继续深入追问...",
+    send: "发送",
+    sendFailed: "侧边对话发送失败。",
+    noContext: "未选择上下文",
+    continuing: "继续当前侧边对话",
+    selectionCrossesMessages:
+      "选区跨越了多条消息，请在同一条回复内选择要引用的文本。",
   },
 
   // Channels

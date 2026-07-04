@@ -14,6 +14,7 @@ import type { Page, Route } from "@playwright/test";
 
 export const MOCK_THREAD_ID = "00000000-0000-0000-0000-000000000001";
 export const MOCK_THREAD_ID_2 = "00000000-0000-0000-0000-000000000002";
+export const MOCK_SIDECAR_THREAD_ID = "00000000-0000-0000-0000-0000000000aa";
 export const MOCK_RUN_ID = "00000000-0000-0000-0000-000000000099";
 
 const MOCK_AUTH_USER = {
@@ -109,19 +110,83 @@ const DEFAULT_SKILLS: MockSkill[] = [
   },
 ];
 
-function mockStreamMessages() {
+function isHiddenInputMessage(message: unknown) {
+  if (typeof message !== "object" || message === null) {
+    return false;
+  }
+  const additionalKwargs = Reflect.get(message, "additional_kwargs");
+  return (
+    typeof additionalKwargs === "object" &&
+    additionalKwargs !== null &&
+    Reflect.get(additionalKwargs, "hide_from_ui") === true
+  );
+}
+
+function visibleInputMessages(messages: unknown[]) {
+  return messages.filter((message) => !isHiddenInputMessage(message));
+}
+
+function visibleRunInputMessages(route: Route) {
+  try {
+    const body = route.request().postDataJSON() as {
+      input?: { messages?: unknown[] };
+    };
+    return visibleInputMessages(body.input?.messages ?? []);
+  } catch {
+    return [];
+  }
+}
+
+function mockStreamMessages(route?: Route, inputMessages?: unknown[]) {
+  const submittedMessages = inputMessages
+    ? visibleInputMessages(inputMessages)
+    : route
+      ? visibleRunInputMessages(route)
+      : [];
+  const responseMessage = {
+    type: "ai",
+    id: "msg-ai-1",
+    content: "Hello from DeerFlow!",
+  };
+  if (submittedMessages.length > 0) {
+    return [...submittedMessages, responseMessage];
+  }
+
   return [
     {
       type: "human",
       id: "msg-human-1",
       content: [{ type: "text", text: "Hello" }],
     },
-    {
-      type: "ai",
-      id: "msg-ai-1",
-      content: "Hello from DeerFlow!",
-    },
+    responseMessage,
   ];
+}
+
+function runStreamThreadId(route: Route) {
+  const pathThreadId = /\/threads\/([^/]+)\/runs\/stream/.exec(
+    new URL(route.request().url()).pathname,
+  )?.[1];
+  if (pathThreadId) {
+    return pathThreadId;
+  }
+
+  try {
+    const body = route.request().postDataJSON() as {
+      thread_id?: string;
+      threadId?: string;
+      context?: { thread_id?: string };
+      config?: { configurable?: { thread_id?: string } };
+    };
+    return (
+      body.thread_id ??
+      body.threadId ??
+      body.context?.thread_id ??
+      body.config?.configurable?.thread_id ??
+      MOCK_THREAD_ID
+    );
+  } catch {
+    return MOCK_THREAD_ID;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -473,7 +538,7 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
 
   // Thread search — sidebar thread list & chats list page
   void page.route("**/api/langgraph/threads/search", async (route) => {
-    const body = threads.map(threadSearchResult);
+    let body = threads.map(threadSearchResult);
 
     let limit: number | undefined;
     let offset = 0;
@@ -481,6 +546,7 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
       const postData = route.request().postDataJSON() as {
         limit?: number;
         offset?: number;
+        metadata?: Record<string, unknown>;
       } | null;
       if (postData) {
         if (typeof postData.limit === "number") {
@@ -488,6 +554,13 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
         }
         if (typeof postData.offset === "number") {
           offset = postData.offset;
+        }
+        if (postData.metadata && typeof postData.metadata === "object") {
+          body = body.filter((thread) =>
+            Object.entries(postData.metadata ?? {}).every(
+              ([key, value]) => thread.metadata?.[key] === value,
+            ),
+          );
         }
       }
     } catch {
@@ -562,6 +635,36 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
       threads = threads.filter((thread) => thread.thread_id !== threadId);
       return route.fulfill({
         status: 204,
+      });
+    }
+    return route.fallback();
+  });
+
+  void page.route("**/api/threads", (route) => {
+    if (route.request().method() === "POST") {
+      const body = route.request().postDataJSON() as {
+        thread_id?: string;
+        metadata?: Record<string, unknown>;
+      };
+      const threadId = body.thread_id ?? MOCK_SIDECAR_THREAD_ID;
+      upsertThread({
+        thread_id: threadId,
+        title: "Side chat",
+        updated_at: new Date().toISOString(),
+        metadata: body.metadata ?? {},
+        messages: [],
+      });
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          thread_id: threadId,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+          metadata: body.metadata ?? {},
+          status: "idle",
+          values: {},
+        }),
       });
     }
     return route.fallback();
@@ -787,18 +890,19 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
 
   // Run stream — returns a minimal SSE response with an AI message
   const handleMockRunStream = (route: Route) => {
-    const requestUrl = route.request().url();
-    const matchingThread = threads.find((thread) =>
-      requestUrl.includes(encodeURIComponent(thread.thread_id)),
+    const threadId = runStreamThreadId(route);
+    const existingThread = threads.find(
+      (thread) => thread.thread_id === threadId,
     );
     const fallbackGoal = threads.find((thread) => thread.goal)?.goal ?? null;
-    const goal = matchingThread?.goal ?? fallbackGoal;
+    const goal = existingThread?.goal ?? fallbackGoal;
     upsertThread({
-      thread_id: MOCK_THREAD_ID,
-      title: "New Chat",
+      thread_id: threadId,
+      title: threadId === MOCK_SIDECAR_THREAD_ID ? "Side chat" : "New Chat",
       updated_at: new Date().toISOString(),
       goal,
-      messages: mockStreamMessages(),
+      metadata: existingThread?.metadata,
+      messages: mockStreamMessages(route),
     });
     return handleRunStream(route, { goal });
   };
@@ -906,17 +1010,19 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
 export function handleRunStream(
   route: Route,
   values: Record<string, unknown> = {},
+  inputMessages?: unknown[],
 ) {
+  const threadId = runStreamThreadId(route);
   const events = [
     {
       event: "metadata",
-      data: { run_id: MOCK_RUN_ID, thread_id: MOCK_THREAD_ID },
+      data: { run_id: MOCK_RUN_ID, thread_id: threadId },
     },
     {
       event: "values",
       data: {
         ...values,
-        messages: mockStreamMessages(),
+        messages: mockStreamMessages(route, inputMessages),
       },
     },
     { event: "end", data: {} },

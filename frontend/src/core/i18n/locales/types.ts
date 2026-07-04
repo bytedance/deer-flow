@@ -333,6 +333,27 @@ export interface Translations {
     loadOlderChats: string;
   };
 
+  // Sidecar
+  sidecar: {
+    title: string;
+    open: string;
+    close: string;
+    addToConversation: string;
+    askInSideChat: string;
+    reference: string;
+    selectedTextFragment: string;
+    selectedTextFragments: string;
+    clearReferences: string;
+    emptyTitle: string;
+    emptyDescription: string;
+    placeholder: string;
+    send: string;
+    sendFailed: string;
+    noContext: string;
+    continuing: string;
+    selectionCrossesMessages: string;
+  };
+
   // Channels
   channels: {
     title: string;

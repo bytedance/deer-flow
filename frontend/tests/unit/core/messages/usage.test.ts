@@ -42,6 +42,27 @@ test("counts later usage-bearing snapshots for the same AI message id", () => {
   });
 });
 
+test("reads usage metadata from additional kwargs when the SDK nests it there", () => {
+  const aiMessage = {
+    id: "ai-1",
+    type: "ai",
+    content: "Answer",
+    additional_kwargs: {
+      usage_metadata: {
+        input_tokens: 8,
+        output_tokens: 3,
+        total_tokens: 11,
+      },
+    },
+  } as unknown as Message;
+
+  expect(accumulateUsage([aiMessage])).toEqual({
+    inputTokens: 8,
+    outputTokens: 3,
+    totalTokens: 11,
+  });
+});
+
 test("keeps header and per-turn aggregation consistent for a reasoning+answer message", () => {
   // A single AI message carrying both reasoning (here via inline <think>) and
   // answer text now lands in exactly one assistant group (#3868), so its usage
