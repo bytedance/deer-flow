@@ -71,6 +71,44 @@ async def _drain_inflight_runs(run_manager: RunManager) -> None:
         logger.exception("Failed to drain in-flight runs during shutdown")
 
 
+async def _publish_recovered_run_stream_end(
+    bridge: StreamBridge,
+    recovered_runs: list[RunRecord],
+    *,
+    cleanup_delay: float = 60.0,
+) -> None:
+    """Terminate retained streams for runs recovered as orphaned at startup."""
+    for record in recovered_runs:
+        stream_exists = getattr(bridge, "stream_exists", None)
+        if stream_exists is not None:
+            try:
+                if not await stream_exists(record.run_id):
+                    logger.debug("Skipping recovered stream end for %s: stream already expired", record.run_id)
+                    continue
+            except Exception:
+                logger.debug("Failed to check recovered stream existence for %s", record.run_id, exc_info=True)
+        try:
+            await bridge.publish_end(record.run_id)
+        except Exception:
+            logger.warning(
+                "Failed to publish recovered run stream end for %s",
+                record.run_id,
+                exc_info=True,
+            )
+            continue
+        task = asyncio.create_task(bridge.cleanup(record.run_id, delay=cleanup_delay))
+        task.add_done_callback(lambda task, run_id=record.run_id: _log_recovered_stream_cleanup_result(task, run_id))
+
+
+def _log_recovered_stream_cleanup_result(task: asyncio.Task[None], run_id: str) -> None:
+    if task.cancelled():
+        return
+    try:
+        task.result()
+    except Exception:
+        logger.warning("Failed to clean up recovered run stream for %s", run_id, exc_info=True)
+
+
 if TYPE_CHECKING:
     from app.gateway.auth.local_provider import LocalAuthProvider
     from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
@@ -220,6 +258,9 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
                 error="Gateway restarted before this run reached a durable final state.",
                 before=now_iso(),
             )
+            sb_config = getattr(config, "stream_bridge", None)
+            cleanup_delay = getattr(sb_config, "recovered_stream_cleanup_delay_seconds", 60.0) if sb_config else 60.0
+            await _publish_recovered_run_stream_end(app.state.stream_bridge, recovered_runs, cleanup_delay=cleanup_delay)
             await _mark_latest_recovered_threads_error(app.state.run_manager, app.state.thread_store, recovered_runs)
 
         try:
