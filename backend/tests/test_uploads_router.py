@@ -36,6 +36,15 @@ def _mounted_provider() -> MagicMock:
     return provider
 
 
+def _symlink_to_or_skip(link_path: Path, target_path: Path) -> None:
+    try:
+        link_path.symlink_to(target_path)
+    except OSError as exc:
+        if getattr(exc, "winerror", None) == 1314:
+            pytest.skip("Windows symlink privilege is not available")
+        raise
+
+
 def test_upload_files_writes_thread_storage_and_skips_local_sandbox_sync(tmp_path):
     thread_uploads_dir = tmp_path / "uploads"
     thread_uploads_dir.mkdir(parents=True)
@@ -178,7 +187,8 @@ def test_upload_files_syncs_non_local_sandbox_and_marks_markdown_file(tmp_path):
 
     provider = MagicMock()
     provider.uses_thread_data_mounts = False
-    provider.acquire.return_value = "aio-1"
+    provider.acquire.side_effect = AssertionError("upload route should use acquire_async")
+    provider.acquire_async = AsyncMock(return_value="aio-1")
     sandbox = MagicMock()
     provider.get.return_value = sandbox
 
@@ -216,7 +226,8 @@ def test_upload_files_makes_non_local_files_sandbox_writable(tmp_path):
 
     provider = MagicMock()
     provider.uses_thread_data_mounts = False
-    provider.acquire.return_value = "aio-1"
+    provider.acquire.side_effect = AssertionError("upload route should use acquire_async")
+    provider.acquire_async = AsyncMock(return_value="aio-1")
     sandbox = MagicMock()
     provider.get.return_value = sandbox
 
@@ -284,7 +295,8 @@ def test_upload_files_acquires_non_local_sandbox_before_writing(tmp_path):
         assert user_id == "owner-upload"
         return "aio-1"
 
-    provider.acquire.side_effect = acquire_before_writes
+    provider.acquire.side_effect = AssertionError("upload route should use acquire_async")
+    provider.acquire_async = AsyncMock(side_effect=acquire_before_writes)
 
     with (
         patch.object(uploads, "get_effective_user_id", return_value="owner-upload"),
@@ -295,7 +307,8 @@ def test_upload_files_acquires_non_local_sandbox_before_writing(tmp_path):
         result = asyncio.run(call_unwrapped(uploads.upload_files, "thread-aio", request=MagicMock(), files=[file], config=SimpleNamespace()))
 
     assert result.success is True
-    provider.acquire.assert_called_once_with("thread-aio", user_id="owner-upload")
+    provider.acquire.assert_not_called()
+    provider.acquire_async.assert_awaited_once_with("thread-aio", user_id="owner-upload")
     sandbox.update_file.assert_called_once_with("/mnt/user-data/uploads/notes.txt", b"hello uploads")
 
 
@@ -305,7 +318,8 @@ def test_upload_files_fails_before_writing_when_non_local_sandbox_unavailable(tm
 
     provider = MagicMock()
     provider.uses_thread_data_mounts = False
-    provider.acquire.side_effect = RuntimeError("sandbox unavailable")
+    provider.acquire.side_effect = AssertionError("upload route should use acquire_async")
+    provider.acquire_async = AsyncMock(side_effect=RuntimeError("sandbox unavailable"))
     file = ChunkedUpload("notes.txt", [b"hello uploads"])
 
     with (
@@ -317,6 +331,7 @@ def test_upload_files_fails_before_writing_when_non_local_sandbox_unavailable(tm
 
     assert list(thread_uploads_dir.iterdir()) == []
     assert file.read_calls == []
+    provider.acquire.assert_not_called()
     provider.get.assert_not_called()
 
 
@@ -390,7 +405,8 @@ def test_upload_files_does_not_sync_non_local_sandbox_when_total_size_exceeds_li
 
     provider = MagicMock()
     provider.uses_thread_data_mounts = False
-    provider.acquire.return_value = "aio-1"
+    provider.acquire.side_effect = AssertionError("upload route should use acquire_async")
+    provider.acquire_async = AsyncMock(return_value="aio-1")
     sandbox = MagicMock()
     provider.get.return_value = sandbox
 
@@ -408,7 +424,8 @@ def test_upload_files_does_not_sync_non_local_sandbox_when_total_size_exceeds_li
             asyncio.run(call_unwrapped(uploads.upload_files, "thread-aio", request=MagicMock(), files=files, config=SimpleNamespace()))
 
     assert exc_info.value.status_code == 413
-    provider.acquire.assert_called_once_with("thread-aio", user_id="owner-upload")
+    provider.acquire.assert_not_called()
+    provider.acquire_async.assert_awaited_once_with("thread-aio", user_id="owner-upload")
     provider.get.assert_called_once_with("aio-1")
     sandbox.update_file.assert_not_called()
 
@@ -419,7 +436,8 @@ def test_upload_files_does_not_sync_non_local_sandbox_when_conversion_fails(tmp_
 
     provider = MagicMock()
     provider.uses_thread_data_mounts = False
-    provider.acquire.return_value = "aio-1"
+    provider.acquire.side_effect = AssertionError("upload route should use acquire_async")
+    provider.acquire_async = AsyncMock(return_value="aio-1")
     sandbox = MagicMock()
     provider.get.return_value = sandbox
 
@@ -435,7 +453,8 @@ def test_upload_files_does_not_sync_non_local_sandbox_when_conversion_fails(tmp_
             asyncio.run(call_unwrapped(uploads.upload_files, "thread-aio", request=MagicMock(), files=[file], config=SimpleNamespace()))
 
     assert exc_info.value.status_code == 500
-    provider.acquire.assert_called_once_with("thread-aio", user_id="owner-upload")
+    provider.acquire.assert_not_called()
+    provider.acquire_async.assert_awaited_once_with("thread-aio", user_id="owner-upload")
     provider.get.assert_called_once_with("aio-1")
     sandbox.update_file.assert_not_called()
     assert not (thread_uploads_dir / "report.pdf").exists()
@@ -559,7 +578,7 @@ def test_upload_files_rejects_preexisting_symlink_destination(tmp_path):
     thread_uploads_dir.mkdir(parents=True)
     outside_file = tmp_path / "outside.txt"
     outside_file.write_text("protected", encoding="utf-8")
-    (thread_uploads_dir / "victim.txt").symlink_to(outside_file)
+    _symlink_to_or_skip(thread_uploads_dir / "victim.txt", outside_file)
 
     provider = MagicMock()
     provider.uses_thread_data_mounts = True
@@ -584,7 +603,7 @@ def test_upload_files_rejects_dangling_symlink_destination(tmp_path):
     thread_uploads_dir = tmp_path / "uploads"
     thread_uploads_dir.mkdir(parents=True)
     missing_target = tmp_path / "missing-target.txt"
-    (thread_uploads_dir / "victim.txt").symlink_to(missing_target)
+    _symlink_to_or_skip(thread_uploads_dir / "victim.txt", missing_target)
 
     provider = MagicMock()
     provider.uses_thread_data_mounts = True

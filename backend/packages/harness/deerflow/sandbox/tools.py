@@ -1544,6 +1544,99 @@ def _truncate_ls_output(output: str, max_chars: int) -> str:
     return f"{output[:kept]}{marker}"
 
 
+# Fixed env var exposing the IM-channel platform user id (Feishu open_id,
+# Slack Uxxx, ...) to sandbox commands, so skills can act on the current end
+# user's channel identity (#3914). An identifier, not a secret.
+CHANNEL_USER_ID_ENV = "DEERFLOW_CHANNEL_USER_ID"
+
+_CHANNEL_USER_ID_CONTEXT_KEY = "channel_user_id"
+
+# body.context is client-writable on web requests, so bound the value: real
+# platform ids are tens of chars; anything past this is hostile or corrupt and
+# must not bloat every command string sent to the sandbox.
+_CHANNEL_USER_ID_MAX_LEN = 256
+
+
+def _is_windows() -> bool:
+    return os.name == "nt"
+
+
+def _channel_identity_prefix(runtime: Runtime) -> str | None:
+    """Build the command prefix that sets or clears the channel-user-id env var.
+
+    Returns ``None`` for a non-IM run (no ``channel_user_id`` key in context) so
+    the command is left untouched. For an IM run the prefix is always emitted:
+
+    - valid id (non-empty str within the length cap) → ``export VAR=<quoted>; ``
+    - unusable id (empty / non-str / over the cap) → ``unset VAR; ``
+
+    The id deliberately rides the command string instead of the
+    ``execute_command(env=...)`` channel: a non-empty ``env`` switches
+    ``AioSandbox`` to the ``bash.exec`` API (fresh session per call, image
+    >= 1.9.3 required), which is reserved for request-scoped secrets. Emitting an
+    explicit ``export``-or-``unset`` on every IM command makes per-call identity
+    correct **without depending on the AIO shell's session semantics**: the AIO
+    no-env path reuses a persistent shell session (the reason for the class lock,
+    #1433), so a bare command could otherwise resolve a stale value exported by
+    an earlier sender in a shared group-chat sandbox. The ``unset`` closes the
+    window the length/type guard would otherwise open — a sender whose id is
+    dropped inherits the previous sender's value. Values are identifiers, not
+    secrets, so keeping them in the audit-visible command string is fine.
+    """
+    context = getattr(runtime, "context", None)
+    if not isinstance(context, dict) or _CHANNEL_USER_ID_CONTEXT_KEY not in context:
+        return None
+    channel_user_id = context.get(_CHANNEL_USER_ID_CONTEXT_KEY)
+    if isinstance(channel_user_id, str) and 0 < len(channel_user_id) <= _CHANNEL_USER_ID_MAX_LEN:
+        return f"export {CHANNEL_USER_ID_ENV}={shlex.quote(channel_user_id)}; "
+    return f"unset {CHANNEL_USER_ID_ENV}; "
+
+
+def _github_env_from_runtime(runtime: Runtime) -> dict[str, str] | None:
+    """Build a per-call env overlay carrying a GitHub App installation token.
+
+    The GitHub channel mints a short-lived installation token in the
+    ``ChannelManager`` (app layer) and threads it through ``run_context``
+    so it lands in ``runtime.context["github_token"]``. We expose it to
+    the agent's bash as both ``GH_TOKEN`` (what the ``gh`` CLI reads) and
+    ``GITHUB_TOKEN`` (the conventional name). Returning ``None`` when no
+    token is present keeps non-GitHub runs identical to before.
+
+    The value at ``runtime.context["github_token"]`` may be either:
+
+    * a ``str`` — the captured token, the simple shape used by tests and
+      by older code paths that don't need refresh; or
+    * a zero-arg sync callable returning ``str`` — a provider that re-mints
+      transparently when the underlying installation token's 1h TTL is
+      nearing expiry. The provider's cache logic lives app-side (see
+      ``app.gateway.github.app_auth.mint_installation_token`` for the
+      cache + leeway semantics); the harness just calls it.
+
+    The callable path is what lets long autonomous runs survive past the
+    60-minute installation-token life: every bash invocation re-asks the
+    provider, which returns the cached token until ~55 min, then mints a
+    fresh one. Without this, a coder agent doing a multi-hour refactor
+    would do most of the work and then 401 on the final ``git push``.
+
+    The token still crosses the harness/app boundary as opaque data — the
+    harness never imports the app-layer minting code, preserving the
+    dependency firewall enforced by ``tests/test_harness_boundary.py``.
+    """
+    context = runtime.context if runtime.context is not None else None
+    value = context.get("github_token") if context else None
+    if callable(value):
+        try:
+            token = value()
+        except Exception:
+            logger.warning("github_token provider raised; skipping env overlay", exc_info=True)
+            return None
+    else:
+        token = value
+    if not isinstance(token, str) or not token:
+        return None
+    return {"GH_TOKEN": token, "GITHUB_TOKEN": token}
+
+
 @tool("bash", parse_docstring=True)
 def bash_tool(runtime: Runtime, description: str, command: str) -> str:
     """Execute a bash command in a Linux environment.
@@ -1563,9 +1656,15 @@ def bash_tool(runtime: Runtime, description: str, command: str) -> str:
     """
     try:
         sandbox = ensure_sandbox_initialized(runtime)
-        # Request-scoped secrets resolved for the active skill (#3861); injected as
-        # per-call env into the subprocess, never placed in the command string.
+        # Request-scoped secrets resolved for the active skill (#3861), plus a
+        # short-lived GitHub App installation token threaded through by the
+        # GitHub channel. Both are injected as per-call env into the subprocess,
+        # never placed in the command string.
         injected_env = read_active_secrets(getattr(runtime, "context", None)) or None
+        identity_prefix = _channel_identity_prefix(runtime)
+        github_env = _github_env_from_runtime(runtime)
+        if github_env:
+            injected_env = {**(injected_env or {}), **github_env}
         if is_local_sandbox(runtime):
             if not is_host_bash_allowed():
                 return f"Error: {LOCAL_HOST_BASH_DISABLED_MESSAGE}"
@@ -1574,6 +1673,10 @@ def bash_tool(runtime: Runtime, description: str, command: str) -> str:
             validate_local_bash_command_paths(command, thread_data)
             command = replace_virtual_paths_in_command(command, thread_data)
             command = _apply_cwd_prefix(command, thread_data)
+            # POSIX-only: the Windows local sandbox may execute via
+            # PowerShell/cmd.exe where `export` is not valid syntax.
+            if identity_prefix and not _is_windows():
+                command = identity_prefix + command
             try:
                 from deerflow.config.app_config import get_app_config
 
@@ -1589,6 +1692,8 @@ def bash_tool(runtime: Runtime, description: str, command: str) -> str:
                 max_chars,
             )
         ensure_thread_directories_exist(runtime)
+        if identity_prefix:
+            command = identity_prefix + command
         try:
             from deerflow.config.app_config import get_app_config
 

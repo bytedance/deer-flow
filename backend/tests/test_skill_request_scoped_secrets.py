@@ -228,7 +228,7 @@ class TestRequiredSecretsParsing:
         skill_file = self._write_skill(tmp_path, "name: erp-report\ndescription: Pull an ERP report")
         skill = parse_skill_file(skill_file, SkillCategory.CUSTOM)
         assert skill is not None
-        assert skill.required_secrets == []
+        assert skill.required_secrets == ()
 
     def test_string_list_form(self, tmp_path):
         from deerflow.skills.parser import parse_skill_file
@@ -316,7 +316,7 @@ class TestSecretCarrier:
         assert extract_request_secrets(None) == {}
 
 
-def _make_secret_skill(tmp_path: Path, name: str, required_secrets):
+def _make_secret_skill(tmp_path: Path, name: str, required_secrets, *, enabled: bool = True, secrets_autonomous: bool = True):
     skill_dir = tmp_path / name
     skill_dir.mkdir()
     skill_file = skill_dir / "SKILL.md"
@@ -329,8 +329,9 @@ def _make_secret_skill(tmp_path: Path, name: str, required_secrets):
         skill_file=skill_file,
         relative_path=Path(name),
         category=SkillCategory.CUSTOM,
-        enabled=True,
-        required_secrets=required_secrets,
+        enabled=enabled,
+        required_secrets=tuple(required_secrets),
+        secrets_autonomous=secrets_autonomous,
     )
 
 
@@ -610,8 +611,7 @@ class TestInContextBindsSecrets:
     def test_disabled_skill_in_context_not_bound(self, tmp_path, monkeypatch):
         from deerflow.runtime.secret_context import read_active_secrets
 
-        skill = _make_secret_skill(tmp_path, "erp-report", [SecretRequirement("ERP_TOKEN")])
-        skill.enabled = False
+        skill = _make_secret_skill(tmp_path, "erp-report", [SecretRequirement("ERP_TOKEN")], enabled=False)
         context = {"secrets": {"ERP_TOKEN": "tok-123"}}
         self._run_call(tmp_path, monkeypatch, [skill], context=context, skill_context=[_skill_context_entry(skill)])
 
@@ -638,8 +638,7 @@ class TestInContextBindsSecrets:
         high-sensitivity skills: in-context binding is refused, slash still works."""
         from deerflow.runtime.secret_context import read_active_secrets
 
-        skill = _make_secret_skill(tmp_path, "erp-report", [SecretRequirement("ERP_TOKEN")])
-        skill.secrets_autonomous = False
+        skill = _make_secret_skill(tmp_path, "erp-report", [SecretRequirement("ERP_TOKEN")], secrets_autonomous=False)
 
         context = {"secrets": {"ERP_TOKEN": "tok-123"}}
         self._run_call(tmp_path, monkeypatch, [skill], context=context, skill_context=[_skill_context_entry(skill)])

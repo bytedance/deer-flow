@@ -295,6 +295,7 @@ class SubagentExecutor:
         oauth_provider: str | None = None,
         oauth_id: str | None = None,
         run_id: str | None = None,
+        channel_user_id: str | None = None,
         deerflow_trace_id: str | None = None,
     ):
         """Initialize the executor.
@@ -342,6 +343,10 @@ class SubagentExecutor:
         self.oauth_provider = oauth_provider
         self.oauth_id = oauth_id
         self.run_id = run_id
+        # IM-channel sender identity captured at task_tool dispatch: group
+        # chats share one thread across senders, so delegated bash commands
+        # must export the dispatching turn's id, not none at all.
+        self.channel_user_id = channel_user_id
         self.deerflow_trace_id = deerflow_trace_id
 
         self._base_tools = _filter_tools(
@@ -604,6 +609,8 @@ class SubagentExecutor:
             context["oauth_provider"] = self.oauth_provider
             context["oauth_id"] = self.oauth_id
             context["run_id"] = self.run_id
+            if self.channel_user_id:
+                context["channel_user_id"] = self.channel_user_id
             if self.deerflow_trace_id:
                 context[DEERFLOW_TRACE_METADATA_KEY] = self.deerflow_trace_id
             context["is_subagent"] = True
