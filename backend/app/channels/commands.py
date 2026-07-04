@@ -11,6 +11,7 @@ from __future__ import annotations
 KNOWN_CHANNEL_COMMANDS: frozenset[str] = frozenset(
     {
         "/bootstrap",
+        "/goal",
         "/new",
         "/status",
         "/models",

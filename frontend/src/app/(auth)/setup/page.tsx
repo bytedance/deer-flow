@@ -9,6 +9,10 @@ import { FlickeringGrid } from "@/components/ui/flickering-grid";
 import { Input } from "@/components/ui/input";
 import { getCsrfHeaders } from "@/core/api/fetcher";
 import { useAuth } from "@/core/auth/AuthProvider";
+import {
+  fetchSetupStatus,
+  isSystemAlreadyInitializedError,
+} from "@/core/auth/setup";
 import { parseAuthError } from "@/core/auth/types";
 
 type SetupMode = "loading" | "init_admin" | "change_password";
@@ -36,23 +40,22 @@ export default function SetupPage() {
       setMode("change_password");
     } else if (!isAuthenticated) {
       // Check if the system has no users yet
-      void fetch("/api/v1/auth/setup-status")
-        .then((r) => r.json())
+      void fetchSetupStatus()
         .then((data: { needs_setup?: boolean }) => {
           if (cancelled) return;
           if (data.needs_setup) {
             setMode("init_admin");
           } else {
             // System already set up and user is not logged in — go to login
-            router.push("/login");
+            router.replace("/login");
           }
         })
         .catch(() => {
-          if (!cancelled) router.push("/login");
+          if (!cancelled) router.replace("/login");
         });
     } else {
       // Authenticated but needs_setup is false — already set up
-      router.push("/workspace");
+      router.replace("/workspace");
     }
 
     return () => {
@@ -84,6 +87,10 @@ export default function SetupPage() {
 
       if (!res.ok) {
         const data = await res.json();
+        if (isSystemAlreadyInitializedError(data)) {
+          router.replace("/login");
+          return;
+        }
         const authError = parseAuthError(data);
         setError(authError.message);
         return;

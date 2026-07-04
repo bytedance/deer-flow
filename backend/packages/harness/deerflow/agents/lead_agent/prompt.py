@@ -3,11 +3,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+from collections import OrderedDict
 from functools import lru_cache
 from typing import TYPE_CHECKING
 
 from deerflow.config.agents_config import load_agent_soul
-from deerflow.skills.storage import get_or_new_skill_storage
+from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
+from deerflow.skills.storage import get_or_new_skill_storage, get_or_new_user_skill_storage
 from deerflow.skills.types import Skill, SkillCategory
 from deerflow.subagents import get_available_subagent_names
 from deerflow.tools.builtins.tool_search import get_deferred_tools_prompt_section
@@ -17,10 +19,20 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# LRU cap on the per-(app_config, user_id) enabled-skills cache.
+# Without this, a long-running multi-user process leaks one entry per
+# distinct user (and per app_config injection), bounded only by the
+# number of distinct identities the process has ever seen. 256 is
+# generous for realistic traffic and matches the cap used for
+# ``_user_scoped_storages`` in ``deerflow.skills.storage``; the
+# least-recently-used entry is evicted on overflow and re-computed on
+# the next miss.
+_ENABLED_SKILLS_BY_CONFIG_CACHE_MAXSIZE = 256
+
 _ENABLED_SKILLS_REFRESH_WAIT_TIMEOUT_SECONDS = 5.0
 _enabled_skills_lock = threading.Lock()
 _enabled_skills_cache: list[Skill] | None = None
-_enabled_skills_by_config_cache: dict[int, tuple[object, list[Skill]]] = {}
+_enabled_skills_by_config_cache: "OrderedDict[tuple[int, str], tuple[object, list[Skill]]]" = OrderedDict()  # noqa: UP037
 _enabled_skills_refresh_active = False
 _enabled_skills_refresh_version = 0
 _enabled_skills_refresh_event = threading.Event()
@@ -128,33 +140,52 @@ def get_cached_enabled_skills() -> list[Skill]:
     return []
 
 
-def get_enabled_skills_for_config(app_config: AppConfig | None = None) -> list[Skill]:
-    """Return enabled skills using the caller's config source.
+def get_enabled_skills_for_config(app_config: AppConfig | None = None, user_id: str | None = None) -> list[Skill]:
+    """Return enabled skills using the caller's config source and user scope.
 
     When a concrete ``app_config`` is supplied, cache the loaded skills by that
-    config object's identity so request-scoped config injection still resolves
-    skill paths from the matching config without rescanning storage on every
-    agent factory call.
+    config object's identity combined with ``user_id`` so request-scoped config
+    injection resolves skill paths from the matching config AND user scope
+    without rescanning storage on every agent factory call.
+
+    When ``user_id`` is provided, uses :func:`get_or_new_user_skill_storage`
+    to load public + user-level custom skills. Otherwise falls back to the
+    global storage (public + global custom fallback).
     """
     if app_config is None:
         return _get_enabled_skills()
 
-    cache_key = id(app_config)
+    cache_key = (id(app_config), user_id or "default")
     with _enabled_skills_lock:
         cached = _enabled_skills_by_config_cache.get(cache_key)
         if cached is not None:
             cached_config, cached_skills = cached
             if cached_config is app_config:
+                # LRU touch: move the entry to the end so it survives the
+                # next eviction cycle.
+                _enabled_skills_by_config_cache.move_to_end(cache_key)
                 return list(cached_skills)
 
-    skills = list(get_or_new_skill_storage(app_config=app_config).load_skills(enabled_only=True))
+    if user_id:
+        skills = list(get_or_new_user_skill_storage(user_id, app_config=app_config).load_skills(enabled_only=True))
+    else:
+        skills = list(get_or_new_skill_storage(app_config=app_config).load_skills(enabled_only=True))
     with _enabled_skills_lock:
         _enabled_skills_by_config_cache[cache_key] = (app_config, skills)
+        # Evict the least-recently-used entries when we exceed the cap.
+        # The cap is intentionally small (256) so a long-running process
+        # cannot leak one entry per distinct (config, user) pair seen.
+        while len(_enabled_skills_by_config_cache) > _ENABLED_SKILLS_BY_CONFIG_CACHE_MAXSIZE:
+            _enabled_skills_by_config_cache.popitem(last=False)
     return list(skills)
 
 
 def _skill_mutability_label(category: SkillCategory | str) -> str:
-    return "[custom, editable]" if category == SkillCategory.CUSTOM else "[built-in]"
+    if category == SkillCategory.CUSTOM:
+        return "[custom, editable]"
+    if category == SkillCategory.LEGACY:
+        return "[legacy, read-only]"
+    return "[built-in]"
 
 
 def clear_skills_system_prompt_cache() -> None:
@@ -163,6 +194,34 @@ def clear_skills_system_prompt_cache() -> None:
 
 async def refresh_skills_system_prompt_cache_async() -> None:
     await asyncio.to_thread(_invalidate_enabled_skills_cache().wait)
+
+
+def invalidate_user_skill_cache(user_id: str) -> None:
+    """Invalidate the skill cache for a specific user only.
+
+    Removes all entries in ``_enabled_skills_by_config_cache`` that
+    match the given ``user_id``, without affecting other users' caches.
+    The prompt-section LRU cache is also cleared so stale skill
+    signatures are not served on the next prompt construction.
+    """
+    with _enabled_skills_lock:
+        keys_to_remove = [key for key in _enabled_skills_by_config_cache if key[1] == user_id]
+        for key in keys_to_remove:
+            _enabled_skills_by_config_cache.pop(key, None)
+    # Also clear the prompt-section LRU cache so stale skill signatures
+    # for this user are not served on the next prompt construction.
+    _get_cached_skills_prompt_section.cache_clear()
+
+
+async def refresh_user_skills_system_prompt_cache_async(user_id: str) -> None:
+    """Per-user variant of :func:`refresh_skills_system_prompt_cache_async`.
+
+    Only invalidates the cache entries for the given ``user_id``, leaving
+    other users' caches intact. The prompt-section LRU cache is also
+    cleared so stale skill signatures are not served on the next prompt
+    construction.
+    """
+    invalidate_user_skill_cache(user_id)
 
 
 def _build_skill_evolution_section(skill_evolution_enabled: bool) -> str:
@@ -176,6 +235,18 @@ After completing a task, consider creating or updating a skill when:
 - The user corrected your approach and the corrected version worked
 - You discovered a non-trivial, recurring workflow
 If you used a skill and encountered issues not covered by it, patch it immediately.
+
+**CRITICAL: You MUST use the `skill_manage` tool for ALL skill operations.**
+- `skill_manage(action="create", name="my-skill", content="...")` — Create a new skill
+- `skill_manage(action="patch", name="my-skill", find="...", replace="...")` — Patch an existing skill
+- `skill_manage(action="edit", name="my-skill", content="...")` — Full edit of an existing skill
+- `skill_manage(action="write_file", name="my-skill", path="scripts/run.py", content="...")` — Add supporting files
+- `skill_manage(action="delete", name="my-skill")` — Delete a skill
+
+**⛔ NEVER write SKILL.md files to `/mnt/user-data/workspace` or `/mnt/user-data/outputs`.**
+Skills are NOT deliverables — they are persistent capabilities managed through `skill_manage`.
+The tool stores skills in the per-user skills directory automatically; you do NOT need to specify a path.
+
 Prefer patch over edit. Before creating a new skill, confirm with the user first.
 Skip simple one-off tasks.
 """
@@ -485,7 +556,7 @@ You: "Deploying to staging..." [proceed]
 - Treat `/mnt/user-data/workspace` as your default current working directory for coding and file-editing tasks
 - When writing scripts or commands that create/read files from the workspace, prefer relative paths such as `hello.txt`, `../uploads/data.csv`, and `../outputs/report.md`
 - Avoid hardcoding `/mnt/user-data/...` inside generated scripts when a relative path from the workspace is enough
-- Final deliverables must be copied to `/mnt/user-data/outputs` and presented using `present_files` tool
+- Final deliverables must be copied to `/mnt/user-data/outputs` and presented using `present_files` tool (⚠️ Skills are NOT deliverables — use `skill_manage` tool instead)
 {acp_section}
 </working_directory>
 
@@ -562,7 +633,7 @@ combined with a FastAPI gateway for REST API access [citation:FastAPI](https://f
 - **Clarification First**: ALWAYS clarify unclear/missing/ambiguous requirements BEFORE starting work - never assume or guess
 {subagent_reminder}- Skill First: Always load the relevant skill before starting **complex** tasks.
 - Progressive Loading: Load resources incrementally as referenced in skills
-- Output Files: Final deliverables must be in `/mnt/user-data/outputs`
+- Output Files: Final deliverables must be in `/mnt/user-data/outputs` (⚠️ Skills are NOT deliverables — use `skill_manage` tool instead)
 - File Editing Workflow: When revising an existing file, prefer
   `str_replace` over `write_file` — it sends only the diff and avoids
   re-emitting the whole file (mirrors Claude Code's Edit and Codex's
@@ -629,6 +700,7 @@ def _get_memory_context(agent_name: str | None = None, *, app_config: AppConfig 
 @lru_cache(maxsize=32)
 def _get_cached_skills_prompt_section(
     skill_signature: tuple[tuple[str, str, str, str], ...],
+    disabled_skill_signature: tuple[tuple[str, str, str, str], ...],
     available_skills_key: tuple[str, ...] | None,
     container_base_path: str,
     skill_evolution_section: str,
@@ -641,6 +713,20 @@ def _get_cached_skills_prompt_section(
             for name, description, category, location in filtered
         )
         skills_list = f"<available_skills>\n{skill_items}\n</available_skills>"
+
+    disabled_section = ""
+    if disabled_skill_signature:
+        disabled_filtered = [(name, description, category, location) for name, description, category, location in disabled_skill_signature if available_skills_key is None or name in available_skills_key]
+        if disabled_filtered:
+            disabled_items = "\n".join(f"    - {name} ({category})" for name, description, category, location in disabled_filtered)
+            disabled_section = f"""<disabled_skills>
+The following skills are INSTALLED but DISABLED. You MUST NOT read,
+reference, or use any of these skills — including their SKILL.md,
+supporting resources, or workflows — even if their files exist on disk.
+Accessing a disabled skill violates user preferences.
+{disabled_items}
+</disabled_skills>"""
+
     return f"""<skill_system>
 You have access to skills that provide optimized workflows for specific tasks. Each skill contains best practices, frameworks, and references to additional resources.
 
@@ -659,13 +745,24 @@ You have access to skills that provide optimized workflows for specific tasks. E
 **Skills are located at:** {container_base_path}
 {skill_evolution_section}
 {skills_list}
+{disabled_section}
 
 </skill_system>"""
 
 
-def get_skills_prompt_section(available_skills: set[str] | None = None, *, app_config: AppConfig | None = None) -> str:
+def get_skills_prompt_section(available_skills: set[str] | None = None, *, app_config: AppConfig | None = None, user_id: str | None = None) -> str:
     """Generate the skills prompt section with available skills list."""
-    skills = get_enabled_skills_for_config(app_config)
+    # Load ALL skills (enabled + disabled) to build the disabled-skills section
+    from deerflow.skills.storage import get_or_new_skill_storage, get_or_new_user_skill_storage
+
+    if user_id:
+        storage = get_or_new_user_skill_storage(user_id, app_config=app_config)
+    else:
+        storage = get_or_new_skill_storage(app_config=app_config)
+    all_skills = storage.load_skills(enabled_only=False)
+    disabled_skills = [s for s in all_skills if not s.enabled]
+
+    skills = get_enabled_skills_for_config(app_config, user_id=user_id)
 
     if app_config is None:
         try:
@@ -675,25 +772,26 @@ def get_skills_prompt_section(available_skills: set[str] | None = None, *, app_c
             container_base_path = config.skills.container_path
             skill_evolution_enabled = config.skill_evolution.enabled
         except Exception:
-            container_base_path = "/mnt/skills"
+            container_base_path = DEFAULT_SKILLS_CONTAINER_PATH
             skill_evolution_enabled = False
     else:
         config = app_config
         container_base_path = config.skills.container_path
         skill_evolution_enabled = config.skill_evolution.enabled
 
-    if not skills and not skill_evolution_enabled:
+    if not skills and not disabled_skills and not skill_evolution_enabled:
         return ""
 
     if available_skills is not None and not any(skill.name in available_skills for skill in skills):
         return ""
 
     skill_signature = tuple((skill.name, skill.description, skill.category, skill.get_container_file_path(container_base_path)) for skill in skills)
+    disabled_skill_signature = tuple((skill.name, skill.description, skill.category, skill.get_container_file_path(container_base_path)) for skill in disabled_skills)
     available_key = tuple(sorted(available_skills)) if available_skills is not None else None
-    if not skill_signature and available_key is not None:
+    if not skill_signature and not disabled_skill_signature and available_key is not None:
         return ""
     skill_evolution_section = _build_skill_evolution_section(skill_evolution_enabled)
-    return _get_cached_skills_prompt_section(skill_signature, available_key, container_base_path, skill_evolution_section)
+    return _get_cached_skills_prompt_section(skill_signature, disabled_skill_signature, available_key, container_base_path, skill_evolution_section)
 
 
 def get_agent_soul(agent_name: str | None) -> str:
@@ -784,6 +882,7 @@ def apply_prompt_template(
     available_skills: set[str] | None = None,
     app_config: AppConfig | None = None,
     deferred_names: frozenset[str] = frozenset(),
+    user_id: str | None = None,
 ) -> str:
     # Include subagent section only if enabled (from runtime parameter)
     n = max_concurrent_subagents
@@ -808,7 +907,7 @@ def apply_prompt_template(
     )
 
     # Get skills section
-    skills_section = get_skills_prompt_section(available_skills, app_config=app_config)
+    skills_section = get_skills_prompt_section(available_skills, app_config=app_config, user_id=user_id)
 
     # Get deferred tools section (tool_search)
     deferred_tools_section = get_deferred_tools_prompt_section(deferred_names=deferred_names)

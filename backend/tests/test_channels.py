@@ -638,6 +638,57 @@ class TestChannelManager:
         assert headers["Cookie"] == f"csrf_token={csrf_token}"
         assert headers["X-DeerFlow-Internal-Token"]
 
+    def test_concurrent_inbound_for_same_chat_reuses_single_thread(self):
+        # Each inbound message is dispatched on its own task, so two messages
+        # arriving close together for the same chat can both look up a missing
+        # thread before either stores one. Without per-conversation locking they
+        # each create a thread and the second store overwrites the first,
+        # orphaning a Gateway thread and splitting the conversation. The create
+        # path must be serialized so only one thread is created and reused.
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+
+            created_ids: list[str] = []
+            first_create_started = asyncio.Event()
+            release_create = asyncio.Event()
+
+            async def blocking_create(*, metadata=None, headers=None):
+                thread_id = f"thread-{len(created_ids) + 1}"
+                created_ids.append(thread_id)
+                first_create_started.set()
+                # Hold the create open so a second concurrent message has a
+                # chance to race in before this one stores its thread_id.
+                await release_create.wait()
+                return {"thread_id": thread_id}
+
+            mock_client = MagicMock()
+            mock_client.threads.create = blocking_create
+            manager._client = mock_client
+
+            msg = InboundMessage(channel_name="slack", chat_id="C1", user_id="U1", text="hi")
+
+            task1 = asyncio.create_task(manager._get_or_create_thread(mock_client, msg))
+            await first_create_started.wait()
+            # task2 should block on the per-conversation lock rather than enter
+            # threads.create a second time.
+            task2 = asyncio.create_task(manager._get_or_create_thread(mock_client, msg))
+            await asyncio.sleep(0)
+            release_create.set()
+
+            (tid1, created1), (tid2, created2) = await asyncio.gather(task1, task2)
+
+            assert len(created_ids) == 1
+            assert tid1 == tid2 == "thread-1"
+            assert created1 is True
+            assert created2 is False
+            assert store.get_thread_id("slack", "C1") == "thread-1"
+
+        _run(go())
+
     def test_fetch_gateway_includes_internal_auth_headers(self, monkeypatch):
         from app.channels.manager import ChannelManager
 
@@ -1520,7 +1571,7 @@ class TestChannelManager:
             await manager.stop()
 
             mock_client.runs.stream.assert_called_once()
-            assert [msg.text for msg in outbound_received] == ["Hello", "Hello world", "Hello world"]
+            assert [msg.text for msg in outbound_received] == ["Hello ▉", "Hello world ▉", "Hello world"]
             assert [msg.is_final for msg in outbound_received] == [False, False, True]
             assert all(msg.thread_ts == "om-source-1" for msg in outbound_received)
 
@@ -1591,7 +1642,7 @@ class TestChannelManager:
             await manager.stop()
 
             mock_client.runs.stream.assert_called_once()
-            assert [msg.text for msg in outbound_received] == ["Hello", "Hello world", "Hello world"]
+            assert [msg.text for msg in outbound_received] == ["Hello ▉", "Hello world ▉", "Hello world"]
             assert [msg.is_final for msg in outbound_received] == [False, False, True]
 
         _run(go())
@@ -1649,8 +1700,8 @@ class TestChannelManager:
             await manager.stop()
 
             assert [msg.is_final for msg in outbound_received] == [False, False, True]
-            assert outbound_received[0].text == "Thinking"
-            assert outbound_received[1].text == "Which environment?"
+            assert outbound_received[0].text == "Thinking ▉"
+            assert outbound_received[1].text == "Which environment? ▉"
             assert outbound_received[2].text == "Which environment?"
             assert all(PENDING_CLARIFICATION_METADATA_KEY not in msg.metadata for msg in outbound_received[:-1])
             assert outbound_received[-1].metadata[PENDING_CLARIFICATION_METADATA_KEY] is True
@@ -4921,7 +4972,7 @@ class TestChannelService:
         service._start_channel = mock_start_channel
 
         async def go():
-            await service.restart_channel("feishu")
+            await service.restart_channel("feishu", reload_config=False)
 
         _run(go())
 
@@ -6270,5 +6321,190 @@ class TestTelegramStreaming:
             assert bot.edited[0]["text"] == "a" * 4096
             assert [m["text"] for m in bot.sent] == ["Working on it...", "b" * 10]
             assert ch._last_bot_message["12345"] == 101
+
+        _run(go())
+
+
+class TestHandleGoalCommand:
+    """Covers the IM-channel ``/goal`` handler (get/set/clear via the Gateway)."""
+
+    @staticmethod
+    def _install_mock_httpx(monkeypatch, calls, *, goal_payload=None, fail_method=None):
+        class MockResponse:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"goal": goal_payload}
+
+        class MockAsyncClient:
+            def __init__(self, *args, **kwargs):
+                return None
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return None
+
+            async def _record(self, method, url, **kwargs):
+                calls.append({"method": method, "url": url, **kwargs})
+                if fail_method == method:
+                    raise RuntimeError("gateway down")
+                return MockResponse()
+
+            async def get(self, url, **kwargs):
+                return await self._record("get", url, **kwargs)
+
+            async def put(self, url, **kwargs):
+                return await self._record("put", url, **kwargs)
+
+            async def delete(self, url, **kwargs):
+                return await self._record("delete", url, **kwargs)
+
+        monkeypatch.setattr("app.channels.manager.httpx.AsyncClient", MockAsyncClient)
+
+    @staticmethod
+    def _make_manager(monkeypatch, *, thread_id):
+        from app.channels.manager import ChannelManager
+
+        bus = MessageBus()
+        store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+        manager = ChannelManager(bus=bus, store=store, gateway_url="http://gateway:8001")
+
+        async def _lookup(msg):
+            return thread_id
+
+        monkeypatch.setattr(manager, "_lookup_thread_id", _lookup)
+        return manager
+
+    @staticmethod
+    def _msg(text):
+        return InboundMessage(
+            channel_name="slack",
+            chat_id="C1",
+            user_id="U1",
+            text=text,
+            msg_type=InboundMessageType.COMMAND,
+        )
+
+    def test_status_without_thread_reports_no_active_goal(self, monkeypatch):
+        calls = []
+        self._install_mock_httpx(monkeypatch, calls)
+
+        async def go():
+            manager = self._make_manager(monkeypatch, thread_id=None)
+            reply = await manager._handle_goal_command(self._msg("/goal"), "")
+            assert reply == "No active goal."
+            assert calls == []  # no thread -> no gateway round-trip
+
+        _run(go())
+
+    def test_status_with_active_goal_reports_objective(self, monkeypatch):
+        calls = []
+        self._install_mock_httpx(monkeypatch, calls, goal_payload={"objective": "ship it"})
+
+        async def go():
+            manager = self._make_manager(monkeypatch, thread_id="t-1")
+            reply = await manager._handle_goal_command(self._msg("/goal"), "")
+            assert reply == "Goal: ship it"
+            assert calls[0]["method"] == "get"
+            assert calls[0]["url"].endswith("/api/threads/t-1/goal")
+
+        _run(go())
+
+    def test_status_with_no_goal_reports_none(self, monkeypatch):
+        calls = []
+        self._install_mock_httpx(monkeypatch, calls, goal_payload=None)
+
+        async def go():
+            manager = self._make_manager(monkeypatch, thread_id="t-1")
+            reply = await manager._handle_goal_command(self._msg("/goal"), "")
+            assert reply == "No active goal."
+
+        _run(go())
+
+    def test_clear_with_thread_calls_delete(self, monkeypatch):
+        calls = []
+        self._install_mock_httpx(monkeypatch, calls)
+
+        async def go():
+            manager = self._make_manager(monkeypatch, thread_id="t-1")
+            reply = await manager._handle_goal_command(self._msg("/goal clear"), "clear")
+            assert reply == "Goal cleared."
+            assert calls[0]["method"] == "delete"
+
+        _run(go())
+
+    def test_clear_without_thread_is_noop(self, monkeypatch):
+        calls = []
+        self._install_mock_httpx(monkeypatch, calls)
+
+        async def go():
+            manager = self._make_manager(monkeypatch, thread_id=None)
+            reply = await manager._handle_goal_command(self._msg("/goal reset"), "reset")
+            assert reply == "Goal cleared."
+            assert calls == []
+
+        _run(go())
+
+    def test_set_with_existing_thread_puts_objective(self, monkeypatch):
+        calls = []
+        self._install_mock_httpx(monkeypatch, calls, goal_payload={"objective": "finish the work"})
+
+        async def go():
+            manager = self._make_manager(monkeypatch, thread_id="t-1")
+            chats = []
+
+            async def _handle_chat(msg, **kwargs):
+                chats.append((msg, kwargs))
+
+            monkeypatch.setattr(manager, "_handle_chat", _handle_chat)
+
+            reply = await manager._handle_goal_command(self._msg("/goal finish the work"), "finish the work")
+            assert reply is None
+            assert calls[0]["method"] == "put"
+            assert calls[0]["json"] == {"objective": "finish the work"}
+            assert chats[0][0].text == "finish the work"
+            assert chats[0][0].msg_type == InboundMessageType.CHAT
+            assert chats[0][1] == {"bound_identity_checked": True}
+
+        _run(go())
+
+    def test_set_without_thread_creates_one(self, monkeypatch):
+        calls = []
+        self._install_mock_httpx(monkeypatch, calls, goal_payload={"objective": "do X"})
+
+        async def go():
+            manager = self._make_manager(monkeypatch, thread_id=None)
+            chats = []
+
+            async def _create(client, msg):
+                return "new-thread"
+
+            async def _handle_chat(msg, **kwargs):
+                chats.append((msg, kwargs))
+
+            monkeypatch.setattr(manager, "_create_thread", _create)
+            monkeypatch.setattr(manager, "_get_client", lambda: object())
+            monkeypatch.setattr(manager, "_handle_chat", _handle_chat)
+
+            reply = await manager._handle_goal_command(self._msg("/goal do X"), "do X")
+            assert reply is None
+            assert calls[0]["method"] == "put"
+            assert calls[0]["url"].endswith("/api/threads/new-thread/goal")
+            assert chats[0][0].text == "do X"
+            assert chats[0][0].msg_type == InboundMessageType.CHAT
+
+        _run(go())
+
+    def test_set_failure_returns_error_message(self, monkeypatch):
+        calls = []
+        self._install_mock_httpx(monkeypatch, calls, fail_method="put")
+
+        async def go():
+            manager = self._make_manager(monkeypatch, thread_id="t-1")
+            reply = await manager._handle_goal_command(self._msg("/goal do X"), "do X")
+            assert reply == "Failed to set goal."
 
         _run(go())

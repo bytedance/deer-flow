@@ -35,6 +35,7 @@ export type MockThread = {
   metadata?: Record<string, unknown>;
   messages?: unknown[];
   artifacts?: string[];
+  goal?: Record<string, unknown> | null;
 };
 
 export type MockAgent = {
@@ -55,6 +56,36 @@ export type MockAPIOptions = {
   threads?: MockThread[];
   agents?: MockAgent[];
   skills?: MockSkill[];
+  scheduledTasks?: Array<{
+    id: string;
+    thread_id: string | null;
+    context_mode?: "fresh_thread_per_run" | "reuse_thread";
+    last_thread_id?: string | null;
+    title: string;
+    prompt: string;
+    schedule_type: "once" | "cron";
+    schedule_spec: Record<string, unknown>;
+    timezone: string;
+    status:
+      | "enabled"
+      | "paused"
+      | "running"
+      | "completed"
+      | "failed"
+      | "cancelled";
+    next_run_at: string | null;
+    last_run_at: string | null;
+    last_run_id: string | null;
+    last_error: string | null;
+    run_count: number;
+    created_at: string;
+    updated_at: string;
+  }>;
+  uploadLimits?: {
+    max_files: number;
+    max_file_size: number;
+    max_total_size: number;
+  };
 };
 
 const DEFAULT_SKILLS: MockSkill[] = [
@@ -106,6 +137,29 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
   let threads = [...(options?.threads ?? [])];
   const agents = options?.agents ?? [];
   const skills = options?.skills ?? DEFAULT_SKILLS;
+  const scheduledTasks = options?.scheduledTasks ?? [];
+  let mutableScheduledTasks = [...scheduledTasks];
+  const mutableTaskRuns: Record<
+    string,
+    Array<{
+      id: string;
+      task_id: string;
+      thread_id: string | null;
+      run_id: string | null;
+      scheduled_for: string;
+      trigger: "scheduled" | "manual";
+      status: "queued" | "running" | "success" | "failed" | "skipped";
+      error: string | null;
+      started_at: string | null;
+      finished_at: string | null;
+      created_at: string;
+    }>
+  > = {};
+  const uploadLimits = options?.uploadLimits ?? {
+    max_files: 10,
+    max_file_size: 50 * 1024 * 1024,
+    max_total_size: 100 * 1024 * 1024,
+  };
 
   const upsertThread = (thread: MockThread) => {
     threads = [
@@ -123,7 +177,7 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
       ...(thread.agent_name ? { agent_name: thread.agent_name } : {}),
     },
     status: "idle",
-    values: { title: thread.title ?? "Untitled" },
+    values: { title: thread.title ?? "Untitled", goal: thread.goal ?? null },
   });
 
   // Auth — keep workspace tests independent from a real gateway session.
@@ -173,6 +227,245 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
         status: 200,
         contentType: "application/json",
         body: JSON.stringify({ connections: [] }),
+      });
+    }
+    return route.fallback();
+  });
+
+  void page.route("**/api/suggestions/config", (route) => {
+    if (route.request().method() === "GET") {
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ enabled: false }),
+      });
+    }
+    return route.fallback();
+  });
+
+  void page.route("**/api/scheduled-tasks", (route) => {
+    if (route.request().method() === "GET") {
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(
+          mutableScheduledTasks.map((task) => ({
+            context_mode: "fresh_thread_per_run",
+            last_thread_id: null,
+            ...task,
+            thread_id: task.thread_id ?? null,
+          })),
+        ),
+      });
+    }
+    if (route.request().method() === "POST") {
+      const payload = route.request().postDataJSON() as Record<string, unknown>;
+      const threadId =
+        typeof payload.thread_id === "string" ? payload.thread_id : "";
+      const title = typeof payload.title === "string" ? payload.title : "";
+      const prompt = typeof payload.prompt === "string" ? payload.prompt : "";
+      const timezone =
+        typeof payload.timezone === "string" ? payload.timezone : "UTC";
+      const created = {
+        id: "task-created",
+        thread_id: threadId || null,
+        context_mode:
+          (payload.context_mode as "fresh_thread_per_run" | "reuse_thread") ??
+          "fresh_thread_per_run",
+        last_thread_id: null,
+        title,
+        prompt,
+        schedule_type: payload.schedule_type as "once" | "cron",
+        schedule_spec: (payload.schedule_spec as Record<string, unknown>) ?? {},
+        timezone,
+        status: "enabled" as const,
+        next_run_at: null,
+        last_run_at: null,
+        last_run_id: null,
+        last_error: null,
+        run_count: 0,
+        created_at: "2026-07-01T00:00:00+00:00",
+        updated_at: "2026-07-01T00:00:00+00:00",
+      };
+      mutableScheduledTasks = [created, ...mutableScheduledTasks];
+      mutableTaskRuns[created.id] = [];
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(created),
+      });
+    }
+    return route.fallback();
+  });
+
+  void page.route("**/api/scheduled-tasks/*/pause", (route) => {
+    if (route.request().method() === "POST") {
+      const taskId = decodeURIComponent(
+        new URL(route.request().url()).pathname.split("/").at(-2) ?? "",
+      );
+      mutableScheduledTasks = mutableScheduledTasks.map((task) =>
+        task.id === taskId ? { ...task, status: "paused" as const } : task,
+      );
+      const task = mutableScheduledTasks.find((item) => item.id === taskId);
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(task),
+      });
+    }
+    return route.fallback();
+  });
+
+  void page.route("**/api/scheduled-tasks/*/resume", (route) => {
+    if (route.request().method() === "POST") {
+      const taskId = decodeURIComponent(
+        new URL(route.request().url()).pathname.split("/").at(-2) ?? "",
+      );
+      mutableScheduledTasks = mutableScheduledTasks.map((task) =>
+        task.id === taskId ? { ...task, status: "enabled" as const } : task,
+      );
+      const task = mutableScheduledTasks.find((item) => item.id === taskId);
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(task),
+      });
+    }
+    return route.fallback();
+  });
+
+  void page.route("**/api/scheduled-tasks/*/trigger", (route) => {
+    if (route.request().method() === "POST") {
+      const taskId = decodeURIComponent(
+        new URL(route.request().url()).pathname.split("/").at(-2) ?? "",
+      );
+      const task = mutableScheduledTasks.find((item) => item.id === taskId);
+      if (task) {
+        const runId = `run-${taskId}`;
+        mutableTaskRuns[taskId] = [
+          {
+            id: `task-run-${taskId}`,
+            task_id: taskId,
+            thread_id: task.thread_id,
+            run_id: runId,
+            scheduled_for: "2026-07-01T00:00:00+00:00",
+            trigger: "manual",
+            status: "success",
+            error: null,
+            started_at: "2026-07-01T00:00:00+00:00",
+            finished_at: "2026-07-01T00:00:00+00:00",
+            created_at: "2026-07-01T00:00:00+00:00",
+          },
+          ...(mutableTaskRuns[taskId] ?? []),
+        ];
+        mutableScheduledTasks = mutableScheduledTasks.map((item) =>
+          item.id === taskId
+            ? {
+                ...item,
+                last_run_id: runId,
+                last_run_at: "2026-07-01T00:00:00+00:00",
+                run_count: item.run_count + 1,
+              }
+            : item,
+        );
+      }
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ id: taskId, triggered: true }),
+      });
+    }
+    return route.fallback();
+  });
+
+  void page.route("**/api/scheduled-tasks/*", (route) => {
+    const request = route.request();
+    if (request.method() === "PATCH") {
+      const taskId = decodeURIComponent(
+        new URL(request.url()).pathname.split("/").at(-1) ?? "",
+      );
+      const payload = request.postDataJSON() as Record<string, unknown>;
+      let updated: (typeof mutableScheduledTasks)[number] | undefined;
+      mutableScheduledTasks = mutableScheduledTasks.map((task) => {
+        if (task.id !== taskId) {
+          return task;
+        }
+        updated = {
+          ...task,
+          ...(typeof payload.title === "string"
+            ? { title: payload.title }
+            : {}),
+          ...(typeof payload.prompt === "string"
+            ? { prompt: payload.prompt }
+            : {}),
+          ...(payload.schedule_spec
+            ? {
+                schedule_spec: payload.schedule_spec as Record<string, unknown>,
+              }
+            : {}),
+          ...(typeof payload.timezone === "string"
+            ? { timezone: payload.timezone }
+            : {}),
+          updated_at: "2026-07-01T00:00:00+00:00",
+        };
+        return updated;
+      });
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(updated ?? {}),
+      });
+    }
+    if (request.method() === "DELETE") {
+      const taskId = decodeURIComponent(
+        new URL(request.url()).pathname.split("/").at(-1) ?? "",
+      );
+      mutableScheduledTasks = mutableScheduledTasks.filter(
+        (task) => task.id !== taskId,
+      );
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ id: taskId, deleted: true }),
+      });
+    }
+    return route.fallback();
+  });
+
+  void page.route("**/api/threads/*/scheduled-tasks", (route) => {
+    if (route.request().method() === "GET") {
+      const url = new URL(route.request().url());
+      const parts = url.pathname.split("/");
+      const threadId = decodeURIComponent(
+        parts[parts.indexOf("threads") + 1] ?? "",
+      );
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(
+          mutableScheduledTasks
+            .filter((task) => task.thread_id === threadId)
+            .map((task) => ({
+              context_mode: "fresh_thread_per_run",
+              last_thread_id: null,
+              ...task,
+              thread_id: task.thread_id ?? null,
+            })),
+        ),
+      });
+    }
+    return route.fallback();
+  });
+
+  void page.route("**/api/scheduled-tasks/*/runs", (route) => {
+    if (route.request().method() === "GET") {
+      const taskId = decodeURIComponent(
+        new URL(route.request().url()).pathname.split("/").at(-2) ?? "",
+      );
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(mutableTaskRuns[taskId] ?? []),
       });
     }
     return route.fallback();
@@ -283,6 +576,74 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
     return route.fallback();
   });
 
+  void page.route(/\/api\/threads\/[^/]+\/goal$/, async (route) => {
+    const threadId = decodeURIComponent(
+      new URL(route.request().url()).pathname.split("/").at(-2) ?? "",
+    );
+    let matchingThread = threads.find(
+      (thread) => thread.thread_id === threadId,
+    );
+
+    if (route.request().method() === "GET") {
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ goal: matchingThread?.goal ?? null }),
+      });
+    }
+
+    if (route.request().method() === "DELETE") {
+      if (matchingThread) {
+        matchingThread.goal = null;
+      }
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ goal: null }),
+      });
+    }
+
+    if (route.request().method() === "PUT") {
+      const payload = route.request().postDataJSON() as {
+        objective?: string;
+      };
+      const goal = {
+        objective: payload.objective ?? "",
+        status: "active",
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+        continuation_count: 0,
+        max_continuations: 8,
+        no_progress_count: 0,
+        max_no_progress_continuations: 2,
+      };
+      matchingThread ??= {
+        thread_id: threadId,
+        title: "New Chat",
+        updated_at: new Date().toISOString(),
+      };
+      upsertThread({ ...matchingThread, goal });
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ goal }),
+      });
+    }
+
+    return route.fallback();
+  });
+
+  void page.route("**/api/threads/*/uploads/limits", (route) => {
+    if (route.request().method() === "GET") {
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(uploadLimits),
+      });
+    }
+    return route.fallback();
+  });
+
   // Thread history — useStream fetches state history on mount
   void page.route("**/api/langgraph/threads/*/history", (route) => {
     const url = route.request().url();
@@ -297,6 +658,7 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
           {
             values: {
               title: matchingThread.title ?? "Untitled",
+              goal: matchingThread.goal ?? null,
               messages: matchingThread.messages ?? [
                 {
                   type: "human",
@@ -339,6 +701,7 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
         body: JSON.stringify({
           values: {
             title: matchingThread?.title ?? "Untitled",
+            goal: matchingThread?.goal ?? null,
             messages: matchingThread
               ? (matchingThread.messages ?? [
                   {
@@ -424,13 +787,20 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
 
   // Run stream — returns a minimal SSE response with an AI message
   const handleMockRunStream = (route: Route) => {
+    const requestUrl = route.request().url();
+    const matchingThread = threads.find((thread) =>
+      requestUrl.includes(encodeURIComponent(thread.thread_id)),
+    );
+    const fallbackGoal = threads.find((thread) => thread.goal)?.goal ?? null;
+    const goal = matchingThread?.goal ?? fallbackGoal;
     upsertThread({
       thread_id: MOCK_THREAD_ID,
       title: "New Chat",
       updated_at: new Date().toISOString(),
+      goal,
       messages: mockStreamMessages(),
     });
-    return handleRunStream(route);
+    return handleRunStream(route, { goal });
   };
 
   void page.route("**/api/langgraph/runs/stream", handleMockRunStream);
@@ -449,6 +819,20 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
           models: [],
           token_usage: { enabled: false },
         }),
+      });
+    }
+    return route.fallback();
+  });
+
+  // Feature flags — frontend gates UI (e.g. agents) on these. Default to
+  // enabled so existing tests exercise the normal path; tests that need the
+  // disabled state override this route after calling mockLangGraphAPI.
+  void page.route("**/api/features", (route) => {
+    if (route.request().method() === "GET") {
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ agents_api: { enabled: true } }),
       });
     }
     return route.fallback();
@@ -519,7 +903,10 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
  * Build a minimal SSE stream that the LangGraph SDK can parse.
  * The stream returns a single AI message: "Hello from DeerFlow!".
  */
-export function handleRunStream(route: Route) {
+export function handleRunStream(
+  route: Route,
+  values: Record<string, unknown> = {},
+) {
   const events = [
     {
       event: "metadata",
@@ -528,6 +915,7 @@ export function handleRunStream(route: Route) {
     {
       event: "values",
       data: {
+        ...values,
         messages: mockStreamMessages(),
       },
     },

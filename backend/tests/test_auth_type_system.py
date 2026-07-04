@@ -714,3 +714,82 @@ def test_csrf_cookie_not_secure_on_http():
     assert csrf_cookies, "csrf_token cookie not set on HTTP register"
     csrf_header = csrf_cookies[0]
     assert "secure" not in csrf_header.lower().replace("samesite", "")
+
+
+def test_csrf_cookie_persistent_on_https():
+    """HTTPS register → csrf_token cookie is persistent (has max_age), like access_token.
+
+    Regression for iOS Safari home-screen PWAs. When iOS terminates a
+    standalone web app it evicts *session* cookies but keeps *persistent*
+    ones. The access_token cookie is persistent over HTTPS (carries
+    max_age), so the user still appears logged in after reopening — but a
+    session-only csrf_token cookie is dropped, so the first state-changing
+    request fails with 403 "CSRF token missing. Include X-CSRF-Token
+    header." The two cookies represent one session and must share a lifetime.
+    """
+    _setup_config()
+    client = _get_auth_client()
+    resp = client.post(
+        "/api/v1/auth/register",
+        json={"email": _unique_email("csrf-persist"), "password": "Tr0ub4dor3a"},
+        headers={"x-forwarded-proto": "https"},
+    )
+    assert resp.status_code == 201
+    set_cookies = _get_set_cookie_headers(resp)
+    csrf_cookies = [h for h in set_cookies if "csrf_token=" in h]
+    assert csrf_cookies, "csrf_token cookie not set on HTTPS register"
+    assert "max-age" in csrf_cookies[0].lower(), "csrf_token must be persistent over HTTPS so iOS PWAs don't drop it as a session cookie"
+    # It must pair with the access_token's lifetime: both persistent on HTTPS.
+    access_cookies = [h for h in set_cookies if "access_token=" in h]
+    assert access_cookies and "max-age" in access_cookies[0].lower()
+
+
+def test_csrf_cookie_session_only_on_http():
+    """HTTP register → csrf_token cookie has NO max_age (session cookie).
+
+    Mirrors the access_token's ``... if is_https else None`` guard so the
+    pair stays symmetric: persistent together over HTTPS, session-only
+    together over plain HTTP (local dev). Keeping them in lockstep is what
+    avoids the "logged in but csrf_token gone" state.
+    """
+    _setup_config()
+    client = _get_auth_client()
+    resp = client.post(
+        "/api/v1/auth/register",
+        json={"email": _unique_email("csrf-session"), "password": "Tr0ub4dor3a"},
+    )
+    assert resp.status_code == 201
+    csrf_cookies = [h for h in _get_set_cookie_headers(resp) if "csrf_token=" in h]
+    assert csrf_cookies, "csrf_token cookie not set on HTTP register"
+    assert "max-age" not in csrf_cookies[0].lower()
+
+
+def test_oidc_callback_csrf_cookie_persistent_on_https():
+    """The OIDC-callback CSRF cookie helper is persistent over HTTPS too.
+
+    ``routers.auth._set_csrf_cookie`` is the second place a csrf_token cookie
+    is minted (GET OIDC callback, which CSRFMiddleware does not cover). It has
+    the same session-vs-persistent asymmetry and the same iOS PWA failure
+    mode, so it must also carry max_age over HTTPS.
+    """
+    from starlette.requests import Request
+    from starlette.responses import Response
+
+    from app.gateway.routers.auth import _set_csrf_cookie
+
+    _setup_config()
+    scope = {
+        "type": "http",
+        "method": "GET",
+        "path": "/api/v1/auth/callback/example",
+        "headers": [(b"x-forwarded-proto", b"https")],
+        "scheme": "http",
+        "server": ("internal", 8000),
+        "query_string": b"",
+    }
+    response = Response()
+    _set_csrf_cookie(response, Request(scope))
+    set_cookie = response.headers.get("set-cookie", "").lower()
+    assert "csrf_token=" in set_cookie
+    assert "secure" in set_cookie
+    assert "max-age" in set_cookie

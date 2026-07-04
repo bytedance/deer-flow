@@ -60,10 +60,12 @@ instead of hanging.
 
 ### Slash commands
 
-`/help` `/new` `/threads` (`/switch`) `/model` `/skills` `/tools` `/mcp`
-`/memory` `/uploads` `/usage` `/config` `/quit`, plus `/<skill-name> task` to
-activate any enabled skill for the current turn (same semantics as elsewhere in
-DeerFlow). `/model` and `/threads` open modal pickers.
+`/help` `/new` `/goal` `/threads` (`/switch`) `/model` `/skills` `/tools`
+`/mcp` `/memory` `/uploads` `/usage` `/config` `/quit`, plus
+`/<skill-name> task` to activate any enabled skill for the current turn (same
+semantics as elsewhere in DeerFlow). `/model` and `/threads` open modal pickers.
+Use `/goal <condition>` to set the active thread goal, `/goal` to show it, and
+`/goal clear` to clear it.
 
 ## Architecture
 

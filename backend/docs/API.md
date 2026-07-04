@@ -108,7 +108,10 @@ in a single run. The unified Gateway path defaults to `100` in
 `build_run_config` (see `backend/app/gateway/services.py`), which is a safer
 starting point for plan-mode or subagent-heavy runs. Clients can still set
 `recursion_limit` explicitly in the request body; increase it if you run deeply
-nested subagent graphs.
+nested subagent graphs. For safety, the Gateway clamps any client-supplied value
+to a configurable server ceiling (`max_recursion_limit` in `config.yaml`,
+default `1000`) so a single run cannot execute unbounded graph steps (runaway
+LLM cost / DoS); invalid or non-positive values fall back to the `100` default.
 
 **Configurable Options:**
 - `model_name` (string): Override the default model
