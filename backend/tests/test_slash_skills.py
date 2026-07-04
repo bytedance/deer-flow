@@ -106,8 +106,9 @@ def test_resolve_slash_skill_respects_available_skill_whitelist(tmp_path):
 
 
 def test_resolve_slash_skill_rejects_disabled_skills(tmp_path):
-    skill = _make_skill(tmp_path, "data-analysis")
-    skill.enabled = False
+    import dataclasses
+
+    skill = dataclasses.replace(_make_skill(tmp_path, "data-analysis"), enabled=False)
 
     assert resolve_slash_skill("/data-analysis run", [skill]) is None
 
@@ -466,8 +467,9 @@ def test_skill_activation_middleware_returns_clear_error_for_missing_skill(monke
 
 
 def test_skill_activation_middleware_returns_clear_error_for_disabled_skill(monkeypatch, tmp_path):
-    skill = _make_skill(tmp_path, "data-analysis")
-    skill.enabled = False
+    import dataclasses
+
+    skill = dataclasses.replace(_make_skill(tmp_path, "data-analysis"), enabled=False)
     monkeypatch.setattr(middleware_module, "get_or_new_skill_storage", lambda **kwargs: _make_storage(tmp_path, [skill]))
 
     middleware = SkillActivationMiddleware()

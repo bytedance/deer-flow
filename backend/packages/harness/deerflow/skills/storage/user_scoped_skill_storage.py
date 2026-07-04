@@ -29,6 +29,7 @@ two users own same-named custom skills.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import logging
 import os
@@ -205,12 +206,12 @@ class UserScopedSkillStorage(LocalSkillStorage):
         from deerflow.config.extensions_config import get_extensions_config
 
         extensions_config = get_extensions_config()
-        for skill in skills:
-            category = skill.category.value if hasattr(skill.category, "value") else skill.category
-            if category != SkillCategory.PUBLIC.value:
-                per_user_state = self.get_skill_enabled_state(skill.name)
-                global_state = extensions_config.is_skill_enabled(skill.name, category)
-                skill.enabled = per_user_state and global_state
+        skills = [
+            dataclasses.replace(s, enabled=self.get_skill_enabled_state(s.name) and extensions_config.is_skill_enabled(s.name, s.category.value if hasattr(s.category, "value") else s.category))
+            if dataclasses.is_dataclass(s) and not isinstance(s, type) and (s.category.value if hasattr(s.category, "value") else s.category) != SkillCategory.PUBLIC.value
+            else s
+            for s in skills
+        ]
 
         if enabled_only:
             skills = [s for s in skills if s.enabled]

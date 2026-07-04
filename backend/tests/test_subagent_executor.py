@@ -165,7 +165,7 @@ def _skill(name: str, allowed_tools: list[str] | None) -> Skill:
         skill_file=skill_dir / "SKILL.md",
         relative_path=Path(name),
         category="custom",
-        allowed_tools=allowed_tools,
+        allowed_tools=tuple(allowed_tools) if allowed_tools is not None else None,
         enabled=True,
     )
 
@@ -2416,6 +2416,43 @@ class TestSubagentGuardrailAttribution:
         assert context.get("oauth_id") == "subj-123"
         assert context.get("run_id") == "run-42"
         assert context.get("is_subagent") is True
+
+    @pytest.mark.anyio
+    async def test_aexecute_propagates_channel_user_id_to_subagent_context(
+        self,
+        classes,
+        executor_module,
+        monkeypatch,
+    ):
+        """The IM-channel sender identity captured at task_tool must reach the
+        subagent's ``astream`` context so delegated bash commands export the
+        dispatching turn's ``DEERFLOW_CHANNEL_USER_ID`` (group chats share one
+        thread across senders)."""
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentConfig = classes["SubagentConfig"]
+        executor = SubagentExecutor(
+            config=SubagentConfig(
+                name="general-purpose",
+                description="Channel identity test agent",
+                system_prompt="You are a channel identity test agent.",
+                max_turns=5,
+                timeout_seconds=30,
+            ),
+            tools=[],
+            parent_model="test-model",
+            thread_id="thread-channel-1",
+            trace_id="trace-channel-1",
+            channel_user_id="ou_group_sender_1",
+        )
+        fake_agent = _FakeStreamAgent()
+        monkeypatch.setattr(executor, "_build_initial_state", self._noop_build_initial_state)
+        monkeypatch.setattr(executor, "_create_agent", lambda *a, **kw: fake_agent)
+
+        await executor._aexecute("do something")
+
+        context = fake_agent.captured_context
+        assert context is not None
+        assert context.get("channel_user_id") == "ou_group_sender_1"
 
     @pytest.mark.anyio
     async def test_aexecute_context_defaults_to_none_when_attribution_absent(

@@ -15,7 +15,7 @@ from typing import NamedTuple
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
 from deerflow.sandbox.env_policy import build_sandbox_env
 from deerflow.sandbox.local.list_dir import list_dir
-from deerflow.sandbox.sandbox import Sandbox
+from deerflow.sandbox.sandbox import Sandbox, _validate_extra_env
 from deerflow.sandbox.search import GrepMatch, find_glob_matches, find_grep_matches
 
 logger = logging.getLogger(__name__)
@@ -442,6 +442,14 @@ class LocalSandbox(Sandbox):
         env: dict[str, str] | None = None,
         timeout: float | None = None,
     ) -> str:
+        # Validate ``env`` keys against the POSIX env-var rule. Defense in
+        # depth: ``subprocess.run(env=...)`` does not go through a shell so a
+        # metachar in a key here would not actually inject — but the public
+        # ``Sandbox.execute_command`` contract is shared with the AIO sandbox,
+        # which DOES splice keys into ``export <k>=<v>``. Enforcing the same
+        # rule on both implementations keeps the contract consistent and forces
+        # any new caller to use safe key names.
+        _validate_extra_env(env)
         # Resolve container paths in command before execution
         resolved_command = self._resolve_paths_in_command(command)
         shell = self._get_shell()
@@ -518,6 +526,9 @@ class LocalSandbox(Sandbox):
         stdin get immediate EOF, and ``start_new_session`` puts the command in
         its own process group so a genuinely blocking foreground command can be
         killed in full (children included) when it times out.
+
+        ``env`` is forwarded to :class:`subprocess.Popen`; ``None`` means
+        inherit the current process environment (the common case).
 
         Returns ``(stdout, stderr, returncode, timed_out)``.
         """
