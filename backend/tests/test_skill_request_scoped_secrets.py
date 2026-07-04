@@ -650,6 +650,44 @@ class TestInContextBindsSecrets:
 
         assert read_active_secrets(context) == {"ERP_TOKEN": "tok-erp", "CRM_TOKEN": "tok-crm"}
 
+    def test_shadowing_name_does_not_bind_unread_skill(self, tmp_path, monkeypatch):
+        """Confused-deputy guard: a custom skill may shadow a same-named public
+        one (load_skills de-dupes by name, custom wins). A thread that read the
+        PUBLIC foo (no declared secrets) must NOT bind the CUSTOM foo's declared
+        secret — matching is by exact container path, never by name."""
+        from deerflow.runtime.secret_context import read_active_secrets
+
+        # Registry exposes only the custom foo (name de-dup, custom wins); the
+        # model read the public foo, whose path differs.
+        custom_foo = _make_secret_skill(tmp_path, "foo", [SecretRequirement("ERP_TOKEN")])
+        context = {"secrets": {"ERP_TOKEN": "tok-123"}}
+        entry = {
+            "name": "foo",
+            "path": "/mnt/skills/public/foo/SKILL.md",  # the PUBLIC one the model actually read
+            "description": "d",
+            "loaded_at": 0,
+        }
+        self._run_call(tmp_path, monkeypatch, [custom_foo], context=context, skill_context=[entry])
+
+        assert read_active_secrets(context) == {}
+
+    def test_stale_path_does_not_fall_back_to_name(self, tmp_path, monkeypatch):
+        """A skill_context path that no longer resolves must not degrade to a
+        name match — it simply does not bind."""
+        from deerflow.runtime.secret_context import read_active_secrets
+
+        skill = _make_secret_skill(tmp_path, "erp-report", [SecretRequirement("ERP_TOKEN")])
+        context = {"secrets": {"ERP_TOKEN": "tok-123"}}
+        entry = {
+            "name": "erp-report",
+            "path": "/mnt/skills/custom/erp-report-OLD-PATH/SKILL.md",
+            "description": "d",
+            "loaded_at": 0,
+        }
+        self._run_call(tmp_path, monkeypatch, [skill], context=context, skill_context=[entry])
+
+        assert read_active_secrets(context) == {}
+
     def test_no_caller_secrets_means_no_binding(self, tmp_path, monkeypatch):
         """The supply gate: without caller-provided values on THIS request there
         is nothing to inject, no matter what is in skill_context."""

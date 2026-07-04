@@ -406,18 +406,25 @@ Follow this skill before choosing a general workflow. Load supporting resources 
             logger.exception("Failed to load skills while resolving in-context secret bindings")
             return []
 
+        # Match strictly by container file path — never by name. skill_context
+        # entries carry the exact path the model read (path-validated at capture),
+        # and it equals the registry's own get_container_file_path. A by-name
+        # fallback would be a confused deputy: DeerFlow lets a custom skill shadow
+        # a same-named public/legacy one (load_skills de-dupes by name, custom
+        # wins), so a thread that read public/foo could bind the *custom* foo's
+        # declared secrets even though the custom skill was never loaded. A path
+        # that no longer resolves (e.g. the skill was moved/removed) simply does
+        # not bind — the safe direction.
         by_path: dict[str, Skill] = {}
-        by_name: dict[str, Skill] = {}
         for skill in skills:
             by_path[skill.get_container_file_path(container_root)] = skill
-            by_name.setdefault(skill.name, skill)
 
         sources: list[tuple[str, tuple[SecretRequirement, ...]]] = []
         seen: set[str] = set()
         for entry in entries:
             if not isinstance(entry, dict):
                 continue
-            skill = by_path.get(entry.get("path")) or by_name.get(entry.get("name"))
+            skill = by_path.get(entry.get("path"))
             if skill is None or skill.name in seen:
                 continue
             seen.add(skill.name)
