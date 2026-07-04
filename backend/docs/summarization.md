@@ -2,6 +2,8 @@
 
 DeerFlow includes automatic conversation summarization to handle long conversations that approach model token limits. When enabled, the system automatically condenses older messages while preserving recent context.
 
+New checkpoints no longer use raw task-result or skill-read transcript content to derive durable context. The capture path consumes bounded structured metadata stamped on the corresponding `ToolMessage.additional_kwargs`; transcript text remains display/model content, not the state-capture protocol.
+
 ## Overview
 
 The summarization feature uses LangChain's `SummarizationMiddleware` to monitor conversation history and trigger summarization based on configurable thresholds. When activated, it:
@@ -161,7 +163,7 @@ The default LangChain prompt instructs the model to:
    - Recent messages are preserved
    - The generated prose summary is stored in `summary_text`
 6. **AI/Tool Pair Protection**: The system ensures AI messages and their corresponding tool messages stay together
-7. **Skill context channel**: Skill files read during the conversation (tool calls whose name is in `skill_file_read_tool_names` and whose path is under `skills.container_path`, narrowed to `.../SKILL.md`) are captured by `DurableContextMiddleware` into the checkpointed `skill_context` channel as references: `name`, `path`, a one-line `description` parsed in-memory from the file's frontmatter, and `loaded_at`, deduped by path. On every model call they are rendered into a hidden durable-context data message as a compact "active skills" reminder that points at each `SKILL.md` for on-demand re-read, so which skills are active survives summarization without persisting or re-injecting the verbatim body. The channel keeps the most recently read skills (cap `_SKILL_CONTEXT_MAX_ENTRIES`; re-reading an existing skill refreshes its recency); sessions typically load only 1-3.
+7. **Skill context channel**: Skill files read during the conversation (tool calls whose name is in `skill_file_read_tool_names` and whose path is under `skills.container_path`, narrowed to `.../SKILL.md`) are stamped with `skill_context_entry` metadata at the read-tool boundary, then captured by `DurableContextMiddleware` into the checkpointed `skill_context` channel as references: `name`, `path`, a one-line `description` parsed in-memory from the file's frontmatter, and `loaded_at`, deduped by path. On every model call they are rendered into a hidden durable-context data message as a compact "active skills" reminder that points at each `SKILL.md` for on-demand re-read, so which skills are active survives summarization without persisting or re-injecting the verbatim body. The channel keeps the most recently read skills (cap `_SKILL_CONTEXT_MAX_ENTRIES`; re-reading an existing skill refreshes its recency); sessions typically load only 1-3.
 
 ### Token Counting
 

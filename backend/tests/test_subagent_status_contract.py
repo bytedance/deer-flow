@@ -1,29 +1,20 @@
-"""Contract tests for ``deerflow.subagents.status_contract``.
-
-Bytedance/deer-flow issue #3146: the backend stamps
-``ToolMessage.additional_kwargs.subagent_status`` so the frontend can read
-the subagent state from a structured field instead of parsing the result
-text. The mapping from "task tool result text" to status is shared with the
-frontend through the cross-language fixture file
-``contracts/subagent_status_contract.json``.
-
-These tests pin the backend implementation against that fixture so any
-edit on either side surfaces immediately as a test failure.
-"""
+"""Contract tests for ``deerflow.subagents.status_contract``."""
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
 
-import pytest
-
 from deerflow.subagents.status_contract import (
     SUBAGENT_ERROR_KEY,
+    SUBAGENT_METADATA_TEXT_MAX_CHARS,
+    SUBAGENT_RESULT_BRIEF_KEY,
+    SUBAGENT_RESULT_SHA256_KEY,
     SUBAGENT_STATUS_KEY,
     SUBAGENT_STATUS_VALUES,
-    extract_subagent_status,
+    _bound_metadata_text,
     make_subagent_additional_kwargs,
+    read_subagent_result_metadata,
 )
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -44,18 +35,6 @@ def test_status_values_match_contract():
     assert set(SUBAGENT_STATUS_VALUES) == set(contract["valid_status_values"])
 
 
-@pytest.mark.parametrize("case", _load_contract()["cases"], ids=lambda c: c["name"])
-def test_extract_subagent_status_matches_contract(case):
-    """Every fixture case maps through ``extract_subagent_status`` to the
-    expected status — covers task_tool's 5 normal returns, the 3
-    pre-execution ``Error:`` returns, the middleware-wrapped exception
-    case, whitespace handling, and the streaming chunk that must stay
-    unrecognised.
-    """
-    status = extract_subagent_status(case["content"])
-    assert status == case["expected_status"], f"case {case['name']!r}: expected {case['expected_status']!r}, got {status!r}"
-
-
 def test_make_subagent_additional_kwargs_includes_status():
     kwargs = make_subagent_additional_kwargs("completed")
     assert kwargs == {SUBAGENT_STATUS_KEY: "completed"}
@@ -66,6 +45,30 @@ def test_make_subagent_additional_kwargs_includes_error_when_present():
     assert kwargs == {SUBAGENT_STATUS_KEY: "failed", SUBAGENT_ERROR_KEY: "boom"}
 
 
+def test_make_subagent_additional_kwargs_includes_bounded_result_metadata():
+    kwargs = make_subagent_additional_kwargs("completed", result="done")
+    assert kwargs[SUBAGENT_STATUS_KEY] == "completed"
+    assert kwargs[SUBAGENT_RESULT_BRIEF_KEY] == "done"
+    assert len(kwargs[SUBAGENT_RESULT_SHA256_KEY]) == 64
+    assert SUBAGENT_ERROR_KEY not in kwargs
+
+
+def test_make_subagent_additional_kwargs_bounds_large_result_metadata():
+    huge = "x" * (SUBAGENT_METADATA_TEXT_MAX_CHARS + 5000)
+    kwargs = make_subagent_additional_kwargs("completed", result=huge)
+    assert len(kwargs[SUBAGENT_RESULT_BRIEF_KEY]) <= SUBAGENT_METADATA_TEXT_MAX_CHARS
+    assert kwargs[SUBAGENT_RESULT_BRIEF_KEY] != huge
+    assert len(kwargs[SUBAGENT_RESULT_SHA256_KEY]) == 64
+
+
+def test_bound_metadata_text_respects_small_caps():
+    text = "A" * 100
+
+    assert _bound_metadata_text(text, cap=0) == ""
+    assert _bound_metadata_text(text, cap=1) == "A"
+    assert len(_bound_metadata_text(text, cap=15)) <= 15
+
+
 def test_make_subagent_additional_kwargs_omits_blank_error():
     """Empty / whitespace error must not leak as ``subagent_error: ""``."""
     assert make_subagent_additional_kwargs("failed", error="") == {SUBAGENT_STATUS_KEY: "failed"}
@@ -73,6 +76,44 @@ def test_make_subagent_additional_kwargs_omits_blank_error():
     assert make_subagent_additional_kwargs("failed", error=None) == {SUBAGENT_STATUS_KEY: "failed"}
 
 
+def test_make_subagent_additional_kwargs_bounds_large_error_metadata():
+    huge = "boom " * 2000
+    kwargs = make_subagent_additional_kwargs("failed", error=huge)
+    assert kwargs[SUBAGENT_STATUS_KEY] == "failed"
+    assert len(kwargs[SUBAGENT_ERROR_KEY]) <= SUBAGENT_METADATA_TEXT_MAX_CHARS
+    assert SUBAGENT_RESULT_BRIEF_KEY not in kwargs
+
+
+def test_read_subagent_result_metadata_returns_bounded_payload():
+    parsed = read_subagent_result_metadata(
+        {
+            SUBAGENT_STATUS_KEY: "completed",
+            SUBAGENT_RESULT_BRIEF_KEY: "structured",
+            SUBAGENT_RESULT_SHA256_KEY: "a" * 64,
+            SUBAGENT_ERROR_KEY: "ignored",
+        }
+    )
+    assert parsed == {
+        "status": "completed",
+        "result_brief": "structured",
+        "result_sha256": "a" * 64,
+    }
+
+
+def test_read_subagent_result_metadata_rejects_unknown_status():
+    assert read_subagent_result_metadata({SUBAGENT_STATUS_KEY: "future"}) is None
+
+
+def test_read_subagent_result_metadata_rejects_non_hex_sha256():
+    """A 64-char value that is not a lowercase hex digest must be dropped."""
+    base = {SUBAGENT_STATUS_KEY: "completed", SUBAGENT_RESULT_BRIEF_KEY: "structured"}
+    for bad_hash in ("z" * 64, "A" * 64, "a" * 63, "a" * 65, ("a" * 63) + " "):
+        parsed = read_subagent_result_metadata({**base, SUBAGENT_RESULT_SHA256_KEY: bad_hash})
+        assert parsed == {"status": "completed", "result_brief": "structured"}, bad_hash
+
+
 def test_make_subagent_additional_kwargs_rejects_unknown_status():
+    import pytest
+
     with pytest.raises(ValueError, match="invalid subagent status"):
         make_subagent_additional_kwargs("garbage")  # type: ignore[arg-type]

@@ -181,6 +181,12 @@ from deerflow.config import get_app_config
 # from app.gateway.routers.uploads import ...  # ← will fail CI
 ```
 
+Package import hygiene: the `deerflow.agents` and `deerflow.subagents` package
+roots expose heavyweight graph/executor entrypoints lazily. Internal modules
+that only need lightweight types, config, or registries should import the
+concrete submodule instead of adding eager package-root imports that pull in the
+tool graph or subagent executor during state/schema imports.
+
 ### Agent System
 
 **Lead Agent** (`packages/harness/deerflow/agents/lead_agent/agent.py`):
@@ -215,7 +221,7 @@ Lead-agent middlewares are assembled in strict order across three functions: the
 8. **GuardrailMiddleware** - *(optional, if `guardrails.enabled`)* Pre-tool-call authorization via pluggable `GuardrailProvider`; returns an error ToolMessage on deny. Providers: built-in `AllowlistProvider` (zero deps), OAP policy providers (e.g. `aport-agent-guardrails`), or custom. See [docs/GUARDRAILS.md](docs/GUARDRAILS.md)
 9. **SandboxAuditMiddleware** - Audits sandboxed shell/file operations for security logging before tool execution
 10. **ReadBeforeWriteMiddleware** - *(optional, if `read_before_write.enabled`, default on)* Version gate on file writes (issue #3857): `read_file` stamps a content hash onto its ToolMessage; `write_file` (append/overwrite-existing) and `str_replace` are blocked unless the newest mark for that path matches the file's current hash. Marks live on messages, so summarization dropping the read result invalidates the gate automatically; writes never refresh marks, forcing a re-read between consecutive edits. Gate check + tool execution are serialized per (thread, path) so same-turn parallel writes cannot reuse one stale mark; on sandboxes whose `read_file` reports failures as `"Error: ..."` strings instead of raising (AIO/E2B), uninspectable targets fail open (creation proceeds, no mark stamped)
-11. **ToolErrorHandlingMiddleware** - Converts tool exceptions into error `ToolMessage`s so the run can continue instead of aborting
+11. **ToolErrorHandlingMiddleware** - Receives `AppConfig`, converts tool exceptions into error `ToolMessage`s so the run can continue instead of aborting, stamps structured metadata for task exception wrappers, and stamps skill-read metadata for downstream durable-context capture. Task tool result text is generated from the same status/result/error inputs as the structured metadata so callers do not hand-write a second protocol string.
 
 **Lead-only middlewares** (`build_middlewares`, appended after the base):
 
