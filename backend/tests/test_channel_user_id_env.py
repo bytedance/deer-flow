@@ -135,16 +135,33 @@ class TestBashToolChannelIdentityPrefix:
         assert call["command"].startswith(f"export {CHANNEL_USER_ID_ENV}=ou_1; ")
         assert "secret-value" not in call["command"]
 
-    def test_non_string_or_empty_values_are_ignored(self):
-        assert _channel_identity_prefix(SimpleNamespace(context={"channel_user_id": ""})) is None
-        assert _channel_identity_prefix(SimpleNamespace(context={"channel_user_id": 123})) is None
+    def test_non_im_run_leaves_command_untouched(self):
+        """No channel_user_id key at all → non-IM run → prefix is None so the
+        command (the vast majority: Web/API/subagent) is unchanged."""
+        assert _channel_identity_prefix(SimpleNamespace(context={"thread_id": "t1"})) is None
+        assert _channel_identity_prefix(SimpleNamespace(context={})) is None
         assert _channel_identity_prefix(SimpleNamespace(context=None)) is None
 
-    def test_overlong_value_is_ignored(self):
-        """body.context is client-writable on web requests; a pathological value
-        must not bloat every command sent to the sandbox. Real platform ids are
-        well under the cap."""
-        assert _channel_identity_prefix(SimpleNamespace(context={"channel_user_id": "x" * 5000})) is None
+    def test_unusable_value_emits_unset_not_none(self, monkeypatch):
+        """An IM run whose id is unusable (empty / non-str / over the cap) must
+        emit ``unset`` — not skip the prefix. Skipping would let a bare command
+        resolve a stale value left in the AIO persistent shell by an earlier
+        sender (willem-bd's group-chat leak window)."""
+        for bad in ("", 123, "x" * 5000, None):
+            prefix = _channel_identity_prefix(SimpleNamespace(context={"channel_user_id": bad}))
+            assert prefix == f"unset {CHANNEL_USER_ID_ENV}; ", f"value={bad!r}"
+
+    def test_group_chat_dropped_id_clears_previous_sender(self, monkeypatch):
+        """Sender A (valid) then sender B (over-cap id, dropped): B's command must
+        carry ``unset`` so it cannot inherit A's exported id in a shared
+        persistent-shell sandbox — per-call correctness independent of session
+        persistence."""
+        a = _run_bash(monkeypatch, _aio_runtime({"channel_user_id": "sender-a"}))
+        b = _run_bash(monkeypatch, _aio_runtime({"channel_user_id": "b" * 5000}))
+
+        assert a.calls[0]["command"] == f"export {CHANNEL_USER_ID_ENV}=sender-a; echo hi"
+        assert b.calls[0]["command"] == f"unset {CHANNEL_USER_ID_ENV}; echo hi"
+        assert b.calls[0]["env"] is None
 
     def test_windows_local_sandbox_skips_prefix(self, monkeypatch):
         """On Windows the local sandbox may execute via PowerShell/cmd.exe where

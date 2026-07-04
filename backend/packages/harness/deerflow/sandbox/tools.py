@@ -1562,26 +1562,34 @@ def _is_windows() -> bool:
 
 
 def _channel_identity_prefix(runtime: Runtime) -> str | None:
-    """Build the ``export`` prefix carrying the channel user id, or ``None``.
+    """Build the command prefix that sets or clears the channel-user-id env var.
+
+    Returns ``None`` for a non-IM run (no ``channel_user_id`` key in context) so
+    the command is left untouched. For an IM run the prefix is always emitted:
+
+    - valid id (non-empty str within the length cap) → ``export VAR=<quoted>; ``
+    - unusable id (empty / non-str / over the cap) → ``unset VAR; ``
 
     The id deliberately rides the command string instead of the
     ``execute_command(env=...)`` channel: a non-empty ``env`` switches
     ``AioSandbox`` to the ``bash.exec`` API (fresh session per call, image
-    >= 1.9.3 required), which is reserved for request-scoped secrets. A plain
-    ``export`` prefix keeps the legacy persistent-shell path, is visible in
-    audit logs (fine — it is an identifier, not a secret), and gives per-call
-    correctness in group chats where one thread/sandbox is shared by senders
-    with different platform ids.
+    >= 1.9.3 required), which is reserved for request-scoped secrets. Emitting an
+    explicit ``export``-or-``unset`` on every IM command makes per-call identity
+    correct **without depending on the AIO shell's session semantics**: the AIO
+    no-env path reuses a persistent shell session (the reason for the class lock,
+    #1433), so a bare command could otherwise resolve a stale value exported by
+    an earlier sender in a shared group-chat sandbox. The ``unset`` closes the
+    window the length/type guard would otherwise open — a sender whose id is
+    dropped inherits the previous sender's value. Values are identifiers, not
+    secrets, so keeping them in the audit-visible command string is fine.
     """
     context = getattr(runtime, "context", None)
-    if not isinstance(context, dict):
+    if not isinstance(context, dict) or _CHANNEL_USER_ID_CONTEXT_KEY not in context:
         return None
     channel_user_id = context.get(_CHANNEL_USER_ID_CONTEXT_KEY)
-    if not isinstance(channel_user_id, str) or not channel_user_id:
-        return None
-    if len(channel_user_id) > _CHANNEL_USER_ID_MAX_LEN:
-        return None
-    return f"export {CHANNEL_USER_ID_ENV}={shlex.quote(channel_user_id)}; "
+    if isinstance(channel_user_id, str) and 0 < len(channel_user_id) <= _CHANNEL_USER_ID_MAX_LEN:
+        return f"export {CHANNEL_USER_ID_ENV}={shlex.quote(channel_user_id)}; "
+    return f"unset {CHANNEL_USER_ID_ENV}; "
 
 
 @tool("bash", parse_docstring=True)
