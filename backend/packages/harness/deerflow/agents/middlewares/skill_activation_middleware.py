@@ -18,9 +18,9 @@ from langchain_core.messages import AIMessage, HumanMessage
 
 from deerflow.runtime.secret_context import ACTIVE_SECRETS_CONTEXT_KEY, extract_request_secrets
 from deerflow.skills.slash import parse_slash_skill_reference, resolve_slash_skill
-from deerflow.skills.storage import get_or_new_skill_storage
+from deerflow.skills.storage import get_or_new_skill_storage, get_or_new_user_skill_storage
 from deerflow.skills.storage.skill_storage import SkillStorage
-from deerflow.skills.types import SKILL_MD_FILE, SecretRequirement
+from deerflow.skills.types import SKILL_MD_FILE, SecretRequirement, SkillCategory
 from deerflow.utils.messages import get_original_user_content_text
 
 if TYPE_CHECKING:
@@ -41,6 +41,7 @@ class _Activation:
     skill_content: str
     content_hash: str
     remaining_text: str
+    editable: bool
     required_secrets: tuple[SecretRequirement, ...] = ()
 
 
@@ -73,26 +74,38 @@ class SkillActivationMiddleware(AgentMiddleware):
         *,
         available_skills: set[str] | None = None,
         app_config: AppConfig | None = None,
+        user_id: str | None = None,
     ) -> None:
         super().__init__()
         self._available_skills = set(available_skills) if available_skills is not None else None
         self._app_config = app_config
+        self._user_id = user_id
 
     def _storage(self) -> SkillStorage:
+        if self._user_id is not None:
+            return get_or_new_user_skill_storage(self._user_id, app_config=self._app_config)
         if self._app_config is not None:
             return get_or_new_skill_storage(app_config=self._app_config)
         return get_or_new_skill_storage()
 
     @staticmethod
-    def _read_skill_content(skill_file: Path, skills_root: Path) -> str:
+    def _read_skill_content(skill_file: Path, skills_root: Path, *, storage: SkillStorage | None = None) -> str:
         if skill_file.name != SKILL_MD_FILE:
             raise ValueError(f"Expected {SKILL_MD_FILE}, got {skill_file.name}")
-        resolved_root = skills_root.resolve()
-        resolved_file = skill_file.resolve()
-        try:
-            resolved_file.relative_to(resolved_root)
-        except ValueError as exc:
-            raise ValueError("Resolved skill file must stay within the configured skills root.") from exc
+        # Use the storage's path validation if available — UserScopedSkillStorage
+        # stores custom skills in a per-user directory that is not a sub-path of
+        # the global skills root, so the simple relative_to check would reject them.
+        # Fall back to the relative_to check when the storage is a mock (e.g. tests)
+        # that doesn't implement validate_skill_file_path.
+        if storage is not None and hasattr(storage, "validate_skill_file_path"):
+            resolved_file = storage.validate_skill_file_path(skill_file)
+        else:
+            resolved_file = skill_file.resolve()
+            resolved_root = skills_root.resolve()
+            try:
+                resolved_file.relative_to(resolved_root)
+            except ValueError as exc:
+                raise ValueError("Resolved skill file must stay within the configured skills root.") from exc
         if not resolved_file.is_file():
             raise FileNotFoundError(resolved_file)
         return resolved_file.read_text(encoding="utf-8")
@@ -122,12 +135,14 @@ class SkillActivationMiddleware(AgentMiddleware):
             return _ActivationResolution(failure_message=f"Skill `/{reference.name}` could not be resolved.")
 
         try:
-            skill_content = self._read_skill_content(resolved.skill.skill_file, storage.get_skills_root_path())
+            skill_content = self._read_skill_content(resolved.skill.skill_file, storage.get_skills_root_path(), storage=storage)
         except (OSError, ValueError):
             logger.exception("Failed to read slash-activated skill %s", resolved.skill.name)
             return _ActivationResolution(failure_message=f"Skill `/{reference.name}` could not be loaded safely. Please check the skill installation.")
 
         content_hash = hashlib.sha256(skill_content.encode("utf-8")).hexdigest()
+        # CUSTOM skills are editable; PUBLIC and LEGACY are read-only
+        editable = resolved.skill.category == SkillCategory.CUSTOM
         return _ActivationResolution(
             activation=_Activation(
                 skill_name=resolved.skill.name,
@@ -136,6 +151,7 @@ class SkillActivationMiddleware(AgentMiddleware):
                 skill_content=skill_content,
                 content_hash=content_hash,
                 remaining_text=resolved.remaining_text,
+                editable=editable,
                 required_secrets=tuple(resolved.skill.required_secrets or ()),
             )
         )
@@ -149,6 +165,7 @@ class SkillActivationMiddleware(AgentMiddleware):
         escaped_category = html.escape(activation.category, quote=True)
         escaped_path = html.escape(activation.container_file_path, quote=True)
         escaped_content_hash = html.escape(activation.content_hash, quote=True)
+        editable_str = "true" if activation.editable else "false"
         return f"""<slash_skill_activation>
 The user explicitly activated the `{activation.skill_name}` skill for this turn.
 Treat the task text as:
@@ -158,7 +175,7 @@ Treat the task text as:
 
 Follow this skill before choosing a general workflow. Load supporting resources from the same skill directory only when needed.
 
-<skill name="{escaped_skill_name}" category="{escaped_category}" path="{escaped_path}" sha256="{escaped_content_hash}">
+<skill name="{escaped_skill_name}" category="{escaped_category}" path="{escaped_path}" sha256="{escaped_content_hash}" editable="{editable_str}">
 <skill_content encoding="xml-escaped">
 {escaped_skill_content}
 </skill_content>

@@ -42,14 +42,6 @@ class TestReplaceVirtualPathsWindows:
         result = replace_virtual_paths_in_command(cmd, _WIN_THREAD_DATA)
         assert "\\" not in result, f"Backslash in: {result}"
 
-    @patch("deerflow.sandbox.tools._resolve_acp_workspace_path", return_value=r"C:\Users\admin\deer-flow\acp-workspace\data.json")
-    @patch("deerflow.sandbox.tools._get_acp_workspace_host_path", return_value=r"C:\Users\admin\deer-flow\acp-workspace")
-    def test_acp_workspace_no_backslash(self, _mock_acp_host, _mock_resolve_acp) -> None:
-        cmd = "cat /mnt/acp-workspace/data.json"
-        result = replace_virtual_paths_in_command(cmd, _WIN_THREAD_DATA)
-        assert "\\" not in result, f"Backslash in: {result}"
-        assert "C:/Users/admin/deer-flow/acp-workspace/data.json" in result
-
 
 class TestLocalSandboxResolvePathsInCommandWindows:
     """LocalSandbox._resolve_paths_in_command must normalize backslashes."""
@@ -77,3 +69,22 @@ class TestLocalSandboxResolvePathsInCommandWindows:
         result = sandbox._resolve_paths_in_command(cmd)
         assert "\\" not in result, f"Backslash in: {result}"
         assert "C:/Users/admin/data/workspace/file.txt" in result
+
+    def test_acp_workspace_no_backslash(self) -> None:
+        """PR #3889 moved ACP workspace path resolution from
+        ``replace_virtual_paths_in_command`` to ``LocalSandbox._resolve_paths_in_command``
+        via ``PathMapping``. Verify the Windows backslash normalization still
+        applies to ACP workspace paths through the new routing — the same
+        guarantee ``test_acp_workspace_no_backslash`` (now removed) provided
+        for the legacy inline code path.
+        """
+        sandbox = LocalSandbox(
+            "test",
+            path_mappings=[
+                PathMapping(container_path="/mnt/acp-workspace", local_path=r"C:\Users\admin\deer-flow\acp-workspace", read_only=False),
+            ],
+        )
+        cmd = "cat /mnt/acp-workspace/data.json"
+        result = sandbox._resolve_paths_in_command(cmd)
+        assert "\\" not in result, f"Backslash in: {result}"
+        assert "C:/Users/admin/deer-flow/acp-workspace/data.json" in result

@@ -2,6 +2,8 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 
+from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
+
 SKILL_MD_FILE = "SKILL.md"
 
 
@@ -10,10 +12,14 @@ class SkillCategory(StrEnum):
 
     - ``PUBLIC``: built-in skill bundled with the platform, read-only.
     - ``CUSTOM``: user-authored skill that can be edited or deleted.
+    - ``LEGACY``: global custom skill from before user-isolation migration,
+      presented as read-only (visible but not editable/deletable). These
+      skills are mounted at ``/mnt/skills/legacy/<name>/`` in the sandbox.
     """
 
     PUBLIC = "public"
     CUSTOM = "custom"
+    LEGACY = "legacy"
 
 
 @dataclass(frozen=True)
@@ -50,7 +56,7 @@ class Skill:
         path = self.relative_path.as_posix()
         return "" if path == "." else path
 
-    def get_container_path(self, container_base_path: str = "/mnt/skills") -> str:
+    def get_container_path(self, container_base_path: str = DEFAULT_SKILLS_CONTAINER_PATH) -> str:
         """
         Get the full path to this skill in the container.
 
@@ -66,7 +72,7 @@ class Skill:
             return f"{category_base}/{skill_path}"
         return category_base
 
-    def get_container_file_path(self, container_base_path: str = "/mnt/skills") -> str:
+    def get_container_file_path(self, container_base_path: str = DEFAULT_SKILLS_CONTAINER_PATH) -> str:
         """
         Get the full path to this skill's main file (SKILL.md) in the container.
 

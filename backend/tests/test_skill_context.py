@@ -1,6 +1,10 @@
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
-from deerflow.agents.middlewares.skill_context import extract_skills, render_skill_context
+from deerflow.agents.middlewares.skill_context import (
+    build_skill_entry_metadata_from_read,
+    extract_skills,
+    render_skill_context,
+)
 
 _ROOT = "/mnt/skills"
 _READ = frozenset({"read_file", "read", "view", "cat"})
@@ -20,12 +24,44 @@ def _ai_read(tool_call_id: str, path: str, name: str = "read_file") -> AIMessage
     )
 
 
+def _skill_metadata(path: str = "/mnt/skills/public/data-analysis/SKILL.md", description: str = "Analyze data with pandas and charts.") -> dict:
+    return {
+        "skill_context_entry": {
+            "name": path.split("/")[-2],
+            "path": path,
+            "description": description,
+        }
+    }
+
+
 class TestExtractSkills:
+    def test_build_skill_entry_metadata_from_read_rejects_non_skill_files(self):
+        assert (
+            build_skill_entry_metadata_from_read(
+                "/mnt/skills/public/data-analysis/README.md",
+                _SKILL_BODY,
+                skills_root=_ROOT,
+            )
+            is None
+        )
+
+    def test_build_skill_entry_metadata_from_read_returns_compact_reference(self):
+        entry = build_skill_entry_metadata_from_read(
+            "/mnt/skills/public/data-analysis/SKILL.md",
+            _SKILL_BODY,
+            skills_root=_ROOT,
+        )
+        assert entry == {
+            "path": "/mnt/skills/public/data-analysis/SKILL.md",
+            "description": "Analyze data with pandas and charts.",
+        }
+        assert "ALWAYS_USE_PANDAS_SENTINEL" not in repr(entry)
+
     def test_captures_skill_reference_with_description(self):
         msgs = [
             HumanMessage(content="use the analysis skill"),
             _ai_read("r1", "/mnt/skills/public/data-analysis/SKILL.md"),
-            ToolMessage(content=_SKILL_BODY, tool_call_id="r1", id="tm1"),
+            ToolMessage(content=_SKILL_BODY, tool_call_id="r1", id="tm1", additional_kwargs=_skill_metadata()),
         ]
         out = extract_skills(msgs, skills_root=_ROOT, read_tool_names=_READ)
         assert len(out) == 1
@@ -37,10 +73,15 @@ class TestExtractSkills:
         assert isinstance(out[0]["loaded_at"], int)
 
     def test_description_is_capped_at_capture_time(self):
-        body = "---\nname: huge\ndescription: " + ("x" * 2000) + "\n---\nBODY_SENTINEL"
+        description = "x" * 500
         msgs = [
             _ai_read("r1", "/mnt/skills/public/huge/SKILL.md"),
-            ToolMessage(content=body, tool_call_id="r1", id="tm1"),
+            ToolMessage(
+                content="BODY_SENTINEL",
+                tool_call_id="r1",
+                id="tm1",
+                additional_kwargs=_skill_metadata("/mnt/skills/public/huge/SKILL.md", description),
+            ),
         ]
 
         out = extract_skills(msgs, skills_root=_ROOT, read_tool_names=_READ)
@@ -49,26 +90,36 @@ class TestExtractSkills:
         assert len(out[0]["description"]) <= 500
         assert "BODY_SENTINEL" not in repr(out[0])
 
-    def test_missing_frontmatter_yields_empty_description(self):
+    def test_metadata_with_empty_description_yields_empty_description(self):
         msgs = [
             _ai_read("r1", "/mnt/skills/public/x/SKILL.md"),
-            ToolMessage(content="# X\nno frontmatter here", tool_call_id="r1", id="tm1"),
+            ToolMessage(
+                content="# X\nno frontmatter here",
+                tool_call_id="r1",
+                id="tm1",
+                additional_kwargs=_skill_metadata("/mnt/skills/public/x/SKILL.md", ""),
+            ),
         ]
         out = extract_skills(msgs, skills_root=_ROOT, read_tool_names=_READ)
         assert out and out[0]["description"] == ""
 
-    def test_malformed_frontmatter_yields_empty_description(self):
+    def test_missing_metadata_logs_warning_without_recovering_from_content(self, caplog):
         msgs = [
             _ai_read("r1", "/mnt/skills/public/x/SKILL.md"),
-            ToolMessage(content="---\n: : not valid yaml\n---\nbody", tool_call_id="r1", id="tm1"),
+            ToolMessage(content=_SKILL_BODY, tool_call_id="r1", id="tm1"),
         ]
-        out = extract_skills(msgs, skills_root=_ROOT, read_tool_names=_READ)
-        assert out and out[0]["description"] == ""
+
+        with caplog.at_level("WARNING", logger="deerflow.agents.middlewares.skill_context"):
+            assert extract_skills(msgs, skills_root=_ROOT, read_tool_names=_READ) == []
+
+        assert "missing skill read metadata" in caplog.text
+        assert "tool_call_id=r1" in caplog.text
+        assert "/mnt/skills/public/x/SKILL.md" in caplog.text
 
     def test_normalizes_dot_segments_under_skills_root(self):
         msgs = [
             _ai_read("r1", "/mnt/skills/public/./data-analysis/SKILL.md"),
-            ToolMessage(content="body", tool_call_id="r1", id="tm1"),
+            ToolMessage(content="body", tool_call_id="r1", id="tm1", additional_kwargs=_skill_metadata()),
         ]
 
         out = extract_skills(msgs, skills_root="/mnt/skills/", read_tool_names=_READ)
@@ -129,7 +180,12 @@ class TestExtractSkills:
     def test_trailing_slash_root_normalized(self):
         msgs = [
             _ai_read("r1", "/mnt/skills/public/a/SKILL.md"),
-            ToolMessage(content="body", tool_call_id="r1", id="tm1"),
+            ToolMessage(
+                content="body",
+                tool_call_id="r1",
+                id="tm1",
+                additional_kwargs=_skill_metadata("/mnt/skills/public/a/SKILL.md", ""),
+            ),
         ]
         out = extract_skills(msgs, skills_root="/mnt/skills/", read_tool_names=_READ)
         assert out and out[0]["name"] == "a"
@@ -137,12 +193,178 @@ class TestExtractSkills:
     def test_multiple_skills_each_captured(self):
         msgs = [
             _ai_read("r1", "/mnt/skills/public/a/SKILL.md"),
-            ToolMessage(content="A", tool_call_id="r1", id="tm1"),
+            ToolMessage(
+                content="A",
+                tool_call_id="r1",
+                id="tm1",
+                additional_kwargs=_skill_metadata("/mnt/skills/public/a/SKILL.md", "A"),
+            ),
             _ai_read("r2", "/mnt/skills/custom/b/SKILL.md"),
-            ToolMessage(content="B", tool_call_id="r2", id="tm2"),
+            ToolMessage(
+                content="B",
+                tool_call_id="r2",
+                id="tm2",
+                additional_kwargs=_skill_metadata("/mnt/skills/custom/b/SKILL.md", "B"),
+            ),
         ]
         out = extract_skills(msgs, skills_root=_ROOT, read_tool_names=_READ)
         assert [e["name"] for e in out] == ["a", "b"]
+
+    def test_extract_skills_prefers_metadata_only_when_path_matches_read_call(self):
+        msgs = [
+            _ai_read("r1", "/mnt/skills/public/data-analysis/SKILL.md"),
+            ToolMessage(
+                content="---\nname: wrong\ndescription: content body\n---\nbody",
+                tool_call_id="r1",
+                id="tm1",
+                additional_kwargs={
+                    "skill_context_entry": {
+                        "name": "data-analysis",
+                        "path": "/mnt/skills/public/data-analysis/SKILL.md",
+                        "description": "Structured description.",
+                    }
+                },
+            ),
+        ]
+
+        out = extract_skills(msgs, skills_root=_ROOT, read_tool_names=_READ)
+
+        assert out == [
+            {
+                "name": "data-analysis",
+                "path": "/mnt/skills/public/data-analysis/SKILL.md",
+                "description": "Structured description.",
+                "loaded_at": 1,
+            }
+        ]
+
+    def test_extract_skills_rejects_metadata_path_mismatch_without_reparsing_content(self):
+        msgs = [
+            _ai_read("r1", "/mnt/skills/public/data-analysis/SKILL.md"),
+            ToolMessage(
+                content=_SKILL_BODY,
+                tool_call_id="r1",
+                id="tm1",
+                additional_kwargs={
+                    "skill_context_entry": {
+                        "name": "other",
+                        "path": "/mnt/skills/public/other/SKILL.md",
+                        "description": "Wrong metadata.",
+                    }
+                },
+            ),
+        ]
+
+        out = extract_skills(msgs, skills_root=_ROOT, read_tool_names=_READ)
+
+        assert out == []
+
+    def test_extract_skills_warns_on_metadata_path_mismatch(self, caplog):
+        msgs = [
+            _ai_read("r1", "/mnt/skills/public/data-analysis/SKILL.md"),
+            ToolMessage(
+                content=_SKILL_BODY,
+                tool_call_id="r1",
+                id="tm1",
+                additional_kwargs={
+                    "skill_context_entry": {
+                        "name": "other",
+                        "path": "/mnt/skills/public/other/SKILL.md",
+                        "description": "Wrong metadata.",
+                    }
+                },
+            ),
+        ]
+
+        with caplog.at_level("WARNING", logger="deerflow.agents.middlewares.skill_context"):
+            assert extract_skills(msgs, skills_root=_ROOT, read_tool_names=_READ) == []
+
+        assert "mismatched skill read metadata" in caplog.text
+        assert "expected_path=/mnt/skills/public/data-analysis/SKILL.md" in caplog.text
+        assert "metadata_path=/mnt/skills/public/other/SKILL.md" in caplog.text
+
+    def test_extract_skills_rebuilds_name_from_validated_read_path(self):
+        msgs = [
+            _ai_read("r1", "/mnt/skills/public/data-analysis/SKILL.md"),
+            ToolMessage(
+                content="---\ndescription: content body\n---\nbody",
+                tool_call_id="r1",
+                id="tm1",
+                additional_kwargs={
+                    "skill_context_entry": {
+                        "name": "spoofed-name",
+                        "path": "/mnt/skills/public/data-analysis/SKILL.md",
+                        "description": "Structured description.",
+                    }
+                },
+            ),
+        ]
+
+        out = extract_skills(msgs, skills_root=_ROOT, read_tool_names=_READ)
+
+        assert out[0]["name"] == "data-analysis"
+        assert out[0]["path"] == "/mnt/skills/public/data-analysis/SKILL.md"
+        assert out[0]["description"] == "Structured description."
+
+    def test_extract_skills_accepts_same_path_metadata_with_missing_description(self):
+        msgs = [
+            _ai_read("r1", "/mnt/skills/public/data-analysis/SKILL.md"),
+            ToolMessage(
+                content=_SKILL_BODY,
+                tool_call_id="r1",
+                id="tm1",
+                additional_kwargs={
+                    "skill_context_entry": {
+                        "name": "data-analysis",
+                        "path": "/mnt/skills/public/data-analysis/SKILL.md",
+                    }
+                },
+            ),
+        ]
+
+        out = extract_skills(msgs, skills_root=_ROOT, read_tool_names=_READ)
+
+        assert out[0]["path"] == "/mnt/skills/public/data-analysis/SKILL.md"
+        assert out[0]["description"] == ""
+
+    def test_extract_skills_accepts_same_path_metadata_with_non_string_description_as_empty(self):
+        msgs = [
+            _ai_read("r1", "/mnt/skills/public/data-analysis/SKILL.md"),
+            ToolMessage(
+                content=_SKILL_BODY,
+                tool_call_id="r1",
+                id="tm1",
+                additional_kwargs={
+                    "skill_context_entry": {
+                        "name": "data-analysis",
+                        "path": "/mnt/skills/public/data-analysis/SKILL.md",
+                        "description": 123,
+                    }
+                },
+            ),
+        ]
+
+        out = extract_skills(msgs, skills_root=_ROOT, read_tool_names=_READ)
+
+        assert out[0]["path"] == "/mnt/skills/public/data-analysis/SKILL.md"
+        assert out[0]["description"] == ""
+
+    def test_extract_skills_ignores_standalone_outside_root_metadata(self):
+        msgs = [
+            _ai_read("r1", "/workspace/notes.md"),
+            ToolMessage(
+                content="notes",
+                tool_call_id="r1",
+                additional_kwargs={
+                    "skill_context_entry": {
+                        "name": "secret",
+                        "path": "/mnt/skills/public/secret/SKILL.md",
+                        "description": "Do not trust this.",
+                    }
+                },
+            ),
+        ]
+        assert extract_skills(msgs, skills_root=_ROOT, read_tool_names=_READ) == []
 
 
 class TestRenderSkillContext:
@@ -172,7 +394,7 @@ class TestRenderSkillContext:
         assert "- x" in out
         assert "/mnt/skills/public/x/SKILL.md" in out
 
-    def test_render_caps_legacy_large_description(self):
+    def test_render_caps_large_description(self):
         entries = [{"name": "x", "path": "/mnt/skills/public/x/SKILL.md", "description": "x" * 2000, "loaded_at": 0}]
 
         out = render_skill_context(entries)

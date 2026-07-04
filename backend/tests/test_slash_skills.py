@@ -32,10 +32,20 @@ def _make_skill(tmp_path: Path, name: str, content: str = "skill body") -> Skill
 
 
 def _make_storage(tmp_path: Path, skills: list[Skill]):
+    def _validate_skill_file_path(skill_file: Path) -> Path:
+        resolved = skill_file.resolve()
+        root = tmp_path.resolve()
+        try:
+            resolved.relative_to(root)
+        except ValueError:
+            raise ValueError("Resolved skill file must stay within the configured skills root.")
+        return resolved
+
     return SimpleNamespace(
         load_skills=lambda *, enabled_only: [skill for skill in skills if skill.enabled] if enabled_only else skills,
         get_container_root=lambda: "/mnt/skills",
         get_skills_root_path=lambda: tmp_path,
+        validate_skill_file_path=_validate_skill_file_path,
     )
 
 

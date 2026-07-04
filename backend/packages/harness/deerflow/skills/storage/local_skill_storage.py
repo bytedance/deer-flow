@@ -14,13 +14,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from deerflow.config.runtime_paths import resolve_path
+from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
 from deerflow.skills.permissions import make_skill_written_path_sandbox_readable
 from deerflow.skills.storage.skill_storage import SKILL_MD_FILE, SkillStorage
 from deerflow.skills.types import SkillCategory
 
 logger = logging.getLogger(__name__)
-
-DEFAULT_SKILLS_CONTAINER_PATH = "/mnt/skills"
 
 # Bound for the best-effort temp-dir cleanup so a stalled filesystem (e.g. NFS)
 # cannot hold back the install outcome propagating out of the finally block.
@@ -190,6 +189,7 @@ class LocalSkillStorage(SkillStorage):
             staging_target = Path(staging_root) / skill_name
             shutil.copytree(skill_dir, staging_target)
             _move_staged_skill_into_reserved_target(staging_target, target)
+        make_skill_written_path_sandbox_readable(custom_dir, target)
 
     def delete_custom_skill(self, name: str, *, history_meta: dict | None = None) -> None:
         self.validate_skill_name(name)

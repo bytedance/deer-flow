@@ -8,6 +8,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Iterable
 from pathlib import Path
 
+from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
 from deerflow.skills.types import SKILL_MD_FILE, Skill, SkillCategory  # noqa: F401
 
 logger = logging.getLogger(__name__)
@@ -24,7 +25,7 @@ class SkillStorage(ABC):
     compose them with protocol-level helpers.
     """
 
-    def __init__(self, container_path: str = "/mnt/skills") -> None:
+    def __init__(self, container_path: str = DEFAULT_SKILLS_CONTAINER_PATH) -> None:
         self._container_root = container_path
 
     # ------------------------------------------------------------------
@@ -108,6 +109,28 @@ class SkillStorage(ABC):
 
         Origin: ``deerflow.skills.loader.get_skills_root_path``.
         """
+
+    def validate_skill_file_path(self, skill_file: Path) -> Path:
+        """Validate that *skill_file* is within an allowed root and return its resolved path.
+
+        The default implementation checks that ``skill_file`` is under
+        ``get_skills_root_path()`` — sufficient for :class:`LocalSkillStorage`
+        where both public and custom skills live under the same root.
+
+        :class:`UserScopedSkillStorage` overrides this to also accept files
+        under the per-user custom root, because custom skills are stored in a
+        separate directory tree that is not a sub-path of the global root.
+
+        Raises:
+            ValueError: if the resolved path escapes all allowed roots.
+        """
+        resolved_file = skill_file.resolve()
+        resolved_root = self.get_skills_root_path().resolve()
+        try:
+            resolved_file.relative_to(resolved_root)
+        except ValueError as exc:
+            raise ValueError("Resolved skill file must stay within the configured skills root.") from exc
+        return resolved_file
 
     @abstractmethod
     def _iter_skill_files(self) -> Iterable[tuple[SkillCategory, Path, Path]]:
@@ -200,6 +223,12 @@ class SkillStorage(ABC):
     def get_skill_history_file(self, name: str) -> Path:
         """Path to ``custom/.history/<name>.jsonl``. Does not create parents.
 
+        **Note:** This default implementation returns a path under the global
+        skills root, which is correct for :class:`LocalSkillStorage` but
+        **incorrect** for :class:`UserScopedSkillStorage`. Subclasses that
+        redirect custom skill paths must override this method (as
+        ``UserScopedSkillStorage`` already does).
+
         Origin: ``deerflow.skills.manager.get_skill_history_file``.
         """
         normalized_name = self.validate_skill_name(name)
@@ -230,6 +259,10 @@ class SkillStorage(ABC):
 
         # Merge enabled state from extensions config (re-read every call so
         # changes made by another process are picked up immediately).
+        # All skill categories (PUBLIC, LEGACY, CUSTOM) respect the
+        # extensions_config enabled/disabled state.  CUSTOM skills default
+        # to enabled when no explicit config entry exists (so newly
+        # installed skills appear active without requiring a manual toggle).
         try:
             from deerflow.config.extensions_config import ExtensionsConfig
 
@@ -246,7 +279,12 @@ class SkillStorage(ABC):
         return skills
 
     def ensure_custom_skill_is_editable(self, name: str) -> None:
-        """Origin: ``deerflow.skills.manager.ensure_custom_skill_is_editable``."""
+        """Origin: ``deerflow.skills.manager.ensure_custom_skill_is_editable``.
+
+        Only CUSTOM-category skills are editable. PUBLIC (built-in) and
+        LEGACY (shared pre-migration) skills are read-only; attempting to
+        edit them raises ``ValueError`` with a helpful suggestion.
+        """
         if self.custom_skill_exists(name):
             return
         if self.public_skill_exists(name):
