@@ -36,6 +36,7 @@ import tempfile
 from collections.abc import Iterable
 from pathlib import Path
 
+from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
 from deerflow.skills.permissions import make_skill_written_path_sandbox_readable
 from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
 from deerflow.skills.storage.skill_storage import SKILL_MD_FILE
@@ -70,7 +71,7 @@ class UserScopedSkillStorage(LocalSkillStorage):
         self,
         user_id: str,
         host_path: str | None = None,
-        container_path: str = "/mnt/skills",
+        container_path: str = DEFAULT_SKILLS_CONTAINER_PATH,
         app_config=None,
     ) -> None:
         super().__init__(host_path=host_path, container_path=container_path, app_config=app_config)
