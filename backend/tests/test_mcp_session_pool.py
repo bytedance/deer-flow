@@ -1625,3 +1625,80 @@ def test_reset_mcp_tools_cache_from_running_loop_is_bounded():
 
     assert done.is_set(), "reset_mcp_tools_cache() deadlocked inside a running loop"
     assert cm.closed is True, "owner task must run __aexit__ once the loop regains control"
+
+
+# ---------------------------------------------------------------------------
+# get_mcp_tools: routing when one server name is a prefix of another
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_mcp_tools_routed_to_source_server_with_prefix_overlap():
+    """Regression: tools must be routed to the server that produced them, not the first
+    server whose name is a string prefix of the (prefixed) tool name.
+
+    With `tool_name_prefix=True`, a tool from server `web_scraper` is named
+    `web_scraper_search`. When a server `web` is also configured, prefix-matching the tool
+    name picks `web` first (`"web_scraper_search".startswith("web_")`), mis-routing the
+    tool and stripping it to the wrong original name. Routing by the source grouping fixes it.
+    """
+    from langchain_core.tools import StructuredTool
+    from pydantic import BaseModel, Field
+
+    from deerflow.mcp.tools import get_mcp_tools
+
+    class Args(BaseModel):
+        query: str = Field(..., description="query")
+
+    web_tool = StructuredTool(
+        name="web_open",
+        description="d",
+        args_schema=Args,
+        coroutine=AsyncMock(),
+        response_format="content_and_artifact",
+    )
+    scraper_tool = StructuredTool(
+        name="web_scraper_search",
+        description="d",
+        args_schema=Args,
+        coroutine=AsyncMock(),
+        response_format="content_and_artifact",
+    )
+
+    extensions_config = MagicMock()
+    extensions_config.model_extra = {}
+
+    # `web` is inserted before `web_scraper`, so a first-prefix-match mis-routes
+    # `web_scraper_search` to `web`.
+    servers_config = {
+        "web": {"transport": "stdio", "command": "npx", "args": ["web"]},
+        "web_scraper": {"transport": "stdio", "command": "npx", "args": ["scraper"]},
+    }
+
+    routed: list[tuple[str, str]] = []
+
+    def fake_wrap(tool, server_name, connection, interceptors, tool_call_timeout=None):
+        routed.append((tool.name, server_name))
+        return tool
+
+    async def get_tools_for_server(*, server_name: str | None = None):
+        if server_name == "web":
+            return [web_tool]
+        if server_name == "web_scraper":
+            return [scraper_tool]
+        raise AssertionError(f"unexpected server_name: {server_name}")
+
+    with (
+        patch("deerflow.mcp.tools.ExtensionsConfig.from_file", return_value=extensions_config),
+        patch("deerflow.mcp.tools.build_servers_config", return_value=servers_config),
+        patch("deerflow.mcp.tools.get_initial_oauth_headers", return_value={}),
+        patch("deerflow.mcp.tools.build_oauth_tool_interceptor", return_value=None),
+        patch("langchain_mcp_adapters.client.MultiServerMCPClient") as MockClient,
+        patch("deerflow.mcp.tools._make_session_pool_tool", side_effect=fake_wrap),
+    ):
+        MockClient.return_value.get_tools = AsyncMock(side_effect=get_tools_for_server)
+        await get_mcp_tools()
+
+    routing = dict(routed)
+    assert routing["web_scraper_search"] == "web_scraper", f"tool mis-routed to {routing.get('web_scraper_search')!r}, expected 'web_scraper'"
+    assert routing["web_open"] == "web"
