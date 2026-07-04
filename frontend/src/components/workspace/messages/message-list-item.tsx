@@ -11,7 +11,6 @@ import {
   useMemo,
   useState,
   useEffect,
-  type AnchorHTMLAttributes,
   type ImgHTMLAttributes,
 } from "react";
 
@@ -33,6 +32,7 @@ import {
   type FeedbackData,
 } from "@/core/api/feedback";
 import { resolveArtifactURL } from "@/core/artifacts/utils";
+import { extractCitationSources } from "@/core/citations/sources";
 import { useI18n } from "@/core/i18n/hooks";
 import {
   extractContentFromMessage,
@@ -45,9 +45,11 @@ import { useRehypeSplitWordsIntoSpans } from "@/core/rehype";
 import { SafeReasoningContent } from "@/core/streamdown/components";
 import { cn } from "@/lib/utils";
 
+import { CitationSourcesPanel } from "../citations/citation-sources-panel";
 import { CopyButton } from "../copy-button";
 
 import { MarkdownContent } from "./markdown-content";
+import { createMarkdownLinkComponent } from "./markdown-link";
 
 function FeedbackButtons({
   threadId,
@@ -274,20 +276,7 @@ function MessageContent_({
       img: (props: ImgHTMLAttributes<HTMLImageElement>) => (
         <MessageImage {...props} threadId={threadId} maxWidth="90%" />
       ),
-      a: ({ href, ...props }: AnchorHTMLAttributes<HTMLAnchorElement>) => {
-        if (href?.startsWith("/mnt/")) {
-          const url = resolveArtifactURL(href, threadId);
-          return (
-            <a
-              {...props}
-              href={url}
-              target="_blank"
-              rel="noopener noreferrer"
-            />
-          );
-        }
-        return <a {...props} href={href} />;
-      },
+      a: createMarkdownLinkComponent(threadId),
     }),
     [threadId],
   );
@@ -313,6 +302,10 @@ function MessageContent_({
     }
     return rawContent ?? "";
   }, [rawContent, isHuman]);
+  const citationSources = useMemo(
+    () => (isHuman ? [] : extractCitationSources(contentToDisplay)),
+    [contentToDisplay, isHuman],
+  );
 
   const filesList =
     files && files.length > 0 ? (
@@ -400,6 +393,7 @@ function MessageContent_({
         className="my-3"
         components={components}
       />
+      <CitationSourcesPanel sources={citationSources} />
     </AIElementMessageContent>
   );
 }

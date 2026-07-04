@@ -63,67 +63,41 @@ make dev
 ## Project Structure
 
 ```
-backend/src/
-├── agents/                  # Agent system
-│   ├── lead_agent/         # Main agent implementation
-│   │   └── agent.py        # Agent factory and creation
-│   ├── middlewares/        # Agent middlewares
-│   │   ├── thread_data_middleware.py
-│   │   ├── sandbox_middleware.py
-│   │   ├── title_middleware.py
-│   │   ├── uploads_middleware.py
-│   │   ├── view_image_middleware.py
-│   │   └── clarification_middleware.py
-│   └── thread_state.py     # Thread state definition
-│
-├── gateway/                 # FastAPI Gateway
-│   ├── app.py              # FastAPI application
-│   └── routers/            # Route handlers
-│       ├── models.py       # /api/models endpoints
-│       ├── mcp.py          # /api/mcp endpoints
-│       ├── skills.py       # /api/skills endpoints
-│       ├── artifacts.py    # /api/threads/.../artifacts
-│       └── uploads.py      # /api/threads/.../uploads
-│
-├── sandbox/                 # Sandbox execution
-│   ├── __init__.py         # Sandbox interface
-│   ├── local.py            # Local sandbox provider
-│   └── tools.py            # Sandbox tools (bash, file ops)
-│
-├── tools/                   # Agent tools
-│   └── builtins/           # Built-in tools
-│       ├── present_file_tool.py
-│       ├── ask_clarification_tool.py
-│       └── view_image_tool.py
-│
-├── mcp/                     # MCP integration
-│   └── manager.py          # MCP server management
-│
-├── models/                  # Model system
-│   └── factory.py          # Model factory
-│
-├── skills/                  # Skills system
-│   └── loader.py           # Skills loader
-│
-├── config/                  # Configuration
-│   ├── app_config.py       # Main app config
-│   ├── extensions_config.py # Extensions config
-│   └── summarization_config.py
-│
-├── community/               # Community tools
-│   ├── tavily/             # Tavily web search
-│   ├── jina/               # Jina web fetch
-│   ├── firecrawl/          # Firecrawl scraping
-│   ├── fastcrw/            # fastCRW scraping (Firecrawl-compatible)
-│   ├── crawl4ai/           # Crawl4AI web fetch (self-hosted, no key)
-│   └── aio_sandbox/        # Docker sandbox
-│
-├── reflection/              # Dynamic loading
-│   └── __init__.py         # Module resolution
-│
-└── utils/                   # Utilities
-    └── __init__.py
+backend/
+├── packages/harness/deerflow/  # deerflow-harness package (import: deerflow.*)
+│   ├── agents/                 # Agent system
+│   │   ├── lead_agent/         # Main agent (agent.py factory, prompt.py)
+│   │   ├── middlewares/        # Agent middleware chain
+│   │   ├── memory/             # Memory extraction & storage
+│   │   └── thread_state.py     # Thread state definition
+│   ├── sandbox/                # Sandbox execution
+│   │   ├── local/              # Local sandbox provider
+│   │   ├── sandbox.py          # Abstract interface
+│   │   ├── tools.py            # Sandbox tools (bash, file ops)
+│   │   └── middleware.py       # Sandbox lifecycle
+│   ├── subagents/              # Subagent delegation
+│   ├── tools/builtins/         # Built-in tools
+│   ├── mcp/                    # MCP integration
+│   ├── models/                 # Model factory
+│   ├── skills/                 # Skills system
+│   ├── config/                 # Configuration system
+│   ├── runtime/                # Embedded run execution (RunManager, StreamBridge)
+│   ├── persistence/            # Checkpointer/store engines & schema migrations
+│   ├── guardrails/             # Pre-tool-call authorization providers
+│   ├── tracing/                # Tracer factory & trace metadata
+│   ├── uploads/                # Uploads manager
+│   ├── tui/                    # Terminal UI (`deerflow` console script)
+│   ├── community/              # Community tools (tavily/, jina_ai/, firecrawl/, …)
+│   ├── reflection/             # Dynamic module loading
+│   └── utils/                  # Utilities
+└── app/                        # FastAPI Gateway + IM channels (import: app.*)
+    ├── gateway/                # Gateway API
+    │   ├── app.py              # FastAPI application
+    │   └── routers/            # Route handlers (threads, models, mcp, skills, uploads, …)
+    └── channels/               # IM channel integrations (Feishu, Slack, Telegram, …)
 ```
+
+See [AGENTS.md](AGENTS.md) for the full module-by-module breakdown.
 
 ## Code Style
 

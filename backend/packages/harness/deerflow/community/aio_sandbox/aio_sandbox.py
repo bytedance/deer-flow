@@ -6,6 +6,7 @@ import threading
 import uuid
 
 from agent_sandbox import Sandbox as AioSandboxClient
+from agent_sandbox.core.api_error import ApiError
 
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
 from deerflow.sandbox.sandbox import Sandbox
@@ -16,6 +17,19 @@ logger = logging.getLogger(__name__)
 _MAX_DOWNLOAD_SIZE = 100 * 1024 * 1024  # 100 MB
 
 _ERROR_OBSERVATION_SIGNATURE = "'ErrorObservation' object has no attribute 'exit_code'"
+
+# Env-bearing commands require the bash.exec API (POST /v1/bash/exec), which the
+# all-in-one-sandbox image only ships since 1.9.x. Older images (including any
+# ``latest`` tag frozen on the 1.0.0.x line) answer 404 for the whole /v1/bash/*
+# namespace. That raw 404 is useless to the model (it just retries), so the
+# sandbox fails fast with this operator-facing message instead (#3921).
+_BASH_EXEC_UNSUPPORTED_ERROR = (
+    "Error: this sandbox image does not support per-command environment injection "
+    "(POST /v1/bash/exec returned 404), which is required to run skills that declare "
+    "required-secrets. This is a deployment issue that retrying cannot fix: upgrade the "
+    "sandbox image to all-in-one-sandbox >= 1.9.3 (set `sandbox.image` in config.yaml, "
+    "e.g. pin the tag `1.11.0`) and recreate the sandbox container, then try again."
+)
 
 
 class AioSandbox(Sandbox):
@@ -40,6 +54,9 @@ class AioSandbox(Sandbox):
         self._home_dir = home_dir
         self._lock = threading.Lock()
         self._closed = False
+        # Set to True after bash.exec answers 404 (image predates /v1/bash/*),
+        # so later env-bearing calls fail fast instead of re-hitting HTTP (#3921).
+        self._bash_exec_unsupported = False
 
     @property
     def base_url(self) -> str:
@@ -204,7 +221,14 @@ class AioSandbox(Sandbox):
         legacy persistent-shell path: if the (unlikely, since each call is a fresh
         session) corruption marker shows up, the call is retried on another fresh
         session rather than returned verbatim.
+
+        Images older than all-in-one-sandbox 1.9.x have no ``/v1/bash/*`` routes;
+        there is no fallback on the legacy shell path that would keep the secret
+        values out of the command string, so the only safe behaviour is to fail
+        fast with an actionable error (#3921).
         """
+        if self._bash_exec_unsupported:
+            return _BASH_EXEC_UNSUPPORTED_ERROR
         output = self._run_bash_exec(command, env)
         if output and _ERROR_OBSERVATION_SIGNATURE in output:
             logger.warning("ErrorObservation detected in bash.exec output, retrying on a fresh session")
@@ -229,6 +253,13 @@ class AioSandbox(Sandbox):
                 if stderr:
                     output += f"\nStd Error:\n{stderr}" if output else stderr
                 return output if output else "(no output)"
+            except ApiError as e:
+                if e.status_code == 404:
+                    self._bash_exec_unsupported = True
+                    logger.error("Sandbox %s does not support bash.exec (/v1/bash/exec returned 404); env-bearing commands are unavailable until the sandbox image is upgraded to all-in-one-sandbox >= 1.9.3", self.id)
+                    return _BASH_EXEC_UNSUPPORTED_ERROR
+                logger.error(f"Failed to execute command with injected env in sandbox: {e}")
+                return f"Error: {e}"
             except Exception as e:
                 logger.error(f"Failed to execute command with injected env in sandbox: {e}")
                 return f"Error: {e}"

@@ -194,11 +194,12 @@ If you need to start services individually:
    pnpm dev
    ```
 
-2. **Start nginx**:
+2. **Start nginx** (run from the repo root):
    ```bash
    make nginx
-   # or directly: nginx -c $(pwd)/docker/nginx/nginx.local.conf -g 'daemon off;'
    ```
+
+   This runs `scripts/nginx.sh`, which launches nginx in the foreground the same way `scripts/serve.sh` (used by `make dev` / `make start`) does: it pre-creates the `logs/` and `temp/` directories and uses the local dev config at `docker/nginx/nginx.local.conf`.
 
 3. **Access the application**:
    - Web Interface: http://localhost:2026
@@ -229,12 +230,11 @@ deer-flow/
 │       ├── nginx.conf      # Nginx config for Docker
 │       └── nginx.local.conf # Nginx config for local dev
 ├── backend/                 # Backend application
-│   ├── src/
+│   ├── packages/harness/   # deerflow-harness package (import: deerflow.*)
+│   │   └── deerflow/       # Agents, tools, sandbox, MCP, skills, config
+│   ├── app/                # FastAPI Gateway + IM channels (import: app.*)
 │   │   ├── gateway/        # Gateway API and LangGraph-compatible runtime (port 8001)
-│   │   ├── agents/         # LangGraph agent runtime used by Gateway
-│   │   ├── mcp/            # Model Context Protocol integration
-│   │   ├── skills/         # Skills system
-│   │   └── sandbox/        # Sandbox execution
+│   │   └── channels/       # IM channel integrations
 │   ├── docs/               # Backend documentation
 │   └── Makefile            # Backend commands
 ├── frontend/               # Frontend application

@@ -376,7 +376,9 @@ class LocalSandbox(Sandbox):
 
         def replace_match(match: re.Match) -> str:
             matched_path = match.group(0)
-            return self._resolve_path(matched_path)
+            # Normalize to forward slashes so bash doesn't interpret Windows
+            # backslash sequences (\\U, \\a, \\d, \\s, \\n, \\t) as escapes.
+            return self._resolve_path(matched_path).replace("\\", "/")
 
         return pattern.sub(replace_match, command)
 

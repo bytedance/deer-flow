@@ -209,6 +209,12 @@ def _build_runtime_middlewares(
     from deerflow.agents.middlewares.sandbox_audit_middleware import SandboxAuditMiddleware
 
     tail.append(SandboxAuditMiddleware())
+
+    if app_config.read_before_write.enabled:
+        from deerflow.agents.middlewares.read_before_write_middleware import ReadBeforeWriteMiddleware
+
+        tail.append(ReadBeforeWriteMiddleware())
+
     tail.append(ToolErrorHandlingMiddleware(app_config=app_config))
 
     return [*outer_wrappers, *thread_hooks, *tail]
