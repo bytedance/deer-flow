@@ -29,10 +29,18 @@ from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import AIMessage, AnyMessage, BaseMessage, HumanMessage, ToolMessage
 from langgraph.types import Command
 
+from deerflow.utils.messages import message_to_text
+
 if TYPE_CHECKING:
     from deerflow.runtime.events.store.base import RunEventStore
 
 logger = logging.getLogger(__name__)
+
+_LEGACY_SUMMARY_MESSAGE_NAME = "summary"
+
+
+def _is_user_visible_human_message(message: BaseMessage) -> bool:
+    return isinstance(message, HumanMessage) and message.name != _LEGACY_SUMMARY_MESSAGE_NAME and message.additional_kwargs.get("hide_from_ui") is not True
 
 
 class RunJournal(BaseCallbackHandler):
@@ -104,33 +112,7 @@ class RunJournal(BaseCallbackHandler):
     @staticmethod
     def _message_text(message: BaseMessage) -> str:
         """Extract displayable text from a message's mixed content shape."""
-        content = getattr(message, "content", None)
-        if isinstance(content, str):
-            return content
-        if isinstance(content, list):
-            parts: list[str] = []
-            for block in content:
-                if isinstance(block, str):
-                    parts.append(block)
-                elif isinstance(block, Mapping):
-                    text = block.get("text")
-                    if isinstance(text, str):
-                        parts.append(text)
-                    else:
-                        nested = block.get("content")
-                        if isinstance(nested, str):
-                            parts.append(nested)
-            return "".join(parts)
-        if isinstance(content, Mapping):
-            for key in ("text", "content"):
-                value = content.get(key)
-                if isinstance(value, str):
-                    return value
-
-        text = getattr(message, "text", None)
-        if isinstance(text, str):
-            return text
-        return ""
+        return message_to_text(message, text_attribute_fallback=True)
 
     def _record_message_summary(self, message: BaseMessage, *, caller: str | None = None) -> None:
         """Update run-level convenience fields for persisted run rows."""
@@ -221,12 +203,12 @@ class RunJournal(BaseCallbackHandler):
             [len(batch) for batch in messages],
         )
 
-        # Capture the first human message sent to any LLM in this run.
-        if not self._first_human_msg and messages:
+        # Capture the first user message sent to the lead agent in this run.
+        caller = self._identify_caller(tags)
+        if caller == "lead_agent" and not self._first_human_msg and messages:
             for batch in reversed(messages):
                 for m in reversed(batch):
-                    if isinstance(m, HumanMessage) and m.name != "summary" and m.additional_kwargs.get("hide_from_ui") is not True:
-                        caller = self._identify_caller(tags)
+                    if _is_user_visible_human_message(m):
                         self.set_first_human_message(m.text)
                         self._put(
                             event_type="llm.human.input",
@@ -335,7 +317,7 @@ class RunJournal(BaseCallbackHandler):
                     per_call_model: str | None = None
                     if isinstance(response_metadata, Mapping):
                         per_call_model = response_metadata.get("model_name") or response_metadata.get("model")
-                    self._record_model_usage(per_call_model, input_tk, output_tk, total_tk)
+                    self._record_model_usage(per_call_model, input_tk, output_tk, total_tk, self._extract_cache_read(usage_dict))
 
                     self._schedule_progress_flush()
 
@@ -451,12 +433,18 @@ class RunJournal(BaseCallbackHandler):
         input_tokens: int,
         output_tokens: int,
         total_tokens: int,
+        cache_read_tokens: int = 0,
     ) -> None:
         """Add a single LLM call's token usage to the per-model accumulator.
 
         Missing / empty ``model_name`` collapses into a shared ``"unknown"``
         bucket so the breakdown stays usable when a provider doesn't surface
         ``response_metadata.model_name``.
+
+        ``cache_read_tokens`` (prompt-cache hits, from
+        ``usage_metadata.input_token_details.cache_read``) is stored as a
+        sparse bucket key — only written when non-zero — so buckets from
+        providers without cache reporting keep their historical shape.
         """
         if total_tokens <= 0:
             return
@@ -467,6 +455,19 @@ class RunJournal(BaseCallbackHandler):
         bucket["input_tokens"] += int(input_tokens or 0)
         bucket["output_tokens"] += int(output_tokens or 0)
         bucket["total_tokens"] += int(total_tokens)
+        if cache_read_tokens > 0:
+            bucket["cache_read_tokens"] = bucket.get("cache_read_tokens", 0) + int(cache_read_tokens)
+
+    @staticmethod
+    def _extract_cache_read(usage_dict: dict) -> int:
+        """Prompt-cache-hit input tokens from LangChain's normalized usage."""
+        details = usage_dict.get("input_token_details") or {}
+        if not isinstance(details, Mapping):
+            return 0
+        try:
+            return max(int(details.get("cache_read") or 0), 0)
+        except (TypeError, ValueError):
+            return 0
 
     # -- Public methods (called by worker) --
 
@@ -484,6 +485,7 @@ class RunJournal(BaseCallbackHandler):
             input_tokens: Input token count
             output_tokens: Output token count
             total_tokens: Total token count (computed from input+output if 0/missing)
+            cache_read_tokens: Optional prompt-cache-hit input tokens
         """
         if not self._track_tokens:
             return
@@ -518,7 +520,8 @@ class RunJournal(BaseCallbackHandler):
             else:
                 self._lead_agent_tokens += total_tk
 
-            self._record_model_usage(record.get("model_name"), input_tk, output_tk, total_tk)
+            cache_read_tk = record.get("cache_read_tokens", 0) or 0
+            self._record_model_usage(record.get("model_name"), input_tk, output_tk, total_tk, int(cache_read_tk))
 
             self._schedule_progress_flush()
 

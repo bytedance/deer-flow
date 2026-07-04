@@ -44,6 +44,73 @@ test.describe("Chat workspace", () => {
     await expect(textarea).toHaveValue("/data-analysis ");
   });
 
+  test("goal command sets a goal and starts an agent run", async ({ page }) => {
+    let streamCalls = 0;
+    await page.goto("/workspace/chats/new");
+    await page.route("**/runs/stream", (route) => {
+      streamCalls += 1;
+      return route.fallback();
+    });
+
+    const textarea = page.getByPlaceholder(/how can i assist you/i);
+    await expect(textarea).toBeVisible({ timeout: 15_000 });
+
+    await textarea.fill("/go");
+    await expect(page.getByRole("option", { name: /goal/i })).toBeVisible();
+
+    await textarea.fill("/goal finish all tests");
+    await textarea.press("Enter");
+
+    await expect(
+      page.locator("span.font-medium", { hasText: "finish all tests" }),
+    ).toBeVisible();
+    await expect.poll(() => streamCalls).toBe(1);
+    await expect(page.getByText("Hello from DeerFlow!")).toBeVisible();
+  });
+
+  test("goal command keeps the welcome header clear of the goal status", async ({
+    page,
+  }) => {
+    await page.goto("/workspace/chats/new");
+
+    const textarea = page.getByPlaceholder(/how can i assist you/i);
+    await expect(textarea).toBeVisible({ timeout: 15_000 });
+
+    await textarea.fill(
+      "/goal finish a small repo check and report the result",
+    );
+    await textarea.press("Enter");
+
+    const goal = page.locator("span.font-medium", {
+      hasText: "finish a small repo check",
+    });
+    await expect(goal).toBeVisible();
+    await expect(page.getByText(/welcome to/i)).toBeHidden();
+
+    const overlaps = await page.evaluate(() => {
+      const welcome = [...document.querySelectorAll("p")].find((el) =>
+        el.textContent?.toLowerCase().includes("welcome to"),
+      );
+      const goal = [...document.querySelectorAll("span")].find((el) =>
+        el.textContent?.includes(
+          "finish a small repo check and report the result",
+        ),
+      );
+      if (!welcome || !goal) {
+        return false;
+      }
+      const welcomeRect = welcome.getBoundingClientRect();
+      const goalRect = goal.getBoundingClientRect();
+      return !(
+        welcomeRect.right < goalRect.left ||
+        goalRect.right < welcomeRect.left ||
+        welcomeRect.bottom < goalRect.top ||
+        goalRect.bottom < welcomeRect.top
+      );
+    });
+    expect(overlaps).toBe(false);
+  });
+
   test("uses arrow keys to navigate skill suggestions before prompt history", async ({
     page,
   }) => {
@@ -141,6 +208,77 @@ test.describe("Chat workspace", () => {
     await expect(page.getByText("Hello from DeerFlow!")).toBeVisible({
       timeout: 10_000,
     });
+  });
+
+  test("blocks suggestion template placeholders until replaced", async ({
+    page,
+  }) => {
+    let streamCalled = false;
+    let submittedText: string | undefined;
+    await page.route("**/runs/stream", (route) => {
+      streamCalled = true;
+      const body = route.request().postDataJSON() as {
+        input?: { messages?: Array<{ content?: unknown }> };
+      };
+      const content = body.input?.messages?.at(-1)?.content;
+      if (typeof content === "string") {
+        submittedText = content;
+      } else if (Array.isArray(content)) {
+        submittedText = content
+          .map((block) =>
+            typeof block === "object" &&
+            block !== null &&
+            "text" in block &&
+            typeof block.text === "string"
+              ? block.text
+              : "",
+          )
+          .join("");
+      }
+      return handleRunStream(route);
+    });
+
+    await page.goto("/workspace/chats/new");
+
+    const textarea = page.getByPlaceholder(/how can i assist you/i);
+    await expect(textarea).toBeVisible({ timeout: 15_000 });
+
+    await page.getByRole("button", { name: /research/i }).click();
+    await expect(textarea).toHaveValue(
+      "Conduct a deep dive research on [topic], and summarize the findings.",
+    );
+
+    await textarea.press("Enter");
+    await page.waitForTimeout(500);
+
+    expect(streamCalled).toBe(false);
+    await expect(textarea).toHaveValue(
+      "Conduct a deep dive research on [topic], and summarize the findings.",
+    );
+    await expect
+      .poll(
+        () =>
+          textarea.evaluate((element) => {
+            const input = element as HTMLTextAreaElement;
+            return input.value.slice(input.selectionStart, input.selectionEnd);
+          }),
+        { timeout: 5_000 },
+      )
+      .toBe("[topic]");
+
+    await textarea.pressSequentially("AI agents");
+    await expect(textarea).toHaveValue(
+      "Conduct a deep dive research on AI agents, and summarize the findings.",
+    );
+
+    await textarea.press("Enter");
+
+    await expect.poll(() => streamCalled, { timeout: 10_000 }).toBeTruthy();
+    await expect
+      .poll(() => submittedText, { timeout: 10_000 })
+      .toBe(
+        "Conduct a deep dive research on AI agents, and summarize the findings.",
+      );
   });
 
   test("slash skill command is submitted as normal chat text", async ({
@@ -285,6 +423,113 @@ test.describe("Chat workspace", () => {
     await expect(page.getByText("Hello from DeerFlow!")).toBeVisible({
       timeout: 10_000,
     });
+  });
+
+  test("shows gateway upload limits on the attachment entry point", async ({
+    page,
+  }) => {
+    await page.goto("/workspace/chats/new");
+
+    const addAttachments = page.getByTestId("add-attachments-button");
+    await expect(addAttachments).toBeVisible({ timeout: 15_000 });
+    await addAttachments.hover();
+
+    await expect(page.getByRole("tooltip")).toContainText("50 MiB");
+    await expect(page.getByRole("tooltip")).toContainText("100 MiB");
+  });
+
+  test("rejects an oversized attachment before upload", async ({ page }) => {
+    let uploadCalled = false;
+    await page.route("**/api/threads/*/uploads", (route) => {
+      if (route.request().method() === "POST") {
+        uploadCalled = true;
+      }
+      return route.fallback();
+    });
+    await page.route("**/api/threads/*/uploads/limits", (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          max_files: 10,
+          max_file_size: 5,
+          max_total_size: 20,
+        }),
+      }),
+    );
+
+    await page.goto("/workspace/chats/new");
+    const addAttachments = page.getByTestId("add-attachments-button");
+    await addAttachments.hover();
+    await expect(page.getByRole("tooltip")).toContainText("5 B");
+
+    await page.getByLabel("Upload files").setInputFiles({
+      name: "too-large.txt",
+      mimeType: "text/plain",
+      buffer: Buffer.from("123456"),
+    });
+
+    await expect(
+      page.locator("[data-sonner-toast]").filter({ hasText: "too-large.txt" }),
+    ).toBeVisible();
+    await expect(page.locator("form").getByText("too-large.txt")).toBeHidden();
+
+    const textarea = page.locator('textarea[name="message"]');
+    await textarea.fill("Continue without the rejected attachment");
+    await textarea.press("Enter");
+    await expect(page.getByText("Hello from DeerFlow!")).toBeVisible({
+      timeout: 10_000,
+    });
+    expect(uploadCalled).toBe(false);
+  });
+
+  test("keeps valid attachments in order when the total limit is exceeded", async ({
+    page,
+  }) => {
+    await page.route("**/api/threads/*/uploads/limits", (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          max_files: 3,
+          max_file_size: 10,
+          max_total_size: 5,
+        }),
+      }),
+    );
+
+    await page.goto("/workspace/chats/new");
+    const addAttachments = page.getByTestId("add-attachments-button");
+    await addAttachments.hover();
+    await expect(page.getByRole("tooltip")).toContainText("5 B");
+
+    await page.getByLabel("Upload files").setInputFiles([
+      {
+        name: "first.txt",
+        mimeType: "text/plain",
+        buffer: Buffer.from("1234"),
+      },
+      {
+        name: "over-total.txt",
+        mimeType: "text/plain",
+        buffer: Buffer.from("12"),
+      },
+      {
+        name: "second.txt",
+        mimeType: "text/plain",
+        buffer: Buffer.from("1"),
+      },
+    ]);
+
+    const promptForm = page.locator("form").filter({
+      has: page.locator('textarea[name="message"]'),
+    });
+    await expect(promptForm.getByText("first.txt")).toBeVisible();
+    await expect(promptForm.getByText("second.txt")).toBeVisible();
+    await expect(promptForm.getByText("over-total.txt")).toBeHidden();
+    await expect(
+      page.locator("[data-sonner-toast]").filter({ hasText: "5 B" }),
+    ).toBeVisible();
   });
 
   test("keeps attachments visible while upload submit is pending", async ({

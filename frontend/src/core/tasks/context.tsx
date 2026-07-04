@@ -7,19 +7,21 @@ import {
   useState,
 } from "react";
 
+import { computeNextSubtask } from "./subtask-update";
 import type { Subtask } from "./types";
-
-function isTerminalSubtaskStatus(status: Subtask["status"] | undefined) {
-  return status === "completed" || status === "failed";
-}
 
 export interface SubtaskContextValue {
   tasks: Record<string, Subtask>;
+  // Always mirrors the latest `tasks` (updated during render). `updateSubtask`
+  // reads/writes through this instead of a closure snapshot so async callers
+  // (e.g. a late-resolving backfill) merge into current state, not stale state.
+  tasksRef: React.RefObject<Record<string, Subtask>>;
   setTasks: (tasks: Record<string, Subtask>) => void;
 }
 
 export const SubtaskContext = createContext<SubtaskContextValue>({
   tasks: {},
+  tasksRef: { current: {} },
   setTasks: () => {
     /* noop */
   },
@@ -27,8 +29,12 @@ export const SubtaskContext = createContext<SubtaskContextValue>({
 
 export function SubtasksProvider({ children }: { children: React.ReactNode }) {
   const [tasks, setTasks] = useState<Record<string, Subtask>>({});
+  const tasksRef = useRef(tasks);
+  // Keep the ref pointing at the freshest state on every render so reads in
+  // async callbacks (backfill `.then`) never see a stale map.
+  tasksRef.current = tasks;
   return (
-    <SubtaskContext.Provider value={{ tasks, setTasks }}>
+    <SubtaskContext.Provider value={{ tasks, tasksRef, setTasks }}>
       {children}
     </SubtaskContext.Provider>
   );
@@ -50,7 +56,7 @@ export function useSubtask(id: string) {
 }
 
 export function useUpdateSubtask() {
-  const { tasks, setTasks } = useSubtaskContext();
+  const { tasksRef, setTasks } = useSubtaskContext();
   const shouldNotifyAfterRenderRef = useRef(false);
   // No deps: must run after every render to check the ref set during render.
   useEffect(() => {
@@ -58,37 +64,32 @@ export function useUpdateSubtask() {
       return;
     }
     shouldNotifyAfterRenderRef.current = false;
-    setTasks({ ...tasks });
+    setTasks({ ...tasksRef.current });
   });
 
   const updateSubtask = useCallback(
     (task: Partial<Subtask> & { id: string }) => {
-      const previous = tasks[task.id];
-      const previousStatus = previous?.status;
-      // MessageList writes the pending task tool-call state before parsing the
-      // matching ToolMessage in the same render. Keep terminal results stable
-      // across the next render so the refresh notification does not loop.
-      const next = {
-        ...previous,
-        ...task,
-        ...(task.status === "in_progress" &&
-        isTerminalSubtaskStatus(previousStatus)
-          ? { status: previousStatus }
-          : {}),
-      } as Subtask;
+      // Read the *latest* state via the ref, never a `tasks` snapshot captured in
+      // this callback's closure. Without this, an in-flight
+      // fetchSubtaskSteps().then(updateSubtask) resolving late would write a stale
+      // map, clobbering SSE steps/status and sibling subtasks added meanwhile (#3779).
+      const current = tasksRef.current;
+      const { next, becameTerminal } = computeNextSubtask(
+        current[task.id],
+        task,
+      );
 
-      const becameTerminal =
-        isTerminalSubtaskStatus(next.status) && previousStatus !== next.status;
+      current[task.id] = next;
 
-      tasks[task.id] = next;
-
-      if (task.latestMessage) {
-        setTasks({ ...tasks });
+      if (task.latestMessage || task.steps) {
+        setTasks({ ...current });
       } else if (becameTerminal) {
+        // Defer the render to the after-render effect so a terminal-only update
+        // does not loop with MessageList's same-render pending write.
         shouldNotifyAfterRenderRef.current = true;
       }
     },
-    [tasks, setTasks],
+    [tasksRef, setTasks],
   );
 
   return updateSubtask;

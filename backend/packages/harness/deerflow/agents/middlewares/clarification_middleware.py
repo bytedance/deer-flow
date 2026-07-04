@@ -114,6 +114,44 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
 
         return "\n".join(message_parts)
 
+    def _is_disabled(self, request: ToolCallRequest) -> bool:
+        """Whether clarifications are suppressed for this run.
+
+        Non-interactive channels (e.g. GitHub webhooks) set
+        ``disable_clarification`` in the run context because a clarification
+        would dead-end the run — the human only "replies" via a later
+        webhook delivery, by which point the agent's turn is long over.
+        When set, we don't interrupt; we return a ToolMessage nudging the
+        agent to proceed with its best judgment instead.
+        """
+        runtime = getattr(request, "runtime", None)
+        context = getattr(runtime, "context", None)
+        if not context:
+            return False
+        return bool(context.get("disable_clarification"))
+
+    def _handle_disabled_clarification(self, request: ToolCallRequest) -> ToolMessage:
+        """Suppress a clarification and tell the agent to proceed.
+
+        Returns a plain ToolMessage (not a ``Command(goto=END)``) so the
+        agent loop continues instead of ending — the agent receives this
+        as the tool result and generates again, ideally acting rather
+        than re-asking.
+        """
+        tool_call_id = request.tool_call.get("id", "")
+        logger.info("ask_clarification suppressed (disable_clarification set); instructing agent to proceed")
+        return ToolMessage(
+            id=self._stable_message_id(tool_call_id, "proceed-without-clarification"),
+            content=(
+                "Clarification is disabled in this context — the human is not present "
+                "to answer synchronously. Do not ask for confirmation. Proceed with your "
+                "best judgment, carry out the requested action, and state any assumptions "
+                "you made in your final response."
+            ),
+            tool_call_id=tool_call_id,
+            name="ask_clarification",
+        )
+
     def _handle_clarification(self, request: ToolCallRequest) -> Command:
         """Handle clarification request and return command to interrupt execution.
 
@@ -175,6 +213,9 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
             # Not a clarification call, execute normally
             return handler(request)
 
+        if self._is_disabled(request):
+            return self._handle_disabled_clarification(request)
+
         return self._handle_clarification(request)
 
     @override
@@ -196,5 +237,8 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
         if request.tool_call.get("name") != "ask_clarification":
             # Not a clarification call, execute normally
             return await handler(request)
+
+        if self._is_disabled(request):
+            return self._handle_disabled_clarification(request)
 
         return self._handle_clarification(request)
