@@ -136,9 +136,12 @@ Blocking-IO runtime gate (`tests/blocking_io/`):
   for #1917); `test_sqlite_lifespan.py` (locks the offload around
   SQLite path resolution plus `ensure_sqlite_parent_dir`, fix for #1912);
   `test_jsonl_run_event_store.py` (locks `JsonlRunEventStore`'s async
-  API offloading its file IO via `asyncio.to_thread`, fix #3084); and
+  API offloading its file IO via `asyncio.to_thread`);
   `test_uploads_middleware.py` (locks `UploadsMiddleware.abefore_agent`
-  offloading the uploads-directory scan off the event loop).
+  offloading the uploads-directory scan off the event loop); and
+  `test_uploads_router.py` (locks Gateway upload/list/delete endpoints
+  offloading upload directory creation, staged writes, chmod/cleanup,
+  directory scans/deletes, and remote sandbox sync off the event loop).
 - `test_gate_smoke.py` is a meta-test asserting the gate actually catches
   unoffloaded blocking IO and that the `@pytest.mark.allow_blocking_io`
   opt-out works.
@@ -766,6 +769,7 @@ Multi-file upload with automatic document conversion:
 - Files stored in thread-isolated directories under the resolving user's bucket (`users/{user_id}/threads/{thread_id}/user-data/uploads`). For IM channels the owner is threaded explicitly via the `user_id=` kwarg (see IM Channels → Owner-scoped file storage); HTTP/embedded callers resolve it from `get_effective_user_id()`
 - Duplicate filenames in a single upload request are auto-renamed with `_N` suffixes so later files do not truncate earlier files
 - Gateway HTTP uploads stage bytes as `.upload-*.part` files and atomically replace the destination only after size validation. These staging files are hidden from upload listings, agent upload context, and sandbox listing/search tools, and swept on Gateway startup if a hard crash leaves one behind.
+- Gateway HTTP upload/list/delete handlers offload filesystem work through `deerflow.utils.file_io.run_file_io`, a dedicated ContextVar-preserving file IO executor. Non-mounted sandbox uploads acquire sandboxes with `SandboxProvider.acquire_async()` and offload `read_bytes()` plus `sandbox.update_file()` together.
 - Agent receives uploaded file list via `UploadsMiddleware`
 
 See [docs/FILE_UPLOAD.md](docs/FILE_UPLOAD.md) for details.
