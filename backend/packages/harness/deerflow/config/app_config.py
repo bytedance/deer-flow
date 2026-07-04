@@ -27,6 +27,7 @@ from deerflow.config.run_events_config import RunEventsConfig
 from deerflow.config.runtime_paths import existing_project_file
 from deerflow.config.safety_finish_reason_config import SafetyFinishReasonConfig
 from deerflow.config.sandbox_config import SandboxConfig
+from deerflow.config.scheduler_config import SchedulerConfig
 from deerflow.config.skill_evolution_config import SkillEvolutionConfig
 from deerflow.config.skills_config import SkillsConfig
 from deerflow.config.stream_bridge_config import StreamBridgeConfig, load_stream_bridge_config_from_dict
@@ -189,6 +190,13 @@ class AppConfig(BaseModel):
         description=format_field_description(
             "run_events",
             field_doc="Run-event store backend (memory for dev, db for production queries, jsonl for lightweight single-node persistence).",
+        ),
+    )
+    scheduler: SchedulerConfig = Field(
+        default_factory=SchedulerConfig,
+        description=format_field_description(
+            "scheduler",
+            field_doc="Scheduled task runtime configuration (background poller for one-time and cron agent runs).",
         ),
     )
     checkpointer: CheckpointerConfig | None = Field(

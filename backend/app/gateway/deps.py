@@ -238,6 +238,17 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         from deerflow.persistence.thread_meta import make_thread_store
 
         app.state.thread_store = make_thread_store(sf, app.state.store)
+        if sf is not None:
+            from deerflow.persistence.scheduled_task_runs import (
+                ScheduledTaskRunRepository,
+            )
+            from deerflow.persistence.scheduled_tasks import ScheduledTaskRepository
+
+            app.state.scheduled_task_repo = ScheduledTaskRepository(sf)
+            app.state.scheduled_task_run_repo = ScheduledTaskRunRepository(sf)
+        else:
+            app.state.scheduled_task_repo = None
+            app.state.scheduled_task_run_repo = None
 
         # Run event store. The store and the matching ``run_events_config`` are
         # both frozen at startup so ``get_run_context`` does not combine a
@@ -316,6 +327,27 @@ def get_thread_store(request: Request) -> ThreadMetaStore:
     return val
 
 
+def get_scheduled_task_repo(request: Request):
+    val = getattr(request.app.state, "scheduled_task_repo", None)
+    if val is None:
+        raise HTTPException(status_code=503, detail="Scheduled task repo not available")
+    return val
+
+
+def get_scheduled_task_run_repo(request: Request):
+    val = getattr(request.app.state, "scheduled_task_run_repo", None)
+    if val is None:
+        raise HTTPException(status_code=503, detail="Scheduled task run repo not available")
+    return val
+
+
+def get_scheduled_task_service(request: Request):
+    val = getattr(request.app.state, "scheduled_task_service", None)
+    if val is None:
+        raise HTTPException(status_code=503, detail="Scheduled task service not available")
+    return val
+
+
 def get_run_context(request: Request) -> RunContext:
     """Build a :class:`RunContext` from ``app.state`` singletons.
 
@@ -333,6 +365,7 @@ def get_run_context(request: Request) -> RunContext:
         run_events_config=getattr(request.app.state, "run_events_config", None),
         thread_store=get_thread_store(request),
         app_config=get_config(),
+        on_run_completed=getattr(request.app.state, "scheduled_task_service", None).handle_run_completion if getattr(request.app.state, "scheduled_task_service", None) is not None else None,
     )
 
 

@@ -70,6 +70,7 @@ DeerFlow has newly integrated the intelligent search and crawling toolset indepe
     - [Long-Term Memory](#long-term-memory)
   - [Recommended Models](#recommended-models)
   - [Embedded Python Client](#embedded-python-client)
+  - [Scheduled Tasks](#scheduled-tasks)
   - [Terminal Workbench (TUI)](#terminal-workbench-tui)
   - [Documentation](#documentation)
   - [⚠️ Security Notice](#️-security-notice)
@@ -766,6 +767,29 @@ client.clear_goal("thread-1")
 ```
 
 All dict-returning methods are validated against Gateway Pydantic response models in CI (`TestGatewayConformance`), ensuring the embedded client stays in sync with the HTTP API schemas. See `backend/packages/harness/deerflow/client.py` for full API documentation.
+
+## Scheduled Tasks
+
+DeerFlow now includes a first-class scheduled-task MVP in the workspace.
+
+Current MVP capabilities:
+
+- Manage tasks at `/workspace/scheduled-tasks`
+- Choose whether each scheduled task reuses a thread or creates a fresh thread per run
+- Support `once` and `cron` schedules
+- Run background scheduled executions as non-interactive DeerFlow runs (`ask_clarification` is not exposed there)
+- Use `skip` overlap behavior for due cron executions that collide with an active run on the same reused thread
+- Pause, resume, trigger, inspect history, and delete tasks
+- Execute scheduled work through the normal DeerFlow run lifecycle
+
+Current MVP limits:
+
+- No conversation-created `schedule_task` tool yet
+- No text-only notification jobs
+- No channel or GitHub dispatch targets
+- No `interval` schedule type in this first cut
+
+Enable background polling with `config.yaml -> scheduler.enabled`. Manual trigger uses the same scheduled-task resource and execution path.
 
 ## Terminal Workbench (TUI)
 
