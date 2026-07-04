@@ -103,6 +103,22 @@ def parse_required_secrets(raw: object, skill_file: Path) -> tuple[SecretRequire
     return tuple(secrets)
 
 
+def parse_secrets_autonomous(raw: object, skill_file: Path) -> bool:
+    """Parse the optional ``secrets-autonomous`` frontmatter field (issue #3914).
+
+    ``True`` (the default) lets declared secrets bind while the skill is
+    in-context via an autonomous model load; ``False`` restricts binding to
+    explicit ``/slash`` activation. A malformed (non-boolean) value fails
+    closed to ``False`` — the safer, less-injection direction.
+    """
+    if raw is None:
+        return True
+    if isinstance(raw, bool):
+        return raw
+    logger.warning("Ignoring malformed secrets-autonomous value in %s: %r (autonomous binding disabled)", skill_file, raw)
+    return False
+
+
 def parse_skill_file(skill_file: Path, category: SkillCategory, relative_path: Path | None = None) -> Skill | None:
     """Parse a SKILL.md file and extract metadata.
 
@@ -170,6 +186,8 @@ def parse_skill_file(skill_file: Path, category: SkillCategory, relative_path: P
             logger.error("Invalid required-secrets in %s: %s", skill_file, exc)
             return None
 
+        secrets_autonomous = parse_secrets_autonomous(metadata.get("secrets-autonomous"), skill_file)
+
         return Skill(
             name=name,
             description=description,
@@ -181,6 +199,7 @@ def parse_skill_file(skill_file: Path, category: SkillCategory, relative_path: P
             allowed_tools=allowed_tools,
             enabled=True,  # Actual state comes from the extensions config file.
             required_secrets=required_secrets,
+            secrets_autonomous=secrets_autonomous,
         )
 
     except Exception:

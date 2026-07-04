@@ -378,7 +378,15 @@ def build_run_config(
             if context_value is None:
                 context = {}
             elif isinstance(context_value, Mapping):
-                context = dict(context_value)
+                # Strip caller-supplied ``__``-prefixed keys: those are the
+                # harness's private run-context channels (skill secret-binding
+                # sources, the active-secret set, the run journal). A caller must
+                # not be able to seed them and forge internal state — e.g. a
+                # forged ``__slash_skill_secret_source`` would otherwise bypass the
+                # skill enabled/allowlist/declaration gates (#3938). Legitimate
+                # caller keys (``secrets``, ``user_id``, model overrides) never use
+                # the ``__`` prefix.
+                context = {key: value for key, value in context_value.items() if not (isinstance(key, str) and key.startswith("__"))}
             else:
                 raise ValueError("request config 'context' must be a mapping or null.")
             context["thread_id"] = thread_id
