@@ -74,11 +74,13 @@ async def make_stream_bridge(app_config: AppConfig | None = None) -> AsyncIterat
             redis_url=redis_url,
             queue_maxsize=config.queue_maxsize,
             max_connections=config.max_connections,
+            stream_ttl_seconds=config.stream_ttl_seconds,
         )
         logger.info(
-            "Stream bridge initialised: redis (queue_maxsize=%d, max_connections=%s)",
+            "Stream bridge initialised: redis (queue_maxsize=%d, max_connections=%s, stream_ttl_seconds=%d)",
             config.queue_maxsize,
             config.max_connections,
+            config.stream_ttl_seconds,
         )
         try:
             yield bridge

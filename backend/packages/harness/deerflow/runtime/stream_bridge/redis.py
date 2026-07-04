@@ -63,11 +63,16 @@ class RedisStreamBridge(StreamBridge):
         queue_maxsize: int = 256,
         key_prefix: str = "deerflow:stream_bridge",
         max_connections: int | None = None,
+        stream_ttl_seconds: int | None = 86400,
         client: Redis | None = None,
     ) -> None:
         self._redis_url = redis_url
         self._maxsize = max(1, queue_maxsize)
         self._key_prefix = key_prefix.rstrip(":")
+        if stream_ttl_seconds is not None and stream_ttl_seconds > 0:
+            self._stream_ttl_seconds = stream_ttl_seconds
+        else:
+            self._stream_ttl_seconds = None
         # Each live SSE subscriber holds one pooled connection blocked in
         # ``XREAD ... BLOCK`` for up to ``heartbeat_interval``. ``max_connections``
         # caps that pool; ``None`` keeps redis-py's effectively-unbounded default.
@@ -76,6 +81,26 @@ class RedisStreamBridge(StreamBridge):
 
     def _stream_key(self, run_id: str) -> str:
         return f"{self._key_prefix}:{run_id}"
+
+    async def _xadd_retained(self, key: str, fields: dict[str, str], *, maxlen: int) -> None:
+        if self._stream_ttl_seconds is None:
+            await self._redis.xadd(
+                key,
+                fields,
+                maxlen=maxlen,
+                approximate=False,
+            )
+            return
+
+        async with self._redis.pipeline(transaction=True) as pipe:
+            pipe.xadd(
+                key,
+                fields,
+                maxlen=maxlen,
+                approximate=False,
+            )
+            pipe.expire(key, self._stream_ttl_seconds)
+            await pipe.execute()
 
     @staticmethod
     def _decode(value: Any) -> str:
@@ -113,24 +138,24 @@ class RedisStreamBridge(StreamBridge):
         )
 
     async def publish(self, run_id: str, event: str, data: Any) -> None:
-        await self._redis.xadd(
-            self._stream_key(run_id),
+        key = self._stream_key(run_id)
+        await self._xadd_retained(
+            key,
             {
                 "kind": _KIND_EVENT,
                 "event": event,
                 "data": self._encode_data(data),
             },
             maxlen=self._maxsize,
-            approximate=False,
         )
 
     async def publish_end(self, run_id: str) -> None:
         # Keep the configured number of data events plus the internal end marker.
-        await self._redis.xadd(
-            self._stream_key(run_id),
+        key = self._stream_key(run_id)
+        await self._xadd_retained(
+            key,
             {"kind": _KIND_END},
             maxlen=self._maxsize + 1,
-            approximate=False,
         )
 
     async def stream_exists(self, run_id: str) -> bool:
