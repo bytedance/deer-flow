@@ -222,7 +222,8 @@ def test_task_tool_forwards_channel_user_id_to_executor(monkeypatch):
         tool_call_id="tc-channel-id",
     )
 
-    assert output == "Task Succeeded. Result: done"
+    message = _task_tool_message(output)
+    assert message.content == "Task Succeeded. Result: done"
     assert captured["executor_kwargs"]["channel_user_id"] == "ou_group_sender_1"
 
 
