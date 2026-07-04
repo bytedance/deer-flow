@@ -21,7 +21,16 @@ logger = logging.getLogger(__name__)
 _PROMPT_INPUT_DIRS = {"references", "templates"}
 _PROMPT_INPUT_SUFFIXES = frozenset({".json", ".markdown", ".md", ".rst", ".txt", ".yaml", ".yml"})
 _CODE_SUFFIXES = frozenset({".bash", ".cjs", ".js", ".mjs", ".php", ".pl", ".ps1", ".py", ".rb", ".sh", ".ts", ".zsh"})
-_EXECUTABLE_MAGIC_PREFIXES = (b"\x7fELF", b"MZ", b"\xfe\xed\xfa", b"\xcf\xfa\xed\xfe", b"\xca\xfe\xba\xbe")
+_EXECUTABLE_MAGIC_PREFIXES = (
+    b"\x7fELF",
+    b"MZ",
+    b"\xfe\xed\xfa\xce",
+    b"\xfe\xed\xfa\xcf",
+    b"\xce\xfa\xed\xfe",
+    b"\xcf\xfa\xed\xfe",
+    b"\xca\xfe\xba\xbe",
+    b"\xbe\xba\xfe\xca",
+)
 
 
 class SkillAlreadyExistsError(ValueError):
@@ -219,7 +228,10 @@ async def _scan_skill_archive_contents_or_raise(skill_dir: Path, skill_name: str
             continue
         if path.name == "SKILL.md":
             raise SkillSecurityScanError(f"Security scan failed for skill '{skill_name}': nested SKILL.md is not allowed at {skill_name}/{rel_path.as_posix()}")
-        if await asyncio.to_thread(_is_code_file, path, rel_path):
+        is_code = _is_script_support_file(rel_path) or rel_path.suffix.lower() in _CODE_SUFFIXES
+        if not is_code and not rel_path.suffix:
+            is_code = await asyncio.to_thread(_has_shebang, path)
+        if is_code:
             await _scan_skill_file_or_raise(skill_dir, path, skill_name, executable=True)
         elif _should_scan_support_file(rel_path):
             await _scan_skill_file_or_raise(skill_dir, path, skill_name, executable=False)
