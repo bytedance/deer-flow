@@ -20,6 +20,7 @@ from app.gateway.routers.threads import ThreadGoalResponse
 from app.gateway.routers.uploads import UploadResponse
 from deerflow.client import DeerFlowClient
 from deerflow.config.paths import Paths
+from deerflow.skills.types import SkillCategory
 from deerflow.uploads.manager import PathTraversalError
 
 # ---------------------------------------------------------------------------
@@ -157,7 +158,9 @@ class TestConfigQueries:
     def test_list_skills_enabled_only(self, client):
         with patch("deerflow.skills.storage.local_skill_storage.LocalSkillStorage.load_skills", return_value=[]) as mock_load:
             client.list_skills(enabled_only=True)
-            mock_load.assert_called_once_with(enabled_only=True)
+            # UserScopedSkillStorage.load_skills calls super().load_skills(enabled_only=False)
+            # then filters enabled-only itself, so the parent call always uses enabled_only=False.
+            mock_load.assert_called_once_with(enabled_only=False)
 
     def test_get_memory(self, client):
         memory = {"version": "1.0", "facts": []}
@@ -1296,8 +1299,15 @@ class TestSkillsManagement:
             # Pre-set agent to verify it gets invalidated
             client._agent = MagicMock()
 
+            # ``update_skill`` reads the skill list twice (find + reload) and
+            # ``UserScopedSkillStorage.load_skills`` internally calls
+            # ``super().load_skills()`` once per outer call, so the patched
+            # method is invoked 4 times: provide 4 return values.
             with (
-                patch("deerflow.skills.storage.local_skill_storage.LocalSkillStorage.load_skills", side_effect=[[skill], [updated_skill]]),
+                patch(
+                    "deerflow.skills.storage.local_skill_storage.LocalSkillStorage.load_skills",
+                    side_effect=[[skill], [skill], [updated_skill], [updated_skill]],
+                ),
                 patch("deerflow.client.ExtensionsConfig.resolve_config_path", return_value=tmp_path),
                 patch("deerflow.client.get_extensions_config", return_value=ext_config),
                 patch("deerflow.client.reload_extensions_config"),
@@ -1331,7 +1341,11 @@ class TestSkillsManagement:
 
             from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
 
-            with patch("deerflow.skills.storage._default_skill_storage", LocalSkillStorage(host_path=str(skills_root))):
+            local_storage = LocalSkillStorage(host_path=str(skills_root))
+            with (
+                patch("deerflow.skills.storage._default_skill_storage", local_storage),
+                patch("deerflow.client.get_or_new_user_skill_storage", lambda user_id, **kwargs: local_storage),
+            ):
                 result = client.install_skill(archive_path)
 
             assert result["success"] is True
@@ -2175,7 +2189,11 @@ class TestScenarioSkillInstallAndUse:
             # Step 1: Install
             from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
 
-            with patch("deerflow.skills.storage._default_skill_storage", LocalSkillStorage(host_path=str(skills_root))):
+            local_storage = LocalSkillStorage(host_path=str(skills_root))
+            with (
+                patch("deerflow.skills.storage._default_skill_storage", local_storage),
+                patch("deerflow.client.get_or_new_user_skill_storage", lambda user_id, **kwargs: local_storage),
+            ):
                 result = client.install_skill(archive)
             assert result["success"] is True
             assert (skills_root / "custom" / "my-analyzer" / "SKILL.md").exists()
@@ -2415,7 +2433,11 @@ class TestGatewayConformance:
 
         from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
 
-        with patch("deerflow.skills.storage._default_skill_storage", LocalSkillStorage(host_path=str(tmp_path))):
+        local_storage = LocalSkillStorage(host_path=str(tmp_path))
+        with (
+            patch("deerflow.skills.storage._default_skill_storage", local_storage),
+            patch("deerflow.client.get_or_new_user_skill_storage", lambda user_id, **kwargs: local_storage),
+        ):
             result = client.install_skill(archive)
 
         parsed = SkillInstallResponse(**result)
@@ -2647,7 +2669,11 @@ class TestInstallSkillSecurity:
 
             from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
 
-            with patch("deerflow.skills.storage._default_skill_storage", LocalSkillStorage(host_path=str(skills_root))):
+            local_storage = LocalSkillStorage(host_path=str(skills_root))
+            with (
+                patch("deerflow.skills.storage._default_skill_storage", local_storage),
+                patch("deerflow.client.get_or_new_user_skill_storage", lambda user_id, **kwargs: local_storage),
+            ):
                 result = client.install_skill(archive)
 
             assert result["success"] is True
@@ -2680,7 +2706,7 @@ class TestInstallSkillSecurity:
                 with pytest.raises(ValueError, match="Invalid skill name"):
                     client.install_skill(archive)
 
-    def test_existing_skill_rejected(self, client):
+    def test_existing_skill_rejected(self, client, allow_skill_security_scan):
         """Installing a skill that already exists is rejected."""
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -2701,6 +2727,7 @@ class TestInstallSkillSecurity:
             with (
                 patch("deerflow.skills.storage._default_skill_storage", LocalSkillStorage(host_path=str(skills_root))),
                 patch("deerflow.skills.validation._validate_skill_frontmatter", return_value=(True, "OK", "dupe-skill")),
+                patch("deerflow.client.get_or_new_user_skill_storage", return_value=LocalSkillStorage(host_path=str(skills_root))),
             ):
                 with pytest.raises(ValueError, match="already exists"):
                     client.install_skill(archive)
@@ -2830,6 +2857,7 @@ class TestConfigUpdateErrors:
         """FileNotFoundError when extensions_config.json cannot be located."""
         skill = MagicMock()
         skill.name = "some-skill"
+        skill.category = SkillCategory.PUBLIC  # Only PUBLIC skills need extensions_config.json
 
         with (
             patch("deerflow.skills.storage.local_skill_storage.LocalSkillStorage.load_skills", return_value=[skill]),

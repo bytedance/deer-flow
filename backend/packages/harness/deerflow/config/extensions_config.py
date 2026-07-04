@@ -217,15 +217,20 @@ class ExtensionsConfig(BaseModel):
 
         Args:
             skill_name: Name of the skill
-            skill_category: Category of the skill
+            skill_category: Category of the skill (public, custom, or legacy)
 
         Returns:
-            True if enabled, False otherwise
+            True if enabled, False otherwise.
+
+        Note:
+            All skill categories (public, custom, legacy) respect the
+            extensions_config enabled/disabled state.  When no explicit
+            entry exists, skills default to enabled.
         """
         skill_config = self.skills.get(skill_name)
         if skill_config is None:
-            # Default to enable for public & custom skill
-            return skill_category in ("public", "custom")
+            # Default to enabled for all skill categories
+            return skill_category in ("public", "custom", "legacy")
         return skill_config.enabled
 
 

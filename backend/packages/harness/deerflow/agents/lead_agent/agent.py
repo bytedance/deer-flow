@@ -266,6 +266,7 @@ def build_middlewares(
     available_skills: set[str] | None = None,
     app_config: AppConfig | None = None,
     deferred_setup=None,
+    user_id: str | None = None,
 ):
     """Build the lead-agent middleware chain based on runtime configuration.
 
@@ -282,6 +283,8 @@ def build_middlewares(
         app_config: Explicit AppConfig; falls back to ``get_app_config()`` when omitted.
         deferred_setup: Optional deferred-MCP-tool setup that attaches
             ``DeferredToolFilterMiddleware`` when ``tool_search`` is enabled.
+        user_id: Effective user ID for user-scoped skill loading. Passed through
+            to ``SkillActivationMiddleware`` so it can resolve per-user custom skills.
 
     Returns:
         List of middleware instances.
@@ -300,7 +303,7 @@ def build_middlewares(
     # explicit user activation priority over model-side relevance guessing.
     from deerflow.agents.middlewares.skill_activation_middleware import SkillActivationMiddleware
 
-    middlewares.append(SkillActivationMiddleware(available_skills=available_skills, app_config=resolved_app_config))
+    middlewares.append(SkillActivationMiddleware(available_skills=available_skills, app_config=resolved_app_config, user_id=user_id))
 
     # Capture completed task delegations and loaded skill files before
     # summarization can compact them, then inject durable context channels
@@ -401,11 +404,11 @@ def _available_skill_names(agent_config, is_bootstrap: bool) -> set[str] | None:
     return None
 
 
-def _load_enabled_skills_for_tool_policy(available_skills: set[str] | None, *, app_config: AppConfig) -> list[Skill]:
+def _load_enabled_skills_for_tool_policy(available_skills: set[str] | None, *, app_config: AppConfig, user_id: str | None = None) -> list[Skill]:
     try:
         from deerflow.agents.lead_agent.prompt import get_enabled_skills_for_config
 
-        skills = get_enabled_skills_for_config(app_config)
+        skills = get_enabled_skills_for_config(app_config, user_id=user_id)
     except Exception:
         logger.exception("Failed to load skills for allowed-tools policy")
         raise
@@ -430,6 +433,14 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
 
     cfg = _get_runtime_config(config)
     resolved_app_config = app_config
+
+    # Extract user_id for user-scoped skill loading.
+    # LangGraph gateway injects user_id into config["configurable"];
+    # fall back to the runtime contextvar when not present.
+    from deerflow.runtime.user_context import get_effective_user_id
+
+    runtime_user_id = cfg.get("user_id")
+    resolved_user_id = str(runtime_user_id) if runtime_user_id else get_effective_user_id()
 
     thinking_enabled = cfg.get("thinking_enabled", True)
     reasoning_effort = cfg.get("reasoning_effort", None)
@@ -497,7 +508,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
             existing = list(existing)
         config["callbacks"] = [*existing, *tracing_callbacks]
 
-    skills_for_tool_policy = _load_enabled_skills_for_tool_policy(available_skills, app_config=resolved_app_config)
+    skills_for_tool_policy = _load_enabled_skills_for_tool_policy(available_skills, app_config=resolved_app_config, user_id=resolved_user_id)
 
     if is_bootstrap:
         # Special bootstrap agent with minimal prompt for initial custom agent creation flow
@@ -515,6 +526,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
                 available_skills=set(_BOOTSTRAP_SKILL_NAMES),
                 app_config=resolved_app_config,
                 deferred_setup=setup,
+                user_id=resolved_user_id,
             ),
             system_prompt=apply_prompt_template(
                 subagent_enabled=subagent_enabled,
@@ -522,6 +534,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
                 available_skills=set(_BOOTSTRAP_SKILL_NAMES),
                 app_config=resolved_app_config,
                 deferred_names=setup.deferred_names,
+                user_id=resolved_user_id,
             ),
             state_schema=ThreadState,
         )
@@ -543,6 +556,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
             available_skills=available_skills,
             app_config=resolved_app_config,
             deferred_setup=setup,
+            user_id=resolved_user_id,
         ),
         system_prompt=apply_prompt_template(
             subagent_enabled=subagent_enabled,
@@ -551,6 +565,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
             available_skills=available_skills,
             app_config=resolved_app_config,
             deferred_names=setup.deferred_names,
+            user_id=resolved_user_id,
         ),
         state_schema=ThreadState,
     )
