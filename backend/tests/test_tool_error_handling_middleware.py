@@ -343,7 +343,7 @@ def test_task_exception_wrapper_uses_subagent_result_formatter():
     assert result.tool_call_id == "tc-task"
     assert result.name == "task"
     assert result.status == "error"
-    assert result.content == "Task failed. Error: RuntimeError: network down"
+    assert result.content == "Task failed. Error: RuntimeError: network down. Continue with available context, or choose an alternative tool."
     assert result.additional_kwargs[SUBAGENT_STATUS_KEY] == "failed"
     assert result.additional_kwargs[SUBAGENT_ERROR_KEY] == "RuntimeError: network down"
 

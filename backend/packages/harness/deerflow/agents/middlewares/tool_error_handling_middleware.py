@@ -31,6 +31,7 @@ logger = logging.getLogger(__name__)
 
 _MISSING_TOOL_CALL_ID = "missing_tool_call_id"
 _TASK_TOOL_NAME = "task"
+_RECOVERY_HINT = "Continue with available context, or choose an alternative tool."
 
 
 def _stamp_task_exception_status(message: ToolMessage, *, tool_name: str, error: str) -> ToolMessage:
@@ -38,7 +39,9 @@ def _stamp_task_exception_status(message: ToolMessage, *, tool_name: str, error:
     if tool_name != _TASK_TOOL_NAME:
         return message
     content, metadata_error = format_subagent_result_message("failed", error=error)
-    message.content = content
+    if not content.endswith((".", "!", "?")):
+        content += "."
+    message.content = f"{content} {_RECOVERY_HINT}"
     existing = dict(message.additional_kwargs or {})
     existing.update(make_subagent_additional_kwargs("failed", error=metadata_error))
     message.additional_kwargs = existing
@@ -65,7 +68,7 @@ class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         if len(detail) > 500:
             detail = detail[:497] + "..."
 
-        content = f"Error: Tool '{tool_name}' failed with {exc.__class__.__name__}: {detail}. Continue with available context, or choose an alternative tool."
+        content = f"Error: Tool '{tool_name}' failed with {exc.__class__.__name__}: {detail}. {_RECOVERY_HINT}"
         message = ToolMessage(
             content=content,
             tool_call_id=tool_call_id,
