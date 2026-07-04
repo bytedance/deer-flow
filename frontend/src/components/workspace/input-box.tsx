@@ -594,6 +594,10 @@ export function InputBox({
 
   const handleSubmit = useCallback(
     async (message: PromptInputMessage) => {
+      if (status === "streaming") {
+        toast.info(t.inputBox.pleaseWaitStreaming);
+        return Promise.reject(new Error("streaming"));
+      }
       const submitAction = getInputSubmitAction({
         text: message.text,
         fileCount: message.files.length,
@@ -607,11 +611,7 @@ export function InputBox({
         setFollowupsLoading(false);
         const saved = await handleGoalCommand(submitAction.command);
         // Only start a run when a goal was actually saved; status/clear never run.
-        if (
-          saved &&
-          submitAction.command.kind === "set" &&
-          status !== "streaming"
-        ) {
+        if (saved && submitAction.command.kind === "set") {
           return submitThreadMessage({
             ...message,
             text: submitAction.command.objective,
@@ -1437,6 +1437,12 @@ export function InputBox({
               disabled={disabled}
               variant="outline"
               status={status}
+              onClick={(e) => {
+                if (status === "streaming") {
+                  e.preventDefault();
+                  onStop?.();
+                }
+              }}
             />
           </PromptInputTools>
         </PromptInputFooter>

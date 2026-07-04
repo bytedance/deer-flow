@@ -127,6 +127,7 @@ export interface Translations {
           type: "separator";
         }
     )[];
+    pleaseWaitStreaming: string;
   };
 
   // Sidebar
