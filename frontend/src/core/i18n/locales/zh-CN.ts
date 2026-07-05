@@ -51,6 +51,7 @@ export const zhCN: Translations = {
     exportAsJSON: "导出为 JSON",
     exportSuccess: "对话已导出",
     regenerate: "重新生成",
+    branch: "分叉",
     showArtifacts: "查看此对话的文件",
   },
 
@@ -418,6 +419,8 @@ export const zhCN: Translations = {
   conversation: {
     noMessages: "还没有消息",
     startConversation: "开始新的对话以查看消息",
+    branchCreated: "已创建分叉对话",
+    branchFailed: "创建分叉对话失败。",
   },
 
   // Chats

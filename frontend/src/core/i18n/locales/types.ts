@@ -40,6 +40,7 @@ export interface Translations {
     exportAsJSON: string;
     exportSuccess: string;
     regenerate: string;
+    branch: string;
     showArtifacts: string;
   };
 
@@ -344,6 +345,8 @@ export interface Translations {
   conversation: {
     noMessages: string;
     startConversation: string;
+    branchCreated: string;
+    branchFailed: string;
   };
 
   // Chats
