@@ -27,7 +27,30 @@ from deerflow.persistence.base import Base
 from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
 
-NOW = datetime.now(UTC)
+# Pinned to noon UTC so hour-level seed offsets (NOW - 1h, NOW - 2h) never cross
+# the midnight boundary into the previous calendar day, which would otherwise
+# make "today" rows bucket into yesterday whenever the suite runs within a few
+# hours of UTC midnight. The client fixture freezes the console router's
+# `datetime.now` to this same instant, keeping the router's view of "today"
+# (and active-run durations) aligned with these seed timestamps.
+NOW = datetime.now(UTC).replace(hour=12, minute=0, second=0, microsecond=0)
+
+
+class _FrozenDatetime(datetime):
+    """``datetime`` subclass whose ``now()`` returns a fixed instant.
+
+    Everything else (``combine``, ``replace``, arithmetic, ``isinstance``) is
+    inherited unchanged from ``datetime``; only ``now`` is redirected so the
+    router derives its day-bucket window and live durations from ``NOW``.
+    """
+
+    _frozen: datetime | None = None
+
+    @classmethod
+    def now(cls, tz=None):
+        if cls._frozen is None:  # pragma: no cover - defensive fallback
+            return super().now(tz)
+        return cls._frozen if tz is None else cls._frozen.astimezone(tz)
 
 
 def _seed_rows() -> tuple[list[ThreadMetaRow], list[RunRow]]:
@@ -133,6 +156,10 @@ def client(session_factory, monkeypatch):
     monkeypatch.setattr(console, "list_custom_agents", lambda: [object(), object()])
     # No pricing configured by default; TestPricing patches its own config.
     monkeypatch.setattr(console, "get_app_config", lambda: SimpleNamespace(models=[]))
+    # Pin the router's wall-clock to NOW so day-bucketing and durations are
+    # independent of when the suite runs (see NOW's docstring).
+    _FrozenDatetime._frozen = NOW
+    monkeypatch.setattr(console, "datetime", _FrozenDatetime)
     app = make_authed_test_app()
     app.include_router(console.router)
     return TestClient(app)
