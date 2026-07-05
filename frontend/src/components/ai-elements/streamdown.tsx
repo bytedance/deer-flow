@@ -1,10 +1,9 @@
 "use client";
 
-import { Component, useMemo, type ComponentProps, type ReactNode } from "react";
+import { Component, type ComponentProps, type ReactNode } from "react";
 import { Streamdown } from "streamdown";
 
 import { installClipboardFallback } from "@/core/clipboard";
-import { capBlockquoteNesting } from "@/core/streamdown/preprocess";
 
 export type ClipboardSafeStreamdownProps = ComponentProps<typeof Streamdown>;
 
@@ -58,16 +57,9 @@ export function ClipboardSafeStreamdown({
   children,
   ...props
 }: ClipboardSafeStreamdownProps) {
-  // Fast path for the dominant pathological input (pure ">" chains) so the
-  // error boundary below rarely has to absorb a full stack overflow.
-  const safeChildren = useMemo(
-    () =>
-      typeof children === "string" ? capBlockquoteNesting(children) : children,
-    [children],
-  );
   return (
     <StreamdownFallbackBoundary raw={children}>
-      <Streamdown {...props}>{safeChildren}</Streamdown>
+      <Streamdown {...props}>{children}</Streamdown>
     </StreamdownFallbackBoundary>
   );
 }

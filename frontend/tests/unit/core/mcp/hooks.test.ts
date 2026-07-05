@@ -1,14 +1,14 @@
+import { beforeEach, describe, expect, it, rs } from "@rstest/core";
 import { QueryClient } from "@tanstack/react-query";
-import { beforeEach, describe, expect, it, vi } from "vitest";
 
-vi.mock("@/core/api/fetcher", () => ({
-  fetch: vi.fn(),
+rs.mock("@/core/api/fetcher", () => ({
+  fetch: rs.fn(),
 }));
 
 import { fetch } from "@/core/api/fetcher";
 import { MCPConfigRequestError, loadMCPConfig } from "@/core/mcp/api";
 
-const mockedFetch = vi.mocked(fetch);
+const mockedFetch = rs.mocked(fetch);
 
 function makeClient() {
   return new QueryClient({

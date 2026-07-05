@@ -167,10 +167,10 @@ LLM_PROVIDERS: list[LLMProvider] = [
     LLMProvider(
         name="deepseek",
         display_name="DeepSeek",
-        description="DeepSeek Reasoner with thinking support",
+        description="DeepSeek V4 with thinking support",
         use="deerflow.models.patched_deepseek:PatchedChatDeepSeek",
-        models=["deepseek-reasoner", "deepseek-chat"],
-        default_model="deepseek-reasoner",
+        models=["deepseek-v4-pro", "deepseek-v4-flash"],
+        default_model="deepseek-v4-pro",
         env_var="DEEPSEEK_API_KEY",
         package="langchain-deepseek",
         extra_config={
@@ -510,6 +510,30 @@ SEARCH_PROVIDERS: list[SearchProvider] = [
         env_var="FIRECRAWL_API_KEY",
         extra_config={"max_results": 5},
     ),
+    SearchProvider(
+        name="fastcrw",
+        display_name="fastCRW",
+        description="Firecrawl-compatible web scraper, single binary, self-host or cloud",
+        use="deerflow.community.fastcrw.tools:web_search_tool",
+        env_var="CRW_API_KEY",
+        extra_config={"max_results": 5},
+    ),
+    SearchProvider(
+        name="brave",
+        display_name="Brave Search",
+        description="Independent index, official API, API key required",
+        use="deerflow.community.brave.tools:web_search_tool",
+        env_var="BRAVE_SEARCH_API_KEY",
+        extra_config={"max_results": 5},
+    ),
+    SearchProvider(
+        name="groundroute",
+        display_name="GroundRoute",
+        description="One key across six engines, price-routed with failover, API key required",
+        use="deerflow.community.groundroute.tools:web_search_tool",
+        env_var="GROUNDROUTE_API_KEY",
+        extra_config={"max_results": 5},
+    ),
 ]
 
 WEB_FETCH_PROVIDERS: list[WebProvider] = [
@@ -546,5 +570,30 @@ WEB_FETCH_PROVIDERS: list[WebProvider] = [
         use="deerflow.community.firecrawl.tools:web_fetch_tool",
         env_var="FIRECRAWL_API_KEY",
         tool_name="web_fetch",
+    ),
+    WebProvider(
+        name="groundroute",
+        display_name="GroundRoute",
+        description="Page fetch via routed engines, API key required",
+        use="deerflow.community.groundroute.tools:web_fetch_tool",
+        env_var="GROUNDROUTE_API_KEY",
+        tool_name="web_fetch",
+    ),
+    WebProvider(
+        name="fastcrw",
+        display_name="fastCRW",
+        description="Firecrawl-compatible web scraper with markdown output, self-host or cloud",
+        use="deerflow.community.fastcrw.tools:web_fetch_tool",
+        env_var="CRW_API_KEY",
+        tool_name="web_fetch",
+    ),
+    WebProvider(
+        name="crawl4ai",
+        display_name="Crawl4AI",
+        description="Self-hosted headless Chromium with markdown output, no API key required",
+        use="deerflow.community.crawl4ai.tools:web_fetch_tool",
+        env_var=None,
+        tool_name="web_fetch",
+        extra_config={"base_url": "http://localhost:11235", "timeout": 30},
     ),
 ]

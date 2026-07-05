@@ -137,7 +137,7 @@ sequenceDiagram
 关键组件：
 
 - `runtime/runs/worker.py::run_agent` — 在 `asyncio.Task` 里跑 `agent.astream()`，把每个 chunk 通过 `serialize(chunk, mode=mode)` 转成 JSON，再 `bridge.publish()`。
-- `runtime/stream_bridge` — 抽象 Queue。`publish/subscribe` 解耦生产者和消费者，支持 `Last-Event-ID` 重连、心跳、多订阅者 fan-out。
+- `runtime/stream_bridge` — 抽象 Queue。`publish/subscribe` 解耦生产者和消费者，支持 `Last-Event-ID` 重连、心跳、多订阅者 fan-out。Redis backend 会在每次 `publish()` / `publish_end()` 刷新 retained stream key TTL；启动恢复将 orphan run 标记为 error 后也会发布 `END_SENTINEL`，避免重连的 SSE 客户端只收到心跳。注意：TTL 是 Redis 内存安全网（防止 key 泄漏），不是 subscriber 终止机制——如果 worker 和 gateway 同时挂掉，已连接的 SSE 客户端在 TTL 过期后仍无法收到 END 信号，需要依赖客户端侧超时。完整的跨 pod subscriber 终止需要 worker 存活检测（liveness），当前版本不包含此功能。
 - `app/gateway/services.py::sse_consumer` — 从 bridge 订阅，格式化为 SSE wire 帧。
 - `runtime/serialization.py::serialize` — mode-aware 序列化；`messages` mode 下 `serialize_messages_tuple` 把 `(chunk, metadata)` 转成 `[chunk.model_dump(), metadata]`。
 

@@ -1,4 +1,4 @@
-import { afterEach, expect, test, vi } from "vitest";
+import { afterEach, expect, test, rs } from "@rstest/core";
 
 import {
   installClipboardFallback,
@@ -15,7 +15,7 @@ const originalClipboardItemDescriptor = Object.getOwnPropertyDescriptor(
 );
 
 afterEach(() => {
-  vi.restoreAllMocks();
+  rs.restoreAllMocks();
   if (!hadOriginalNavigator) {
     Reflect.deleteProperty(globalThis, "navigator");
   } else {
@@ -46,7 +46,7 @@ afterEach(() => {
 });
 
 test("writes text with the Clipboard API when available", async () => {
-  const writeText = vi.fn().mockResolvedValue(undefined);
+  const writeText = rs.fn().mockResolvedValue(undefined);
   Object.defineProperty(globalThis, "navigator", {
     configurable: true,
     value: {
@@ -75,14 +75,14 @@ test("returns false when Clipboard API is unavailable", async () => {
 
 test("falls back to execCommand when Clipboard API is unavailable", async () => {
   const textarea = {
-    remove: vi.fn(),
-    select: vi.fn(),
-    setAttribute: vi.fn(),
+    remove: rs.fn(),
+    select: rs.fn(),
+    setAttribute: rs.fn(),
     style: {},
     value: "",
   };
-  const appendChild = vi.fn();
-  const execCommand = vi.fn().mockReturnValue(true);
+  const appendChild = rs.fn();
+  const execCommand = rs.fn().mockReturnValue(true);
 
   Object.defineProperty(globalThis, "navigator", {
     configurable: true,
@@ -94,7 +94,7 @@ test("falls back to execCommand when Clipboard API is unavailable", async () => 
       body: {
         appendChild,
       },
-      createElement: vi.fn().mockReturnValue(textarea),
+      createElement: rs.fn().mockReturnValue(textarea),
       execCommand,
     },
   });
@@ -109,16 +109,16 @@ test("falls back to execCommand when Clipboard API is unavailable", async () => 
 
 test("falls back to parent removal when textarea.remove is unavailable", async () => {
   const parentNode = {
-    removeChild: vi.fn(),
+    removeChild: rs.fn(),
   };
   const textarea = {
     parentNode,
-    select: vi.fn(),
-    setAttribute: vi.fn(),
+    select: rs.fn(),
+    setAttribute: rs.fn(),
     style: {},
     value: "",
   };
-  const execCommand = vi.fn().mockReturnValue(true);
+  const execCommand = rs.fn().mockReturnValue(true);
 
   Object.defineProperty(globalThis, "navigator", {
     configurable: true,
@@ -128,9 +128,9 @@ test("falls back to parent removal when textarea.remove is unavailable", async (
     configurable: true,
     value: {
       body: {
-        appendChild: vi.fn(),
+        appendChild: rs.fn(),
       },
-      createElement: vi.fn().mockReturnValue(textarea),
+      createElement: rs.fn().mockReturnValue(textarea),
       execCommand,
     },
   });
@@ -142,8 +142,8 @@ test("falls back to parent removal when textarea.remove is unavailable", async (
 test("does not fail cleanup when textarea removal APIs are unavailable", async () => {
   const textarea = {
     parentNode: {},
-    select: vi.fn(),
-    setAttribute: vi.fn(),
+    select: rs.fn(),
+    setAttribute: rs.fn(),
     style: {},
     value: "",
   };
@@ -156,10 +156,10 @@ test("does not fail cleanup when textarea removal APIs are unavailable", async (
     configurable: true,
     value: {
       body: {
-        appendChild: vi.fn(),
+        appendChild: rs.fn(),
       },
-      createElement: vi.fn().mockReturnValue(textarea),
-      execCommand: vi.fn().mockReturnValue(true),
+      createElement: rs.fn().mockReturnValue(textarea),
+      execCommand: rs.fn().mockReturnValue(true),
     },
   });
 
@@ -168,11 +168,11 @@ test("does not fail cleanup when textarea removal APIs are unavailable", async (
 
 test("cleans up the textarea when selecting text fails", async () => {
   const textarea = {
-    remove: vi.fn(),
-    select: vi.fn(() => {
+    remove: rs.fn(),
+    select: rs.fn(() => {
       throw new Error("selection failed");
     }),
-    setAttribute: vi.fn(),
+    setAttribute: rs.fn(),
     style: {},
     value: "",
   };
@@ -185,10 +185,10 @@ test("cleans up the textarea when selecting text fails", async () => {
     configurable: true,
     value: {
       body: {
-        appendChild: vi.fn(),
+        appendChild: rs.fn(),
       },
-      createElement: vi.fn().mockReturnValue(textarea),
-      execCommand: vi.fn(),
+      createElement: rs.fn().mockReturnValue(textarea),
+      execCommand: rs.fn(),
     },
   });
 
@@ -198,9 +198,9 @@ test("cleans up the textarea when selecting text fails", async () => {
 
 test("returns false when execCommand fallback fails", async () => {
   const textarea = {
-    remove: vi.fn(),
-    select: vi.fn(),
-    setAttribute: vi.fn(),
+    remove: rs.fn(),
+    select: rs.fn(),
+    setAttribute: rs.fn(),
     style: {},
     value: "",
   };
@@ -213,10 +213,10 @@ test("returns false when execCommand fallback fails", async () => {
     configurable: true,
     value: {
       body: {
-        appendChild: vi.fn(),
+        appendChild: rs.fn(),
       },
-      createElement: vi.fn().mockReturnValue(textarea),
-      execCommand: vi.fn().mockReturnValue(false),
+      createElement: rs.fn().mockReturnValue(textarea),
+      execCommand: rs.fn().mockReturnValue(false),
     },
   });
 
@@ -233,9 +233,9 @@ test("returns false when execCommand fallback cannot create an element", async (
     configurable: true,
     value: {
       body: {
-        appendChild: vi.fn(),
+        appendChild: rs.fn(),
       },
-      execCommand: vi.fn(),
+      execCommand: rs.fn(),
     },
   });
 
@@ -256,7 +256,7 @@ test("returns false when navigator is unavailable", async () => {
 });
 
 test("returns false when Clipboard API rejects", async () => {
-  const writeText = vi.fn().mockRejectedValue(new Error("denied"));
+  const writeText = rs.fn().mockRejectedValue(new Error("denied"));
   Object.defineProperty(globalThis, "navigator", {
     configurable: true,
     value: {
@@ -271,14 +271,14 @@ test("returns false when Clipboard API rejects", async () => {
 
 test("installs a writeText fallback when Clipboard API is unavailable", async () => {
   const textarea = {
-    remove: vi.fn(),
-    select: vi.fn(),
-    setAttribute: vi.fn(),
+    remove: rs.fn(),
+    select: rs.fn(),
+    setAttribute: rs.fn(),
     style: {},
     value: "",
   };
-  const appendChild = vi.fn();
-  const execCommand = vi.fn().mockReturnValue(true);
+  const appendChild = rs.fn();
+  const execCommand = rs.fn().mockReturnValue(true);
 
   Object.defineProperty(globalThis, "navigator", {
     configurable: true,
@@ -290,7 +290,7 @@ test("installs a writeText fallback when Clipboard API is unavailable", async ()
       body: {
         appendChild,
       },
-      createElement: vi.fn().mockReturnValue(textarea),
+      createElement: rs.fn().mockReturnValue(textarea),
       execCommand,
     },
   });
@@ -333,12 +333,12 @@ test("installed writeText fallback converts thrown DOM failures to rejections", 
     configurable: true,
     value: {
       body: {
-        appendChild: vi.fn(),
+        appendChild: rs.fn(),
       },
-      createElement: vi.fn(() => {
+      createElement: rs.fn(() => {
         throw new Error("dom unavailable");
       }),
-      execCommand: vi.fn(),
+      execCommand: rs.fn(),
     },
   });
 
@@ -358,16 +358,16 @@ test("installed writeText fallback distinguishes copy command failure", async ()
     configurable: true,
     value: {
       body: {
-        appendChild: vi.fn(),
+        appendChild: rs.fn(),
       },
-      createElement: vi.fn().mockReturnValue({
-        remove: vi.fn(),
-        select: vi.fn(),
-        setAttribute: vi.fn(),
+      createElement: rs.fn().mockReturnValue({
+        remove: rs.fn(),
+        select: rs.fn(),
+        setAttribute: rs.fn(),
         style: {},
         value: "",
       }),
-      execCommand: vi.fn().mockReturnValue(false),
+      execCommand: rs.fn().mockReturnValue(false),
     },
   });
 
@@ -380,13 +380,13 @@ test("installed writeText fallback distinguishes copy command failure", async ()
 
 test("installs a write fallback for ClipboardItem text/plain payloads", async () => {
   const textarea = {
-    remove: vi.fn(),
-    select: vi.fn(),
-    setAttribute: vi.fn(),
+    remove: rs.fn(),
+    select: rs.fn(),
+    setAttribute: rs.fn(),
     style: {},
     value: "",
   };
-  const execCommand = vi.fn().mockReturnValue(true);
+  const execCommand = rs.fn().mockReturnValue(true);
 
   Object.defineProperty(globalThis, "navigator", {
     configurable: true,
@@ -396,9 +396,9 @@ test("installs a write fallback for ClipboardItem text/plain payloads", async ()
     configurable: true,
     value: {
       body: {
-        appendChild: vi.fn(),
+        appendChild: rs.fn(),
       },
-      createElement: vi.fn().mockReturnValue(textarea),
+      createElement: rs.fn().mockReturnValue(textarea),
       execCommand,
     },
   });
@@ -418,7 +418,7 @@ test("installs a write fallback for ClipboardItem text/plain payloads", async ()
 });
 
 test("installed write fallback rejects when ClipboardItem lacks text/plain", async () => {
-  const execCommand = vi.fn().mockReturnValue(true);
+  const execCommand = rs.fn().mockReturnValue(true);
 
   Object.defineProperty(globalThis, "navigator", {
     configurable: true,
@@ -428,12 +428,12 @@ test("installed write fallback rejects when ClipboardItem lacks text/plain", asy
     configurable: true,
     value: {
       body: {
-        appendChild: vi.fn(),
+        appendChild: rs.fn(),
       },
-      createElement: vi.fn().mockReturnValue({
-        remove: vi.fn(),
-        select: vi.fn(),
-        setAttribute: vi.fn(),
+      createElement: rs.fn().mockReturnValue({
+        remove: rs.fn(),
+        select: rs.fn(),
+        setAttribute: rs.fn(),
         style: {},
         value: "",
       }),
@@ -454,7 +454,7 @@ test("installed write fallback rejects when ClipboardItem lacks text/plain", asy
 });
 
 test("installed write fallback rejects when getType cannot provide text/plain", async () => {
-  const execCommand = vi.fn().mockReturnValue(true);
+  const execCommand = rs.fn().mockReturnValue(true);
 
   Object.defineProperty(globalThis, "navigator", {
     configurable: true,
@@ -464,12 +464,12 @@ test("installed write fallback rejects when getType cannot provide text/plain", 
     configurable: true,
     value: {
       body: {
-        appendChild: vi.fn(),
+        appendChild: rs.fn(),
       },
-      createElement: vi.fn().mockReturnValue({
-        remove: vi.fn(),
-        select: vi.fn(),
-        setAttribute: vi.fn(),
+      createElement: rs.fn().mockReturnValue({
+        remove: rs.fn(),
+        select: rs.fn(),
+        setAttribute: rs.fn(),
         style: {},
         value: "",
       }),
@@ -482,7 +482,7 @@ test("installed write fallback rejects when getType cannot provide text/plain", 
   await expect(
     globalThis.navigator.clipboard.write([
       {
-        getType: vi.fn().mockRejectedValue(new Error("missing")),
+        getType: rs.fn().mockRejectedValue(new Error("missing")),
         types: ["text/plain"],
       } as unknown as ClipboardItem,
     ]),
@@ -491,7 +491,7 @@ test("installed write fallback rejects when getType cannot provide text/plain", 
 });
 
 test("installed write fallback rejects before getType when item types exclude text/plain", async () => {
-  const getType = vi.fn().mockResolvedValue(new Blob(["ignored"]));
+  const getType = rs.fn().mockResolvedValue(new Blob(["ignored"]));
   Object.defineProperty(globalThis, "navigator", {
     configurable: true,
     value: {},
@@ -550,7 +550,7 @@ test("installed write fallback rejects when getType returns a non-Blob", async (
   await expect(
     globalThis.navigator.clipboard.write([
       {
-        getType: vi.fn().mockResolvedValue("plain text"),
+        getType: rs.fn().mockResolvedValue("plain text"),
         types: ["text/plain"],
       } as unknown as ClipboardItem,
     ]),
@@ -558,7 +558,7 @@ test("installed write fallback rejects when getType returns a non-Blob", async (
 });
 
 test("installed write fallback preserves existing clipboard prototype methods", async () => {
-  const readText = vi.fn().mockResolvedValue("existing");
+  const readText = rs.fn().mockResolvedValue("existing");
   const clipboard = Object.create({
     readText,
   });
@@ -588,8 +588,8 @@ test("installed write fallback preserves existing clipboard prototype methods", 
 });
 
 test("installClipboardFallback does not replace existing clipboard methods when only ClipboardItem is missing", async () => {
-  const write = vi.fn().mockResolvedValue(undefined);
-  const writeText = vi.fn().mockResolvedValue(undefined);
+  const write = rs.fn().mockResolvedValue(undefined);
+  const writeText = rs.fn().mockResolvedValue(undefined);
   const clipboard = {
     write,
     writeText,
@@ -727,7 +727,7 @@ test("installClipboardFallback does not throw when ClipboardItem cannot be defin
     value: undefined,
   });
   Reflect.deleteProperty(globalThis, "ClipboardItem");
-  vi.spyOn(Object, "defineProperty").mockImplementation(
+  rs.spyOn(Object, "defineProperty").mockImplementation(
     (target, property, descriptor) => {
       if (target === globalThis && property === "ClipboardItem") {
         throw new Error("locked global");
@@ -746,8 +746,8 @@ test("installs ClipboardItem fallback when the global property exists but is unu
     configurable: true,
     value: {
       clipboard: {
-        write: vi.fn().mockResolvedValue(undefined),
-        writeText: vi.fn().mockResolvedValue(undefined),
+        write: rs.fn().mockResolvedValue(undefined),
+        writeText: rs.fn().mockResolvedValue(undefined),
       },
     },
   });

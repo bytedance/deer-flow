@@ -32,10 +32,20 @@ def _make_skill(tmp_path: Path, name: str, content: str = "skill body") -> Skill
 
 
 def _make_storage(tmp_path: Path, skills: list[Skill]):
+    def _validate_skill_file_path(skill_file: Path) -> Path:
+        resolved = skill_file.resolve()
+        root = tmp_path.resolve()
+        try:
+            resolved.relative_to(root)
+        except ValueError:
+            raise ValueError("Resolved skill file must stay within the configured skills root.")
+        return resolved
+
     return SimpleNamespace(
         load_skills=lambda *, enabled_only: [skill for skill in skills if skill.enabled] if enabled_only else skills,
         get_container_root=lambda: "/mnt/skills",
         get_skills_root_path=lambda: tmp_path,
+        validate_skill_file_path=_validate_skill_file_path,
     )
 
 
@@ -73,7 +83,7 @@ def test_parse_slash_skill_reference_rejects_invalid_names():
 
 
 def test_resolve_slash_skill_ignores_reserved_control_commands(tmp_path):
-    for command in ["bootstrap", "help", "memory", "models", "new", "status"]:
+    for command in ["bootstrap", "goal", "help", "memory", "models", "new", "status"]:
         skill = _make_skill(tmp_path, command)
 
         assert resolve_slash_skill(f"/{command} create an agent", [skill]) is None
@@ -96,8 +106,9 @@ def test_resolve_slash_skill_respects_available_skill_whitelist(tmp_path):
 
 
 def test_resolve_slash_skill_rejects_disabled_skills(tmp_path):
-    skill = _make_skill(tmp_path, "data-analysis")
-    skill.enabled = False
+    import dataclasses
+
+    skill = dataclasses.replace(_make_skill(tmp_path, "data-analysis"), enabled=False)
 
     assert resolve_slash_skill("/data-analysis run", [skill]) is None
 
@@ -397,15 +408,14 @@ def test_skill_activation_middleware_activates_only_latest_real_user_message(mon
     assert not any(is_slash_skill_activation_reminder(message) for message in captured["messages"])
 
 
-def test_skill_activation_middleware_ignores_hidden_and_summary_user_messages(monkeypatch, tmp_path):
+def test_skill_activation_middleware_ignores_hidden_user_messages(monkeypatch, tmp_path):
     skill = _make_skill(tmp_path, "data-analysis", content="# Data Analysis\nUse pandas.")
     monkeypatch.setattr(middleware_module, "get_or_new_skill_storage", lambda **kwargs: _make_storage(tmp_path, [skill]))
 
     middleware = SkillActivationMiddleware()
     real_user = HumanMessage(content="continue normally", id="msg-1")
     hidden_slash = HumanMessage(content="/data-analysis hidden request", id="msg-2", additional_kwargs={"hide_from_ui": True})
-    summary_slash = HumanMessage(content="/data-analysis summary request", id="msg-3", name="summary")
-    request = _make_model_request([real_user, hidden_slash, summary_slash])
+    request = _make_model_request([real_user, hidden_slash])
     captured = {}
 
     def handler(model_request: ModelRequest):
@@ -417,6 +427,12 @@ def test_skill_activation_middleware_ignores_hidden_and_summary_user_messages(mo
     assert isinstance(result, AIMessage)
     assert captured["messages"] == request.messages
     assert not any(is_slash_skill_activation_reminder(message) for message in captured["messages"])
+
+
+def test_skill_activation_middleware_ignores_legacy_summary_messages():
+    summary_msg = HumanMessage(content="/data-analysis should not activate from summary", name="summary")
+
+    assert middleware_module._is_user_activation_target(summary_msg) is False
 
 
 def test_skill_activation_middleware_returns_clear_error_for_disallowed_skill(monkeypatch, tmp_path):
@@ -451,8 +467,9 @@ def test_skill_activation_middleware_returns_clear_error_for_missing_skill(monke
 
 
 def test_skill_activation_middleware_returns_clear_error_for_disabled_skill(monkeypatch, tmp_path):
-    skill = _make_skill(tmp_path, "data-analysis")
-    skill.enabled = False
+    import dataclasses
+
+    skill = dataclasses.replace(_make_skill(tmp_path, "data-analysis"), enabled=False)
     monkeypatch.setattr(middleware_module, "get_or_new_skill_storage", lambda **kwargs: _make_storage(tmp_path, [skill]))
 
     middleware = SkillActivationMiddleware()

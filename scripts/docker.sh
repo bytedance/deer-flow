@@ -191,9 +191,23 @@ start() {
 
     sandbox_mode="$(detect_sandbox_mode)"
 
-    services="frontend gateway nginx"
+    services="redis frontend gateway nginx"
     if [ "$sandbox_mode" = "provisioner" ]; then
-        services="frontend gateway provisioner nginx"
+        services="redis frontend gateway provisioner nginx"
+    fi
+
+    # Only aio mode (AioSandboxProvider without provisioner_url) needs the host
+    # Docker socket. Mount it via the opt-in docker-compose.dood.yaml overlay so
+    # the default (local) and provisioner modes never expose the host daemon.
+    # Mounting the socket = root-equivalent host control; see SECURITY.md.
+    if [ "$sandbox_mode" = "aio" ]; then
+        local docker_socket="${DEER_FLOW_DOCKER_SOCKET:-/var/run/docker.sock}"
+        if [ ! -S "$docker_socket" ]; then
+            echo -e "${YELLOW}⚠ Docker socket not found at $docker_socket — AioSandboxProvider (DooD) will not work.${NC}"
+            exit 1
+        fi
+        echo -e "${YELLOW}Mounting host Docker socket into gateway (DooD = host root-equivalent). See SECURITY.md.${NC}"
+        COMPOSE_CMD="$COMPOSE_CMD -f $DOCKER_DIR/docker-compose.dood.yaml"
     fi
 
     echo -e "${BLUE}Runtime: Gateway embedded agent runtime${NC}"
@@ -282,6 +296,10 @@ logs() {
             service="nginx"
             echo -e "${BLUE}Viewing nginx logs...${NC}"
             ;;
+        --redis)
+            service="redis"
+            echo -e "${BLUE}Viewing redis logs...${NC}"
+            ;;
         --provisioner)
             service="provisioner"
             echo -e "${BLUE}Viewing provisioner logs...${NC}"
@@ -291,7 +309,7 @@ logs() {
             ;;
         *)
             echo -e "${YELLOW}Unknown option: $1${NC}"
-            echo "Usage: $0 logs [--frontend|--gateway|--nginx|--provisioner]"
+            echo "Usage: $0 logs [--frontend|--gateway|--nginx|--redis|--provisioner]"
             exit 1
             ;;
     esac
@@ -343,6 +361,7 @@ help() {
     echo "                  --frontend   View frontend logs only"
     echo "                  --gateway    View gateway logs only"
     echo "                  --nginx      View nginx logs only"
+    echo "                  --redis      View redis logs only"
     echo "                  --provisioner View provisioner logs only"
     echo "  stop          - Stop Docker development services"
     echo "  help          - Show this help message"

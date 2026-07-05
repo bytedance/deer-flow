@@ -17,12 +17,14 @@ logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from deerflow.config.app_config import AppConfig
+    from deerflow.config.channel_connections_config import ChannelConnectionsConfig
 
 # Channel name → import path for lazy loading
 _CHANNEL_REGISTRY: dict[str, str] = {
     "dingtalk": "app.channels.dingtalk:DingTalkChannel",
     "discord": "app.channels.discord:DiscordChannel",
     "feishu": "app.channels.feishu:FeishuChannel",
+    "github": "app.channels.github:GitHubChannel",
     "slack": "app.channels.slack:SlackChannel",
     "telegram": "app.channels.telegram:TelegramChannel",
     "wechat": "app.channels.wechat:WechatChannel",
@@ -64,8 +66,7 @@ def _merge_channel_connection_runtime_config(channels_config: dict[str, Any], ap
     merge_runtime_channel_configs(channels_config, connection_config)
 
 
-def _make_connection_repo(app_config: AppConfig):
-    connection_config = getattr(app_config, "channel_connections", None)
+def _make_connection_repo(connection_config: ChannelConnectionsConfig | None):
     if connection_config is None or not getattr(connection_config, "enabled", False):
         return None
 
@@ -90,7 +91,13 @@ class ChannelService:
     instantiates enabled channels, and starts the ChannelManager dispatcher.
     """
 
-    def __init__(self, channels_config: dict[str, Any] | None = None, *, connection_repo: Any | None = None) -> None:
+    def __init__(
+        self,
+        channels_config: dict[str, Any] | None = None,
+        *,
+        connection_repo: Any | None = None,
+        require_bound_identity: bool = False,
+    ) -> None:
         self.bus = MessageBus()
         self.store = ChannelStore()
         self._connection_repo = connection_repo
@@ -107,6 +114,7 @@ class ChannelService:
             default_session=default_session if isinstance(default_session, dict) else None,
             channel_sessions=channel_sessions,
             connection_repo=connection_repo,
+            require_bound_identity=require_bound_identity,
         )
         self._channels: dict[str, Any] = {}  # name -> Channel instance
         self._config = config
@@ -126,7 +134,14 @@ class ChannelService:
         if "channels" in extra:
             channels_config = dict(extra["channels"] or {})
         _merge_channel_connection_runtime_config(channels_config, app_config)
-        return cls(channels_config=channels_config, connection_repo=_make_connection_repo(app_config))
+        connection_config = getattr(app_config, "channel_connections", None)
+        connections_enabled = connection_config is not None and getattr(connection_config, "enabled", False)
+        require_bound_identity = bool(connections_enabled and getattr(connection_config, "require_bound_identity", True))
+        return cls(
+            channels_config=channels_config,
+            connection_repo=_make_connection_repo(connection_config),
+            require_bound_identity=require_bound_identity,
+        )
 
     async def start(self) -> None:
         """Start the manager and all enabled channels."""
@@ -220,8 +235,9 @@ class ChannelService:
     def _load_channel_config(self, name: str) -> dict[str, Any] | None:
         """Load the latest config for a specific channel from disk.
 
-        Uses ``get_app_config()`` which detects file changes via mtime,
-        so edits to ``config.yaml`` are picked up without a process restart.
+        Uses ``get_app_config()`` which detects file changes via config
+        signature, so edits to ``config.yaml`` are picked up without a process
+        restart.
         The UI runtime-config overlay applied at startup is re-applied here
         so a file-driven reload neither drops credentials entered from the
         browser nor resurrects a channel disconnected from it.
@@ -345,6 +361,40 @@ class ChannelService:
     def get_channel(self, name: str) -> Channel | None:
         """Return a running channel instance by name when available."""
         return self._channels.get(name)
+
+    def is_channel_enabled(self, name: str) -> bool:
+        """Return whether ``channels.<name>.enabled`` is truthy in the live config.
+
+        Tracks the runtime-authoritative ``_config`` dict, which
+        :meth:`configure_channel` updates when the UI flips the
+        enabled flag — so callers that read this between requests get
+        the current effective setting without re-reading config.yaml.
+        Used by the GitHub webhook router as a fan-out kill-switch:
+        ``channels.github.enabled: false`` skips dispatch even though
+        the webhook route itself remains mounted (which is governed by
+        ``GITHUB_WEBHOOK_SECRET``, not this flag).
+        """
+        config = self._config.get(name)
+        if not isinstance(config, dict):
+            return False
+        return bool(config.get("enabled", False))
+
+    def get_channel_config(self, name: str) -> dict[str, Any] | None:
+        """Return a shallow copy of the live ``channels.<name>`` block, or None.
+
+        Mirrors :meth:`is_channel_enabled` in tracking the runtime-
+        authoritative ``_config`` dict, so callers see the same effective
+        configuration the manager sees — including any updates pushed via
+        :meth:`configure_channel` from the UI. Returns ``None`` when no
+        config exists for ``name`` (rather than an empty dict) so callers
+        can distinguish "not configured" from "configured with defaults".
+        The shallow copy keeps callers from accidentally mutating live
+        config state.
+        """
+        config = self._config.get(name)
+        if not isinstance(config, dict):
+            return None
+        return dict(config)
 
 
 # -- singleton access -------------------------------------------------------

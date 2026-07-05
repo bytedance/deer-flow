@@ -1,6 +1,8 @@
 """Tests for the MCP persistent-session pool."""
 
 import asyncio
+import logging
+import stat
 import threading
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -259,6 +261,293 @@ async def test_session_pool_tool_wrapping():
 
 
 @pytest.mark.asyncio
+async def test_session_pool_tool_pins_cwd_and_temp_env(tmp_path):
+    """Stdio MCP subprocesses should write relative and temp outputs under user-data."""
+    from langchain_core.tools import StructuredTool
+    from pydantic import BaseModel, Field
+
+    from deerflow.config.paths import Paths
+    from deerflow.mcp.tools import _MCP_TMP_SUBDIR, _make_session_pool_tool
+
+    class Args(BaseModel):
+        url: str = Field(..., description="url")
+
+    original_tool = StructuredTool(
+        name="playwright_navigate",
+        description="Navigate browser",
+        args_schema=Args,
+        coroutine=AsyncMock(),
+        response_format="content_and_artifact",
+    )
+
+    mock_session = AsyncMock()
+    mock_session.call_tool = AsyncMock(return_value=MagicMock(content=[], isError=False, structuredContent=None))
+    mock_cm = MagicMock()
+    mock_cm.__aenter__ = AsyncMock(return_value=mock_session)
+    mock_cm.__aexit__ = AsyncMock(return_value=False)
+
+    paths = Paths(tmp_path)
+    connection = {"transport": "stdio", "command": "pw", "args": [], "env": {"KEEP": "1"}}
+    mock_runtime = MagicMock()
+    mock_runtime.context = {"thread_id": "thread-42", "user_id": "user-7"}
+    mock_runtime.config = {}
+
+    with (
+        patch("deerflow.mcp.tools.get_paths", return_value=paths),
+        patch("langchain_mcp_adapters.sessions.create_session", return_value=mock_cm) as create_session,
+    ):
+        wrapped = _make_session_pool_tool(original_tool, "playwright", connection)
+        await wrapped.coroutine(runtime=mock_runtime, url="https://example.com")
+
+    session_connection = create_session.call_args.args[0]
+    workspace = paths.sandbox_work_dir("thread-42", user_id="user-7")
+    tmp_dir = workspace / _MCP_TMP_SUBDIR
+
+    assert session_connection["cwd"] == str(workspace)
+    assert session_connection["env"]["KEEP"] == "1"
+    assert session_connection["env"]["TMPDIR"] == str(tmp_dir)
+    assert session_connection["env"]["TMP"] == str(tmp_dir)
+    assert session_connection["env"]["TEMP"] == str(tmp_dir)
+    assert tmp_dir.is_dir()
+    assert stat.S_IMODE(tmp_dir.stat().st_mode) == 0o700
+
+
+@pytest.mark.asyncio
+async def test_session_pool_tool_does_not_override_explicit_tmpdir(tmp_path):
+    """An operator-provided TMPDIR must win over our injected default."""
+    from langchain_core.tools import StructuredTool
+    from pydantic import BaseModel, Field
+
+    from deerflow.config.paths import Paths
+    from deerflow.mcp.tools import _MCP_TMP_SUBDIR, _make_session_pool_tool
+
+    class Args(BaseModel):
+        url: str = Field(..., description="url")
+
+    original_tool = StructuredTool(
+        name="playwright_navigate",
+        description="Navigate browser",
+        args_schema=Args,
+        coroutine=AsyncMock(),
+        response_format="content_and_artifact",
+    )
+
+    mock_session = AsyncMock()
+    mock_session.call_tool = AsyncMock(return_value=MagicMock(content=[], isError=False, structuredContent=None))
+    mock_cm = MagicMock()
+    mock_cm.__aenter__ = AsyncMock(return_value=mock_session)
+    mock_cm.__aexit__ = AsyncMock(return_value=False)
+
+    paths = Paths(tmp_path)
+    connection = {"transport": "stdio", "command": "pw", "args": [], "env": {"TMPDIR": "/operator/tmp"}}
+    mock_runtime = MagicMock()
+    mock_runtime.context = {"thread_id": "thread-42", "user_id": "user-7"}
+    mock_runtime.config = {}
+
+    with (
+        patch("deerflow.mcp.tools.get_paths", return_value=paths),
+        patch("langchain_mcp_adapters.sessions.create_session", return_value=mock_cm) as create_session,
+    ):
+        wrapped = _make_session_pool_tool(original_tool, "playwright", connection)
+        await wrapped.coroutine(runtime=mock_runtime, url="https://example.com")
+
+    session_connection = create_session.call_args.args[0]
+    # Operator-provided TMPDIR is preserved; TMP/TEMP still get our default.
+    assert session_connection["env"]["TMPDIR"] == "/operator/tmp"
+    assert session_connection["env"]["TMP"].endswith(_MCP_TMP_SUBDIR)
+
+
+@pytest.mark.asyncio
+async def test_session_pool_tool_does_not_override_explicit_cwd(tmp_path):
+    """An operator-provided cwd must win over our injected workspace default."""
+    from langchain_core.tools import StructuredTool
+    from pydantic import BaseModel, Field
+
+    from deerflow.config.paths import Paths
+    from deerflow.mcp.tools import _MCP_TMP_SUBDIR, _make_session_pool_tool
+
+    class Args(BaseModel):
+        url: str = Field(..., description="url")
+
+    original_tool = StructuredTool(
+        name="playwright_navigate",
+        description="Navigate browser",
+        args_schema=Args,
+        coroutine=AsyncMock(),
+        response_format="content_and_artifact",
+    )
+
+    mock_session = AsyncMock()
+    mock_session.call_tool = AsyncMock(return_value=MagicMock(content=[], isError=False, structuredContent=None))
+    mock_cm = MagicMock()
+    mock_cm.__aenter__ = AsyncMock(return_value=mock_session)
+    mock_cm.__aexit__ = AsyncMock(return_value=False)
+
+    operator_cwd = str(tmp_path / "operator-cwd")
+    paths = Paths(tmp_path)
+    connection = {"transport": "stdio", "command": "pw", "args": [], "cwd": operator_cwd}
+    mock_runtime = MagicMock()
+    mock_runtime.context = {"thread_id": "thread-42", "user_id": "user-7"}
+    mock_runtime.config = {}
+
+    with (
+        patch("deerflow.mcp.tools.get_paths", return_value=paths),
+        patch("langchain_mcp_adapters.sessions.create_session", return_value=mock_cm) as create_session,
+    ):
+        wrapped = _make_session_pool_tool(original_tool, "playwright", connection)
+        await wrapped.coroutine(runtime=mock_runtime, url="https://example.com")
+
+    session_connection = create_session.call_args.args[0]
+    workspace = paths.sandbox_work_dir("thread-42", user_id="user-7")
+    tmp_dir = workspace / _MCP_TMP_SUBDIR
+
+    assert session_connection["cwd"] == operator_cwd
+    assert session_connection["env"]["TMPDIR"] == str(tmp_dir)
+
+
+@pytest.mark.asyncio
+async def test_session_pool_tool_skips_fs_work_for_non_stdio_transport(tmp_path):
+    """SSE/HTTP transports must not get a pinned cwd/temp env or workspace dirs."""
+    from langchain_core.tools import StructuredTool
+    from pydantic import BaseModel, Field
+
+    from deerflow.config.paths import Paths
+    from deerflow.mcp.tools import _make_session_pool_tool
+
+    class Args(BaseModel):
+        url: str = Field(..., description="url")
+
+    original_tool = StructuredTool(
+        name="srv_act",
+        description="test",
+        args_schema=Args,
+        coroutine=AsyncMock(),
+        response_format="content_and_artifact",
+    )
+
+    mock_session = AsyncMock()
+    mock_session.call_tool = AsyncMock(return_value=MagicMock(content=[], isError=False, structuredContent=None))
+    mock_cm = MagicMock()
+    mock_cm.__aenter__ = AsyncMock(return_value=mock_session)
+    mock_cm.__aexit__ = AsyncMock(return_value=False)
+
+    paths = Paths(tmp_path)
+    connection = {"transport": "sse", "url": "http://localhost:9000/sse", "env": {"KEEP": "1"}}
+    mock_runtime = MagicMock()
+    mock_runtime.context = {"thread_id": "thread-42", "user_id": "user-7"}
+    mock_runtime.config = {}
+
+    with (
+        patch("deerflow.mcp.tools.get_paths", return_value=paths) as get_paths,
+        patch("langchain_mcp_adapters.sessions.create_session", return_value=mock_cm) as create_session,
+    ):
+        wrapped = _make_session_pool_tool(original_tool, "srv", connection)
+        await wrapped.coroutine(runtime=mock_runtime, url="https://example.com")
+
+    session_connection = create_session.call_args.args[0]
+    assert "cwd" not in session_connection
+    assert session_connection["env"] == {"KEEP": "1"}
+    # No filesystem work at all: get_paths() is never consulted and no thread
+    # workspace directory is created for non-stdio transports.
+    get_paths.assert_not_called()
+    assert not paths.sandbox_work_dir("thread-42", user_id="user-7").exists()
+
+
+@pytest.mark.asyncio
+async def test_session_pool_tool_skips_after_walk_when_no_text_content(tmp_path):
+    """With no text content to rewrite, the post-call snapshot diff must be skipped."""
+    from langchain_core.tools import StructuredTool
+    from pydantic import BaseModel, Field
+
+    from deerflow.config.paths import Paths
+    from deerflow.mcp.tools import _make_session_pool_tool
+
+    class Args(BaseModel):
+        url: str = Field(..., description="url")
+
+    original_tool = StructuredTool(
+        name="playwright_navigate",
+        description="Navigate browser",
+        args_schema=Args,
+        coroutine=AsyncMock(),
+        response_format="content_and_artifact",
+    )
+
+    # An image-only result carries no text, so bare-filename correlation has
+    # nothing to do and the second recursive walk should not run.
+    from mcp.types import ImageContent
+
+    image_result = MagicMock(content=[ImageContent(type="image", data="QUJD", mimeType="image/png")], isError=False, structuredContent=None)
+    mock_session = AsyncMock()
+    mock_session.call_tool = AsyncMock(return_value=image_result)
+    mock_cm = MagicMock()
+    mock_cm.__aenter__ = AsyncMock(return_value=mock_session)
+    mock_cm.__aexit__ = AsyncMock(return_value=False)
+
+    paths = Paths(tmp_path)
+    connection = {"transport": "stdio", "command": "pw", "args": []}
+    mock_runtime = MagicMock()
+    mock_runtime.context = {"thread_id": "thread-42", "user_id": "user-7"}
+    mock_runtime.config = {}
+
+    with (
+        patch("deerflow.mcp.tools.get_paths", return_value=paths),
+        patch("langchain_mcp_adapters.sessions.create_session", return_value=mock_cm),
+        patch("deerflow.mcp.tools._changed_workspace_files") as changed_files,
+    ):
+        wrapped = _make_session_pool_tool(original_tool, "playwright", connection)
+        await wrapped.coroutine(runtime=mock_runtime, url="https://example.com")
+
+    changed_files.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_session_pool_tool_runs_after_walk_when_text_content_present(tmp_path):
+    """A text result must trigger the post-call snapshot diff for path rewriting."""
+    from langchain_core.tools import StructuredTool
+    from pydantic import BaseModel, Field
+
+    from deerflow.config.paths import Paths
+    from deerflow.mcp.tools import _make_session_pool_tool
+
+    class Args(BaseModel):
+        url: str = Field(..., description="url")
+
+    original_tool = StructuredTool(
+        name="playwright_navigate",
+        description="Navigate browser",
+        args_schema=Args,
+        coroutine=AsyncMock(),
+        response_format="content_and_artifact",
+    )
+
+    from mcp.types import TextContent
+
+    text_result = MagicMock(content=[TextContent(type="text", text="Saved as shot.png")], isError=False, structuredContent=None)
+    mock_session = AsyncMock()
+    mock_session.call_tool = AsyncMock(return_value=text_result)
+    mock_cm = MagicMock()
+    mock_cm.__aenter__ = AsyncMock(return_value=mock_session)
+    mock_cm.__aexit__ = AsyncMock(return_value=False)
+
+    paths = Paths(tmp_path)
+    connection = {"transport": "stdio", "command": "pw", "args": []}
+    mock_runtime = MagicMock()
+    mock_runtime.context = {"thread_id": "thread-42", "user_id": "user-7"}
+    mock_runtime.config = {}
+
+    with (
+        patch("deerflow.mcp.tools.get_paths", return_value=paths),
+        patch("langchain_mcp_adapters.sessions.create_session", return_value=mock_cm),
+        patch("deerflow.mcp.tools._changed_workspace_files", return_value=[]) as changed_files,
+    ):
+        wrapped = _make_session_pool_tool(original_tool, "playwright", connection)
+        await wrapped.coroutine(runtime=mock_runtime, url="https://example.com")
+
+    changed_files.assert_called_once()
+
+
+@pytest.mark.asyncio
 async def test_session_pool_tool_forwards_interceptor_headers():
     """Regression for PR #3294: when an interceptor sets ``request.headers``, the
     pooled stdio call must forward them via ``meta={"headers": ...}`` so downstream
@@ -423,8 +712,10 @@ async def test_session_pool_tool_extracts_thread_id():
         await wrapped.coroutine(runtime=mock_runtime, x=1)
 
     # Verify the session was created with the correct scope key.
+    # The scope key is "{user_id}:{thread_id}"; the autouse fixture sets
+    # the effective user to "test-user-autouse".
     pool = get_session_pool()
-    assert ("server", "from-config") in pool._entries
+    assert ("server", "test-user-autouse:from-config") in pool._entries
 
 
 @pytest.mark.asyncio
@@ -459,7 +750,7 @@ async def test_session_pool_tool_default_scope():
         await wrapped.coroutine(runtime=None, x=1)
 
     pool = get_session_pool()
-    assert ("server", "default") in pool._entries
+    assert ("server", "test-user-autouse:default") in pool._entries
 
 
 @pytest.mark.asyncio
@@ -499,7 +790,7 @@ async def test_session_pool_tool_get_config_fallback():
         await wrapped.coroutine(runtime=None, x=1)
 
     pool = get_session_pool()
-    assert ("server", "from-langgraph-config") in pool._entries
+    assert ("server", "test-user-autouse:from-langgraph-config") in pool._entries
 
 
 def test_session_pool_tool_sync_wrapper_path_is_safe():
@@ -599,7 +890,15 @@ async def test_http_transport_tools_not_pooled():
         patch("langchain_mcp_adapters.sessions.create_session", return_value=mock_cm),
     ):
         mock_client_instance = MockClient.return_value
-        mock_client_instance.get_tools = AsyncMock(return_value=[http_tool, stdio_tool])
+
+        async def get_tools_for_server(*, server_name: str | None = None):
+            if server_name == "myserver":
+                return [http_tool]
+            if server_name == "playwright":
+                return [stdio_tool]
+            raise AssertionError(f"unexpected server_name: {server_name}")
+
+        mock_client_instance.get_tools = AsyncMock(side_effect=get_tools_for_server)
 
         tools = await get_mcp_tools()
 
@@ -616,6 +915,134 @@ async def test_http_transport_tools_not_pooled():
     stdio_tools = [t for t in tools if t.name == "playwright_navigate"]
     assert len(stdio_tools) == 1
     assert stdio_tools[0].coroutine is not stdio_tool.coroutine
+
+
+@pytest.mark.asyncio
+async def test_non_stdio_tool_call_timeout_warns_that_it_is_ignored(caplog):
+    """HTTP/SSE servers should not silently ignore stdio-only tool_call_timeout."""
+    from langchain_core.tools import StructuredTool
+    from pydantic import BaseModel, Field
+
+    from deerflow.config.extensions_config import McpServerConfig
+    from deerflow.mcp.tools import get_mcp_tools
+
+    class Args(BaseModel):
+        query: str = Field(..., description="query")
+
+    http_tool = StructuredTool(
+        name="remote_search",
+        description="Search tool",
+        args_schema=Args,
+        coroutine=AsyncMock(),
+        response_format="content_and_artifact",
+    )
+
+    server_cfg = McpServerConfig(
+        type="http",
+        url="https://example.com/mcp",
+        tool_call_timeout=30.0,
+    )
+    extensions_config = MagicMock()
+    extensions_config.get_enabled_mcp_servers.return_value = {"remote": server_cfg}
+    extensions_config.mcp_servers = {"remote": server_cfg}
+    extensions_config.model_extra = {}
+
+    servers_config = {
+        "remote": {"transport": "http", "url": "https://example.com/mcp"},
+    }
+
+    with (
+        patch("deerflow.mcp.tools.ExtensionsConfig.from_file", return_value=extensions_config),
+        patch("deerflow.mcp.tools.build_servers_config", return_value=servers_config),
+        patch("deerflow.mcp.tools.get_initial_oauth_headers", return_value={}),
+        patch("deerflow.mcp.tools.build_oauth_tool_interceptor", return_value=None),
+        patch("langchain_mcp_adapters.client.MultiServerMCPClient") as MockClient,
+        caplog.at_level(logging.WARNING, logger="deerflow.mcp.tools"),
+    ):
+        mock_client_instance = MockClient.return_value
+        mock_client_instance.get_tools = AsyncMock(return_value=[http_tool])
+
+        tools = await get_mcp_tools()
+
+    assert tools == [http_tool]
+    assert any(record.levelno == logging.WARNING and "remote" in record.getMessage() and "tool_call_timeout" in record.getMessage() and "stdio" in record.getMessage() for record in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# Regression for PR #3843: tool_call_timeout must not leak into connection dict
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_stdio_tool_call_timeout_does_not_raise_typeerror():
+    """A stdio server with tool_call_timeout must load tools without TypeError.
+
+    The timeout must be read from McpServerConfig (extensions_config), NOT from
+    the connection dict that langchain's create_session receives.  If it leaks
+    into the connection dict, _create_stdio_session() raises TypeError.
+    Regression for PR #3843 P1 bug.
+    """
+    from langchain_core.tools import StructuredTool
+    from pydantic import BaseModel, Field
+
+    from deerflow.config.extensions_config import McpServerConfig
+    from deerflow.mcp.tools import get_mcp_tools
+
+    class Args(BaseModel):
+        query: str = Field(..., description="query")
+
+    stdio_tool = StructuredTool(
+        name="biomcp_search",
+        description="Search biomedical data",
+        args_schema=Args,
+        coroutine=AsyncMock(),
+        response_format="content_and_artifact",
+    )
+
+    mock_session = AsyncMock()
+    mock_cm = MagicMock()
+    mock_cm.__aenter__ = AsyncMock(return_value=mock_session)
+    mock_cm.__aexit__ = AsyncMock(return_value=False)
+
+    # Use real McpServerConfig so tool_call_timeout is a real field value,
+    # not a MagicMock that might accidentally work.
+    server_cfg = McpServerConfig(
+        type="stdio",
+        command="biomcp",
+        args=["serve"],
+        tool_call_timeout=60.0,
+    )
+
+    extensions_config = MagicMock()
+    extensions_config.get_enabled_mcp_servers.return_value = {"biomcp": server_cfg}
+    extensions_config.mcp_servers = {"biomcp": server_cfg}
+    extensions_config.model_extra = {}
+
+    # Connection dict must NOT contain tool_call_timeout — this is the key assertion.
+    servers_config = {
+        "biomcp": {"transport": "stdio", "command": "biomcp", "args": ["serve"]},
+    }
+
+    with (
+        patch("deerflow.mcp.tools.ExtensionsConfig.from_file", return_value=extensions_config),
+        patch("deerflow.mcp.tools.build_servers_config", return_value=servers_config),
+        patch("deerflow.mcp.tools.get_initial_oauth_headers", return_value={}),
+        patch("deerflow.mcp.tools.build_oauth_tool_interceptor", return_value=None),
+        patch("langchain_mcp_adapters.client.MultiServerMCPClient") as MockClient,
+        patch("langchain_mcp_adapters.sessions.create_session", return_value=mock_cm),
+    ):
+        mock_client_instance = MockClient.return_value
+        mock_client_instance.get_tools = AsyncMock(return_value=[stdio_tool])
+
+        # This must NOT raise TypeError from _create_stdio_session()
+        tools = await get_mcp_tools()
+
+    assert len(tools) == 1
+    # The tool should be wrapped with session pool (it's stdio)
+    assert tools[0].coroutine is not stdio_tool.coroutine
+
+    # Verify the connection dict passed to the pool does NOT contain tool_call_timeout
+    assert "tool_call_timeout" not in servers_config["biomcp"]
 
 
 # ---------------------------------------------------------------------------
@@ -1198,3 +1625,80 @@ def test_reset_mcp_tools_cache_from_running_loop_is_bounded():
 
     assert done.is_set(), "reset_mcp_tools_cache() deadlocked inside a running loop"
     assert cm.closed is True, "owner task must run __aexit__ once the loop regains control"
+
+
+# ---------------------------------------------------------------------------
+# get_mcp_tools: routing when one server name is a prefix of another
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_mcp_tools_routed_to_source_server_with_prefix_overlap():
+    """Regression: tools must be routed to the server that produced them, not the first
+    server whose name is a string prefix of the (prefixed) tool name.
+
+    With `tool_name_prefix=True`, a tool from server `web_scraper` is named
+    `web_scraper_search`. When a server `web` is also configured, prefix-matching the tool
+    name picks `web` first (`"web_scraper_search".startswith("web_")`), mis-routing the
+    tool and stripping it to the wrong original name. Routing by the source grouping fixes it.
+    """
+    from langchain_core.tools import StructuredTool
+    from pydantic import BaseModel, Field
+
+    from deerflow.mcp.tools import get_mcp_tools
+
+    class Args(BaseModel):
+        query: str = Field(..., description="query")
+
+    web_tool = StructuredTool(
+        name="web_open",
+        description="d",
+        args_schema=Args,
+        coroutine=AsyncMock(),
+        response_format="content_and_artifact",
+    )
+    scraper_tool = StructuredTool(
+        name="web_scraper_search",
+        description="d",
+        args_schema=Args,
+        coroutine=AsyncMock(),
+        response_format="content_and_artifact",
+    )
+
+    extensions_config = MagicMock()
+    extensions_config.model_extra = {}
+
+    # `web` is inserted before `web_scraper`, so a first-prefix-match mis-routes
+    # `web_scraper_search` to `web`.
+    servers_config = {
+        "web": {"transport": "stdio", "command": "npx", "args": ["web"]},
+        "web_scraper": {"transport": "stdio", "command": "npx", "args": ["scraper"]},
+    }
+
+    routed: list[tuple[str, str]] = []
+
+    def fake_wrap(tool, server_name, connection, interceptors, tool_call_timeout=None):
+        routed.append((tool.name, server_name))
+        return tool
+
+    async def get_tools_for_server(*, server_name: str | None = None):
+        if server_name == "web":
+            return [web_tool]
+        if server_name == "web_scraper":
+            return [scraper_tool]
+        raise AssertionError(f"unexpected server_name: {server_name}")
+
+    with (
+        patch("deerflow.mcp.tools.ExtensionsConfig.from_file", return_value=extensions_config),
+        patch("deerflow.mcp.tools.build_servers_config", return_value=servers_config),
+        patch("deerflow.mcp.tools.get_initial_oauth_headers", return_value={}),
+        patch("deerflow.mcp.tools.build_oauth_tool_interceptor", return_value=None),
+        patch("langchain_mcp_adapters.client.MultiServerMCPClient") as MockClient,
+        patch("deerflow.mcp.tools._make_session_pool_tool", side_effect=fake_wrap),
+    ):
+        MockClient.return_value.get_tools = AsyncMock(side_effect=get_tools_for_server)
+        await get_mcp_tools()
+
+    routing = dict(routed)
+    assert routing["web_scraper_search"] == "web_scraper", f"tool mis-routed to {routing.get('web_scraper_search')!r}, expected 'web_scraper'"
+    assert routing["web_open"] == "web"

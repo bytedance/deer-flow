@@ -3,6 +3,7 @@
 import asyncio
 import atexit
 import logging
+import os
 import threading
 import uuid
 from collections.abc import Callable, Coroutine
@@ -26,7 +27,10 @@ from deerflow.models import create_chat_model
 from deerflow.skills.tool_policy import filter_tools_by_skill_allowed_tools
 from deerflow.skills.types import Skill
 from deerflow.subagents.config import SubagentConfig, resolve_subagent_model_name
+from deerflow.subagents.step_events import capture_new_step_messages
 from deerflow.subagents.token_collector import SubagentTokenCollector
+from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY
+from deerflow.tracing import build_tracing_callbacks, inject_langfuse_metadata
 
 if TYPE_CHECKING:
     # Imported lazily at runtime inside _build_initial_state: importing
@@ -87,7 +91,7 @@ class SubagentResult:
     started_at: datetime | None = None
     completed_at: datetime | None = None
     ai_messages: list[dict[str, Any]] | None = None
-    token_usage_records: list[dict[str, int | str]] = field(default_factory=list)
+    token_usage_records: list[dict[str, int | str | None]] = field(default_factory=list)
     usage_reported: bool = False
     cancel_event: threading.Event = field(default_factory=threading.Event, repr=False)
     _state_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
@@ -105,7 +109,7 @@ class SubagentResult:
         error: str | None = None,
         completed_at: datetime | None = None,
         ai_messages: list[dict[str, Any]] | None = None,
-        token_usage_records: list[dict[str, int | str]] | None = None,
+        token_usage_records: list[dict[str, int | str | None]] | None = None,
     ) -> bool:
         """Set a terminal status exactly once.
 
@@ -286,6 +290,13 @@ class SubagentExecutor:
         thread_data: ThreadDataState | None = None,
         thread_id: str | None = None,
         trace_id: str | None = None,
+        user_id: str | None = None,
+        user_role: str | None = None,
+        oauth_provider: str | None = None,
+        oauth_id: str | None = None,
+        run_id: str | None = None,
+        channel_user_id: str | None = None,
+        deerflow_trace_id: str | None = None,
     ):
         """Initialize the executor.
 
@@ -300,6 +311,16 @@ class SubagentExecutor:
             thread_data: Thread data from parent agent.
             thread_id: Thread ID for sandbox operations.
             trace_id: Trace ID from parent for distributed tracing.
+            user_id: User ID captured from the parent tool's runtime context.
+                When None, the tracing layer falls back to DEFAULT_USER_ID.
+            user_role: Authenticated user's role, propagated so GuardrailMiddleware
+                on the subagent can apply role-aware policy to delegated calls.
+            oauth_provider: External identity provider, when authenticated via SSO.
+            oauth_id: Subject id at the external identity provider.
+            run_id: Parent run id, so delegated guardrail decisions attribute to
+                the same run as the lead agent.
+            deerflow_trace_id: DeerFlow request-level correlation id propagated
+                from the parent run for Langfuse metadata correlation.
         """
         self.config = config
         self.app_config = app_config
@@ -316,6 +337,17 @@ class SubagentExecutor:
         self.thread_id = thread_id
         # Generate trace_id if not provided (for top-level calls)
         self.trace_id = trace_id or str(uuid.uuid4())[:8]
+        self.user_id = user_id
+        # Guardrail attribution propagated from the parent runtime context.
+        self.user_role = user_role
+        self.oauth_provider = oauth_provider
+        self.oauth_id = oauth_id
+        self.run_id = run_id
+        # IM-channel sender identity captured at task_tool dispatch: group
+        # chats share one thread across senders, so delegated bash commands
+        # must export the dispatching turn's id, not none at all.
+        self.channel_user_id = channel_user_id
+        self.deerflow_trace_id = deerflow_trace_id
 
         self._base_tools = _filter_tools(
             tools,
@@ -336,7 +368,7 @@ class SubagentExecutor:
         app_config = self.app_config or get_app_config()
         if self.model_name is None:
             self.model_name = resolve_subagent_model_name(self.config, self.parent_model, app_config=app_config)
-        model = create_chat_model(name=self.model_name, thinking_enabled=False, app_config=app_config)
+        model = create_chat_model(name=self.model_name, thinking_enabled=False, app_config=app_config, attach_tracing=False)
 
         from deerflow.agents.middlewares.tool_error_handling_middleware import build_subagent_runtime_middlewares
 
@@ -351,6 +383,7 @@ class SubagentExecutor:
             middleware=middlewares,
             system_prompt=None,
             state_schema=ThreadState,
+            checkpointer=False,
         )
 
     async def _load_skills(self) -> list[Skill]:
@@ -505,6 +538,15 @@ class SubagentExecutor:
         if ai_messages is None:
             ai_messages = []
             result.ai_messages = ai_messages
+        # O(1) duplicate detection for streamed AI messages. ``stream_mode="values"``
+        # re-yields the full state every super-step, so the same trailing message is
+        # re-examined on each chunk; an id-keyed set keeps that check O(1) instead of
+        # rescanning the append-only ``ai_messages`` list (O(n) per chunk -> O(n^2)
+        # over a run, which reaches max_turns=150 for deep-research subagents).
+        seen_message_ids: set[str] = {mid for msg in ai_messages if (mid := msg.get("id"))}
+        # Cursor into the append-only message history so each ``values``-mode
+        # chunk only re-scans the newly-appended tail (see capture_new_step_messages).
+        processed_message_count = 0
 
         collector: SubagentTokenCollector | None = None
         try:
@@ -521,12 +563,57 @@ class SubagentExecutor:
                 "callbacks": [collector],
                 "tags": [collector_caller],
             }
+
+            # Inject tracing callbacks at the graph level so a single subagent run
+            # produces one trace with all node / LLM / tool calls as child spans.
+            # This mirrors the lead agent pattern: graph-level tracing paired with
+            # attach_tracing=False on the model avoids double-counted traces.
+            tracing_callbacks = build_tracing_callbacks()
+            if tracing_callbacks:
+                existing_callbacks = list(run_config.get("callbacks") or [])
+                run_config["callbacks"] = [*existing_callbacks, *tracing_callbacks]
+
+            # Normalize subagent name for tracing so it matches the lead-agent
+            # naming shape (lowercase, hyphens only). Inline because there is no
+            # shared helper — runtime/runs/naming.py only handles lead-agent runs.
+            if self.config.name:
+                normalized_name = self.config.name.strip().lower().replace("_", "-")
+                assistant_id = f"subagent:{normalized_name}"
+            else:
+                assistant_id = "subagent"
+
+            # Inject Langfuse trace-attribute metadata so the subagent trace
+            # links to the parent thread and carries the correct session/user IDs.
+            inject_langfuse_metadata(
+                run_config,
+                thread_id=self.thread_id,
+                user_id=self.user_id,
+                assistant_id=assistant_id,
+                model_name=self.model_name,
+                environment=os.environ.get("DEER_FLOW_ENV") or os.environ.get("ENVIRONMENT"),
+                deerflow_trace_id=self.deerflow_trace_id,
+            )
+
             context: dict[str, Any] = {}
             if self.thread_id:
                 run_config["configurable"] = {"thread_id": self.thread_id}
                 context["thread_id"] = self.thread_id
             if self.app_config is not None:
                 context["app_config"] = self.app_config
+            # Propagate guardrail attribution so delegated tool calls are
+            # evaluated with the parent run's identity (role-aware policy,
+            # audit). user_id reuses the resolved tracing id; on every
+            # authenticated/IM path this equals the parent context value.
+            context["user_id"] = self.user_id
+            context["user_role"] = self.user_role
+            context["oauth_provider"] = self.oauth_provider
+            context["oauth_id"] = self.oauth_id
+            context["run_id"] = self.run_id
+            if self.channel_user_id:
+                context["channel_user_id"] = self.channel_user_id
+            if self.deerflow_trace_id:
+                context[DEERFLOW_TRACE_METADATA_KEY] = self.deerflow_trace_id
+            context["is_subagent"] = True
 
             logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} starting async execution with max_turns={self.config.max_turns}")
 
@@ -560,26 +647,16 @@ class SubagentExecutor:
 
                 final_state = chunk
 
-                # Extract AI messages from the current state
+                # Capture every step message (assistant turns AND tool outputs)
+                # appended since the last chunk. A single super-step can append
+                # several ToolMessages when the model emits multiple tool calls in
+                # one turn, so capturing only messages[-1] would drop all but the
+                # last output (#3779). Dedup/serialization live in capture_step_message.
                 messages = chunk.get("messages", [])
-                if messages:
-                    last_message = messages[-1]
-                    # Check if this is a new AI message
-                    if isinstance(last_message, AIMessage):
-                        # Convert message to dict for serialization
-                        message_dict = last_message.model_dump()
-                        # Only add if it's not already in the list (avoid duplicates)
-                        # Check by comparing message IDs if available, otherwise compare full dict
-                        message_id = message_dict.get("id")
-                        is_duplicate = False
-                        if message_id:
-                            is_duplicate = any(msg.get("id") == message_id for msg in ai_messages)
-                        else:
-                            is_duplicate = message_dict in ai_messages
-
-                        if not is_duplicate:
-                            ai_messages.append(message_dict)
-                            logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} captured AI message #{len(ai_messages)}")
+                previous_count = len(ai_messages)
+                processed_message_count = capture_new_step_messages(messages, ai_messages, seen_message_ids, processed_message_count)
+                if len(ai_messages) > previous_count:
+                    logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} captured {len(ai_messages) - previous_count} step message(s); total #{len(ai_messages)}")
 
             logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} completed async execution")
             token_usage_records = collector.snapshot_records()

@@ -71,6 +71,44 @@ async def _drain_inflight_runs(run_manager: RunManager) -> None:
         logger.exception("Failed to drain in-flight runs during shutdown")
 
 
+async def _publish_recovered_run_stream_end(
+    bridge: StreamBridge,
+    recovered_runs: list[RunRecord],
+    *,
+    cleanup_delay: float = 60.0,
+) -> None:
+    """Terminate retained streams for runs recovered as orphaned at startup."""
+    for record in recovered_runs:
+        stream_exists = getattr(bridge, "stream_exists", None)
+        if stream_exists is not None:
+            try:
+                if not await stream_exists(record.run_id):
+                    logger.debug("Skipping recovered stream end for %s: stream already expired", record.run_id)
+                    continue
+            except Exception:
+                logger.debug("Failed to check recovered stream existence for %s", record.run_id, exc_info=True)
+        try:
+            await bridge.publish_end(record.run_id)
+        except Exception:
+            logger.warning(
+                "Failed to publish recovered run stream end for %s",
+                record.run_id,
+                exc_info=True,
+            )
+            continue
+        task = asyncio.create_task(bridge.cleanup(record.run_id, delay=cleanup_delay))
+        task.add_done_callback(lambda task, run_id=record.run_id: _log_recovered_stream_cleanup_result(task, run_id))
+
+
+def _log_recovered_stream_cleanup_result(task: asyncio.Task[None], run_id: str) -> None:
+    if task.cancelled():
+        return
+    try:
+        task.result()
+    except Exception:
+        logger.warning("Failed to clean up recovered run stream for %s", run_id, exc_info=True)
+
+
 if TYPE_CHECKING:
     from app.gateway.auth.local_provider import LocalAuthProvider
     from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
@@ -200,6 +238,17 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         from deerflow.persistence.thread_meta import make_thread_store
 
         app.state.thread_store = make_thread_store(sf, app.state.store)
+        if sf is not None:
+            from deerflow.persistence.scheduled_task_runs import (
+                ScheduledTaskRunRepository,
+            )
+            from deerflow.persistence.scheduled_tasks import ScheduledTaskRepository
+
+            app.state.scheduled_task_repo = ScheduledTaskRepository(sf)
+            app.state.scheduled_task_run_repo = ScheduledTaskRunRepository(sf)
+        else:
+            app.state.scheduled_task_repo = None
+            app.state.scheduled_task_run_repo = None
 
         # Run event store. The store and the matching ``run_events_config`` are
         # both frozen at startup so ``get_run_context`` does not combine a
@@ -220,6 +269,9 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
                 error="Gateway restarted before this run reached a durable final state.",
                 before=now_iso(),
             )
+            sb_config = getattr(config, "stream_bridge", None)
+            cleanup_delay = getattr(sb_config, "recovered_stream_cleanup_delay_seconds", 60.0) if sb_config else 60.0
+            await _publish_recovered_run_stream_end(app.state.stream_bridge, recovered_runs, cleanup_delay=cleanup_delay)
             await _mark_latest_recovered_threads_error(app.state.run_manager, app.state.thread_store, recovered_runs)
 
         try:
@@ -275,6 +327,27 @@ def get_thread_store(request: Request) -> ThreadMetaStore:
     return val
 
 
+def get_scheduled_task_repo(request: Request):
+    val = getattr(request.app.state, "scheduled_task_repo", None)
+    if val is None:
+        raise HTTPException(status_code=503, detail="Scheduled task repo not available")
+    return val
+
+
+def get_scheduled_task_run_repo(request: Request):
+    val = getattr(request.app.state, "scheduled_task_run_repo", None)
+    if val is None:
+        raise HTTPException(status_code=503, detail="Scheduled task run repo not available")
+    return val
+
+
+def get_scheduled_task_service(request: Request):
+    val = getattr(request.app.state, "scheduled_task_service", None)
+    if val is None:
+        raise HTTPException(status_code=503, detail="Scheduled task service not available")
+    return val
+
+
 def get_run_context(request: Request) -> RunContext:
     """Build a :class:`RunContext` from ``app.state`` singletons.
 
@@ -292,6 +365,7 @@ def get_run_context(request: Request) -> RunContext:
         run_events_config=getattr(request.app.state, "run_events_config", None),
         thread_store=get_thread_store(request),
         app_config=get_config(),
+        on_run_completed=getattr(request.app.state, "scheduled_task_service", None).handle_run_completion if getattr(request.app.state, "scheduled_task_service", None) is not None else None,
     )
 
 
@@ -375,6 +449,28 @@ async def get_current_user_from_request(request: Request):
         )
 
     return user
+
+
+async def require_admin_user(request: Request, *, detail: str) -> None:
+    """Require the authenticated caller to be an admin user.
+
+    ``AuthMiddleware`` normally stamps ``request.state.user`` before the request
+    reaches a router. Falling back to the strict dependency keeps the route safe
+    in tests or alternative ASGI compositions that mount a router without the
+    global middleware. ``detail`` is the route-specific 403 message.
+
+    Centralising this here means a future change to the admin definition (e.g.
+    allowing an internal system role, adding audit logging, or switching to a
+    permission-based check) lands in one place instead of drifting across the
+    per-router copies that previously existed in ``mcp``, ``channel_connections``
+    and ``channels``.
+    """
+    user = getattr(request.state, "user", None)
+    if user is None:
+        user = await get_current_user_from_request(request)
+
+    if getattr(user, "system_role", None) != "admin":
+        raise HTTPException(status_code=403, detail=detail)
 
 
 async def get_optional_user_from_request(request: Request):

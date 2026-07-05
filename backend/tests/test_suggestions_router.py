@@ -2,7 +2,21 @@ import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
+
 from app.gateway.routers import suggestions
+from deerflow.trace_context import request_trace_context
+
+
+@pytest.fixture(autouse=True)
+def _clear_langfuse_env(monkeypatch):
+    from deerflow.config.tracing_config import reset_tracing_config
+
+    for name in ("LANGFUSE_TRACING", "LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY", "LANGFUSE_BASE_URL", "DEER_FLOW_ENV", "ENVIRONMENT"):
+        monkeypatch.delenv(name, raising=False)
+    reset_tracing_config()
+    yield
+    reset_tracing_config()
 
 
 def test_strip_markdown_code_fence_removes_wrapping():
@@ -74,7 +88,7 @@ def test_generate_suggestions_strips_inline_think_block(monkeypatch):
     fake_model.ainvoke = AsyncMock(return_value=MagicMock(content=content))
     monkeypatch.setattr(suggestions, "create_chat_model", lambda **kwargs: fake_model)
 
-    result = asyncio.run(suggestions.generate_suggestions.__wrapped__("t1", req, request=None, config=SimpleNamespace()))
+    result = asyncio.run(suggestions.generate_suggestions.__wrapped__("t1", req, request=None, config=SimpleNamespace(suggestions=SimpleNamespace(enabled=True))))
 
     assert result.suggestions == ["深度学习和机器学习的区别？", "常用框架有哪些？", "需要什么数学基础？"]
 
@@ -103,11 +117,43 @@ def test_generate_suggestions_parses_and_limits(monkeypatch):
 
     # Bypass the require_permission decorator (which needs request +
     # thread_store) — these tests cover the parsing logic.
-    result = asyncio.run(suggestions.generate_suggestions.__wrapped__("t1", req, request=None, config=SimpleNamespace()))
+    result = asyncio.run(suggestions.generate_suggestions.__wrapped__("t1", req, request=None, config=SimpleNamespace(suggestions=SimpleNamespace(enabled=True))))
 
     assert result.suggestions == ["Q1", "Q2", "Q3"]
     fake_model.ainvoke.assert_awaited_once()
     assert fake_model.ainvoke.await_args.kwargs["config"] == {"run_name": "suggest_agent"}
+
+
+def test_generate_suggestions_injects_deerflow_trace_metadata_when_langfuse_enabled(monkeypatch):
+    monkeypatch.setenv("LANGFUSE_TRACING", "true")
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-lf-test")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-lf-test")
+    from deerflow.config.tracing_config import reset_tracing_config
+
+    reset_tracing_config()
+    req = suggestions.SuggestionsRequest(
+        messages=[
+            suggestions.SuggestionMessage(role="user", content="Hi"),
+            suggestions.SuggestionMessage(role="assistant", content="Hello"),
+        ],
+        n=1,
+        model_name="suggest-model",
+    )
+    fake_model = MagicMock()
+    fake_model.ainvoke = AsyncMock(return_value=MagicMock(content='["Q1"]'))
+    monkeypatch.setattr(suggestions, "create_chat_model", lambda **kwargs: fake_model)
+
+    try:
+        with request_trace_context("suggest-trace-1"):
+            result = asyncio.run(suggestions.generate_suggestions.__wrapped__("thread-suggest", req, request=None, config=SimpleNamespace(suggestions=SimpleNamespace(enabled=True))))
+    finally:
+        reset_tracing_config()
+
+    assert result.suggestions == ["Q1"]
+    metadata = fake_model.ainvoke.await_args.kwargs["config"]["metadata"]
+    assert metadata["deerflow_trace_id"] == "suggest-trace-1"
+    assert metadata["langfuse_session_id"] == "thread-suggest"
+    assert metadata["langfuse_trace_name"] == "suggest_agent"
 
 
 def test_generate_suggestions_parses_list_block_content(monkeypatch):
@@ -125,7 +171,7 @@ def test_generate_suggestions_parses_list_block_content(monkeypatch):
 
     # Bypass the require_permission decorator (which needs request +
     # thread_store) — these tests cover the parsing logic.
-    result = asyncio.run(suggestions.generate_suggestions.__wrapped__("t1", req, request=None, config=SimpleNamespace()))
+    result = asyncio.run(suggestions.generate_suggestions.__wrapped__("t1", req, request=None, config=SimpleNamespace(suggestions=SimpleNamespace(enabled=True))))
 
     assert result.suggestions == ["Q1", "Q2"]
     fake_model.ainvoke.assert_awaited_once()
@@ -147,7 +193,7 @@ def test_generate_suggestions_parses_output_text_block_content(monkeypatch):
 
     # Bypass the require_permission decorator (which needs request +
     # thread_store) — these tests cover the parsing logic.
-    result = asyncio.run(suggestions.generate_suggestions.__wrapped__("t1", req, request=None, config=SimpleNamespace()))
+    result = asyncio.run(suggestions.generate_suggestions.__wrapped__("t1", req, request=None, config=SimpleNamespace(suggestions=SimpleNamespace(enabled=True))))
 
     assert result.suggestions == ["Q1", "Q2"]
     fake_model.ainvoke.assert_awaited_once()
@@ -166,6 +212,43 @@ def test_generate_suggestions_returns_empty_on_model_error(monkeypatch):
 
     # Bypass the require_permission decorator (which needs request +
     # thread_store) — these tests cover the parsing logic.
-    result = asyncio.run(suggestions.generate_suggestions.__wrapped__("t1", req, request=None, config=SimpleNamespace()))
+    result = asyncio.run(suggestions.generate_suggestions.__wrapped__("t1", req, request=None, config=SimpleNamespace(suggestions=SimpleNamespace(enabled=True))))
 
     assert result.suggestions == []
+
+
+def test_generate_suggestions_returns_empty_when_disabled(monkeypatch):
+    """Ensure suggestions are bypassed and returned an empty list when disabled in config."""
+    req = suggestions.SuggestionsRequest(
+        messages=[
+            suggestions.SuggestionMessage(role="user", content="Hi"),
+            suggestions.SuggestionMessage(role="assistant", content="Hello"),
+        ],
+        n=3,
+        model_name=None,
+    )
+
+    mock_config = SimpleNamespace(suggestions=SimpleNamespace(enabled=False))
+
+    fake_model = MagicMock()
+    fake_model.ainvoke = AsyncMock(side_effect=RuntimeError("Model should not be called."))
+    monkeypatch.setattr(suggestions, "create_chat_model", lambda **kwargs: fake_model)
+
+    result = asyncio.run(suggestions.generate_suggestions.__wrapped__("t1", req, request=None, config=mock_config))
+
+    assert result.suggestions == []
+    fake_model.ainvoke.assert_not_called()
+
+
+def test_get_suggestions_config():
+    """Ensure the GET /config endpoint correctly returns the boolean state."""
+
+    # Test when enabled
+    mock_config_true = SimpleNamespace(suggestions=SimpleNamespace(enabled=True))
+    result_true = asyncio.run(suggestions.get_suggestions_config(config=mock_config_true))
+    assert result_true.enabled is True
+
+    # Test when disabled
+    mock_config_false = SimpleNamespace(suggestions=SimpleNamespace(enabled=False))
+    result_false = asyncio.run(suggestions.get_suggestions_config(config=mock_config_false))
+    assert result_false.enabled is False

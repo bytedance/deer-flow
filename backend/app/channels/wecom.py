@@ -8,7 +8,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any, cast
 
 from app.channels.base import Channel
-from app.channels.commands import extract_connect_code, is_known_channel_command
+from app.channels.commands import is_known_channel_command
 from app.channels.connection_identity import attach_connection_identity
 from app.channels.message_bus import (
     InboundMessage,
@@ -31,7 +31,6 @@ class WeComChannel(Channel):
         self._ws_frames: dict[str, dict[str, Any]] = {}
         self._ws_stream_ids: dict[str, str] = {}
         self._working_message = "Working on it..."
-        self._connection_repo = config.get("connection_repo")
 
     @property
     def supports_streaming(self) -> bool:
@@ -82,11 +81,32 @@ class WeComChannel(Channel):
             self._ws_client.on("message.mixed", self._on_ws_mixed)
             self._ws_client.on("message.image", self._on_ws_image)
             self._ws_client.on("message.file", self._on_ws_file)
+            self._ws_client.on("error", self._on_ws_error)
+            self._ws_client.on("disconnected", self._on_ws_disconnected)
             self._ws_task = asyncio.create_task(self._ws_client.connect())
+            self._ws_task.add_done_callback(self._on_ws_task_done)
 
             self._running = True
             self.bus.subscribe_outbound(self._on_outbound)
         logger.info("WeCom channel started")
+
+    def _on_ws_task_done(self, task: asyncio.Task) -> None:
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is None:
+            return
+        logger.error(
+            "WeCom WebSocket connection task failed: %s. Check that the network/proxy allows wss://openws.work.weixin.qq.com and that bot_id/bot_secret are valid.",
+            exc,
+        )
+
+    def _on_ws_error(self, error: Any) -> None:
+        logger.error("WeCom WebSocket error: %s", error)
+
+    def _on_ws_disconnected(self, *args: Any) -> None:
+        detail = f" ({args[0]})" if args else ""
+        logger.warning("WeCom WebSocket disconnected%s; SDK will attempt to reconnect", detail)
 
     async def stop(self) -> None:
         self._running = False
@@ -274,8 +294,8 @@ class WeComChannel(Channel):
 
         user_id = (body.get("from") or {}).get("userid")
 
-        connect_code = extract_connect_code(text)
-        if connect_code and self._connection_repo is not None:
+        connect_code = self._pending_connect_code(text)
+        if connect_code:
             handled = await self._bind_connection_from_connect_code(
                 frame=frame,
                 user_id=str(user_id or ""),
@@ -292,7 +312,11 @@ class WeComChannel(Channel):
             msg_type=inbound_type,
             thread_ts=msg_id,
             files=files or [],
-            metadata={"aibotid": body.get("aibotid"), "chattype": body.get("chattype")},
+            metadata={
+                "aibotid": body.get("aibotid"),
+                "chattype": body.get("chattype"),
+                "message_id": msg_id,
+            },
         )
         inbound.topic_id = user_id  # keep the same thread
 
@@ -368,30 +392,20 @@ class WeComChannel(Channel):
             if not stream_id:
                 return
 
-            last_exc: Exception | None = None
-            for attempt in range(_max_retries):
-                try:
-                    await self._ws_client.reply_stream(frame, stream_id, msg.text, bool(msg.is_final))
-                    return
-                except Exception as exc:
-                    last_exc = exc
-                    if attempt < _max_retries - 1:
-                        await asyncio.sleep(2**attempt)
-            if last_exc:
-                raise last_exc
+            await self._send_with_retry(
+                lambda: self._ws_client.reply_stream(frame, stream_id, msg.text, bool(msg.is_final)),
+                max_retries=_max_retries,
+                log_prefix="[WeCom]",
+                operation_name="stream send",
+            )
+            return
 
         body = {"msgtype": "markdown", "markdown": {"content": msg.text}}
-        last_exc = None
-        for attempt in range(_max_retries):
-            try:
-                await self._ws_client.send_message(msg.chat_id, body)
-                return
-            except Exception as exc:
-                last_exc = exc
-                if attempt < _max_retries - 1:
-                    await asyncio.sleep(2**attempt)
-        if last_exc:
-            raise last_exc
+        await self._send_with_retry(
+            lambda: self._ws_client.send_message(msg.chat_id, body),
+            max_retries=_max_retries,
+            log_prefix="[WeCom]",
+        )
 
     async def _upload_media_ws(
         self,
