@@ -7,8 +7,10 @@ import copy
 import json
 import logging
 import math
+import os
 import re
 import uuid
+from contextlib import nullcontext
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -24,6 +26,8 @@ from deerflow.agents.memory.storage import (
 )
 from deerflow.config.memory_config import get_memory_config
 from deerflow.models import create_chat_model
+from deerflow.trace_context import request_trace_context
+from deerflow.tracing import inject_langfuse_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -476,9 +480,12 @@ class MemoryUpdater:
 
     def _get_model(self):
         """Get the model for memory updates."""
+        return create_chat_model(name=self._resolve_model_name(), thinking_enabled=False)
+
+    def _resolve_model_name(self) -> str | None:
+        """Return the configured model name for memory updates."""
         config = get_memory_config()
-        model_name = self._model_name or config.model_name
-        return create_chat_model(name=model_name, thinking_enabled=False)
+        return self._model_name or config.model_name
 
     def _build_correction_hint(
         self,
@@ -570,6 +577,7 @@ class MemoryUpdater:
         correction_detected: bool = False,
         reinforcement_detected: bool = False,
         user_id: str | None = None,
+        deerflow_trace_id: str | None = None,
     ) -> bool:
         """Update memory asynchronously by delegating to the sync path.
 
@@ -587,6 +595,7 @@ class MemoryUpdater:
             correction_detected=correction_detected,
             reinforcement_detected=reinforcement_detected,
             user_id=user_id,
+            deerflow_trace_id=deerflow_trace_id,
         )
 
     def _do_update_memory_sync(
@@ -597,6 +606,7 @@ class MemoryUpdater:
         correction_detected: bool = False,
         reinforcement_detected: bool = False,
         user_id: str | None = None,
+        deerflow_trace_id: str | None = None,
     ) -> bool:
         """Pure-sync memory update using ``model.invoke()``.
 
@@ -606,33 +616,53 @@ class MemoryUpdater:
         lead agent) is never touched — no cross-loop connection reuse is
         possible.
         """
-        try:
-            prepared = self._prepare_update_prompt(
-                messages=messages,
-                agent_name=agent_name,
-                correction_detected=correction_detected,
-                reinforcement_detected=reinforcement_detected,
-                user_id=user_id,
-            )
-            if prepared is None:
-                return False
+        # Callers may run us in a ``threading.Timer`` thread or an
+        # ``_SYNC_MEMORY_UPDATER_EXECUTOR`` worker — neither propagates the
+        # request-trace ContextVar. Rebind it here from the explicitly plumbed
+        # ``deerflow_trace_id`` so ``TraceContextFilter`` attaches the correct
+        # trace id to every log record emitted below (including model-invoke
+        # tracing-callback logs). ``nullcontext`` when unknown avoids
+        # fabricating a bogus id via ``request_trace_context(None)``.
+        trace_ctx = request_trace_context(deerflow_trace_id) if deerflow_trace_id else nullcontext()
+        with trace_ctx:
+            try:
+                prepared = self._prepare_update_prompt(
+                    messages=messages,
+                    agent_name=agent_name,
+                    correction_detected=correction_detected,
+                    reinforcement_detected=reinforcement_detected,
+                    user_id=user_id,
+                )
+                if prepared is None:
+                    return False
 
-            current_memory, prompt = prepared
-            model = self._get_model()
-            response = model.invoke(prompt, config={"run_name": "memory_agent"})
-            return self._finalize_update(
-                current_memory=current_memory,
-                response_content=response.content,
-                thread_id=thread_id,
-                agent_name=agent_name,
-                user_id=user_id,
-            )
-        except json.JSONDecodeError as e:
-            logger.warning("Failed to parse LLM response for memory update: %s", e)
-            return False
-        except Exception as e:
-            logger.exception("Memory update failed: %s", e)
-            return False
+                current_memory, prompt = prepared
+                model_name = self._resolve_model_name()
+                model = self._get_model()
+                invoke_config: dict[str, Any] = {"run_name": "memory_agent"}
+                inject_langfuse_metadata(
+                    invoke_config,
+                    thread_id=thread_id,
+                    user_id=user_id,
+                    assistant_id="memory_agent",
+                    model_name=model_name,
+                    environment=os.environ.get("DEER_FLOW_ENV") or os.environ.get("ENVIRONMENT"),
+                    deerflow_trace_id=deerflow_trace_id,
+                )
+                response = model.invoke(prompt, config=invoke_config)
+                return self._finalize_update(
+                    current_memory=current_memory,
+                    response_content=response.content,
+                    thread_id=thread_id,
+                    agent_name=agent_name,
+                    user_id=user_id,
+                )
+            except json.JSONDecodeError as e:
+                logger.warning("Failed to parse LLM response for memory update: %s", e)
+                return False
+            except Exception as e:
+                logger.exception("Memory update failed: %s", e)
+                return False
 
     def update_memory(
         self,
@@ -642,6 +672,7 @@ class MemoryUpdater:
         correction_detected: bool = False,
         reinforcement_detected: bool = False,
         user_id: str | None = None,
+        deerflow_trace_id: str | None = None,
     ) -> bool:
         """Synchronously update memory using the sync LLM path.
 
@@ -680,6 +711,7 @@ class MemoryUpdater:
                     correction_detected=correction_detected,
                     reinforcement_detected=reinforcement_detected,
                     user_id=user_id,
+                    deerflow_trace_id=deerflow_trace_id,
                 )
                 return future.result()
             except Exception:
@@ -693,6 +725,7 @@ class MemoryUpdater:
             correction_detected=correction_detected,
             reinforcement_detected=reinforcement_detected,
             user_id=user_id,
+            deerflow_trace_id=deerflow_trace_id,
         )
 
     def _apply_updates(
@@ -832,6 +865,7 @@ def update_memory_from_conversation(
     correction_detected: bool = False,
     reinforcement_detected: bool = False,
     user_id: str | None = None,
+    deerflow_trace_id: str | None = None,
 ) -> bool:
     """Convenience function to update memory from a conversation.
 
@@ -847,4 +881,4 @@ def update_memory_from_conversation(
         True if successful, False otherwise.
     """
     updater = MemoryUpdater()
-    return updater.update_memory(messages, thread_id, agent_name, correction_detected, reinforcement_detected, user_id=user_id)
+    return updater.update_memory(messages, thread_id, agent_name, correction_detected, reinforcement_detected, user_id=user_id, deerflow_trace_id=deerflow_trace_id)

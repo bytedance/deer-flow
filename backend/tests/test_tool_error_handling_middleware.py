@@ -11,10 +11,12 @@ from deerflow.agents.middlewares.tool_error_handling_middleware import (
     build_subagent_runtime_middlewares,
 )
 from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
+from deerflow.config import summarization_config
 from deerflow.config.app_config import AppConfig, CircuitBreakerConfig
 from deerflow.config.guardrails_config import GuardrailsConfig
 from deerflow.config.model_config import ModelConfig
 from deerflow.config.sandbox_config import SandboxConfig
+from deerflow.subagents.status_contract import SUBAGENT_ERROR_KEY, SUBAGENT_STATUS_KEY
 
 
 def _request(name: str = "web_search", tool_call_id: str | None = "tc-1"):
@@ -142,15 +144,31 @@ def test_build_subagent_runtime_middlewares_threads_app_config_to_llm_middleware
     assert captured["app_config"] is app_config
     # 8 baseline (InputSanitization, ToolOutputBudget, ThreadData, Sandbox,
     # DanglingToolCall, LLMErrorHandling, SandboxAudit, ToolErrorHandling)
-    # + 1 SafetyFinishReasonMiddleware (enabled by default).
+    # + 1 ReadBeforeWriteMiddleware + 1 LoopDetectionMiddleware
+    # + 1 SafetyFinishReasonMiddleware (all enabled by default).
     from deerflow.agents.middlewares.safety_finish_reason_middleware import SafetyFinishReasonMiddleware
     from deerflow.agents.middlewares.tool_output_budget_middleware import ToolOutputBudgetMiddleware
 
-    assert len(middlewares) == 9
+    assert len(middlewares) == 11
     assert isinstance(middlewares[0], FakeMiddleware)  # InputSanitizationMiddleware stub
     assert isinstance(middlewares[1], ToolOutputBudgetMiddleware)
     assert any(isinstance(m, ToolErrorHandlingMiddleware) for m in middlewares)
     assert isinstance(middlewares[-1], SafetyFinishReasonMiddleware)
+
+
+def test_lead_runtime_middlewares_thread_app_config_to_tool_error_handling(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setitem(
+        sys.modules,
+        "deerflow.agents.middlewares.input_sanitization_middleware",
+        _module("deerflow.agents.middlewares.input_sanitization_middleware", InputSanitizationMiddleware=object),
+    )
+    app_config = _make_app_config()
+    _stub_runtime_middleware_imports(monkeypatch)
+
+    middlewares = build_lead_runtime_middlewares(app_config=app_config)
+
+    tool_middleware = next(mw for mw in middlewares if isinstance(mw, ToolErrorHandlingMiddleware))
+    assert tool_middleware._app_config is app_config
 
 
 def test_build_lead_runtime_middlewares_orders_thread_data_before_uploads():
@@ -187,6 +205,7 @@ def test_build_lead_runtime_middlewares_chain_order_matches_agents_md():
     from deerflow.agents.middlewares.dangling_tool_call_middleware import DanglingToolCallMiddleware
     from deerflow.agents.middlewares.input_sanitization_middleware import InputSanitizationMiddleware
     from deerflow.agents.middlewares.llm_error_handling_middleware import LLMErrorHandlingMiddleware
+    from deerflow.agents.middlewares.read_before_write_middleware import ReadBeforeWriteMiddleware
     from deerflow.agents.middlewares.sandbox_audit_middleware import SandboxAuditMiddleware
     from deerflow.agents.middlewares.thread_data_middleware import ThreadDataMiddleware
     from deerflow.agents.middlewares.tool_output_budget_middleware import ToolOutputBudgetMiddleware
@@ -212,6 +231,7 @@ def test_build_lead_runtime_middlewares_chain_order_matches_agents_md():
         ("DanglingToolCallMiddleware", DanglingToolCallMiddleware),
         ("LLMErrorHandlingMiddleware", LLMErrorHandlingMiddleware),
         ("SandboxAuditMiddleware", SandboxAuditMiddleware),
+        ("ReadBeforeWriteMiddleware", ReadBeforeWriteMiddleware),
         ("ToolErrorHandlingMiddleware", ToolErrorHandlingMiddleware),
     ]
     actual = [(label, idx_of(cls, label=label)) for label, cls in expected_order]
@@ -230,6 +250,69 @@ def test_wrap_tool_call_passthrough_on_success():
     assert result is expected
 
 
+def test_read_file_skill_read_stamps_compact_skill_metadata():
+    app_config = _make_app_config()
+    app_config.skills.container_path = "/mnt/skills"
+    app_config.summarization.skill_file_read_tool_names = ["read_file"]
+    middleware = ToolErrorHandlingMiddleware(app_config=app_config)
+    req = _request(name="read_file", tool_call_id="read-1")
+    req.tool_call["args"] = {"path": "/mnt/skills/public/data-analysis/SKILL.md"}
+
+    result = middleware.wrap_tool_call(
+        req,
+        lambda _req: ToolMessage(
+            content="---\nname: data-analysis\ndescription: Analyze data.\n---\nBODY",
+            tool_call_id="read-1",
+            name="read_file",
+        ),
+    )
+
+    assert result.additional_kwargs["skill_context_entry"] == {
+        "path": "/mnt/skills/public/data-analysis/SKILL.md",
+        "description": "Analyze data.",
+    }
+
+
+def test_skill_read_config_is_cached_on_middleware_instance():
+    middleware = ToolErrorHandlingMiddleware()
+    default_names = getattr(summarization_config, "DEFAULT_SKILL_FILE_READ_TOOL_NAMES", None)
+
+    assert default_names is not None
+    assert middleware._skill_read_tool_names == frozenset(default_names)
+    assert middleware._skills_root == "/mnt/skills"
+
+
+def test_skill_metadata_respects_custom_skills_root():
+    app_config = _make_app_config()
+    app_config.skills.container_path = "/custom/skills"
+    app_config.summarization.skill_file_read_tool_names = ["read_file"]
+    middleware = ToolErrorHandlingMiddleware(app_config=app_config)
+    req = _request(name="read_file", tool_call_id="read-1")
+    req.tool_call["args"] = {"path": "/custom/skills/public/x/SKILL.md"}
+
+    result = middleware.wrap_tool_call(
+        req,
+        lambda _req: ToolMessage("---\ndescription: X\n---\nBody", tool_call_id="read-1", name="read_file"),
+    )
+
+    assert result.additional_kwargs["skill_context_entry"]["path"] == "/custom/skills/public/x/SKILL.md"
+
+
+def test_skill_metadata_disabled_when_read_tool_names_empty():
+    app_config = _make_app_config()
+    app_config.summarization.skill_file_read_tool_names = []
+    middleware = ToolErrorHandlingMiddleware(app_config=app_config)
+    req = _request(name="read_file", tool_call_id="read-1")
+    req.tool_call["args"] = {"path": "/mnt/skills/public/x/SKILL.md"}
+
+    result = middleware.wrap_tool_call(
+        req,
+        lambda _req: ToolMessage("---\ndescription: X\n---\nBody", tool_call_id="read-1", name="read_file"),
+    )
+
+    assert "skill_context_entry" not in result.additional_kwargs
+
+
 def test_wrap_tool_call_returns_error_tool_message_on_exception():
     middleware = ToolErrorHandlingMiddleware()
     req = _request(name="web_search", tool_call_id="tc-42")
@@ -245,6 +328,24 @@ def test_wrap_tool_call_returns_error_tool_message_on_exception():
     assert result.status == "error"
     assert "Tool 'web_search' failed" in result.text
     assert "network down" in result.text
+
+
+def test_task_exception_wrapper_uses_subagent_result_formatter():
+    middleware = ToolErrorHandlingMiddleware()
+    req = _request(name="task", tool_call_id="tc-task")
+
+    def _boom(_req):
+        raise RuntimeError("network down")
+
+    result = middleware.wrap_tool_call(req, _boom)
+
+    assert isinstance(result, ToolMessage)
+    assert result.tool_call_id == "tc-task"
+    assert result.name == "task"
+    assert result.status == "error"
+    assert result.content == "Task failed. Error: RuntimeError: network down. Continue with available context, or choose an alternative tool."
+    assert result.additional_kwargs[SUBAGENT_STATUS_KEY] == "failed"
+    assert result.additional_kwargs[SUBAGENT_ERROR_KEY] == "RuntimeError: network down"
 
 
 def test_wrap_tool_call_uses_fallback_tool_call_id_when_missing():
@@ -369,6 +470,56 @@ def test_subagent_runtime_middlewares_skip_deferred_filter_without_names(monkeyp
     for setup in (None, DeferredToolSetup(None, frozenset(), None)):
         middlewares = build_subagent_runtime_middlewares(app_config=app_config, deferred_setup=setup)
         assert not any(isinstance(m, DeferredToolFilterMiddleware) for m in middlewares)
+
+
+def test_subagent_runtime_middlewares_attach_loop_detection_when_enabled(monkeypatch):
+    """Subagents must inherit the lead's LoopDetectionMiddleware so a degenerate
+    tool loop is broken instead of burning tokens until ``max_turns`` (#3875).
+    ``loop_detection.enabled`` defaults to True, so the default subagent chain
+    carries the guard. Phase 1 of #3875."""
+    from deerflow.agents.middlewares.loop_detection_middleware import LoopDetectionMiddleware
+
+    app_config = _make_app_config()
+    _stub_runtime_middleware_imports(monkeypatch)
+
+    middlewares = build_subagent_runtime_middlewares(app_config=app_config, model_name="test-model")
+
+    loop = [m for m in middlewares if isinstance(m, LoopDetectionMiddleware)]
+    assert len(loop) == 1
+
+
+def test_subagent_runtime_middlewares_omit_loop_detection_when_disabled(monkeypatch):
+    """``loop_detection.enabled=False`` must drop the guard from the subagent
+    chain, mirroring the lead's gate (``lead_agent/agent.py``)."""
+    from deerflow.agents.middlewares.loop_detection_middleware import LoopDetectionMiddleware
+    from deerflow.config.loop_detection_config import LoopDetectionConfig
+
+    app_config = _make_app_config().model_copy(update={"loop_detection": LoopDetectionConfig(enabled=False)})
+    _stub_runtime_middleware_imports(monkeypatch)
+
+    middlewares = build_subagent_runtime_middlewares(app_config=app_config, model_name="test-model")
+
+    assert not any(isinstance(m, LoopDetectionMiddleware) for m in middlewares)
+
+
+def test_subagent_runtime_middlewares_place_loop_detection_before_safety_finish(monkeypatch):
+    """LoopDetectionMiddleware must be registered before SafetyFinishReasonMiddleware
+    (earlier in the middleware list). LangChain dispatches after_model hooks in
+    reverse registration order, so SafetyFinishReasonMiddleware (registered
+    later) executes first — the placement its docstring requires and the lead
+    chain (``lead_agent/agent.py``) uses. The assertion pins registration order,
+    not execution order."""
+    from deerflow.agents.middlewares.loop_detection_middleware import LoopDetectionMiddleware
+    from deerflow.agents.middlewares.safety_finish_reason_middleware import SafetyFinishReasonMiddleware
+
+    app_config = _make_app_config()
+    _stub_runtime_middleware_imports(monkeypatch)
+
+    middlewares = build_subagent_runtime_middlewares(app_config=app_config, model_name="test-model")
+
+    loop_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, LoopDetectionMiddleware))
+    safety_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, SafetyFinishReasonMiddleware))
+    assert loop_idx < safety_idx
 
 
 def test_lead_runtime_chain_finds_historical_uploads_under_lazy_init_false(tmp_path, monkeypatch):

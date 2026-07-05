@@ -1,31 +1,36 @@
-"""Backend↔frontend contract for the structured subagent status.
+"""Backend↔frontend contract for structured subagent result metadata.
 
-Bytedance/deer-flow issue #3146: the frontend used to derive the
-subtask card state by string-matching the leading text of the
-``task`` tool's result. That contract was fragile — any rewording on
-the backend silently broke the card lifecycle, and the issue history
-of #3107 BUG-007 / #3131 review showed it repeatedly.
-
-This module replaces the text-shaped contract with a small structured
-one carried inside ``ToolMessage.additional_kwargs``:
+``task`` tool result text is model-visible display content. Runtime
+consumers read the structured facts carried inside
+``ToolMessage.additional_kwargs``:
 
 - ``subagent_status``: one of ``SUBAGENT_STATUS_VALUES``.
 - ``subagent_error`` (optional): the human-readable error blob the
   backend recorded.
+- ``subagent_result_brief`` / ``subagent_result_sha256`` (optional):
+  bounded completed-result metadata plus a digest of the full result.
 
-The mapping from "task tool result text" to status is the one piece
-the backend stamper (``ToolErrorHandlingMiddleware``) and the
-frontend fallback parser must agree on. The shared fixture at
-``contracts/subagent_status_contract.json`` is the single source of
-truth — both sides' tests load it and assert behaviour.
+The shared fixture at ``contracts/subagent_status_contract.json`` pins
+the enum values across Python and TypeScript.
 """
 
 from __future__ import annotations
 
-from typing import Literal
+import hashlib
+import re
+from collections.abc import Mapping
+from typing import Literal, NotRequired, TypedDict
 
 SUBAGENT_STATUS_KEY = "subagent_status"
 SUBAGENT_ERROR_KEY = "subagent_error"
+SUBAGENT_RESULT_BRIEF_KEY = "subagent_result_brief"
+SUBAGENT_RESULT_SHA256_KEY = "subagent_result_sha256"
+SUBAGENT_METADATA_TEXT_MAX_CHARS = 2000
+
+#: The producer always emits ``hashlib.sha256(...).hexdigest()`` — 64
+#: lowercase hex chars. Readers enforce the same shape so a corrupted
+#: relay value cannot masquerade as a digest.
+_SHA256_HEX_RE = re.compile(r"[0-9a-f]{64}")
 
 SubagentStatusValue = Literal[
     "completed",
@@ -46,41 +51,32 @@ SUBAGENT_STATUS_VALUES: tuple[SubagentStatusValue, ...] = (
     "polling_timed_out",
 )
 
-# Prefix table — ordered most-specific-first because some prefixes are
-# substrings of others ("Task timed out" vs "Task polling timed out", "Task
-# failed" vs "Task failed. Error: ..."). The "Task " prefixes come from
-# ``task_tool.py``'s 5 normal-return strings; the bare ``Error:`` prefix
-# catches both the 3 ``Error:`` pre-execution returns and the wrapper
-# produced by ``ToolErrorHandlingMiddleware`` for any task tool exception.
-_PREFIX_TO_STATUS: tuple[tuple[str, SubagentStatusValue], ...] = (
-    ("Task Succeeded. Result:", "completed"),
-    ("Task polling timed out", "polling_timed_out"),
-    ("Task timed out", "timed_out"),
-    ("Task cancelled by user", "cancelled"),
-    ("Task failed.", "failed"),
-    ("Error", "failed"),
-)
+
+class StructuredSubagentResult(TypedDict):
+    status: SubagentStatusValue
+    result_brief: NotRequired[str]
+    result_sha256: NotRequired[str]
+    error: NotRequired[str]
 
 
-def extract_subagent_status(content: str) -> SubagentStatusValue | None:
-    """Infer the structured status for a ``task`` tool result string.
-
-    Returns ``None`` when the content does not match any known terminal
-    prefix. Non-terminal streaming chunks fall into this branch by
-    design — the middleware then leaves ``subagent_status`` unset so
-    the frontend keeps the card on its in-progress placeholder until
-    the real terminal frame arrives.
-    """
-    trimmed = content.strip()
-    for prefix, status in _PREFIX_TO_STATUS:
-        if trimmed.startswith(prefix):
-            return status
-    return None
+def _bound_metadata_text(text: str, cap: int = SUBAGENT_METADATA_TEXT_MAX_CHARS) -> str:
+    cleaned = text.strip()
+    if len(cleaned) <= cap:
+        return cleaned
+    marker = "\n...\n"
+    if cap <= len(marker):
+        return cleaned[:cap]
+    head = cap * 2 // 3
+    tail = cap - head - len(marker)
+    if tail <= 0:
+        return cleaned[:cap]
+    return f"{cleaned[:head]}{marker}{cleaned[-tail:]}"
 
 
 def make_subagent_additional_kwargs(
     status: SubagentStatusValue,
     *,
+    result: str | None = None,
     error: str | None = None,
 ) -> dict[str, str]:
     """Build the ``additional_kwargs`` payload the middleware stamps.
@@ -91,12 +87,72 @@ def make_subagent_additional_kwargs(
     Raises:
         ValueError: when ``status`` is not in :data:`SUBAGENT_STATUS_VALUES`.
             We do not accept arbitrary strings: a typo would silently leak
-            through to the frontend and degrade to the legacy prefix
-            fallback rather than failing loudly.
+            through to consumers as missing metadata rather than failing
+            loudly at the producer boundary.
     """
     if status not in SUBAGENT_STATUS_VALUES:
         raise ValueError(f"invalid subagent status {status!r}; expected one of {SUBAGENT_STATUS_VALUES}")
     payload: dict[str, str] = {SUBAGENT_STATUS_KEY: status}
-    if error and error.strip():
-        payload[SUBAGENT_ERROR_KEY] = error.strip()
+    if status == "completed" and isinstance(result, str) and result.strip():
+        payload[SUBAGENT_RESULT_BRIEF_KEY] = _bound_metadata_text(result)
+        payload[SUBAGENT_RESULT_SHA256_KEY] = hashlib.sha256(result.encode("utf-8")).hexdigest()
+    if status != "completed" and isinstance(error, str) and error.strip():
+        payload[SUBAGENT_ERROR_KEY] = _bound_metadata_text(error)
+    return payload
+
+
+def format_subagent_result_message(
+    status: SubagentStatusValue,
+    *,
+    result: str | None = None,
+    error: str | None = None,
+) -> tuple[str, str | None]:
+    """Return model-visible task content plus normalized metadata error."""
+    result_text = "" if result is None else str(result)
+    error_text = str(error).strip() if isinstance(error, str) else ""
+
+    if status == "completed":
+        return f"Task Succeeded. Result: {result_text}", None
+
+    if status == "cancelled":
+        detail = error_text or "Task cancelled by user."
+        if detail == "Task cancelled by user.":
+            return detail, detail
+        return f"Task cancelled by user. Error: {detail}", detail
+
+    if status == "timed_out":
+        detail = error_text or "Task timed out."
+        if detail == "Task timed out.":
+            return detail, detail
+        return f"Task timed out. Error: {detail}", detail
+
+    if status == "polling_timed_out":
+        detail = error_text or "Task polling timed out."
+        return detail, detail
+
+    detail = error_text or "Task failed."
+    if detail == "Task failed.":
+        return detail, detail
+    return f"Task failed. Error: {detail}", detail
+
+
+def read_subagent_result_metadata(
+    additional_kwargs: Mapping[str, object] | None,
+) -> StructuredSubagentResult | None:
+    if not additional_kwargs:
+        return None
+    raw_status = additional_kwargs.get(SUBAGENT_STATUS_KEY)
+    if raw_status not in SUBAGENT_STATUS_VALUES:
+        return None
+    status = raw_status
+    payload: StructuredSubagentResult = {"status": status}
+    raw_result = additional_kwargs.get(SUBAGENT_RESULT_BRIEF_KEY)
+    raw_hash = additional_kwargs.get(SUBAGENT_RESULT_SHA256_KEY)
+    raw_error = additional_kwargs.get(SUBAGENT_ERROR_KEY)
+    if status == "completed" and isinstance(raw_result, str) and raw_result.strip():
+        payload["result_brief"] = _bound_metadata_text(raw_result)
+        if isinstance(raw_hash, str) and _SHA256_HEX_RE.fullmatch(raw_hash):
+            payload["result_sha256"] = raw_hash
+    if status != "completed" and isinstance(raw_error, str) and raw_error.strip():
+        payload["error"] = _bound_metadata_text(raw_error)
     return payload

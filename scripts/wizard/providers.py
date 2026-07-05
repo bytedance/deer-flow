@@ -167,10 +167,10 @@ LLM_PROVIDERS: list[LLMProvider] = [
     LLMProvider(
         name="deepseek",
         display_name="DeepSeek",
-        description="DeepSeek Reasoner with thinking support",
+        description="DeepSeek V4 with thinking support",
         use="deerflow.models.patched_deepseek:PatchedChatDeepSeek",
-        models=["deepseek-reasoner", "deepseek-chat"],
-        default_model="deepseek-reasoner",
+        models=["deepseek-v4-pro", "deepseek-v4-flash"],
+        default_model="deepseek-v4-pro",
         env_var="DEEPSEEK_API_KEY",
         package="langchain-deepseek",
         extra_config={
@@ -586,5 +586,14 @@ WEB_FETCH_PROVIDERS: list[WebProvider] = [
         use="deerflow.community.fastcrw.tools:web_fetch_tool",
         env_var="CRW_API_KEY",
         tool_name="web_fetch",
+    ),
+    WebProvider(
+        name="crawl4ai",
+        display_name="Crawl4AI",
+        description="Self-hosted headless Chromium with markdown output, no API key required",
+        use="deerflow.community.crawl4ai.tools:web_fetch_tool",
+        env_var=None,
+        tool_name="web_fetch",
+        extra_config={"base_url": "http://localhost:11235", "timeout": 30},
     ),
 ]

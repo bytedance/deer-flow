@@ -2,7 +2,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from deerflow.community.aio_sandbox.aio_sandbox import AioSandbox
-from deerflow.sandbox.local.local_sandbox import LocalSandbox
+from deerflow.sandbox.local.local_sandbox import LocalSandbox, PathMapping
 from deerflow.sandbox.search import GrepMatch, find_glob_matches, find_grep_matches
 from deerflow.sandbox.tools import glob_tool, grep_tool, ls_tool
 
@@ -57,18 +57,20 @@ def test_glob_tool_supports_skills_virtual_paths(tmp_path, monkeypatch) -> None:
     (skills_dir / "public" / "demo").mkdir(parents=True)
     (skills_dir / "public" / "demo" / "SKILL.md").write_text("# Demo\n", encoding="utf-8")
 
-    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: LocalSandbox(id="local"))
+    sandbox = LocalSandbox(
+        id="local",
+        path_mappings=[
+            PathMapping(container_path="/mnt/skills", local_path=str(skills_dir), read_only=True),
+        ],
+    )
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: sandbox)
 
-    with (
-        patch("deerflow.sandbox.tools._get_skills_container_path", return_value="/mnt/skills"),
-        patch("deerflow.sandbox.tools._get_skills_host_path", return_value=str(skills_dir)),
-    ):
-        result = glob_tool.func(
-            runtime=runtime,
-            description="find skills",
-            pattern="**/SKILL.md",
-            path="/mnt/skills",
-        )
+    result = glob_tool.func(
+        runtime=runtime,
+        description="find skills",
+        pattern="**/SKILL.md",
+        path="/mnt/skills",
+    )
 
     assert "/mnt/skills/public/demo/SKILL.md" in result
     assert str(skills_dir) not in result
@@ -427,17 +429,19 @@ def test_ls_tool_masks_skills_host_paths(tmp_path, monkeypatch) -> None:
     (skills_dir / "public").mkdir(parents=True)
     (skills_dir / "public" / "SKILL.md").write_text("# Skill\n", encoding="utf-8")
 
-    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: LocalSandbox(id="local"))
+    sandbox = LocalSandbox(
+        id="local",
+        path_mappings=[
+            PathMapping(container_path="/mnt/skills", local_path=str(skills_dir), read_only=True),
+        ],
+    )
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: sandbox)
 
-    with (
-        patch("deerflow.sandbox.tools._get_skills_container_path", return_value="/mnt/skills"),
-        patch("deerflow.sandbox.tools._get_skills_host_path", return_value=str(skills_dir)),
-    ):
-        result = ls_tool.func(
-            runtime=runtime,
-            description="list skills",
-            path="/mnt/skills",
-        )
+    result = ls_tool.func(
+        runtime=runtime,
+        description="list skills",
+        path="/mnt/skills",
+    )
 
     # Virtual paths must be present
     assert "/mnt/skills" in result
@@ -459,3 +463,76 @@ def test_ls_tool_returns_empty_for_empty_directory(tmp_path, monkeypatch) -> Non
     )
 
     assert result == "(empty)"
+
+
+def test_ls_tool_skills_path_uses_sandbox_mapping_user_id_not_contextvar(tmp_path, monkeypatch) -> None:
+    """ls_tool must resolve /mnt/skills/custom via the sandbox PathMapping
+    (which uses the user_id from acquire time), not via _resolve_skills_path
+    (which uses get_effective_user_id() from contextvar).
+
+    Regression: when the contextvar user_id differs from the sandbox mapping's
+    user_id (e.g., contextvar unset → "default", but sandbox uses authenticated
+    "user-abc"), _resolve_skills_path would resolve to the wrong directory,
+    making /mnt/skills/custom appear empty. The fix delegates resolution to the
+    sandbox's PathMapping which always uses the acquire-time user_id.
+    """
+    from deerflow.runtime.user_context import reset_current_user, set_current_user
+
+    # Create two user-specific custom skill directories:
+    # - user-abc: has a skill "my-skill"
+    # - default: empty (the fallback when contextvar is unset)
+    base_dir = tmp_path / ".deer-flow"
+    user_abc_custom = base_dir / "users" / "user-abc" / "skills" / "custom"
+    user_abc_custom.mkdir(parents=True)
+    (user_abc_custom / "my-skill").mkdir()
+    (user_abc_custom / "my-skill" / "SKILL.md").write_text("# My Skill\n", encoding="utf-8")
+
+    default_custom = base_dir / "users" / "default" / "skills" / "custom"
+    default_custom.mkdir(parents=True)  # exists but empty
+
+    # Create a sandbox with PathMappings that use user-abc's directory
+    # (simulating a sandbox acquired for user-abc)
+    sandbox = LocalSandbox(
+        id="local:user-abc:thread-1",
+        path_mappings=[
+            PathMapping(container_path="/mnt/skills/custom", local_path=str(user_abc_custom), read_only=True),
+        ],
+    )
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: sandbox)
+
+    # Leave contextvar unset → get_effective_user_id() returns "default"
+    # Before the fix, _resolve_skills_path would resolve to default_custom (empty)
+    # After the fix, the sandbox PathMapping resolves to user-abc_custom (has my-skill)
+    token = set_current_user(SimpleNamespace(id="default"))  # contextvar says "default"
+    try:
+        result = ls_tool.func(
+            runtime=_make_runtime(tmp_path),
+            description="list custom skills",
+            path="/mnt/skills/custom",
+        )
+
+        # Must show user-abc's skill (sandbox mapping), NOT default's empty dir (contextvar)
+        assert "my-skill" in result
+        assert str(user_abc_custom) not in result  # host paths must not leak
+    finally:
+        reset_current_user(token)
+
+
+def test_ls_tool_filters_upload_staging_files(tmp_path, monkeypatch) -> None:
+    runtime = _make_runtime(tmp_path)
+    uploads = tmp_path / "uploads"
+    (uploads / "report.txt").write_text("ready\n", encoding="utf-8")
+    (uploads / ".upload-active.part").write_text("partial\n", encoding="utf-8")
+    (uploads / ".upload-note.txt").write_text("intentional\n", encoding="utf-8")
+
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: LocalSandbox(id="local"))
+
+    result = ls_tool.func(
+        runtime=runtime,
+        description="list uploads",
+        path="/mnt/user-data/uploads",
+    )
+
+    assert "/mnt/user-data/uploads/report.txt" in result
+    assert "/mnt/user-data/uploads/.upload-note.txt" in result
+    assert ".upload-active.part" not in result

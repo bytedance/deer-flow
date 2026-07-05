@@ -36,6 +36,13 @@ The **Sandbox Provisioner** is a FastAPI service that dynamically manages sandbo
 
 5. **Cleanup**: When the session ends, `DELETE /api/sandboxes/{sandbox_id}` removes both the Pod and Service.
 
+The sandbox business endpoints are implemented as synchronous FastAPI handlers
+because the Kubernetes Python client used here is synchronous. Starlette runs
+sync handlers in its worker pool, keeping create/read/list/delete K8s API calls
+and the NodePort polling sleep off the ASGI event-loop thread. Keep `/health`
+lightweight; do not move the sandbox CRUD handlers back to `async def` unless
+the K8s client path is also made async or explicitly offloaded.
+
 ## Requirements
 
 Host machine with a running Kubernetes cluster (Docker Desktop K8s, OrbStack, minikube, kind, etc.)
