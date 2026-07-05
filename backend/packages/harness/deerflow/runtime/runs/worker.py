@@ -49,10 +49,12 @@ from deerflow.runtime.goal import (
 )
 from deerflow.runtime.serialization import serialize
 from deerflow.runtime.stream_bridge import StreamBridge
-from deerflow.runtime.user_context import resolve_runtime_user_id
+from deerflow.runtime.user_context import get_effective_user_id, resolve_runtime_user_id
 from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, get_current_trace_id, normalize_trace_id
 from deerflow.tracing import inject_langfuse_metadata
 from deerflow.utils.messages import message_to_text
+from deerflow.workspace_changes import capture_workspace_snapshot, record_workspace_changes
+from deerflow.workspace_changes.types import WorkspaceSnapshot
 
 from .manager import RunManager, RunRecord
 from .naming import resolve_root_run_name
@@ -230,6 +232,8 @@ async def run_agent(
     requested_modes: set[str] = set(stream_modes or ["values"])
     pre_run_checkpoint_id: str | None = None
     pre_run_snapshot: dict[str, Any] | None = None
+    pre_run_workspace_snapshot: WorkspaceSnapshot | None = None
+    workspace_changes_user_id: str | None = None
     snapshot_capture_failed = False
     llm_error_fallback_message: str | None = None
     # Message ids checkpointed *before* this run started. The stream loop uses
@@ -273,6 +277,16 @@ async def run_agent(
 
         # 1. Mark running
         await run_manager.set_status(run_id, RunStatus.running)
+
+        if event_store is not None:
+            workspace_changes_user_id = get_effective_user_id()
+            try:
+                pre_run_workspace_snapshot = await capture_workspace_snapshot(
+                    thread_id,
+                    user_id=workspace_changes_user_id,
+                )
+            except Exception:
+                logger.warning("Could not capture pre-run workspace snapshot for run %s", run_id, exc_info=True)
 
         # Snapshot the latest pre-run checkpoint so rollback can restore it.
         if checkpointer is not None:
@@ -550,6 +564,18 @@ async def run_agent(
         # abort/exception paths, where the stream loop broke before its own flush.
         if subagent_events is not None:
             await subagent_events.flush()
+
+        if event_store is not None and pre_run_workspace_snapshot is not None:
+            try:
+                await record_workspace_changes(
+                    event_store,
+                    thread_id,
+                    run_id,
+                    pre_run_workspace_snapshot,
+                    user_id=workspace_changes_user_id,
+                )
+            except Exception:
+                logger.warning("Failed to record workspace changes for run %s", run_id, exc_info=True)
 
         # Flush any buffered journal events and persist completion data
         if journal is not None:

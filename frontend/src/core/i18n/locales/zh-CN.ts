@@ -86,6 +86,27 @@ export const zhCN: Translations = {
     copiedReference: (title) => `已复制 ${title} 引用`,
   },
 
+  // Workspace Changes
+  workspaceChanges: {
+    title: "工作区变更",
+    editedTitle: (count) => `已编辑 ${count} 个文件`,
+    badge: (count, additions, deletions) =>
+      `${count} 个文件已更改 +${additions} -${deletions}`,
+    viewChanges: "查看更改",
+    created: "新增",
+    modified: "修改",
+    deleted: "删除",
+    openFile: "打开文件",
+    loading: "正在加载工作区变更...",
+    noChanges: "没有记录到工作区变更。",
+    diffUnavailable: "无法展示 diff",
+    binaryUnavailable: "二进制文件，无法展示 diff。",
+    largeUnavailable: "文件过大，已省略 diff。",
+    sensitiveUnavailable: "敏感路径，已隐藏内容。",
+    truncatedUnavailable: "变更集过大，已省略 diff。",
+    truncatedSummary: "部分变更已被截断。",
+  },
+
   // Input Box
   inputBox: {
     placeholder: "今天我能为你做些什么？",

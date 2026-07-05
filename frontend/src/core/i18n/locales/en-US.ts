@@ -87,6 +87,27 @@ export const enUS: Translations = {
     copiedReference: (title) => `Copied ${title} reference`,
   },
 
+  // Workspace Changes
+  workspaceChanges: {
+    title: "Workspace changes",
+    editedTitle: (count) => `Edited ${count} ${count === 1 ? "file" : "files"}`,
+    badge: (count, additions, deletions) =>
+      `${count} ${count === 1 ? "file" : "files"} changed +${additions} -${deletions}`,
+    viewChanges: "View changes",
+    created: "Created",
+    modified: "Modified",
+    deleted: "Deleted",
+    openFile: "Open file",
+    loading: "Loading workspace changes...",
+    noChanges: "No workspace changes recorded.",
+    diffUnavailable: "Diff unavailable",
+    binaryUnavailable: "Binary file. Diff unavailable.",
+    largeUnavailable: "Large file. Diff omitted.",
+    sensitiveUnavailable: "Sensitive path. Content hidden.",
+    truncatedUnavailable: "Diff omitted because the change set is too large.",
+    truncatedSummary: "Some changes were truncated.",
+  },
+
   // Input Box
   inputBox: {
     placeholder: "How can I assist you today?",
