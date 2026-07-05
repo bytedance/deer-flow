@@ -855,7 +855,7 @@ def test_start_run_stamps_internal_owner_guardrail_attribution(_stub_app_config)
                     "oauth_id": "spoofed-subject",
                 }
             },
-            context={"user_id": "owner-1"},
+            context={"user_id": "spoofed-client"},
             on_disconnect="cancel",
             multitask_strategy="reject",
             stream_mode=None,

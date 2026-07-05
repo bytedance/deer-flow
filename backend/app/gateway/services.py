@@ -210,7 +210,7 @@ def inject_authenticated_user_context(
             return
         owner_user_id = getattr(internal_owner_user, "id", None)
         if owner_user_id is not None:
-            runtime_context.setdefault("user_id", str(owner_user_id))
+            runtime_context["user_id"] = str(owner_user_id)
         runtime_context["user_role"] = getattr(internal_owner_user, "system_role", None)
         runtime_context["oauth_provider"] = getattr(internal_owner_user, "oauth_provider", None)
         runtime_context["oauth_id"] = getattr(internal_owner_user, "oauth_id", None)
