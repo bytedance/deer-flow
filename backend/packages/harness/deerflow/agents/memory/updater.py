@@ -403,15 +403,12 @@ def _fact_content_key(content: Any) -> str | None:
 def _parse_fact_datetime(raw: str) -> datetime | None:
     """Parse an ISO-8601 datetime string from a fact's createdAt field.
 
-    Handles both ``Z``-suffixed and ``+00:00`` offset formats. Returns
-    ``None`` on any parse failure so callers can safely skip malformed facts.
+    Returns ``None`` on any parse failure so callers can safely skip malformed facts.
     """
     if not raw:
         return None
     try:
-        # Handle Z suffix (e.g. "2025-06-01T12:00:00Z")
-        normalized = raw.replace("Z", "+00:00")
-        result = datetime.fromisoformat(normalized)
+        result = datetime.fromisoformat(raw)
         # Naive datetimes (no tzinfo) would cause TypeError when compared
         # with the timezone-aware cutoff.  Assume UTC for safety.
         if result.tzinfo is None:
