@@ -125,6 +125,9 @@ deterministic scope step before routing each candidate to a fix and/or a
 Regression tests related to Docker/provisioner behavior:
 - `tests/test_docker_sandbox_mode_detection.py` (mode detection from `config.yaml`)
 - `tests/test_provisioner_kubeconfig.py` (kubeconfig file/directory handling)
+- `tests/test_provisioner_request_threading.py` (keeps provisioner sandbox CRUD
+  endpoints as sync FastAPI handlers so synchronous K8s client calls run in the
+  Starlette worker pool instead of on the ASGI event loop)
 
 Blocking-IO runtime gate (`tests/blocking_io/`):
 - Wraps every item under `tests/blocking_io/` with a strict Blockbuster
