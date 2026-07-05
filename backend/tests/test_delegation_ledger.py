@@ -181,6 +181,34 @@ class TestExtractDelegations:
         assert out[0]["status"] == "failed"
         assert out[0]["result_brief"] == "structured boom"
 
+    def test_max_turns_reached_task_carries_partial_result_in_brief(self):
+        """#3875 Phase 2: a turn-capped delegation is result-bearing like
+        ``completed``, so the recovered partial result lands in
+        ``result_brief`` (preferred over the cap notice on ``error``) — the
+        lead's durable context shows the work produced before the budget ran
+        out, not just the cap reason."""
+        msgs = [
+            _ai_task_call("call_capped", "deep research"),
+            ToolMessage(
+                content="Task reached max turns. Reached max_turns=150 Partial result: investigated 3 of 5 sources",
+                tool_call_id="call_capped",
+                id="tm_capped",
+                additional_kwargs={
+                    "subagent_status": "max_turns_reached",
+                    "subagent_result_brief": "investigated 3 of 5 sources",
+                    "subagent_result_sha256": "a" * 64,
+                    "subagent_error": "Reached max_turns=150",
+                },
+            ),
+        ]
+
+        out = extract_delegations(msgs)
+
+        assert out[0]["status"] == "max_turns_reached"
+        # result_brief wins over error, so the partial work is what the lead sees.
+        assert "investigated 3 of 5 sources" in out[0]["result_brief"]
+        assert out[0]["result_sha256"] == "a" * 64
+
     def test_terminal_looking_content_without_structured_metadata_keeps_dispatch_in_progress(self):
         msgs = [
             _ai_task_call("call_2", "bad task"),
