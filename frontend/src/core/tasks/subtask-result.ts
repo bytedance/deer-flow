@@ -56,6 +56,7 @@ const STRUCTURED_STATUS_TO_SUBTASK: Record<string, SubtaskStatus> = {
   cancelled: "failed",
   timed_out: "failed",
   polling_timed_out: "failed",
+  max_turns_reached: "failed",
 };
 
 /**

@@ -63,6 +63,8 @@ def _status_guidance(status: str) -> str:
         return "timed-out attempt; may retry with a changed plan"
     if status == "polling_timed_out":
         return "polling timed-out attempt; may retry with a changed plan"
+    if status == "max_turns_reached":
+        return "hit the turn budget with a partial result; reuse the partial result, retry with a tighter scope, or raise the per-agent max_turns"
     return "prior attempt; inspect status before retrying"
 
 

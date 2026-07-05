@@ -890,6 +890,80 @@ class TestAsyncExecutionPath:
         assert result.completed_at is not None
 
     @pytest.mark.anyio
+    async def test_aexecute_recursion_error_classified_as_max_turns_reached(self, classes, base_config, mock_agent, msg):
+        """#3875 Phase 2: ``GraphRecursionError`` (``recursion_limit`` ==
+        ``max_turns``) must surface as ``MAX_TURNS_REACHED`` with the partial
+        work recovered from the last streamed chunk — not as a generic FAILED
+        that hides the budget cap and discards the partial result.
+
+        Before this fix the exception fell through to the generic
+        ``except Exception`` and the subagent was reported as broken, so the
+        lead could not tell "out of budget" from "broken subagent" and the
+        work already streamed into ``final_state`` was lost.
+        """
+        from langgraph.errors import GraphRecursionError
+
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentStatus = classes["SubagentStatus"]
+
+        partial_ai = msg.ai("Found 3 of 5 sources; still working", "msg-1")
+        partial_state = {"messages": [msg.human("Task"), partial_ai]}
+
+        async def mock_astream(*args, **kwargs):
+            yield partial_state
+            raise GraphRecursionError("Recursion limit of 10 reached")
+
+        mock_agent.astream = mock_astream
+
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+        )
+
+        with patch.object(executor, "_create_agent", return_value=mock_agent):
+            result = await executor._aexecute("Task")
+
+        assert result.status == SubagentStatus.MAX_TURNS_REACHED
+        # The partial work from the last streamed chunk is preserved, not dropped.
+        assert result.result == "Found 3 of 5 sources; still working"
+        # The cap is surfaced so the lead can tell "out of budget" from "broken".
+        assert result.error is not None
+        assert str(base_config.max_turns) in result.error
+        assert result.completed_at is not None
+
+    @pytest.mark.anyio
+    async def test_aexecute_recursion_error_before_first_chunk_uses_sentinel(self, classes, base_config, mock_agent):
+        """If ``GraphRecursionError`` fires before any chunk is yielded there is
+        no partial state to recover; the result must still be
+        ``MAX_TURNS_REACHED`` (with the ``No response generated`` sentinel)
+        rather than FAILED, so the budget-cap signal survives even when no
+        work was streamed."""
+        from langgraph.errors import GraphRecursionError
+
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentStatus = classes["SubagentStatus"]
+
+        async def mock_astream(*args, **kwargs):
+            raise GraphRecursionError("Recursion limit reached before first step")
+            yield  # pragma: no cover - make this an async generator
+
+        mock_agent.astream = mock_astream
+
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+        )
+
+        with patch.object(executor, "_create_agent", return_value=mock_agent):
+            result = await executor._aexecute("Task")
+
+        assert result.status == SubagentStatus.MAX_TURNS_REACHED
+        assert result.result == "No response generated"
+        assert result.completed_at is not None
+
+    @pytest.mark.anyio
     async def test_aexecute_no_final_state(self, classes, base_config, mock_agent):
         """Test handling when no final state is returned."""
         SubagentExecutor = classes["SubagentExecutor"]
@@ -1606,6 +1680,31 @@ class TestCleanupBackgroundTask:
             trace_id="test-trace",
             status=SubagentStatus.TIMED_OUT,
             error="timeout",
+            completed_at=datetime.now(),
+        )
+        executor_module._background_tasks[task_id] = result
+
+        executor_module.cleanup_background_task(task_id)
+
+        assert task_id not in executor_module._background_tasks
+
+    def test_cleanup_removes_terminal_max_turns_reached_task(self, executor_module, classes):
+        """Test that cleanup removes a MAX_TURNS_REACHED task (#3875 Phase 2).
+
+        ``is_terminal`` includes MAX_TURNS_REACHED so the task_tool polling
+        loop's cleanup path treats a budget-capped subagent as done and
+        removes it from the background registry, matching COMPLETED / FAILED /
+        TIMED_OUT."""
+        SubagentResult = classes["SubagentResult"]
+        SubagentStatus = classes["SubagentStatus"]
+
+        task_id = "test-max-turns-task"
+        result = SubagentResult(
+            task_id=task_id,
+            trace_id="test-trace",
+            status=SubagentStatus.MAX_TURNS_REACHED,
+            result="partial work recovered",
+            error="Reached max_turns=10",
             completed_at=datetime.now(),
         )
         executor_module._background_tasks[task_id] = result
