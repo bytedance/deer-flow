@@ -32,6 +32,7 @@ from deerflow.subagents.step_events import capture_new_step_messages
 from deerflow.subagents.token_collector import SubagentTokenCollector
 from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY
 from deerflow.tracing import build_tracing_callbacks, inject_langfuse_metadata
+from deerflow.utils.messages import message_content_to_text
 
 if TYPE_CHECKING:
     # Imported lazily at runtime inside _build_initial_state: importing
@@ -140,42 +141,14 @@ class SubagentResult:
             return True
 
 
-def _stringify_message_content(content: Any) -> str:
-    """Normalise an LLM message ``content`` value to a plain string.
-
-    Handles the three shapes providers return: a bare string, a list of
-    content blocks (each a string or a ``{"text": ...}`` dict), and any other
-    object (stringified). Raw string chunks inside a list are concatenated
-    directly; full text blocks are kept as separate joined parts for
-    readability.
-    """
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        text_parts: list[str] = []
-        pending_str_parts: list[str] = []
-        for block in content:
-            if isinstance(block, str):
-                pending_str_parts.append(block)
-            elif isinstance(block, dict):
-                if pending_str_parts:
-                    text_parts.append("".join(pending_str_parts))
-                    pending_str_parts.clear()
-                text_val = block.get("text")
-                if isinstance(text_val, str):
-                    text_parts.append(text_val)
-        if pending_str_parts:
-            text_parts.append("".join(pending_str_parts))
-        return "\n".join(text_parts) if text_parts else "No text content in response"
-    return str(content)
-
-
 def _extract_final_result(final_state: Any, *, trace_id: str, name: str) -> str:
     """Extract a human-readable result string from the streamed subagent state.
 
     Finds the last ``AIMessage`` in the conversation and stringifies its
-    content; falls back to the last message of any type when no AIMessage is
-    present. Returns a sentinel string when there is nothing to extract, so
+    content via the shared :func:`message_content_to_text` helper; falls back
+    to the last message of any type when no AIMessage is present. Returns a
+    sentinel string (``"No response generated"``) when there is nothing to
+    extract — including when the shared helper yields an empty string — so
     callers never confuse a missing result with a legitimately empty one.
 
     Used on both the normal-completion path and the max-turns path
@@ -197,13 +170,15 @@ def _extract_final_result(final_state: Any, *, trace_id: str, name: str) -> str:
             break
 
     if last_ai_message is not None:
-        return _stringify_message_content(last_ai_message.content)
+        text = message_content_to_text(last_ai_message.content)
+        return text if text else "No response generated"
 
     if messages:
         last_message = messages[-1]
         logger.warning(f"[trace={trace_id}] Subagent {name} no AIMessage found, using last message: {type(last_message)}")
         raw_content = last_message.content if hasattr(last_message, "content") else str(last_message)
-        return _stringify_message_content(raw_content)
+        text = message_content_to_text(raw_content)
+        return text if text else "No response generated"
 
     logger.warning(f"[trace={trace_id}] Subagent {name} no messages in final state")
     return "No response generated"

@@ -495,7 +495,7 @@ async def task_tool(
                 # out of running; the structured status is the precise reason.
                 _cache_subagent_usage(tool_call_id, usage, enabled=cache_token_usage)
                 _report_subagent_usage(runtime, result)
-                writer({"type": "task_failed", "task_id": task_id, "error": f"Reached max turns ({config.max_turns})", "usage": usage})
+                writer({"type": "task_failed", "task_id": task_id, "error": f"Reached max_turns={config.max_turns}", "usage": usage})
                 logger.warning(f"[trace={trace_id}] Task {task_id} reached max_turns={config.max_turns}; returning partial result")
                 cleanup_background_task(task_id)
                 return _task_result_command(
