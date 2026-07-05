@@ -282,7 +282,10 @@ export function getMessageCopyData(message: Message) {
   if (message.type === "human") {
     return stripUploadedFilesTag(content);
   }
-  return content ?? extractReasoningContentFromMessage(message) ?? "";
+  if (content.length > 0) {
+    return content;
+  }
+  return extractReasoningContentFromMessage(message) ?? "";
 }
 
 export function extractTextFromMessage(message: Message) {
