@@ -40,6 +40,7 @@ export interface Translations {
     exportAsJSON: string;
     exportSuccess: string;
     regenerate: string;
+    showArtifacts: string;
   };
 
   home: {

@@ -4,7 +4,15 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 import { ConversationEmptyState } from "@/components/ai-elements/conversation";
 import { Button } from "@/components/ui/button";
+import {
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetHeader,
+  SheetTitle,
+} from "@/components/ui/sheet";
 import { env } from "@/env";
+import { useIsMobile } from "@/hooks/use-mobile";
 import { cn } from "@/lib/utils";
 
 import {
@@ -24,6 +32,7 @@ const ChatBox: React.FC<{ children: React.ReactNode; threadId: string }> = ({
   threadId,
 }) => {
   const { thread } = useThread();
+  const isMobile = useIsMobile();
   const pathname = usePathname();
   const threadIdRef = useRef(threadId);
 
@@ -127,6 +136,102 @@ const ChatBox: React.FC<{ children: React.ReactNode; threadId: string }> = ({
     }
   }, [artifactsOpen, setArtifactsOpen, sidecarOpen]);
 
+  const rightPanelContent = useMemo(() => {
+    if (renderedRightPanel === "sidecar") {
+      return <SidecarPanel />;
+    }
+    if (renderedRightPanel === "artifacts" && selectedArtifact) {
+      return (
+        <ArtifactFileDetail
+          className="size-full"
+          filepath={selectedArtifact}
+          threadId={threadId}
+        />
+      );
+    }
+    if (renderedRightPanel === "artifacts") {
+      return (
+        <div className="relative flex size-full justify-center">
+          <div className="absolute top-1 right-1 z-30">
+            <Button
+              size="icon-sm"
+              variant="ghost"
+              onClick={() => {
+                setArtifactsOpen(false);
+              }}
+            >
+              <XIcon />
+            </Button>
+          </div>
+          {artifacts.length === 0 ? (
+            <ConversationEmptyState
+              icon={<FilesIcon />}
+              title="No artifact selected"
+              description="Select an artifact to view its details"
+            />
+          ) : (
+            <div className="flex size-full max-w-(--container-width-sm) flex-col justify-center p-4 pt-8">
+              <header className="shrink-0">
+                <h2 className="text-lg font-medium">Artifacts</h2>
+              </header>
+              <main className="min-h-0 grow">
+                <ArtifactFileList
+                  className="max-w-(--container-width-sm) p-4 pt-12"
+                  files={artifacts}
+                  threadId={threadId}
+                />
+              </main>
+            </div>
+          )}
+        </div>
+      );
+    }
+    return null;
+  }, [
+    renderedRightPanel,
+    selectedArtifact,
+    threadId,
+    artifacts,
+    setArtifactsOpen,
+  ]);
+
+  if (isMobile) {
+    return (
+      <>
+        <div className="relative size-full min-w-0">{children}</div>
+        <Sheet
+          open={rightPanelOpen}
+          onOpenChange={(open) => {
+            if (open) {
+              return;
+            }
+            if (sidecarOpen) {
+              sidecar?.close();
+            }
+            if (artifactsOpen) {
+              setArtifactsOpen(false);
+            }
+          }}
+        >
+          <SheetContent
+            className="w-[calc(100vw-1rem)] max-w-none gap-0 p-0 sm:max-w-md [&>button]:hidden"
+            side="right"
+          >
+            <SheetHeader className="sr-only">
+              <SheetTitle>
+                {renderedRightPanel === "sidecar" ? "Sidecar" : "Artifacts"}
+              </SheetTitle>
+              <SheetDescription>
+                Browse the side panel for this conversation.
+              </SheetDescription>
+            </SheetHeader>
+            <div className="min-h-0 flex-1 p-3 pt-10">{rightPanelContent}</div>
+          </SheetContent>
+        </Sheet>
+      </>
+    );
+  }
+
   return (
     <div
       id={`${resizableIdBase}-panels`}
@@ -163,49 +268,7 @@ const ChatBox: React.FC<{ children: React.ReactNode; threadId: string }> = ({
             rightPanelOpen ? "opacity-100" : "opacity-0",
           )}
         >
-          {renderedRightPanel === "sidecar" ? (
-            <SidecarPanel />
-          ) : renderedRightPanel === "artifacts" && selectedArtifact ? (
-            <ArtifactFileDetail
-              className="size-full"
-              filepath={selectedArtifact}
-              threadId={threadId}
-            />
-          ) : renderedRightPanel === "artifacts" ? (
-            <div className="relative flex size-full justify-center">
-              <div className="absolute top-1 right-1 z-30">
-                <Button
-                  size="icon-sm"
-                  variant="ghost"
-                  onClick={() => {
-                    setArtifactsOpen(false);
-                  }}
-                >
-                  <XIcon />
-                </Button>
-              </div>
-              {artifacts.length === 0 ? (
-                <ConversationEmptyState
-                  icon={<FilesIcon />}
-                  title="No artifact selected"
-                  description="Select an artifact to view its details"
-                />
-              ) : (
-                <div className="flex size-full max-w-(--container-width-sm) flex-col justify-center p-4 pt-8">
-                  <header className="shrink-0">
-                    <h2 className="text-lg font-medium">Artifacts</h2>
-                  </header>
-                  <main className="min-h-0 grow">
-                    <ArtifactFileList
-                      className="max-w-(--container-width-sm) p-4 pt-12"
-                      files={artifacts}
-                      threadId={threadId}
-                    />
-                  </main>
-                </div>
-              )}
-            </div>
-          ) : null}
+          {rightPanelContent}
         </div>
       </aside>
     </div>

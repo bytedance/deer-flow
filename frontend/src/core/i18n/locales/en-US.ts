@@ -51,6 +51,7 @@ export const enUS: Translations = {
     exportAsJSON: "Export as JSON",
     exportSuccess: "Conversation exported",
     regenerate: "Regenerate",
+    showArtifacts: "Show artifacts of this conversation",
   },
 
   // Home

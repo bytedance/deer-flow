@@ -51,6 +51,7 @@ export const zhCN: Translations = {
     exportAsJSON: "导出为 JSON",
     exportSuccess: "对话已导出",
     regenerate: "重新生成",
+    showArtifacts: "查看此对话的文件",
   },
 
   // Home
