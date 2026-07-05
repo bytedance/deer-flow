@@ -37,6 +37,7 @@ import { useI18n } from "@/core/i18n/hooks";
 import {
   extractContentFromMessage,
   extractReasoningContentFromMessage,
+  getMessageCopyData,
   parseUploadedFiles,
   stripUploadedFilesTag,
   type FileInMessage,
@@ -162,13 +163,7 @@ export function MessageListItem({
           )}
         >
           <div className="pointer-events-auto flex gap-1">
-            <CopyButton
-              clipboardData={
-                extractContentFromMessage(message) ??
-                extractReasoningContentFromMessage(message) ??
-                ""
-              }
-            />
+            <CopyButton clipboardData={getMessageCopyData(message)} />
             {feedback !== undefined && runId && threadId && (
               <FeedbackButtons
                 threadId={threadId}
