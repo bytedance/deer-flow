@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import re
 from abc import ABC, abstractmethod
@@ -267,8 +268,7 @@ class SkillStorage(ABC):
             from deerflow.config.extensions_config import ExtensionsConfig
 
             extensions_config = ExtensionsConfig.from_file()
-            for skill in skills:
-                skill.enabled = extensions_config.is_skill_enabled(skill.name, skill.category)
+            skills = [dataclasses.replace(s, enabled=extensions_config.is_skill_enabled(s.name, s.category)) for s in skills]
         except Exception as e:
             logger.warning("Failed to load extensions config: %s", e)
 

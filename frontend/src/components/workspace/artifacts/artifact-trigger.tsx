@@ -4,11 +4,14 @@ import { Button } from "@/components/ui/button";
 import { Tooltip } from "@/components/workspace/tooltip";
 import { useI18n } from "@/core/i18n/hooks";
 
+import { useMaybeSidecar } from "../sidecar/context";
+
 import { useArtifacts } from "./context";
 
 export const ArtifactTrigger = () => {
   const { t } = useI18n();
   const { artifacts, setOpen: setArtifactsOpen } = useArtifacts();
+  const sidecar = useMaybeSidecar();
 
   if (!artifacts || artifacts.length === 0) {
     return null;
@@ -19,6 +22,7 @@ export const ArtifactTrigger = () => {
         className="text-muted-foreground hover:text-foreground"
         variant="ghost"
         onClick={() => {
+          sidecar?.close();
           setArtifactsOpen(true);
         }}
       >

@@ -1248,6 +1248,9 @@ def test_state_cursor_is_loaded_from_disk(tmp_path: Path):
         bus=MessageBus(),
         config={"bot_token": "bot-token", "state_dir": str(state_dir)},
     )
+    # State load moved out of __init__ (it does filesystem IO that would block
+    # the async path); mirror start() by loading explicitly here.
+    channel._load_state()
 
     assert channel._get_updates_buf == "cursor-123"
 
@@ -1266,6 +1269,9 @@ def test_auth_state_is_loaded_from_disk(tmp_path: Path):
         bus=MessageBus(),
         config={"state_dir": str(state_dir), "qrcode_login_enabled": True},
     )
+    # State load moved out of __init__ (it does filesystem IO that would block
+    # the async path); mirror start() by loading explicitly here.
+    channel._load_state()
 
     assert channel._bot_token == "saved-token"
     assert channel._ilink_bot_id == "bot-1"

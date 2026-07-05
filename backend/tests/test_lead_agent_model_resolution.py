@@ -288,6 +288,40 @@ def test_make_lead_agent_reads_runtime_options_from_context(monkeypatch):
     assert result["model"] is not None
 
 
+def test_make_lead_agent_filters_clarification_tool_for_non_interactive_runs(monkeypatch):
+    app_config = _make_app_config([_make_model("safe-model", supports_thinking=False)])
+
+    import deerflow.tools as tools_module
+
+    def _named_tool(name: str):
+        tool = MagicMock()
+        tool.name = name
+        return tool
+
+    monkeypatch.setattr(lead_agent_module, "get_app_config", lambda: app_config)
+    monkeypatch.setattr(
+        tools_module,
+        "get_available_tools",
+        lambda **kwargs: [_named_tool("ask_clarification"), _named_tool("bash")],
+    )
+    monkeypatch.setattr(lead_agent_module, "build_middlewares", lambda config, model_name, agent_name=None, **kwargs: [])
+    monkeypatch.setattr(lead_agent_module, "create_chat_model", lambda **kwargs: object())
+    monkeypatch.setattr(lead_agent_module, "create_agent", lambda **kwargs: kwargs)
+
+    result = lead_agent_module.make_lead_agent(
+        {
+            "context": {
+                "model_name": "safe-model",
+                "thinking_enabled": False,
+                "subagent_enabled": False,
+                "non_interactive": True,
+            }
+        }
+    )
+
+    assert [tool.name for tool in result["tools"]] == ["bash"]
+
+
 def test_make_lead_agent_rejects_invalid_bootstrap_agent_name(monkeypatch):
     app_config = _make_app_config([_make_model("safe-model", supports_thinking=False)])
 

@@ -20,7 +20,7 @@ def _make_skill(name: str, allowed_tools: list[str] | None = None) -> Skill:
         skill_file=Path(f"/tmp/{name}/SKILL.md"),
         relative_path=Path(name),
         category="public",
-        allowed_tools=allowed_tools,
+        allowed_tools=tuple(allowed_tools) if allowed_tools is not None else None,
         enabled=True,
     )
 
@@ -170,6 +170,61 @@ def test_get_skills_prompt_section_uses_explicit_config_for_enabled_skills(monke
     assert "global-skill" not in result
 
 
+def test_get_skills_prompt_section_deferred_path_uses_skill_index(monkeypatch):
+    """When skill_names is provided, renders <skill_index> instead of <available_skills>."""
+    skills = [_make_skill("data-analysis"), _make_skill("deep-research")]
+    monkeypatch.setattr("deerflow.agents.lead_agent.prompt._get_enabled_skills", lambda: skills)
+    monkeypatch.setattr(
+        "deerflow.config.get_app_config",
+        lambda: SimpleNamespace(
+            skills=SimpleNamespace(container_path="/mnt/skills"),
+            skill_evolution=SimpleNamespace(enabled=False),
+        ),
+    )
+    # Deferred path never touches storage, but patch defensively in case of fallback.
+    _null_storage = SimpleNamespace(load_skills=lambda *, enabled_only: [])
+    monkeypatch.setattr("deerflow.agents.lead_agent.prompt.get_or_new_skill_storage", lambda **kw: _null_storage)
+    monkeypatch.setattr("deerflow.agents.lead_agent.prompt.get_or_new_user_skill_storage", lambda *a, **kw: _null_storage)
+
+    # Deferred path: skill_names provided
+    result = get_skills_prompt_section(
+        available_skills=None,
+        skill_names=frozenset({"data-analysis", "deep-research"}),
+    )
+    assert "<skill_index>" in result
+    assert "data-analysis" in result
+    assert "deep-research" in result
+    assert "describe_skill" in result
+    # Must NOT contain legacy full-metadata format
+    assert "<available_skills>" not in result
+    assert "Description for data-analysis" not in result  # descriptions excluded from index
+
+
+def test_get_skills_prompt_section_legacy_path_when_skill_names_none(monkeypatch):
+    """When skill_names is None, falls back to legacy <available_skills> rendering."""
+    skills = [_make_skill("data-analysis")]
+    monkeypatch.setattr("deerflow.agents.lead_agent.prompt._get_enabled_skills", lambda: skills)
+    monkeypatch.setattr(
+        "deerflow.config.get_app_config",
+        lambda: SimpleNamespace(
+            skills=SimpleNamespace(container_path="/mnt/skills"),
+            skill_evolution=SimpleNamespace(enabled=False),
+        ),
+    )
+    # Legacy path loads ALL skills (enabled + disabled) from storage for the disabled-skills section.
+    _storage = SimpleNamespace(load_skills=lambda *, enabled_only: skills)
+    monkeypatch.setattr("deerflow.agents.lead_agent.prompt.get_or_new_skill_storage", lambda **kw: _storage)
+    monkeypatch.setattr("deerflow.agents.lead_agent.prompt.get_or_new_user_skill_storage", lambda *a, **kw: _storage)
+
+    # Legacy path: skill_names not provided
+    result = get_skills_prompt_section(available_skills=None)
+    assert "<available_skills>" in result
+    assert "data-analysis" in result
+    assert "Description for data-analysis" in result
+    assert "<skill_index>" not in result
+    assert "describe_skill" not in result
+
+
 def test_make_lead_agent_empty_skills_passed_correctly(monkeypatch):
     from unittest.mock import MagicMock
 
@@ -231,11 +286,17 @@ def test_make_lead_agent_filters_tools_from_available_skills(monkeypatch):
 
     mock_app_config = MagicMock()
     mock_app_config.get_model_config.return_value = SimpleNamespace(supports_thinking=False, supports_vision=False)
+    mock_app_config.tool_search.enabled = True
+    mock_app_config.skills.container_path = "/mnt/skills"
+    mock_app_config.skills.deferred_discovery = True  # describe_skill will be added
     monkeypatch.setattr(lead_agent_module, "get_app_config", lambda: mock_app_config)
 
     agent_kwargs = lead_agent_module.make_lead_agent({"configurable": {"agent_name": "test"}})
 
-    assert [tool.name for tool in agent_kwargs["tools"]] == ["read_file", "web_search"]
+    # With skills.deferred_discovery=True, describe_skill is added to tools
+    tool_names = [tool.name for tool in agent_kwargs["tools"]]
+    assert "read_file" in tool_names
+    assert "describe_skill" in tool_names
 
 
 def test_skill_allowed_tools_default_does_not_preserve_read_file_for_subagents():
@@ -269,7 +330,9 @@ def test_make_lead_agent_all_legacy_skills_preserve_all_tools(monkeypatch):
 
     agent_kwargs = lead_agent_module.make_lead_agent({"configurable": {"agent_name": "test"}})
 
-    assert [tool.name for tool in agent_kwargs["tools"]] == ["bash", "read_file", "update_agent"]
+    # describe_skill is appended after skill-allowed-tools filtering (it bypasses policy).
+    tool_names = [tool.name for tool in agent_kwargs["tools"]]
+    assert tool_names == ["bash", "read_file", "update_agent", "describe_skill"]
 
 
 def test_make_lead_agent_enforces_allowed_tools_when_skill_cache_is_cold(monkeypatch):
@@ -298,7 +361,9 @@ def test_make_lead_agent_enforces_allowed_tools_when_skill_cache_is_cold(monkeyp
 
     agent_kwargs = lead_agent_module.make_lead_agent({"configurable": {"agent_name": "test"}})
 
-    assert [tool.name for tool in agent_kwargs["tools"]] == ["read_file"]
+    # describe_skill is appended after skill-allowed-tools filtering (it bypasses policy).
+    tool_names = [tool.name for tool in agent_kwargs["tools"]]
+    assert tool_names == ["read_file", "describe_skill"]
 
 
 def test_make_lead_agent_fails_closed_when_skill_policy_load_fails(monkeypatch):
@@ -329,3 +394,81 @@ def test_make_lead_agent_fails_closed_when_skill_policy_load_fails(monkeypatch):
         lead_agent_module.make_lead_agent({"configurable": {"agent_name": "test"}})
 
     create_agent_mock.assert_not_called()
+
+
+def test_make_lead_agent_drops_update_agent_on_github_channel(monkeypatch):
+    """Webhook-channel runs MUST NOT see ``update_agent``.
+
+    The lead-agent prompt actively encourages the model to call
+    ``update_agent`` when the user asks it to change its own skills /
+    tool_groups / SOUL.md. On the GitHub channel, the "user" is whichever
+    external commenter posted the triggering ``@<bot>`` mention — anyone
+    with comment access on the configured repo. Exposing the tool there
+    would let that commenter durably mutate the agent's tool whitelist
+    or persona for every subsequent run. The factory therefore omits the
+    tool from the toolset whenever the run's channel is webhook-shaped.
+
+    This test guards against a future contributor reintroducing the tool
+    unconditionally — that regression would silently re-open the
+    privilege-escalation path.
+    """
+    from unittest.mock import MagicMock
+
+    from deerflow.agents.lead_agent import agent as lead_agent_module
+
+    monkeypatch.setattr(lead_agent_module, "_resolve_model_name", lambda x=None, **kwargs: "default-model")
+    monkeypatch.setattr(lead_agent_module, "create_chat_model", lambda **kwargs: "model")
+    monkeypatch.setattr(lead_agent_module, "build_middlewares", lambda *args, **kwargs: [])
+    monkeypatch.setattr(lead_agent_module, "apply_prompt_template", lambda **kwargs: "mock_prompt")
+    monkeypatch.setattr(lead_agent_module, "create_agent", lambda **kwargs: kwargs)
+    monkeypatch.setattr(lead_agent_module, "load_agent_config", lambda x: AgentConfig(name="test", skills=None))
+    monkeypatch.setattr(lead_agent_module, "_load_enabled_skills_for_tool_policy", lambda available_skills, *, app_config, user_id=None: [_make_skill("legacy", None)])
+    monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [NamedTool("bash"), NamedTool("read_file")])
+
+    mock_app_config = MagicMock()
+    mock_app_config.get_model_config.return_value = SimpleNamespace(supports_thinking=False, supports_vision=False)
+    monkeypatch.setattr(lead_agent_module, "get_app_config", lambda: mock_app_config)
+
+    # ``channel_name`` is plumbed onto run_context by ChannelManager and
+    # surfaced via _get_runtime_config alongside the other configurable keys.
+    agent_kwargs = lead_agent_module.make_lead_agent({"configurable": {"agent_name": "test"}, "context": {"channel_name": "github"}})
+    tool_names = [tool.name for tool in agent_kwargs["tools"]]
+    assert "update_agent" not in tool_names
+    # Sanity: regular tools still flow through.
+    assert "bash" in tool_names
+    assert "read_file" in tool_names
+
+
+def test_make_lead_agent_keeps_update_agent_on_non_webhook_channels(monkeypatch):
+    """Direct invocation and non-webhook channels still get ``update_agent``.
+
+    Sanity check for the inverse of
+    ``test_make_lead_agent_drops_update_agent_on_github_channel``: a chat-UI
+    or default-channel run (or any run with no channel context at all)
+    must keep the tool, otherwise the operator-trusted "change your own
+    skills" workflow would break.
+    """
+    from unittest.mock import MagicMock
+
+    from deerflow.agents.lead_agent import agent as lead_agent_module
+
+    monkeypatch.setattr(lead_agent_module, "_resolve_model_name", lambda x=None, **kwargs: "default-model")
+    monkeypatch.setattr(lead_agent_module, "create_chat_model", lambda **kwargs: "model")
+    monkeypatch.setattr(lead_agent_module, "build_middlewares", lambda *args, **kwargs: [])
+    monkeypatch.setattr(lead_agent_module, "apply_prompt_template", lambda **kwargs: "mock_prompt")
+    monkeypatch.setattr(lead_agent_module, "create_agent", lambda **kwargs: kwargs)
+    monkeypatch.setattr(lead_agent_module, "load_agent_config", lambda x: AgentConfig(name="test", skills=None))
+    monkeypatch.setattr(lead_agent_module, "_load_enabled_skills_for_tool_policy", lambda available_skills, *, app_config, user_id=None: [_make_skill("legacy", None)])
+    monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [NamedTool("bash")])
+
+    mock_app_config = MagicMock()
+    mock_app_config.get_model_config.return_value = SimpleNamespace(supports_thinking=False, supports_vision=False)
+    monkeypatch.setattr(lead_agent_module, "get_app_config", lambda: mock_app_config)
+
+    # No channel set — equivalent to a chat-UI or direct invocation.
+    kwargs_default = lead_agent_module.make_lead_agent({"configurable": {"agent_name": "test"}})
+    assert "update_agent" in [t.name for t in kwargs_default["tools"]]
+
+    # Explicit non-webhook channel — telegram is interactive/trusted-by-operator.
+    kwargs_tg = lead_agent_module.make_lead_agent({"configurable": {"agent_name": "test"}, "context": {"channel_name": "telegram"}})
+    assert "update_agent" in [t.name for t in kwargs_tg["tools"]]

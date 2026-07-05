@@ -292,8 +292,8 @@ def test_explicit_config_enabled_skills_are_cached_by_config_identity(monkeypatc
 
         def load_skills(*, enabled_only):
             nonlocal load_count
-            load_count += 1
-            assert enabled_only is True
+            if enabled_only:
+                load_count += 1
             return [make_skill("cached-skill")]
 
         return SimpleNamespace(load_skills=load_skills)
@@ -417,5 +417,52 @@ def test_system_prompt_template_preserves_placeholders():
         "{subagent_section}",
         "{acp_section}",
         "{subagent_reminder}",
+        "{skill_first_reminder}",
     ):
         assert ph in template, f"placeholder {ph} accidentally removed"
+
+
+def _make_minimal_app_config():
+    return SimpleNamespace(
+        sandbox=SimpleNamespace(mounts=[]),
+        skills=SimpleNamespace(container_path="/mnt/skills"),
+        skill_evolution=SimpleNamespace(enabled=False),
+        tool_search=SimpleNamespace(enabled=False),
+        memory=SimpleNamespace(enabled=False, injection_enabled=True, max_injection_tokens=2000),
+        acp_agents={},
+    )
+
+
+def test_apply_prompt_template_legacy_path_does_not_mention_describe_skill(monkeypatch):
+    """When skill_names is None (legacy path), critical_reminders must not
+    reference describe_skill (the tool is not registered in legacy mode)."""
+    config = _make_minimal_app_config()
+    monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
+    monkeypatch.setattr(prompt_module, "get_or_new_skill_storage", lambda app_config=None: SimpleNamespace(load_skills=lambda enabled_only=True: []))
+    monkeypatch.setattr(prompt_module, "get_agent_soul", lambda agent_name=None: "")
+
+    prompt = prompt_module.apply_prompt_template(app_config=config)
+
+    # Legacy wording — tool-agnostic
+    assert "Always load the relevant skill" in prompt
+    # Must NOT reference the deferred tool
+    assert "describe_skill(name)" not in prompt
+
+
+def test_apply_prompt_template_deferred_path_mentions_describe_skill(monkeypatch):
+    """When skill_names is provided (deferred path), critical_reminders must
+    reference describe_skill so the LLM knows how to discover skills."""
+    config = _make_minimal_app_config()
+    monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
+    monkeypatch.setattr(prompt_module, "get_or_new_skill_storage", lambda app_config=None: SimpleNamespace(load_skills=lambda enabled_only=True: []))
+    monkeypatch.setattr(prompt_module, "get_agent_soul", lambda agent_name=None: "")
+
+    prompt = prompt_module.apply_prompt_template(
+        app_config=config,
+        skill_names=frozenset({"data-analysis"}),
+    )
+
+    # Deferred wording — references describe_skill
+    assert "describe_skill(name)" in prompt
+    # Must NOT contain the legacy wording
+    assert "Always load the relevant skill" not in prompt

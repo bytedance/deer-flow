@@ -20,6 +20,7 @@ def test_scan_file_detects_async_thread_and_tool_boundaries(tmp_path):
         import threading
         import time
         from concurrent.futures import ThreadPoolExecutor
+        from deerflow.utils.file_io import run_file_io
         from langchain.tools import tool
         from langchain_core.tools import StructuredTool
 
@@ -29,6 +30,7 @@ def test_scan_file_detects_async_thread_and_tool_boundaries(tmp_path):
 
         async def handler(model):
             await asyncio.to_thread(str, "x")
+            await run_file_io(str, "y")
             model.invoke("blocking")
             time.sleep(1)
 
@@ -53,6 +55,7 @@ def test_scan_file_detects_async_thread_and_tool_boundaries(tmp_path):
     assert async_tool_finding.function == "async_tool"
     assert async_tool_finding.async_context is True
     assert "ASYNC_THREAD_OFFLOAD" in categories
+    assert "ASYNC_FILE_IO_OFFLOAD" in categories
     assert "SYNC_INVOKE_IN_ASYNC" in categories
     assert "BLOCKING_CALL_IN_ASYNC" in categories
     assert "SYNC_ASYNC_BRIDGE" in categories
