@@ -17,13 +17,14 @@ Configuration example (``config.yaml``)::
       image: python:3.12-slim      # any OCI image; runs unchanged
       memory_mib: 1024             # per-box memory cap (optional)
       cpus: 2                      # per-box vCPUs (optional)
+      replicas: 3                  # active + warm VM cap per gateway process
+      idle_timeout: 600            # warm VM idle seconds before stop; 0 disables
       environment:                 # injected into every command
         PYTHONUNBUFFERED: "1"
 
-Install the runtime (an optional ``[boxlite]`` extra + lockfile update will
-follow once the approach lands)::
+Install the optional runtime before selecting this provider::
 
-    pip install boxlite
+    pip install "deerflow-harness[boxlite]"
 
 Host requirement: BoxLite boots micro-VMs, so a Linux host needs KVM (nested
 virtualization when DeerFlow itself runs inside a cloud VM); macOS uses

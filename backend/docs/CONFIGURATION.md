@@ -342,6 +342,32 @@ sandbox:
    use: deerflow.community.aio_sandbox:AioSandboxProvider # Docker-based sandbox
 ```
 
+**BoxLite micro-VM Sandbox** (runs sandbox code in daemonless OCI micro-VMs):
+```yaml
+sandbox:
+   use: deerflow.community.boxlite:BoxliteProvider
+   image: python:3.12-slim
+   memory_mib: 1024                 # optional per-box memory cap
+   cpus: 2                          # optional per-box vCPUs
+   replicas: 3                      # max active + warm VMs per gateway process
+   idle_timeout: 600                # warm VM idle seconds before stop; 0 disables idle reaping
+   environment:
+      PYTHONUNBUFFERED: "1"
+```
+
+Install the optional runtime before selecting this provider:
+
+```bash
+pip install "deerflow-harness[boxlite]"
+```
+
+BoxLite boxes are named from the effective `(user_id, thread_id)` scope and are
+released into an in-process warm pool after each turn. The same user/thread can
+reclaim its warm VM on the next acquire; different threads cannot share a VM.
+`replicas` caps active plus warm VMs. When the cap is reached only warm VMs are
+evicted; active VMs continue and the provider may temporarily exceed the cap if
+all boxes are active.
+
 **Docker Execution with Kubernetes** (runs sandbox code in Kubernetes pods via provisioner service):
 
 This mode runs each sandbox in an isolated Kubernetes Pod on your **host machine's cluster**. Requires Docker Desktop K8s, OrbStack, or similar local K8s setup.

@@ -64,6 +64,7 @@ postgres = [
 # always installs this extra because Docker defaults to the redis bridge.
 redis = ["redis>=5.0.0"]
 pymupdf = ["pymupdf4llm>=0.0.17"]
+boxlite = ["boxlite>=0.9.7"]
 
 [build-system]
 requires = ["hatchling"]

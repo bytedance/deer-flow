@@ -16,13 +16,23 @@ sandbox:
   image: python:3.12-slim   # any OCI image, run unchanged (default: python:3.12-slim)
   memory_mib: 1024          # per-box memory cap (optional)
   cpus: 2                   # per-box vCPUs (optional)
+  replicas: 3              # active + warm VM cap per gateway process (default: 3)
+  idle_timeout: 600        # warm VM idle seconds before stop; 0 disables reaping
   environment:              # injected into every command
     PYTHONUNBUFFERED: "1"
 ```
 
+Install the optional runtime before selecting this provider:
+
 ```bash
-pip install boxlite   # an optional `[boxlite]` extra + uv.lock update will follow once the approach lands
+pip install "deerflow-harness[boxlite]"
 ```
+
+The `boxlite` package is an optional DeerFlow harness extra, not part of the
+default install. It is also limited to the host platforms and architectures
+where BoxLite publishes wheels and can boot micro-VMs. Unsupported development
+hosts, such as Windows, should use another sandbox provider or run DeerFlow from
+a supported Linux/macOS environment.
 
 **Host requirement:** BoxLite boots micro-VMs, so a Linux host needs KVM — i.e.
 nested virtualization when DeerFlow runs inside a cloud VM. macOS uses
@@ -34,10 +44,9 @@ container-based providers.
 DeerFlow's `Sandbox` contract is synchronous; BoxLite's SDK is async-native and
 its box handles are event-loop-affine. The provider owns **one** private asyncio
 loop on a daemon thread and marshals every coroutine onto it via
-`run_coroutine_threadsafe`. This keeps all operations on the loop the box was
-started on and is safe under DeerFlow's `asyncio.to_thread` worker pool — without
-using BoxLite's greenlet sync facade, which refuses to run inside an async
-context and is thread-affine.
+`run_coroutine_threadsafe`. BoxLite boxes are named deterministically from
+`user_id:thread_id`, released into an in-process warm pool after each agent turn,
+and reclaimed by the same thread on the next acquire.
 
 | File | Role |
 | --- | --- |
@@ -57,8 +66,9 @@ inside the box and reuse `deerflow.sandbox.search`, mirroring `e2b_sandbox`:
 The provider creates `/mnt/user-data/{workspace,uploads,outputs}` and
 `/mnt/skills` on box start so those virtual paths resolve natively.
 
-**Out of scope for this pass** (follow-ups): warm pooling, idle reaping, mount
-syncing, and remote/provisioner modes.
+Warm-pool capacity is governed by `sandbox.replicas` across active + warm VMs.
+`sandbox.idle_timeout` controls how long released warm VMs stay running; `0`
+disables idle reaping. Active boxes are never evicted to satisfy the cap.
 
 ## Status
 
