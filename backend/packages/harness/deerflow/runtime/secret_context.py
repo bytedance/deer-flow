@@ -51,9 +51,24 @@ def read_active_secrets(context: Any) -> dict[str, str]:
     return _string_pairs(context.get(ACTIVE_SECRETS_CONTEXT_KEY))
 
 
+# Private run-context keys the skill-activation middleware uses to carry secret
+# bindings across a run. Only ``secrets`` / ``__active_skill_secrets`` hold
+# values; the binding-source and audit keys hold names only. All are listed so
+# the redaction allowlist stays a complete guard even if a future edit starts
+# storing a value under one of the name-only keys.
+_SLASH_SECRET_SOURCE_KEY = "__slash_skill_secret_source"
+_SECRETS_BINDING_AUDIT_KEY = "__skill_secrets_binding_audit"
+
 # Run-context keys whose values are request-scoped secrets and must be stripped
 # before a context mapping is serialized anywhere observable (traces, logs).
-REDACTED_CONTEXT_KEYS = frozenset({SECRETS_CONTEXT_KEY, ACTIVE_SECRETS_CONTEXT_KEY})
+REDACTED_CONTEXT_KEYS = frozenset(
+    {
+        SECRETS_CONTEXT_KEY,
+        ACTIVE_SECRETS_CONTEXT_KEY,
+        _SLASH_SECRET_SOURCE_KEY,
+        _SECRETS_BINDING_AUDIT_KEY,
+    }
+)
 
 
 def redact_secret_context_keys(context: Any) -> Any:

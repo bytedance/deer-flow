@@ -317,7 +317,7 @@ class RunJournal(BaseCallbackHandler):
                     per_call_model: str | None = None
                     if isinstance(response_metadata, Mapping):
                         per_call_model = response_metadata.get("model_name") or response_metadata.get("model")
-                    self._record_model_usage(per_call_model, input_tk, output_tk, total_tk)
+                    self._record_model_usage(per_call_model, input_tk, output_tk, total_tk, self._extract_cache_read(usage_dict))
 
                     self._schedule_progress_flush()
 
@@ -433,12 +433,18 @@ class RunJournal(BaseCallbackHandler):
         input_tokens: int,
         output_tokens: int,
         total_tokens: int,
+        cache_read_tokens: int = 0,
     ) -> None:
         """Add a single LLM call's token usage to the per-model accumulator.
 
         Missing / empty ``model_name`` collapses into a shared ``"unknown"``
         bucket so the breakdown stays usable when a provider doesn't surface
         ``response_metadata.model_name``.
+
+        ``cache_read_tokens`` (prompt-cache hits, from
+        ``usage_metadata.input_token_details.cache_read``) is stored as a
+        sparse bucket key — only written when non-zero — so buckets from
+        providers without cache reporting keep their historical shape.
         """
         if total_tokens <= 0:
             return
@@ -449,6 +455,19 @@ class RunJournal(BaseCallbackHandler):
         bucket["input_tokens"] += int(input_tokens or 0)
         bucket["output_tokens"] += int(output_tokens or 0)
         bucket["total_tokens"] += int(total_tokens)
+        if cache_read_tokens > 0:
+            bucket["cache_read_tokens"] = bucket.get("cache_read_tokens", 0) + int(cache_read_tokens)
+
+    @staticmethod
+    def _extract_cache_read(usage_dict: dict) -> int:
+        """Prompt-cache-hit input tokens from LangChain's normalized usage."""
+        details = usage_dict.get("input_token_details") or {}
+        if not isinstance(details, Mapping):
+            return 0
+        try:
+            return max(int(details.get("cache_read") or 0), 0)
+        except (TypeError, ValueError):
+            return 0
 
     # -- Public methods (called by worker) --
 
@@ -466,6 +485,7 @@ class RunJournal(BaseCallbackHandler):
             input_tokens: Input token count
             output_tokens: Output token count
             total_tokens: Total token count (computed from input+output if 0/missing)
+            cache_read_tokens: Optional prompt-cache-hit input tokens
         """
         if not self._track_tokens:
             return
@@ -500,7 +520,8 @@ class RunJournal(BaseCallbackHandler):
             else:
                 self._lead_agent_tokens += total_tk
 
-            self._record_model_usage(record.get("model_name"), input_tk, output_tk, total_tk)
+            cache_read_tk = record.get("cache_read_tokens", 0) or 0
+            self._record_model_usage(record.get("model_name"), input_tk, output_tk, total_tk, int(cache_read_tk))
 
             self._schedule_progress_flush()
 

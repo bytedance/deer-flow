@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, model_validator
 
 from deerflow.config.paths import get_paths
 from deerflow.runtime.user_context import get_effective_user_id
@@ -22,6 +22,93 @@ logger = logging.getLogger(__name__)
 
 SOUL_FILENAME = "SOUL.md"
 AGENT_NAME_PATTERN = re.compile(r"^[A-Za-z0-9-]+$")
+
+
+class GitHubTriggerConfig(BaseModel):
+    """Per-event trigger filter inside a :class:`GitHubBinding`."""
+
+    # If set, only these GitHub action values fire the agent. None means "any
+    # action allowed". Example: ["opened"] for pull_request restricts the agent
+    # to only respond to brand-new PRs.
+    actions: list[str] | None = None
+    # If True, comment events only fire when the bot login is @-mentioned in
+    # the comment body. Ignored on non-comment events.
+    require_mention: bool = False
+    # GitHub logins whose events bypass require_mention. Lets a repo owner
+    # talk to the bot without typing the handle every time.
+    allow_authors: list[str] = Field(default_factory=list)
+    # Override the global default bot mention login for this trigger only.
+    # Useful when one agent answers as @bot-a and another as @bot-b.
+    mention_login: str | None = None
+
+
+class GitHubBinding(BaseModel):
+    """One (agent, repo) binding with per-event trigger overrides."""
+
+    # GitHub "owner/name" string.
+    repo: str
+    # Event name → trigger override. Missing keys fall back to the dispatcher's
+    # default trigger for that event.
+    triggers: dict[str, GitHubTriggerConfig] = Field(default_factory=dict)
+
+
+class GitHubAgentConfig(BaseModel):
+    """Top-level ``github:`` block on a custom agent's ``config.yaml``."""
+
+    # GitHub App installation id used to mint per-repo access tokens. The
+    # ``ChannelManager`` mints a 1h installation token from this and injects it
+    # into ``run_context["github_token"]``, which the ``bash`` tool exposes to
+    # the agent's sandbox as ``GH_TOKEN`` / ``GITHUB_TOKEN``. The agent then
+    # uses ``gh`` to read repo state, push branches, and post comments itself.
+    # None means no token is minted: the agent still runs but cannot push or
+    # post (effectively read-only via unauthenticated ``gh`` for public repos,
+    # or fully blind for private ones).
+    installation_id: int | None = None
+    # GitHub App login this agent posts as (e.g. ``llm-gateway-ai`` for the
+    # ``llm-gateway-ai[bot]`` App identity, without the ``[bot]`` suffix).
+    # The dispatcher's self-event gate uses this to recognize webhook
+    # deliveries triggered by this agent's own activity, regardless of what
+    # ``mention_login`` the agent uses for trigger matching. None means
+    # "fall back to mention_login / agent name", which is fine when those
+    # match the bot identity, but should be set explicitly when they differ.
+    bot_login: str | None = None
+    # Override the default github-channel ``recursion_limit`` (250). GitHub
+    # runs are autonomous and long-running by nature — clone, explore, edit,
+    # test, push, comment — but the right ceiling varies a lot by workload:
+    # a review-only agent might be happy at 50, a multi-file refactor agent
+    # might need 500+. Setting None means "use the channel default (250)".
+    # Any positive integer is honored verbatim — including values below the
+    # channel default and below the global 100-step floor — so an explicit
+    # safety setting like ``recursion_limit: 50`` halts the agent at 50
+    # super-steps as configured. Values <=0 are ignored (treated as None)
+    # — a negative/zero limit would halt the agent before the first step.
+    recursion_limit: int | None = None
+    # Repos this agent is bound to. Empty list = bound to nothing = the agent
+    # never fires from a webhook, even if it has a ``github:`` block.
+    bindings: list[GitHubBinding] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _unique_binding_repos(self) -> "GitHubAgentConfig":
+        """Reject duplicate ``repo`` values across ``bindings``.
+
+        At most one binding per repo is allowed. The per-event ``triggers``
+        map on a single binding already expresses "this agent listens to N
+        events on this repo", so multiple bindings for the same repo would
+        either duplicate events (silent first-wins / double-registration —
+        see PR feedback R3) or fragment them across rows for no benefit.
+        Since this is the initial implementation and no existing operator
+        config relies on duplicate-repo bindings, we fail loudly at config
+        load instead of papering over the ambiguity at dispatch time.
+        """
+        seen: set[str] = set()
+        dupes: set[str] = set()
+        for binding in self.bindings:
+            if binding.repo in seen:
+                dupes.add(binding.repo)
+            seen.add(binding.repo)
+        if dupes:
+            raise ValueError(f"Agent github.bindings has duplicate repos {sorted(dupes)}. Each repo must appear at most once — merge their `triggers:` maps into a single binding.")
+        return self
 
 
 def validate_agent_name(name: str | None) -> str | None:
@@ -47,6 +134,40 @@ class AgentConfig(BaseModel):
     # - [] (explicit empty list): disable all skills
     # - ["skill1", "skill2"]: load only the specified skills
     skills: list[str] | None = None
+    # Optional binding to GitHub repositories so this agent can respond to
+    # webhook events from the gateway dispatcher. None means "no GitHub
+    # integration", which is the case for every existing agent.
+    github: GitHubAgentConfig | None = None
+
+
+# Fields explicitly managed by the agent-update surfaces (the
+# ``update_agent`` harness tool and the HTTP ``PATCH /api/agents/{name}``
+# route). Anything else declared on :class:`AgentConfig` — currently
+# ``github``, and any future field — is preserved verbatim by
+# :func:`preserve_non_managed_fields` so neither surface can silently
+# drop hand-authored configuration. ``name`` is included because the
+# updaters always re-emit it from the directory name (it must never come
+# from the request body).
+MANAGED_AGENT_CONFIG_FIELDS: frozenset[str] = frozenset({"name", "description", "model", "tool_groups", "skills"})
+
+
+def preserve_non_managed_fields(existing_cfg: AgentConfig) -> dict[str, object]:
+    """Return every top-level field on ``existing_cfg`` not in :data:`MANAGED_AGENT_CONFIG_FIELDS`.
+
+    Used by the two surfaces that rewrite a custom agent's ``config.yaml``
+    (the ``update_agent`` harness tool and the HTTP ``PATCH /api/agents/{name}``
+    route) to carry forward any hand-authored field — currently ``github``,
+    and any field added to :class:`AgentConfig` in the future — that the
+    update API does not expose as an argument. Without this, operators who
+    hand-author a ``github:`` block on a custom agent would silently lose
+    it the next time the agent or a UI editor touched ``description`` /
+    ``model`` / ``tool_groups`` / ``skills``.
+
+    ``exclude_unset=True`` is recursive in Pydantic v2, so a sub-field the
+    user did not write (and that defaulted to a Pydantic default) is not
+    materialized into the dict — the file round-trips visually intact.
+    """
+    return existing_cfg.model_dump(exclude_unset=True, exclude=MANAGED_AGENT_CONFIG_FIELDS)
 
 
 def resolve_agent_dir(name: str, *, user_id: str | None = None) -> Path:

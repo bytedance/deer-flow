@@ -6,6 +6,7 @@ import {
 } from "@tanstack/react-query";
 
 import {
+  fetchInfiniteThreadsPage,
   filterInfiniteThreadsCache,
   getInfiniteThreadsNextPageParam,
   INFINITE_THREADS_PAGE_SIZE,
@@ -25,12 +26,16 @@ import type { AgentThread } from "@/core/threads/types";
 // / stream-finish in sync with both the legacy array cache and the new
 // infinite cache.
 
-function makeThread(id: string, title = `Title ${id}`): AgentThread {
+function makeThread(
+  id: string,
+  title = `Title ${id}`,
+  metadata: Record<string, unknown> = {},
+): AgentThread {
   return {
     thread_id: id,
     created_at: "2025-01-01T00:00:00Z",
     updated_at: "2025-01-01T00:00:00Z",
-    metadata: {},
+    metadata,
     status: "idle",
     values: { title },
   } as unknown as AgentThread;
@@ -83,6 +88,66 @@ describe("getInfiniteThreadsNextPageParam", () => {
     const page1 = makePage(0, 5);
     expect(getInfiniteThreadsNextPageParam(page1, [page1], 5)).toBe(5);
     expect(getInfiniteThreadsNextPageParam(page1, [page1], 10)).toBeUndefined();
+  });
+});
+
+describe("fetchInfiniteThreadsPage", () => {
+  test("fills a visible page while advancing offsets by raw backend rows", async () => {
+    const search = rs
+      .fn()
+      .mockResolvedValueOnce([
+        makeThread("sidecar-1", "Sidecar", { deerflow_sidecar: true }),
+        makeThread("primary-1"),
+      ])
+      .mockResolvedValueOnce([makeThread("primary-2")]);
+
+    const page = await fetchInfiniteThreadsPage(
+      { threads: { search } },
+      { sortBy: "updated_at", sortOrder: "desc" },
+      0,
+      2,
+    );
+
+    expect(page.map((thread) => thread.thread_id)).toEqual([
+      "primary-1",
+      "primary-2",
+    ]);
+    expect(search).toHaveBeenNthCalledWith(1, {
+      sortBy: "updated_at",
+      sortOrder: "desc",
+      limit: 2,
+      offset: 0,
+    });
+    expect(search).toHaveBeenNthCalledWith(2, {
+      sortBy: "updated_at",
+      sortOrder: "desc",
+      limit: 1,
+      offset: 2,
+    });
+    expect(getInfiniteThreadsNextPageParam(page, [page], 2)).toBe(3);
+  });
+
+  test("keeps sidecar rows when the caller explicitly searches for sidecars", async () => {
+    const search = rs.fn().mockResolvedValueOnce([
+      makeThread("sidecar-1", "Sidecar", {
+        deerflow_sidecar: true,
+        parent_thread_id: "parent-1",
+      }),
+    ]);
+
+    const page = await fetchInfiniteThreadsPage(
+      { threads: { search } },
+      {
+        sortBy: "updated_at",
+        sortOrder: "desc",
+        metadata: { deerflow_sidecar: true, parent_thread_id: "parent-1" },
+      },
+      0,
+      2,
+    );
+
+    expect(page.map((thread) => thread.thread_id)).toEqual(["sidecar-1"]);
+    expect(getInfiniteThreadsNextPageParam(page, [page], 2)).toBeUndefined();
   });
 });
 

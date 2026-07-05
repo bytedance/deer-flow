@@ -167,10 +167,10 @@ LLM_PROVIDERS: list[LLMProvider] = [
     LLMProvider(
         name="deepseek",
         display_name="DeepSeek",
-        description="DeepSeek Reasoner with thinking support",
+        description="DeepSeek V4 with thinking support",
         use="deerflow.models.patched_deepseek:PatchedChatDeepSeek",
-        models=["deepseek-reasoner", "deepseek-chat"],
-        default_model="deepseek-reasoner",
+        models=["deepseek-v4-pro", "deepseek-v4-flash"],
+        default_model="deepseek-v4-pro",
         env_var="DEEPSEEK_API_KEY",
         package="langchain-deepseek",
         extra_config={

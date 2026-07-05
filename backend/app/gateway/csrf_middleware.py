@@ -48,6 +48,10 @@ def should_check_csrf(request: Request) -> bool:
     # Exempt /api/v1/auth/me endpoint
     if path == "/api/v1/auth/me":
         return False
+    # Inbound webhooks authenticate themselves via provider-specific signatures
+    # (e.g. GitHub's X-Hub-Signature-256), not the CSRF double-submit cookie.
+    if request.url.path.startswith("/api/webhooks/"):
+        return False
     return True
 
 

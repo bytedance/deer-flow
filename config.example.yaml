@@ -15,7 +15,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 17
+config_version: 18
 
 # ============================================================================
 # Logging
@@ -70,6 +70,17 @@ max_recursion_limit: 1000
 # Models Configuration
 # ============================================================================
 # Configure available LLM models for the agent to use
+#
+# Optional per-model pricing (powers the real-cost display on the workspace
+# console). Add a `pricing` block to any model entry; use ONE currency across
+# all models. Prices are per one million tokens.
+#
+#   pricing:
+#     currency: CNY                    # ISO code shown in the console (CNY, USD, ...)
+#     input_per_million: 8.0           # price per 1M input tokens (cache miss)
+#     output_per_million: 32.0         # price per 1M output tokens
+#     input_cache_hit_per_million: 0.8 # price per 1M cache-hit input tokens
+#                                      # (optional; omit → hits billed at miss price)
 
 models:
   # Example: Volcengine (Doubao) model
@@ -243,17 +254,17 @@ models:
   #       thinking:
   #         type: disabled
 
-  # Example: DeepSeek model (with thinking support)
-  # - name: deepseek-v3
-  #   display_name: DeepSeek V3 (Thinking)
+  # Example: DeepSeek V4 model (with thinking support)
+  # - name: deepseek-v4
+  #   display_name: DeepSeek V4 (Thinking)
   #   use: deerflow.models.patched_deepseek:PatchedChatDeepSeek
-  #   model: deepseek-reasoner
+  #   model: deepseek-v4-pro
   #   api_key: $DEEPSEEK_API_KEY
   #   timeout: 600.0
   #   max_retries: 2
   #   max_tokens: 8192
   #   supports_thinking: true
-  #   supports_vision: false  # DeepSeek V3 does not support vision
+  #   supports_vision: false  # DeepSeek V4 does not support vision
   #   when_thinking_enabled:
   #     extra_body:
   #       thinking:
@@ -677,6 +688,7 @@ tools:
   #   base_url: http://localhost:3032    # Browserless instance URL (default: :3032; Docker: http://browserless:3000)
   #   # token: $BROWSERLESS_TOKEN        # API token (required for Browserless Cloud; optional for self-hosted)
   #   timeout_s: 30                       # Request timeout in seconds
+  #   # allow_private_addresses: false    # SSRF guard: keep false in production. Set true ONLY for intentional internal targets.
   #   # wait_for_event: "networkidle"    # Wait for a page event before returning (e.g. "load", "networkidle")
   #   # wait_for_timeout_ms: 2000        # Extra wait after page load in milliseconds
   #   # wait_for_selector: "article"     # CSS selector to wait for before returning
@@ -693,6 +705,7 @@ tools:
   #   use: deerflow.community.crawl4ai.tools:web_fetch_tool
   #   base_url: http://localhost:11235   # Crawl4AI server URL (Docker: http://crawl4ai:11235)
   #   timeout: 30                         # Request timeout in seconds
+  #   # allow_private_addresses: false     # SSRF guard: keep false in production. Set true ONLY for intentional internal targets.
   #   # filter: fit                       # Markdown filter: fit (default) | raw | bm25 | llm
   #   # token: $CRAWL4AI_TOKEN            # Bearer token (only if the server has JWT auth enabled)
 
@@ -772,6 +785,7 @@ tools:
   #   use: deerflow.community.fastcrw.tools:web_fetch_tool
   #   # api_key: $CRW_API_KEY
   #   # base_url: https://fastcrw.com/api   # default cloud; set to e.g. http://localhost:3000 for self-host
+  #   # allow_private_addresses: false      # SSRF guard: keep false in production. Set true ONLY for intentional internal targets.
 
   # Image search tool (uses DuckDuckGo)
   # Use this to find reference images before image generation
@@ -1180,6 +1194,13 @@ skills:
   # Default: /mnt/skills
   container_path: /mnt/skills
 
+  # Deferred skill discovery (default: false)
+  # When enabled, only skill names appear in the system prompt (<skill_index>).
+  # The LLM discovers skill details on demand via the describe_skill tool.
+  # This keeps the system prompt compact and prefix-cache friendly when many
+  # skills are installed.
+  # deferred_discovery: true
+
 # Note: To restrict which skills are loaded for a specific custom agent,
 # define a `skills` list in that agent's `config.yaml` (e.g. `agents/my-agent/config.yaml`):
 # - Omitted or null: load all globally enabled skills (default)
@@ -1403,6 +1424,30 @@ run_events:
   backend: memory
   max_trace_content: 10240
   track_token_usage: true
+
+# ============================================================================
+# Scheduled Tasks Configuration
+# ============================================================================
+# Background scheduler for one-time and recurring (cron) agent runs.
+# All fields are restart-required (captured at Gateway lifespan startup).
+#
+# Multi-worker note: the scheduler runs once per uvicorn worker. SQLite silently
+# ignores row-level locks, so multiple workers can double-fire the same task.
+# For multi-worker deployments (GATEWAY_WORKERS > 1), use the Postgres database
+# backend, where FOR UPDATE SKIP LOCKED serializes claims correctly.
+#
+# scheduler:
+#   enabled: false               # Master switch for the background poller
+#   poll_interval_seconds: 5     # How often to scan for due tasks
+#   lease_seconds: 120           # Claim lease; a crashed process's task becomes reclaimable after this
+#   max_concurrent_runs: 3       # Global cap on active scheduled runs; each poll claims only into the remaining budget
+#   min_once_delay_seconds: 60   # Minimum future offset for one-time tasks at creation time
+scheduler:
+  enabled: false
+  poll_interval_seconds: 5
+  lease_seconds: 120
+  max_concurrent_runs: 3
+  min_once_delay_seconds: 60
 
 # ============================================================================
 # Stream Bridge Configuration

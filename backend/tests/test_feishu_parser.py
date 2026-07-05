@@ -228,6 +228,7 @@ def test_feishu_on_message_extracts_image_and_file_keys():
         assert files == [{"image_key": "img_123"}, {"file_key": "file_456"}]
         assert "[image]" in mock_make_inbound.call_args[1]["text"]
         assert "[file]" in mock_make_inbound.call_args[1]["text"]
+        assert channel._pending_inbound_batches == {}
 
 
 def test_feishu_on_message_reuses_stored_parent_topic_for_card_replies():
@@ -283,6 +284,176 @@ def _make_text_event(
     event.event.sender.sender_id.open_id = user_id
     event.event.message.content = json.dumps({"text": text})
     return event
+
+
+def _make_file_event(
+    file_key: str,
+    *,
+    chat_id: str = "chat_1",
+    message_id: str = "msg_1",
+    user_id: str = "user_1",
+    root_id: str | None = None,
+    parent_id: str | None = None,
+    thread_id: str | None = None,
+):
+    event = MagicMock()
+    event.event.message.chat_id = chat_id
+    event.event.message.message_id = message_id
+    event.event.message.root_id = root_id
+    event.event.message.parent_id = parent_id
+    event.event.message.thread_id = thread_id
+    event.event.sender.sender_id.open_id = user_id
+    event.event.message.content = json.dumps({"file_key": file_key})
+    return event
+
+
+def test_feishu_batches_top_level_file_messages_from_same_user(monkeypatch):
+    async def go():
+        monkeypatch.setattr("app.channels.feishu.FEISHU_INBOUND_BATCH_WINDOW_SECONDS", 0.01)
+        bus = MessageBus()
+        channel = FeishuChannel(bus, {"app_id": "test", "app_secret": "test"})
+        channel._main_loop = asyncio.get_running_loop()
+        channel._add_reaction = AsyncMock()
+        channel._ensure_running_card_started = MagicMock()
+
+        channel._on_message(_make_file_event("file_a", message_id="msg_file_1"))
+        channel._on_message(_make_file_event("file_b", message_id="msg_file_2"))
+
+        inbound = await asyncio.wait_for(bus.get_inbound(), timeout=0.5)
+
+        assert inbound.thread_ts == "msg_file_1"
+        assert inbound.topic_id == "msg_file_1"
+        assert inbound.text == "[file]\n\n[file]"
+        assert inbound.files == [{"file_key": "file_a"}, {"file_key": "file_b"}]
+        assert inbound.metadata["message_id"] == "msg_file_1"
+        assert inbound.metadata["topic_id"] == "msg_file_1"
+        assert inbound.metadata["batched_message_ids"] == ["msg_file_1", "msg_file_2"]
+        channel._ensure_running_card_started.assert_called_once_with("msg_file_1")
+        assert [call.args for call in channel._add_reaction.call_args_list] == [
+            ("msg_file_1", "OK"),
+            ("msg_file_2", "OK"),
+        ]
+
+    _run(go())
+
+
+def test_feishu_rich_text_file_message_does_not_enter_batch():
+    bus = MessageBus()
+    channel = FeishuChannel(bus, {"app_id": "test", "app_secret": "test"})
+    channel._schedule_prepare_inbound = MagicMock()
+
+    event = MagicMock()
+    event.event.message.chat_id = "chat_1"
+    event.event.message.message_id = "msg_rich_file"
+    event.event.message.root_id = None
+    event.event.message.parent_id = None
+    event.event.message.thread_id = None
+    event.event.sender.sender_id.open_id = "user_1"
+    event.event.message.content = json.dumps(
+        {
+            "content": [
+                [
+                    {"tag": "text", "text": "Review"},
+                    {"tag": "file", "file_key": "file_a"},
+                ]
+            ]
+        }
+    )
+
+    channel._on_message(event)
+
+    channel._schedule_prepare_inbound.assert_called_once()
+    inbound = channel._schedule_prepare_inbound.call_args.args[1]
+    assert inbound.text == "Review [file]"
+    assert inbound.files == [{"file_key": "file_a"}]
+    assert channel._pending_inbound_batches == {}
+
+
+def test_feishu_file_batch_window_expiry_starts_new_topic(monkeypatch):
+    async def go():
+        monkeypatch.setattr("app.channels.feishu.FEISHU_INBOUND_BATCH_WINDOW_SECONDS", 0.01)
+        bus = MessageBus()
+        channel = FeishuChannel(bus, {"app_id": "test", "app_secret": "test"})
+        channel._main_loop = asyncio.get_running_loop()
+        channel._add_reaction = AsyncMock()
+        channel._ensure_running_card_started = MagicMock()
+
+        channel._on_message(_make_file_event("file_a", message_id="msg_file_1"))
+        first = await asyncio.wait_for(bus.get_inbound(), timeout=0.5)
+
+        channel._on_message(_make_file_event("file_b", message_id="msg_file_2"))
+        second = await asyncio.wait_for(bus.get_inbound(), timeout=0.5)
+
+        assert first.topic_id == "msg_file_1"
+        assert first.files == [{"file_key": "file_a"}]
+        assert second.topic_id == "msg_file_2"
+        assert second.files == [{"file_key": "file_b"}]
+        assert channel._ensure_running_card_started.call_args_list[0].args == ("msg_file_1",)
+        assert channel._ensure_running_card_started.call_args_list[1].args == ("msg_file_2",)
+
+    _run(go())
+
+
+def test_feishu_explicit_file_reply_does_not_enter_batch(monkeypatch):
+    async def go():
+        monkeypatch.setattr("app.channels.feishu.FEISHU_INBOUND_BATCH_WINDOW_SECONDS", 10.0)
+        bus = MessageBus()
+        channel = FeishuChannel(bus, {"app_id": "test", "app_secret": "test"})
+        channel._main_loop = asyncio.get_running_loop()
+        channel._add_reaction = AsyncMock()
+        channel._ensure_running_card_started = MagicMock()
+
+        channel._on_message(_make_file_event("file_a", message_id="msg_reply", root_id="msg_root"))
+
+        inbound = await asyncio.wait_for(bus.get_inbound(), timeout=0.5)
+        assert inbound.thread_ts == "msg_reply"
+        assert inbound.topic_id == "msg_root"
+        assert inbound.files == [{"file_key": "file_a"}]
+        assert channel._pending_inbound_batches == {}
+
+    _run(go())
+
+
+def test_feishu_expired_file_batch_does_not_get_overwritten(monkeypatch):
+    monkeypatch.setattr("app.channels.feishu.FEISHU_INBOUND_BATCH_WINDOW_SECONDS", 0.5)
+    now = 0.0
+    monkeypatch.setattr("app.channels.feishu.time.time", lambda: now)
+
+    bus = MessageBus()
+    channel = FeishuChannel(bus, {"app_id": "test", "app_secret": "test"})
+    channel._schedule_batch_flush = MagicMock()
+    channel._schedule_prepare_inbound = MagicMock()
+
+    first = InboundMessage(
+        channel_name="feishu",
+        chat_id="chat_1",
+        user_id="user_1",
+        text="[file]",
+        thread_ts="msg_file_1",
+        files=[{"file_key": "file_a"}],
+    )
+    second = InboundMessage(
+        channel_name="feishu",
+        chat_id="chat_1",
+        user_id="user_1",
+        text="[file]",
+        thread_ts="msg_file_2",
+        files=[{"file_key": "file_b"}],
+    )
+
+    channel._queue_file_inbound_batch("msg_file_1", first)
+    now = 1.0
+    channel._queue_file_inbound_batch("msg_file_2", second)
+
+    channel._schedule_prepare_inbound.assert_called_once_with(
+        "msg_file_1",
+        first,
+        source_message_ids=["msg_file_1"],
+    )
+    assert channel._pop_pending_inbound_batch(channel._pending_key("chat_1", "user_1"), anchor_message_id="msg_file_1") is None
+
+    current = channel._pop_pending_inbound_batch(channel._pending_key("chat_1", "user_1"), anchor_message_id="msg_file_2")
+    assert current == ("msg_file_2", second, ["msg_file_2"])
 
 
 def test_feishu_plain_reply_consumes_pending_clarification_topic():

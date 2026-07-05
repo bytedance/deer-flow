@@ -13,12 +13,20 @@ import {
 } from "@/components/workspace/chats";
 import { ExportTrigger } from "@/components/workspace/export-trigger";
 import { GoalStatus } from "@/components/workspace/goal-status";
-import { InputBox } from "@/components/workspace/input-box";
+import {
+  InputBox,
+  type InputBoxSubmitOptions,
+} from "@/components/workspace/input-box";
 import {
   MessageList,
   MESSAGE_LIST_DEFAULT_PADDING_BOTTOM,
 } from "@/components/workspace/messages";
 import { ThreadContext } from "@/components/workspace/messages/context";
+import {
+  SidecarProvider,
+  SidecarTrigger,
+} from "@/components/workspace/sidecar";
+import { ThreadScheduledTasksLink } from "@/components/workspace/thread-scheduled-tasks-link";
 import { ThreadTitle } from "@/components/workspace/thread-title";
 import { TodoList } from "@/components/workspace/todo-list";
 import { TokenUsageIndicator } from "@/components/workspace/token-usage-indicator";
@@ -150,8 +158,8 @@ export default function ChatPage() {
   ]);
 
   const handleSubmit = useCallback(
-    (message: PromptInputMessage) => {
-      const sendPromise = sendMessage(threadId, message);
+    (message: PromptInputMessage, options?: InputBoxSubmitOptions) => {
+      const sendPromise = sendMessage(threadId, message, undefined, options);
       if (message.files.length > 0) {
         return sendPromise;
       }
@@ -179,150 +187,161 @@ export default function ChatPage() {
 
   return (
     <ThreadContext.Provider value={{ thread, isMock }}>
-      <ChatBox threadId={threadId}>
-        <div className="relative flex size-full min-h-0 justify-between">
-          <header
-            className={cn(
-              "absolute top-0 right-0 left-0 z-30 flex h-12 shrink-0 items-center gap-2 px-2 sm:px-4",
-              isWelcomeMode
-                ? "bg-background/0 backdrop-blur-none"
-                : "bg-background/80 shadow-xs backdrop-blur",
-            )}
-          >
-            <SidebarTrigger className="md:hidden" />
-            <div className="flex min-w-0 flex-1 items-center text-sm font-medium">
-              <ThreadTitle threadId={threadId} thread={thread} />
-            </div>
-            <div className="flex shrink-0 items-center gap-2">
-              <TokenUsageIndicator
-                threadId={isNewThread ? undefined : threadId}
-                backendUsage={backendTokenUsage}
-                enabled={tokenUsageEnabled}
-                messages={thread.messages}
-                pendingMessages={pendingUsageMessages}
-                preferences={localSettings.tokenUsage}
-                onPreferencesChange={(preferences) =>
-                  setLocalSettings("tokenUsage", preferences)
-                }
-              />
-              <ExportTrigger threadId={threadId} />
-              <ArtifactTrigger />
-            </div>
-          </header>
-          <main className="flex min-h-0 max-w-full grow flex-col">
-            <div className="flex min-h-0 flex-1 justify-center">
-              <MessageList
-                className={cn("size-full", !isWelcomeMode && "pt-10")}
-                threadId={threadId}
-                thread={thread}
-                paddingBottom={MESSAGE_LIST_DEFAULT_PADDING_BOTTOM}
-                hasMoreHistory={hasMoreHistory}
-                loadMoreHistory={loadMoreHistory}
-                isHistoryLoading={isHistoryLoading}
-                tokenUsageInlineMode={tokenUsageInlineMode}
-                canRegenerate={
-                  !isNewThread &&
-                  !isMock &&
-                  env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY !== "true" &&
-                  !isUploading &&
-                  !thread.isLoading
-                }
-                onRegenerateMessage={handleRegenerate}
-              />
-            </div>
-            <div
+      <SidecarProvider
+        parentThreadId={threadId}
+        context={settings.context}
+        isMock={isMock}
+      >
+        <ChatBox threadId={threadId}>
+          <div className="relative flex size-full min-h-0 justify-between">
+            <header
               className={cn(
-                "right-0 bottom-0 left-0 z-30 flex justify-center px-3 sm:px-4",
-                isWelcomeMode ? "absolute" : "relative shrink-0 pb-4",
+                "absolute top-0 right-0 left-0 z-30 flex h-12 shrink-0 items-center gap-2 px-2 sm:px-4",
+                isWelcomeMode
+                  ? "bg-background/0 backdrop-blur-none"
+                  : "bg-background/80 shadow-xs backdrop-blur",
               )}
             >
+              <SidebarTrigger className="md:hidden" />
+              <div className="flex min-w-0 flex-1 items-center text-sm font-medium">
+                <ThreadTitle threadId={threadId} thread={thread} />
+              </div>
+              <div className="flex shrink-0 items-center gap-2">
+                {!isNewThread && (
+                  <ThreadScheduledTasksLink threadId={threadId} />
+                )}
+                <TokenUsageIndicator
+                  threadId={isNewThread ? undefined : threadId}
+                  backendUsage={backendTokenUsage}
+                  enabled={tokenUsageEnabled}
+                  messages={thread.messages}
+                  pendingMessages={pendingUsageMessages}
+                  preferences={localSettings.tokenUsage}
+                  onPreferencesChange={(preferences) =>
+                    setLocalSettings("tokenUsage", preferences)
+                  }
+                />
+                <SidecarTrigger />
+                <ExportTrigger threadId={threadId} />
+                <ArtifactTrigger />
+              </div>
+            </header>
+            <main className="flex min-h-0 max-w-full grow flex-col">
+              <div className="flex min-h-0 flex-1 justify-center">
+                <MessageList
+                  className={cn("size-full", !isWelcomeMode && "pt-10")}
+                  testId="main-message-list"
+                  threadId={threadId}
+                  thread={thread}
+                  paddingBottom={MESSAGE_LIST_DEFAULT_PADDING_BOTTOM}
+                  hasMoreHistory={hasMoreHistory}
+                  loadMoreHistory={loadMoreHistory}
+                  isHistoryLoading={isHistoryLoading}
+                  tokenUsageInlineMode={tokenUsageInlineMode}
+                  canRegenerate={
+                    !isNewThread &&
+                    !isMock &&
+                    env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY !== "true" &&
+                    !isUploading &&
+                    !thread.isLoading
+                  }
+                  onRegenerateMessage={handleRegenerate}
+                />
+              </div>
               <div
                 className={cn(
-                  "relative w-full",
-                  isWelcomeMode &&
-                    "-translate-y-[calc(50vh-48px)] sm:-translate-y-[calc(50vh-96px)]",
-                  isWelcomeMode
-                    ? "max-w-(--container-width-sm)"
-                    : "max-w-(--container-width-md)",
+                  "right-0 bottom-0 left-0 z-30 flex justify-center px-3 sm:px-4",
+                  isWelcomeMode ? "absolute" : "relative shrink-0 pb-4",
                 )}
               >
-                {(hasGoal || hasTodos) && (
-                  <div
-                    className={cn(
-                      "right-0 left-0 z-0",
-                      isWelcomeMode ? "absolute -top-4" : "relative",
-                    )}
-                  >
+                <div
+                  className={cn(
+                    "relative w-full",
+                    isWelcomeMode &&
+                      "-translate-y-[calc(50vh-48px)] sm:-translate-y-[calc(50vh-96px)]",
+                    isWelcomeMode
+                      ? "max-w-(--container-width-sm)"
+                      : "max-w-(--container-width-md)",
+                  )}
+                >
+                  {(hasGoal || hasTodos) && (
                     <div
                       className={cn(
-                        "right-0 bottom-0 left-0 flex flex-col",
-                        isWelcomeMode ? "absolute" : "relative",
+                        "right-0 left-0 z-0",
+                        isWelcomeMode ? "absolute -top-4" : "relative",
                       )}
                     >
-                      {activeGoal && <GoalStatus goal={activeGoal} />}
-                      {hasTodos && (
-                        <TodoList
-                          className="bg-background/5"
-                          todos={thread.values.todos ?? []}
-                          hidden={false}
-                        />
-                      )}
+                      <div
+                        className={cn(
+                          "right-0 bottom-0 left-0 flex flex-col",
+                          isWelcomeMode ? "absolute" : "relative",
+                        )}
+                      >
+                        {activeGoal && <GoalStatus goal={activeGoal} />}
+                        {hasTodos && (
+                          <TodoList
+                            className="bg-background/5"
+                            todos={thread.values.todos ?? []}
+                            hidden={false}
+                          />
+                        )}
+                      </div>
                     </div>
-                  </div>
-                )}
-                {mountedRef.current ? (
-                  <InputBox
-                    className={cn(
-                      "bg-background/5 w-full",
-                      isWelcomeMode && "-translate-y-2 sm:-translate-y-4",
-                    )}
-                    isWelcomeMode={isWelcomeMode}
-                    threadId={threadId}
-                    autoFocus={isWelcomeMode}
-                    status={
-                      thread.error
-                        ? "error"
-                        : thread.isLoading
-                          ? "streaming"
-                          : "ready"
-                    }
-                    context={settings.context}
-                    extraHeader={
-                      isWelcomeMode &&
-                      !hasGoal &&
-                      !hasTodos && <Welcome mode={settings.context.mode} />
-                    }
-                    disabled={
-                      isMock ||
-                      env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true" ||
-                      isUploading
-                    }
-                    onContextChange={(context) =>
-                      setSettings("context", context)
-                    }
-                    onGoalChange={setLocalGoal}
-                    onSubmit={handleSubmit}
-                    onStop={handleStop}
-                  />
-                ) : (
-                  <div
-                    aria-hidden="true"
-                    className={cn(
-                      "bg-background/5 h-32 w-full rounded-2xl",
-                      isWelcomeMode && "-translate-y-2 sm:-translate-y-4",
-                    )}
-                  />
-                )}
-                {env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true" && (
-                  <div className="text-muted-foreground/67 w-full translate-y-12 text-center text-xs">
-                    {t.common.notAvailableInDemoMode}
-                  </div>
-                )}
+                  )}
+                  {mountedRef.current ? (
+                    <InputBox
+                      className={cn(
+                        "bg-background/5 w-full",
+                        isWelcomeMode && "-translate-y-2 sm:-translate-y-4",
+                      )}
+                      isWelcomeMode={isWelcomeMode}
+                      threadId={threadId}
+                      autoFocus={isWelcomeMode}
+                      status={
+                        thread.error
+                          ? "error"
+                          : thread.isLoading
+                            ? "streaming"
+                            : "ready"
+                      }
+                      context={settings.context}
+                      extraHeader={
+                        isWelcomeMode &&
+                        !hasGoal &&
+                        !hasTodos && <Welcome mode={settings.context.mode} />
+                      }
+                      disabled={
+                        isMock ||
+                        env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true" ||
+                        isUploading
+                      }
+                      onContextChange={(context) =>
+                        setSettings("context", context)
+                      }
+                      onGoalChange={setLocalGoal}
+                      onSubmit={handleSubmit}
+                      onStop={handleStop}
+                    />
+                  ) : (
+                    <div
+                      aria-hidden="true"
+                      className={cn(
+                        "bg-background/5 h-32 w-full rounded-2xl",
+                        isWelcomeMode && "-translate-y-2 sm:-translate-y-4",
+                      )}
+                    />
+                  )}
+                  {env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true" && (
+                    <div className="text-muted-foreground/67 w-full translate-y-12 text-center text-xs">
+                      {t.common.notAvailableInDemoMode}
+                    </div>
+                  )}
+                </div>
               </div>
-            </div>
-          </main>
-        </div>
-      </ChatBox>
+            </main>
+          </div>
+        </ChatBox>
+      </SidecarProvider>
     </ThreadContext.Provider>
   );
 }

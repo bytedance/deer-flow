@@ -9,7 +9,7 @@ from agent_sandbox import Sandbox as AioSandboxClient
 from agent_sandbox.core.api_error import ApiError
 
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
-from deerflow.sandbox.sandbox import Sandbox
+from deerflow.sandbox.sandbox import Sandbox, _validate_extra_env
 from deerflow.sandbox.search import GrepMatch, path_matches, should_ignore_path, truncate_line
 
 logger = logging.getLogger(__name__)
@@ -169,6 +169,12 @@ class AioSandbox(Sandbox):
             The output of the command.
         """
         del timeout
+        # Validate ``env`` keys before forwarding them to the ``bash.exec`` API.
+        # The public ``Sandbox.execute_command`` contract accepts arbitrary dict
+        # keys; enforcing the POSIX env-var name rule keeps the contract
+        # consistent with the local and e2b sandboxes and catches unsafe keys
+        # early. ``_validate_extra_env`` is a no-op when ``env`` is None or empty.
+        _validate_extra_env(env)
         if env:
             return self._execute_with_env(command, env)
         with self._lock:

@@ -766,15 +766,32 @@ async def get_thread_history(thread_id: str, body: ThreadHistoryRequest, request
                                 if isinstance(content, dict) and content.get("type") == "ai" and "id" in content:
                                     msg_to_run[content["id"]] = e["run_id"]
 
-                            # 3. Inject the exact correct duration into each AI message
+                            # 3. Attach the owning run_id to replayed messages.
+                            # Raw LangGraph checkpoint messages do not carry a
+                            # native run link. Message events are exact when
+                            # present, but historical/runtime stores can miss
+                            # them; the user-input message already records the
+                            # run id for the whole turn, so use it as the
+                            # fallback for following AI/tool messages.
+                            current_turn_run_id = None
                             for msg in serialized_msgs:
-                                if msg.get("type") == "ai":
+                                if msg.get("type") == "human":
+                                    additional_kwargs = msg.get("additional_kwargs")
+                                    if isinstance(additional_kwargs, dict):
+                                        run_id = additional_kwargs.get("run_id")
+                                        if isinstance(run_id, str) and run_id:
+                                            current_turn_run_id = run_id
+                                    continue
+
+                                if msg.get("type") in {"ai", "tool"}:
                                     msg_id = msg.get("id")
-                                    run_id = msg_to_run.get(msg_id)
-                                    if run_id and run_id in run_durations:
-                                        if "additional_kwargs" not in msg:
-                                            msg["additional_kwargs"] = {}
-                                        msg["additional_kwargs"]["turn_duration"] = run_durations[run_id]
+                                    run_id = msg_to_run.get(msg_id) or current_turn_run_id
+                                    if run_id:
+                                        msg["run_id"] = run_id
+                                        if msg.get("type") == "ai" and run_id in run_durations:
+                                            if "additional_kwargs" not in msg:
+                                                msg["additional_kwargs"] = {}
+                                            msg["additional_kwargs"]["turn_duration"] = run_durations[run_id]
 
                     except Exception:
                         logger.warning("Failed to inject turn_duration for thread %s", thread_id, exc_info=True)
