@@ -5,11 +5,12 @@ import type { Skill } from "./type";
 
 async function throwSkillsApiError(
   response: Response,
-  fallback: string,
+  action: string,
 ): Promise<never> {
   const body = (await response.json().catch(() => ({}))) as {
     detail?: unknown;
   };
+  const fallback = `${action}: HTTP ${response.status} ${response.statusText || "Unknown"}`;
   throw new Error(typeof body.detail === "string" ? body.detail : fallback);
 }
 
@@ -18,7 +19,7 @@ export async function loadSkills() {
   if (!skills.ok) {
     await throwSkillsApiError(
       skills,
-      `Failed to load skills: ${skills.statusText}`,
+      "Failed to load skills",
     );
   }
   const json = await skills.json();
@@ -41,7 +42,7 @@ export async function enableSkill(skillName: string, enabled: boolean) {
   if (!response.ok) {
     await throwSkillsApiError(
       response,
-      `Failed to update ${skillName}: ${response.statusText}`,
+      `Failed to update ${skillName}`,
     );
   }
   return response.json();

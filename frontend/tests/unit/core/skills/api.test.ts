@@ -13,10 +13,14 @@ import { enableSkill, loadSkills } from "@/core/skills/api";
 
 const mockedFetch = rs.mocked(fetcher);
 
-function jsonResponse(status: number, body: unknown): Response {
+function jsonResponse(
+  status: number,
+  body: unknown,
+  statusText = status >= 400 ? "Bad Request" : "OK",
+): Response {
   return new Response(JSON.stringify(body), {
     status,
-    statusText: status >= 400 ? "Bad Request" : "OK",
+    statusText,
     headers: { "Content-Type": "application/json" },
   });
 }
@@ -63,6 +67,14 @@ describe("skills api", () => {
     );
   });
 
+  test("falls back to HTTP status when loading skills fails without detail", async () => {
+    mockedFetch.mockResolvedValueOnce(jsonResponse(503, {}, ""));
+
+    await expect(loadSkills()).rejects.toThrow(
+      "Failed to load skills: HTTP 503 Unknown",
+    );
+  });
+
   test("updates a skill enabled flag", async () => {
     mockedFetch.mockResolvedValueOnce(
       jsonResponse(200, { success: true, skill_name: "data-analysis" }),
@@ -93,6 +105,16 @@ describe("skills api", () => {
 
     await expect(enableSkill("foo", false)).rejects.toThrow(
       "Skill toggle denied",
+    );
+  });
+
+  test("falls back to HTTP status when updating a skill fails without detail", async () => {
+    mockedFetch.mockResolvedValueOnce(
+      jsonResponse(409, {}, ""),
+    );
+
+    await expect(enableSkill("foo", false)).rejects.toThrow(
+      "Failed to update foo: HTTP 409 Unknown",
     );
   });
 });
