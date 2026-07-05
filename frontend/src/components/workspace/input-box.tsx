@@ -65,7 +65,6 @@ import { isHiddenFromUIMessage } from "@/core/messages/utils";
 import { useModels } from "@/core/models/hooks";
 import { useSkills } from "@/core/skills/hooks";
 import { useSuggestionsConfig } from "@/core/suggestions/hooks";
-import { findSuggestionTemplatePlaceholder } from "@/core/suggestions/placeholders";
 import type { AgentThreadContext, GoalState } from "@/core/threads";
 import { textOfMessage } from "@/core/threads/utils";
 import {

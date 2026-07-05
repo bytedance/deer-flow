@@ -6,7 +6,7 @@
  *
  * Update this pattern whenever new placeholder tokens are added to templates.
  */
-const SUGGESTION_TEMPLATE_PLACEHOLDER_PATTERN =
+export const SUGGESTION_TEMPLATE_PLACEHOLDER_PATTERN =
   /\[(?:主题|来源|topic|source)\]/i;
 
 /**
