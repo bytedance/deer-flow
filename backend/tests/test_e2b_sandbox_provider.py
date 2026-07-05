@@ -725,6 +725,33 @@ def test_sync_outputs_to_host_is_noop_when_client_closed():
     p._sync_outputs_to_host(sb, thread_id="t1", user_id="u1")
 
 
+def test_read_file_supports_bounded_ranges():
+    files = FakeFilesAPI(
+        store={
+            "/home/user/workspace/range.txt": (
+                "line 1\nline 2\nline 3\nline 4\nline 5".encode("utf-8")
+            )
+        },
+    )
+    client = FakeClient(files=files)
+    sb = _make_sandbox(client, sandbox_id="sb-read-range")
+
+    assert sb.read_file("/mnt/user-data/workspace/range.txt") == "line 1\nline 2\nline 3\nline 4\nline 5"
+    assert sb.read_file("/mnt/user-data/workspace/range.txt", start_line=2, end_line=4) == "line 2\nline 3\nline 4"
+    assert sb.read_file("/mnt/user-data/workspace/range.txt", start_line=4) == "line 4\nline 5"
+    assert sb.read_file("/mnt/user-data/workspace/range.txt", end_line=2) == "line 1\nline 2"
+
+    resolved_path = "/home/user/workspace/range.txt"
+    assert all(path == resolved_path for path, _fmt in files.read_calls), files.read_calls
+
+
+def test_read_file_returns_error_for_missing_file():
+    client = FakeClient(files=FakeFilesAPI())
+    sb = _make_sandbox(client, sandbox_id="sb-read-missing")
+
+    assert sb.read_file("/mnt/user-data/workspace/missing.txt").startswith("Error:")
+
+
 def test_download_file_uses_streaming_read_and_returns_full_bytes():
     payload = b"A" * (128 * 1024)  # 128 KiB — well below the cap.
     files = FakeFilesAPI(store={"/home/user/outputs/small.bin": payload})
