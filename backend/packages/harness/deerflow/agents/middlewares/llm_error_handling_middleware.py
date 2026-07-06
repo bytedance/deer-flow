@@ -203,6 +203,17 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
             "StreamChunkTimeoutError",  # langchain-openai: chunk gap exceeded stream_chunk_timeout
         }:
             return True, "transient"
+        # Upstream sometimes returns ``200 OK`` with an empty
+        # ``generations`` list (observed against Volces "coding" /
+        # ark.cn-beijing.volces.com). ``langchain_core.language_models.
+        # chat_models.ainvoke`` then crashes with
+        # ``IndexError: list index out of range`` at
+        # ``llm_result.generations[0][0].message``. That isn't really a
+        # client bug — it's a transient upstream-payload glitch — so we
+        # route it through the same retry/backoff path as other transient
+        # provider failures rather than failing the whole run.
+        if isinstance(exc, IndexError):
+            return True, "transient"
         if status_code in _RETRIABLE_STATUS_CODES:
             return True, "transient"
         if _matches_any(lowered, _BUSY_PATTERNS):

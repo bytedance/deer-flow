@@ -14,9 +14,21 @@ export function getUsageMetadata(message: Message): TokenUsage | null {
   if (message.type !== "ai") {
     return null;
   }
-  const usage = (message as Record<string, unknown>).usage_metadata as
-    | { input_tokens?: number; output_tokens?: number; total_tokens?: number }
-    | undefined;
+  const usage =
+    ((message as Record<string, unknown>).usage_metadata as
+      | {
+          input_tokens?: number;
+          output_tokens?: number;
+          total_tokens?: number;
+        }
+      | undefined) ??
+    (message.additional_kwargs?.usage_metadata as
+      | {
+          input_tokens?: number;
+          output_tokens?: number;
+          total_tokens?: number;
+        }
+      | undefined);
   if (!usage) {
     return null;
   }

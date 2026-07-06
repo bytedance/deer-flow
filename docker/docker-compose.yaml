@@ -5,6 +5,7 @@
 #   - nginx:       Reverse proxy (port 2026, configurable via PORT env var)
 #   - frontend:    Next.js production server
 #   - gateway:     FastAPI Gateway API + agent runtime
+#   - redis:       Redis Streams backend for cross-worker SSE stream bridge
 #   - provisioner: (optional) Sandbox provisioner for Kubernetes mode
 #
 # Key environment variables (set via environment/.env or scripts/deploy.sh):
@@ -24,6 +25,22 @@
 # Access: http://localhost:${PORT:-2026}
 
 services:
+  # ── Redis Stream Bridge ────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: deer-flow-redis
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - deer-flow
+    restart: unless-stopped
+
   # ── Reverse Proxy ──────────────────────────────────────────────────────────
   nginx:
     image: nginx:alpine
@@ -74,10 +91,10 @@ services:
     container_name: deer-flow-gateway
     # Gateway hosts the agent runtime with in-process RunManager + StreamBridge
     # singletons -- run state lives in this worker's memory. Default to a single
-    # worker: with >1 worker and no nginx sticky sessions, run cancel, SSE
-    # reconnect, request dedup, and per-worker IM channel services all break
-    # across workers until a shared (e.g. redis) stream bridge lands, which is
-    # not yet implemented. Override GATEWAY_WORKERS only once that is in place.
+    # worker: the Redis stream bridge solves cross-worker SSE delivery and
+    # reconnect, but run cancel, request dedup, and per-worker IM channel
+    # services remain worker-local. Override GATEWAY_WORKERS only when the
+    # Redis stream bridge is enabled and those limitations are acceptable.
     command: sh -c "cd backend && PYTHONPATH=. uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 --workers ${GATEWAY_WORKERS:-1}"
     volumes:
       - ${DEER_FLOW_CONFIG_PATH}:/app/backend/config.yaml:ro
@@ -102,6 +119,7 @@ services:
       - DEER_FLOW_HOME=/app/backend/.deer-flow
       - DEER_FLOW_CONFIG_PATH=/app/backend/config.yaml
       - DEER_FLOW_EXTENSIONS_CONFIG_PATH=/app/backend/extensions_config.json
+      - DEER_FLOW_STREAM_BRIDGE_REDIS_URL=${DEER_FLOW_STREAM_BRIDGE_REDIS_URL:-redis://redis:6379/0}
       - DEER_FLOW_CHANNELS_LANGGRAPH_URL=${DEER_FLOW_CHANNELS_LANGGRAPH_URL:-http://gateway:8001/api}
       - DEER_FLOW_CHANNELS_GATEWAY_URL=${DEER_FLOW_CHANNELS_GATEWAY_URL:-http://gateway:8001}
       - DEER_FLOW_INTERNAL_AUTH_TOKEN=${DEER_FLOW_INTERNAL_AUTH_TOKEN}
@@ -117,6 +135,9 @@ services:
       - ../.env
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    depends_on:
+      redis:
+        condition: service_healthy
     networks:
       - deer-flow
     restart: unless-stopped
@@ -152,6 +173,9 @@ services:
       interval: 10s
       timeout: 5s
       retries: 6
+volumes:
+  redis-data:
+
 networks:
   deer-flow:
     driver: bridge

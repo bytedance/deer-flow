@@ -92,3 +92,18 @@ def test_resolve_unknown_command():
 def test_resolve_bare_slash_is_unknown_empty():
     res = resolve("/")
     assert res.kind == "unknown"
+
+
+def test_goal_is_builtin_command():
+    resolved = resolve("/goal finish the implementation")
+
+    assert resolved.kind == "builtin"
+    assert resolved.name == "goal"
+    assert resolved.args == "finish the implementation"
+
+
+def test_goal_builtin_takes_precedence_over_skill():
+    registry = build_registry([{"name": "goal", "description": "skill", "enabled": True}])
+
+    assert [command.name for command in registry].count("goal") == 1
+    assert resolve("/goal finish", skills=["goal"]).kind == "builtin"
