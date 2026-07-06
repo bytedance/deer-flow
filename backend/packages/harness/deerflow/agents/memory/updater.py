@@ -111,16 +111,28 @@ def create_memory_fact(
     memory_data = get_memory_data(agent_name, user_id=user_id)
     updated_memory = dict(memory_data)
     facts = list(memory_data.get("facts", []))
-    facts.append(
-        {
-            "id": f"fact_{uuid.uuid4().hex[:8]}",
-            "content": normalized_content,
-            "category": normalized_category,
-            "confidence": validated_confidence,
-            "createdAt": now,
-            "source": "manual",
-        }
-    )
+
+    # Compute embedding for semantic search (best-effort, logged on failure)
+    embedding: list[float] | None = None
+    try:
+        from deerflow.agents.memory.embeddings import compute_embedding
+
+        embedding = compute_embedding(normalized_content)
+    except Exception:
+        logger.debug("Failed to compute embedding for manual fact", exc_info=True)
+
+    fact_entry: dict[str, Any] = {
+        "id": f"fact_{uuid.uuid4().hex[:8]}",
+        "content": normalized_content,
+        "category": normalized_category,
+        "confidence": validated_confidence,
+        "createdAt": now,
+        "source": "manual",
+    }
+    if embedding is not None:
+        fact_entry["embedding"] = embedding
+
+    facts.append(fact_entry)
     updated_memory["facts"] = facts
 
     if not _save_memory_to_file(updated_memory, agent_name, user_id=user_id):
@@ -701,6 +713,16 @@ class MemoryUpdater:
                     normalized_source_error = source_error.strip()
                     if normalized_source_error:
                         fact_entry["sourceError"] = normalized_source_error
+
+                # Compute embedding for semantic search (best-effort)
+                try:
+                    from deerflow.agents.memory.embeddings import compute_embedding
+
+                    embedding = compute_embedding(normalized_content)
+                    if embedding is not None:
+                        fact_entry["embedding"] = embedding
+                except Exception:
+                    pass
                 current_memory["facts"].append(fact_entry)
                 if fact_key is not None:
                     existing_fact_keys.add(fact_key)

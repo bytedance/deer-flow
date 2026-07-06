@@ -98,6 +98,19 @@ class MemoryConfig(BaseModel):
             "safety-truncation ceiling is raised accordingly."
         ),
     )
+    embedding_model: str | None = Field(
+        default=None,
+        description=(
+            "Optional model name for computing fact embeddings. "
+            "When set, facts are ranked by semantic similarity to the current "
+            "conversation instead of static confidence. "
+            "The model must be defined in `config.yaml` under the ``models`` "
+            "list (any provider with an OpenAI-compatible ``/v1/embeddings`` "
+            "endpoint). "
+            "When ``None`` (default), falls back to character n-gram embedding "
+            "(zero external dependencies, no API call)."
+        ),
+    )
 
 
 # Global configuration instance

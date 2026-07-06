@@ -424,8 +424,13 @@ def format_memory_for_injection(
     use_tiktoken: bool = True,
     guaranteed_categories: list[str] | None = None,
     guaranteed_token_budget: int = 500,
+    query: str | None = None,
 ) -> str:
     """Format memory data for injection into system prompt.
+
+    When *query* is provided and facts have stored embeddings, facts are
+    ranked by **semantic relevance** to the query (cosine similarity).
+    Without *query* or embeddings, falls back to confidence-based ranking.
 
     Args:
         memory_data: The memory data dictionary.
@@ -445,6 +450,10 @@ def format_memory_for_injection(
             point the safety-truncation ceiling is raised to
             ``max_tokens + guaranteed_actual_usage`` to protect them.
             Ignored when *guaranteed_categories* is ``None`` or empty.
+        query: Optional conversation context for semantic fact ranking.
+            When provided, facts are ranked by cosine similarity between
+            the query embedding and each fact's stored embedding. Falls
+            back to confidence ranking when embeddings are unavailable.
 
     Returns:
         Formatted memory string for system prompt injection.
@@ -540,15 +549,41 @@ def format_memory_for_injection(
         all_fact_lines: list[str] = []
 
         try:
+            # When *query* is provided, compute query embedding once for
+            # vector-based ranking.  Falls back to confidence when the fact
+            # has no stored embedding.
+            _query_embedding: list[float] | None = None
+            _vector_available = False
+            if query:
+                try:
+                    from deerflow.agents.memory.embeddings import compute_embedding
+
+                    _query_embedding = compute_embedding(query)
+                    _vector_available = True
+                    logger.debug(
+                        "format_memory_for_injection: using vector ranking (query=%.40s, embed_dim=%d)",
+                        query,
+                        len(_query_embedding),
+                    )
+                except Exception:
+                    logger.debug("format_memory_for_injection: vector rank unavailable, fallback to confidence")
+
+            def _ranking_key(fact: dict[str, Any]) -> float:
+                """Rank by vector similarity when available, else confidence."""
+                if _query_embedding is not None:
+                    fact_emb = fact.get("embedding")
+                    if isinstance(fact_emb, list) and len(fact_emb) > 0:
+                        from deerflow.agents.memory.embeddings import cosine_similarity
+
+                        return cosine_similarity(_query_embedding, fact_emb)
+                return _coerce_confidence(fact.get("confidence"), default=0.0)
+
             # Partition valid facts into guaranteed vs regular groups.
             # Use the *raw* category field (no ``or "context"`` default) so
             # a category-less legacy fact is never silently promoted into
             # a guaranteed pool whose operator configured
             # ``guaranteed_categories=["context"]``.  Missing-category facts
             # always fall through to the regular path.
-            def _confidence_key(fact: dict[str, Any]) -> float:
-                return _coerce_confidence(fact.get("confidence"), default=0.0)
-
             if effective_guaranteed:
 
                 def _category_match(fact: dict[str, Any]) -> bool:
@@ -560,17 +595,17 @@ def format_memory_for_injection(
 
                 guaranteed = sorted(
                     [f for f in valid_facts if _category_match(f)],
-                    key=_confidence_key,
+                    key=_ranking_key,
                     reverse=True,
                 )
                 regular = sorted(
                     [f for f in valid_facts if not _category_match(f)],
-                    key=_confidence_key,
+                    key=_ranking_key,
                     reverse=True,
                 )
             else:
                 guaranteed = []
-                regular = sorted(valid_facts, key=_confidence_key, reverse=True)
+                regular = sorted(valid_facts, key=_ranking_key, reverse=True)
 
             # ── Phase 1: select guaranteed lines ──────────────────────────
             header_cost = _count_tokens(facts_header, use_tiktoken=use_tiktoken)

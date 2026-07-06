@@ -145,18 +145,23 @@ class DynamicContextMiddleware(AgentMiddleware):
         self._agent_name = agent_name
         self._app_config = app_config
 
-    def _build_full_reminder(self) -> tuple[str, str | None]:
+    def _build_full_reminder(self, query: str | None = None) -> tuple[str, str | None]:
         """Return (date_reminder, memory_block | None).
 
         Framework-owned data (date) is separated from user-owned data (memory)
         so the downstream SystemMessage carries only framework authority and
         memory stays at role:user — preventing untrusted content from gaining
         system privilege (OWASP LLM01).
+
+        Args:
+            query: Optional conversation context for semantic fact ranking.
+                When provided, facts are ranked by vector similarity to this
+                query rather than static confidence.
         """
         from deerflow.agents.lead_agent.prompt import _get_memory_context
 
         injection_enabled = self._app_config.memory.injection_enabled if self._app_config else True
-        memory_context = _get_memory_context(self._agent_name, app_config=self._app_config) if injection_enabled else ""
+        memory_context = _get_memory_context(self._agent_name, app_config=self._app_config, query=query) if injection_enabled else ""
         current_date = datetime.now().strftime("%Y-%m-%d, %A")
 
         date_reminder = "\n".join(
@@ -255,7 +260,19 @@ class DynamicContextMiddleware(AgentMiddleware):
             first_idx = next((i for i, m in enumerate(messages) if _is_user_injection_target(m)), None)
             if first_idx is None:
                 return None
-            date_reminder, memory_block = self._build_full_reminder()
+
+            # Extract the user's message text as query for semantic fact ranking
+            user_msg = messages[first_idx]
+            user_query: str | None = None
+            if hasattr(user_msg, "content") and isinstance(user_msg.content, str):
+                user_query = user_msg.content.strip()
+            elif hasattr(user_msg, "content") and isinstance(user_msg.content, list):
+                text_parts = [
+                    p.get("text", "") for p in user_msg.content if isinstance(p, dict) and isinstance(p.get("text"), str)
+                ]
+                user_query = " ".join(text_parts).strip() or None
+
+            date_reminder, memory_block = self._build_full_reminder(query=user_query)
             logger.info(
                 "DynamicContextMiddleware: injecting full reminder (has_memory=%s) into first HumanMessage id=%r",
                 memory_block is not None,

@@ -651,13 +651,16 @@ combined with a FastAPI gateway for REST API access [citation:FastAPI](https://f
 """
 
 
-def _get_memory_context(agent_name: str | None = None, *, app_config: AppConfig | None = None) -> str:
+def _get_memory_context(agent_name: str | None = None, *, app_config: AppConfig | None = None, query: str | None = None) -> str:
     """Get memory context for injection into system prompt.
 
     Args:
         agent_name: If provided, loads per-agent memory. If None, loads global memory.
         app_config: Explicit application config. When provided, memory options
             are read from this value instead of the global config singleton.
+        query: Optional conversation context for semantic fact ranking.
+            When provided, facts are ranked by relevance to this query
+            instead of static confidence (requires stored embeddings).
 
     Returns:
         Formatted memory context string wrapped in XML tags, or empty string if disabled.
@@ -683,6 +686,7 @@ def _get_memory_context(agent_name: str | None = None, *, app_config: AppConfig 
             use_tiktoken=(config.token_counting == "tiktoken"),
             guaranteed_categories=getattr(config, "guaranteed_categories", None),
             guaranteed_token_budget=getattr(config, "guaranteed_token_budget", 500),
+            query=query,
         )
 
         if not memory_content.strip():
