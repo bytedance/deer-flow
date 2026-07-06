@@ -727,11 +727,7 @@ def test_sync_outputs_to_host_is_noop_when_client_closed():
 
 def test_read_file_supports_bounded_ranges():
     files = FakeFilesAPI(
-        store={
-            "/home/user/workspace/range.txt": (
-                "line 1\nline 2\nline 3\nline 4\nline 5".encode("utf-8")
-            )
-        },
+        store={"/home/user/workspace/range.txt": b"line 1\nline 2\nline 3\nline 4\nline 5"},
     )
     client = FakeClient(files=files)
     sb = _make_sandbox(client, sandbox_id="sb-read-range")
