@@ -31,6 +31,7 @@ The rewrite wraps the 9 steps in a single Python `Orchestrator` class. Phase 1 (
 - `skills/public/chatbi-report/scripts/tests/test_orchestrator.py` — unit tests for `Orchestrator.run_phase_1` / `run_phase_2` / `ForceContinue` / `CheckpointSignal`
 - `skills/public/chatbi-report/scripts/tests/test_pipeline_cli.py` — CLI subprocess tests (wire format kinds)
 - `skills/public/chatbi-report/scripts/tests/test_e2e_minimal.py` — E2E gating test (mock SQLBot + stub compute + stub descriptions)
+- `out_dir/orchestrator-metrics.json` (sidecar, written by Phase 2) — detailed per-step metrics; does NOT alter the spec-pinned `status.json` schema
 
 ### Modified
 - `skills/public/chatbi-report/scripts/sqlbot_client.py` — drop `--mock` boolean flag (only `--mock-fixture` remains, per Goals #6)
@@ -54,6 +55,10 @@ These apply at the boundary handler + boundary unit test FIRST, per [[cross-cutt
 3. **Mock/real SQLBot is selected at `Orchestrator` construction, not at runtime.** `Orchestrator(cfg, sqlbot_instance)` is the only switch. CLI translates `--mock-fixture` into `MockSQLBotClient(fixture)` else `RealSQLBotClient()` (which raises on missing `SQLBOT_BASE_URL`).
 4. **Last-line stdout is JSON wire format, never user progress messages.** Progress messages go to stderr (or are omitted). Agent parses `stdout.strip().splitlines()[-1]` as JSON.
 5. **Phase 2 reads `out_dir/{stem}.parsed.json` and `out_dir/{stem}.wide.json` from disk** (not from agent in-process state) — this keeps Phase 2 invocation independent of Phase 1 process lifetime.
+6. **`wide.json` is flat `list[dict]`** (not nested), with `section_idx` / `report_idx` baked into each row. Same shape as `_cli_assemble_wide` (compute.py:444-472). T11 filters per-report before passing to `normalize_wide_by_report`.
+7. **Descriptions flow via `descriptions_dir`, NOT a `dict[str, str]`.** Agent writes files matching `<stem>.description.report-<idx>.txt` (or the no-stem fallback `description.report-<idx>.txt`) into a directory; `run_phase_2` calls `render_markdown.attach_description_files(doc, descriptions_dir, stem=stem)` which sets `report.description_text` (the public attribute — renderers read `getattr(report, "description_text", None)`).
+8. **`status.json` schema is spec-pinned: 8 flat metrics keys only** (see `assemble_status.write_status:54-63`). Orchestrator's detailed per-step metrics are written to a sidecar `orchestrator-metrics.json` (NOT in `status.json`) — preserves the schema and exposes debug data.
+9. **`render_docx.style_path` is REQUIRED** (no default in the library). `OrchestratorConfig.style_path` defaults to `scripts/example/style.json` (the bundled default). CLI `--style-path` overrides.
 
 ---
 
@@ -183,7 +188,7 @@ class ForceContinue:
 @dataclass
 class Phase1Result:
     parsed: dict
-    wide: dict
+    wide: list[dict]   # flat list[dict] with section_idx/report_idx per row (same shape as _cli_assemble_wide)
     ir: list[dict]
     description_prompts: list[str]
     metrics: dict[str, Any]
@@ -268,9 +273,10 @@ class Orchestrator:
     def run_phase_2(
         self,
         parsed: dict,
-        wide: dict,
+        wide: list[dict],
         compute_sources: dict[str, str],
-        descriptions: dict[str, str],
+        descriptions_dir: str,
+        stem: str,
     ) -> CheckpointSignal | RunResult:
         raise NotImplementedError
 ```
@@ -592,7 +598,8 @@ def test_run_phase_1_assemble_and_extract_ir(tmp_path):
     assert (tmp_path / "input.ir.json").exists()
     assert "4_assemble" in result.metrics
     assert "6_ir" in result.metrics
-    assert isinstance(result.wide, dict)
+    assert isinstance(result.wide, list)  # flat list[dict], section_idx/report_idx per row
+    assert all({"section_idx", "report_idx"} <= set(r.keys()) for r in result.wide)
     assert isinstance(result.ir, list)
     # description_prompts collected per-report (input.md may have none)
     assert isinstance(result.description_prompts, list)
@@ -608,10 +615,11 @@ Expected: `AssertionError: input.wide.json not found`
 In `run_phase_1` of `pipeline.py`, after step 3 (query) and after the 3.5 checkpoint emit, insert:
 
 ```python
-        # Step 4: assemble-wide (per report, then aggregate)
+        # Step 4: assemble-wide (flat list[dict] with section_idx/report_idx baked in,
+        # matching the existing _cli_assemble_wide contract in compute.py:444-472)
         from compute import assemble_wide_table
 
-        per_report_wide: list[list[dict]] = []
+        flat_wide: list[dict] = []
         for sec_idx, section in enumerate(parsed.sections):
             for rep_idx, report in enumerate(section.reports):
                 per_idx = [
@@ -623,17 +631,19 @@ In `run_phase_1` of `pipeline.py`, after step 3 (query) and after the 3.5 checkp
                     for r in query_payload.get("results", [])
                     if r.get("section_idx") == sec_idx and r.get("report_idx") == rep_idx
                 ]
-                rows = assemble_wide_table(per_idx, report)
-                per_report_wide.append(rows)
-        wide_obj = {"per_report": per_report_wide}
+                rows = assemble_wide_table(per_idx, report, sec_idx, rep_idx)
+                flat_wide.extend(rows)
         wide_path = self._cfg.out_dir / f"{stem}.wide.json"
         wide_path.write_text(
-            json.dumps(wide_obj, ensure_ascii=False, indent=2),
+            json.dumps(flat_wide, ensure_ascii=False, indent=2, default=str),
             encoding="utf-8",
         )
         artifacts["wide"] = wide_path
-        n_rows = sum(len(rs) for rs in per_report_wide)
-        n_cols = sum(len(rs[0]) if rs else 0 for rs in per_report_wide)
+        n_rows = len(flat_wide)
+        n_cols = sum(
+            len({k for k in r.keys() if k not in {"branch_num", "section_idx", "report_idx", "data_dt", "org_ecd"}})
+            for r in flat_wide
+        )
         metrics["4_assemble"] = {"rows": n_rows, "cols": n_cols}
 
         # Step 6: extract-ir (per report, all sections)
@@ -662,12 +672,12 @@ In `run_phase_1` of `pipeline.py`, after step 3 (query) and after the 3.5 checkp
         metrics["6_ir"] = {"n_specs": len(ir)}
 ```
 
-Also update the final `return Phase1Result(...)` to use the assembled `wide_obj` and collected `ir` / `description_prompts`:
+Also update the final `return Phase1Result(...)` to use the assembled `flat_wide` and collected `ir` / `description_prompts`:
 
 ```python
         return Phase1Result(
             parsed=parsed.to_dict(),
-            wide=wide_obj,
+            wide=flat_wide,
             ir=ir,
             description_prompts=description_prompts,
             metrics=metrics,
@@ -785,15 +795,19 @@ def test_run_phase_2_validate_marks_sentinel_for_bad_source(tmp_path):
         parsed=p1.parsed,
         wide=p1.wide,
         compute_sources={"good_col": str(bad_src)},  # name mismatch is the failure
-        descriptions={},
+        descriptions_dir=str(tmp_path),
+        stem=INPUT_MD.stem,
     )
     # Continue to RunResult (compute failures don't abort Phase 2)
     assert isinstance(final, p.RunResult)
     status = json.loads(final.status_json.read_text(encoding="utf-8"))
-    # bad_col triggers a sentinel; status.json records the validate failure
-    assert "8a_validate" in status.get("metrics", {})
-    assert status["metrics"]["8a_validate"]["total"] == 1
-    assert status["metrics"]["8a_validate"]["ok"] == 0
+    # status.json schema is spec-pinned: only 8 flat metrics keys exist (assemble_status:54-63).
+    # Detailed per-step metrics live in the sidecar orchestrator-metrics.json.
+    assert status["metrics"]["computed_count"] == 1
+    assert status["metrics"]["compute_validation_failures"] == 1
+    sidecar = json.loads((tmp_path / "orchestrator-metrics.json").read_text(encoding="utf-8"))
+    assert sidecar["8a_validate"]["total"] == 1
+    assert sidecar["8a_validate"]["ok"] == 0
 ```
 
 - [ ] **Step 2: Run the test to verify it fails**
@@ -809,9 +823,10 @@ Replace the body of `run_phase_2` in `skills/public/chatbi-report/scripts/pipeli
     def run_phase_2(
         self,
         parsed: dict,
-        wide: dict,
+        wide: list[dict],
         compute_sources: dict[str, str],
-        descriptions: dict[str, str],
+        descriptions_dir: str,
+        stem: str,
     ) -> CheckpointSignal | RunResult:
         from compute import validate_ast, validate_signature
 
@@ -834,16 +849,15 @@ Replace the body of `run_phase_2` in `skills/public/chatbi-report/scripts/pipeli
             if ok:
                 metrics["8a_validate"]["ok"] += 1
 
-        # Mark sentinel in wide.per_report (replacing the column value where present)
+        # Mark sentinel in flat wide rows (column value replacement where present)
         if sentinel_cols:
-            for report_rows in wide.get("per_report", []):
-                for row in report_rows:
-                    for col in sentinel_cols:
-                        if col in row:
-                            row[col] = "⚠️COMPUTE_FAILED"
+            for row in wide:
+                for col in sentinel_cols:
+                    if col in row:
+                        row[col] = "⚠️COMPUTE_FAILED"
 
         # Placeholder for steps 8b–9 (filled in next tasks)
-        return self._finish_phase_2(parsed, wide, metrics)
+        return self._finish_phase_2(parsed, wide, metrics, descriptions_dir, stem)
 ```
 
 Add a private helper to `Orchestrator` that the next tasks will replace incrementally. Append after `run_phase_2`:
@@ -918,12 +932,13 @@ def test_run_phase_2_evaluate_and_apply(tmp_path):
         parsed=p1.parsed,
         wide=p1.wide,
         compute_sources={"noop": str(src)},
-        descriptions={},
+        descriptions_dir=str(tmp_path),
+        stem=INPUT_MD.stem,
     )
     assert isinstance(final, p.RunResult)
-    status = json.loads(final.status_json.read_text(encoding="utf-8"))
-    assert "8b_evaluate" in status["metrics"]
-    assert "8c_apply" in status["metrics"]
+    sidecar = json.loads((tmp_path / "orchestrator-metrics.json").read_text(encoding="utf-8"))
+    assert "8b_evaluate" in sidecar
+    assert "8c_apply" in sidecar
 ```
 
 - [ ] **Step 2: Run the test to verify it fails**
@@ -948,13 +963,9 @@ In `run_phase_2`, replace the trailing `# Placeholder for steps 8b–9` block wi
                 continue
             eval_total += 1
             try:
-                # Build a DataFrame from wide.per_report rows (best effort).
-                # If a column is missing, evaluate_column will receive NaN; we don't
-                # care for the unit test — sentinel-marked cells already short-circuit.
-                rows_for_df = []
-                for report_rows in wide.get("per_report", []):
-                    rows_for_df.extend(report_rows)
-                df = pd.DataFrame(rows_for_df)
+                # Build a DataFrame from wide rows (flat). Missing columns yield NaN;
+                # sentinel-marked cells already short-circuit via 8a.
+                df = pd.DataFrame(wide)
                 series = evaluate_column(
                     source=Path(src_path_str).read_text(encoding="utf-8"),
                     function_name=col_name,
@@ -969,12 +980,11 @@ In `run_phase_2`, replace the trailing `# Placeholder for steps 8b–9` block wi
                 sentinel_cols.add(col_name)
         metrics["8b_evaluate"] = {"ok": eval_ok, "total": eval_total}
 
-        # Step 8c: apply-computed
-        applied = apply_computed_results(wide.get("per_report", []), computed)
-        wide = {**wide, "per_report": applied}
-        metrics["8c_apply"] = {"n_columns": len(applied[0]) if applied else 0}
+        # Step 8c: apply-computed (in-place, preserves section_idx/report_idx)
+        wide = apply_computed_results(wide, computed)
+        metrics["8c_apply"] = {"n_columns": len(computed)}
 
-        return self._finish_phase_2(parsed, wide, metrics)
+        return self._finish_phase_2(parsed, wide, metrics, descriptions_dir, stem)
 ```
 
 - [ ] **Step 4: Run the test to verify it passes**
@@ -1012,14 +1022,14 @@ def test_run_phase_2_attach_descriptions_and_8d5_checkpoint(tmp_path):
     p1 = orch.run_phase_1()
     assert isinstance(p1, p.Phase1Result)
 
-    # No compute sources, no description files → 8d.5 should still trigger
-    # because we have at least 1 description_prompt in input.md and the
-    # descriptions dict is empty.
+    # No description files → 8d.5 should trigger because we have at least 1
+    # description_prompt in input.md and no files exist under descriptions_dir.
     final = orch.run_phase_2(
         parsed=p1.parsed,
         wide=p1.wide,
         compute_sources={},
-        descriptions={},  # empty → 8d.5 triggers
+        descriptions_dir=str(tmp_path / "desc"),  # empty dir → 8d.5 triggers
+        stem=INPUT_MD.stem,
     )
     if p1.description_prompts:
         assert isinstance(final, p.CheckpointSignal)
@@ -1039,68 +1049,42 @@ Expected: result is `RunResult` (current impl skips 8d.5 entirely) — test fail
 In `run_phase_2`, replace the final `return self._finish_phase_2(...)` with:
 
 ```python
-        # Step 8d: attach description files (read each path into the doc).
-        from parse_md import doc_from_dict as _doc_from_dict  # noqa: F401  (re-import safe)
-        from render_markdown import doc_from_dict
+        # Step 8d: attach descriptions via render_markdown's standard API
+        # (sets report.description_text, NOT _description_text — see render_markdown:96-112).
+        # Idempotent: T11 calls this again, but it's a no-op once description_text is set.
+        from render_markdown import attach_description_files
+        from parse_md import doc_from_dict
 
         doc = doc_from_dict(parsed)
-        failed_descriptions: list[str] = []
-        for report_idx_str, file_path in descriptions.items():
-            p_file = Path(file_path)
-            if not p_file.exists():
-                failed_descriptions.append(report_idx_str)
-                continue
-            content = p_file.read_text(encoding="utf-8")
-            # Find the report at the given global index; attach as a side-channel
-            # attribute the renderer can read. We mutate the doc structure.
-            try:
-                idx = int(report_idx_str)
-            except ValueError:
-                failed_descriptions.append(report_idx_str)
-                continue
-            target = _find_report_by_global_index(doc, idx)
-            if target is not None:
-                target._description_text = content  # type: ignore[attr-defined]
-        metrics["8d_describe"] = {
-            "ok": len(descriptions) - len(failed_descriptions),
-            "total": len(descriptions),
-        }
+        attach_description_files(doc, descriptions_dir, stem=stem)
 
-        # Step 8d.5: description checkpoint (always trigger if any failed AND prompts existed)
-        if failed_descriptions and p1_artifact_count(parsed) > 0:
+        # Detect failures: any report with description_prompt that didn't get description_text.
+        total = 0
+        found = 0
+        for section in doc.sections:
+            for report in section.reports:
+                if not report.description_prompt:
+                    continue
+                total += 1
+                if getattr(report, "description_text", None):
+                    found += 1
+        metrics["8d_describe"] = {"ok": found, "total": total}
+
+        # Step 8d.5: description checkpoint (per spec §"用户回复路由" — 8d.5 always triggers
+        # when any description file is missing AND prompts existed, 2026-06-27 policy reversal).
+        if total > 0 and found < total:
             return CheckpointSignal(
                 step="8d.5",
                 metrics=metrics,
-                artifacts={"parsed": self._cfg.out_dir / f"{self._cfg.md_path.stem}.parsed.json"},
-                message=f"description 生成 {len(failed_descriptions)}/{len(descriptions)} 失败",
+                artifacts={"parsed": self._cfg.out_dir / f"{stem}.parsed.json"},
+                message=f"description 生成 {found}/{total} 失败",
             )
 
-        return self._finish_phase_2(parsed, wide, metrics)
+        return self._finish_phase_2(parsed, wide, metrics, descriptions_dir, stem)
 ```
 
-Add module-level helpers at the bottom of `pipeline.py`:
-
-```python
-def _find_report_by_global_index(doc: Any, global_idx: int) -> Any:
-    """Walk doc.sections[*].reports in order; return the report at global index."""
-    counter = 0
-    for section in doc.sections:
-        for report in section.reports:
-            if counter == global_idx:
-                return report
-            counter += 1
-    return None
-
-
-def p1_artifact_count(parsed: dict) -> int:
-    """Count report slots that would have description_prompts (rough heuristic)."""
-    count = 0
-    for section in parsed.get("sections", []):
-        for report in section.get("reports", []):
-            if report.get("description_prompt"):
-                count += 1
-    return count
-```
+The old `_find_report_by_global_index` and `p1_artifact_count` module helpers are deleted
+(their work is now done by `attach_description_files` + `getattr` checks).
 
 - [ ] **Step 4: Run the test to verify it passes**
 
@@ -1137,18 +1121,24 @@ def test_run_phase_2_render_produces_report_and_status(tmp_path):
     p1 = orch.run_phase_1()
     assert isinstance(p1, p.Phase1Result)
 
-    # Provide description files matching the report's description_prompts
-    descriptions = {}
+    # Provide description files matching the report's description_prompts.
+    # Filename convention matches render_markdown.attach_description_files
+    # fallback: {stem}.description.report-<idx>.txt or description.report-<idx>.txt.
+    desc_dir = tmp_path / "desc"
+    desc_dir.mkdir()
+    stem = INPUT_MD.stem
     for i, _ in enumerate(p1.description_prompts):
-        d = tmp_path / f"desc-{i}.txt"
-        d.write_text(f"description for report {i}", encoding="utf-8")
-        descriptions[str(i)] = str(d)
+        # flat_idx (single-section input.md → flat == section-relative)
+        (desc_dir / f"{stem}.description.report-{i}.txt").write_text(
+            f"description for report {i}", encoding="utf-8"
+        )
 
     final = orch.run_phase_2(
         parsed=p1.parsed,
         wide=p1.wide,
         compute_sources={},
-        descriptions=descriptions,
+        descriptions_dir=str(desc_dir),
+        stem=stem,
     )
     assert isinstance(final, p.RunResult)
     assert final.report_md.exists()
@@ -1160,6 +1150,10 @@ def test_run_phase_2_render_produces_report_and_status(tmp_path):
     assert final.status_json.exists()
     status = json.loads(final.status_json.read_text(encoding="utf-8"))
     assert status["error_class"] is None
+    # status.json schema is spec-pinned (8 flat keys); see assemble_status:54-63.
+    assert status["exit_step"] == "9"
+    assert "queried_count" in status["metrics"]
+    assert "compute_validation_failures" in status["metrics"]
 ```
 
 - [ ] **Step 2: Run the test to verify it fails**
@@ -1173,34 +1167,96 @@ Replace the entire `_finish_phase_2` method body with:
 
 ```python
     def _finish_phase_2(
-        self, parsed: dict, wide: dict, metrics: dict[str, Any],
+        self, parsed: dict, wide: list[dict], metrics: dict[str, Any],
+        descriptions_dir: str,
+        stem: str,
     ) -> RunResult:
         from render_docx import render_docx
-        from render_markdown import doc_from_dict, normalize_wide_by_report, render_markdown
+        from render_markdown import (
+            attach_description_files,
+            doc_from_dict,
+            normalize_wide_by_report,
+            render_markdown,
+        )
 
         doc = doc_from_dict(parsed)
-        wide_by_report = normalize_wide_by_report(doc, wide)
+
+        # wide is flat list[dict] (from disk or Phase1Result.wide). Filter per report
+        # and reshape to the {data_dt, org_ecd, branch_num, cells, raw_cells} format
+        # render_markdown / render_docx expect. Mirrors _cli_assemble_wide +
+        # normalize_wide_by_report semantics.
+        wide_by_report: list[list[dict]] = []
+        for sec_idx, section in enumerate(doc.sections):
+            for rep_idx, _ in enumerate(section.reports):
+                rows = [
+                    r for r in wide
+                    if r.get("section_idx") == sec_idx and r.get("report_idx") == rep_idx
+                ]
+                if not rows:
+                    wide_by_report.append([])
+                    continue
+                wide_by_report.append(normalize_wide_by_report(doc, rows)[0])
+
+        # Attach description text via the existing render_markdown API
+        # (sets report.description_text, NOT _description_text — see render_markdown:96-112).
+        attach_description_files(doc, descriptions_dir, stem=stem)
         compute_status: dict[str, str] = {}
 
         report_md_path = self._cfg.out_dir / "report.md"
-        render_markdown(
+        # render_markdown returns str; we write to file ourselves (signature: render_markdown:243).
+        md_text = render_markdown(
             doc=doc,
             wide_by_report=wide_by_report,
             compute_status=compute_status,
-            out_path=report_md_path,
         )
+        report_md_path.write_text(md_text, encoding="utf-8")
+
         report_docx_path: Path | None = None
         if not self._cfg.skip_docx:
             report_docx_path = self._cfg.out_dir / "report.docx"
+            # style_path is REQUIRED (no default in render_docx:122-128); use bundled default.
+            resolved_style = self._cfg.style_path or (
+                Path(__file__).resolve().parent / "example" / "style.json"
+            )
             render_docx(
                 report_doc=doc,
                 wide=wide_by_report,
                 out_path=str(report_docx_path),
-                style_path=str(self._cfg.style_path) if self._cfg.style_path else None,
+                style_path=str(resolved_style),
             )
 
-        status_path = self._cfg.out_dir / "status.json"
+        # Translate orchestrator-shaped metrics → write_status schema (8 flat keys,
+        # see assemble_status.py:54-63). Detailed per-step metrics are NOT persisted
+        # in status.json by design (spec-pinned schema).
         from assemble_status import write_status
+
+        def _ok_total(entry: dict | None) -> tuple[int, int]:
+            if not entry:
+                return 0, 0
+            return int(entry.get("ok", 0)), int(entry.get("total", 0))
+
+        q_ok, q_total = _ok_total(metrics.get("3_query"))
+        a_ok, a_total = _ok_total(metrics.get("8a_validate"))
+        d_ok, d_total = _ok_total(metrics.get("8d_describe"))
+        flat_metrics = {
+            "queried_count": q_total,
+            "query_failures": q_total - q_ok,
+            "computed_count": a_total,
+            "compute_validation_failures": a_total - a_ok,
+            "descriptions_generated": d_ok,
+            "description_failures": d_total - d_ok,
+            "llm_calls": 0,  # orchestrator never invokes the LLM directly
+            "duration_seconds": float(metrics.get("duration_seconds", 0.0)),
+        }
+        # Keep orchestrator's detailed metrics in a sidecar for debugging —
+        # NOT status.json (spec-pinned schema).
+        sidecar_path = self._cfg.out_dir / "orchestrator-metrics.json"
+        sidecar_path.write_text(
+            json.dumps(metrics, ensure_ascii=False, indent=2, default=str),
+            encoding="utf-8",
+        )
+
+        status_path = self._cfg.out_dir / "status.json"
         outputs: dict[str, str] = {"report_md": str(report_md_path)}
         if report_docx_path is not None:
             outputs["report_docx"] = str(report_docx_path)
@@ -1210,7 +1266,7 @@ Replace the entire `_finish_phase_2` method body with:
             error_class=None,
             error_detail=None,
             outputs=outputs,
-            metrics=metrics,
+            metrics=flat_metrics,
         )
         return RunResult(
             report_md=report_md_path,
@@ -1329,19 +1385,21 @@ def test_cli_phase2_emits_phase2_result_wire_format(tmp_path):
     p1_payload = json.loads(p1.stdout.strip().splitlines()[-1])
     assert p1_payload["kind"] == "phase1_result"
 
-    # Provide description files
+    # Provide description files at <stem>.description.report-<idx>.txt
+    # (matches render_markdown.attach_description_files fallback naming).
+    desc_dir = tmp_path / "desc"
+    desc_dir.mkdir()
+    stem = INPUT_MD.stem
     for i, _ in enumerate(p1_payload["result"]["description_prompts"]):
-        (tmp_path / f"desc-{i}.txt").write_text(f"desc {i}", encoding="utf-8")
-
-    desc_args: list[str] = []
-    for i in range(len(p1_payload["result"]["description_prompts"])):
-        desc_args += ["--description", f"{i}={tmp_path / f'desc-{i}.txt'}"]
+        (desc_dir / f"{stem}.description.report-{i}.txt").write_text(
+            f"desc {i}", encoding="utf-8"
+        )
 
     p2 = _run_cli(
         "phase2",
         "--md", str(INPUT_MD),
         "--out-dir", str(tmp_path),
-        *desc_args,
+        "--descriptions-dir", str(desc_dir),
     )
     assert p2.returncode == 0, f"stderr: {p2.stderr}"
     last_line = p2.stdout.strip().splitlines()[-1]
@@ -1426,14 +1484,25 @@ def main(argv: list[str] | None = None) -> int:
     p1.add_argument("--md", required=True)
     p1.add_argument("--out-dir", required=True)
     p1.add_argument("--mock-fixture", default=None)
+    # force_continue flags — set when the user has already acknowledged the
+    # checkpoint at 1.5 / 3.5 (see spec §"用户回复路由" — agent re-invokes
+    # `phase1` with these set after user picks "继续").
+    p1.add_argument("--skip-lint-checkpoint", action="store_true",
+                    help="Skip the 1.5 lint checkpoint (user confirmed continue).")
+    p1.add_argument("--skip-query-checkpoint", action="store_true",
+                    help="Skip the 3.5 query checkpoint (user confirmed continue).")
 
     p2 = sub.add_parser("phase2", help="Run Phase 2 (steps 8a–9).")
     p2.add_argument("--md", required=True)
     p2.add_argument("--out-dir", required=True)
-    p2.add_argument("--compute-source", action="append", default=[])
-    p2.add_argument("--description", action="append", default=[])
+    p2.add_argument("--compute-source", action="append", default=[],
+                    help="colname=/path/to/source.py (repeatable)")
+    p2.add_argument("--descriptions-dir", default=None,
+                    help="dir containing <stem>.description.report-<idx>.txt files "
+                         "(defaults to <out_dir>)")
     p2.add_argument("--skip-docx", action="store_true")
-    p2.add_argument("--style-path", default=None)
+    p2.add_argument("--style-path", default=None,
+                    help="DOCX style JSON (defaults to example/style.json)")
 
     args = parser.parse_args(argv)
 
@@ -1453,7 +1522,11 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         if args.cmd == "phase1":
-            result = orch.run_phase_1()
+            fc = ForceContinue(
+                skip_lint_checkpoint=args.skip_lint_checkpoint,
+                skip_query_checkpoint=args.skip_query_checkpoint,
+            )
+            result = orch.run_phase_1(force_continue=fc)
         else:
             stem = cfg.md_path.stem
             parsed = json.loads(
@@ -1462,11 +1535,13 @@ def main(argv: list[str] | None = None) -> int:
             wide = json.loads(
                 (cfg.out_dir / f"{stem}.wide.json").read_text(encoding="utf-8")
             )
+            descriptions_dir = args.descriptions_dir or str(cfg.out_dir)
             result = orch.run_phase_2(
                 parsed=parsed,
                 wide=wide,
                 compute_sources=_parse_kv_list(args.compute_source),
-                descriptions=_parse_kv_list(args.description),
+                descriptions_dir=descriptions_dir,
+                stem=stem,
             )
     except Exception as exc:
         print(f"FAIL: {exc}", file=sys.stderr)
@@ -1552,18 +1627,21 @@ def test_e2e_minimal(tmp_path):
         )
         compute_sources[ir_item["name"]] = str(src)
 
-    descriptions: dict[str, str] = {}
+    descriptions_dir = tmp_path / "desc"
+    descriptions_dir.mkdir()
+    stem = INPUT_MD.stem
     for i, _ in enumerate(p1.description_prompts):
-        d = tmp_path / f"desc-{i}.txt"
-        d.write_text(f"description text for report {i}", encoding="utf-8")
-        descriptions[str(i)] = str(d)
+        (descriptions_dir / f"{stem}.description.report-{i}.txt").write_text(
+            f"description text for report {i}", encoding="utf-8"
+        )
 
     # Phase 2
     final = orch.run_phase_2(
         parsed=p1.parsed,
         wide=p1.wide,
         compute_sources=compute_sources,
-        descriptions=descriptions,
+        descriptions_dir=str(descriptions_dir),
+        stem=stem,
     )
     assert isinstance(final, p.RunResult), f"expected RunResult, got {type(final).__name__}"
 
@@ -1574,9 +1652,19 @@ def test_e2e_minimal(tmp_path):
     assert final.report_docx.exists()
     assert final.status_json.exists()
 
+    # status.json: spec-pinned schema (8 flat metrics keys, see assemble_status:54-63).
     status = json.loads(final.status_json.read_text(encoding="utf-8"))
     assert status.get("error_class") != "USER_ABORTED", status
     assert status.get("exit_step") == "9"
+    assert status["metrics"]["queried_count"] >= 1
+    assert status["metrics"]["query_failures"] == 0  # mock fixture all succeed
+
+    # orchestrator-metrics.json: detailed per-step metrics sidecar.
+    sidecar = json.loads(
+        (tmp_path / "orchestrator-metrics.json").read_text(encoding="utf-8")
+    )
+    assert "8a_validate" in sidecar
+    assert "8b_evaluate" in sidecar
 ```
 
 - [ ] **Step 2: Run the E2E test**
@@ -1706,13 +1794,13 @@ python /mnt/skills/public/chatbi-report/scripts/pipeline.py phase1 \
   --mock-fixture /mnt/skills/public/chatbi-report/example/mock_sqlbot/profit_yoy.json
 ```
 
-If the parsed last-line JSON is `{"kind": "checkpoint", "step": "1.5" | "3.5", ...}`, call `ask_clarification` per the table in `references/pipeline.md`. If user picks "停止", call `assemble_status.py` with `error_class=USER_ABORTED`. If user picks "继续", call the same `phase1` command again with `force_continue` (set via the agent's next call — see spec §"用户回复路由").
+If the parsed last-line JSON is `{"kind": "checkpoint", "step": "1.5" | "3.5", ...}`, call `ask_clarification` per the table in `references/pipeline.md`. If user picks "停止", call `assemble_status.py` with `error_class=USER_ABORTED`. If user picks "继续", re-invoke the same `phase1` command with `--skip-lint-checkpoint` and/or `--skip-query-checkpoint` (these set `ForceContinue` per spec §"用户回复路由").
 
 ### Step 4–6: assemble, extract-ir (auto, embedded in Phase 1)
 
 ### Step 7: codegen (agent LLM, in chat)
 
-Read the last-line JSON's `result.ir` (list of ComputeIR) and `result.description_prompts`. Write compute source files and description files to `/mnt/user-data/outputs/`.
+Read the last-line JSON's `result.ir` (list of ComputeIR) and `result.description_prompts`. Write compute source files to `/mnt/user-data/outputs/compute/<name>.py` and description files to `/mnt/user-data/outputs/desc/<stem>.description.report-<idx>.txt` (filename convention matches `render_markdown.attach_description_files`).
 
 ### Step 8a–8d.5: validate, evaluate, apply, describe (Phase 2 subcommand)
 
@@ -1720,8 +1808,7 @@ Read the last-line JSON's `result.ir` (list of ComputeIR) and `result.descriptio
 python /mnt/skills/public/chatbi-report/scripts/pipeline.py phase2 \
   --md /mnt/user-data/uploads/<file>.md \
   --out-dir /mnt/user-data/outputs \
-  --description 0=/mnt/user-data/outputs/desc-0.txt \
-  --description 1=/mnt/user-data/outputs/desc-1.txt \
+  --descriptions-dir /mnt/user-data/outputs/desc \
   --compute-source my_col=/mnt/user-data/outputs/compute/my_col.py
 ```
 
@@ -1839,7 +1926,7 @@ In `skills/public/chatbi-report/references/pipeline.md`, replace the "State mach
 | 8a validate | in-process | `Orchestrator.run_phase_2` | per-source pass/fail → sentinel |
 | 8b evaluate | in-process | `Orchestrator.run_phase_2` | per-source computed dict |
 | 8c apply-computed | in-process | `Orchestrator.run_phase_2` | updated wide.per_report |
-| 8d attach descriptions | in-process | `Orchestrator.run_phase_2` | doc._description_text per report |
+| 8d attach descriptions | in-process | `Orchestrator.run_phase_2` | `report.description_text` per report (via `render_markdown.attach_description_files`) |
 | 8d.5 description checkpoint | dataclass emit | `Orchestrator.run_phase_2` | `CheckpointSignal("8d.5", ...)` if any failure |
 | 9 render + status | in-process | `Orchestrator.run_phase_2` | `report.md`, `report.docx`, `status.json` |
 
@@ -1968,8 +2055,8 @@ git commit -m "docs(chatbi-report): troubleshooting.md — new error path via wi
 | `_emit_wire_format` | T12 | T12 only |
 | `_parse_kv_list` | T12 | T12 only |
 | `main` | T12 | T12 only |
-| `_find_report_by_global_index` | T10 | T10 only |
-| `p1_artifact_count` | T10 | T10 only |
+| `attach_description_files` (called from T10 + T11) | render_markdown.py (library) | T10, T11 |
+| `orchestrator-metrics.json` (sidecar) | T11 | T11, T13 (asserts) |
 
 No type drift. `clearLayers` vs `clearFullLayers`-style bugs are not present.
 
