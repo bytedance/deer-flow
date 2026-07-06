@@ -19,6 +19,7 @@ from langchain.agents import create_agent
 from langchain.tools import BaseTool
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
+from langgraph.errors import GraphRecursionError
 
 from deerflow.agents.thread_state import SandboxState, ThreadDataState, ThreadState
 from deerflow.config import get_app_config
@@ -31,6 +32,7 @@ from deerflow.subagents.step_events import capture_new_step_messages
 from deerflow.subagents.token_collector import SubagentTokenCollector
 from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY
 from deerflow.tracing import build_tracing_callbacks, inject_langfuse_metadata
+from deerflow.utils.messages import message_content_to_text
 
 if TYPE_CHECKING:
     # Imported lazily at runtime inside _build_initial_state: importing
@@ -57,6 +59,7 @@ class SubagentStatus(Enum):
     FAILED = "failed"
     CANCELLED = "cancelled"
     TIMED_OUT = "timed_out"
+    MAX_TURNS_REACHED = "max_turns_reached"
 
     @property
     def is_terminal(self) -> bool:
@@ -65,6 +68,7 @@ class SubagentStatus(Enum):
             type(self).FAILED,
             type(self).CANCELLED,
             type(self).TIMED_OUT,
+            type(self).MAX_TURNS_REACHED,
         }
 
 
@@ -135,6 +139,49 @@ class SubagentResult:
             self.completed_at = completed_at or datetime.now()
             self.status = status
             return True
+
+
+def _extract_final_result(final_state: Any, *, trace_id: str, name: str) -> str:
+    """Extract a human-readable result string from the streamed subagent state.
+
+    Finds the last ``AIMessage`` in the conversation and stringifies its
+    content via the shared :func:`message_content_to_text` helper; falls back
+    to the last message of any type when no AIMessage is present. Returns a
+    sentinel string (``"No response generated"``) when there is nothing to
+    extract — including when the shared helper yields an empty string — so
+    callers never confuse a missing result with a legitimately empty one.
+
+    Used on both the normal-completion path and the max-turns path
+    (#3875 Phase 2): when ``recursion_limit`` aborts the run mid-flight,
+    ``final_state`` holds the last chunk streamed before the limit fired, so
+    this recovers the partial work instead of dropping it.
+    """
+    if final_state is None:
+        logger.warning(f"[trace={trace_id}] Subagent {name} no final state")
+        return "No response generated"
+
+    messages = final_state.get("messages", [])
+    logger.info(f"[trace={trace_id}] Subagent {name} final messages count: {len(messages)}")
+
+    last_ai_message = None
+    for msg in reversed(messages):
+        if isinstance(msg, AIMessage):
+            last_ai_message = msg
+            break
+
+    if last_ai_message is not None:
+        text = message_content_to_text(last_ai_message.content)
+        return text if text else "No response generated"
+
+    if messages:
+        last_message = messages[-1]
+        logger.warning(f"[trace={trace_id}] Subagent {name} no AIMessage found, using last message: {type(last_message)}")
+        raw_content = last_message.content if hasattr(last_message, "content") else str(last_message)
+        text = message_content_to_text(raw_content)
+        return text if text else "No response generated"
+
+    logger.warning(f"[trace={trace_id}] Subagent {name} no messages in final state")
+    return "No response generated"
 
 
 # Global storage for background task results
@@ -660,85 +707,32 @@ class SubagentExecutor:
 
             logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} completed async execution")
             token_usage_records = collector.snapshot_records()
-            final_result: str | None = None
-
-            if final_state is None:
-                logger.warning(f"[trace={self.trace_id}] Subagent {self.config.name} no final state")
-                final_result = "No response generated"
-            else:
-                # Extract the final message - find the last AIMessage
-                messages = final_state.get("messages", [])
-                logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} final messages count: {len(messages)}")
-
-                # Find the last AIMessage in the conversation
-                last_ai_message = None
-                for msg in reversed(messages):
-                    if isinstance(msg, AIMessage):
-                        last_ai_message = msg
-                        break
-
-                if last_ai_message is not None:
-                    content = last_ai_message.content
-                    # Handle both str and list content types for the final result
-                    if isinstance(content, str):
-                        final_result = content
-                    elif isinstance(content, list):
-                        # Extract text from list of content blocks for final result only.
-                        # Concatenate raw string chunks directly, but preserve separation
-                        # between full text blocks for readability.
-                        text_parts = []
-                        pending_str_parts = []
-                        for block in content:
-                            if isinstance(block, str):
-                                pending_str_parts.append(block)
-                            elif isinstance(block, dict):
-                                if pending_str_parts:
-                                    text_parts.append("".join(pending_str_parts))
-                                    pending_str_parts.clear()
-                                text_val = block.get("text")
-                                if isinstance(text_val, str):
-                                    text_parts.append(text_val)
-                        if pending_str_parts:
-                            text_parts.append("".join(pending_str_parts))
-                        final_result = "\n".join(text_parts) if text_parts else "No text content in response"
-                    else:
-                        final_result = str(content)
-                elif messages:
-                    # Fallback: use the last message if no AIMessage found
-                    last_message = messages[-1]
-                    logger.warning(f"[trace={self.trace_id}] Subagent {self.config.name} no AIMessage found, using last message: {type(last_message)}")
-                    raw_content = last_message.content if hasattr(last_message, "content") else str(last_message)
-                    if isinstance(raw_content, str):
-                        final_result = raw_content
-                    elif isinstance(raw_content, list):
-                        parts = []
-                        pending_str_parts = []
-                        for block in raw_content:
-                            if isinstance(block, str):
-                                pending_str_parts.append(block)
-                            elif isinstance(block, dict):
-                                if pending_str_parts:
-                                    parts.append("".join(pending_str_parts))
-                                    pending_str_parts.clear()
-                                text_val = block.get("text")
-                                if isinstance(text_val, str):
-                                    parts.append(text_val)
-                        if pending_str_parts:
-                            parts.append("".join(pending_str_parts))
-                        final_result = "\n".join(parts) if parts else "No text content in response"
-                    else:
-                        final_result = str(raw_content)
-                else:
-                    logger.warning(f"[trace={self.trace_id}] Subagent {self.config.name} no messages in final state")
-                    final_result = "No response generated"
-
-            if final_result is None:
-                final_result = "No response generated"
-
+            final_result = _extract_final_result(final_state, trace_id=self.trace_id, name=self.config.name)
             result.try_set_terminal(
                 SubagentStatus.COMPLETED,
                 result=final_result,
                 token_usage_records=token_usage_records,
+            )
+
+        except GraphRecursionError:
+            # ``recursion_limit`` on run_config == ``self.config.max_turns``
+            # (set above). Hitting it means the subagent exhausted its turn
+            # budget before producing a final answer — previously this fell
+            # through to the generic ``except Exception`` and was
+            # misclassified as FAILED, so the lead agent could not tell
+            # "broken subagent" from "out of budget" and the partial work
+            # already streamed into ``final_state`` was discarded (#3875).
+            # ``final_state`` holds the last chunk yielded before the limit
+            # fired, so recover whatever the subagent had produced and surface
+            # a distinct terminal status the lead can act on.
+            max_turns = self.config.max_turns
+            logger.warning(f"[trace={self.trace_id}] Subagent {self.config.name} reached max_turns={max_turns} (GraphRecursionError); recovering partial result")
+            partial = _extract_final_result(final_state, trace_id=self.trace_id, name=self.config.name)
+            result.try_set_terminal(
+                SubagentStatus.MAX_TURNS_REACHED,
+                result=partial,
+                error=f"Reached max_turns={max_turns}",
+                token_usage_records=collector.snapshot_records() if collector is not None else None,
             )
 
         except Exception as e:

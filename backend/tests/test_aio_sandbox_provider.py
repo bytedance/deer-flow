@@ -626,3 +626,66 @@ def test_destroy_swallows_close_errors_and_still_destroys_backend(tmp_path, capl
 
     assert "Error closing sandbox sandbox-dest-err during destroy" in caplog.text
     provider._backend.destroy.assert_called_once()
+
+
+def test_cleanup_idle_sandboxes_keeps_active_cleanup_and_delegates_warm_expiry(tmp_path):
+    """AIO active-idle cleanup must remain local while warm expiry uses the shared lifecycle."""
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider = _make_provider(tmp_path)
+    provider._lock = aio_mod.threading.Lock()
+    provider._sandboxes = {"active-old": MagicMock()}
+    provider._sandbox_infos = {
+        "active-old": aio_mod.SandboxInfo(sandbox_id="active-old", sandbox_url="http://active-old"),
+    }
+    provider._thread_sandboxes = {("default", "thread-old"): "active-old"}
+    provider._last_activity = {"active-old": 0.0}
+    provider._warm_pool = {
+        "warm-old": (
+            aio_mod.SandboxInfo(sandbox_id="warm-old", sandbox_url="http://warm-old"),
+            0.0,
+        )
+    }
+
+    calls = []
+    provider.destroy = MagicMock(side_effect=lambda _sandbox_id: calls.append("active"))
+    provider._reap_expired_warm = MagicMock(side_effect=lambda _idle_timeout: calls.append("warm"))
+
+    provider._cleanup_idle_sandboxes(1.0)
+
+    provider.destroy.assert_called_once_with("active-old")
+    provider._reap_expired_warm.assert_called_once_with(1.0)
+    assert calls == ["active", "warm"]
+
+
+def test_create_sandbox_evicts_oldest_warm_replica_via_shared_lifecycle(tmp_path, monkeypatch):
+    """Replica enforcement must destroy the oldest warm SandboxInfo before creating another."""
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider = _make_provider(tmp_path)
+    provider._lock = aio_mod.threading.Lock()
+    provider._config = {"replicas": 2}
+    provider._sandboxes = {}
+    provider._sandbox_infos = {}
+    provider._thread_sandboxes = {}
+    provider._last_activity = {}
+
+    oldest_info = aio_mod.SandboxInfo(sandbox_id="warm-oldest", sandbox_url="http://warm-oldest")
+    newest_info = aio_mod.SandboxInfo(sandbox_id="warm-newest", sandbox_url="http://warm-newest")
+    created_info = aio_mod.SandboxInfo(sandbox_id="created", sandbox_url="http://created")
+    provider._warm_pool = {
+        "warm-newest": (newest_info, 20.0),
+        "warm-oldest": (oldest_info, 10.0),
+    }
+    provider._backend = SimpleNamespace(
+        create=MagicMock(return_value=created_info),
+        destroy=MagicMock(),
+    )
+    monkeypatch.setattr(aio_mod.AioSandboxProvider, "_get_extra_mounts", lambda _self, _thread_id, *, user_id=None: [])
+    monkeypatch.setattr(aio_mod, "wait_for_sandbox_ready", lambda _url, *, timeout=60: True)
+
+    sandbox_id = provider._create_sandbox(None, "created", user_id="default")
+
+    assert sandbox_id == "created"
+    provider._backend.destroy.assert_called_once_with(oldest_info)
+    assert "warm-oldest" not in provider._warm_pool
+    assert provider._warm_pool == {"warm-newest": (newest_info, 20.0)}
+    assert provider._sandbox_infos["created"] is created_info

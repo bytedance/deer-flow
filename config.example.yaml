@@ -1086,7 +1086,32 @@ sandbox:
 #   #   API_KEY: $MY_API_KEY        # Reads from host's MY_API_KEY env var
 #   #   DATABASE_URL: $DATABASE_URL  # Reads from host's DATABASE_URL env var
 
-# Option 3: Provisioner-managed AIO Sandbox (docker-compose-dev)
+# Option 3: BoxLite micro-VM Sandbox
+# Runs each sandbox as a BoxLite micro-VM. Released boxes stay in an in-process
+# warm pool and can be reclaimed by the same user/thread without a cold start.
+# Requires the boxlite runtime and host virtualization support (KVM on Linux,
+# Hypervisor.framework on macOS).
+# sandbox:
+#   use: deerflow.community.boxlite:BoxliteProvider
+#   image: python:3.12-slim
+#
+#   # Optional: Per-box memory and CPU limits.
+#   # memory_mib: 1024
+#   # cpus: 2
+#
+#   # Optional: Maximum active + warm BoxLite VMs per gateway process (default: 3).
+#   # Active boxes are never evicted; only warm-pool boxes are stopped to make room.
+#   # replicas: 3
+#
+#   # Optional: Seconds before an idle warm-pool VM is stopped (default: 600).
+#   # Set to 0 to keep warm VMs until shutdown or replica eviction.
+#   # idle_timeout: 600
+#
+#   # Optional: Environment variables to inject into every command.
+#   # environment:
+#   #   PYTHONUNBUFFERED: "1"
+#
+# Option 4: Provisioner-managed AIO Sandbox (docker-compose-dev)
 # Each sandbox_id gets a dedicated Pod in k3s, managed by the provisioner.
 # Recommended for production or advanced users who want better isolation and scalability.:
 # sandbox:

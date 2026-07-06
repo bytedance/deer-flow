@@ -137,6 +137,25 @@ function visibleRunInputMessages(route: Route) {
   }
 }
 
+function messageId(message: unknown): string | undefined {
+  if (typeof message !== "object" || message === null) {
+    return undefined;
+  }
+  const raw = Reflect.get(message, "id");
+  return typeof raw === "string" ? raw : undefined;
+}
+
+function branchMessagesFromTurn(messages: unknown[], targetIds: Set<string>) {
+  let targetEndIndex = -1;
+  for (const [index, message] of messages.entries()) {
+    const id = messageId(message);
+    if (id && targetIds.has(id)) {
+      targetEndIndex = Math.max(targetEndIndex, index);
+    }
+  }
+  return targetEndIndex >= 0 ? messages.slice(0, targetEndIndex + 1) : messages;
+}
+
 function mockStreamMessages(route?: Route, inputMessages?: unknown[]) {
   const submittedMessages = inputMessages
     ? visibleInputMessages(inputMessages)
@@ -674,6 +693,60 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
     if (route.request().method() === "DELETE") {
       return route.fulfill({
         status: 204,
+      });
+    }
+    return route.fallback();
+  });
+
+  void page.route(/\/api\/threads\/[^/]+\/branches$/, (route) => {
+    if (route.request().method() === "POST") {
+      const pathParts = new URL(route.request().url()).pathname.split("/");
+      const sourceThreadId = decodeURIComponent(pathParts.at(-2) ?? "");
+      const sourceThread = threads.find(
+        (thread) => thread.thread_id === sourceThreadId,
+      );
+      const body = route.request().postDataJSON() as {
+        message_id?: string;
+        message_ids?: string[];
+        title?: string;
+      };
+      const targetIds = new Set(
+        [body.message_id, ...(body.message_ids ?? [])].filter(
+          (id): id is string => typeof id === "string" && id.length > 0,
+        ),
+      );
+      let sourceTitle = sourceThread?.title?.trim();
+      if (sourceThread?.metadata?.deerflow_branch === true) {
+        sourceTitle = sourceTitle?.replace(/^(Branch:\s*)+/i, "").trim();
+      }
+      const title = body.title ?? sourceTitle;
+
+      upsertThread({
+        thread_id: MOCK_THREAD_ID_2,
+        title,
+        updated_at: new Date().toISOString(),
+        metadata: {
+          deerflow_branch: true,
+          branch_parent_thread_id: sourceThreadId,
+          branch_parent_message_id: body.message_id,
+          branch_parent_checkpoint_id: "mock-checkpoint",
+        },
+        messages: branchMessagesFromTurn(
+          sourceThread?.messages ?? [],
+          targetIds,
+        ),
+      });
+
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          thread_id: MOCK_THREAD_ID_2,
+          parent_thread_id: sourceThreadId,
+          parent_checkpoint_id: "mock-checkpoint",
+          branched_from_message_id: body.message_id,
+          workspace_clone_mode: "current_thread_best_effort",
+        }),
       });
     }
     return route.fallback();

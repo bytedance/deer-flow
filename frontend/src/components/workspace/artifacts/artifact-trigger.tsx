@@ -17,17 +17,19 @@ export const ArtifactTrigger = () => {
     return null;
   }
   return (
-    <Tooltip content="Show artifacts of this conversation">
+    <Tooltip content={t.common.showArtifacts}>
       <Button
+        aria-label={t.common.showArtifacts}
         className="text-muted-foreground hover:text-foreground"
         variant="ghost"
+        data-testid="artifact-trigger"
         onClick={() => {
           sidecar?.close();
           setArtifactsOpen(true);
         }}
       >
         <FilesIcon />
-        {t.common.artifacts}
+        <span className="hidden sm:inline">{t.common.artifacts}</span>
       </Button>
     </Tooltip>
   );

@@ -13,6 +13,7 @@ from deerflow.subagents.status_contract import (
     SUBAGENT_STATUS_KEY,
     SUBAGENT_STATUS_VALUES,
     _bound_metadata_text,
+    format_subagent_result_message,
     make_subagent_additional_kwargs,
     read_subagent_result_metadata,
 )
@@ -61,6 +62,32 @@ def test_make_subagent_additional_kwargs_bounds_large_result_metadata():
     assert len(kwargs[SUBAGENT_RESULT_SHA256_KEY]) == 64
 
 
+def test_make_subagent_additional_kwargs_max_turns_reached_carries_result_and_error():
+    """#3875 Phase 2: a turn-capped run is result-bearing — the partial work
+    the executor recovered must travel on ``subagent_result_brief`` / ``sha256``
+    (so the delegation ledger and card keep it) AND the cap notice must travel
+    on ``subagent_error``. This is the one status that carries both."""
+    kwargs = make_subagent_additional_kwargs("max_turns_reached", result="investigated 3 of 5 sources", error="Reached max_turns=150")
+    assert kwargs[SUBAGENT_STATUS_KEY] == "max_turns_reached"
+    assert kwargs[SUBAGENT_RESULT_BRIEF_KEY] == "investigated 3 of 5 sources"
+    assert len(kwargs[SUBAGENT_RESULT_SHA256_KEY]) == 64
+    assert kwargs[SUBAGENT_ERROR_KEY] == "Reached max_turns=150"
+
+
+def test_format_subagent_result_message_max_turns_reached_leads_with_partial_result():
+    """The model-visible text leads with the recovered partial result and
+    names the cap; the metadata error carries the cap reason only."""
+    content, metadata_error = format_subagent_result_message("max_turns_reached", result="investigated 3 of 5 sources", error="Reached max_turns=150")
+    assert content.startswith("Task reached max turns")
+    assert "investigated 3 of 5 sources" in content
+    assert metadata_error == "Reached max_turns=150"
+
+
+def test_format_subagent_result_message_max_turns_reached_uses_sentinel_when_no_partial():
+    content, _metadata_error = format_subagent_result_message("max_turns_reached", result=None, error="Reached max_turns=150")
+    assert "No partial result was produced" in content
+
+
 def test_bound_metadata_text_respects_small_caps():
     text = "A" * 100
 
@@ -97,6 +124,26 @@ def test_read_subagent_result_metadata_returns_bounded_payload():
         "status": "completed",
         "result_brief": "structured",
         "result_sha256": "a" * 64,
+    }
+
+
+def test_read_subagent_result_metadata_max_turns_reached_reads_result_brief_and_error():
+    """A turn-capped result carries both result metadata and the cap error;
+    the reader must surface both so the delegation ledger can prefer the
+    partial result and still expose the cap reason."""
+    parsed = read_subagent_result_metadata(
+        {
+            SUBAGENT_STATUS_KEY: "max_turns_reached",
+            SUBAGENT_RESULT_BRIEF_KEY: "investigated 3 of 5 sources",
+            SUBAGENT_RESULT_SHA256_KEY: "a" * 64,
+            SUBAGENT_ERROR_KEY: "Reached max_turns=150",
+        }
+    )
+    assert parsed == {
+        "status": "max_turns_reached",
+        "result_brief": "investigated 3 of 5 sources",
+        "result_sha256": "a" * 64,
+        "error": "Reached max_turns=150",
     }
 
 

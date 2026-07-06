@@ -29,7 +29,7 @@ from deerflow.sandbox.sandbox import Sandbox, _validate_extra_env
 from deerflow.sandbox.search import GrepMatch, path_matches, should_ignore_path, truncate_line
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Callable
 
     from boxlite import SimpleBox
 
@@ -61,7 +61,7 @@ class BoxliteBox(Sandbox):
         self,
         id: str,
         box: SimpleBox,
-        run: Callable[[Awaitable[T]], T],
+        run: Callable[..., T],
         *,
         default_env: dict[str, str] | None = None,
     ) -> None:
@@ -124,6 +124,11 @@ class BoxliteBox(Sandbox):
         DeerFlow passes a bash command *string*; BoxLite's ``exec`` takes argv, so
         it runs through ``sh -lc``. Per-call ``env`` is layered over the static
         config environment and scoped to this command only.
+
+        *timeout* bounds both layers: BoxLite's SDK ``exec(timeout=...)`` handles
+        command timeout inside the VM, and the event-loop bridge receives the
+        same value so ``run_coroutine_threadsafe(...).result(timeout)`` cannot
+        block the caller forever if the SDK future itself never resolves.
         """
         _validate_extra_env(env)  # POSIX env-var key rule; raises ValueError on a bad key
         merged_env = {**self._default_env, **(env or {})} or None
@@ -132,7 +137,7 @@ class BoxliteBox(Sandbox):
                 return "Error: sandbox has been closed"
             box = self._box
         try:
-            result = self._run(box.exec("sh", "-lc", command, env=merged_env, timeout=timeout))
+            result = self._run(box.exec("sh", "-lc", command, env=merged_env, timeout=timeout), timeout=timeout)
         except Exception as e:
             logger.error("Failed to execute command in BoxLite box %s: %s", self.id, e)
             return f"Error: {e}"

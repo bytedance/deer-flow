@@ -145,17 +145,33 @@ describe("parseSubtaskResult — structured additional_kwargs (preferred path)",
     expect(parsed.status).toBe("completed");
   });
 
-  it("collapses cancelled / timed_out / polling_timed_out to failed for the card UI", () => {
+  it("collapses cancelled / timed_out / polling_timed_out / max_turns_reached to failed for the card UI", () => {
     for (const backendStatus of [
       "cancelled",
       "timed_out",
       "polling_timed_out",
+      "max_turns_reached",
     ]) {
       const parsed = parseSubtaskResult("anything at all", {
         [SUBAGENT_STATUS_KEY]: backendStatus,
       });
       expect(parsed.status).toBe("failed");
     }
+  });
+
+  it("surfaces the cap notice as error for a max_turns_reached task", () => {
+    // bytedance/deer-flow#3875 Phase 2: collapsed to failed for the card;
+    // the cap notice travels on subagent_error. The recovered partial result
+    // lives on subagent_result_brief, which the card only renders for the
+    // completed pill — so result stays undefined here, by design.
+    const parsed = parseSubtaskResult("ignored content", {
+      [SUBAGENT_STATUS_KEY]: "max_turns_reached",
+      [SUBAGENT_ERROR_KEY]: "Reached max_turns=150",
+      [SUBAGENT_RESULT_BRIEF_KEY]: "investigated 3 of 5 sources",
+    });
+    expect(parsed.status).toBe("failed");
+    expect(parsed.error).toBe("Reached max_turns=150");
+    expect(parsed.result).toBeUndefined();
   });
 
   it("uses subagent_error when supplied", () => {

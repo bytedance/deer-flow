@@ -2,6 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { toast } from "sonner";
 
 import { type PromptInputMessage } from "@/components/ai-elements/prompt-input";
 import { SidebarTrigger } from "@/components/ui/sidebar";
@@ -37,6 +38,7 @@ import { useModels } from "@/core/models/hooks";
 import { useNotification } from "@/core/notification/hooks";
 import { useLocalSettings, useThreadSettings } from "@/core/settings";
 import {
+  useBranchThread,
   useThreadMetadata,
   useThreadStream,
   useThreadTokenUsage,
@@ -68,6 +70,7 @@ export default function ChatPage() {
     enabled: !isNewThread && !isMock,
     isMock,
   });
+  const branchThread = useBranchThread();
   const backendTokenUsage = threadTokenUsageToTokenUsage(threadTokenUsage.data);
   const mountedRef = useRef(false);
   useSpecificChatMode();
@@ -175,6 +178,32 @@ export default function ChatPage() {
       regenerateMessage(threadId, messageId, supersededMessageIds),
     [regenerateMessage, threadId],
   );
+  const handleBranchTurn = useCallback(
+    async (messageId: string, messageIds: string[]) => {
+      if (
+        isNewThread ||
+        isMock ||
+        env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true"
+      ) {
+        return;
+      }
+
+      try {
+        const response = await branchThread.mutateAsync({
+          threadId,
+          messageId,
+          messageIds,
+        });
+        toast.success(t.conversation.branchCreated);
+        router.push(`/workspace/chats/${response.thread_id}`);
+      } catch (error) {
+        toast.error(
+          error instanceof Error ? error.message : t.conversation.branchFailed,
+        );
+      }
+    },
+    [branchThread, isMock, isNewThread, router, t, threadId],
+  );
 
   const tokenUsageInlineMode = tokenUsageEnabled
     ? localSettings.tokenUsage.inlineMode
@@ -246,6 +275,15 @@ export default function ChatPage() {
                     !thread.isLoading
                   }
                   onRegenerateMessage={handleRegenerate}
+                  canBranch={
+                    !isNewThread &&
+                    !isMock &&
+                    env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY !== "true" &&
+                    !isUploading &&
+                    !thread.isLoading &&
+                    !branchThread.isPending
+                  }
+                  onBranchTurn={handleBranchTurn}
                 />
               </div>
               <div
