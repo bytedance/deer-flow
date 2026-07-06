@@ -17,15 +17,9 @@ from decimal import Decimal
 from pathlib import Path
 
 from docx import Document
-from docx.shared import Cm, Inches, Pt, RGBColor
+from docx.shared import Cm, Pt, RGBColor
 
-from render_markdown import (
-    _charts_for_report,
-    _load_charts_manifest,
-    attach_description_files,
-    doc_from_dict,
-    normalize_wide_by_report,
-)
+from render_markdown import attach_description_files, doc_from_dict, normalize_wide_by_report
 
 DATA_TYPE_MAP = {
     "元": "currency",
@@ -131,7 +125,6 @@ def render_docx(
     *,
     out_path: str,
     style_path: str,
-    charts_manifest: str | None = None,
 ) -> None:
     """渲染完整 DOCX。"""
     style = _load_style(style_path)
@@ -154,27 +147,24 @@ def render_docx(
     run = p.add_run(report_doc.title)
     _apply_font(run, style["font"]["title"])
 
-    manifest = _load_charts_manifest(charts_manifest)
     ridx = 0
-    for section_idx, sec in enumerate(report_doc.sections):
-        _render_section(docx, sec, wide_by_report, ridx, style, manifest, section_idx)
+    for sec in report_doc.sections:
+        _render_section(docx, sec, wide_by_report, ridx, style)
         ridx += len(sec.reports)
 
     docx.save(out_path)
 
 
-def _render_section(docx, sec, wide_by_report, ridx, style, manifest, section_idx):
+def _render_section(docx, sec, wide_by_report, ridx, style):
     p = docx.add_paragraph()
     run = p.add_run(sec.title)
     _apply_font(run, style["font"]["section"])
 
     for rep_idx, report in enumerate(sec.reports):
-        wide_idx = ridx + rep_idx
-        wide_rows = wide_by_report[wide_idx] if wide_idx < len(wide_by_report) else []
-        _render_report(docx, report, wide_rows, style, manifest, section_idx, rep_idx)
+        _render_report(docx, report, wide_by_report[ridx + rep_idx] if ridx + rep_idx < len(wide_by_report) else [], style)
 
 
-def _render_report(docx, report, wide_rows, style, manifest, section_idx, report_idx):
+def _render_report(docx, report, wide_rows, style):
     p = docx.add_paragraph()
     run = p.add_run(report.title)
     _apply_font(run, style["font"]["report"])
@@ -182,15 +172,6 @@ def _render_report(docx, report, wide_rows, style, manifest, section_idx, report
     description_text = getattr(report, "description_text", None)
     if description_text:
         _add_styled_paragraph(docx, str(description_text).strip(), style["font"]["body"])
-
-    # Insert chart PNGs after the description, before the table.
-    # Failed entries (status != "ok") are dropped by the shared helper.
-    for chart in _charts_for_report(manifest, section_idx, report_idx):
-        try:
-            docx.add_picture(chart["path"], width=Inches(5.5))
-        except Exception:
-            # Missing file or decode error — skip rather than abort the doc.
-            pass
 
     if not wide_rows:
         docx.add_paragraph().add_run("（无数据行）").italic = True
@@ -247,7 +228,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out", required=True)
     parser.add_argument("--descriptions-dir", default=None)
     parser.add_argument("--stem", default=None)
-    parser.add_argument("--charts-manifest", default=None)
     args = parser.parse_args(argv)
 
     try:
@@ -255,11 +235,7 @@ def main(argv: list[str] | None = None) -> int:
         doc = doc_from_dict(parsed)
         wide = normalize_wide_by_report(doc, json.loads(Path(args.wide).read_text(encoding="utf-8")))
         attach_description_files(doc, args.descriptions_dir, args.stem or Path(args.parsed).name.removesuffix(".parsed.json"))
-        render_docx(
-            doc, wide,
-            out_path=args.out, style_path=args.style,
-            charts_manifest=args.charts_manifest,
-        )
+        render_docx(doc, wide, out_path=args.out, style_path=args.style)
     except Exception as exc:
         print(f"FAIL: {exc}", file=sys.stderr)
         return 1

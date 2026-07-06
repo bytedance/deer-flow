@@ -108,33 +108,71 @@ python -m pytest backend/tests/chatbi_report/ -v   # integration scenarios
 The third form is accepted with a lint WARN — see `scripts/md_lint.py`
 for the full rule list.
 
-## Chart generation
+## Chart generation (planned)
 
-Charts are declared explicitly with `> 图表:` blocks in the template; no
-schema-based inference. See `SKILL.md` and Step **8c.5 chart-gen** in
-`references/pipeline.md`.
+The current pipeline (`render_markdown.py` + `render_docx.py`) emits HTML
+tables and Chinese narrative only — no charts. This section describes the
+planned integration of `skills/public/matplotlib/` so each report gets a
+static PNG companion to its table.
 
-Supported chart types: `line`, `bar`, `pie`, `bar_line` (dual axis with
-left bars + right lines). Series modes: `行社` (one series per org row),
-`指标` (one series per metric, aggregated when multiple orgs), or omitted
-for a single aggregated series.
+### Why matplotlib
 
-Example:
+| Candidate | Output | Fit for embedded reports |
+|---|---|---|
+| matplotlib | PNG/SVG (static) | Matches markdown `<img>` + python-docx `add_picture` directly |
+| pyecharts-viz | HTML by default; PNG only via `snapshot_selenium` + browser | Skill is "examples generator" with no data ingest API |
+| echart-skill | Single-file HTML (interactive ECharts) | Designed for live dashboards; no PNG export path; would duplicate chatbi-report's data layer |
 
-```md
-> 图表:
->   标题: 利润总额趋势
->   类型: line
->   x轴: 时期
->   y轴: 利润总额
->   系列: 行社
->   单位: 万元
->   输出: profit-trend
+matplotlib ships `fonts/wqy-microhei.ttc` for Chinese, needs no server,
+no browser, no DuckDB — minimum surface area for chatbi-report's
+deterministic render layer.
+
+### Pipeline change: new Step 4.5 `chart-gen`
+
+Insert between `Step 4 assemble-wide` and `Step 6 extract-ir` in
+`SKILL.md` and `references/pipeline.md`:
+
+```bash
+python /mnt/skills/public/chatbi-report/scripts/chart_gen.py \
+  --wide  /mnt/user-data/outputs/<stem>.wide.json \
+  --out   /mnt/user-data/outputs/<stem>.charts/
 ```
 
-`chart_gen.py` runs after `apply-computed` (Step 8c.5) so computed columns
-can be charted. It writes PNG files to `<stem>.charts/` plus a `<stem>.charts.json`
-manifest; renderers consume only the manifest via `--charts-manifest`.
+Behavior: walk each `Report` in wide.json and infer a chart type from the
+`Th` schema:
+
+- 时间列（如 2023/2024/2025，多级表头含 `period`）→ 折线图（趋势）
+- 类别列 + 数值列 → 柱状图（横向对比）
+- 占比列（`data-unit="%"`）→ 饼图
+
+Output:
+
+```text
+/mnt/user-data/outputs/<stem>.charts/<report_idx>.<chart_type>.png
+```
+
+`chart_gen.py` is deterministic; no LLM involved. It must read `data_unit`
+from `<th data-unit=...>` for axis labels and reuse the Decimal values
+already produced by `assemble-wide` (do not re-round).
+
+### Renderer edits
+
+`scripts/render_markdown.py` — before each report's `<table>`, prepend a
+markdown image link:
+
+```markdown
+![<report.title>](<stem>.charts/<report_idx>.bar.png)
+```
+
+`scripts/render_docx.py` — at the same insertion point, embed natively
+via `docx.shared.Inches(<width>)` + `doc.add_picture(<png path>)` so the
+generated DOCX has no external file dependency at read time.
+
+### Out of scope
+
+- Interactive charts in markdown (chatbi-report targets static docx output)
+- 3D charts (matplotlib covers them; defer until a real report needs one)
+- LLM-driven chart-type selection (Step 4.5 uses header schema only)
 
 ## Troubleshooting
 

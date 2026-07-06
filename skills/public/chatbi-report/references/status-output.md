@@ -22,7 +22,6 @@ Do not paste raw `status.json` to the user.
 | `<stem>.status.json` | Agent / orchestrator / automation | machine-readable status contract |
 | `<stem>.report.md` | user | report body, also echo or summarize in chat |
 | `<stem>.report.docx` | user | downloadable final report |
-| `<stem>.charts.json` + `<stem>.charts/*.png` | renderer only | chart manifest + PNGs; consumed via `--charts-manifest` by renderers and `assemble_status.py` |
 
 `runlog.md` content should be Chinese-first if retained.
 
@@ -72,7 +71,7 @@ Do not guess numbers from memory. Read the corresponding output files after each
   "exit_step": "1 | 1.5 | 2 | 3 | 3.5 | 4 | 5 | 6 | 7 | 8a | 8b | 8c | 8d | 8d.5 | 9",
   "error_class": null | "F1" | "F19" | "CHATBI-*" | "STEP*_ERROR" | "USER_ABORTED",
   "error_detail": "...",
-  "outputs": {"json": "...", "docx": "...", "md": "...", "charts_manifest": "..."},
+  "outputs": {"json": "...", "docx": "...", "md": "..."},
   "metrics": {
     "queried_count": 0,
     "query_failures": 0,
@@ -80,9 +79,6 @@ Do not guess numbers from memory. Read the corresponding output files after each
     "compute_validation_failures": 0,
     "descriptions_generated": 0,
     "description_failures": 0,
-    "charts_declared": 0,
-    "charts_generated": 0,
-    "chart_failures": 0,
     "llm_calls": 0,
     "duration_seconds": 0.0
   }
@@ -93,11 +89,8 @@ Whole-number steps may be JSON numbers for compatibility. Non-integer checkpoint
 
 ## Status decision
 
-- `success`: `error_class is None` and all failure metrics are 0
-  (`query_failures`, `compute_validation_failures`, `description_failures`,
-  `chart_failures`).
-- `partial`: `error_class is None` and one or more failure metrics are > 0
-  (including `chart_failures` from Step 8c.5).
+- `success`: `error_class is None` and all failure metrics are 0.
+- `partial`: `error_class is None` and one or more failure metrics are > 0.
 - `error`: `error_class` is set.
 
 ## Error classes

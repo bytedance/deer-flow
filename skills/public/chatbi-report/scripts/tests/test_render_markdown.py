@@ -1,5 +1,4 @@
 """Unit tests for scripts/render_markdown.py."""
-import json
 from pathlib import Path
 
 import pytest
@@ -90,75 +89,3 @@ def test_render_markdown_description_before_table(fixture_dir):
     assert "### 1.1 整体利润分析\n\n这是描述段。\n\n<table>" in out
     assert '<th rowspan="2">行社</th>' in out
     assert '<td>王益联社</td>' in out
-
-
-# ---------- chart manifest integration (Task 6) ---------- #
-
-def test_render_markdown_inserts_chart_before_table(tmp_path):
-    md = tmp_path / "report.md"
-    md.write_text(
-        "# T\n\n## S\n\n### R\n\n"
-        "> 机构:\n"
-        ">   branch_num=A; branch_short_name=机构A\n"
-        "> 时期: time_info=[\"2025\"]\n"
-        "<table><thead><tr>"
-        "<th data-idx=\"BAS_0263\" data-unit=\"万元\">利润</th>"
-        "</tr></thead>"
-        "<tbody><tr><td></td></tr></tbody></table>\n",
-        encoding="utf-8",
-    )
-    doc = pm.parse_file(str(md))
-    wide = [{
-        "data_dt": "机构A", "org_ecd": "A",
-        "cells": {"BAS_0263": "1,420"},
-        "raw_cells": {"BAS_0263": "1,420"},
-    }]
-    manifest = {
-        "reports": [{
-            "section_idx": 0, "report_idx": 0,
-            "charts": [{
-                "title": "利润趋势", "type": "line", "status": "ok",
-                "relative_path": "input.charts/profit-trend.png",
-            }],
-        }],
-    }
-    manifest_path = tmp_path / "charts.json"
-    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-    out = rm.render_markdown(doc, [wide], {}, charts_manifest=str(manifest_path))
-    assert "![利润趋势](input.charts/profit-trend.png)" in out
-    assert out.index("![利润趋势]") < out.index("<table>")
-
-
-def test_render_markdown_failed_chart_excluded(tmp_path):
-    md = tmp_path / "report.md"
-    md.write_text(
-        "# T\n\n## S\n\n### R\n\n"
-        "> 机构:\n"
-        ">   branch_num=A; branch_short_name=机构A\n"
-        "> 时期: time_info=[\"2025\"]\n"
-        "<table><thead><tr>"
-        "<th data-idx=\"BAS_0263\" data-unit=\"万元\">利润</th>"
-        "</tr></thead>"
-        "<tbody><tr><td></td></tr></tbody></table>\n",
-        encoding="utf-8",
-    )
-    doc = pm.parse_file(str(md))
-    wide = [{
-        "data_dt": "机构A", "org_ecd": "A",
-        "cells": {"BAS_0263": "1"},
-        "raw_cells": {"BAS_0263": "1"},
-    }]
-    manifest = {
-        "reports": [{
-            "section_idx": 0, "report_idx": 0,
-            "charts": [
-                {"title": "bad", "type": "bar", "status": "failed", "relative_path": "x.png"},
-                {"title": "good", "type": "line", "status": "ok", "relative_path": "input.charts/good.png"},
-            ],
-        }],
-    }
-    manifest_path = tmp_path / "charts.json"
-    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-    out = rm.render_markdown(doc, [wide], {}, charts_manifest=str(manifest_path))
-    assert "![good](input.charts/good.png)" in out
-    assert "![bad]" not in out

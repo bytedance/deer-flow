@@ -86,9 +86,6 @@ Current client uses no API key or Authorization header.
 | Description is `⚠️DESCRIPTION_FAILED` | description generation failed twice | Fix `> 描述:` prompt and rerun if needed |
 | DOCX shows English or wrong header | missing `data-idx` or malformed header cell | Run `md_lint.py` and fix template |
 | Sandbox cannot import pandas | runtime image/deps stale | restart with `make dev` |
-| Chart missing in report | No `> 图表:` block or manifest not passed to renderer | Add chart block; check Step 8c.5 output; pass `--charts-manifest <stem>.charts.json` to renderers |
-| Chart shows `CHART_PARTIAL` | Axis label unmatched or ambiguous | Use exact header text from `<th>` |
-| Chinese labels show boxes in chart | CJK font not loaded | Verify `/mnt/skills/public/matplotlib/fonts/wqy-microhei.ttc` exists |
 
 ## Do not do these during normal report runs
 

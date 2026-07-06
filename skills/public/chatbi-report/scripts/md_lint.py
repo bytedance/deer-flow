@@ -18,8 +18,6 @@ from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from pathlib import Path
 
-from parse_md import _ALLOWED_SERIES_VALUES, _is_valid_color
-
 
 # 已识别的展示单位（其他值是 WARN 而非 ERROR）
 RECOGNIZED_UNITS = {"元", "万元", "亿元", "%", "百分点", "个", "次"}
@@ -174,114 +172,12 @@ def _split_reports(section_body: str) -> list[tuple[str, str]]:
     return chunks
 
 
-_CHART_KEY_MAP = {
-    "标题": "title",
-    "类型": "type",
-    "x轴": "x",
-    "y轴": "y",
-    "y轴左": "y_left",
-    "y轴右": "y_right",
-    "系列": "series",
-    "单位": "unit",
-    "左轴单位": "left_unit",
-    "右轴单位": "right_unit",
-    "条形配色": "bar_colors",
-    "折线配色": "line_colors",
-    "输出": "output",
-}
-_REQUIRED_CHART_FIELDS = {"标题", "类型", "x轴"}
-_ALLOWED_CHART_TYPES = {"line", "bar", "pie", "bar_line"}
-_SAFE_OUTPUT_RE = re.compile(r"^[a-zA-Z0-9._-]+$")
-
-
-def _lint_chart_blocks(body: str, report: LintReport, *, location: str) -> None:
-    """校验 0..N 个 `> 图表:` 块。无块即返回。"""
-    for match in re.finditer(r"^>\s*图表:\s*$", body, re.MULTILINE):
-        fields: dict[str, str] = {}
-        for raw in body[match.end():].splitlines():
-            if not raw:
-                continue
-            if not raw.startswith(">"):
-                break
-            if re.match(r"^>\s?\S", raw) and not re.match(r"^>\s{2,}\S", raw):
-                break
-            line = raw.lstrip("> ").strip()
-            if not line or ":" not in line:
-                continue
-            key, value = (s.strip() for s in line.split(":", 1))
-            if key in _CHART_KEY_MAP:
-                fields[key] = value
-        for m in (_REQUIRED_CHART_FIELDS - set(fields.keys())):
-            report.errors.append(LintError(
-                "CHATBI-CHART-MISSING",
-                f"chart missing required field `{m}`",
-                location=location,
-            ))
-        ctype = fields.get("类型")
-        if ctype and ctype not in _ALLOWED_CHART_TYPES:
-            report.errors.append(LintError(
-                "CHATBI-CHART-TYPE",
-                f"unsupported chart type `{ctype}`",
-                location=location,
-            ))
-        if ctype and ctype != "bar_line" and "y轴" not in fields:
-            report.errors.append(LintError(
-                "CHATBI-CHART-MISSING",
-                f"chart type `{ctype}` missing required field `y轴`",
-                location=location,
-            ))
-        output = fields.get("输出")
-        if output and not _SAFE_OUTPUT_RE.match(output):
-            report.errors.append(LintError(
-                "CHATBI-CHART-OUTPUT",
-                f"chart output `{output}` must be a flat basename (no `/`)",
-                location=location,
-            ))
-        series = fields.get("系列")
-        if series and series not in _ALLOWED_SERIES_VALUES:
-            report.errors.append(LintError(
-                "CHATBI-CHART-SERIES",
-                f"unsupported series `{series}`; must be one of {sorted(_ALLOWED_SERIES_VALUES)}",
-                location=location,
-            ))
-        if ctype == "bar_line":
-            if "y轴" in fields:
-                report.errors.append(LintError(
-                    "CHATBI-CHART-BARLINE-Y",
-                    "bar_line chart must use `y轴左`/`y轴右`, not `y轴`",
-                    location=location,
-                ))
-            if "y轴左" not in fields:
-                report.errors.append(LintError(
-                    "CHATBI-CHART-MISSING",
-                    "bar_line chart missing required field `y轴左`",
-                    location=location,
-                ))
-            if "y轴右" not in fields:
-                report.errors.append(LintError(
-                    "CHATBI-CHART-MISSING",
-                    "bar_line chart missing required field `y轴右`",
-                    location=location,
-                ))
-            for color_field in ("条形配色", "折线配色"):
-                if color_field in fields:
-                    for c in fields[color_field].split(","):
-                        c = c.strip()
-                        if c and not _is_valid_color(c):
-                            report.errors.append(LintError(
-                                "CHATBI-CHART-COLOR",
-                                f"invalid color format `{c}` in `{color_field}`",
-                                location=location,
-                            ))
-
-
 def _lint_one_report(report_title: str, body: str, report: LintReport, *, location: str) -> None:
     loc = f"{location} > 报表 `{report_title}`"
     time_match = re.search(r"^>\s*时期:\s*(.+)$", body, re.MULTILINE)
 
     _lint_org_block(body, report, location=loc)
     _lint_description_block(body, report, location=loc)
-    _lint_chart_blocks(body, report, location=loc)
 
     if not time_match:
         report.errors.append(LintError("F19", "missing `> 时期:` block", location=loc))

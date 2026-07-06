@@ -10,7 +10,6 @@ Run forward only:
 1 lint → 1.5 lint checkpoint → 2 parse → 3 query → 3.5 query checkpoint
 → 4 assemble-wide → 6 extract-ir
 → 7 codegen → 8a validate → 8b evaluate → 8c apply-computed
-→ 8c.5 chart-gen
 → 8d describe → 8d.5 description checkpoint
 → 9 render/status
 ```
@@ -27,7 +26,7 @@ Step 4 `assemble-wide` and the per-idx `unit` field on `<th data-idx>`.
 
 | Type | Meaning | Steps |
 |---|---|---|
-| `bash` | deterministic CLI in sandbox | 1, 2, 3, 4, 6, 8a, 8b, 8c, 8c.5, 9 |
+| `bash` | deterministic CLI in sandbox | 1, 2, 3, 4, 6, 8a, 8b, 8c, 9 |
 | `agent-turn-LLM` | lead agent writes files using LLM output | 7, 8d |
 | `agent-turn-checkpoint` | lead agent calls `ask_clarification` and waits for user | 1.5, 3.5, 8d.5 |
 
@@ -46,10 +45,9 @@ Step 4 `assemble-wide` and the per-idx `unit` field on `<th data-idx>`.
 | 8a validate | bash | `python /mnt/skills/public/chatbi-report/scripts/compute.py validate --source <compute.py> --function <name> --df <wide.json> --example-input ... --example-expected ...` | exit 0/1 |
 | 8b evaluate | bash | `python /mnt/skills/public/chatbi-report/scripts/compute.py evaluate --source <compute.py> --function <name> --df <wide.json> --name '<ComputeIR.name>' --out <computed.slug>.json` | computed JSON files |
 | 8c apply-computed | bash | `python /mnt/skills/public/chatbi-report/scripts/compute.py apply-computed --wide <wide.json> --computed-dir <outputs> --stem <stem>` | updated `<stem>.wide.json` |
-| 8c.5 chart-gen | bash | `python /mnt/skills/public/chatbi-report/scripts/chart_gen.py --parsed /mnt/user-data/outputs/<stem>.parsed.json --wide /mnt/user-data/outputs/<stem>.wide.json --out-dir /mnt/user-data/outputs/<stem>.charts --manifest /mnt/user-data/outputs/<stem>.charts.json` | `<stem>.charts.json` + `<stem>.charts/*.png` |
 | 8d describe | agent-turn-LLM | read `prompts/description_gen.md` + `<wide.json>`; write `<stem>.description.report-<idx>.txt` for each parsed `description_prompt` | description text files |
 | 8d.5 description checkpoint | agent-turn-checkpoint | see `checkpoints.md` | user reply + runlog line + optional status abort |
-| 9 render/status | bash | `render_markdown.py` (with `--charts-manifest <stem>.charts.json`) + optional `render_docx.py` (with `--charts-manifest <stem>.charts.json`) + `assemble_status.py --charts-manifest <stem>.charts.json` | report MD/DOCX/status/runlog |
+| 9 render/status | bash | `render_markdown.py` + optional `render_docx.py` + `assemble_status.py` | report MD/DOCX/status/runlog |
 
 ## Retry budget
 
@@ -61,7 +59,6 @@ Step 4 `assemble-wide` and the per-idx `unit` field on `<th data-idx>`.
 | 4 assemble-wide | 0 | stop, show raw error |
 | 7 codegen | one initial draft per spec | 8a decides retry |
 | 8a validate | one re-codegen per spec | failed column becomes `⚠️COMPUTE_FAILED`; continue |
-| 8c.5 chart-gen | 0; per-chart failures are captured in manifest | failed charts become `CHART_PARTIAL`; pipeline continues |
 | 8d describe | one regenerate per report | failed description file contains `⚠️DESCRIPTION_FAILED`; continue |
 | 9 render/status | 0; if only a description file is missing, rerun that report's Step 8d once | stop on remaining failure |
 
@@ -88,7 +85,6 @@ Send one short Chinese progress update after every completed step.
 | 8a | `✅ 校验 {ok}/{total} 通过` or `⚠️ 第 {i} 个失败：{stderr[:60]}` |
 | 8b | `🧮 evaluate：{ok}/{total} spec 成功` |
 | 8c | `📊 已合并 {n} 个计算列到宽表` |
-| 8c.5 | `📊 图表生成：{ok}/{total} 成功` or `⚠️ 图表生成：{ok}/{total} 成功，{failed} 失败` |
 | 8d | `📝 描述生成：{ok}/{total} 成功` |
 | 8d.5 | `🚦 Checkpoint：描述 {ok}/{total} 成功，等用户确认` |
 | 9 | `🎉 报表已生成：report.md / report.docx（{status}）` |

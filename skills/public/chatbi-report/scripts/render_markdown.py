@@ -215,45 +215,22 @@ def _render_table(report: Report, wide_rows: list[dict], compute_status: dict[st
     return lines
 
 
-def _load_charts_manifest(path: str | None) -> dict:
-    """Load a charts.json manifest. Returns {} when path is None or missing."""
-    if not path:
-        return {}
-    p = Path(path)
-    if not p.exists():
-        return {}
-    return json.loads(p.read_text(encoding="utf-8"))
-
-
-def _charts_for_report(manifest: dict, section_idx: int, report_idx: int) -> list[dict]:
-    """Successful chart entries for one report. Failed entries are dropped."""
-    for rep in manifest.get("reports", []):
-        if rep.get("section_idx") == section_idx and rep.get("report_idx") == report_idx:
-            return [c for c in rep.get("charts", []) if c.get("status") == "ok"]
-    return []
-
-
 def render_markdown(
     doc: ReportDoc,
     wide_by_report: list[list[dict]],
     compute_status: dict,
-    *,
-    charts_manifest: str | None = None,
 ) -> str:
-    manifest = _load_charts_manifest(charts_manifest)
     lines: list[str] = [f"# {doc.title}", ""]
     ridx = 0
-    for section_idx, section in enumerate(doc.sections):
+    for section in doc.sections:
         lines.extend([f"## {section.title}", ""])
-        for report_idx, report in enumerate(section.reports):
+        for report in section.reports:
             wide_rows = wide_by_report[ridx] if ridx < len(wide_by_report) else []
             ridx += 1
             lines.extend([f"### {report.title}", ""])
             description_text = getattr(report, "description_text", None)
             if description_text:
                 lines.extend([str(description_text).strip(), ""])
-            for chart in _charts_for_report(manifest, section_idx, report_idx):
-                lines.extend([f"![{chart['title']}]({chart['relative_path']})", ""])
             if not wide_rows:
                 lines.extend(["_(no data rows in this report)_", ""])
                 continue
@@ -270,7 +247,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--compute-status", default=None)
     parser.add_argument("--descriptions-dir", default=None)
     parser.add_argument("--stem", default=None)
-    parser.add_argument("--charts-manifest", default=None)
     args = parser.parse_args(argv)
 
     try:
@@ -279,10 +255,7 @@ def main(argv: list[str] | None = None) -> int:
         wide = normalize_wide_by_report(doc, json.loads(Path(args.wide).read_text(encoding="utf-8")))
         compute_status = json.loads(Path(args.compute_status).read_text(encoding="utf-8")) if args.compute_status else {}
         attach_description_files(doc, args.descriptions_dir, args.stem or Path(args.parsed).name.removesuffix(".parsed.json"))
-        Path(args.out).write_text(
-            render_markdown(doc, wide, compute_status, charts_manifest=args.charts_manifest),
-            encoding="utf-8",
-        )
+        Path(args.out).write_text(render_markdown(doc, wide, compute_status), encoding="utf-8")
     except Exception as exc:
         print(f"FAIL: {exc}", file=sys.stderr)
         return 1
