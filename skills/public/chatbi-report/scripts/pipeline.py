@@ -210,4 +210,74 @@ class Orchestrator:
         descriptions_dir: str,
         stem: str,
     ) -> CheckpointSignal | RunResult:
-        raise NotImplementedError
+        from compute import validate_ast, validate_signature
+
+        metrics: dict[str, Any] = {
+            "8a_validate": {"ok": 0, "total": 0},
+        }
+        sentinel_cols: set[str] = set()
+
+        for col_name, src_path_str in compute_sources.items():
+            src_path = Path(src_path_str)
+            source = src_path.read_text(encoding="utf-8")
+            metrics["8a_validate"]["total"] += 1
+            ok = True
+            try:
+                validate_ast(source)
+                validate_signature(source, col_name)
+            except Exception:
+                ok = False
+                sentinel_cols.add(col_name)
+            if ok:
+                metrics["8a_validate"]["ok"] += 1
+
+        # Mark sentinel in flat wide rows (column value replacement where present)
+        if sentinel_cols:
+            for row in wide:
+                for col in sentinel_cols:
+                    if col in row:
+                        row[col] = "⚠️COMPUTE_FAILED"
+
+        return self._finish_phase_2(parsed, wide, metrics, descriptions_dir, stem)
+
+    def _finish_phase_2(
+        self, parsed: dict, wide: list[dict], metrics: dict[str, Any],
+        descriptions_dir: str, stem: str,
+    ) -> RunResult:
+        status_path = self._cfg.out_dir / "status.json"
+        from assemble_status import write_status
+
+        # Map detailed metrics → spec-pinned 8-key schema for status.json.
+        # Detailed per-step metrics go to the sidecar orchestrator-metrics.json
+        # so the schema stays untouched.
+        flat_metrics = {
+            "computed_count": metrics["8a_validate"]["total"],
+            "compute_validation_failures": metrics["8a_validate"]["total"]
+            - metrics["8a_validate"]["ok"],
+        }
+        write_status(
+            out_path=str(status_path),
+            exit_step="9",
+            error_class=None,
+            error_detail="",
+            outputs={
+                "report_md": str(self._cfg.out_dir / "report.md"),
+                "report_docx": (
+                    None if self._cfg.skip_docx
+                    else str(self._cfg.out_dir / "report.docx")
+                ),
+            },
+            metrics=flat_metrics,
+        )
+        # Sidecar for debug data
+        sidecar = self._cfg.out_dir / "orchestrator-metrics.json"
+        sidecar.write_text(
+            json.dumps(metrics, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        return RunResult(
+            report_md=self._cfg.out_dir / "report.md",
+            report_docx=None if self._cfg.skip_docx else self._cfg.out_dir / "report.docx",
+            status_json=status_path,
+            metrics=metrics,
+        )

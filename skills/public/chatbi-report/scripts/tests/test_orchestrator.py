@@ -214,3 +214,35 @@ def test_run_phase_1_force_continue_skips_lint_checkpoint(tmp_path):
         assert result.step != "1.5"
     else:
         assert isinstance(result, p.Phase1Result)
+
+
+def test_run_phase_2_validate_marks_sentinel_for_bad_source(tmp_path):
+    """Phase 2 step 8a marks wide cells with ⚠️COMPUTE_FAILED for invalid sources."""
+    from sqlbot_client import MockSQLBotClient
+
+    cfg = p.OrchestratorConfig(md_path=INPUT_MD, out_dir=tmp_path)
+    orch = p.Orchestrator(cfg, MockSQLBotClient(str(FIXTURE)))
+    p1 = orch.run_phase_1()
+    assert isinstance(p1, p.Phase1Result)
+
+    # Bad source: function name mismatch → validate_signature fails
+    bad_src = tmp_path / "bad.py"
+    bad_src.write_text("def wrong_name(df):\n    return 0\n", encoding="utf-8")
+
+    final = orch.run_phase_2(
+        parsed=p1.parsed,
+        wide=p1.wide,
+        compute_sources={"good_col": str(bad_src)},  # name mismatch is the failure
+        descriptions_dir=str(tmp_path),
+        stem=INPUT_MD.stem,
+    )
+    # Continue to RunResult (compute failures don't abort Phase 2)
+    assert isinstance(final, p.RunResult)
+    status = json.loads(final.status_json.read_text(encoding="utf-8"))
+    # status.json schema is spec-pinned: only 8 flat metrics keys exist (assemble_status:54-63).
+    # Detailed per-step metrics live in the sidecar orchestrator-metrics.json.
+    assert status["metrics"]["computed_count"] == 1
+    assert status["metrics"]["compute_validation_failures"] == 1
+    sidecar = json.loads((tmp_path / "orchestrator-metrics.json").read_text(encoding="utf-8"))
+    assert sidecar["8a_validate"]["total"] == 1
+    assert sidecar["8a_validate"]["ok"] == 0
