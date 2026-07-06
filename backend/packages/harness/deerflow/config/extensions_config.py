@@ -79,6 +79,10 @@ class SkillStateConfig(BaseModel):
 class ExtensionsConfig(BaseModel):
     """Unified configuration for MCP servers and skills."""
 
+    middlewares: list[str] = Field(
+        default_factory=list,
+        description="AgentMiddleware class paths loaded into the lead-agent middleware chain. Each entry uses 'module.path:ClassName'.",
+    )
     mcp_servers: dict[str, McpServerConfig] = Field(
         default_factory=dict,
         description="Map of MCP server name to configuration",

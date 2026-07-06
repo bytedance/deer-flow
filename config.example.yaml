@@ -15,7 +15,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 18
+config_version: 19
 
 # ============================================================================
 # Logging
@@ -29,6 +29,20 @@ logging:
   enhance:
     enabled: false
     format: text
+
+# ============================================================================
+# Agent Extensions
+# ============================================================================
+# Optional lead-agent AgentMiddleware classes loaded into the runtime middleware
+# chain after built-in lead middlewares and any programmatic custom middlewares,
+# but before the safety/clarification tail. Missing optional extension packages
+# are skipped; invalid classes or broken modules fail loudly at agent creation.
+extensions:
+  middlewares: []
+  # Example:
+  # middlewares:
+  #   - my_company.deerflow_middlewares:DomainGuardMiddleware
+  #   - my_company.deerflow_middlewares:LatencyStampingMiddleware
 
 # ============================================================================
 # Token Usage

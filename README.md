@@ -626,6 +626,8 @@ When you install `.skill` archives through the Gateway, DeerFlow accepts standar
 
 Tools follow the same philosophy. DeerFlow comes with a core toolset — web search, web fetch, rendered web capture, file operations, bash execution — and supports custom tools via MCP servers and Python functions. Swap anything. Add anything.
 
+Advanced deployments can also extend the lead-agent runtime itself by declaring zero-argument `AgentMiddleware` classes in `config.yaml` under `extensions.middlewares`. DeerFlow loads those middlewares into the agent pipeline after its built-in context/tool/runtime middlewares and before the safety/clarification tail, so enterprise forks can add domain guardrails, tool-call governance, or observability hooks without patching `lead_agent/agent.py`.
+
 Gateway-generated follow-up suggestions now normalize both plain-string model output and block/list-style rich content before parsing the JSON array response, so provider-specific content wrappers do not silently drop suggestions.
 
 Interrupted first-turn runs still persist a fallback conversation title, so stopping a streaming response does not leave the thread as "Untitled" after refresh.

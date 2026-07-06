@@ -6,10 +6,12 @@ import inspect
 from unittest.mock import MagicMock
 
 import pytest
+from langchain.agents.middleware import AgentMiddleware
 
 from deerflow.agents.lead_agent import agent as lead_agent_module
 from deerflow.agents.middlewares.loop_detection_middleware import LoopDetectionMiddleware
 from deerflow.config.app_config import AppConfig
+from deerflow.config.extensions_config import ExtensionsConfig
 from deerflow.config.loop_detection_config import LoopDetectionConfig
 from deerflow.config.memory_config import MemoryConfig
 from deerflow.config.model_config import ModelConfig
@@ -35,6 +37,14 @@ def _make_model(name: str, *, supports_thinking: bool) -> ModelConfig:
         supports_thinking=supports_thinking,
         supports_vision=False,
     )
+
+
+class ConfiguredGuardMiddleware(AgentMiddleware):
+    pass
+
+
+class ConfiguredAuditMiddleware(AgentMiddleware):
+    pass
 
 
 def test_make_lead_agent_signature_matches_langgraph_server_factory_abi():
@@ -474,6 +484,61 @@ def test_build_middlewares_omits_loop_detection_when_disabled(monkeypatch):
     )
 
     assert not any(isinstance(m, LoopDetectionMiddleware) for m in middlewares)
+
+
+def test_build_middlewares_injects_configured_extension_middlewares(monkeypatch):
+    app_config = _make_app_config(
+        [_make_model("safe-model", supports_thinking=False)],
+        loop_detection=LoopDetectionConfig(enabled=False),
+    )
+    app_config.extensions = ExtensionsConfig(
+        middlewares=[
+            f"{__name__}:ConfiguredGuardMiddleware",
+            f"{__name__}:ConfiguredAuditMiddleware",
+        ]
+    )
+    manual_middleware = MagicMock()
+
+    monkeypatch.setattr(lead_agent_module, "get_app_config", lambda: app_config)
+    monkeypatch.setattr(lead_agent_module, "build_lead_runtime_middlewares", lambda *, app_config, lazy_init=True: [])
+    monkeypatch.setattr(lead_agent_module, "_create_summarization_middleware", lambda *, app_config=None: None)
+    monkeypatch.setattr(lead_agent_module, "_create_todo_list_middleware", lambda is_plan_mode: None)
+
+    middlewares = lead_agent_module.build_middlewares(
+        {"configurable": {"is_plan_mode": False, "subagent_enabled": False}},
+        model_name="safe-model",
+        custom_middlewares=[manual_middleware],
+        app_config=app_config,
+    )
+
+    middleware_types = [type(m).__name__ for m in middlewares]
+    assert middleware_types[-4:] == [
+        "ConfiguredGuardMiddleware",
+        "ConfiguredAuditMiddleware",
+        "SafetyFinishReasonMiddleware",
+        "ClarificationMiddleware",
+    ]
+    assert middlewares[middleware_types.index("ConfiguredGuardMiddleware") - 1] is manual_middleware
+
+
+def test_build_middlewares_rejects_invalid_configured_extension_middleware(monkeypatch):
+    app_config = _make_app_config(
+        [_make_model("safe-model", supports_thinking=False)],
+        loop_detection=LoopDetectionConfig(enabled=False),
+    )
+    app_config.extensions = ExtensionsConfig(middlewares=[f"{__name__}:_make_model"])
+
+    monkeypatch.setattr(lead_agent_module, "get_app_config", lambda: app_config)
+    monkeypatch.setattr(lead_agent_module, "build_lead_runtime_middlewares", lambda *, app_config, lazy_init=True: [])
+    monkeypatch.setattr(lead_agent_module, "_create_summarization_middleware", lambda *, app_config=None: None)
+    monkeypatch.setattr(lead_agent_module, "_create_todo_list_middleware", lambda is_plan_mode: None)
+
+    with pytest.raises(TypeError, match="must be an AgentMiddleware class"):
+        lead_agent_module.build_middlewares(
+            {"configurable": {"is_plan_mode": False, "subagent_enabled": False}},
+            model_name="safe-model",
+            app_config=app_config,
+        )
 
 
 def test_create_summarization_middleware_uses_configured_model_alias(monkeypatch):
