@@ -373,6 +373,19 @@ class Orchestrator:
             return int(entry.get("ok", 0)), int(entry.get("total", 0))
 
         q_ok, q_total = _ok_total(metrics.get("3_query"))
+        if q_total == 0:
+            # Phase 2 invocation: re-derive query counts from query.json on disk
+            # (Phase 1 stored the same numbers in metrics; CLI invocations don't
+            # carry Phase 1 metrics into Phase 2).
+            q_path = self._cfg.out_dir / f"{stem}.query.json"
+            if q_path.exists():
+                payload = json.loads(q_path.read_text(encoding="utf-8"))
+                entries = payload.get("results", [])
+                q_total = len(entries)
+                q_ok = sum(
+                    1 for e in entries
+                    if e.get("results") and all(bool(r.get("success")) for r in e["results"])
+                )
         a_ok, a_total = _ok_total(metrics.get("8a_validate"))
         d_ok, d_total = _ok_total(metrics.get("8d_describe"))
         flat_metrics = {
