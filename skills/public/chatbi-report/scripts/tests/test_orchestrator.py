@@ -71,3 +71,22 @@ def test_orchestrator_constructor_stores_cfg_and_sqlbot():
     real_client = RealSQLBotClient(base_url="http://sqlbot.lan:9070")
     orch_real = p.Orchestrator(cfg, real_client)
     assert orch_real._sqlbot is real_client
+
+
+def test_run_phase_1_lint_and_parse_writes_parsed_json(tmp_path):
+    """Phase 1 step 1 (lint) + step 2 (parse) writes out_dir/{stem}.parsed.json."""
+    from sqlbot_client import MockSQLBotClient
+
+    cfg = p.OrchestratorConfig(md_path=INPUT_MD, out_dir=tmp_path)
+    orch = p.Orchestrator(cfg, MockSQLBotClient(str(FIXTURE)))
+    result = orch.run_phase_1()
+    assert isinstance(result, p.Phase1Result)
+    assert (tmp_path / "input.parsed.json").exists()
+    parsed = json.loads((tmp_path / "input.parsed.json").read_text(encoding="utf-8"))
+    assert "sections" in parsed
+    assert parsed["title"]  # non-empty title from input.md
+    # metrics for steps 1 and 2 are present
+    assert "1_lint" in result.metrics
+    assert "2_parse" in result.metrics
+    assert result.metrics["2_parse"]["n_sec"] >= 1
+    assert result.metrics["2_parse"]["n_rep"] >= 1

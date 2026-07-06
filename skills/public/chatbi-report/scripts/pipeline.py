@@ -5,6 +5,7 @@ docx/superpowers/specs/2026-07-06-chatbi-report-rewrite-design.md.
 """
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -70,7 +71,40 @@ class Orchestrator:
         *,
         force_continue: ForceContinue | None = None,
     ) -> Phase1Result | CheckpointSignal:
-        raise NotImplementedError
+        from md_lint import lint_file
+        from parse_md import parse_file
+
+        metrics: dict[str, Any] = {}
+        artifacts: dict[str, Path] = {}
+        fc = force_continue or ForceContinue()
+
+        # Step 1: lint
+        lint = lint_file(str(self._cfg.md_path))
+        metrics["1_lint"] = {"n_err": len(lint.errors), "n_warn": len(lint.warnings)}
+
+        # Step 2: parse
+        parsed = parse_file(str(self._cfg.md_path))
+        stem = self._cfg.md_path.stem
+        parsed_path = self._cfg.out_dir / f"{stem}.parsed.json"
+        parsed_path.write_text(
+            json.dumps(parsed.to_dict(), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        artifacts["parsed"] = parsed_path
+        n_sec = len(parsed.sections)
+        n_rep = sum(len(s.reports) for s in parsed.sections)
+        n_idx = len(parsed.all_idx_ids)
+        metrics["2_parse"] = {"n_sec": n_sec, "n_rep": n_rep, "n_idx": n_idx}
+
+        return Phase1Result(
+            parsed=parsed.to_dict(),
+            wide=[],
+            ir=[],
+            description_prompts=[],
+            metrics=metrics,
+            runlog=[],
+            artifacts=artifacts,
+        )
 
     def run_phase_2(
         self,
