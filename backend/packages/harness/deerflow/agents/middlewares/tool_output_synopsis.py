@@ -540,10 +540,7 @@ def _summarize_text(content: str, *, tool_name: str = "") -> ToolOutputSynopsis:
         stripped = line.strip()
         if not stripped:
             continue
-        if not (
-            re.match(r"^#{1,6}\s+", stripped)
-            or re.match(r"^[A-Z0-9][A-Z0-9\s:_-]{6,}$", stripped)
-        ):
+        if not (re.match(r"^#{1,6}\s+", stripped) or re.match(r"^[A-Z0-9][A-Z0-9\s:_-]{6,}$", stripped)):
             continue
         header = _one_line(stripped, 160)
         if header in seen:

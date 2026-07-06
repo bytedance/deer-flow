@@ -256,10 +256,7 @@ class TestBuildPreview:
         assert "10000 chars" in preview
 
     def test_json_preview_includes_structure_and_raw_sample(self):
-        content = (
-            '{"meta":{"source":"unit"},"items":[{"id":1,"name":"alpha"},{"id":2,"name":"beta"}],'
-            '"payload":"' + "x" * 5000 + '","tail_marker":"SHOULD_NOT_NEED_TAIL"}'
-        )
+        content = '{"meta":{"source":"unit"},"items":[{"id":1,"name":"alpha"},{"id":2,"name":"beta"}],"payload":"' + "x" * 5000 + '","tail_marker":"SHOULD_NOT_NEED_TAIL"}'
         preview = _build_preview(
             content,
             tool_name="mcp_json",
@@ -271,7 +268,7 @@ class TestBuildPreview:
         assert "JSON object with 4 top-level keys" in preview
         assert "Top-level keys: meta, items, payload, tail_marker" in preview
         assert "items: array length 2" in preview
-        assert "$.meta.source: \"unit\"" in preview
+        assert '$.meta.source: "unit"' in preview
         assert not preview.startswith('{"meta"')
         # The synopsis no longer hides the raw head/tail bytes; the model
         # gets the typed synopsis AND inline raw samples so it can read
@@ -354,7 +351,7 @@ class TestToolOutputSynopsis:
         assert "items: array" in synopsis.structure
 
     def test_xml_synopsis_extracts_root_and_children(self):
-        content = "<feed><entry id=\"1\"/><entry id=\"2\"/><meta/></feed>"
+        content = '<feed><entry id="1"/><entry id="2"/><meta/></feed>'
         synopsis = build_tool_output_synopsis(content, tool_name="xml")
         assert synopsis.kind == "xml"
         assert "XML document with root tag feed." in synopsis.summary
@@ -424,7 +421,8 @@ class TestToolOutputSynopsis:
         # Tab-indented output (ls -l, tree, indented logs) used to be
         # accepted as TSV because _try_table only checked that the
         # delimiter is present and rows agree on width.
-        bash_out = "ls -l output:\n\ttotal 0\n\tdrwxr-xr-x  2 user  group   64 Jun 24 17:00 dir1\n\tdrwxr-xr-x  2 user  group   64 Jun 24 17:00 dir2\n\tdrwxr-xr-x  2 user  group   64 Jun 24 17:00 dir3\n\tdrwxr-xr-x  2 user  group   64 Jun 24 17:00 dir4\n\tdrwxr-xr-x  2 user  group   64 Jun 24 17:00 dir5\n"
+        row = "drwxr-xr-x  2 user  group   64 Jun 24 17:00 dir"
+        bash_out = "ls -l output:\n\ttotal 0\n" + "\n".join(f"\t{row}{i}" for i in range(1, 6)) + "\n"
         synopsis = build_tool_output_synopsis(bash_out, tool_name="bash")
         assert synopsis.kind == "text", f"expected text, got {synopsis.kind!r}: {synopsis.summary}"
 
@@ -452,11 +450,9 @@ class TestToolOutputSynopsis:
         # from tests and other callers that pass small inputs.
         short = "hello world " * 30  # ~360 chars
         synopsis = build_tool_output_synopsis(short)
-        opener_line = next((l for l in synopsis.summary if l.startswith("Opening excerpt: ")), "")
+        opener_line = next((ln for ln in synopsis.summary if ln.startswith("Opening excerpt: ")), "")
         # Closer is now suppressed entirely for short inputs.
-        assert all(not l.startswith("Closing excerpt: ") for l in synopsis.summary), (
-            f"unexpected closer for short input: {synopsis.summary}"
-        )
+        assert all(not ln.startswith("Closing excerpt: ") for ln in synopsis.summary), f"unexpected closer for short input: {synopsis.summary}"
         assert opener_line, "opening excerpt should still be present"
 
     def test_review_12_preview_head_tail_chars_are_operational(self):
