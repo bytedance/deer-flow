@@ -155,3 +155,22 @@ def test_run_phase_1_query_checkpoint_when_all_fail(tmp_path):
     assert result.step == "3.5"
     assert result.metrics["3_query"]["ok"] < result.metrics["3_query"]["total"]
     assert (tmp_path / "input.query.json").exists()  # written before checkpoint
+
+
+def test_run_phase_1_assemble_and_extract_ir(tmp_path):
+    """Phase 1 steps 4+6 produce wide.json + ir.json; Phase1Result fully populated."""
+    from sqlbot_client import MockSQLBotClient
+
+    cfg = p.OrchestratorConfig(md_path=INPUT_MD, out_dir=tmp_path)
+    orch = p.Orchestrator(cfg, MockSQLBotClient(str(FIXTURE)))
+    result = orch.run_phase_1()
+    assert isinstance(result, p.Phase1Result)
+    assert (tmp_path / "input.wide.json").exists()
+    assert (tmp_path / "input.ir.json").exists()
+    assert "4_assemble" in result.metrics
+    assert "6_ir" in result.metrics
+    assert isinstance(result.wide, list)  # flat list[dict], section_idx/report_idx per row
+    assert all({"section_idx", "report_idx"} <= set(r.keys()) for r in result.wide)
+    assert isinstance(result.ir, list)
+    # description_prompts collected per-report (input.md may have none)
+    assert isinstance(result.description_prompts, list)

@@ -136,11 +136,67 @@ class Orchestrator:
                 message=f"SQLBot 查询 {ok}/{total} 成功,部分失败",
             )
 
+        # Step 4: assemble-wide (flat list[dict] with section_idx/report_idx baked in,
+        # matching the existing _cli_assemble_wide contract in compute.py:444-472)
+        from compute import assemble_wide_table
+
+        flat_wide: list[dict] = []
+        for sec_idx, section in enumerate(parsed.sections):
+            for rep_idx, report in enumerate(section.reports):
+                per_idx = [
+                    {
+                        "idx_id": r["idx_id"],
+                        "period": r.get("period"),
+                        "results": r["results"],
+                    }
+                    for r in query_payload.get("results", [])
+                    if r.get("section_idx") == sec_idx and r.get("report_idx") == rep_idx
+                ]
+                rows = assemble_wide_table(per_idx, report, sec_idx, rep_idx)
+                flat_wide.extend(rows)
+        wide_path = self._cfg.out_dir / f"{stem}.wide.json"
+        wide_path.write_text(
+            json.dumps(flat_wide, ensure_ascii=False, indent=2, default=str),
+            encoding="utf-8",
+        )
+        artifacts["wide"] = wide_path
+        n_rows = len(flat_wide)
+        n_cols = sum(
+            len({k for k in r.keys() if k not in {"branch_num", "section_idx", "report_idx", "data_dt", "org_ecd"}})
+            for r in flat_wide
+        )
+        metrics["4_assemble"] = {"rows": n_rows, "cols": n_cols}
+
+        # Step 6: extract-ir (per report, all sections)
+        from compute import extract_compute_ir
+
+        ir: list[dict] = []
+        description_prompts: list[str] = []
+        for section in parsed.sections:
+            for report in section.reports:
+                for spec in extract_compute_ir(report):
+                    ir.append({
+                        "name": spec.name,
+                        "formula_repr": spec.formula_repr,
+                        "base_idx_ids": list(spec.base_idx_ids),
+                        "periods": list(spec.periods),
+                        "examples": list(spec.examples),
+                    })
+                if report.description_prompt:
+                    description_prompts.append(report.description_prompt)
+        ir_path = self._cfg.out_dir / f"{stem}.ir.json"
+        ir_path.write_text(
+            json.dumps(ir, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        artifacts["ir"] = ir_path
+        metrics["6_ir"] = {"n_specs": len(ir)}
+
         return Phase1Result(
             parsed=parsed.to_dict(),
-            wide=[],
-            ir=[],
-            description_prompts=[],
+            wide=flat_wide,
+            ir=ir,
+            description_prompts=description_prompts,
             metrics=metrics,
             runlog=[],
             artifacts=artifacts,
