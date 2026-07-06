@@ -225,6 +225,15 @@ def test_run_phase_2_validate_marks_sentinel_for_bad_source(tmp_path):
     p1 = orch.run_phase_1()
     assert isinstance(p1, p.Phase1Result)
 
+    # Provide description files matching input.md's prompts to bypass 8d.5.
+    desc_dir = tmp_path / "desc"
+    desc_dir.mkdir()
+    stem = INPUT_MD.stem
+    for i, _ in enumerate(p1.description_prompts):
+        (desc_dir / f"{stem}.description.report-{i}.txt").write_text(
+            f"desc {i}", encoding="utf-8"
+        )
+
     # Bad source: function name mismatch → validate_signature fails
     bad_src = tmp_path / "bad.py"
     bad_src.write_text("def wrong_name(df):\n    return 0\n", encoding="utf-8")
@@ -233,8 +242,8 @@ def test_run_phase_2_validate_marks_sentinel_for_bad_source(tmp_path):
         parsed=p1.parsed,
         wide=p1.wide,
         compute_sources={"good_col": str(bad_src)},  # name mismatch is the failure
-        descriptions_dir=str(tmp_path),
-        stem=INPUT_MD.stem,
+        descriptions_dir=str(desc_dir),
+        stem=stem,
     )
     # Continue to RunResult (compute failures don't abort Phase 2)
     assert isinstance(final, p.RunResult)
@@ -257,6 +266,15 @@ def test_run_phase_2_evaluate_and_apply(tmp_path):
     p1 = orch.run_phase_1()
     assert isinstance(p1, p.Phase1Result)
 
+    # Provide description files matching input.md's prompts to bypass 8d.5.
+    desc_dir = tmp_path / "desc"
+    desc_dir.mkdir()
+    stem = INPUT_MD.stem
+    for i, _ in enumerate(p1.description_prompts):
+        (desc_dir / f"{stem}.description.report-{i}.txt").write_text(
+            f"desc {i}", encoding="utf-8"
+        )
+
     # Source: takes a DataFrame and returns a Series-like dict.
     # We don't bind it to an actual wide column (the IR may not produce a matching
     # column); the test only asserts the apply step runs without aborting.
@@ -269,10 +287,36 @@ def test_run_phase_2_evaluate_and_apply(tmp_path):
         parsed=p1.parsed,
         wide=p1.wide,
         compute_sources={"noop": str(src)},
-        descriptions_dir=str(tmp_path),
-        stem=INPUT_MD.stem,
+        descriptions_dir=str(desc_dir),
+        stem=stem,
     )
     assert isinstance(final, p.RunResult)
     sidecar = json.loads((tmp_path / "orchestrator-metrics.json").read_text(encoding="utf-8"))
     assert "8b_evaluate" in sidecar
     assert "8c_apply" in sidecar
+
+
+def test_run_phase_2_attach_descriptions_and_8d5_checkpoint(tmp_path):
+    """Phase 2 reads description files; 8d.5 checkpoint triggers on missing files."""
+    from sqlbot_client import MockSQLBotClient
+
+    cfg = p.OrchestratorConfig(md_path=INPUT_MD, out_dir=tmp_path)
+    orch = p.Orchestrator(cfg, MockSQLBotClient(str(FIXTURE)))
+    p1 = orch.run_phase_1()
+    assert isinstance(p1, p.Phase1Result)
+
+    # No description files → 8d.5 should trigger because we have at least 1
+    # description_prompt in input.md and no files exist under descriptions_dir.
+    final = orch.run_phase_2(
+        parsed=p1.parsed,
+        wide=p1.wide,
+        compute_sources={},
+        descriptions_dir=str(tmp_path / "desc"),  # empty dir → 8d.5 triggers
+        stem=INPUT_MD.stem,
+    )
+    if p1.description_prompts:
+        assert isinstance(final, p.CheckpointSignal)
+        assert final.step == "8d.5"
+    else:
+        # input.md has no description_prompt → 8d.5 skipped, RunResult
+        assert isinstance(final, p.RunResult)

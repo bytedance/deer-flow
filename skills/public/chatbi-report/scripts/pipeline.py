@@ -271,6 +271,35 @@ class Orchestrator:
         wide = apply_computed_results(wide, computed)
         metrics["8c_apply"] = {"n_columns": len(computed)}
 
+        # Step 8d: attach descriptions via render_markdown's standard API
+        # (sets report.description_text, NOT _description_text — see render_markdown:96-112).
+        from render_markdown import attach_description_files, doc_from_dict
+
+        doc = doc_from_dict(parsed)
+        attach_description_files(doc, descriptions_dir, stem=stem)
+
+        # Detect failures: any report with description_prompt that didn't get description_text.
+        d_total = 0
+        d_found = 0
+        for section in doc.sections:
+            for report in section.reports:
+                if not report.description_prompt:
+                    continue
+                d_total += 1
+                if getattr(report, "description_text", None):
+                    d_found += 1
+        metrics["8d_describe"] = {"ok": d_found, "total": d_total}
+
+        # Step 8d.5: description checkpoint (per spec §"用户回复路由" — 8d.5 always triggers
+        # when any description file is missing AND prompts existed, 2026-06-27 policy reversal).
+        if d_total > 0 and d_found < d_total:
+            return CheckpointSignal(
+                step="8d.5",
+                metrics=metrics,
+                artifacts={"parsed": self._cfg.out_dir / f"{stem}.parsed.json"},
+                message=f"description 生成 {d_found}/{d_total} 失败",
+            )
+
         return self._finish_phase_2(parsed, wide, metrics, descriptions_dir, stem)
 
     def _finish_phase_2(
