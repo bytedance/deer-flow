@@ -1,6 +1,11 @@
 import type { AIMessage, Message, Run } from "@langchain/langgraph-sdk";
 import { useStream } from "@langchain/langgraph-sdk/react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  useInfiniteQuery,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
@@ -130,9 +135,10 @@ function getStreamErrorMessage(error: unknown): string {
 }
 
 /** Extract failure metadata from a structured stream error for layer-aware display. */
-function extractFailureMeta(
-  error: unknown,
-): { category: string | null; layer: string | null } {
+function extractFailureMeta(error: unknown): {
+  category: string | null;
+  layer: string | null;
+} {
   if (typeof error === "object" && error !== null) {
     const category = Reflect.get(error, "failure_category");
     const layer = Reflect.get(error, "failed_layer");
@@ -336,6 +342,26 @@ export function useThreadStream({
               });
             },
           );
+          void queryClient.setQueriesData(
+            { queryKey: ["threads", "infinite"], exact: false },
+            (
+              oldData:
+                | { pages: AgentThread[][]; pageParams: number[] }
+                | undefined,
+            ) => {
+              if (!oldData) return oldData;
+              return {
+                ...oldData,
+                pages: oldData.pages.map((page) =>
+                  page.map((t) =>
+                    t.thread_id === threadIdRef.current
+                      ? { ...t, values: { ...t.values, ...patch } }
+                      : t,
+                  ),
+                ),
+              };
+            },
+          );
           void queryClient.setQueryData(
             ["thread", threadIdRef.current],
             (old: AgentThread | undefined) => {
@@ -365,7 +391,9 @@ export function useThreadStream({
         event.type === "ui_blocks_folded"
       ) {
         const e = event as { type: "ui_blocks_folded"; blocks: UIBlock[] };
-        useBlockStore.getState().replaceAllBlocks(threadIdRef.current ?? "", e.blocks);
+        useBlockStore
+          .getState()
+          .replaceAllBlocks(threadIdRef.current ?? "", e.blocks);
         return;
       }
 
@@ -450,6 +478,35 @@ export function useThreadStream({
               });
             },
           );
+          void queryClient.setQueriesData(
+            {
+              queryKey: ["threads", "infinite"],
+              exact: false,
+            },
+            (
+              oldData:
+                | { pages: AgentThread[][]; pageParams: number[] }
+                | undefined,
+            ) => {
+              if (!oldData) return oldData;
+              return {
+                ...oldData,
+                pages: oldData.pages.map((page) =>
+                  page.map((t) =>
+                    t.thread_id === threadIdRef.current
+                      ? {
+                          ...t,
+                          values: {
+                            ...t.values,
+                            title: update.title,
+                          },
+                        }
+                      : t,
+                  ),
+                ),
+              };
+            },
+          );
         }
       }
     },
@@ -465,7 +522,10 @@ export function useThreadStream({
         const message =
           quotaError.code === "quota_daily_exceeded"
             ? t.errors.quota_daily_exceeded(quotaError.used, quotaError.limit)
-            : t.errors.quota_monthly_exceeded(quotaError.used, quotaError.limit);
+            : t.errors.quota_monthly_exceeded(
+                quotaError.used,
+                quotaError.limit,
+              );
         toast.error(message);
       } else {
         const message = getStreamErrorMessage(error);
@@ -482,7 +542,10 @@ export function useThreadStream({
       onFinishFiredRef.current = true;
       appendMessages(messagesRef.current);
       listeners.current.onFinish?.(state.values);
-      void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
+      void queryClient.invalidateQueries({
+        queryKey: ["threads"],
+        exact: false,
+      });
       if (threadIdRef.current) {
         void queryClient.invalidateQueries({
           queryKey: ["thread", threadIdRef.current],
@@ -515,11 +578,20 @@ export function useThreadStream({
       if (bgError !== null) {
         setBackgroundError(bgError);
       }
-      if (wasLoadingBeforeHideRef.current && !thread.isLoading && !onFinishFiredRef.current) {
+      if (
+        wasLoadingBeforeHideRef.current &&
+        !thread.isLoading &&
+        !onFinishFiredRef.current
+      ) {
         onFinishFiredRef.current = true;
         appendMessages(messagesRef.current);
-        listeners.current.onFinish?.(thread.messages as unknown as AgentThreadState);
-        void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
+        listeners.current.onFinish?.(
+          thread.messages as unknown as AgentThreadState,
+        );
+        void queryClient.invalidateQueries({
+          queryKey: ["threads"],
+          exact: false,
+        });
         if (threadIdRef.current) {
           void queryClient.invalidateQueries({
             queryKey: ["thread", threadIdRef.current],
@@ -528,7 +600,13 @@ export function useThreadStream({
       }
     }
     wasVisibleRef.current = isVisible;
-  }, [isVisible, thread.isLoading, appendMessages, queryClient, thread.messages]);
+  }, [
+    isVisible,
+    thread.isLoading,
+    appendMessages,
+    queryClient,
+    thread.messages,
+  ]);
 
   // Optimistic messages shown before the server stream responds
   const [optimisticMessages, setOptimisticMessages] = useState<Message[]>([]);
@@ -574,7 +652,10 @@ export function useThreadStream({
       options?: SendMessageOptions,
     ) => {
       const text = message.text.trim();
-      const shouldRetryUiInteraction = isHiddenUiInteractionMessage(text, options);
+      const shouldRetryUiInteraction = isHiddenUiInteractionMessage(
+        text,
+        options,
+      );
 
       if (sendInFlightRef.current) {
         if (shouldRetryUiInteraction) {
@@ -587,7 +668,9 @@ export function useThreadStream({
               });
             }, UI_INTERACTION_RETRY_DELAY_MS);
           } else {
-            toast.error("交互提交已收到，但线程暂时忙碌，未能继续执行。请稍后重试。");
+            toast.error(
+              "交互提交已收到，但线程暂时忙碌，未能继续执行。请稍后重试。",
+            );
           }
         }
         return;
@@ -760,7 +843,10 @@ export function useThreadStream({
             },
           },
         );
-        void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
+        void queryClient.invalidateQueries({
+          queryKey: ["threads"],
+          exact: false,
+        });
       } catch (error) {
         setOptimisticMessages([]);
         setIsUploading(false);
@@ -782,7 +868,11 @@ export function useThreadStream({
   // `todos` don't flash empty while the SDK reloads history for the new thread.
   // The ref is cleared once the new thread's history finishes loading.
   const lastValuesRef = useRef<Record<string, unknown>>({});
-  if (thread.values && Object.keys(thread.values).length > 0 && !thread.isThreadLoading) {
+  if (
+    thread.values &&
+    Object.keys(thread.values).length > 0 &&
+    !thread.isThreadLoading
+  ) {
     lastValuesRef.current = thread.values;
   } else if (!thread.isThreadLoading) {
     lastValuesRef.current = {};
@@ -820,7 +910,10 @@ export function useThreadStream({
     messages: mergedMessages,
     backgroundPaused: isThreadSwitchPending ? false : backgroundPaused,
     backgroundError: isThreadSwitchPending ? null : backgroundError,
-  } as typeof thread & { backgroundPaused: boolean; backgroundError: unknown | null };
+  } as typeof thread & {
+    backgroundPaused: boolean;
+    backgroundError: unknown | null;
+  };
 
   return {
     thread: mergedThread,
@@ -967,6 +1060,50 @@ export function useThreads(
   });
 }
 
+const DEFAULT_PAGE_SIZE = 30;
+
+export function useInfiniteThreads(
+  params: {
+    limit?: number;
+    status?: string;
+    metadata?: Record<string, unknown>;
+  } = {},
+) {
+  const pageSize = params.limit ?? DEFAULT_PAGE_SIZE;
+  return useInfiniteQuery<AgentThread[]>({
+    queryKey: ["threads", "infinite", params],
+    queryFn: async ({ pageParam }) => {
+      const body: Record<string, unknown> = {
+        limit: pageSize,
+        offset: pageParam as number,
+      };
+      if (params.status) body.status = params.status;
+      if (params.metadata) body.metadata = params.metadata;
+
+      const response = await fetchGateway(
+        `${getBackendBaseURL()}/api/threads/search`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        },
+      );
+
+      if (!response.ok) {
+        throw new Error("Failed to fetch threads");
+      }
+
+      return response.json() as Promise<AgentThread[]>;
+    },
+    initialPageParam: 0,
+    getNextPageParam: (lastPage, allPages) => {
+      if (lastPage.length < pageSize) return undefined;
+      return allPages.reduce((sum, p) => sum + p.length, 0);
+    },
+    refetchOnWindowFocus: false,
+  });
+}
+
 export function useThreadRuns(threadId?: string) {
   const apiClient = getAPIClient();
   return useQuery<Run[]>({
@@ -1013,9 +1150,29 @@ export function useDeleteThread() {
           return oldData.filter((t) => t.thread_id !== threadId);
         },
       );
+      queryClient.setQueriesData(
+        {
+          queryKey: ["threads", "infinite"],
+          exact: false,
+        },
+        (
+          oldData: { pages: AgentThread[][]; pageParams: number[] } | undefined,
+        ) => {
+          if (!oldData) return oldData;
+          return {
+            ...oldData,
+            pages: oldData.pages.map((page) =>
+              page.filter((t) => t.thread_id !== threadId),
+            ),
+          };
+        },
+      );
     },
     onSettled() {
-      void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
+      void queryClient.invalidateQueries({
+        queryKey: ["threads"],
+        exact: false,
+      });
     },
   });
 }
@@ -1054,6 +1211,27 @@ export function useRenameThread() {
             }
             return t;
           });
+        },
+      );
+      queryClient.setQueriesData(
+        {
+          queryKey: ["threads", "infinite"],
+          exact: false,
+        },
+        (
+          oldData: { pages: AgentThread[][]; pageParams: number[] } | undefined,
+        ) => {
+          if (!oldData) return oldData;
+          return {
+            ...oldData,
+            pages: oldData.pages.map((page) =>
+              page.map((t) =>
+                t.thread_id === threadId
+                  ? { ...t, values: { ...t.values, title } }
+                  : t,
+              ),
+            ),
+          };
         },
       );
     },
