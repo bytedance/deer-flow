@@ -8,6 +8,7 @@ import {
   MessageSquareTextIcon,
   PaperclipIcon,
   RocketIcon,
+  Trash2Icon,
   XIcon,
   ZapIcon,
 } from "lucide-react";
@@ -36,6 +37,14 @@ import {
 } from "@/components/ai-elements/prompt-input";
 import { Button } from "@/components/ui/button";
 import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import {
   DropdownMenuGroup,
   DropdownMenuLabel,
 } from "@/components/ui/dropdown-menu";
@@ -50,6 +59,7 @@ import {
 } from "@/core/sidecar";
 import { createSidecarThread } from "@/core/sidecar/api";
 import {
+  useDeleteThread,
   useThreadStream,
   type ThreadStreamOptions,
 } from "@/core/threads/hooks";
@@ -137,6 +147,9 @@ export function SidecarPanel({ className }: { className?: string }) {
   const { models, tokenUsageEnabled } = useModels();
   const [modelDialogOpen, setModelDialogOpen] = useState(false);
   const [creatingThread, setCreatingThread] = useState(false);
+  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+  const { mutateAsync: deleteThread, isPending: isDeleting } =
+    useDeleteThread();
   const [queuedSubmit, setQueuedSubmit] = useState<{
     message: PromptInputMessage;
     references: SidecarReference[];
@@ -437,6 +450,39 @@ export function SidecarPanel({ className }: { className?: string }) {
     ],
   );
 
+  const discardDraftAndClose = useCallback(() => {
+    sidecar.clearActiveReferences();
+    sidecar.setSidecarThreadId(null);
+    sidecar.close();
+  }, [sidecar]);
+
+  const handleDelete = useCallback(async () => {
+    const threadId = sidecar.sidecarThreadId;
+    // Guard: the trash button only opens this dialog once a thread exists, so a
+    // missing id here means the draft was cleared underneath us — just close.
+    if (!threadId) {
+      discardDraftAndClose();
+      setDeleteDialogOpen(false);
+      return;
+    }
+    try {
+      await deleteThread({ threadId });
+      discardDraftAndClose();
+      setDeleteDialogOpen(false);
+      toast.success(t.sidecar.deleteSuccess);
+    } catch (error) {
+      toast.error(
+        error instanceof Error ? error.message : t.sidecar.deleteFailed,
+      );
+    }
+  }, [
+    deleteThread,
+    discardDraftAndClose,
+    sidecar.sidecarThreadId,
+    t.sidecar.deleteFailed,
+    t.sidecar.deleteSuccess,
+  ]);
+
   return (
     <div
       className={cn("flex size-full min-h-0 flex-col", className)}
@@ -454,16 +500,35 @@ export function SidecarPanel({ className }: { className?: string }) {
                 : t.sidecar.noContext}
           </div>
         </div>
-        <Tooltip content={t.common.close}>
-          <Button
-            aria-label={t.common.close}
-            size="icon-sm"
-            variant="ghost"
-            onClick={() => sidecar.close()}
-          >
-            <XIcon />
-          </Button>
-        </Tooltip>
+        {hasSidecarThread ? (
+          <Tooltip content={t.sidecar.delete}>
+            <Button
+              aria-label={t.sidecar.delete}
+              className="text-muted-foreground hover:text-destructive"
+              data-testid="sidecar-delete-button"
+              size="icon-sm"
+              variant="ghost"
+              onClick={() => setDeleteDialogOpen(true)}
+            >
+              <Trash2Icon />
+            </Button>
+          </Tooltip>
+        ) : (
+          // No conversation yet — nothing to delete, so this just discards the
+          // draft and closes the panel. A plain X (no confirm) keeps it light.
+          <Tooltip content={t.common.close}>
+            <Button
+              aria-label={t.common.close}
+              className="text-muted-foreground hover:text-foreground"
+              data-testid="sidecar-close-button"
+              size="icon-sm"
+              variant="ghost"
+              onClick={() => discardDraftAndClose()}
+            >
+              <XIcon />
+            </Button>
+          </Tooltip>
+        )}
       </header>
 
       <div className="min-h-0 flex-1">
@@ -558,6 +623,55 @@ export function SidecarPanel({ className }: { className?: string }) {
           </PromptInput>
         </PromptInputProvider>
       </div>
+
+      <Dialog
+        open={deleteDialogOpen}
+        onOpenChange={(open) => {
+          // While the delete is in flight the only way out is the (disabled)
+          // Cancel button, so ignore overlay/Esc/close-button dismissals that
+          // would otherwise hide the dialog and imply the delete was cancelled.
+          if (!open && isDeleting) {
+            return;
+          }
+          setDeleteDialogOpen(open);
+        }}
+      >
+        <DialogContent
+          showCloseButton={!isDeleting}
+          onEscapeKeyDown={(event) => {
+            if (isDeleting) {
+              event.preventDefault();
+            }
+          }}
+          onInteractOutside={(event) => {
+            if (isDeleting) {
+              event.preventDefault();
+            }
+          }}
+        >
+          <DialogHeader>
+            <DialogTitle>{t.sidecar.delete}</DialogTitle>
+            <DialogDescription>{t.sidecar.deleteConfirm}</DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setDeleteDialogOpen(false)}
+              disabled={isDeleting}
+            >
+              {t.common.cancel}
+            </Button>
+            <Button
+              variant="destructive"
+              data-testid="sidecar-delete-confirm-button"
+              onClick={() => void handleDelete()}
+              disabled={isDeleting}
+            >
+              {isDeleting ? t.common.loading : t.common.delete}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

@@ -362,6 +362,10 @@ export interface Translations {
     title: string;
     open: string;
     close: string;
+    delete: string;
+    deleteConfirm: string;
+    deleteSuccess: string;
+    deleteFailed: string;
     addToConversation: string;
     askInSideChat: string;
     reference: string;

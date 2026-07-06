@@ -452,6 +452,11 @@ export const enUS: Translations = {
     title: "Side chat",
     open: "Open side chat",
     close: "Close side chat",
+    delete: "Delete side chat",
+    deleteConfirm:
+      "Are you sure you want to delete this side chat? This action cannot be undone. To simply hide it, use the side chat toggle in the header instead.",
+    deleteSuccess: "Side chat deleted",
+    deleteFailed: "Failed to delete side chat.",
     addToConversation: "Add to conversation",
     askInSideChat: "Ask in side chat",
     reference: "Reference",
