@@ -23,7 +23,6 @@ import {
   useState,
   type ComponentProps,
   type KeyboardEvent,
-  type RefObject,
 } from "react";
 import { toast } from "sonner";
 
@@ -614,7 +613,7 @@ export function InputBox({
       }
       const placeholder = findSuggestionTemplatePlaceholder(message.text);
       if (placeholder) {
-        toast.error(t.inputBox.suggestionPlaceholderRequired);
+        toast.warning(t.inputBox.suggestionPlaceholderRequired);
         requestAnimationFrame(() => {
           const textarea = textareaRef.current;
           if (!textarea) {
@@ -1068,6 +1067,18 @@ export function InputBox({
     suggestionsEnabled,
     threadId,
   ]);
+
+  const onSelectPlaceholder = useCallback((newText: string) => {
+    const placeholder = findSuggestionTemplatePlaceholder(newText);
+    if (placeholder) {
+      requestAnimationFrame(() => {
+        const textarea = textareaRef.current;
+        if (!textarea) return;
+        textarea.focus();
+        textarea.setSelectionRange(placeholder.start, placeholder.end);
+      });
+    }
+  }, []);
 
   return (
     <div
@@ -1568,7 +1579,7 @@ export function InputBox({
         searchParams.get("mode") !== "skill" &&
         !showSkillSuggestions && (
           <div className="flex items-center justify-center pt-2">
-            <SuggestionList textareaRef={textareaRef} />
+            <SuggestionList onSelectPlaceholder={onSelectPlaceholder} />
           </div>
         )}
 
@@ -1598,9 +1609,9 @@ export function InputBox({
 }
 
 function SuggestionList({
-  textareaRef,
+  onSelectPlaceholder,
 }: {
-  textareaRef: RefObject<HTMLTextAreaElement | null>;
+  onSelectPlaceholder: (newText: string) => void;
 }) {
   const { t } = useI18n();
   const { textInput } = usePromptInputController();
@@ -1608,16 +1619,9 @@ function SuggestionList({
     (prompt: string | undefined) => {
       if (!prompt) return;
       textInput.setInput(prompt);
-      requestAnimationFrame(() => {
-        const textarea = textareaRef.current;
-        const placeholder = findSuggestionTemplatePlaceholder(prompt);
-        if (textarea && placeholder) {
-          textarea.focus();
-          textarea.setSelectionRange(placeholder.start, placeholder.end);
-        }
-      });
+      onSelectPlaceholder(prompt);
     },
-    [textareaRef, textInput],
+    [textInput, onSelectPlaceholder],
   );
   return (
     <Suggestions className="min-h-16 w-full max-w-full justify-center px-4 sm:w-fit sm:px-0">
