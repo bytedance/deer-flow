@@ -86,13 +86,53 @@ parse, SQLBot, compute, description, or DOCX issues need explanation.
 
 ## Pipeline quick view
 
+The pipeline is wrapped by a single `Orchestrator` class (`scripts/pipeline.py`)
+that runs Phase 1 (steps 1–6) and Phase 2 (steps 8a–9) in-process. The two LLM
+steps (7 codegen, 8d describe) remain agent-external between phases. Three user
+checkpoints (1.5 lint, 3.5 query, 8d.5 description) emit a `CheckpointSignal` on
+the last line of stdout that the agent maps to `ask_clarification`.
+
 ```text
-1 lint → 1.5 lint checkpoint → 2 parse → 3 query → 3.5 query checkpoint
-→ 4 assemble-wide → 6 extract-ir
-→ 7 codegen → 8a validate → 8b evaluate → 8c apply-computed
-→ 8d describe → 8d.5 description checkpoint
-→ 9 render/status
+# Agent calls pipeline.py phase1
+[orchestrator] 1 lint → 1.5 lint checkpoint → 2 parse → 3 query → 3.5 query checkpoint
+                → 4 assemble-wide → 6 extract-ir
+[agent] reads ir.json + description_prompts; writes compute sources + description files
+# Agent calls pipeline.py phase2
+[orchestrator] 8a validate → 8b evaluate → 8c apply-computed
+                → 8d attach descriptions → 8d.5 description checkpoint
+                → 9 render markdown + docx + status.json
 ```
+
+### Phase 1 subcommand
+
+```bash
+python /mnt/skills/public/chatbi-report/scripts/pipeline.py phase1 \
+  --md /mnt/user-data/uploads/<file>.md \
+  --out-dir /mnt/user-data/outputs \
+  --mock-fixture /mnt/skills/public/chatbi-report/example/mock_sqlbot/profit_yoy.json
+```
+
+The last line of stdout is JSON. Three kinds:
+- `{"kind": "phase1_result", "result": {...}}` — proceed to agent LLM work
+- `{"kind": "checkpoint", "step": "1.5" | "3.5", ...}` — call `ask_clarification`
+  per the table in `references/pipeline.md`. If user picks "继续", re-invoke the
+  same `phase1` command with `--skip-lint-checkpoint` and/or `--skip-query-checkpoint`.
+  If "停止", write `status.json` with `error_class=USER_ABORTED` and stop.
+
+### Phase 2 subcommand
+
+```bash
+python /mnt/skills/public/chatbi-report/scripts/pipeline.py phase2 \
+  --md /mnt/user-data/uploads/<file>.md \
+  --out-dir /mnt/user-data/outputs \
+  --descriptions-dir /mnt/user-data/outputs/desc \
+  --compute-source my_col=/mnt/user-data/outputs/compute/my_col.py
+```
+
+The last line of stdout is JSON. Two kinds:
+- `{"kind": "phase2_result", "result": {...}}` — report rendered, share paths
+- `{"kind": "checkpoint", "step": "8d.5", ...}` — call `ask_clarification` per
+  the table in `references/pipeline.md`
 
 Note: Step 5 (unit-convert) was removed — `unit_conversion.py` is a library
 (`convert_unit()` + `SCALE_FACTOR`), not a CLI. Unit conversion is folded into
@@ -108,6 +148,8 @@ Key points:
 - Checkpoints use `ask_clarification(..., clarification_type="risk_confirmation", ...)`.
 - If a user stops at Step 8d.5, tell them to edit the original `> 描述:` block and rerun.
 - Do not accept in-run replacement prompts or modify uploaded source templates.
+- **Never delegate `pipeline.py` to a subagent.** The lead agent must call it
+  directly — subagents lose access to wire-format stdout and checkpoint routing.
 
 ## Output rules
 
