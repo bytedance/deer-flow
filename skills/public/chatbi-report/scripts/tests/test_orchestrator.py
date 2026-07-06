@@ -10,8 +10,8 @@ import pytest
 import pipeline as p
 
 
-FIXTURE = Path(__file__).parents[1] / "example" / "mock_sqlbot" / "profit_yoy.json"
-INPUT_MD = Path(__file__).parents[1] / "example" / "input.md"
+FIXTURE = Path(__file__).parents[2] / "example" / "mock_sqlbot" / "profit_yoy.json"
+INPUT_MD = Path(__file__).parents[2] / "example" / "input.md"
 
 
 def test_dataclasses_construct_with_minimal_args():
@@ -55,3 +55,19 @@ def test_dataclasses_construct_with_minimal_args():
         metrics={},
     )
     assert rr.report_md == Path("/tmp/x/report.md")
+
+
+def test_orchestrator_constructor_stores_cfg_and_sqlbot():
+    """Constructor accepts either MockSQLBotClient or RealSQLBotClient."""
+    from sqlbot_client import MockSQLBotClient, RealSQLBotClient
+
+    cfg = p.OrchestratorConfig(md_path=INPUT_MD, out_dir=Path("/tmp/x"))
+
+    mock_client = MockSQLBotClient(str(FIXTURE))
+    orch_mock = p.Orchestrator(cfg, mock_client)
+    assert orch_mock._cfg is cfg
+    assert orch_mock._sqlbot is mock_client
+
+    real_client = RealSQLBotClient(base_url="http://sqlbot.lan:9070")
+    orch_real = p.Orchestrator(cfg, real_client)
+    assert orch_real._sqlbot is real_client

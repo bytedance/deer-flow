@@ -56,3 +56,28 @@ class RunResult:
     report_docx: Path | None
     status_json: Path
     metrics: dict[str, Any]
+
+
+class Orchestrator:
+    """Phase 1 / Phase 2 in-process pipeline. See spec."""
+
+    def __init__(self, cfg: OrchestratorConfig, sqlbot: Any) -> None:
+        self._cfg = cfg
+        self._sqlbot = sqlbot
+
+    def run_phase_1(
+        self,
+        *,
+        force_continue: ForceContinue | None = None,
+    ) -> Phase1Result | CheckpointSignal:
+        raise NotImplementedError
+
+    def run_phase_2(
+        self,
+        parsed: dict,
+        wide: list[dict],
+        compute_sources: dict[str, str],
+        descriptions_dir: str,
+        stem: str,
+    ) -> CheckpointSignal | RunResult:
+        raise NotImplementedError
