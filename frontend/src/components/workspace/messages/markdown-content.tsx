@@ -11,6 +11,8 @@ import { streamdownPlugins } from "@/core/streamdown";
 import { cn } from "@/lib/utils";
 
 import { CitationLink } from "../citations/citation-link";
+import { KBCitationLink } from "../citations/kb-citation-link";
+import type { RetrievalSource } from "@/core/messages/utils";
 
 function isExternalUrl(href: string | undefined): boolean {
   return !!href && /^https?:\/\//.test(href);
@@ -23,6 +25,7 @@ export type MarkdownContentProps = {
   className?: string;
   remarkPlugins?: MessageResponseProps["remarkPlugins"];
   components?: MessageResponseProps["components"];
+  sources?: RetrievalSource[] | null;
 };
 
 /** Renders markdown content. */
@@ -32,6 +35,7 @@ export function MarkdownContent({
   className,
   remarkPlugins = streamdownPlugins.remarkPlugins,
   components: componentsFromProps,
+  sources,
 }: MarkdownContentProps) {
   const components = useMemo(() => {
     return {
@@ -42,6 +46,13 @@ export function MarkdownContent({
             const [, text] = match;
             return <CitationLink {...props}>{text}</CitationLink>;
           }
+        }
+        if (props.href?.startsWith("kb://")) {
+          return (
+            <KBCitationLink href={props.href} sources={sources}>
+              {props.children}
+            </KBCitationLink>
+          );
         }
         const { className, target, rel, ...rest } = props;
         const external = isExternalUrl(props.href);
@@ -59,7 +70,7 @@ export function MarkdownContent({
       },
       ...componentsFromProps,
     };
-  }, [componentsFromProps]);
+  }, [componentsFromProps, sources]);
 
   if (!content) return null;
 

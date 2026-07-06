@@ -38,7 +38,10 @@ export function RetrievalSources({ messages }: { messages: Message[] }) {
       {expanded && (
         <div className="mt-1.5 flex flex-wrap gap-1.5">
           {sources.map((source) => (
-            <SourceBadge key={`${source.kb_id}:${source.doc_title}`} source={source} />
+            <SourceBadge
+              key={`${source.kb_id}:${source.doc_title}`}
+              source={source}
+            />
           ))}
         </div>
       )}
@@ -52,6 +55,9 @@ function SourceBadge({ source }: { source: RetrievalSource }) {
       <span className="max-w-32 truncate">{source.kb_name}</span>
       <span className="text-muted-foreground">·</span>
       <span className="max-w-40 truncate">{source.doc_title}</span>
+      <span className="text-muted-foreground ml-0.5 text-[10px]">
+        {source.score.toFixed(2)}
+      </span>
     </Badge>
   );
 }
