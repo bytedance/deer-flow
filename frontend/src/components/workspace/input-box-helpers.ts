@@ -1,9 +1,10 @@
 import type { Skill } from "@/core/skills";
+export {
+  SUGGESTION_TEMPLATE_PLACEHOLDER_PATTERN,
+  findSuggestionTemplatePlaceholder,
+} from "@/core/suggestions/placeholders";
 
 export const MAX_SKILL_SUGGESTIONS = 6;
-
-export const SUGGESTION_TEMPLATE_PLACEHOLDER_PATTERN =
-  /\[(?:主题|来源|topic|source)\]/i;
 
 export type SlashSuggestion = {
   name: string;
@@ -98,18 +99,6 @@ export function isAbortError(error: unknown): boolean {
       error !== null &&
       Reflect.get(error, "name") === "AbortError")
   );
-}
-
-export function findSuggestionTemplatePlaceholder(text: string) {
-  const match = SUGGESTION_TEMPLATE_PLACEHOLDER_PATTERN.exec(text);
-  if (!match) {
-    return null;
-  }
-
-  return {
-    start: match.index,
-    end: match.index + match[0].length,
-  };
 }
 
 export function getLeadingSlashSkillQuery(value: string): string | null {

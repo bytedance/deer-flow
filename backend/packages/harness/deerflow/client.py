@@ -1319,6 +1319,11 @@ class DeerFlowClient:
             "token_counting": config.token_counting,
             "guaranteed_categories": config.guaranteed_categories,
             "guaranteed_token_budget": config.guaranteed_token_budget,
+            "staleness_review_enabled": config.staleness_review_enabled,
+            "staleness_age_days": config.staleness_age_days,
+            "staleness_min_candidates": config.staleness_min_candidates,
+            "staleness_max_removals_per_cycle": config.staleness_max_removals_per_cycle,
+            "staleness_protected_categories": config.staleness_protected_categories,
         }
 
     def get_memory_status(self) -> dict:

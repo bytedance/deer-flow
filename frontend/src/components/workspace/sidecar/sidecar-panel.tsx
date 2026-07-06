@@ -478,6 +478,7 @@ export function SidecarPanel({ className }: { className?: string }) {
             loadMoreHistory={loadMoreHistory}
             isHistoryLoading={isHistoryLoading}
             tokenUsageInlineMode={tokenUsageInlineMode}
+            sidecarSurface
             initialScroll="instant"
             resizeScroll="instant"
           />

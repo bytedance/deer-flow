@@ -2617,6 +2617,11 @@ class TestGatewayConformance:
         mem_cfg.injection_enabled = True
         mem_cfg.max_injection_tokens = 2000
         mem_cfg.token_counting = "tiktoken"
+        mem_cfg.staleness_review_enabled = True
+        mem_cfg.staleness_age_days = 90
+        mem_cfg.staleness_min_candidates = 3
+        mem_cfg.staleness_max_removals_per_cycle = 10
+        mem_cfg.staleness_protected_categories = ["correction"]
 
         with patch("deerflow.config.memory_config.get_memory_config", return_value=mem_cfg):
             result = client.get_memory_config()
@@ -2636,6 +2641,11 @@ class TestGatewayConformance:
         mem_cfg.injection_enabled = True
         mem_cfg.max_injection_tokens = 2000
         mem_cfg.token_counting = "tiktoken"
+        mem_cfg.staleness_review_enabled = True
+        mem_cfg.staleness_age_days = 90
+        mem_cfg.staleness_min_candidates = 3
+        mem_cfg.staleness_max_removals_per_cycle = 10
+        mem_cfg.staleness_protected_categories = ["correction"]
 
         memory_data = {
             "version": "1.0",

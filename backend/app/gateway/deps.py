@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from collections.abc import AsyncGenerator, Callable
 from contextlib import AsyncExitStack, asynccontextmanager
 from typing import TYPE_CHECKING, TypeVar, cast
@@ -43,6 +44,27 @@ logger = logging.getLogger(__name__)
 # them together if their sum must stay within the server's graceful-shutdown
 # timeout.
 _RUN_DRAIN_TIMEOUT_SECONDS = 5.0
+
+
+def _enforce_postgres_for_multi_worker(config: AppConfig) -> None:
+    """Refuse to start when GATEWAY_WORKERS > 1 and the DB backend is not Postgres.
+
+    SQLite write-locks cannot support concurrent multi-process access.
+    This gate runs once at startup before any persistence engine is
+    initialised so the error message is clear and the process exits
+    immediately.
+    """
+    try:
+        workers = int(os.environ.get("GATEWAY_WORKERS", "1"))
+    except (TypeError, ValueError):
+        workers = 1
+
+    if workers <= 1:
+        return
+
+    backend = getattr(config.database, "backend", None)
+    if backend != "postgres":
+        raise SystemExit(f"GATEWAY_WORKERS={workers} requires database.backend='postgres', but database.backend is '{backend}'. SQLite cannot support concurrent multi-process access. Set GATEWAY_WORKERS=1 or switch to Postgres.")
 
 
 async def _drain_inflight_runs(run_manager: RunManager) -> None:
@@ -208,6 +230,12 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
     from deerflow.runtime import make_store, make_stream_bridge
     from deerflow.runtime.checkpointer.async_provider import make_checkpointer
     from deerflow.runtime.events.store import make_run_event_store
+
+    # ------------------------------------------------------------------
+    # Multi-worker safety gate: reject SQLite when GATEWAY_WORKERS > 1.
+    # SQLite write-locks cannot support concurrent multi-process access.
+    # ------------------------------------------------------------------
+    _enforce_postgres_for_multi_worker(startup_config)
 
     async with AsyncExitStack() as stack:
         config = startup_config
