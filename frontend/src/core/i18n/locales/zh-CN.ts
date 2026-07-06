@@ -521,6 +521,17 @@ export const zhCN: Translations = {
     skillInstallTooltip: "安装技能并使其可在 DeerFlow 中使用",
   },
 
+  humanInput: {
+    answered: "已回答",
+    pending: "发送中...",
+    readOnly: "只读",
+    otherLabel: "其他回答",
+    otherPlaceholder: "输入其他回答...",
+    submit: "提交",
+    emptyError: "请输入回答后再提交。",
+    answeredValue: (value: string) => `已回答：${value}`,
+  },
+
   uploads: {
     uploading: "上传中...",
     uploadingFiles: "文件上传中，请稍候...",

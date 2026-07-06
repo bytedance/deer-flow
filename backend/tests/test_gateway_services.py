@@ -132,6 +132,37 @@ def test_normalize_input_preserves_additional_kwargs_and_id():
     assert msg.additional_kwargs == {"files": files, "custom": "keep-me"}
 
 
+def test_normalize_input_preserves_human_input_response_metadata():
+    from langchain_core.messages import HumanMessage
+
+    from app.gateway.services import normalize_input
+
+    response = {
+        "version": 1,
+        "kind": "human_input_response",
+        "source": "ask_clarification",
+        "request_id": "clarification:call-abc",
+        "response_kind": "option",
+        "option_id": "option-2",
+        "value": "staging",
+    }
+    result = normalize_input(
+        {
+            "messages": [
+                {
+                    "type": "human",
+                    "content": [{"type": "text", "text": "For your clarification, my answer is: staging"}],
+                    "additional_kwargs": {"human_input_response": response},
+                }
+            ]
+        }
+    )
+
+    msg = result["messages"][0]
+    assert isinstance(msg, HumanMessage)
+    assert msg.additional_kwargs["human_input_response"] == response
+
+
 def test_normalize_input_passes_through_basemessage_instances():
     from langchain_core.messages import HumanMessage
 
