@@ -304,42 +304,110 @@ class Orchestrator:
 
     def _finish_phase_2(
         self, parsed: dict, wide: list[dict], metrics: dict[str, Any],
-        descriptions_dir: str, stem: str,
+        descriptions_dir: str,
+        stem: str,
     ) -> RunResult:
-        status_path = self._cfg.out_dir / "status.json"
+        from render_docx import render_docx
+        from render_markdown import (
+            attach_description_files,
+            doc_from_dict,
+            normalize_wide_by_report,
+            render_markdown,
+        )
+
+        doc = doc_from_dict(parsed)
+
+        # wide is flat list[dict] (from disk or Phase1Result.wide). Filter per report
+        # and reshape to the {data_dt, org_ecd, branch_num, cells, raw_cells} format
+        # render_markdown / render_docx expect. Mirrors _cli_assemble_wide +
+        # normalize_wide_by_report semantics.
+        wide_by_report: list[list[dict]] = []
+        for sec_idx, section in enumerate(doc.sections):
+            for rep_idx, _ in enumerate(section.reports):
+                rows = [
+                    r for r in wide
+                    if r.get("section_idx") == sec_idx and r.get("report_idx") == rep_idx
+                ]
+                if not rows:
+                    wide_by_report.append([])
+                    continue
+                wide_by_report.append(normalize_wide_by_report(doc, rows)[0])
+
+        # Attach description text via the existing render_markdown API
+        # (sets report.description_text, NOT _description_text — see render_markdown:96-112).
+        # Idempotent: 8d already called this, but no-op when description_text is set.
+        attach_description_files(doc, descriptions_dir, stem=stem)
+        compute_status: dict[str, str] = {}
+
+        report_md_path = self._cfg.out_dir / "report.md"
+        # render_markdown returns str; we write to file ourselves (signature: render_markdown:243).
+        md_text = render_markdown(
+            doc=doc,
+            wide_by_report=wide_by_report,
+            compute_status=compute_status,
+        )
+        report_md_path.write_text(md_text, encoding="utf-8")
+
+        report_docx_path: Path | None = None
+        if not self._cfg.skip_docx:
+            report_docx_path = self._cfg.out_dir / "report.docx"
+            # style_path is REQUIRED (no default in render_docx:122-128); use bundled default.
+            resolved_style = self._cfg.style_path or (
+                Path(__file__).resolve().parents[1] / "example" / "style.json"
+            )
+            render_docx(
+                doc,
+                wide_by_report,
+                out_path=str(report_docx_path),
+                style_path=str(resolved_style),
+            )
+
+        # Translate orchestrator-shaped metrics → write_status schema (8 flat keys,
+        # see assemble_status.py:54-63). Detailed per-step metrics are NOT persisted
+        # in status.json by design (spec-pinned schema).
         from assemble_status import write_status
 
-        # Map detailed metrics → spec-pinned 8-key schema for status.json.
-        # Detailed per-step metrics go to the sidecar orchestrator-metrics.json
-        # so the schema stays untouched.
+        def _ok_total(entry: dict | None) -> tuple[int, int]:
+            if not entry:
+                return 0, 0
+            return int(entry.get("ok", 0)), int(entry.get("total", 0))
+
+        q_ok, q_total = _ok_total(metrics.get("3_query"))
+        a_ok, a_total = _ok_total(metrics.get("8a_validate"))
+        d_ok, d_total = _ok_total(metrics.get("8d_describe"))
         flat_metrics = {
-            "computed_count": metrics["8a_validate"]["total"],
-            "compute_validation_failures": metrics["8a_validate"]["total"]
-            - metrics["8a_validate"]["ok"],
+            "queried_count": q_total,
+            "query_failures": q_total - q_ok,
+            "computed_count": a_total,
+            "compute_validation_failures": a_total - a_ok,
+            "descriptions_generated": d_ok,
+            "description_failures": d_total - d_ok,
+            "llm_calls": 0,  # orchestrator never invokes the LLM directly
+            "duration_seconds": float(metrics.get("duration_seconds", 0.0)),
         }
-        write_status(
-            out_path=str(status_path),
-            exit_step="9",
-            error_class=None,
-            error_detail="",
-            outputs={
-                "report_md": str(self._cfg.out_dir / "report.md"),
-                "report_docx": (
-                    None if self._cfg.skip_docx
-                    else str(self._cfg.out_dir / "report.docx")
-                ),
-            },
-            metrics=flat_metrics,
-        )
-        # Sidecar for debug data
-        sidecar = self._cfg.out_dir / "orchestrator-metrics.json"
-        sidecar.write_text(
-            json.dumps(metrics, ensure_ascii=False, indent=2),
+        # Keep orchestrator's detailed metrics in a sidecar for debugging —
+        # NOT status.json (spec-pinned schema).
+        sidecar_path = self._cfg.out_dir / "orchestrator-metrics.json"
+        sidecar_path.write_text(
+            json.dumps(metrics, ensure_ascii=False, indent=2, default=str),
             encoding="utf-8",
         )
+
+        status_path = self._cfg.out_dir / "status.json"
+        outputs: dict[str, str] = {"report_md": str(report_md_path)}
+        if report_docx_path is not None:
+            outputs["report_docx"] = str(report_docx_path)
+        write_status(
+            out_path=status_path,
+            exit_step="9",
+            error_class=None,
+            error_detail=None,
+            outputs=outputs,
+            metrics=flat_metrics,
+        )
         return RunResult(
-            report_md=self._cfg.out_dir / "report.md",
-            report_docx=None if self._cfg.skip_docx else self._cfg.out_dir / "report.docx",
+            report_md=report_md_path,
+            report_docx=report_docx_path,
             status_json=status_path,
             metrics=metrics,
         )

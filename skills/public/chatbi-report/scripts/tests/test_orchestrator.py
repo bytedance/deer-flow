@@ -320,3 +320,73 @@ def test_run_phase_2_attach_descriptions_and_8d5_checkpoint(tmp_path):
     else:
         # input.md has no description_prompt → 8d.5 skipped, RunResult
         assert isinstance(final, p.RunResult)
+
+
+def test_run_phase_2_render_produces_report_and_status(tmp_path):
+    """Phase 2 step 9 writes report.md + report.docx + status.json."""
+    from sqlbot_client import MockSQLBotClient
+
+    cfg = p.OrchestratorConfig(md_path=INPUT_MD, out_dir=tmp_path)
+    orch = p.Orchestrator(cfg, MockSQLBotClient(str(FIXTURE)))
+    p1 = orch.run_phase_1()
+    assert isinstance(p1, p.Phase1Result)
+
+    # Provide description files matching the report's description_prompts.
+    desc_dir = tmp_path / "desc"
+    desc_dir.mkdir()
+    stem = INPUT_MD.stem
+    for i, _ in enumerate(p1.description_prompts):
+        (desc_dir / f"{stem}.description.report-{i}.txt").write_text(
+            f"description for report {i}", encoding="utf-8"
+        )
+
+    final = orch.run_phase_2(
+        parsed=p1.parsed,
+        wide=p1.wide,
+        compute_sources={},
+        descriptions_dir=str(desc_dir),
+        stem=stem,
+    )
+    assert isinstance(final, p.RunResult)
+    assert final.report_md.exists()
+    assert final.report_md.read_text(encoding="utf-8")  # non-empty
+    if not cfg.skip_docx:
+        assert final.report_docx is not None
+        assert final.report_docx.exists()
+        assert final.report_docx.stat().st_size > 0
+    assert final.status_json.exists()
+    status = json.loads(final.status_json.read_text(encoding="utf-8"))
+    assert status["error_class"] is None
+    # status.json schema is spec-pinned (8 flat keys); see assemble_status:54-63.
+    assert status["exit_step"] == 9
+    assert "queried_count" in status["metrics"]
+    assert "compute_validation_failures" in status["metrics"]
+
+
+def test_run_phase_2_render_skip_docx(tmp_path):
+    """When cfg.skip_docx=True, report.docx path is None and not written."""
+    from sqlbot_client import MockSQLBotClient
+
+    cfg = p.OrchestratorConfig(md_path=INPUT_MD, out_dir=tmp_path, skip_docx=True)
+    orch = p.Orchestrator(cfg, MockSQLBotClient(str(FIXTURE)))
+    p1 = orch.run_phase_1()
+    assert isinstance(p1, p.Phase1Result)
+
+    desc_dir = tmp_path / "desc"
+    desc_dir.mkdir()
+    stem = INPUT_MD.stem
+    for i, _ in enumerate(p1.description_prompts):
+        (desc_dir / f"{stem}.description.report-{i}.txt").write_text(
+            f"desc {i}", encoding="utf-8"
+        )
+
+    final = orch.run_phase_2(
+        parsed=p1.parsed,
+        wide=p1.wide,
+        compute_sources={},
+        descriptions_dir=str(desc_dir),
+        stem=stem,
+    )
+    assert isinstance(final, p.RunResult)
+    assert final.report_docx is None
+    assert final.report_md.exists()
