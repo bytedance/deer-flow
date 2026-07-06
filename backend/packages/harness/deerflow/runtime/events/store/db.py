@@ -144,10 +144,13 @@ class DbRunEventStore(RunEventStore):
     async def put_batch(self, events):
         if not events:
             return []
+        thread_ids = {e["thread_id"] for e in events}
+        if len(thread_ids) > 1:
+            raise ValueError(f"put_batch requires all events to belong to the same thread; got {thread_ids!r}")
         user_id = self._user_id_from_context()
         async with self._sf() as session:
             async with session.begin():
-                # Get max seq for the thread (assume all events in batch belong to same thread).
+                # All events belong to the same thread (validated above).
                 thread_id = events[0]["thread_id"]
                 max_seq = await self._max_seq_for_thread(session, thread_id)
                 seq = max_seq or 0
@@ -212,7 +215,9 @@ class DbRunEventStore(RunEventStore):
         run_id,
         *,
         event_types=None,
+        task_id=None,
         limit=500,
+        after_seq=None,
         user_id: str | None | _AutoSentinel = AUTO,
     ):
         resolved_user_id = resolve_user_id(user_id, method_name="DbRunEventStore.list_events")
@@ -221,6 +226,15 @@ class DbRunEventStore(RunEventStore):
             stmt = stmt.where(RunEventRow.user_id == resolved_user_id)
         if event_types:
             stmt = stmt.where(RunEventRow.event_type.in_(event_types))
+        if task_id is not None:
+            # Filter on metadata["task_id"] in SQL (before LIMIT) so cursor
+            # pagination over a single subagent task stays correct (#3779). The
+            # query is already scoped to (thread_id, run_id), so the JSON probe
+            # only runs over this run's small candidate set; ``.as_string()``
+            # renders to json_extract (SQLite) / ->> (Postgres).
+            stmt = stmt.where(RunEventRow.event_metadata["task_id"].as_string() == task_id)
+        if after_seq is not None:
+            stmt = stmt.where(RunEventRow.seq > after_seq)
         stmt = stmt.order_by(RunEventRow.seq.asc()).limit(limit)
         async with self._sf() as session:
             result = await session.execute(stmt)

@@ -144,14 +144,14 @@ def e2e_env(tmp_path, monkeypatch):
     #    non-determinism and cost to E2E tests (title generation is already
     #    disabled via TitleConfig above, but the middleware still participates
     #    in the chain and can interfere with event ordering).
-    from deerflow.agents.lead_agent.agent import _build_middlewares as _original_build_middlewares
+    from deerflow.agents.lead_agent.agent import build_middlewares as _original_build_middlewares
     from deerflow.agents.middlewares.title_middleware import TitleMiddleware
 
     def _sync_safe_build_middlewares(*args, **kwargs):
         mws = _original_build_middlewares(*args, **kwargs)
         return [m for m in mws if not isinstance(m, TitleMiddleware)]
 
-    monkeypatch.setattr("deerflow.client._build_middlewares", _sync_safe_build_middlewares)
+    monkeypatch.setattr("deerflow.client.build_middlewares", _sync_safe_build_middlewares)
 
     return {"tmp_path": tmp_path}
 
@@ -563,9 +563,14 @@ class TestSkillInstallation:
         (skills_root / "custom").mkdir(parents=True)
         from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
 
+        local_storage = LocalSkillStorage(host_path=str(skills_root))
         monkeypatch.setattr(
             "deerflow.skills.storage._default_skill_storage",
-            LocalSkillStorage(host_path=str(skills_root)),
+            local_storage,
+        )
+        monkeypatch.setattr(
+            "deerflow.client.get_or_new_user_skill_storage",
+            lambda user_id, **kwargs: local_storage,
         )
         self._skills_root = skills_root
 

@@ -15,13 +15,20 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 10
+config_version: 19
 
 # ============================================================================
 # Logging
 # ============================================================================
 # Log level for deerflow modules (debug/info/warning/error)
 log_level: info
+
+# Request trace correlation for Gateway logs, HTTP response headers, and
+# Langfuse metadata. Disabled by default to preserve existing HTTP/log output.
+logging:
+  enhance:
+    enabled: false
+    format: text
 
 # ============================================================================
 # Token Usage
@@ -33,9 +40,47 @@ token_usage:
   enabled: true
 
 # ============================================================================
+# Token Budget — Per-run token limits
+# ============================================================================
+# Prevents runaway API costs by enforcing hard token limits per run.
+# When warn_threshold is crossed, the agent receives an in-context warning.
+# When hard_stop_threshold is crossed, tool_calls are stripped and the agent
+# is forced to produce a final answer immediately.
+token_budget:
+  enabled: false                # Set to true to activate budget enforcement
+  max_tokens: 200000            # Total token limit (input + output) per run
+  max_input_tokens: null        # Optional separate input-only limit
+  max_output_tokens: null       # Optional separate output-only limit
+  warn_threshold: 0.8           # Warn at 80% of the budget
+  hard_stop_threshold: 1.0      # Force stop at 100% of the budget
+
+# ============================================================================
+# Recursion Limit — Hard ceiling for a client-supplied run recursion_limit
+# ============================================================================
+# A run's recursion_limit caps the number of LangGraph super-steps (each is at
+# least one LLM call). The Gateway never trusts a client-supplied value
+# verbatim: any value above this ceiling is clamped down to it, preventing
+# runaway API cost / DoS. Invalid or non-positive client values fall back to
+# the server default of 100. Raise this only if you legitimately run very
+# deeply nested subagent graphs.
+max_recursion_limit: 1000
+
+
+# ============================================================================
 # Models Configuration
 # ============================================================================
 # Configure available LLM models for the agent to use
+#
+# Optional per-model pricing (powers the real-cost display on the workspace
+# console). Add a `pricing` block to any model entry; use ONE currency across
+# all models. Prices are per one million tokens.
+#
+#   pricing:
+#     currency: CNY                    # ISO code shown in the console (CNY, USD, ...)
+#     input_per_million: 8.0           # price per 1M input tokens (cache miss)
+#     output_per_million: 32.0         # price per 1M output tokens
+#     input_cache_hit_per_million: 0.8 # price per 1M cache-hit input tokens
+#                                      # (optional; omit → hits billed at miss price)
 
 models:
   # Example: Volcengine (Doubao) model
@@ -177,17 +222,49 @@ models:
   #       thinking:
   #         type: disabled
 
-  # Example: DeepSeek model (with thinking support)
-  # - name: deepseek-v3
-  #   display_name: DeepSeek V3 (Thinking)
+  # Example: Xiaomi MiMo model (with thinking support)
+  # MiMo thinking mode returns reasoning_content and requires that field to be
+  # replayed on historical assistant messages in multi-turn agent/tool-call
+  # conversations. Use PatchedChatMiMo instead of plain ChatOpenAI.
+  # Use https://api.xiaomimimo.com/v1 with pay-as-you-go `sk-...` keys.
+  # Use your Token Plan regional URL (for example
+  # https://token-plan-cn.xiaomimimo.com/v1) with Token Plan `tp-...` keys.
+  # PatchedChatMiMo is model-id agnostic; use it for every MiMo thinking model
+  # entry you configure (for example mimo-v2.5-pro, mimo-v2.5, mimo-v2-pro,
+  # mimo-v2-omni, or mimo-v2-flash), including models referenced by subagent
+  # model overrides.
+  # See: https://platform.xiaomimimo.com/docs/en-US/usage-guide/passing-back-reasoning_content
+  # - name: mimo-v2.5-pro
+  #   display_name: MiMo V2.5 Pro
+  #   use: deerflow.models.patched_mimo:PatchedChatMiMo
+  #   model: mimo-v2.5-pro
+  #   api_key: $MIMO_API_KEY
+  #   base_url: https://api.xiaomimimo.com/v1
+  #   request_timeout: 600.0
+  #   max_retries: 2
+  #   max_tokens: 8192
+  #   supports_thinking: true
+  #   supports_vision: false
+  #   when_thinking_enabled:
+  #     extra_body:
+  #       thinking:
+  #         type: enabled
+  #   when_thinking_disabled:
+  #     extra_body:
+  #       thinking:
+  #         type: disabled
+
+  # Example: DeepSeek V4 model (with thinking support)
+  # - name: deepseek-v4
+  #   display_name: DeepSeek V4 (Thinking)
   #   use: deerflow.models.patched_deepseek:PatchedChatDeepSeek
-  #   model: deepseek-reasoner
+  #   model: deepseek-v4-pro
   #   api_key: $DEEPSEEK_API_KEY
   #   timeout: 600.0
   #   max_retries: 2
   #   max_tokens: 8192
   #   supports_thinking: true
-  #   supports_vision: false  # DeepSeek V3 does not support vision
+  #   supports_vision: false  # DeepSeek V4 does not support vision
   #   when_thinking_enabled:
   #     extra_body:
   #       thinking:
@@ -242,13 +319,39 @@ models:
   #       thinking:
   #         type: disabled
 
+  # Example: StepFun (阶跃星辰) reasoning models
+  # StepFun provides OpenAI-compatible API with reasoning models.
+  # With reasoning_format: deepseek-style, the API returns reasoning_content
+  # (same field as DeepSeek), which must be replayed on historical assistant
+  # messages in multi-turn tool-call conversations.
+  # Use PatchedChatStepFun instead of plain ChatOpenAI.
+  # Docs: https://platform.stepfun.com/docs/api-reference/chat-completions
+  # - name: step-3.7-flash
+  #   display_name: Step 3.7 Flash
+  #   use: deerflow.models.patched_stepfun:PatchedChatStepFun
+  #   model: step-3.7-flash
+  #   api_key: $STEPFUN_API_KEY
+  #   base_url: https://api.stepfun.com/v1
+  #   request_timeout: 600.0
+  #   max_retries: 2
+  #   max_tokens: 4096
+  #   supports_thinking: true
+  #   supports_reasoning_effort: true
+  #   supports_vision: true
+  #   when_thinking_enabled:
+  #     extra_body:
+  #       reasoning_format: deepseek-style
+  #   when_thinking_disabled:
+  #     extra_body:
+  #       reasoning_format: deepseek-style
+
   # Example: MiniMax (OpenAI-compatible) - International Edition
-  # MiniMax provides high-performance models with 204K context window
+  # MiniMax provides high-performance models with 512K context window and 128K max output
   # Docs: https://platform.minimax.io/docs/api-reference/text-openai-api
-  # - name: minimax-m2.5
-  #   display_name: MiniMax M2.5
-  #   use: langchain_openai:ChatOpenAI
-  #   model: MiniMax-M2.5
+  # - name: minimax-m3
+  #   display_name: MiniMax M3
+  #   use: deerflow.models.patched_minimax:PatchedChatMiniMax
+  #   model: MiniMax-M3
   #   api_key: $MINIMAX_API_KEY
   #   base_url: https://api.minimax.io/v1
   #   request_timeout: 600.0
@@ -257,26 +360,96 @@ models:
   #   temperature: 1.0  # MiniMax requires temperature in (0.0, 1.0]
   #   supports_vision: true
   #   supports_thinking: true
+  #   # PatchedChatMiniMax is the MiniMax adapter: it enables reasoning_split and
+  #   # maps MiniMax's structured reasoning into reasoning_content (the field
+  #   # DeerFlow understands), and it strips the per-message `name` field that
+  #   # DeerFlow middlewares attach — MiniMax rejects requests whose user-message
+  #   # names differ with "user name must be consistent (2013)". Declare the
+  #   # thinking toggle so non-thinking paths (flash mode, follow-up suggestions,
+  #   # title/memory generation) truly disable reasoning instead of spending
+  #   # tokens on it.
+  #   when_thinking_enabled:
+  #     extra_body:
+  #       thinking:
+  #         type: adaptive
+  #   when_thinking_disabled:
+  #     extra_body:
+  #       thinking:
+  #         type: disabled
 
-  # - name: minimax-m2.5-highspeed
-  #   display_name: MiniMax M2.5 Highspeed
-  #   use: langchain_openai:ChatOpenAI
-  #   model: MiniMax-M2.5-highspeed
+  # NOTE: M2.x models always think — passing thinking:{type:disabled} has no
+  # effect (per MiniMax docs), so the toggle above is omitted for M2.7. The
+  # follow-up-suggestions endpoint strips inline <think> defensively regardless.
+  # Still use the PatchedChatMiniMax adapter: it strips the per-message `name`
+  # field DeerFlow middlewares attach, which MiniMax otherwise rejects with
+  # "user name must be consistent (2013)".
+  # - name: minimax-m2.7
+  #   display_name: MiniMax M2.7
+  #   use: deerflow.models.patched_minimax:PatchedChatMiniMax
+  #   model: MiniMax-M2.7
   #   api_key: $MINIMAX_API_KEY
   #   base_url: https://api.minimax.io/v1
   #   request_timeout: 600.0
   #   max_retries: 2
   #   max_tokens: 4096
   #   temperature: 1.0  # MiniMax requires temperature in (0.0, 1.0]
-  #   supports_vision: true
+  #   supports_vision: false  # M2.7 is text-only; M3 supports vision
+  #   supports_thinking: true
+
+  # - name: minimax-m2.7-highspeed
+  #   display_name: MiniMax M2.7 Highspeed
+  #   use: deerflow.models.patched_minimax:PatchedChatMiniMax
+  #   model: MiniMax-M2.7-highspeed
+  #   api_key: $MINIMAX_API_KEY
+  #   base_url: https://api.minimax.io/v1
+  #   request_timeout: 600.0
+  #   max_retries: 2
+  #   max_tokens: 4096
+  #   temperature: 1.0  # MiniMax requires temperature in (0.0, 1.0]
+  #   supports_vision: false  # M2.7 is text-only; M3 supports vision
   #   supports_thinking: true
 
   # Example: MiniMax (OpenAI-compatible) - CN 中国区用户
-  # MiniMax provides high-performance models with 204K context window
+  # MiniMax provides high-performance models with 512K context window and 128K max output
   # Docs: https://platform.minimaxi.com/docs/api-reference/text-openai-api
+  # - name: minimax-m3
+  #   display_name: MiniMax M3
+  #   use: deerflow.models.patched_minimax:PatchedChatMiniMax
+  #   model: MiniMax-M3
+  #   api_key: $MINIMAX_API_KEY
+  #   base_url: https://api.minimaxi.com/v1
+  #   request_timeout: 600.0
+  #   max_retries: 2
+  #   max_tokens: 4096
+  #   temperature: 1.0  # MiniMax requires temperature in (0.0, 1.0]
+  #   supports_vision: true
+  #   supports_thinking: true
+  #   # PatchedChatMiniMax is the MiniMax adapter: it enables reasoning_split and
+  #   # maps MiniMax's structured reasoning into reasoning_content (the field
+  #   # DeerFlow understands), and it strips the per-message `name` field that
+  #   # DeerFlow middlewares attach — MiniMax rejects requests whose user-message
+  #   # names differ with "user name must be consistent (2013)". Declare the
+  #   # thinking toggle so non-thinking paths (flash mode, follow-up suggestions,
+  #   # title/memory generation) truly disable reasoning instead of spending
+  #   # tokens on it.
+  #   when_thinking_enabled:
+  #     extra_body:
+  #       thinking:
+  #         type: adaptive
+  #   when_thinking_disabled:
+  #     extra_body:
+  #       thinking:
+  #         type: disabled
+
+  # NOTE: M2.x models always think — passing thinking:{type:disabled} has no
+  # effect (per MiniMax docs), so the toggle above is omitted for M2.7. The
+  # follow-up-suggestions endpoint strips inline <think> defensively regardless.
+  # Still use the PatchedChatMiniMax adapter: it strips the per-message `name`
+  # field DeerFlow middlewares attach, which MiniMax otherwise rejects with
+  # "user name must be consistent (2013)".
   # - name: minimax-m2.7
   #   display_name: MiniMax M2.7
-  #   use: langchain_openai:ChatOpenAI
+  #   use: deerflow.models.patched_minimax:PatchedChatMiniMax
   #   model: MiniMax-M2.7
   #   api_key: $MINIMAX_API_KEY
   #   base_url: https://api.minimaxi.com/v1
@@ -284,12 +457,12 @@ models:
   #   max_retries: 2
   #   max_tokens: 4096
   #   temperature: 1.0  # MiniMax requires temperature in (0.0, 1.0]
-  #   supports_vision: true
+  #   supports_vision: false  # M2.7 is text-only; M3 supports vision
   #   supports_thinking: true
 
   # - name: minimax-m2.7-highspeed
   #   display_name: MiniMax M2.7 Highspeed
-  #   use: langchain_openai:ChatOpenAI
+  #   use: deerflow.models.patched_minimax:PatchedChatMiniMax
   #   model: MiniMax-M2.7-highspeed
   #   api_key: $MINIMAX_API_KEY
   #   base_url: https://api.minimaxi.com/v1
@@ -297,7 +470,7 @@ models:
   #   max_retries: 2
   #   max_tokens: 4096
   #   temperature: 1.0  # MiniMax requires temperature in (0.0, 1.0]
-  #   supports_vision: true
+  #   supports_vision: false  # M2.7 is text-only; M3 supports vision
   #   supports_thinking: true
 
   # Example: OpenRouter (OpenAI-compatible)
@@ -312,6 +485,46 @@ models:
   #   max_retries: 2
   #   max_tokens: 8192
   #   temperature: 0.7
+
+  # Example: Atlas Cloud (OpenAI-compatible)
+  # Atlas Cloud exposes a single OpenAI-compatible endpoint in front of many open
+  # models (DeepSeek, Qwen, Kimi, GLM, MiniMax, Llama, ...), so it uses the same
+  # ChatOpenAI + base_url pattern as other OpenAI-compatible gateways.
+  # Browse model ids at https://api.atlascloud.ai/v1/models — see https://atlascloud.ai
+  # - name: atlascloud-deepseek-v3.2
+  #   display_name: DeepSeek V3.2 (Atlas Cloud)
+  #   use: langchain_openai:ChatOpenAI
+  #   model: deepseek-ai/DeepSeek-V3.2-Exp
+  #   api_key: $ATLASCLOUD_API_KEY
+  #   base_url: https://api.atlascloud.ai/v1
+  #   request_timeout: 600.0
+  #   max_retries: 2
+  #   max_tokens: 8192
+  #   temperature: 0.7
+  #   supports_vision: false
+  #
+  # For reasoning models on Atlas Cloud (e.g. a Qwen3 *-thinking id), use the
+  # patched OpenAI-compatible adapter so reasoning_content is replayed across
+  # multi-turn tool-call conversations:
+  # - name: atlascloud-qwen3-thinking
+  #   display_name: Qwen3 235B Thinking (Atlas Cloud)
+  #   use: deerflow.models.patched_openai:PatchedChatOpenAI
+  #   model: qwen/qwen3-235b-a22b-thinking-2507
+  #   api_key: $ATLASCLOUD_API_KEY
+  #   base_url: https://api.atlascloud.ai/v1
+  #   request_timeout: 600.0
+  #   max_retries: 2
+  #   max_tokens: 8192
+  #   supports_thinking: true
+  #   supports_vision: false
+  #   when_thinking_enabled:
+  #     extra_body:
+  #       thinking:
+  #         type: enabled
+  #   when_thinking_disabled:
+  #     extra_body:
+  #       thinking:
+  #         type: disabled
 
   # Example: vLLM 0.19.0 (OpenAI-compatible, with reasoning toggle)
   # DeerFlow's vLLM provider preserves vLLM reasoning across tool-call turns and
@@ -378,16 +591,39 @@ tools:
     group: web
     use: deerflow.community.ddg_search.tools:web_search_tool
     max_results: 5
+    # backend: auto          # DDGS backend(s): auto, duckduckgo, brave, wikipedia, etc.
+    # region: wt-wt          # wt-wt is normalized for Wikipedia when backend includes auto/all/wikipedia.
+    # safesearch: moderate   # on, moderate, off
+
+  # Web search tool (uses SearXNG, self-hosted, no API key required)
+  # SearXNG is a free internet metasearch engine which aggregates results from
+  # various search services. Deploy your own instance: https://github.com/searxng/searxng
+  # For Docker deployments, use the Docker service name instead of localhost.
+  # - name: web_search
+  #   group: web
+  #   use: deerflow.community.searxng.tools:web_search_tool
+  #   base_url: http://localhost:8088   # SearXNG instance URL (default: :8088; Docker: http://searxng:8080)
+  #   max_results: 5                     # Maximum number of search results
 
   # Web search tool (uses Serper - Google Search API, requires SERPER_API_KEY)
   # Serper provides real-time Google Search results. Sign up at https://serper.dev
-  # Note: set SERPER_API_KEY in your environment before starting the app, or
-  # uncomment and fill in api_key below (the $VAR syntax is resolved at startup).
+  # Note: set SERPER_API_KEY in your environment before starting the app.
+  # Avoid putting literal API keys in config.yaml; use the $VAR form instead.
   # - name: web_search
   #   group: web
   #   use: deerflow.community.serper.tools:web_search_tool
-  #   max_results: 5
-  #   # api_key: $SERPER_API_KEY  # Optional if SERPER_API_KEY env var is set
+  #   max_results: 5   # capped at 10 by the Serper provider
+  #   # api_key: $SERPER_API_KEY  # Optional explicit env-var reference
+
+  # Web search tool (uses Brave Search API, requires BRAVE_SEARCH_API_KEY)
+  # Brave Search returns results from an independent index. Sign up at
+  # https://brave.com/search/api/ to get a key. Unlike the DuckDuckGo
+  # `backend: brave` option above, this calls the official Brave API directly.
+  # - name: web_search
+  #   group: web
+  #   use: deerflow.community.brave.tools:web_search_tool
+  #   max_results: 5                  # Capped at 20 by the Brave Search API
+  #   # api_key: $BRAVE_SEARCH_API_KEY  # Optional if the env var is set
 
   # Web search tool (requires Tavily API key)
   # - name: web_search
@@ -419,6 +655,83 @@ tools:
   #   max_results: 5
   #   # api_key: $FIRECRAWL_API_KEY
 
+  # Web search tool (uses GroundRoute, requires GROUNDROUTE_API_KEY)
+  # GroundRoute is a meta search layer: one API in front of six engines (Serper,
+  # Brave, Exa, Tavily, Firecrawl, Perplexity). It routes each query to the cheapest
+  # engine that clears a quality bar and fails over if one is down. Pricing is
+  # gain-share (you keep about half of any cache savings). Get a key at
+  # https://groundroute.ai/keys
+  # - name: web_search
+  #   group: web
+  #   use: deerflow.community.groundroute.tools:web_search_tool
+  #   max_results: 5                  # Clamped to 1-50 by GroundRoute
+  #   # api_key: $GROUNDROUTE_API_KEY  # Optional if the env var is set
+  
+  # Web search tool (uses fastCRW - Firecrawl-compatible web scraper, single binary,
+  # self-host or cloud. Cloud requires CRW_API_KEY; self-host may need no key.)
+  # - name: web_search
+  #   group: web
+  #   use: deerflow.community.fastcrw.tools:web_search_tool
+  #   max_results: 5
+  #   # api_key: $CRW_API_KEY
+  #   # base_url: https://fastcrw.com/api   # default cloud; set to e.g. http://localhost:3000 for self-host
+
+  # Web fetch tool (uses Browserless - headless Chrome, self-hosted or cloud)
+  # Browserless renders pages with a real headless Chrome, ideal for JavaScript-heavy
+  # sites and SPAs. Deploy your own: https://github.com/browserless/browserless
+  # For Docker deployments, use the Docker service name instead of localhost.
+  # NOTE: Only one web_fetch provider can be active at a time.
+  # Comment out the Jina AI web_fetch entry below before enabling this one.
+  # - name: web_fetch
+  #   group: web
+  #   use: deerflow.community.browserless.tools:web_fetch_tool
+  #   base_url: http://localhost:3032    # Browserless instance URL (default: :3032; Docker: http://browserless:3000)
+  #   # token: $BROWSERLESS_TOKEN        # API token (required for Browserless Cloud; optional for self-hosted)
+  #   timeout_s: 30                       # Request timeout in seconds
+  #   # allow_private_addresses: false    # SSRF guard: keep false in production. Set true ONLY for intentional internal targets.
+  #   # wait_for_event: "networkidle"    # Wait for a page event before returning (e.g. "load", "networkidle")
+  #   # wait_for_timeout_ms: 2000        # Extra wait after page load in milliseconds
+  #   # wait_for_selector: "article"     # CSS selector to wait for before returning
+
+  # Web fetch tool (uses Crawl4AI - self-hosted headless Chromium, no API key)
+  # Crawl4AI returns server-cleaned "fit" markdown directly (no readability step needed),
+  # ideal for JavaScript-heavy sites. Self-host (JWT auth is off by default, no key):
+  #   docker run -d -p 11235:11235 --shm-size=1g unclecode/crawl4ai:0.8.6
+  # For Docker deployments, use the Docker service name instead of localhost.
+  # NOTE: Only one web_fetch provider can be active at a time.
+  # Comment out the Jina AI web_fetch entry below before enabling this one.
+  # - name: web_fetch
+  #   group: web
+  #   use: deerflow.community.crawl4ai.tools:web_fetch_tool
+  #   base_url: http://localhost:11235   # Crawl4AI server URL (Docker: http://crawl4ai:11235)
+  #   timeout: 30                         # Request timeout in seconds
+  #   # allow_private_addresses: false     # SSRF guard: keep false in production. Set true ONLY for intentional internal targets.
+  #   # filter: fit                       # Markdown filter: fit (default) | raw | bm25 | llm
+  #   # token: $CRAWL4AI_TOKEN            # Bearer token (only if the server has JWT auth enabled)
+
+  # Web capture tool (uses Browserless /screenshot to render a page as an artifact)
+  # Browserless captures JavaScript-heavy pages with a real headless Chrome and
+  # writes the screenshot into the current thread's outputs. It can run against
+  # a self-hosted Browserless instance without a token, or Browserless Cloud with
+  # BROWSERLESS_TOKEN. For Docker deployments, use the Docker service name instead
+  # of localhost.
+  # - name: web_capture
+  #   group: web
+  #   use: deerflow.community.browserless.tools:web_capture_tool
+  #   base_url: http://localhost:3032       # Browserless instance URL (Docker: http://browserless:3000)
+  #   # token: $BROWSERLESS_TOKEN           # Required for Browserless Cloud; optional for self-hosted
+  #   timeout_s: 30                         # Request timeout in seconds
+  #   output_format: png                    # png, jpeg, or webp
+  #   full_page: true                       # Capture entire page instead of viewport only
+  #   viewport_width: 1280
+  #   viewport_height: 720
+  #   # wait_for_selector: "main"           # CSS selector to wait for before capturing
+  #   # wait_for_selector_timeout_ms: 5000
+  #   # wait_for_timeout_ms: 1000           # Extra wait after navigation in milliseconds
+  #   # best_attempt: true                  # Continue with current page state if waits time out
+  #   # allow_private_addresses: false      # SSRF guard: keep false in production. Set true ONLY to
+  #   #                                     # capture internal/private targets (loopback, RFC1918, etc.)
+
   # Web fetch tool (uses Exa)
   # NOTE: Only one web_fetch provider can be active at a time.
   # Comment out the Jina AI web_fetch entry below before enabling this one.
@@ -432,6 +745,10 @@ tools:
     group: web
     use: deerflow.community.jina_ai.tools:web_fetch_tool
     timeout: 10
+    # Optional proxy for restricted networks / Docker / WSL.
+    # Use host.docker.internal instead of 127.0.0.1 when the proxy runs on the host.
+    # proxy: $HTTPS_PROXY
+    # trust_env: true
 
   # Web fetch tool (uses InfoQuest)
   # - name: web_fetch
@@ -450,6 +767,26 @@ tools:
   #   use: deerflow.community.firecrawl.tools:web_fetch_tool
   #   # api_key: $FIRECRAWL_API_KEY
 
+  # Web fetch tool (uses GroundRoute, requires GROUNDROUTE_API_KEY)
+  # Fetches a page's extracted text via GroundRoute mode=page.
+  # NOTE: Only one web_fetch provider can be active at a time.
+  # Comment out the Jina AI web_fetch entry above before enabling this one.
+  # - name: web_fetch
+  #   group: web
+  #   use: deerflow.community.groundroute.tools:web_fetch_tool
+  #   # api_key: $GROUNDROUTE_API_KEY
+  
+  # Web fetch tool (uses fastCRW - Firecrawl-compatible web scraper, single binary,
+  # self-host or cloud. Cloud requires CRW_API_KEY; self-host may need no key.)
+  # NOTE: Only one web_fetch provider can be active at a time.
+  # Comment out the Jina AI web_fetch entry above before enabling this one.
+  # - name: web_fetch
+  #   group: web
+  #   use: deerflow.community.fastcrw.tools:web_fetch_tool
+  #   # api_key: $CRW_API_KEY
+  #   # base_url: https://fastcrw.com/api   # default cloud; set to e.g. http://localhost:3000 for self-host
+  #   # allow_private_addresses: false      # SSRF guard: keep false in production. Set true ONLY for intentional internal targets.
+
   # Image search tool (uses DuckDuckGo)
   # Use this to find reference images before image generation
   - name: image_search
@@ -465,6 +802,30 @@ tools:
   #   image_search_time_range: 10
   #   # Image size filter. Options: "l" (large), "m" (medium), "i" (icon).
   #   image_size: "i"
+
+  # Image search tool (uses Serper - Google Images API, requires SERPER_API_KEY)
+  # Serper provides real-time Google Images results. Sign up at https://serper.dev
+  # Note: set SERPER_API_KEY in your environment before starting the app.
+  # Avoid putting literal API keys in config.yaml; use the $VAR form instead.
+  # - name: image_search
+  #   group: web
+  #   use: deerflow.community.serper.tools:image_search_tool
+  #   max_results: 5   # capped at 10 by the Serper provider
+  #   # api_key: $SERPER_API_KEY  # Optional explicit env-var reference
+
+  # Image search tool (uses Brave Image Search API, requires BRAVE_SEARCH_API_KEY)
+  # Brave provides independent image results and works alongside the Brave web search tool.
+  # Note: set BRAVE_SEARCH_API_KEY in your environment before starting the app.
+  # Avoid putting literal API keys in config.yaml; use the $VAR form instead.
+  # - name: image_search
+  #   group: web
+  #   use: deerflow.community.brave.tools:image_search_tool
+  #   max_results: 5   # capped at 200 by Brave Image Search
+  #   # country: US
+  #   # search_lang: en
+  #   # safesearch: strict
+  #   # spellcheck: true
+  #   # api_key: $BRAVE_SEARCH_API_KEY  # Optional explicit env-var reference
 
   # File operations tools
   - name: ls
@@ -513,6 +874,44 @@ tool_search:
   enabled: false
 
 # ============================================================================
+# Tool Output Budget Protection
+# ============================================================================
+# Prevents oversized tool results from blowing the model context window.
+# Outputs exceeding `externalize_min_chars` are persisted to disk and replaced
+# with a compact preview + file reference. The model can read the full output
+# via read_file.  When disk persistence is unavailable, outputs exceeding
+# `fallback_max_chars` are head+tail truncated instead.
+#
+# `exempt_tools` prevents persist→read→persist infinite loops for read tools.
+# `tool_overrides` allows per-tool threshold customization.
+
+tool_output:
+  enabled: true
+  externalize_min_chars: 12000
+  preview_head_chars: 2000
+  preview_tail_chars: 1000
+  fallback_max_chars: 30000
+  fallback_head_chars: 8000
+  fallback_tail_chars: 3000
+  storage_subdir: ".tool-results"
+  exempt_tools:
+    - read_file
+    - read_file_tool
+  # tool_overrides:
+  #   web_search: 8000
+  #   bash: 20000
+
+# ============================================================================
+# Suggestions Configuration
+# ============================================================================
+# Configure whether the agent automatically generates follow-up question
+# suggestions at the end of each response.
+
+suggestions:
+  enabled: true
+
+
+# ============================================================================
 # Loop Detection Configuration
 # ============================================================================
 # Detect and interrupt repeated identical tool-call loops.
@@ -534,6 +933,42 @@ loop_detection:
   #   bash:
   #     warn: 150
   #     hard_limit: 300
+
+# ============================================================================
+# Tool Progress State Machine Configuration (RFC #3177)
+# ============================================================================
+# Detects tool stagnation and repetition at the (thread, tool) level.
+# Tracks consecutive "no-new-info" calls (error, partial_success, near-duplicate success).
+# Three transition paths (determined by deerflow_tool_meta.recoverable_by_model):
+#   recoverable=true  (no_results, not_found, permission): ACTIVE → WARNED (terminal; hint re-injected each call)
+#   recoverable=false (rate_limited, transient):           ACTIVE → WARNED → BLOCKED after warn_escalation_count more
+#   recoverable=false + action=stop (auth, config):        ACTIVE → BLOCKED immediately
+# Requires ToolErrorHandlingMiddleware to be active (always on).
+
+# tool_progress:
+#   enabled: false
+#   stagnation_threshold: 3        # Consecutive problems before WARNED
+#   warn_escalation_count: 2       # More problems after WARNED before BLOCKED
+#   inject_assessment: true
+#   jaccard_similarity_threshold: 0.8  # Word-set similarity threshold for near-duplicate detection
+#   min_word_count_for_similarity: 10  # Min unique words to apply Jaccard check
+#   max_tracked_threads: 100
+#   exempt_tools:
+#     - ask_clarification
+#     - write_todos
+#     - present_files
+#     - task
+
+# ============================================================================
+# Read-Before-Write File Gate (issue #3857)
+# ============================================================================
+# Blocks write_file (append / overwrite of an existing file) and str_replace
+# unless the agent has read the file's current version first; any write
+# invalidates earlier reads, forcing a re-read between consecutive edits.
+# Deterministic guardrail against blind duplicate appends in long tasks.
+
+read_before_write:
+  enabled: true
 
 # ============================================================================
 # Provider Safety Termination Configuration
@@ -605,8 +1040,12 @@ sandbox:
   allow_host_bash: false
   # Optional: Mount additional host directories into the sandbox.
   # Each mount maps a host path to a virtual container path accessible by the agent.
+  # Note: with LocalSandboxProvider under `make up` (docker-compose), host_path is
+  # checked from inside the deer-flow-gateway container — you must also bind-mount
+  # the same directory into services.gateway.volumes in docker/docker-compose.yaml
+  # for this mount to take effect (see issue #3244).
   # mounts:
-  #   - host_path: /home/user/my-project    # Absolute path on the host machine
+  #   - host_path: /home/user/my-project    # Absolute path; see note above for Docker mode
   #     container_path: /mnt/my-project     # Virtual path inside the sandbox
   #     read_only: true                     # Whether the mount is read-only (default: false)
 
@@ -617,6 +1056,15 @@ sandbox:
   bash_output_max_chars: 20000
   read_file_output_max_chars: 50000
   ls_output_max_chars: 20000
+
+  # Maximum wall-clock seconds a single host bash command may run before it is
+  # terminated (process group and all). A blocking foreground command — e.g. a
+  # server started without backgrounding — is killed after this long so the
+  # agent's turn cannot hang. Start long-lived processes in the background with
+  # output redirected (e.g. `your-command > /tmp/server.log 2>&1 &`) when you
+  # need logs; unredirected background output is drained with bounded capture
+  # and excess output is discarded.
+  bash_command_timeout: 600
 
 # Option 2: Container-based AIO Sandbox
 # Executes commands in isolated containers (Docker or Apple Container)
@@ -629,6 +1077,8 @@ sandbox:
 #   # Optional: Container image to use (works with both Docker and Apple Container)
 #   # Default: enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest
 #   # Recommended: enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest (works on both x86_64 and arm64)
+#   # Custom images should extend the default image or implement the same AIO
+#   # sandbox HTTP API used by agent-sandbox. See backend/docs/CONFIGURATION.md.
 #   # image: enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest
 #
 #   # Optional: Base port for sandbox containers (default: 8080)
@@ -661,12 +1111,39 @@ sandbox:
 #   #   API_KEY: $MY_API_KEY        # Reads from host's MY_API_KEY env var
 #   #   DATABASE_URL: $DATABASE_URL  # Reads from host's DATABASE_URL env var
 
-# Option 3: Provisioner-managed AIO Sandbox (docker-compose-dev)
+# Option 3: BoxLite micro-VM Sandbox
+# Runs each sandbox as a BoxLite micro-VM. Released boxes stay in an in-process
+# warm pool and can be reclaimed by the same user/thread without a cold start.
+# Requires the boxlite runtime and host virtualization support (KVM on Linux,
+# Hypervisor.framework on macOS).
+# sandbox:
+#   use: deerflow.community.boxlite:BoxliteProvider
+#   image: python:3.12-slim
+#
+#   # Optional: Per-box memory and CPU limits.
+#   # memory_mib: 1024
+#   # cpus: 2
+#
+#   # Optional: Maximum active + warm BoxLite VMs per gateway process (default: 3).
+#   # Active boxes are never evicted; only warm-pool boxes are stopped to make room.
+#   # replicas: 3
+#
+#   # Optional: Seconds before an idle warm-pool VM is stopped (default: 600).
+#   # Set to 0 to keep warm VMs until shutdown or replica eviction.
+#   # idle_timeout: 600
+#
+#   # Optional: Environment variables to inject into every command.
+#   # environment:
+#   #   PYTHONUNBUFFERED: "1"
+#
+# Option 4: Provisioner-managed AIO Sandbox (docker-compose-dev)
 # Each sandbox_id gets a dedicated Pod in k3s, managed by the provisioner.
 # Recommended for production or advanced users who want better isolation and scalability.:
 # sandbox:
 #   use: deerflow.community.aio_sandbox:AioSandboxProvider
 #   provisioner_url: http://provisioner:8002
+#   # Note: provisioner-created Pods use the provisioner's SANDBOX_IMAGE
+#   # environment variable, not sandbox.image from this config file.
 
 # ============================================================================
 # Subagents Configuration
@@ -675,16 +1152,18 @@ sandbox:
 # Subagents are background workers delegated tasks by the lead agent
 
 # subagents:
-#   # Default timeout in seconds for all subagents (default: 900 = 15 minutes)
-#   timeout_seconds: 900
-#   # Optional global max-turn override for all subagents
+#   # Default timeout (seconds) for built-in subagents (default: 1800 = 30 min).
+#   # Custom agents use their own timeout_seconds (default 900) unless overridden.
+#   timeout_seconds: 1800
+#   # Optional global max-turn override for all subagents.
+#   # Built-in defaults: general-purpose=150, bash=60. Leave unset to keep them.
 #   # max_turns: 120
 #
 #   # Optional per-agent overrides (applies to both built-in and custom agents)
 #   agents:
 #     general-purpose:
-#       timeout_seconds: 1800  # 30 minutes for complex multi-step tasks
-#       max_turns: 160
+#       timeout_seconds: 2700  # 45 minutes for very long deep-research tasks
+#       max_turns: 250         # raise above the 150 default for very deep tasks
 #       # model: qwen3:32b     # Use a specific model (default: inherit from lead agent)
 #       # skills:               # Skill whitelist (default: inherit all enabled skills)
 #       #   - web-search
@@ -765,6 +1244,13 @@ skills:
   # Default: /mnt/skills
   container_path: /mnt/skills
 
+  # Deferred skill discovery (default: false)
+  # When enabled, only skill names appear in the system prompt (<skill_index>).
+  # The LLM discovers skill details on demand via the describe_skill tool.
+  # This keeps the system prompt compact and prefix-cache friendly when many
+  # skills are installed.
+  # deferred_discovery: true
+
 # Note: To restrict which skills are loaded for a specific custom agent,
 # define a `skills` list in that agent's `config.yaml` (e.g. `agents/my-agent/config.yaml`):
 # - Omitted or null: load all globally enabled skills (default)
@@ -780,7 +1266,7 @@ title:
   enabled: true
   max_words: 6
   max_chars: 60
-  model_name: null # Use default model (first model in models list)
+  model_name: null # null = fast local fallback; set a model name to use LLM title generation
 
 # ============================================================================
 # Summarization Configuration
@@ -830,13 +1316,14 @@ summarization:
   # The prompt should guide the model to extract important context
   summary_prompt: null
 
-  # Recently-loaded skill files are excluded from summarization so the agent
-  # does not lose skill instructions after a compression pass. Claude Code uses
-  # a similar strategy (keep the most recent ~5 skills, ~25k total tokens, with
-  # a ~5k cap per skill). Set preserve_recent_skill_count to 0 to disable.
-  preserve_recent_skill_count: 5
-  preserve_recent_skill_tokens: 25000
-  preserve_recent_skill_tokens_per_skill: 5000
+  # Loaded SKILL.md references (read_file calls under skills.container_path) are
+  # captured into the durable skill_context channel and re-injected after
+  # compaction as name/path/description reminders. The full skill body is not
+  # persisted; the agent should re-read the file before applying instructions.
+  # Tool names counted as skill reads:
+  # Legacy preserve_recent_skill_* summarization settings are no longer used;
+  # skill retention is handled by this durable reference channel instead. Set
+  # this list to [] to disable durable skill-reference capture.
   skill_file_read_tool_names:
     - read_file
     - read
@@ -857,6 +1344,49 @@ memory:
   fact_confidence_threshold: 0.7 # Minimum confidence for storing facts
   injection_enabled: true # Whether to inject memory into system prompt
   max_injection_tokens: 2000 # Maximum tokens for memory injection
+  # Token counting strategy for memory-injection budgeting:
+  #   tiktoken (default) - accurate, but the encoding's BPE data may be
+  #     downloaded from a public network endpoint on first use. In
+  #     network-restricted environments this download can block for a long
+  #     time (see issues #3402 / #3429). Pre-cache the encoding or set this
+  #     to "char" to avoid it.
+  #   char - network-free CJK-aware character-based estimate; never touches
+  #     tiktoken. Slightly less precise budgeting, zero network I/O.
+  token_counting: tiktoken
+  # Guaranteed injection: fact categories that bypass the regular token budget
+  # and draw from a reserved allowance, so high-signal corrections (e.g.
+  # "don't use `pip`, use `uv`") survive even when the budget is tight.
+  #   guaranteed_categories - list of fact categories to guarantee. Pass [] to
+  #     disable; defaults to ["correction"].
+  #   guaranteed_token_budget - token ceiling for guaranteed facts. In the
+  #     common case the total injection stays within ``max_injection_tokens``
+  #     (guaranteed lines displace regular ones); the allowance becomes
+  #     additive only when guaranteed lines alone would overflow
+  #     ``max_injection_tokens``, in which case the safety-truncation ceiling
+  #     is raised accordingly.
+  guaranteed_categories:
+    - correction
+  guaranteed_token_budget: 500
+  # Staleness review: periodically prune aged facts that may no longer reflect
+  # the user's current situation.  When triggered, the LLM reviews facts older
+  # than ``staleness_age_days`` during the normal memory-update call (same LLM
+  # invocation — no extra API call) and decides KEEP or REMOVE for each.
+  #   staleness_review_enabled - master switch (default: true)
+  #   staleness_age_days       - facts older than this are candidates (default: 90)
+  #   staleness_min_candidates - minimum stale facts required to trigger a review
+  #                              cycle; avoids wasteful LLM calls when there are
+  #                              very few candidates (default: 3)
+  #   staleness_max_removals_per_cycle - safety cap on removals per cycle; when
+  #                                      exceeded, the lowest-confidence entries
+  #                                      are kept (default: 10)
+  #   staleness_protected_categories - fact categories exempt from review
+  #                                    (default: ["correction"])
+  staleness_review_enabled: true
+  staleness_age_days: 90
+  staleness_min_candidates: 3
+  staleness_max_removals_per_cycle: 10
+  staleness_protected_categories:
+    - correction
 
 # ============================================================================
 # Custom Agent Management API
@@ -878,12 +1408,12 @@ skill_evolution:
 # Checkpointer Configuration (DEPRECATED — use `database` instead)
 # ============================================================================
 # Legacy standalone checkpointer config. Kept for backward compatibility.
-# Prefer the unified `database` section below, which drives BOTH the
-# LangGraph checkpointer AND DeerFlow application data (runs, feedback,
-# events) from a single backend setting.
+# Prefer the unified `database` section below, which drives the LangGraph
+# checkpointer, LangGraph Store, and DeerFlow application data (runs,
+# feedback, events) from a single backend setting.
 #
 # If both `checkpointer` and `database` are present, `checkpointer`
-# takes precedence for LangGraph state persistence only.
+# takes precedence for the LangGraph checkpointer and Store only.
 #
 # checkpointer:
 #   type: sqlite
@@ -896,8 +1426,8 @@ skill_evolution:
 # ============================================================================
 # Database
 # ============================================================================
-# Unified storage backend for LangGraph checkpointer and DeerFlow
-# application data (runs, threads metadata, feedback, etc.).
+# Unified storage backend for the LangGraph checkpointer, LangGraph Store,
+# and DeerFlow application data (runs, threads metadata, feedback, etc.).
 #
 # backend: memory  -- No persistence, data lost on restart
 # backend: sqlite  -- Single-node deployment, files in sqlite_dir
@@ -908,7 +1438,7 @@ skill_evolution:
 #   sqlite_dir: .deer-flow/data
 #
 # SQLite mode uses a single deerflow.db file with WAL journal mode
-# for both checkpointer and application data.
+# for the checkpointer, Store, and application data.
 #
 # Postgres mode: put your connection URL in .env as DATABASE_URL,
 # then reference it here with $DATABASE_URL.
@@ -924,16 +1454,17 @@ skill_evolution:
 #                  UV_EXTRAS=postgres
 #              Multiple extras (`postgres,ollama`) supported here too — see
 #              docker/dev-entrypoint.sh.
-#   Docker img build-arg `UV_EXTRAS=postgres docker compose build` — single
-#              extra only at build time (backend/Dockerfile passes the value
-#              as one token to `--extra`).
+#   Docker img build-arg `UV_EXTRAS=postgres,discord docker compose build`
+#              supports comma- or whitespace-separated extras at build time
+#              (backend/Dockerfile expands them to repeated `--extra` flags).
 #
 # First-time bootstrap (before `make dev`):
 #   cd backend && uv sync --all-packages --extra postgres
 #   (--all-packages propagates the extra into workspace members — see PR #2584)
 #
 # NOTE: When both `checkpointer` and `database` are configured,
-# `checkpointer` takes precedence for LangGraph state persistence.
+# `checkpointer` takes precedence for the LangGraph checkpointer and Store;
+# `database` still controls DeerFlow application data.
 # If you use `database`, you can remove the `checkpointer` section.
 # database:
 #   backend: sqlite
@@ -963,6 +1494,108 @@ run_events:
   backend: memory
   max_trace_content: 10240
   track_token_usage: true
+
+# ============================================================================
+# Scheduled Tasks Configuration
+# ============================================================================
+# Background scheduler for one-time and recurring (cron) agent runs.
+# All fields are restart-required (captured at Gateway lifespan startup).
+#
+# Multi-worker note: the scheduler runs once per uvicorn worker. SQLite silently
+# ignores row-level locks, so multiple workers can double-fire the same task.
+# For multi-worker deployments (GATEWAY_WORKERS > 1), use the Postgres database
+# backend, where FOR UPDATE SKIP LOCKED serializes claims correctly.
+#
+# scheduler:
+#   enabled: false               # Master switch for the background poller
+#   poll_interval_seconds: 5     # How often to scan for due tasks
+#   lease_seconds: 120           # Claim lease; a crashed process's task becomes reclaimable after this
+#   max_concurrent_runs: 3       # Global cap on active scheduled runs; each poll claims only into the remaining budget
+#   min_once_delay_seconds: 60   # Minimum future offset for one-time tasks at creation time
+scheduler:
+  enabled: false
+  poll_interval_seconds: 5
+  lease_seconds: 120
+  max_concurrent_runs: 3
+  min_once_delay_seconds: 60
+
+# ============================================================================
+# Stream Bridge Configuration
+# ============================================================================
+# The stream bridge carries live agent events from gateway workers to SSE
+# clients. Docker Compose sets DEER_FLOW_STREAM_BRIDGE_REDIS_URL automatically,
+# so Docker deployments use Redis Streams even if this section is omitted.
+#
+# The redis bridge requires the optional `redis` extra. It is auto-detected from
+# this section on `make dev`, and always installed in the Docker image. To install
+# it manually: cd backend && uv sync --all-packages --extra redis
+#
+# stream_bridge:
+#   type: memory                 # single-process only
+#   queue_maxsize: 256
+#
+# stream_bridge:
+#   type: redis                  # recommended for Docker / multi-worker gateway
+#   redis_url: redis://redis:6379/0
+#   queue_maxsize: 256           # events retained per run (redis stream MAXLEN)
+#   stream_ttl_seconds: 86400    # rolling TTL for retained stream buffers.
+#                                # Refreshed on each publish/publish_end; set 0
+#                                # to disable. This is not a run timeout.
+#   recovered_stream_cleanup_delay_seconds: 60  # seconds to wait after
+#                                # publishing END for a recovered orphan run
+#                                # before deleting the stream key.
+#   max_connections: 100         # optional pool ceiling. Each live SSE client
+#                                # holds one connection blocked in XREAD ... BLOCK
+#                                # for up to heartbeat_interval (15s), so hundreds
+#                                # of concurrent clients open hundreds of
+#                                # connections. Unset = redis-py default (unbounded).
+#
+# NOTE: the redis bridge is fail-hard in v1. Redis.from_url is lazy, so a down
+# Redis does not block gateway startup, but the first publish/xread raises. A
+# mid-run Redis outage fails the active run — there is no automatic retry/backoff
+# or fallback to the in-memory bridge. Run Redis with HA / a restart policy.
+
+# ============================================================================
+# User-Owned IM Channel Connections
+# ============================================================================
+# Lets logged-in users connect their own IM accounts from the DeerFlow frontend
+# while reusing the existing `channels` runtime configuration below.
+#
+# Security notes:
+# - No public IP, OAuth callback URL, or provider webhook is required.
+# - Provider bot/app credentials stay under `channels.*`.
+# - `channel_connections` stores per-user bindings and one-time connect codes.
+# - Telegram uses a deep link when `bot_username` is configured.
+# - Slack, Discord, Feishu, DingTalk, WeChat, and WeCom use `/connect <code>`
+#   through the already-running bot/app.
+#
+# channel_connections:
+#   enabled: false
+#   # Security: keep this enabled unless you intentionally want legacy open-bot behavior.
+#   # Disabling it lets unbound external IM users create DeerFlow threads/runs.
+#   require_bound_identity: true
+#
+#   telegram:
+#     enabled: false
+#     bot_username: $TELEGRAM_BOT_USERNAME
+#
+#   slack:
+#     enabled: false
+#
+#   discord:
+#     enabled: false
+#
+#   feishu:
+#     enabled: false
+#
+#   dingtalk:
+#     enabled: false
+#
+#   wechat:
+#     enabled: false
+#
+#   wecom:
+#     enabled: false
 
 # ============================================================================
 # IM Channels Configuration
@@ -1130,3 +1763,53 @@ run_events:
 #   failure_threshold: 5
 #   # Time in seconds before attempting to recover (default: 60)
 #   recovery_timeout_sec: 60
+
+# ============================================================================
+# SSO / OIDC Authentication (optional)
+# ============================================================================
+# Enable SSO login via any OIDC-compatible provider (Keycloak, Google, Azure AD, Okta, etc.).
+# When enabled, the login page will show SSO buttons alongside the standard email/password form.
+#
+# Provider configuration:
+#   - issuer:      The OIDC issuer URL (e.g. https://keycloak.example.com/realms/deerflow)
+#   - client_id:   OAuth2 client ID from the provider
+#   - client_secret: OAuth2 client secret ($ENV_VAR references supported)
+#   - redirect_uri: Callback URL. In production, this must match what you configure in
+#                   the provider. Defaults to a self-derived URL in development.
+#
+# Keycloak setup:
+#   1. Create a client with type "confidential" and Standard Flow enabled
+#   2. Add Valid Redirect URI: http://localhost:8001/api/v1/auth/callback/keycloak
+#   3. Add Web Origin: http://localhost:8001 (or your frontend origin)
+
+# auth:
+#   oidc:
+#     enabled: true
+#     # Base URL of the frontend, used for redirects after SSO callback.
+#     # In production behind a reverse proxy, set this to the public frontend URL
+#     # (e.g. https://deerflow.example.com). In development, leave unset.
+#     # frontend_base_url: http://localhost:3000
+#     providers:
+#       keycloak:
+#         display_name: Keycloak
+#         issuer: https://keycloak.example.com/realms/deerflow
+#         client_id: deerflow
+#         client_secret: $KEYCLOAK_CLIENT_SECRET
+#         # Optional: explicitly set the callback URL.
+#         # redirect_uri: https://deerflow.example.com/api/v1/auth/callback/keycloak
+#         scopes:
+#           - openid
+#           - email
+#           - profile
+#         token_endpoint_auth_method: client_secret_post
+#
+#         # User provisioning settings (safe defaults shown below):
+#         auto_create_users: true          # Auto-create DeerFlow account on first SSO login
+#         require_verified_email: true     # Reject SSO logins without verified email
+#         # allowed_email_domains:          # Restrict to specific email domains
+#         #   - example.com
+#         admin_emails: []                 # Auto-grant admin role to these emails
+#
+#         # Security features (enabled by default):
+#         pkce_enabled: true               # PKCE (S256) for authorization code flow
+#         nonce_enabled: true              # Nonce validation in ID tokens

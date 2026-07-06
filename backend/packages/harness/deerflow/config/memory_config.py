@@ -1,5 +1,7 @@
 """Configuration for memory mechanism."""
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 
@@ -59,6 +61,76 @@ class MemoryConfig(BaseModel):
         ge=100,
         le=8000,
         description="Maximum tokens to use for memory injection",
+    )
+    token_counting: Literal["tiktoken", "char"] = Field(
+        default="tiktoken",
+        description=(
+            "Token counting strategy for memory-injection budgeting. "
+            "'tiktoken' is accurate but the encoding's BPE data may be "
+            "downloaded from a public network endpoint on first use, which "
+            "can block for a long time in network-restricted environments "
+            "(see issue #3402/#3429). 'char' uses a network-free "
+            "CJK-aware character-based estimate and never touches tiktoken."
+        ),
+    )
+    guaranteed_categories: list[str] = Field(
+        default_factory=lambda: ["correction"],
+        description=(
+            "Fact categories that are always injected into the prompt regardless "
+            "of the regular token budget. These facts are allocated from a "
+            "separate reserved budget (``guaranteed_token_budget``). "
+            "This ensures high-value facts such as explicit user corrections "
+            "are never silently dropped when the token budget is tight."
+        ),
+    )
+    guaranteed_token_budget: int = Field(
+        default=500,
+        ge=50,
+        le=2000,
+        description=(
+            "Token ceiling for guaranteed-category facts. "
+            "Guaranteed facts are selected first from this budget and placed at "
+            "the front of the Facts block so they cannot be evicted by regular "
+            "facts. In the common case the total output still fits within "
+            "``max_injection_tokens`` (guaranteed lines displace regular ones); "
+            "the budget becomes additive only when guaranteed lines alone push "
+            "the output past ``max_injection_tokens``, in which case the "
+            "safety-truncation ceiling is raised accordingly."
+        ),
+    )
+    # ── Staleness review ────────────────────────────────────────────────
+    staleness_review_enabled: bool = Field(
+        default=True,
+        description=(
+            "Enable staleness review for aged facts. When enabled, facts older "
+            "than ``staleness_age_days`` are surfaced in the memory-update prompt "
+            "so the LLM can semantically judge whether each is still valid or "
+            "should be removed. This solves the 'silent staleness' problem where "
+            "outdated facts persist because no future conversation explicitly "
+            "contradicts them."
+        ),
+    )
+    staleness_age_days: int = Field(
+        default=90,
+        ge=30,
+        le=365,
+        description=("Facts older than this many days become candidates for staleness review. 90 days (~one quarter) balances between catching genuine changes (job switches, tech-stack migrations) and avoiding noise on stable facts."),
+    )
+    staleness_min_candidates: int = Field(
+        default=3,
+        ge=1,
+        le=50,
+        description=("Minimum number of stale facts required to trigger a review cycle. Below this threshold the prompt overhead is not justified."),
+    )
+    staleness_max_removals_per_cycle: int = Field(
+        default=10,
+        ge=1,
+        le=50,
+        description=("Maximum number of facts the staleness review can remove in a single update cycle. Prevents the LLM from over-pruning when reviewing a large backlog of aged facts."),
+    )
+    staleness_protected_categories: list[str] = Field(
+        default_factory=lambda: ["correction"],
+        description=("Fact categories exempt from staleness review. Correction facts represent explicit user feedback and should not be auto-pruned based on age alone."),
     )
 
 

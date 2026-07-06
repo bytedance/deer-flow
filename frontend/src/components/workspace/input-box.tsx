@@ -1,5 +1,6 @@
 "use client";
 
+import type { Message } from "@langchain/langgraph-sdk";
 import type { ChatStatus } from "ai";
 import {
   CheckIcon,
@@ -9,6 +10,7 @@ import {
   PlusIcon,
   SparklesIcon,
   RocketIcon,
+  TargetIcon,
   XIcon,
   ZapIcon,
 } from "lucide-react";
@@ -20,7 +22,9 @@ import {
   useRef,
   useState,
   type ComponentProps,
+  type KeyboardEvent,
 } from "react";
+import { toast } from "sonner";
 
 import {
   PromptInput,
@@ -33,6 +37,7 @@ import {
   PromptInputBody,
   PromptInputButton,
   PromptInputFooter,
+  PromptInputHeader,
   PromptInputSubmit,
   PromptInputTextarea,
   PromptInputTools,
@@ -58,9 +63,24 @@ import {
 import { fetch } from "@/core/api/fetcher";
 import { getBackendBaseURL } from "@/core/config";
 import { useI18n } from "@/core/i18n/hooks";
+import { isHiddenFromUIMessage } from "@/core/messages/utils";
 import { useModels } from "@/core/models/hooks";
-import type { AgentThreadContext } from "@/core/threads";
+import {
+  buildReferenceMessageMetadata,
+  type SidecarContext,
+} from "@/core/sidecar";
+import { useSkills } from "@/core/skills/hooks";
+import { useSuggestionsConfig } from "@/core/suggestions/hooks";
+import type { AgentThreadContext, GoalState } from "@/core/threads";
 import { textOfMessage } from "@/core/threads/utils";
+import {
+  formatUploadSize,
+  useUploadLimits,
+  validateUploadLimits,
+  type UploadLimits,
+  type UploadLimitViolation,
+} from "@/core/uploads";
+import { isIMEComposing } from "@/lib/ime";
 import { cn } from "@/lib/utils";
 
 import {
@@ -80,8 +100,24 @@ import {
   DropdownMenuTrigger,
 } from "../ui/dropdown-menu";
 
+import {
+  abortGoalRequest,
+  beginGoalRequest,
+  createGoalRequestState,
+  findSuggestionTemplatePlaceholder,
+  finishGoalRequest,
+  getInputSubmitAction,
+  getLeadingSlashSkillQuery,
+  getMatchingSkillSuggestions,
+  type GoalCommand,
+  isAbortError,
+  isCurrentGoalRequest,
+  readGoalResponseError,
+  type SlashSuggestion,
+} from "./input-box-helpers";
 import { useThread } from "./messages/context";
 import { ModeHoverGuide } from "./mode-hover-guide";
+import { ReferenceAttachmentSummary, useMaybeSidecar } from "./sidecar";
 import { Tooltip } from "./tooltip";
 
 type InputMode = "flash" | "thinking" | "pro" | "ultra";
@@ -99,6 +135,68 @@ function getResolvedMode(
   return supportsThinking ? "pro" : "flash";
 }
 
+function escapeXmlAttribute(value: string) {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/"/g, "&quot;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+export type InputBoxSubmitOptions = {
+  additionalKwargs?: Record<string, unknown>;
+  additionalInputMessages?: Message[];
+  onSent?: () => void;
+};
+
+function buildHiddenConversationQuoteMessage({
+  contexts,
+}: {
+  contexts: SidecarContext[];
+}): Message {
+  return {
+    type: "human",
+    content: [
+      {
+        type: "text",
+        text: [
+          contexts.length === 1
+            ? "The user added the following quoted context to this conversation."
+            : `The user added the following ${contexts.length} quoted contexts to this conversation.`,
+          "Use the referenced_message blocks as reference material for the user's next message.",
+          "",
+          ...contexts.flatMap((context, index) =>
+            [
+              `<referenced_message index="${index + 1}" label="${escapeXmlAttribute(
+                context.label,
+              )}">`,
+              `Role: ${context.role === "user" ? "User" : "Assistant"}`,
+              context.messageId ? `Message ID: ${context.messageId}` : null,
+              "",
+              context.content,
+              "</referenced_message>",
+              "",
+            ].filter((line): line is string => line !== null),
+          ),
+        ]
+          .filter((line): line is string => line !== null)
+          .join("\n"),
+      },
+    ],
+    additional_kwargs: {
+      hide_from_ui: true,
+      conversation_quote_context: true,
+      // Keep ids/roles/count 1:1 parallel with `contexts` so consumers can zip
+      // them safely; do not dedupe ids here.
+      referenced_message_ids: contexts.map(
+        (context) => context.messageId ?? "",
+      ),
+      referenced_message_roles: contexts.map((context) => context.role),
+      quote_context_count: contexts.length,
+    },
+  } as Message;
+}
+
 export function InputBox({
   className,
   disabled,
@@ -111,6 +209,7 @@ export function InputBox({
   initialValue,
   onContextChange,
   onFollowupsVisibilityChange,
+  onGoalChange,
   onSubmit,
   onStop,
   ...props
@@ -144,7 +243,11 @@ export function InputBox({
     },
   ) => void;
   onFollowupsVisibilityChange?: (visible: boolean) => void;
-  onSubmit?: (message: PromptInputMessage) => void | Promise<void>;
+  onGoalChange?: (goal: GoalState | null) => void;
+  onSubmit?: (
+    message: PromptInputMessage,
+    options?: InputBoxSubmitOptions,
+  ) => void | Promise<void>;
   onStop?: () => void;
 }) {
   const { t } = useI18n();
@@ -152,12 +255,28 @@ export function InputBox({
   const [modelDialogOpen, setModelDialogOpen] = useState(false);
   const { models } = useModels();
   const { thread, isMock } = useThread();
-  const { textInput } = usePromptInputController();
+  const { attachments, textInput } = usePromptInputController();
+  const sidecar = useMaybeSidecar();
+  const attachmentParts = attachments.files;
+  const removeAttachment = attachments.remove;
+  const { skills } = useSkills();
+  const { data: uploadLimits } = useUploadLimits(threadId);
   const promptRootRef = useRef<HTMLDivElement | null>(null);
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const goalRequestStateRef = useRef(createGoalRequestState());
+  const promptHistoryIndexRef = useRef<number | null>(null);
+  const promptHistoryDraftRef = useRef("");
 
   const [followups, setFollowups] = useState<string[]>([]);
+  const { data: suggestionsConfig } = useSuggestionsConfig();
+  const suggestionsConfigLoaded = suggestionsConfig !== undefined;
+  const suggestionsEnabled = suggestionsConfig?.enabled;
   const [followupsHidden, setFollowupsHidden] = useState(false);
   const [followupsLoading, setFollowupsLoading] = useState(false);
+  const [textareaFocused, setTextareaFocused] = useState(false);
+  const [skillSuggestionIndex, setSkillSuggestionIndex] = useState(0);
+  const [dismissedSkillSuggestionValue, setDismissedSkillSuggestionValue] =
+    useState<string | null>(null);
   const lastGeneratedForAiIdRef = useRef<string | null>(null);
   const wasStreamingRef = useRef(false);
   const messagesRef = useRef(thread.messages);
@@ -166,6 +285,76 @@ export function InputBox({
   const [pendingSuggestion, setPendingSuggestion] = useState<string | null>(
     null,
   );
+  const builtinSlashCommands = useMemo<SlashSuggestion[]>(
+    () => [
+      {
+        name: "goal",
+        description: t.inputBox.goalCommandDescription,
+        kind: "builtin",
+      },
+    ],
+    [t.inputBox.goalCommandDescription],
+  );
+
+  const reportUploadLimitViolations = useCallback(
+    (violations: UploadLimitViolation[]) => {
+      for (const violation of violations) {
+        if (violation.code === "max_file_size") {
+          toast.error(
+            t.uploads.filesTooLarge(
+              violation.files.map((file) => file.name).join(", "),
+              formatUploadSize(violation.limit),
+            ),
+          );
+        } else if (violation.code === "max_files") {
+          toast.error(
+            t.uploads.tooManyFiles(violation.files.length, violation.limit),
+          );
+        } else {
+          toast.error(
+            t.uploads.totalSizeTooLarge(
+              violation.files.length,
+              formatUploadSize(violation.limit),
+            ),
+          );
+        }
+      }
+    },
+    [t.uploads],
+  );
+
+  useEffect(() => {
+    if (!uploadLimits) {
+      return;
+    }
+
+    const attachmentEntries = attachmentParts.flatMap((attachment) =>
+      attachment.file instanceof File
+        ? [{ id: attachment.id, file: attachment.file }]
+        : [],
+    );
+    const validation = validateUploadLimits(
+      [],
+      attachmentEntries.map(({ file }) => file),
+      uploadLimits,
+    );
+    if (validation.rejected.length === 0) {
+      return;
+    }
+
+    const rejected = new Set(validation.rejected);
+    for (const entry of attachmentEntries) {
+      if (rejected.has(entry.file)) {
+        removeAttachment(entry.id);
+      }
+    }
+    reportUploadLimitViolations(validation.violations);
+  }, [
+    attachmentParts,
+    removeAttachment,
+    reportUploadLimitViolations,
+    uploadLimits,
+  ]);
 
   useEffect(() => {
     if (models.length === 0) {
@@ -206,6 +395,49 @@ export function InputBox({
     () => selectedModel?.supports_reasoning_effort ?? false,
     [selectedModel],
   );
+
+  const promptHistory = useMemo(() => {
+    const history: string[] = [];
+    for (const message of thread.messages) {
+      if (message.type !== "human") {
+        continue;
+      }
+      const additionalKwargs = message.additional_kwargs;
+      if (
+        additionalKwargs &&
+        typeof additionalKwargs === "object" &&
+        Reflect.get(additionalKwargs, "hide_from_ui") === true
+      ) {
+        continue;
+      }
+      const text = textOfMessage(message)?.trim();
+      if (!text) {
+        continue;
+      }
+      if (history.at(-1) !== text) {
+        history.push(text);
+      }
+    }
+    return history;
+  }, [thread.messages]);
+
+  useEffect(() => {
+    promptHistoryIndexRef.current = null;
+    promptHistoryDraftRef.current = "";
+  }, [threadId]);
+
+  useEffect(() => {
+    const goalRequestState = goalRequestStateRef.current;
+    return () => abortGoalRequest(goalRequestState);
+  }, [threadId]);
+
+  useEffect(() => {
+    const currentIndex = promptHistoryIndexRef.current;
+    if (currentIndex !== null && currentIndex >= promptHistory.length) {
+      promptHistoryIndexRef.current = null;
+      promptHistoryDraftRef.current = "";
+    }
+  }, [promptHistory.length]);
 
   const handleModelSelect = useCallback(
     (model_name: string) => {
@@ -252,18 +484,173 @@ export function InputBox({
     [onContextChange, context],
   );
 
-  const handleSubmit = useCallback(
+  const handleGoalCommand = useCallback(
+    async (command: GoalCommand): Promise<boolean> => {
+      const request = beginGoalRequest(goalRequestStateRef.current, threadId);
+      const signal = request.controller.signal;
+      try {
+        let goal: GoalState | null = null;
+        if (command.kind === "status") {
+          const response = await fetch(
+            `${getBackendBaseURL()}/api/threads/${encodeURIComponent(
+              threadId,
+            )}/goal`,
+            { method: "GET", signal },
+          );
+          if (!response.ok) {
+            throw new Error(await readGoalResponseError(response));
+          }
+          goal =
+            ((await response.json()) as { goal?: GoalState | null }).goal ??
+            null;
+          if (
+            !isCurrentGoalRequest(
+              goalRequestStateRef.current,
+              request,
+              threadId,
+            )
+          ) {
+            return false;
+          }
+          const objective = goal?.objective;
+          toast.info(
+            objective !== undefined
+              ? // Function replacer so a goal containing `$&`/`$1` isn't
+                // interpreted as a replacement pattern.
+                t.inputBox.goalActive.replace("{goal}", () => objective)
+              : t.inputBox.goalNone,
+          );
+          onGoalChange?.(goal);
+        } else if (command.kind === "clear") {
+          const response = await fetch(
+            `${getBackendBaseURL()}/api/threads/${encodeURIComponent(
+              threadId,
+            )}/goal`,
+            { method: "DELETE", signal },
+          );
+          if (!response.ok) {
+            throw new Error(await readGoalResponseError(response));
+          }
+          if (
+            !isCurrentGoalRequest(
+              goalRequestStateRef.current,
+              request,
+              threadId,
+            )
+          ) {
+            return false;
+          }
+          toast.success(t.inputBox.goalCleared);
+          onGoalChange?.(null);
+        } else {
+          const response = await fetch(
+            `${getBackendBaseURL()}/api/threads/${encodeURIComponent(
+              threadId,
+            )}/goal`,
+            {
+              method: "PUT",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ objective: command.objective }),
+              signal,
+            },
+          );
+          if (!response.ok) {
+            throw new Error(await readGoalResponseError(response));
+          }
+          goal =
+            ((await response.json()) as { goal?: GoalState | null }).goal ??
+            null;
+          if (
+            !isCurrentGoalRequest(
+              goalRequestStateRef.current,
+              request,
+              threadId,
+            )
+          ) {
+            return false;
+          }
+          toast.success(t.inputBox.goalSet);
+          onGoalChange?.(goal);
+        }
+        textInput.setInput("");
+        return true;
+      } catch (error) {
+        if (
+          isAbortError(error) ||
+          !isCurrentGoalRequest(goalRequestStateRef.current, request, threadId)
+        ) {
+          return false;
+        }
+        toast.error(
+          error instanceof Error ? error.message : t.inputBox.goalFailed,
+        );
+        return false;
+      } finally {
+        finishGoalRequest(goalRequestStateRef.current, request);
+      }
+    },
+    [
+      onGoalChange,
+      t.inputBox.goalActive,
+      t.inputBox.goalCleared,
+      t.inputBox.goalFailed,
+      t.inputBox.goalNone,
+      t.inputBox.goalSet,
+      textInput,
+      threadId,
+    ],
+  );
+
+  const submitThreadMessage = useCallback(
     (message: PromptInputMessage) => {
-      if (status === "streaming") {
-        onStop?.();
-        return;
+      const files = message.files.flatMap((file) =>
+        file.file instanceof File ? [file.file] : [],
+      );
+      const uploadValidation = validateUploadLimits([], files, uploadLimits);
+      if (uploadValidation.violations.length > 0) {
+        reportUploadLimitViolations(uploadValidation.violations);
+        return Promise.reject(new Error("Attachment limits exceeded."));
       }
-      if (!message.text.trim() && message.files.length === 0) {
-        return;
+      const placeholder = findSuggestionTemplatePlaceholder(message.text);
+      if (placeholder) {
+        toast.warning(t.inputBox.suggestionPlaceholderRequired);
+        requestAnimationFrame(() => {
+          const textarea = textareaRef.current;
+          if (!textarea) {
+            return;
+          }
+          textarea.focus();
+          textarea.setSelectionRange(placeholder.start, placeholder.end);
+        });
+        return Promise.reject(
+          new Error("Suggestion template placeholder is unresolved."),
+        );
       }
+      promptHistoryIndexRef.current = null;
+      promptHistoryDraftRef.current = "";
       setFollowups([]);
       setFollowupsHidden(false);
       setFollowupsLoading(false);
+      const quotes = sidecar?.conversationQuotes ?? [];
+      const quoteIds = quotes.map((quote) => quote.id);
+      const quoteContexts = quotes.map((quote) => quote.context);
+      const submitOptions: InputBoxSubmitOptions | undefined = quotes.length
+        ? {
+            additionalKwargs: buildReferenceMessageMetadata(quoteContexts),
+            additionalInputMessages: [
+              buildHiddenConversationQuoteMessage({
+                contexts: quoteContexts,
+              }),
+            ],
+            // Clear quotes only once the send genuinely proceeds. If the send
+            // is dropped by the in-flight guard, `onSent` never fires and the
+            // quotes stay attached so they aren't silently lost.
+            onSent: () => {
+              sidecar?.clearConversationQuotes(quoteIds);
+            },
+          }
+        : undefined;
+      const submit = () => onSubmit?.(message, submitOptions);
 
       // Guard against submitting before the initial model auto-selection
       // effect has flushed thread settings to storage/state.
@@ -278,21 +665,69 @@ export function InputBox({
         });
         return new Promise<void>((resolve, reject) => {
           setTimeout(() => {
-            Promise.resolve(onSubmit?.(message)).then(resolve).catch(reject);
+            Promise.resolve(submit()).then(resolve).catch(reject);
           }, 0);
         });
       }
 
-      return onSubmit?.(message);
+      return submit();
     },
     [
       context,
       onContextChange,
       onSubmit,
-      onStop,
+      reportUploadLimitViolations,
       resolvedModelName,
       selectedModel?.supports_thinking,
+      sidecar,
+      t.inputBox.suggestionPlaceholderRequired,
+      uploadLimits,
+    ],
+  );
+
+  const handleSubmit = useCallback(
+    async (message: PromptInputMessage) => {
+      if (status === "streaming") {
+        toast.info(t.inputBox.pleaseWaitStreaming);
+        return Promise.reject(new Error("streaming"));
+      }
+      const submitAction = getInputSubmitAction({
+        text: message.text,
+        fileCount: message.files.length,
+        status,
+      });
+      if (submitAction.kind === "goal") {
+        promptHistoryIndexRef.current = null;
+        promptHistoryDraftRef.current = "";
+        setFollowups([]);
+        setFollowupsHidden(false);
+        setFollowupsLoading(false);
+        const saved = await handleGoalCommand(submitAction.command);
+        // Only start a run when a goal was actually saved; status/clear never run.
+        if (saved && submitAction.command.kind === "set") {
+          return submitThreadMessage({
+            ...message,
+            text: submitAction.command.objective,
+            files: [],
+          });
+        }
+        return;
+      }
+      if (submitAction.kind === "stop") {
+        onStop?.();
+        return;
+      }
+      if (submitAction.kind === "empty") {
+        return;
+      }
+      return submitThreadMessage(message);
+    },
+    [
+      handleGoalCommand,
+      onStop,
       status,
+      submitThreadMessage,
+      t.inputBox.pleaseWaitStreaming,
     ],
   );
 
@@ -347,9 +782,187 @@ export function InputBox({
     setTimeout(() => requestFormSubmit(), 0);
   }, [pendingSuggestion, requestFormSubmit, textInput]);
 
+  const slashSkillQuery = useMemo(
+    () => getLeadingSlashSkillQuery(textInput.value ?? ""),
+    [textInput.value],
+  );
+  const skillSuggestions = useMemo(
+    () =>
+      slashSkillQuery === null
+        ? []
+        : getMatchingSkillSuggestions(
+            skills,
+            slashSkillQuery,
+            builtinSlashCommands,
+          ),
+    [builtinSlashCommands, skills, slashSkillQuery],
+  );
+  const showSkillSuggestions =
+    !disabled &&
+    textareaFocused &&
+    slashSkillQuery !== null &&
+    skillSuggestions.length > 0 &&
+    dismissedSkillSuggestionValue !== textInput.value;
+
+  useEffect(() => {
+    setSkillSuggestionIndex(0);
+  }, [slashSkillQuery, skillSuggestions.length]);
+
+  const applySkillSuggestion = useCallback(
+    (suggestion: SlashSuggestion) => {
+      const nextValue = `/${suggestion.name} `;
+      textInput.setInput(nextValue);
+      setDismissedSkillSuggestionValue(nextValue);
+      requestAnimationFrame(() => {
+        const textarea = textareaRef.current;
+        if (!textarea) {
+          return;
+        }
+        textarea.focus();
+        textarea.setSelectionRange(nextValue.length, nextValue.length);
+      });
+    },
+    [textInput],
+  );
+
+  const handleSkillSuggestionKeyDown = useCallback(
+    (event: KeyboardEvent<HTMLTextAreaElement>) => {
+      if (!showSkillSuggestions) {
+        return;
+      }
+
+      if (event.key === "ArrowDown") {
+        event.preventDefault();
+        setSkillSuggestionIndex(
+          (index) => (index + 1) % skillSuggestions.length,
+        );
+        return;
+      }
+
+      if (event.key === "ArrowUp") {
+        event.preventDefault();
+        setSkillSuggestionIndex(
+          (index) =>
+            (index - 1 + skillSuggestions.length) % skillSuggestions.length,
+        );
+        return;
+      }
+
+      if (event.key === "Enter" || event.key === "Tab") {
+        if (event.shiftKey) {
+          return;
+        }
+        event.preventDefault();
+        const selectedSkill = skillSuggestions[skillSuggestionIndex];
+        if (selectedSkill) {
+          applySkillSuggestion(selectedSkill);
+        }
+        return;
+      }
+
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setDismissedSkillSuggestionValue(textInput.value);
+      }
+    },
+    [
+      applySkillSuggestion,
+      showSkillSuggestions,
+      skillSuggestionIndex,
+      skillSuggestions,
+      textInput.value,
+    ],
+  );
+
+  const setPromptHistoryValue = useCallback(
+    (value: string) => {
+      textInput.setInput(value);
+      requestAnimationFrame(() => {
+        const textarea = textareaRef.current;
+        if (!textarea) {
+          return;
+        }
+        textarea.focus();
+        textarea.setSelectionRange(value.length, value.length);
+      });
+    },
+    [textInput],
+  );
+
+  const handlePromptHistoryKeyDown = useCallback(
+    (event: KeyboardEvent<HTMLTextAreaElement>) => {
+      if (
+        event.altKey ||
+        event.ctrlKey ||
+        event.metaKey ||
+        event.shiftKey ||
+        isIMEComposing(event) ||
+        promptHistory.length === 0 ||
+        (event.key !== "ArrowUp" && event.key !== "ArrowDown")
+      ) {
+        return;
+      }
+
+      const currentValue = textInput.value ?? "";
+      const currentHistoryIndex = promptHistoryIndexRef.current;
+      const isBrowsingHistory = currentHistoryIndex !== null;
+
+      if (!isBrowsingHistory && currentValue.length > 0) {
+        return;
+      }
+
+      if (event.key === "ArrowUp") {
+        event.preventDefault();
+        const nextIndex = isBrowsingHistory
+          ? Math.max(currentHistoryIndex - 1, 0)
+          : promptHistory.length - 1;
+        if (!isBrowsingHistory) {
+          promptHistoryDraftRef.current = currentValue;
+        }
+        promptHistoryIndexRef.current = nextIndex;
+        setPromptHistoryValue(promptHistory[nextIndex] ?? "");
+        return;
+      }
+
+      if (!isBrowsingHistory) {
+        return;
+      }
+
+      event.preventDefault();
+      if (currentHistoryIndex >= promptHistory.length - 1) {
+        promptHistoryIndexRef.current = null;
+        setPromptHistoryValue(promptHistoryDraftRef.current);
+        promptHistoryDraftRef.current = "";
+        return;
+      }
+
+      const nextIndex = currentHistoryIndex + 1;
+      promptHistoryIndexRef.current = nextIndex;
+      setPromptHistoryValue(promptHistory[nextIndex] ?? "");
+    },
+    [promptHistory, setPromptHistoryValue, textInput.value],
+  );
+
+  const handlePromptTextareaKeyDown = useCallback(
+    (event: KeyboardEvent<HTMLTextAreaElement>) => {
+      handleSkillSuggestionKeyDown(event);
+      if (event.defaultPrevented) {
+        return;
+      }
+      handlePromptHistoryKeyDown(event);
+    },
+    [handlePromptHistoryKeyDown, handleSkillSuggestionKeyDown],
+  );
+
+  const handlePromptTextareaChange = useCallback(() => {
+    promptHistoryIndexRef.current = null;
+    promptHistoryDraftRef.current = "";
+  }, []);
+
   const showFollowups =
     !disabled &&
     !isWelcomeMode &&
+    !showSkillSuggestions &&
     !followupsHidden &&
     (followupsLoading || followups.length > 0);
 
@@ -384,10 +997,14 @@ export function InputBox({
     if (!lastAiId || lastAiId === lastGeneratedForAiIdRef.current) {
       return;
     }
+    if (!suggestionsConfigLoaded) {
+      return;
+    }
     lastGeneratedForAiIdRef.current = lastAiId;
 
     const recent = messagesRef.current
       .filter((m) => m.type === "human" || m.type === "ai")
+      .filter((m) => !isHiddenFromUIMessage(m))
       .map((m) => {
         const role = m.type === "human" ? "user" : "assistant";
         const content = textOfMessage(m) ?? "";
@@ -397,6 +1014,11 @@ export function InputBox({
       .slice(-6);
 
     if (recent.length === 0) {
+      return;
+    }
+
+    if (!suggestionsEnabled) {
+      setFollowups([]);
       return;
     }
 
@@ -436,13 +1058,33 @@ export function InputBox({
       });
 
     return () => controller.abort();
-  }, [context.model_name, disabled, isMock, status, threadId]);
+  }, [
+    context.model_name,
+    disabled,
+    isMock,
+    status,
+    suggestionsConfigLoaded,
+    suggestionsEnabled,
+    threadId,
+  ]);
+
+  const onSelectPlaceholder = useCallback((newText: string) => {
+    const placeholder = findSuggestionTemplatePlaceholder(newText);
+    if (placeholder) {
+      requestAnimationFrame(() => {
+        const textarea = textareaRef.current;
+        if (!textarea) return;
+        textarea.focus();
+        textarea.setSelectionRange(placeholder.start, placeholder.end);
+      });
+    }
+  }, []);
 
   return (
     <div
       ref={promptRootRef}
       className={cn(
-        "relative flex flex-col",
+        "relative flex min-w-0 flex-col",
         isWelcomeMode ? "gap-4" : "gap-2",
       )}
     >
@@ -478,9 +1120,55 @@ export function InputBox({
           </div>
         </div>
       )}
+      {showSkillSuggestions && (
+        <div className="absolute right-0 bottom-full left-0 z-40 mb-2 px-1">
+          <div
+            aria-label="Skill suggestions"
+            className="bg-popover/95 text-popover-foreground border-border max-h-72 overflow-y-auto rounded-xl border p-1 shadow-lg backdrop-blur-sm"
+            role="listbox"
+          >
+            {skillSuggestions.map((suggestion, index) => {
+              const selected = index === skillSuggestionIndex;
+              return (
+                <button
+                  aria-selected={selected}
+                  className={cn(
+                    "flex min-h-12 w-full min-w-0 cursor-pointer items-center gap-3 rounded-lg px-3 py-2 text-left transition-colors",
+                    selected
+                      ? "bg-accent text-accent-foreground"
+                      : "text-popover-foreground hover:bg-accent/70 hover:text-accent-foreground",
+                  )}
+                  key={`${suggestion.kind}:${suggestion.name}`}
+                  onClick={() => applySkillSuggestion(suggestion)}
+                  onMouseDown={(event) => event.preventDefault()}
+                  onMouseEnter={() => setSkillSuggestionIndex(index)}
+                  role="option"
+                  type="button"
+                >
+                  {suggestion.kind === "builtin" ? (
+                    <TargetIcon className="text-muted-foreground size-4 shrink-0" />
+                  ) : (
+                    <SparklesIcon className="text-muted-foreground size-4 shrink-0" />
+                  )}
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate text-sm font-medium">
+                      /{suggestion.name}
+                    </span>
+                    {suggestion.description && (
+                      <span className="text-muted-foreground block truncate text-xs">
+                        {suggestion.description}
+                      </span>
+                    )}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
       <PromptInput
         className={cn(
-          "bg-background/85 rounded-2xl backdrop-blur-sm transition-all duration-300 ease-out *:data-[slot='input-group']:rounded-2xl",
+          "bg-background/85 relative z-10 rounded-2xl backdrop-blur-sm transition-all duration-300 ease-out *:data-[slot='input-group']:rounded-2xl",
           className,
         )}
         disabled={disabled}
@@ -496,9 +1184,22 @@ export function InputBox({
             </div>
           </div>
         )}
-        <PromptInputAttachments>
-          {(attachment) => <PromptInputAttachment data={attachment} />}
-        </PromptInputAttachments>
+        <PromptInputHeader className="flex-wrap px-3 pt-3 pb-0 empty:hidden">
+          <PromptInputAttachments className="contents p-0">
+            {(attachment) => (
+              <div className="max-w-60">
+                <PromptInputAttachment data={attachment} />
+              </div>
+            )}
+          </PromptInputAttachments>
+          {sidecar && sidecar.conversationQuotes.length > 0 && (
+            <ReferenceAttachmentSummary
+              references={sidecar.conversationQuotes}
+              testId="conversation-quote-attachment"
+              onClear={() => sidecar.clearConversationQuotes()}
+            />
+          )}
+        </PromptInputHeader>
         <PromptInputBody className="absolute top-0 right-0 left-0 z-3">
           <PromptInputTextarea
             className={cn("size-full")}
@@ -506,10 +1207,15 @@ export function InputBox({
             placeholder={t.inputBox.placeholder}
             autoFocus={autoFocus}
             defaultValue={initialValue}
+            onBlur={() => setTextareaFocused(false)}
+            onChange={handlePromptTextareaChange}
+            onFocus={() => setTextareaFocused(true)}
+            onKeyDown={handlePromptTextareaKeyDown}
+            ref={textareaRef}
           />
         </PromptInputBody>
-        <PromptInputFooter className="flex">
-          <PromptInputTools>
+        <PromptInputFooter className="flex flex-wrap gap-2 sm:flex-nowrap">
+          <PromptInputTools className="min-w-0 flex-1 flex-wrap">
             {/* TODO: Add more connectors here
           <PromptInputActionMenu>
             <PromptInputActionMenuTrigger className="px-2!" />
@@ -519,7 +1225,10 @@ export function InputBox({
               />
             </PromptInputActionMenuContent>
           </PromptInputActionMenu> */}
-            <AddAttachmentsButton className="px-2!" />
+            <AddAttachmentsButton
+              className="px-2!"
+              uploadLimits={uploadLimits}
+            />
             <PromptInputActionMenu>
               <ModeHoverGuide
                 mode={
@@ -531,7 +1240,7 @@ export function InputBox({
                     : "flash"
                 }
               >
-                <PromptInputActionMenuTrigger className="gap-1! px-2!">
+                <PromptInputActionMenuTrigger className="max-w-28 gap-1! px-2! sm:max-w-none">
                   <div>
                     {context.mode === "flash" && <ZapIcon className="size-3" />}
                     {context.mode === "thinking" && (
@@ -546,7 +1255,7 @@ export function InputBox({
                   </div>
                   <div
                     className={cn(
-                      "text-xs font-normal",
+                      "truncate text-xs font-normal",
                       context.mode === "ultra" ? "golden-text" : "",
                     )}
                   >
@@ -693,7 +1402,7 @@ export function InputBox({
             </PromptInputActionMenu>
             {supportReasoningEffort && context.mode !== "flash" && (
               <PromptInputActionMenu>
-                <PromptInputActionMenuTrigger className="gap-1! px-2!">
+                <PromptInputActionMenuTrigger className="hidden gap-1! px-2! sm:inline-flex">
                   <div className="text-xs font-normal">
                     {t.inputBox.reasoningEffort}:
                     {context.reasoning_effort === "minimal" &&
@@ -808,13 +1517,13 @@ export function InputBox({
               </PromptInputActionMenu>
             )}
           </PromptInputTools>
-          <PromptInputTools>
+          <PromptInputTools className="min-w-0 justify-end">
             <ModelSelector
               open={modelDialogOpen}
               onOpenChange={setModelDialogOpen}
             >
               <ModelSelectorTrigger asChild>
-                <PromptInputButton>
+                <PromptInputButton className="max-w-40 min-w-0 sm:max-w-56">
                   <div className="flex min-w-0 flex-col items-start text-left">
                     <ModelSelectorName className="text-xs font-normal">
                       {selectedModel?.display_name}
@@ -852,19 +1561,27 @@ export function InputBox({
               disabled={disabled}
               variant="outline"
               status={status}
+              onClick={(e) => {
+                if (status === "streaming") {
+                  e.preventDefault();
+                  onStop?.();
+                }
+              }}
             />
           </PromptInputTools>
         </PromptInputFooter>
-        {!isWelcomeMode && (
-          <div className="bg-background absolute right-0 -bottom-[17px] left-0 z-0 h-4"></div>
-        )}
       </PromptInput>
-
-      {isWelcomeMode && searchParams.get("mode") !== "skill" && (
-        <div className="flex items-center justify-center pt-2">
-          <SuggestionList />
-        </div>
+      {!isWelcomeMode && (
+        <div className="bg-background absolute right-0 -bottom-[17px] left-0 z-0 h-4"></div>
       )}
+
+      {isWelcomeMode &&
+        searchParams.get("mode") !== "skill" &&
+        !showSkillSuggestions && (
+          <div className="flex items-center justify-center pt-2">
+            <SuggestionList onSelectPlaceholder={onSelectPlaceholder} />
+          </div>
+        )}
 
       <Dialog open={confirmOpen} onOpenChange={setConfirmOpen}>
         <DialogContent>
@@ -891,31 +1608,23 @@ export function InputBox({
   );
 }
 
-function SuggestionList() {
+function SuggestionList({
+  onSelectPlaceholder,
+}: {
+  onSelectPlaceholder: (newText: string) => void;
+}) {
   const { t } = useI18n();
   const { textInput } = usePromptInputController();
   const handleSuggestionClick = useCallback(
     (prompt: string | undefined) => {
       if (!prompt) return;
       textInput.setInput(prompt);
-      setTimeout(() => {
-        const textarea = document.querySelector<HTMLTextAreaElement>(
-          "textarea[name='message']",
-        );
-        if (textarea) {
-          const selStart = prompt.indexOf("[");
-          const selEnd = prompt.indexOf("]");
-          if (selStart !== -1 && selEnd !== -1) {
-            textarea.setSelectionRange(selStart, selEnd + 1);
-            textarea.focus();
-          }
-        }
-      }, 500);
+      onSelectPlaceholder(prompt);
     },
-    [textInput],
+    [textInput, onSelectPlaceholder],
   );
   return (
-    <Suggestions className="min-h-16 w-fit items-start">
+    <Suggestions className="min-h-16 w-full max-w-full justify-center px-4 sm:w-fit sm:px-0">
       <ConfettiButton
         className="text-muted-foreground cursor-pointer rounded-full px-4 text-xs font-normal"
         variant="outline"
@@ -960,13 +1669,28 @@ function SuggestionList() {
   );
 }
 
-function AddAttachmentsButton({ className }: { className?: string }) {
+function AddAttachmentsButton({
+  className,
+  uploadLimits,
+}: {
+  className?: string;
+  uploadLimits?: UploadLimits;
+}) {
   const { t } = useI18n();
   const attachments = usePromptInputAttachments();
+  const tooltipContent = uploadLimits
+    ? t.uploads.limitsHint(
+        uploadLimits.max_files,
+        formatUploadSize(uploadLimits.max_file_size),
+        formatUploadSize(uploadLimits.max_total_size),
+      )
+    : t.inputBox.addAttachments;
   return (
-    <Tooltip content={t.inputBox.addAttachments}>
+    <Tooltip content={<span className="block max-w-80">{tooltipContent}</span>}>
       <PromptInputButton
+        aria-label={t.inputBox.addAttachments}
         className={cn("px-2!", className)}
+        data-testid="add-attachments-button"
         onClick={() => attachments.openFileDialog()}
       >
         <PaperclipIcon className="size-3" />

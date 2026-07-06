@@ -1,4 +1,5 @@
 import asyncio
+import threading
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from deerflow.agents.memory.prompt import format_conversation_for_update
@@ -12,6 +13,7 @@ from deerflow.agents.memory.updater import (
     update_memory_fact,
 )
 from deerflow.config.memory_config import MemoryConfig
+from deerflow.trace_context import get_current_trace_id, request_trace_context
 
 
 def _make_memory(facts: list[dict[str, object]] | None = None) -> dict[str, object]:
@@ -76,6 +78,27 @@ def test_apply_updates_skips_existing_duplicate_and_preserves_removals() -> None
 
     assert [fact["content"] for fact in result["facts"]] == ["User likes Python"]
     assert all(fact["id"] != "fact_remove" for fact in result["facts"])
+
+
+def test_apply_updates_skips_whitespace_only_facts() -> None:
+    updater = MemoryUpdater()
+    current_memory = _make_memory()
+    update_data = {
+        "newFacts": [
+            {"content": "   ", "category": "context", "confidence": 0.9},
+            {"content": "User prefers dark mode", "category": "preference", "confidence": 0.9},
+        ],
+    }
+
+    with patch(
+        "deerflow.agents.memory.updater.get_memory_config",
+        return_value=_memory_config(max_facts=100, fact_confidence_threshold=0.7),
+    ):
+        result = updater._apply_updates(current_memory, update_data, thread_id="thread-ws")
+
+    # The whitespace-only fact must not be stored; the real fact still is.
+    assert [fact["content"] for fact in result["facts"]] == ["User prefers dark mode"]
+    assert all(fact["content"].strip() for fact in result["facts"])
 
 
 def test_prepare_update_prompt_preserves_non_ascii_memory_text() -> None:
@@ -563,6 +586,28 @@ class TestUpdateMemoryStructuredResponse:
         model.invoke = MagicMock(return_value=response)
         return model
 
+    def _run_update_with_response(self, content):
+        updater = MemoryUpdater()
+        mock_storage = MagicMock()
+        mock_storage.save = MagicMock(return_value=True)
+
+        with (
+            patch.object(updater, "_get_model", return_value=self._make_mock_model(content)),
+            patch("deerflow.agents.memory.updater.get_memory_config", return_value=_memory_config(enabled=True, fact_confidence_threshold=0.7, max_facts=100)),
+            patch("deerflow.agents.memory.updater.get_memory_data", return_value=_make_memory()),
+            patch("deerflow.agents.memory.updater.get_memory_storage", return_value=mock_storage),
+        ):
+            msg = MagicMock()
+            msg.type = "human"
+            msg.content = "Remember that I prefer concise updates."
+            ai_msg = MagicMock()
+            ai_msg.type = "ai"
+            ai_msg.content = "Got it."
+            ai_msg.tool_calls = []
+            result = updater.update_memory([msg, ai_msg], thread_id="thread-memory")
+
+        return result, mock_storage
+
     def test_string_response_parses(self):
         updater = MemoryUpdater()
         valid_json = '{"user": {}, "history": {}, "newFacts": [], "factsToRemove": []}'
@@ -608,6 +653,82 @@ class TestUpdateMemoryStructuredResponse:
             result = updater.update_memory([msg, ai_msg])
 
         assert result is True
+
+    def test_wrapped_json_responses_parse(self):
+        """Memory update should tolerate provider wrappers around valid JSON."""
+        valid_json = '{"user": {}, "history": {}, "newFacts": [{"content": "User prefers concise updates", "category": "preference", "confidence": 0.9}], "factsToRemove": []}'
+        response_variants = [
+            f"<think>Analyze the conversation first.</think>\n{valid_json}",
+            f"<think>Analyze the conversation first.\n{valid_json}",
+            f"Here is the memory update:\n{valid_json}",
+            f"{valid_json}\nDone.",
+            f"```json\n{valid_json}\n```",
+        ]
+
+        for content in response_variants:
+            result, mock_storage = self._run_update_with_response(content)
+
+            assert result is True
+            saved_memory = mock_storage.save.call_args.args[0]
+            assert saved_memory["facts"][0]["content"] == "User prefers concise updates"
+
+    def test_ignores_unrelated_json_before_memory_update(self):
+        """Parser should not select unrelated JSON objects before the memory update."""
+        valid_json = '{"user": {}, "history": {}, "newFacts": [{"content": "Remember the actual update", "category": "context", "confidence": 0.9}], "factsToRemove": []}'
+        response = f'Example object: {{"user": "alice"}}\nActual memory update:\n{valid_json}'
+
+        result, mock_storage = self._run_update_with_response(response)
+
+        assert result is True
+        saved_memory = mock_storage.save.call_args.args[0]
+        assert saved_memory["facts"][0]["content"] == "Remember the actual update"
+
+    def test_invalid_json_response_is_skipped_without_saving(self):
+        """Truncated JSON should remain a safe skipped update, not guessed repair."""
+        result, mock_storage = self._run_update_with_response('{"user": {}, "history": {}, "newFacts": [')
+
+        assert result is False
+        mock_storage.save.assert_not_called()
+
+    def test_schema_guard_ignores_invalid_update_fields(self):
+        """Parsed JSON with bad field types should not break the memory update."""
+        response = '{"user": "bad", "history": [], "newFacts": ["bad", {"content": "User works on DeerFlow", "category": "context", "confidence": 0.91}], "factsToRemove": "bad"}'
+
+        result, mock_storage = self._run_update_with_response(response)
+
+        assert result is True
+        saved_memory = mock_storage.save.call_args.args[0]
+        assert [fact["content"] for fact in saved_memory["facts"]] == ["User works on DeerFlow"]
+
+    def test_fact_schema_guard_coerces_and_filters_nested_fields(self):
+        """Malformed fact entries should be normalized per fact, not fail the whole update."""
+        response = (
+            '{"user": {}, "history": {}, "newFacts": ['
+            '{"content": "  User likes async updates  ", "category": 9, "confidence": "0.91", "sourceError": "  parse issue  "}, '
+            '{"content": "skip invalid confidence", "category": "context", "confidence": "high"}, '
+            '{"content": 12, "category": "context", "confidence": 0.9}, '
+            '{"content": " ", "category": "context", "confidence": 0.9}'
+            '], "factsToRemove": []}'
+        )
+
+        result, mock_storage = self._run_update_with_response(response)
+
+        assert result is True
+        saved_memory = mock_storage.save.call_args.args[0]
+        assert len(saved_memory["facts"]) == 1
+        assert saved_memory["facts"][0]["content"] == "User likes async updates"
+        assert saved_memory["facts"][0]["category"] == "context"
+        assert saved_memory["facts"][0]["confidence"] == 0.91
+        assert saved_memory["facts"][0]["sourceError"] == "parse issue"
+
+    def test_malformed_replacement_update_fails_closed(self):
+        """Malformed replacement facts should not turn remove+add into delete-only."""
+        response = '{"user": {}, "history": {}, "newFacts": [{"content": "replacement fact", "category": "context", "confidence": "bad"}], "factsToRemove": ["fact_old"]}'
+
+        result, mock_storage = self._run_update_with_response(response)
+
+        assert result is False
+        mock_storage.save.assert_not_called()
 
     def test_async_update_memory_delegates_to_sync(self):
         """aupdate_memory should delegate to sync _do_update_memory_sync via to_thread."""
@@ -1081,3 +1202,151 @@ class TestUserIdForwarding:
         mock_load.assert_called_once_with(None, user_id="user-99")
         save_call = mock_storage.save.call_args
         assert save_call.kwargs.get("user_id") == "user-99" or (len(save_call.args) > 2 and save_call.args[2] == "user-99")
+
+    def test_sync_update_injects_deerflow_trace_metadata_when_langfuse_enabled(self, monkeypatch):
+        monkeypatch.setenv("LANGFUSE_TRACING", "true")
+        monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-lf-test")
+        monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-lf-test")
+        from deerflow.config.tracing_config import reset_tracing_config
+
+        reset_tracing_config()
+        updater = MemoryUpdater(model_name="memory-model")
+        valid_json = '{"user": {}, "history": {}, "newFacts": [], "factsToRemove": []}'
+        model = self._make_mock_model(valid_json)
+        mock_storage = MagicMock()
+        mock_storage.save = MagicMock(return_value=True)
+
+        try:
+            with (
+                patch.object(updater, "_get_model", return_value=model),
+                patch("deerflow.agents.memory.updater.get_memory_config", return_value=_memory_config(enabled=True)),
+                patch("deerflow.agents.memory.updater.get_memory_data", return_value=_make_memory()),
+                patch("deerflow.agents.memory.updater.get_memory_storage", return_value=mock_storage),
+            ):
+                msg = MagicMock()
+                msg.type = "human"
+                msg.content = "Hello"
+                ai_msg = MagicMock()
+                ai_msg.type = "ai"
+                ai_msg.content = "Hi"
+                ai_msg.tool_calls = []
+                result = updater.update_memory([msg, ai_msg], thread_id="thread-memory", user_id="user-42", deerflow_trace_id="memory-trace-1")
+        finally:
+            reset_tracing_config()
+
+        assert result is True
+        invoke_config = model.invoke.call_args.kwargs["config"]
+        metadata = invoke_config["metadata"]
+        assert metadata["deerflow_trace_id"] == "memory-trace-1"
+        assert metadata["langfuse_session_id"] == "thread-memory"
+        assert metadata["langfuse_user_id"] == "user-42"
+        assert metadata["langfuse_trace_name"] == "memory_agent"
+
+
+class TestSyncUpdateBindsTraceContextVar:
+    """Regression: _do_update_memory_sync must bind ``deerflow_trace_id`` into the
+    request-trace ContextVar for the duration of the update.
+
+    The memory pipeline plumbs ``deerflow_trace_id`` through ``ConversationContext``
+    precisely because ContextVar does not propagate to ``threading.Timer`` threads
+    or ``ThreadPoolExecutor.submit(...)`` workers. Langfuse metadata is already
+    correct because it takes an explicit function argument, but the enhanced-log
+    ``TraceContextFilter`` only reads the ContextVar — so without this bind, every
+    log record emitted from the Timer/Executor path (model-error logs, tracing
+    callback logs) shows ``trace_id=-`` despite the correct id being available.
+    """
+
+    @staticmethod
+    def _make_updater_with_capturing_model(captured: list[str | None]) -> tuple[MemoryUpdater, MagicMock]:
+        updater = MemoryUpdater()
+
+        def _capture_and_respond(*_args, **_kwargs):
+            captured.append(get_current_trace_id())
+            response = MagicMock()
+            response.content = '{"user": {}, "history": {}, "newFacts": [], "factsToRemove": []}'
+            return response
+
+        model = MagicMock()
+        model.invoke = MagicMock(side_effect=_capture_and_respond)
+        return updater, model
+
+    @staticmethod
+    def _run_sync_update_in_fresh_thread(updater: MemoryUpdater, model: MagicMock, *, deerflow_trace_id: str | None) -> bool:
+        """Run ``_do_update_memory_sync`` in a bare ``threading.Thread`` to guarantee
+        no ContextVar inheritance from the pytest main thread (mirrors the Timer /
+        Executor worker execution model)."""
+        results: list[bool] = []
+
+        def _target() -> None:
+            with (
+                patch.object(updater, "_get_model", return_value=model),
+                patch("deerflow.agents.memory.updater.get_memory_config", return_value=_memory_config(enabled=True)),
+                patch("deerflow.agents.memory.updater.get_memory_data", return_value=_make_memory()),
+                patch("deerflow.agents.memory.updater.get_memory_storage", return_value=MagicMock(save=MagicMock(return_value=True))),
+            ):
+                msg = MagicMock()
+                msg.type = "human"
+                msg.content = "Hello"
+                ai_msg = MagicMock()
+                ai_msg.type = "ai"
+                ai_msg.content = "Hi"
+                results.append(
+                    updater._do_update_memory_sync(
+                        messages=[msg, ai_msg],
+                        deerflow_trace_id=deerflow_trace_id,
+                    )
+                )
+
+        thread = threading.Thread(target=_target)
+        thread.start()
+        thread.join()
+        return results[0]
+
+    def test_binds_deerflow_trace_id_into_contextvar(self) -> None:
+        captured: list[str | None] = []
+        updater, model = self._make_updater_with_capturing_model(captured)
+
+        result = self._run_sync_update_in_fresh_thread(updater, model, deerflow_trace_id="trace-mem-xyz")
+
+        assert result is True
+        assert captured == ["trace-mem-xyz"]
+
+    def test_none_trace_id_does_not_fabricate_id(self) -> None:
+        """When no trace_id is provided the ContextVar must stay unbound —
+        fabricating a fresh id would produce log records with a bogus 'correlated'
+        id that has no relationship to any real request."""
+        captured: list[str | None] = []
+        updater, model = self._make_updater_with_capturing_model(captured)
+
+        result = self._run_sync_update_in_fresh_thread(updater, model, deerflow_trace_id=None)
+
+        assert result is True
+        assert captured == [None]
+
+    def test_restores_outer_contextvar_after_return(self) -> None:
+        """The binding must be scoped to the function; a pre-existing outer trace
+        id in the caller's context must be intact after the call returns."""
+        captured: list[str | None] = []
+        updater, model = self._make_updater_with_capturing_model(captured)
+
+        with (
+            request_trace_context("outer-trace"),
+            patch.object(updater, "_get_model", return_value=model),
+            patch("deerflow.agents.memory.updater.get_memory_config", return_value=_memory_config(enabled=True)),
+            patch("deerflow.agents.memory.updater.get_memory_data", return_value=_make_memory()),
+            patch("deerflow.agents.memory.updater.get_memory_storage", return_value=MagicMock(save=MagicMock(return_value=True))),
+        ):
+            msg = MagicMock()
+            msg.type = "human"
+            msg.content = "Hello"
+            ai_msg = MagicMock()
+            ai_msg.type = "ai"
+            ai_msg.content = "Hi"
+
+            updater._do_update_memory_sync(
+                messages=[msg, ai_msg],
+                deerflow_trace_id="inner-trace",
+            )
+
+            assert captured == ["inner-trace"]
+            assert get_current_trace_id() == "outer-trace"

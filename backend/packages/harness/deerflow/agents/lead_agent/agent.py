@@ -18,6 +18,8 @@ middleware, and the async path inside ``TitleMiddleware``. Any new in-graph
 ``create_chat_model`` call must add to this list and pass the flag.
 """
 
+from __future__ import annotations
+
 import logging
 
 from langchain.agents import create_agent
@@ -41,11 +43,22 @@ from deerflow.agents.thread_state import ThreadState
 from deerflow.config.agents_config import load_agent_config, validate_agent_name
 from deerflow.config.app_config import AppConfig, get_app_config
 from deerflow.models import create_chat_model
-from deerflow.skills.tool_policy import filter_tools_by_skill_allowed_tools
+from deerflow.skills.tool_policy import SKILL_LOADING_TOOL_NAMES, filter_tools_by_skill_allowed_tools
 from deerflow.skills.types import Skill
 from deerflow.tracing import build_tracing_callbacks
 
 logger = logging.getLogger(__name__)
+
+_BOOTSTRAP_SKILL_NAMES = {"bootstrap"}
+_NON_INTERACTIVE_DISABLED_TOOL_NAMES = frozenset({"ask_clarification"})
+
+# Channels whose inbound messages originate from untrusted external
+# commenters (anyone on a GitHub repo, etc.) and whose run context is
+# therefore unsafe for admin-shaped tools like ``update_agent``. The
+# corresponding gate lives in :func:`_make_lead_agent`; the channel name
+# itself is plumbed into ``run_context`` by
+# ``ChannelManager._resolve_run_params``.
+_WEBHOOK_CHANNELS: frozenset[str] = frozenset({"github"})
 
 
 def _get_runtime_config(config: RunnableConfig) -> dict:
@@ -122,19 +135,9 @@ def _create_summarization_middleware(*, app_config: AppConfig | None = None) -> 
     if resolved_app_config.memory.enabled:
         hooks.append(memory_flush_hook)
 
-    # The logic below relies on two assumptions holding true: this factory is
-    # the sole entry point for DeerFlowSummarizationMiddleware, and the runtime
-    # config is not expected to change after startup.
-    skills_container_path = resolved_app_config.skills.container_path or "/mnt/skills"
-
     return DeerFlowSummarizationMiddleware(
         **kwargs,
-        skills_container_path=skills_container_path,
-        skill_file_read_tool_names=config.skill_file_read_tool_names,
         before_summarization=hooks,
-        preserve_recent_skill_count=config.preserve_recent_skill_count,
-        preserve_recent_skill_tokens=config.preserve_recent_skill_tokens,
-        preserve_recent_skill_tokens_per_skill=config.preserve_recent_skill_tokens_per_skill,
     )
 
 
@@ -263,20 +266,34 @@ Being proactive with task management demonstrates thoroughness and ensures all r
 # ViewImageMiddleware should be before ClarificationMiddleware to inject image details before LLM
 # ToolErrorHandlingMiddleware should be before ClarificationMiddleware to convert tool exceptions to ToolMessages
 # ClarificationMiddleware should be last to intercept clarification requests after model calls
-def _build_middlewares(
+def build_middlewares(
     config: RunnableConfig,
     model_name: str | None,
     agent_name: str | None = None,
     custom_middlewares: list[AgentMiddleware] | None = None,
     *,
+    available_skills: set[str] | None = None,
     app_config: AppConfig | None = None,
+    deferred_setup=None,
+    user_id: str | None = None,
 ):
-    """Build middleware chain based on runtime configuration.
+    """Build the lead-agent middleware chain based on runtime configuration.
+
+    Public entry point for the lead agent's full middleware composition. Used by
+    ``make_lead_agent`` and by the embedded ``DeerFlowClient`` (a lead-agent variant
+    that needs the identical chain). Keep this name stable: it is imported across a
+    module boundary, so renames/signature changes ripple into ``client.py``.
 
     Args:
         config: Runtime configuration containing configurable options like is_plan_mode.
+        model_name: Resolved runtime model name; gates vision-only middleware.
         agent_name: If provided, MemoryMiddleware will use per-agent memory storage.
         custom_middlewares: Optional list of custom middlewares to inject into the chain.
+        app_config: Explicit AppConfig; falls back to ``get_app_config()`` when omitted.
+        deferred_setup: Optional deferred-MCP-tool setup that attaches
+            ``DeferredToolFilterMiddleware`` when ``tool_search`` is enabled.
+        user_id: Effective user ID for user-scoped skill loading. Passed through
+            to ``SkillActivationMiddleware`` so it can resolve per-user custom skills.
 
     Returns:
         List of middleware instances.
@@ -289,6 +306,25 @@ def _build_middlewares(
     from deerflow.agents.middlewares.dynamic_context_middleware import DynamicContextMiddleware
 
     middlewares.append(DynamicContextMiddleware(agent_name=agent_name, app_config=resolved_app_config))
+
+    # Deterministically load a full SKILL.md when the user starts the turn with
+    # /skill-name. This keeps the base system prompt metadata-only while giving
+    # explicit user activation priority over model-side relevance guessing.
+    from deerflow.agents.middlewares.skill_activation_middleware import SkillActivationMiddleware
+
+    middlewares.append(SkillActivationMiddleware(available_skills=available_skills, app_config=resolved_app_config, user_id=user_id))
+
+    # Capture completed task delegations and loaded skill files before
+    # summarization can compact them, then inject durable context channels
+    # (summary + ledger + skills) into model calls.
+    from deerflow.agents.middlewares.durable_context_middleware import DurableContextMiddleware
+
+    middlewares.append(
+        DurableContextMiddleware(
+            skills_container_path=resolved_app_config.skills.container_path,
+            skill_file_read_tool_names=resolved_app_config.summarization.skill_file_read_tool_names,
+        )
+    )
 
     # Add summarization middleware if enabled
     summarization_middleware = _create_summarization_middleware(app_config=resolved_app_config)
@@ -318,11 +354,20 @@ def _build_middlewares(
     if model_config is not None and model_config.supports_vision:
         middlewares.append(ViewImageMiddleware())
 
-    # Add DeferredToolFilterMiddleware to hide deferred tool schemas from model binding
-    if resolved_app_config.tool_search.enabled:
+    # Hide deferred tool schemas from model binding until tool_search promotes them.
+    # The deferred set + catalog hash come from the build-time setup (assembled
+    # after tool-policy filtering); promotion is read from graph state.
+    if deferred_setup is not None and deferred_setup.deferred_names:
         from deerflow.agents.middlewares.deferred_tool_filter_middleware import DeferredToolFilterMiddleware
 
-        middlewares.append(DeferredToolFilterMiddleware())
+        middlewares.append(DeferredToolFilterMiddleware(deferred_setup.deferred_names, deferred_setup.catalog_hash))
+
+    # Coalesce every SystemMessage into a single leading one before the request
+    # reaches the provider. Strict backends (vLLM, SGLang, Qwen, Anthropic)
+    # reject non-leading SystemMessages. See system_message_coalescing_middleware.py.
+    from deerflow.agents.middlewares.system_message_coalescing_middleware import SystemMessageCoalescingMiddleware
+
+    middlewares.append(SystemMessageCoalescingMiddleware())
 
     # Add SubagentLimitMiddleware to truncate excess parallel task calls
     subagent_enabled = cfg.get("subagent_enabled", False)
@@ -334,6 +379,13 @@ def _build_middlewares(
     loop_detection_config = resolved_app_config.loop_detection
     if loop_detection_config.enabled:
         middlewares.append(LoopDetectionMiddleware.from_config(loop_detection_config))
+
+    # TokenBudgetMiddleware - enforce per-run token limits
+    token_budget_config = resolved_app_config.token_budget
+    if token_budget_config.enabled:
+        from deerflow.agents.middlewares.token_budget_middleware import TokenBudgetMiddleware
+
+        middlewares.append(TokenBudgetMiddleware.from_config(token_budget_config))
 
     # Inject custom middlewares before ClarificationMiddleware
     if custom_middlewares:
@@ -355,17 +407,17 @@ def _build_middlewares(
 
 def _available_skill_names(agent_config, is_bootstrap: bool) -> set[str] | None:
     if is_bootstrap:
-        return {"bootstrap"}
+        return set(_BOOTSTRAP_SKILL_NAMES)
     if agent_config and agent_config.skills is not None:
         return set(agent_config.skills)
     return None
 
 
-def _load_enabled_skills_for_tool_policy(available_skills: set[str] | None, *, app_config: AppConfig) -> list[Skill]:
+def _load_enabled_skills_for_tool_policy(available_skills: set[str] | None, *, app_config: AppConfig, user_id: str | None = None) -> list[Skill]:
     try:
         from deerflow.agents.lead_agent.prompt import get_enabled_skills_for_config
 
-        skills = get_enabled_skills_for_config(app_config)
+        skills = get_enabled_skills_for_config(app_config, user_id=user_id)
     except Exception:
         logger.exception("Failed to load skills for allowed-tools policy")
         raise
@@ -386,9 +438,18 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
     # Lazy import to avoid circular dependency
     from deerflow.tools import get_available_tools
     from deerflow.tools.builtins import setup_agent, update_agent
+    from deerflow.tools.builtins.tool_search import assemble_deferred_tools
 
     cfg = _get_runtime_config(config)
     resolved_app_config = app_config
+
+    # Extract user_id for user-scoped skill loading.
+    # LangGraph gateway injects user_id into config["configurable"];
+    # fall back to the runtime contextvar when not present.
+    from deerflow.runtime.user_context import get_effective_user_id
+
+    runtime_user_id = cfg.get("user_id")
+    resolved_user_id = str(runtime_user_id) if runtime_user_id else get_effective_user_id()
 
     thinking_enabled = cfg.get("thinking_enabled", True)
     reasoning_effort = cfg.get("reasoning_effort", None)
@@ -397,6 +458,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
     subagent_enabled = cfg.get("subagent_enabled", False)
     max_concurrent_subagents = cfg.get("max_concurrent_subagents", 3)
     is_bootstrap = cfg.get("is_bootstrap", False)
+    non_interactive = bool(cfg.get("non_interactive", False))
     agent_name = validate_agent_name(cfg.get("agent_name"))
 
     agent_config = load_agent_config(agent_name) if not is_bootstrap else None
@@ -456,39 +518,109 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
             existing = list(existing)
         config["callbacks"] = [*existing, *tracing_callbacks]
 
-    skills_for_tool_policy = _load_enabled_skills_for_tool_policy(available_skills, app_config=resolved_app_config)
+    skills_for_tool_policy = _load_enabled_skills_for_tool_policy(available_skills, app_config=resolved_app_config, user_id=resolved_user_id)
+
+    # Build skill search setup (deferred skill discovery).
+    # Controlled by skills.deferred_discovery — independent from tool_search.enabled.
+    from deerflow.skills.describe import build_skill_search_setup
+
+    skill_search_enabled = resolved_app_config.skills.deferred_discovery
+    container_base_path = resolved_app_config.skills.container_path
 
     if is_bootstrap:
         # Special bootstrap agent with minimal prompt for initial custom agent creation flow
-        tools = get_available_tools(model_name=model_name, subagent_enabled=subagent_enabled, app_config=resolved_app_config) + [setup_agent]
+        # Keep the bootstrap skill set intentionally narrow so agent creation
+        # remains deterministic before the custom agent's own config exists.
+        bootstrap_skills = [s for s in skills_for_tool_policy if s.name in _BOOTSTRAP_SKILL_NAMES]
+        skill_setup = build_skill_search_setup(
+            bootstrap_skills,
+            enabled=skill_search_enabled,
+            container_base_path=container_base_path,
+        )
+        raw_tools = get_available_tools(model_name=model_name, subagent_enabled=subagent_enabled, app_config=resolved_app_config) + [setup_agent]
+        filtered = filter_tools_by_skill_allowed_tools(raw_tools, skills_for_tool_policy, always_allowed_tool_names=SKILL_LOADING_TOOL_NAMES)
+        if non_interactive:
+            filtered = [tool for tool in filtered if tool.name not in _NON_INTERACTIVE_DISABLED_TOOL_NAMES]
+        final_tools, setup = assemble_deferred_tools(filtered, enabled=resolved_app_config.tool_search.enabled)
+        if skill_setup.describe_skill_tool:
+            final_tools.append(skill_setup.describe_skill_tool)
         return create_agent(
             model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, app_config=resolved_app_config, attach_tracing=False),
-            tools=filter_tools_by_skill_allowed_tools(tools, skills_for_tool_policy),
-            middleware=_build_middlewares(config, model_name=model_name, app_config=resolved_app_config),
+            tools=final_tools,
+            middleware=build_middlewares(
+                config,
+                model_name=model_name,
+                available_skills=set(_BOOTSTRAP_SKILL_NAMES),
+                app_config=resolved_app_config,
+                deferred_setup=setup,
+                user_id=resolved_user_id,
+            ),
             system_prompt=apply_prompt_template(
                 subagent_enabled=subagent_enabled,
                 max_concurrent_subagents=max_concurrent_subagents,
-                available_skills=set(["bootstrap"]),
+                available_skills=set(_BOOTSTRAP_SKILL_NAMES),
                 app_config=resolved_app_config,
+                deferred_names=setup.deferred_names,
+                user_id=resolved_user_id,
+                skill_names=skill_setup.skill_names or None,
             ),
             state_schema=ThreadState,
         )
 
     # Custom agents can update their own SOUL.md / config via update_agent.
     # The default agent (no agent_name) does not see this tool.
-    extra_tools = [update_agent] if agent_name else []
+    # Build skill search setup from policy-filtered skills (same list used for
+    # tool-policy filtering), so describe_skill only exposes allowed skills.
+    skill_setup = build_skill_search_setup(
+        skills_for_tool_policy,
+        enabled=skill_search_enabled,
+        container_base_path=container_base_path,
+    )
+    #
+    # Withhold ``update_agent`` from runs triggered by webhook channels
+    # (currently only ``github``). Webhook prompts come from arbitrary
+    # external commenters — anyone who can post on a configured repo and
+    # types ``@<bot>`` clears the trigger gate. Exposing the tool there
+    # gives that commenter a path to mutate the agent's ``tool_groups``
+    # / ``SOUL.md`` / ``model``, and the change persists for every
+    # subsequent run. Self-mutation belongs in operator-trusted surfaces
+    # (the chat UI, the HTTP API), not in webhook fan-out.
+    #
+    # The channel name is plumbed into ``run_context`` by
+    # ``ChannelManager._resolve_run_params``; bootstrap and direct invocations
+    # leave it unset, so ``update_agent`` remains available there.
+    channel_name = cfg.get("channel_name")
+    is_webhook_channel = channel_name in _WEBHOOK_CHANNELS
+    extra_tools = [update_agent] if agent_name and not is_webhook_channel else []
     # Default lead agent (unchanged behavior)
-    tools = get_available_tools(model_name=model_name, groups=agent_config.tool_groups if agent_config else None, subagent_enabled=subagent_enabled, app_config=resolved_app_config)
+    raw_tools = get_available_tools(model_name=model_name, groups=agent_config.tool_groups if agent_config else None, subagent_enabled=subagent_enabled, app_config=resolved_app_config)
+    filtered = filter_tools_by_skill_allowed_tools(raw_tools + extra_tools, skills_for_tool_policy, always_allowed_tool_names=SKILL_LOADING_TOOL_NAMES)
+    if non_interactive:
+        filtered = [tool for tool in filtered if tool.name not in _NON_INTERACTIVE_DISABLED_TOOL_NAMES]
+    final_tools, setup = assemble_deferred_tools(filtered, enabled=resolved_app_config.tool_search.enabled)
+    if skill_setup.describe_skill_tool:
+        final_tools.append(skill_setup.describe_skill_tool)
     return create_agent(
         model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, reasoning_effort=reasoning_effort, app_config=resolved_app_config, attach_tracing=False),
-        tools=filter_tools_by_skill_allowed_tools(tools + extra_tools, skills_for_tool_policy),
-        middleware=_build_middlewares(config, model_name=model_name, agent_name=agent_name, app_config=resolved_app_config),
+        tools=final_tools,
+        middleware=build_middlewares(
+            config,
+            model_name=model_name,
+            agent_name=agent_name,
+            available_skills=available_skills,
+            app_config=resolved_app_config,
+            deferred_setup=setup,
+            user_id=resolved_user_id,
+        ),
         system_prompt=apply_prompt_template(
             subagent_enabled=subagent_enabled,
             max_concurrent_subagents=max_concurrent_subagents,
             agent_name=agent_name,
-            available_skills=set(agent_config.skills) if agent_config and agent_config.skills is not None else None,
+            available_skills=available_skills,
             app_config=resolved_app_config,
+            deferred_names=setup.deferred_names,
+            user_id=resolved_user_id,
+            skill_names=skill_setup.skill_names or None,
         ),
         state_schema=ThreadState,
     )
