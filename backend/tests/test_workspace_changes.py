@@ -18,7 +18,7 @@ from deerflow.workspace_changes import (
     scan_workspace_roots,
 )
 from deerflow.workspace_changes.api import get_workspace_changes_response
-from deerflow.workspace_changes.scanner import is_sensitive_workspace_path
+from deerflow.workspace_changes.scanner import SAMPLE_BYTES, is_sensitive_workspace_path
 
 
 def _roots(tmp_path):
@@ -68,6 +68,98 @@ def test_compare_snapshots_reports_text_file_changes(tmp_path):
     assert "+gamma" in changes["/mnt/user-data/workspace/draft.md"].diff
     assert changes["/mnt/user-data/outputs/report.md"].status == "created"
     assert changes["/mnt/user-data/workspace/old.txt"].status == "deleted"
+
+
+def test_compare_snapshots_treats_utf16_markdown_as_text(tmp_path):
+    roots = _roots(tmp_path)
+    workspace = roots[0].host_path
+
+    before = scan_workspace_roots(roots)
+    (workspace / "guide.md").write_bytes("# 标题\n\nhello\n".encode("utf-16"))
+    after = scan_workspace_roots(roots)
+
+    result = compare_snapshots(before, after)
+
+    change = result.files[0]
+    assert change.path == "/mnt/user-data/workspace/guide.md"
+    assert change.binary is False
+    assert change.diff_unavailable_reason is None
+    assert "+# 标题" in change.diff
+
+
+def test_compare_snapshots_reads_cached_utf16_markdown_baseline(tmp_path):
+    roots = _roots(tmp_path)
+    workspace = roots[0].host_path
+    cache_dir = tmp_path / "cache"
+
+    (workspace / "guide.md").write_bytes("# 标题\n\nhello\n".encode("utf-16"))
+    before = scan_workspace_roots(roots, text_cache_dir=cache_dir)
+    (workspace / "guide.md").write_bytes("# 标题\n\nupdated\n".encode("utf-16"))
+    after = scan_workspace_roots(roots)
+
+    result = compare_snapshots(before, after)
+
+    change = result.files[0]
+    assert change.binary is False
+    assert change.diff_unavailable_reason is None
+    assert "-hello" in change.diff
+    assert "+updated" in change.diff
+
+
+def test_compare_snapshots_treats_utf8_markdown_crossing_sample_boundary_as_text(
+    tmp_path,
+):
+    roots = _roots(tmp_path)
+    workspace = roots[0].host_path
+
+    before = scan_workspace_roots(roots)
+    content = ("a" * (SAMPLE_BYTES - 1)) + "你" + "\nrest\n"
+    (workspace / "guide.md").write_text(content, encoding="utf-8")
+    after = scan_workspace_roots(roots)
+
+    result = compare_snapshots(before, after)
+
+    change = result.files[0]
+    assert change.path == "/mnt/user-data/workspace/guide.md"
+    assert change.binary is False
+    assert "你" in change.diff
+    assert "+rest" in change.diff
+
+
+def test_compare_snapshots_strips_utf8_bom(tmp_path):
+    roots = _roots(tmp_path)
+    workspace = roots[0].host_path
+
+    before = scan_workspace_roots(roots)
+    content = "# 标题\n\nhello\n".encode()
+    (workspace / "guide.md").write_bytes(b"\xef\xbb\xbf" + content)
+    after = scan_workspace_roots(roots)
+
+    result = compare_snapshots(before, after)
+
+    change = result.files[0]
+    assert change.path == "/mnt/user-data/workspace/guide.md"
+    assert change.binary is False
+    assert change.diff_unavailable_reason is None
+    assert "\ufeff" not in change.diff
+    assert "+# 标题" in change.diff
+
+
+def test_compare_snapshots_keeps_nul_bytes_classified_as_binary(tmp_path):
+    roots = _roots(tmp_path)
+    workspace = roots[0].host_path
+
+    before = scan_workspace_roots(roots)
+    (workspace / "guide.md").write_bytes(b"\x00\x01\x02binary\n")
+    after = scan_workspace_roots(roots)
+
+    result = compare_snapshots(before, after)
+
+    change = result.files[0]
+    assert change.path == "/mnt/user-data/workspace/guide.md"
+    assert change.binary is True
+    assert change.diff == ""
+    assert change.diff_unavailable_reason == "binary"
 
 
 def test_count_diff_lines_ignores_only_real_headers():
