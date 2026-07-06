@@ -22,7 +22,7 @@
 2. **9 步逻辑、3 个 checkpoint、2 个 LLM 边界全部保留**。这次重构不改业务行为,不改 checkpoint 数量,不并 LLM 调用。
 3. **Phase 1 / Phase 2 拆分**。以 LLM 边界为切分点 —— Phase 1 = 步骤 1~6(纯 bash),Phase 2 = 步骤 8a~9(纯 bash),两个 LLM 步骤(7 codegen、8d describe)由 agent 在 Phase 之间手动执行。
 4. **E2E 锚点**。新增 `tests/e2e_minimal.py`,用 `MockSQLBotClient` 走完 Phase 1 + Phase 2,断言所有产物文件存在 + `status.json` 无 `USER_ABORTED`。这是"完工 gating"—— 没有 E2E green 不算完成(对齐 [[ai-report-archived-lesson]] 的教训)。
-5. **统一错误诊断**。所有非 checkpoint 失败走 Python 异常类(不再用 stderr `FAIL:` 字符串),checkpoint 命中走 `CheckpointSignal` dataclass,agent 拿到后自己决定 `ask_clarification` 措辞。
+5. **统一错误诊断**。所有非 checkpoint 失败走 Python 异常类(不再用 stderr `FAIL:` 字符串),checkpoint 命中走 `CheckpointSignal` dataclass,agent 按 Architecture §"CheckpointSignal → `ask_clarification` 映射" 翻译成 `ask_clarification` 调用(标准映射在 spec 内固定,3 个 developer 实施写一致的 ask 措辞)。
 6. **消除 `--mock` / `--mock-fixture` 双 flag 冗余**(用户 2026-07-06 反馈)。改为单一 `--mock-fixture <path>`,有则 mock、无则 real。
 7. **可观测性**。Orchestrator 内部集中 `metrics` dict(每步耗时 + 成功/失败计数),为后续单点优化提供数据基础。
 
@@ -37,6 +37,21 @@
 - 不动 `chart_gen.py` / `test_chart_gen.py` —— 保留作为未来 chart 集成的参考代码,不在本次重构范围内。
 - 不保留 ai-report 任何代码(虽然 architecture 模式镜像 ai-report,但 chatbi-report 是 active skill,见 [[chatbi-report-replaces-sqlbot-report]])。
 - 不补历史运行数据 / 不迁移用户已生成的报告文件。
+
+## Anti-patterns
+
+下列反模式必须避免 —— 实施时容易"优化"进去但会破坏 spec 核心设计的坑。
+
+### 不要把 `run_phase_1` / `run_phase_2` delegate 给 subagent
+
+Lead agent 有 `task_tool`(`factory._assemble_from_features` line 271-273)可 spawn subagent。但 **subagent 没有 `ask_clarification` 能力**(子图里没有 user loop),且 subagent 的 bash 是隔离的,拿不到主 agent 的 graph state(`artifacts`、`promoted` tools)。
+
+如果让 lead agent 用 `task_tool` 派 subagent 跑 Phase 1:
+- 3 个 checkpoint **全部消失** —— subagent 不能 ask_clarification,query 失败后无法获得用户拍板
+- 自动 fail-fast 或全部吞掉(query 失败 cells 直接走 sentinel,无用户决策)
+- artifacts 写入 subagent 隔离沙箱,主 agent 看不到
+
+**正确做法**:Lead agent 必须**自己**用 sandbox bash 调 `pipeline.py`,这样 checkpoint 命中时 `ask_clarification` 才能工作,artifacts 写到主 agent 可见的 `/mnt/user-data/outputs/`。
 
 ## Architecture
 
@@ -86,6 +101,27 @@ chatbi-report 当前的 9 步里,2 个 LLM 步骤(codegen、describe)是 agent-i
 2. 合并后 agent 失去"读完 IR 再决定 codegen 策略"的机会窗口(目前 codegen 是在 IR 写盘后才调起的)。
 3. checkpoint 必须落在 Phase 内,不能跨 Phase(否则无法在 Phase 1 内部"lint 失败就停")。
 
+### Wire format(stdout 契约)
+
+`pipeline.py` 与 lead agent 的通信走 stdout + exit code,定义如下:
+
+```text
+末行约定(单行 JSON,agent 用 json.loads 解析):
+  {"kind": "phase1_result", "result": {...Phase1Result fields...}}
+  {"kind": "phase2_result", "result": {...RunResult fields...}}
+  {"kind": "checkpoint", "step": "1.5" | "3.5" | "8d.5",
+   "metrics": {...}, "artifacts": {...}, "message": "..."}
+  {"kind": "phase_aborted", "step": "...", "reason": "USER_ABORTED"}
+
+非末行输出 = 进度消息(progress / status),agent 透传给用户。
+错误 → Python 异常(traceback 进 stderr,exit code != 0)。
+agent 拿到 exit code != 0 时,显示 traceback,不再调 ask_clarification。
+
+agent parse 末行后,按 kind 分支处理(见下两节)。
+```
+
+为什么必须 wire format 显式:Python `Phase1Result | CheckpointSignal` 在类型注解上是 union,实际 stdout 是字符串。agent 拿不到 Python 对象,只能 parse 字符串。如果 pipeline.py 写 `print(result)`(默认 repr),agent 看到 `Phase1Result(parsed=..., wide=...)` 字面量,无法程序化处理。末行 JSON 契约是必要的"序列化边界"。
+
 ### Orchestrator API(单一入口)
 
 ```python
@@ -113,6 +149,13 @@ class CheckpointSignal:
     artifacts: dict[str, Path]    # 已写盘的产物路径,Agent 可展示给用户
     message: str                  # 给用户看的中文一句话
 
+
+@dataclass
+class ForceContinue:
+    """二次调 run_phase_1 时,跳过用户已确认的 checkpoint。"""
+    skip_lint_checkpoint: bool = False
+    skip_query_checkpoint: bool = False
+
 @dataclass
 class Phase1Result:
     parsed: dict                  # ReportDoc.to_dict()
@@ -138,10 +181,15 @@ class Orchestrator:
         self._cfg = cfg
         self._sqlbot = sqlbot
 
-    def run_phase_1(self) -> Phase1Result | CheckpointSignal:
+    def run_phase_1(
+        self,
+        *,
+        force_continue: ForceContinue | None = None,
+    ) -> Phase1Result | CheckpointSignal:
         """跑 1→1.5→2→3→3.5→4→6。
         - 1.5 / 3.5 命中:返回 CheckpointSignal
         - 否则:返回 Phase1Result(产物已写盘)
+        - force_continue: 二次调时跳过用户已确认的 checkpoint(见 "用户回复路由")
         """
 
     def run_phase_2(
@@ -158,11 +206,83 @@ class Orchestrator:
         """
 ```
 
+### CheckpointSignal → `ask_clarification` 映射
+
+`CheckpointSignal` 是数据类,不是 callable。Agent 拿到后**必须**翻译成 `ask_clarification_tool` 调用 —— 这是 lead agent **唯一**的 ask 接口(由 `ClarificationMiddleware` 拦截,见 `backend/packages/harness/deerflow/tools/builtins/clarification_tool.py`)。每种 step 的标准映射:
+
+| `CheckpointSignal.step` | `ask_clarification` `type` | `options` |
+|---|---|---|
+| `"1.5"` (lint 错误) | `"risk_confirmation"` | `["继续(忽略错误)", "停止,先看报告"]` |
+| `"3.5"` (query 部分失败) | `"approach_choice"` | `["继续(用 sentinel 标记)", "停止,先排查 SQLBot"]` |
+| `"8d.5"` (description 失败) | `"approach_choice"` | `["继续(用 sentinel)", "停止,先看模板"]` |
+
+Agent 处理末行 JSON 的标准模板:
+
+```python
+# 1. agent parse pipeline.py stdout 末行
+last_line = json.loads(stdout.strip().splitlines()[-1])
+
+# 2. 按 kind 分支
+if last_line["kind"] == "checkpoint":
+    signal = CheckpointSignal(**last_line)
+    if signal.step == "1.5":
+        choice = ask_clarification(
+            question=signal.message,
+            type="risk_confirmation",
+            context=f"n_err={signal.metrics.get('n_err')}, n_warn={signal.metrics.get('n_warn')}",
+            options=["继续(忽略错误)", "停止,先看报告"],
+        )
+    elif signal.step == "3.5":
+        choice = ask_clarification(
+            question=signal.message,
+            type="approach_choice",
+            context=f"ok={signal.metrics.get('ok')}/total={signal.metrics.get('total')}",
+            options=["继续(用 sentinel 标记)", "停止,先排查 SQLBot"],
+        )
+    elif signal.step == "8d.5":
+        choice = ask_clarification(
+            question=signal.message,
+            type="approach_choice",
+            context=f"ok={signal.metrics.get('ok')}/total={signal.metrics.get('total')}",
+            options=["继续(用 sentinel)", "停止,先看模板"],
+        )
+    # 3. 用户回 choice 后,见下节 "用户回复路由"
+```
+
+不写这个映射,3 个 developer 实施时会写出 3 种不同的 ask 措辞,CheckpointSignal 行为不可预测。
+
+### 用户回复路由(continue vs stop)
+
+用户回"继续"或"停止"后,agent 必须按以下路由处理(基于上面 `choice` 字符串):
+
+```python
+# 二次调 run_phase_1 时,带 force_continue 跳过已确认的 checkpoint
+if choice in ("继续(忽略错误)", "继续(用 sentinel 标记)", "继续(用 sentinel)"):
+    result = orch.run_phase_1(force_continue=ForceContinue(
+        skip_lint_checkpoint=(signal.step == "1.5"),
+        skip_query_checkpoint=(signal.step == "3.5"),
+    ))
+elif choice.startswith("停止"):
+    # 显式调 partial-status 写盘,把当前状态定格为 USER_ABORTED
+    from scripts.assemble_status import write_status
+    write_status(
+        out_path=out_dir / "status.json",
+        exit_step=signal.step,             # "1.5" | "3.5" | "8d.5"
+        error_class="USER_ABORTED",
+        error_detail=f"User aborted at {signal.step}: {signal.message}",
+        outputs={k: str(p) for k, p in signal.artifacts.items()},
+        metrics=signal.metrics,
+    )
+    # 然后 stop(返回 1 给 LangGraph,或 stop agent loop)
+```
+
+不写这个路由,agent 拿到 CheckpointSignal 后只问用户,用户回了以后 agent 不动 —— 因为没人告诉它怎么把"用户决定"翻译成具体动作。`status.json` 写盘是"中途停止"信号,frontend 拿到这个 `error_class` 就知道是用户主动停的,不是系统错误。
+
 ### 关键决策
 
 | 决策 | 选择 | 理由 |
 |---|---|---|
-| Orchestrator 是不是 callable? | **不是,CheckpointSignal 是数据类** | Agent 拿到后自己决定怎么 ask_clarification,不绑死 agent 框架 |
+| Orchestrator 是不是 callable? | **不是,CheckpointSignal 是数据类** | Agent 按 Architecture §"CheckpointSignal → `ask_clarification` 映射" 翻译成 ask_clarification_tool 调用(标准映射在 spec 内固定) |
 | Phase 边界是函数边界还是协程? | **函数边界** | 不引入 asyncio,保持简单,测试时普通函数即可 |
 | cfg + sqlbot 是构造参数? | **是** | 测试可注入 `MockSQLBotClient(fixture_path=...)`,生产注入 `RealSQLBotClient(base_url=...)` |
 | `run_phase_1` 返回 `Phase1Result | CheckpointSignal`? | **是** | Agent 拿到返回值后类型分支处理,无需 try/except |
