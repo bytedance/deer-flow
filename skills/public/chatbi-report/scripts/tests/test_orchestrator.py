@@ -174,3 +174,43 @@ def test_run_phase_1_assemble_and_extract_ir(tmp_path):
     assert isinstance(result.ir, list)
     # description_prompts collected per-report (input.md may have none)
     assert isinstance(result.description_prompts, list)
+
+
+def test_run_phase_1_force_continue_skips_lint_checkpoint(tmp_path):
+    """With skip_lint_checkpoint=True, the 1.5 checkpoint is bypassed.
+
+    Use a markdown whose lint produces errors but which still parses cleanly
+    (a `<thead>` row with a cell that has `data-unit` but no `data-idx`,
+    triggering CHATBI-DATAIDX-MISSING).
+    """
+    from sqlbot_client import MockSQLBotClient
+
+    bad_idx = tmp_path / "bad_idx.md"
+    bad_idx.write_text(
+        "# Title\n\n"
+        "## Section\n\n"
+        "### Report\n\n"
+        "> 机构:\n"
+        ">   branch_num=27020199; branch_short_name=王益联社\n"
+        "> 时期: time_info=[\"2025\"]\n\n"
+        "<table><thead><tr>"
+        "<th>label</th>"
+        "<th data-unit=\"万元\">no-data-idx-cell</th>"
+        "</tr></thead>"
+        "<tbody><tr><td>2025-12-31</td><td>x</td></tr></tbody>"
+        "</table>\n",
+        encoding="utf-8",
+    )
+    cfg = p.OrchestratorConfig(md_path=bad_idx, out_dir=tmp_path)
+    orch = p.Orchestrator(cfg, MockSQLBotClient(str(FIXTURE)))
+    # Without force_continue: lint error -> 1.5 checkpoint
+    blocked = orch.run_phase_1()
+    assert isinstance(blocked, p.CheckpointSignal)
+    assert blocked.step == "1.5"
+    # With force_continue: 1.5 skipped. Result is Phase1Result, or 3.5 if query
+    # has no usable idx.
+    result = orch.run_phase_1(force_continue=p.ForceContinue(skip_lint_checkpoint=True))
+    if isinstance(result, p.CheckpointSignal):
+        assert result.step != "1.5"
+    else:
+        assert isinstance(result, p.Phase1Result)
