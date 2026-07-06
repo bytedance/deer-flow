@@ -1342,6 +1342,26 @@ memory:
   guaranteed_categories:
     - correction
   guaranteed_token_budget: 500
+  # Staleness review: periodically prune aged facts that may no longer reflect
+  # the user's current situation.  When triggered, the LLM reviews facts older
+  # than ``staleness_age_days`` during the normal memory-update call (same LLM
+  # invocation — no extra API call) and decides KEEP or REMOVE for each.
+  #   staleness_review_enabled - master switch (default: true)
+  #   staleness_age_days       - facts older than this are candidates (default: 90)
+  #   staleness_min_candidates - minimum stale facts required to trigger a review
+  #                              cycle; avoids wasteful LLM calls when there are
+  #                              very few candidates (default: 3)
+  #   staleness_max_removals_per_cycle - safety cap on removals per cycle; when
+  #                                      exceeded, the lowest-confidence entries
+  #                                      are kept (default: 10)
+  #   staleness_protected_categories - fact categories exempt from review
+  #                                    (default: ["correction"])
+  staleness_review_enabled: true
+  staleness_age_days: 90
+  staleness_min_candidates: 3
+  staleness_max_removals_per_cycle: 10
+  staleness_protected_categories:
+    - correction
 
 # ============================================================================
 # Custom Agent Management API
