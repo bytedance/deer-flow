@@ -16,6 +16,7 @@ Usage:
 """
 
 import asyncio
+import concurrent.futures
 import json
 import logging
 import mimetypes
@@ -34,16 +35,19 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 from langchain_core.runnables import RunnableConfig
 
 from deerflow.agents.lead_agent.agent import build_middlewares
-from deerflow.agents.lead_agent.prompt import apply_prompt_template
+from deerflow.agents.lead_agent.prompt import apply_prompt_template, get_enabled_skills_for_config
 from deerflow.agents.thread_state import ThreadState
 from deerflow.config.agents_config import AGENT_NAME_PATTERN
-from deerflow.config.app_config import get_app_config, reload_app_config
+from deerflow.config.app_config import get_app_config, is_trace_correlation_enabled, reload_app_config
 from deerflow.config.extensions_config import ExtensionsConfig, SkillStateConfig, get_extensions_config, reload_extensions_config
 from deerflow.config.paths import get_paths
 from deerflow.models import create_chat_model
+from deerflow.runtime.goal import DEFAULT_MAX_GOAL_CONTINUATIONS, build_goal_state, goal_thread_lock, read_thread_goal, write_thread_goal
 from deerflow.runtime.user_context import get_effective_user_id
-from deerflow.skills.storage import get_or_new_skill_storage
+from deerflow.skills.describe import build_skill_search_setup
+from deerflow.skills.storage import get_or_new_user_skill_storage
 from deerflow.tools.builtins.tool_search import assemble_deferred_tools
+from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, generate_trace_id, get_current_trace_id, reset_current_trace_id, set_current_trace_id
 from deerflow.tracing import build_tracing_callbacks, inject_langfuse_metadata
 from deerflow.uploads.manager import (
     claim_unique_filename,
@@ -57,6 +61,19 @@ from deerflow.uploads.manager import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _run_async_from_sync(coro):
+    """Run an async helper from this synchronous client API."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop is not None and loop.is_running():
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            return executor.submit(asyncio.run, coro).result()
+    return asyncio.run(coro)
 
 
 StreamEventType = Literal["values", "messages-tuple", "custom", "end"]
@@ -240,6 +257,19 @@ class DeerFlowClient:
 
         tools = self._get_tools(model_name=model_name, subagent_enabled=subagent_enabled)
         final_tools, deferred_setup = assemble_deferred_tools(tools, enabled=self._app_config.tool_search.enabled)
+
+        # Wire deferred skill discovery — mirrors agent.py so config flag works on both paths.
+        skills_list = get_enabled_skills_for_config(self._app_config)
+        if self._available_skills is not None:
+            skills_list = [s for s in skills_list if s.name in self._available_skills]
+        skill_setup = build_skill_search_setup(
+            skills_list,
+            enabled=self._app_config.skills.deferred_discovery,
+            container_base_path=self._app_config.skills.container_path,
+        )
+        if skill_setup.describe_skill_tool:
+            final_tools.append(skill_setup.describe_skill_tool)
+
         kwargs: dict[str, Any] = {
             # attach_tracing=False because ``stream()`` injects tracing
             # callbacks at the graph invocation root so a single embedded run
@@ -255,13 +285,17 @@ class DeerFlowClient:
                 custom_middlewares=self._middlewares,
                 app_config=self._app_config,
                 deferred_setup=deferred_setup,
+                user_id=get_effective_user_id(),
             ),
             "system_prompt": apply_prompt_template(
                 subagent_enabled=subagent_enabled,
                 max_concurrent_subagents=max_concurrent_subagents,
                 agent_name=self._agent_name,
                 available_skills=self._available_skills,
+                app_config=self._app_config,
                 deferred_names=deferred_setup.deferred_names,
+                user_id=get_effective_user_id(),
+                skill_names=skill_setup.skill_names or None,
             ),
             "state_schema": ThreadState,
         }
@@ -410,6 +444,52 @@ class DeerFlowClient:
     # Public API — threads
     # ------------------------------------------------------------------
 
+    def _get_thread_checkpointer(self):
+        checkpointer = self._checkpointer
+        if checkpointer is None:
+            from deerflow.runtime.checkpointer.provider import get_checkpointer
+
+            checkpointer = get_checkpointer()
+        return checkpointer
+
+    def get_goal(self, thread_id: str) -> dict:
+        """Return the active goal for a thread, if any."""
+        checkpointer = self._get_thread_checkpointer()
+        goal = _run_async_from_sync(read_thread_goal(checkpointer, thread_id))
+        return {"goal": goal}
+
+    def set_goal(
+        self,
+        thread_id: str,
+        objective: str,
+        *,
+        max_continuations: int = DEFAULT_MAX_GOAL_CONTINUATIONS,
+    ) -> dict:
+        """Set or replace a thread-scoped goal."""
+        checkpointer = self._get_thread_checkpointer()
+        goal = build_goal_state(objective, max_continuations=max_continuations)
+
+        async def _set_goal() -> None:
+            async with goal_thread_lock(thread_id):
+                await write_thread_goal(checkpointer, thread_id, goal, create_if_missing=True)
+
+        _run_async_from_sync(_set_goal())
+        return {"goal": goal}
+
+    def clear_goal(self, thread_id: str) -> dict:
+        """Clear the active goal for a thread."""
+        checkpointer = self._get_thread_checkpointer()
+
+        async def _clear_goal() -> None:
+            async with goal_thread_lock(thread_id):
+                await write_thread_goal(checkpointer, thread_id, None)
+
+        try:
+            _run_async_from_sync(_clear_goal())
+        except LookupError:
+            pass
+        return {"goal": None}
+
     def list_threads(self, limit: int = 10) -> dict:
         """List the recent N threads.
 
@@ -420,11 +500,7 @@ class DeerFlowClient:
             Dict with "thread_list" key containing list of thread info dicts,
             sorted by thread creation time descending.
         """
-        checkpointer = self._checkpointer
-        if checkpointer is None:
-            from deerflow.runtime.checkpointer.provider import get_checkpointer
-
-            checkpointer = get_checkpointer()
+        checkpointer = self._get_thread_checkpointer()
 
         thread_info_map = {}
 
@@ -475,11 +551,7 @@ class DeerFlowClient:
         Returns:
             Dict containing the thread's full checkpoint history.
         """
-        checkpointer = self._checkpointer
-        if checkpointer is None:
-            from deerflow.runtime.checkpointer.provider import get_checkpointer
-
-            checkpointer = get_checkpointer()
+        checkpointer = self._get_thread_checkpointer()
 
         config = {"configurable": {"thread_id": thread_id}}
         checkpoints = []
@@ -513,6 +585,61 @@ class DeerFlowClient:
     # ------------------------------------------------------------------
 
     def stream(
+        self,
+        message: str,
+        *,
+        thread_id: str | None = None,
+        **kwargs,
+    ) -> Generator[StreamEvent, None, None]:
+        """Stream a conversation turn with a DeerFlow request trace context.
+
+        Mirrors the Gateway ``TraceMiddleware`` gate: when
+        ``logging.enhance.enabled`` is off the embedded client does **not**
+        create a fresh request-level trace id, so Langfuse traces from
+        embedded / TUI / CLI callers keep their pre-enhancement schema and
+        do not gain a ``metadata.deerflow_trace_id`` key by default. A
+        caller that explicitly binds its own trace via
+        :func:`deerflow.trace_context.request_trace_context` still opts in:
+        the inner ``get_current_trace_id()`` read propagates that value
+        into Langfuse metadata regardless of the flag.
+        """
+        if not is_trace_correlation_enabled(self._app_config):
+            yield from self._stream_without_trace_context(message, thread_id=thread_id, **kwargs)
+            return
+
+        # Resolve the trace id once, without mutating the caller's context.
+        # Inherits an ambient id if the caller opted in via
+        # ``request_trace_context``; otherwise mints a fresh one.
+        trace_id = get_current_trace_id() or generate_trace_id()
+
+        # Bind the trace id only around each ``next()`` step, never across a
+        # ``yield``. ``stream()`` is a sync generator, which shares the
+        # caller's context — a ``with ensure_trace_context(): yield from ...``
+        # would (1) leak the id into the caller's context between yields and
+        # (2) risk ``ValueError: Token was created in a different Context``
+        # when GC finalizes an abandoned generator in a different context.
+        # Per-step set/reset keeps LangGraph node execution and its log
+        # records inside the binding while returning control to the caller
+        # with the ContextVar restored.
+        inner = self._stream_without_trace_context(message, thread_id=thread_id, **kwargs)
+        _EXHAUSTED = object()
+        try:
+            while True:
+                token = set_current_trace_id(trace_id)
+                try:
+                    try:
+                        event = next(inner)
+                    except StopIteration:
+                        event = _EXHAUSTED
+                finally:
+                    reset_current_trace_id(token)
+                if event is _EXHAUSTED:
+                    break
+                yield event
+        finally:
+            inner.close()
+
+    def _stream_without_trace_context(
         self,
         message: str,
         *,
@@ -610,6 +737,7 @@ class DeerFlowClient:
             config["callbacks"] = [*existing_callbacks, *tracing_callbacks]
 
         configurable = config.get("configurable") or {}
+        deerflow_trace_id = get_current_trace_id()
         inject_langfuse_metadata(
             config,
             thread_id=thread_id,
@@ -617,12 +745,15 @@ class DeerFlowClient:
             assistant_id=self._agent_name or "lead-agent",
             model_name=configurable.get("model_name") or self._model_name,
             environment=self._environment or os.environ.get("DEER_FLOW_ENV") or os.environ.get("ENVIRONMENT"),
+            deerflow_trace_id=deerflow_trace_id,
         )
 
         self._ensure_agent(config)
 
         state: dict[str, Any] = {"messages": [HumanMessage(content=message)]}
         context = {"thread_id": thread_id}
+        if deerflow_trace_id:
+            context[DEERFLOW_TRACE_METADATA_KEY] = deerflow_trace_id
         if self._agent_name:
             context["agent_name"] = self._agent_name
 
@@ -879,6 +1010,7 @@ class DeerFlowClient:
             Dict with "skills" key containing list of skill info dicts,
             matching the Gateway API ``SkillsListResponse`` schema.
         """
+        storage = get_or_new_user_skill_storage(get_effective_user_id(), app_config=self._app_config)
         return {
             "skills": [
                 {
@@ -888,7 +1020,7 @@ class DeerFlowClient:
                     "category": s.category,
                     "enabled": s.enabled,
                 }
-                for s in get_or_new_skill_storage().load_skills(enabled_only=enabled_only)
+                for s in storage.load_skills(enabled_only=enabled_only)
             ]
         }
 
@@ -997,9 +1129,8 @@ class DeerFlowClient:
         Returns:
             Skill info dict, or None if not found.
         """
-        from deerflow.skills.storage import get_or_new_skill_storage
-
-        skill = next((s for s in get_or_new_skill_storage().load_skills(enabled_only=False) if s.name == name), None)
+        storage = get_or_new_user_skill_storage(get_effective_user_id(), app_config=self._app_config)
+        skill = next((s for s in storage.load_skills(enabled_only=False) if s.name == name), None)
         if skill is None:
             return None
         return {
@@ -1024,32 +1155,76 @@ class DeerFlowClient:
             ValueError: If the skill is not found.
             OSError: If the config file cannot be written.
         """
-        from deerflow.skills.storage import get_or_new_skill_storage
-
-        skills = get_or_new_skill_storage().load_skills(enabled_only=False)
+        storage = get_or_new_user_skill_storage(get_effective_user_id(), app_config=self._app_config)
+        skills = storage.load_skills(enabled_only=False)
         skill = next((s for s in skills if s.name == name), None)
         if skill is None:
             raise ValueError(f"Skill '{name}' not found")
 
-        config_path = ExtensionsConfig.resolve_config_path()
-        if config_path is None:
-            raise FileNotFoundError("Cannot locate extensions_config.json. Set DEER_FLOW_EXTENSIONS_CONFIG_PATH or ensure it exists in the project root.")
+        # PUBLIC skills → global extensions_config.json (shared state).
+        # CUSTOM / LEGACY skills → per-user _skill_states.json (isolated state).
+        from deerflow.skills.types import SkillCategory
 
-        extensions_config = get_extensions_config()
-        extensions_config.skills[name] = SkillStateConfig(enabled=enabled)
+        if skill.category == SkillCategory.PUBLIC:
+            config_path = ExtensionsConfig.resolve_config_path()
+            if config_path is None:
+                raise FileNotFoundError("Cannot locate extensions_config.json. Set DEER_FLOW_EXTENSIONS_CONFIG_PATH or ensure it exists in the project root.")
 
-        config_data = {
-            "mcpServers": {n: s.model_dump() for n, s in extensions_config.mcp_servers.items()},
-            "skills": {n: {"enabled": sc.enabled} for n, sc in extensions_config.skills.items()},
-        }
+            extensions_config = get_extensions_config()
+            extensions_config.skills[name] = SkillStateConfig(enabled=enabled)
 
-        self._atomic_write_json(config_path, config_data)
+            config_data = {
+                "mcpServers": {n: s.model_dump() for n, s in extensions_config.mcp_servers.items()},
+                "skills": {n: {"enabled": sc.enabled} for n, sc in extensions_config.skills.items()},
+            }
+
+            self._atomic_write_json(config_path, config_data)
+            reload_extensions_config()
+        else:
+            # CUSTOM / LEGACY: write per-user state
+            from deerflow.skills.storage.user_scoped_skill_storage import UserScopedSkillStorage
+
+            if isinstance(storage, UserScopedSkillStorage):
+                storage.set_skill_enabled_state(name, enabled)
+            else:
+                # Fallback for non-user-scoped storage (unlikely in practice)
+                config_path = ExtensionsConfig.resolve_config_path()
+                if config_path is None:
+                    raise FileNotFoundError("Cannot locate extensions_config.json. Set DEER_FLOW_EXTENSIONS_CONFIG_PATH or ensure it exists in the project root.")
+                extensions_config = get_extensions_config()
+                extensions_config.skills[name] = SkillStateConfig(enabled=enabled)
+                config_data = {
+                    "mcpServers": {n: s.model_dump() for n, s in extensions_config.mcp_servers.items()},
+                    "skills": {n: {"enabled": sc.enabled} for n, sc in extensions_config.skills.items()},
+                }
+                self._atomic_write_json(config_path, config_data)
+                reload_extensions_config()
+
+        # Invalidate the prompt cache for this caller (and for all users if
+        # the changed skill is PUBLIC, since PUBLIC state is shared). Mirrors
+        # what ``routers/skills.py::update_skill`` does — without this the
+        # cached enabled-state would stay stale until process restart. See
+        # review feedback on PR #3889.
+        try:
+            from deerflow.agents.lead_agent.prompt import clear_skills_system_prompt_cache, invalidate_user_skill_cache
+
+            skill_category_value = skill.category.value if hasattr(skill.category, "value") else skill.category
+            if skill_category_value == SkillCategory.PUBLIC.value:
+                clear_skills_system_prompt_cache()
+            else:
+                invalidate_user_skill_cache(get_effective_user_id())
+        except Exception as exc:
+            # Don't let cache-invalidation failures mask the actual write
+            # success — log and continue. The stale-cache window is bounded
+            # by the next config reload.
+            import logging
+
+            logging.getLogger(__name__).warning("Failed to invalidate skills prompt cache after update_skill: %s", exc)
 
         self._agent = None
         self._agent_config_key = None
-        reload_extensions_config()
 
-        updated = next((s for s in get_or_new_skill_storage().load_skills(enabled_only=False) if s.name == name), None)
+        updated = next((s for s in storage.load_skills(enabled_only=False) if s.name == name), None)
         if updated is None:
             raise RuntimeError(f"Skill '{name}' disappeared after update")
         return {
@@ -1073,7 +1248,7 @@ class DeerFlowClient:
             FileNotFoundError: If the file does not exist.
             ValueError: If the file is invalid.
         """
-        return get_or_new_skill_storage().install_skill_from_archive(skill_path)
+        return get_or_new_user_skill_storage(get_effective_user_id(), app_config=self._app_config).install_skill_from_archive(skill_path)
 
     # ------------------------------------------------------------------
     # Public API — memory management

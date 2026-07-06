@@ -146,3 +146,112 @@ async def test_unknown_command_shows_error_system_row():
             pilot,
         )
     assert any(r.kind == "system" and r.tone == "error" for r in app.state.rows)
+
+
+# --------------------------------------------------------------------------- #
+# /goal handler
+# --------------------------------------------------------------------------- #
+
+
+class _GoalClient(_FakeClient):
+    """Records goal API calls and keeps an in-memory active goal."""
+
+    def __init__(self):
+        self.calls: list[tuple] = []
+        self.goal: dict | None = None
+
+    def get_goal(self, thread_id):
+        self.calls.append(("get", thread_id))
+        return {"goal": self.goal}
+
+    def set_goal(self, thread_id, objective):
+        self.calls.append(("set", thread_id, objective))
+        self.goal = {"objective": objective, "status": "active"}
+        return {"goal": self.goal}
+
+    def clear_goal(self, thread_id):
+        self.calls.append(("clear", thread_id))
+        self.goal = None
+        return {"goal": None}
+
+
+class _GoalSession(_FakeSession):
+    def __init__(self):
+        self.client = _GoalClient()
+
+
+def _system_rows(app):
+    return [r for r in app.state.rows if r.kind == "system"]
+
+
+@pytest.mark.asyncio
+async def test_goal_set_mints_thread_and_reports_objective():
+    session = _GoalSession()
+    app = DeerFlowTUI(session, LaunchPlan(mode="tui"))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert app._conv_thread_id is None
+        app._handle_goal("finish the work")
+        await pilot.pause()
+    assert app._conv_thread_id is not None
+    assert ("set", app._conv_thread_id, "finish the work") in session.client.calls
+    assert any("Goal set: finish the work" in r.text for r in _system_rows(app))
+
+
+@pytest.mark.asyncio
+async def test_goal_status_without_thread_reports_no_active_goal():
+    session = _GoalSession()
+    app = DeerFlowTUI(session, LaunchPlan(mode="tui"))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._handle_goal("")
+        await pilot.pause()
+    # No thread yet -> no gateway round-trip.
+    assert session.client.calls == []
+    assert any(r.text == "No active goal." for r in _system_rows(app))
+
+
+@pytest.mark.asyncio
+async def test_goal_status_reports_active_objective():
+    session = _GoalSession()
+    session.client.goal = {"objective": "ship it", "status": "active"}
+    app = DeerFlowTUI(session, LaunchPlan(mode="tui"))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._conv_thread_id = "t-1"
+        app._handle_goal("")
+        await pilot.pause()
+    assert ("get", "t-1") in session.client.calls
+    assert any("Goal: ship it" in r.text for r in _system_rows(app))
+
+
+@pytest.mark.asyncio
+async def test_goal_clear_calls_gateway_and_confirms():
+    session = _GoalSession()
+    session.client.goal = {"objective": "ship it", "status": "active"}
+    app = DeerFlowTUI(session, LaunchPlan(mode="tui"))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._conv_thread_id = "t-1"
+        app._handle_goal("clear")
+        await pilot.pause()
+    assert ("clear", "t-1") in session.client.calls
+    assert any(r.text == "Goal cleared." for r in _system_rows(app))
+
+
+@pytest.mark.asyncio
+async def test_goal_set_failure_shows_error_tone():
+    class _Boom(_GoalClient):
+        def set_goal(self, thread_id, objective):
+            raise RuntimeError("gateway down")
+
+    session = _GoalSession()
+    session.client = _Boom()
+    app = DeerFlowTUI(session, LaunchPlan(mode="tui"))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._conv_thread_id = "t-1"
+        app._handle_goal("do it")
+        await pilot.pause()
+    errors = [r for r in _system_rows(app) if r.tone == "error"]
+    assert any("Could not set goal." in r.text for r in errors)

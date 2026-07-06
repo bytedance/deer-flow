@@ -79,7 +79,7 @@ def _setup_executor_classes():
     sys.modules["deerflow.skills.storage"] = storage_module
 
     # Import real classes inside fixture
-    from langchain_core.messages import AIMessage, HumanMessage
+    from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
     from deerflow.subagents.config import SubagentConfig
     from deerflow.subagents.executor import (
@@ -100,6 +100,7 @@ def _setup_executor_classes():
     classes = {
         "AIMessage": AIMessage,
         "HumanMessage": HumanMessage,
+        "ToolMessage": ToolMessage,
         "SubagentConfig": SubagentConfig,
         "SubagentExecutor": SubagentExecutor,
         "SubagentResult": SubagentResult,
@@ -164,7 +165,7 @@ def _skill(name: str, allowed_tools: list[str] | None) -> Skill:
         skill_file=skill_dir / "SKILL.md",
         relative_path=Path(name),
         category="custom",
-        allowed_tools=allowed_tools,
+        allowed_tools=tuple(allowed_tools) if allowed_tools is not None else None,
         enabled=True,
     )
 
@@ -225,6 +226,12 @@ class _MsgHelper:
 
     def ai(self, content, msg_id=None):
         msg = self.classes["AIMessage"](content=content)
+        if msg_id:
+            msg.id = msg_id
+        return msg
+
+    def tool(self, content, tool_call_id, name=None, msg_id=None):
+        msg = self.classes["ToolMessage"](content=content, tool_call_id=tool_call_id, name=name)
         if msg_id:
             msg.id = msg_id
         return msg
@@ -806,6 +813,34 @@ class TestAsyncExecutionPath:
         assert [m["content"] for m in result.ai_messages] == ["same", "different"]
 
     @pytest.mark.anyio
+    async def test_aexecute_captures_all_tool_outputs_from_one_super_step(self, classes, base_config, mock_agent, msg):
+        """Regression for #3779: when the model emits several tool calls in one
+        turn, LangGraph's ToolNode appends all their ToolMessages in a single
+        ``values`` super-step. Capturing only ``messages[-1]`` dropped every tool
+        output but the last; all three must now survive in ``ai_messages``."""
+        SubagentExecutor = classes["SubagentExecutor"]
+
+        human = msg.human("Task")
+        ai_turn = msg.ai("running three tools", "ai-1")
+        t1 = msg.tool("result 1", "call_1", name="web_search", msg_id="tool-1")
+        t2 = msg.tool("result 2", "call_2", name="read_file", msg_id="tool-2")
+        t3 = msg.tool("result 3", "call_3", name="web_search", msg_id="tool-3")
+        final = msg.ai("done", "ai-2")
+        chunks = [
+            {"messages": [human, ai_turn]},
+            # One super-step appends all three ToolMessages at once.
+            {"messages": [human, ai_turn, t1, t2, t3]},
+            {"messages": [human, ai_turn, t1, t2, t3, final]},
+        ]
+        mock_agent.astream = lambda *args, **kwargs: async_iterator(chunks)
+
+        executor = SubagentExecutor(config=base_config, tools=[], thread_id="test-thread")
+        with patch.object(executor, "_create_agent", return_value=mock_agent):
+            result = await executor._aexecute("Task")
+
+        assert [m["id"] for m in result.ai_messages] == ["ai-1", "tool-1", "tool-2", "tool-3", "ai-2"]
+
+    @pytest.mark.anyio
     async def test_aexecute_handles_list_content(self, classes, base_config, mock_agent, msg):
         """Test handling of list-type content in AIMessage."""
         SubagentExecutor = classes["SubagentExecutor"]
@@ -852,6 +887,80 @@ class TestAsyncExecutionPath:
 
         assert result.status == SubagentStatus.FAILED
         assert "Agent error" in result.error
+        assert result.completed_at is not None
+
+    @pytest.mark.anyio
+    async def test_aexecute_recursion_error_classified_as_max_turns_reached(self, classes, base_config, mock_agent, msg):
+        """#3875 Phase 2: ``GraphRecursionError`` (``recursion_limit`` ==
+        ``max_turns``) must surface as ``MAX_TURNS_REACHED`` with the partial
+        work recovered from the last streamed chunk — not as a generic FAILED
+        that hides the budget cap and discards the partial result.
+
+        Before this fix the exception fell through to the generic
+        ``except Exception`` and the subagent was reported as broken, so the
+        lead could not tell "out of budget" from "broken subagent" and the
+        work already streamed into ``final_state`` was lost.
+        """
+        from langgraph.errors import GraphRecursionError
+
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentStatus = classes["SubagentStatus"]
+
+        partial_ai = msg.ai("Found 3 of 5 sources; still working", "msg-1")
+        partial_state = {"messages": [msg.human("Task"), partial_ai]}
+
+        async def mock_astream(*args, **kwargs):
+            yield partial_state
+            raise GraphRecursionError("Recursion limit of 10 reached")
+
+        mock_agent.astream = mock_astream
+
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+        )
+
+        with patch.object(executor, "_create_agent", return_value=mock_agent):
+            result = await executor._aexecute("Task")
+
+        assert result.status == SubagentStatus.MAX_TURNS_REACHED
+        # The partial work from the last streamed chunk is preserved, not dropped.
+        assert result.result == "Found 3 of 5 sources; still working"
+        # The cap is surfaced so the lead can tell "out of budget" from "broken".
+        assert result.error is not None
+        assert str(base_config.max_turns) in result.error
+        assert result.completed_at is not None
+
+    @pytest.mark.anyio
+    async def test_aexecute_recursion_error_before_first_chunk_uses_sentinel(self, classes, base_config, mock_agent):
+        """If ``GraphRecursionError`` fires before any chunk is yielded there is
+        no partial state to recover; the result must still be
+        ``MAX_TURNS_REACHED`` (with the ``No response generated`` sentinel)
+        rather than FAILED, so the budget-cap signal survives even when no
+        work was streamed."""
+        from langgraph.errors import GraphRecursionError
+
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentStatus = classes["SubagentStatus"]
+
+        async def mock_astream(*args, **kwargs):
+            raise GraphRecursionError("Recursion limit reached before first step")
+            yield  # pragma: no cover - make this an async generator
+
+        mock_agent.astream = mock_astream
+
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+        )
+
+        with patch.object(executor, "_create_agent", return_value=mock_agent):
+            result = await executor._aexecute("Task")
+
+        assert result.status == SubagentStatus.MAX_TURNS_REACHED
+        assert result.result == "No response generated"
         assert result.completed_at is not None
 
     @pytest.mark.anyio
@@ -1579,6 +1688,31 @@ class TestCleanupBackgroundTask:
 
         assert task_id not in executor_module._background_tasks
 
+    def test_cleanup_removes_terminal_max_turns_reached_task(self, executor_module, classes):
+        """Test that cleanup removes a MAX_TURNS_REACHED task (#3875 Phase 2).
+
+        ``is_terminal`` includes MAX_TURNS_REACHED so the task_tool polling
+        loop's cleanup path treats a budget-capped subagent as done and
+        removes it from the background registry, matching COMPLETED / FAILED /
+        TIMED_OUT."""
+        SubagentResult = classes["SubagentResult"]
+        SubagentStatus = classes["SubagentStatus"]
+
+        task_id = "test-max-turns-task"
+        result = SubagentResult(
+            task_id=task_id,
+            trace_id="test-trace",
+            status=SubagentStatus.MAX_TURNS_REACHED,
+            result="partial work recovered",
+            error="Reached max_turns=10",
+            completed_at=datetime.now(),
+        )
+        executor_module._background_tasks[task_id] = result
+
+        executor_module.cleanup_background_task(task_id)
+
+        assert task_id not in executor_module._background_tasks
+
     def test_cleanup_skips_running_task(self, executor_module, classes):
         """Test that cleanup does NOT remove a RUNNING task.
 
@@ -2074,7 +2208,7 @@ class TestSubagentTracingWiring:
         yield
         reset_tracing_config()
 
-    def _make_executor(self, classes, *, user_id=None, name="general-purpose", parent_model="test-model"):
+    def _make_executor(self, classes, *, user_id=None, name="general-purpose", parent_model="test-model", deerflow_trace_id=None):
         SubagentExecutor = classes["SubagentExecutor"]
         SubagentConfig = classes["SubagentConfig"]
         config = SubagentConfig(
@@ -2091,6 +2225,7 @@ class TestSubagentTracingWiring:
             thread_id="thread-trace-1",
             trace_id="trace-1",
             user_id=user_id,
+            deerflow_trace_id=deerflow_trace_id,
         )
 
     @pytest.mark.anyio
@@ -2148,7 +2283,7 @@ class TestSubagentTracingWiring:
         sentinel = _Sentinel()
         monkeypatch.setattr(executor_module, "build_tracing_callbacks", lambda: [sentinel])
 
-        executor = self._make_executor(classes, user_id="alice", name="general_purpose")
+        executor = self._make_executor(classes, user_id="alice", name="general_purpose", deerflow_trace_id="gateway-trace-sub")
         fake_agent = _FakeStreamAgent()
         monkeypatch.setattr(executor, "_build_initial_state", self._noop_build_initial_state)
         monkeypatch.setattr(executor, "_create_agent", lambda *a, **kw: fake_agent)
@@ -2161,6 +2296,8 @@ class TestSubagentTracingWiring:
         # Underscores are normalized to hyphens so the trace name matches the
         # lead-agent naming shape.
         assert metadata.get("langfuse_trace_name") == "subagent:general-purpose"
+        assert metadata.get("deerflow_trace_id") == "gateway-trace-sub"
+        assert fake_agent.captured_context.get("deerflow_trace_id") == "gateway-trace-sub"
         tags = metadata.get("langfuse_tags") or []
         assert any(t.startswith("model:") for t in tags), "model tag must be emitted for cost attribution"
 
@@ -2378,6 +2515,43 @@ class TestSubagentGuardrailAttribution:
         assert context.get("oauth_id") == "subj-123"
         assert context.get("run_id") == "run-42"
         assert context.get("is_subagent") is True
+
+    @pytest.mark.anyio
+    async def test_aexecute_propagates_channel_user_id_to_subagent_context(
+        self,
+        classes,
+        executor_module,
+        monkeypatch,
+    ):
+        """The IM-channel sender identity captured at task_tool must reach the
+        subagent's ``astream`` context so delegated bash commands export the
+        dispatching turn's ``DEERFLOW_CHANNEL_USER_ID`` (group chats share one
+        thread across senders)."""
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentConfig = classes["SubagentConfig"]
+        executor = SubagentExecutor(
+            config=SubagentConfig(
+                name="general-purpose",
+                description="Channel identity test agent",
+                system_prompt="You are a channel identity test agent.",
+                max_turns=5,
+                timeout_seconds=30,
+            ),
+            tools=[],
+            parent_model="test-model",
+            thread_id="thread-channel-1",
+            trace_id="trace-channel-1",
+            channel_user_id="ou_group_sender_1",
+        )
+        fake_agent = _FakeStreamAgent()
+        monkeypatch.setattr(executor, "_build_initial_state", self._noop_build_initial_state)
+        monkeypatch.setattr(executor, "_create_agent", lambda *a, **kw: fake_agent)
+
+        await executor._aexecute("do something")
+
+        context = fake_agent.captured_context
+        assert context is not None
+        assert context.get("channel_user_id") == "ou_group_sender_1"
 
     @pytest.mark.anyio
     async def test_aexecute_context_defaults_to_none_when_attribution_absent(

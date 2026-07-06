@@ -18,19 +18,25 @@ from app.gateway.routers import (
     auth,
     channel_connections,
     channels,
+    console,
+    features,
     feedback,
+    github_webhooks,
     mcp,
     memory,
     models,
     runs,
+    scheduled_tasks,
     skills,
     suggestions,
     thread_runs,
     threads,
     uploads,
 )
+from app.gateway.trace_middleware import TraceMiddleware, resolve_trace_enabled
 from deerflow.config import app_config as deerflow_app_config
-from deerflow.config.app_config import apply_logging_level
+from deerflow.logging_config import DEFAULT_LOG_DATE_FORMAT, DEFAULT_LOG_FORMAT, configure_logging
+from deerflow.uploads.manager import cleanup_stale_upload_staging_files
 
 AppConfig = deerflow_app_config.AppConfig
 get_app_config = deerflow_app_config.get_app_config
@@ -38,8 +44,8 @@ get_app_config = deerflow_app_config.get_app_config
 # Default logging; lifespan overrides from config.yaml log_level.
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
+    format=DEFAULT_LOG_FORMAT,
+    datefmt=DEFAULT_LOG_DATE_FORMAT,
 )
 
 logger = logging.getLogger(__name__)
@@ -172,7 +178,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # snapshot on `app.state` to keep that contract enforceable.
     try:
         startup_config = get_app_config()
-        apply_logging_level(startup_config.log_level)
+        configure_logging(startup_config)
         logger.info("Configuration loaded successfully")
         warn_if_auth_disabled_enabled()
     except Exception as e:
@@ -207,6 +213,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         except Exception:
             logger.warning("tiktoken warm-up skipped", exc_info=True)
 
+    try:
+        removed_upload_staging_files = await asyncio.to_thread(cleanup_stale_upload_staging_files)
+        if removed_upload_staging_files:
+            logger.info("Removed %d stale upload staging file(s)", removed_upload_staging_files)
+    except Exception:
+        logger.warning("Upload staging file cleanup skipped", exc_info=True)
+
     # Initialize LangGraph runtime components (StreamBridge, RunManager, checkpointer, store)
     async with langgraph_runtime(app, startup_config):
         logger.info("LangGraph runtime initialised")
@@ -223,6 +236,25 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             logger.info("Channel service started: %s", channel_service.get_status())
         except Exception:
             logger.exception("No IM channels configured or channel service failed to start")
+
+        try:
+            from app.gateway.services import launch_scheduled_thread_run
+            from app.scheduler import ScheduledTaskService
+
+            if getattr(app.state, "scheduled_task_repo", None) is not None and getattr(app.state, "scheduled_task_run_repo", None) is not None:
+                scheduled_task_service = ScheduledTaskService(
+                    task_repo=app.state.scheduled_task_repo,
+                    task_run_repo=app.state.scheduled_task_run_repo,
+                    launch_run=lambda **kwargs: launch_scheduled_thread_run(app=app, **kwargs),
+                    poll_interval_seconds=startup_config.scheduler.poll_interval_seconds,
+                    lease_seconds=startup_config.scheduler.lease_seconds,
+                    max_concurrent_runs=startup_config.scheduler.max_concurrent_runs,
+                )
+                app.state.scheduled_task_service = scheduled_task_service
+                if startup_config.scheduler.enabled:
+                    await scheduled_task_service.start()
+        except Exception:
+            logger.exception("Failed to initialize scheduled task service")
 
         yield
 
@@ -246,6 +278,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             )
         except Exception:
             logger.exception("Failed to stop channel service")
+
+        if getattr(app.state, "scheduled_task_service", None) is not None:
+            try:
+                await app.state.scheduled_task_service.stop()
+            except Exception:
+                logger.exception("Failed to stop scheduled task service")
 
     logger.info("Shutting down API Gateway")
 
@@ -362,9 +400,23 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
             allow_headers=["*"],
         )
 
+    # Request trace correlation: when logging.enhance.enabled=true, bind one
+    # trace id per Gateway HTTP request and write it to response start headers.
+    # `logging` is registered as restart-required (see reload_boundary.py) so we
+    # snapshot the flag from the startup AppConfig instead of reading live; a
+    # runtime toggle would otherwise leave the log formatter (installed once by
+    # configure_logging() at lifespan startup) out of sync with the middleware.
+    app.add_middleware(TraceMiddleware, enabled=_resolve_trace_enabled_for_app_construction())
+
     # Include routers
     # Models API is mounted at /api/models
     app.include_router(models.router)
+
+    # Features API is mounted at /api/features
+    app.include_router(features.router)
+
+    # Console API (cross-thread observability) is mounted at /api/console
+    app.include_router(console.router)
 
     # MCP API is mounted at /api/mcp
     app.include_router(mcp.router)
@@ -383,6 +435,9 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
 
     # Thread cleanup API is mounted at /api/threads/{thread_id}
     app.include_router(threads.router)
+
+    # Scheduled tasks API is mounted at /api/scheduled-tasks
+    app.include_router(scheduled_tasks.router)
 
     # Agents API is mounted at /api/agents
     app.include_router(agents.router)
@@ -411,6 +466,24 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
     # Stateless Runs API (stream/wait without a pre-existing thread)
     app.include_router(runs.router)
 
+    # GitHub webhooks API is mounted at /api/webhooks/github
+    # Exempt from auth and CSRF middleware (see auth_middleware._PUBLIC_PATH_PREFIXES
+    # and csrf_middleware.should_check_csrf); authenticity is enforced via the
+    # X-Hub-Signature-256 HMAC against GITHUB_WEBHOOK_SECRET.
+    # Including this router transitively imports app.gateway.github, which
+    # registers the GitHub channel's ChannelRunPolicy as an import side-effect.
+    #
+    # Fail-closed: only mount the route when a webhook secret is configured
+    # (or when the explicit DEER_FLOW_ALLOW_UNVERIFIED_GITHUB_WEBHOOKS=1
+    # dev opt-in is set). A misconfigured deployment without a secret cannot
+    # serve forged deliveries because the URL responds 404 — there is no
+    # handler to reach.
+    if github_webhooks.is_route_enabled():
+        app.include_router(github_webhooks.router)
+        logger.info("GitHub webhooks route mounted at /api/webhooks/github")
+    else:
+        logger.warning("GitHub webhooks route NOT mounted: GITHUB_WEBHOOK_SECRET unset and DEER_FLOW_ALLOW_UNVERIFIED_GITHUB_WEBHOOKS not set. /api/webhooks/github will respond 404. Configure either env var to enable the route.")
+
     @app.get("/health", tags=["health"])
     async def health_check() -> dict[str, str]:
         """Health check endpoint.
@@ -421,6 +494,16 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
         return {"status": "healthy", "service": "deer-flow-gateway"}
 
     return app
+
+
+def _resolve_trace_enabled_for_app_construction() -> bool:
+    """Resolve the trace middleware flag without making imports require config.yaml."""
+    try:
+        return resolve_trace_enabled(get_app_config())
+    except FileNotFoundError:
+        # Startup lifespan still performs strict config loading before serving.
+        logger.debug("config.yaml not found while constructing Gateway app; TraceMiddleware disabled for this app instance")
+        return False
 
 
 # Create app instance for uvicorn

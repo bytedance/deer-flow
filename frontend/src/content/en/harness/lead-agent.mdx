@@ -107,9 +107,9 @@ Thinking mode is controlled per-request through the `thinking_enabled` flag. If 
 
 ```yaml
 models:
-  - name: deepseek-v3
+  - name: deepseek-v4
     use: deerflow.models.patched_deepseek:PatchedChatDeepSeek
-    model: deepseek-reasoner
+    model: deepseek-v4-pro
     api_key: $DEEPSEEK_API_KEY
     supports_thinking: true
     when_thinking_enabled:

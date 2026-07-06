@@ -71,11 +71,17 @@ class RunEventStore(abc.ABC):
         run_id: str,
         *,
         event_types: list[str] | None = None,
+        task_id: str | None = None,
         limit: int = 500,
+        after_seq: int | None = None,
     ) -> list[dict]:
         """Return the full event stream for a run, ordered by seq ascending.
 
-        Optionally filter by event_types.
+        Optionally filter by ``event_types`` and/or ``task_id`` (matched against
+        ``metadata["task_id"]``). ``after_seq`` is a forward cursor returning the
+        first ``limit`` records with seq > after_seq, so callers can page through
+        a single subagent task's events without the run-wide ``limit`` truncating
+        the tail (#3779).
         """
 
     @abc.abstractmethod

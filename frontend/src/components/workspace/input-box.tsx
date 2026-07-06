@@ -1,5 +1,6 @@
 "use client";
 
+import type { Message } from "@langchain/langgraph-sdk";
 import type { ChatStatus } from "ai";
 import {
   CheckIcon,
@@ -9,6 +10,7 @@ import {
   PlusIcon,
   SparklesIcon,
   RocketIcon,
+  TargetIcon,
   XIcon,
   ZapIcon,
 } from "lucide-react";
@@ -36,6 +38,7 @@ import {
   PromptInputBody,
   PromptInputButton,
   PromptInputFooter,
+  PromptInputHeader,
   PromptInputSubmit,
   PromptInputTextarea,
   PromptInputTools,
@@ -63,11 +66,21 @@ import { getBackendBaseURL } from "@/core/config";
 import { useI18n } from "@/core/i18n/hooks";
 import { isHiddenFromUIMessage } from "@/core/messages/utils";
 import { useModels } from "@/core/models/hooks";
-import type { Skill } from "@/core/skills";
+import {
+  buildReferenceMessageMetadata,
+  type SidecarContext,
+} from "@/core/sidecar";
 import { useSkills } from "@/core/skills/hooks";
 import { useSuggestionsConfig } from "@/core/suggestions/hooks";
-import type { AgentThreadContext } from "@/core/threads";
+import type { AgentThreadContext, GoalState } from "@/core/threads";
 import { textOfMessage } from "@/core/threads/utils";
+import {
+  formatUploadSize,
+  useUploadLimits,
+  validateUploadLimits,
+  type UploadLimits,
+  type UploadLimitViolation,
+} from "@/core/uploads";
 import { isIMEComposing } from "@/lib/ime";
 import { cn } from "@/lib/utils";
 
@@ -88,67 +101,27 @@ import {
   DropdownMenuTrigger,
 } from "../ui/dropdown-menu";
 
+import {
+  abortGoalRequest,
+  beginGoalRequest,
+  createGoalRequestState,
+  findSuggestionTemplatePlaceholder,
+  finishGoalRequest,
+  getInputSubmitAction,
+  getLeadingSlashSkillQuery,
+  getMatchingSkillSuggestions,
+  type GoalCommand,
+  isAbortError,
+  isCurrentGoalRequest,
+  readGoalResponseError,
+  type SlashSuggestion,
+} from "./input-box-helpers";
 import { useThread } from "./messages/context";
 import { ModeHoverGuide } from "./mode-hover-guide";
+import { ReferenceAttachmentSummary, useMaybeSidecar } from "./sidecar";
 import { Tooltip } from "./tooltip";
 
 type InputMode = "flash" | "thinking" | "pro" | "ultra";
-
-const MAX_SKILL_SUGGESTIONS = 6;
-const SUGGESTION_TEMPLATE_PLACEHOLDER_PATTERN =
-  /\[(?:主题|来源|topic|source)\]/i;
-
-function findSuggestionTemplatePlaceholder(text: string) {
-  const match = SUGGESTION_TEMPLATE_PLACEHOLDER_PATTERN.exec(text);
-  if (!match) {
-    return null;
-  }
-
-  return {
-    start: match.index,
-    end: match.index + match[0].length,
-  };
-}
-
-function getLeadingSlashSkillQuery(value: string): string | null {
-  if (!value.startsWith("/")) {
-    return null;
-  }
-
-  const query = value.slice(1);
-  if (query.includes("/") || /\s/.test(query)) {
-    return null;
-  }
-
-  return query;
-}
-
-function getMatchingSkillSuggestions(skills: Skill[], query: string): Skill[] {
-  const normalizedQuery = query.toLowerCase();
-
-  return skills
-    .map((skill, index) => ({
-      skill,
-      index,
-      name: skill.name.toLowerCase(),
-    }))
-    .filter(({ skill, name }) => {
-      if (!skill.enabled) {
-        return false;
-      }
-      return !normalizedQuery || name.includes(normalizedQuery);
-    })
-    .sort((a, b) => {
-      const aStartsWith = a.name.startsWith(normalizedQuery);
-      const bStartsWith = b.name.startsWith(normalizedQuery);
-      if (aStartsWith !== bStartsWith) {
-        return aStartsWith ? -1 : 1;
-      }
-      return a.index - b.index;
-    })
-    .slice(0, MAX_SKILL_SUGGESTIONS)
-    .map(({ skill }) => skill);
-}
 
 function getResolvedMode(
   mode: InputMode | undefined,
@@ -163,6 +136,68 @@ function getResolvedMode(
   return supportsThinking ? "pro" : "flash";
 }
 
+function escapeXmlAttribute(value: string) {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/"/g, "&quot;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+export type InputBoxSubmitOptions = {
+  additionalKwargs?: Record<string, unknown>;
+  additionalInputMessages?: Message[];
+  onSent?: () => void;
+};
+
+function buildHiddenConversationQuoteMessage({
+  contexts,
+}: {
+  contexts: SidecarContext[];
+}): Message {
+  return {
+    type: "human",
+    content: [
+      {
+        type: "text",
+        text: [
+          contexts.length === 1
+            ? "The user added the following quoted context to this conversation."
+            : `The user added the following ${contexts.length} quoted contexts to this conversation.`,
+          "Use the referenced_message blocks as reference material for the user's next message.",
+          "",
+          ...contexts.flatMap((context, index) =>
+            [
+              `<referenced_message index="${index + 1}" label="${escapeXmlAttribute(
+                context.label,
+              )}">`,
+              `Role: ${context.role === "user" ? "User" : "Assistant"}`,
+              context.messageId ? `Message ID: ${context.messageId}` : null,
+              "",
+              context.content,
+              "</referenced_message>",
+              "",
+            ].filter((line): line is string => line !== null),
+          ),
+        ]
+          .filter((line): line is string => line !== null)
+          .join("\n"),
+      },
+    ],
+    additional_kwargs: {
+      hide_from_ui: true,
+      conversation_quote_context: true,
+      // Keep ids/roles/count 1:1 parallel with `contexts` so consumers can zip
+      // them safely; do not dedupe ids here.
+      referenced_message_ids: contexts.map(
+        (context) => context.messageId ?? "",
+      ),
+      referenced_message_roles: contexts.map((context) => context.role),
+      quote_context_count: contexts.length,
+    },
+  } as Message;
+}
+
 export function InputBox({
   className,
   disabled,
@@ -175,6 +210,7 @@ export function InputBox({
   initialValue,
   onContextChange,
   onFollowupsVisibilityChange,
+  onGoalChange,
   onSubmit,
   onStop,
   ...props
@@ -208,7 +244,11 @@ export function InputBox({
     },
   ) => void;
   onFollowupsVisibilityChange?: (visible: boolean) => void;
-  onSubmit?: (message: PromptInputMessage) => void | Promise<void>;
+  onGoalChange?: (goal: GoalState | null) => void;
+  onSubmit?: (
+    message: PromptInputMessage,
+    options?: InputBoxSubmitOptions,
+  ) => void | Promise<void>;
   onStop?: () => void;
 }) {
   const { t } = useI18n();
@@ -216,10 +256,15 @@ export function InputBox({
   const [modelDialogOpen, setModelDialogOpen] = useState(false);
   const { models } = useModels();
   const { thread, isMock } = useThread();
-  const { textInput } = usePromptInputController();
+  const { attachments, textInput } = usePromptInputController();
+  const sidecar = useMaybeSidecar();
+  const attachmentParts = attachments.files;
+  const removeAttachment = attachments.remove;
   const { skills } = useSkills();
+  const { data: uploadLimits } = useUploadLimits(threadId);
   const promptRootRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const goalRequestStateRef = useRef(createGoalRequestState());
   const promptHistoryIndexRef = useRef<number | null>(null);
   const promptHistoryDraftRef = useRef("");
 
@@ -241,6 +286,76 @@ export function InputBox({
   const [pendingSuggestion, setPendingSuggestion] = useState<string | null>(
     null,
   );
+  const builtinSlashCommands = useMemo<SlashSuggestion[]>(
+    () => [
+      {
+        name: "goal",
+        description: t.inputBox.goalCommandDescription,
+        kind: "builtin",
+      },
+    ],
+    [t.inputBox.goalCommandDescription],
+  );
+
+  const reportUploadLimitViolations = useCallback(
+    (violations: UploadLimitViolation[]) => {
+      for (const violation of violations) {
+        if (violation.code === "max_file_size") {
+          toast.error(
+            t.uploads.filesTooLarge(
+              violation.files.map((file) => file.name).join(", "),
+              formatUploadSize(violation.limit),
+            ),
+          );
+        } else if (violation.code === "max_files") {
+          toast.error(
+            t.uploads.tooManyFiles(violation.files.length, violation.limit),
+          );
+        } else {
+          toast.error(
+            t.uploads.totalSizeTooLarge(
+              violation.files.length,
+              formatUploadSize(violation.limit),
+            ),
+          );
+        }
+      }
+    },
+    [t.uploads],
+  );
+
+  useEffect(() => {
+    if (!uploadLimits) {
+      return;
+    }
+
+    const attachmentEntries = attachmentParts.flatMap((attachment) =>
+      attachment.file instanceof File
+        ? [{ id: attachment.id, file: attachment.file }]
+        : [],
+    );
+    const validation = validateUploadLimits(
+      [],
+      attachmentEntries.map(({ file }) => file),
+      uploadLimits,
+    );
+    if (validation.rejected.length === 0) {
+      return;
+    }
+
+    const rejected = new Set(validation.rejected);
+    for (const entry of attachmentEntries) {
+      if (rejected.has(entry.file)) {
+        removeAttachment(entry.id);
+      }
+    }
+    reportUploadLimitViolations(validation.violations);
+  }, [
+    attachmentParts,
+    removeAttachment,
+    reportUploadLimitViolations,
+    uploadLimits,
+  ]);
 
   useEffect(() => {
     if (models.length === 0) {
@@ -313,6 +428,11 @@ export function InputBox({
   }, [threadId]);
 
   useEffect(() => {
+    const goalRequestState = goalRequestStateRef.current;
+    return () => abortGoalRequest(goalRequestState);
+  }, [threadId]);
+
+  useEffect(() => {
     const currentIndex = promptHistoryIndexRef.current;
     if (currentIndex !== null && currentIndex >= promptHistory.length) {
       promptHistoryIndexRef.current = null;
@@ -365,14 +485,132 @@ export function InputBox({
     [onContextChange, context],
   );
 
-  const handleSubmit = useCallback(
-    (message: PromptInputMessage) => {
-      if (status === "streaming") {
-        onStop?.();
-        return;
+  const handleGoalCommand = useCallback(
+    async (command: GoalCommand): Promise<boolean> => {
+      const request = beginGoalRequest(goalRequestStateRef.current, threadId);
+      const signal = request.controller.signal;
+      try {
+        let goal: GoalState | null = null;
+        if (command.kind === "status") {
+          const response = await fetch(
+            `${getBackendBaseURL()}/api/threads/${encodeURIComponent(
+              threadId,
+            )}/goal`,
+            { method: "GET", signal },
+          );
+          if (!response.ok) {
+            throw new Error(await readGoalResponseError(response));
+          }
+          goal =
+            ((await response.json()) as { goal?: GoalState | null }).goal ??
+            null;
+          if (
+            !isCurrentGoalRequest(
+              goalRequestStateRef.current,
+              request,
+              threadId,
+            )
+          ) {
+            return false;
+          }
+          const objective = goal?.objective;
+          toast.info(
+            objective !== undefined
+              ? // Function replacer so a goal containing `$&`/`$1` isn't
+                // interpreted as a replacement pattern.
+                t.inputBox.goalActive.replace("{goal}", () => objective)
+              : t.inputBox.goalNone,
+          );
+          onGoalChange?.(goal);
+        } else if (command.kind === "clear") {
+          const response = await fetch(
+            `${getBackendBaseURL()}/api/threads/${encodeURIComponent(
+              threadId,
+            )}/goal`,
+            { method: "DELETE", signal },
+          );
+          if (!response.ok) {
+            throw new Error(await readGoalResponseError(response));
+          }
+          if (
+            !isCurrentGoalRequest(
+              goalRequestStateRef.current,
+              request,
+              threadId,
+            )
+          ) {
+            return false;
+          }
+          toast.success(t.inputBox.goalCleared);
+          onGoalChange?.(null);
+        } else {
+          const response = await fetch(
+            `${getBackendBaseURL()}/api/threads/${encodeURIComponent(
+              threadId,
+            )}/goal`,
+            {
+              method: "PUT",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ objective: command.objective }),
+              signal,
+            },
+          );
+          if (!response.ok) {
+            throw new Error(await readGoalResponseError(response));
+          }
+          goal =
+            ((await response.json()) as { goal?: GoalState | null }).goal ??
+            null;
+          if (
+            !isCurrentGoalRequest(
+              goalRequestStateRef.current,
+              request,
+              threadId,
+            )
+          ) {
+            return false;
+          }
+          toast.success(t.inputBox.goalSet);
+          onGoalChange?.(goal);
+        }
+        textInput.setInput("");
+        return true;
+      } catch (error) {
+        if (
+          isAbortError(error) ||
+          !isCurrentGoalRequest(goalRequestStateRef.current, request, threadId)
+        ) {
+          return false;
+        }
+        toast.error(
+          error instanceof Error ? error.message : t.inputBox.goalFailed,
+        );
+        return false;
+      } finally {
+        finishGoalRequest(goalRequestStateRef.current, request);
       }
-      if (!message.text.trim() && message.files.length === 0) {
-        return;
+    },
+    [
+      onGoalChange,
+      t.inputBox.goalActive,
+      t.inputBox.goalCleared,
+      t.inputBox.goalFailed,
+      t.inputBox.goalNone,
+      t.inputBox.goalSet,
+      textInput,
+      threadId,
+    ],
+  );
+
+  const submitThreadMessage = useCallback(
+    (message: PromptInputMessage) => {
+      const files = message.files.flatMap((file) =>
+        file.file instanceof File ? [file.file] : [],
+      );
+      const uploadValidation = validateUploadLimits([], files, uploadLimits);
+      if (uploadValidation.violations.length > 0) {
+        reportUploadLimitViolations(uploadValidation.violations);
+        return Promise.reject(new Error("Attachment limits exceeded."));
       }
       const placeholder = findSuggestionTemplatePlaceholder(message.text);
       if (placeholder) {
@@ -394,6 +632,26 @@ export function InputBox({
       setFollowups([]);
       setFollowupsHidden(false);
       setFollowupsLoading(false);
+      const quotes = sidecar?.conversationQuotes ?? [];
+      const quoteIds = quotes.map((quote) => quote.id);
+      const quoteContexts = quotes.map((quote) => quote.context);
+      const submitOptions: InputBoxSubmitOptions | undefined = quotes.length
+        ? {
+            additionalKwargs: buildReferenceMessageMetadata(quoteContexts),
+            additionalInputMessages: [
+              buildHiddenConversationQuoteMessage({
+                contexts: quoteContexts,
+              }),
+            ],
+            // Clear quotes only once the send genuinely proceeds. If the send
+            // is dropped by the in-flight guard, `onSent` never fires and the
+            // quotes stay attached so they aren't silently lost.
+            onSent: () => {
+              sidecar?.clearConversationQuotes(quoteIds);
+            },
+          }
+        : undefined;
+      const submit = () => onSubmit?.(message, submitOptions);
 
       // Guard against submitting before the initial model auto-selection
       // effect has flushed thread settings to storage/state.
@@ -408,22 +666,69 @@ export function InputBox({
         });
         return new Promise<void>((resolve, reject) => {
           setTimeout(() => {
-            Promise.resolve(onSubmit?.(message)).then(resolve).catch(reject);
+            Promise.resolve(submit()).then(resolve).catch(reject);
           }, 0);
         });
       }
 
-      return onSubmit?.(message);
+      return submit();
     },
     [
       context,
       onContextChange,
       onSubmit,
-      onStop,
+      reportUploadLimitViolations,
       resolvedModelName,
       selectedModel?.supports_thinking,
-      status,
+      sidecar,
       t.inputBox.suggestionPlaceholderRequired,
+      uploadLimits,
+    ],
+  );
+
+  const handleSubmit = useCallback(
+    async (message: PromptInputMessage) => {
+      if (status === "streaming") {
+        toast.info(t.inputBox.pleaseWaitStreaming);
+        return Promise.reject(new Error("streaming"));
+      }
+      const submitAction = getInputSubmitAction({
+        text: message.text,
+        fileCount: message.files.length,
+        status,
+      });
+      if (submitAction.kind === "goal") {
+        promptHistoryIndexRef.current = null;
+        promptHistoryDraftRef.current = "";
+        setFollowups([]);
+        setFollowupsHidden(false);
+        setFollowupsLoading(false);
+        const saved = await handleGoalCommand(submitAction.command);
+        // Only start a run when a goal was actually saved; status/clear never run.
+        if (saved && submitAction.command.kind === "set") {
+          return submitThreadMessage({
+            ...message,
+            text: submitAction.command.objective,
+            files: [],
+          });
+        }
+        return;
+      }
+      if (submitAction.kind === "stop") {
+        onStop?.();
+        return;
+      }
+      if (submitAction.kind === "empty") {
+        return;
+      }
+      return submitThreadMessage(message);
+    },
+    [
+      handleGoalCommand,
+      onStop,
+      status,
+      submitThreadMessage,
+      t.inputBox.pleaseWaitStreaming,
     ],
   );
 
@@ -486,8 +791,12 @@ export function InputBox({
     () =>
       slashSkillQuery === null
         ? []
-        : getMatchingSkillSuggestions(skills, slashSkillQuery),
-    [skills, slashSkillQuery],
+        : getMatchingSkillSuggestions(
+            skills,
+            slashSkillQuery,
+            builtinSlashCommands,
+          ),
+    [builtinSlashCommands, skills, slashSkillQuery],
   );
   const showSkillSuggestions =
     !disabled &&
@@ -501,8 +810,8 @@ export function InputBox({
   }, [slashSkillQuery, skillSuggestions.length]);
 
   const applySkillSuggestion = useCallback(
-    (skill: Skill) => {
-      const nextValue = `/${skill.name} `;
+    (suggestion: SlashSuggestion) => {
+      const nextValue = `/${suggestion.name} `;
       textInput.setInput(nextValue);
       setDismissedSkillSuggestionValue(nextValue);
       requestAnimationFrame(() => {
@@ -807,7 +1116,7 @@ export function InputBox({
             className="bg-popover/95 text-popover-foreground border-border max-h-72 overflow-y-auto rounded-xl border p-1 shadow-lg backdrop-blur-sm"
             role="listbox"
           >
-            {skillSuggestions.map((skill, index) => {
+            {skillSuggestions.map((suggestion, index) => {
               const selected = index === skillSuggestionIndex;
               return (
                 <button
@@ -818,21 +1127,25 @@ export function InputBox({
                       ? "bg-accent text-accent-foreground"
                       : "text-popover-foreground hover:bg-accent/70 hover:text-accent-foreground",
                   )}
-                  key={skill.name}
-                  onClick={() => applySkillSuggestion(skill)}
+                  key={`${suggestion.kind}:${suggestion.name}`}
+                  onClick={() => applySkillSuggestion(suggestion)}
                   onMouseDown={(event) => event.preventDefault()}
                   onMouseEnter={() => setSkillSuggestionIndex(index)}
                   role="option"
                   type="button"
                 >
-                  <SparklesIcon className="text-muted-foreground size-4 shrink-0" />
+                  {suggestion.kind === "builtin" ? (
+                    <TargetIcon className="text-muted-foreground size-4 shrink-0" />
+                  ) : (
+                    <SparklesIcon className="text-muted-foreground size-4 shrink-0" />
+                  )}
                   <span className="min-w-0 flex-1">
                     <span className="block truncate text-sm font-medium">
-                      /{skill.name}
+                      /{suggestion.name}
                     </span>
-                    {skill.description && (
+                    {suggestion.description && (
                       <span className="text-muted-foreground block truncate text-xs">
-                        {skill.description}
+                        {suggestion.description}
                       </span>
                     )}
                   </span>
@@ -860,9 +1173,22 @@ export function InputBox({
             </div>
           </div>
         )}
-        <PromptInputAttachments>
-          {(attachment) => <PromptInputAttachment data={attachment} />}
-        </PromptInputAttachments>
+        <PromptInputHeader className="flex-wrap px-3 pt-3 pb-0 empty:hidden">
+          <PromptInputAttachments className="contents p-0">
+            {(attachment) => (
+              <div className="max-w-60">
+                <PromptInputAttachment data={attachment} />
+              </div>
+            )}
+          </PromptInputAttachments>
+          {sidecar && sidecar.conversationQuotes.length > 0 && (
+            <ReferenceAttachmentSummary
+              references={sidecar.conversationQuotes}
+              testId="conversation-quote-attachment"
+              onClear={() => sidecar.clearConversationQuotes()}
+            />
+          )}
+        </PromptInputHeader>
         <PromptInputBody className="absolute top-0 right-0 left-0 z-3">
           <PromptInputTextarea
             className={cn("size-full")}
@@ -888,7 +1214,10 @@ export function InputBox({
               />
             </PromptInputActionMenuContent>
           </PromptInputActionMenu> */}
-            <AddAttachmentsButton className="px-2!" />
+            <AddAttachmentsButton
+              className="px-2!"
+              uploadLimits={uploadLimits}
+            />
             <PromptInputActionMenu>
               <ModeHoverGuide
                 mode={
@@ -1221,6 +1550,12 @@ export function InputBox({
               disabled={disabled}
               variant="outline"
               status={status}
+              onClick={(e) => {
+                if (status === "streaming") {
+                  e.preventDefault();
+                  onStop?.();
+                }
+              }}
             />
           </PromptInputTools>
         </PromptInputFooter>
@@ -1330,13 +1665,28 @@ function SuggestionList({
   );
 }
 
-function AddAttachmentsButton({ className }: { className?: string }) {
+function AddAttachmentsButton({
+  className,
+  uploadLimits,
+}: {
+  className?: string;
+  uploadLimits?: UploadLimits;
+}) {
   const { t } = useI18n();
   const attachments = usePromptInputAttachments();
+  const tooltipContent = uploadLimits
+    ? t.uploads.limitsHint(
+        uploadLimits.max_files,
+        formatUploadSize(uploadLimits.max_file_size),
+        formatUploadSize(uploadLimits.max_total_size),
+      )
+    : t.inputBox.addAttachments;
   return (
-    <Tooltip content={t.inputBox.addAttachments}>
+    <Tooltip content={<span className="block max-w-80">{tooltipContent}</span>}>
       <PromptInputButton
+        aria-label={t.inputBox.addAttachments}
         className={cn("px-2!", className)}
+        data-testid="add-attachments-button"
         onClick={() => attachments.openFileDialog()}
       >
         <PaperclipIcon className="size-3" />

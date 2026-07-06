@@ -24,6 +24,7 @@ _CHANNEL_REGISTRY: dict[str, str] = {
     "dingtalk": "app.channels.dingtalk:DingTalkChannel",
     "discord": "app.channels.discord:DiscordChannel",
     "feishu": "app.channels.feishu:FeishuChannel",
+    "github": "app.channels.github:GitHubChannel",
     "slack": "app.channels.slack:SlackChannel",
     "telegram": "app.channels.telegram:TelegramChannel",
     "wechat": "app.channels.wechat:WechatChannel",
@@ -360,6 +361,40 @@ class ChannelService:
     def get_channel(self, name: str) -> Channel | None:
         """Return a running channel instance by name when available."""
         return self._channels.get(name)
+
+    def is_channel_enabled(self, name: str) -> bool:
+        """Return whether ``channels.<name>.enabled`` is truthy in the live config.
+
+        Tracks the runtime-authoritative ``_config`` dict, which
+        :meth:`configure_channel` updates when the UI flips the
+        enabled flag — so callers that read this between requests get
+        the current effective setting without re-reading config.yaml.
+        Used by the GitHub webhook router as a fan-out kill-switch:
+        ``channels.github.enabled: false`` skips dispatch even though
+        the webhook route itself remains mounted (which is governed by
+        ``GITHUB_WEBHOOK_SECRET``, not this flag).
+        """
+        config = self._config.get(name)
+        if not isinstance(config, dict):
+            return False
+        return bool(config.get("enabled", False))
+
+    def get_channel_config(self, name: str) -> dict[str, Any] | None:
+        """Return a shallow copy of the live ``channels.<name>`` block, or None.
+
+        Mirrors :meth:`is_channel_enabled` in tracking the runtime-
+        authoritative ``_config`` dict, so callers see the same effective
+        configuration the manager sees — including any updates pushed via
+        :meth:`configure_channel` from the UI. Returns ``None`` when no
+        config exists for ``name`` (rather than an empty dict) so callers
+        can distinguish "not configured" from "configured with defaults".
+        The shallow copy keeps callers from accidentally mutating live
+        config state.
+        """
+        config = self._config.get(name)
+        if not isinstance(config, dict):
+            return None
+        return dict(config)
 
 
 # -- singleton access -------------------------------------------------------

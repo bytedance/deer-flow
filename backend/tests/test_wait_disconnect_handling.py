@@ -16,10 +16,10 @@ disconnect.
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
-from deerflow.runtime import RunManager, RunStatus
+from deerflow.runtime import RunManager, RunRecord, RunStatus
 from deerflow.runtime.runs.schemas import DisconnectMode
 from deerflow.runtime.stream_bridge.memory import MemoryStreamBridge
 
@@ -36,11 +36,37 @@ class _FakeRequest:
     """
 
     disconnect_after: int = 10**9  # effectively "never" by default
+    headers: dict[str, str] = field(default_factory=dict)
     _polls: int = 0
 
     async def is_disconnected(self) -> bool:
         self._polls += 1
         return self._polls > self.disconnect_after
+
+
+class _MissingStreamBridge:
+    """Bridge stub that can report no retained stream for terminal records."""
+
+    supports_cross_process = True
+
+    def __init__(self) -> None:
+        self.subscribed = False
+
+    async def publish(self, run_id, event, data):
+        return None
+
+    async def publish_end(self, run_id):
+        return None
+
+    async def stream_exists(self, run_id: str) -> bool:
+        return False
+
+    def subscribe(self, run_id, *, last_event_id=None, heartbeat_interval=15.0):
+        self.subscribed = True
+        raise AssertionError("terminal missing streams should end before subscribing")
+
+    async def cleanup(self, run_id, *, delay=0):
+        return None
 
 
 async def _create_running_record(mgr: RunManager, *, on_disconnect: DisconnectMode) -> Any:
@@ -173,5 +199,53 @@ class TestWaitForRunCompletion:
 
             assert completed is True
             assert record.status == RunStatus.success
+
+        asyncio.run(run())
+
+    def test_terminal_missing_stream_returns_complete(self) -> None:
+        """A known-terminal run with cleaned-up stream should not wait forever."""
+        from app.gateway.services import wait_for_run_completion
+
+        async def run() -> None:
+            mgr = RunManager()
+            bridge = _MissingStreamBridge()
+            record = RunRecord(
+                run_id="terminal-missing-run",
+                thread_id=THREAD_ID,
+                assistant_id=None,
+                status=RunStatus.success,
+                on_disconnect=DisconnectMode.cancel,
+                store_only=True,
+            )
+            request = _FakeRequest()
+
+            completed = await wait_for_run_completion(bridge, record, request, mgr)
+
+            assert completed is True
+            assert bridge.subscribed is False
+
+        asyncio.run(run())
+
+    def test_sse_consumer_terminal_missing_stream_yields_end(self) -> None:
+        """Joining a terminal store-only run with no stream should emit a terminal SSE."""
+        from app.gateway.services import sse_consumer
+
+        async def run() -> None:
+            mgr = RunManager()
+            bridge = _MissingStreamBridge()
+            record = RunRecord(
+                run_id="terminal-missing-run",
+                thread_id=THREAD_ID,
+                assistant_id=None,
+                status=RunStatus.success,
+                on_disconnect=DisconnectMode.cancel,
+                store_only=True,
+            )
+            request = _FakeRequest()
+
+            frames = [frame async for frame in sse_consumer(bridge, record, request, mgr)]
+
+            assert frames == ["event: end\ndata: null\n\n"]
+            assert bridge.subscribed is False
 
         asyncio.run(run())

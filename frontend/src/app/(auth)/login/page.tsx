@@ -9,6 +9,11 @@ import { Button } from "@/components/ui/button";
 import { FlickeringGrid } from "@/components/ui/flickering-grid";
 import { Input } from "@/components/ui/input";
 import { useAuth } from "@/core/auth/AuthProvider";
+import {
+  canCreateRegularAccount,
+  fetchSetupStatus,
+  type SetupStatusResponse,
+} from "@/core/auth/setup";
 import { parseAuthError } from "@/core/auth/types";
 import { useI18n } from "@/core/i18n/hooks";
 
@@ -58,6 +63,10 @@ export default function LoginPage() {
   const [ssoProviders, setSsoProviders] = useState<
     { id: string; display_name: string; type: string }[]
   >([]);
+  const [setupStatus, setSetupStatus] = useState<SetupStatusResponse | null>(
+    null,
+  );
+  const [setupStatusChecked, setSetupStatusChecked] = useState(false);
 
   // Extract error from query params (e.g., ?error=sso_failed)
   const errorParam = searchParams.get("error");
@@ -77,6 +86,11 @@ export default function LoginPage() {
   // Get next parameter for validated redirect
   const nextParam = searchParams.get("next");
   const redirectPath = validateNextParam(nextParam) ?? "/workspace";
+  const regularSignupAllowed = canCreateRegularAccount({
+    checked: setupStatusChecked,
+    status: setupStatus,
+  });
+  const systemNeedsAdminSetup = setupStatus?.needs_setup === true;
 
   // Redirect if already authenticated (client-side, post-login)
   useEffect(() => {
@@ -85,22 +99,29 @@ export default function LoginPage() {
     }
   }, [isAuthenticated, redirectPath, router]);
 
-  // Redirect to setup if the system has no users yet
+  // Fetch setup state and SSO providers
   useEffect(() => {
     let cancelled = false;
 
-    void fetch("/api/v1/auth/setup-status")
-      .then((r) => r.json())
-      .then((data: { needs_setup?: boolean }) => {
-        if (!cancelled && data.needs_setup) {
-          router.push("/setup");
+    void fetchSetupStatus()
+      .then((data) => {
+        if (cancelled) return;
+        setSetupStatus(data);
+        if (data.needs_setup) {
+          setIsLogin(true);
         }
       })
       .catch(() => {
-        // Ignore errors; user stays on login page
+        if (!cancelled) {
+          setSetupStatus(null);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setSetupStatusChecked(true);
+        }
       });
 
-    // Fetch SSO providers
     void fetch("/api/v1/auth/providers")
       .then((r) => r.json())
       .then(
@@ -119,13 +140,19 @@ export default function LoginPage() {
     return () => {
       cancelled = true;
     };
-  }, [router]);
+  }, []);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError("");
     setShowSsoHint(false);
     setLoading(true);
+
+    if (!isLogin && !regularSignupAllowed) {
+      setError(t.login.adminSetupRequiredDescription);
+      setLoading(false);
+      return;
+    }
 
     try {
       const endpoint = isLogin
@@ -186,6 +213,21 @@ export default function LoginPage() {
             {isLogin ? t.login.signInTitle : t.login.createAccountTitle}
           </p>
         </div>
+
+        {systemNeedsAdminSetup && (
+          <div className="border-l-2 border-blue-500 ps-3 text-sm">
+            <p className="font-medium">{t.login.adminSetupRequiredTitle}</p>
+            <p className="text-muted-foreground mt-1">
+              {t.login.adminSetupRequiredDescription}
+            </p>
+            <Link
+              href="/setup"
+              className="mt-2 inline-block font-medium text-blue-500 hover:underline"
+            >
+              {t.login.createAdminAccount}
+            </Link>
+          </div>
+        )}
 
         <form onSubmit={handleSubmit} className="space-y-2">
           <div className="flex flex-col space-y-1">
@@ -263,19 +305,21 @@ export default function LoginPage() {
           </div>
         )}
 
-        <div className="text-center text-sm">
-          <button
-            type="button"
-            onClick={() => {
-              setIsLogin(!isLogin);
-              setError("");
-              setShowSsoHint(false);
-            }}
-            className="text-blue-500 hover:underline"
-          >
-            {isLogin ? t.login.noAccountSignUp : t.login.haveAccountSignIn}
-          </button>
-        </div>
+        {regularSignupAllowed && (
+          <div className="text-center text-sm">
+            <button
+              type="button"
+              onClick={() => {
+                setIsLogin(!isLogin);
+                setError("");
+                setShowSsoHint(false);
+              }}
+              className="text-blue-500 hover:underline"
+            >
+              {isLogin ? t.login.noAccountSignUp : t.login.haveAccountSignIn}
+            </button>
+          </div>
+        )}
 
         <div className="text-muted-foreground text-center text-xs">
           <Link href="/" className="hover:underline">
