@@ -246,3 +246,33 @@ def test_run_phase_2_validate_marks_sentinel_for_bad_source(tmp_path):
     sidecar = json.loads((tmp_path / "orchestrator-metrics.json").read_text(encoding="utf-8"))
     assert sidecar["8a_validate"]["total"] == 1
     assert sidecar["8a_validate"]["ok"] == 0
+
+
+def test_run_phase_2_evaluate_and_apply(tmp_path):
+    """Phase 2 evaluates compute source and applies results to wide."""
+    from sqlbot_client import MockSQLBotClient
+
+    cfg = p.OrchestratorConfig(md_path=INPUT_MD, out_dir=tmp_path)
+    orch = p.Orchestrator(cfg, MockSQLBotClient(str(FIXTURE)))
+    p1 = orch.run_phase_1()
+    assert isinstance(p1, p.Phase1Result)
+
+    # Source: takes a DataFrame and returns a Series-like dict.
+    # We don't bind it to an actual wide column (the IR may not produce a matching
+    # column); the test only asserts the apply step runs without aborting.
+    src = tmp_path / "noop.py"
+    src.write_text(
+        "def noop(df):\n    return {}\n",
+        encoding="utf-8",
+    )
+    final = orch.run_phase_2(
+        parsed=p1.parsed,
+        wide=p1.wide,
+        compute_sources={"noop": str(src)},
+        descriptions_dir=str(tmp_path),
+        stem=INPUT_MD.stem,
+    )
+    assert isinstance(final, p.RunResult)
+    sidecar = json.loads((tmp_path / "orchestrator-metrics.json").read_text(encoding="utf-8"))
+    assert "8b_evaluate" in sidecar
+    assert "8c_apply" in sidecar

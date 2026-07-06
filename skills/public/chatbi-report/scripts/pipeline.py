@@ -238,6 +238,39 @@ class Orchestrator:
                     if col in row:
                         row[col] = "⚠️COMPUTE_FAILED"
 
+        # Step 8b: evaluate (per compute source; failures continue)
+        from compute import apply_computed_results, evaluate_column
+        import pandas as pd
+
+        computed: dict[str, dict] = {}
+        eval_ok = 0
+        eval_total = 0
+        for col_name, src_path_str in compute_sources.items():
+            if col_name in sentinel_cols:
+                continue
+            eval_total += 1
+            try:
+                # Build a DataFrame from wide rows (flat). Missing columns yield NaN;
+                # sentinel-marked cells already short-circuit via 8a.
+                df = pd.DataFrame(wide)
+                series = evaluate_column(
+                    source=Path(src_path_str).read_text(encoding="utf-8"),
+                    function_name=col_name,
+                    df=df,
+                )
+                computed[col_name] = {
+                    str(idx): (None if pd.isna(v) else v)
+                    for idx, v in series.items()
+                }
+                eval_ok += 1
+            except Exception:
+                sentinel_cols.add(col_name)
+        metrics["8b_evaluate"] = {"ok": eval_ok, "total": eval_total}
+
+        # Step 8c: apply-computed (in-place, preserves section_idx/report_idx)
+        wide = apply_computed_results(wide, computed)
+        metrics["8c_apply"] = {"n_columns": len(computed)}
+
         return self._finish_phase_2(parsed, wide, metrics, descriptions_dir, stem)
 
     def _finish_phase_2(
