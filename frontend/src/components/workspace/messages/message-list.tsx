@@ -212,6 +212,7 @@ export function MessageList({
   canRegenerate = false,
   canBranch = false,
   enableSidecarActions = true,
+  sidecarSurface = false,
   initialScroll = "smooth",
   resizeScroll = "smooth",
 }: {
@@ -235,6 +236,7 @@ export function MessageList({
   canRegenerate?: boolean;
   canBranch?: boolean;
   enableSidecarActions?: boolean;
+  sidecarSurface?: boolean;
   initialScroll?: ConversationProps["initial"];
   resizeScroll?: ConversationProps["resize"];
 }) {
@@ -417,10 +419,18 @@ export function MessageList({
     if (!selectionToolbar) {
       return;
     }
-    sidecar?.addContextToConversation(selectionToolbar.context);
+    // On the sidecar surface, "add to conversation" targets the side chat's
+    // own composer (activeReferences) rather than the main composer's quotes,
+    // so the selected snippet is attached to the conversation the user is
+    // actually reading.
+    if (sidecarSurface) {
+      sidecar?.openContext(selectionToolbar.context);
+    } else {
+      sidecar?.addContextToConversation(selectionToolbar.context);
+    }
     window.getSelection()?.removeAllRanges();
     setSelectionToolbar(null);
-  }, [selectionToolbar, sidecar]);
+  }, [selectionToolbar, sidecar, sidecarSurface]);
 
   const handleAskSelectionInSidecar = useCallback(() => {
     if (!selectionToolbar) {
@@ -873,17 +883,19 @@ export function MessageList({
             <MessageCircleIcon className="size-3.5" />
             {t.sidecar.addToConversation}
           </Button>
-          <Button
-            className="h-8 rounded-full px-2.5 text-xs"
-            size="sm"
-            type="button"
-            variant="ghost"
-            onClick={handleAskSelectionInSidecar}
-            onMouseDown={(event) => event.preventDefault()}
-          >
-            <MessageSquarePlusIcon className="size-3.5" />
-            {t.sidecar.askInSideChat}
-          </Button>
+          {!sidecarSurface && (
+            <Button
+              className="h-8 rounded-full px-2.5 text-xs"
+              size="sm"
+              type="button"
+              variant="ghost"
+              onClick={handleAskSelectionInSidecar}
+              onMouseDown={(event) => event.preventDefault()}
+            >
+              <MessageSquarePlusIcon className="size-3.5" />
+              {t.sidecar.askInSideChat}
+            </Button>
+          )}
           <Button
             aria-label={t.common.close}
             className="size-8 rounded-full"

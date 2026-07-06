@@ -105,6 +105,32 @@ async function selectTextAndClickToolbarButton(
   throw lastError;
 }
 
+async function expectSidecarSelectionToolbarActions(page: Page, text: string) {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      await selectTextOnPage(page, text, "sidecar-message-list");
+      const labels = await page.evaluate(() =>
+        Array.from(
+          document.querySelectorAll<HTMLButtonElement>(
+            "[data-sidecar-selection-toolbar] button",
+          ),
+        ).map((button) => button.textContent?.trim() ?? ""),
+      );
+      expect(labels.some((label) => /add to conversation/i.test(label))).toBe(
+        true,
+      );
+      expect(labels.some((label) => /ask in side chat/i.test(label))).toBe(
+        false,
+      );
+      return;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError;
+}
+
 async function expectComposerHeightsEqual(page: Page) {
   const metrics = await page.evaluate(() => {
     const findFormByPlaceholder = (pattern: RegExp) => {
@@ -943,28 +969,14 @@ test.describe("Side chat", () => {
         .first(),
     ).toBeVisible();
 
+    // Selecting text inside the side chat itself only offers "Add to
+    // conversation" (no "Ask in side chat"), and the snippet attaches to the
+    // side chat's own composer rather than the main composer's quotes.
+    await expectSidecarSelectionToolbarActions(page, "Hello from DeerFlow!");
     await selectTextAndClickToolbarButton(
       page,
       "Hello from DeerFlow!",
       "Add to conversation",
-      "sidecar-message-list",
-    );
-    await expect(
-      mainInputForm.getByTestId("conversation-quote-attachment"),
-    ).toContainText("1 selected text fragment");
-    await expect(sidecarReference).toBeHidden();
-    await mainInputForm
-      .getByTestId("conversation-quote-attachment")
-      .getByRole("button", { name: /clear selected references/i })
-      .click();
-    await expect(
-      mainInputForm.getByTestId("conversation-quote-attachment"),
-    ).toBeHidden();
-
-    await selectTextAndClickToolbarButton(
-      page,
-      "Hello from DeerFlow!",
-      "Ask in side chat",
       "sidecar-message-list",
     );
     await expect(sidecarReference).toContainText("1 selected text fragment");
