@@ -26,7 +26,7 @@ skills/public/chatbi-report/
 ├── .env.example          # SQLBOT_BASE_URL (no API key per 2026-06-23 spec)
 ├── scripts/
 │   ├── retry.py
-│   ├── sqlbot_client.py
+│   ├── sqlbot_client.py      # MockSQLBotClient + RealSQLBotClient
 │   ├── md_lint.py
 │   ├── parse_md.py
 │   ├── compute.py            # IR + codegen + validators
@@ -34,49 +34,41 @@ skills/public/chatbi-report/
 │   ├── render_markdown.py
 │   ├── render_docx.py
 │   ├── report_style.json
-│   └── assemble_status.py
+│   ├── chart_gen.py
+│   ├── assemble_status.py
+│   └── pipeline.py           # Orchestrator — Phase 1 / Phase 2 in-process wrapper
 └── prompts/
     └── compute_codegen.md    # LLM system prompt + few-shot
 ```
 
 ## SQLBot query mode
 
-The skill is temporarily configured to use mock SQLBot data in `SKILL.md` Step 3:
+The `Orchestrator` class in `scripts/pipeline.py` selects `MockSQLBotClient` when
+`--mock-fixture` is passed to `phase1`, and `RealSQLBotClient` otherwise. The
+single flag drives both Phase 1 and Phase 2 invocations.
+
+### Phase 1 default (mock fixture)
 
 ```bash
-python /mnt/skills/public/chatbi-report/scripts/sqlbot_client.py query \
-  --parsed /mnt/user-data/outputs/<stem>.parsed.json \
-  --mock \
-  --out /mnt/user-data/outputs/<stem>.query.json
+python /mnt/skills/public/chatbi-report/scripts/pipeline.py phase1 \
+  --md /mnt/user-data/uploads/<file>.md \
+  --out-dir /mnt/user-data/outputs \
+  --mock-fixture /mnt/skills/public/chatbi-report/example/mock_sqlbot/profit_yoy.json
 ```
 
-`--mock` uses the bundled fixture:
+`--mock-fixture` selects `MockSQLBotClient` and points it at the given JSON
+file. The bundled demo fixture lives at:
 
 ```text
 /mnt/skills/public/chatbi-report/example/mock_sqlbot/profit_yoy.json
 ```
 
-Use a different fixture with `--mock-fixture`:
+### Switching to real SQLBot
 
-```bash
-python /mnt/skills/public/chatbi-report/scripts/sqlbot_client.py query \
-  --parsed /mnt/user-data/outputs/<stem>.parsed.json \
-  --mock-fixture /mnt/user-data/uploads/custom_sqlbot_fixture.json \
-  --out /mnt/user-data/outputs/<stem>.query.json
-```
-
-To switch to the real SQLBot REST API:
-
-1. Remove `--mock` from Step 3 in `SKILL.md`.
+1. Drop `--mock-fixture` from the `phase1` command.
 2. Set `SQLBOT_BASE_URL` in the runtime environment, for example:
    ```bash
    SQLBOT_BASE_URL=http://your-sqlbot:9070
-   ```
-3. Keep the same `query` command shape:
-   ```bash
-   python /mnt/skills/public/chatbi-report/scripts/sqlbot_client.py query \
-     --parsed /mnt/user-data/outputs/<stem>.parsed.json \
-     --out /mnt/user-data/outputs/<stem>.query.json
    ```
 
 Real mode posts to:
@@ -92,7 +84,6 @@ No API key or Authorization header is used by the current client.
 ```bash
 cd /Users/raidery/bench/harness/raidery/deer-flow
 python -m pytest skills/public/chatbi-report/scripts/tests/ -v
-python -m pytest backend/tests/chatbi_report/ -v   # integration scenarios
 ```
 
 ## MD contract (recap)
