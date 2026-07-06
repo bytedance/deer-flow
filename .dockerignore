@@ -66,6 +66,10 @@ frontend/node_modules
 backend/.venv
 backend/htmlcov
 backend/.coverage
+# Runtime state — MUST NOT be baked into image
+backend/.deer-flow/
+backend/sandbox/
+backend/logs/
 *.md
 !README.md
 !frontend/README.md
