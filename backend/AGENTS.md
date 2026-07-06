@@ -283,6 +283,11 @@ Config values starting with `$` are resolved as environment variables (e.g., `$O
 
 MCP servers and skills are configured together in `extensions_config.json` in project root:
 
+Docker development mounts the project directory at `/app/project` and points
+`DEER_FLOW_CONFIG_PATH` / `DEER_FLOW_EXTENSIONS_CONFIG_PATH` into that directory.
+Keep mutable config files behind a directory bind mount: single-file bind mounts
+can become stale or inaccessible when a host editor replaces a file on save.
+
 Configuration priority:
 1. Explicit `config_path` argument
 2. `DEER_FLOW_EXTENSIONS_CONFIG_PATH` environment variable
