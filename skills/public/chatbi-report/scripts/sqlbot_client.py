@@ -170,9 +170,6 @@ class MockSQLBotClient:
         return {"success": False, "data": []}
 
 
-DEFAULT_MOCK_FIXTURE = Path(__file__).resolve().parents[1] / "example" / "mock_sqlbot" / "profit_yoy.json"
-
-
 def _unique_indicator_periods(report: dict) -> list[tuple[str, str | None]]:
     idx_ids: list[str] = []
     header_pairs: list[tuple[str, str | None]] = []
@@ -284,15 +281,14 @@ def query_from_parsed(parsed: dict, client: Any) -> dict:
 
 def _cli_query(args: argparse.Namespace) -> int:
     parsed = json.loads(Path(args.parsed).read_text(encoding="utf-8"))
-    if args.mock or args.mock_fixture:
-        fixture = args.mock_fixture or str(DEFAULT_MOCK_FIXTURE)
-        client: Any = MockSQLBotClient(fixture)
+    if args.mock_fixture:
+        client: Any = MockSQLBotClient(args.mock_fixture)
     else:
         client = RealSQLBotClient(base_url=args.base_url)
 
     payload = query_from_parsed(parsed, client)
     Path(args.out).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    mode = "mock" if args.mock or args.mock_fixture else "real"
+    mode = "mock" if args.mock_fixture else "real"
     print(f"OK: queried {len(payload['results'])} indicator-periods via {mode} -> {args.out}")
     return 0
 
@@ -305,8 +301,7 @@ def main(argv: list[str] | None = None) -> int:
     p_query.add_argument("--parsed", required=True, help="parsed ReportDoc JSON from parse_md.py")
     p_query.add_argument("--out", required=True, help="query.json output path")
     p_query.add_argument("--base-url", default=None, help="SQLBot base URL; defaults to SQLBOT_BASE_URL")
-    p_query.add_argument("--mock", action="store_true", help="use default example mock fixture")
-    p_query.add_argument("--mock-fixture", default=None, help="mock fixture path; implies --mock")
+    p_query.add_argument("--mock-fixture", default=None, help="mock fixture path; when set, MockSQLBotClient is used")
     p_query.set_defaults(func=_cli_query)
 
     args = parser.parse_args(argv)
