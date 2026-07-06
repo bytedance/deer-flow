@@ -37,6 +37,8 @@ END_SENTINEL = StreamEvent(id="", event="__end__", data=None)
 class StreamBridge(abc.ABC):
     """Abstract base for stream bridges."""
 
+    supports_cross_process: bool = False
+
     @abc.abstractmethod
     async def publish(self, run_id: str, event: str, data: Any) -> None:
         """Enqueue a single event for *run_id* (producer side)."""

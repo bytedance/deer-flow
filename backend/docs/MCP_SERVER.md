@@ -14,6 +14,29 @@ DeerFlow supports configurable MCP servers and skills to extend its capabilities
 3. Configure each server’s command, arguments, and environment variables as needed.
 4. Restart the application to load and register MCP tools.
 
+## Per-Tool Timeout (Stdio MCP Servers)
+
+For `stdio` MCP servers, set `tool_call_timeout` to limit each individual MCP tool call in seconds:
+
+```json
+{
+   "mcpServers": {
+      "github": {
+         "enabled": true,
+         "type": "stdio",
+         "command": "npx",
+         "args": ["-y", "@modelcontextprotocol/server-github"],
+         "env": {
+            "GITHUB_TOKEN": "$GITHUB_TOKEN"
+         },
+         "tool_call_timeout": 60
+      }
+   }
+}
+```
+
+`tool_call_timeout` only applies to `stdio` servers. `http` and `sse` servers use transport-level timeouts, and DeerFlow logs a warning if `tool_call_timeout` is configured for those transports.
+
 ## Filesystem MCP Servers
 
 DeerFlow already provides built-in file tools for thread-scoped workspace access.

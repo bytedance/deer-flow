@@ -14,6 +14,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp
 
+from app.gateway.auth.config import get_auth_config
 from app.gateway.auth_disabled import is_auth_disabled
 
 CSRF_COOKIE_NAME = "csrf_token"
@@ -46,6 +47,10 @@ def should_check_csrf(request: Request) -> bool:
     path = request.url.path.rstrip("/")
     # Exempt /api/v1/auth/me endpoint
     if path == "/api/v1/auth/me":
+        return False
+    # Inbound webhooks authenticate themselves via provider-specific signatures
+    # (e.g. GitHub's X-Hub-Signature-256), not the CSRF double-submit cookie.
+    if request.url.path.startswith("/api/webhooks/"):
         return False
     return True
 
@@ -220,6 +225,12 @@ class CSRFMiddleware(BaseHTTPMiddleware):
                 httponly=False,  # Must be JS-readable for Double Submit Cookie pattern
                 secure=is_https,
                 samesite="strict",
+                # Match the access_token cookie's lifetime (auth.py::_set_session_cookie)
+                # so the double-submit pair never diverges. A session-only csrf_token is
+                # evicted when iOS Safari terminates a home-screen PWA while the persistent
+                # access_token survives — leaving the user "logged in" but unable to make
+                # any state-changing request (403 "CSRF token missing").
+                max_age=get_auth_config().token_expiry_days * 24 * 3600 if is_https else None,
             )
 
         return response

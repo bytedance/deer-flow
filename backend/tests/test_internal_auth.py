@@ -48,3 +48,33 @@ def test_internal_auth_headers_can_carry_owner_user_id(monkeypatch):
     finally:
         monkeypatch.delenv("DEER_FLOW_INTERNAL_AUTH_TOKEN", raising=False)
         importlib.reload(reloaded)
+
+
+def test_get_internal_user_normalises_unsafe_owner_user_id():
+    """P2-3: X-DeerFlow-Owner-User-Id is at the trust boundary, so the
+    synthetic internal user must use a path-safe id. ``make_safe_user_id``
+    is lossy but deterministic; two distinct raw inputs never collide.
+    """
+    import app.gateway.internal_auth as internal_auth
+    from deerflow.config.paths import make_safe_user_id
+
+    # Path-traversal-style payloads must be normalised away.
+    user_a = internal_auth.get_internal_user(owner_user_id="ou_abc/../../etc/passwd")
+    user_b = internal_auth.get_internal_user(owner_user_id="ou_abc/../../etc/passwd")
+    assert user_a.id == user_b.id
+    assert "/" not in user_a.id
+    assert ".." not in user_a.id
+
+    # Negative chat ids and unsafe punctuation must be normalised.
+    user_neg = internal_auth.get_internal_user(owner_user_id="-1001234567890:alice")
+    assert user_neg.id == make_safe_user_id("-1001234567890:alice")
+    assert ":" not in user_neg.id
+    assert user_neg.system_role == "internal"
+
+    # Already-safe ids pass through unchanged.
+    user_safe = internal_auth.get_internal_user(owner_user_id="alice_42")
+    assert user_safe.id == "alice_42"
+
+    # Empty / None falls back to default.
+    assert internal_auth.get_internal_user().id == "default"
+    assert internal_auth.get_internal_user(owner_user_id="").id == "default"
