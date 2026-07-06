@@ -16,6 +16,10 @@ from deerflow.agents.middlewares.skill_context import (
     _tool_call_path,
     build_skill_entry_metadata_from_read,
 )
+from deerflow.agents.middlewares.tool_result_meta import (
+    normalize_tool_result,
+    stamp_exception_meta,
+)
 from deerflow.config.app_config import AppConfig
 from deerflow.config.summarization_config import DEFAULT_SKILL_FILE_READ_TOOL_NAMES
 from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
@@ -79,7 +83,8 @@ class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         # failures raised before task_tool can build its own Command still
         # carry the same structured metadata.
         structured_error = f"{exc.__class__.__name__}: {detail}"
-        return _stamp_task_exception_status(message, tool_name=tool_name, error=structured_error)
+        message = _stamp_task_exception_status(message, tool_name=tool_name, error=structured_error)
+        return stamp_exception_meta(message, structured_error)
 
     def _stamp_skill_read_metadata(
         self,
@@ -127,7 +132,7 @@ class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         except Exception as exc:
             logger.exception("Tool execution failed (sync): name=%s id=%s", request.tool_call.get("name"), request.tool_call.get("id"))
             return self._build_error_message(request, exc)
-        return self._maybe_stamp(result, request)
+        return normalize_tool_result(self._maybe_stamp(result, request))
 
     @override
     async def awrap_tool_call(
@@ -143,7 +148,7 @@ class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         except Exception as exc:
             logger.exception("Tool execution failed (async): name=%s id=%s", request.tool_call.get("name"), request.tool_call.get("id"))
             return self._build_error_message(request, exc)
-        return self._maybe_stamp(result, request)
+        return normalize_tool_result(self._maybe_stamp(result, request))
 
 
 def _build_runtime_middlewares(
@@ -213,14 +218,42 @@ def _build_runtime_middlewares(
 
     tail.append(SandboxAuditMiddleware())
 
+    # ReadBeforeWriteMiddleware is the outermost write gate: it blocks writes to files
+    # the model hasn't read in their current version.  It must sit outside ToolProgress
+    # and ToolErrorHandling so that a blocked write returns immediately without consuming
+    # a ToolProgress slot.  The middleware stamps deerflow_tool_meta on the blocked
+    # ToolMessage itself so downstream callers receive a well-formed result.
     if app_config.read_before_write.enabled:
         from deerflow.agents.middlewares.read_before_write_middleware import ReadBeforeWriteMiddleware
 
         tail.append(ReadBeforeWriteMiddleware())
 
+    # ToolProgressMiddleware must be outer (lower index) so its wrap_tool_call handler
+    # chain includes ToolErrorHandlingMiddleware (inner), which stamps deerflow_tool_meta
+    # on every result before ToolProgressMiddleware reads it in _update_state_from_result.
+    # Framework rule: first in list = outermost (types.py: "compose with first in list as outermost layer").
+    tool_progress_config = app_config.tool_progress
+    _ToolProgressMiddleware = None
+    if tool_progress_config.enabled:
+        from deerflow.agents.middlewares.tool_progress_middleware import ToolProgressMiddleware as _ToolProgressMiddleware
+
+        tail.append(_ToolProgressMiddleware.from_config(tool_progress_config))
+
     tail.append(ToolErrorHandlingMiddleware(app_config=app_config))
 
-    return [*outer_wrappers, *thread_hooks, *tail]
+    middlewares = [*outer_wrappers, *thread_hooks, *tail]
+
+    # Guard: ToolProgressMiddleware (outer) must appear before ToolErrorHandlingMiddleware (inner)
+    # so that its wrap_tool_call chain encloses the stamping step.  Fail loudly at build time
+    # rather than silently no-oping at runtime if a future insertion reverses the order.
+    # Uses isinstance (not type().__name__) so subclasses and renames are covered.
+    if _ToolProgressMiddleware is not None:
+        _progress_idx = next((i for i, m in enumerate(middlewares) if isinstance(m, _ToolProgressMiddleware)), None)
+        _error_idx = next((i for i, m in enumerate(middlewares) if isinstance(m, ToolErrorHandlingMiddleware)), None)
+        if _progress_idx is not None and _error_idx is not None and _progress_idx > _error_idx:
+            raise RuntimeError(f"ToolProgressMiddleware must be outer (index {_progress_idx}) of ToolErrorHandlingMiddleware (index {_error_idx}) — check middleware append order")
+
+    return middlewares
 
 
 def build_lead_runtime_middlewares(*, app_config: AppConfig, lazy_init: bool = True) -> list[AgentMiddleware]:

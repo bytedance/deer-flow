@@ -15,7 +15,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 18
+config_version: 19
 
 # ============================================================================
 # Logging
@@ -933,6 +933,31 @@ loop_detection:
   #   bash:
   #     warn: 150
   #     hard_limit: 300
+
+# ============================================================================
+# Tool Progress State Machine Configuration (RFC #3177)
+# ============================================================================
+# Detects tool stagnation and repetition at the (thread, tool) level.
+# Tracks consecutive "no-new-info" calls (error, partial_success, near-duplicate success).
+# Three transition paths (determined by deerflow_tool_meta.recoverable_by_model):
+#   recoverable=true  (no_results, not_found, permission): ACTIVE → WARNED (terminal; hint re-injected each call)
+#   recoverable=false (rate_limited, transient):           ACTIVE → WARNED → BLOCKED after warn_escalation_count more
+#   recoverable=false + action=stop (auth, config):        ACTIVE → BLOCKED immediately
+# Requires ToolErrorHandlingMiddleware to be active (always on).
+
+# tool_progress:
+#   enabled: false
+#   stagnation_threshold: 3        # Consecutive problems before WARNED
+#   warn_escalation_count: 2       # More problems after WARNED before BLOCKED
+#   inject_assessment: true
+#   jaccard_similarity_threshold: 0.8  # Word-set similarity threshold for near-duplicate detection
+#   min_word_count_for_similarity: 10  # Min unique words to apply Jaccard check
+#   max_tracked_threads: 100
+#   exempt_tools:
+#     - ask_clarification
+#     - write_todos
+#     - present_files
+#     - task
 
 # ============================================================================
 # Read-Before-Write File Gate (issue #3857)

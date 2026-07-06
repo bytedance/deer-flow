@@ -10,6 +10,7 @@ from deerflow.agents.middlewares.tool_error_handling_middleware import (
     build_lead_runtime_middlewares,
     build_subagent_runtime_middlewares,
 )
+from deerflow.agents.middlewares.tool_result_meta import TOOL_META_KEY
 from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
 from deerflow.config import summarization_config
 from deerflow.config.app_config import AppConfig, CircuitBreakerConfig
@@ -154,6 +155,72 @@ def test_build_subagent_runtime_middlewares_threads_app_config_to_llm_middleware
     assert isinstance(middlewares[1], ToolOutputBudgetMiddleware)
     assert any(isinstance(m, ToolErrorHandlingMiddleware) for m in middlewares)
     assert isinstance(middlewares[-1], SafetyFinishReasonMiddleware)
+
+
+def test_tool_progress_middleware_is_outer_relative_to_error_handling(monkeypatch: pytest.MonkeyPatch):
+    # ToolProgressMiddleware must have a lower index than ToolErrorHandlingMiddleware
+    # so that the framework's "first in list = outermost" rule makes it outer.
+    # Only then can it read deerflow_tool_meta stamped by ToolErrorHandlingMiddleware.
+    from deerflow.agents.middlewares.tool_progress_middleware import ToolProgressMiddleware
+    from deerflow.config.tool_progress_config import ToolProgressConfig
+
+    app_config = AppConfig(
+        models=[
+            ModelConfig(
+                name="test-model",
+                display_name="test-model",
+                description=None,
+                use="langchain_openai:ChatOpenAI",
+                model="test-model",
+            )
+        ],
+        sandbox=SandboxConfig(use="test"),
+        guardrails=GuardrailsConfig(enabled=False),
+        circuit_breaker=CircuitBreakerConfig(failure_threshold=7, recovery_timeout_sec=11),
+        tool_progress=ToolProgressConfig(enabled=True),
+    )
+
+    _stub_runtime_middleware_imports(monkeypatch)
+
+    middlewares = build_subagent_runtime_middlewares(app_config=app_config, lazy_init=False)
+
+    progress_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, ToolProgressMiddleware))
+    error_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, ToolErrorHandlingMiddleware))
+    assert progress_idx < error_idx, f"ToolProgressMiddleware (index {progress_idx}) must be outer (lower index) than ToolErrorHandlingMiddleware (index {error_idx}); order: {[type(m).__name__ for m in middlewares]}"
+
+
+def test_middleware_ordering_guard_raises_when_progress_is_inner(monkeypatch: pytest.MonkeyPatch):
+    """_build_runtime_middlewares must raise RuntimeError when ToolProgressMiddleware ends up
+    at a higher index than ToolErrorHandlingMiddleware.
+
+    We trigger the wrong-order condition by patching SandboxAuditMiddleware to be an actual
+    ToolErrorHandlingMiddleware instance, which appears BEFORE ToolProgressMiddleware in the
+    list. The guard's isinstance() check finds it first, making error_idx < progress_idx.
+    """
+    from deerflow.agents.middlewares.tool_error_handling_middleware import (
+        ToolErrorHandlingMiddleware,
+        build_lead_runtime_middlewares,
+    )
+    from deerflow.config.tool_progress_config import ToolProgressConfig
+
+    _stub_runtime_middleware_imports(monkeypatch)
+    # Override the SandboxAuditMiddleware stub with a real ToolErrorHandlingMiddleware so it
+    # becomes the FIRST ToolErrorHandlingMiddleware in the list, appearing before
+    # ToolProgressMiddleware and triggering the ordering guard.
+    monkeypatch.setitem(
+        sys.modules,
+        "deerflow.agents.middlewares.sandbox_audit_middleware",
+        _module(
+            "deerflow.agents.middlewares.sandbox_audit_middleware",
+            SandboxAuditMiddleware=ToolErrorHandlingMiddleware,
+        ),
+    )
+
+    app_config = _make_app_config()
+    app_config = app_config.model_copy(update={"tool_progress": ToolProgressConfig(enabled=True)})
+
+    with pytest.raises(RuntimeError, match="ToolProgressMiddleware must be outer"):
+        build_lead_runtime_middlewares(app_config=app_config, lazy_init=False)
 
 
 def test_lead_runtime_middlewares_thread_app_config_to_tool_error_handling(monkeypatch: pytest.MonkeyPatch):
@@ -328,6 +395,23 @@ def test_wrap_tool_call_returns_error_tool_message_on_exception():
     assert result.status == "error"
     assert "Tool 'web_search' failed" in result.text
     assert "network down" in result.text
+
+
+def test_wrap_tool_call_stamps_tool_meta_on_exception():
+    middleware = ToolErrorHandlingMiddleware()
+    req = _request(name="web_search", tool_call_id="tc-42")
+
+    def _boom(_req):
+        raise ConnectionError("connection refused")
+
+    result = middleware.wrap_tool_call(req, _boom)
+
+    assert isinstance(result, ToolMessage)
+    assert TOOL_META_KEY in result.additional_kwargs
+    meta = result.additional_kwargs[TOOL_META_KEY]
+    assert meta["status"] == "error"
+    assert meta["source"] == "exception"
+    assert meta["error_type"] == "transient"
 
 
 def test_task_exception_wrapper_uses_subagent_result_formatter():
