@@ -28,13 +28,3 @@ export function findSuggestionTemplatePlaceholder(
     end: match.index + match[0].length,
   };
 }
-
-/**
- * Returns `true` if the given text contains an unreplaced suggestion template
- * placeholder such as `[topic]`, `[source]`, `[主题]`, or `[来源]`.
- *
- * Convenience wrapper around `findSuggestionTemplatePlaceholder` for boolean checks.
- */
-export function hasUnreplacedPlaceholder(text: string): boolean {
-  return findSuggestionTemplatePlaceholder(text) !== null;
-}

@@ -1,9 +1,6 @@
 import { describe, expect, test } from "@rstest/core";
 
-import {
-  findSuggestionTemplatePlaceholder,
-  hasUnreplacedPlaceholder,
-} from "@/core/suggestions/placeholders";
+import { findSuggestionTemplatePlaceholder } from "@/core/suggestions/placeholders";
 
 describe("findSuggestionTemplatePlaceholder", () => {
   test("finds Chinese [主题] and returns correct range", () => {
@@ -56,19 +53,5 @@ describe("findSuggestionTemplatePlaceholder", () => {
     expect(
       findSuggestionTemplatePlaceholder("Research [TOPIC] deeply"),
     ).not.toBeNull();
-  });
-});
-
-describe("hasUnreplacedPlaceholder", () => {
-  test("returns true when placeholder exists", () => {
-    expect(hasUnreplacedPlaceholder("帮我研究一下[主题]然后写个报告")).toBe(
-      true,
-    );
-  });
-
-  test("returns false when no placeholder", () => {
-    expect(hasUnreplacedPlaceholder("深入浅出的研究一下，并总结发现。")).toBe(
-      false,
-    );
   });
 });
