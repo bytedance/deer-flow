@@ -3,20 +3,22 @@
 # deploy_x86.sh - Build, start, or stop DeerFlow production services (x86/amd64 target)
 #
 # Commands:
-#   deploy.sh                    — build + start
+#   deploy.sh                    — print usage
 #   deploy.sh build              — build all images (mode-agnostic)
-#   deploy.sh build-gateway      — build only gateway image
+#   deploy.sh gateway            — build only gateway image
+#   deploy.sh frontend           — build only frontend image (deer-flow-frontend)
 #   deploy.sh start              — start from pre-built images
 #   deploy.sh down               — stop and remove containers
 #
 # Sandbox mode (local / aio / provisioner) is auto-detected from config.yaml.
 #
 # Examples:
-#   deploy.sh                    # build + start
+#   deploy.sh                    # print usage
 #   deploy.sh build              # build all images
-#   deploy.sh build-gateway      # build gateway image only
+#   deploy.sh gateway            # build gateway image only
+#   deploy.sh frontend           # build frontend image only
 #   deploy.sh start              # start pre-built images
-#   deploy.sh down               — stop and remove containers
+#   deploy.sh down               # stop and remove containers
 #
 # Must be run from the repo root directory.
 
@@ -27,20 +29,21 @@ export DOCKER_BUILDKIT=1
 export DOCKER_DEFAULT_PLATFORM=linux/amd64
 
 case "${1:-}" in
-    build|build-gateway|start|down)
+    build|gateway|frontend|start|down)
         CMD="$1"
         if [ -n "${2:-}" ]; then
             echo "Unknown argument: $2"
-            echo "Usage: deploy.sh [build|build-gateway|start|down]"
+            echo "Usage: deploy.sh [build|gateway|frontend|start|down]"
             exit 1
         fi
         ;;
     "")
-        CMD=""
+        echo "Usage: deploy.sh [build|gateway|frontend|start|down]"
+        exit 0
         ;;
     *)
         echo "Unknown argument: $1"
-        echo "Usage: deploy.sh [build|build-gateway|start|down]"
+        echo "Usage: deploy.sh [build|gateway|frontend|start|down]"
         exit 1
         ;;
 esac
@@ -255,10 +258,10 @@ if [ "$CMD" = "build" ]; then
     exit 0
 fi
 
-# ── build-gateway ─────────────────────────────────────────────────────────────
+# ── gateway ───────────────────────────────────────────────────────────────────
 # Build only the gateway image (useful for quick iteration during development)
 
-if [ "$CMD" = "build-gateway" ]; then
+if [ "$CMD" = "gateway" ]; then
     echo "=========================================="
     echo "  DeerFlow — Building Gateway Image"
     echo "=========================================="
@@ -281,6 +284,33 @@ if [ "$CMD" = "build-gateway" ]; then
     exit 0
 fi
 
+# ── frontend ──────────────────────────────────────────────────────────────────
+# Build only the frontend image (deer-flow-frontend). Useful when iterating on
+# the Next.js frontend without touching the backend.
+
+if [ "$CMD" = "frontend" ]; then
+    echo "=========================================="
+    echo "  DeerFlow — Building Frontend Image"
+    echo "=========================================="
+    echo ""
+
+    # Docker socket is needed for compose to parse volume specs
+    if [ -z "$DEER_FLOW_DOCKER_SOCKET" ]; then
+        export DEER_FLOW_DOCKER_SOCKET="/var/run/docker.sock"
+    fi
+
+    "${COMPOSE_CMD[@]}" build frontend
+
+    echo ""
+    echo "=========================================="
+    echo "  ✓ Frontend image (deer-flow-frontend) built successfully"
+    echo "=========================================="
+    echo ""
+    echo "  Next: deploy.sh start"
+    echo ""
+    exit 0
+fi
+
 # ── Banner ────────────────────────────────────────────────────────────────────
 
 echo "=========================================="
@@ -289,7 +319,7 @@ echo "=========================================="
 echo ""
 
 # ── Detect runtime configuration ────────────────────────────────────────────
-# Only needed for start / up — determines whether provisioner is launched.
+# Only needed for start — determines whether provisioner is launched.
 
 sandbox_mode="$(detect_sandbox_mode)"
 echo -e "${BLUE}Sandbox mode: $sandbox_mode${NC}"
@@ -332,13 +362,6 @@ if [ "$CMD" = "start" ]; then
     echo ""
     # shellcheck disable=SC2086
     "${COMPOSE_CMD[@]}" up -d --remove-orphans $services
-else
-    # Default: build + start
-    echo "Building images and starting containers..."
-    echo ""
-    # shellcheck disable=SC2086
-    #"${COMPOSE_CMD[@]}" up --build -d --remove-orphans $services
-    "${COMPOSE_CMD[@]}" up --build --no-cache --remove-orphans $services
 fi
 
 echo ""
