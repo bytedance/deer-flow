@@ -411,3 +411,154 @@ class Orchestrator:
             status_json=status_path,
             metrics=metrics,
         )
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+
+def _emit_wire_format(result: Phase1Result | CheckpointSignal | RunResult) -> None:
+    """Print last-line JSON for the lead agent to parse."""
+    if isinstance(result, Phase1Result):
+        payload = {
+            "kind": "phase1_result",
+            "result": {
+                "parsed": result.parsed,
+                "wide": result.wide,
+                "ir": result.ir,
+                "description_prompts": result.description_prompts,
+                "metrics": result.metrics,
+                "artifacts": {k: str(v) for k, v in result.artifacts.items()},
+            },
+        }
+    elif isinstance(result, CheckpointSignal):
+        payload = {
+            "kind": "checkpoint",
+            "step": result.step,
+            "metrics": result.metrics,
+            "artifacts": {k: str(v) for k, v in result.artifacts.items()},
+            "message": result.message,
+        }
+    elif isinstance(result, RunResult):
+        payload = {
+            "kind": "phase2_result",
+            "result": {
+                "report_md": str(result.report_md),
+                "report_docx": str(result.report_docx) if result.report_docx else None,
+                "status_json": str(result.status_json),
+                "metrics": result.metrics,
+            },
+        }
+    else:
+        raise TypeError(f"unexpected result type: {type(result).__name__}")
+    print(json.dumps(payload, ensure_ascii=False, default=str))
+
+
+def _parse_kv_list(items: list[str]) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for item in items:
+        if "=" not in item:
+            raise ValueError(f"expected key=value, got: {item!r}")
+        k, v = item.split("=", 1)
+        out[k.strip()] = v.strip()
+    return out
+
+
+def main(argv: list[str] | None = None) -> int:
+    import argparse
+    import sys
+
+    from sqlbot_client import MockSQLBotClient, RealSQLBotClient
+
+    parser = argparse.ArgumentParser(prog="pipeline", description=__doc__)
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    p1 = sub.add_parser("phase1", help="Run Phase 1 (steps 1–6).")
+    p1.add_argument("--md", required=True)
+    p1.add_argument("--out-dir", required=True)
+    p1.add_argument("--mock-fixture", default=None)
+    # force_continue flags — set when the user has already acknowledged the
+    # checkpoint at 1.5 / 3.5 (see spec §"用户回复路由" — agent re-invokes
+    # `phase1` with these set after user picks "继续").
+    p1.add_argument("--skip-lint-checkpoint", action="store_true",
+                    help="Skip the 1.5 lint checkpoint (user confirmed continue).")
+    p1.add_argument("--skip-query-checkpoint", action="store_true",
+                    help="Skip the 3.5 query checkpoint (user confirmed continue).")
+
+    p2 = sub.add_parser("phase2", help="Run Phase 2 (steps 8a–9).")
+    p2.add_argument("--md", required=True)
+    p2.add_argument("--out-dir", required=True)
+    p2.add_argument("--compute-source", action="append", default=[],
+                    help="colname=/path/to/source.py (repeatable)")
+    p2.add_argument("--descriptions-dir", default=None,
+                    help="dir containing <stem>.description.report-<idx>.txt files "
+                         "(defaults to <out_dir>)")
+    p2.add_argument("--skip-docx", action="store_true")
+    p2.add_argument("--style-path", default=None,
+                    help="DOCX style JSON (defaults to example/style.json)")
+
+    args = parser.parse_args(argv)
+
+    cfg = OrchestratorConfig(
+        md_path=Path(args.md),
+        out_dir=Path(args.out_dir),
+        mock_fixture=Path(args.mock_fixture) if getattr(args, "mock_fixture", None) else None,
+        skip_docx=getattr(args, "skip_docx", False),
+        style_path=Path(args.style_path) if getattr(args, "style_path", None) else None,
+    )
+    try:
+        if args.cmd == "phase1":
+            sqlbot: Any
+            if cfg.mock_fixture is not None:
+                sqlbot = MockSQLBotClient(str(cfg.mock_fixture))
+            else:
+                sqlbot = RealSQLBotClient()
+            orch = Orchestrator(cfg, sqlbot)
+            fc = ForceContinue(
+                skip_lint_checkpoint=args.skip_lint_checkpoint,
+                skip_query_checkpoint=args.skip_query_checkpoint,
+            )
+            result = orch.run_phase_1(force_continue=fc)
+        else:
+            # Phase 2 doesn't invoke SQLBot (parsed + wide are read from disk).
+            # Use a dummy client to satisfy the Orchestrator constructor.
+            orch = Orchestrator(cfg, MockSQLBotClient(str(FIXTURE))) if False else Orchestrator(
+                cfg, _NullSQLBotClient()
+            )
+            stem = cfg.md_path.stem
+            parsed = json.loads(
+                (cfg.out_dir / f"{stem}.parsed.json").read_text(encoding="utf-8")
+            )
+            wide = json.loads(
+                (cfg.out_dir / f"{stem}.wide.json").read_text(encoding="utf-8")
+            )
+            descriptions_dir = args.descriptions_dir or str(cfg.out_dir)
+            result = orch.run_phase_2(
+                parsed=parsed,
+                wide=wide,
+                compute_sources=_parse_kv_list(args.compute_source),
+                descriptions_dir=descriptions_dir,
+                stem=stem,
+            )
+    except Exception as exc:
+        print(f"FAIL: {exc}", file=sys.stderr)
+        return 1
+
+    _emit_wire_format(result)
+    return 0
+
+
+class _NullSQLBotClient:
+    """Placeholder for Phase 2 invocations — never called because phase 2
+    reads parsed + wide from disk."""
+
+    def query_report_info(self, *args: Any, **kwargs: Any) -> None:
+        raise RuntimeError(
+            "_NullSQLBotClient.query_report_info should not be called — "
+            "Phase 2 reads parsed + wide from disk and does not invoke SQLBot."
+        )
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
