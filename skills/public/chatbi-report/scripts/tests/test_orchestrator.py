@@ -107,3 +107,51 @@ def test_run_phase_1_query_writes_query_json(tmp_path):
     assert "3_query" in result.metrics
     assert result.metrics["3_query"]["ok"] >= 1
     assert result.metrics["3_query"]["total"] >= 1
+
+
+def test_run_phase_1_lint_checkpoint_on_broken_md(tmp_path):
+    """Phase 1 returns CheckpointSignal(step='1.5') when lint has errors."""
+    from sqlbot_client import MockSQLBotClient
+
+    broken = tmp_path / "broken.md"
+    broken.write_text(
+        "# Title\n\n"
+        "> 机构:\n"
+        ">   branch_num=27020199; branch_short_name=王益联社\n"
+        "> 时期: time_info=[\"2025\"]\n\n"
+        "## Section\n\n"
+        "### Report\n\n"
+        "| missing-data-idx attr | header |\n"
+        "| --- | --- |\n"
+        "| cell1 | cell2 |\n",
+        encoding="utf-8",
+    )
+    cfg = p.OrchestratorConfig(md_path=broken, out_dir=tmp_path)
+    orch = p.Orchestrator(cfg, MockSQLBotClient(str(FIXTURE)))
+    result = orch.run_phase_1()
+    assert isinstance(result, p.CheckpointSignal)
+    assert result.step == "1.5"
+    assert result.metrics["1_lint"]["n_err"] >= 1
+
+
+def test_run_phase_1_query_checkpoint_when_all_fail(tmp_path):
+    """Phase 1 returns CheckpointSignal(step='3.5') when query has any failure.
+
+    Per 2026-06-27 policy reversal: always trigger 3.5, even when ok == 0.
+    """
+    from sqlbot_client import MockSQLBotClient
+
+    fail_fixture = tmp_path / "fail.json"
+    fail_fixture.write_text(
+        json.dumps({"BAS_0263": {"success": False, "data": []}}),
+        encoding="utf-8",
+    )
+    cfg = p.OrchestratorConfig(
+        md_path=INPUT_MD, out_dir=tmp_path, mock_fixture=fail_fixture,
+    )
+    orch = p.Orchestrator(cfg, MockSQLBotClient(str(fail_fixture)))
+    result = orch.run_phase_1()
+    assert isinstance(result, p.CheckpointSignal)
+    assert result.step == "3.5"
+    assert result.metrics["3_query"]["ok"] < result.metrics["3_query"]["total"]
+    assert (tmp_path / "input.query.json").exists()  # written before checkpoint

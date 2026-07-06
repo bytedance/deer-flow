@@ -82,6 +82,14 @@ class Orchestrator:
         lint = lint_file(str(self._cfg.md_path))
         metrics["1_lint"] = {"n_err": len(lint.errors), "n_warn": len(lint.warnings)}
 
+        if not fc.skip_lint_checkpoint and lint.errors:
+            return CheckpointSignal(
+                step="1.5",
+                metrics=metrics,
+                artifacts=artifacts,
+                message=f"lint 发现 {len(lint.errors)} 错误、{len(lint.warnings)} 警告",
+            )
+
         # Step 2: parse
         parsed = parse_file(str(self._cfg.md_path))
         stem = self._cfg.md_path.stem
@@ -119,6 +127,14 @@ class Orchestrator:
 
         ok, total = _count_query_outcomes(query_payload)
         metrics["3_query"] = {"ok": ok, "total": total}
+
+        if not fc.skip_query_checkpoint and ok < total:
+            return CheckpointSignal(
+                step="3.5",
+                metrics=metrics,
+                artifacts=artifacts,
+                message=f"SQLBot 查询 {ok}/{total} 成功,部分失败",
+            )
 
         return Phase1Result(
             parsed=parsed.to_dict(),
