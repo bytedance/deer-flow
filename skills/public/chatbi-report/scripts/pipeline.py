@@ -96,6 +96,30 @@ class Orchestrator:
         n_idx = len(parsed.all_idx_ids)
         metrics["2_parse"] = {"n_sec": n_sec, "n_rep": n_rep, "n_idx": n_idx}
 
+        # Step 3: query
+        from sqlbot_client import query_from_parsed
+
+        query_payload = query_from_parsed(parsed.to_dict(), self._sqlbot)
+        query_path = self._cfg.out_dir / f"{stem}.query.json"
+        query_path.write_text(
+            json.dumps(query_payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        artifacts["query"] = query_path
+
+        def _count_query_outcomes(payload: dict) -> tuple[int, int]:
+            total = 0
+            ok = 0
+            for entry in payload.get("results", []):
+                rows = entry.get("results", [])
+                total += 1
+                if rows and all(bool(r.get("success")) for r in rows):
+                    ok += 1
+            return ok, total
+
+        ok, total = _count_query_outcomes(query_payload)
+        metrics["3_query"] = {"ok": ok, "total": total}
+
         return Phase1Result(
             parsed=parsed.to_dict(),
             wide=[],

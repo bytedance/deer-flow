@@ -90,3 +90,20 @@ def test_run_phase_1_lint_and_parse_writes_parsed_json(tmp_path):
     assert "2_parse" in result.metrics
     assert result.metrics["2_parse"]["n_sec"] >= 1
     assert result.metrics["2_parse"]["n_rep"] >= 1
+
+
+def test_run_phase_1_query_writes_query_json(tmp_path):
+    """Phase 1 step 3 (query) writes out_dir/{stem}.query.json with mock SQLBot."""
+    from sqlbot_client import MockSQLBotClient
+
+    cfg = p.OrchestratorConfig(md_path=INPUT_MD, out_dir=tmp_path)
+    orch = p.Orchestrator(cfg, MockSQLBotClient(str(FIXTURE)))
+    result = orch.run_phase_1()
+    assert isinstance(result, p.Phase1Result)
+    assert (tmp_path / "input.query.json").exists()
+    query = json.loads((tmp_path / "input.query.json").read_text(encoding="utf-8"))
+    assert "results" in query
+    assert len(query["results"]) >= 1
+    assert "3_query" in result.metrics
+    assert result.metrics["3_query"]["ok"] >= 1
+    assert result.metrics["3_query"]["total"] >= 1
