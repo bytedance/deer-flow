@@ -9,6 +9,15 @@ export class AgentNameCheckError extends Error {
   constructor(
     message: string,
     public readonly reason: "backend_unreachable" | "request_failed",
+    /**
+     * Raw backend `detail` string when the failure came from a backend
+     * response carrying one. `null` when no detail was provided (e.g.
+     * network-layer failure, empty response body, unparseable body) — in
+     * which case `message` is a generated fallback like "Failed to check
+     * agent name: Bad Gateway" and the UI should prefer its own localized
+     * fallback instead of surfacing the generated string.
+     */
+    public readonly detail: string | null = null,
   ) {
     super(message);
     this.name = "AgentNameCheckError";
@@ -78,6 +87,19 @@ export async function deleteAgent(name: string): Promise<void> {
   if (!res.ok) throw new Error(`Failed to delete agent: ${res.statusText}`);
 }
 
+interface FeaturesResponse {
+  agents_api: { enabled: boolean };
+}
+
+export async function fetchAgentsApiEnabled(): Promise<boolean> {
+  const res = await fetch(`${getBackendBaseURL()}/api/features`);
+  if (!res.ok) {
+    throw new Error(`Failed to load features: ${res.statusText}`);
+  }
+  const data = (await res.json()) as FeaturesResponse;
+  return data.agents_api.enabled;
+}
+
 export async function checkAgentName(
   name: string,
 ): Promise<{ available: boolean; name: string }> {
@@ -104,9 +126,11 @@ export async function checkAgentName(
         "backend_unreachable",
       );
     }
+    const backendDetail = typeof err.detail === "string" ? err.detail : null;
     throw new AgentNameCheckError(
-      err.detail ?? `Failed to check agent name: ${res.statusText}`,
+      backendDetail ?? `Failed to check agent name: ${res.statusText}`,
       "request_failed",
+      backendDetail,
     );
   }
   return res.json() as Promise<{ available: boolean; name: string }>;

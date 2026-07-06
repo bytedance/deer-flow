@@ -133,6 +133,58 @@ class TestFilterMessagesForMemory:
         assert "/mnt/user-data/uploads/" not in all_content
         assert "<uploaded_files>" not in all_content
 
+    # --- hide_from_ui messages are excluded ---
+
+    def test_hide_from_ui_human_message_is_excluded(self):
+        """Middleware-injected hidden HumanMessages (TodoMiddleware.todo_reminder,
+        ViewImageMiddleware, p0 DynamicContextMiddleware.__memory) must never reach
+        the memory-updating LLM."""
+        hidden_reminder = HumanMessage(
+            content="<system_reminder>\nYour todo list from earlier is no longer visible.\n</system_reminder>",
+            additional_kwargs={"hide_from_ui": True, "name": "todo_reminder"},
+        )
+        msgs = [
+            _human("What is the capital of France?"),
+            _ai("The capital of France is Paris."),
+            hidden_reminder,  # should be skipped
+            _ai("Is there anything else I can help with?"),  # should be kept
+        ]
+        result = filter_messages_for_memory(msgs)
+
+        human_contents = [m.content for m in result if m.type == "human"]
+        assert len(human_contents) == 1
+        assert "What is the capital of France?" in human_contents[0]
+        assert not any("todo list" in c for c in human_contents)
+        assert not any(m.additional_kwargs.get("hide_from_ui") for m in result if m.type == "human")
+
+    def test_p0_memory_payload_is_excluded(self):
+        """The p0 DynamicContextMiddleware.__memory HumanMessage carries extracted
+        memory facts back to the memory LLM; feeding it again risks a
+        self-amplification loop, so it must be filtered out."""
+        memory_payload = HumanMessage(
+            content="<memory>User prefers concise answers</memory>",
+            additional_kwargs={"hide_from_ui": True},
+        )
+        msgs = [
+            _human("Help me with Python."),
+            _ai("Sure."),
+            memory_payload,  # should be skipped
+        ]
+        result = filter_messages_for_memory(msgs)
+
+        human_contents = [m.content for m in result if m.type == "human"]
+        assert len(human_contents) == 1
+        assert "Help me with Python." in human_contents[0]
+        assert not any("<memory>" in c for c in human_contents)
+
+    def test_hide_from_ui_false_is_preserved(self):
+        """Messages without hide_from_ui (or with it set to False) are kept."""
+        visible_msg = HumanMessage(content="Visible message", additional_kwargs={"hide_from_ui": False})
+        msgs = [visible_msg, _ai("Reply.")]
+        result = filter_messages_for_memory(msgs)
+        assert len(result) == 2
+        assert result[0].content == "Visible message"
+
 
 # ===========================================================================
 # detect_correction

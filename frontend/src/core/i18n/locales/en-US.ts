@@ -50,6 +50,9 @@ export const enUS: Translations = {
     exportAsMarkdown: "Export as Markdown",
     exportAsJSON: "Export as JSON",
     exportSuccess: "Conversation exported",
+    regenerate: "Regenerate",
+    branch: "Branch conversation",
+    showArtifacts: "Show artifacts of this conversation",
   },
 
   // Home
@@ -75,6 +78,36 @@ export const enUS: Translations = {
     copiedToClipboard: "Copied to clipboard",
     failedToCopyToClipboard: "Failed to copy to clipboard",
     linkCopied: "Link copied to clipboard",
+  },
+
+  // Citations
+  citations: {
+    sourcesSummary: (count) =>
+      `Used ${count} ${count === 1 ? "source" : "sources"}`,
+    citeCount: (count) => `${count} ${count === 1 ? "cite" : "cites"}`,
+    copyReference: (title) => `Copy ${title} reference`,
+    copiedReference: (title) => `Copied ${title} reference`,
+  },
+
+  // Workspace Changes
+  workspaceChanges: {
+    title: "Workspace changes",
+    editedTitle: (count) => `Edited ${count} ${count === 1 ? "file" : "files"}`,
+    badge: (count, additions, deletions) =>
+      `${count} ${count === 1 ? "file" : "files"} changed +${additions} -${deletions}`,
+    viewChanges: "View changes",
+    created: "Created",
+    modified: "Modified",
+    deleted: "Deleted",
+    openFile: "Open file",
+    loading: "Loading workspace changes...",
+    noChanges: "No workspace changes recorded.",
+    diffUnavailable: "Diff unavailable",
+    binaryUnavailable: "Binary file. Diff unavailable.",
+    largeUnavailable: "Large file. Diff omitted.",
+    sensitiveUnavailable: "Sensitive path. Content hidden.",
+    truncatedUnavailable: "Diff omitted because the change set is too large.",
+    truncatedSummary: "Some changes were truncated.",
   },
 
   // Input Box
@@ -115,6 +148,18 @@ export const enUS: Translations = {
       "You already have text in the input. Choose how to send it.",
     followupConfirmAppend: "Append & send",
     followupConfirmReplace: "Replace & send",
+    suggestionPlaceholderRequired:
+      "Replace the suggestion placeholder before sending.",
+    goalCommandDescription: "Set, show, or clear an active goal",
+    goalLabel: "Goal",
+    goalContinuing: "Continuing {count}/{max}",
+    goalContinuationTooltip:
+      "Auto-continued {count}/{max} times toward the goal; stops at the limit.",
+    goalSet: "Goal set.",
+    goalCleared: "Goal cleared.",
+    goalNone: "No active goal.",
+    goalActive: "Active goal: {goal}",
+    goalFailed: "Goal command failed.",
     suggestions: [
       {
         suggestion: "Write",
@@ -164,15 +209,153 @@ export const enUS: Translations = {
         icon: SparklesIcon,
       },
     ],
+    pleaseWaitStreaming: "Please wait for the current response to finish.",
   },
 
   // Sidebar
   sidebar: {
     newChat: "New chat",
     chats: "Chats",
+    channels: "Channels",
     recentChats: "Recent chats",
     demoChats: "Demo chats",
     agents: "Agents",
+    scheduledTasks: "Scheduled tasks",
+    agentsDisabledTooltip: "Feature not enabled",
+  },
+
+  // Scheduled tasks
+  scheduledTasks: {
+    scheduleType: {
+      cron: "Recurring",
+      once: "One-time",
+    },
+    preset: {
+      label: "Repeat",
+      hourly: "Hourly",
+      daily: "Daily",
+      weekly: "Weekly",
+      monthly: "Monthly",
+      custom: "Custom cron",
+    },
+    fields: {
+      minute: "Minute",
+      time: "Time",
+      weekday: "On",
+      dayOfMonth: "Day of month",
+      cron: "Cron expression",
+      cronPlaceholder: "0 9 * * *",
+      runAt: "Run at",
+      timezone: "Timezone",
+    },
+    weekdays: {
+      mon: "Mon",
+      tue: "Tue",
+      wed: "Wed",
+      thu: "Thu",
+      fri: "Fri",
+      sat: "Sat",
+      sun: "Sun",
+    },
+    preview: "Preview",
+    cronHelp: "Open crontab.guru",
+    create: {
+      title: "Create scheduled task",
+      taskTitle: "Task title",
+      prompt: "Prompt",
+      submit: "Create",
+      fillRequired: "Fill all required fields",
+    },
+    context: {
+      fresh: "Fresh thread",
+      reuse: "Reuse thread",
+      threadIdPlaceholder: "Thread ID",
+    },
+    filters: {
+      allStatuses: "All statuses",
+      enabled: "Enabled",
+      paused: "Paused",
+      completed: "Completed",
+      failed: "Failed",
+      allTypes: "All types",
+      cron: "Cron",
+      once: "Once",
+    },
+    detail: {
+      contextMode: "Context mode",
+      thread: "Thread",
+      lastThread: "Last thread",
+      schedule: "Schedule",
+      nextRun: "Next run",
+      lastRun: "Last run",
+      lastRunId: "Last run id",
+      lastError: "Last error",
+      runsCount: "{count} runs",
+      runsCountOne: "{count} run",
+      noRuns: "No runs yet",
+      noSelection: "No scheduled task selected",
+      filteredByThread: "Filtered by thread: {id}",
+      loadFailed: "Failed to load scheduled tasks",
+    },
+    actions: {
+      edit: "Edit",
+      cancelEdit: "Cancel edit",
+      pause: "Pause",
+      resume: "Resume",
+      trigger: "Trigger now",
+      delete: "Delete",
+    },
+    deleteConfirm:
+      "Are you sure you want to delete this scheduled task? This action cannot be undone.",
+    errors: {
+      create: "Failed to create scheduled task",
+      update: "Failed to update scheduled task",
+      pause: "Failed to pause scheduled task",
+      resume: "Failed to resume scheduled task",
+      trigger: "Failed to trigger scheduled task",
+      delete: "Failed to delete scheduled task",
+    },
+    edit: {
+      titlePlaceholder: "Edit title",
+      promptPlaceholder: "Edit prompt",
+      submit: "Save edit",
+    },
+    status: {
+      enabled: "Enabled",
+      paused: "Paused",
+      running: "Running",
+      completed: "Completed",
+      failed: "Failed",
+      cancelled: "Cancelled",
+    },
+    runTrigger: { scheduled: "scheduled", manual: "manual" },
+    runStatus: {
+      queued: "Queued",
+      running: "Running",
+      success: "Success",
+      failed: "Failed",
+      skipped: "Skipped",
+      interrupted: "Interrupted",
+    },
+    recipes: {
+      label: "Quick create",
+      trending: {
+        title: "GitHub Trending daily",
+        desc: "Summarize today's top 10 trending repos",
+      },
+      news: {
+        title: "Daily tech news digest",
+        desc: "Collect and summarize the day's top tech news",
+      },
+      issues: {
+        title: "GitHub Issue triage",
+        desc: "Triage a repo's open issues (fill in {{repo}})",
+      },
+      weekly: {
+        title: "Weekly report",
+        desc: "Compile a weekly summary, every Monday",
+      },
+    },
   },
 
   // Agents
@@ -184,6 +367,9 @@ export const enUS: Translations = {
     emptyTitle: "No custom agents yet",
     emptyDescription:
       "Create your first custom agent with a specialized system prompt.",
+    featureDisabledTitle: "Agents feature is not enabled",
+    featureDisabledDescription:
+      "This feature is not enabled on this server. Please contact your administrator.",
     chat: "Chat",
     delete: "Delete",
     deleteConfirm:
@@ -204,6 +390,7 @@ export const enUS: Translations = {
     nameStepNetworkError:
       "Network request failed — check your network or backend connection",
     nameStepCheckError: "Could not verify name availability — please try again",
+    nameStepCheckErrorWithDetail: "Name check failed: {detail}",
     nameStepApiDisabledError:
       "Custom agent management is not enabled on this server. Please contact your administrator.",
     nameStepBootstrapMessage:
@@ -233,24 +420,86 @@ export const enUS: Translations = {
   // Workspace
   workspace: {
     officialWebsite: "DeerFlow's official website",
-    githubTooltip: "DeerFlow on Github",
+    githubTooltip: "DeerFlow on GitHub",
     settingsAndMore: "Settings and more",
     visitGithub: "DeerFlow on GitHub",
-    reportIssue: "Report a issue",
+    reportIssue: "Report an issue",
     contactUs: "Contact us",
     about: "About DeerFlow",
     logout: "Log out",
+    gatewayUnavailable: "Gateway is temporarily unavailable.",
+    gatewayUnavailableRetrying: "Retrying in the background…",
   },
 
   // Conversation
   conversation: {
     noMessages: "No messages yet",
     startConversation: "Start a conversation to see messages here",
+    branchCreated: "Conversation branch created",
+    branchFailed: "Failed to branch conversation.",
   },
 
   // Chats
   chats: {
     searchChats: "Search chats",
+    loadMoreToSearch: "Load more to search older conversations",
+    loadingMore: "Loading more...",
+    loadOlderChats: "Load older chats",
+  },
+
+  // Sidecar
+  sidecar: {
+    title: "Side chat",
+    open: "Open side chat",
+    close: "Close side chat",
+    addToConversation: "Add to conversation",
+    askInSideChat: "Ask in side chat",
+    reference: "Reference",
+    selectedTextFragment: "{count} selected text fragment",
+    selectedTextFragments: "{count} selected text fragments",
+    clearReferences: "Clear selected references",
+    emptyTitle: "Ask a follow-up",
+    emptyDescription: "Ask a follow-up grounded in the referenced text.",
+    placeholder: "Ask a deeper follow-up...",
+    send: "Send",
+    sendFailed: "Failed to send side chat message.",
+    noContext: "No context selected",
+    continuing: "Continue in this side chat",
+    selectionCrossesMessages:
+      "Selection spans multiple messages. Select text within a single reply to quote it.",
+  },
+
+  // Channels
+  channels: {
+    title: "Channels",
+    connect: "Connect",
+    modify: "Modify",
+    reconnect: "Reconnect",
+    disconnect: "Disconnect",
+    connected: "Connected",
+    notConnected: "Not connected",
+    pending: "Pending",
+    revoked: "Disconnected",
+    disabled: "Disabled",
+    unconfigured: "Not configured",
+    unavailable: "Channel connections are unavailable right now.",
+    unavailableShort: "Unavailable",
+    setupTitle: (name: string) => `Connect ${name}`,
+    setupEditTitle: (name: string) => `Modify ${name}`,
+    setupDescription:
+      "Enter the values needed by this server process. They are not written to config.yaml.",
+    saveAndConnect: "Save and connect",
+    saveChanges: "Save changes",
+    descriptions: {
+      telegram: "Telegram direct messages through your DeerFlow bot.",
+      slack: "Slack workspace messages and mentions.",
+      discord: "Discord server messages through your DeerFlow bot.",
+      feishu: "Feishu and Lark messages through your DeerFlow app.",
+      dingtalk: "DingTalk Stream Push messages through your DeerFlow bot.",
+      wechat: "WeChat iLink messages through your DeerFlow bot.",
+      wecom: "WeCom messages through your DeerFlow AI bot.",
+    },
+    connectedAs: (name: string) => `Connected as ${name}.`,
   },
 
   // Page titles (document title)
@@ -288,6 +537,14 @@ export const enUS: Translations = {
   uploads: {
     uploading: "Uploading...",
     uploadingFiles: "Uploading files, please wait...",
+    limitsHint: (maxFiles: number, maxFileSize: string, maxTotalSize: string) =>
+      `Add attachments (up to ${maxFiles} files, ${maxFileSize} each, ${maxTotalSize} total). Most regular file types are supported; compress macOS .app bundles first.`,
+    filesTooLarge: (files: string, maxFileSize: string) =>
+      `Files exceeding the ${maxFileSize} per-file limit were not added: ${files}.`,
+    tooManyFiles: (count: number, maxFiles: number) =>
+      `${count} file${count === 1 ? " was" : "s were"} not added. You can attach up to ${maxFiles} files at once.`,
+    totalSizeTooLarge: (count: number, maxTotalSize: string) =>
+      `${count} file${count === 1 ? " was" : "s were"} not added. Attachments can total up to ${maxTotalSize}.`,
   },
 
   subtasks: {
@@ -353,6 +610,7 @@ export const enUS: Translations = {
     sections: {
       account: "Account",
       appearance: "Appearance",
+      channels: "Channels",
       memory: "Memory",
       tools: "Tools",
       skills: "Skills",
@@ -454,6 +712,15 @@ export const enUS: Translations = {
     tools: {
       title: "Tools",
       description: "Manage the configuration and enabled status of MCP tools.",
+      adminRequired: "Admin privileges are required to manage MCP tools.",
+      empty: "No MCP tools configured.",
+    },
+    channels: {
+      title: "Channels",
+      description:
+        "Connect IM accounts that can send messages to DeerFlow from outside the browser.",
+      disabled:
+        "Channel connections are not enabled on this server. Ask an administrator to enable channel_connections.",
     },
     skills: {
       title: "Agent Skills",
@@ -464,6 +731,9 @@ export const enUS: Translations = {
       emptyDescription:
         "Put your agent skill folders under the `/skills/custom` folder under the root folder of DeerFlow.",
       emptyButton: "Create Your First Skill",
+      adminRequired: "Admin privileges are required to manage agent skills.",
+      installAdminRequired:
+        "Admin privileges are required to install agent skills.",
     },
     notification: {
       title: "Notification",
@@ -482,8 +752,12 @@ export const enUS: Translations = {
       profileTitle: "Profile",
       email: "Email",
       role: "Role",
+      ssoProvider: "SSO",
       changePasswordTitle: "Change Password",
       changePasswordDescription: "Update your account password.",
+      ssoPasswordDescription: "Password is managed by your SSO provider.",
+      ssoPasswordMessage:
+        "This account signs in with {provider}, so DeerFlow cannot manage or change its password here. Use your SSO provider's account settings instead.",
       currentPassword: "Current password",
       newPassword: "New password",
       confirmNewPassword: "Confirm new password",
@@ -498,6 +772,38 @@ export const enUS: Translations = {
     acknowledge: {
       emptyTitle: "Acknowledgements",
       emptyDescription: "Credits and acknowledgements will show here.",
+    },
+  },
+  login: {
+    signInTitle: "Sign in to your account",
+    createAccountTitle: "Create a new account",
+    email: "Email",
+    emailPlaceholder: "you@example.com",
+    password: "Password",
+    passwordPlaceholder: "•••••••",
+    pleaseWait: "Please wait...",
+    signIn: "Sign In",
+    createAccount: "Create Account",
+    createAdminAccount: "Create admin account",
+    adminSetupRequiredTitle: "Administrator setup is required",
+    adminSetupRequiredDescription:
+      "DeerFlow needs an administrator account before new regular accounts can be created.",
+    orContinueWith: "Or continue with",
+    ssoHint:
+      "If your account uses single sign-on, sign in with the option below instead.",
+    continueWith: (provider: string) => `Continue with ${provider}`,
+    noAccountSignUp: "Don't have an account? Sign up",
+    haveAccountSignIn: "Already have an account? Sign in",
+    backToHome: "← Back to home",
+    networkError: "Network error. Please try again.",
+    authFailed: "Authentication failed.",
+    errors: {
+      sso_failed: "SSO login failed. Please try again or use email login.",
+      sso_cancelled: "SSO login was cancelled.",
+      sso_account_exists:
+        "An account with this email already exists. Please sign in with your password or contact your administrator.",
+      sso_not_allowed:
+        "SSO login is not allowed for your account. Contact your administrator.",
     },
   },
 };

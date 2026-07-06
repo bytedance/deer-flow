@@ -881,6 +881,7 @@ export type PromptInputTextareaProps = ComponentProps<
 
 export const PromptInputTextarea = ({
   onChange,
+  onKeyDown,
   className,
   placeholder = "What would you like to know?",
   ...props
@@ -891,6 +892,10 @@ export const PromptInputTextarea = ({
   const [isComposing, setIsComposing] = useState(false);
 
   const handleKeyDown: KeyboardEventHandler<HTMLTextAreaElement> = (e) => {
+    onKeyDown?.(e);
+    if (e.defaultPrevented) {
+      return;
+    }
     if (e.key === "Enter") {
       if (isIMEComposing(e, isComposing)) {
         return;
@@ -910,19 +915,6 @@ export const PromptInputTextarea = ({
       }
 
       form?.requestSubmit();
-    }
-
-    // Remove last attachment when Backspace is pressed and textarea is empty
-    if (
-      e.key === "Backspace" &&
-      e.currentTarget.value === "" &&
-      attachments.files.length > 0
-    ) {
-      e.preventDefault();
-      const lastAttachment = attachments.files.at(-1);
-      if (lastAttachment) {
-        attachments.remove(lastAttachment.id);
-      }
     }
   };
 

@@ -9,9 +9,10 @@ from weakref import WeakValueDictionary
 
 from langchain.tools import tool
 
-from deerflow.agents.lead_agent.prompt import refresh_skills_system_prompt_cache_async
+from deerflow.agents.lead_agent.prompt import refresh_user_skills_system_prompt_cache_async
+from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.skills.security_scanner import scan_skill_content
-from deerflow.skills.storage import get_or_new_skill_storage
+from deerflow.skills.storage import get_or_new_user_skill_storage
 from deerflow.skills.storage.skill_storage import SkillStorage
 from deerflow.skills.types import SKILL_MD_FILE
 from deerflow.tools.sync import make_sync_tool_wrapper
@@ -19,14 +20,16 @@ from deerflow.tools.types import Runtime
 
 logger = logging.getLogger(__name__)
 
-_skill_locks: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
+# Lock granularity: (user_id, skill_name) to avoid cross-user blocking.
+_skill_locks: WeakValueDictionary[tuple[str, str], asyncio.Lock] = WeakValueDictionary()
 
 
-def _get_lock(name: str) -> asyncio.Lock:
-    lock = _skill_locks.get(name)
+def _get_lock(user_id: str, name: str) -> asyncio.Lock:
+    key = (user_id, name)
+    lock = _skill_locks.get(key)
     if lock is None:
         lock = asyncio.Lock()
-        _skill_locks[name] = lock
+        _skill_locks[key] = lock
     return lock
 
 
@@ -85,9 +88,10 @@ async def _skill_manage_impl(
         expected_count: Optional expected number of replacements for patch.
     """
     name = SkillStorage.validate_skill_name(name)
-    lock = _get_lock(name)
+    user_id = resolve_runtime_user_id(runtime)
+    lock = _get_lock(user_id, name)
     thread_id = _get_thread_id(runtime)
-    skill_storage = get_or_new_skill_storage()
+    skill_storage = get_or_new_user_skill_storage(user_id)
 
     async with lock:
         if action == "create":
@@ -103,9 +107,8 @@ async def _skill_manage_impl(
                 name,
                 _history_record(action="create", file_path=SKILL_MD_FILE, prev_content=None, new_content=content, thread_id=thread_id, scanner=scan),
             )
-            await refresh_skills_system_prompt_cache_async()
+            await refresh_user_skills_system_prompt_cache_async(user_id)
             return f"Created custom skill '{name}'."
-
         if action == "edit":
             await _to_thread(skill_storage.ensure_custom_skill_is_editable, name)
             if content is None:
@@ -120,7 +123,7 @@ async def _skill_manage_impl(
                 name,
                 _history_record(action="edit", file_path=SKILL_MD_FILE, prev_content=prev_content, new_content=content, thread_id=thread_id, scanner=scan),
             )
-            await refresh_skills_system_prompt_cache_async()
+            await refresh_user_skills_system_prompt_cache_async(user_id)
             return f"Updated custom skill '{name}'."
 
         if action == "patch":
@@ -144,7 +147,7 @@ async def _skill_manage_impl(
                 name,
                 _history_record(action="patch", file_path=SKILL_MD_FILE, prev_content=prev_content, new_content=new_content, thread_id=thread_id, scanner=scan),
             )
-            await refresh_skills_system_prompt_cache_async()
+            await refresh_user_skills_system_prompt_cache_async(user_id)
             return f"Patched custom skill '{name}' ({replacement_count} replacement(s) applied, {occurrences} match(es) found)."
 
         if action == "delete":
@@ -160,7 +163,7 @@ async def _skill_manage_impl(
                     scanner={"decision": "allow", "reason": "Deletion requested."},
                 ),
             )
-            await refresh_skills_system_prompt_cache_async()
+            await refresh_user_skills_system_prompt_cache_async(user_id)
             return f"Deleted custom skill '{name}'."
 
         if action == "write_file":
@@ -178,6 +181,7 @@ async def _skill_manage_impl(
                 name,
                 _history_record(action="write_file", file_path=path, prev_content=prev_content, new_content=content, thread_id=thread_id, scanner=scan),
             )
+            await refresh_user_skills_system_prompt_cache_async(user_id)
             return f"Wrote '{path}' for custom skill '{name}'."
 
         if action == "remove_file":
@@ -194,10 +198,14 @@ async def _skill_manage_impl(
                 name,
                 _history_record(action="remove_file", file_path=path, prev_content=prev_content, new_content=None, thread_id=thread_id, scanner={"decision": "allow", "reason": "Deletion requested."}),
             )
+            await refresh_user_skills_system_prompt_cache_async(user_id)
             return f"Removed '{path}' from custom skill '{name}'."
 
         if await _to_thread(skill_storage.public_skill_exists, name):
-            raise ValueError(f"'{name}' is a built-in skill. To customise it, create a new skill with the same name under skills/custom/.")
+            # public_skill_exists covers both built-in (PUBLIC) and legacy (LEGACY)
+            # skills; the UserScopedSkillStorage override distinguishes them in
+            # ensure_custom_skill_is_editable with category-specific messages.
+            raise ValueError(f"'{name}' is a read-only skill (built-in or legacy shared). To customise it, create your own version with the same name.")
         raise ValueError(f"Unsupported action '{action}'.")
 
 

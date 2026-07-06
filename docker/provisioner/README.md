@@ -36,6 +36,13 @@ The **Sandbox Provisioner** is a FastAPI service that dynamically manages sandbo
 
 5. **Cleanup**: When the session ends, `DELETE /api/sandboxes/{sandbox_id}` removes both the Pod and Service.
 
+The sandbox business endpoints are implemented as synchronous FastAPI handlers
+because the Kubernetes Python client used here is synchronous. Starlette runs
+sync handlers in its worker pool, keeping create/read/list/delete K8s API calls
+and the NodePort polling sleep off the ASGI event-loop thread. Keep `/health`
+lightweight; do not move the sandbox CRUD handlers back to `async def` unless
+the K8s client path is also made async or explicitly offloaded.
+
 ## Requirements
 
 Host machine with a running Kubernetes cluster (Docker Desktop K8s, OrbStack, minikube, kind, etc.)
@@ -137,7 +144,7 @@ The provisioner is configured via environment variables (set in [docker-compose-
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `K8S_NAMESPACE` | `deer-flow` | Kubernetes namespace for sandbox resources |
-| `SANDBOX_IMAGE` | `enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest` | Container image for sandbox Pods |
+| `SANDBOX_IMAGE` | `enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest` | AIO-compatible container image for sandbox Pods |
 | `SKILLS_HOST_PATH` | - | **Host machine** path to skills directory (must be absolute) |
 | `THREADS_HOST_PATH` | - | **Host machine** path to threads data directory (must be absolute) |
 | `SKILLS_PVC_NAME` | empty (use hostPath) | PVC name for skills volume; when set, sandbox Pods use PVC instead of hostPath |
@@ -145,6 +152,14 @@ The provisioner is configured via environment variables (set in [docker-compose-
 | `KUBECONFIG_PATH` | `/root/.kube/config` | Path to kubeconfig **inside** the provisioner container |
 | `NODE_HOST` | `host.docker.internal` | Hostname that backend containers use to reach host NodePorts |
 | `K8S_API_SERVER` | (from kubeconfig) | Override K8s API server URL (e.g., `https://host.docker.internal:26443`) |
+
+### Custom sandbox image
+
+Provisioner-created sandbox Pods use the provisioner's `SANDBOX_IMAGE` environment variable. This is separate from `sandbox.image` in `config.yaml`, which applies to local Docker or Apple Container mode.
+
+For persistent dependencies, build an image that extends the default `all-in-one-sandbox` image and set `SANDBOX_IMAGE` to your published tag. A from-scratch image must remain compatible with the AIO sandbox HTTP API consumed by `agent-sandbox`, keep `/mnt/user-data` writable, and listen on the configured sandbox port.
+
+See [Building a Custom AIO Sandbox Image](../../backend/docs/CONFIGURATION.md#building-a-custom-aio-sandbox-image) for the runtime contract and a minimal Dockerfile example.
 
 ### PVC User-Data Upgrade Note
 

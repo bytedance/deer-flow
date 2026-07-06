@@ -9,7 +9,7 @@
 使用 `TitleMiddleware` 在 `after_model` 钩子中：
 1. 检测是否是首次对话（1个用户消息 + 1个助手回复）
 2. 检查 state 是否已有 title
-3. 调用 LLM 生成简洁的标题（默认最多6个词）
+3. 默认从首条用户消息生成本地 fallback 标题，避免在流式回复结束前额外等待一次 LLM 调用；显式配置 `model_name` 时才调用 LLM 生成标题（默认最多6个词）
 4. 将 title 存储到 `ThreadState` 中（会被 checkpointer 持久化）
 
 TitleMiddleware 会先把 LangChain message content 里的结构化 block/list 内容归一化为纯文本，再拼到 title prompt 里，避免把 Python/JSON 的原始 repr 泄漏到标题生成模型。
@@ -67,7 +67,7 @@ title:
   enabled: true
   max_words: 6
   max_chars: 60
-  model_name: null  # 使用默认模型
+  model_name: null  # null = 快速本地 fallback；填模型名才启用 LLM 标题
 ```
 
 或在代码中配置：
@@ -149,17 +149,21 @@ sequenceDiagram
     participant Client
     participant LangGraph
     participant TitleMiddleware
-    participant LLM
+    participant TitleModel as Title model (optional)
     participant Checkpointer
 
     User->>Client: 发送首条消息
     Client->>LangGraph: POST /threads/{id}/runs
     LangGraph->>Agent: 处理消息
     Agent-->>LangGraph: 返回回复
-    LangGraph->>TitleMiddleware: after_agent()
+    LangGraph->>TitleMiddleware: after_model()/aafter_model()
     TitleMiddleware->>TitleMiddleware: 检查是否需要生成 title
-    TitleMiddleware->>LLM: 生成 title
-    LLM-->>TitleMiddleware: 返回 title
+    alt title.model_name 为空（默认）
+        TitleMiddleware->>TitleMiddleware: 从首条用户消息生成本地 fallback title
+    else 显式配置 title.model_name
+        TitleMiddleware->>TitleModel: 生成 LLM title
+        TitleModel-->>TitleMiddleware: 返回 title
+    end
     TitleMiddleware->>LangGraph: return {"title": "..."}
     LangGraph->>Checkpointer: 保存 state (含 title)
     LangGraph-->>Client: 返回响应
@@ -178,20 +182,15 @@ sequenceDiagram
 ## 注意事项
 
 1. **读取方式不同**：Title 在 `state.values.title` 而非 `thread.metadata.title`
-2. **性能考虑**：title 生成会增加约 0.5-1 秒延迟，可通过使用更快的模型优化
-3. **并发安全**：middleware 在 agent 执行后运行，不会阻塞主流程
-4. **Fallback 策略**：如果 LLM 调用失败，会使用用户消息的前几个词作为 title
+2. **性能考虑**：默认配置不调用标题模型；只有显式配置 `title.model_name` 时，才会在首轮回复后额外等待一次 LLM title 生成
+3. **并发安全**：middleware 在 agent 首次完整回复后更新 state，不需要客户端额外请求
+4. **Fallback 策略**：默认使用用户消息前几个字符作为 title；如果显式启用的 LLM 调用失败，也会回退到该策略
 
 ## 测试
 
-```python
-# 测试 title 生成
-import pytest
-from deerflow.agents.title_middleware import TitleMiddleware
-
-def test_title_generation():
-    # TODO: 添加单元测试
-    pass
+```bash
+cd backend
+uv run pytest tests/test_title_middleware_core_logic.py tests/test_title_generation.py
 ```
 
 ## 故障排查
@@ -199,8 +198,8 @@ def test_title_generation():
 ### Title 没有生成
 
 1. 检查配置是否启用：`get_title_config().enabled == True`
-2. 检查日志：查找 "Generated thread title" 或错误信息
-3. 确认是首次对话：只有 1 个用户消息和 1 个助手回复时才会触发
+2. 确认是首次对话：只有 1 个用户消息和 1 个助手回复时才会触发
+3. 如果显式配置了 `title.model_name`，检查标题模型是否可用；未配置时会走本地 fallback
 
 ### Title 生成但客户端看不到
 
@@ -231,16 +230,19 @@ def test_title_generation():
 ```python
 # TitleMiddleware 核心逻辑
 @override
-def after_agent(self, state: TitleMiddlewareState, runtime: Runtime) -> dict | None:
-    """Generate and set thread title after the first agent response."""
-    if self._should_generate_title(state, runtime):
-        title = self._generate_title(runtime)
-        print(f"Generated thread title: {title}")
-        
-        # ✅ 返回 state 更新，会被 checkpointer 自动持久化
-        return {"title": title}
-    
-    return None
+async def aafter_model(self, state: TitleMiddlewareState, runtime: Runtime) -> dict | None:
+    return await self._agenerate_title_result(state)
+
+async def _agenerate_title_result(self, state: TitleMiddlewareState) -> dict | None:
+    if not self._should_generate_title(state):
+        return None
+
+    config = self._get_title_config()
+    if not config.model_name:
+        return self._generate_title_result(state)
+
+    # 显式配置 title.model_name 时才调用标题模型；失败会回退到本地 title。
+    ...
 ```
 
 ## 相关文件

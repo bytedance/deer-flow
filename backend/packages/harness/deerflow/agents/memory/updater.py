@@ -7,8 +7,10 @@ import copy
 import json
 import logging
 import math
+import os
 import re
 import uuid
+from contextlib import nullcontext
 from typing import Any
 
 from deerflow.agents.memory.prompt import (
@@ -22,6 +24,8 @@ from deerflow.agents.memory.storage import (
 )
 from deerflow.config.memory_config import get_memory_config
 from deerflow.models import create_chat_model
+from deerflow.trace_context import request_trace_context
+from deerflow.tracing import inject_langfuse_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -36,11 +40,6 @@ _SYNC_MEMORY_UPDATER_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
     thread_name_prefix="memory-updater-sync",
 )
 atexit.register(lambda: _SYNC_MEMORY_UPDATER_EXECUTOR.shutdown(wait=False))
-
-
-def _create_empty_memory() -> dict[str, Any]:
-    """Backward-compatible wrapper around the storage-layer empty-memory factory."""
-    return create_empty_memory()
 
 
 def _save_memory_to_file(memory_data: dict[str, Any], agent_name: str | None = None, *, user_id: str | None = None) -> bool:
@@ -227,6 +226,110 @@ def _extract_text(content: Any) -> str:
     return str(content)
 
 
+_REQUIRED_MEMORY_UPDATE_TOP_LEVEL_KEYS = frozenset({"user", "history", "newFacts", "factsToRemove"})
+
+
+def _normalize_memory_update_fact(fact: Any) -> dict[str, Any] | None:
+    """Normalize a single fact entry from a model-produced memory update."""
+    if not isinstance(fact, dict):
+        return None
+
+    raw_content = fact.get("content")
+    if not isinstance(raw_content, str):
+        return None
+    content = raw_content.strip()
+    if not content:
+        return None
+
+    raw_category = fact.get("category")
+    category = raw_category.strip() if isinstance(raw_category, str) and raw_category.strip() else "context"
+
+    raw_confidence = fact.get("confidence", 0.5)
+    if isinstance(raw_confidence, bool):
+        return None
+    if isinstance(raw_confidence, str):
+        raw_confidence = raw_confidence.strip()
+        if not raw_confidence:
+            return None
+        try:
+            raw_confidence = float(raw_confidence)
+        except ValueError:
+            return None
+    elif isinstance(raw_confidence, (int, float)):
+        raw_confidence = float(raw_confidence)
+    else:
+        return None
+
+    if not math.isfinite(raw_confidence):
+        return None
+
+    normalized_fact = {
+        "content": content,
+        "category": category,
+        "confidence": raw_confidence,
+    }
+    source_error = fact.get("sourceError")
+    if isinstance(source_error, str):
+        normalized_source_error = source_error.strip()
+        if normalized_source_error:
+            normalized_fact["sourceError"] = normalized_source_error
+
+    return normalized_fact
+
+
+def _normalize_memory_update_data(update_data: dict[str, Any]) -> dict[str, Any]:
+    """Coerce parsed memory update data into the shape consumed by _apply_updates."""
+    user = update_data.get("user")
+    history = update_data.get("history")
+    new_facts = update_data.get("newFacts")
+    facts_to_remove = update_data.get("factsToRemove")
+    normalized_facts_to_remove = [fact_id for fact_id in facts_to_remove if isinstance(fact_id, str)] if isinstance(facts_to_remove, list) else []
+    normalized_new_facts = []
+    dropped_new_fact = not isinstance(new_facts, list)
+    if isinstance(new_facts, list):
+        for fact in new_facts:
+            normalized_fact = _normalize_memory_update_fact(fact)
+            if normalized_fact is not None:
+                normalized_new_facts.append(normalized_fact)
+            else:
+                dropped_new_fact = True
+
+    if normalized_facts_to_remove and dropped_new_fact:
+        raise json.JSONDecodeError(
+            "Unsafe partial memory update: factsToRemove with malformed newFacts",
+            json.dumps(update_data, ensure_ascii=False),
+            0,
+        )
+
+    return {
+        "user": user if isinstance(user, dict) else {},
+        "history": history if isinstance(history, dict) else {},
+        "newFacts": normalized_new_facts,
+        "factsToRemove": normalized_facts_to_remove,
+    }
+
+
+def _parse_memory_update_response(response_content: Any) -> dict[str, Any]:
+    """Parse the first valid memory-update JSON object from an LLM response.
+
+    Some providers may wrap JSON in thinking traces, prose, or markdown fences
+    even when prompted to return JSON only. This parser accepts safely
+    extractable JSON objects but does not repair truncated or malformed JSON.
+    """
+    response_text = _extract_text(response_content).strip()
+    decoder = json.JSONDecoder()
+
+    for match in re.finditer(r"\{", response_text):
+        try:
+            parsed, _end = decoder.raw_decode(response_text[match.start() :])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict) and _REQUIRED_MEMORY_UPDATE_TOP_LEVEL_KEYS.issubset(parsed):
+            return _normalize_memory_update_data(parsed)
+
+    raise json.JSONDecodeError("No valid memory update JSON object found", response_text, 0)
+
+
 # Matches sentences that describe a file-upload *event* rather than general
 # file-related work.  Deliberately narrow to avoid removing legitimate facts
 # such as "User works with CSV files" or "prefers PDF export".
@@ -286,9 +389,12 @@ class MemoryUpdater:
 
     def _get_model(self):
         """Get the model for memory updates."""
+        return create_chat_model(name=self._resolve_model_name(), thinking_enabled=False)
+
+    def _resolve_model_name(self) -> str | None:
+        """Return the configured model name for memory updates."""
         config = get_memory_config()
-        model_name = self._model_name or config.model_name
-        return create_chat_model(name=model_name, thinking_enabled=False)
+        return self._model_name or config.model_name
 
     def _build_correction_hint(
         self,
@@ -353,13 +459,7 @@ class MemoryUpdater:
         user_id: str | None = None,
     ) -> bool:
         """Parse the model response, apply updates, and persist memory."""
-        response_text = _extract_text(response_content).strip()
-
-        if response_text.startswith("```"):
-            lines = response_text.split("\n")
-            response_text = "\n".join(lines[1:-1] if lines[-1] == "```" else lines[1:])
-
-        update_data = json.loads(response_text)
+        update_data = _parse_memory_update_response(response_content)
         # Deep-copy before in-place mutation so a subsequent save() failure
         # cannot corrupt the still-cached original object reference.
         updated_memory = self._apply_updates(copy.deepcopy(current_memory), update_data, thread_id)
@@ -374,6 +474,7 @@ class MemoryUpdater:
         correction_detected: bool = False,
         reinforcement_detected: bool = False,
         user_id: str | None = None,
+        deerflow_trace_id: str | None = None,
     ) -> bool:
         """Update memory asynchronously by delegating to the sync path.
 
@@ -391,6 +492,7 @@ class MemoryUpdater:
             correction_detected=correction_detected,
             reinforcement_detected=reinforcement_detected,
             user_id=user_id,
+            deerflow_trace_id=deerflow_trace_id,
         )
 
     def _do_update_memory_sync(
@@ -401,6 +503,7 @@ class MemoryUpdater:
         correction_detected: bool = False,
         reinforcement_detected: bool = False,
         user_id: str | None = None,
+        deerflow_trace_id: str | None = None,
     ) -> bool:
         """Pure-sync memory update using ``model.invoke()``.
 
@@ -410,33 +513,53 @@ class MemoryUpdater:
         lead agent) is never touched — no cross-loop connection reuse is
         possible.
         """
-        try:
-            prepared = self._prepare_update_prompt(
-                messages=messages,
-                agent_name=agent_name,
-                correction_detected=correction_detected,
-                reinforcement_detected=reinforcement_detected,
-                user_id=user_id,
-            )
-            if prepared is None:
-                return False
+        # Callers may run us in a ``threading.Timer`` thread or an
+        # ``_SYNC_MEMORY_UPDATER_EXECUTOR`` worker — neither propagates the
+        # request-trace ContextVar. Rebind it here from the explicitly plumbed
+        # ``deerflow_trace_id`` so ``TraceContextFilter`` attaches the correct
+        # trace id to every log record emitted below (including model-invoke
+        # tracing-callback logs). ``nullcontext`` when unknown avoids
+        # fabricating a bogus id via ``request_trace_context(None)``.
+        trace_ctx = request_trace_context(deerflow_trace_id) if deerflow_trace_id else nullcontext()
+        with trace_ctx:
+            try:
+                prepared = self._prepare_update_prompt(
+                    messages=messages,
+                    agent_name=agent_name,
+                    correction_detected=correction_detected,
+                    reinforcement_detected=reinforcement_detected,
+                    user_id=user_id,
+                )
+                if prepared is None:
+                    return False
 
-            current_memory, prompt = prepared
-            model = self._get_model()
-            response = model.invoke(prompt, config={"run_name": "memory_agent"})
-            return self._finalize_update(
-                current_memory=current_memory,
-                response_content=response.content,
-                thread_id=thread_id,
-                agent_name=agent_name,
-                user_id=user_id,
-            )
-        except json.JSONDecodeError as e:
-            logger.warning("Failed to parse LLM response for memory update: %s", e)
-            return False
-        except Exception as e:
-            logger.exception("Memory update failed: %s", e)
-            return False
+                current_memory, prompt = prepared
+                model_name = self._resolve_model_name()
+                model = self._get_model()
+                invoke_config: dict[str, Any] = {"run_name": "memory_agent"}
+                inject_langfuse_metadata(
+                    invoke_config,
+                    thread_id=thread_id,
+                    user_id=user_id,
+                    assistant_id="memory_agent",
+                    model_name=model_name,
+                    environment=os.environ.get("DEER_FLOW_ENV") or os.environ.get("ENVIRONMENT"),
+                    deerflow_trace_id=deerflow_trace_id,
+                )
+                response = model.invoke(prompt, config=invoke_config)
+                return self._finalize_update(
+                    current_memory=current_memory,
+                    response_content=response.content,
+                    thread_id=thread_id,
+                    agent_name=agent_name,
+                    user_id=user_id,
+                )
+            except json.JSONDecodeError as e:
+                logger.warning("Failed to parse LLM response for memory update: %s", e)
+                return False
+            except Exception as e:
+                logger.exception("Memory update failed: %s", e)
+                return False
 
     def update_memory(
         self,
@@ -446,6 +569,7 @@ class MemoryUpdater:
         correction_detected: bool = False,
         reinforcement_detected: bool = False,
         user_id: str | None = None,
+        deerflow_trace_id: str | None = None,
     ) -> bool:
         """Synchronously update memory using the sync LLM path.
 
@@ -484,6 +608,7 @@ class MemoryUpdater:
                     correction_detected=correction_detected,
                     reinforcement_detected=reinforcement_detected,
                     user_id=user_id,
+                    deerflow_trace_id=deerflow_trace_id,
                 )
                 return future.result()
             except Exception:
@@ -497,6 +622,7 @@ class MemoryUpdater:
             correction_detected=correction_detected,
             reinforcement_detected=reinforcement_detected,
             user_id=user_id,
+            deerflow_trace_id=deerflow_trace_id,
         )
 
     def _apply_updates(
@@ -554,7 +680,12 @@ class MemoryUpdater:
                     continue
                 normalized_content = raw_content.strip()
                 fact_key = _fact_content_key(normalized_content)
-                if fact_key is not None and fact_key in existing_fact_keys:
+                if fact_key is None:
+                    # Empty / whitespace-only content: skip it the same way the
+                    # non-string guard above does, instead of appending a blank
+                    # fact that violates the non-empty-content invariant.
+                    continue
+                if fact_key in existing_fact_keys:
                     continue
 
                 fact_entry = {
@@ -593,6 +724,7 @@ def update_memory_from_conversation(
     correction_detected: bool = False,
     reinforcement_detected: bool = False,
     user_id: str | None = None,
+    deerflow_trace_id: str | None = None,
 ) -> bool:
     """Convenience function to update memory from a conversation.
 
@@ -608,4 +740,4 @@ def update_memory_from_conversation(
         True if successful, False otherwise.
     """
     updater = MemoryUpdater()
-    return updater.update_memory(messages, thread_id, agent_name, correction_detected, reinforcement_detected, user_id=user_id)
+    return updater.update_memory(messages, thread_id, agent_name, correction_detected, reinforcement_detected, user_id=user_id, deerflow_trace_id=deerflow_trace_id)

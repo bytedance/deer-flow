@@ -211,6 +211,21 @@ class ThreadMetaRepository(ThreadMetaStore):
             row.updated_at = datetime.now(UTC)
             await session.commit()
 
+    async def update_owner(
+        self,
+        thread_id: str,
+        owner_user_id: str,
+        *,
+        user_id: str | None | _AutoSentinel = AUTO,
+    ) -> None:
+        """Move a thread metadata row to ``owner_user_id``."""
+        resolved_user_id = resolve_user_id(user_id, method_name="ThreadMetaRepository.update_owner")
+        async with self._sf() as session:
+            if not await self._check_ownership(session, thread_id, resolved_user_id):
+                return
+            await session.execute(update(ThreadMetaRow).where(ThreadMetaRow.thread_id == thread_id).values(user_id=owner_user_id, updated_at=datetime.now(UTC)))
+            await session.commit()
+
     async def delete(
         self,
         thread_id: str,

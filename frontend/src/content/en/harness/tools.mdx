@@ -3,7 +3,7 @@ title: Tools
 description: "The Lead Agent is a tool-calling agent. Tools are how it interacts with the world: searching the web, reading and writing files, running commands, delegating tasks, and presenting outputs to the user."
 ---
 
-import { Callout, Cards, Tabs } from "nextra/components";
+import { Callout, Tabs } from "nextra/components";
 
 # Tools
 
@@ -113,7 +113,7 @@ Community tools connect the agent to external services. They are configured in `
 
 ### Web search
 
-<Tabs items={["DuckDuckGo (default)", "Tavily", "Exa", "InfoQuest", "Firecrawl"]}>
+<Tabs items={["DuckDuckGo (default)", "Tavily", "Brave", "Exa", "InfoQuest", "Firecrawl", "GroundRoute"]}>
   <Tabs.Tab>
 ```yaml
 tools:
@@ -130,6 +130,17 @@ tools:
 High-quality search with structured results. Requires a [Tavily](https://tavily.com) API key.
 
 Install: `cd backend && uv add 'deerflow-harness[tavily]'`
+
+  </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+tools:
+  - use: deerflow.community.brave.tools:web_search_tool
+    api_key: $BRAVE_SEARCH_API_KEY
+```
+Results from Brave's independent index via the official [Brave Search API](https://brave.com/search/api/). Requires an API key. `max_results` is capped at 20.
+
+No extra dependency required.
 
   </Tabs.Tab>
   <Tabs.Tab>
@@ -162,11 +173,24 @@ Firecrawl-powered search and crawl. Requires a [Firecrawl](https://firecrawl.dev
 Install: `cd backend && uv add 'deerflow-harness[firecrawl]'`
 
   </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+tools:
+  - use: deerflow.community.groundroute.tools:web_search_tool
+    api_key: $GROUNDROUTE_API_KEY
+```
+GroundRoute is a meta search layer: one API in front of six engines (Serper, Brave, Exa, Tavily, Firecrawl, Perplexity). Routes each query to the cheapest engine that clears a quality bar and fails over if one is down. Pricing is gain-share, you keep about half of any cache savings.
+
+Requires a [GroundRoute](https://groundroute.ai) API key. Also supports `web_fetch`.
+
+Install: `cd backend && uv add 'deerflow-harness[groundroute]'`
+
+  </Tabs.Tab>
 </Tabs>
 
 ### Web fetch (page content extraction)
 
-<Tabs items={["Jina AI (default)", "Exa", "InfoQuest", "Firecrawl"]}>
+<Tabs items={["Jina AI (default)", "Browserless", "Exa", "InfoQuest", "Firecrawl", "GroundRoute"]}>
   <Tabs.Tab>
 ```yaml
 tools:
@@ -175,6 +199,17 @@ tools:
 ```
 Converts web pages to clean Markdown. Works without an API key at reduced rate
 limits.
+  </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+tools:
+  - name: web_fetch
+    group: web
+    use: deerflow.community.browserless.tools:web_fetch_tool
+    base_url: http://localhost:3032
+    # token: $BROWSERLESS_TOKEN # required for Browserless Cloud; omit for self-hosted (a $VAR that is unset fails startup)
+```
+Renders JavaScript-heavy pages with headless Chrome, then extracts readable Markdown.
   </Tabs.Tab>
   <Tabs.Tab>
 ```yaml
@@ -197,17 +232,72 @@ tools:
     api_key: $FIRECRAWL_API_KEY
 ```
   </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+tools:
+  - use: deerflow.community.groundroute.tools:web_fetch_tool
+    api_key: $GROUNDROUTE_API_KEY
+```
+  </Tabs.Tab>
 </Tabs>
 
-### Image search
+### Web capture (rendered screenshots)
 
 ```yaml
 tools:
-  - use: deerflow.community.image_search.tools:image_search_tool
-  # Or use InfoQuest:
-  # - use: deerflow.community.infoquest.tools:image_search_tool
-  #   api_key: $INFOQUEST_API_KEY
+  - name: web_capture
+    group: web
+    use: deerflow.community.browserless.tools:web_capture_tool
+    base_url: http://localhost:3032
+    # token: $BROWSERLESS_TOKEN # required for Browserless Cloud; omit for self-hosted (a $VAR that is unset fails startup)
+    output_format: png
+    full_page: true
+    viewport_width: 1280
+    viewport_height: 720
+    # allow_private_addresses: false # SSRF guard; keep false in production. Set true ONLY to capture internal targets.
 ```
+
+Captures rendered web pages with Browserless `/screenshot` and presents the image
+through DeerFlow's artifact system. This is useful for visual evidence, UI checks,
+and JavaScript-heavy pages where Markdown extraction is not enough. By default it
+refuses URLs that resolve to private, loopback, or cloud-metadata addresses;
+set `allow_private_addresses: true` only when you intentionally target an internal host.
+
+### Image search
+
+<Tabs items={["DuckDuckGo (default)", "InfoQuest", "Serper", "Brave"]}>
+  <Tabs.Tab>
+```yaml
+tools:
+  - use: deerflow.community.image_search.tools:image_search_tool
+```
+No API key required. Default configuration, good for development and general use.
+  </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+tools:
+  - use: deerflow.community.infoquest.tools:image_search_tool
+    api_key: $INFOQUEST_API_KEY
+```
+Requires an InfoQuest API key.
+  </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+tools:
+  - use: deerflow.community.serper.tools:image_search_tool
+    api_key: $SERPER_API_KEY
+```
+Google Images results via Serper. Requires a [Serper](https://serper.dev) API key. Reuses `SERPER_API_KEY` with the Serper `web_search` tool.
+  </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+tools:
+  - use: deerflow.community.brave.tools:image_search_tool
+    api_key: $BRAVE_SEARCH_API_KEY
+```
+Independent image results via Brave Image Search. Requires a [Brave Search API](https://brave.com/search/api/) key. Reuses `BRAVE_SEARCH_API_KEY` with the Brave `web_search` tool.
+  </Tabs.Tab>
+</Tabs>
 
 ## Tool groups
 

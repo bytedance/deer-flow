@@ -108,7 +108,10 @@ in a single run. The unified Gateway path defaults to `100` in
 `build_run_config` (see `backend/app/gateway/services.py`), which is a safer
 starting point for plan-mode or subagent-heavy runs. Clients can still set
 `recursion_limit` explicitly in the request body; increase it if you run deeply
-nested subagent graphs.
+nested subagent graphs. For safety, the Gateway clamps any client-supplied value
+to a configurable server ceiling (`max_recursion_limit` in `config.yaml`,
+default `1000`) so a single run cannot execute unbounded graph steps (runaway
+LLM cost / DoS); invalid or non-positive values fall back to the `100` default.
 
 **Configurable Options:**
 - `model_name` (string): Override the default model
@@ -228,10 +231,13 @@ Get current MCP server configurations.
 GET /api/mcp/config
 ```
 
+Requires an authenticated admin session. Sensitive env/header/OAuth secret
+values are masked in the response.
+
 **Response:**
 ```json
 {
-  "mcpServers": {
+  "mcp_servers": {
     "github": {
       "enabled": true,
       "type": "stdio",
@@ -255,10 +261,15 @@ PUT /api/mcp/config
 Content-Type: application/json
 ```
 
+Requires an authenticated admin session. API-managed `stdio` MCP servers may
+only use allowed executable names for `command` (default: `npx`, `uvx`). Set
+`DEER_FLOW_MCP_STDIO_COMMAND_ALLOWLIST` to a comma-separated list when a
+deployment needs additional trusted launchers.
+
 **Request Body:**
 ```json
 {
-  "mcpServers": {
+  "mcp_servers": {
     "github": {
       "enabled": true,
       "type": "stdio",
@@ -276,8 +287,38 @@ Content-Type: application/json
 **Response:**
 ```json
 {
+  "mcp_servers": {
+    "github": {
+      "enabled": true,
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "env": {
+        "GITHUB_TOKEN": "***"
+      },
+      "description": "GitHub operations"
+    }
+  }
+}
+```
+
+#### Reset MCP Tools Cache
+
+Clear cached MCP tools and persistent MCP sessions process-wide. This affects
+all threads and users in the current Gateway process. Tools are loaded again
+from configured MCP servers on the next agent run or tool lookup.
+
+```http
+POST /api/mcp/cache/reset
+```
+
+Requires an authenticated admin session.
+
+**Response:**
+```json
+{
   "success": true,
-  "message": "MCP configuration updated"
+  "message": "MCP tools cache reset. Tools will reload on next use."
 }
 ```
 
