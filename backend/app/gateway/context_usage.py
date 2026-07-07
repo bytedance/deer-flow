@@ -68,19 +68,90 @@ def _approx_text_tokens(text: str | None) -> int:
     return max(1, len(text) // 4)
 
 
-def _approx_tool_schema_tokens(tool: Any) -> int:
+def _is_exact_counting(app_config: Any) -> bool:
+    """True when ``token_usage.counting == "exact"`` (use the model tokenizer)."""
+    cfg = getattr(app_config, "token_usage", None)
+    method = getattr(cfg, "is_exact_counting", None)
+    return bool(method()) if callable(method) else False
+
+
+def _count_text(text: str | None, app_config: Any) -> int:
+    """Count tokens in ``text`` using the configured strategy.
+
+    ``approximate`` (default) keeps the fast network-free chars//4 heuristic.
+    ``exact`` delegates to the model tokenizer (tiktoken cl100k_base) via the
+    shared memory-module machinery — lazily loaded, cached, with a CJK-aware
+    char fallback when tiktoken is unavailable or the BPE download fails.
+    """
+    if not text:
+        return 0
+    if not _is_exact_counting(app_config):
+        return _approx_text_tokens(text)
+    try:
+        from deerflow.agents.memory.prompt import _count_tokens  # noqa: SLF001
+
+        return int(_count_tokens(text, use_tiktoken=True))
+    except Exception:
+        # tiktoken unavailable / import failure → keep the heuristic rather
+        # than zeroing the row (a single category failure must never collapse
+        # the whole breakdown).
+        return _approx_text_tokens(text)
+
+
+def _count_messages(messages: list[Any], app_config: Any) -> int:
+    """Count tokens across checkpoint messages using the configured strategy.
+
+    ``approximate`` reuses langchain's ``count_tokens_approximately`` (chars//4).
+    ``exact`` tokenizes each message's textual content with the model tokenizer
+    and sums per-message overhead (role tags etc.) via the same approximation,
+    so structured/image parts degrade gracefully instead of raising.
+    """
+    if not messages:
+        return 0
+    if not _is_exact_counting(app_config):
+        from langchain_core.messages.utils import count_tokens_approximately
+
+        return int(count_tokens_approximately(messages))
+
+    from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+
+    from deerflow.agents.memory.prompt import _count_tokens  # noqa: SLF001
+
+    total = 0
+    for msg in messages:
+        # Pull the primary textual content; non-string content (image parts,
+        # structured tool payloads) is skipped from the exact count rather
+        # than coerced — its contribution stays in the approximate overhead.
+        content = getattr(msg, "content", None)
+        parts = content if isinstance(content, list) else [content]
+        for part in parts:
+            text = None
+            if isinstance(part, str):
+                text = part
+            elif isinstance(part, dict):
+                text = part.get("text") if isinstance(part.get("text"), str) else None
+            if text:
+                total += int(_count_tokens(text, use_tiktoken=True))
+        # Per-message framing overhead (role tag, delimiters). Bounded 4-token
+        # bump keeps the total commensurate with the approximate baseline.
+        if isinstance(msg, (AIMessage, HumanMessage, SystemMessage, ToolMessage)):
+            total += 4
+    return total
+
+
+def _approx_tool_schema_tokens(tool: Any, app_config: Any | None = None) -> int:
     """Approximate the tokens a tool's OpenAI schema occupies in the prompt."""
     try:
         from langchain_core.utils.function_calling import convert_to_openai_tool
 
         schema = convert_to_openai_tool(tool)
-        return _approx_text_tokens(json.dumps(schema, ensure_ascii=False))
+        return _count_text(json.dumps(schema, ensure_ascii=False), app_config)
     except Exception:
         # Fall back to a description-only estimate so a single broken tool
         # never causes the whole breakdown to collapse.
         name = getattr(tool, "name", "") or ""
         description = getattr(tool, "description", "") or ""
-        return _approx_text_tokens(f"{name}\n{description}")
+        return _count_text(f"{name}\n{description}", app_config)
 
 
 async def _resolve_thread_model_name(run_store: Any, thread_id: str, app_config: Any) -> str | None:
@@ -102,10 +173,8 @@ async def _resolve_thread_model_name(run_store: Any, thread_id: str, app_config:
     return models[0].name if models else None
 
 
-async def _count_message_tokens(checkpointer: Any, thread_id: str) -> int:
+async def _count_message_tokens(checkpointer: Any, thread_id: str, app_config: Any | None = None) -> int:
     """Approximate the tokens of the messages currently in the checkpoint."""
-    from langchain_core.messages.utils import count_tokens_approximately
-
     try:
         checkpoint_tuple = await checkpointer.aget_tuple({"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}})
     except Exception:
@@ -119,14 +188,14 @@ async def _count_message_tokens(checkpointer: Any, thread_id: str) -> int:
     messages = channel_values.get("messages") or []
     if not messages:
         return 0
-    return int(count_tokens_approximately(messages))
+    return _count_messages(messages, app_config)
 
 
 def _count_skills_section(app_config: Any) -> int:
     try:
         from deerflow.agents.lead_agent.prompt import get_skills_prompt_section
 
-        return _approx_text_tokens(get_skills_prompt_section(app_config=app_config))
+        return _count_text(get_skills_prompt_section(app_config=app_config), app_config)
     except Exception:
         logger.warning("Failed to render skills prompt section", exc_info=True)
         return 0
@@ -141,22 +210,45 @@ def _count_subagent_section(app_config: Any) -> int:
         from deerflow.agents.lead_agent.prompt import _build_subagent_section  # noqa: SLF001
 
         max_concurrent = getattr(subagents_cfg, "max_concurrent_subagents", 3)
-        return _approx_text_tokens(_build_subagent_section(max_concurrent, app_config=app_config))
+        return _count_text(_build_subagent_section(max_concurrent, app_config=app_config), app_config)
     except Exception:
         logger.warning("Failed to render subagent prompt section", exc_info=True)
         return 0
 
 
-def _count_system_prompt(app_config: Any) -> int:
-    """System prompt tokens *excluding* skills/subagent/deferred-tools sections.
+def _compute_deferred_tool_names(app_config: Any) -> frozenset[str]:
+    """Derive the deferred tool-name set from config + MCP cache.
 
-    Those breakdown items get their own row, so we render the full prompt and
-    subtract the per-row pieces to avoid double-counting.
+    Mirrors :func:`deerflow.tools.builtins.tool_search.build_deferred_tool_setup`:
+    when ``tool_search.enabled`` is on, every MCP-sourced tool is deferred;
+    otherwise the set is empty. The deferred set is produced at agent-build
+    time as a build-time closure (no global registry / ContextVar), so the
+    request path recomputes it deterministically from the same inputs.
+    """
+    ts_cfg = getattr(app_config, "tool_search", None)
+    if not bool(getattr(ts_cfg, "enabled", False)):
+        return frozenset()
+    try:
+        from deerflow.mcp.cache import get_cached_mcp_tools
+        from deerflow.tools.mcp_metadata import is_mcp_tool
+
+        return frozenset(t.name for t in get_cached_mcp_tools() if is_mcp_tool(t))
+    except Exception:
+        return frozenset()
+
+
+def _count_system_prompt(app_config: Any) -> int:
+    """System prompt tokens *excluding* skills/subagent sections.
+
+    Skills and the subagent section each get their own breakdown row, so we
+    render the full prompt and subtract those pieces to avoid double-counting.
+    The ``<available-deferred-tools>`` section has no row of its own, so it is
+    kept *inside* the system-prompt count by passing the real deferred-name
+    set into ``apply_prompt_template``.
     """
     try:
         from deerflow.agents.lead_agent.prompt import (
             apply_prompt_template,
-            get_deferred_tools_prompt_section,
             get_skills_prompt_section,
         )
 
@@ -164,19 +256,23 @@ def _count_system_prompt(app_config: Any) -> int:
         subagent_enabled = bool(getattr(subagents_cfg, "enabled", False))
         max_concurrent = getattr(subagents_cfg, "max_concurrent_subagents", 3) if subagents_cfg else 3
 
+        # Render the FULL prompt including the deferred-tools names section;
+        # that section has no row of its own, so it must stay inside the
+        # system_prompt count.
+        deferred_names = _compute_deferred_tool_names(app_config)
         full = apply_prompt_template(
             subagent_enabled=subagent_enabled,
             max_concurrent_subagents=max_concurrent,
             app_config=app_config,
+            deferred_names=deferred_names,
         )
-        full_tokens = _approx_text_tokens(full)
+        full_tokens = _count_text(full, app_config)
 
         # Pieces accounted for under their own breakdown rows.
-        skills_tokens = _approx_text_tokens(get_skills_prompt_section(app_config=app_config))
-        deferred_section_tokens = _approx_text_tokens(get_deferred_tools_prompt_section(app_config=app_config))
+        skills_tokens = _count_text(get_skills_prompt_section(app_config=app_config), app_config)
         subagent_section_tokens = _count_subagent_section(app_config) if subagent_enabled else 0
 
-        return max(0, full_tokens - skills_tokens - deferred_section_tokens - subagent_section_tokens)
+        return max(0, full_tokens - skills_tokens - subagent_section_tokens)
     except Exception:
         logger.warning("Failed to render system prompt for token breakdown", exc_info=True)
         return 0
@@ -186,7 +282,7 @@ def _count_memory_files(app_config: Any) -> int:
     try:
         from deerflow.agents.lead_agent.prompt import _get_memory_context  # noqa: SLF001
 
-        return _approx_text_tokens(_get_memory_context(app_config=app_config))
+        return _count_text(_get_memory_context(app_config=app_config), app_config)
     except Exception:
         logger.warning("Failed to render memory context", exc_info=True)
         return 0
@@ -195,32 +291,21 @@ def _count_memory_files(app_config: Any) -> int:
 def _split_tools(app_config: Any, model_name: str | None) -> tuple[int, int, int, int]:
     """Return (system_tools_active, mcp_tools_active, system_tools_deferred, mcp_tools_deferred).
 
-    Active vs deferred is determined by the tool_search deferred registry.
-    System vs MCP is determined by name-matching against the MCP cache —
-    :func:`deerflow.mcp.cache.get_cached_mcp_tools` returns the same snapshot
-    that :func:`deerflow.tools.get_available_tools` itself consumes
-    internally, so a single cache read is enough to classify every tool.
-    Skipping the redundant ``ExtensionsConfig.from_file()`` here avoids extra
-    file I/O and INFO-level log noise on every ``GET /token-usage`` poll.
+    A tool is "deferred" exactly when ``tool_search.enabled`` is on AND it is
+    MCP-sourced — mirroring
+    :func:`deerflow.tools.builtins.tool_search.build_deferred_tool_setup`, which
+    defers ``[t for t in filtered_tools if is_mcp_tool(t)]`` when enabled. The
+    MCP-source tag is written by :func:`deerflow.tools.get_available_tools` via
+    :func:`deerflow.tools.mcp_metadata.tag_mcp_tool`, so ``is_mcp_tool(tool)``
+    classifies the returned list directly — no separate registry lookup or MCP
+    name-snapshot is needed.
     """
     try:
-        from deerflow.tools.builtins.tool_search import get_deferred_registry
+        from deerflow.tools.mcp_metadata import is_mcp_tool
         from deerflow.tools.tools import get_available_tools
 
         subagents_cfg = getattr(app_config, "subagents", None)
         subagent_enabled = bool(getattr(subagents_cfg, "enabled", False))
-
-        # Snapshot MCP names BEFORE `get_available_tools` so we have a stable
-        # set to classify against. The cache is mtime-invalidated so this is
-        # cheap on a hit; if MCP is currently disabled the cache simply
-        # returns an empty list.
-        mcp_names: set[str] = set()
-        try:
-            from deerflow.mcp.cache import get_cached_mcp_tools
-
-            mcp_names = {t.name for t in get_cached_mcp_tools() if getattr(t, "name", None)}
-        except Exception:
-            mcp_names = set()
 
         all_tools = get_available_tools(
             model_name=model_name,
@@ -228,28 +313,27 @@ def _split_tools(app_config: Any, model_name: str | None) -> tuple[int, int, int
             app_config=app_config,
         )
 
-        deferred_registry = get_deferred_registry()
-        deferred_names: set[str] = deferred_registry.deferred_names if deferred_registry is not None else set()
+        # deferred ⟺ (tool_search enabled AND MCP-sourced), per build_deferred_tool_setup.
+        ts_cfg = getattr(app_config, "tool_search", None)
+        tool_search_enabled = bool(getattr(ts_cfg, "enabled", False))
 
         system_active = 0
         mcp_active = 0
         system_deferred = 0
         mcp_deferred = 0
         for tool in all_tools:
-            name = getattr(tool, "name", None) or ""
-            tokens = _approx_tool_schema_tokens(tool)
-            is_mcp = name in mcp_names
-            is_deferred = name in deferred_names
+            tokens = _approx_tool_schema_tokens(tool, app_config)
+            is_mcp = is_mcp_tool(tool)
+            is_deferred = tool_search_enabled and is_mcp
             if is_deferred:
                 if is_mcp:
                     mcp_deferred += tokens
                 else:
                     system_deferred += tokens
+            elif is_mcp:
+                mcp_active += tokens
             else:
-                if is_mcp:
-                    mcp_active += tokens
-                else:
-                    system_active += tokens
+                system_active += tokens
         return system_active, mcp_active, system_deferred, mcp_deferred
     except Exception:
         logger.warning("Failed to enumerate tools for context-usage breakdown", exc_info=True)
@@ -354,7 +438,7 @@ async def build_context_usage(request: Request, thread_id: str, run_store: Any) 
         app_config = None
 
     try:
-        messages_tokens = await _count_message_tokens(checkpointer, thread_id)
+        messages_tokens = await _count_message_tokens(checkpointer, thread_id, app_config)
     except Exception:
         return None
 

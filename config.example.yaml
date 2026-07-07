@@ -38,6 +38,14 @@ logging:
 # and shows usage metadata in the workspace UI when providers return it.
 token_usage:
   enabled: true
+  # Token-counting strategy for the context-usage indicator breakdown.
+  #   "approximate" (default) — network-free chars//4 heuristic; fast, no deps.
+  #   "exact"                 — model tokenizer (tiktoken cl100k_base); lazily
+  #                             loaded + cached, but the first call may download
+  #                             BPE data from a public endpoint. Falls back to a
+  #                             CJK-aware char estimate if tiktoken is unavailable.
+  # Only affects the context-usage breakdown rows, not provider billing.
+  counting: approximate
 
 # ============================================================================
 # Token Budget — Per-run token limits

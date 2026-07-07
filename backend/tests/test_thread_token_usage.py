@@ -316,3 +316,183 @@ def test_summarization_trigger_returns_none_when_disabled():
         ),
     )
     assert context_usage._summarization_trigger_tokens(config) is None
+
+
+# ---------------------------------------------------------------------------
+# Tests for deferred-tool derivation + tool/prompt helpers.
+#
+# These exercise the code paths the original PR left untested: the lazy imports
+# inside `_split_tools` / `_count_system_prompt` previously raised
+# (ImportError / TypeError) and were swallowed by the surrounding try/except,
+# silently zeroing whole breakdown rows.
+# ---------------------------------------------------------------------------
+
+
+def _make_tool(name: str, *, mcp: bool = False) -> SimpleNamespace:
+    tool = SimpleNamespace(name=name, description=f"tool {name}")
+    tool.metadata = {"deerflow_mcp": True} if mcp else {}
+    # A short, deterministic schema-ish body so _approx_tool_schema_tokens
+    # falls into its except branch and counts name + description.
+    return tool
+
+
+def test_compute_deferred_tool_names_empty_when_disabled(monkeypatch):
+    """tool_search disabled -> no deferred tools, regardless of MCP cache."""
+    import deerflow.tools.mcp_metadata as mcp_meta  # noqa: F401
+
+    monkeypatch.setattr(
+        "deerflow.mcp.cache.get_cached_mcp_tools",
+        lambda: [_make_tool("mcp_a", mcp=True), _make_tool("mcp_b", mcp=True)],
+    )
+    config = SimpleNamespace(tool_search=SimpleNamespace(enabled=False))
+    assert context_usage._compute_deferred_tool_names(config) == frozenset()
+
+
+def test_compute_deferred_tool_names_picks_mcp_when_enabled(monkeypatch):
+    monkeypatch.setattr(
+        "deerflow.mcp.cache.get_cached_mcp_tools",
+        lambda: [_make_tool("mcp_a", mcp=True), _make_tool("mcp_b", mcp=True)],
+    )
+    config = SimpleNamespace(tool_search=SimpleNamespace(enabled=True))
+    assert context_usage._compute_deferred_tool_names(config) == frozenset({"mcp_a", "mcp_b"})
+
+
+def test_split_tools_classifies_deferred_mcp_when_enabled(monkeypatch):
+    """With tool_search on, MCP tools go to *_deferred; system tools to system_tools."""
+    monkeypatch.setattr(
+        "deerflow.tools.tools.get_available_tools",
+        lambda **_: [_make_tool("bash", mcp=False), _make_tool("mcp_a", mcp=True)],
+    )
+    config = SimpleNamespace(
+        subagents=SimpleNamespace(enabled=False),
+        tool_search=SimpleNamespace(enabled=True),
+    )
+    system_active, mcp_active, system_deferred, mcp_deferred = context_usage._split_tools(config, None)
+    assert system_active > 0  # bash counted as active system tool
+    assert mcp_active == 0  # no MCP tool is active — all are deferred
+    assert system_deferred == 0  # only MCP tools can be deferred
+    assert mcp_deferred > 0  # mcp_a counted as deferred MCP tool
+
+
+def test_split_tools_classifies_mcp_active_when_disabled(monkeypatch):
+    """With tool_search off, MCP tools are NOT deferred — they bind as active."""
+    monkeypatch.setattr(
+        "deerflow.tools.tools.get_available_tools",
+        lambda **_: [_make_tool("mcp_a", mcp=True)],
+    )
+    config = SimpleNamespace(
+        subagents=SimpleNamespace(enabled=False),
+        tool_search=SimpleNamespace(enabled=False),
+    )
+    system_active, mcp_active, system_deferred, mcp_deferred = context_usage._split_tools(config, None)
+    assert mcp_active > 0
+    assert mcp_deferred == 0
+
+
+def test_count_system_prompt_returns_nonzero(monkeypatch):
+    """Regression: the broken kwarg raised TypeError, swallowed to 0.
+
+    With the fix, ``apply_prompt_template`` is called with the correct
+    ``deferred_names`` argument and the row is non-zero for any non-empty
+    prompt.
+    """
+
+    def _fake_apply(**kwargs):
+        # Ensure deferred_names is accepted (was the regression trigger).
+        assert "deferred_names" in kwargs
+        return "x" * 400  # 400 chars -> 100 tokens
+
+    monkeypatch.setattr(
+        "deerflow.agents.lead_agent.prompt.apply_prompt_template",
+        _fake_apply,
+    )
+    monkeypatch.setattr(
+        "deerflow.agents.lead_agent.prompt.get_skills_prompt_section",
+        lambda **_: "",
+    )
+    config = SimpleNamespace(
+        subagents=None,
+        tool_search=SimpleNamespace(enabled=False),
+    )
+    tokens = context_usage._count_system_prompt(config)
+    assert tokens == 100  # would be 0 if the TypeError were still swallowed
+
+
+# ---------------------------------------------------------------------------
+# Token-counting strategy dispatch (approximate vs exact / model tokenizer).
+# ---------------------------------------------------------------------------
+
+
+def _config_with_counting(counting: str | None) -> SimpleNamespace:
+    from deerflow.config.token_usage_config import TokenUsageConfig
+
+    return SimpleNamespace(token_usage=TokenUsageConfig(counting=counting) if counting is not None else None)
+
+
+def test_is_exact_counting_reads_config():
+    assert context_usage._is_exact_counting(_config_with_counting("exact")) is True
+    assert context_usage._is_exact_counting(_config_with_counting("approximate")) is False
+    # Missing token_usage block -> approximate (safe default).
+    assert context_usage._is_exact_counting(SimpleNamespace()) is False
+    # None app_config -> approximate.
+    assert context_usage._is_exact_counting(None) is False
+
+
+def test_count_text_approximate_uses_chars_div_4():
+    config = _config_with_counting("approximate")
+    # 12 chars -> 3 tokens.
+    assert context_usage._count_text("hello world!", config) == 3
+    assert context_usage._count_text("", config) == 0
+    assert context_usage._count_text(None, config) == 0
+
+
+def test_count_text_exact_delegates_to_model_tokenizer(monkeypatch):
+    """In exact mode ``_count_text`` routes through the tiktoken-backed counter."""
+    calls: list[str] = []
+
+    def _fake_count(text, encoding_name="cl100k_base", *, use_tiktoken=True):
+        calls.append(text)
+        return 42  # deterministic sentinel
+
+    monkeypatch.setattr("deerflow.agents.memory.prompt._count_tokens", _fake_count)
+    config = _config_with_counting("exact")
+
+    assert context_usage._count_text("你好世界", config) == 42
+    assert calls == ["你好世界"]
+
+
+def test_count_text_exact_falls_back_when_tokenizer_unavailable(monkeypatch):
+    """A tokenizer failure must degrade to the heuristic, not zero."""
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("tiktoken exploded")
+
+    monkeypatch.setattr("deerflow.agents.memory.prompt._count_tokens", _boom)
+    config = _config_with_counting("exact")
+    # 8 chars -> 2 tokens (heuristic fallback), NOT 0.
+    assert context_usage._count_text("abcdefgh", config) == 2
+
+
+def test_count_messages_approximate_uses_langchain_heuristic(monkeypatch):
+    config = _config_with_counting("approximate")
+    captured: list = []
+
+    def _fake_approx(messages):
+        captured.append(messages)
+        return 7
+
+    monkeypatch.setattr("langchain_core.messages.utils.count_tokens_approximately", _fake_approx)
+    msgs = [SimpleNamespace(content="hi")]
+    assert context_usage._count_messages(msgs, config) == 7
+    assert captured == [msgs]
+
+
+def test_count_messages_exact_tokenizes_text(monkeypatch):
+    monkeypatch.setattr("deerflow.agents.memory.prompt._count_tokens", lambda text, **_: len(text))
+    config = _config_with_counting("exact")
+    # Each message contributes its text length + 4 framing tokens.
+    from langchain_core.messages import HumanMessage, SystemMessage
+
+    msgs = [SystemMessage(content="sys"), HumanMessage(content="hello")]
+    # "sys" (3) + 4 + "hello" (5) + 4 = 16
+    assert context_usage._count_messages(msgs, config) == 16
