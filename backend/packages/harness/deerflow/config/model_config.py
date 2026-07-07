@@ -41,6 +41,16 @@ class ModelConfig(BaseModel):
             "percentage."
         ),
     )
+    stream_chunk_timeout: float | None = Field(
+        default=None,
+        description=(
+            "Maximum seconds to wait between successive streaming chunks before "
+            "langchain-openai raises StreamChunkTimeoutError. None means use the "
+            "factory default (240s for OpenAI-compatible clients). Tune higher for "
+            "reasoning models with long thinking pauses; lower for latency-sensitive "
+            "interactive endpoints. Has no effect on non-OpenAI-compatible providers."
+        ),
+    )
     thinking: dict | None = Field(
         default_factory=lambda: None,
         description=(

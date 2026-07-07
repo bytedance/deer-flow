@@ -103,6 +103,23 @@ def test_raises_when_model_not_found(monkeypatch):
         factory_module.create_chat_model(name="ghost-model")
 
 
+def test_pricing_metadata_never_reaches_the_provider_client(monkeypatch):
+    """`models[*].pricing` is console-only metadata (issue: ChatOpenAI forwards
+    unknown kwargs into the completion request payload, so an un-stripped
+    `pricing` block breaks every live LLM call with
+    ``Completions.create() got an unexpected keyword argument 'pricing'``)."""
+    model = _make_model("priced")
+    # ModelConfig is extra="allow" — pricing rides along as an extra field.
+    model.pricing = {"currency": "CNY", "input_per_million": 8, "output_per_million": 32, "input_cache_hit_per_million": 0.8}
+    cfg = _make_app_config([model])
+    _patch_factory(monkeypatch, cfg)
+
+    FakeChatModel.captured_kwargs = {}
+    factory_module.create_chat_model(name="priced")
+
+    assert "pricing" not in FakeChatModel.captured_kwargs
+
+
 def test_appends_all_tracing_callbacks(monkeypatch):
     cfg = _make_app_config([_make_model("alpha")])
     _patch_factory(monkeypatch, cfg)
@@ -566,11 +583,11 @@ def test_thinking_shortcut_not_leaked_into_model_when_disabled(monkeypatch):
 def test_openai_compatible_provider_passes_base_url(monkeypatch):
     """OpenAI-compatible providers like MiniMax should pass base_url through to the model."""
     model = ModelConfig(
-        name="minimax-m2.5",
-        display_name="MiniMax M2.5",
+        name="minimax-m3",
+        display_name="MiniMax M3",
         description=None,
         use="langchain_openai:ChatOpenAI",
-        model="MiniMax-M2.5",
+        model="MiniMax-M3",
         base_url="https://api.minimax.io/v1",
         api_key="test-key",
         max_tokens=4096,
@@ -590,9 +607,9 @@ def test_openai_compatible_provider_passes_base_url(monkeypatch):
 
     monkeypatch.setattr(factory_module, "resolve_class", lambda path, base: CapturingModel)
 
-    factory_module.create_chat_model(name="minimax-m2.5")
+    factory_module.create_chat_model(name="minimax-m3")
 
-    assert captured.get("model") == "MiniMax-M2.5"
+    assert captured.get("model") == "MiniMax-M3"
     assert captured.get("base_url") == "https://api.minimax.io/v1"
     assert captured.get("api_key") == "test-key"
     assert captured.get("temperature") == 1.0
@@ -603,11 +620,11 @@ def test_openai_compatible_provider_passes_base_url(monkeypatch):
 def test_openai_compatible_provider_respects_explicit_stream_usage(monkeypatch):
     """Explicit stream_usage should not be overwritten by the factory default."""
     model = ModelConfig(
-        name="minimax-m2.5",
-        display_name="MiniMax M2.5",
+        name="minimax-m3",
+        display_name="MiniMax M3",
         description=None,
         use="langchain_openai:ChatOpenAI",
-        model="MiniMax-M2.5",
+        model="MiniMax-M3",
         base_url="https://api.minimax.io/v1",
         api_key="test-key",
         stream_usage=False,
@@ -626,7 +643,7 @@ def test_openai_compatible_provider_respects_explicit_stream_usage(monkeypatch):
 
     monkeypatch.setattr(factory_module, "resolve_class", lambda path, base: CapturingModel)
 
-    factory_module.create_chat_model(name="minimax-m2.5")
+    factory_module.create_chat_model(name="minimax-m3")
 
     assert captured.get("stream_usage") is False
 
@@ -695,11 +712,11 @@ def test_non_openai_provider_does_not_receive_stream_usage_default(monkeypatch):
 def test_openai_compatible_provider_multiple_models(monkeypatch):
     """Multiple models from the same OpenAI-compatible provider should coexist."""
     m1 = ModelConfig(
-        name="minimax-m2.5",
-        display_name="MiniMax M2.5",
+        name="minimax-m3",
+        display_name="MiniMax M3",
         description=None,
         use="langchain_openai:ChatOpenAI",
-        model="MiniMax-M2.5",
+        model="MiniMax-M3",
         base_url="https://api.minimax.io/v1",
         api_key="test-key",
         temperature=1.0,
@@ -707,15 +724,15 @@ def test_openai_compatible_provider_multiple_models(monkeypatch):
         supports_thinking=False,
     )
     m2 = ModelConfig(
-        name="minimax-m2.5-highspeed",
-        display_name="MiniMax M2.5 Highspeed",
+        name="minimax-m2.7-highspeed",
+        display_name="MiniMax M2.7 Highspeed",
         description=None,
         use="langchain_openai:ChatOpenAI",
-        model="MiniMax-M2.5-highspeed",
+        model="MiniMax-M2.7-highspeed",
         base_url="https://api.minimax.io/v1",
         api_key="test-key",
         temperature=1.0,
-        supports_vision=True,
+        supports_vision=False,  # M2.7 is text-only; M3 supports vision
         supports_thinking=False,
     )
     cfg = _make_app_config([m1, m2])
@@ -731,12 +748,12 @@ def test_openai_compatible_provider_multiple_models(monkeypatch):
     monkeypatch.setattr(factory_module, "resolve_class", lambda path, base: CapturingModel)
 
     # Create first model
-    factory_module.create_chat_model(name="minimax-m2.5")
-    assert captured.get("model") == "MiniMax-M2.5"
+    factory_module.create_chat_model(name="minimax-m3")
+    assert captured.get("model") == "MiniMax-M3"
 
     # Create second model
-    factory_module.create_chat_model(name="minimax-m2.5-highspeed")
-    assert captured.get("model") == "MiniMax-M2.5-highspeed"
+    factory_module.create_chat_model(name="minimax-m2.7-highspeed")
+    assert captured.get("model") == "MiniMax-M2.7-highspeed"
 
 
 # ---------------------------------------------------------------------------
@@ -1069,3 +1086,263 @@ def test_no_duplicate_kwarg_when_reasoning_effort_in_config_and_thinking_disable
 
     # kwargs (runtime) takes precedence: thinking-disabled path sets reasoning_effort=minimal
     assert captured.get("reasoning_effort") == "minimal"
+
+
+# ---------------------------------------------------------------------------
+# stream_chunk_timeout default injection (issue #3189)
+# ---------------------------------------------------------------------------
+
+
+def test_stream_chunk_timeout_defaults_to_240_for_openai_compatible_model(monkeypatch):
+    """OpenAI-compatible clients must receive a generous 240s chunk-gap budget by
+    default, so reasoning models with long thinking pauses don't trip
+    langchain-openai's aggressive 60s built-in default.
+    """
+    model = _make_model(use="langchain_openai:ChatOpenAI")
+    cfg = _make_app_config([model])
+
+    captured: dict = {}
+
+    class CapturingModel(FakeChatModel):
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            BaseChatModel.__init__(self, **kwargs)
+
+    _patch_factory(monkeypatch, cfg, model_class=CapturingModel)
+    factory_module.create_chat_model(name="test-model")
+
+    assert captured.get("stream_chunk_timeout") == 240.0
+
+
+def test_stream_chunk_timeout_user_value_not_overridden(monkeypatch):
+    """If the user explicitly sets stream_chunk_timeout in config.yaml, the
+    factory must not overwrite it with the default — even if the value is
+    smaller (60s) or larger (600s) than the default.
+    """
+    model = ModelConfig(
+        name="custom-timeout-model",
+        display_name="Custom Timeout",
+        description=None,
+        use="langchain_openai:ChatOpenAI",
+        model="gpt-4o-mini",
+        stream_chunk_timeout=60.0,  # user-set explicit value
+    )
+    cfg = _make_app_config([model])
+
+    captured: dict = {}
+
+    class CapturingModel(FakeChatModel):
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            BaseChatModel.__init__(self, **kwargs)
+
+    _patch_factory(monkeypatch, cfg, model_class=CapturingModel)
+    factory_module.create_chat_model(name="custom-timeout-model")
+
+    assert captured.get("stream_chunk_timeout") == 60.0
+
+
+def test_stream_chunk_timeout_not_injected_for_non_openai_provider(monkeypatch):
+    """Only langchain_openai:ChatOpenAI receives the default. Anthropic / Vertex /
+    other clients that don't understand this kwarg must not be polluted with it.
+    """
+    model = _make_model(use="langchain_anthropic:ChatAnthropic")
+    cfg = _make_app_config([model])
+
+    captured: dict = {}
+
+    class CapturingModel(FakeChatModel):
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            BaseChatModel.__init__(self, **kwargs)
+
+    _patch_factory(monkeypatch, cfg, model_class=CapturingModel)
+    factory_module.create_chat_model(name="test-model")
+
+    assert "stream_chunk_timeout" not in captured
+
+
+def test_stream_chunk_timeout_default_constant_is_documented():
+    """Lock the default value at 240s. If we ever want to change this, the
+    deliberate update here (and the docstring on _apply_stream_chunk_timeout_default)
+    forces a paired review of the rationale comment block above the constant.
+    """
+    assert factory_module._DEFAULT_STREAM_CHUNK_TIMEOUT_SECONDS == 240.0
+
+
+def test_stream_chunk_timeout_popped_for_non_openai_provider_when_user_set_it(monkeypatch):
+    """Regression for CR feedback on issue #3189: if a user accidentally sets
+    ``stream_chunk_timeout`` on a non-OpenAI provider, the factory must drop
+    the kwarg before forwarding it to the model constructor. Otherwise the
+    third-party client raises ``TypeError: unexpected keyword argument
+    'stream_chunk_timeout'`` because the parameter is specific to
+    ``langchain_openai:ChatOpenAI``.
+    """
+    model = ModelConfig(
+        name="anthropic-with-stray-timeout",
+        display_name="Anthropic With Stray Timeout",
+        description=None,
+        use="langchain_anthropic:ChatAnthropic",
+        model="claude-sonnet-4",
+        stream_chunk_timeout=60.0,  # user-set on a non-OpenAI provider — must be dropped
+    )
+    cfg = _make_app_config([model])
+
+    captured: dict = {}
+
+    class CapturingModel(FakeChatModel):
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            BaseChatModel.__init__(self, **kwargs)
+
+    _patch_factory(monkeypatch, cfg, model_class=CapturingModel)
+    factory_module.create_chat_model(name="anthropic-with-stray-timeout")
+
+    assert "stream_chunk_timeout" not in captured
+
+
+# ---------------------------------------------------------------------------
+# OpenAI base_url normalization + unknown-key warning
+# (regression: api_base copied onto a ChatOpenAI model crashed at request time)
+# ---------------------------------------------------------------------------
+
+
+def _make_model_with_extras(name="extra-model", *, use="langchain_openai:ChatOpenAI", **extras):
+    """Build a ModelConfig with arbitrary extra keys (ModelConfig is extra='allow')."""
+    return ModelConfig(
+        name=name,
+        display_name=name,
+        description=None,
+        use=use,
+        model=name,
+        supports_thinking=False,
+        supports_reasoning_effort=False,
+        supports_vision=False,
+        **extras,
+    )
+
+
+def test_api_base_normalized_to_base_url_for_chatopenai(monkeypatch):
+    """A config that sets api_base on a ChatOpenAI model should reach the constructor as base_url."""
+    cfg = _make_app_config([_make_model_with_extras("oai", api_base="http://localhost:4001/v1")])
+    _patch_factory(monkeypatch, cfg)
+
+    FakeChatModel.captured_kwargs = {}
+    factory_module.create_chat_model(name="oai")
+
+    assert FakeChatModel.captured_kwargs.get("base_url") == "http://localhost:4001/v1"
+    assert "api_base" not in FakeChatModel.captured_kwargs
+
+
+def test_base_url_takes_precedence_when_both_set(monkeypatch):
+    """When both base_url and api_base are present, base_url wins and api_base is dropped."""
+    cfg = _make_app_config([_make_model_with_extras("oai", base_url="http://canonical/v1", api_base="http://alias/v1")])
+    _patch_factory(monkeypatch, cfg)
+
+    FakeChatModel.captured_kwargs = {}
+    factory_module.create_chat_model(name="oai")
+
+    assert FakeChatModel.captured_kwargs.get("base_url") == "http://canonical/v1"
+    assert "api_base" not in FakeChatModel.captured_kwargs
+
+
+def test_api_base_not_normalized_for_non_openai_class(monkeypatch):
+    """api_base must be left untouched for model classes that are not the OpenAI-compatible family."""
+    cfg = _make_app_config([_make_model_with_extras("ds", use="deerflow.models.patched_deepseek:PatchedChatDeepSeek", api_base="http://ds/v3")])
+    _patch_factory(monkeypatch, cfg)
+
+    FakeChatModel.captured_kwargs = {}
+    factory_module.create_chat_model(name="ds")
+
+    # PatchedChatDeepSeek legitimately takes api_base — it must pass through unchanged.
+    assert FakeChatModel.captured_kwargs.get("api_base") == "http://ds/v3"
+    assert "base_url" not in FakeChatModel.captured_kwargs
+
+
+def test_no_op_when_neither_base_url_nor_api_base(monkeypatch):
+    """Normalization is a no-op when the model declares no endpoint override."""
+    cfg = _make_app_config([_make_model("plain")])
+    _patch_factory(monkeypatch, cfg)
+
+    FakeChatModel.captured_kwargs = {}
+    factory_module.create_chat_model(name="plain")
+
+    assert "base_url" not in FakeChatModel.captured_kwargs
+    assert "api_base" not in FakeChatModel.captured_kwargs
+
+
+def test_unknown_config_key_emits_warning(monkeypatch, caplog):
+    """A typo'd config key should produce a heads-up warning naming the offending key.
+
+    Uses the real ChatOpenAI class (not the stub) so the field/alias schema is realistic — the
+    warning's whole value is that it matches what LangChain will actually divert to model_kwargs.
+    """
+    import logging
+
+    from langchain_openai import ChatOpenAI
+
+    cfg = _make_app_config([_make_model_with_extras("typo", api_key="sk-test", definitely_not_a_real_kwarg=True)])
+    _patch_factory(monkeypatch, cfg, model_class=ChatOpenAI)
+
+    with caplog.at_level(logging.WARNING, logger=factory_module.__name__):
+        factory_module.create_chat_model(name="typo")
+
+    assert any("definitely_not_a_real_kwarg" in rec.message for rec in caplog.records)
+
+
+def test_known_config_keys_emit_no_warning(monkeypatch, caplog):
+    """Recognized keys (model, base_url alias, max_tokens, factory-injected kwargs) must not warn."""
+    import logging
+
+    from langchain_openai import ChatOpenAI
+
+    cfg = _make_app_config([_make_model_with_extras("clean", api_key="sk-test", base_url="http://ok/v1", max_tokens=100)])
+    _patch_factory(monkeypatch, cfg, model_class=ChatOpenAI)
+
+    with caplog.at_level(logging.WARNING, logger=factory_module.__name__):
+        factory_module.create_chat_model(name="clean")
+
+    assert not any("not recognized parameters" in rec.message for rec in caplog.records)
+
+
+def test_api_base_normalized_for_patched_chatopenai(monkeypatch):
+    """The PatchedChatOpenAI subclass is in the OpenAI-compatible family and must normalize too."""
+    cfg = _make_app_config([_make_model_with_extras("patched", use="deerflow.models.patched_openai:PatchedChatOpenAI", api_base="http://localhost:4001/v1")])
+    _patch_factory(monkeypatch, cfg)
+
+    FakeChatModel.captured_kwargs = {}
+    factory_module.create_chat_model(name="patched")
+
+    assert FakeChatModel.captured_kwargs.get("base_url") == "http://localhost:4001/v1"
+    assert "api_base" not in FakeChatModel.captured_kwargs
+
+
+def test_api_base_dropped_when_openai_api_base_field_name_set(monkeypatch):
+    """If the field-name openai_api_base is set alongside api_base, the alias is dropped (no dup)."""
+    cfg = _make_app_config([_make_model_with_extras("oai", openai_api_base="http://canonical/v1", api_base="http://alias/v1")])
+    _patch_factory(monkeypatch, cfg)
+
+    FakeChatModel.captured_kwargs = {}
+    factory_module.create_chat_model(name="oai")
+
+    assert FakeChatModel.captured_kwargs.get("openai_api_base") == "http://canonical/v1"
+    assert "api_base" not in FakeChatModel.captured_kwargs
+    assert "base_url" not in FakeChatModel.captured_kwargs
+
+
+def test_no_unknown_key_warning_for_non_openai_class(monkeypatch, caplog):
+    """The unknown-key warning is scoped to the OpenAI family; other providers must not false-positive.
+
+    Regression: a ChatAnthropic model with a legit kwarg like frequency_penalty (which LangChain
+    routes into model_kwargs for that provider) previously tripped the 'not recognized' warning.
+    """
+    import logging
+
+    cfg = _make_app_config([_make_model_with_extras("anthropic", use="langchain_anthropic:ChatAnthropic", frequency_penalty=0.5)])
+    _patch_factory(monkeypatch, cfg)
+
+    FakeChatModel.captured_kwargs = {}
+    with caplog.at_level(logging.WARNING, logger=factory_module.__name__):
+        factory_module.create_chat_model(name="anthropic")
+
+    assert not any("not recognized parameters" in rec.message for rec in caplog.records)

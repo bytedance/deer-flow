@@ -7,12 +7,16 @@ import copy
 import json
 import logging
 import math
+import os
 import re
 import uuid
+from contextlib import nullcontext
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from deerflow.agents.memory.prompt import (
     MEMORY_UPDATE_PROMPT,
+    STALENESS_REVIEW_PROMPT,
     format_conversation_for_update,
 )
 from deerflow.agents.memory.storage import (
@@ -22,6 +26,8 @@ from deerflow.agents.memory.storage import (
 )
 from deerflow.config.memory_config import get_memory_config
 from deerflow.models import create_chat_model
+from deerflow.trace_context import request_trace_context
+from deerflow.tracing import inject_langfuse_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -36,11 +42,6 @@ _SYNC_MEMORY_UPDATER_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
     thread_name_prefix="memory-updater-sync",
 )
 atexit.register(lambda: _SYNC_MEMORY_UPDATER_EXECUTOR.shutdown(wait=False))
-
-
-def _create_empty_memory() -> dict[str, Any]:
-    """Backward-compatible wrapper around the storage-layer empty-memory factory."""
-    return create_empty_memory()
 
 
 def _save_memory_to_file(memory_data: dict[str, Any], agent_name: str | None = None, *, user_id: str | None = None) -> bool:
@@ -302,11 +303,30 @@ def _normalize_memory_update_data(update_data: dict[str, Any]) -> dict[str, Any]
             0,
         )
 
+    # ── Normalize staleness review removals ──
+    stale_removals_raw = update_data.get("staleFactsToRemove")
+    normalized_stale_removals: list[dict[str, str]] = []
+    if isinstance(stale_removals_raw, list):
+        for entry in stale_removals_raw:
+            if not isinstance(entry, dict):
+                continue
+            fact_id = entry.get("id")
+            if not isinstance(fact_id, str) or not fact_id:
+                continue
+            reason = entry.get("reason", "")
+            normalized_stale_removals.append(
+                {
+                    "id": fact_id,
+                    "reason": reason if isinstance(reason, str) else "",
+                }
+            )
+
     return {
         "user": user if isinstance(user, dict) else {},
         "history": history if isinstance(history, dict) else {},
         "newFacts": normalized_new_facts,
         "factsToRemove": normalized_facts_to_remove,
+        "staleFactsToRemove": normalized_stale_removals,
     }
 
 
@@ -377,6 +397,73 @@ def _fact_content_key(content: Any) -> str | None:
     return stripped.casefold()
 
 
+# ── Staleness review helpers ──────────────────────────────────────────────
+
+
+def _parse_fact_datetime(raw: str) -> datetime | None:
+    """Parse an ISO-8601 datetime string from a fact's createdAt field.
+
+    Returns ``None`` on any parse failure so callers can safely skip malformed facts.
+    """
+    if not raw:
+        return None
+    try:
+        result = datetime.fromisoformat(raw)
+        # Naive datetimes (no tzinfo) would cause TypeError when compared
+        # with the timezone-aware cutoff.  Assume UTC for safety.
+        if result.tzinfo is None:
+            result = result.replace(tzinfo=UTC)
+        return result
+    except (ValueError, TypeError):
+        return None
+
+
+def _select_stale_candidates(
+    current_memory: dict[str, Any],
+    config: Any,
+) -> list[dict[str, Any]]:
+    """Return facts that are older than ``staleness_age_days`` and not protected.
+
+    Protected categories (default: ``correction``) are excluded because they
+    represent explicit user feedback that should not be auto-pruned by age.
+    """
+    cutoff = datetime.now(UTC) - timedelta(days=config.staleness_age_days)
+    protected = frozenset(config.staleness_protected_categories)
+    candidates: list[dict[str, Any]] = []
+    for fact in current_memory.get("facts", []):
+        if not isinstance(fact, dict):
+            continue
+        category = fact.get("category", "")
+        if isinstance(category, str) and category in protected:
+            continue
+        created_at = _parse_fact_datetime(fact.get("createdAt", ""))
+        if created_at is not None and created_at < cutoff:
+            candidates.append(fact)
+    return candidates
+
+
+def _build_staleness_section(
+    stale_candidates: list[dict[str, Any]],
+    age_days: int,
+) -> str:
+    """Format the staleness review prompt section from candidate facts."""
+    if not stale_candidates:
+        return ""
+    lines: list[str] = []
+    for fact in stale_candidates:
+        fid = fact.get("id", "?")
+        cat = str(fact.get("category", "context")).strip() or "context"
+        conf = fact.get("confidence", 0.0)
+        created_raw = fact.get("createdAt", "")
+        created_short = created_raw[:10] if isinstance(created_raw, str) and len(created_raw) >= 10 else created_raw
+        content = str(fact.get("content", ""))
+        lines.append(f'- [{fid} | {cat} | {conf:.2f} | {created_short}] "{content}"')
+    return STALENESS_REVIEW_PROMPT.format(
+        stale_facts="\n".join(lines),
+        age_days=age_days,
+    )
+
+
 class MemoryUpdater:
     """Updates memory using LLM based on conversation context."""
 
@@ -390,9 +477,12 @@ class MemoryUpdater:
 
     def _get_model(self):
         """Get the model for memory updates."""
+        return create_chat_model(name=self._resolve_model_name(), thinking_enabled=False)
+
+    def _resolve_model_name(self) -> str | None:
+        """Return the configured model name for memory updates."""
         config = get_memory_config()
-        model_name = self._model_name or config.model_name
-        return create_chat_model(name=model_name, thinking_enabled=False)
+        return self._model_name or config.model_name
 
     def _build_correction_hint(
         self,
@@ -441,10 +531,22 @@ class MemoryUpdater:
             correction_detected=correction_detected,
             reinforcement_detected=reinforcement_detected,
         )
+
+        # ── Build staleness review section ──
+        staleness_section = ""
+        if config.staleness_review_enabled:
+            stale_candidates = _select_stale_candidates(current_memory, config)
+            if len(stale_candidates) >= config.staleness_min_candidates:
+                staleness_section = _build_staleness_section(
+                    stale_candidates,
+                    config.staleness_age_days,
+                )
+
         prompt = MEMORY_UPDATE_PROMPT.format(
             current_memory=json.dumps(current_memory, indent=2, ensure_ascii=False),
             conversation=conversation_text,
             correction_hint=correction_hint,
+            staleness_review_section=staleness_section,
         )
         return current_memory, prompt
 
@@ -472,6 +574,7 @@ class MemoryUpdater:
         correction_detected: bool = False,
         reinforcement_detected: bool = False,
         user_id: str | None = None,
+        deerflow_trace_id: str | None = None,
     ) -> bool:
         """Update memory asynchronously by delegating to the sync path.
 
@@ -489,6 +592,7 @@ class MemoryUpdater:
             correction_detected=correction_detected,
             reinforcement_detected=reinforcement_detected,
             user_id=user_id,
+            deerflow_trace_id=deerflow_trace_id,
         )
 
     def _do_update_memory_sync(
@@ -499,6 +603,7 @@ class MemoryUpdater:
         correction_detected: bool = False,
         reinforcement_detected: bool = False,
         user_id: str | None = None,
+        deerflow_trace_id: str | None = None,
     ) -> bool:
         """Pure-sync memory update using ``model.invoke()``.
 
@@ -508,33 +613,53 @@ class MemoryUpdater:
         lead agent) is never touched — no cross-loop connection reuse is
         possible.
         """
-        try:
-            prepared = self._prepare_update_prompt(
-                messages=messages,
-                agent_name=agent_name,
-                correction_detected=correction_detected,
-                reinforcement_detected=reinforcement_detected,
-                user_id=user_id,
-            )
-            if prepared is None:
-                return False
+        # Callers may run us in a ``threading.Timer`` thread or an
+        # ``_SYNC_MEMORY_UPDATER_EXECUTOR`` worker — neither propagates the
+        # request-trace ContextVar. Rebind it here from the explicitly plumbed
+        # ``deerflow_trace_id`` so ``TraceContextFilter`` attaches the correct
+        # trace id to every log record emitted below (including model-invoke
+        # tracing-callback logs). ``nullcontext`` when unknown avoids
+        # fabricating a bogus id via ``request_trace_context(None)``.
+        trace_ctx = request_trace_context(deerflow_trace_id) if deerflow_trace_id else nullcontext()
+        with trace_ctx:
+            try:
+                prepared = self._prepare_update_prompt(
+                    messages=messages,
+                    agent_name=agent_name,
+                    correction_detected=correction_detected,
+                    reinforcement_detected=reinforcement_detected,
+                    user_id=user_id,
+                )
+                if prepared is None:
+                    return False
 
-            current_memory, prompt = prepared
-            model = self._get_model()
-            response = model.invoke(prompt, config={"run_name": "memory_agent"})
-            return self._finalize_update(
-                current_memory=current_memory,
-                response_content=response.content,
-                thread_id=thread_id,
-                agent_name=agent_name,
-                user_id=user_id,
-            )
-        except json.JSONDecodeError as e:
-            logger.warning("Failed to parse LLM response for memory update: %s", e)
-            return False
-        except Exception as e:
-            logger.exception("Memory update failed: %s", e)
-            return False
+                current_memory, prompt = prepared
+                model_name = self._resolve_model_name()
+                model = self._get_model()
+                invoke_config: dict[str, Any] = {"run_name": "memory_agent"}
+                inject_langfuse_metadata(
+                    invoke_config,
+                    thread_id=thread_id,
+                    user_id=user_id,
+                    assistant_id="memory_agent",
+                    model_name=model_name,
+                    environment=os.environ.get("DEER_FLOW_ENV") or os.environ.get("ENVIRONMENT"),
+                    deerflow_trace_id=deerflow_trace_id,
+                )
+                response = model.invoke(prompt, config=invoke_config)
+                return self._finalize_update(
+                    current_memory=current_memory,
+                    response_content=response.content,
+                    thread_id=thread_id,
+                    agent_name=agent_name,
+                    user_id=user_id,
+                )
+            except json.JSONDecodeError as e:
+                logger.warning("Failed to parse LLM response for memory update: %s", e)
+                return False
+            except Exception as e:
+                logger.exception("Memory update failed: %s", e)
+                return False
 
     def update_memory(
         self,
@@ -544,6 +669,7 @@ class MemoryUpdater:
         correction_detected: bool = False,
         reinforcement_detected: bool = False,
         user_id: str | None = None,
+        deerflow_trace_id: str | None = None,
     ) -> bool:
         """Synchronously update memory using the sync LLM path.
 
@@ -582,6 +708,7 @@ class MemoryUpdater:
                     correction_detected=correction_detected,
                     reinforcement_detected=reinforcement_detected,
                     user_id=user_id,
+                    deerflow_trace_id=deerflow_trace_id,
                 )
                 return future.result()
             except Exception:
@@ -595,6 +722,7 @@ class MemoryUpdater:
             correction_detected=correction_detected,
             reinforcement_detected=reinforcement_detected,
             user_id=user_id,
+            deerflow_trace_id=deerflow_trace_id,
         )
 
     def _apply_updates(
@@ -636,10 +764,48 @@ class MemoryUpdater:
                     "updatedAt": now,
                 }
 
-        # Remove facts
+        # Remove facts (contradiction-based)
         facts_to_remove = set(update_data.get("factsToRemove", []))
         if facts_to_remove:
             current_memory["facts"] = [f for f in current_memory.get("facts", []) if f.get("id") not in facts_to_remove]
+
+        # ── Staleness review removals ──
+        stale_removals = update_data.get("staleFactsToRemove", [])
+        if isinstance(stale_removals, list) and stale_removals:
+            stale_ids_to_remove = {entry["id"] for entry in stale_removals if isinstance(entry, dict) and "id" in entry}
+
+            # Deterministic guardrail: intersect with actual staleness
+            # candidates so an LLM slip that emits a protected-category or
+            # non-aged fact id is silently rejected.  Runs unconditionally
+            # so the apply-layer protection is independent of model behavior
+            # AND of the staleness_review_enabled flag.
+            candidate_ids = {f["id"] for f in _select_stale_candidates(current_memory, config)}
+            stale_ids_to_remove &= candidate_ids
+
+            if not stale_ids_to_remove:
+                # After intersection with candidate set, nothing to remove.
+                stale_removals = []
+            else:
+                # Safety cap: limit max staleness removals per cycle.
+                # When the LLM returns more than the cap, keep only the
+                # lowest-confidence entries up to the limit so the most
+                # questionable facts are removed first.
+                max_stale = config.staleness_max_removals_per_cycle
+                if len(stale_ids_to_remove) > max_stale:
+                    stale_facts = [f for f in current_memory.get("facts", []) if f.get("id") in stale_ids_to_remove]
+                    stale_facts.sort(key=lambda f: f.get("confidence", 0))
+                    stale_ids_to_remove = {f["id"] for f in stale_facts[:max_stale]}
+
+                current_memory["facts"] = [f for f in current_memory.get("facts", []) if f.get("id") not in stale_ids_to_remove]
+
+            # Log removals for observability
+            for entry in stale_removals:
+                if isinstance(entry, dict) and entry.get("id") in stale_ids_to_remove:
+                    logger.info(
+                        "Staleness review removed fact %s: %s",
+                        entry["id"],
+                        entry.get("reason", "no reason provided"),
+                    )
 
         # Add new facts
         existing_fact_keys = {fact_key for fact_key in (_fact_content_key(fact.get("content")) for fact in current_memory.get("facts", [])) if fact_key is not None}
@@ -652,7 +818,12 @@ class MemoryUpdater:
                     continue
                 normalized_content = raw_content.strip()
                 fact_key = _fact_content_key(normalized_content)
-                if fact_key is not None and fact_key in existing_fact_keys:
+                if fact_key is None:
+                    # Empty / whitespace-only content: skip it the same way the
+                    # non-string guard above does, instead of appending a blank
+                    # fact that violates the non-empty-content invariant.
+                    continue
+                if fact_key in existing_fact_keys:
                     continue
 
                 fact_entry = {
@@ -691,6 +862,7 @@ def update_memory_from_conversation(
     correction_detected: bool = False,
     reinforcement_detected: bool = False,
     user_id: str | None = None,
+    deerflow_trace_id: str | None = None,
 ) -> bool:
     """Convenience function to update memory from a conversation.
 
@@ -706,4 +878,4 @@ def update_memory_from_conversation(
         True if successful, False otherwise.
     """
     updater = MemoryUpdater()
-    return updater.update_memory(messages, thread_id, agent_name, correction_detected, reinforcement_detected, user_id=user_id)
+    return updater.update_memory(messages, thread_id, agent_name, correction_detected, reinforcement_detected, user_id=user_id, deerflow_trace_id=deerflow_trace_id)

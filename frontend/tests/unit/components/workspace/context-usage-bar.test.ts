@@ -1,4 +1,4 @@
-import { expect, test } from "vitest";
+import { expect, test } from "@rstest/core";
 
 import { breakdownToSegments } from "@/components/workspace/context-usage-bar";
 import type { ContextUsageBreakdownItem } from "@/core/threads/token-usage";

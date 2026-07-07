@@ -80,16 +80,42 @@ export function getMessageGroups(messages: Message[]): MessageGroup[] {
         if (open) {
           open.messages.push(message);
         } else {
-          console.error(
-            "Unexpected tool message outside a processing group",
-            message,
-          );
+          // Fallback for orphan tool messages — LangGraph `messages-tuple` can
+          // emit tool-result events out of order or replay them from subagent
+          // state (e.g. bash subagent under LocalSandboxProvider with
+          // allow_host_bash). When that happens, the tool message arrives after
+          // a terminal group and lastOpenGroup() returns null. Previously we
+          // dropped the message with console.error, silently hiding the tool
+          // result from the UI. Attach to the most recent group instead so the
+          // user can still see what the agent did.
+          const lastGroup = groups[groups.length - 1];
+          if (lastGroup) {
+            lastGroup.messages.push(message);
+          } else {
+            // groups is empty (shouldn't happen — the outer for loop is guarded
+            // by `messages.length === 0 -> return []`), but keep the diagnostic
+            // just in case.
+            console.error(
+              "Unexpected tool message with no preceding group",
+              message,
+            );
+          }
         }
       }
       continue;
     }
 
     if (message.type === "ai") {
+      // A message with answer content and no tool calls becomes its own
+      // assistant bubble below, which already renders the message's
+      // reasoning_content inside the bubble's <Reasoning> collapsible. Such a
+      // message must NOT also feed the processing group, or the ChainOfThought
+      // panel above the bubble paints the identical reasoning a second time
+      // (#3868). Intermediate reasoning (no content) and tool-calling steps
+      // still belong in the processing group.
+      const becomesAssistantBubble =
+        hasContent(message) && !hasToolCalls(message);
+
       if (hasPresentFiles(message)) {
         groups.push({
           id: message.id,
@@ -102,7 +128,10 @@ export function getMessageGroups(messages: Message[]): MessageGroup[] {
           type: "assistant:subagent",
           messages: [message],
         });
-      } else if (hasReasoning(message) || hasToolCalls(message)) {
+      } else if (
+        !becomesAssistantBubble &&
+        (hasReasoning(message) || hasToolCalls(message))
+      ) {
         const lastGroup = groups[groups.length - 1];
         // Accumulate consecutive intermediate AI messages into one processing group.
         if (lastGroup?.type !== "assistant:processing") {
@@ -116,9 +145,7 @@ export function getMessageGroups(messages: Message[]): MessageGroup[] {
         }
       }
 
-      // Not an else-if: a message with reasoning + content (but no tool calls) goes
-      // into the processing group above AND gets its own assistant bubble here.
-      if (hasContent(message) && !hasToolCalls(message)) {
+      if (becomesAssistantBubble) {
         groups.push({ id: message.id, type: "assistant", messages: [message] });
       }
     }
@@ -250,6 +277,17 @@ export function getAssistantTurnCopyData(
   );
 }
 
+export function getMessageCopyData(message: Message) {
+  const content = extractContentFromMessage(message);
+  if (message.type === "human") {
+    return stripUploadedFilesTag(content);
+  }
+  if (content.length > 0) {
+    return content;
+  }
+  return extractReasoningContentFromMessage(message) ?? "";
+}
+
 export function extractTextFromMessage(message: Message) {
   if (typeof message.content === "string") {
     return (
@@ -259,7 +297,13 @@ export function extractTextFromMessage(message: Message) {
   }
   if (Array.isArray(message.content)) {
     return message.content
-      .map((content) => (content.type === "text" ? content.text : ""))
+      .map((content) =>
+        typeof content === "string"
+          ? content
+          : content.type === "text"
+            ? content.text
+            : "",
+      )
       .join("\n")
       .trim();
   }
@@ -323,6 +367,9 @@ export function extractContentFromMessage(message: Message) {
   if (Array.isArray(message.content)) {
     return message.content
       .map((content) => {
+        if (typeof content === "string") {
+          return content;
+        }
         switch (content.type) {
           case "text":
             return content.text;
@@ -469,10 +516,14 @@ export function findToolCallResult(toolCallId: string, messages: Message[]) {
 }
 
 export function isHiddenFromUIMessage(message: Message) {
+  const content = extractTextFromMessage(message);
   return (
     message.additional_kwargs?.hide_from_ui === true ||
     (typeof message.name === "string" &&
-      HIDDEN_CONTROL_MESSAGE_NAMES.has(message.name))
+      HIDDEN_CONTROL_MESSAGE_NAMES.has(message.name)) ||
+    (message.type === "human" &&
+      content.includes("<slash_skill_activation>") &&
+      stripUploadedFilesTag(content).length === 0)
   );
 }
 
@@ -488,12 +539,13 @@ export interface FileInMessage {
 }
 
 /**
- * Strip <uploaded_files> tag from message content.
- * Returns the content with the tag removed.
+ * Strip backend-injected human context tags from message content.
+ * Kept under its historical name because callers use it for uploaded-file
+ * display cleanup.
  */
 export function stripUploadedFilesTag(content: string): string {
   return content
-    .replace(/<uploaded_files>[\s\S]*?<\/uploaded_files>/g, "")
+    .replace(/<(uploaded_files|slash_skill_activation)>[\s\S]*?<\/\1>/g, "")
     .trim();
 }
 
@@ -504,6 +556,7 @@ export function stripUploadedFilesTag(content: string): string {
  * These markers are *not* user copy — they come from:
  *
  * - ``UploadsMiddleware`` → ``<uploaded_files>``
+ * - ``SkillActivationMiddleware`` → ``<slash_skill_activation>``
  * - ``DynamicContextMiddleware`` → ``<system-reminder>`` (carrying
  *   ``<memory>`` / ``<current_date>`` inside)
  * - ``TodoListMiddleware`` / ``LoopDetectionMiddleware`` style reminders
@@ -517,6 +570,7 @@ export function stripUploadedFilesTag(content: string): string {
  */
 export const INTERNAL_MARKER_TAGS = [
   "uploaded_files",
+  "slash_skill_activation",
   "system-reminder",
   "memory",
   "current_date",

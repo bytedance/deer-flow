@@ -1,8 +1,12 @@
 import asyncio
+import json
+import logging
+import os
 import posixpath
 import re
 import shlex
 from collections.abc import Callable
+from functools import lru_cache
 from pathlib import Path
 
 from langchain.tools import tool
@@ -10,6 +14,9 @@ from langchain.tools import tool
 from deerflow.agents.thread_state import ThreadDataState
 from deerflow.config import get_app_config
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
+from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
+from deerflow.runtime.secret_context import read_active_secrets
+from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.sandbox.exceptions import (
     SandboxError,
     SandboxNotFoundError,
@@ -22,7 +29,14 @@ from deerflow.sandbox.search import GrepMatch
 from deerflow.sandbox.security import LOCAL_HOST_BASH_DISABLED_MESSAGE, is_host_bash_allowed
 from deerflow.tools.types import Runtime
 
+logger = logging.getLogger(__name__)
+
 _ABSOLUTE_PATH_PATTERN = re.compile(r"(?<![:\w])(?<!:/)/(?:[^\s\"'`;&|<>()]+)")
+# A ``{...}`` block holding a single identifier-like placeholder (e.g. ``{id}``
+# in a REST template or ``{port}`` in an f-string). Bash brace expansion such as
+# ``{passwd,shadow}`` or ``{,.bak}`` does NOT match (commas/dots/empty inner).
+_IDENTIFIER_BRACE_BLOCK_PATTERN = re.compile(r"\{([^{}]*)\}")
+_IDENTIFIER_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _FILE_URL_PATTERN = re.compile(r"\bfile://\S+", re.IGNORECASE)
 _URL_WITH_SCHEME_PATTERN = re.compile(r"^[a-z][a-z0-9+.-]*://", re.IGNORECASE)
 _URL_IN_COMMAND_PATTERN = re.compile(r"\b[a-z][a-z0-9+.-]*://[^\s\"'`;&|<>()]+", re.IGNORECASE)
@@ -36,13 +50,23 @@ _LOCAL_BASH_SYSTEM_PATH_PREFIXES = (
     "/dev/",
 )
 
-_DEFAULT_SKILLS_CONTAINER_PATH = "/mnt/skills"
+_DEFAULT_SKILLS_CONTAINER_PATH = DEFAULT_SKILLS_CONTAINER_PATH
 _ACP_WORKSPACE_VIRTUAL_PATH = "/mnt/acp-workspace"
 _DEFAULT_GLOB_MAX_RESULTS = 200
 _MAX_GLOB_MAX_RESULTS = 1000
 _DEFAULT_GREP_MAX_RESULTS = 100
 _MAX_GREP_MAX_RESULTS = 500
 _DEFAULT_WRITE_FILE_ERROR_MAX_CHARS = 2000
+
+# Maximum bytes accepted in a single non-append write_file call (issue #3189).
+# Oversized single-shot writes correlate with LLM streaming chunk-gap timeouts
+# because the tool-call JSON payload (which the model must emit as one
+# continuous stream) grows past the safe window. 80 KB ≈ 20K tokens, a
+# comfortable headroom under the factory-default 240s stream_chunk_timeout.
+# Deployments can override via env var DEERFLOW_WRITE_FILE_MAX_BYTES; set to
+# 0 (or negative) to disable the guard entirely.
+_WRITE_FILE_CONTENT_MAX_BYTES = 80 * 1024
+_WRITE_FILE_MAX_BYTES_ENV = "DEERFLOW_WRITE_FILE_MAX_BYTES"
 _LOCAL_BASH_CWD_COMMANDS = {"cd", "pushd"}
 _LOCAL_BASH_COMMAND_WRAPPERS = {"command", "builtin"}
 _LOCAL_BASH_COMMAND_PREFIX_KEYWORDS = {"!", "{", "case", "do", "elif", "else", "for", "if", "select", "then", "time", "until", "while"}
@@ -132,8 +156,101 @@ def _is_skills_path(path: str) -> bool:
     return path == skills_prefix or path.startswith(f"{skills_prefix}/")
 
 
+def _extract_skill_name_from_skills_path(path: str) -> str | None:
+    """Extract a skill name from a virtual skills path.
+
+    /mnt/skills/public/bootstrap/SKILL.md → "bootstrap"
+    /mnt/skills/custom/my-skill/SKILL.md → "my-skill"
+    /mnt/skills/legacy/my-skill/references/... → "my-skill"
+    /mnt/skills/public/bootstrap/ → "bootstrap"
+    Returns None if the path doesn't contain a recognizable skill name pattern.
+    """
+    skills_prefix = _get_skills_container_path()
+    if not _is_skills_path(path):
+        return None
+    # Strip the skills prefix, e.g. "/mnt/skills/"
+    relative = path[len(skills_prefix) :].lstrip("/")
+    if not relative:
+        return None
+    # Expected patterns: "public/<name>/...", "custom/<name>/...", "legacy/<name>/..."
+    # or "<name>/..." (direct skill access)
+    parts = relative.split("/")
+    if len(parts) >= 2 and parts[0] in ("public", "custom", "legacy"):
+        return parts[1]
+    if len(parts) == 1 and parts[0] in ("public", "custom", "legacy"):
+        # Category root like /mnt/skills/custom — not a skill path.
+        return None
+    if len(parts) >= 1:
+        # Direct path like /mnt/skills/my-skill/SKILL.md
+        return parts[0]
+    return None
+
+
+def _is_disabled_skill_path(path: str, *, user_id: str | None = None) -> bool:
+    """Check if a path belongs to a disabled skill.
+
+    PUBLIC skill enabled state is read from the global
+    ``extensions_config.json``.  CUSTOM / LEGACY skill enabled state is
+    read from the per-user ``_skill_states.json`` so that two users with
+    same-named custom skills can toggle independently.
+
+    Returns False for non-skills paths or paths whose skill is enabled.
+    """
+    skill_name = _extract_skill_name_from_skills_path(path)
+    if skill_name is None:
+        return False
+    try:
+        from deerflow.runtime.user_context import get_effective_user_id
+        from deerflow.skills.storage import get_or_new_user_skill_storage
+
+        # Determine the category from the path
+        skills_prefix = _get_skills_container_path()
+        relative = path[len(skills_prefix) :].lstrip("/")
+        if relative.startswith("public/"):
+            category = "public"
+        elif relative.startswith("custom/"):
+            category = "custom"
+        elif relative.startswith("legacy/"):
+            category = "legacy"
+        else:
+            # Try to infer from storage
+            effective_uid = user_id or get_effective_user_id()
+            storage = get_or_new_user_skill_storage(effective_uid)
+            all_skills = storage.load_skills(enabled_only=False)
+            matching = next((s for s in all_skills if s.name == skill_name), None)
+            if matching is None:
+                return False  # Skill doesn't exist, not a disabled skill path
+            category = matching.category.value
+
+        if category == "public":
+            from deerflow.config.extensions_config import ExtensionsConfig
+
+            ext_config = ExtensionsConfig.from_file()
+            return not ext_config.is_skill_enabled(skill_name, category)
+        else:
+            # CUSTOM / LEGACY: use per-user state
+            effective_uid = user_id or get_effective_user_id()
+            storage = get_or_new_user_skill_storage(effective_uid)
+            return not storage.get_skill_enabled_state(skill_name)
+    except (OSError, ValueError, KeyError, json.JSONDecodeError) as exc:
+        # Access-control check must fail closed: when we can't determine the
+        # enabled state (corrupt _skill_states.json, mid-write race, missing
+        # config), refuse access rather than silently serving a disabled
+        # skill's files. See review feedback on PR #3889.
+        logger.warning("Failed to determine enabled state, denying access: %s", exc)
+        return True
+
+
 def _resolve_skills_path(path: str) -> str:
     """Resolve a virtual skills path to a host filesystem path.
+
+    WARNING: For per-user custom skills (``/mnt/skills/custom/...``), this
+    function uses ``get_effective_user_id()`` from the contextvar, which may
+    differ from the sandbox PathMapping's user_id (set during acquire via
+    ``resolve_runtime_user_id``). In local sandbox mode, skills paths should
+    be resolved by the sandbox's PathMapping instead of this function. This
+    function is retained for output masking (``mask_local_paths_in_output``)
+    and non-sandbox code paths.
 
     Args:
         path: Virtual skills path (e.g. /mnt/skills/public/bootstrap/SKILL.md)
@@ -153,6 +270,27 @@ def _resolve_skills_path(path: str) -> str:
         return skills_host
 
     relative = path[len(skills_container) :].lstrip("/")
+
+    # Per-user custom skills: resolve to user-specific directory.
+    # ``skill_manage_tool`` writes custom skills to the per-user directory,
+    # and ``LocalSandboxProvider._build_thread_path_mappings`` mounts
+    # ``/mnt/skills/custom`` to that same per-user dir.  Without this
+    # branch, ``_resolve_skills_path("/mnt/skills/custom")`` would map to
+    # the global ``{skills_host}/custom/`` which is the repository-level
+    # ``skills/custom/`` — an entirely different directory that may be
+    # empty or contain legacy skills only.
+    if relative == "custom" or relative.startswith("custom/"):
+        from deerflow.config.paths import get_paths
+        from deerflow.runtime.user_context import get_effective_user_id
+
+        user_id = get_effective_user_id()
+        paths = get_paths()
+        user_custom_dir = paths.user_custom_skills_dir(user_id)
+        custom_relative = relative[len("custom") :].lstrip("/")
+        if custom_relative:
+            return str(user_custom_dir / custom_relative)
+        return str(user_custom_dir)
+
     return _join_path_preserving_style(skills_host, relative)
 
 
@@ -372,10 +510,13 @@ def _resolve_max_results(name: str, requested: int, *, default: int, upper_bound
 
 def _resolve_local_read_path(path: str, thread_data: ThreadDataState) -> str:
     validate_local_tool_path(path, thread_data, read_only=True)
-    if _is_skills_path(path):
-        return _resolve_skills_path(path)
-    if _is_acp_workspace_path(path):
-        return _resolve_acp_workspace_path(path, _extract_thread_id_from_thread_data(thread_data))
+    if _is_skills_path(path) or _is_acp_workspace_path(path):
+        # Skills and ACP workspace paths are resolved by the sandbox's
+        # PathMapping (which uses the user_id from acquire time), not
+        # by _resolve_skills_path / _resolve_acp_workspace_path (which
+        # use get_effective_user_id() from contextvar and may differ
+        # from the sandbox mapping's user_id).
+        return path
     return _resolve_and_validate_user_data_path(path, thread_data)
 
 
@@ -538,76 +679,93 @@ def _thread_actual_to_virtual_mappings(thread_data: ThreadDataState) -> dict[str
     return {actual: virtual for virtual, actual in _thread_virtual_to_actual_mappings(thread_data).items()}
 
 
+@lru_cache(maxsize=512)
+def _compiled_mask_patterns(sources: tuple[tuple[str, str], ...]) -> tuple[tuple[re.Pattern[str], str, str], ...]:
+    """Compile the host→virtual masking patterns once per source set.
+
+    ``sources`` is an ordered tuple of ``(host_base, virtual_base)`` pairs
+    (skills, then ACP workspace, then per-thread user-data mappings sorted by
+    host-path length, longest first). The patterns derive only from
+    config-stable + per-thread inputs, so they're cached and reused instead of
+    being rebuilt — ``re.escape`` + ``re.compile`` + ``Path.resolve`` (a
+    syscall) — on every call. ``mask_local_paths_in_output`` runs once per
+    glob/grep match, so without this the same patterns are recompiled per
+    match.
+    """
+    compiled: list[tuple[re.Pattern[str], str, str]] = []
+    for host_base, virtual_base in sources:
+        seen: set[str] = set()
+        # Same base set as ``_path_variants(raw) | _path_variants(resolved)``;
+        # ordered deterministically so the cached tuple is stable (variants of
+        # one host map to the same virtual and don't overlap after substitution,
+        # so order within a source is irrelevant to the result).
+        for root in (str(Path(host_base)), str(Path(host_base).resolve())):
+            for variant in sorted(_path_variants(root)):
+                if variant in seen:
+                    continue
+                seen.add(variant)
+                escaped = re.escape(variant).replace(r"\\", r"[/\\]")
+                compiled.append((re.compile(escaped + r"(?:[/\\][^\s\"';&|<>()]*)?"), variant, virtual_base))
+    return tuple(compiled)
+
+
 def mask_local_paths_in_output(output: str, thread_data: ThreadDataState | None) -> str:
     """Mask host absolute paths from local sandbox output using virtual paths.
 
-    Handles user-data paths (per-thread), skills paths, and ACP workspace paths (global).
+    Handles user-data paths (per-thread), skills paths (global + per-user
+    custom), and ACP workspace paths (per-thread).
     """
-    result = output
+    # Build the ordered (host_base, virtual_base) source list. Order is
+    # preserved from the original implementation: skills, then per-user
+    # custom skills, then ACP workspace, then user-data mappings (longest
+    # host path first). Custom mount host paths are masked by
+    # LocalSandbox._reverse_resolve_paths_in_output().
+    sources: list[tuple[str, str]] = []
 
-    # Mask skills host paths
     skills_host = _get_skills_host_path()
-    skills_container = _get_skills_container_path()
     if skills_host:
-        raw_base = str(Path(skills_host))
-        resolved_base = str(Path(skills_host).resolve())
-        for base in _path_variants(raw_base) | _path_variants(resolved_base):
-            escaped = re.escape(base).replace(r"\\", r"[/\\]")
-            pattern = re.compile(escaped + r"(?:[/\\][^\s\"';&|<>()]*)?")
+        sources.append((skills_host, _get_skills_container_path()))
 
-            def replace_skills(match: re.Match, _base: str = base) -> str:
-                matched_path = match.group(0)
-                if matched_path == _base:
-                    return skills_container
-                relative = matched_path[len(_base) :].lstrip("/\\")
-                return f"{skills_container}/{relative}" if relative else skills_container
+    # Per-user custom skills: mask host paths under the user's custom
+    # skills directory back to /mnt/skills/custom. The sandbox's
+    # _reverse_resolve_path handles this for its own operations, but
+    # mask_local_paths_in_output serves as a safety net for edge cases
+    # where host paths appear in output that bypassed sandbox resolution.
+    try:
+        from deerflow.config.paths import get_paths
+        from deerflow.runtime.user_context import get_effective_user_id
 
-            result = pattern.sub(replace_skills, result)
+        user_id = get_effective_user_id()
+        user_custom_dir = get_paths().user_custom_skills_dir(user_id)
+        if user_custom_dir.exists():
+            skills_container = _get_skills_container_path()
+            sources.append((str(user_custom_dir), f"{skills_container}/custom"))
+    except Exception:
+        pass
 
-    # Mask ACP workspace host paths
-    _thread_id = _extract_thread_id_from_thread_data(thread_data)
-    acp_host = _get_acp_workspace_host_path(_thread_id)
+    acp_host = _get_acp_workspace_host_path(_extract_thread_id_from_thread_data(thread_data))
     if acp_host:
-        raw_base = str(Path(acp_host))
-        resolved_base = str(Path(acp_host).resolve())
-        for base in _path_variants(raw_base) | _path_variants(resolved_base):
-            escaped = re.escape(base).replace(r"\\", r"[/\\]")
-            pattern = re.compile(escaped + r"(?:[/\\][^\s\"';&|<>()]*)?")
+        sources.append((acp_host, _ACP_WORKSPACE_VIRTUAL_PATH))
 
-            def replace_acp(match: re.Match, _base: str = base) -> str:
-                matched_path = match.group(0)
-                if matched_path == _base:
-                    return _ACP_WORKSPACE_VIRTUAL_PATH
-                relative = matched_path[len(_base) :].lstrip("/\\")
-                return f"{_ACP_WORKSPACE_VIRTUAL_PATH}/{relative}" if relative else _ACP_WORKSPACE_VIRTUAL_PATH
+    if thread_data is not None:
+        mappings = _thread_actual_to_virtual_mappings(thread_data)
+        for actual_base, virtual_base in sorted(mappings.items(), key=lambda item: len(item[0]), reverse=True):
+            sources.append((actual_base, virtual_base))
 
-            result = pattern.sub(replace_acp, result)
+    if not sources:
+        return output
 
-    # Custom mount host paths are masked by LocalSandbox._reverse_resolve_paths_in_output()
+    result = output
+    for pattern, base, virtual in _compiled_mask_patterns(tuple(sources)):
 
-    # Mask user-data host paths
-    if thread_data is None:
-        return result
+        def replace_match(match: re.Match, _base: str = base, _virtual: str = virtual) -> str:
+            matched_path = match.group(0)
+            if matched_path == _base:
+                return _virtual
+            relative = matched_path[len(_base) :].lstrip("/\\")
+            return f"{_virtual}/{relative}" if relative else _virtual
 
-    mappings = _thread_actual_to_virtual_mappings(thread_data)
-    if not mappings:
-        return result
-
-    for actual_base, virtual_base in sorted(mappings.items(), key=lambda item: len(item[0]), reverse=True):
-        raw_base = str(Path(actual_base))
-        resolved_base = str(Path(actual_base).resolve())
-        for base in _path_variants(raw_base) | _path_variants(resolved_base):
-            escaped_actual = re.escape(base).replace(r"\\", r"[/\\]")
-            pattern = re.compile(escaped_actual + r"(?:[/\\][^\s\"';&|<>()]*)?")
-
-            def replace_match(match: re.Match, _base: str = base, _virtual: str = virtual_base) -> str:
-                matched_path = match.group(0)
-                if matched_path == _base:
-                    return _virtual
-                relative = matched_path[len(_base) :].lstrip("/\\")
-                return f"{_virtual}/{relative}" if relative else _virtual
-
-            result = pattern.sub(replace_match, result)
+        result = pattern.sub(replace_match, result)
 
     return result
 
@@ -839,12 +997,6 @@ def _validate_local_bash_cwd_target(command_name: str, target: str | None, allow
             raise PermissionError(f"Unsafe working directory change in command: {command_name} {target}. Use paths under {VIRTUAL_PATH_PREFIX}")
 
 
-def _looks_like_unsafe_cwd_target(target: str | None) -> bool:
-    if target is None:
-        return False
-    return target == "-" or target.startswith(("$", "`", "~", "/", "..")) or _has_dotdot_path_segment(target)
-
-
 def _validate_local_bash_root_path_args(command_name: str, tokens: list[str], start_index: int) -> None:
     if command_name not in _LOCAL_BASH_ROOT_PATH_COMMANDS:
         return
@@ -927,6 +1079,54 @@ def resolve_and_validate_user_data_path(path: str, thread_data: ThreadDataState)
     return _resolve_and_validate_user_data_path(path, thread_data)
 
 
+def _braces_are_identifier_placeholders_only(fragment: str) -> bool:
+    """Return True only if every ``{...}`` block is a single identifier placeholder.
+
+    Identifier-only blocks (``{id}``, ``{port}``) come from REST templates and
+    f-strings and are text. Bash brace expansion (``{passwd,shadow}``, ``{,.bak}``,
+    ``{etc,var}``) reconstitutes real host paths at runtime, so it must NOT be
+    exempted. Stray, empty, or nested braces are rejected too (each ``{``/``}``
+    must belong to one balanced single-placeholder block).
+
+    ``${VAR}`` shell variable expansion (e.g. ``/home/${USER}/.ssh/id_rsa``) also
+    expands to a real host path at runtime, so a ``${`` anywhere disqualifies the
+    fragment even though the inner name is identifier-shaped.
+    """
+    if "${" in fragment:
+        return False
+    blocks = _IDENTIFIER_BRACE_BLOCK_PATTERN.findall(fragment)
+    # Every brace must be part of a balanced ``{...}`` block (no stray/nested braces).
+    if fragment.count("{") != len(blocks) or fragment.count("}") != len(blocks):
+        return False
+    return all(_IDENTIFIER_PATTERN.fullmatch(inner) for inner in blocks)
+
+
+def _is_non_path_literal_fragment(fragment: str) -> bool:
+    """Return True if a ``/segment`` match is almost certainly text, not a path.
+
+    The absolute-path scan runs over the raw command string, so it also matches
+    ``/segment`` sequences sitting inside string literals, f-strings, and
+    templates (e.g. ``python -c "print(f'/端口{port}')"`` or a REST template
+    like ``/devices/{id}/port``). Non-ASCII characters and single identifier-like
+    ``{placeholder}`` braces do not appear in real host filesystem paths a command
+    would open, so treating such fragments as text removes those false positives.
+
+    Bash brace expansion (``cat /etc/{passwd,shadow}``) is deliberately NOT
+    exempted: it expands to plain host paths at runtime, so only braces that are
+    single identifier placeholders are treated as text (see
+    :func:`_braces_are_identifier_placeholders_only`).
+
+    This guard is best-effort, not a security boundary (see
+    :func:`validate_local_bash_command_paths`): plain ASCII host paths such as
+    ``/etc/passwd`` contain none of these markers and are still rejected.
+    """
+    if any(ord(ch) > 127 for ch in fragment):
+        return True
+    if "{" in fragment or "}" in fragment:
+        return _braces_are_identifier_placeholders_only(fragment)
+    return False
+
+
 def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState | None) -> None:
     """Validate absolute paths in local-sandbox bash commands.
 
@@ -959,6 +1159,8 @@ def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState
         if _is_in_spans(match.start(), url_spans):
             continue
         absolute_path = match.group()
+        if _is_non_path_literal_fragment(absolute_path):
+            continue
         if _is_allowed_local_bash_absolute_path(absolute_path, allowed_paths, allow_system_paths=True):
             continue
 
@@ -970,47 +1172,33 @@ def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState
 
 
 def replace_virtual_paths_in_command(command: str, thread_data: ThreadDataState | None) -> str:
-    """Replace all virtual paths (/mnt/user-data, /mnt/skills, /mnt/acp-workspace) in a command string.
+    """Replace /mnt/user-data virtual paths in a command string for local sandbox.
+
+    Skills paths (/mnt/skills) and ACP workspace paths (/mnt/acp-workspace)
+    are NOT replaced here — LocalSandbox._resolve_paths_in_command() resolves
+    them via PathMapping at execution time, which uses the correct user_id
+    from sandbox acquire. Pre-resolving with _resolve_skills_path /
+    _resolve_acp_workspace_path uses get_effective_user_id() from contextvar
+    which may differ from the sandbox mapping's user_id.
 
     Args:
         command: The command string that may contain virtual paths.
         thread_data: The thread data containing actual paths.
 
     Returns:
-        The command with all virtual paths replaced.
+        The command with user-data virtual paths replaced.
     """
     result = command
 
-    # Replace skills paths
-    skills_container = _get_skills_container_path()
-    skills_host = _get_skills_host_path()
-    if skills_host and skills_container in result:
-        skills_pattern = re.compile(rf"{re.escape(skills_container)}(/[^\s\"';&|<>()]*)?")
-
-        def replace_skills_match(match: re.Match) -> str:
-            return _resolve_skills_path(match.group(0))
-
-        result = skills_pattern.sub(replace_skills_match, result)
-
-    # Replace ACP workspace paths
-    _thread_id = _extract_thread_id_from_thread_data(thread_data)
-    acp_host = _get_acp_workspace_host_path(_thread_id)
-    if acp_host and _ACP_WORKSPACE_VIRTUAL_PATH in result:
-        acp_pattern = re.compile(rf"{re.escape(_ACP_WORKSPACE_VIRTUAL_PATH)}(/[^\s\"';&|<>()]*)?")
-
-        def replace_acp_match(match: re.Match, _tid: str | None = _thread_id) -> str:
-            return _resolve_acp_workspace_path(match.group(0), _tid)
-
-        result = acp_pattern.sub(replace_acp_match, result)
-
-    # Custom mount paths are resolved by LocalSandbox._resolve_paths_in_command()
+    # Skills, ACP workspace, and custom mount paths are resolved by
+    # LocalSandbox._resolve_paths_in_command() via PathMapping.
 
     # Replace user-data paths
     if VIRTUAL_PATH_PREFIX in result and thread_data is not None:
         pattern = re.compile(rf"{re.escape(VIRTUAL_PATH_PREFIX)}(/[^\s\"';&|<>()]*)?")
 
         def replace_user_data_match(match: re.Match) -> str:
-            return replace_virtual_path(match.group(0), thread_data)
+            return replace_virtual_path(match.group(0), thread_data).replace("\\", "/")
 
         result = pattern.sub(replace_user_data_match, result)
 
@@ -1045,9 +1233,9 @@ def get_thread_data(runtime: Runtime | None) -> ThreadDataState | None:
 def is_local_sandbox(runtime: Runtime | None) -> bool:
     """Check if the current sandbox is a local sandbox.
 
-    Accepts both the legacy generic id ``"local"`` (acquire with no thread
-    context) and the per-thread id format ``"local:{thread_id}"`` produced by
-    :meth:`LocalSandboxProvider.acquire` once a thread is known.
+    Accepts both the generic id ``"local"`` (acquire with no thread context)
+    and the per-thread id format ``"local:{user_id}:{thread_id}"`` produced
+    by :meth:`LocalSandboxProvider.acquire` once a thread is known.
     """
     if runtime is None:
         return False
@@ -1135,7 +1323,7 @@ def ensure_sandbox_initialized(runtime: Runtime | None = None) -> Sandbox:
         raise SandboxRuntimeError("Thread ID not available in runtime context")
 
     provider = get_sandbox_provider()
-    sandbox_id = provider.acquire(thread_id)
+    sandbox_id = provider.acquire(thread_id, user_id=resolve_runtime_user_id(runtime))
 
     # Update runtime state - this persists across tool calls
     runtime.state["sandbox"] = {"sandbox_id": sandbox_id}
@@ -1180,7 +1368,7 @@ async def ensure_sandbox_initialized_async(runtime: Runtime | None = None) -> Sa
         raise SandboxRuntimeError("Thread ID not available in runtime context")
 
     provider = get_sandbox_provider()
-    sandbox_id = await provider.acquire_async(thread_id)
+    sandbox_id = await provider.acquire_async(thread_id, user_id=resolve_runtime_user_id(runtime))
 
     runtime.state["sandbox"] = {"sandbox_id": sandbox_id}
 
@@ -1247,6 +1435,37 @@ def ensure_thread_directories_exist(runtime: Runtime | None) -> None:
 
     # Mark as created to avoid redundant operations
     runtime.state["thread_directories_created"] = True
+
+
+_SECRET_REDACTION = "[redacted]"
+
+# Values shorter than this are not redacted from bash output. A short secret
+# value (a 2-char region code, a numeric id, a PIN) would otherwise shred
+# unrelated bytes of tool output — exit codes, timestamps, sizes, paths —
+# corrupting the result the model reads back. The redaction of a value this
+# short is more likely noise than genuine leak protection; the secret is still
+# injected into the subprocess, only the output mask skips it.
+_MIN_MASK_LENGTH = 8
+
+
+def mask_secret_values(output: str, injected_env: dict[str, str] | None) -> str:
+    """Redact injected secret values from bash output before it re-enters context.
+
+    Skill scripts receive request-scoped secrets as env vars (#3861). If a script
+    echoes one (debugging, ``set -x``, an error dump), the value would otherwise
+    flow into the tool result — and thus into the prompt and the trace. This is
+    the skill-specific fifth leak surface (the bash tool returns subprocess stdout,
+    unlike MCP tools). Replace each non-empty secret value with a redaction marker.
+    Longest values first so a value that is a substring of another is not partially
+    revealed. Values shorter than ``_MIN_MASK_LENGTH`` are skipped — a redacted
+    3-char token is more likely to corrupt unrelated output than to protect a
+    real secret.
+    """
+    if not injected_env or not output:
+        return output
+    for value in sorted((v for v in injected_env.values() if v and len(v) >= _MIN_MASK_LENGTH), key=len, reverse=True):
+        output = output.replace(value, _SECRET_REDACTION)
+    return output
 
 
 def _truncate_bash_output(output: str, max_chars: int) -> str:
@@ -1325,6 +1544,99 @@ def _truncate_ls_output(output: str, max_chars: int) -> str:
     return f"{output[:kept]}{marker}"
 
 
+# Fixed env var exposing the IM-channel platform user id (Feishu open_id,
+# Slack Uxxx, ...) to sandbox commands, so skills can act on the current end
+# user's channel identity (#3914). An identifier, not a secret.
+CHANNEL_USER_ID_ENV = "DEERFLOW_CHANNEL_USER_ID"
+
+_CHANNEL_USER_ID_CONTEXT_KEY = "channel_user_id"
+
+# body.context is client-writable on web requests, so bound the value: real
+# platform ids are tens of chars; anything past this is hostile or corrupt and
+# must not bloat every command string sent to the sandbox.
+_CHANNEL_USER_ID_MAX_LEN = 256
+
+
+def _is_windows() -> bool:
+    return os.name == "nt"
+
+
+def _channel_identity_prefix(runtime: Runtime) -> str | None:
+    """Build the command prefix that sets or clears the channel-user-id env var.
+
+    Returns ``None`` for a non-IM run (no ``channel_user_id`` key in context) so
+    the command is left untouched. For an IM run the prefix is always emitted:
+
+    - valid id (non-empty str within the length cap) → ``export VAR=<quoted>; ``
+    - unusable id (empty / non-str / over the cap) → ``unset VAR; ``
+
+    The id deliberately rides the command string instead of the
+    ``execute_command(env=...)`` channel: a non-empty ``env`` switches
+    ``AioSandbox`` to the ``bash.exec`` API (fresh session per call, image
+    >= 1.9.3 required), which is reserved for request-scoped secrets. Emitting an
+    explicit ``export``-or-``unset`` on every IM command makes per-call identity
+    correct **without depending on the AIO shell's session semantics**: the AIO
+    no-env path reuses a persistent shell session (the reason for the class lock,
+    #1433), so a bare command could otherwise resolve a stale value exported by
+    an earlier sender in a shared group-chat sandbox. The ``unset`` closes the
+    window the length/type guard would otherwise open — a sender whose id is
+    dropped inherits the previous sender's value. Values are identifiers, not
+    secrets, so keeping them in the audit-visible command string is fine.
+    """
+    context = getattr(runtime, "context", None)
+    if not isinstance(context, dict) or _CHANNEL_USER_ID_CONTEXT_KEY not in context:
+        return None
+    channel_user_id = context.get(_CHANNEL_USER_ID_CONTEXT_KEY)
+    if isinstance(channel_user_id, str) and 0 < len(channel_user_id) <= _CHANNEL_USER_ID_MAX_LEN:
+        return f"export {CHANNEL_USER_ID_ENV}={shlex.quote(channel_user_id)}; "
+    return f"unset {CHANNEL_USER_ID_ENV}; "
+
+
+def _github_env_from_runtime(runtime: Runtime) -> dict[str, str] | None:
+    """Build a per-call env overlay carrying a GitHub App installation token.
+
+    The GitHub channel mints a short-lived installation token in the
+    ``ChannelManager`` (app layer) and threads it through ``run_context``
+    so it lands in ``runtime.context["github_token"]``. We expose it to
+    the agent's bash as both ``GH_TOKEN`` (what the ``gh`` CLI reads) and
+    ``GITHUB_TOKEN`` (the conventional name). Returning ``None`` when no
+    token is present keeps non-GitHub runs identical to before.
+
+    The value at ``runtime.context["github_token"]`` may be either:
+
+    * a ``str`` — the captured token, the simple shape used by tests and
+      by older code paths that don't need refresh; or
+    * a zero-arg sync callable returning ``str`` — a provider that re-mints
+      transparently when the underlying installation token's 1h TTL is
+      nearing expiry. The provider's cache logic lives app-side (see
+      ``app.gateway.github.app_auth.mint_installation_token`` for the
+      cache + leeway semantics); the harness just calls it.
+
+    The callable path is what lets long autonomous runs survive past the
+    60-minute installation-token life: every bash invocation re-asks the
+    provider, which returns the cached token until ~55 min, then mints a
+    fresh one. Without this, a coder agent doing a multi-hour refactor
+    would do most of the work and then 401 on the final ``git push``.
+
+    The token still crosses the harness/app boundary as opaque data — the
+    harness never imports the app-layer minting code, preserving the
+    dependency firewall enforced by ``tests/test_harness_boundary.py``.
+    """
+    context = runtime.context if runtime.context is not None else None
+    value = context.get("github_token") if context else None
+    if callable(value):
+        try:
+            token = value()
+        except Exception:
+            logger.warning("github_token provider raised; skipping env overlay", exc_info=True)
+            return None
+    else:
+        token = value
+    if not isinstance(token, str) or not token:
+        return None
+    return {"GH_TOKEN": token, "GITHUB_TOKEN": token}
+
+
 @tool("bash", parse_docstring=True)
 def bash_tool(runtime: Runtime, description: str, command: str) -> str:
     """Execute a bash command in a Linux environment.
@@ -1333,6 +1645,10 @@ def bash_tool(runtime: Runtime, description: str, command: str) -> str:
     - Use `python` to run Python code.
     - Prefer a thread-local virtual environment in `/mnt/user-data/workspace/.venv`.
     - Use `python -m pip` (inside the virtual environment) to install Python packages.
+    - To start a long-lived process such as a web server, ALWAYS run it in the background with its
+      output redirected, e.g. `your-command > /mnt/user-data/workspace/server.log 2>&1 &`, then check
+      the log file or poll the port. A long-lived process run in the foreground blocks the turn until
+      it is killed at the command timeout.
 
     Args:
         description: Explain why you are running this command in short words. ALWAYS PROVIDE THIS PARAMETER FIRST.
@@ -1340,6 +1656,15 @@ def bash_tool(runtime: Runtime, description: str, command: str) -> str:
     """
     try:
         sandbox = ensure_sandbox_initialized(runtime)
+        # Request-scoped secrets resolved for the active skill (#3861), plus a
+        # short-lived GitHub App installation token threaded through by the
+        # GitHub channel. Both are injected as per-call env into the subprocess,
+        # never placed in the command string.
+        injected_env = read_active_secrets(getattr(runtime, "context", None)) or None
+        identity_prefix = _channel_identity_prefix(runtime)
+        github_env = _github_env_from_runtime(runtime)
+        if github_env:
+            injected_env = {**(injected_env or {}), **github_env}
         if is_local_sandbox(runtime):
             if not is_host_bash_allowed():
                 return f"Error: {LOCAL_HOST_BASH_DISABLED_MESSAGE}"
@@ -1348,16 +1673,27 @@ def bash_tool(runtime: Runtime, description: str, command: str) -> str:
             validate_local_bash_command_paths(command, thread_data)
             command = replace_virtual_paths_in_command(command, thread_data)
             command = _apply_cwd_prefix(command, thread_data)
-            output = sandbox.execute_command(command)
+            # POSIX-only: the Windows local sandbox may execute via
+            # PowerShell/cmd.exe where `export` is not valid syntax.
+            if identity_prefix and not _is_windows():
+                command = identity_prefix + command
             try:
                 from deerflow.config.app_config import get_app_config
 
                 sandbox_cfg = get_app_config().sandbox
                 max_chars = sandbox_cfg.bash_output_max_chars if sandbox_cfg else 20000
+                command_timeout = sandbox_cfg.bash_command_timeout if sandbox_cfg else None
             except Exception:
                 max_chars = 20000
-            return _truncate_bash_output(mask_local_paths_in_output(output, thread_data), max_chars)
+                command_timeout = None
+            output = sandbox.execute_command(command, env=injected_env, timeout=command_timeout)
+            return _truncate_bash_output(
+                mask_secret_values(mask_local_paths_in_output(output, thread_data), injected_env),
+                max_chars,
+            )
         ensure_thread_directories_exist(runtime)
+        if identity_prefix:
+            command = identity_prefix + command
         try:
             from deerflow.config.app_config import get_app_config
 
@@ -1365,7 +1701,7 @@ def bash_tool(runtime: Runtime, description: str, command: str) -> str:
             max_chars = sandbox_cfg.bash_output_max_chars if sandbox_cfg else 20000
         except Exception:
             max_chars = 20000
-        return _truncate_bash_output(sandbox.execute_command(command), max_chars)
+        return _truncate_bash_output(mask_secret_values(sandbox.execute_command(command, env=injected_env), injected_env), max_chars)
     except SandboxError as e:
         return f"Error: {e}"
     except PermissionError as e:
@@ -1390,6 +1726,10 @@ def ls_tool(runtime: Runtime, description: str, path: str) -> str:
         path: The **absolute** path to the directory to list.
     """
     try:
+        # Block access to disabled skill directories
+        if _is_disabled_skill_path(path, user_id=resolve_runtime_user_id(runtime)):
+            skill_name = _extract_skill_name_from_skills_path(path) or "unknown"
+            return f"Error: Skill '{skill_name}' is disabled. Access to its files is blocked. Enable the skill in settings before using it."
         sandbox = ensure_sandbox_initialized(runtime)
         ensure_thread_directories_exist(runtime)
         requested_path = path
@@ -1397,13 +1737,16 @@ def ls_tool(runtime: Runtime, description: str, path: str) -> str:
         if is_local_sandbox(runtime):
             thread_data = get_thread_data(runtime)
             validate_local_tool_path(path, thread_data, read_only=True)
-            if _is_skills_path(path):
-                path = _resolve_skills_path(path)
-            elif _is_acp_workspace_path(path):
-                path = _resolve_acp_workspace_path(path, _extract_thread_id_from_thread_data(thread_data))
+            if _is_skills_path(path) or _is_acp_workspace_path(path):
+                # Skills and ACP workspace paths are resolved by the sandbox's
+                # PathMapping (which uses the user_id from acquire time), not
+                # by _resolve_skills_path / _resolve_acp_workspace_path (which
+                # use get_effective_user_id() from contextvar and may differ
+                # from the sandbox mapping's user_id).
+                pass
             elif not _is_custom_mount_path(path):
                 path = _resolve_and_validate_user_data_path(path, thread_data)
-            # Custom mount paths are resolved by LocalSandbox._resolve_path()
+            # Custom mount paths and skills/ACP paths are resolved by LocalSandbox._resolve_path()
         children = sandbox.list_dir(path)
         if not children:
             return "(empty)"
@@ -1603,6 +1946,29 @@ async def _grep_tool_async(
 grep_tool.coroutine = _grep_tool_async
 
 
+def read_current_file_content(runtime: Runtime | None, path: str) -> str:
+    """Read the full current content of ``path`` using read_file's resolution rules.
+
+    Shared by ``read_file_tool`` and ``ReadBeforeWriteMiddleware`` (issue #3857)
+    so the gate hashes exactly the bytes the read tool would see. Raises
+    ``FileNotFoundError`` when the file does not exist; other sandbox errors
+    propagate to the caller.
+    """
+    sandbox = ensure_sandbox_initialized(runtime)
+    ensure_thread_directories_exist(runtime)
+    if is_local_sandbox(runtime):
+        thread_data = get_thread_data(runtime)
+        validate_local_tool_path(path, thread_data, read_only=True)
+        if _is_skills_path(path):
+            path = _resolve_skills_path(path)
+        elif _is_acp_workspace_path(path):
+            path = _resolve_acp_workspace_path(path, _extract_thread_id_from_thread_data(thread_data))
+        elif not _is_custom_mount_path(path):
+            path = _resolve_and_validate_user_data_path(path, thread_data)
+        # Custom mount paths are resolved by LocalSandbox._resolve_path()
+    return sandbox.read_file(path)
+
+
 @tool("read_file", parse_docstring=True)
 def read_file_tool(
     runtime: Runtime,
@@ -1620,20 +1986,12 @@ def read_file_tool(
         end_line: Optional ending line number (1-indexed, inclusive). Use with start_line to read a specific range.
     """
     try:
-        sandbox = ensure_sandbox_initialized(runtime)
-        ensure_thread_directories_exist(runtime)
+        # Block access to disabled skill files
+        if _is_disabled_skill_path(path, user_id=resolve_runtime_user_id(runtime)):
+            skill_name = _extract_skill_name_from_skills_path(path) or "unknown"
+            return f"Error: Skill '{skill_name}' is disabled. Access to its files is blocked. Enable the skill in settings before using it."
         requested_path = path
-        if is_local_sandbox(runtime):
-            thread_data = get_thread_data(runtime)
-            validate_local_tool_path(path, thread_data, read_only=True)
-            if _is_skills_path(path):
-                path = _resolve_skills_path(path)
-            elif _is_acp_workspace_path(path):
-                path = _resolve_acp_workspace_path(path, _extract_thread_id_from_thread_data(thread_data))
-            elif not _is_custom_mount_path(path):
-                path = _resolve_and_validate_user_data_path(path, thread_data)
-            # Custom mount paths are resolved by LocalSandbox._resolve_path()
-        content = sandbox.read_file(path)
+        content = read_current_file_content(runtime, path)
         if not content:
             return "(empty)"
         if start_line is not None and end_line is not None:
@@ -1654,6 +2012,12 @@ def read_file_tool(
         return f"Error: Permission denied reading file: {requested_path}"
     except IsADirectoryError:
         return f"Error: Path is a directory, not a file: {requested_path}"
+    except UnicodeDecodeError:
+        return (
+            f"Error: cannot read '{requested_path}' as text — it appears to be a binary file "
+            "(e.g. .xlsx, .pdf, or an image). read_file only supports UTF-8 text. Use bash with a "
+            "suitable library instead (pandas/openpyxl for spreadsheets), or view_image for images."
+        )
     except Exception as e:
         return f"Error: Unexpected error reading file: {_sanitize_error(e, runtime)}"
 
@@ -1671,6 +2035,23 @@ async def _read_file_tool_async(
 read_file_tool.coroutine = _read_file_tool_async
 
 
+def _effective_write_file_max_bytes() -> int:
+    """Return the active size cap for non-append write_file calls.
+
+    Reads ``DEERFLOW_WRITE_FILE_MAX_BYTES`` at call time (not import time)
+    so tests and runtime tweaks take effect without restart. Falls back to
+    the default on missing/malformed values. A non-positive value disables
+    the guard.
+    """
+    raw = os.environ.get(_WRITE_FILE_MAX_BYTES_ENV)
+    if raw is None:
+        return _WRITE_FILE_CONTENT_MAX_BYTES
+    try:
+        return int(raw)
+    except ValueError:
+        return _WRITE_FILE_CONTENT_MAX_BYTES
+
+
 @tool("write_file", parse_docstring=True)
 def write_file_tool(
     runtime: Runtime,
@@ -1679,14 +2060,53 @@ def write_file_tool(
     content: str,
     append: bool = False,
 ) -> str:
-    """Write text content to a file. By default this overwrites the target file; set append to true to add content to the end without replacing existing content.
+    """Write text content to a file. By default this overwrites the target file; set append=True to add content to the end without replacing existing content.
+
+    READ-BEFORE-WRITE (issue #3857): if the target file already exists (including
+    append=True), you must have read its CURRENT version with read_file first.
+    Any write invalidates earlier reads, so re-read between consecutive
+    modifications — a ranged read of the relevant section is enough. Writes
+    that fail this check are rejected with an error.
+
+    SIZE POLICY (issue #3189):
+    A single non-append write_file call must not exceed 80 KB of UTF-8 content.
+    Oversized single-shot writes correlate with LLM streaming chunk-gap
+    timeouts because the tool-call JSON payload — which the model must emit as
+    one continuous stream — grows past the safe window. For larger documents,
+    use ONE of these strategies (write_file rejects oversized payloads with an
+    actionable error):
+
+      1. INCREMENTAL EDIT (preferred for revisions): after the initial write,
+         use `str_replace` to surgically update sections. This is the same
+         pattern Claude Code's Write+Edit and OpenAI Codex's apply_patch use,
+         and keeps each tool call's payload small.
+      2. APPEND-IN-CHUNKS (for new long-form content): split the document into
+         sections, each well under 80 KB. First call uses append=False to
+         create the file; subsequent calls use append=True. The 80 KB cap does
+         NOT apply to append=True calls.
+
+    Operators can override the cap via env var `DEERFLOW_WRITE_FILE_MAX_BYTES`
+    (0 disables the guard entirely). Raising it risks streaming timeouts.
 
     Args:
         description: Explain why you are writing to this file in short words. ALWAYS PROVIDE THIS PARAMETER FIRST.
         path: The **absolute** path to the file to write to. ALWAYS PROVIDE THIS PARAMETER SECOND.
         content: The content to write to the file. ALWAYS PROVIDE THIS PARAMETER THIRD.
-        append: Whether to append content to the end of the file instead of overwriting it. Defaults to false.
+        append: Whether to append content to the end of the file instead of overwriting it. Defaults to False.
     """
+    if not append:
+        max_bytes = _effective_write_file_max_bytes()
+        if max_bytes > 0:
+            content_bytes = len(content.encode("utf-8"))
+            if content_bytes > max_bytes:
+                return (
+                    f"Error: write_file content ({content_bytes} bytes) exceeds the "
+                    f"{max_bytes}-byte single-call limit. Split the content into smaller "
+                    "pieces: either (a) write the first section now, then use `str_replace` "
+                    "for further edits, or (b) call write_file again with append=True "
+                    "carrying the next section. See SIZE POLICY in the tool docstring "
+                    "or issue #3189 for the rationale."
+                )
     try:
         requested_path = path
         sandbox = ensure_sandbox_initialized(runtime)
@@ -1742,6 +2162,9 @@ def str_replace_tool(
 ) -> str:
     """Replace a substring in a file with another substring.
     If `replace_all` is False (default), the substring to replace must appear **exactly once** in the file.
+
+    READ-BEFORE-WRITE (issue #3857): you must have read the file's CURRENT
+    version with read_file first; any write invalidates earlier reads.
 
     Args:
         description: Explain why you are replacing the substring in short words. ALWAYS PROVIDE THIS PARAMETER FIRST.

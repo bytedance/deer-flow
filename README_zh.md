@@ -18,22 +18,29 @@ https://github.com/user-attachments/assets/a8bcadc4-e040-4cf2-8fda-dd768b999c18
 
 ## 官网
 
-[<img width="2880" height="1600" alt="image" src="https://github.com/user-attachments/assets/a598c49f-3b2f-41ea-a052-05e21349188a" />](https://deerflow.tech)
-
 想了解更多，或者直接看**真实演示**，可以访问[**官网**](https://deerflow.tech)。
 
 ## 字节跳动火山引擎方舟 Coding Plan
-
-[<img width="4808" height="2400" alt="codingplan -banner 素材" src="https://github.com/user-attachments/assets/d30dae52-84f2-4021-b32f-6d281252b9ea" />](https://www.volcengine.com/activity/codingplan?utm_campaign=deer_flow&utm_content=deer_flow&utm_medium=devrel&utm_source=OWO&utm_term=deer_flow)
 
 - 我们推荐使用 Doubao-Seed-2.0-Code、DeepSeek v3.2 和 Kimi 2.5 运行 DeerFlow
 - [现在就加入 Coding Plan](https://www.volcengine.com/activity/codingplan?utm_campaign=deer_flow&utm_content=deer_flow&utm_medium=devrel&utm_source=OWO&utm_term=deer_flow)
 - [海外地区的开发者请点击这里](https://www.byteplus.com/en/activity/codingplan?utm_campaign=deer_flow&utm_content=deer_flow&utm_medium=devrel&utm_source=OWO&utm_term=deer_flow)
 
+## InfoQuest
+
+DeerFlow 新近集成了 BytePlus 自研的智能搜索与抓取工具集——[InfoQuest（支持免费在线体验）](https://docs.byteplus.com/en/docs/InfoQuest/What_is_Info_Quest)
+
+<a href="https://docs.byteplus.com/en/docs/InfoQuest/What_is_Info_Quest" target="_blank">
+  <img
+    src="https://sf16-sg.tiktokcdn.com/obj/eden-sg/hubseh7bsbps/20251208-160108.png"   alt="InfoQuest_banner"
+  />
+</a>
+
 ## 目录
 
 - [🦌 DeerFlow - 2.0](#-deerflow---20)
   - [官网](#官网)
+  - [字节跳动火山引擎方舟 Coding Plan](#字节跳动火山引擎方舟-coding-plan)
   - [InfoQuest](#infoquest)
   - [目录](#目录)
   - [一句话交给 Coding Agent 安装](#一句话交给-coding-agent-安装)
@@ -52,12 +59,15 @@ https://github.com/user-attachments/assets/a8bcadc4-e040-4cf2-8fda-dd768b999c18
   - [核心特性](#核心特性)
     - [Skills 与 Tools](#skills-与-tools)
       - [Claude Code 集成](#claude-code-集成)
+    - [Session Goals](#session-goals)
     - [Sub-Agents](#sub-agents)
     - [Sandbox 与文件系统](#sandbox-与文件系统)
     - [Context Engineering](#context-engineering)
     - [长期记忆](#长期记忆)
   - [推荐模型](#推荐模型)
   - [内嵌 Python Client](#内嵌-python-client)
+  - [定时任务 (Scheduled Tasks)](#定时任务-scheduled-tasks)
+  - [终端工作台 (TUI)](#终端工作台-tui)
   - [文档](#文档)
   - [⚠️ 安全使用](#️-安全使用)
   - [参与贡献](#参与贡献)
@@ -87,67 +97,110 @@ https://github.com/user-attachments/assets/a8bcadc4-e040-4cf2-8fda-dd768b999c18
    cd deer-flow
    ```
 
-2. **生成本地配置文件**
+2. **运行安装向导（推荐）**
 
    在项目根目录（`deer-flow/`）执行：
 
    ```bash
-   make config
+   make setup
    ```
 
-   这个命令会基于示例模板生成本地配置文件。
+   这会启动一个交互式向导，引导你选择 LLM provider、可选的 web 搜索工具，以及 sandbox 模式、bash 权限、文件写入等执行/安全偏好。它会生成一份最小化的 `config.yaml`，并把 API key 写入 `.env`，大约 2 分钟完成。
 
-3. **配置你要使用的模型**
+   随时可以运行 `make doctor` 检查配置和系统环境，并获得可执行的修复建议。
+   如果你要提交本地安装、配置或运行问题，可以执行 `make support-bundle`。
+   命令会直接打印 reporter 下一步建议，并在 `.deer-flow/support-bundles/` 下生成
+   `*-issue-summary.md`、面向 AI 辅助提 issue 的 `*-issue-draft.md`，以及可选证据
+   zip。提交 GitHub issue 时，先把 `*-issue-summary.md` 粘贴到 issue 正文；如果由
+   AI 助手代填 issue，就从 `*-issue-draft.md` 开始，并先替换所有 REQUIRED 占位符，
+   不要编造未知事实。只有维护者要求证据包，或摘要不足以诊断时，再附上 zip。维护者
+   或 AI 辅助 triage 可以优先读取 `triage.json`；bundle 只包含脱敏后的诊断信息和
+   文件 manifest，不包含 `.env`、原始对话消息或用户文件内容；提交前仍建议自己快速
+   检查一遍。
 
-   编辑 `config.yaml`，至少定义一个模型：
+   > **进阶 / 手动配置**：如果你更想直接编辑 `config.yaml`，可以改用 `make config` 复制完整的示例模板。完整参考见 `config.example.yaml`，其中包含 CLI-backed provider（Codex CLI、Claude Code OAuth）、OpenRouter、Responses API 等更多配置。
+
+   <details>
+   <summary>手动模型配置示例</summary>
 
    ```yaml
    models:
-     - name: gpt-4                       # 内部标识
-       display_name: GPT-4               # 展示名称
-       use: langchain_openai:ChatOpenAI  # LangChain 类路径
-       model: gpt-4                      # API 使用的模型标识
-       api_key: $OPENAI_API_KEY          # API key（推荐使用环境变量）
-       max_tokens: 4096                  # 单次请求最大 tokens
-       temperature: 0.7                  # 采样温度
+     - name: gpt-4o
+       display_name: GPT-4o
+       use: langchain_openai:ChatOpenAI
+       model: gpt-4o
+       api_key: $OPENAI_API_KEY
 
      - name: openrouter-gemini-2.5-flash
        display_name: Gemini 2.5 Flash (OpenRouter)
        use: langchain_openai:ChatOpenAI
        model: google/gemini-2.5-flash-preview
-       api_key: $OPENAI_API_KEY          # 这里 OpenRouter 依然沿用 OpenAI 兼容字段名
+       api_key: $OPENROUTER_API_KEY
        base_url: https://openrouter.ai/api/v1
+
+     - name: gpt-5-responses
+       display_name: GPT-5 (Responses API)
+       use: langchain_openai:ChatOpenAI
+       model: gpt-5
+       api_key: $OPENAI_API_KEY
+       use_responses_api: true
+       output_version: responses/v1
+
+     - name: qwen3-32b-vllm
+       display_name: Qwen3 32B (vLLM)
+       use: deerflow.models.vllm_provider:VllmChatModel
+       model: Qwen/Qwen3-32B
+       api_key: $VLLM_API_KEY
+       base_url: http://localhost:8000/v1
+       supports_thinking: true
+       when_thinking_enabled:
+         extra_body:
+           chat_template_kwargs:
+             enable_thinking: true
    ```
 
    OpenRouter 以及类似的 OpenAI 兼容网关，建议通过 `langchain_openai:ChatOpenAI` 配合 `base_url` 来配置。如果你更想用 provider 自己的环境变量名，也可以直接把 `api_key` 指向对应变量，例如 `api_key: $OPENROUTER_API_KEY`。
 
-4. **为已配置的模型设置 API key**
+   如果要让 OpenAI 模型走 `/v1/responses`，继续使用 `langchain_openai:ChatOpenAI`，并设置 `use_responses_api: true` 和 `output_version: responses/v1`。
 
-   可任选以下一种方式：
+   对于 vLLM 0.19.0，请使用 `deerflow.models.vllm_provider:VllmChatModel`。对于 Qwen 风格的推理模型，DeerFlow 通过 `extra_body.chat_template_kwargs.enable_thinking` 开关推理，并在多轮 tool-call 对话中保留 vLLM 非标准的 `reasoning` 字段。旧版 `thinking` 配置会自动规范化以保持向后兼容。推理模型可能还需要在启动 vLLM 服务时加上 `--reasoning-parser ...` 参数。如果你的本地 vLLM 部署接受任意非空 API key，可以把 `VLLM_API_KEY` 设为一个占位值。
 
-- 方式 A：编辑项目根目录下的 `.env` 文件（推荐）
-
-   ```bash
-   TAVILY_API_KEY=your-tavily-api-key
-   OPENAI_API_KEY=your-openai-api-key
-   # 如果配置使用的是 langchain_openai:ChatOpenAI + base_url，OpenRouter 也会读取 OPENAI_API_KEY
-   # 其他 provider 的 key 按需补充
-   INFOQUEST_API_KEY=your-infoquest-api-key
-   ```
-
-- 方式 B：在 shell 中导出环境变量
-
-   ```bash
-   export OPENAI_API_KEY=your-openai-api-key
-   ```
-
-- 方式 C：直接编辑 `config.yaml`（不建议用于生产环境）
+   CLI-backed provider 配置示例：
 
    ```yaml
    models:
-     - name: gpt-4
-       api_key: your-actual-api-key-here  # 替换为真实 key
+     - name: gpt-5.4
+       display_name: GPT-5.4 (Codex CLI)
+       use: deerflow.models.openai_codex_provider:CodexChatModel
+       model: gpt-5.4
+       supports_thinking: true
+       supports_reasoning_effort: true
+
+     - name: claude-sonnet-4.6
+       display_name: Claude Sonnet 4.6 (Claude Code OAuth)
+       use: deerflow.models.claude_provider:ClaudeChatModel
+       model: claude-sonnet-4-6
+       max_tokens: 4096
+       supports_thinking: true
    ```
+
+   - Codex CLI 会读取 `~/.codex/auth.json`
+   - Claude Code 支持 `CLAUDE_CODE_OAUTH_TOKEN`、`ANTHROPIC_AUTH_TOKEN`、`CLAUDE_CODE_CREDENTIALS_PATH`，或 `~/.claude/.credentials.json`
+   - ACP agent 条目与 model provider 是分开配置的——如果你配置了 `acp_agents.codex`，请把它指向一个 Codex ACP 适配器，例如 `npx -y @zed-industries/codex-acp`
+   - 在 macOS 上，如有需要可显式导出 Claude Code 的认证信息：
+
+   ```bash
+   eval "$(python3 scripts/export_claude_code_oauth.py --print-export)"
+   ```
+
+   API key 也可以手动写入 `.env` 文件（推荐）或在 shell 中导出：
+
+   ```bash
+   OPENAI_API_KEY=your-openai-api-key
+   TAVILY_API_KEY=your-tavily-api-key
+   ```
+
+   </details>
 
 ### 运行应用
 
@@ -194,7 +247,7 @@ make down   # 停止并移除容器
 
 如果你更希望直接在本地启动各个服务：
 
-前提：先完成上面的“配置”步骤（`make config` 和模型 API key 配置）。`make dev` 需要有效配置文件，默认读取项目根目录下的 `config.yaml`。可以用 `DEER_FLOW_PROJECT_ROOT` 显式指定项目根目录，也可以用 `DEER_FLOW_CONFIG_PATH` 指向某个具体配置文件。运行期状态默认写到项目根目录下的 `.deer-flow`，可用 `DEER_FLOW_HOME` 覆盖；skills 默认读取项目根目录下的 `skills/`，可用 `DEER_FLOW_SKILLS_PATH` 覆盖。
+前提：先完成上面的“配置”步骤（`make setup`）。`make dev` 需要有效配置文件，默认读取项目根目录下的 `config.yaml`。可以用 `DEER_FLOW_PROJECT_ROOT` 显式指定项目根目录，也可以用 `DEER_FLOW_CONFIG_PATH` 指向某个具体配置文件。运行期状态默认写到项目根目录下的 `.deer-flow`，可用 `DEER_FLOW_HOME` 覆盖；skills 默认读取项目根目录下的 `skills/`，可用 `DEER_FLOW_SKILLS_PATH` 覆盖。启动前先运行 `make doctor` 校验配置。
 在 Windows 上，请使用 Git Bash 运行本地开发流程。基于 bash 的服务脚本不支持直接在原生 `cmd.exe` 或 PowerShell 中执行，且 WSL 也不保证可用，因为部分脚本依赖 Git for Windows 的 `cygpath` 等工具。
 
 1. **检查依赖环境**：
@@ -242,11 +295,14 @@ DeerFlow 支持可配置的 MCP Server 和 skills，用来扩展能力。
 
 DeerFlow 支持从即时通讯应用接收任务。只要配置完成，对应渠道会自动启动，而且都不需要公网 IP。
 
+DeerFlow 还可以在 workspace UI 里暴露用户自有的 IM 渠道连接。启用 `channel_connections` 后，已登录用户可以从侧边栏 / Settings > Channels 绑定 Telegram、Slack、Discord、Feishu/Lark、DingTalk、WeChat 或 WeCom。它复用现有的 `channels.*` 出站传输，因此不需要公网 IP 或 provider 回调地址。入站 IM 消息会以所连接的 DeerFlow 用户身份运行。设置和安全注意事项参见 [IM Channel Connections](backend/docs/IM_CHANNEL_CONNECTIONS.md)。
+
 | 渠道 | 传输方式 | 上手难度 |
 |---------|-----------|------------|
 | Telegram | Bot API（long-polling） | 简单 |
 | Slack | Socket Mode | 中等 |
 | Feishu / Lark | WebSocket | 中等 |
+| WeChat | Tencent iLink（long-polling） | 中等 |
 | 企业微信智能机器人 | WebSocket | 中等 |
 | 钉钉 | Stream Push（WebSocket） | 中等 |
 
@@ -306,6 +362,19 @@ channels:
             thinking_enabled: true
             subagent_enabled: true
 
+  wechat:
+    enabled: false
+    bot_token: $WECHAT_BOT_TOKEN
+    ilink_bot_id: $WECHAT_ILINK_BOT_ID
+    qrcode_login_enabled: true      # 可选：bot_token 缺失时允许首次扫码登录引导
+    allowed_users: []               # 留空表示允许所有人
+    polling_timeout: 35
+    state_dir: ./.deer-flow/wechat/state
+    max_inbound_image_bytes: 20971520
+    max_outbound_image_bytes: 20971520
+    max_inbound_file_bytes: 52428800
+    max_outbound_file_bytes: 52428800
+
   dingtalk:
     enabled: true
     client_id: $DINGTALK_CLIENT_ID             # 钉钉开放平台 ClientId
@@ -331,6 +400,10 @@ SLACK_APP_TOKEN=xapp-...
 # Feishu / Lark
 FEISHU_APP_ID=cli_xxxx
 FEISHU_APP_SECRET=your_app_secret
+
+# WeChat iLink
+WECHAT_BOT_TOKEN=your_ilink_bot_token
+WECHAT_ILINK_BOT_ID=your_ilink_bot_id
 
 # 企业微信智能机器人
 WECOM_BOT_ID=your_bot_id
@@ -360,6 +433,14 @@ DINGTALK_CLIENT_SECRET=your_client_secret
 2. 添加权限：`im:message`、`im:message.p2p_msg:readonly`、`im:resource`。
 3. 在 **事件订阅** 中订阅 `im.message.receive_v1`，连接方式选择 **长连接**。
 4. 复制 App ID 和 App Secret，在 `.env` 中设置 `FEISHU_APP_ID` 和 `FEISHU_APP_SECRET`，并在 `config.yaml` 中启用该渠道。
+
+**WeChat 配置**
+
+1. 在 `config.yaml` 中启用 `wechat` 渠道。
+2. 在 `.env` 中设置 `WECHAT_BOT_TOKEN`，或者把 `qrcode_login_enabled` 设为 `true` 以便首次扫码登录引导。
+3. 当 `bot_token` 缺失且启用了扫码引导时，留意后端日志里 iLink 返回的二维码内容，并完成绑定流程。
+4. 扫码流程成功后，DeerFlow 会把获取到的 token 持久化到 `state_dir`，便于后续重启复用。
+5. Docker Compose 部署时，请把 `state_dir` 放在持久化卷上，这样 `get_updates_buf` 游标和已保存的登录状态才能在重启后保留。
 
 **企业微信智能机器人配置**
 
@@ -429,9 +510,11 @@ Skills 采用按需渐进加载，不会一次性把所有内容都塞进上下�
 
 通过 Gateway 安装 `.skill` 压缩包时，DeerFlow 会接受标准的可选 frontmatter 元数据，比如 `version`、`author`、`compatibility`，不会把本来合法的外部 skill 拒之门外。
 
-Tools 也是同样的思路。DeerFlow 自带一组核心工具：网页搜索、网页抓取、文件操作、bash 执行；同时也支持通过 MCP Server 和 Python 函数扩展自定义工具。你可以替换任何一项，也可以继续往里加。
+Tools 也是同样的思路。DeerFlow 自带一组核心工具：网页搜索、网页抓取、网页渲染截图、文件操作、bash 执行；同时也支持通过 MCP Server 和 Python 函数扩展自定义工具。你可以替换任何一项，也可以继续往里加。
 
 Gateway 生成后续建议时，现在会先把普通字符串输出和 block/list 风格的富文本内容统一归一化，再去解析 JSON 数组响应，因此不同 provider 的内容包装方式不会再悄悄把建议吞掉。
+
+Web UI 支持从已完成的 assistant 回复分叉出一个新的主对话。新 thread 会从该回复对应的 checkpoint 开始，并尽力复制当前 thread 的工作区文件。
 
 ```text
 # sandbox 容器内的路径
@@ -474,6 +557,22 @@ DEERFLOW_LANGGRAPH_URL=http://localhost:2026/api/langgraph  # LangGraph API
 ```
 
 完整 API 说明见 [`skills/public/claude-to-deerflow/SKILL.md`](skills/public/claude-to-deerflow/SKILL.md)。
+
+### Session Goals
+
+用 `/goal <完成条件>` 为当前 thread 绑定一个激活态的完成条件。这个 goal 是 thread 维度的状态，而不是技能激活，所以它会跨轮次持续生效，直到 DeerFlow 判定它已被满足、或者你手动清除它。
+
+支持的命令：
+
+```text
+/goal finish the implementation and make all tests pass
+/goal              # 查看当前激活的 goal
+/goal clear        # 清除它
+```
+
+每次 Gateway 驱动的 run 结束后，DeerFlow 会用一个 non-thinking 的评估模型，把可见的对话内容拿去和激活的 goal 比对。评估模型必须返回一个带类型的 blocker（`missing_evidence`、`needs_user_input`、`run_failed`、`external_wait` 或 `goal_not_met_yet`），并附上可见证据。只有在最近一轮 assistant 回复已被持久化 checkpoint、blocker 是 `goal_not_met_yet`、评估期间 thread 没有变化、且无进展熔断器没有触发时，DeerFlow 才会注入一次 hidden continuation。安全上限默认是 8 次 hidden continuation；连续两次相同的无进展评估后就会停止。`/goal clear` 以及任何用户手动输入的新内容，优先级都高于排队中的 continuation。当 goal 被满足时，DeerFlow 会自动清除它，并发布更新后的 thread 状态。
+
+Web UI 会在输入框上方展示当前激活的 goal。同样的命令在 TUI 和受支持的 IM 渠道里也可用。在 Web UI 和受支持的 IM 渠道里，设置 `/goal <完成条件>` 还会以该条件作为任务启动一次 run；状态查询和清除命令则只管理 goal 状态本身。
 
 ### Sub-Agents
 
@@ -522,7 +621,7 @@ DeerFlow 对模型没有强绑定，只要实现了 OpenAI 兼容 API 的 LLM，
 
 ## 内嵌 Python Client
 
-DeerFlow 也可以作为内嵌的 Python 库使用，不必启动完整的 HTTP 服务。`DeerFlowClient` 提供了进程内的直接访问方式，覆盖所有 agent 和 Gateway 能力，返回的数据结构与 HTTP Gateway API 保持一致：
+DeerFlow 也可以作为内嵌的 Python 库使用，不必启动完整的 HTTP 服务。`DeerFlowClient` 提供了进程内的直接访问方式，覆盖所有 agent 和 Gateway 能力，返回的数据结构与 HTTP Gateway API 保持一致。HTTP Gateway 还提供 `DELETE /api/threads/{thread_id}`，用于在 LangGraph thread 本身被删除之后，清理 DeerFlow 托管的本地 thread 数据：
 
 ```python
 from deerflow.client import DeerFlowClient
@@ -542,9 +641,55 @@ models = client.list_models()        # {"models": [...]}
 skills = client.list_skills()        # {"skills": [...]}
 client.update_skill("web-search", enabled=True)
 client.upload_files("thread-1", ["./report.pdf"])  # {"success": True, "files": [...]}
+client.set_goal("thread-1", "finish the implementation and make all tests pass")
+client.get_goal("thread-1")       # {"goal": {...}} or {"goal": None}
+client.clear_goal("thread-1")
 ```
 
 所有返回 dict 的方法都会在 CI 中通过 Gateway 的 Pydantic 响应模型校验（`TestGatewayConformance`），以确保内嵌 client 始终和 HTTP API schema 保持同步。完整 API 说明见 `backend/packages/harness/deerflow/client.py`。
+
+## 定时任务 (Scheduled Tasks)
+
+DeerFlow 现在在 workspace 里内置了一个一等的定时任务（scheduled-task）MVP。
+
+当前 MVP 能力：
+
+- 在 `/workspace/scheduled-tasks` 管理任务
+- 每个定时任务可以选择复用同一个 thread，也可以选择每次运行新建一个 thread
+- 支持 `once` 和 `cron` 两种调度方式
+- 后台定时执行以非交互式 DeerFlow run 运行（那里不会暴露 `ask_clarification`）
+- 当到期的 cron 执行与同一复用 thread 上的活跃 run 冲突时，采用 `skip` 的重叠处理策略
+- 支持暂停、恢复、手动触发、查看历史和删除任务
+- 定时任务通过正常的 DeerFlow run 生命周期执行
+
+当前 MVP 限制：
+
+- 暂时还没有可在对话中创建任务的 `schedule_task` 工具
+- 没有纯文本通知任务
+- 没有渠道或 GitHub 分发目标
+- 第一版没有 `interval` 调度类型
+
+通过 `config.yaml -> scheduler.enabled` 开启后台轮询。手动触发使用同样的 scheduled-task 资源和执行路径。
+
+## 终端工作台 (TUI)
+
+`deerflow` 是一个面向终端用户的工作台，**内嵌**运行在 `DeerFlowClient` 之上——无需启动 Gateway、前端、nginx 或 Docker，同时沿用与 DeerFlow 其它部分相同的 `config.yaml`、checkpointer、技能、记忆、MCP 和沙箱配置。
+
+![DeerFlow TUI](docs/tui/tui-preview.svg)
+
+```bash
+uv pip install 'deerflow-harness[tui]'        # 可选的 'textual' 依赖
+
+deerflow                                      # 启动终端 UI（需要 TTY）
+deerflow --continue                           # 恢复最近一次会话
+deerflow --resume THREAD                      # 按 id 恢复指定会话
+deerflow --print "总结一下这个仓库"             # 无头模式，结果打印到 stdout
+deerflow --json  "hello"                       # 无头模式，输出按行分隔的 StreamEvent
+```
+
+键盘驱动的对话界面：流式渲染的对话区（回答按 Markdown 渲染）、紧凑的工具活动卡片、`/` 斜杠命令面板、`/model` 与 `/threads` 选择器、输入历史，以及 `Esc` / `Ctrl+C` 打断。在 TUI 里开启的会话也会出现在 Web UI 侧边栏——它会以本地默认用户身份写入共享的会话存储，因此终端与网页保持同步，**无需运行 Gateway**。
+
+完整说明见 [backend/docs/TUI.md](backend/docs/TUI.md)。
 
 ## 文档
 

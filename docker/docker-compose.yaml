@@ -5,6 +5,7 @@
 #   - nginx:       Reverse proxy (port 2026, configurable via PORT env var)
 #   - frontend:    Next.js production server
 #   - gateway:     FastAPI Gateway API + agent runtime
+#   - redis:       Redis Streams backend for cross-worker SSE stream bridge
 #   - provisioner: (optional) Sandbox provisioner for Kubernetes mode
 #
 # Key environment variables (set via environment/.env or scripts/deploy.sh):
@@ -13,7 +14,7 @@
 #   DEER_FLOW_CONFIG_PATH            — path to config.yaml
 #   DEER_FLOW_EXTENSIONS_CONFIG_PATH — path to extensions_config.json
 #   DEER_FLOW_SKILLS_PATH            — skills dir, default $DEER_FLOW_PROJECT_ROOT/skills
-#   DEER_FLOW_DOCKER_SOCKET          — Docker socket path, default /var/run/docker.sock
+#   DEER_FLOW_DOCKER_SOCKET          — Docker socket path for aio/DooD mode, default /var/run/docker.sock (used only by the opt-in docker-compose.dood.yaml overlay)
 #   DEER_FLOW_REPO_ROOT              — repo root (used for skills host path in DooD)
 #   BETTER_AUTH_SECRET               — required for frontend auth/session security
 #   DEER_FLOW_INTERNAL_AUTH_TOKEN    — shared internal Gateway auth token for multi-worker IM channels
@@ -24,6 +25,22 @@
 # Access: http://localhost:${PORT:-2026}
 
 services:
+  # ── Redis Stream Bridge ────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: deer-flow-redis
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - deer-flow
+    restart: unless-stopped
+
   # ── Reverse Proxy ──────────────────────────────────────────────────────────
   nginx:
     image: nginx:alpine
@@ -72,27 +89,29 @@ services:
         UV_INDEX_URL: ${UV_INDEX_URL:-https://pypi.org/simple}
         UV_EXTRAS: ${UV_EXTRAS:-}
     container_name: deer-flow-gateway
-    command: sh -c "cd backend && PYTHONPATH=. uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 --workers ${GATEWAY_WORKERS:-4}"
+    # Gateway hosts the agent runtime with in-process RunManager + StreamBridge
+    # singletons -- run state lives in this worker's memory. Default to a single
+    # worker: the Redis stream bridge solves cross-worker SSE delivery and
+    # reconnect, but run cancel, request dedup, and per-worker IM channel
+    # services remain worker-local. Override GATEWAY_WORKERS only when the
+    # Redis stream bridge is enabled and those limitations are acceptable.
+    command: sh -c "cd backend && PYTHONPATH=. uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 --workers ${GATEWAY_WORKERS:-1}"
     volumes:
       - ${DEER_FLOW_CONFIG_PATH}:/app/backend/config.yaml:ro
       - ${DEER_FLOW_EXTENSIONS_CONFIG_PATH}:/app/backend/extensions_config.json:ro
       - ../skills:/app/skills:ro
       - ${DEER_FLOW_HOME}:/app/backend/.deer-flow
-      # DooD: AioSandboxProvider starts sandbox containers via host Docker daemon
-      - ${DEER_FLOW_DOCKER_SOCKET}:/var/run/docker.sock
-      # CLI auth directories for auto-auth (Claude Code + Codex CLI)
-      - type: bind
-        source: ${HOME:?HOME must be set}/.claude
-        target: /root/.claude
-        read_only: true
-        bind:
-          create_host_path: true
-      - type: bind
-        source: ${HOME:?HOME must be set}/.codex
-        target: /root/.codex
-        read_only: true
-        bind:
-          create_host_path: true
+      # DooD: the host Docker socket is NOT mounted by default. It is added only
+      # for aio (pure-DooD) sandbox mode via the opt-in docker-compose.dood.yaml
+      # overlay (appended by scripts/deploy.sh). See backend/docs/CONFIGURATION.md
+      # Security Note section for details.
+       
+      # CLI auth dirs (Claude Code / Codex) are NOT mounted by default: they
+      # expose the entire ~/.claude and ~/.codex (history, projects, global
+      # config, credentials) into the container. Mount them only when you use
+      # the Claude/Codex CLI login as a model provider or ACP agent, via the
+      # opt-in docker-compose.cli-auth.yaml overlay. Prefer an env token
+      # (CLAUDE_CODE_OAUTH_TOKEN, see .env.example / backend/docs/CONFIGURATION.md).
     working_dir: /app
     environment:
       - CI=true
@@ -100,6 +119,7 @@ services:
       - DEER_FLOW_HOME=/app/backend/.deer-flow
       - DEER_FLOW_CONFIG_PATH=/app/backend/config.yaml
       - DEER_FLOW_EXTENSIONS_CONFIG_PATH=/app/backend/extensions_config.json
+      - DEER_FLOW_STREAM_BRIDGE_REDIS_URL=${DEER_FLOW_STREAM_BRIDGE_REDIS_URL:-redis://redis:6379/0}
       - DEER_FLOW_CHANNELS_LANGGRAPH_URL=${DEER_FLOW_CHANNELS_LANGGRAPH_URL:-http://gateway:8001/api}
       - DEER_FLOW_CHANNELS_GATEWAY_URL=${DEER_FLOW_CHANNELS_GATEWAY_URL:-http://gateway:8001}
       - DEER_FLOW_INTERNAL_AUTH_TOKEN=${DEER_FLOW_INTERNAL_AUTH_TOKEN}
@@ -107,10 +127,17 @@ services:
       - DEER_FLOW_HOST_BASE_DIR=${DEER_FLOW_HOME}
       - DEER_FLOW_HOST_SKILLS_PATH=${DEER_FLOW_REPO_ROOT}/skills
       - DEER_FLOW_SANDBOX_HOST=host.docker.internal
+      # Proxy values (HTTP_PROXY/HTTPS_PROXY/ALL_PROXY) are inherited from ../.env via env_file.
+      # Only NO_PROXY is declared here so internal service hostnames are always exempt from the proxy.
+      - NO_PROXY=${NO_PROXY:-}${NO_PROXY:+,}localhost,127.0.0.1,::1,gateway,frontend,nginx,provisioner,host.docker.internal
+      - no_proxy=${no_proxy:-}${no_proxy:+,}localhost,127.0.0.1,::1,gateway,frontend,nginx,provisioner,host.docker.internal
     env_file:
       - ../.env
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    depends_on:
+      redis:
+        condition: service_healthy
     networks:
       - deer-flow
     restart: unless-stopped
@@ -146,6 +173,9 @@ services:
       interval: 10s
       timeout: 5s
       retries: 6
+volumes:
+  redis-data:
+
 networks:
   deer-flow:
     driver: bridge

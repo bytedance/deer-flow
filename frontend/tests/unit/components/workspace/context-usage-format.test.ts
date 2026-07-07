@@ -1,4 +1,4 @@
-import { expect, test } from "vitest";
+import { expect, test } from "@rstest/core";
 
 import { formatContextUsagePercentage } from "@/components/workspace/context-usage-format";
 

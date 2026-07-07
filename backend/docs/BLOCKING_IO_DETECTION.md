@@ -67,6 +67,11 @@ The normal workflow is:
 3. Add or update a focused runtime anchor in `backend/tests/blocking_io/`.
 4. Let CI prevent that path from regressing.
 
+Contributors changing backend async code can run the `blocking-io-guard` skill
+(`.agent/skills/blocking-io-guard/`) to execute steps 1–3 for their own diff: it
+scans the change for blocking-IO candidates, drafts or extends a runtime anchor,
+and verifies the anchor fails when the blocking IO regresses.
+
 Runtime detection has two maintenance paths.
 
 ### Add a runtime rule
@@ -144,6 +149,9 @@ The runtime anchors protect confirmed blocking-IO bug shapes:
   (fix #3084); this anchor drives the real async API under the gate so any
   blocking IO reintroduced on the loop fails, not only removal of one
   `to_thread` call.
+- `UploadsMiddleware.before_agent` uploads-directory scan: a sync-only middleware
+  hook runs on the event loop under async graph execution, so the scan is
+  offloaded via `abefore_agent` + `run_in_executor`.
 - Gate health checks: Blockbuster catches unoffloaded calls, opt-out works, and
   patches are restored after exceptions.
 

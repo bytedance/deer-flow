@@ -5,6 +5,7 @@
 #   - nginx: Reverse proxy (port 2026)
 #   - frontend: Frontend Next.js dev server (port 3000)
 #   - gateway: Backend Gateway API + agent runtime (port 8001)
+#   - redis: Redis Streams backend for cross-worker SSE stream bridge
 #   - provisioner (optional): Sandbox provisioner (creates Pods in host Kubernetes)
 #
 # Prerequisites:
@@ -13,6 +14,22 @@
 # Access: http://localhost:2026
 
 services:
+  # ── Redis Stream Bridge ────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: deer-flow-redis
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - deer-flow-dev
+    restart: unless-stopped
+
   # ── Sandbox Provisioner ────────────────────────────────────────────────
   # Manages per-sandbox Pod + Service lifecycle in the host Kubernetes
   # cluster via the K8s API.
@@ -138,45 +155,52 @@ services:
       # Preserve the .venv built during Docker image build — mounting the full backend/
       # directory above would otherwise shadow it with the (empty) host directory.
       - gateway-venv:/app/backend/.venv
-      - ../config.yaml:/app/config.yaml
-      - ../extensions_config.json:/app/extensions_config.json
+      # Mount the project directory instead of its mutable config files individually.
+      # Host editors commonly replace files on save; a directory bind keeps those
+      # replacements visible inside Docker Desktop/WSL containers.
+      - ../:/app/project
       - ../skills:/app/skills
       - ../logs:/app/logs
       # Use a Docker-managed uv cache volume instead of a host bind mount.
       # On macOS/Docker Desktop, uv may fail to create symlinks inside shared
       # host directories, which causes startup-time `uv sync` to crash.
       - gateway-uv-cache:/root/.cache/uv
-      # DooD: AioSandboxProvider runs inside the Gateway process.
-      - /var/run/docker.sock:/var/run/docker.sock
-      # CLI auth directories for auto-auth (Claude Code + Codex CLI)
-      - type: bind
-        source: ${HOME:?HOME must be set}/.claude
-        target: /root/.claude
-        read_only: true
-        bind:
-          create_host_path: true
-      - type: bind
-        source: ${HOME:?HOME must be set}/.codex
-        target: /root/.codex
-        read_only: true
-        bind:
-          create_host_path: true
+      # DooD: the host Docker socket is NOT mounted by default. It is added only
+      # for aio (pure-DooD) sandbox mode via the opt-in docker-compose.dood.yaml
+      # overlay (appended by scripts/docker.sh). See backend/docs/CONFIGURATION.md 
+      
+      # CLI auth dirs (Claude Code / Codex) are NOT mounted by default: they
+      # expose the entire ~/.claude and ~/.codex (history, projects, global
+      # config, credentials) into the container. Mount them only when you use
+      # the Claude/Codex CLI login as a model provider or ACP agent, via the
+      # opt-in docker-compose.cli-auth.yaml overlay. Prefer an env token
+      # (CLAUDE_CODE_OAUTH_TOKEN, see .env.example / backend/docs/CONFIGURATION.md).
     working_dir: /app
     environment:
       - CI=true
       - DEER_FLOW_PROJECT_ROOT=/app
       - DEER_FLOW_HOME=/app/backend/.deer-flow
+      - DEER_FLOW_CONFIG_PATH=/app/project/config.yaml
+      - DEER_FLOW_EXTENSIONS_CONFIG_PATH=/app/project/extensions_config.json
+      - DEER_FLOW_STREAM_BRIDGE_REDIS_URL=${DEER_FLOW_STREAM_BRIDGE_REDIS_URL:-redis://redis:6379/0}
       - DEER_FLOW_CHANNELS_LANGGRAPH_URL=${DEER_FLOW_CHANNELS_LANGGRAPH_URL:-http://gateway:8001/api}
       - DEER_FLOW_CHANNELS_GATEWAY_URL=${DEER_FLOW_CHANNELS_GATEWAY_URL:-http://gateway:8001}
       - DEER_FLOW_INTERNAL_AUTH_TOKEN=${DEER_FLOW_INTERNAL_AUTH_TOKEN:-}
       - DEER_FLOW_HOST_BASE_DIR=${DEER_FLOW_ROOT}/backend/.deer-flow
       - DEER_FLOW_HOST_SKILLS_PATH=${DEER_FLOW_ROOT}/skills
       - DEER_FLOW_SANDBOX_HOST=host.docker.internal
+      # Proxy values (HTTP_PROXY/HTTPS_PROXY/ALL_PROXY) are inherited from ../.env via env_file.
+      # Only NO_PROXY is declared here so internal service hostnames are always exempt from the proxy.
+      - NO_PROXY=${NO_PROXY:-}${NO_PROXY:+,}localhost,127.0.0.1,::1,gateway,frontend,nginx,provisioner,host.docker.internal
+      - no_proxy=${no_proxy:-}${no_proxy:+,}localhost,127.0.0.1,::1,gateway,frontend,nginx,provisioner,host.docker.internal
     env_file:
       - ../.env
     extra_hosts:
       # For Linux: map host.docker.internal to host gateway
       - "host.docker.internal:host-gateway"
+    depends_on:
+      redis:
+        condition: service_healthy
     networks:
       - deer-flow-dev
     restart: unless-stopped
@@ -186,6 +210,7 @@ volumes:
   # image build are not shadowed by the host backend/ directory mount.
   gateway-venv:
   gateway-uv-cache:
+  redis-data:
 
 networks:
   deer-flow-dev:

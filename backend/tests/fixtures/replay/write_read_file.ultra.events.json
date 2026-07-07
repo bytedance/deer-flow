@@ -1,0 +1,162 @@
+{
+  "scenario": "write_read_file",
+  "mode": "ultra",
+  "events": [
+    {
+      "event": "metadata",
+      "keys": [
+        "run_id",
+        "thread_id"
+      ]
+    },
+    {
+      "event": "values",
+      "keys": [
+        "artifacts",
+        "delegations",
+        "messages",
+        "skill_context",
+        "viewed_images"
+      ]
+    },
+    {
+      "event": "values",
+      "keys": [
+        "artifacts",
+        "delegations",
+        "messages",
+        "skill_context",
+        "thread_data",
+        "viewed_images"
+      ]
+    },
+    {
+      "event": "values",
+      "keys": [
+        "artifacts",
+        "delegations",
+        "messages",
+        "skill_context",
+        "thread_data",
+        "viewed_images"
+      ]
+    },
+    {
+      "event": "values",
+      "keys": [
+        "artifacts",
+        "delegations",
+        "messages",
+        "skill_context",
+        "thread_data",
+        "viewed_images"
+      ]
+    },
+    {
+      "event": "values",
+      "keys": [
+        "artifacts",
+        "delegations",
+        "messages",
+        "skill_context",
+        "thread_data",
+        "title",
+        "viewed_images"
+      ]
+    },
+    {
+      "event": "values",
+      "keys": [
+        "artifacts",
+        "delegations",
+        "messages",
+        "skill_context",
+        "thread_data",
+        "title",
+        "viewed_images"
+      ]
+    },
+    {
+      "event": "values",
+      "keys": [
+        "artifacts",
+        "delegations",
+        "messages",
+        "sandbox",
+        "skill_context",
+        "thread_data",
+        "title",
+        "viewed_images"
+      ]
+    },
+    {
+      "event": "values",
+      "keys": [
+        "artifacts",
+        "delegations",
+        "messages",
+        "sandbox",
+        "skill_context",
+        "thread_data",
+        "title",
+        "viewed_images"
+      ]
+    },
+    {
+      "event": "values",
+      "keys": [
+        "artifacts",
+        "delegations",
+        "messages",
+        "sandbox",
+        "skill_context",
+        "thread_data",
+        "title",
+        "viewed_images"
+      ]
+    },
+    {
+      "event": "values",
+      "keys": [
+        "artifacts",
+        "delegations",
+        "messages",
+        "sandbox",
+        "skill_context",
+        "thread_data",
+        "title",
+        "viewed_images"
+      ]
+    },
+    {
+      "event": "values",
+      "keys": [
+        "artifacts",
+        "delegations",
+        "messages",
+        "sandbox",
+        "skill_context",
+        "thread_data",
+        "title",
+        "viewed_images"
+      ]
+    },
+    {
+      "event": "values",
+      "keys": [
+        "artifacts",
+        "delegations",
+        "messages",
+        "sandbox",
+        "skill_context",
+        "thread_data",
+        "title",
+        "viewed_images"
+      ]
+    },
+    {
+      "event": "end",
+      "keys": null
+    }
+  ]
+}

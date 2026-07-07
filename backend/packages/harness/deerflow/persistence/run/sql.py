@@ -11,7 +11,7 @@ import json
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import func, select, update
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.persistence.run.model import RunRow
@@ -230,6 +230,7 @@ class RunRepository(RunStore):
         lead_agent_tokens: int = 0,
         subagent_tokens: int = 0,
         middleware_tokens: int = 0,
+        token_usage_by_model: dict[str, dict[str, int]] | None = None,
         message_count: int = 0,
         last_ai_message: str | None = None,
         first_human_message: str | None = None,
@@ -248,6 +249,7 @@ class RunRepository(RunStore):
             "lead_agent_tokens": lead_agent_tokens,
             "subagent_tokens": subagent_tokens,
             "middleware_tokens": middleware_tokens,
+            "token_usage_by_model": self._safe_json(token_usage_by_model) or {},
             "message_count": message_count,
             "updated_at": datetime.now(UTC),
         }
@@ -273,6 +275,7 @@ class RunRepository(RunStore):
         lead_agent_tokens: int | None = None,
         subagent_tokens: int | None = None,
         middleware_tokens: int | None = None,
+        token_usage_by_model: dict[str, dict[str, int]] | None = None,
         message_count: int | None = None,
         last_ai_message: str | None = None,
         first_human_message: str | None = None,
@@ -292,6 +295,8 @@ class RunRepository(RunStore):
         for key, value in optional_counters.items():
             if value is not None:
                 values[key] = value
+        if token_usage_by_model is not None:
+            values["token_usage_by_model"] = self._safe_json(token_usage_by_model) or {}
         if last_ai_message is not None:
             values["last_ai_message"] = last_ai_message[:2000]
         if first_human_message is not None:
@@ -301,26 +306,33 @@ class RunRepository(RunStore):
             await session.commit()
 
     async def aggregate_tokens_by_thread(self, thread_id: str, *, include_active: bool = False) -> dict[str, Any]:
-        """Aggregate token usage via a single SQL GROUP BY query."""
+        """Aggregate token usage for a thread.
+
+        ``by_model`` is reduced in Python from each row's ``token_usage_by_model``
+        JSON column so subagent / middleware tokens land on the model that
+        actually produced them (issue #3645). Rows written before that column
+        existed fall back to ``RunRow.model_name`` + ``RunRow.total_tokens``,
+        preserving the legacy lead-only behavior instead of dropping the data.
+
+        Headline totals (``total_tokens``, ``total_input_tokens``,
+        ``total_output_tokens``) and the ``by_caller`` bucket are summed from
+        their own columns and are therefore unaffected by the JSON column being
+        empty.
+        """
         statuses = ("success", "error", "running") if include_active else ("success", "error")
         _completed = RunRow.status.in_(statuses)
         _thread = RunRow.thread_id == thread_id
-        model_name = func.coalesce(RunRow.model_name, "unknown")
 
-        stmt = (
-            select(
-                model_name.label("model"),
-                func.count().label("runs"),
-                func.coalesce(func.sum(RunRow.total_tokens), 0).label("total_tokens"),
-                func.coalesce(func.sum(RunRow.total_input_tokens), 0).label("total_input_tokens"),
-                func.coalesce(func.sum(RunRow.total_output_tokens), 0).label("total_output_tokens"),
-                func.coalesce(func.sum(RunRow.lead_agent_tokens), 0).label("lead_agent"),
-                func.coalesce(func.sum(RunRow.subagent_tokens), 0).label("subagent"),
-                func.coalesce(func.sum(RunRow.middleware_tokens), 0).label("middleware"),
-            )
-            .where(_thread, _completed)
-            .group_by(model_name)
-        )
+        stmt = select(
+            RunRow.model_name,
+            RunRow.total_tokens,
+            RunRow.total_input_tokens,
+            RunRow.total_output_tokens,
+            RunRow.lead_agent_tokens,
+            RunRow.subagent_tokens,
+            RunRow.middleware_tokens,
+            RunRow.token_usage_by_model,
+        ).where(_thread, _completed)
 
         async with self._sf() as session:
             rows = (await session.execute(stmt)).all()
@@ -329,14 +341,28 @@ class RunRepository(RunStore):
         lead_agent = subagent = middleware = 0
         by_model: dict[str, dict] = {}
         for r in rows:
-            by_model[r.model] = {"tokens": r.total_tokens, "runs": r.runs}
+            total_runs += 1
             total_tokens += r.total_tokens
             total_input += r.total_input_tokens
             total_output += r.total_output_tokens
-            total_runs += r.runs
-            lead_agent += r.lead_agent
-            subagent += r.subagent
-            middleware += r.middleware
+            lead_agent += r.lead_agent_tokens
+            subagent += r.subagent_tokens
+            middleware += r.middleware_tokens
+
+            # ``or {}`` covers rows written before ``token_usage_by_model``
+            # existed (the column is NULL on a manual ALTER ADD COLUMN without
+            # backfill); fresh rows always carry the journal-produced dict.
+            usage_by_model = r.token_usage_by_model or {}
+            if usage_by_model:
+                for model, usage in usage_by_model.items():
+                    entry = by_model.setdefault(model, {"tokens": 0, "runs": 0})
+                    entry["tokens"] += usage.get("total_tokens", 0)
+                    entry["runs"] += 1
+            else:
+                model = r.model_name or "unknown"
+                entry = by_model.setdefault(model, {"tokens": 0, "runs": 0})
+                entry["tokens"] += r.total_tokens
+                entry["runs"] += 1
 
         return {
             "total_tokens": total_tokens,

@@ -17,20 +17,31 @@ from __future__ import annotations
 import logging
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
 import yaml
 from langchain_core.messages import ToolMessage
 from langchain_core.tools import tool
 from langgraph.types import Command
+from pydantic import BeforeValidator
 
-from deerflow.config.agents_config import load_agent_config, validate_agent_name
+from deerflow.config.agents_config import load_agent_config, preserve_non_managed_fields, validate_agent_name
 from deerflow.config.app_config import get_app_config
 from deerflow.config.paths import get_paths
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.tools.types import Runtime
 
 logger = logging.getLogger(__name__)
+
+_NULLISH_STRINGS = frozenset({"null", "none", "undefined"})
+
+# Channels whose inbound messages come from untrusted external commenters
+# (anyone on a GitHub repo, etc.). The lead-agent factory already drops
+# this tool for runs on these channels (see ``_WEBHOOK_CHANNELS`` in
+# ``deerflow.agents.lead_agent.agent``); this set is the in-tool mirror
+# so a custom factory that re-attaches ``update_agent`` cannot silently
+# expose self-mutation over a webhook.
+_UNTRUSTED_CHANNELS: frozenset[str] = frozenset({"github"})
 
 
 def _stage_temp(path: Path, text: str) -> Path:
@@ -67,14 +78,26 @@ def _cleanup_temps(temps: list[Path]) -> None:
             logger.debug("Failed to clean up temp file %s", tmp, exc_info=True)
 
 
+def _is_nullish_string(value: object) -> bool:
+    return isinstance(value, str) and value.strip().lower() in _NULLISH_STRINGS
+
+
+def _normalize_nullish_string(value: object) -> object:
+    return None if _is_nullish_string(value) else value
+
+
+OptionalText = Annotated[str | None, BeforeValidator(_normalize_nullish_string)]
+OptionalStringList = Annotated[list[str] | None, BeforeValidator(_normalize_nullish_string)]
+
+
 @tool(parse_docstring=True)
 def update_agent(
     runtime: Runtime,
-    soul: str | None = None,
-    description: str | None = None,
-    skills: list[str] | None = None,
-    tool_groups: list[str] | None = None,
-    model: str | None = None,
+    soul: OptionalText = None,
+    description: OptionalText = None,
+    skills: OptionalStringList = None,
+    tool_groups: OptionalStringList = None,
+    model: OptionalText = None,
 ) -> Command:
     """Persist updates to the current custom agent's SOUL.md and config.yaml.
 
@@ -86,7 +109,9 @@ def update_agent(
     semantics, so always start from the current SOUL and apply your edits.
 
     Pass ``skills=[]`` to disable all skills for this agent. Omit ``skills``
-    entirely to keep the existing whitelist.
+    entirely to keep the existing whitelist. Do not pass literal strings like
+    ``"null"`` / ``"none"`` / ``"undefined"`` for unchanged fields; omit those
+    fields instead.
 
     Args:
         soul: Optional full replacement SOUL.md content.
@@ -102,12 +127,23 @@ def update_agent(
     """
     tool_call_id = runtime.tool_call_id
     agent_name_raw: str | None = runtime.context.get("agent_name") if runtime.context else None
+    channel_name: str | None = runtime.context.get("channel_name") if runtime.context else None
 
     def _err(message: str) -> Command:
-        return Command(update={"messages": [ToolMessage(content=f"Error: {message}", tool_call_id=tool_call_id)]})
+        return Command(update={"messages": [ToolMessage(content=f"Error: {message}", tool_call_id=tool_call_id, status="error")]})
+
+    # Defence in depth — the lead-agent factory already withholds this
+    # tool from webhook-channel runs (see ``_WEBHOOK_CHANNELS`` in
+    # ``deerflow.agents.lead_agent.agent``). The same channel set is
+    # mirrored here so a future code path that re-attaches the tool
+    # without going through ``_make_lead_agent`` (custom factories,
+    # tests, etc.) does not silently accept untrusted self-mutation
+    # requests routed from a webhook.
+    if channel_name in _UNTRUSTED_CHANNELS:
+        return _err(f"update_agent is disabled on the {channel_name!r} channel. Self-mutation requests must come from an operator-trusted surface (chat UI or the HTTP API), not a webhook fan-out.")
 
     if soul is None and description is None and skills is None and tool_groups is None and model is None:
-        return _err("No fields provided. Pass at least one of: soul, description, skills, tool_groups, model.")
+        return _err('No fields provided. Pass at least one of: soul, description, skills, tool_groups, model. Omit unchanged fields instead of passing null-like strings such as "null", "none", or "undefined".')
 
     try:
         agent_name = validate_agent_name(agent_name_raw)
@@ -174,6 +210,17 @@ def update_agent(
         config_data["skills"] = new_skills
     if skills is not None and skills != existing_cfg.skills:
         updated_fields.append("skills")
+
+    # Preserve every top-level AgentConfig field that this tool does not
+    # expose as an argument (currently ``github:``, plus any future field
+    # added to :class:`AgentConfig`). The same helper is used by the HTTP
+    # ``PATCH /api/agents/{name}`` route so the two surfaces stay in lockstep.
+    # Without this, operators who hand-author a ``github:`` block on a custom
+    # agent would silently lose it the next time the agent self-updates via
+    # ``update_agent``.
+    preserved = preserve_non_managed_fields(existing_cfg)
+    for key, value in preserved.items():
+        config_data.setdefault(key, value)
 
     config_changed = bool({"description", "model", "tool_groups", "skills"} & set(updated_fields))
 

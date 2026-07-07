@@ -42,8 +42,36 @@ esac
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
+ENV_FILE="$REPO_ROOT/.env"
 DOCKER_DIR="$REPO_ROOT/docker"
-COMPOSE_CMD=(docker compose -p deer-flow -f "$DOCKER_DIR/docker-compose.yaml")
+if [ -f "$ENV_FILE" ]; then
+    COMPOSE_CMD=(docker compose --env-file "$ENV_FILE" -p deer-flow -f "$DOCKER_DIR/docker-compose.yaml")
+else
+    COMPOSE_CMD=(docker compose -p deer-flow -f "$DOCKER_DIR/docker-compose.yaml")
+fi
+
+load_uv_extras_from_dotenv() {
+    local line=""
+    local value=""
+
+    [ -f "$ENV_FILE" ] || return 0
+    [ -z "${UV_EXTRAS+x}" ] || return 0
+
+    line="$(grep -E '^[[:space:]]*(export[[:space:]]+)?UV_EXTRAS[[:space:]]*=' "$ENV_FILE" | tail -n 1 || true)"
+    [ -n "$line" ] || return 0
+
+    value="${line#*=}"
+    value="${value%$'\r'}"
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+    case "$value" in
+        \"*\") value="${value#\"}"; value="${value%\"}" ;;
+        \'*\') value="${value#\'}"; value="${value%\'}" ;;
+    esac
+    export UV_EXTRAS="$value"
+}
+
+load_uv_extras_from_dotenv
 
 # ── Colors ────────────────────────────────────────────────────────────────────
 
@@ -172,6 +200,44 @@ if  [ "$CMD" != "down" ] && [ -z "$DEER_FLOW_INTERNAL_AUTH_TOKEN" ]; then
     fi
 fi
 
+# ── UV_EXTRAS auto-detection ─────────────────────────────────────────────────
+# The production Dockerfile accepts UV_EXTRAS as a single build-arg token and
+# adds the --extra prefix itself. Convert the detector's uv flag string
+# ("--extra postgres --extra discord") to a comma-joined name token.
+
+if [ "$CMD" != "down" ] && [ -z "$UV_EXTRAS" ]; then
+    _detect_python=""
+    for _python in python3 python; do
+        if command -v "$_python" >/dev/null 2>&1 && \
+            "$_python" -c 'import sys; sys.version_info >= (3, 6) or sys.exit(1)' >/dev/null 2>&1; then
+            _detect_python="$_python"
+            break
+        fi
+    done
+fi
+
+if [ "$CMD" != "down" ] && [ -z "$UV_EXTRAS" ] && [ -n "$_detect_python" ]; then
+    _uv_extras_flags="$("$_detect_python" "$REPO_ROOT/scripts/detect_uv_extras.py" 2>/dev/null || true)"
+    _uv_extras=""
+    set -- $_uv_extras_flags
+    while [ "$#" -gt 0 ]; do
+        if [ "$1" = "--extra" ] && [ "$#" -gt 1 ]; then
+            if [ -z "$_uv_extras" ]; then
+                _uv_extras="$2"
+            else
+                _uv_extras="$_uv_extras,$2"
+            fi
+            shift 2
+        else
+            shift
+        fi
+    done
+    if [ -n "$_uv_extras" ]; then
+        export UV_EXTRAS="$_uv_extras"
+        echo -e "${GREEN}✓ Auto-detected UV_EXTRAS=${UV_EXTRAS} from config.yaml${NC}"
+    fi
+fi
+
 # ── detect_sandbox_mode ───────────────────────────────────────────────────────
 
 detect_sandbox_mode() {
@@ -215,7 +281,6 @@ if [ "$CMD" = "down" ]; then
     export DEER_FLOW_HOME="${DEER_FLOW_HOME:-$REPO_ROOT/backend/.deer-flow}"
     export DEER_FLOW_CONFIG_PATH="${DEER_FLOW_CONFIG_PATH:-$DEER_FLOW_HOME/config.yaml}"
     export DEER_FLOW_EXTENSIONS_CONFIG_PATH="${DEER_FLOW_EXTENSIONS_CONFIG_PATH:-$DEER_FLOW_HOME/extensions_config.json}"
-    export DEER_FLOW_DOCKER_SOCKET="${DEER_FLOW_DOCKER_SOCKET:-/var/run/docker.sock}"
     export DEER_FLOW_REPO_ROOT="${DEER_FLOW_REPO_ROOT:-$REPO_ROOT}"
     export BETTER_AUTH_SECRET="${BETTER_AUTH_SECRET:-placeholder}"
     export DEER_FLOW_INTERNAL_AUTH_TOKEN="${DEER_FLOW_INTERNAL_AUTH_TOKEN:-placeholder}"
@@ -231,11 +296,6 @@ if [ "$CMD" = "build" ]; then
     echo "  DeerFlow — Building Images"
     echo "=========================================="
     echo ""
-
-    # Docker socket is needed for compose to parse volume specs
-    if [ -z "$DEER_FLOW_DOCKER_SOCKET" ]; then
-        export DEER_FLOW_DOCKER_SOCKET="/var/run/docker.sock"
-    fi
 
     "${COMPOSE_CMD[@]}" build
 
@@ -264,26 +324,31 @@ echo -e "${BLUE}Sandbox mode: $sandbox_mode${NC}"
 
 echo -e "${BLUE}Runtime: Gateway embedded agent runtime${NC}"
 
-services="frontend gateway nginx"
+services="redis frontend gateway nginx"
 
 if [ "$sandbox_mode" = "provisioner" ]; then
     services="$services provisioner"
 fi
 
-# ── DEER_FLOW_DOCKER_SOCKET ───────────────────────────────────────────────────
+# ── DEER_FLOW_DOCKER_SOCKET (aio / pure-DooD mode only) ──────────────────────
+# Only aio mode (AioSandboxProvider without provisioner_url) needs the host
+# Docker socket. It is mounted via the opt-in docker-compose.dood.yaml overlay,
+# appended here, so the default (local) and provisioner modes never expose the
+# host daemon. Mounting the socket = root-equivalent host control; see SECURITY.md.
 
 if [ -z "$DEER_FLOW_DOCKER_SOCKET" ]; then
     export DEER_FLOW_DOCKER_SOCKET="/var/run/docker.sock"
 fi
 
-if [ "$sandbox_mode" != "local" ]; then
+if [ "$sandbox_mode" = "aio" ]; then
     if [ ! -S "$DEER_FLOW_DOCKER_SOCKET" ]; then
         echo -e "${RED}⚠ Docker socket not found at $DEER_FLOW_DOCKER_SOCKET${NC}"
         echo "  AioSandboxProvider (DooD) will not work."
         exit 1
-    else
-        echo -e "${GREEN}✓ Docker socket: $DEER_FLOW_DOCKER_SOCKET${NC}"
     fi
+    echo -e "${GREEN}✓ Docker socket: $DEER_FLOW_DOCKER_SOCKET${NC}"
+    echo -e "${YELLOW}  Mounting host Docker socket into gateway (DooD = host root-equivalent). See SECURITY.md.${NC}"
+    COMPOSE_CMD+=(-f "$DOCKER_DIR/docker-compose.dood.yaml")
 fi
 
 echo ""

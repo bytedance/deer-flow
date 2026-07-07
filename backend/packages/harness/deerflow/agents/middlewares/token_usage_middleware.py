@@ -97,7 +97,7 @@ def _build_todo_actions(previous_todos: list[Todo], next_todos: list[Todo]) -> l
                 previous_index, previous_match = content_matches.pop(0)
                 matched_previous_indices.add(previous_index)
 
-        if previous_match is None and index < len(previous_todos) and index not in matched_previous_indices:
+        if previous_match is None and content not in previous_by_content and index < len(previous_todos) and index not in matched_previous_indices:
             previous_match = previous_todos[index]
             matched_previous_indices.add(index)
 

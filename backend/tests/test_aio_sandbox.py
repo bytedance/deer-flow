@@ -79,23 +79,71 @@ class TestErrorObservationRetry:
         assert result == "success"
         assert call_count == 2
 
-    def test_retry_passes_fresh_session_id(self, sandbox):
-        """The retry call should include a new session id kwarg."""
-        calls = []
+    def test_retry_creates_fresh_session_before_targeting_it(self, sandbox):
+        """Recovery must explicitly create a session, then exec against that id.
+
+        The sandbox image only auto-creates a session when exec_command is
+        called with *no* id; an exec carrying an unknown id returns HTTP 404
+        "Session not found". So the retry must obtain a real, distinct session
+        via create_session() first and target that id, rather than fabricating
+        an id and handing it straight to exec_command (the regression that
+        404'd every recovery and looped runs to the recursion limit).
+        """
+        exec_calls = []
+        created_ids = []
+        cleaned_ids = []
 
         def mock_exec(command, **kwargs):
-            calls.append(kwargs)
-            if len(calls) == 1:
+            exec_calls.append(kwargs)
+            if len(exec_calls) == 1:
                 return SimpleNamespace(data=SimpleNamespace(output="'ErrorObservation' object has no attribute 'exit_code'"))
             return SimpleNamespace(data=SimpleNamespace(output="ok"))
 
-        sandbox._client.shell.exec_command = mock_exec
+        def mock_create_session(id, **kwargs):
+            created_ids.append(id)
+            return SimpleNamespace(data=SimpleNamespace(session_id=id))
 
-        sandbox.execute_command("test")
-        assert len(calls) == 2
-        assert "id" not in calls[0]
-        assert "id" in calls[1]
-        assert len(calls[1]["id"]) == 36  # UUID format
+        def mock_cleanup_session(session_id, **kwargs):
+            cleaned_ids.append(session_id)
+
+        sandbox._client.shell.exec_command = mock_exec
+        sandbox._client.shell.create_session = mock_create_session
+        sandbox._client.shell.cleanup_session = mock_cleanup_session
+
+        result = sandbox.execute_command("test")
+
+        assert result == "ok"
+        assert len(exec_calls) == 2
+        # First attempt runs on the default session (no id).
+        assert "id" not in exec_calls[0]
+        # A fresh session was explicitly created...
+        assert len(created_ids) == 1
+        assert len(created_ids[0]) == 36  # UUID format
+        # ...and the retry targets exactly that created session, never an
+        # uncreated/fabricated id (which would 404).
+        assert exec_calls[1].get("id") == created_ids[0]
+        # ...and that one-shot recovery session is released afterwards so a
+        # sandbox that keeps hitting corruption doesn't accumulate sessions.
+        assert cleaned_ids == [created_ids[0]]
+
+    def test_cleanup_failure_does_not_mask_successful_retry(self, sandbox):
+        """A failure releasing the recovery session must not lose the retry output."""
+
+        def mock_exec(command, **kwargs):
+            if "id" not in kwargs:
+                return SimpleNamespace(data=SimpleNamespace(output="'ErrorObservation' object has no attribute 'exit_code'"))
+            return SimpleNamespace(data=SimpleNamespace(output="recovered"))
+
+        def mock_cleanup_session(session_id, **kwargs):
+            raise RuntimeError("cleanup boom")
+
+        sandbox._client.shell.exec_command = mock_exec
+        sandbox._client.shell.create_session = lambda id, **kwargs: SimpleNamespace(data=SimpleNamespace(session_id=id))
+        sandbox._client.shell.cleanup_session = mock_cleanup_session
+
+        # The retry succeeded; the swallowed cleanup error must not turn this
+        # into an "Error: ..." result.
+        assert sandbox.execute_command("test") == "recovered"
 
     def test_no_retry_on_clean_output(self, sandbox):
         """Normal output should not trigger a retry."""
@@ -111,6 +159,90 @@ class TestErrorObservationRetry:
         result = sandbox.execute_command("echo hello")
         assert result == "all good"
         assert call_count == 1
+
+
+class TestBashExecUnsupportedFailFast:
+    """Regression tests for #3921: sandbox images older than all-in-one-sandbox
+    1.9.x have no ``/v1/bash/exec`` route, so every env-bearing command (skills
+    declaring ``required-secrets``) hit a bare nginx 404 that the model kept
+    retrying. The sandbox must fail fast with an actionable, operator-facing
+    error instead."""
+
+    def _api_error_404(self):
+        from agent_sandbox.core.api_error import ApiError
+
+        return ApiError(
+            headers={"server": "nginx/1.18.0 (Ubuntu)"},
+            status_code=404,
+            body={"success": False, "message": "Not Found", "data": None},
+        )
+
+    def test_bash_exec_404_returns_actionable_error(self, sandbox):
+        """A 404 from bash.exec must explain the image capability gap and the
+        remediation (upgrade image), not surface the raw nginx error."""
+        sandbox._client.bash.exec = MagicMock(side_effect=self._api_error_404())
+
+        out = sandbox.execute_command("echo $TOK", env={"TOK": "secret-v"})
+
+        assert out.startswith("Error:")
+        # Actionable: names the missing capability and the minimum image version.
+        assert "/v1/bash/exec" in out
+        assert "1.9.3" in out
+        assert "required-secrets" in out
+        # Not the raw upstream 404 body the model can't act on.
+        assert "nginx" not in out
+
+    def test_bash_exec_404_is_cached_and_stops_retry_storm(self, sandbox):
+        """After one 404 the capability gap is remembered on the instance:
+        follow-up env-bearing calls return the same actionable error without
+        another HTTP round-trip (the original bug produced 4 consecutive 404s
+        as the model retried variants of the command)."""
+        sandbox._client.bash.exec = MagicMock(side_effect=self._api_error_404())
+
+        first = sandbox.execute_command("cmd-1", env={"TOK": "v"})
+        second = sandbox.execute_command("cmd-2", env={"TOK": "v"})
+
+        assert sandbox._client.bash.exec.call_count == 1
+        assert first == second
+        assert "1.9.3" in second
+
+    def test_bash_exec_non_404_error_is_not_cached(self, sandbox):
+        """Transient failures (e.g. 500) must not permanently disable the env
+        path — the next env-bearing call should try bash.exec again."""
+        from agent_sandbox.core.api_error import ApiError
+
+        sandbox._client.bash.exec = MagicMock(side_effect=ApiError(status_code=500, body="boom"))
+
+        first = sandbox.execute_command("cmd-1", env={"TOK": "v"})
+        second = sandbox.execute_command("cmd-2", env={"TOK": "v"})
+
+        assert sandbox._client.bash.exec.call_count == 2
+        assert first.startswith("Error:")
+        assert "1.9.3" not in first
+        assert second.startswith("Error:")
+
+    def test_env_less_path_unaffected_after_404(self, sandbox):
+        """The legacy persistent-shell path must keep working on an image
+        without bash.exec — only env injection is unavailable there."""
+        sandbox._client.bash.exec = MagicMock(side_effect=self._api_error_404())
+        sandbox._client.shell.exec_command = MagicMock(return_value=SimpleNamespace(data=SimpleNamespace(output="plain ok")))
+
+        sandbox.execute_command("cmd", env={"TOK": "v"})
+        out = sandbox.execute_command("echo plain")
+
+        assert out == "plain ok"
+        sandbox._client.shell.exec_command.assert_called_once()
+
+    def test_bash_exec_success_does_not_mark_unsupported(self, sandbox):
+        """A healthy bash.exec keeps the env path fully enabled."""
+        sandbox._client.bash.exec = MagicMock(return_value=SimpleNamespace(data=SimpleNamespace(stdout="ok", stderr=None)))
+
+        first = sandbox.execute_command("cmd-1", env={"TOK": "v"})
+        second = sandbox.execute_command("cmd-2", env={"TOK": "v"})
+
+        assert first == "ok"
+        assert second == "ok"
+        assert sandbox._client.bash.exec.call_count == 2
 
 
 class TestListDirSerialization:
@@ -318,3 +450,76 @@ class TestDownloadFile:
         result = sandbox.download_file("/mnt/user-data/outputs/single.bin")
 
         assert result == b"single-chunk"
+
+
+class TestClose:
+    """Verify AioSandbox.close() tears down the host-side HTTP client (#2872)."""
+
+    def test_close_calls_real_nested_httpx_client(self, sandbox):
+        """close() must close the real httpx.Client at the bottom of the chain.
+
+        Mirrors the actual Fern structure:
+            Sandbox._client_wrapper.httpx_client  -> Fern HttpClient (no close())
+                .httpx_client                     -> httpx.Client    (the real owner)
+
+        The intermediate HttpClient deliberately exposes NO close(), so a naive
+        one-level lookup (the original bug) would silently close nothing.
+        """
+        real_httpx = MagicMock(spec=["close"])
+        fern_http = SimpleNamespace(httpx_client=real_httpx)  # no close on this layer
+        sandbox._client._client_wrapper = SimpleNamespace(httpx_client=fern_http)
+
+        sandbox.close()
+
+        real_httpx.close.assert_called_once_with()
+
+    def test_close_clears_client_reference(self, sandbox):
+        """After close(), the client reference must be dropped (use-after-close safety)."""
+        real_httpx = MagicMock(spec=["close"])
+        fern_http = SimpleNamespace(httpx_client=real_httpx)
+        sandbox._client._client_wrapper = SimpleNamespace(httpx_client=fern_http)
+
+        sandbox.close()
+
+        assert sandbox._client is None
+        assert sandbox._closed is True
+
+    def test_close_is_idempotent(self, sandbox):
+        """Calling close() multiple times must close the underlying client at most once."""
+        real_httpx = MagicMock(spec=["close"])
+        fern_http = SimpleNamespace(httpx_client=real_httpx)
+        sandbox._client._client_wrapper = SimpleNamespace(httpx_client=fern_http)
+
+        sandbox.close()
+        sandbox.close()
+        sandbox.close()
+
+        assert real_httpx.close.call_count == 1
+
+    def test_close_swallows_exceptions(self, sandbox, caplog):
+        """close() must be best-effort: client errors are logged but never raised."""
+        real_httpx = MagicMock(spec=["close"])
+        real_httpx.close.side_effect = RuntimeError("teardown boom")
+        fern_http = SimpleNamespace(httpx_client=real_httpx)
+        sandbox._client._client_wrapper = SimpleNamespace(httpx_client=fern_http)
+
+        with caplog.at_level("WARNING"):
+            sandbox.close()
+
+        assert "Error closing AioSandbox client" in caplog.text
+
+    def test_close_falls_back_to_client_close(self, sandbox):
+        """If no nested httpx.Client is reachable, close() degrades to the client's own close()."""
+        # Replace the mocked client with a stub that exposes only top-level close()
+        client = MagicMock(spec=["close"])
+        sandbox._client = client
+
+        sandbox.close()
+
+        client.close.assert_called_once_with()
+
+    def test_close_when_no_close_attr_does_not_raise(self, sandbox):
+        """A client without any close attribute must not crash close()."""
+        sandbox._client = SimpleNamespace()  # no close, no _client_wrapper
+        sandbox.close()  # must not raise
+        assert sandbox._client is None

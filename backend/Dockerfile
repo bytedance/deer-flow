@@ -14,7 +14,7 @@ ARG NODE_MAJOR=22
 ARG APT_MIRROR
 ARG UV_INDEX_URL
 # Optional extras to install (e.g. "postgres" for PostgreSQL support)
-# Usage: docker build --build-arg UV_EXTRAS=postgres ...
+# Usage: docker build --build-arg UV_EXTRAS=postgres,discord ...
 ARG UV_EXTRAS
 
 # Optionally override apt mirror for restricted networks (e.g. APT_MIRROR=mirrors.aliyun.com)
@@ -46,9 +46,24 @@ WORKDIR /app
 COPY backend ./backend
 
 # Install dependencies with cache mount
-# When UV_EXTRAS is set (e.g. "postgres"), installs optional dependencies.
+# `redis` is always installed because Docker Compose defaults the stream bridge
+# to Redis (DEER_FLOW_STREAM_BRIDGE_REDIS_URL); it is an optional extra elsewhere
+# so slim non-Docker installs do not pull it.
+# When UV_EXTRAS is set (comma- or whitespace-separated), installs optional dependencies.
 RUN --mount=type=cache,target=/root/.cache/uv \
-    sh -c "cd backend && UV_INDEX_URL=${UV_INDEX_URL:-https://pypi.org/simple} uv sync ${UV_EXTRAS:+--extra $UV_EXTRAS}"
+    sh -c 'cd backend && \
+    set -f; \
+    extras_flags=""; \
+    for extra in $(printf "%s" "$UV_EXTRAS" | tr "," " "); do \
+        case "$extra" in \
+            [!A-Za-z]* | *[!A-Za-z0-9_-]*) \
+                echo "UV_EXTRAS entry $extra is invalid (must match [A-Za-z][A-Za-z0-9_-]*)" >&2; \
+                exit 1; \
+                ;; \
+        esac; \
+        extras_flags="$extras_flags --extra $extra"; \
+    done; \
+    UV_INDEX_URL=${UV_INDEX_URL:-https://pypi.org/simple} uv sync --extra redis $extras_flags'
 
 # UTF-8 locale prevents UnicodeEncodeError on Chinese/emoji content in minimal
 # containers where locale configuration may be missing and the default encoding is not UTF-8.
@@ -64,7 +79,7 @@ FROM builder AS dev
 # Install Docker CLI (for DooD: allows starting sandbox containers via host Docker socket)
 COPY --from=docker:cli /usr/local/bin/docker /usr/local/bin/docker
 
-EXPOSE 8001 2024
+EXPOSE 8001
 
 CMD ["sh", "-c", "cd backend && PYTHONPATH=. uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001"]
 
@@ -94,8 +109,8 @@ WORKDIR /app
 # Copy backend with pre-built virtualenv from builder
 COPY --from=builder /app/backend ./backend
 
-# Expose ports (gateway: 8001, langgraph: 2024)
-EXPOSE 8001 2024
+# Expose Gateway API port.
+EXPOSE 8001
 
 # Default command (can be overridden in docker-compose)
 CMD ["sh", "-c", "cd backend && PYTHONPATH=. uv run --no-sync uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001"]

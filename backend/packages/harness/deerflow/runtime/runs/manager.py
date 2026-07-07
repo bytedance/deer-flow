@@ -83,6 +83,7 @@ class RunRecord:
     multitask_strategy: str = "reject"
     metadata: dict = field(default_factory=dict)
     kwargs: dict = field(default_factory=dict)
+    user_id: str | None = None
     created_at: str = ""
     updated_at: str = ""
     task: asyncio.Task | None = field(default=None, repr=False)
@@ -98,9 +99,12 @@ class RunRecord:
     lead_agent_tokens: int = 0
     subagent_tokens: int = 0
     middleware_tokens: int = 0
+    # Per-model token breakdown
+    token_usage_by_model: dict[str, dict[str, int]] = field(default_factory=dict)
     message_count: int = 0
     last_ai_message: str | None = None
     first_human_message: str | None = None
+    finalizing: bool = False
 
 
 class RunManager:
@@ -118,13 +122,48 @@ class RunManager:
         persistence_retry_policy: PersistenceRetryPolicy | None = None,
     ) -> None:
         self._runs: dict[str, RunRecord] = {}
+        # Secondary index: thread_id -> insertion-ordered run_id set (a dict is
+        # used as an ordered set), maintained in lockstep with ``_runs`` so
+        # per-thread queries avoid O(total in-memory runs) full scans while
+        # preserving ``_runs`` iteration order (see ``_thread_records_locked``).
+        self._runs_by_thread: dict[str, dict[str, None]] = {}
         self._lock = asyncio.Lock()
         self._store = store
         self._persistence_retry_policy = persistence_retry_policy or PersistenceRetryPolicy()
 
+    def _index_run_locked(self, record: RunRecord) -> None:
+        """Register *record* in the thread index. Caller must hold ``self._lock``."""
+        self._runs_by_thread.setdefault(record.thread_id, {})[record.run_id] = None
+
+    def _unindex_run_locked(self, run_id: str, thread_id: str) -> None:
+        """Drop *run_id* from the thread index. Caller must hold ``self._lock``."""
+        bucket = self._runs_by_thread.get(thread_id)
+        if bucket is not None:
+            bucket.pop(run_id, None)
+            if not bucket:
+                self._runs_by_thread.pop(thread_id, None)
+
+    def _thread_records_locked(self, thread_id: str) -> list[RunRecord]:
+        """Return live in-memory records for *thread_id*. Caller must hold ``self._lock``.
+
+        Uses the ``_runs_by_thread`` index for O(runs-in-thread) lookup instead of
+        scanning every in-memory run. Correctness rests on the index and ``_runs``
+        being mutated in lockstep under ``self._lock`` (no ``await`` between the two
+        writes), so any holder of the lock sees them agree. The ``self._runs.get``
+        filter is defense-in-depth, not reconciliation: it drops a stale id still in
+        the index but already gone from ``_runs``, yet it cannot recover a run that is
+        in ``_runs`` but missing from the index (such a run would be silently
+        omitted). It guards only that one direction, should a future refactor ever
+        break the lockstep invariant.
+        """
+        run_ids = self._runs_by_thread.get(thread_id)
+        if not run_ids:
+            return []
+        return [record for run_id in run_ids if (record := self._runs.get(run_id)) is not None]
+
     @staticmethod
     def _store_put_payload(record: RunRecord, *, error: str | None = None) -> dict[str, Any]:
-        return {
+        payload = {
             "thread_id": record.thread_id,
             "assistant_id": record.assistant_id,
             "status": record.status.value,
@@ -135,6 +174,9 @@ class RunManager:
             "created_at": record.created_at,
             "model_name": record.model_name,
         }
+        if record.user_id is not None:
+            payload["user_id"] = record.user_id
+        return payload
 
     async def _call_store_with_retry(
         self,
@@ -241,6 +283,7 @@ class RunManager:
             kwargs=row.get("kwargs") or {},
             created_at=row.get("created_at") or "",
             updated_at=row.get("updated_at") or "",
+            user_id=row.get("user_id"),
             error=row.get("error"),
             model_name=row.get("model_name"),
             store_only=True,
@@ -251,6 +294,7 @@ class RunManager:
             lead_agent_tokens=row.get("lead_agent_tokens") or 0,
             subagent_tokens=row.get("subagent_tokens") or 0,
             middleware_tokens=row.get("middleware_tokens") or 0,
+            token_usage_by_model=row.get("token_usage_by_model") or {},
             message_count=row.get("message_count") or 0,
             last_ai_message=row.get("last_ai_message"),
             first_human_message=row.get("first_human_message"),
@@ -320,6 +364,7 @@ class RunManager:
         metadata: dict | None = None,
         kwargs: dict | None = None,
         multitask_strategy: str = "reject",
+        user_id: str | None = None,
     ) -> RunRecord:
         """Create a new pending run and register it."""
         run_id = str(uuid.uuid4())
@@ -333,11 +378,13 @@ class RunManager:
             multitask_strategy=multitask_strategy,
             metadata=metadata or {},
             kwargs=kwargs or {},
+            user_id=user_id,
             created_at=now,
             updated_at=now,
         )
         async with self._lock:
             self._runs[run_id] = record
+            self._index_run_locked(record)
             persisted = False
             try:
                 await self._persist_new_run_to_store(record)
@@ -349,6 +396,7 @@ class RunManager:
                 # Also covers cancellation, which bypasses ``except Exception``.
                 if not persisted:
                     self._runs.pop(run_id, None)
+                    self._unindex_run_locked(run_id, record.thread_id)
         logger.info("Run created: run_id=%s thread_id=%s", run_id, thread_id)
         return record
 
@@ -404,8 +452,7 @@ class RunManager:
             limit: Maximum number of runs to return.
         """
         async with self._lock:
-            # Dict insertion order gives deterministic results when timestamps tie.
-            memory_records = [r for r in self._runs.values() if r.thread_id == thread_id]
+            memory_records = self._thread_records_locked(thread_id)
         if self._store is None:
             return sorted(memory_records, key=lambda r: r.created_at, reverse=True)[:limit]
         records_by_id = {record.run_id: record for record in memory_records}
@@ -437,6 +484,64 @@ class RunManager:
                 record.error = error
         await self._persist_status(record, status, error=error)
         logger.info("Run %s -> %s", run_id, status.value)
+
+    async def set_finalizing(self, run_id: str, finalizing: bool) -> None:
+        """Mark whether a run is performing post-cancel cleanup."""
+        async with self._lock:
+            record = self._runs.get(run_id)
+            if record is None:
+                logger.warning("set_finalizing called for unknown run %s", run_id)
+                return
+            record.finalizing = finalizing
+            record.updated_at = _now_iso()
+
+    async def wait_for_prior_finalizing(
+        self,
+        thread_id: str,
+        run_id: str,
+        *,
+        poll_interval: float = 0.01,
+    ) -> None:
+        """Wait until older same-thread runs have finished post-cancel cleanup."""
+        while True:
+            async with self._lock:
+                found_current = False
+                prior_finalizing = False
+                for record in self._thread_records_locked(thread_id):
+                    if record.run_id == run_id:
+                        found_current = True
+                        break
+                    if record.finalizing:
+                        prior_finalizing = True
+
+                if not found_current or not prior_finalizing:
+                    return
+
+            await asyncio.sleep(poll_interval)
+
+    async def has_later_run(self, thread_id: str, run_id: str) -> bool:
+        """Return whether a newer in-memory run has been admitted for the thread."""
+        async with self._lock:
+            seen_current = False
+            for record in self._thread_records_locked(thread_id):
+                if record.run_id == run_id:
+                    seen_current = True
+                    continue
+                if seen_current:
+                    return True
+        return False
+
+    async def has_later_started_run(self, thread_id: str, run_id: str) -> bool:
+        """Return whether a newer same-thread run may have already advanced state."""
+        async with self._lock:
+            seen_current = False
+            for record in self._thread_records_locked(thread_id):
+                if record.run_id == run_id:
+                    seen_current = True
+                    continue
+                if seen_current and (record.status != RunStatus.pending or record.finalizing):
+                    return True
+        return False
 
     async def _persist_model_name(self, run_id: str, model_name: str | None) -> None:
         """Best-effort persist model_name update to the backing store."""
@@ -486,7 +591,9 @@ class RunManager:
                 return False
             record.abort_action = action
             record.abort_event.set()
-            if record.task is not None and not record.task.done():
+            task_active = record.task is not None and not record.task.done()
+            record.finalizing = task_active
+            if task_active:
                 record.task.cancel()
             record.status = RunStatus.interrupted
             record.updated_at = _now_iso()
@@ -504,6 +611,7 @@ class RunManager:
         kwargs: dict | None = None,
         multitask_strategy: str = "reject",
         model_name: str | None = None,
+        user_id: str | None = None,
     ) -> RunRecord:
         """Atomically check for inflight runs and create a new one.
 
@@ -524,7 +632,7 @@ class RunManager:
             if multitask_strategy not in _supported_strategies:
                 raise UnsupportedStrategyError(f"Multitask strategy '{multitask_strategy}' is not yet supported. Supported strategies: {', '.join(_supported_strategies)}")
 
-            inflight = [r for r in self._runs.values() if r.thread_id == thread_id and r.status in (RunStatus.pending, RunStatus.running)]
+            inflight = [r for r in self._thread_records_locked(thread_id) if r.status in (RunStatus.pending, RunStatus.running) or r.finalizing]
 
             if multitask_strategy == "reject" and inflight:
                 raise ConflictError(f"Thread {thread_id} already has an active run")
@@ -546,11 +654,13 @@ class RunManager:
                 multitask_strategy=multitask_strategy,
                 metadata=metadata or {},
                 kwargs=kwargs or {},
+                user_id=user_id,
                 created_at=now,
                 updated_at=now,
                 model_name=model_name,
             )
             self._runs[run_id] = record
+            self._index_run_locked(record)
             persisted = False
             try:
                 await self._persist_new_run_to_store(record)
@@ -562,12 +672,17 @@ class RunManager:
                 # Also covers cancellation, which bypasses ``except Exception``.
                 if not persisted:
                     self._runs.pop(run_id, None)
+                    self._unindex_run_locked(run_id, record.thread_id)
 
             if multitask_strategy in ("interrupt", "rollback") and inflight:
                 for r in inflight:
+                    if r.finalizing:
+                        continue
                     r.abort_action = multitask_strategy
                     r.abort_event.set()
-                    if r.task is not None and not r.task.done():
+                    task_active = r.task is not None and not r.task.done()
+                    r.finalizing = task_active
+                    if task_active:
                         r.task.cancel()
                     r.status = RunStatus.interrupted
                     r.updated_at = now
@@ -635,15 +750,109 @@ class RunManager:
     async def has_inflight(self, thread_id: str) -> bool:
         """Return ``True`` if *thread_id* has a pending or running run."""
         async with self._lock:
-            return any(r.thread_id == thread_id and r.status in (RunStatus.pending, RunStatus.running) for r in self._runs.values())
+            return any(r.status in (RunStatus.pending, RunStatus.running) or r.finalizing for r in self._thread_records_locked(thread_id))
 
     async def cleanup(self, run_id: str, *, delay: float = 300) -> None:
         """Remove a run record after an optional delay."""
         if delay > 0:
             await asyncio.sleep(delay)
         async with self._lock:
-            self._runs.pop(run_id, None)
+            record = self._runs.pop(run_id, None)
+            if record is not None:
+                self._unindex_run_locked(run_id, record.thread_id)
         logger.debug("Run record %s cleaned up", run_id)
+
+    async def shutdown(self, *, timeout: float = 5.0) -> None:
+        """Cancel and bounded-await all in-flight runs on process shutdown.
+
+        Chat runs execute in fire-and-forget background ``asyncio`` tasks that
+        write checkpoints through a shared checkpointer. On shutdown the
+        checkpointer's resources (e.g. the postgres connection pool owned by the
+        gateway's ``AsyncExitStack``) are torn down; if a run task is still
+        mid-graph at that point, langgraph's
+        ``AsyncPregelLoop._checkpointer_put_after_previous`` runs its
+        ``finally: await checkpointer.aput(...)`` against the closed pool. Because
+        that put runs in a langgraph-internal task (not on ``run_agent``'s call
+        stack), the resulting ``psycopg_pool.PoolClosed`` is not catchable by the
+        worker and surfaces as an unhandled exception during ``asyncio.run()``
+        shutdown (bytedance/deer-flow issue #3373).
+
+        Draining in-flight runs *before* the checkpointer is closed lets each
+        run that settles within ``timeout`` flush its final checkpoint while
+        resources are still open. Only runs that do **not** settle on their own
+        are marked ``interrupted`` — a run that completes (e.g. ``success``)
+        during the drain keeps its real terminal status instead of being
+        blanket-overwritten. The whole drain, including the trailing status
+        persistence, is bounded by ``timeout`` so a run stuck in cleanup (or a
+        slow store under DB pressure) cannot hang worker shutdown — the
+        precondition for the signal-reentrancy deadlock guarded by
+        ``app.gateway.app._SHUTDOWN_HOOK_TIMEOUT_SECONDS``. Runs still active
+        after ``timeout`` are logged and may still race teardown.
+        """
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+
+        async with self._lock:
+            inflight = [record for record in self._runs.values() if record.status in (RunStatus.pending, RunStatus.running) and record.task is not None and not record.task.done()]
+            for record in inflight:
+                record.abort_action = "interrupt"
+                record.abort_event.set()
+                record.task.cancel()  # type: ignore[union-attr]  # filtered above
+                # Status is decided AFTER the drain (below), not here: a run that
+                # completes on its own during the drain must keep its real status.
+
+        if not inflight:
+            return
+
+        tasks = [record.task for record in inflight]
+        _, pending = await asyncio.wait(tasks, timeout=timeout)
+
+        # Only mark/persist ``interrupted`` for runs that did not settle on their
+        # own (still pending after the timeout, or ended cancelled). A run that
+        # finished normally during the drain keeps the status it set for itself.
+        to_persist: list[RunRecord] = []
+        async with self._lock:
+            for record in inflight:
+                task = record.task
+                if task not in pending and not task.cancelled():
+                    # Completed on its own — retrieve any surfaced exception so it
+                    # is not reported as "never retrieved", and keep its status.
+                    task.exception()  # type: ignore[union-attr]  # done & not cancelled
+                    continue
+                if record.status in (RunStatus.pending, RunStatus.running):
+                    record.status = RunStatus.interrupted
+                    record.updated_at = _now_iso()
+                to_persist.append(record)
+
+        # Bound the trailing status persistence within the remaining budget so a
+        # slow store (``_call_store_with_retry`` can back off under DB pressure)
+        # cannot push shutdown past ``timeout``.
+        if to_persist:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                logger.warning("Run drain budget exhausted before persisting %d interrupted run(s) on shutdown", len(to_persist))
+            else:
+                try:
+                    results = await asyncio.wait_for(
+                        asyncio.gather(*(self._persist_status(record, RunStatus.interrupted) for record in to_persist), return_exceptions=True),
+                        timeout=remaining,
+                    )
+                except TimeoutError:
+                    logger.warning("Run drain status persistence exceeded the %.1fs budget; %d record(s) may not be persisted", timeout, len(to_persist))
+                else:
+                    # ``_persist_status`` is best-effort: it catches and logs its
+                    # own failures, returning ``False``. Inspect the aggregate so a
+                    # partial failure is surfaced at shutdown level (with the
+                    # run_id) instead of being silently swallowed by the gather.
+                    for record, result in zip(to_persist, results):
+                        if isinstance(result, Exception):
+                            logger.warning("Unexpected error persisting interrupted status for run %s during shutdown: %r", record.run_id, result)
+                        elif result is False:
+                            logger.warning("Could not persist interrupted status for run %s during shutdown", record.run_id)
+
+        if pending:
+            logger.warning("Run drain exceeded %.1fs on shutdown; %d run task(s) still active and may race checkpointer teardown", timeout, len(pending))
+        logger.info("Drained %d in-flight run(s) on shutdown (%d settled within %.1fs)", len(inflight), len(inflight) - len(pending), timeout)
 
 
 class ConflictError(Exception):

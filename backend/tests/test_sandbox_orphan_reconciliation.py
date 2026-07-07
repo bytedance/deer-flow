@@ -28,7 +28,8 @@ def test_backend_list_running_default_returns_empty():
     from deerflow.community.aio_sandbox.backend import SandboxBackend
 
     class StubBackend(SandboxBackend):
-        def create(self, thread_id, sandbox_id, extra_mounts=None):
+        def create(self, thread_id, sandbox_id, extra_mounts=None, *, user_id=None):
+            del thread_id, sandbox_id, extra_mounts, user_id
             pass
 
         def destroy(self, info):
