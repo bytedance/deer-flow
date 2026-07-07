@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import ANY, AsyncMock, MagicMock
 
+import pytest
 from _router_auth_helpers import make_authed_test_app
 from fastapi.testclient import TestClient
+from langchain_core.messages import HumanMessage, SystemMessage
 
 from app.gateway import context_usage
 from app.gateway.context_usage import build_context_usage_payload
@@ -496,3 +498,140 @@ def test_count_messages_exact_tokenizes_text(monkeypatch):
     msgs = [SystemMessage(content="sys"), HumanMessage(content="hello")]
     # "sys" (3) + 4 + "hello" (5) + 4 = 16
     assert context_usage._count_messages(msgs, config) == 16
+
+
+def test_checkpoint_memory_is_reported_separately_from_messages():
+    messages = [
+        SystemMessage(content="Today is Tuesday", id="turn-1__date", additional_kwargs={"dynamic_context_reminder": True}),
+        HumanMessage(content="Remember that my name is Ada", id="turn-1__memory", additional_kwargs={"dynamic_context_reminder": True}),
+        HumanMessage(content="Hello", id="turn-1__user"),
+    ]
+    config = _config_with_counting("approximate")
+
+    conversation_tokens, memory_tokens = context_usage._count_checkpoint_tokens(messages, config)
+
+    assert conversation_tokens > 0
+    assert memory_tokens > 0
+    without_memory, _ = context_usage._count_checkpoint_tokens([messages[0], messages[2]], config)
+    assert conversation_tokens == without_memory
+
+
+@pytest.mark.asyncio
+async def test_thread_runtime_reads_latest_persisted_options():
+    run_store = MagicMock()
+    run_store.list_by_thread = AsyncMock(
+        return_value=[
+            {
+                "model_name": "large-model",
+                "kwargs": {
+                    "config": {
+                        "configurable": {"subagent_enabled": False},
+                        "context": {"subagent_enabled": True, "max_concurrent_subagents": 7},
+                    }
+                },
+            }
+        ]
+    )
+
+    model_name, runtime = await context_usage._resolve_thread_runtime(
+        run_store,
+        "thread-1",
+        SimpleNamespace(models=[]),
+    )
+
+    assert model_name == "large-model"
+    assert runtime["subagent_enabled"] is True
+    assert runtime["max_concurrent_subagents"] == 7
+
+
+@pytest.mark.asyncio
+async def test_thread_agent_name_comes_from_metadata(monkeypatch):
+    thread_store = MagicMock()
+    thread_store.get = AsyncMock(return_value={"metadata": {"agent_name": "reviewer"}})
+    monkeypatch.setattr(context_usage, "get_thread_store", lambda _request: thread_store)
+
+    agent_name = await context_usage._resolve_thread_agent_name(MagicMock(), "thread-1")
+
+    assert agent_name == "reviewer"
+    thread_store.get.assert_awaited_once_with("thread-1")
+
+
+def test_custom_agent_settings_flow_into_prompt_and_tools(monkeypatch):
+    from deerflow.config import agents_config as agents_config_module
+
+    monkeypatch.setattr(
+        agents_config_module,
+        "load_agent_config",
+        lambda name, user_id=None: SimpleNamespace(skills=["code-review"], tool_groups=["web"]),
+    )
+    monkeypatch.setattr(context_usage, "_count_checkpoint_tokens", lambda _messages, _config: (11, 3))
+    skills_counter = MagicMock(return_value=5)
+    prompt_counter = MagicMock(return_value=13)
+    tools_counter = MagicMock(return_value=(17, 19, 23, 29))
+    monkeypatch.setattr(context_usage, "_count_skills_section", skills_counter)
+    monkeypatch.setattr(context_usage, "_count_subagent_section", MagicMock(return_value=7))
+    monkeypatch.setattr(context_usage, "_count_system_prompt", prompt_counter)
+    monkeypatch.setattr(context_usage, "_split_tools", tools_counter)
+
+    app_config = SimpleNamespace(
+        subagents=SimpleNamespace(enabled=False, max_concurrent_subagents=3),
+        get_model_config=lambda _name: SimpleNamespace(context_window=100_000),
+        summarization=SimpleNamespace(enabled=False),
+    )
+    counts = context_usage._compute_context_counts(
+        [],
+        app_config,
+        "large-model",
+        {"subagent_enabled": True, "max_concurrent_subagents": 6},
+        "reviewer",
+    )
+
+    assert counts["memory_tokens"] == 3
+    assert counts["max_context_tokens"] == 100_000
+    scoped_user_id = skills_counter.call_args.args[2]
+    assert skills_counter.call_args.args[:2] == (app_config, {"code-review"})
+    assert isinstance(scoped_user_id, str)
+    assert prompt_counter.call_args.kwargs == {
+        "agent_name": "reviewer",
+        "available_skills": {"code-review"},
+        "user_id": scoped_user_id,
+        "subagent_enabled": True,
+        "max_concurrent_subagents": 6,
+    }
+    assert tools_counter.call_args.kwargs == {
+        "tool_groups": ["web"],
+        "available_skills": {"code-review"},
+        "user_id": scoped_user_id,
+        "subagent_enabled": True,
+    }
+
+
+@pytest.mark.asyncio
+async def test_context_rendering_is_offloaded_from_event_loop(monkeypatch):
+    checkpointer = MagicMock()
+    messages = [HumanMessage(content="hello")]
+    counts = _kwargs(max_context_tokens=10_000, messages_tokens=4)
+    monkeypatch.setattr(context_usage, "get_checkpointer", lambda _request: checkpointer)
+    monkeypatch.setattr(context_usage, "get_config", lambda: SimpleNamespace())
+    monkeypatch.setattr(context_usage, "_load_checkpoint_messages", AsyncMock(return_value=messages))
+    monkeypatch.setattr(
+        context_usage,
+        "_resolve_thread_runtime",
+        AsyncMock(return_value=("model", {"subagent_enabled": False})),
+    )
+    monkeypatch.setattr(context_usage, "_resolve_thread_agent_name", AsyncMock(return_value=None))
+    to_thread = AsyncMock(return_value=counts)
+    monkeypatch.setattr(context_usage.asyncio, "to_thread", to_thread)
+
+    payload = await context_usage.build_context_usage(MagicMock(), "thread-1", MagicMock())
+
+    assert payload is not None
+    assert payload["used_tokens"] == 4
+    to_thread.assert_awaited_once_with(
+        context_usage._compute_context_counts,
+        messages,
+        ANY,
+        "model",
+        {"subagent_enabled": False},
+        None,
+    )

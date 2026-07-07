@@ -13,15 +13,18 @@ endpoint. The numbers are approximate (``count_tokens_approximately`` /
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Any
 
 from fastapi import HTTPException, Request
 
-from app.gateway.deps import get_checkpointer, get_config
+from app.gateway.deps import get_checkpointer, get_config, get_thread_store
 
 logger = logging.getLogger(__name__)
+
+_CONTEXT_COUNT_TIMEOUT_SECONDS = 5.0
 
 
 # Order in which breakdown rows are listed in the UI. Items missing from the
@@ -154,8 +157,8 @@ def _approx_tool_schema_tokens(tool: Any, app_config: Any | None = None) -> int:
         return _count_text(f"{name}\n{description}", app_config)
 
 
-async def _resolve_thread_model_name(run_store: Any, thread_id: str, app_config: Any) -> str | None:
-    """Pick the model name a thread is currently using.
+async def _resolve_thread_runtime(run_store: Any, thread_id: str, app_config: Any) -> tuple[str | None, dict[str, Any]]:
+    """Pick the model and persisted runtime options for the latest run.
 
     Prefers the most recent run's ``model_name`` (set by the runtime when
     the run starts), falling back to the first configured model.
@@ -167,50 +170,95 @@ async def _resolve_thread_model_name(run_store: Any, thread_id: str, app_config:
     if runs:
         latest = runs[0]
         name = latest.get("model_name") if isinstance(latest, dict) else getattr(latest, "model_name", None)
+        kwargs = latest.get("kwargs", {}) if isinstance(latest, dict) else getattr(latest, "kwargs", {})
+        persisted_config = kwargs.get("config", {}) if isinstance(kwargs, dict) else {}
+        runtime: dict[str, Any] = {}
+        if isinstance(persisted_config, dict):
+            for key in ("configurable", "context"):
+                values = persisted_config.get(key)
+                if isinstance(values, dict):
+                    runtime.update(values)
         if isinstance(name, str) and name:
-            return name
+            return name, runtime
+    else:
+        runtime = {}
     models = getattr(app_config, "models", None) or []
-    return models[0].name if models else None
+    return (models[0].name if models else None), runtime
 
 
-async def _count_message_tokens(checkpointer: Any, thread_id: str, app_config: Any | None = None) -> int:
-    """Approximate the tokens of the messages currently in the checkpoint."""
-    try:
-        checkpoint_tuple = await checkpointer.aget_tuple({"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}})
-    except Exception:
-        logger.warning("Failed to load checkpoint for thread %s", thread_id, exc_info=True)
-        raise
-
+async def _load_checkpoint_messages(checkpointer: Any, thread_id: str) -> list[Any]:
+    """Load the messages currently persisted in the thread checkpoint."""
+    checkpoint_tuple = await checkpointer.aget_tuple({"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}})
     if checkpoint_tuple is None:
-        return 0
+        return []
     checkpoint = getattr(checkpoint_tuple, "checkpoint", {}) or {}
     channel_values = checkpoint.get("channel_values", {}) if isinstance(checkpoint, dict) else {}
-    messages = channel_values.get("messages") or []
-    if not messages:
-        return 0
-    return _count_messages(messages, app_config)
+    return list(channel_values.get("messages") or [])
 
 
-def _count_skills_section(app_config: Any) -> int:
+def _is_injected_memory_message(message: Any) -> bool:
+    """Identify the persisted memory copy added by DynamicContextMiddleware."""
+    additional_kwargs = getattr(message, "additional_kwargs", {}) or {}
+    message_id = getattr(message, "id", None)
+    return bool(additional_kwargs.get("dynamic_context_reminder") and isinstance(message_id, str) and message_id.endswith("__memory"))
+
+
+def _count_checkpoint_tokens(messages: list[Any], app_config: Any) -> tuple[int, int]:
+    """Return (conversation, injected-memory) tokens without double counting."""
+    memory_messages = [message for message in messages if _is_injected_memory_message(message)]
+    conversation_messages = [message for message in messages if not _is_injected_memory_message(message)]
+    return _count_messages(conversation_messages, app_config), _count_messages(memory_messages, app_config)
+
+
+async def _resolve_thread_agent_name(request: Request, thread_id: str) -> str | None:
+    """Read the custom-agent identity persisted with the UI thread."""
+    try:
+        record = await get_thread_store(request).get(thread_id)
+    except Exception:
+        logger.warning("Failed to load thread metadata for context usage", exc_info=True)
+        return None
+    metadata = record.get("metadata", {}) if isinstance(record, dict) else {}
+    agent_name = metadata.get("agent_name") if isinstance(metadata, dict) else None
+    return agent_name if isinstance(agent_name, str) and agent_name else None
+
+
+def _count_skills_section(
+    app_config: Any,
+    available_skills: set[str] | None = None,
+    user_id: str | None = None,
+) -> int:
     try:
         from deerflow.agents.lead_agent.prompt import get_skills_prompt_section
 
-        return _count_text(get_skills_prompt_section(app_config=app_config), app_config)
+        return _count_text(
+            get_skills_prompt_section(
+                available_skills=available_skills,
+                app_config=app_config,
+                user_id=user_id,
+            ),
+            app_config,
+        )
     except Exception:
         logger.warning("Failed to render skills prompt section", exc_info=True)
         return 0
 
 
-def _count_subagent_section(app_config: Any) -> int:
+def _count_subagent_section(
+    app_config: Any,
+    *,
+    enabled: bool | None = None,
+    max_concurrent: int | None = None,
+) -> int:
     """Tokens for the subagent / custom-agents section when enabled."""
     try:
         subagents_cfg = getattr(app_config, "subagents", None)
-        if subagents_cfg is None or not getattr(subagents_cfg, "enabled", False):
+        resolved_enabled = bool(getattr(subagents_cfg, "enabled", False)) if enabled is None else enabled
+        if not resolved_enabled:
             return 0
         from deerflow.agents.lead_agent.prompt import _build_subagent_section  # noqa: SLF001
 
-        max_concurrent = getattr(subagents_cfg, "max_concurrent_subagents", 3)
-        return _count_text(_build_subagent_section(max_concurrent, app_config=app_config), app_config)
+        resolved_max = max_concurrent if max_concurrent is not None else getattr(subagents_cfg, "max_concurrent_subagents", 3)
+        return _count_text(_build_subagent_section(resolved_max, app_config=app_config), app_config)
     except Exception:
         logger.warning("Failed to render subagent prompt section", exc_info=True)
         return 0
@@ -237,7 +285,15 @@ def _compute_deferred_tool_names(app_config: Any) -> frozenset[str]:
         return frozenset()
 
 
-def _count_system_prompt(app_config: Any) -> int:
+def _count_system_prompt(
+    app_config: Any,
+    *,
+    agent_name: str | None = None,
+    available_skills: set[str] | None = None,
+    user_id: str | None = None,
+    subagent_enabled: bool | None = None,
+    max_concurrent_subagents: int | None = None,
+) -> int:
     """System prompt tokens *excluding* skills/subagent sections.
 
     Skills and the subagent section each get their own breakdown row, so we
@@ -253,24 +309,38 @@ def _count_system_prompt(app_config: Any) -> int:
         )
 
         subagents_cfg = getattr(app_config, "subagents", None)
-        subagent_enabled = bool(getattr(subagents_cfg, "enabled", False))
-        max_concurrent = getattr(subagents_cfg, "max_concurrent_subagents", 3) if subagents_cfg else 3
+        resolved_subagent_enabled = bool(getattr(subagents_cfg, "enabled", False)) if subagent_enabled is None else subagent_enabled
+        resolved_max_concurrent = max_concurrent_subagents if max_concurrent_subagents is not None else getattr(subagents_cfg, "max_concurrent_subagents", 3)
 
         # Render the FULL prompt including the deferred-tools names section;
         # that section has no row of its own, so it must stay inside the
         # system_prompt count.
         deferred_names = _compute_deferred_tool_names(app_config)
         full = apply_prompt_template(
-            subagent_enabled=subagent_enabled,
-            max_concurrent_subagents=max_concurrent,
+            subagent_enabled=resolved_subagent_enabled,
+            max_concurrent_subagents=resolved_max_concurrent,
+            agent_name=agent_name,
+            available_skills=available_skills,
             app_config=app_config,
             deferred_names=deferred_names,
+            user_id=user_id,
         )
         full_tokens = _count_text(full, app_config)
 
         # Pieces accounted for under their own breakdown rows.
-        skills_tokens = _count_text(get_skills_prompt_section(app_config=app_config), app_config)
-        subagent_section_tokens = _count_subagent_section(app_config) if subagent_enabled else 0
+        skills_tokens = _count_text(
+            get_skills_prompt_section(
+                available_skills=available_skills,
+                app_config=app_config,
+                user_id=user_id,
+            ),
+            app_config,
+        )
+        subagent_section_tokens = _count_subagent_section(
+            app_config,
+            enabled=resolved_subagent_enabled,
+            max_concurrent=resolved_max_concurrent,
+        )
 
         return max(0, full_tokens - skills_tokens - subagent_section_tokens)
     except Exception:
@@ -278,17 +348,15 @@ def _count_system_prompt(app_config: Any) -> int:
         return 0
 
 
-def _count_memory_files(app_config: Any) -> int:
-    try:
-        from deerflow.agents.lead_agent.prompt import _get_memory_context  # noqa: SLF001
-
-        return _count_text(_get_memory_context(app_config=app_config), app_config)
-    except Exception:
-        logger.warning("Failed to render memory context", exc_info=True)
-        return 0
-
-
-def _split_tools(app_config: Any, model_name: str | None) -> tuple[int, int, int, int]:
+def _split_tools(
+    app_config: Any,
+    model_name: str | None,
+    *,
+    tool_groups: list[str] | None = None,
+    available_skills: set[str] | None = None,
+    user_id: str | None = None,
+    subagent_enabled: bool | None = None,
+) -> tuple[int, int, int, int]:
     """Return (system_tools_active, mcp_tools_active, system_tools_deferred, mcp_tools_deferred).
 
     A tool is "deferred" exactly when ``tool_search.enabled`` is on AND it is
@@ -304,14 +372,31 @@ def _split_tools(app_config: Any, model_name: str | None) -> tuple[int, int, int
         from deerflow.tools.mcp_metadata import is_mcp_tool
         from deerflow.tools.tools import get_available_tools
 
-        subagents_cfg = getattr(app_config, "subagents", None)
-        subagent_enabled = bool(getattr(subagents_cfg, "enabled", False))
+        resolved_subagent_enabled = bool(getattr(getattr(app_config, "subagents", None), "enabled", False)) if subagent_enabled is None else subagent_enabled
 
         all_tools = get_available_tools(
             model_name=model_name,
-            subagent_enabled=subagent_enabled,
+            groups=tool_groups,
+            subagent_enabled=resolved_subagent_enabled,
             app_config=app_config,
         )
+
+        from deerflow.agents.lead_agent.agent import _load_enabled_skills_for_tool_policy  # noqa: SLF001
+        from deerflow.skills.tool_policy import SKILL_LOADING_TOOL_NAMES, filter_tools_by_skill_allowed_tools
+
+        try:
+            skills = _load_enabled_skills_for_tool_policy(
+                available_skills,
+                app_config=app_config,
+                user_id=user_id,
+            )
+            all_tools = filter_tools_by_skill_allowed_tools(
+                all_tools,
+                skills,
+                always_allowed_tool_names=SKILL_LOADING_TOOL_NAMES,
+            )
+        except Exception:
+            logger.warning("Failed to apply skill tool policy to context usage", exc_info=True)
 
         # deferred ⟺ (tool_search enabled AND MCP-sourced), per build_deferred_tool_setup.
         ts_cfg = getattr(app_config, "tool_search", None)
@@ -338,6 +423,76 @@ def _split_tools(app_config: Any, model_name: str | None) -> tuple[int, int, int
     except Exception:
         logger.warning("Failed to enumerate tools for context-usage breakdown", exc_info=True)
         return 0, 0, 0, 0
+
+
+def _compute_context_counts(
+    messages: list[Any],
+    app_config: Any,
+    model_name: str | None,
+    runtime: dict[str, Any],
+    agent_name: str | None,
+) -> dict[str, Any]:
+    """Render and count all synchronous context components in a worker thread."""
+    from deerflow.config.agents_config import load_agent_config
+    from deerflow.runtime.user_context import get_effective_user_id
+
+    user_id = get_effective_user_id()
+    agent_config = None
+    if agent_name:
+        try:
+            agent_config = load_agent_config(agent_name, user_id=user_id)
+        except Exception:
+            logger.warning("Failed to load custom-agent config for context usage", exc_info=True)
+
+    available_skills = set(agent_config.skills) if agent_config and agent_config.skills is not None else None
+    tool_groups = agent_config.tool_groups if agent_config else None
+    subagents_cfg = getattr(app_config, "subagents", None)
+    subagent_enabled = bool(runtime.get("subagent_enabled", getattr(subagents_cfg, "enabled", False)))
+    max_concurrent = int(
+        runtime.get(
+            "max_concurrent_subagents",
+            getattr(subagents_cfg, "max_concurrent_subagents", 3),
+        )
+    )
+
+    messages_tokens, memory_tokens = _count_checkpoint_tokens(messages, app_config)
+    skills_tokens = _count_skills_section(app_config, available_skills, user_id)
+    custom_agents_tokens = _count_subagent_section(
+        app_config,
+        enabled=subagent_enabled,
+        max_concurrent=max_concurrent,
+    )
+    system_prompt_tokens = _count_system_prompt(
+        app_config,
+        agent_name=agent_name,
+        available_skills=available_skills,
+        user_id=user_id,
+        subagent_enabled=subagent_enabled,
+        max_concurrent_subagents=max_concurrent,
+    )
+    system_tools_active, mcp_tools_active, system_tools_deferred, mcp_tools_deferred = _split_tools(
+        app_config,
+        model_name,
+        tool_groups=tool_groups,
+        available_skills=available_skills,
+        user_id=user_id,
+        subagent_enabled=subagent_enabled,
+    )
+    model_cfg = app_config.get_model_config(model_name) if model_name else None
+    max_context_tokens = int(model_cfg.context_window) if model_cfg is not None and getattr(model_cfg, "context_window", None) else None
+    return {
+        "max_context_tokens": max_context_tokens,
+        "messages_tokens": messages_tokens,
+        "system_prompt_tokens": system_prompt_tokens,
+        "skills_tokens": skills_tokens,
+        "custom_agents_tokens": custom_agents_tokens,
+        "memory_tokens": memory_tokens,
+        "system_tools_active": system_tools_active,
+        "mcp_tools_active": mcp_tools_active,
+        "system_tools_deferred": system_tools_deferred,
+        "mcp_tools_deferred": mcp_tools_deferred,
+        "summarization_trigger": _summarization_trigger_tokens(app_config),
+    }
 
 
 def _summarization_trigger_tokens(app_config: Any) -> int | None:
@@ -438,45 +593,49 @@ async def build_context_usage(request: Request, thread_id: str, run_store: Any) 
         app_config = None
 
     try:
-        messages_tokens = await _count_message_tokens(checkpointer, thread_id, app_config)
+        messages = await _load_checkpoint_messages(checkpointer, thread_id)
     except Exception:
+        logger.warning("Failed to load checkpoint for thread %s", thread_id, exc_info=True)
+        return None
+    if app_config is None:
+        messages_tokens, memory_tokens = await asyncio.to_thread(_count_checkpoint_tokens, messages, None)
+        return build_context_usage_payload(
+            max_context_tokens=None,
+            messages_tokens=messages_tokens,
+            system_prompt_tokens=0,
+            skills_tokens=0,
+            custom_agents_tokens=0,
+            memory_tokens=memory_tokens,
+            system_tools_active=0,
+            mcp_tools_active=0,
+            system_tools_deferred=0,
+            mcp_tools_deferred=0,
+            summarization_trigger=None,
+        )
+
+    model_name, runtime = await _resolve_thread_runtime(run_store, thread_id, app_config)
+    agent_name = await _resolve_thread_agent_name(request, thread_id)
+    if not agent_name:
+        runtime_agent_name = runtime.get("agent_name")
+        agent_name = runtime_agent_name if isinstance(runtime_agent_name, str) else None
+
+    try:
+        counts = await asyncio.wait_for(
+            asyncio.to_thread(
+                _compute_context_counts,
+                messages,
+                app_config,
+                model_name,
+                runtime,
+                agent_name,
+            ),
+            timeout=_CONTEXT_COUNT_TIMEOUT_SECONDS,
+        )
+    except TimeoutError:
+        logger.warning("Context-usage calculation timed out for thread %s", thread_id)
+        return None
+    except Exception:
+        logger.warning("Context-usage calculation failed for thread %s", thread_id, exc_info=True)
         return None
 
-    max_context_tokens: int | None = None
-    skills_tokens = 0
-    custom_agents_tokens = 0
-    memory_tokens = 0
-    system_prompt_tokens = 0
-    system_tools_active = 0
-    mcp_tools_active = 0
-    system_tools_deferred = 0
-    mcp_tools_deferred = 0
-    summarization_trigger: int | None = None
-
-    if app_config is not None:
-        model_name = await _resolve_thread_model_name(run_store, thread_id, app_config)
-        if model_name:
-            model_cfg = app_config.get_model_config(model_name)
-            if model_cfg is not None and getattr(model_cfg, "context_window", None):
-                max_context_tokens = int(model_cfg.context_window)
-
-        skills_tokens = _count_skills_section(app_config)
-        custom_agents_tokens = _count_subagent_section(app_config)
-        memory_tokens = _count_memory_files(app_config)
-        system_prompt_tokens = _count_system_prompt(app_config)
-        system_tools_active, mcp_tools_active, system_tools_deferred, mcp_tools_deferred = _split_tools(app_config, model_name)
-        summarization_trigger = _summarization_trigger_tokens(app_config)
-
-    return build_context_usage_payload(
-        max_context_tokens=max_context_tokens,
-        messages_tokens=messages_tokens,
-        system_prompt_tokens=system_prompt_tokens,
-        skills_tokens=skills_tokens,
-        custom_agents_tokens=custom_agents_tokens,
-        memory_tokens=memory_tokens,
-        system_tools_active=system_tools_active,
-        mcp_tools_active=mcp_tools_active,
-        system_tools_deferred=system_tools_deferred,
-        mcp_tools_deferred=mcp_tools_deferred,
-        summarization_trigger=summarization_trigger,
-    )
+    return build_context_usage_payload(**counts)
