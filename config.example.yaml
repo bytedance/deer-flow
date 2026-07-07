@@ -1254,6 +1254,16 @@ skills:
   # skills are installed.
   # deferred_discovery: true
 
+# ============================================================================
+# SkillScan Configuration
+# ============================================================================
+# Native deterministic skill safety scanning. This runs before the LLM skill
+# scanner on skill install/update and agent-managed skill writes.
+skill_scan:
+  # Set false to disable the new deterministic analyzers. Safe archive
+  # extraction and the LLM skill scanner still run.
+  enabled: true
+
 # Note: To restrict which skills are loaded for a specific custom agent,
 # define a `skills` list in that agent's `config.yaml` (e.g. `agents/my-agent/config.yaml`):
 # - Omitted or null: load all globally enabled skills (default)
