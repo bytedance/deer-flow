@@ -103,6 +103,23 @@ def test_raises_when_model_not_found(monkeypatch):
         factory_module.create_chat_model(name="ghost-model")
 
 
+def test_pricing_metadata_never_reaches_the_provider_client(monkeypatch):
+    """`models[*].pricing` is console-only metadata (issue: ChatOpenAI forwards
+    unknown kwargs into the completion request payload, so an un-stripped
+    `pricing` block breaks every live LLM call with
+    ``Completions.create() got an unexpected keyword argument 'pricing'``)."""
+    model = _make_model("priced")
+    # ModelConfig is extra="allow" — pricing rides along as an extra field.
+    model.pricing = {"currency": "CNY", "input_per_million": 8, "output_per_million": 32, "input_cache_hit_per_million": 0.8}
+    cfg = _make_app_config([model])
+    _patch_factory(monkeypatch, cfg)
+
+    FakeChatModel.captured_kwargs = {}
+    factory_module.create_chat_model(name="priced")
+
+    assert "pricing" not in FakeChatModel.captured_kwargs
+
+
 def test_appends_all_tracing_callbacks(monkeypatch):
     cfg = _make_app_config([_make_model("alpha")])
     _patch_factory(monkeypatch, cfg)
@@ -1182,3 +1199,150 @@ def test_stream_chunk_timeout_popped_for_non_openai_provider_when_user_set_it(mo
     factory_module.create_chat_model(name="anthropic-with-stray-timeout")
 
     assert "stream_chunk_timeout" not in captured
+
+
+# ---------------------------------------------------------------------------
+# OpenAI base_url normalization + unknown-key warning
+# (regression: api_base copied onto a ChatOpenAI model crashed at request time)
+# ---------------------------------------------------------------------------
+
+
+def _make_model_with_extras(name="extra-model", *, use="langchain_openai:ChatOpenAI", **extras):
+    """Build a ModelConfig with arbitrary extra keys (ModelConfig is extra='allow')."""
+    return ModelConfig(
+        name=name,
+        display_name=name,
+        description=None,
+        use=use,
+        model=name,
+        supports_thinking=False,
+        supports_reasoning_effort=False,
+        supports_vision=False,
+        **extras,
+    )
+
+
+def test_api_base_normalized_to_base_url_for_chatopenai(monkeypatch):
+    """A config that sets api_base on a ChatOpenAI model should reach the constructor as base_url."""
+    cfg = _make_app_config([_make_model_with_extras("oai", api_base="http://localhost:4001/v1")])
+    _patch_factory(monkeypatch, cfg)
+
+    FakeChatModel.captured_kwargs = {}
+    factory_module.create_chat_model(name="oai")
+
+    assert FakeChatModel.captured_kwargs.get("base_url") == "http://localhost:4001/v1"
+    assert "api_base" not in FakeChatModel.captured_kwargs
+
+
+def test_base_url_takes_precedence_when_both_set(monkeypatch):
+    """When both base_url and api_base are present, base_url wins and api_base is dropped."""
+    cfg = _make_app_config([_make_model_with_extras("oai", base_url="http://canonical/v1", api_base="http://alias/v1")])
+    _patch_factory(monkeypatch, cfg)
+
+    FakeChatModel.captured_kwargs = {}
+    factory_module.create_chat_model(name="oai")
+
+    assert FakeChatModel.captured_kwargs.get("base_url") == "http://canonical/v1"
+    assert "api_base" not in FakeChatModel.captured_kwargs
+
+
+def test_api_base_not_normalized_for_non_openai_class(monkeypatch):
+    """api_base must be left untouched for model classes that are not the OpenAI-compatible family."""
+    cfg = _make_app_config([_make_model_with_extras("ds", use="deerflow.models.patched_deepseek:PatchedChatDeepSeek", api_base="http://ds/v3")])
+    _patch_factory(monkeypatch, cfg)
+
+    FakeChatModel.captured_kwargs = {}
+    factory_module.create_chat_model(name="ds")
+
+    # PatchedChatDeepSeek legitimately takes api_base — it must pass through unchanged.
+    assert FakeChatModel.captured_kwargs.get("api_base") == "http://ds/v3"
+    assert "base_url" not in FakeChatModel.captured_kwargs
+
+
+def test_no_op_when_neither_base_url_nor_api_base(monkeypatch):
+    """Normalization is a no-op when the model declares no endpoint override."""
+    cfg = _make_app_config([_make_model("plain")])
+    _patch_factory(monkeypatch, cfg)
+
+    FakeChatModel.captured_kwargs = {}
+    factory_module.create_chat_model(name="plain")
+
+    assert "base_url" not in FakeChatModel.captured_kwargs
+    assert "api_base" not in FakeChatModel.captured_kwargs
+
+
+def test_unknown_config_key_emits_warning(monkeypatch, caplog):
+    """A typo'd config key should produce a heads-up warning naming the offending key.
+
+    Uses the real ChatOpenAI class (not the stub) so the field/alias schema is realistic — the
+    warning's whole value is that it matches what LangChain will actually divert to model_kwargs.
+    """
+    import logging
+
+    from langchain_openai import ChatOpenAI
+
+    cfg = _make_app_config([_make_model_with_extras("typo", api_key="sk-test", definitely_not_a_real_kwarg=True)])
+    _patch_factory(monkeypatch, cfg, model_class=ChatOpenAI)
+
+    with caplog.at_level(logging.WARNING, logger=factory_module.__name__):
+        factory_module.create_chat_model(name="typo")
+
+    assert any("definitely_not_a_real_kwarg" in rec.message for rec in caplog.records)
+
+
+def test_known_config_keys_emit_no_warning(monkeypatch, caplog):
+    """Recognized keys (model, base_url alias, max_tokens, factory-injected kwargs) must not warn."""
+    import logging
+
+    from langchain_openai import ChatOpenAI
+
+    cfg = _make_app_config([_make_model_with_extras("clean", api_key="sk-test", base_url="http://ok/v1", max_tokens=100)])
+    _patch_factory(monkeypatch, cfg, model_class=ChatOpenAI)
+
+    with caplog.at_level(logging.WARNING, logger=factory_module.__name__):
+        factory_module.create_chat_model(name="clean")
+
+    assert not any("not recognized parameters" in rec.message for rec in caplog.records)
+
+
+def test_api_base_normalized_for_patched_chatopenai(monkeypatch):
+    """The PatchedChatOpenAI subclass is in the OpenAI-compatible family and must normalize too."""
+    cfg = _make_app_config([_make_model_with_extras("patched", use="deerflow.models.patched_openai:PatchedChatOpenAI", api_base="http://localhost:4001/v1")])
+    _patch_factory(monkeypatch, cfg)
+
+    FakeChatModel.captured_kwargs = {}
+    factory_module.create_chat_model(name="patched")
+
+    assert FakeChatModel.captured_kwargs.get("base_url") == "http://localhost:4001/v1"
+    assert "api_base" not in FakeChatModel.captured_kwargs
+
+
+def test_api_base_dropped_when_openai_api_base_field_name_set(monkeypatch):
+    """If the field-name openai_api_base is set alongside api_base, the alias is dropped (no dup)."""
+    cfg = _make_app_config([_make_model_with_extras("oai", openai_api_base="http://canonical/v1", api_base="http://alias/v1")])
+    _patch_factory(monkeypatch, cfg)
+
+    FakeChatModel.captured_kwargs = {}
+    factory_module.create_chat_model(name="oai")
+
+    assert FakeChatModel.captured_kwargs.get("openai_api_base") == "http://canonical/v1"
+    assert "api_base" not in FakeChatModel.captured_kwargs
+    assert "base_url" not in FakeChatModel.captured_kwargs
+
+
+def test_no_unknown_key_warning_for_non_openai_class(monkeypatch, caplog):
+    """The unknown-key warning is scoped to the OpenAI family; other providers must not false-positive.
+
+    Regression: a ChatAnthropic model with a legit kwarg like frequency_penalty (which LangChain
+    routes into model_kwargs for that provider) previously tripped the 'not recognized' warning.
+    """
+    import logging
+
+    cfg = _make_app_config([_make_model_with_extras("anthropic", use="langchain_anthropic:ChatAnthropic", frequency_penalty=0.5)])
+    _patch_factory(monkeypatch, cfg)
+
+    FakeChatModel.captured_kwargs = {}
+    with caplog.at_level(logging.WARNING, logger=factory_module.__name__):
+        factory_module.create_chat_model(name="anthropic")
+
+    assert not any("not recognized parameters" in rec.message for rec in caplog.records)

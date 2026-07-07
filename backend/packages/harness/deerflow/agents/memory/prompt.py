@@ -115,7 +115,8 @@ Output Format (JSON):
   "newFacts": [
     {{ "content": "...", "category": "preference|knowledge|context|behavior|goal|correction", "confidence": 0.0-1.0 }}
   ],
-  "factsToRemove": ["fact_id_1", "fact_id_2"]
+  "factsToRemove": ["fact_id_1", "fact_id_2"],
+  "staleFactsToRemove": [{{ "id": "fact_id", "reason": "brief explanation" }}]
 }}
 
 Important Rules:
@@ -135,7 +136,38 @@ Important Rules:
   session-specific and ephemeral — they will not be accessible in future sessions.
   Recording upload events causes confusion in subsequent conversations.
 
+{staleness_review_section}
+
 Return ONLY valid JSON, no explanation or markdown."""
+
+
+# Prompt section injected into MEMORY_UPDATE_PROMPT when staleness review triggers.
+# Surfaces aged facts explicitly so the LLM can semantically judge each one,
+# rather than relying on passive contradiction from the current conversation.
+STALENESS_REVIEW_PROMPT = """## Staleness Review
+
+The following facts were created more than {age_days} days ago and may no longer
+accurately reflect the user's current situation. Review each one against the full
+conversation context and your understanding of the user.
+
+<stale_facts>
+{stale_facts}
+</stale_facts>
+
+For each fact, decide KEEP or REMOVE:
+- KEEP: Still likely valid — even if not mentioned in this conversation.
+  Stable attributes (native language, core expertise, personality traits) often
+  remain true indefinitely.
+- REMOVE: Outdated, contradicted by recent context, or no longer relevant.
+  Examples: tech-stack migrations, job changes, relocated offices, abandoned projects.
+
+Add REMOVE decisions to "staleFactsToRemove" in your output JSON.
+Each entry must be {{"id": "fact_id", "reason": "brief explanation"}}.
+The reason should cite what signal in the conversation (or absence thereof)
+supports the removal.
+
+Be conservative — when in doubt, KEEP. Removing a valid fact is worse than
+keeping a slightly stale one, because the next review cycle will re-evaluate it."""
 
 
 # Prompt template for extracting facts from a single message

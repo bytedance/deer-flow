@@ -6,6 +6,7 @@ requires-python = ">=3.12"
 dependencies = [
     "agent-client-protocol>=0.4.0",
     "agent-sandbox>=0.0.19",
+    "croniter>=6.0.0",
     "dotenv>=0.9.9",
     "exa-py>=1.0.0",
     "httpx>=0.28.0",
@@ -58,7 +59,12 @@ postgres = [
     "psycopg[binary]>=3.3.3",
     "psycopg-pool>=3.3.0",
 ]
+# Cross-process SSE stream bridge (stream_bridge.type: redis). Optional so
+# single-process / memory-bridge installs do not pull redis. The Docker image
+# always installs this extra because Docker defaults to the redis bridge.
+redis = ["redis>=5.0.0"]
 pymupdf = ["pymupdf4llm>=0.0.17"]
+boxlite = ["boxlite>=0.9.7"]
 
 [build-system]
 requires = ["hatchling"]

@@ -177,6 +177,59 @@ class TestFilterMessagesForMemory:
         assert "Help me with Python." in human_contents[0]
         assert not any("<memory>" in c for c in human_contents)
 
+    def test_hide_from_ui_human_input_response_is_preserved(self):
+        """Hidden card replies are user-authored answers, not framework context."""
+        hidden_response = HumanMessage(
+            content="For your clarification, my answer is: staging",
+            additional_kwargs={
+                "hide_from_ui": True,
+                "human_input_response": {
+                    "version": 1,
+                    "kind": "human_input_response",
+                    "source": "ask_clarification",
+                    "request_id": "clarification:call-abc",
+                    "response_kind": "option",
+                    "option_id": "option-2",
+                    "value": "staging",
+                },
+            },
+        )
+        msgs = [
+            _human("Deploy the app."),
+            _ai("Which environment?"),
+            hidden_response,
+            _ai("Deploying to staging."),
+        ]
+
+        result = filter_messages_for_memory(msgs)
+
+        human_contents = [m.content for m in result if m.type == "human"]
+        assert "Deploy the app." in human_contents
+        assert "For your clarification, my answer is: staging" in human_contents
+
+    def test_hide_from_ui_malformed_human_input_response_is_excluded(self):
+        hidden_response = HumanMessage(
+            content="For your clarification, my answer is: staging",
+            additional_kwargs={
+                "hide_from_ui": True,
+                "human_input_response": {
+                    "version": 1,
+                    "kind": "human_input_response",
+                    "source": "ask_clarification",
+                    "request_id": "clarification:call-abc",
+                    "response_kind": "option",
+                    "value": "staging",
+                },
+            },
+        )
+        msgs = [_human("Deploy the app."), _ai("Which environment?"), hidden_response]
+
+        result = filter_messages_for_memory(msgs)
+
+        human_contents = [m.content for m in result if m.type == "human"]
+        assert "Deploy the app." in human_contents
+        assert "For your clarification, my answer is: staging" not in human_contents
+
     def test_hide_from_ui_false_is_preserved(self):
         """Messages without hide_from_ui (or with it set to False) are kept."""
         visible_msg = HumanMessage(content="Visible message", additional_kwargs={"hide_from_ui": False})

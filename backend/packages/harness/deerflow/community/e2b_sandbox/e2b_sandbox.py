@@ -9,7 +9,7 @@ import threading
 from e2b_code_interpreter import Sandbox as E2BClientSandbox
 
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
-from deerflow.sandbox.sandbox import Sandbox
+from deerflow.sandbox.sandbox import Sandbox, _validate_extra_env
 from deerflow.sandbox.search import GrepMatch, path_matches, should_ignore_path, truncate_line
 
 logger = logging.getLogger(__name__)
@@ -133,11 +133,14 @@ class E2BSandbox(Sandbox):
         Args:
             command: The command to execute.
             env: Optional per-call environment variables (request-scoped secrets,
-                issue #3861). Passed through to e2b as ``envs``, which are scoped
-                to this command only and never placed in the command string.
+                issue #3861). Validated against the POSIX env-var name rule
+                (shared with the local and AIO sandboxes) and passed through to
+                e2b as ``envs``, which are scoped to this command only and never
+                placed in the command string.
             timeout: Optional per-call command timeout in seconds. ``None`` keeps
                 the e2b SDK default (60s).
         """
+        _validate_extra_env(env)
         with self._lock:
             client = self._client
             if client is None:

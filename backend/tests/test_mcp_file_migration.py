@@ -327,11 +327,19 @@ class TestRewriteLocalPathsInText:
 
 class TestWorkspaceSnapshots:
     def test_changed_workspace_files_detects_created_and_modified_files(self, paths: Paths):
+        import time
+
         workspace = paths.sandbox_work_dir("t1", user_id="u1")
         existing = _workspace_file(paths, "existing.txt", content=b"old")
         before = mcp_tools._snapshot_workspace_files(workspace)
 
-        existing.write_bytes(b"new")
+        # Ensure the mtime advances so the change is detectable.  Without the
+        # sleep, write_bytes(b"new") may land in the same nanosecond as the
+        # snapshot, and since b"old" and b"new" have the same length, the
+        # (mtime_ns, size) signature stays identical → _changed_workspace_files
+        # misses the modification.
+        time.sleep(0.05)
+        existing.write_bytes(b"new_content")  # different length guarantees size change too
         created = _workspace_file(paths, "created.txt", content=b"created")
 
         changed = set(mcp_tools._changed_workspace_files(workspace, before))

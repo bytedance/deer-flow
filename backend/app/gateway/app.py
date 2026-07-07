@@ -18,12 +18,15 @@ from app.gateway.routers import (
     auth,
     channel_connections,
     channels,
+    console,
     features,
     feedback,
+    github_webhooks,
     mcp,
     memory,
     models,
     runs,
+    scheduled_tasks,
     skills,
     suggestions,
     thread_runs,
@@ -234,6 +237,25 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         except Exception:
             logger.exception("No IM channels configured or channel service failed to start")
 
+        try:
+            from app.gateway.services import launch_scheduled_thread_run
+            from app.scheduler import ScheduledTaskService
+
+            if getattr(app.state, "scheduled_task_repo", None) is not None and getattr(app.state, "scheduled_task_run_repo", None) is not None:
+                scheduled_task_service = ScheduledTaskService(
+                    task_repo=app.state.scheduled_task_repo,
+                    task_run_repo=app.state.scheduled_task_run_repo,
+                    launch_run=lambda **kwargs: launch_scheduled_thread_run(app=app, **kwargs),
+                    poll_interval_seconds=startup_config.scheduler.poll_interval_seconds,
+                    lease_seconds=startup_config.scheduler.lease_seconds,
+                    max_concurrent_runs=startup_config.scheduler.max_concurrent_runs,
+                )
+                app.state.scheduled_task_service = scheduled_task_service
+                if startup_config.scheduler.enabled:
+                    await scheduled_task_service.start()
+        except Exception:
+            logger.exception("Failed to initialize scheduled task service")
+
         yield
 
         try:
@@ -256,6 +278,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             )
         except Exception:
             logger.exception("Failed to stop channel service")
+
+        if getattr(app.state, "scheduled_task_service", None) is not None:
+            try:
+                await app.state.scheduled_task_service.stop()
+            except Exception:
+                logger.exception("Failed to stop scheduled task service")
 
     logger.info("Shutting down API Gateway")
 
@@ -387,6 +415,9 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
     # Features API is mounted at /api/features
     app.include_router(features.router)
 
+    # Console API (cross-thread observability) is mounted at /api/console
+    app.include_router(console.router)
+
     # MCP API is mounted at /api/mcp
     app.include_router(mcp.router)
 
@@ -404,6 +435,9 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
 
     # Thread cleanup API is mounted at /api/threads/{thread_id}
     app.include_router(threads.router)
+
+    # Scheduled tasks API is mounted at /api/scheduled-tasks
+    app.include_router(scheduled_tasks.router)
 
     # Agents API is mounted at /api/agents
     app.include_router(agents.router)
@@ -431,6 +465,24 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
 
     # Stateless Runs API (stream/wait without a pre-existing thread)
     app.include_router(runs.router)
+
+    # GitHub webhooks API is mounted at /api/webhooks/github
+    # Exempt from auth and CSRF middleware (see auth_middleware._PUBLIC_PATH_PREFIXES
+    # and csrf_middleware.should_check_csrf); authenticity is enforced via the
+    # X-Hub-Signature-256 HMAC against GITHUB_WEBHOOK_SECRET.
+    # Including this router transitively imports app.gateway.github, which
+    # registers the GitHub channel's ChannelRunPolicy as an import side-effect.
+    #
+    # Fail-closed: only mount the route when a webhook secret is configured
+    # (or when the explicit DEER_FLOW_ALLOW_UNVERIFIED_GITHUB_WEBHOOKS=1
+    # dev opt-in is set). A misconfigured deployment without a secret cannot
+    # serve forged deliveries because the URL responds 404 — there is no
+    # handler to reach.
+    if github_webhooks.is_route_enabled():
+        app.include_router(github_webhooks.router)
+        logger.info("GitHub webhooks route mounted at /api/webhooks/github")
+    else:
+        logger.warning("GitHub webhooks route NOT mounted: GITHUB_WEBHOOK_SECRET unset and DEER_FLOW_ALLOW_UNVERIFIED_GITHUB_WEBHOOKS not set. /api/webhooks/github will respond 404. Configure either env var to enable the route.")
 
     @app.get("/health", tags=["health"])
     async def health_check() -> dict[str, str]:

@@ -26,6 +26,7 @@ from app.gateway.pagination import trim_run_message_page
 from app.gateway.services import sse_consumer, start_run, wait_for_run_completion
 from deerflow.runtime import RunRecord, RunStatus, serialize_channel_values_for_api
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, get_original_user_content_text, message_to_text
+from deerflow.workspace_changes import get_workspace_changes_response
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/threads", tags=["runs"])
@@ -539,10 +540,10 @@ async def join_run(thread_id: str, run_id: str, request: Request) -> StreamingRe
     record = await run_mgr.get(run_id)
     if record is None or record.thread_id != thread_id:
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
-    if record.store_only:
+    bridge = get_stream_bridge(request)
+    if record.store_only and not bridge.supports_cross_process:
         raise HTTPException(status_code=409, detail=f"Run {run_id} is not active on this worker and cannot be streamed")
 
-    bridge = get_stream_bridge(request)
     return StreamingResponse(
         sse_consumer(bridge, record, request, run_mgr),
         media_type="text/event-stream",
@@ -579,7 +580,8 @@ async def stream_existing_run(
     record = await run_mgr.get(run_id)
     if record is None or record.thread_id != thread_id:
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
-    if record.store_only and action is None:
+    bridge = get_stream_bridge(request)
+    if record.store_only and action is None and not bridge.supports_cross_process:
         raise HTTPException(status_code=409, detail=f"Run {run_id} is not active on this worker and cannot be streamed")
 
     # Cancel if an action was requested (stop-button / interrupt flow)
@@ -594,7 +596,6 @@ async def stream_existing_run(
                 pass
             return Response(status_code=204)
 
-    bridge = get_stream_bridge(request)
     return StreamingResponse(
         sse_consumer(bridge, record, request, run_mgr),
         media_type="text/event-stream",
@@ -740,6 +741,26 @@ async def list_run_events(
     event_store = get_run_event_store(request)
     types = event_types.split(",") if event_types else None
     return await event_store.list_events(thread_id, run_id, event_types=types, task_id=task_id, limit=limit, after_seq=after_seq)
+
+
+@router.get("/{thread_id}/runs/{run_id}/workspace-changes")
+@require_permission("runs", "read", owner_check=True)
+async def get_run_workspace_changes(
+    thread_id: str,
+    run_id: str,
+    request: Request,
+    include_files: bool = Query(default=True),
+    include_diff: bool = Query(default=True),
+) -> dict:
+    """Return workspace/output file changes recorded for one run."""
+    event_store = get_run_event_store(request)
+    return await get_workspace_changes_response(
+        event_store,
+        thread_id,
+        run_id,
+        include_files=include_files,
+        include_diff=include_diff,
+    )
 
 
 @router.get("/{thread_id}/token-usage", response_model=ThreadTokenUsageResponse)

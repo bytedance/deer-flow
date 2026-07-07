@@ -277,6 +277,17 @@ export function getAssistantTurnCopyData(
   );
 }
 
+export function getMessageCopyData(message: Message) {
+  const content = extractContentFromMessage(message);
+  if (message.type === "human") {
+    return stripUploadedFilesTag(content);
+  }
+  if (content.length > 0) {
+    return content;
+  }
+  return extractReasoningContentFromMessage(message) ?? "";
+}
+
 export function extractTextFromMessage(message: Message) {
   if (typeof message.content === "string") {
     return (

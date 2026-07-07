@@ -9,6 +9,8 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 
+import pytest
+
 from deerflow.config.paths import Paths
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -32,8 +34,10 @@ class FakeCommandsAPI:
         head = self._responses.pop(0)
         return head
 
-    def run(self, cmd: str) -> SimpleNamespace:
+    def run(self, cmd: str, envs: dict[str, str] | None = None, **kwargs) -> SimpleNamespace:
         self.calls.append(cmd)
+        self.envs = getattr(self, "envs", [])
+        self.envs.append(envs)
         head = self._next()
         if head == self.GONE:
             raise RuntimeError(self.NOT_FOUND_MSG)
@@ -248,7 +252,7 @@ def test_execute_command_returns_stdout_on_success():
 
 def test_execute_command_does_not_mark_dead_on_unrelated_error():
 
-    def boom(_cmd: str) -> Any:
+    def boom(_cmd: str, **kwargs) -> Any:
         raise RuntimeError("Connection reset by peer")
 
     client = FakeClient(commands=FakeCommandsAPI([boom]))
@@ -292,6 +296,26 @@ def test_execute_command_env_none_passes_no_envs_kwarg():
     _, kwargs = commands.run.call_args
     assert "envs" not in kwargs
     assert "timeout" not in kwargs
+
+
+def test_execute_command_forwards_env_as_envs():
+    """Per-call ``env`` reaches the e2b SDK as ``envs`` so secrets like
+    ``GITHUB_TOKEN`` are scoped to a single command without mutating shared
+    state. Mirrors the local/AIO sandboxes' overlay contract.
+    """
+    client = FakeClient(commands=FakeCommandsAPI([SimpleNamespace(stdout="ok", stderr="", exit_code=0)]))
+    sb = _make_sandbox(client)
+    sb.execute_command("gh pr create", env={"GH_TOKEN": "tok-123"})
+    assert client.commands.envs == [{"GH_TOKEN": "tok-123"}]
+
+
+def test_execute_command_rejects_invalid_env_key():
+    client = FakeClient(commands=FakeCommandsAPI([]))
+    sb = _make_sandbox(client)
+    with pytest.raises(ValueError, match="extra_env key"):
+        sb.execute_command("echo hi", env={"X;rm -rf /;Y": "v"})
+    # The SDK was never reached — validation happens before commands.run.
+    assert client.commands.calls == []
 
 
 def test_ping_returns_false_when_sandbox_gone():

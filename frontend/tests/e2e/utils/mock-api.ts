@@ -14,6 +14,7 @@ import type { Page, Route } from "@playwright/test";
 
 export const MOCK_THREAD_ID = "00000000-0000-0000-0000-000000000001";
 export const MOCK_THREAD_ID_2 = "00000000-0000-0000-0000-000000000002";
+export const MOCK_SIDECAR_THREAD_ID = "00000000-0000-0000-0000-0000000000aa";
 export const MOCK_RUN_ID = "00000000-0000-0000-0000-000000000099";
 
 const MOCK_AUTH_USER = {
@@ -56,6 +57,31 @@ export type MockAPIOptions = {
   threads?: MockThread[];
   agents?: MockAgent[];
   skills?: MockSkill[];
+  scheduledTasks?: Array<{
+    id: string;
+    thread_id: string | null;
+    context_mode?: "fresh_thread_per_run" | "reuse_thread";
+    last_thread_id?: string | null;
+    title: string;
+    prompt: string;
+    schedule_type: "once" | "cron";
+    schedule_spec: Record<string, unknown>;
+    timezone: string;
+    status:
+      | "enabled"
+      | "paused"
+      | "running"
+      | "completed"
+      | "failed"
+      | "cancelled";
+    next_run_at: string | null;
+    last_run_at: string | null;
+    last_run_id: string | null;
+    last_error: string | null;
+    run_count: number;
+    created_at: string;
+    updated_at: string;
+  }>;
   uploadLimits?: {
     max_files: number;
     max_file_size: number;
@@ -84,19 +110,102 @@ const DEFAULT_SKILLS: MockSkill[] = [
   },
 ];
 
-function mockStreamMessages() {
+function isHiddenInputMessage(message: unknown) {
+  if (typeof message !== "object" || message === null) {
+    return false;
+  }
+  const additionalKwargs = Reflect.get(message, "additional_kwargs");
+  return (
+    typeof additionalKwargs === "object" &&
+    additionalKwargs !== null &&
+    Reflect.get(additionalKwargs, "hide_from_ui") === true
+  );
+}
+
+function visibleInputMessages(messages: unknown[]) {
+  return messages.filter((message) => !isHiddenInputMessage(message));
+}
+
+function visibleRunInputMessages(route: Route) {
+  try {
+    const body = route.request().postDataJSON() as {
+      input?: { messages?: unknown[] };
+    };
+    return visibleInputMessages(body.input?.messages ?? []);
+  } catch {
+    return [];
+  }
+}
+
+function messageId(message: unknown): string | undefined {
+  if (typeof message !== "object" || message === null) {
+    return undefined;
+  }
+  const raw = Reflect.get(message, "id");
+  return typeof raw === "string" ? raw : undefined;
+}
+
+function branchMessagesFromTurn(messages: unknown[], targetIds: Set<string>) {
+  let targetEndIndex = -1;
+  for (const [index, message] of messages.entries()) {
+    const id = messageId(message);
+    if (id && targetIds.has(id)) {
+      targetEndIndex = Math.max(targetEndIndex, index);
+    }
+  }
+  return targetEndIndex >= 0 ? messages.slice(0, targetEndIndex + 1) : messages;
+}
+
+function mockStreamMessages(route?: Route, inputMessages?: unknown[]) {
+  const submittedMessages = inputMessages
+    ? visibleInputMessages(inputMessages)
+    : route
+      ? visibleRunInputMessages(route)
+      : [];
+  const responseMessage = {
+    type: "ai",
+    id: "msg-ai-1",
+    content: "Hello from DeerFlow!",
+  };
+  if (submittedMessages.length > 0) {
+    return [...submittedMessages, responseMessage];
+  }
+
   return [
     {
       type: "human",
       id: "msg-human-1",
       content: [{ type: "text", text: "Hello" }],
     },
-    {
-      type: "ai",
-      id: "msg-ai-1",
-      content: "Hello from DeerFlow!",
-    },
+    responseMessage,
   ];
+}
+
+function runStreamThreadId(route: Route) {
+  const pathThreadId = /\/threads\/([^/]+)\/runs\/stream/.exec(
+    new URL(route.request().url()).pathname,
+  )?.[1];
+  if (pathThreadId) {
+    return pathThreadId;
+  }
+
+  try {
+    const body = route.request().postDataJSON() as {
+      thread_id?: string;
+      threadId?: string;
+      context?: { thread_id?: string };
+      config?: { configurable?: { thread_id?: string } };
+    };
+    return (
+      body.thread_id ??
+      body.threadId ??
+      body.context?.thread_id ??
+      body.config?.configurable?.thread_id ??
+      MOCK_THREAD_ID
+    );
+  } catch {
+    return MOCK_THREAD_ID;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -112,6 +221,24 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
   let threads = [...(options?.threads ?? [])];
   const agents = options?.agents ?? [];
   const skills = options?.skills ?? DEFAULT_SKILLS;
+  const scheduledTasks = options?.scheduledTasks ?? [];
+  let mutableScheduledTasks = [...scheduledTasks];
+  const mutableTaskRuns: Record<
+    string,
+    Array<{
+      id: string;
+      task_id: string;
+      thread_id: string | null;
+      run_id: string | null;
+      scheduled_for: string;
+      trigger: "scheduled" | "manual";
+      status: "queued" | "running" | "success" | "failed" | "skipped";
+      error: string | null;
+      started_at: string | null;
+      finished_at: string | null;
+      created_at: string;
+    }>
+  > = {};
   const uploadLimits = options?.uploadLimits ?? {
     max_files: 10,
     max_file_size: 50 * 1024 * 1024,
@@ -189,9 +316,248 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
     return route.fallback();
   });
 
+  void page.route("**/api/suggestions/config", (route) => {
+    if (route.request().method() === "GET") {
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ enabled: false }),
+      });
+    }
+    return route.fallback();
+  });
+
+  void page.route("**/api/scheduled-tasks", (route) => {
+    if (route.request().method() === "GET") {
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(
+          mutableScheduledTasks.map((task) => ({
+            context_mode: "fresh_thread_per_run",
+            last_thread_id: null,
+            ...task,
+            thread_id: task.thread_id ?? null,
+          })),
+        ),
+      });
+    }
+    if (route.request().method() === "POST") {
+      const payload = route.request().postDataJSON() as Record<string, unknown>;
+      const threadId =
+        typeof payload.thread_id === "string" ? payload.thread_id : "";
+      const title = typeof payload.title === "string" ? payload.title : "";
+      const prompt = typeof payload.prompt === "string" ? payload.prompt : "";
+      const timezone =
+        typeof payload.timezone === "string" ? payload.timezone : "UTC";
+      const created = {
+        id: "task-created",
+        thread_id: threadId || null,
+        context_mode:
+          (payload.context_mode as "fresh_thread_per_run" | "reuse_thread") ??
+          "fresh_thread_per_run",
+        last_thread_id: null,
+        title,
+        prompt,
+        schedule_type: payload.schedule_type as "once" | "cron",
+        schedule_spec: (payload.schedule_spec as Record<string, unknown>) ?? {},
+        timezone,
+        status: "enabled" as const,
+        next_run_at: null,
+        last_run_at: null,
+        last_run_id: null,
+        last_error: null,
+        run_count: 0,
+        created_at: "2026-07-01T00:00:00+00:00",
+        updated_at: "2026-07-01T00:00:00+00:00",
+      };
+      mutableScheduledTasks = [created, ...mutableScheduledTasks];
+      mutableTaskRuns[created.id] = [];
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(created),
+      });
+    }
+    return route.fallback();
+  });
+
+  void page.route("**/api/scheduled-tasks/*/pause", (route) => {
+    if (route.request().method() === "POST") {
+      const taskId = decodeURIComponent(
+        new URL(route.request().url()).pathname.split("/").at(-2) ?? "",
+      );
+      mutableScheduledTasks = mutableScheduledTasks.map((task) =>
+        task.id === taskId ? { ...task, status: "paused" as const } : task,
+      );
+      const task = mutableScheduledTasks.find((item) => item.id === taskId);
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(task),
+      });
+    }
+    return route.fallback();
+  });
+
+  void page.route("**/api/scheduled-tasks/*/resume", (route) => {
+    if (route.request().method() === "POST") {
+      const taskId = decodeURIComponent(
+        new URL(route.request().url()).pathname.split("/").at(-2) ?? "",
+      );
+      mutableScheduledTasks = mutableScheduledTasks.map((task) =>
+        task.id === taskId ? { ...task, status: "enabled" as const } : task,
+      );
+      const task = mutableScheduledTasks.find((item) => item.id === taskId);
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(task),
+      });
+    }
+    return route.fallback();
+  });
+
+  void page.route("**/api/scheduled-tasks/*/trigger", (route) => {
+    if (route.request().method() === "POST") {
+      const taskId = decodeURIComponent(
+        new URL(route.request().url()).pathname.split("/").at(-2) ?? "",
+      );
+      const task = mutableScheduledTasks.find((item) => item.id === taskId);
+      if (task) {
+        const runId = `run-${taskId}`;
+        mutableTaskRuns[taskId] = [
+          {
+            id: `task-run-${taskId}`,
+            task_id: taskId,
+            thread_id: task.thread_id,
+            run_id: runId,
+            scheduled_for: "2026-07-01T00:00:00+00:00",
+            trigger: "manual",
+            status: "success",
+            error: null,
+            started_at: "2026-07-01T00:00:00+00:00",
+            finished_at: "2026-07-01T00:00:00+00:00",
+            created_at: "2026-07-01T00:00:00+00:00",
+          },
+          ...(mutableTaskRuns[taskId] ?? []),
+        ];
+        mutableScheduledTasks = mutableScheduledTasks.map((item) =>
+          item.id === taskId
+            ? {
+                ...item,
+                last_run_id: runId,
+                last_run_at: "2026-07-01T00:00:00+00:00",
+                run_count: item.run_count + 1,
+              }
+            : item,
+        );
+      }
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ id: taskId, triggered: true }),
+      });
+    }
+    return route.fallback();
+  });
+
+  void page.route("**/api/scheduled-tasks/*", (route) => {
+    const request = route.request();
+    if (request.method() === "PATCH") {
+      const taskId = decodeURIComponent(
+        new URL(request.url()).pathname.split("/").at(-1) ?? "",
+      );
+      const payload = request.postDataJSON() as Record<string, unknown>;
+      let updated: (typeof mutableScheduledTasks)[number] | undefined;
+      mutableScheduledTasks = mutableScheduledTasks.map((task) => {
+        if (task.id !== taskId) {
+          return task;
+        }
+        updated = {
+          ...task,
+          ...(typeof payload.title === "string"
+            ? { title: payload.title }
+            : {}),
+          ...(typeof payload.prompt === "string"
+            ? { prompt: payload.prompt }
+            : {}),
+          ...(payload.schedule_spec
+            ? {
+                schedule_spec: payload.schedule_spec as Record<string, unknown>,
+              }
+            : {}),
+          ...(typeof payload.timezone === "string"
+            ? { timezone: payload.timezone }
+            : {}),
+          updated_at: "2026-07-01T00:00:00+00:00",
+        };
+        return updated;
+      });
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(updated ?? {}),
+      });
+    }
+    if (request.method() === "DELETE") {
+      const taskId = decodeURIComponent(
+        new URL(request.url()).pathname.split("/").at(-1) ?? "",
+      );
+      mutableScheduledTasks = mutableScheduledTasks.filter(
+        (task) => task.id !== taskId,
+      );
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ id: taskId, deleted: true }),
+      });
+    }
+    return route.fallback();
+  });
+
+  void page.route("**/api/threads/*/scheduled-tasks", (route) => {
+    if (route.request().method() === "GET") {
+      const url = new URL(route.request().url());
+      const parts = url.pathname.split("/");
+      const threadId = decodeURIComponent(
+        parts[parts.indexOf("threads") + 1] ?? "",
+      );
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(
+          mutableScheduledTasks
+            .filter((task) => task.thread_id === threadId)
+            .map((task) => ({
+              context_mode: "fresh_thread_per_run",
+              last_thread_id: null,
+              ...task,
+              thread_id: task.thread_id ?? null,
+            })),
+        ),
+      });
+    }
+    return route.fallback();
+  });
+
+  void page.route("**/api/scheduled-tasks/*/runs", (route) => {
+    if (route.request().method() === "GET") {
+      const taskId = decodeURIComponent(
+        new URL(route.request().url()).pathname.split("/").at(-2) ?? "",
+      );
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(mutableTaskRuns[taskId] ?? []),
+      });
+    }
+    return route.fallback();
+  });
+
   // Thread search — sidebar thread list & chats list page
   void page.route("**/api/langgraph/threads/search", async (route) => {
-    const body = threads.map(threadSearchResult);
+    let body = threads.map(threadSearchResult);
 
     let limit: number | undefined;
     let offset = 0;
@@ -199,6 +565,7 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
       const postData = route.request().postDataJSON() as {
         limit?: number;
         offset?: number;
+        metadata?: Record<string, unknown>;
       } | null;
       if (postData) {
         if (typeof postData.limit === "number") {
@@ -206,6 +573,13 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
         }
         if (typeof postData.offset === "number") {
           offset = postData.offset;
+        }
+        if (postData.metadata && typeof postData.metadata === "object") {
+          body = body.filter((thread) =>
+            Object.entries(postData.metadata ?? {}).every(
+              ([key, value]) => thread.metadata?.[key] === value,
+            ),
+          );
         }
       }
     } catch {
@@ -285,10 +659,110 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
     return route.fallback();
   });
 
+  void page.route("**/api/threads", (route) => {
+    if (route.request().method() === "POST") {
+      const body = route.request().postDataJSON() as {
+        thread_id?: string;
+        metadata?: Record<string, unknown>;
+      };
+      const threadId = body.thread_id ?? MOCK_SIDECAR_THREAD_ID;
+      upsertThread({
+        thread_id: threadId,
+        title: "Side chat",
+        updated_at: new Date().toISOString(),
+        metadata: body.metadata ?? {},
+        messages: [],
+      });
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          thread_id: threadId,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+          metadata: body.metadata ?? {},
+          status: "idle",
+          values: {},
+        }),
+      });
+    }
+    return route.fallback();
+  });
+
   void page.route(/\/api\/threads\/[^/]+$/, (route) => {
     if (route.request().method() === "DELETE") {
+      const threadId = decodeURIComponent(
+        new URL(route.request().url()).pathname.split("/").at(-1) ?? "",
+      );
+      // Mirror the gateway's `require_existing=True` ownership guard: deleting
+      // an already-removed thread 404s. `useDeleteThread` first deletes via the
+      // LangGraph route (which drops the thread_meta row) and then hits this
+      // route, so this reproduces the real double-delete 404 the frontend must
+      // treat as idempotent success.
+      if (!threads.some((thread) => thread.thread_id === threadId)) {
+        return route.fulfill({
+          status: 404,
+          contentType: "application/json",
+          body: JSON.stringify({ detail: `Thread ${threadId} not found` }),
+        });
+      }
+      threads = threads.filter((thread) => thread.thread_id !== threadId);
       return route.fulfill({
         status: 204,
+      });
+    }
+    return route.fallback();
+  });
+
+  void page.route(/\/api\/threads\/[^/]+\/branches$/, (route) => {
+    if (route.request().method() === "POST") {
+      const pathParts = new URL(route.request().url()).pathname.split("/");
+      const sourceThreadId = decodeURIComponent(pathParts.at(-2) ?? "");
+      const sourceThread = threads.find(
+        (thread) => thread.thread_id === sourceThreadId,
+      );
+      const body = route.request().postDataJSON() as {
+        message_id?: string;
+        message_ids?: string[];
+        title?: string;
+      };
+      const targetIds = new Set(
+        [body.message_id, ...(body.message_ids ?? [])].filter(
+          (id): id is string => typeof id === "string" && id.length > 0,
+        ),
+      );
+      let sourceTitle = sourceThread?.title?.trim();
+      if (sourceThread?.metadata?.deerflow_branch === true) {
+        sourceTitle = sourceTitle?.replace(/^(Branch:\s*)+/i, "").trim();
+      }
+      const title = body.title ?? sourceTitle;
+
+      upsertThread({
+        thread_id: MOCK_THREAD_ID_2,
+        title,
+        updated_at: new Date().toISOString(),
+        metadata: {
+          deerflow_branch: true,
+          branch_parent_thread_id: sourceThreadId,
+          branch_parent_message_id: body.message_id,
+          branch_parent_checkpoint_id: "mock-checkpoint",
+        },
+        messages: branchMessagesFromTurn(
+          sourceThread?.messages ?? [],
+          targetIds,
+        ),
+      });
+
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          thread_id: MOCK_THREAD_ID_2,
+          parent_thread_id: sourceThreadId,
+          parent_checkpoint_id: "mock-checkpoint",
+          branched_from_message_id: body.message_id,
+          workspace_clone_mode: "current_thread_best_effort",
+        }),
       });
     }
     return route.fallback();
@@ -505,18 +979,19 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
 
   // Run stream — returns a minimal SSE response with an AI message
   const handleMockRunStream = (route: Route) => {
-    const requestUrl = route.request().url();
-    const matchingThread = threads.find((thread) =>
-      requestUrl.includes(encodeURIComponent(thread.thread_id)),
+    const threadId = runStreamThreadId(route);
+    const existingThread = threads.find(
+      (thread) => thread.thread_id === threadId,
     );
     const fallbackGoal = threads.find((thread) => thread.goal)?.goal ?? null;
-    const goal = matchingThread?.goal ?? fallbackGoal;
+    const goal = existingThread?.goal ?? fallbackGoal;
     upsertThread({
-      thread_id: MOCK_THREAD_ID,
-      title: "New Chat",
+      thread_id: threadId,
+      title: threadId === MOCK_SIDECAR_THREAD_ID ? "Side chat" : "New Chat",
       updated_at: new Date().toISOString(),
       goal,
-      messages: mockStreamMessages(),
+      metadata: existingThread?.metadata,
+      messages: mockStreamMessages(route),
     });
     return handleRunStream(route, { goal });
   };
@@ -624,17 +1099,19 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
 export function handleRunStream(
   route: Route,
   values: Record<string, unknown> = {},
+  inputMessages?: unknown[],
 ) {
+  const threadId = runStreamThreadId(route);
   const events = [
     {
       event: "metadata",
-      data: { run_id: MOCK_RUN_ID, thread_id: MOCK_THREAD_ID },
+      data: { run_id: MOCK_RUN_ID, thread_id: threadId },
     },
     {
       event: "values",
       data: {
         ...values,
-        messages: mockStreamMessages(),
+        messages: mockStreamMessages(route, inputMessages),
       },
     },
     { event: "end", data: {} },

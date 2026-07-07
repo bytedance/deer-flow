@@ -5,14 +5,31 @@ Mirrors the pattern used by ``deerflow/sandbox/sandbox_provider.py``.
 
 from __future__ import annotations
 
+import logging
 import threading
+from collections import OrderedDict
 
 from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
 from deerflow.skills.storage.skill_storage import SkillStorage
+from deerflow.skills.storage.user_scoped_skill_storage import UserScopedSkillStorage
+
+logger = logging.getLogger(__name__)
 
 _default_skill_storage: SkillStorage | None = None
 _default_skill_storage_config: object | None = None  # AppConfig identity the singleton was built from
 _skill_storage_lock = threading.Lock()
+
+# Maximum number of per-user storage instances to keep in cache.
+# Real-world deployments rarely have more than a few concurrent users per
+# process; 64 is a generous ceiling that prevents unbounded memory growth.
+_MAX_USER_SCOPED_STORAGES = 64
+
+# Per-user skill storage cache with double-check lock for concurrent creation.
+# OrderedDict so that LRU eviction can remove the least-recently-used entry
+# via ``move_to_end`` + ``popitem(last=False)`` when the cache exceeds
+# ``_MAX_USER_SCOPED_STORAGES``.
+_user_scoped_storages: OrderedDict[str, UserScopedSkillStorage] = OrderedDict()
+_user_scoped_storage_lock = threading.Lock()
 
 
 def get_or_new_skill_storage(**kwargs) -> SkillStorage:
@@ -27,6 +44,10 @@ def get_or_new_skill_storage(**kwargs) -> SkillStorage:
     **Singleton** is returned (created on first call, then reused) when neither
     ``skills_path`` nor ``app_config`` is given — uses ``get_app_config()`` to
     resolve the active configuration.
+
+    This singleton is used for reading **public** skills (global, read-only).
+    For user-scoped custom skill operations, use
+    :func:`get_or_new_user_skill_storage` instead.
     """
     global _default_skill_storage, _default_skill_storage_config
 
@@ -79,17 +100,86 @@ def get_or_new_skill_storage(**kwargs) -> SkillStorage:
         return _default_skill_storage
 
 
+def get_or_new_user_skill_storage(user_id: str, **kwargs) -> SkillStorage:
+    """Return a per-user ``SkillStorage`` instance for custom skill isolation.
+
+    Uses :class:`UserScopedSkillStorage` which redirects custom skill paths
+    to ``{base_dir}/users/{user_id}/skills/custom/`` while keeping public
+    skill reads from the global root.
+
+    ``user_id`` is normalised via :func:`make_safe_user_id` so that external
+    identities (e.g. IM channel ids containing non-``[A-Za-z0-9_-]`` chars)
+    are safely bucketed before reaching :class:`UserScopedSkillStorage`, which
+    calls :func:`_validate_user_id` internally.
+
+    Instances are cached by the *normalised* ``user_id`` with double-check
+    locking to prevent concurrent creation races. When the cache exceeds
+    ``_MAX_USER_SCOPED_STORAGES``, the least-recently-accessed entry is
+    evicted (true LRU, not FIFO).
+    """
+    from deerflow.config.paths import make_safe_user_id
+
+    safe_id = make_safe_user_id(user_id)
+
+    # Always acquire lock so move_to_end is safe — makes this a true LRU
+    # cache instead of FIFO. The overhead is negligible since dict ops are
+    # fast and this function is called once per agent-creation cycle.
+    with _user_scoped_storage_lock:
+        cached = _user_scoped_storages.get(safe_id)
+        if cached is not None:
+            _user_scoped_storages.move_to_end(safe_id)
+            return cached
+
+        cached = UserScopedSkillStorage(safe_id, **kwargs)
+        _user_scoped_storages[safe_id] = cached
+        # Evict least-recently-used entry if cache exceeds the ceiling.
+        # Since we just moved the current user_id to the end, popitem(last=False)
+        # will evict the oldest/least-recently-accessed entry (never the
+        # one we just created).
+        while len(_user_scoped_storages) > _MAX_USER_SCOPED_STORAGES:
+            evicted_key, evicted_val = _user_scoped_storages.popitem(last=False)
+            logger.info("Evicted user-scoped skill storage for safe_id=%s (cache ceiling %d)", evicted_key, _MAX_USER_SCOPED_STORAGES)
+        return cached
+
+
 def reset_skill_storage() -> None:
-    """Clear the cached singleton (used in tests and hot-reload scenarios)."""
+    """Clear all cached storage instances (used in tests and hot-reload scenarios)."""
     global _default_skill_storage, _default_skill_storage_config
     with _skill_storage_lock:
         _default_skill_storage = None
         _default_skill_storage_config = None
+    with _user_scoped_storage_lock:
+        _user_scoped_storages.clear()
+
+
+def reset_user_skill_storage(user_id: str | None = None) -> None:
+    """Clear per-user skill storage cache for a specific user, or all users.
+
+    ``user_id`` is normalised via :func:`make_safe_user_id` so that the
+    cache key matches the one used by :func:`get_or_new_user_skill_storage`.
+    Without normalisation, IM-channel user IDs (e.g. ``feishu:xxx``) would
+    fail to clear their stale cache entries.
+
+    Args:
+        user_id: If provided, remove only that user's cached storage.
+            If ``None``, clear the entire per-user cache.
+    """
+    from deerflow.config.paths import make_safe_user_id
+
+    with _user_scoped_storage_lock:
+        if user_id is not None:
+            safe_id = make_safe_user_id(user_id)
+            _user_scoped_storages.pop(safe_id, None)
+        else:
+            _user_scoped_storages.clear()
 
 
 __all__ = [
     "LocalSkillStorage",
     "SkillStorage",
+    "UserScopedSkillStorage",
     "get_or_new_skill_storage",
+    "get_or_new_user_skill_storage",
     "reset_skill_storage",
+    "reset_user_skill_storage",
 ]

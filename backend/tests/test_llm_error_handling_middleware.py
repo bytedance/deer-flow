@@ -678,3 +678,77 @@ def test_user_message_for_quota_unchanged() -> None:
 
     assert "out of quota" in message
     assert "streaming response was interrupted" not in message
+
+
+def test_classify_error_index_error_is_retriable_transient() -> None:
+    """``langchain_core.language_models.chat_models.ainvoke`` crashes with
+    ``IndexError: list index out of range`` when the upstream provider
+    returns ``200 OK`` with ``generations == []`` (observed against the
+    Volces "coding" endpoint at ark.cn-beijing.volces.com). That's an
+    upstream-payload glitch we don't want killing the entire run, so it
+    must classify as retriable/transient and go through the normal
+    retry/backoff path.
+    """
+    middleware = _build_middleware()
+    exc = IndexError("list index out of range")
+    retriable, reason = middleware._classify_error(exc)
+    assert retriable is True
+    assert reason == "transient"
+
+
+def test_async_index_error_retries_then_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Empty-``generations`` payloads from the upstream provider must not
+    abort the run on the first failure. Confirm that the retry loop kicks
+    in and the next attempt's successful AIMessage is returned to the
+    caller instead of an error fallback.
+    """
+    middleware = _build_middleware(retry_max_attempts=3, retry_base_delay_ms=10, retry_cap_delay_ms=10)
+    attempts = 0
+
+    async def fake_sleep(_delay: float) -> None:
+        return None
+
+    async def handler(_request) -> AIMessage:
+        nonlocal attempts
+        attempts += 1
+        if attempts < 2:
+            raise IndexError("list index out of range")
+        return AIMessage(content="ok")
+
+    monkeypatch.setattr("asyncio.sleep", fake_sleep)
+
+    result = asyncio.run(middleware.awrap_model_call(SimpleNamespace(), handler))
+
+    assert isinstance(result, AIMessage)
+    assert result.content == "ok"
+    assert attempts == 2
+
+
+def test_async_index_error_exhausted_returns_user_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If every retry hits the same empty-``generations`` IndexError, the
+    middleware must still produce a user-facing fallback AIMessage (with
+    ``deerflow_error_fallback=True``) instead of letting the IndexError
+    propagate out of the agent loop and ending the run in ``error``
+    status with no GitHub-side reply.
+    """
+    middleware = _build_middleware(retry_max_attempts=2, retry_base_delay_ms=10, retry_cap_delay_ms=10)
+
+    async def fake_sleep(_delay: float) -> None:
+        return None
+
+    async def handler(_request) -> AIMessage:
+        raise IndexError("list index out of range")
+
+    monkeypatch.setattr("asyncio.sleep", fake_sleep)
+
+    result = asyncio.run(middleware.awrap_model_call(SimpleNamespace(), handler))
+
+    assert isinstance(result, AIMessage)
+    assert result.additional_kwargs["deerflow_error_fallback"] is True
+    assert result.additional_kwargs["error_reason"] == "transient"
+    assert result.additional_kwargs["error_type"] == "IndexError"
+    assert "temporarily unavailable" in str(result.content)

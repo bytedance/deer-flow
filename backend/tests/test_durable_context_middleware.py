@@ -1,17 +1,23 @@
+from typing import Annotated
+
 from _agent_e2e_helpers import FakeToolCallingModel
 from langchain.agents import create_agent
+from langchain.tools import InjectedToolCallId
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import tool
 from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.types import Command
 
 from deerflow.agents import thread_state as thread_state_module
 from deerflow.agents.lead_agent import agent as lead_agent_module
 from deerflow.agents.middlewares.durable_context_middleware import DurableContextMiddleware
 from deerflow.agents.middlewares.summarization_middleware import DeerFlowSummarizationMiddleware
+from deerflow.agents.middlewares.tool_error_handling_middleware import ToolErrorHandlingMiddleware
 from deerflow.agents.thread_state import ThreadState, merge_delegations
 from deerflow.config.app_config import AppConfig
 from deerflow.config.model_config import ModelConfig
 from deerflow.config.sandbox_config import SandboxConfig
+from deerflow.subagents.status_contract import make_subagent_additional_kwargs
 
 
 def _make_app_config() -> AppConfig:
@@ -45,7 +51,12 @@ def _msgs_with_completed_task():
                 }
             ],
         ),
-        ToolMessage(content="Task Succeeded. Result: JWT", tool_call_id="call_1", id="tm_1"),
+        ToolMessage(
+            content="Task Succeeded. Result: JWT",
+            tool_call_id="call_1",
+            id="tm_1",
+            additional_kwargs=make_subagent_additional_kwargs("completed", result="JWT"),
+        ),
     ]
 
 
@@ -70,7 +81,12 @@ def _msgs_with_completed_tasks(count: int):
                         }
                     ],
                 ),
-                ToolMessage(content=f"Task Succeeded. Result: result {i}", tool_call_id=tool_call_id, id=f"tm_{i}"),
+                ToolMessage(
+                    content=f"Task Succeeded. Result: result {i}",
+                    tool_call_id=tool_call_id,
+                    id=f"tm_{i}",
+                    additional_kwargs=make_subagent_additional_kwargs("completed", result=f"result {i}"),
+                ),
             ]
         )
     return messages
@@ -155,6 +171,42 @@ class TestBeforeModelCapture:
 
         assert out is None
 
+    def test_durable_context_uses_structured_task_metadata_when_content_disagrees(self):
+        middleware = DurableContextMiddleware()
+        state = {
+            "messages": [
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "task",
+                            "args": {
+                                "description": "research",
+                                "prompt": "do research",
+                                "subagent_type": "general-purpose",
+                            },
+                            "id": "call-1",
+                            "type": "tool_call",
+                        }
+                    ],
+                ),
+                ToolMessage(
+                    content="Task Succeeded. Result: legacy",
+                    tool_call_id="call-1",
+                    additional_kwargs={
+                        "subagent_status": "completed",
+                        "subagent_result_brief": "structured",
+                        "subagent_result_sha256": "a" * 64,
+                    },
+                ),
+            ],
+            "delegations": [],
+        }
+
+        update = middleware.before_model(state, runtime=None)
+
+        assert update["delegations"][0]["result_brief"] == "structured"
+
 
 class TestMiddlewareRegistration:
     def test_registered_before_summarization(self, monkeypatch):
@@ -189,7 +241,12 @@ class RecordingFakeModel(FakeToolCallingModel):
 
 
 @tool("task", parse_docstring=True)
-def fake_task(description: str, prompt: str, subagent_type: str) -> str:
+def fake_task(
+    description: str,
+    prompt: str,
+    subagent_type: str,
+    tool_call_id: Annotated[str, InjectedToolCallId],
+) -> Command:
     """Fake task tool.
 
     Args:
@@ -197,7 +254,18 @@ def fake_task(description: str, prompt: str, subagent_type: str) -> str:
         prompt: full task instructions.
         subagent_type: which subagent type to use.
     """
-    return "Task Succeeded. Result: AUTH_USES_JWT_SENTINEL"
+    return Command(
+        update={
+            "messages": [
+                ToolMessage(
+                    content="Task Succeeded. Result: AUTH_USES_JWT_SENTINEL",
+                    tool_call_id=tool_call_id,
+                    name="task",
+                    additional_kwargs=make_subagent_additional_kwargs("completed", result="AUTH_USES_JWT_SENTINEL"),
+                )
+            ]
+        }
+    )
 
 
 @tool("read_file", parse_docstring=True)
@@ -314,6 +382,13 @@ class TestSkillContextCapture:
                 content="---\nname: data-analysis\ndescription: Analyze data.\n---\nBODY_SENTINEL",
                 tool_call_id="r1",
                 id="tm1",
+                additional_kwargs={
+                    "skill_context_entry": {
+                        "name": "data-analysis",
+                        "path": "/mnt/skills/public/data-analysis/SKILL.md",
+                        "description": "Analyze data.",
+                    }
+                },
             ),
         ]
 
@@ -330,7 +405,18 @@ class TestSkillContextCapture:
         middleware = DurableContextMiddleware(skills_container_path="/custom/skills", skill_file_read_tool_names=["open"])
         msgs = [
             AIMessage(content="", tool_calls=[{"name": "open", "args": {"path": "/custom/skills/public/x/SKILL.md"}, "id": "r1", "type": "tool_call"}]),
-            ToolMessage(content="---\nname: x\ndescription: d\n---\nbody", tool_call_id="r1", id="tm1"),
+            ToolMessage(
+                content="---\nname: x\ndescription: d\n---\nbody",
+                tool_call_id="r1",
+                id="tm1",
+                additional_kwargs={
+                    "skill_context_entry": {
+                        "name": "x",
+                        "path": "/custom/skills/public/x/SKILL.md",
+                        "description": "d",
+                    }
+                },
+            ),
         ]
 
         out = middleware.before_model({"messages": msgs}, None)
@@ -353,7 +439,7 @@ class TestSkillContextInjection:
         agent = create_agent(
             model=model,
             tools=[fake_read_file],
-            middleware=[DurableContextMiddleware()],
+            middleware=[ToolErrorHandlingMiddleware(), DurableContextMiddleware()],
             state_schema=ThreadState,
         )
 
@@ -381,6 +467,7 @@ class TestSkillContextInjection:
             model=model,
             tools=[fake_read_file],
             middleware=[
+                ToolErrorHandlingMiddleware(),
                 DurableContextMiddleware(),
                 DeerFlowSummarizationMiddleware(model=summary_model, trigger=("messages", 4), keep=("messages", 2), token_counter=len),
             ],

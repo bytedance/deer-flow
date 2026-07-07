@@ -81,6 +81,8 @@ models:
 
 For OpenAI-compatible gateways (for example Novita or OpenRouter), keep using `langchain_openai:ChatOpenAI` and set `base_url`:
 
+> **Note:** for `langchain_openai:ChatOpenAI` the endpoint override key is `base_url` (not `api_base`). If you write `api_base` it is automatically normalized to `base_url`, and unrecognized keys are logged with a warning at model-build time. Some other model classes (e.g. `PatchedChatDeepSeek`) do use `api_base` — match the key to the class you configured.
+
 ```yaml
 models:
   - name: novita-deepseek-v3.2
@@ -220,6 +222,30 @@ tool_groups:
   - name: bash         # Shell command execution
 ```
 
+### Scheduler
+
+The scheduled-task MVP adds a scheduler section to `config.yaml`:
+
+```yaml
+scheduler:
+  enabled: false
+  poll_interval_seconds: 5
+  lease_seconds: 120
+  max_concurrent_runs: 3
+  min_once_delay_seconds: 60
+```
+
+Notes:
+
+- `enabled: false` keeps background polling off by default.
+- `max_concurrent_runs` is a global cap on active scheduled runs (queued/running run rows); each poll cycle claims only into the remaining budget, so long runs accumulating across cycles cannot exceed it.
+- All scheduler fields are restart-required; edits need a Gateway restart.
+- Multi-worker deployments (`GATEWAY_WORKERS > 1`) must use the Postgres database backend. SQLite silently ignores row-level locks, so multiple workers can double-fire the same task.
+- The MVP supports thread reuse and fresh-thread-per-run execution modes.
+- The MVP supports only `once` and `cron`.
+- Manual trigger uses the same scheduled-task resource and run lifecycle.
+- Scheduled task definitions and task-run history are persisted in the application database.
+
 ### Tools
 
 Configure specific tools available to the agent:
@@ -315,6 +341,32 @@ sandbox:
 sandbox:
    use: deerflow.community.aio_sandbox:AioSandboxProvider # Docker-based sandbox
 ```
+
+**BoxLite micro-VM Sandbox** (runs sandbox code in daemonless OCI micro-VMs):
+```yaml
+sandbox:
+   use: deerflow.community.boxlite:BoxliteProvider
+   image: python:3.12-slim
+   memory_mib: 1024                 # optional per-box memory cap
+   cpus: 2                          # optional per-box vCPUs
+   replicas: 3                      # max active + warm VMs per gateway process
+   idle_timeout: 600                # warm VM idle seconds before stop; 0 disables idle reaping
+   environment:
+      PYTHONUNBUFFERED: "1"
+```
+
+Install the optional runtime before selecting this provider:
+
+```bash
+pip install "deerflow-harness[boxlite]"
+```
+
+BoxLite boxes are named from the effective `(user_id, thread_id)` scope and are
+released into an in-process warm pool after each turn. The same user/thread can
+reclaim its warm VM on the next acquire; different threads cannot share a VM.
+`replicas` caps active plus warm VMs. When the cap is reached only warm VMs are
+evicted; active VMs continue and the provider may temporarily exceed the cap if
+all boxes are active.
 
 **Docker Execution with Kubernetes** (runs sandbox code in Kubernetes pods via provisioner service):
 
@@ -455,6 +507,7 @@ If you rebuild the runtime from scratch instead of extending the published image
 
 - `sandbox.get_context()`, including `home_dir`
 - `shell.exec_command(...)`
+- `bash.exec(...)` — only exercised for per-command environment injection (skills that declare `required-secrets`). The `/v1/bash/*` routes exist since upstream all-in-one-sandbox `1.9.3`; on older images (including a `latest` tag still frozen on the `1.0.0.x` line) DeerFlow fails fast with an actionable error instead of surfacing the raw 404. Pin `sandbox.image` to `1.9.3` or newer (e.g. `1.11.0`) and recreate the sandbox container to use `required-secrets` with the AIO sandbox.
 - `file.read_file(...)`
 - `file.write_file(...)`, including base64 writes for binary content
 - streamed `file.download_file(...)`
