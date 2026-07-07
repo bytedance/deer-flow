@@ -442,9 +442,9 @@ _pool_lock = threading.Lock()
 def get_session_pool() -> MCPSessionPool:
     """Return the global session-pool singleton."""
     global _pool
-    # Build and return under the lock with a double check so racing cold-start
-    # callers construct exactly one pool and reset_session_pool() can't null the
-    # global out from under the return (which previously handed back None). The
+    # Build and return under the lock so racing cold-start callers construct
+    # exactly one pool and reset_session_pool() can't null the global between
+    # reading it and returning it (which previously could hand back None). The
     # critical section is tiny and never awaits, so a threading.Lock is safe to
     # hold from both the async and sync/worker-thread paths.
     with _pool_lock:

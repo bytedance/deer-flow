@@ -67,12 +67,14 @@ def test_reset_racing_get_never_returns_none():
     """
     reset_session_pool()
     none_seen: list[int] = []
+    none_seen_lock = threading.Lock()
     stop = threading.Event()
 
     def getter() -> None:
         while not stop.is_set():
             if get_session_pool() is None:
-                none_seen.append(1)
+                with none_seen_lock:
+                    none_seen.append(1)
 
     def resetter() -> None:
         for _ in range(100000):
