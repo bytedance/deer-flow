@@ -50,6 +50,11 @@ class LocalSkillStorage(SkillStorage):
             self._app_config = config
             self._host_root: Path = config.skills.get_skills_path()
         else:
+            # Keep app_config as-is (may be None). This host_path constructor is used by
+            # tests and non-user-scoped storage; eagerly calling get_app_config() here would
+            # break config-free environments (e.g. CI). The skill_scan.enabled kill switch is
+            # resolved lazily at scan time by skill_scan_enabled(), which also picks up
+            # hot-reloaded config, so a None here is honored, not ignored.
             self._app_config = app_config
             self._host_root = resolve_path(host_path)
 

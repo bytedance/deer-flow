@@ -37,6 +37,7 @@ MAX_FILE_BYTES = 64 * 1024 * 1024
 
 _BLOCK_SEVERITY = "CRITICAL"
 _NESTED_ZIP_PEEK_MEMBER_LIMIT = 256
+_MAX_ARCHIVE_MEMBERS = 4096
 
 _SPECS = [
     RuleSpec("package-path-traversal", "CRITICAL", "Archive member path traverses outside the skill root.", "Remove parent-directory traversal from the package path."),
@@ -44,6 +45,7 @@ _SPECS = [
     RuleSpec("package-symlink", "HIGH", "Package contains a symlink entry.", "Remove symlinks from the skill package."),
     RuleSpec("package-nested-skill-md", "CRITICAL", "Package contains a nested SKILL.md file.", "Keep exactly one SKILL.md at the skill root."),
     RuleSpec("package-oversized-total", "CRITICAL", "Package total uncompressed size exceeds the limit.", "Remove large files or split assets out of the skill package."),
+    RuleSpec("package-too-many-members", "CRITICAL", "Package contains more members than the allowed limit.", "Reduce the number of files in the skill package."),
     RuleSpec("package-oversized-file", "CRITICAL", "Package contains a file that exceeds the per-file size limit.", "Remove or shrink the oversized file."),
     RuleSpec("package-executable-binary", "CRITICAL", "Package contains an executable binary.", "Remove binary executables from the skill package."),
     RuleSpec("package-nested-archive", "HIGH", "Package contains a nested archive file.", "Unpack and review nested archives before packaging the skill."),
@@ -66,6 +68,7 @@ _SPECS = [
     RuleSpec("python-sensitive-path-read", "HIGH", "Python reads a sensitive path.", "Remove sensitive host-path access from the skill."),
     RuleSpec("python-unsafe-deserialization", "MEDIUM", "Python uses unsafe deserialization.", "Use safe loaders or trusted typed formats."),
     RuleSpec("shell-reverse-shell", "CRITICAL", "Shell script contains a reverse-shell idiom.", "Remove reverse-shell behavior from the skill."),
+    RuleSpec("shell-reverse-shell-heuristic", "HIGH", "Shell script resembles a reverse-shell idiom.", "Confirm this is not reverse-shell behavior; unmistakable reverse-shell signals are blocked outright."),
     RuleSpec("shell-sensitive-exfil", "CRITICAL", "Shell script reads sensitive paths and sends data over the network.", "Remove sensitive reads or outbound transfer commands."),
     RuleSpec("shell-curl-pipe-shell", "HIGH", "Shell script pipes remote content into a shell.", "Download, verify, and execute reviewed code explicitly instead."),
     RuleSpec("shell-destructive-command", "HIGH", "Shell script contains an unmistakably destructive command.", "Remove destructive commands from skill scripts."),
@@ -99,27 +102,19 @@ _HIDDEN_SENSITIVE_FILES = {
     "credentials",
     "config",
 }
-_TEXT_SUFFIXES = {
-    ".bash",
-    ".cfg",
-    ".env",
-    ".ini",
-    ".json",
-    ".md",
-    ".markdown",
-    ".py",
-    ".rst",
-    ".sh",
-    ".toml",
-    ".txt",
-    ".yaml",
-    ".yml",
-}
 _PLACEHOLDER_VALUES = {"", "x", "xx", "xxx", "xxxx", "changeme", "change-me", "example", "placeholder", "test", "dummy", "your-key", "<your-key>"}
 _SENSITIVE_PATH_RE = re.compile(r"(~/.ssh|/etc/passwd|/etc/shadow|/var/run/docker\.sock|docker\.sock|169\.254\.169\.254)")
 _EXTERNAL_HTTP_RE = re.compile(r"http://([A-Za-z0-9.-]+)(?::\d+)?(?:/|\b)")
 _URL_RE = re.compile(r"https?://[^\s)'\"<>]+")
 _LOCAL_HTTP_HOSTS = {"localhost", "127.0.0.1", "0.0.0.0", "::1"}
+# `rm` with a recursive flag (any order/combination, optional --no-preserve-root)
+# targeting the filesystem root, a wildcard, or a complete system-root directory.
+# Subpaths like ``/tmp/scratch`` or ``/home/user/project`` stay unflagged.
+_DESTRUCTIVE_RM_RE = (
+    r"\brm\s+(?:-\S+\s+|--no-preserve-root\s+)*-\S*[rR]\S*\s+"
+    r"(?:-\S+\s+|--no-preserve-root\s+)*"
+    r"/(?:\*|\s|$|(?:bin|boot|dev|etc|home|lib|lib64|opt|proc|root|run|sbin|srv|sys|usr|var)(?:/\*?)?(?:\s|$))"
+)
 
 
 def skill_scan_enabled(app_config: Any | None = None) -> bool:
@@ -177,7 +172,13 @@ def scan_archive_preflight(archive_path: Path) -> ScanResult:
     total_size = 0
     try:
         with zipfile.ZipFile(archive_path, "r") as zf:
-            for info in zf.infolist():
+            members = zf.infolist()
+            if len(members) > _MAX_ARCHIVE_MEMBERS:
+                # Early-abort before the per-member reads below: a huge member
+                # count is a bounded DoS vector even when the total size is small.
+                finding = _finding("package-too-many-members", file=None, evidence=f"{len(members)} members")
+                return _scan_result([finding], scanner_errors)
+            for info in members:
                 normalized = _normalize_archive_name(info.filename)
                 findings.extend(_scan_archive_member_metadata(info, normalized))
                 if info.is_dir():
@@ -225,7 +226,7 @@ def scan_skill_dir(skill_dir: Path) -> ScanResult:
             continue
 
         findings.extend(_scan_file_package_properties(rel_path, file_bytes, path.stat().st_size))
-        text = _decode_text_for_analysis(rel_path, file_bytes)
+        text = _decode_text_for_analysis(file_bytes)
         if text is None:
             continue
 
@@ -346,9 +347,8 @@ def _scan_python(rel_path: str, text: str) -> list[SecurityFinding]:
     sensitive_node: ast.AST | None = None
     env_node: ast.AST | None = None
     network_node: ast.AST | None = None
-
-    if "socket" in text and "dup2" in text and "subprocess" in text:
-        findings.append(_finding_for_text("python-reverse-shell", rel_path, text, "dup2"))
+    reverse_shell_parts: set[str] = set()
+    reverse_shell_node: ast.AST | None = None
 
     for node in ast.walk(tree):
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
@@ -383,6 +383,17 @@ def _scan_python(rel_path: str, text: str) -> list[SecurityFinding]:
             has_network_sink = True
             network_node = network_node or node
 
+        if call_name == "os.dup2":
+            reverse_shell_parts.add("dup2")
+            reverse_shell_node = reverse_shell_node or node
+        elif call_name == "socket.socket":
+            reverse_shell_parts.add("socket")
+        elif call_name.startswith("subprocess.") or call_name in {"os.system", "os.popen"}:
+            reverse_shell_parts.add("subprocess")
+
+    if {"dup2", "socket", "subprocess"} <= reverse_shell_parts:
+        findings.append(_finding_for_node("python-reverse-shell", rel_path, reverse_shell_node, "socket + dup2 + subprocess"))
+
     if has_sensitive_read and has_network_sink:
         findings.append(_finding_for_node("python-sensitive-exfil", rel_path, sensitive_node or network_node, "sensitive read + network sink"))
     elif has_sensitive_read:
@@ -394,14 +405,17 @@ def _scan_python(rel_path: str, text: str) -> list[SecurityFinding]:
 
 def _scan_shell(rel_path: str, text: str) -> list[SecurityFinding]:
     findings: list[SecurityFinding] = []
-    reverse_re = re.compile(r"(/dev/tcp/|bash\s+-i|nc\s+-e|mkfifo\s+)")
-    if match := reverse_re.search(text):
+    # Unmistakable reverse-shell signals hard-block; weaker idioms (bash -i,
+    # mkfifo) only warn->LLM because they appear in legitimate scripts.
+    if match := re.search(r"(/dev/tcp/|nc\s+-e\b)", text):
         findings.append(_finding_from_match("shell-reverse-shell", rel_path, text, match))
+    if match := re.search(r"(bash\s+-i\b|mkfifo\s+)", text):
+        findings.append(_finding_from_match("shell-reverse-shell-heuristic", rel_path, text, match))
     if re.search(r"(/etc/shadow|/etc/passwd)", text) and re.search(r"\b(curl|wget|nc|scp)\b", text):
         findings.append(_finding_for_text("shell-sensitive-exfil", rel_path, text, "/etc"))
     if match := re.search(r"\b(curl|wget)\b[^\n|;]*\|\s*(?:sh|bash)\b", text):
         findings.append(_finding_from_match("shell-curl-pipe-shell", rel_path, text, match))
-    if match := re.search(r"rm\s+-rf\s+/(?:\s|$)|:\(\)\{\s*:\|:&\s*\};:|dd\s+[^#\n]*\bof=/dev/", text):
+    if match := re.search(_DESTRUCTIVE_RM_RE + r"|:\(\)\{\s*:\|:&\s*\};:|dd\s+[^#\n]*\bof=/dev/", text):
         findings.append(_finding_from_match("shell-destructive-command", rel_path, text, match))
     if match := re.search(r"\b(env|printenv|export\s+-p)\b", text):
         findings.append(_finding_from_match("shell-env-dump", rel_path, text, match))
@@ -490,7 +504,10 @@ def _read_archive_member(zf: zipfile.ZipFile, info: zipfile.ZipInfo) -> bytes | 
 
 
 def _redact_secret_evidence(value: str) -> str:
-    return f"{value[:6]}…[redacted]"
+    # Drop the value entirely: the rule_id already names the secret category, and
+    # any retained prefix (e.g. value[:6]) leaks real token bytes into findings
+    # that flow to Gateway responses and LLM context.
+    return "[redacted]"
 
 
 def _scan_result(findings: list[SecurityFinding], scanner_errors: list[str]) -> ScanResult:
@@ -565,24 +582,15 @@ def _binary_magic_evidence(prefix: bytes) -> str:
     return "Mach-O"
 
 
-def _decode_text_for_analysis(rel_path: str, file_bytes: bytes) -> str | None:
+def _decode_text_for_analysis(file_bytes: bytes) -> str | None:
+    # Binaries are rejected by the NUL probe and the decode failure below, so
+    # every NUL-free, UTF-8-decodable file is analyzed regardless of extension.
     if b"\x00" in file_bytes[:4096]:
         return None
-    suffix = PurePosixPath(rel_path).suffix.lower()
-    if suffix not in _TEXT_SUFFIXES and not _has_text_shebang(file_bytes):
-        try:
-            return file_bytes.decode("utf-8")
-        except UnicodeDecodeError:
-            return None
     try:
         return file_bytes.decode("utf-8")
     except UnicodeDecodeError:
         return None
-
-
-def _has_text_shebang(file_bytes: bytes) -> bool:
-    first_line = file_bytes.splitlines()[:1]
-    return bool(first_line and first_line[0].startswith(b"#!"))
 
 
 def _is_python_path(rel_path: str, text: str) -> bool:
