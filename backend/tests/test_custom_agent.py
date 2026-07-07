@@ -575,6 +575,59 @@ class TestAgentsAPI:
         assert response.status_code == 200
         assert response.json()["description"] == "new desc"
 
+    def test_update_agent_preserves_hand_authored_github_block(self, agent_client):
+        """A hand-authored ``github:`` block on disk must survive PATCH.
+
+        The HTTP route does not expose ``github`` as an editable field
+        (and rightly so — the GitHub App credentials and binding triggers
+        are operator-authored, not end-user-editable). But it MUST carry
+        the block forward when rewriting ``config.yaml`` for a description /
+        model / tool_groups / skills change, otherwise an operator who
+        edits the agent's description from the Web UI silently strips the
+        binding and the next webhook delivery silently no-ops.
+
+        Mirrors the same property the harness ``update_agent`` tool enforces
+        via ``preserve_non_managed_fields``; both surfaces share the helper.
+        """
+        # Create an agent through the API, then hand-author a github: block
+        # into its config.yaml — exactly the workflow an operator would
+        # follow when wiring a new repo binding.
+        agent_client.post("/api/agents", json={"name": "github-agent", "description": "old desc", "soul": "p"})
+
+        tmp_path: Path = agent_client._tmp_path  # type: ignore[attr-defined]
+        agent_dir = tmp_path / "users" / "test-user-autouse" / "agents" / "github-agent"
+        config_file = agent_dir / "config.yaml"
+        config_data = yaml.safe_load(config_file.read_text())
+        config_data["github"] = {
+            "installation_id": 99999,
+            "bot_login": "github-agent-bot",
+            "bindings": [
+                {
+                    "repo": "acme/widget",
+                    "triggers": {"pull_request": {"actions": ["opened"]}},
+                }
+            ],
+        }
+        config_file.write_text(yaml.safe_dump(config_data, sort_keys=False), encoding="utf-8")
+
+        # PATCH only the description.
+        response = agent_client.put("/api/agents/github-agent", json={"description": "new desc"})
+        assert response.status_code == 200
+
+        # github: block must survive verbatim.
+        reloaded = yaml.safe_load(config_file.read_text())
+        assert reloaded["description"] == "new desc"
+        assert reloaded["github"] == {
+            "installation_id": 99999,
+            "bot_login": "github-agent-bot",
+            "bindings": [
+                {
+                    "repo": "acme/widget",
+                    "triggers": {"pull_request": {"actions": ["opened"]}},
+                }
+            ],
+        }
+
     def test_update_missing_agent_404(self, agent_client):
         response = agent_client.put("/api/agents/ghost-agent", json={"soul": "new"})
         assert response.status_code == 404

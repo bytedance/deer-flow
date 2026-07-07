@@ -6,6 +6,8 @@ import re
 from copy import copy
 from typing import Any
 
+from deerflow.agents.human_input import read_human_input_response
+
 _UPLOAD_BLOCK_RE = re.compile(r"<uploaded_files>[\s\S]*?</uploaded_files>\n*", re.IGNORECASE)
 _CORRECTION_PATTERNS = (
     re.compile(r"\bthat(?:'s| is) (?:wrong|incorrect)\b", re.IGNORECASE),
@@ -66,7 +68,8 @@ def filter_messages_for_memory(messages: list[Any]) -> list[Any]:
             # hide_from_ui and must never reach the memory-updating LLM — otherwise
             # framework-internal text pollutes long-term memory (and the p0 __memory
             # payload could trigger a self-amplification loop).
-            if getattr(msg, "additional_kwargs", {}).get("hide_from_ui"):
+            additional_kwargs = getattr(msg, "additional_kwargs", {}) or {}
+            if additional_kwargs.get("hide_from_ui") and read_human_input_response(additional_kwargs) is None:
                 continue
             content_str = extract_message_text(msg)
             if "<uploaded_files>" in content_str:

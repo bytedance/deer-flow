@@ -177,3 +177,28 @@ async def test_build_servers_config_async_uses_user_credentials():
         assert result["github"]["env"] == {"GITHUB_TOKEN": "token-a"}
     finally:
         reset_mcp_credential_store_context(token)
+
+
+def test_build_server_params_excludes_tool_call_timeout():
+    """tool_call_timeout must NOT appear in the connection dict.
+
+    langchain-mcp-adapters passes the connection dict to create_session(),
+    which forwards unknown keys to _create_stdio_session(), causing TypeError.
+    The timeout is read from McpServerConfig at the tool wrapper call-site
+    instead.  Regression for PR #3843 P1 bug.
+    """
+    config = McpServerConfig(
+        type="stdio",
+        command="npx",
+        args=["-y", "my-mcp-server"],
+        tool_call_timeout=30.0,
+    )
+
+    params = build_server_params("my-server", config)
+
+    assert "tool_call_timeout" not in params
+    assert params == {
+        "transport": "stdio",
+        "command": "npx",
+        "args": ["-y", "my-mcp-server"],
+    }

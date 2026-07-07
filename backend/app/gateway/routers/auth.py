@@ -513,7 +513,12 @@ async def initialize_admin(request: Request, response: Response, body: Initializ
     try:
         user = await get_local_provider().create_user(email=body.email, password=body.password, system_role="admin", needs_setup=False)
     except ValueError:
-        # DB unique-constraint race: another concurrent request beat us.
+        admin_count = await get_local_provider().count_admin_users()
+        if admin_count == 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=AuthErrorResponse(code=AuthErrorCode.EMAIL_ALREADY_EXISTS, message="Email already registered").model_dump(),
+            )
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=AuthErrorResponse(code=AuthErrorCode.SYSTEM_ALREADY_INITIALIZED, message="System already initialized").model_dump(),
@@ -554,6 +559,10 @@ def _set_csrf_cookie(response: Response, request: Request) -> None:
         httponly=False,  # Must be JS-readable for Double Submit Cookie pattern
         secure=is_https,
         samesite="strict",
+        # Persist for the same lifetime as the access_token (see _set_session_cookie)
+        # so the double-submit pair is evicted together, never leaving a logged-in
+        # session whose csrf_token was dropped (e.g. iOS Safari PWA termination).
+        max_age=get_auth_config().token_expiry_days * 24 * 3600 if is_https else None,
     )
 
 

@@ -21,14 +21,17 @@ import { useI18n } from "../i18n/hooks";
 import { isHiddenFromUIMessage } from "../messages/utils";
 import type { FileInMessage } from "../messages/utils";
 import type { LocalSettings } from "../settings";
+import { isSidecarThread, SIDECAR_METADATA_KEY } from "../sidecar/thread";
 import { useUpdateSubtask } from "../tasks/context";
+import { messageToStep } from "../tasks/steps";
 import type { UploadedFileInfo } from "../uploads";
 import { promptInputFilePartToFile, uploadFiles } from "../uploads";
 
-import { fetchThreadTokenUsage } from "./api";
+import { branchThreadFromTurn, fetchThreadTokenUsage } from "./api";
 import {
   buildThreadsSearchQueryOptions,
   DEFAULT_THREAD_SEARCH_PARAMS,
+  filterThreadSearchResults,
   type ThreadSearchParams,
 } from "./thread-search-query";
 import { threadTokenUsageQueryKey } from "./token-usage";
@@ -57,6 +60,27 @@ export type ThreadStreamOptions = {
 
 type SendMessageOptions = {
   additionalKwargs?: Record<string, unknown>;
+  additionalInputMessages?: Message[];
+  /**
+   * Invoked exactly once when the send passes the in-flight guard and is
+   * genuinely dispatched. It never fires on the early-return path, so callers
+   * can safely perform one-time cleanup (e.g. clearing quoted references)
+   * without losing state when a concurrent send is dropped.
+   */
+  onSent?: () => void;
+};
+
+type ThreadDeleteClient = {
+  threads: {
+    delete: (threadId: string) => Promise<unknown>;
+    search: (query: Record<string, unknown>) => Promise<AgentThread[]>;
+  };
+};
+
+type ThreadSidecarSearchClient = {
+  threads: {
+    search: (query: Record<string, unknown>) => Promise<AgentThread[]>;
+  };
 };
 
 type RegeneratePrepareResponse = {
@@ -69,6 +93,35 @@ type RegeneratePrepareResponse = {
   metadata: Record<string, unknown>;
   target_run_id: string;
 };
+
+export function buildThreadSubmitMessages({
+  text,
+  additionalKwargs,
+  additionalInputMessages = [],
+  filesForSubmit = [],
+}: {
+  text: string;
+  additionalKwargs?: Record<string, unknown>;
+  additionalInputMessages?: Message[];
+  filesForSubmit?: FileInMessage[];
+}): Message[] {
+  return [
+    ...additionalInputMessages,
+    {
+      type: "human",
+      content: [
+        {
+          type: "text",
+          text,
+        },
+      ],
+      additional_kwargs: {
+        ...additionalKwargs,
+        ...(filesForSubmit.length > 0 ? { files: filesForSubmit } : {}),
+      },
+    } as Message,
+  ];
+}
 
 const EMPTY_THREAD_VALUES: AgentThreadState = {
   title: "",
@@ -215,7 +268,13 @@ export function buildVisibleHistoryMessages(
     (message) => !supersededRunIds.has(message.run_id),
   );
   return dedupeMessagesByIdentity([
-    ...visibleRows.map((message) => message.content),
+    // Carry the owning run_id onto the content message so historical subtask
+    // cards can fetch their persisted step history on expand (#3779). run_id
+    // lives on the RunMessage wrapper and would otherwise be dropped here.
+    ...visibleRows.map((message) => ({
+      ...message.content,
+      run_id: message.run_id,
+    })),
     ...appendedMessages,
   ]);
 }
@@ -365,6 +424,107 @@ export function mergeMessages(
   });
 }
 
+/**
+ * Derive the live turns that context summarization is about to drop and that
+ * therefore must be re-archived into history.
+ *
+ * Summarization emits `RemoveMessage(ALL)` + a hidden summary + the retained
+ * tail. Everything in the current live thread before the first retained visible
+ * message is being removed; we keep those (minus the summary control messages
+ * already tracked) so the UI can still show the full conversation (#3825).
+ */
+export function computeSummarizationMovedMessages(
+  currentMessages: Message[],
+  summarizationMessages: Message[],
+  summarizedMessageIds: ReadonlySet<string>,
+): Message[] {
+  const firstRetainedVisibleIdentity = summarizationMessages
+    .filter((message) => message.type !== "remove")
+    .filter((message) => !isHiddenFromUIMessage(message))
+    .map(messageIdentity)
+    .find(isNonEmptyString);
+
+  const moved: Message[] = [];
+  for (const message of currentMessages) {
+    if (
+      firstRetainedVisibleIdentity &&
+      messageIdentity(message) === firstRetainedVisibleIdentity
+    ) {
+      break;
+    }
+    if (!summarizedMessageIds.has(message.id ?? "")) {
+      moved.push(message);
+    }
+  }
+  return moved;
+}
+
+/**
+ * Overlay the messages rescued from context summarization on top of the
+ * (possibly stale) visible history so the merged view never drops them.
+ *
+ * Background (#3825): after summarization the backend removes every live
+ * message (`RemoveMessage(ALL)`) and `onUpdateEvent` re-archives the removed
+ * messages into history through an async `setState`. The live thread messages
+ * are owned by the LangGraph SDK external store while the archived history is
+ * React state, so a render can observe the post-summary (shrunk) thread before
+ * the archive `setState` commits — leaving the rescued messages in neither
+ * merge input. Reading them from a synchronous buffer here keeps the merge
+ * correct at every render regardless of how the two state channels interleave.
+ *
+ * The rescued messages are the oldest live turns, so they follow whatever the
+ * already-loaded history holds. Only messages still missing from history are
+ * appended: once history absorbs a rescued message, its live copy stays
+ * authoritative (the buffered copy is an older snapshot and must never overwrite
+ * it), and ordering is preserved.
+ */
+export function resolvePreservedHistory(
+  visibleHistory: Message[],
+  pendingArchivedMessages: Message[],
+): Message[] {
+  if (pendingArchivedMessages.length === 0) {
+    return visibleHistory;
+  }
+  const presentIdentities = new Set(
+    visibleHistory.map(messageIdentity).filter(isNonEmptyString),
+  );
+  const missing = pendingArchivedMessages.filter((message) => {
+    const identity = messageIdentity(message);
+    // Identity-less messages are intentionally skipped: without a stable
+    // identity they cannot be matched against history to drain or dedupe, so
+    // overlaying them would risk a permanent duplicate. They are still archived
+    // through appendMessages and surface via the normal history path instead.
+    return identity !== undefined && !presentIdentities.has(identity);
+  });
+  if (missing.length === 0) {
+    return visibleHistory;
+  }
+  return [...visibleHistory, ...missing];
+}
+
+/**
+ * Drop the archive-buffer entries that the canonical history state has already
+ * absorbed. This keeps the buffer a transient bridge across the async gap
+ * rather than a second long-lived source of truth — otherwise a stale copy
+ * could resurrect a message that history later filtered out (e.g. a superseded
+ * or regenerated run).
+ */
+export function pruneConfirmedArchivedMessages(
+  pendingArchivedMessages: Message[],
+  visibleHistory: Message[],
+): Message[] {
+  if (pendingArchivedMessages.length === 0) {
+    return pendingArchivedMessages;
+  }
+  const confirmedIdentities = new Set(
+    visibleHistory.map(messageIdentity).filter(isNonEmptyString),
+  );
+  return pendingArchivedMessages.filter((message) => {
+    const identity = messageIdentity(message);
+    return !identity || !confirmedIdentities.has(identity);
+  });
+}
+
 function getMessagesAfterBaseline(
   messages: Message[],
   baselineMessageIds: ReadonlySet<string>,
@@ -503,6 +663,58 @@ export function upsertThreadInInfiniteCache(
       };
     },
   );
+}
+
+export function invalidateStoppedThreadCaches(
+  queryClient: QueryClient,
+  threadId: string | null | undefined,
+  isMock = false,
+) {
+  void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
+  void queryClient.invalidateQueries({
+    queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
+  });
+
+  if (!threadId || isMock) {
+    return;
+  }
+
+  void queryClient.invalidateQueries({ queryKey: ["thread", threadId] });
+  void queryClient.invalidateQueries({
+    queryKey: ["thread", "metadata", threadId, isMock],
+  });
+  void queryClient.invalidateQueries({
+    queryKey: threadTokenUsageQueryKey(threadId),
+  });
+}
+
+export const STOP_THREAD_FINALIZATION_REFETCH_DELAY_MS = 1500;
+
+function scheduleStoppedThreadFinalizationRefetch(
+  queryClient: QueryClient,
+  threadId: string | null | undefined,
+  isMock = false,
+) {
+  if (isMock) {
+    return;
+  }
+  globalThis.setTimeout(() => {
+    invalidateStoppedThreadCaches(queryClient, threadId, isMock);
+  }, STOP_THREAD_FINALIZATION_REFETCH_DELAY_MS);
+}
+
+export async function stopThreadAndInvalidateCaches(
+  queryClient: QueryClient,
+  stop: () => Promise<void> | void,
+  threadId: string | null | undefined,
+  isMock = false,
+) {
+  try {
+    await stop();
+  } finally {
+    invalidateStoppedThreadCaches(queryClient, threadId, isMock);
+    scheduleStoppedThreadFinalizationRefetch(queryClient, threadId, isMock);
+  }
 }
 
 function getStreamErrorMessage(error: unknown): string {
@@ -730,28 +942,26 @@ export function useThreadStream({
       const _messages = getSummarizationMiddlewareMessages(data);
       if (_messages && _messages.length >= 2) {
         for (const m of _messages) {
+          // Backward-compat shim: pre-PR2 threads may still carry a synthetic
+          // HumanMessage(name="summary") from the old summarization path. New
+          // threads keep the summary in ThreadState.summary_text instead.
           if (m.name === "summary" && m.type === "human") {
             summarizedRef.current?.add(m.id ?? "");
           }
         }
-        const firstRetainedVisibleIdentity = _messages
-          .filter((message) => message.type !== "remove")
-          .filter((message) => !isHiddenFromUIMessage(message))
-          .map(messageIdentity)
-          .find(isNonEmptyString);
-        const _currentMessages = [...messagesRef.current];
-        const _movedMessages: Message[] = [];
-        for (const m of _currentMessages) {
-          if (
-            firstRetainedVisibleIdentity &&
-            messageIdentity(m) === firstRetainedVisibleIdentity
-          ) {
-            break;
-          }
-          if (!summarizedRef.current?.has(m.id ?? "")) {
-            _movedMessages.push(m);
-          }
-        }
+        const _movedMessages = computeSummarizationMovedMessages(
+          messagesRef.current,
+          _messages,
+          summarizedRef.current ?? new Set<string>(),
+        );
+        // Buffer the rescued messages synchronously so the merge can keep
+        // displaying them immediately, even though appendMessages below only
+        // updates the archived-history state asynchronously (#3825).
+        pendingArchivedMessagesRef.current = dedupeMessagesByIdentity([
+          ...pendingArchivedMessagesRef.current,
+          ..._movedMessages,
+        ]);
+        pendingArchiveThreadIdRef.current = threadIdRef.current;
         appendMessages(_movedMessages);
         messagesRef.current = [];
       }
@@ -816,8 +1026,16 @@ export function useThreadStream({
           type: "task_running";
           task_id: string;
           message: AIMessage;
+          message_index?: number;
         };
-        updateSubtask({ id: e.task_id, latestMessage: e.message });
+        // Accumulate the full step history instead of overwriting (#3779): keep
+        // latestMessage for the collapsed-header tool-call hint, and append the
+        // normalized step (assistant turn or tool output) to the timeline.
+        updateSubtask({
+          id: e.task_id,
+          latestMessage: e.message,
+          steps: [messageToStep(e.message, e.message_index ?? 0)],
+        });
         return;
       }
 
@@ -859,20 +1077,20 @@ export function useThreadStream({
           .map(messageIdentity)
           .filter((id): id is string => Boolean(id)),
       );
-      void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
-      void queryClient.invalidateQueries({
-        queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
-      });
-      if (threadIdRef.current && !isMock) {
-        void queryClient.invalidateQueries({
-          queryKey: ["thread", threadIdRef.current],
-        });
-        void queryClient.invalidateQueries({
-          queryKey: threadTokenUsageQueryKey(threadIdRef.current),
-        });
-      }
+      invalidateStoppedThreadCaches(queryClient, threadIdRef.current, isMock);
     },
   });
+
+  const stopThread = useCallback(async () => {
+    const stoppedThreadId =
+      threadIdRef.current ?? displayThreadId ?? threadId ?? null;
+    await stopThreadAndInvalidateCaches(
+      queryClient,
+      () => thread.stop(),
+      stoppedThreadId,
+      isMock,
+    );
+  }, [displayThreadId, isMock, queryClient, thread, threadId]);
 
   const hasVisibleStreamState =
     Boolean(threadId) || liveMessagesThreadId === currentViewThreadId;
@@ -896,6 +1114,17 @@ export function useThreadStream({
   const latestMessageCountsRef = useRef({ humanMessageCount });
   const sendInFlightRef = useRef(false);
   const messagesRef = useRef<Message[]>([]);
+  // Synchronous bridge for messages rescued from context summarization. The
+  // archived-history `setState` (via appendMessages) lands on a different
+  // schedule than the live thread external store, so the merge reads this buffer
+  // to avoid dropping rescued messages in the render window before history
+  // catches up (#3825).
+  const pendingArchivedMessagesRef = useRef<Message[]>([]);
+  // The thread the rescue buffer belongs to, captured when onUpdateEvent fills
+  // it. The merge only overlays the buffer when this matches the viewed
+  // `threadId`, so a previous thread's rescued messages can never flash into
+  // another thread or the new-chat screen (#3825).
+  const pendingArchiveThreadIdRef = useRef<string | null>(null);
   const summarizedRef = useRef<Set<string>>(null);
   // Track human message count before sending to prevent clearing optimistic
   // messages before the server's human message arrives (e.g. when AI messages
@@ -912,6 +1141,8 @@ export function useThreadStream({
     startedRef.current = false;
     sendInFlightRef.current = false;
     messagesRef.current = [];
+    pendingArchivedMessagesRef.current = [];
+    pendingArchiveThreadIdRef.current = null;
     summarizedRef.current = new Set<string>();
     pendingUsageBaselineMessageIdsRef.current = new Set();
     setPendingSupersededRunIds(new Set());
@@ -919,6 +1150,16 @@ export function useThreadStream({
     prevHumanMsgCountRef.current =
       latestMessageCountsRef.current.humanMessageCount;
   }, [threadId]);
+
+  // Release archive-buffer entries once the canonical history state has absorbed
+  // them, so the synchronous bridge stays transient and never resurrects a
+  // message that history later filters out (e.g. a superseded run) (#3825).
+  useEffect(() => {
+    pendingArchivedMessagesRef.current = pruneConfirmedArchivedMessages(
+      pendingArchivedMessagesRef.current,
+      visibleHistory,
+    );
+  }, [visibleHistory]);
 
   useEffect(() => {
     if (optimisticThreadId && optimisticThreadId !== currentViewThreadId) {
@@ -975,6 +1216,10 @@ export function useThreadStream({
         return;
       }
       sendInFlightRef.current = true;
+
+      // The send has genuinely proceeded past the in-flight guard, so callers
+      // can now run one-time cleanup that must not fire on the dropped path.
+      options?.onSent?.();
 
       const text = message.text.trim();
 
@@ -1108,23 +1353,12 @@ export function useThreadStream({
 
         await thread.submit(
           {
-            messages: [
-              {
-                type: "human",
-                content: [
-                  {
-                    type: "text",
-                    text,
-                  },
-                ],
-                additional_kwargs: {
-                  ...options?.additionalKwargs,
-                  ...(filesForSubmit.length > 0
-                    ? { files: filesForSubmit }
-                    : {}),
-                },
-              },
-            ],
+            messages: buildThreadSubmitMessages({
+              text,
+              additionalKwargs: options?.additionalKwargs,
+              additionalInputMessages: options?.additionalInputMessages,
+              filesForSubmit,
+            }),
           },
           {
             threadId: threadId,
@@ -1295,8 +1529,18 @@ export function useThreadStream({
     humanMessageCount,
   );
 
+  // Overlay the summarization rescue buffer only onto the history of the thread
+  // it was captured from. visibleHistory is gated on `threadId`, so comparing the
+  // same prop keeps the buffer from flashing into another thread or the new-chat
+  // screen, and reading it here (instead of clearing a ref during render) is
+  // concurrent-mode safe (#3825).
+  const rescueBuffer = pendingArchivedMessagesRef.current;
+  const effectiveHistory =
+    rescueBuffer.length > 0 && pendingArchiveThreadIdRef.current === threadId
+      ? resolvePreservedHistory(visibleHistory, rescueBuffer)
+      : visibleHistory;
   const mergedMessages = mergeMessages(
-    visibleHistory,
+    effectiveHistory,
     persistedMessages,
     visibleOptimisticMessages,
   );
@@ -1311,6 +1555,7 @@ export function useThreadStream({
   // History messages may overlap with thread.messages; thread.messages take precedence
   const mergedThread = {
     ...thread,
+    stop: stopThread,
     values: hasVisibleStreamState ? thread.values : EMPTY_THREAD_VALUES,
     messages: mergedMessages,
   } as typeof thread;
@@ -1547,16 +1792,80 @@ export const INFINITE_THREADS_QUERY_KEY_PREFIX = [
   "searchInfinite",
 ] as const;
 
+const INFINITE_THREADS_NEXT_PAGE_PARAM = Symbol(
+  "deerflow.infiniteThreads.nextPageParam",
+);
+
 type InfiniteThreadsParams = Omit<
   Parameters<ThreadsClient["search"]>[0],
   "limit" | "offset"
 >;
+
+type InfiniteThreadsSearchClient = {
+  threads: {
+    search: ThreadsClient["search"];
+  };
+};
+
+type InfiniteThreadsPageWithNextParam = AgentThread[] & {
+  [INFINITE_THREADS_NEXT_PAGE_PARAM]?: number;
+};
+
+function annotateInfiniteThreadsPage(
+  page: AgentThread[],
+  nextPageParam: number | undefined,
+): AgentThread[] {
+  if (nextPageParam !== undefined) {
+    Reflect.set(page, INFINITE_THREADS_NEXT_PAGE_PARAM, nextPageParam);
+  }
+  return page;
+}
+
+export async function fetchInfiniteThreadsPage(
+  apiClient: InfiniteThreadsSearchClient,
+  params: InfiniteThreadsParams,
+  pageParam: number,
+  pageSize: number = INFINITE_THREADS_PAGE_SIZE,
+): Promise<AgentThread[]> {
+  const threads: AgentThread[] = [];
+  let offset = pageParam;
+  let nextPageParam: number | undefined;
+
+  while (threads.length < pageSize) {
+    const currentLimit = pageSize - threads.length;
+    const response = (await apiClient.threads.search<AgentThreadState>({
+      ...params,
+      limit: currentLimit,
+      offset,
+    })) as AgentThread[];
+
+    threads.push(...filterThreadSearchResults(response, params));
+    offset += response.length;
+
+    if (response.length < currentLimit) {
+      nextPageParam = undefined;
+      break;
+    }
+
+    nextPageParam = offset;
+  }
+
+  return annotateInfiniteThreadsPage(threads, nextPageParam);
+}
 
 export function getInfiniteThreadsNextPageParam(
   lastPage: AgentThread[],
   allPages: AgentThread[][],
   pageSize: number = INFINITE_THREADS_PAGE_SIZE,
 ): number | undefined {
+  const annotatedNextPageParam = Reflect.get(
+    lastPage as InfiniteThreadsPageWithNextParam,
+    INFINITE_THREADS_NEXT_PAGE_PARAM,
+  );
+  if (typeof annotatedNextPageParam === "number") {
+    return annotatedNextPageParam;
+  }
+
   if (lastPage.length < pageSize) {
     return undefined;
   }
@@ -1606,14 +1915,13 @@ export function useInfiniteThreads(
   >({
     queryKey: [...INFINITE_THREADS_QUERY_KEY_PREFIX, params],
     initialPageParam: 0,
-    queryFn: async ({ pageParam }) => {
-      const response = (await apiClient.threads.search<AgentThreadState>({
-        ...params,
-        limit: INFINITE_THREADS_PAGE_SIZE,
-        offset: pageParam,
-      })) as AgentThread[];
-      return response;
-    },
+    queryFn: async ({ pageParam }) =>
+      fetchInfiniteThreadsPage(
+        apiClient,
+        params,
+        pageParam,
+        INFINITE_THREADS_PAGE_SIZE,
+      ),
     getNextPageParam: (lastPage, allPages) =>
       getInfiniteThreadsNextPageParam(lastPage, allPages),
     refetchOnWindowFocus: false,
@@ -1687,6 +1995,35 @@ export function useThreadTokenUsage(
   });
 }
 
+export function useBranchThread() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async ({
+      threadId,
+      messageId,
+      messageIds,
+      title,
+    }: {
+      threadId: string;
+      messageId: string;
+      messageIds?: string[];
+      title?: string;
+    }) => branchThreadFromTurn(threadId, { messageId, messageIds, title }),
+    onSuccess(response, { threadId }) {
+      void queryClient.invalidateQueries({
+        queryKey: ["thread", "metadata", response.thread_id],
+      });
+      void queryClient.invalidateQueries({
+        queryKey: ["thread", "metadata", threadId],
+      });
+      void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
+      void queryClient.invalidateQueries({
+        queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
+      });
+    },
+  });
+}
+
 export function useRunDetail(threadId: string, runId: string) {
   const apiClient = getAPIClient();
   return useQuery<Run>({
@@ -1699,9 +2036,123 @@ export function useRunDetail(threadId: string, runId: string) {
   });
 }
 
+async function deleteLocalThreadData(threadId: string) {
+  const response = await fetch(
+    `${getBackendBaseURL()}/api/threads/${encodeURIComponent(threadId)}`,
+    {
+      method: "DELETE",
+    },
+  );
+
+  // A 404 means the thread is already gone — the desired end state. The prior
+  // `apiClient.threads.delete` call hits the same gateway handler (nginx
+  // rewrites /api/langgraph/threads/* to /api/threads/*) and removes the
+  // thread_meta row, so this second delete's ownership guard 404s. Treat it as
+  // success to keep the delete idempotent.
+  if (!response.ok && response.status !== 404) {
+    const error = await response
+      .json()
+      .catch(() => ({ detail: "Failed to delete local thread data." }));
+    throw new Error(error.detail ?? "Failed to delete local thread data.");
+  }
+}
+
+async function deleteThreadEverywhere(
+  apiClient: ThreadDeleteClient,
+  threadId: string,
+) {
+  await apiClient.threads.delete(threadId);
+  await deleteLocalThreadData(threadId);
+}
+
+export async function findSidecarThreadIdsForParent(
+  apiClient: ThreadSidecarSearchClient,
+  parentThreadId: string,
+) {
+  const threadIds: string[] = [];
+  const limit = 100;
+  let offset = 0;
+
+  while (true) {
+    const response = await apiClient.threads.search({
+      metadata: {
+        [SIDECAR_METADATA_KEY]: true,
+        parent_thread_id: parentThreadId,
+      },
+      limit,
+      offset,
+      sortBy: "updated_at",
+      sortOrder: "desc",
+      select: ["thread_id", "metadata"],
+    });
+
+    for (const thread of response) {
+      if (
+        isSidecarThread(thread) &&
+        thread.metadata?.parent_thread_id === parentThreadId
+      ) {
+        threadIds.push(thread.thread_id);
+      }
+    }
+
+    if (response.length < limit) {
+      break;
+    }
+    offset += response.length;
+  }
+
+  return threadIds;
+}
+
+async function deleteSidecarThreadsForParent(
+  apiClient: ThreadDeleteClient,
+  parentThreadId: string,
+) {
+  let sidecarThreadIds: string[];
+  try {
+    sidecarThreadIds = await findSidecarThreadIdsForParent(
+      apiClient,
+      parentThreadId,
+    );
+  } catch (err) {
+    console.warn(
+      `Failed to look up sidecar threads for parent ${parentThreadId}; skipping cascade cleanup. Orphaned sidecar threads may remain.`,
+      err,
+    );
+    return [];
+  }
+
+  const results = await Promise.allSettled(
+    sidecarThreadIds.map((threadId) =>
+      deleteThreadEverywhere(apiClient, threadId),
+    ),
+  );
+
+  const failedDeletions = results
+    .map((result, index) =>
+      result.status === "rejected"
+        ? { threadId: sidecarThreadIds[index], reason: result.reason }
+        : null,
+    )
+    .filter((entry): entry is { threadId: string; reason: unknown } =>
+      Boolean(entry),
+    );
+
+  if (failedDeletions.length > 0) {
+    console.warn(
+      `Failed to delete ${failedDeletions.length} sidecar thread(s) for parent ${parentThreadId}; orphaned sidecar threads may remain.`,
+      failedDeletions,
+    );
+  }
+
+  return sidecarThreadIds.filter((_, index) => {
+    return results[index]?.status === "fulfilled";
+  });
+}
+
 export function useDeleteThread() {
   const queryClient = useQueryClient();
-  const apiClient = getAPIClient();
+  const apiClient = getAPIClient() as ThreadDeleteClient;
   return useMutation({
     mutationFn: async ({
       threadId,
@@ -1710,24 +2161,17 @@ export function useDeleteThread() {
       threadId: string;
       onRemoteDeleted?: () => void;
     }) => {
+      const deletedSidecarThreadIds = await deleteSidecarThreadsForParent(
+        apiClient,
+        threadId,
+      );
       await apiClient.threads.delete(threadId);
       onRemoteDeleted?.();
-
-      const response = await fetch(
-        `${getBackendBaseURL()}/api/threads/${encodeURIComponent(threadId)}`,
-        {
-          method: "DELETE",
-        },
-      );
-
-      if (!response.ok) {
-        const error = await response
-          .json()
-          .catch(() => ({ detail: "Failed to delete local thread data." }));
-        throw new Error(error.detail ?? "Failed to delete local thread data.");
-      }
+      await deleteLocalThreadData(threadId);
+      return deletedSidecarThreadIds;
     },
-    onSuccess(_, { threadId }) {
+    onSuccess(deletedSidecarThreadIds, { threadId }) {
+      const deletedThreadIds = new Set([threadId, ...deletedSidecarThreadIds]);
       queryClient.setQueriesData(
         {
           queryKey: ["threads", "search"],
@@ -1737,7 +2181,7 @@ export function useDeleteThread() {
           if (oldData == null) {
             return oldData;
           }
-          return oldData.filter((t) => t.thread_id !== threadId);
+          return oldData.filter((t) => !deletedThreadIds.has(t.thread_id));
         },
       );
       queryClient.setQueriesData(
@@ -1746,7 +2190,10 @@ export function useDeleteThread() {
           exact: false,
         },
         (oldData: InfiniteData<AgentThread[]> | undefined) =>
-          filterInfiniteThreadsCache(oldData, (t) => t.thread_id !== threadId),
+          filterInfiniteThreadsCache(
+            oldData,
+            (t) => !deletedThreadIds.has(t.thread_id),
+          ),
       );
     },
 

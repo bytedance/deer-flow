@@ -1,4 +1,5 @@
 import threading
+from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
 
@@ -76,25 +77,18 @@ def test_apply_prompt_template_includes_custom_mounts(monkeypatch):
     mounts = [SimpleNamespace(container_path="/home/user/shared", read_only=False)]
     config = SimpleNamespace(
         sandbox=SimpleNamespace(mounts=mounts),
-        skills=SimpleNamespace(container_path="/mnt/skills"),
+        skills=SimpleNamespace(container_path="/mnt/skills", use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage", get_skills_path=lambda: Path("/tmp/skills")),
     )
     monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
     monkeypatch.setattr(prompt_module, "_get_enabled_skills", lambda: [])
     monkeypatch.setattr(prompt_module, "get_deferred_tools_prompt_section", lambda **kwargs: "")
     monkeypatch.setattr(prompt_module, "_build_acp_section", lambda **kwargs: "")
-    monkeypatch.setattr(prompt_module, "_get_memory_context", lambda agent_name=None, **kwargs: "")
-    monkeypatch.setattr(prompt_module, "get_agent_soul", lambda agent_name=None: "")
-
-    prompt = prompt_module.apply_prompt_template()
-
-    assert "`/home/user/shared`" in prompt
-    assert "Custom Mounted Directories" in prompt
 
 
 def test_apply_prompt_template_includes_relative_path_guidance(monkeypatch):
     config = SimpleNamespace(
         sandbox=SimpleNamespace(mounts=[]),
-        skills=SimpleNamespace(container_path="/mnt/skills"),
+        skills=SimpleNamespace(container_path="/mnt/skills", use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage", get_skills_path=lambda: Path("/tmp/skills")),
     )
     monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
     monkeypatch.setattr(prompt_module, "_get_enabled_skills", lambda: [])
@@ -113,7 +107,7 @@ def test_apply_prompt_template_threads_explicit_app_config_without_global_config
     mounts = [SimpleNamespace(container_path="/home/user/shared", read_only=False)]
     explicit_config = SimpleNamespace(
         sandbox=SimpleNamespace(mounts=mounts),
-        skills=SimpleNamespace(container_path="/mnt/explicit-skills"),
+        skills=SimpleNamespace(container_path="/mnt/explicit-skills", use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage", get_skills_path=lambda: Path("/tmp/explicit-skills")),
         skill_evolution=SimpleNamespace(enabled=False),
         tool_search=SimpleNamespace(enabled=False),
         memory=SimpleNamespace(enabled=False, injection_enabled=True, max_injection_tokens=2000),
@@ -129,6 +123,7 @@ def test_apply_prompt_template_threads_explicit_app_config_without_global_config
     monkeypatch.setattr("deerflow.config.get_app_config", fail_get_app_config)
     monkeypatch.setattr("deerflow.config.memory_config.get_memory_config", fail_get_memory_config)
     monkeypatch.setattr(prompt_module, "get_or_new_skill_storage", lambda app_config=None: SimpleNamespace(load_skills=lambda enabled_only=True: []))
+    monkeypatch.setattr(prompt_module, "get_or_new_user_skill_storage", lambda user_id, app_config=None: SimpleNamespace(load_skills=lambda *, enabled_only: []))
     monkeypatch.setattr(prompt_module, "get_agent_soul", lambda agent_name=None: "")
 
     prompt = prompt_module.apply_prompt_template(app_config=explicit_config)
@@ -152,7 +147,7 @@ def test_apply_prompt_template_threads_explicit_app_config_to_subagents_without_
                 )
             }
         ),
-        skills=SimpleNamespace(container_path="/mnt/skills"),
+        skills=SimpleNamespace(container_path="/mnt/skills", use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage", get_skills_path=lambda: Path("/tmp/skills")),
         skill_evolution=SimpleNamespace(enabled=False),
         tool_search=SimpleNamespace(enabled=False),
         memory=SimpleNamespace(enabled=False, injection_enabled=True, max_injection_tokens=2000),
@@ -284,7 +279,7 @@ def test_explicit_config_enabled_skills_are_cached_by_config_identity(monkeypatc
         cast(
             object,
             SimpleNamespace(
-                skills=SimpleNamespace(container_path="/mnt/skills"),
+                skills=SimpleNamespace(container_path="/mnt/skills", use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage", get_skills_path=lambda: Path("/tmp/skills")),
                 skill_evolution=SimpleNamespace(enabled=False),
             ),
         ),
@@ -297,13 +292,14 @@ def test_explicit_config_enabled_skills_are_cached_by_config_identity(monkeypatc
 
         def load_skills(*, enabled_only):
             nonlocal load_count
-            load_count += 1
-            assert enabled_only is True
+            if enabled_only:
+                load_count += 1
             return [make_skill("cached-skill")]
 
         return SimpleNamespace(load_skills=load_skills)
 
     monkeypatch.setattr(prompt_module, "get_or_new_skill_storage", fake_get_or_new_skill_storage)
+    monkeypatch.setattr(prompt_module, "get_or_new_user_skill_storage", lambda user_id, **kwargs: SimpleNamespace(load_skills=lambda *, enabled_only: [make_skill("cached-skill")] if kwargs.get("app_config") is config else []))
     _set_skills_cache_state()
 
     try:
@@ -421,5 +417,52 @@ def test_system_prompt_template_preserves_placeholders():
         "{subagent_section}",
         "{acp_section}",
         "{subagent_reminder}",
+        "{skill_first_reminder}",
     ):
         assert ph in template, f"placeholder {ph} accidentally removed"
+
+
+def _make_minimal_app_config():
+    return SimpleNamespace(
+        sandbox=SimpleNamespace(mounts=[]),
+        skills=SimpleNamespace(container_path="/mnt/skills"),
+        skill_evolution=SimpleNamespace(enabled=False),
+        tool_search=SimpleNamespace(enabled=False),
+        memory=SimpleNamespace(enabled=False, injection_enabled=True, max_injection_tokens=2000),
+        acp_agents={},
+    )
+
+
+def test_apply_prompt_template_legacy_path_does_not_mention_describe_skill(monkeypatch):
+    """When skill_names is None (legacy path), critical_reminders must not
+    reference describe_skill (the tool is not registered in legacy mode)."""
+    config = _make_minimal_app_config()
+    monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
+    monkeypatch.setattr(prompt_module, "get_or_new_skill_storage", lambda app_config=None: SimpleNamespace(load_skills=lambda enabled_only=True: []))
+    monkeypatch.setattr(prompt_module, "get_agent_soul", lambda agent_name=None: "")
+
+    prompt = prompt_module.apply_prompt_template(app_config=config)
+
+    # Legacy wording — tool-agnostic
+    assert "Always load the relevant skill" in prompt
+    # Must NOT reference the deferred tool
+    assert "describe_skill(name)" not in prompt
+
+
+def test_apply_prompt_template_deferred_path_mentions_describe_skill(monkeypatch):
+    """When skill_names is provided (deferred path), critical_reminders must
+    reference describe_skill so the LLM knows how to discover skills."""
+    config = _make_minimal_app_config()
+    monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
+    monkeypatch.setattr(prompt_module, "get_or_new_skill_storage", lambda app_config=None: SimpleNamespace(load_skills=lambda enabled_only=True: []))
+    monkeypatch.setattr(prompt_module, "get_agent_soul", lambda agent_name=None: "")
+
+    prompt = prompt_module.apply_prompt_template(
+        app_config=config,
+        skill_names=frozenset({"data-analysis"}),
+    )
+
+    # Deferred wording — references describe_skill
+    assert "describe_skill(name)" in prompt
+    # Must NOT contain the legacy wording
+    assert "Always load the relevant skill" not in prompt

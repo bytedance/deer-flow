@@ -11,10 +11,8 @@ import {
   useMemo,
   useState,
   useEffect,
-  type AnchorHTMLAttributes,
   type ImgHTMLAttributes,
 } from "react";
-import rehypeKatex from "rehype-katex";
 
 import { Loader } from "@/components/ai-elements/loader";
 import {
@@ -24,7 +22,6 @@ import {
 } from "@/components/ai-elements/message";
 import {
   Reasoning,
-  ReasoningContent,
   ReasoningTrigger,
 } from "@/components/ai-elements/reasoning";
 import { Task, TaskTrigger } from "@/components/ai-elements/task";
@@ -35,20 +32,28 @@ import {
   type FeedbackData,
 } from "@/core/api/feedback";
 import { resolveArtifactURL } from "@/core/artifacts/utils";
+import { extractCitationSources } from "@/core/citations/sources";
 import { useI18n } from "@/core/i18n/hooks";
 import {
   extractContentFromMessage,
   extractReasoningContentFromMessage,
+  getMessageCopyData,
   parseUploadedFiles,
   stripUploadedFilesTag,
   type FileInMessage,
 } from "@/core/messages/utils";
 import { useRehypeSplitWordsIntoSpans } from "@/core/rehype";
+import { readReferenceMessageContexts } from "@/core/sidecar";
+import { SafeReasoningContent } from "@/core/streamdown/components";
 import { cn } from "@/lib/utils";
 
+import { WorkspaceChangeBadge } from "../changes";
+import { CitationSourcesPanel } from "../citations/citation-sources-panel";
 import { CopyButton } from "../copy-button";
+import { ReferenceAttachmentSummary } from "../sidecar/reference-attachments";
 
 import { MarkdownContent } from "./markdown-content";
+import { createMarkdownLinkComponent } from "./markdown-link";
 
 function FeedbackButtons({
   threadId,
@@ -147,6 +152,7 @@ export function MessageListItem({
         message={message}
         isLoading={isLoading}
         threadId={threadId}
+        runId={runId}
         turnStartTime={turnStartTime}
       />
       {!isLoading && showCopyButton && (
@@ -159,13 +165,7 @@ export function MessageListItem({
           )}
         >
           <div className="pointer-events-auto flex gap-1">
-            <CopyButton
-              clipboardData={
-                extractContentFromMessage(message) ??
-                extractReasoningContentFromMessage(message) ??
-                ""
-              }
-            />
+            <CopyButton clipboardData={getMessageCopyData(message)} />
             {feedback !== undefined && runId && threadId && (
               <FeedbackButtons
                 threadId={threadId}
@@ -217,12 +217,14 @@ function MessageContent_({
   message,
   isLoading = false,
   threadId,
+  runId,
   turnStartTime,
 }: {
   className?: string;
   message: Message;
   isLoading?: boolean;
   threadId: string;
+  runId?: string;
   turnStartTime?: number | null;
 }) {
   const rehypePlugins = useRehypeSplitWordsIntoSpans(isLoading);
@@ -244,7 +246,7 @@ function MessageContent_({
       clientTurnDurations.set(`${threadId}:${message.id}`, rawTurnDuration);
       setCachedDuration(rawTurnDuration);
     }
-  }, [rawTurnDuration, message.id]);
+  }, [rawTurnDuration, message.id, threadId]);
 
   const handleDurationChange = useCallback(
     (d: number | undefined) => {
@@ -253,7 +255,7 @@ function MessageContent_({
         setCachedDuration(d);
       }
     },
-    [message.id],
+    [message.id, threadId],
   );
 
   useEffect(() => {
@@ -275,20 +277,7 @@ function MessageContent_({
       img: (props: ImgHTMLAttributes<HTMLImageElement>) => (
         <MessageImage {...props} threadId={threadId} maxWidth="90%" />
       ),
-      a: ({ href, ...props }: AnchorHTMLAttributes<HTMLAnchorElement>) => {
-        if (href?.startsWith("/mnt/")) {
-          const url = resolveArtifactURL(href, threadId);
-          return (
-            <a
-              {...props}
-              href={url}
-              target="_blank"
-              rel="noopener noreferrer"
-            />
-          );
-        }
-        return <a {...props} href={href} />;
-      },
+      a: createMarkdownLinkComponent(threadId),
     }),
     [threadId],
   );
@@ -307,6 +296,16 @@ function MessageContent_({
     }
     return files as FileInMessage[];
   }, [message.additional_kwargs?.files, rawContent]);
+  const referenceAttachments = useMemo(
+    () =>
+      readReferenceMessageContexts(message.additional_kwargs).map(
+        (context, index) => ({
+          id: index,
+          context,
+        }),
+      ),
+    [message.additional_kwargs],
+  );
 
   const contentToDisplay = useMemo(() => {
     if (isHuman) {
@@ -314,6 +313,10 @@ function MessageContent_({
     }
     return rawContent ?? "";
   }, [rawContent, isHuman]);
+  const citationSources = useMemo(
+    () => (isHuman ? [] : extractCitationSources(contentToDisplay)),
+    [contentToDisplay, isHuman],
+  );
 
   const filesList =
     files && files.length > 0 ? (
@@ -347,7 +350,7 @@ function MessageContent_({
           onTurnDurationChange={handleDurationChange}
         >
           <ReasoningTrigger />
-          <ReasoningContent>{reasoningContent}</ReasoningContent>
+          <SafeReasoningContent>{reasoningContent}</SafeReasoningContent>
         </Reasoning>
       </AIElementMessageContent>
     );
@@ -365,6 +368,13 @@ function MessageContent_({
           className,
         )}
       >
+        {referenceAttachments.length > 0 && (
+          <ReferenceAttachmentSummary
+            className="self-end shadow-none"
+            references={referenceAttachments}
+            testId="message-reference-attachment"
+          />
+        )}
         {filesList}
         {contentToDisplay && (
           <AIElementMessageContent className="w-full max-w-full">
@@ -390,17 +400,25 @@ function MessageContent_({
           >
             <ReasoningTrigger hasContent={!!reasoningContent} />
             {reasoningContent && (
-              <ReasoningContent>{reasoningContent}</ReasoningContent>
+              <SafeReasoningContent>{reasoningContent}</SafeReasoningContent>
             )}
           </Reasoning>
         )}
       <MarkdownContent
         content={contentToDisplay}
         isLoading={isLoading}
-        rehypePlugins={[...rehypePlugins, [rehypeKatex, { output: "html" }]]}
+        rehypePlugins={rehypePlugins}
         className="my-3"
         components={components}
       />
+      <CitationSourcesPanel sources={citationSources} />
+      {message.type === "ai" && (
+        <WorkspaceChangeBadge
+          threadId={threadId}
+          runId={runId}
+          disabled={isLoading}
+        />
+      )}
     </AIElementMessageContent>
   );
 }

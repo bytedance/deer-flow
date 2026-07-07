@@ -10,7 +10,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from deerflow.config.agents_api_config import get_agents_api_config
-from deerflow.config.agents_config import AgentConfig, list_custom_agents, load_agent_config, load_agent_soul
+from deerflow.config.agents_config import AgentConfig, list_custom_agents, load_agent_config, load_agent_soul, preserve_non_managed_fields
 from deerflow.config.paths import get_paths
 from deerflow.runtime.user_context import get_effective_user_id
 
@@ -334,6 +334,17 @@ async def update_agent(name: str, request: AgentUpdateRequest) -> AgentResponse:
                 new_skills = agent_cfg.skills
             if new_skills is not None:
                 updated["skills"] = new_skills
+
+            # Carry forward every top-level AgentConfig field this route does
+            # not manage (currently ``github:``, plus any future field added
+            # to :class:`AgentConfig`). The harness ``update_agent`` tool uses
+            # the same helper, so an operator editing the agent description
+            # from the Web UI does not silently strip a hand-authored
+            # ``github:`` binding — which would otherwise leave the next
+            # webhook delivery unable to find the agent in the registry and
+            # silently no-op.
+            for key, value in preserve_non_managed_fields(agent_cfg).items():
+                updated.setdefault(key, value)
 
             config_file = agent_dir / "config.yaml"
             with open(config_file, "w", encoding="utf-8") as f:

@@ -31,6 +31,14 @@ def _vllm_disable_chat_template_kwargs(chat_template_kwargs: dict) -> dict:
     return disable_kwargs
 
 
+# OpenAI-compatible model classes whose constructor takes ``base_url`` (not ``api_base``)
+# and to which the OpenAI-specific defaults below apply.
+_OPENAI_COMPAT_USE_PATHS = (
+    "langchain_openai:ChatOpenAI",
+    "deerflow.models.patched_openai:PatchedChatOpenAI",
+)
+
+
 def _enable_stream_usage_by_default(model_use_path: str, model_settings_from_config: dict) -> None:
     """Enable stream usage for OpenAI-compatible models unless explicitly configured.
 
@@ -39,12 +47,87 @@ def _enable_stream_usage_by_default(model_use_path: str, model_settings_from_con
     gateways, so token usage tracking would otherwise stay empty and the
     TokenUsageMiddleware would have nothing to log.
     """
-    if model_use_path != "langchain_openai:ChatOpenAI":
+    if model_use_path not in _OPENAI_COMPAT_USE_PATHS:
         return
     if "stream_usage" in model_settings_from_config:
         return
     if "base_url" in model_settings_from_config or "openai_api_base" in model_settings_from_config:
         model_settings_from_config["stream_usage"] = True
+
+
+def _normalize_openai_base_url(model_use_path: str, model_settings_from_config: dict) -> None:
+    """Map the common ``api_base`` alias to ``base_url`` for OpenAI-compatible clients.
+
+    ``langchain_openai:ChatOpenAI`` (and the ``PatchedChatOpenAI`` subclass) accept the OpenAI
+    endpoint override as ``base_url`` (with ``openai_api_base`` as a legacy alias). Several
+    providers in ``config.example.yaml`` use ``api_base`` for *other* model classes, so users
+    frequently copy ``api_base`` onto a ChatOpenAI model by mistake. Because ``ModelConfig`` is
+    ``extra="allow"``, the bad key is not caught at config-load time — it is forwarded to the
+    constructor, which does not reject it but transfers it into ``model_kwargs``; that is then
+    spread into every ``Completions.create()`` call and rejected by the OpenAI SDK at *request*
+    time with an opaque ``unexpected keyword argument 'api_base'`` error (and the endpoint override
+    is silently dropped). Rename it here so the model works as the user intended.
+    """
+    if model_use_path not in _OPENAI_COMPAT_USE_PATHS:
+        return
+    if "api_base" not in model_settings_from_config:
+        return
+    if "base_url" in model_settings_from_config or "openai_api_base" in model_settings_from_config:
+        # Canonical key already present; drop the alias to avoid a duplicate-intent kwarg.
+        model_settings_from_config.pop("api_base", None)
+        logger.warning("Model config sets both an endpoint key (base_url/openai_api_base) and 'api_base'; using the former and ignoring 'api_base'.")
+        return
+    model_settings_from_config["base_url"] = model_settings_from_config.pop("api_base")
+    logger.debug("Normalized model config key 'api_base' -> 'base_url' for OpenAI-compatible client.")
+
+
+def _warn_unknown_model_settings(model_use_path: str, model_class, model_name: str, model_settings_from_config: dict) -> None:
+    """Warn about config keys the OpenAI client will silently divert into ``model_kwargs``.
+
+    ``ModelConfig`` is ``extra="allow"``, so a typo'd key (e.g. ``maxx_tokens``) is not caught at
+    config-load time. LangChain's OpenAI client does not reject an unknown constructor kwarg — it
+    emits a ``UserWarning`` and transfers the key into ``model_kwargs``, which is then spread into
+    every ``Completions.create()`` call and rejected by the OpenAI SDK at *request* time with an
+    opaque ``unexpected keyword argument`` error that is very hard to trace back to a config typo.
+
+    This turns that latent failure into an explicit, actionable log line at model-build time. It is
+    **scoped to the OpenAI-compatible family** (``_OPENAI_COMPAT_USE_PATHS``) — that is where the
+    ``model_kwargs`` divert-and-crash behavior occurs and where the known field/alias set is
+    accurate. Other providers (e.g. ``ChatAnthropic``) route extra kwargs differently and would
+    false-positive against this allow-list, so they are intentionally left alone. Best-effort and
+    non-fatal: it only fires when the class exposes a pydantic ``model_fields`` schema, treats both
+    field names and their aliases as valid, and allow-lists the standard passthrough kwargs the
+    factory injects and the OpenAI client accepts.
+    """
+    if model_use_path not in _OPENAI_COMPAT_USE_PATHS:
+        return
+    known = getattr(model_class, "model_fields", None)
+    if not known:
+        return
+    valid_names = set(known.keys())
+    for field in known.values():
+        alias = getattr(field, "alias", None)
+        if alias:
+            valid_names.add(alias)
+    # Standard kwargs the factory injects or the OpenAI client accepts beyond declared fields.
+    valid_names |= {
+        "model",
+        "model_kwargs",
+        "extra_body",
+        "default_headers",
+        "default_query",
+        "stream_usage",
+        "stream_chunk_timeout",
+        "reasoning_effort",
+    }
+    unknown = sorted(k for k in model_settings_from_config if k not in valid_names)
+    if unknown:
+        logger.warning(
+            "Model '%s' (%s): config key(s) %s are not recognized parameters of the model class and will be forwarded as-is; this may raise at request time. Check for typos (e.g. 'maxx_tokens' -> 'max_tokens').",
+            model_name,
+            getattr(model_class, "__name__", "?"),
+            unknown,
+        )
 
 
 # Default chunk-gap budget for OpenAI-compatible streaming responses.
@@ -71,7 +154,7 @@ def _apply_stream_chunk_timeout_default(model_use_path: str, model_settings_from
     * Non-OpenAI path: drop the key so it is never forwarded to an incompatible
       constructor (which would raise ``TypeError: unexpected keyword argument``).
     """
-    if model_use_path != "langchain_openai:ChatOpenAI":
+    if model_use_path not in _OPENAI_COMPAT_USE_PATHS:
         model_settings_from_config.pop("stream_chunk_timeout", None)
         return
     if "stream_chunk_timeout" in model_settings_from_config:
@@ -121,6 +204,10 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
             "when_thinking_disabled",
             "thinking",
             "supports_vision",
+            # Presentation-only metadata (consumed by the console's cost
+            # display) — must never reach the provider client, which would
+            # forward unknown kwargs into the completion request payload.
+            "pricing",
         },
     )
     # Compute effective when_thinking_enabled by merging in the `thinking` shortcut field.
@@ -159,6 +246,9 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
         kwargs.pop("reasoning_effort", None)
         model_settings_from_config.pop("reasoning_effort", None)
 
+    # Normalize the api_base -> base_url alias FIRST, so the downstream OpenAI-compatible
+    # heuristics (stream_usage / stream_chunk_timeout) see the canonical endpoint key.
+    _normalize_openai_base_url(model_config.use, model_settings_from_config)
     _enable_stream_usage_by_default(model_config.use, model_settings_from_config)
     _apply_stream_chunk_timeout_default(model_config.use, model_settings_from_config)
 
@@ -192,6 +282,8 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
     if "stream_usage" not in model_settings_from_config and "stream_usage" not in kwargs:
         if "stream_usage" in getattr(model_class, "model_fields", {}):
             model_settings_from_config["stream_usage"] = True
+
+    _warn_unknown_model_settings(model_config.use, model_class, name, model_settings_from_config)
 
     model_instance = model_class(**kwargs, **model_settings_from_config)
 

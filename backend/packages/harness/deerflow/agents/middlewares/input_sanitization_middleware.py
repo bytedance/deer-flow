@@ -31,6 +31,9 @@ from langchain.agents.middleware.types import (
 from langchain_core.messages import HumanMessage
 from langgraph.errors import GraphBubbleUp
 
+from deerflow.agents.human_input import read_human_input_response
+from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, message_content_to_text
+
 logger = logging.getLogger(__name__)
 
 _SUMMARY_MESSAGE_NAME = "summary"
@@ -88,14 +91,14 @@ def _escape_tag_match(match: re.Match) -> str:
 def _is_genuine_user_message(message: object) -> bool:
     """Return True for real user messages, excluding system-injected HumanMessages.
 
-    System-injected context is marked via ``hide_from_ui`` or ``name == "summary"``
-    — the same convention used by DynamicContextMiddleware and TodoMiddleware.
+    ``hide_from_ui`` is also used by hidden UI replies from HumanInputCard, so
+    only skip hidden HumanMessages that do not carry a valid user response.
     """
     if not isinstance(message, HumanMessage):
         return False
-    if message.additional_kwargs.get("hide_from_ui"):
-        return False
     if message.name == _SUMMARY_MESSAGE_NAME:
+        return False
+    if message.additional_kwargs.get("hide_from_ui") and read_human_input_response(message.additional_kwargs) is None:
         return False
     return True
 
@@ -233,11 +236,17 @@ class InputSanitizationMiddleware(AgentMiddleware[AgentState]):
             else:
                 new_content = processed
 
+            # Preserve the pre-sanitization user text so downstream consumers that
+            # must see the genuine input (slash skill activation, regenerate) can
+            # recover it after the BEGIN/END wrapping. setdefault keeps an existing
+            # value (e.g. set by UploadsMiddleware or an IM channel) authoritative.
+            preserved_kwargs = dict(msg.additional_kwargs or {})
+            preserved_kwargs.setdefault(ORIGINAL_USER_CONTENT_KEY, message_content_to_text(content))
             messages[i] = HumanMessage(
                 content=new_content,
                 id=msg.id,
                 name=msg.name,
-                additional_kwargs=msg.additional_kwargs,
+                additional_kwargs=preserved_kwargs,
             )
             logger.debug(
                 "InputSanitizationMiddleware: original=%r -> processed=%r",
