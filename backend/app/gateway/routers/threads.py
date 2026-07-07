@@ -24,12 +24,26 @@ from langgraph.checkpoint.base import empty_checkpoint, uuid6
 from pydantic import BaseModel, Field, field_validator
 
 from app.gateway.authz import require_permission
-from app.gateway.deps import get_checkpointer
+from app.gateway.deps import get_checkpointer, get_run_manager
 from app.gateway.internal_auth import get_trusted_internal_owner_user_id
 from app.gateway.utils import sanitize_log_param
 from deerflow.config.paths import Paths, get_paths
+from deerflow.config.summarization_config import ContextSize
 from deerflow.runtime import serialize_channel_values_for_api
-from deerflow.runtime.goal import DEFAULT_MAX_GOAL_CONTINUATIONS, build_goal_state, ensure_thread_checkpoint, goal_thread_lock, read_thread_goal, write_thread_goal
+from deerflow.runtime.context_compaction import (
+    ContextCompactionDisabled,
+    ContextCompactionFailed,
+    ThreadCompactionResult,
+    compact_thread_context,
+)
+from deerflow.runtime.goal import (
+    DEFAULT_MAX_GOAL_CONTINUATIONS,
+    build_goal_state,
+    ensure_thread_checkpoint,
+    goal_thread_lock,
+    read_thread_goal,
+    write_thread_goal,
+)
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.utils.file_io import run_file_io
 from deerflow.utils.time import coerce_iso, now_iso
@@ -317,6 +331,27 @@ class ThreadGoalResponse(BaseModel):
     """Response model for a thread goal."""
 
     goal: dict[str, Any] | None = Field(default=None, description="Current goal state, or null when no goal is active")
+
+
+class ThreadCompactRequest(BaseModel):
+    """Request body for manually compacting a thread's active context."""
+
+    force: bool = Field(default=True, description="Run compaction even if automatic summarization thresholds are not met")
+    keep: ContextSize | None = Field(default=None, description="Optional retention policy for this compaction only")
+    agent_name: str | None = Field(default=None, max_length=128, description="Optional custom agent name for memory attribution")
+
+
+class ThreadCompactResponse(BaseModel):
+    """Response model for manual thread-context compaction."""
+
+    thread_id: str
+    compacted: bool
+    reason: str | None = None
+    removed_message_count: int = 0
+    preserved_message_count: int = 0
+    summary_updated: bool = False
+    checkpoint_id: str | None = None
+    total_tokens: int = 0
 
 
 class HistoryEntry(BaseModel):
@@ -805,6 +840,52 @@ async def clear_thread_goal(thread_id: str, request: Request) -> ThreadGoalRespo
         logger.exception("Failed to clear goal for thread %s", sanitize_log_param(thread_id))
         raise HTTPException(status_code=500, detail="Failed to clear thread goal") from None
     return ThreadGoalResponse(goal=None)
+
+
+def _thread_compact_response(result: ThreadCompactionResult) -> ThreadCompactResponse:
+    return ThreadCompactResponse(
+        thread_id=result.thread_id,
+        compacted=result.compacted,
+        reason=result.reason,
+        removed_message_count=result.removed_message_count,
+        preserved_message_count=result.preserved_message_count,
+        summary_updated=result.summary_updated,
+        checkpoint_id=result.checkpoint_id,
+        total_tokens=result.total_tokens,
+    )
+
+
+@router.post("/{thread_id}/compact", response_model=ThreadCompactResponse)
+@require_permission("threads", "write", owner_check=True, require_existing=True)
+async def compact_thread(thread_id: str, body: ThreadCompactRequest, request: Request) -> ThreadCompactResponse:
+    """Manually summarize old thread context while preserving the visible history."""
+    run_manager = get_run_manager(request)
+    checkpointer = get_checkpointer(request)
+    keep = body.keep.to_tuple() if body.keep is not None else None
+    try:
+        async with goal_thread_lock(thread_id):
+            if await run_manager.has_inflight(thread_id):
+                raise HTTPException(status_code=409, detail="Thread has a run in flight. Compact after the run finishes.")
+            result = await compact_thread_context(
+                checkpointer,
+                thread_id,
+                keep=keep,
+                force=body.force,
+                user_id=get_effective_user_id(),
+                agent_name=body.agent_name,
+            )
+    except ContextCompactionDisabled:
+        raise HTTPException(status_code=409, detail="Context compaction is disabled.") from None
+    except ContextCompactionFailed:
+        raise HTTPException(status_code=500, detail="Failed to compact thread context.") from None
+    except LookupError:
+        raise HTTPException(status_code=404, detail=f"Thread {thread_id} not found") from None
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("Failed to compact thread %s", sanitize_log_param(thread_id))
+        raise HTTPException(status_code=500, detail="Failed to compact thread context.") from None
+    return _thread_compact_response(result)
 
 
 # ---------------------------------------------------------------------------
