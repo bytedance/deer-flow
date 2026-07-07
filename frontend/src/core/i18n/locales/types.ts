@@ -126,6 +126,7 @@ export interface Translations {
     followupConfirmReplace: string;
     suggestionPlaceholderRequired: string;
     goalCommandDescription: string;
+    compactCommandDescription: string;
     goalLabel: string;
     goalContinuing: string;
     goalContinuationTooltip: string;
@@ -134,6 +135,9 @@ export interface Translations {
     goalNone: string;
     goalActive: string;
     goalFailed: string;
+    compactSuccess: string;
+    compactSkipped: string;
+    compactFailed: string;
     suggestions: {
       suggestion: string;
       prompt: string;

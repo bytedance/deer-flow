@@ -385,6 +385,15 @@ async def _call_checkpointer_method(checkpointer: Any, async_name: str, sync_nam
     return await result if inspect.isawaitable(result) else result
 
 
+def _next_channel_version(checkpointer: Any, current_version: Any) -> Any:
+    get_next_version = getattr(checkpointer, "get_next_version", None)
+    if callable(get_next_version):
+        return get_next_version(current_version, None)
+    if isinstance(current_version, int):
+        return current_version + 1
+    return 1
+
+
 async def ensure_thread_checkpoint(checkpointer: Any, thread_id: str) -> None:
     """Create an empty root checkpoint for *thread_id* when none exists."""
     config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
@@ -464,13 +473,7 @@ async def write_thread_goal(
 
     channel_versions = dict(checkpoint.get("channel_versions", {}) or {})
     current_version = channel_versions.get("goal")
-    get_next_version = getattr(checkpointer, "get_next_version", None)
-    if callable(get_next_version):
-        next_version = get_next_version(current_version, None)
-    elif isinstance(current_version, int):
-        next_version = current_version + 1
-    else:
-        next_version = 1
+    next_version = _next_channel_version(checkpointer, current_version)
     channel_versions["goal"] = next_version
 
     checkpoint["channel_values"] = channel_values

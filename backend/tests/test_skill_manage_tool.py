@@ -5,6 +5,8 @@ from types import SimpleNamespace
 import anyio
 import pytest
 
+from deerflow.skills.security_static_scanner import StaticScannerError
+
 skill_manage_module = importlib.import_module("deerflow.tools.skill_manage_tool")
 
 
@@ -206,6 +208,89 @@ def test_skill_manage_rejects_support_path_traversal(monkeypatch, tmp_path):
             "malicious overwrite",
             "references/../SKILL.md",
         )
+
+
+def test_skill_manage_static_critical_blocks_create_before_llm(monkeypatch, tmp_path):
+    skills_root = tmp_path / "skills"
+    config = _make_config(skills_root)
+    monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
+    monkeypatch.setattr("deerflow.skills.security_scanner.get_app_config", lambda: config)
+    from deerflow.config.paths import Paths
+
+    monkeypatch.setattr("deerflow.config.paths.get_paths", lambda: Paths(base_dir=tmp_path))
+    monkeypatch.setattr("deerflow.config.paths._paths", None)
+    refresh_calls = []
+    llm_calls = []
+
+    async def _refresh(user_id: str):
+        refresh_calls.append(("refresh", user_id))
+
+    async def _scan(*args, **kwargs):
+        llm_calls.append({"args": args, "kwargs": kwargs})
+        return await _async_result("allow", "ok")
+
+    monkeypatch.setattr(skill_manage_module, "refresh_user_skills_system_prompt_cache_async", _refresh)
+    monkeypatch.setattr(skill_manage_module, "scan_skill_content", _scan)
+
+    runtime = _make_runtime(user_id="default")
+    content = _skill_content("blocked-skill") + "\n-----BEGIN RSA PRIVATE KEY-----\nabc\n-----END RSA PRIVATE KEY-----\n"
+
+    with pytest.raises(ValueError) as excinfo:
+        anyio.run(
+            skill_manage_module.skill_manage_tool.coroutine,
+            runtime,
+            "create",
+            "blocked-skill",
+            content,
+        )
+
+    assert "Static security scan blocked" in str(excinfo.value)
+    assert "secret-private-key" in str(excinfo.value)
+    assert llm_calls == []
+    assert refresh_calls == []
+    assert not (tmp_path / "users" / "default" / "skills" / "custom" / "blocked-skill" / "SKILL.md").exists()
+
+
+def test_skill_manage_static_scan_failure_blocks_create_before_llm(monkeypatch, tmp_path):
+    skills_root = tmp_path / "skills"
+    config = _make_config(skills_root)
+    monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
+    monkeypatch.setattr("deerflow.skills.security_scanner.get_app_config", lambda: config)
+    from deerflow.config.paths import Paths
+
+    monkeypatch.setattr("deerflow.config.paths.get_paths", lambda: Paths(base_dir=tmp_path))
+    monkeypatch.setattr("deerflow.config.paths._paths", None)
+    refresh_calls = []
+    llm_calls = []
+
+    async def _refresh(user_id: str):
+        refresh_calls.append(("refresh", user_id))
+
+    async def _scan(*args, **kwargs):
+        llm_calls.append({"args": args, "kwargs": kwargs})
+        return await _async_result("allow", "ok")
+
+    def _broken_static_scan(skill_dir, *, skill_name=None, app_config=None):
+        raise StaticScannerError("native scanner unavailable")
+
+    monkeypatch.setattr(skill_manage_module, "refresh_user_skills_system_prompt_cache_async", _refresh)
+    monkeypatch.setattr(skill_manage_module, "scan_skill_content", _scan)
+    monkeypatch.setattr(skill_manage_module, "enforce_static_scan", _broken_static_scan)
+
+    runtime = _make_runtime(user_id="default")
+
+    with pytest.raises(ValueError, match="Static security scan failed.*native scanner unavailable"):
+        anyio.run(
+            skill_manage_module.skill_manage_tool.coroutine,
+            runtime,
+            "create",
+            "scanner-failure-skill",
+            _skill_content("scanner-failure-skill"),
+        )
+
+    assert llm_calls == []
+    assert refresh_calls == []
+    assert not (tmp_path / "users" / "default" / "skills" / "custom" / "scanner-failure-skill" / "SKILL.md").exists()
 
 
 def test_skill_manage_per_user_isolation(monkeypatch, tmp_path):
