@@ -272,6 +272,10 @@ def build_subagent_runtime_middlewares(
 
         middlewares.append(DeferredToolFilterMiddleware(deferred_setup.deferred_names, deferred_setup.catalog_hash))
 
+    from deerflow.agents.middlewares.configured_extensions import load_configured_extension_middlewares
+
+    middlewares.extend(load_configured_extension_middlewares(app_config))
+
     # LoopDetectionMiddleware — subagents inherit none of the lead's runaway
     # guards today (see #3875): with no loop detection a degenerate subagent tool
     # loop runs unchecked until ``max_turns``, re-sending a growing context each

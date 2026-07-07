@@ -533,7 +533,27 @@ def test_build_middlewares_rejects_invalid_configured_extension_middleware(monke
     monkeypatch.setattr(lead_agent_module, "_create_summarization_middleware", lambda *, app_config=None: None)
     monkeypatch.setattr(lead_agent_module, "_create_todo_list_middleware", lambda is_plan_mode: None)
 
-    with pytest.raises(TypeError, match="must be an AgentMiddleware class"):
+    with pytest.raises(ValueError, match="not an instance of type"):
+        lead_agent_module.build_middlewares(
+            {"configurable": {"is_plan_mode": False, "subagent_enabled": False}},
+            model_name="safe-model",
+            app_config=app_config,
+        )
+
+
+def test_build_middlewares_rejects_missing_configured_extension_module(monkeypatch):
+    app_config = _make_app_config(
+        [_make_model("safe-model", supports_thinking=False)],
+        loop_detection=LoopDetectionConfig(enabled=False),
+    )
+    app_config.extensions = ExtensionsConfig(middlewares=["definitely_missing_pkg.middlewares_typo:GuardMiddleware"])
+
+    monkeypatch.setattr(lead_agent_module, "get_app_config", lambda: app_config)
+    monkeypatch.setattr(lead_agent_module, "build_lead_runtime_middlewares", lambda *, app_config, lazy_init=True: [])
+    monkeypatch.setattr(lead_agent_module, "_create_summarization_middleware", lambda *, app_config=None: None)
+    monkeypatch.setattr(lead_agent_module, "_create_todo_list_middleware", lambda is_plan_mode: None)
+
+    with pytest.raises(ImportError, match="Could not import module definitely_missing_pkg.middlewares_typo"):
         lead_agent_module.build_middlewares(
             {"configurable": {"is_plan_mode": False, "subagent_enabled": False}},
             model_name="safe-model",

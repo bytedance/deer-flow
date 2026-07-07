@@ -33,10 +33,10 @@ logging:
 # ============================================================================
 # Agent Extensions
 # ============================================================================
-# Optional lead-agent AgentMiddleware classes loaded into the runtime middleware
-# chain after built-in lead middlewares and any programmatic custom middlewares,
-# but before the safety/clarification tail. Missing optional extension packages
-# are skipped; invalid classes or broken modules fail loudly at agent creation.
+# Optional AgentMiddleware classes loaded into the lead and subagent runtime
+# middleware chains after built-in runtime middlewares, but before the
+# safety/clarification tail. Missing packages, invalid classes, and broken
+# modules fail loudly at agent creation with an actionable import error.
 extensions:
   middlewares: []
   # Example:

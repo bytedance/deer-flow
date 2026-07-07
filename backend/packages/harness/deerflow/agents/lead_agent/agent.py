@@ -21,8 +21,6 @@ middleware, and the async path inside ``TitleMiddleware``. Any new in-graph
 from __future__ import annotations
 
 import logging
-from importlib import import_module
-from typing import cast
 
 from langchain.agents import create_agent
 from langchain.agents.middleware import AgentMiddleware
@@ -31,6 +29,7 @@ from langchain_core.runnables import RunnableConfig
 from deerflow.agents.lead_agent.prompt import apply_prompt_template
 from deerflow.agents.memory.summarization_hook import memory_flush_hook
 from deerflow.agents.middlewares.clarification_middleware import ClarificationMiddleware
+from deerflow.agents.middlewares.configured_extensions import load_configured_extension_middlewares
 from deerflow.agents.middlewares.loop_detection_middleware import LoopDetectionMiddleware
 from deerflow.agents.middlewares.memory_middleware import MemoryMiddleware
 from deerflow.agents.middlewares.safety_finish_reason_middleware import SafetyFinishReasonMiddleware
@@ -258,63 +257,6 @@ Being proactive with task management demonstrates thoroughness and ensures all r
     return TodoMiddleware(system_prompt=system_prompt, tool_description=tool_description)
 
 
-def _is_missing_declared_extension_module(exc: ModuleNotFoundError, module_path: str) -> bool:
-    missing_name = getattr(exc, "name", None)
-    if not missing_name:
-        return False
-    return module_path == missing_name or module_path.startswith(f"{missing_name}.")
-
-
-def _load_configured_extension_middlewares(app_config: AppConfig) -> list[AgentMiddleware]:
-    """Instantiate config-declared lead-agent middlewares.
-
-    Missing extension packages are skipped so one config can be shared across
-    deployments where optional integration packages are not installed. Broken
-    extension modules, invalid attributes, and wrong types fail loudly.
-    """
-    configured_paths = list(app_config.extensions.middlewares or [])
-    middlewares: list[AgentMiddleware] = []
-    for middleware_path in configured_paths:
-        try:
-            module_path, attr_name = middleware_path.rsplit(":", 1)
-        except ValueError as exc:
-            raise ValueError(f"Configured extension middleware '{middleware_path}' must use 'module.path:ClassName' format") from exc
-
-        try:
-            module = import_module(module_path)
-        except ModuleNotFoundError as exc:
-            if _is_missing_declared_extension_module(exc, module_path):
-                logger.info(
-                    "Skipping configured extension middleware %s because its module is not installed",
-                    middleware_path,
-                )
-                continue
-            logger.exception("Failed to import configured extension middleware module %s", module_path)
-            raise
-        except ImportError:
-            logger.exception("Failed to import configured extension middleware module %s", module_path)
-            raise
-
-        try:
-            middleware_cls = getattr(module, attr_name)
-        except AttributeError as exc:
-            raise ImportError(f"Configured extension middleware module {module_path} does not define {attr_name}") from exc
-
-        if not isinstance(middleware_cls, type) or not issubclass(middleware_cls, AgentMiddleware):
-            raise TypeError(f"Configured extension middleware '{middleware_path}' must be an AgentMiddleware class")
-
-        try:
-            middleware = middleware_cls()
-        except Exception:
-            logger.exception("Failed to instantiate configured extension middleware %s", middleware_path)
-            raise
-
-        if not isinstance(middleware, AgentMiddleware):
-            raise TypeError(f"Configured extension middleware '{middleware_path}' must be an AgentMiddleware instance")
-        middlewares.append(cast(AgentMiddleware, middleware))
-    return middlewares
-
-
 # ThreadDataMiddleware must be before SandboxMiddleware to ensure thread_id is available
 # UploadsMiddleware should be after ThreadDataMiddleware to access thread_id
 # DanglingToolCallMiddleware patches missing ToolMessages before model sees the history
@@ -450,7 +392,7 @@ def build_middlewares(
     if custom_middlewares:
         middlewares.extend(custom_middlewares)
 
-    configured_middlewares = _load_configured_extension_middlewares(resolved_app_config)
+    configured_middlewares = load_configured_extension_middlewares(resolved_app_config)
     if configured_middlewares:
         middlewares.extend(configured_middlewares)
 

@@ -94,6 +94,10 @@ class ExtensionsConfig(BaseModel):
     )
     model_config = ConfigDict(extra="allow", populate_by_name=True)
 
+    def to_file_dict(self) -> dict[str, Any]:
+        """Serialize in the public extensions_config.json shape."""
+        return self.model_dump(by_alias=True)
+
     @classmethod
     def resolve_config_path(cls, config_path: str | None = None) -> Path | None:
         """Resolve the extensions config file path.
