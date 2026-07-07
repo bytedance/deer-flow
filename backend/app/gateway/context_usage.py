@@ -186,14 +186,22 @@ async def _resolve_thread_runtime(run_store: Any, thread_id: str, app_config: An
     return (models[0].name if models else None), runtime
 
 
-async def _load_checkpoint_messages(checkpointer: Any, thread_id: str) -> list[Any]:
-    """Load the messages currently persisted in the thread checkpoint."""
+async def _load_checkpoint_messages(checkpointer: Any, thread_id: str) -> tuple[list[Any], dict[str, Any] | None]:
+    """Load messages and the raw promoted-tool entry from the thread checkpoint.
+
+    Returns ``(messages, promoted)``. ``promoted`` is the raw
+    ``{"catalog_hash", "names"}`` dict persisted by ``tool_search`` (or ``None``);
+    it is scoped by catalog hash later in :func:`_split_tools` so a stale
+    promotion from MCP-config drift cannot inflate the active count.
+    """
     checkpoint_tuple = await checkpointer.aget_tuple({"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}})
     if checkpoint_tuple is None:
-        return []
+        return [], None
     checkpoint = getattr(checkpoint_tuple, "checkpoint", {}) or {}
     channel_values = checkpoint.get("channel_values", {}) if isinstance(checkpoint, dict) else {}
-    return list(channel_values.get("messages") or [])
+    messages = list(channel_values.get("messages") or [])
+    promoted = channel_values.get("promoted")
+    return messages, promoted if isinstance(promoted, dict) else None
 
 
 def _is_injected_memory_message(message: Any) -> bool:
@@ -348,6 +356,37 @@ def _count_system_prompt(
         return 0
 
 
+def _effective_promoted_names(promoted: dict[str, Any] | None, mcp_tools: list[Any]) -> frozenset[str]:
+    """Resolve promoted tool names, scoped by the current MCP catalog hash.
+
+    Mirrors :class:`DeferredToolFilterMiddleware._promoted`: a persisted
+    promotion only applies when its ``catalog_hash`` matches the catalog built
+    from the current (policy-filtered) MCP tools. On catalog drift the
+    middleware binds nothing, so we must likewise treat the promotion as empty —
+    otherwise a stale name that still happens to be a current MCP tool would be
+    over-counted as active.
+    """
+    if not promoted:
+        return frozenset()
+    names = promoted.get("names")
+    if not isinstance(names, list) or not names:
+        return frozenset()
+    persisted_hash = promoted.get("catalog_hash")
+    if not isinstance(persisted_hash, str) or not persisted_hash:
+        return frozenset()
+    try:
+        from deerflow.tools.builtins.tool_search import DeferredToolCatalog
+
+        current_hash = DeferredToolCatalog(tuple(mcp_tools)).hash if mcp_tools else None
+    except Exception:
+        # Cannot recompute the current hash -> be conservative: treat nothing as
+        # promoted so we never over-count active tools on uncertain state.
+        return frozenset()
+    if current_hash != persisted_hash:
+        return frozenset()
+    return frozenset(n for n in names if isinstance(n, str) and n)
+
+
 def _split_tools(
     app_config: Any,
     model_name: str | None,
@@ -356,17 +395,22 @@ def _split_tools(
     available_skills: set[str] | None = None,
     user_id: str | None = None,
     subagent_enabled: bool | None = None,
+    promoted: dict[str, Any] | None = None,
 ) -> tuple[int, int, int, int]:
     """Return (system_tools_active, mcp_tools_active, system_tools_deferred, mcp_tools_deferred).
 
-    A tool is "deferred" exactly when ``tool_search.enabled`` is on AND it is
-    MCP-sourced — mirroring
+    A tool is "deferred" exactly when ``tool_search.enabled`` is on, it is
+    MCP-sourced, AND it has not been promoted in this thread — mirroring
     :func:`deerflow.tools.builtins.tool_search.build_deferred_tool_setup`, which
-    defers ``[t for t in filtered_tools if is_mcp_tool(t)]`` when enabled. The
-    MCP-source tag is written by :func:`deerflow.tools.get_available_tools` via
+    defers ``[t for t in filtered_tools if is_mcp_tool(t)]`` when enabled, and
+    :class:`DeferredToolFilterMiddleware`, which binds the full schema of any
+    tool the thread has promoted via ``tool_search`` (catalog-hash scoped).
+    Promoted MCP tools are therefore counted under ``mcp_tools`` (active) rather
+    than the reserved ``mcp_tools_deferred`` row, so the thread's ``used_tokens``
+    reflects what is actually bound. The MCP-source tag is written by
+    :func:`deerflow.tools.get_available_tools` via
     :func:`deerflow.tools.mcp_metadata.tag_mcp_tool`, so ``is_mcp_tool(tool)``
-    classifies the returned list directly — no separate registry lookup or MCP
-    name-snapshot is needed.
+    classifies the returned list directly — no registry lookup is needed.
     """
     try:
         from deerflow.tools.mcp_metadata import is_mcp_tool
@@ -398,9 +442,15 @@ def _split_tools(
         except Exception:
             logger.warning("Failed to apply skill tool policy to context usage", exc_info=True)
 
-        # deferred ⟺ (tool_search enabled AND MCP-sourced), per build_deferred_tool_setup.
+        # deferred ⟺ (tool_search enabled AND MCP-sourced AND not promoted in this thread).
         ts_cfg = getattr(app_config, "tool_search", None)
         tool_search_enabled = bool(getattr(ts_cfg, "enabled", False))
+
+        # Resolve promoted names with catalog-hash scoping (matches the runtime
+        # middleware). Precompute the MCP subset once: it feeds both the hash
+        # check and the per-tool classification.
+        mcp_tools = [tool for tool in all_tools if is_mcp_tool(tool)]
+        promoted_names = _effective_promoted_names(promoted, mcp_tools) if tool_search_enabled else frozenset()
 
         system_active = 0
         mcp_active = 0
@@ -408,8 +458,12 @@ def _split_tools(
         mcp_deferred = 0
         for tool in all_tools:
             tokens = _approx_tool_schema_tokens(tool, app_config)
+            name = getattr(tool, "name", None) or ""
             is_mcp = is_mcp_tool(tool)
-            is_deferred = tool_search_enabled and is_mcp
+            # A promoted tool has its full schema bound (active); only still-deferred
+            # MCP tools feed the reserved *_deferred rows. Stale promoted names from
+            # catalog drift simply match no tool here, so they cannot misclassify.
+            is_deferred = tool_search_enabled and is_mcp and name not in promoted_names
             if is_deferred:
                 if is_mcp:
                     mcp_deferred += tokens
@@ -431,6 +485,7 @@ def _compute_context_counts(
     model_name: str | None,
     runtime: dict[str, Any],
     agent_name: str | None,
+    promoted: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Render and count all synchronous context components in a worker thread."""
     from deerflow.config.agents_config import load_agent_config
@@ -477,6 +532,7 @@ def _compute_context_counts(
         available_skills=available_skills,
         user_id=user_id,
         subagent_enabled=subagent_enabled,
+        promoted=promoted,
     )
     model_cfg = app_config.get_model_config(model_name) if model_name else None
     max_context_tokens = int(model_cfg.context_window) if model_cfg is not None and getattr(model_cfg, "context_window", None) else None
@@ -593,7 +649,7 @@ async def build_context_usage(request: Request, thread_id: str, run_store: Any) 
         app_config = None
 
     try:
-        messages = await _load_checkpoint_messages(checkpointer, thread_id)
+        messages, promoted = await _load_checkpoint_messages(checkpointer, thread_id)
     except Exception:
         logger.warning("Failed to load checkpoint for thread %s", thread_id, exc_info=True)
         return None
@@ -628,6 +684,7 @@ async def build_context_usage(request: Request, thread_id: str, run_store: Any) 
                 model_name,
                 runtime,
                 agent_name,
+                promoted,
             ),
             timeout=_CONTEXT_COUNT_TIMEOUT_SECONDS,
         )

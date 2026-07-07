@@ -391,6 +391,117 @@ def test_split_tools_classifies_mcp_active_when_disabled(monkeypatch):
     assert mcp_deferred == 0
 
 
+def test_split_tools_counts_promoted_mcp_as_active(monkeypatch):
+    """A thread-promoted MCP tool has its schema bound -> counts as active, not deferred.
+
+    Hash scoping is exercised separately (``_effective_promoted_names``); here we
+    stub it so the classification logic is tested in isolation from the catalog
+    hashing that needs real ``BaseTool`` objects.
+    """
+    monkeypatch.setattr(
+        "deerflow.tools.tools.get_available_tools",
+        lambda **_: [_make_tool("mcp_a", mcp=True), _make_tool("mcp_b", mcp=True)],
+    )
+    monkeypatch.setattr(context_usage, "_effective_promoted_names", lambda _promoted, _mcp: frozenset({"mcp_a"}))
+    config = SimpleNamespace(
+        subagents=SimpleNamespace(enabled=False),
+        tool_search=SimpleNamespace(enabled=True),
+    )
+    # mcp_a was promoted in this thread; mcp_b is still deferred.
+    system_active, mcp_active, system_deferred, mcp_deferred = context_usage._split_tools(config, None, promoted={"catalog_hash": "x", "names": ["mcp_a"]})
+    assert mcp_active > 0  # mcp_a now active
+    assert mcp_deferred > 0  # mcp_b still deferred
+    assert system_active == 0
+    assert system_deferred == 0
+
+
+def test_effective_promoted_names_scoped_by_catalog_hash(monkeypatch):
+    """Names apply only when the persisted hash matches the current catalog hash."""
+
+    class _FakeCatalog:
+        def __init__(self, tools):
+            pass
+
+        @property
+        def hash(self):
+            return "current_hash"
+
+    monkeypatch.setattr("deerflow.tools.builtins.tool_search.DeferredToolCatalog", _FakeCatalog)
+    promoted = {"catalog_hash": "current_hash", "names": ["mcp_a", "mcp_b", "mcp_a", ""]}
+    # deduped; empty/non-string entries dropped.
+    assert context_usage._effective_promoted_names(promoted, [object()]) == frozenset({"mcp_a", "mcp_b"})
+
+
+def test_effective_promoted_names_empty_on_catalog_drift(monkeypatch):
+    """Hash mismatch (MCP config changed) -> promotion invalidated, nothing active."""
+
+    class _FakeCatalog:
+        def __init__(self, tools):
+            pass
+
+        @property
+        def hash(self):
+            return "new_hash"
+
+    monkeypatch.setattr("deerflow.tools.builtins.tool_search.DeferredToolCatalog", _FakeCatalog)
+    promoted = {"catalog_hash": "stale_hash", "names": ["mcp_a"]}
+    assert context_usage._effective_promoted_names(promoted, [object()]) == frozenset()
+
+
+def test_effective_promoted_names_conservative_on_hash_failure(monkeypatch):
+    """If the current hash cannot be recomputed, treat nothing as promoted."""
+
+    def _boom(_tools):
+        raise RuntimeError("nope")
+
+    monkeypatch.setattr("deerflow.tools.builtins.tool_search.DeferredToolCatalog", _boom)
+    promoted = {"catalog_hash": "h", "names": ["mcp_a"]}
+    assert context_usage._effective_promoted_names(promoted, [object()]) == frozenset()
+
+
+def test_effective_promoted_names_handles_missing_or_malformed():
+    assert context_usage._effective_promoted_names(None, []) == frozenset()
+    assert context_usage._effective_promoted_names({}, []) == frozenset()
+    assert context_usage._effective_promoted_names({"names": ["x"]}, []) == frozenset()  # no hash
+    assert context_usage._effective_promoted_names({"catalog_hash": "h"}, []) == frozenset()  # no names
+    assert context_usage._effective_promoted_names({"catalog_hash": "h", "names": []}, []) == frozenset()
+
+
+@pytest.mark.asyncio
+async def test_load_checkpoint_messages_returns_raw_promoted_entry():
+    """The raw promoted dict (with catalog_hash) is returned for later hash scoping."""
+    from langchain_core.messages import HumanMessage
+
+    msg = HumanMessage(content="hi")
+    promoted = {"catalog_hash": "abc", "names": ["mcp_a", "mcp_b", "mcp_a"]}
+
+    class _Tuple:
+        checkpoint = {"channel_values": {"messages": [msg], "promoted": promoted}}
+
+    class _Chk:
+        async def aget_tuple(self, _config):
+            return _Tuple()
+
+    messages, result = await context_usage._load_checkpoint_messages(_Chk(), "t1")
+    assert messages == [msg]
+    assert result == promoted  # raw, untouched; dedup happens in _effective_promoted_names
+
+
+@pytest.mark.asyncio
+async def test_load_checkpoint_messages_returns_none_when_missing():
+    """No promoted channel (or non-dict) -> None."""
+
+    class _Tuple:
+        checkpoint = {"channel_values": {"messages": []}}
+
+    class _Chk:
+        async def aget_tuple(self, _config):
+            return _Tuple()
+
+    _messages, promoted = await context_usage._load_checkpoint_messages(_Chk(), "t1")
+    assert promoted is None
+
+
 def test_count_system_prompt_returns_nonzero(monkeypatch):
     """Regression: the broken kwarg raised TypeError, swallowed to 0.
 
@@ -603,6 +714,7 @@ def test_custom_agent_settings_flow_into_prompt_and_tools(monkeypatch):
         "available_skills": {"code-review"},
         "user_id": scoped_user_id,
         "subagent_enabled": True,
+        "promoted": None,
     }
 
 
@@ -613,7 +725,7 @@ async def test_context_rendering_is_offloaded_from_event_loop(monkeypatch):
     counts = _kwargs(max_context_tokens=10_000, messages_tokens=4)
     monkeypatch.setattr(context_usage, "get_checkpointer", lambda _request: checkpointer)
     monkeypatch.setattr(context_usage, "get_config", lambda: SimpleNamespace())
-    monkeypatch.setattr(context_usage, "_load_checkpoint_messages", AsyncMock(return_value=messages))
+    monkeypatch.setattr(context_usage, "_load_checkpoint_messages", AsyncMock(return_value=(messages, None)))
     monkeypatch.setattr(
         context_usage,
         "_resolve_thread_runtime",
@@ -633,5 +745,6 @@ async def test_context_rendering_is_offloaded_from_event_loop(monkeypatch):
         ANY,
         "model",
         {"subagent_enabled": False},
+        None,
         None,
     )
