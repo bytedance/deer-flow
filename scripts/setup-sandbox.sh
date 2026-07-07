@@ -10,6 +10,7 @@ echo ""
 
 # Try to extract image from config.yaml (handles both commented and uncommented sandbox sections)
 IMAGE=""
+CONFIGURED=1
 if [ -f "config.yaml" ]; then
     # Look for uncommented image: field under the sandbox section
     IMAGE=$(grep -A 20 "^sandbox:" config.yaml 2>/dev/null | grep "^  image:" | awk '{print $2}' | head -1 || true)
@@ -21,6 +22,7 @@ if [ -z "$IMAGE" ]; then
     # skills need (see #3921/#3922) — pulling it here would defeat the whole
     # point of this pre-pull helper. Keep this pinned to a version >= 1.9.3.
     IMAGE="enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:1.11.0"
+    CONFIGURED=0
     echo "Using default image: $IMAGE"
 else
     echo "Using configured image: $IMAGE"
@@ -46,4 +48,16 @@ else
     echo "✗ Neither Docker nor Apple Container is available"
     echo "  Please install Docker: https://docs.docker.com/get-docker/"
     exit 1
+fi
+
+if [ "$CONFIGURED" -eq 0 ]; then
+    echo ""
+    echo "⚠ NOTE: pulling this image does not make the sandbox use it."
+    echo "  config.yaml has no uncommented 'sandbox.image', so AioSandboxProvider"
+    echo "  falls back to its own built-in default at runtime, which is still"
+    echo "  pinned to ':latest' (frozen on an old pre-1.9.3 digest — see #3921)."
+    echo "  To actually run on $IMAGE, add it explicitly:"
+    echo ""
+    echo "    sandbox:"
+    echo "      image: $IMAGE"
 fi
