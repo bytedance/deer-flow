@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from parse_md import ComputedSpec, OrgContext, Report, ReportDoc, Section, Th
+from unit_conversion import convert_unit
 
 COMPUTE_FAILURE_STATUSES = {
     "compute_smoke_failed",
@@ -187,7 +188,31 @@ def _leaf_columns(headers: list[list[Th]]) -> list[Th]:
 def _cell_value(th: Th, row: dict) -> str:
     key = _value_key(th)
     if key:
-        return str(row.get("cells", {}).get(key, "—"))
+        raw = str(row.get("cells", {}).get(key, "—"))
+        if raw == "—":
+            return raw
+        # Apply unit conversion and formatting
+        data_unit = th.data_unit
+        if data_unit == "%":
+            try:
+                v = convert_unit(raw, "%")
+                return f"{v:.2f}%"
+            except Exception:
+                return raw
+        elif data_unit in ("万元", "亿元", "元"):
+            # Phase 1: raw data is already in the display unit, just format
+            try:
+                from decimal import Decimal, InvalidOperation
+                v = Decimal(raw.replace(",", "").strip())
+                if data_unit == "万元":
+                    return f"{v:,.2f}"
+                elif data_unit == "亿元":
+                    return f"{v:,.4f}"
+                else:
+                    return f"{v:,.2f}"
+            except Exception:
+                return raw
+        return raw
     label = (th.text or "").strip()
     if label in {"季度", "时期", "日期", "period"}:
         return str(row.get("data_dt", ""))

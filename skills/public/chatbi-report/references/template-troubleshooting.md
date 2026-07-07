@@ -39,16 +39,13 @@ Do not modify the uploaded source template during a run. If the user rejects com
 
 ## SQLBot modes
 
-The `Orchestrator` class in `scripts/pipeline.py` selects `MockSQLBotClient` when
-`--mock-fixture` is passed to `phase1`, and `RealSQLBotClient` otherwise.
-
-Default `phase1` invocation (mock fixture):
+Default Step 3 uses mock data:
 
 ```bash
-python /mnt/skills/public/chatbi-report/scripts/pipeline.py phase1 \
-  --md /mnt/user-data/uploads/<file>.md \
-  --out-dir /mnt/user-data/outputs \
-  --mock-fixture /mnt/skills/public/chatbi-report/example/mock_sqlbot/profit_yoy.json
+python /mnt/skills/public/chatbi-report/scripts/sqlbot_client.py query \
+  --parsed /mnt/user-data/outputs/<stem>.parsed.json \
+  --mock \
+  --out /mnt/user-data/outputs/<stem>.query.json
 ```
 
 Default fixture:
@@ -57,11 +54,13 @@ Default fixture:
 /mnt/skills/public/chatbi-report/example/mock_sqlbot/profit_yoy.json
 ```
 
+Use another fixture with `--mock-fixture`.
+
 For real SQLBot mode:
 
-1. Drop `--mock-fixture` from the `phase1` command.
+1. Remove `--mock` from Step 3.
 2. Set `SQLBOT_BASE_URL` in runtime env.
-3. Keep the same `phase1` command shape.
+3. Keep the same command shape without `--mock`.
 
 Endpoint:
 
@@ -73,21 +72,20 @@ Current client uses no API key or Authorization header.
 
 ## Failure handling
 
-- `pipeline.py phase1` / `pipeline.py phase2` non-zero exit → Python traceback on stderr; the agent displays the traceback and stops. No `assemble_status` write.
-- `phase1` returns `CheckpointSignal("1.5" | "3.5", ...)` → agent calls `ask_clarification` per the mapping table in `references/pipeline.md`. If user picks "停止", agent writes `status.json` with `error_class=USER_ABORTED` via `assemble_status.write_status`. If user picks "继续", agent re-invokes `phase1` with `--skip-lint-checkpoint` and/or `--skip-query-checkpoint`.
-- `phase2` returns `CheckpointSignal("8d.5", ...)` → same routing.
-- 8a / 8b / 8d internal failures (compute, evaluate, description) → cells become `⚠️COMPUTE_FAILED` / `⚠️DESCRIPTION_FAILED` sentinels; pipeline continues to `report.md` / `report.docx` / `status.json` with `error_class=None`.
+- Continue-capable steps `3`, `8a`, and `8d` must still tell the user what failed and why the pipeline continues.
+- Checkpoint stops write `status=error`, `error_class=USER_ABORTED`, and the checkpoint `exit_step`.
+- Blocking steps `1`, `2`, `4`, and `9` stop with the raw error summary and a concrete fix.
 
 ## Common symptoms
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| `phase1` returns `kind=checkpoint, step=3.5` with `ok < total` | SQLBot returned `success=false` for some idx_id OR `data` empty | Check `SQLBOT_BASE_URL`; verify mock fixture has matching `idx_id` keys; if real SQLBot, check periods match `time_info` |
-| `phase1` returns `kind=checkpoint, step=1.5` with `n_err > 0` | markdown template has lint errors (missing `data-idx`, malformed `> 计算:` block, etc.) | Run `python -m md_lint scripts/md_lint.py <file>.md` for the error list |
-| `phase2` finishes but `status.json` shows many `⚠️COMPUTE_FAILED` cells | Compute source code failed `validate_ast` / `validate_signature` / `run_smoke` / `run_example` | Re-read `prompts/compute_codegen.md`; regenerate compute source via LLM |
-| `phase2` returns `kind=checkpoint, step=8d.5` | Description file missing or unreadable | Verify the description file paths passed via `--descriptions-dir` exist; check `out_dir` permissions |
-| `phase2` produces empty `report.md` | wide.per_report has no rows | Check `query.json` — likely no idx_id succeeded; see first row |
-| Sandbox can't import pandas | Container missing deps | Restart with `make dev` |
+| Step 3 query fails or cells show `⚠️QUERY_FAILED` | SQLBot unreachable or no matching data | Check `SQLBOT_BASE_URL`; verify SQLBot response |
+| All idx show `⚠️QUERY_FAILED` | `data_dt` mismatch between tbody and SQLBot response | Verify `> 时期:` matches SQLBot periods |
+| Compute column is `⚠️COMPUTE_FAILED` | AST/signature/smoke/example validation failed | Read Step 8a stderr; fix `> 计算:` block and rerun if needed |
+| Description is `⚠️DESCRIPTION_FAILED` | description generation failed twice | Fix `> 描述:` prompt and rerun if needed |
+| DOCX shows English or wrong header | missing `data-idx` or malformed header cell | Run `md_lint.py` and fix template |
+| Sandbox cannot import pandas | runtime image/deps stale | restart with `make dev` |
 
 ## Do not do these during normal report runs
 
