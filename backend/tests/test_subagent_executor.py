@@ -325,6 +325,7 @@ class TestAgentConstruction:
             "model_name": "parent-model",
             "lazy_init": True,
             "deferred_setup": None,
+            "agent_name": "test-agent",
         }
         assert captured["agent"]["model"] is model
         assert captured["agent"]["middleware"] is middlewares
@@ -890,17 +891,16 @@ class TestAsyncExecutionPath:
         assert result.completed_at is not None
 
     @pytest.mark.anyio
-    async def test_aexecute_recursion_error_classified_as_max_turns_reached(self, classes, base_config, mock_agent, msg):
+    async def test_aexecute_recursion_error_with_partial_surfaces_completed_turn_capped(self, classes, base_config, mock_agent, msg):
         """#3875 Phase 2: ``GraphRecursionError`` (``recursion_limit`` ==
-        ``max_turns``) must surface as ``MAX_TURNS_REACHED`` with the partial
-        work recovered from the last streamed chunk — not as a generic FAILED
-        that hides the budget cap and discards the partial result.
-
-        Before this fix the exception fell through to the generic
-        ``except Exception`` and the subagent was reported as broken, so the
-        lead could not tell "out of budget" from "broken subagent" and the
-        work already streamed into ``final_state`` was lost.
-        """
+        ``max_turns``) with usable partial work surfaces as ``completed`` +
+        ``stop_reason=turn_capped`` — the partial work survives on ``result``
+        the way a clean success does, and the cap travels on the additive
+        ``stop_reason`` field, not a dedicated status enum (which would break v1
+        contract consumers). Before #3949 this fell through to the generic
+        ``except Exception`` and was misclassified as FAILED; #3949 then used a
+        ``MAX_TURNS_REACHED`` enum that diverged from the agreed additive-field
+        contract, which this change corrects."""
         from langgraph.errors import GraphRecursionError
 
         SubagentExecutor = classes["SubagentExecutor"]
@@ -924,21 +924,57 @@ class TestAsyncExecutionPath:
         with patch.object(executor, "_create_agent", return_value=mock_agent):
             result = await executor._aexecute("Task")
 
-        assert result.status == SubagentStatus.MAX_TURNS_REACHED
+        assert result.status == SubagentStatus.COMPLETED
         # The partial work from the last streamed chunk is preserved, not dropped.
         assert result.result == "Found 3 of 5 sources; still working"
-        # The cap is surfaced so the lead can tell "out of budget" from "broken".
-        assert result.error is not None
-        assert str(base_config.max_turns) in result.error
+        # The cap is surfaced on the additive stop_reason field.
+        assert result.stop_reason == "turn_capped"
+        # completed suppresses the error blob; the cap lives on stop_reason only.
+        assert result.error is None
         assert result.completed_at is not None
 
     @pytest.mark.anyio
-    async def test_aexecute_recursion_error_before_first_chunk_uses_sentinel(self, classes, base_config, mock_agent):
+    async def test_aexecute_recursion_error_prefers_guard_stop_reason_over_turn_capped(self, classes, base_config, mock_agent, msg):
+        """If a guard (token budget / loop) already hard-stopped this run and
+        set its stop reason, and ``GraphRecursionError`` then trips on the next
+        super-step before the forced final answer lands, the exception handler
+        surfaces the guard's reason (the binding constraint) instead of blindly
+        falling back to ``turn_capped``. Keeps the exception path consistent
+        with the normal-completion path (both consult
+        ``_consume_guard_stop_reason``) and pops the reason so it is not
+        orphaned in the guard's bounded dict."""
+        from langgraph.errors import GraphRecursionError
+
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentStatus = classes["SubagentStatus"]
+
+        partial_ai = msg.ai("Found 3 of 5 sources; still working", "msg-1")
+        partial_state = {"messages": [msg.human("Task"), partial_ai]}
+
+        async def mock_astream(*args, **kwargs):
+            yield partial_state
+            raise GraphRecursionError("Recursion limit reached after the token budget fired")
+
+        mock_agent.astream = mock_astream
+
+        executor = SubagentExecutor(config=base_config, tools=[], thread_id="test-thread")
+        # A guard fired earlier this run and stamped token_capped.
+        executor._stop_reason_middlewares = [SimpleNamespace(consume_stop_reason=lambda _run_id: "token_capped")]
+
+        with patch.object(executor, "_create_agent", return_value=mock_agent):
+            result = await executor._aexecute("Task")
+
+        assert result.status == SubagentStatus.COMPLETED
+        # Guard reason wins; not the turn_capped fallback.
+        assert result.stop_reason == "token_capped"
+        assert result.result == "Found 3 of 5 sources; still working"
+
+    @pytest.mark.anyio
+    async def test_aexecute_recursion_error_before_first_chunk_surfaces_failed_turn_capped(self, classes, base_config, mock_agent):
         """If ``GraphRecursionError`` fires before any chunk is yielded there is
-        no partial state to recover; the result must still be
-        ``MAX_TURNS_REACHED`` (with the ``No response generated`` sentinel)
-        rather than FAILED, so the budget-cap signal survives even when no
-        work was streamed."""
+        no usable partial work to recover; the result is ``failed`` +
+        ``stop_reason=turn_capped`` so the budget-cap signal survives even when
+        nothing was streamed."""
         from langgraph.errors import GraphRecursionError
 
         SubagentExecutor = classes["SubagentExecutor"]
@@ -959,9 +995,65 @@ class TestAsyncExecutionPath:
         with patch.object(executor, "_create_agent", return_value=mock_agent):
             result = await executor._aexecute("Task")
 
-        assert result.status == SubagentStatus.MAX_TURNS_REACHED
-        assert result.result == "No response generated"
+        assert result.status == SubagentStatus.FAILED
+        assert result.stop_reason == "turn_capped"
+        assert str(base_config.max_turns) in (result.error or "")
         assert result.completed_at is not None
+
+    @pytest.mark.anyio
+    async def test_aexecute_token_capped_surfaces_completed_token_capped(self, classes, base_config, mock_agent, msg):
+        """#3875 Phase 2: the token-budget hard-stop does not raise — it strips
+        tool_calls so the run completes with a final answer. When the captured
+        ``TokenBudgetMiddleware`` reports ``token_capped`` via
+        ``consume_stop_reason``, the completed result carries
+        ``stop_reason=token_capped`` so the lead can tell a budget-capped
+        completion from a clean one."""
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentStatus = classes["SubagentStatus"]
+
+        final_state = {"messages": [msg.human("Task"), msg.ai("partial final answer", "msg-1")]}
+        mock_agent.astream = lambda *args, **kwargs: async_iterator([final_state])
+
+        executor = SubagentExecutor(config=base_config, tools=[], thread_id="test-thread")
+        # Simulate the hard-stop having fired: the captured guard reports
+        # token_capped for this run. _create_agent is mocked below so the real
+        # capture path is bypassed and this list is what _aexecute reads.
+        executor._stop_reason_middlewares = [SimpleNamespace(consume_stop_reason=lambda _run_id: "token_capped")]
+
+        with patch.object(executor, "_create_agent", return_value=mock_agent):
+            result = await executor._aexecute("Task")
+
+        assert result.status == SubagentStatus.COMPLETED
+        assert result.result == "partial final answer"
+        assert result.stop_reason == "token_capped"
+
+    @pytest.mark.anyio
+    async def test_aexecute_loop_capped_surfaces_when_loop_guard_fires(self, classes, base_config, mock_agent, msg):
+        """#3875 Phase 2 (ggnnggez review): the executor collects EVERY guard
+        middleware with ``consume_stop_reason``, not just the first. When the
+        token-budget guard reports no cap but the loop-detection guard reports
+        ``loop_capped``, the completed result carries ``stop_reason=loop_capped``
+        — proving the contract's full cap vocabulary is reachable, not only the
+        token axis. A ``next(...)`` capture would stop at the first guard and
+        miss the loop cap entirely."""
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentStatus = classes["SubagentStatus"]
+
+        final_state = {"messages": [msg.human("Task"), msg.ai("partial final answer", "msg-1")]}
+        mock_agent.astream = lambda *args, **kwargs: async_iterator([final_state])
+
+        executor = SubagentExecutor(config=base_config, tools=[], thread_id="test-thread")
+        executor._stop_reason_middlewares = [
+            SimpleNamespace(consume_stop_reason=lambda _run_id: None),
+            SimpleNamespace(consume_stop_reason=lambda _run_id: "loop_capped"),
+        ]
+
+        with patch.object(executor, "_create_agent", return_value=mock_agent):
+            result = await executor._aexecute("Task")
+
+        assert result.status == SubagentStatus.COMPLETED
+        assert result.result == "partial final answer"
+        assert result.stop_reason == "loop_capped"
 
     @pytest.mark.anyio
     async def test_aexecute_no_final_state(self, classes, base_config, mock_agent):
@@ -1680,31 +1772,6 @@ class TestCleanupBackgroundTask:
             trace_id="test-trace",
             status=SubagentStatus.TIMED_OUT,
             error="timeout",
-            completed_at=datetime.now(),
-        )
-        executor_module._background_tasks[task_id] = result
-
-        executor_module.cleanup_background_task(task_id)
-
-        assert task_id not in executor_module._background_tasks
-
-    def test_cleanup_removes_terminal_max_turns_reached_task(self, executor_module, classes):
-        """Test that cleanup removes a MAX_TURNS_REACHED task (#3875 Phase 2).
-
-        ``is_terminal`` includes MAX_TURNS_REACHED so the task_tool polling
-        loop's cleanup path treats a budget-capped subagent as done and
-        removes it from the background registry, matching COMPLETED / FAILED /
-        TIMED_OUT."""
-        SubagentResult = classes["SubagentResult"]
-        SubagentStatus = classes["SubagentStatus"]
-
-        task_id = "test-max-turns-task"
-        result = SubagentResult(
-            task_id=task_id,
-            trace_id="test-trace",
-            status=SubagentStatus.MAX_TURNS_REACHED,
-            result="partial work recovered",
-            error="Reached max_turns=10",
             completed_at=datetime.now(),
         )
         executor_module._background_tasks[task_id] = result

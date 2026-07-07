@@ -14,13 +14,23 @@ Warning injection uses the deferred pattern:
   - after_model queues the warning (does NOT mutate state).
   - wrap_model_call injects it as a HumanMessage at the next model call.
 This preserves AIMessage(tool_calls) → ToolMessage pairing.
+
+Stop-reason surfacing (#3875 Phase 2):
+  The hard stop does NOT raise — it strips tool_calls so the agent loop
+  terminates naturally and produces a final answer. To let the caller (e.g.
+  the subagent executor) distinguish a budget-capped completion from a clean
+  one, the run that triggered the hard stop is recorded in ``_stop_reason``
+  and exposed via :meth:`consume_stop_reason`. That dict is intentionally NOT
+  cleared by ``after_agent``/``_clear_run_state`` so the executor can read it
+  after the run returns; the bounded dict prevents unbounded growth on
+  abandoned runs, and each subagent run builds a fresh middleware instance so
+  there is no cross-run contamination.
 """
 
 from __future__ import annotations
 
 import logging
 import threading
-from collections import OrderedDict
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, override
@@ -31,6 +41,7 @@ from langchain.agents.middleware.types import ModelCallResult, ModelRequest, Mod
 from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.runtime import Runtime
 
+from deerflow.agents.middlewares._bounded_dict import BoundedDict
 from deerflow.config.token_budget_config import TokenBudgetConfig
 
 logger = logging.getLogger(__name__)
@@ -48,20 +59,6 @@ class TokenUsage:
     total: int = 0
 
 
-class BoundedDict(OrderedDict):
-    """A bounded dictionary to prevent unbounded state growth on abandoned runs."""
-
-    def __init__(self, maxsize=1000, *args, **kwds):
-        self.maxsize = maxsize
-        super().__init__(*args, **kwds)
-
-    def __setitem__(self, key, value):
-        if key not in self:
-            if len(self) >= self.maxsize:
-                self.popitem(last=False)
-        super().__setitem__(key, value)
-
-
 class TokenBudgetMiddleware(AgentMiddleware[AgentState]):
     """Enforce per-run token budget limits."""
 
@@ -75,6 +72,10 @@ class TokenBudgetMiddleware(AgentMiddleware[AgentState]):
         self._pending_warnings: BoundedDict[str, list[str]] = BoundedDict(1000)
         self._seen_messages: BoundedDict[str, dict[str, tuple[int, int]]] = BoundedDict(1000)
         self._cumulative_usage: BoundedDict[str, TokenUsage] = BoundedDict(1000)
+        # Stop reason set when the hard-stop fires. NOT cleared by
+        # ``_clear_run_state``/``after_agent`` so the executor can consume it
+        # after the run returns; bounded so abandoned runs cannot leak.
+        self._stop_reason: BoundedDict[str, str] = BoundedDict(1000)
 
     @classmethod
     def from_config(cls, config: TokenBudgetConfig) -> TokenBudgetMiddleware:
@@ -86,6 +87,19 @@ class TokenBudgetMiddleware(AgentMiddleware[AgentState]):
             self._pending_warnings.clear()
             self._seen_messages.clear()
             self._cumulative_usage.clear()
+            self._stop_reason.clear()
+
+    def consume_stop_reason(self, run_id: str | None) -> str | None:
+        """Pop and return the stop reason the hard-stop set for this run.
+
+        Returns ``"token_capped"`` when the budget hard-stop fired during the
+        run, otherwise ``None``. The executor calls this after the run returns
+        to decide whether a completed subagent was actually budget-capped
+        (and should carry ``stop_reason=token_capped`` to the lead). Popping
+        keeps the dict from accumulating across runs on a reused instance.
+        """
+        with self._lock:
+            return self._stop_reason.pop(run_id, None)
 
     @staticmethod
     def _get_run_id(runtime: Runtime) -> str:
@@ -232,6 +246,11 @@ class TokenBudgetMiddleware(AgentMiddleware[AgentState]):
 
             if highest_fraction >= self._config.hard_stop_threshold:
                 logger.warning("Token budget hard stop triggered for run %s: %s limit exceeded", run_id, trigger_reason)
+                # Record the stop reason so the executor can surface
+                # ``stop_reason=token_capped`` to the lead after the run
+                # returns (the hard stop itself does not raise). See
+                # ``consume_stop_reason``.
+                self._stop_reason[run_id] = "token_capped"
                 stop_text = _BUDGET_EXCEEDED_MSG.format(reason=trigger_reason, used=trigger_used, budget=trigger_budget)
                 return self._build_hard_stop_update(last_msg, stop_text)
 
