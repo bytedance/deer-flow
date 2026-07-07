@@ -29,7 +29,7 @@ from langchain_core.runnables import RunnableConfig
 from deerflow.agents.lead_agent.prompt import apply_prompt_template
 from deerflow.agents.memory.summarization_hook import memory_flush_hook
 from deerflow.agents.middlewares.clarification_middleware import ClarificationMiddleware
-from deerflow.agents.middlewares.loop_detection_middleware import LoopDetectionMiddleware
+from deerflow.agents.middlewares.resource_guard_middleware import ResourceGuardMiddleware
 from deerflow.agents.middlewares.memory_middleware import MemoryMiddleware
 from deerflow.agents.middlewares.safety_finish_reason_middleware import SafetyFinishReasonMiddleware
 from deerflow.agents.middlewares.subagent_limit_middleware import SubagentLimitMiddleware
@@ -375,17 +375,18 @@ def build_middlewares(
         max_concurrent_subagents = cfg.get("max_concurrent_subagents", 3)
         middlewares.append(SubagentLimitMiddleware(max_concurrent=max_concurrent_subagents))
 
-    # LoopDetectionMiddleware — detect and break repetitive tool call loops
+    # ResourceGuardMiddleware — combined: loop detection + token budget enforcement
+    # Merges two formerly separate middlewares to share a single wrap_model_call
+    # hook and warning-drain lifecycle, reducing chain traversal overhead.
     loop_detection_config = resolved_app_config.loop_detection
-    if loop_detection_config.enabled:
-        middlewares.append(LoopDetectionMiddleware.from_config(loop_detection_config))
-
-    # TokenBudgetMiddleware - enforce per-run token limits
     token_budget_config = resolved_app_config.token_budget
-    if token_budget_config.enabled:
-        from deerflow.agents.middlewares.token_budget_middleware import TokenBudgetMiddleware
-
-        middlewares.append(TokenBudgetMiddleware.from_config(token_budget_config))
+    if loop_detection_config.enabled or token_budget_config.enabled:
+        middlewares.append(
+            ResourceGuardMiddleware(
+                loop_config=loop_detection_config,
+                budget_config=token_budget_config,
+            )
+        )
 
     # Inject custom middlewares before ClarificationMiddleware
     if custom_middlewares:
