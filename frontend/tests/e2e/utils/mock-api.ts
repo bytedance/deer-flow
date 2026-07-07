@@ -691,6 +691,22 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
 
   void page.route(/\/api\/threads\/[^/]+$/, (route) => {
     if (route.request().method() === "DELETE") {
+      const threadId = decodeURIComponent(
+        new URL(route.request().url()).pathname.split("/").at(-1) ?? "",
+      );
+      // Mirror the gateway's `require_existing=True` ownership guard: deleting
+      // an already-removed thread 404s. `useDeleteThread` first deletes via the
+      // LangGraph route (which drops the thread_meta row) and then hits this
+      // route, so this reproduces the real double-delete 404 the frontend must
+      // treat as idempotent success.
+      if (!threads.some((thread) => thread.thread_id === threadId)) {
+        return route.fulfill({
+          status: 404,
+          contentType: "application/json",
+          body: JSON.stringify({ detail: `Thread ${threadId} not found` }),
+        });
+      }
+      threads = threads.filter((thread) => thread.thread_id !== threadId);
       return route.fulfill({
         status: 204,
       });

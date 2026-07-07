@@ -122,6 +122,99 @@ class TestFormatClarificationMessage:
         assert "4. None" in result
 
 
+class TestHumanInputPayload:
+    """Tests for structured human input request payloads."""
+
+    def test_payload_with_native_options(self, middleware):
+        payload = middleware._build_human_input_payload(
+            {
+                "question": "Which environment should I deploy to?",
+                "clarification_type": "approach_choice",
+                "context": "Need the target environment for config.",
+                "options": ["development", "staging", "production"],
+            },
+            tool_call_id="call-abc",
+            request_id="clarification:call-abc",
+        )
+
+        assert payload == {
+            "version": 1,
+            "kind": "human_input_request",
+            "source": "ask_clarification",
+            "request_id": "clarification:call-abc",
+            "tool_call_id": "call-abc",
+            "clarification_type": "approach_choice",
+            "question": "Which environment should I deploy to?",
+            "context": "Need the target environment for config.",
+            "input_mode": "choice_with_other",
+            "options": [
+                {"id": "option-1", "label": "development", "value": "development"},
+                {"id": "option-2", "label": "staging", "value": "staging"},
+                {"id": "option-3", "label": "production", "value": "production"},
+            ],
+        }
+
+    def test_payload_with_json_string_options(self, middleware):
+        payload = middleware._build_human_input_payload(
+            {
+                "question": "Pick one",
+                "clarification_type": "approach_choice",
+                "options": json.dumps(["Option A", 2, True, None]),
+            },
+            tool_call_id="call-abc",
+            request_id="clarification:call-abc",
+        )
+
+        assert payload["input_mode"] == "choice_with_other"
+        assert payload["options"] == [
+            {"id": "option-1", "label": "Option A", "value": "Option A"},
+            {"id": "option-2", "label": "2", "value": "2"},
+            {"id": "option-3", "label": "True", "value": "True"},
+            {"id": "option-4", "label": "None", "value": "None"},
+        ]
+
+    def test_payload_with_plain_string_option(self, middleware):
+        payload = middleware._build_human_input_payload(
+            {
+                "question": "Pick one",
+                "clarification_type": "approach_choice",
+                "options": "just one option",
+            },
+            tool_call_id="call-abc",
+            request_id="clarification:call-abc",
+        )
+
+        assert payload["input_mode"] == "choice_with_other"
+        assert payload["options"] == [{"id": "option-1", "label": "just one option", "value": "just one option"}]
+
+    def test_payload_without_options_is_free_text(self, middleware):
+        payload = middleware._build_human_input_payload(
+            {
+                "question": "Tell me more",
+                "clarification_type": "missing_info",
+                "options": None,
+            },
+            tool_call_id="call-abc",
+            request_id="clarification:call-abc",
+        )
+
+        assert payload["input_mode"] == "free_text"
+        assert "options" not in payload
+
+    def test_payload_missing_options_is_free_text(self, middleware):
+        payload = middleware._build_human_input_payload(
+            {
+                "question": "Tell me more",
+                "clarification_type": "missing_info",
+            },
+            tool_call_id="call-abc",
+            request_id="clarification:call-abc",
+        )
+
+        assert payload["input_mode"] == "free_text"
+        assert "options" not in payload
+
+
 class TestClarificationCommandIdempotency:
     """Clarification tool-call retries should not duplicate messages in state."""
 
@@ -147,12 +240,41 @@ class TestClarificationCommandIdempotency:
         assert first_message.id == "clarification:call-clarify-1"
         assert second_message.id == first_message.id
         assert second_message.tool_call_id == first_message.tool_call_id
+        assert first_message.artifact["human_input"]["request_id"] == "clarification:call-clarify-1"
+        assert first_message.artifact["human_input"]["tool_call_id"] == "call-clarify-1"
+        assert first_message.artifact["human_input"]["clarification_type"] == "approach_choice"
+        assert first_message.artifact["human_input"]["input_mode"] == "choice_with_other"
 
         merged = add_messages(add_messages([], [first_message]), [second_message])
 
         assert len(merged) == 1
         assert merged[0].id == "clarification:call-clarify-1"
         assert merged[0].content == first_message.content
+        assert merged[0].artifact == first_message.artifact
+
+    def test_tool_message_model_dump_preserves_human_input_artifact(self, middleware):
+        request = SimpleNamespace(
+            tool_call={
+                "name": "ask_clarification",
+                "id": "call-clarify-1",
+                "args": {
+                    "question": "Which environment should I use?",
+                    "clarification_type": "approach_choice",
+                    "options": ["dev", "prod"],
+                },
+            }
+        )
+
+        result = middleware.wrap_tool_call(request, lambda _req: pytest.fail("handler should not be called"))
+        message = result.update["messages"][0]
+        dumped = message.model_dump()
+
+        assert dumped["artifact"]["human_input"]["request_id"] == "clarification:call-clarify-1"
+        assert dumped["artifact"]["human_input"]["options"] == [
+            {"id": "option-1", "label": "dev", "value": "dev"},
+            {"id": "option-2", "label": "prod", "value": "prod"},
+        ]
+        assert "Which environment should I use?" in dumped["content"]
 
 
 class TestClarificationDisabled:
@@ -178,6 +300,7 @@ class TestClarificationDisabled:
 
         assert isinstance(result, ToolMessage)
         assert result.tool_call_id == "call-clarify-1"
+        assert result.artifact is None
 
     def test_disabled_message_tells_agent_to_proceed(self, middleware):
         request = self._request(runtime_context={"disable_clarification": True})

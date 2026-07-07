@@ -1168,7 +1168,7 @@ export function InputBox({
       )}
       <PromptInput
         className={cn(
-          "bg-background/85 rounded-2xl backdrop-blur-sm transition-all duration-300 ease-out *:data-[slot='input-group']:rounded-2xl",
+          "bg-background/85 relative z-10 rounded-2xl backdrop-blur-sm transition-all duration-300 ease-out *:data-[slot='input-group']:rounded-2xl",
           className,
         )}
         disabled={disabled}
@@ -1570,10 +1570,10 @@ export function InputBox({
             />
           </PromptInputTools>
         </PromptInputFooter>
-        {!isWelcomeMode && (
-          <div className="bg-background absolute right-0 -bottom-[17px] left-0 z-0 h-4"></div>
-        )}
       </PromptInput>
+      {!isWelcomeMode && (
+        <div className="bg-background absolute right-0 -bottom-[17px] left-0 z-0 h-4"></div>
+      )}
 
       {isWelcomeMode &&
         searchParams.get("mode") !== "skill" &&

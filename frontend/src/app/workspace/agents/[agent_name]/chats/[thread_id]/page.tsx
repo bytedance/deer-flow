@@ -2,7 +2,7 @@
 
 import { BotIcon, PlusSquare } from "lucide-react";
 import { useParams, useRouter } from "next/navigation";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import type { PromptInputMessage } from "@/components/ai-elements/prompt-input";
 import { Button } from "@/components/ui/button";
@@ -32,6 +32,13 @@ import { Tooltip } from "@/components/workspace/tooltip";
 import { useActiveGoal } from "@/components/workspace/use-active-goal";
 import { useAgent } from "@/core/agents";
 import { useI18n } from "@/core/i18n/hooks";
+import {
+  buildHumanInputResponseText,
+  hasOpenHumanInputRequest,
+  type HumanInputRequest,
+  type HumanInputResponse,
+} from "@/core/messages/human-input";
+import { isHiddenFromUIMessage } from "@/core/messages/utils";
 import { useModels } from "@/core/models/hooks";
 import { useNotification } from "@/core/notification/hooks";
 import { useLocalSettings, useThreadSettings } from "@/core/settings";
@@ -84,6 +91,7 @@ export default function AgentChatPage() {
     thread,
     pendingUsageMessages,
     sendMessage,
+    regenerateMessage,
     isUploading,
     isHistoryLoading,
     hasMoreHistory,
@@ -168,9 +176,39 @@ export default function AgentChatPage() {
     [sendMessage, threadId, agent_name],
   );
 
+  const handleSubmitHumanInput = useCallback(
+    async (request: HumanInputRequest, response: HumanInputResponse) => {
+      let sent = false;
+      await sendMessage(
+        threadId,
+        {
+          text: buildHumanInputResponseText(request, response),
+          files: [],
+        },
+        { agent_name },
+        {
+          additionalKwargs: {
+            hide_from_ui: true,
+            human_input_response: response,
+          },
+          onSent: () => {
+            sent = true;
+          },
+        },
+      );
+      return sent;
+    },
+    [agent_name, sendMessage, threadId],
+  );
+
   const handleStop = useCallback(async () => {
     await thread.stop();
   }, [thread]);
+  const handleRegenerate = useCallback(
+    (messageId: string, supersededMessageIds: string[]) =>
+      regenerateMessage(threadId, messageId, supersededMessageIds),
+    [regenerateMessage, threadId],
+  );
 
   const tokenUsageInlineMode = tokenUsageEnabled
     ? localSettings.tokenUsage.inlineMode
@@ -179,6 +217,14 @@ export default function AgentChatPage() {
   const { activeGoal, hasGoal, setLocalGoal } = useActiveGoal(
     threadId,
     thread.values.goal,
+  );
+  const hasOpenHumanInputCard = useMemo(
+    () =>
+      hasOpenHumanInputRequest(
+        thread.messages,
+        (message) => !isHiddenFromUIMessage(message),
+      ),
+    [thread.messages],
   );
 
   return (
@@ -253,6 +299,19 @@ export default function AgentChatPage() {
                   loadMoreHistory={loadMoreHistory}
                   isHistoryLoading={isHistoryLoading}
                   tokenUsageInlineMode={tokenUsageInlineMode}
+                  canRegenerate={
+                    !isNewThread &&
+                    !isMock &&
+                    env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY !== "true" &&
+                    !isUploading &&
+                    !thread.isLoading
+                  }
+                  onRegenerateMessage={handleRegenerate}
+                  onSubmitHumanInput={
+                    isMock || env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true"
+                      ? undefined
+                      : handleSubmitHumanInput
+                  }
                 />
               </div>
 
@@ -322,7 +381,9 @@ export default function AgentChatPage() {
                     }
                     disabled={
                       env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true" ||
-                      isUploading
+                      isUploading ||
+                      hasOpenHumanInputCard ||
+                      (!isNewThread && isHistoryLoading)
                     }
                     onContextChange={(context) =>
                       setSettings("context", context)

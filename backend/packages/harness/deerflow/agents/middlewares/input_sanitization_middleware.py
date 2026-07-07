@@ -31,6 +31,7 @@ from langchain.agents.middleware.types import (
 from langchain_core.messages import HumanMessage
 from langgraph.errors import GraphBubbleUp
 
+from deerflow.agents.human_input import read_human_input_response
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, message_content_to_text
 
 logger = logging.getLogger(__name__)
@@ -90,14 +91,14 @@ def _escape_tag_match(match: re.Match) -> str:
 def _is_genuine_user_message(message: object) -> bool:
     """Return True for real user messages, excluding system-injected HumanMessages.
 
-    System-injected context is marked via ``hide_from_ui`` — the same convention
-    used by DynamicContextMiddleware and TodoMiddleware.
+    ``hide_from_ui`` is also used by hidden UI replies from HumanInputCard, so
+    only skip hidden HumanMessages that do not carry a valid user response.
     """
     if not isinstance(message, HumanMessage):
         return False
-    if message.additional_kwargs.get("hide_from_ui"):
-        return False
     if message.name == _SUMMARY_MESSAGE_NAME:
+        return False
+    if message.additional_kwargs.get("hide_from_ui") and read_human_input_response(message.additional_kwargs) is None:
         return False
     return True
 

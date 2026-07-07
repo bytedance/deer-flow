@@ -21,7 +21,7 @@ from langchain_core.messages.utils import convert_to_messages
 from langgraph.types import Command
 
 from app.gateway.auth_disabled import AUTH_SOURCE_INTERNAL
-from app.gateway.deps import get_checkpointer, get_run_context, get_run_manager, get_stream_bridge
+from app.gateway.deps import get_checkpointer, get_local_provider, get_run_context, get_run_manager, get_stream_bridge
 from app.gateway.internal_auth import (
     INTERNAL_OWNER_USER_ID_HEADER_NAME,
     INTERNAL_SYSTEM_ROLE,
@@ -259,7 +259,27 @@ def merge_run_context_overrides(config: dict[str, Any], context: Mapping[str, An
         runtime_context.setdefault("channel_user_id", context["channel_user_id"])
 
 
-def inject_authenticated_user_context(config: dict[str, Any], request: Request) -> None:
+async def resolve_trusted_internal_owner_for_attribution(request: Request, owner_user_id: str | None) -> Any | None:
+    """Resolve the DeerFlow user used only for trusted internal attribution."""
+
+    if not owner_user_id:
+        return None
+    user = getattr(request.state, "user", None)
+    if getattr(user, "system_role", None) != INTERNAL_SYSTEM_ROLE:
+        return None
+    try:
+        return await get_local_provider().get_user(owner_user_id)
+    except Exception:
+        logger.exception("Failed to resolve trusted internal owner %s", sanitize_log_param(owner_user_id))
+        return None
+
+
+def inject_authenticated_user_context(
+    config: dict[str, Any],
+    request: Request,
+    *,
+    internal_owner_user: Any | None = None,
+) -> None:
     """Stamp the authenticated user into the run context for background tools.
 
     Tool execution may happen after the request handler has returned, so tools
@@ -273,6 +293,20 @@ def inject_authenticated_user_context(config: dict[str, Any], request: Request) 
         return
 
     if getattr(user, "system_role", None) == INTERNAL_SYSTEM_ROLE:
+        runtime_context = config.setdefault("context", {})
+        if not isinstance(runtime_context, dict):
+            return
+        if internal_owner_user is None:
+            runtime_context.pop("user_role", None)
+            runtime_context.pop("oauth_provider", None)
+            runtime_context.pop("oauth_id", None)
+            return
+        owner_user_id = getattr(internal_owner_user, "id", None)
+        if owner_user_id is not None:
+            runtime_context["user_id"] = str(owner_user_id)
+        runtime_context["user_role"] = getattr(internal_owner_user, "system_role", None)
+        runtime_context["oauth_provider"] = getattr(internal_owner_user, "oauth_provider", None)
+        runtime_context["oauth_id"] = getattr(internal_owner_user, "oauth_id", None)
         return
 
     runtime_context = config.setdefault("context", {})
@@ -638,7 +672,8 @@ async def start_run(
             # ``body.config`` is free-form and copied verbatim by
             # ``build_run_config``; scrub internal-only keys smuggled there.
             strip_internal_context_keys(config)
-        inject_authenticated_user_context(config, request)
+        internal_owner_user = await resolve_trusted_internal_owner_for_attribution(request, owner_user_id)
+        inject_authenticated_user_context(config, request, internal_owner_user=internal_owner_user)
 
         stream_modes = normalize_stream_modes(body.stream_mode)
 

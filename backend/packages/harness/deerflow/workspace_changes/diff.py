@@ -175,7 +175,7 @@ def _snapshot_text(file: FileSnapshot | None) -> str | None:
         try:
             with open(file.text_path, encoding="utf-8") as cached:
                 return cached.read()
-        except (OSError, UnicodeDecodeError):
+        except OSError:
             return None
     return None
 
