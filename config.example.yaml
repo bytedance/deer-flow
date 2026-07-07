@@ -1076,10 +1076,13 @@ sandbox:
 #
 #   # Optional: Container image to use (works with both Docker and Apple Container)
 #   # Default: enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest
-#   # Recommended: enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest (works on both x86_64 and arm64)
-#   # Custom images should extend the default image or implement the same AIO
-#   # sandbox HTTP API used by agent-sandbox. See backend/docs/CONFIGURATION.md.
-#   # image: enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest
+#   # The mirror's `:latest` tag is frozen on an old pre-1.9.3 digest that lacks
+#   # the /v1/bash/* routes required-secrets skills need (see #3921/#3922), so
+#   # pin an explicit version instead — recommended: 1.11.0 (multi-arch, works
+#   # on both x86_64 and arm64). Custom images should extend the default image
+#   # or implement the same AIO sandbox HTTP API used by agent-sandbox. See
+#   # backend/docs/CONFIGURATION.md.
+#   # image: enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:1.11.0
 #
 #   # Optional: Base port for sandbox containers (default: 8080)
 #   # port: 8080

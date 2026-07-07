@@ -16,7 +16,11 @@ if [ -f "config.yaml" ]; then
 fi
 
 if [ -z "$IMAGE" ]; then
-    IMAGE="enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest"
+    # NOTE: not ":latest". The mirror's `:latest` tag is frozen on an old
+    # pre-1.9.3 digest that lacks the /v1/bash/* routes required-secrets
+    # skills need (see #3921/#3922) — pulling it here would defeat the whole
+    # point of this pre-pull helper. Keep this pinned to a version >= 1.9.3.
+    IMAGE="enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:1.11.0"
     echo "Using default image: $IMAGE"
 else
     echo "Using configured image: $IMAGE"
