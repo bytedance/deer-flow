@@ -65,14 +65,23 @@ def _is_subagent_terminal(result: Any) -> bool:
 
 
 async def _await_subagent_terminal(task_id: str, max_polls: int) -> Any | None:
-    """Poll until the background subagent reaches a terminal status or we run out of polls."""
+    """Wait until the background subagent reaches a terminal status (push-based).
+
+    Uses ``completed_event`` for push notification when the subagent finishes.
+    Falls back to 5-second timeout on the event wait so a stuck subagent
+    still gets polled (backward compatible with legacy in-flight tasks).
+    """
     for _ in range(max_polls):
         result = get_background_task_result(task_id)
         if result is None:
             return None
         if _is_subagent_terminal(result):
             return result
-        await asyncio.sleep(5)
+
+        # Push-based: wait on the completion event (up to 5s per poll cycle).
+        # When the subagent finishes between polls, this returns immediately
+        # instead of waiting the full 5-second sleep.
+        await asyncio.to_thread(result.completed_event.wait, timeout=5)
     return None
 
 

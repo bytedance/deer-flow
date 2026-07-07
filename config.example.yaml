@@ -871,7 +871,7 @@ tools:
 # multiple MCP servers expose a large number of tools.
 
 tool_search:
-  enabled: false
+  enabled: true     # Default: true (keeps MCP tool schemas out of context until needed)
 
 # ============================================================================
 # Tool Output Budget Protection

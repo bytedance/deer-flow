@@ -98,6 +98,7 @@ class SubagentResult:
     token_usage_records: list[dict[str, int | str | None]] = field(default_factory=list)
     usage_reported: bool = False
     cancel_event: threading.Event = field(default_factory=threading.Event, repr=False)
+    completed_event: threading.Event = field(default_factory=threading.Event, repr=False)
     _state_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
 
     def __post_init__(self):
@@ -138,6 +139,7 @@ class SubagentResult:
                 self.token_usage_records = token_usage_records
             self.completed_at = completed_at or datetime.now()
             self.status = status
+            self.completed_event.set()
             return True
 
 

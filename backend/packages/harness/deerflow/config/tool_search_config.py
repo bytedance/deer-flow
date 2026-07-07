@@ -12,8 +12,10 @@ class ToolSearchConfig(BaseModel):
     """
 
     enabled: bool = Field(
-        default=False,
-        description="Defer tools and enable tool_search",
+        default=True,
+        description="Defer MCP tools and enable tool_search discovery. "
+        "When enabled, MCP tool schemas are hidden from the model until "
+        "the tool_search tool promotes them — keeps the context window lean.",
     )
 
 
