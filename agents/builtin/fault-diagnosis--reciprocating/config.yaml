@@ -1,6 +1,6 @@
 name: fault-diagnosis--reciprocating
 display_name: "往复机故障诊断"
-description: "往复式压缩机 / 往复式泵的曲轴角联动 + 缸压 + 阀门事件诊断"
+description: "往复式压缩机 / 往复式泵的整机诊断（曲轴角联动 + 缸压 + 阀门事件）"
 icon: "🔧"
 parent: fault-diagnosis
 order: 3
