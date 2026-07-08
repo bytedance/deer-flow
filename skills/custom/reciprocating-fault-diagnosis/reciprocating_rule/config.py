@@ -153,4 +153,4 @@ DEFAULT_CONFIG_PATH = "/ins-os-manage/configInfo/queryD901Config"
 DEFAULT_DATA_PATH = "/ins-os-view/sg9kData/getTrendDataHis"
 DATA_DENSITY = "high"
 DATA_INCLUDE_FILTER = "history"
-DATA_WINDOW_MS = 5 * 60 * 1000  # ±5 minutes
+DATA_WINDOW_MS = 24 * 60 * 60 * 1000  # 前24小时

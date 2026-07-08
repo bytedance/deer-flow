@@ -128,12 +128,11 @@
 - `diagnosis_date` 必须匹配 `^\d{4}-\d{2}-\d{2}$`。
 - `diagnosis_hour` 必须为 `"0"`-`"23"` 之间的字符串。
 
-拼装诊断时间窗口：
+拼装诊断时间窗口（**严禁 LLM 自行计算毫秒时间戳**，直接传 ISO 字符串，脚本会自动解析）：
 
-- `start_iso = f"{diagnosis_date}T{int(diagnosis_hour):02d}:00:00"`
-- `end_iso = f"{diagnosis_date}T{int(diagnosis_hour):02d}:59:59"`
-
-将 `start_iso` 转换为毫秒时间戳作为 `diagnosis_time_ms`（规则运行时以该时刻为中心取趋势数据窗口）。
+```
+diagnosis_iso = f"{diagnosis_date}T{int(diagnosis_hour):02d}:00:00"
+```
 
 ### 步骤 2：执行受管往复机规则运行时
 
@@ -142,7 +141,7 @@
 ```bash
 python /mnt/skills/custom/reciprocating-fault-diagnosis/scripts/run_reciprocating_rule_diagnosis.py \
   --machine-id "{machineId}" \
-  --diagnosis-time "{diagnosis_time_ms}" \
+  --diagnosis-time "{diagnosis_iso}" \
   --output /mnt/user-data/outputs/reciprocating_rule_result.json
 ```
 

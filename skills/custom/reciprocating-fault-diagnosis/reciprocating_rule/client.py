@@ -79,9 +79,10 @@ class ReciprocatingInsClient:
         *,
         type_list: list[str] | None = None,
     ) -> list[dict[str, Any]]:
-        """Fetch trend data for the given measurement points around a timestamp.
+        """Fetch trend data for the given measurement points.
 
-        Uses ±5-minute window, high density, and the full 160-feature typeList.
+        Uses a lookback window (default 24h) ending at the diagnosis timestamp,
+        high density, and the full 160-feature typeList.
         Returns the raw ``data`` array from the API response.
         """
         if not gpids:
@@ -89,7 +90,7 @@ class ReciprocatingInsClient:
 
         features = type_list or ALL_TYPE_LIST
         start_ms = str(timestamp_ms - DATA_WINDOW_MS)
-        end_ms = str(timestamp_ms + DATA_WINDOW_MS)
+        end_ms = str(timestamp_ms)
 
         body = await self._client._get_json(
             "ins-os-view/sg9kData/getTrendDataHis",

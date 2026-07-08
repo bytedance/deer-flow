@@ -82,10 +82,12 @@ def _section_machine_and_task(payload: dict) -> str:
 
 def _section_key_findings(payload: dict) -> str:
     summary_list = payload.get("equipment_summary", []) or []
-    if not summary_list:
+    # Filter to only equipment with actual findings (non-None max_value)
+    findings = [s for s in summary_list if s.get("max_value")]
+    if not findings:
         return "## 2. 异常发现\n\n_本次诊断未识别到异常_\n"
     lines = ["## 2. 异常发现", ""]
-    for s in summary_list:
+    for s in findings:
         max_value = s.get("max_value") or {}
         label = _equipment_label(s)
         if max_value:

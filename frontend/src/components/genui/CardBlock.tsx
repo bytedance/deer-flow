@@ -60,6 +60,8 @@ export default function CardBlock({ block }: CardBlockProps) {
   if (status && (content || extra)) {
     const style = statusStyles[status] || statusStyles.normal;
     const StatusIcon = style.icon;
+    // LLM 可能传单个对象而非数组，做容错
+    const extraItems: CardExtra[] = Array.isArray(extra) ? extra : extra ? [extra] : [];
 
     return (
       <div
@@ -79,9 +81,9 @@ export default function CardBlock({ block }: CardBlockProps) {
         )}
 
         {/* 额外信息 */}
-        {extra && extra.length > 0 && (
+        {extraItems.length > 0 && (
           <div className="mt-3 grid grid-cols-2 gap-2 border-t border-current/10 pt-3 sm:grid-cols-3">
-            {extra.map((item, idx) => (
+            {extraItems.map((item, idx) => (
               <div key={idx} className="text-xs">
                 <span className="text-muted-foreground">{item.label}：</span>
                 <span className="font-medium text-foreground">{item.value}</span>

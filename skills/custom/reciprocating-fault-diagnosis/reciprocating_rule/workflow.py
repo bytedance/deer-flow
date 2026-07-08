@@ -220,19 +220,8 @@ async def run_diagnosis(
     # ⑦ Collect results
     channel_results = _collect_channel_results(machine)
 
-    cylinder_diagnosis = []
-    for key in machine.keys:
-        for detail in key.diag_details:
-            cylinder_diagnosis.append(
-                DiagnosisResult.__dataclass_fields__["cylinder_diagnosis"].type.__args__[0](
-                    **detail
-                )
-                if isinstance(detail, dict)
-                else detail
-            )
-
-    # Simpler: just reconstruct from dicts
     from .models import DiagnosisItem
+
     cyl_items: list[DiagnosisItem] = []
     for key in machine.keys:
         for detail in key.diag_details:

@@ -98,31 +98,32 @@ def _build_equipment_summary(result_payload: dict[str, Any]) -> list[dict[str, A
     elif worst_channel:
         alarm_status = _health_to_alarm(worst_channel.get("health_value", 0))
 
-    max_point = ""
-    max_feature = ""
-    max_value: Any = 0.0
-    max_unit = ""
+    # Only populate max_value when there is an actual alarm; otherwise leave it
+    # empty so the renderer shows "本次诊断未识别到异常" instead of a fabricated
+    # zero-value entry (e.g. "pp 最大值：0") for a stopped or healthy machine.
+    max_value: dict[str, Any] | None = None
 
     if worst_diag:
-        max_point = worst_diag.get("component") or ""
-        max_feature = worst_diag.get("name") or worst_diag.get("code") or ""
-        max_value = worst_diag.get("level_value", 0)
-    elif worst_channel:
-        max_point = worst_channel.get("name") or ""
-        max_feature = worst_channel.get("main_feature") or ""
-        max_value = worst_channel.get("main_value") or 0.0
+        max_value = {
+            "point": worst_diag.get("component") or "",
+            "feature": worst_diag.get("name") or worst_diag.get("code") or "",
+            "value": worst_diag.get("level_value", 0),
+            "unit": "",
+        }
+    elif worst_channel and alarm_status != "ok":
+        max_value = {
+            "point": worst_channel.get("name") or "",
+            "feature": worst_channel.get("main_feature") or "",
+            "value": worst_channel.get("main_value") or 0.0,
+            "unit": "",
+        }
 
     return [{
         "equipment_id": machine_id,
         "equipment_name": machine_name,
         "operation_phase": "running" if result_payload.get("ss_state") == "NORMAL" else "stopped",
         "alarm_status": alarm_status,
-        "max_value": {
-            "point": max_point,
-            "feature": max_feature,
-            "value": max_value,
-            "unit": max_unit,
-        },
+        "max_value": max_value,
     }]
 
 
