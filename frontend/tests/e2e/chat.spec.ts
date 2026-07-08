@@ -179,6 +179,29 @@ test.describe("Chat workspace", () => {
   });
 
   test("suggests matching skills after a leading slash", async ({ page }) => {
+    let submittedText: string | undefined;
+    await page.route("**/runs/stream", (route) => {
+      const body = route.request().postDataJSON() as {
+        input?: { messages?: Array<{ content?: unknown }> };
+      };
+      const content = body.input?.messages?.at(-1)?.content;
+      if (typeof content === "string") {
+        submittedText = content;
+      } else if (Array.isArray(content)) {
+        submittedText = content
+          .map((block) =>
+            typeof block === "object" &&
+            block !== null &&
+            "text" in block &&
+            typeof block.text === "string"
+              ? block.text
+              : "",
+          )
+          .join("");
+      }
+      return handleRunStream(route);
+    });
+
     await page.goto("/workspace/chats/new");
 
     const textarea = page.getByPlaceholder(/how can i assist you/i);
@@ -194,7 +217,18 @@ test.describe("Chat workspace", () => {
 
     await textarea.press("Enter");
 
-    await expect(textarea).toHaveValue("/data-analysis ");
+    await expect(page.getByText("/data-analysis")).toBeVisible();
+    const skillInput = page.getByRole("textbox", {
+      name: /how can i assist you/i,
+    });
+    await expect(skillInput).toBeVisible();
+
+    await skillInput.fill("summarize this dataset");
+    await skillInput.press("Enter");
+
+    await expect
+      .poll(() => submittedText)
+      .toBe("/data-analysis summarize this dataset");
   });
 
   test("goal command sets a goal and starts an agent run", async ({ page }) => {
@@ -299,7 +333,10 @@ test.describe("Chat workspace", () => {
     await textarea.press("ArrowDown");
     await textarea.press("Enter");
 
-    await expect(textarea).toHaveValue("/frontend-design ");
+    await expect(page.getByText("/frontend-design")).toBeVisible();
+    await expect(
+      page.getByRole("textbox", { name: /how can i assist you/i }),
+    ).toBeVisible();
   });
 
   test("keeps Shift+Enter as newline while skill suggestions are visible", async ({
