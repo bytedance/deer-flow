@@ -52,6 +52,8 @@ services:
       #   export DEER_FLOW_ROOT=/absolute/path/to/deer-flow
       - SKILLS_HOST_PATH=${DEER_FLOW_ROOT}/skills
       - THREADS_HOST_PATH=${DEER_FLOW_ROOT}/backend/.deer-flow/threads
+      # Per-user data base directory for user-scoped skill mounts
+      - DEER_FLOW_HOST_BASE_DIR=${DEER_FLOW_ROOT}/backend/.deer-flow
       # Production: use PVC instead of hostPath to avoid data loss on node failure.
       # When set, hostPath vars above are ignored for the corresponding volume.
       # USERDATA_PVC_NAME uses subPath (deer-flow/users/{user_id}/threads/{thread_id}/user-data) automatically.
