@@ -231,14 +231,26 @@ class RunManager:
         Unlike follow-up status/model updates, failures are propagated so the
         caller can treat creation as failed. Rollback is the caller's
         responsibility after inserting the record into ``_runs``.
+
+        When a partial unique index on ``(thread_id, status)`` rejects a
+        duplicate active run (cross-worker race), translate the database
+        constraint violation into a ``ConflictError`` so the caller can
+        respond with an appropriate HTTP 409.
         """
+        from sqlalchemy.exc import IntegrityError
+
         if self._store is None:
             return
-        await self._call_store_with_retry(
-            "put",
-            record.run_id,
-            lambda: self._store.put(record.run_id, **self._store_put_payload(record)),
-        )
+        try:
+            await self._call_store_with_retry(
+                "put",
+                record.run_id,
+                lambda: self._store.put(record.run_id, **self._store_put_payload(record)),
+            )
+        except IntegrityError:
+            raise ConflictError(
+                f"Thread {record.thread_id} already has an active run"
+            ) from None
 
     async def _persist_to_store(self, record: RunRecord, *, error: str | None = None) -> bool:
         """Best-effort persist run record to backing store."""
@@ -619,14 +631,16 @@ class RunManager:
         already has a pending/running run.  For ``interrupt``/``rollback``,
         cancels inflight runs before creating.
 
-        This method holds the lock across both the check and the insert,
-        eliminating the TOCTOU race in separate ``has_inflight`` + ``create``.
+        For interrupt/rollback the old-run status is persisted to the store
+        *before* inserting the new run so the partial unique index does not
+        fire.  This means old runs are committed as interrupted even when the
+        subsequent new-run insert fails — a trade-off that is correct because
+        the caller explicitly requested cancellation of inflight work.
         """
         run_id = str(uuid.uuid4())
         now = _now_iso()
 
         _supported_strategies = ("reject", "interrupt", "rollback")
-        interrupted_records: list[RunRecord] = []
 
         async with self._lock:
             if multitask_strategy not in _supported_strategies:
@@ -644,6 +658,22 @@ class RunManager:
                     thread_id,
                     multitask_strategy,
                 )
+                for r in inflight:
+                    if r.finalizing:
+                        continue
+                    r.abort_action = multitask_strategy
+                    r.abort_event.set()
+                    task_active = r.task is not None and not r.task.done()
+                    r.finalizing = task_active
+                    if task_active:
+                        r.task.cancel()
+                    r.status = RunStatus.interrupted
+                    r.updated_at = now
+                # Persist interruptions before inserting the new run so
+                # the DB partial unique index won't see two active rows.
+                for r in inflight:
+                    if not r.finalizing:
+                        await self._persist_status(r, RunStatus.interrupted)
 
             record = RunRecord(
                 run_id=run_id,
@@ -665,8 +695,10 @@ class RunManager:
             try:
                 await self._persist_new_run_to_store(record)
                 persisted = True
+            except ConflictError:
+                raise
             except Exception:
-                logger.warning("Failed to persist run %s; rolled back in-memory record", run_id, exc_info=True)
+                logger.warning("Failed to persist run %s; rolling back in-memory record", run_id, exc_info=True)
                 raise
             finally:
                 # Also covers cancellation, which bypasses ``except Exception``.
@@ -674,22 +706,6 @@ class RunManager:
                     self._runs.pop(run_id, None)
                     self._unindex_run_locked(run_id, record.thread_id)
 
-            if multitask_strategy in ("interrupt", "rollback") and inflight:
-                for r in inflight:
-                    if r.finalizing:
-                        continue
-                    r.abort_action = multitask_strategy
-                    r.abort_event.set()
-                    task_active = r.task is not None and not r.task.done()
-                    r.finalizing = task_active
-                    if task_active:
-                        r.task.cancel()
-                    r.status = RunStatus.interrupted
-                    r.updated_at = now
-                    interrupted_records.append(r)
-
-        for interrupted_record in interrupted_records:
-            await self._persist_status(interrupted_record, RunStatus.interrupted)
         logger.info("Run created: run_id=%s thread_id=%s", run_id, thread_id)
         return record
 

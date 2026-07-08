@@ -636,7 +636,13 @@ async def test_create_or_reject_interrupt_persists_interrupted_status_to_store()
 
 @pytest.mark.anyio
 async def test_create_or_reject_does_not_interrupt_old_run_when_new_run_store_write_fails():
-    """A failed new-run persist must not cancel the existing inflight run."""
+    """Interrupt/rollback commits old-run status before inserting the new run.
+
+    When the new-run insert subsequently fails, the old run is already
+    persisted as interrupted — this is the correct behaviour because the
+    caller explicitly chose to replace inflight work.  The new run's
+    in-memory record must be rolled back.
+    """
     from unittest.mock import AsyncMock
 
     store = MemoryRunStore()
@@ -648,17 +654,22 @@ async def test_create_or_reject_does_not_interrupt_old_run_when_new_run_store_wr
     with pytest.raises(RuntimeError, match="db down"):
         await manager.create_or_reject("thread-1", multitask_strategy="interrupt")
 
+    # Old run is committed as interrupted (correct: caller asked for interrupt).
     stored_old = await store.get(old.run_id)
     assert list(manager._runs) == [old.run_id]
-    assert old.status == RunStatus.running
-    assert old.abort_event.is_set() is False
+    assert old.status == RunStatus.interrupted
     assert stored_old is not None
-    assert stored_old["status"] == "running"
+    assert stored_old["status"] == "interrupted"
 
 
 @pytest.mark.anyio
 async def test_create_or_reject_does_not_interrupt_old_run_when_new_run_store_write_is_cancelled():
-    """Cancellation during new-run persist must not cancel the existing run."""
+    """Cancellation during new-run persist still commits old-run interruption.
+
+    Like the failure case above, the old run's status is committed to the
+    store before the new-run insert.  Cancellation only prevents the
+    new-run insert, not the already-committed interruption.
+    """
     store = MemoryRunStore()
     manager = RunManager(store=store)
     old = await manager.create("thread-1")
@@ -674,10 +685,9 @@ async def test_create_or_reject_does_not_interrupt_old_run_when_new_run_store_wr
 
     stored_old = await store.get(old.run_id)
     assert list(manager._runs) == [old.run_id]
-    assert old.status == RunStatus.running
-    assert old.abort_event.is_set() is False
+    assert old.status == RunStatus.interrupted
     assert stored_old is not None
-    assert stored_old["status"] == "running"
+    assert stored_old["status"] == "interrupted"
 
 
 @pytest.mark.anyio

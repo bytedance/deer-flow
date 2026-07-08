@@ -47,4 +47,13 @@ class RunRow(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC))
 
-    __table_args__ = (Index("ix_runs_thread_status", "thread_id", "status"),)
+    __table_args__ = (
+        Index("ix_runs_thread_status", "thread_id", "status"),
+        Index(
+            "ix_one_active_run_per_thread",
+            "thread_id",
+            unique=True,
+            postgresql_where=(status.in_(["pending", "running"])),
+            sqlite_where=(status.in_(["pending", "running"])),
+        ),
+    )
