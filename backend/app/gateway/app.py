@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import re
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
@@ -41,6 +42,37 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger(__name__)
+
+_TELEGRAM_BOT_TOKEN_RE = re.compile(r"bot\d+:[A-Za-z0-9_-]+")
+_SECRET_BEARING_LOGGERS = ("httpx", "httpcore", "telegram", "telegram.ext")
+
+
+def _redact_log_value(value):
+    if isinstance(value, str):
+        return _TELEGRAM_BOT_TOKEN_RE.sub("bot<redacted>", value)
+    return value
+
+
+class _SecretRedactionFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.msg = _redact_log_value(record.msg)
+        if isinstance(record.args, tuple):
+            record.args = tuple(_redact_log_value(arg) for arg in record.args)
+        elif isinstance(record.args, dict):
+            record.args = {key: _redact_log_value(value) for key, value in record.args.items()}
+        return True
+
+
+def _harden_secret_logging() -> None:
+    root = logging.getLogger()
+    for handler in root.handlers:
+        if not any(isinstance(existing, _SecretRedactionFilter) for existing in handler.filters):
+            handler.addFilter(_SecretRedactionFilter())
+    for name in _SECRET_BEARING_LOGGERS:
+        logging.getLogger(name).setLevel(logging.WARNING)
+
+
+_harden_secret_logging()
 
 # Upper bound (seconds) each lifespan shutdown hook is allowed to run.
 # Bounds worker exit time so uvicorn's reload supervisor does not keep
@@ -171,6 +203,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     try:
         startup_config = get_app_config()
         apply_logging_level(startup_config.log_level)
+        _harden_secret_logging()
         logger.info("Configuration loaded successfully")
     except Exception as e:
         error_msg = f"Failed to load configuration during gateway startup: {e}"

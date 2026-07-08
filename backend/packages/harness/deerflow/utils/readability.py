@@ -1,6 +1,5 @@
 import logging
 import re
-import subprocess
 from urllib.parse import urljoin
 
 from markdownify import markdownify as md
@@ -57,20 +56,14 @@ class Article:
 
 class ReadabilityExtractor:
     def extract_article(self, html: str) -> Article:
+        # 2026-06-13: use_readability=True runs a runtime `npm install` (have_node->run_npm_install) that
+        # times out via our egress on EVERY call -> slow web_fetch. node-readability is not set up, so use
+        # the pure-Python extractor directly (fast, no subprocess). Guard against any extractor error.
         try:
-            article = simple_json_from_html_string(html, use_readability=True)
-        except (subprocess.CalledProcessError, FileNotFoundError) as exc:
-            stderr = getattr(exc, "stderr", None)
-            if isinstance(stderr, bytes):
-                stderr = stderr.decode(errors="replace")
-            stderr_info = f"; stderr={stderr.strip()}" if isinstance(stderr, str) and stderr.strip() else ""
-            logger.warning(
-                "Readability.js extraction failed with %s%s; falling back to pure-Python extraction",
-                type(exc).__name__,
-                stderr_info,
-                exc_info=True,
-            )
             article = simple_json_from_html_string(html, use_readability=False)
+        except Exception as exc:
+            logger.warning("pure-Python readability failed: %s; using raw html", type(exc).__name__)
+            article = {"title": "", "content": html, "plain_content": html, "plain_text": []}
 
         html_content = article.get("content")
         if not html_content or not str(html_content).strip():

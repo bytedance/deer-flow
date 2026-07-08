@@ -173,7 +173,17 @@ def build_deferred_tool_setup(filtered_tools: list[BaseTool], *, enabled: bool) 
     if not enabled:
         # Deferral disabled: defer nothing; the model binds every tool as before.
         return DeferredToolSetup(None, frozenset(), None)
-    deferred = [t for t in filtered_tools if is_mcp_tool(t)]
+    # owner 2026-06-13: keep HIGH-VALUE read MCP tools ALWAYS-ACTIVE (the small 120B under-promotes
+    # via tool_search -> rich tools sat unused). Defer only bulky/rare ones. Active stays < ~40 (overload).
+    # MCP tool names are server-prefixed (zbr-fleet_fleet_status, github_get_file_contents, fetch_fetch),
+    # so match by SUFFIX to keep these high-value READ tools always-active.
+    _ALWAYS_ACTIVE_SFX = (
+        "fleet_status", "fleet_stuck", "miner_history", "board_status",
+        "get_file_contents", "search_repositories", "search_code", "list_commits",
+        "get_pull_request", "get_issue", "_fetch",
+        "ops_status", "ops_logs", "ops_service",
+    )
+    deferred = [t for t in filtered_tools if is_mcp_tool(t) and not any(t.name.endswith(_s) for _s in _ALWAYS_ACTIVE_SFX)]
     if not deferred:
         # Enabled, but no MCP tool to defer: same empty result, different reason.
         return DeferredToolSetup(None, frozenset(), None)

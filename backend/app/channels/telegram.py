@@ -4,6 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import json
+import os
+import pathlib
+import subprocess
 import threading
 from typing import Any
 
@@ -68,6 +72,7 @@ class TelegramChannel(Channel):
 
         # General message handler
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._on_text))
+        app.add_handler(MessageHandler((filters.VOICE | filters.AUDIO) & ~filters.COMMAND, self._on_voice))
 
         self._application = app
 
@@ -315,3 +320,89 @@ class TelegramChannel(Channel):
             fut.add_done_callback(lambda f: self._log_future_error(f, "process_incoming_with_reply", update.message.message_id))
         else:
             logger.warning("[Telegram] Main loop not running. Cannot publish inbound message.")
+
+    async def _on_voice(self, update, context) -> None:
+        """Handle Telegram voice/audio messages by transcribing them to text."""
+        if not self._check_user(update.effective_user.id):
+            return
+
+        voice_cfg = self.config.get("voice_transcription") or {}
+        if not voice_cfg.get("enabled", False):
+            await update.message.reply_text("Voice transcription is not enabled yet.")
+            return
+
+        media = update.message.voice or update.message.audio
+        if media is None:
+            return
+
+        max_mb = float(voice_cfg.get("max_file_mb", 25))
+        if getattr(media, "file_size", 0) and media.file_size > max_mb * 1024 * 1024:
+            await update.message.reply_text("Voice message is too large for local transcription.")
+            return
+
+        chat_id = str(update.effective_chat.id)
+        user_id = str(update.effective_user.id)
+        msg_id = str(update.message.message_id)
+        tmp_dir = pathlib.Path(os.environ.get("ZBR_TG_VOICE_DIR", "/tmp/zbr-telegram-voice"))
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+        suffix = ".ogg" if update.message.voice else pathlib.Path(getattr(media, "file_name", "") or "audio.bin").suffix or ".bin"
+        audio_path = tmp_dir / f"{chat_id}-{msg_id}{suffix}"
+
+        try:
+            await update.message.reply_text("Transcribing voice...")
+            tg_file = await context.bot.get_file(media.file_id)
+            await tg_file.download_to_drive(custom_path=str(audio_path))
+            transcript = await asyncio.to_thread(self._transcribe_audio_file, audio_path, voice_cfg)
+        except Exception as exc:
+            logger.exception("[Telegram] voice transcription failed")
+            await update.message.reply_text(f"Voice transcription failed: {str(exc)[:300]}")
+            return
+        finally:
+            try:
+                audio_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+        text = transcript.strip()
+        if not text:
+            await update.message.reply_text("Voice transcription returned empty text.")
+            return
+
+        if update.effective_chat.type == "private":
+            topic_id = None
+        else:
+            reply_to = update.message.reply_to_message
+            topic_id = str(reply_to.message_id) if reply_to else msg_id
+
+        inbound = self._make_inbound(
+            chat_id=chat_id,
+            user_id=user_id,
+            text="[voice transcription]\n" + text,
+            msg_type=InboundMessageType.CHAT,
+            thread_ts=msg_id,
+        )
+        inbound.topic_id = topic_id
+
+        if self._main_loop and self._main_loop.is_running():
+            fut = asyncio.run_coroutine_threadsafe(self.bus.publish_inbound(inbound), self._main_loop)
+            fut.add_done_callback(lambda f: self._log_future_error(f, "publish_voice_transcription", update.message.message_id))
+        else:
+            logger.warning("[Telegram] Main loop not running. Cannot publish voice transcription.")
+
+    def _transcribe_audio_file(self, audio_path: pathlib.Path, voice_cfg: dict[str, Any]) -> str:
+        script = pathlib.Path(voice_cfg.get("script") or os.path.expanduser("~/zbr/scripts/zbr_voice_transcribe.py"))
+        timeout = int(voice_cfg.get("timeout_sec", 180))
+        language = str(voice_cfg.get("language") or "ru")
+        model = str(voice_cfg.get("model") or "")
+        cmd = [str(script), str(audio_path), "--language", language]
+        if model:
+            cmd += ["--model", model]
+        proc = subprocess.run(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout, check=False)
+        if proc.returncode != 0:
+            raise RuntimeError((proc.stderr or proc.stdout or f"transcriber exited {proc.returncode}")[:1200])
+        raw = proc.stdout.strip()
+        try:
+            data = json.loads(raw)
+            return str(data.get("text") or "").strip()
+        except json.JSONDecodeError:
+            return raw

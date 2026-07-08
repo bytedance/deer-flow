@@ -20,7 +20,9 @@ import copy
 import inspect
 import logging
 import os
+import pathlib
 from dataclasses import dataclass, field
+from datetime import datetime
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any, Literal, cast
 
@@ -43,6 +45,53 @@ logger = logging.getLogger(__name__)
 
 # Valid stream_mode values for LangGraph's graph.astream()
 _VALID_LG_MODES = {"values", "updates", "checkpoints", "tasks", "debug", "messages", "custom"}
+_ZBR_AUTONOMY_PREFIX = "/mnt/zbr-autonomy/"
+
+
+def _parse_iso_epoch(value: str | None) -> float:
+    if not value:
+        return 0.0
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+    except Exception:
+        return 0.0
+
+
+def _zbr_artifact_finish_path(record: RunRecord) -> pathlib.Path | None:
+    """Return the host-side target artifact path for ZBR bounded writer runs.
+
+    This is intentionally opt-in via run metadata so normal user chats and
+    general DeerFlow runs keep the standard LangGraph lifecycle.
+    """
+    metadata = record.metadata or {}
+    if metadata.get("zbr_finish_on_artifact") is not True:
+        return None
+    artifact = metadata.get("artifact")
+    if not isinstance(artifact, str) or not artifact.startswith(_ZBR_AUTONOMY_PREFIX):
+        return None
+    name = pathlib.PurePosixPath(artifact).name
+    if not name:
+        return None
+    state_dir = os.environ.get("ZBR_DEERFLOW_AUTONOMY_STATE_DIR")
+    if state_dir:
+        return pathlib.Path(state_dir) / name
+    return pathlib.Path.home() / "zbr/state/deerflow_autonomy" / name
+
+
+def _zbr_target_artifact_written(record: RunRecord) -> bool:
+    path = _zbr_artifact_finish_path(record)
+    if path is None:
+        return False
+    try:
+        stat = path.stat()
+    except OSError:
+        return False
+    if stat.st_size <= 0:
+        return False
+    run_started = _parse_iso_epoch(record.created_at)
+    if run_started and stat.st_mtime + 1.0 < run_started:
+        return False
+    return True
 
 
 def _build_runtime_context(
@@ -316,6 +365,9 @@ async def run_agent(
                 llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(chunk)
                 sse_event = _lg_mode_to_sse_event(single_mode)
                 await bridge.publish(run_id, sse_event, serialize(chunk, mode=single_mode))
+                if _zbr_target_artifact_written(record):
+                    logger.info("Run %s target artifact written — finishing bounded ZBR writer run", run_id)
+                    break
         else:
             # Multiple modes or subgraphs: astream yields tuples
             async for item in agent.astream(
@@ -335,6 +387,9 @@ async def run_agent(
                 llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(chunk)
                 sse_event = _lg_mode_to_sse_event(mode)
                 await bridge.publish(run_id, sse_event, serialize(chunk, mode=mode))
+                if _zbr_target_artifact_written(record):
+                    logger.info("Run %s target artifact written — finishing bounded ZBR writer run", run_id)
+                    break
 
         # 8. Final status
         if record.abort_event.is_set():

@@ -23,9 +23,10 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { useDeleteAgent } from "@/core/agents";
 import type { Agent } from "@/core/agents";
+import { useDeleteAgent } from "@/core/agents";
 import { useI18n } from "@/core/i18n/hooks";
+import { prettyAgentName } from "@/lib/utils";
 
 interface AgentCardProps {
   agent: Agent;
@@ -38,7 +39,7 @@ export function AgentCard({ agent }: AgentCardProps) {
   const [deleteOpen, setDeleteOpen] = useState(false);
 
   function handleChat() {
-    router.push(`/workspace/agents/${agent.name}/chats/new`);
+    router.push(`/workspace/agents/${prettyAgentName(agent.name)}/chats/new`);
   }
 
   async function handleDelete() {
@@ -62,7 +63,7 @@ export function AgentCard({ agent }: AgentCardProps) {
               </div>
               <div className="min-w-0">
                 <CardTitle className="truncate text-base">
-                  {agent.name}
+                  {prettyAgentName(agent.name)}
                 </CardTitle>
                 {agent.model && (
                   <Badge variant="secondary" className="mt-0.5 text-xs">

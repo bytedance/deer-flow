@@ -48,6 +48,10 @@ _HIGH_RISK_PATTERNS: list[re.Pattern[str]] = [
     # --- fork bomb ---
     re.compile(r"\S+\(\)\s*\{[^}]*\|\s*\S+\s*&"),  # :(){ :|:& };:
     re.compile(r"while\s+true.*&\s*done"),  # while true; do bash & done
+    # secret-read: block reading SSH keys / credentials / token-env / seed phrases (no legit
+    # sandbox build task reads these; FIX23 strips cat-heredoc bodies so doc CONTENT mentioning
+    # a secret path is NOT blocked — only actually reading a secret file is).
+    re.compile(r"\.ssh/(id_|authorized_keys|known_hosts)|\bid_(ed25519|rsa|ecdsa)\b|credentials_master|credentials[\w-]*\.csv|backend/agent\.env|state/secrets|github_ro\.env|GITHUB_PERSONAL_ACCESS_TOKEN|GITHUB_READONLY_PAT|github_pat_[A-Za-z0-9]|seed[_ -]?phrase|\bmnemonic\b|BEGIN [A-Z ]*PRIVATE KEY", re.I),
 ]
 
 _MEDIUM_RISK_PATTERNS: list[re.Pattern[str]] = [
@@ -150,14 +154,55 @@ def _classify_single_command(command: str) -> str:
             if pattern.search(joined):
                 return "block"
     except ValueError:
-        # shlex.split fails on unclosed quotes — treat as suspicious
-        return "block"
+        # shlex.split fails on UNBALANCED quotes. This is overwhelmingly a SAFE heredoc / echo
+        # that WRITES source code (Python bodies carry apostrophes like "doesn't", triple-quotes,
+        # f-strings) — file DATA, not executed shell. The raw high-risk regex scan above already
+        # cleared the literal command text, so fail-closed here added ~no protection while it
+        # crippled building (161/170 sandbox blocks were safe code-writes, only 4 had a real
+        # danger token). For a file/code-write pattern, fall through to the medium-risk check;
+        # otherwise keep the conservative fail-closed block.
+        if re.search(
+            r"""<<-?\s*['"]?\w+|>>?\s*\S+\.(py|sh|txt|md|json|ya?ml|toml|ini|cfg|conf|csv|html?|js|ts|tsx|css|sql|env)\b""",
+            command,
+        ):
+            pass  # safe code/file write — classify by medium-risk patterns on the normalized string
+        else:
+            return "block"
 
     for pattern in _MEDIUM_RISK_PATTERNS:
         if pattern.search(normalized):
             return "warn"
 
     return "pass"
+
+
+def _strip_file_heredoc_body(command: str) -> str:
+    """For ``cat > file << DELIM\n<body>\nDELIM`` the heredoc body is FILE DATA (written by cat,
+    never executed) — so file content such as a README's ```bash code-fence or example commands
+    must NOT be scanned as executable shell. Remove the body before classification, but keep the
+    command envelope (the ``cat > file << DELIM`` line) AND everything after the closing delimiter,
+    so a trailing ``&& rm -rf /`` is still scanned. Only relax for a plain ``cat`` writing to a file
+    with no pipe; interpreter heredocs (``bash``/``sh``/``python`` ``<< EOF``) and any piped heredoc
+    keep their body, because there the body IS executed."""
+    m = re.search(r"<<-?\s*(['\"]?)(\w+)\1", command)
+    if not m:
+        return command
+    head = command[: m.start()]
+    # must be `cat ... > file` (writing OUT); not an interpreter, not tee-to-arbitrary
+    if not re.match(r"\s*cat\b", head) or not re.search(r">>?\s*\S", head):
+        return command
+    body_start = command.find("\n", m.end())
+    if body_start < 0:
+        return command
+    # a pipe anywhere on the command line could feed an interpreter -> keep the body
+    if "|" in command[:body_start]:
+        return command
+    delim = m.group(2)
+    close = re.search(r"\n[ \t]*" + re.escape(delim) + r"[ \t]*(?:\n|$)", command[body_start:])
+    if not close:
+        return command
+    body_end = body_start + close.start()
+    return command[:body_start] + "\n<HEREDOC_FILE_BODY_OMITTED>" + command[body_end:]
 
 
 def _classify_command(command: str) -> str:
@@ -171,6 +216,9 @@ def _classify_command(command: str) -> str:
     2. Then split compound commands (e.g. ``cmd1 && cmd2 ; cmd3``) and
        classify each sub-command independently. The most severe verdict wins.
     """
+    # FIX23: drop file-heredoc BODY (file data, never executed) so file CONTENT (e.g. a
+    # README ```bash fence) is not misread as shell; envelope + trailing cmds still scanned.
+    command = _strip_file_heredoc_body(command)
     # Pass 1: whole-command high-risk scan (catches multi-statement patterns)
     normalized = " ".join(command.split())
     for pattern in _HIGH_RISK_PATTERNS:
