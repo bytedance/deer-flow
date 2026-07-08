@@ -163,14 +163,22 @@ def _build_runtime_middlewares(
     from deerflow.agents.middlewares.llm_error_handling_middleware import LLMErrorHandlingMiddleware
     from deerflow.agents.middlewares.thread_data_middleware import ThreadDataMiddleware
     from deerflow.agents.middlewares.tool_output_budget_middleware import ToolOutputBudgetMiddleware
+    from deerflow.agents.middlewares.tool_result_sanitization_middleware import ToolResultSanitizationMiddleware
     from deerflow.sandbox.middleware import SandboxMiddleware
 
     # Layer 1 — outermost wrap_model_call wrappers (listed outer→inner).
     # InputSanitizationMiddleware is first so it becomes the outermost
     # wrapper — sanitised messages are what every inner middleware sees.
+    # ToolResultSanitizationMiddleware mirrors that guardrail for the other
+    # untrusted-content entry point: remote tool results (web_fetch /
+    # web_search) get the same framework/injection-tag neutralization. It sits
+    # inner of ToolOutputBudgetMiddleware (listed after it) so it neutralizes
+    # the raw tool output first; the budget wrapper then truncates the already
+    # neutralized text.
     outer_wrappers: list[AgentMiddleware] = [
         InputSanitizationMiddleware(),
         ToolOutputBudgetMiddleware.from_app_config(app_config),
+        ToolResultSanitizationMiddleware(),
     ]
 
     # Layer 2 — before_agent hooks that read/annotate thread-scoped data.
