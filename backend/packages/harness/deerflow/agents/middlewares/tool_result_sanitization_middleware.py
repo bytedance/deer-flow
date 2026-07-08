@@ -29,8 +29,6 @@ from langchain_core.messages import ToolMessage
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
 
-from deerflow.agents.middlewares.input_sanitization_middleware import neutralize_untrusted_tags
-
 logger = logging.getLogger(__name__)
 
 # Tool names whose results are attacker-influenceable remote content. All web
@@ -54,6 +52,10 @@ def _neutralize_content(content: object) -> object:
     * a list of content blocks — only ``{"type": "text", "text": ...}`` blocks
       are rewritten; non-text blocks (images, etc.) pass through untouched.
     """
+    # Imported lazily so this module can be loaded even when a test stubs the
+    # input-sanitization module, and to mirror the codebase's deferred-import style.
+    from deerflow.agents.middlewares.input_sanitization_middleware import neutralize_untrusted_tags
+
     if isinstance(content, str):
         return neutralize_untrusted_tags(content)
     if isinstance(content, list):
