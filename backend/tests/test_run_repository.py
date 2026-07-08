@@ -125,8 +125,8 @@ class TestRunRepository:
     @pytest.mark.anyio
     async def test_list_by_thread(self, tmp_path):
         repo = await _make_repo(tmp_path)
-        await repo.put("r1", thread_id="t1")
-        await repo.put("r2", thread_id="t1")
+        await repo.put("r1", thread_id="t1", status="success")
+        await repo.put("r2", thread_id="t1", status="error")
         await repo.put("r3", thread_id="t2")
         rows = await repo.list_by_thread("t1")
         assert len(rows) == 2
@@ -136,8 +136,8 @@ class TestRunRepository:
     @pytest.mark.anyio
     async def test_list_by_thread_owner_filter(self, tmp_path):
         repo = await _make_repo(tmp_path)
-        await repo.put("r1", thread_id="t1", user_id="alice")
-        await repo.put("r2", thread_id="t1", user_id="bob")
+        await repo.put("r1", thread_id="t1", user_id="alice", status="success")
+        await repo.put("r2", thread_id="t1", user_id="bob", status="error")
         rows = await repo.list_by_thread("t1", user_id="alice")
         assert len(rows) == 1
         assert rows[0]["user_id"] == "alice"
@@ -161,8 +161,8 @@ class TestRunRepository:
     async def test_list_pending(self, tmp_path):
         repo = await _make_repo(tmp_path)
         await repo.put("r1", thread_id="t1", status="pending")
-        await repo.put("r2", thread_id="t1", status="running")
-        await repo.put("r3", thread_id="t2", status="pending")
+        await repo.put("r2", thread_id="t2", status="running")
+        await repo.put("r3", thread_id="t3", status="pending")
         pending = await repo.list_pending()
         assert len(pending) == 2
         assert all(r["status"] == "pending" for r in pending)
@@ -172,9 +172,9 @@ class TestRunRepository:
     async def test_list_inflight_returns_pending_and_running_before_cutoff(self, tmp_path):
         repo = await _make_repo(tmp_path)
         await repo.put("pending-old", thread_id="t1", status="pending", created_at="2026-01-01T00:00:00+00:00")
-        await repo.put("running-old", thread_id="t1", status="running", created_at="2026-01-01T00:00:01+00:00")
-        await repo.put("success-old", thread_id="t1", status="success", created_at="2026-01-01T00:00:02+00:00")
-        await repo.put("pending-new", thread_id="t1", status="pending", created_at="2026-01-01T00:00:03+00:00")
+        await repo.put("running-old", thread_id="t2", status="running", created_at="2026-01-01T00:00:01+00:00")
+        await repo.put("success-old", thread_id="t3", status="success", created_at="2026-01-01T00:00:02+00:00")
+        await repo.put("pending-new", thread_id="t4", status="pending", created_at="2026-01-01T00:00:03+00:00")
 
         inflight = await repo.list_inflight(before="2026-01-01T00:00:02+00:00")
 
@@ -394,8 +394,8 @@ class TestRunRepository:
     async def test_list_by_thread_ordered_desc(self, tmp_path):
         """list_by_thread returns newest first."""
         repo = await _make_repo(tmp_path)
-        await repo.put("r1", thread_id="t1", created_at="2024-01-01T00:00:00+00:00")
-        await repo.put("r2", thread_id="t1", created_at="2024-01-02T00:00:00+00:00")
+        await repo.put("r1", thread_id="t1", status="success", created_at="2024-01-01T00:00:00+00:00")
+        await repo.put("r2", thread_id="t1", status="error", created_at="2024-01-02T00:00:00+00:00")
         rows = await repo.list_by_thread("t1")
         assert rows[0]["run_id"] == "r2"
         assert rows[1]["run_id"] == "r1"
@@ -405,7 +405,7 @@ class TestRunRepository:
     async def test_list_by_thread_limit(self, tmp_path):
         repo = await _make_repo(tmp_path)
         for i in range(5):
-            await repo.put(f"r{i}", thread_id="t1")
+            await repo.put(f"r{i}", thread_id="t1", status="success")
         rows = await repo.list_by_thread("t1", limit=2)
         assert len(rows) == 2
         await _cleanup()
@@ -413,8 +413,8 @@ class TestRunRepository:
     @pytest.mark.anyio
     async def test_owner_none_returns_all(self, tmp_path):
         repo = await _make_repo(tmp_path)
-        await repo.put("r1", thread_id="t1", user_id="alice")
-        await repo.put("r2", thread_id="t1", user_id="bob")
+        await repo.put("r1", thread_id="t1", user_id="alice", status="success")
+        await repo.put("r2", thread_id="t1", user_id="bob", status="error")
         rows = await repo.list_by_thread("t1", user_id=None)
         assert len(rows) == 2
         await _cleanup()
@@ -428,21 +428,21 @@ class TestRunRepository:
         await init_engine("sqlite", url=url, sqlite_dir=str(tmp_path))
         repo = RunRepository(get_session_factory())
 
-        await repo.put("run-1", thread_id="thread-1", model_name="gpt-4o")
+        await repo.put("run-1", thread_id="thread-1", model_name="gpt-4o", status="success")
         row = await repo.get("run-1")
         assert row is not None
         assert row["model_name"] == "gpt-4o"
 
         long_name = "a" * 200
-        await repo.put("run-2", thread_id="thread-1", model_name=long_name)
+        await repo.put("run-2", thread_id="thread-2", model_name=long_name, status="error")
         row2 = await repo.get("run-2")
         assert row2["model_name"] == "a" * 128
 
-        await repo.put("run-3", thread_id="thread-1", model_name=123)
+        await repo.put("run-3", thread_id="thread-3", model_name=123, status="success")
         row3 = await repo.get("run-3")
         assert row3["model_name"] == "123"
 
-        await repo.put("run-4", thread_id="thread-1", model_name=None)
+        await repo.put("run-4", thread_id="thread-4", model_name=None, status="success")
         row4 = await repo.get("run-4")
         assert row4["model_name"] is None
 

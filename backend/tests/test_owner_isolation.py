@@ -165,7 +165,9 @@ async def test_runs_cross_user_isolation(tmp_path):
 
         with _as_user(USER_A):
             await repo.put("run-a1", thread_id="t-alpha")
-            await repo.put("run-a2", thread_id="t-alpha")
+            # a2 is past/purposeful-completed; only one active run per thread is
+            # enforced by the ix_one_active_run_per_thread partial unique index.
+            await repo.put("run-a2", thread_id="t-alpha", status="success")
 
         with _as_user(USER_B):
             await repo.put("run-b1", thread_id="t-beta")
