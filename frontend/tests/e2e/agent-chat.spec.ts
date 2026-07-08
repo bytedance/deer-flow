@@ -1,7 +1,8 @@
 import { expect, test } from "@playwright/test";
 
-import { mockLangGraphAPI } from "./utils/mock-api";
 import { prettyAgentName } from "@/lib/utils";
+
+import { mockLangGraphAPI } from "./utils/mock-api";
 
 const MOCK_AGENTS = [
   {
