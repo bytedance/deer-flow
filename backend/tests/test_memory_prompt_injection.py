@@ -508,6 +508,36 @@ def test_structure_aware_truncation_preserves_guaranteed_on_overflow(monkeypatch
     assert result.rstrip().endswith("(avoid: pip is deprecated)")
 
 
+def test_structure_aware_truncation_no_facts_does_not_raise(monkeypatch) -> None:
+    """When preceding sections overflow but there are no facts at all, the
+    truncation path must still clip gracefully instead of raising
+    ``UnboundLocalError``.
+
+    Regression: ``facts_header`` / ``all_fact_lines`` were only bound inside the
+    ``if isinstance(facts_data, list) and facts_data:`` block, yet the
+    overflow-truncation path below references them unconditionally. With an empty
+    ``facts`` list and an oversized user-context section, the truncation branch
+    raised ``UnboundLocalError`` and aborted memory injection entirely.
+    """
+    monkeypatch.setattr(
+        "deerflow.agents.memory.prompt._count_tokens",
+        lambda text, encoding_name="cl100k_base", *, use_tiktoken=True: len(text),
+    )
+
+    memory_data = {
+        "user": {"workContext": {"summary": "X" * 4000}},
+        "facts": [],  # no facts -> the facts-block initializers are skipped
+    }
+
+    result = format_memory_for_injection(memory_data, max_tokens=200, use_tiktoken=False)
+
+    assert isinstance(result, str)
+    assert "User Context:" in result
+    # The oversized preceding section was clipped from the tail.
+    assert result.rstrip().endswith("...")
+    assert len(result) < 4000
+
+
 def test_single_inter_section_separator_between_user_and_facts() -> None:
     """[P2] Exactly one ``\\n\\n`` separator between ``User Context:`` and
     ``Facts:`` — never four newlines.
