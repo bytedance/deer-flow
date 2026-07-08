@@ -1,0 +1,19 @@
+{
+  "status": "success",
+  "exit_step": 9,
+  "error_class": null,
+  "error_detail": null,
+  "outputs": {
+    "report_md": "/Users/raidery/bench/harness/raidery/deer-flow/skills/public/chatbi-report/example/report.md"
+  },
+  "metrics": {
+    "queried_count": 4,
+    "query_failures": 0,
+    "computed_count": 0,
+    "compute_validation_failures": 0,
+    "descriptions_generated": 1,
+    "description_failures": 0,
+    "llm_calls": 0,
+    "duration_seconds": 0.0
+  }
+}

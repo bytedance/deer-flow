@@ -31,6 +31,7 @@ report from a Markdown sample, especially when the file contains any of:
 - `<th data-idx="...">`
 - `{{虚拟名}}` or legacy `{{BAS_xxx}}`
 - `> 计算:`
+- `> 图表:`
 - `> 描述:`
 
 Common phrases:
@@ -102,14 +103,8 @@ python /mnt/skills/public/chatbi-report/scripts/pipeline.py \
   phase1 \
   --md /mnt/user-data/uploads/<file>.md \
   --out-dir /mnt/user-data/outputs \
-  --mock                    # use built-in profit_yoy.json fixture (same as --mock-fixture example/mock_sqlbot/profit_yoy.json)
+  --mock                   
 
-# Or specify custom fixture path explicitly
-python /mnt/skills/public/chatbi-report/scripts/pipeline.py \
-  phase1 \
-  --md /mnt/user-data/uploads/<file>.md \
-  --out-dir /mnt/user-data/outputs \
-  --mock-fixture /path/to/fixture.json
 
 # Phase 2: validate → evaluate → apply-computed → describe → render
 python /mnt/skills/public/chatbi-report/scripts/pipeline.py \
@@ -128,9 +123,6 @@ python /mnt/skills/public/chatbi-report/scripts/pipeline.py \
   --descriptions-dir /mnt/user-data/outputs \
   --skip-docx
 ```
-
-For mock mode, use `--mock` (uses built-in `example/mock_sqlbot/profit_yoy.json`) or `--mock-fixture /path/to/fixture.json`.
-For real SQLBot, set env vars and the `RealSQLBotClient` is used implicitly.
 
 **Wire format（stdout last line, JSON）:**
 
@@ -202,7 +194,6 @@ Run only Step 1 lint. If lint has errors or warnings, present the Step 1.5 check
 ```bash
 python /mnt/skills/public/chatbi-report/scripts/md_lint.py /mnt/user-data/uploads/<file>.md
 ```
-
 ---
 
 ## Output rules
@@ -232,6 +223,7 @@ Chinese status summary, `report.md`, and `report.docx`.
 - **修改用户上传的模板**：`/mnt/user-data/uploads/<file>.md` 不可写
 - **修改 skill 自身脚本**：`/mnt/skills/public/chatbi-report/scripts/*` 不可写
 - **静默忽略错误**：不得在用户不知情的情况下跳过失败步骤继续跑
+- **使用 view_image 工具**：全程禁止使用 `view_image` 工具。图表已在 DOCX 中嵌入，报告文件可由用户直接下载，view_image 会触发 ViewImageMiddleware 向 LLM 注入 base64 图像内容，而当前模型不支持 image input，会导致 400 错误。
 
 ### 正确做法 vs 错误做法
 

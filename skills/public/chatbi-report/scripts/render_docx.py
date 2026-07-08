@@ -119,12 +119,112 @@ def _add_styled_paragraph(docx, text: str, font_cfg: dict) -> None:
     _apply_font(run, font_cfg)
 
 
+def _resolve_chart_png(
+    chart_entry: dict, *, chart_dir: str | Path | None,
+) -> Path | None:
+    """Resolve a chart_entry's PNG path. Returns None if path unsafe / missing.
+
+    Defect 2 fix: prefer relative_path + chart_dir for cross-process safety
+    (manifest can move between chart_gen and render_docx); fall back to the
+    absolute path only when chart_dir is unknown or relative_path is missing.
+
+    Path-traversal check: when chart_dir is given, the resolved path must
+    live inside it. Reject any PNG that escapes (e.g., manifest corruption,
+    user-controlled relative_path).
+    """
+    rel = chart_entry.get("relative_path", "")
+    abs_path_str = chart_entry.get("path", "")
+
+    candidate: Path | None = None
+    if chart_dir and rel:
+        # rel is "{stem}.charts/{slug}.png"; chart_dir is "{out_dir}/{stem}.charts".
+        # The PNG lives at chart_dir / basename(rel).
+        candidate = (Path(chart_dir) / Path(rel).name).resolve()
+    elif abs_path_str:
+        candidate = Path(abs_path_str).resolve()
+    else:
+        return None
+
+    if chart_dir:
+        try:
+            candidate.relative_to(Path(chart_dir).resolve())
+        except ValueError:
+            print(
+                f"WARN: chart PNG escapes chart_dir: {candidate} not under {chart_dir}",
+                file=sys.stderr,
+            )
+            return None
+    return candidate
+
+
+def _build_chart_lookup(chart_manifest: dict | None) -> dict[tuple[int, int], list[dict]]:
+    """Index chart_manifest.reports by (section_idx, report_idx) for O(1) lookup."""
+    if not chart_manifest:
+        return {}
+    lookup: dict[tuple[int, int], list[dict]] = {}
+    for entry in chart_manifest.get("reports", []) or []:
+        key = (int(entry.get("section_idx", -1)), int(entry.get("report_idx", -1)))
+        if key[0] < 0 or key[1] < 0:
+            continue
+        lookup[key] = list(entry.get("charts", []) or [])
+    return lookup
+
+
+def _embed_chart(
+    docx, chart_entry: dict, style: dict,
+    *, chart_dir: str | Path | None = None,
+    out_path: str | None = None,
+) -> None:
+    """Embed a single chart PNG into the DOCX under the report's data table.
+
+    `chart_entry` is the manifest dict produced by chart_gen.generate_charts:
+      {title, type, status, path, relative_path, ...}.
+
+    Failures (missing file, bad status, path escapes chart_dir) are logged
+    to stderr; the renderer keeps going so the report's table still ships
+    even when the chart fails.
+    """
+    status = chart_entry.get("status")
+    if status != "ok":
+        print(
+            f"WARN: skipping chart `{chart_entry.get('title', '')}` "
+            f"(status={status}, error={chart_entry.get('error', '')})",
+            file=sys.stderr,
+        )
+        return
+    png_path = _resolve_chart_png(chart_entry, chart_dir=chart_dir)
+    if png_path is None:
+        print(
+            f"WARN: chart PNG cannot be resolved (manifest corrupt or escapes chart_dir)",
+            file=sys.stderr,
+        )
+        return
+    if not png_path.exists():
+        print(
+            f"WARN: chart PNG missing on disk: {png_path}",
+            file=sys.stderr,
+        )
+        return
+    title = chart_entry.get("title") or ""
+    if title:
+        _add_styled_paragraph(docx, title, style["font"]["report"])
+    p = docx.add_paragraph()
+    run = p.add_run()
+    run.add_picture(str(png_path), width=Cm(14))
+    print(
+        f"OK: embedded chart `{title}` -> {out_path or '?'}",
+        file=sys.stderr,
+    )
+
+
 def render_docx(
     report_doc,
     wide_by_report: list[list[dict]],
     *,
     out_path: str,
     style_path: str,
+    chart_manifest: dict | None = None,
+    chart_dir: str | Path | None = None,
 ) -> None:
     """渲染完整 DOCX。"""
     style = _load_style(style_path)
@@ -147,24 +247,51 @@ def render_docx(
     run = p.add_run(report_doc.title)
     _apply_font(run, style["font"]["title"])
 
-    ridx = 0
-    for sec in report_doc.sections:
-        _render_section(docx, sec, wide_by_report, ridx, style)
-        ridx += len(sec.reports)
-
+    # wide_by_report is positionally aligned with report iteration order
+    # (Orchestrator._finish_phase_2 builds it that way); track cumulative
+    # offset as we walk sections so each report slices its own row block.
+    chart_lookup = _build_chart_lookup(chart_manifest)
+    wide_offset = 0
+    for sec_idx, sec in enumerate(report_doc.sections):
+        _render_section(
+            docx, sec, wide_by_report,
+            sec_idx=sec_idx,
+            wide_offset=wide_offset,
+            style=style,
+            chart_lookup=chart_lookup,
+            chart_dir=chart_dir,
+            out_path=out_path,
+        )
+        wide_offset += len(sec.reports)
     docx.save(out_path)
 
 
-def _render_section(docx, sec, wide_by_report, ridx, style):
+def _render_section(
+    docx, sec, wide_by_report, *, sec_idx: int, wide_offset: int, style: dict,
+    chart_lookup: dict[tuple[int, int], list[dict]] | None = None,
+    chart_dir: str | Path | None = None,
+    out_path: str | None = None,
+):
     p = docx.add_paragraph()
     run = p.add_run(sec.title)
     _apply_font(run, style["font"]["section"])
 
     for rep_idx, report in enumerate(sec.reports):
-        _render_report(docx, report, wide_by_report[ridx + rep_idx] if ridx + rep_idx < len(wide_by_report) else [], style)
+        pos = wide_offset + rep_idx
+        rows = wide_by_report[pos] if pos < len(wide_by_report) else []
+        charts = (chart_lookup or {}).get((sec_idx, rep_idx), [])
+        _render_report(
+            docx, report, rows, style,
+            charts=charts, chart_dir=chart_dir, out_path=out_path,
+        )
 
 
-def _render_report(docx, report, wide_rows, style):
+def _render_report(
+    docx, report, wide_rows, style,
+    *, charts: list[dict] | None = None,
+    chart_dir: str | Path | None = None,
+    out_path: str | None = None,
+):
     p = docx.add_paragraph()
     run = p.add_run(report.title)
     _apply_font(run, style["font"]["report"])
@@ -172,6 +299,15 @@ def _render_report(docx, report, wide_rows, style):
     description_text = getattr(report, "description_text", None)
     if description_text:
         _add_styled_paragraph(docx, str(description_text).strip(), style["font"]["body"])
+
+    # Embed charts AFTER description + BEFORE data table — readers understand
+    # numbers in context of the visualization they explain.
+    if charts:
+        for chart_entry in charts:
+            _embed_chart(
+                docx, chart_entry, style,
+                chart_dir=chart_dir, out_path=out_path,
+            )
 
     if not wide_rows:
         docx.add_paragraph().add_run("（无数据行）").italic = True
@@ -228,6 +364,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out", required=True)
     parser.add_argument("--descriptions-dir", default=None)
     parser.add_argument("--stem", default=None)
+    parser.add_argument(
+        "--chart-manifest", default=None,
+        help="chart_gen manifest JSON (optional; charts are skipped when absent)",
+    )
+    parser.add_argument(
+        "--chart-dir", default=None,
+        help="directory containing chart PNGs; defaults to <stem>.charts/ "
+        "sibling of the manifest when both are provided (Defect 2: cross-process safe)",
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -235,7 +380,26 @@ def main(argv: list[str] | None = None) -> int:
         doc = doc_from_dict(parsed)
         wide = normalize_wide_by_report(doc, json.loads(Path(args.wide).read_text(encoding="utf-8")))
         attach_description_files(doc, args.descriptions_dir, args.stem or Path(args.parsed).name.removesuffix(".parsed.json"))
-        render_docx(doc, wide, out_path=args.out, style_path=args.style)
+        chart_manifest = None
+        chart_dir = args.chart_dir
+        if args.chart_manifest:
+            cm_path = Path(args.chart_manifest)
+            if cm_path.exists():
+                chart_manifest = json.loads(cm_path.read_text(encoding="utf-8"))
+                # Defect 2 fallback: derive chart_dir from stem next to manifest
+                # when caller did not pass --chart-dir explicitly.
+                if chart_dir is None:
+                    stem = args.stem or cm_path.name.removesuffix(".charts.json")
+                    chart_dir = str(cm_path.parent / f"{stem}.charts")
+            else:
+                print(
+                    f"WARN: --chart-manifest specified but file missing: {cm_path}; charts skipped",
+                    file=sys.stderr,
+                )
+        render_docx(
+            doc, wide, out_path=args.out, style_path=args.style,
+            chart_manifest=chart_manifest, chart_dir=chart_dir,
+        )
     except Exception as exc:
         print(f"FAIL: {exc}", file=sys.stderr)
         return 1

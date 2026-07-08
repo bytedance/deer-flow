@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from parse_md import ComputedSpec, OrgContext, Report, ReportDoc, Section, Th
+from parse_md import ChartSpec, ComputedSpec, OrgContext, Report, ReportDoc, Section, Th
 from unit_conversion import convert_unit
 
 COMPUTE_FAILURE_STATUSES = {
@@ -56,6 +56,24 @@ def doc_from_dict(d: dict[str, Any]) -> ReportDoc:
                     for s in rep.get("computed_specs", [])
                 ],
                 description_prompt=rep.get("description_prompt"),
+                chart_specs=[
+                    ChartSpec(
+                        标题=s["标题"],
+                        类型=s["类型"],
+                        x轴=s["x轴"],
+                        y轴=s.get("y轴"),
+                        y轴左=s.get("y轴左"),
+                        y轴右=s.get("y轴右"),
+                        系列=s.get("系列"),
+                        单位=s.get("单位"),
+                        左轴单位=s.get("左轴单位"),
+                        右轴单位=s.get("右轴单位"),
+                        条形配色=s.get("条形配色"),
+                        折线配色=s.get("折线配色"),
+                        输出=s.get("输出"),
+                    )
+                    for s in rep.get("chart_specs", [])
+                ],
             ))
         sections.append(Section(title=sec.get("title", ""), reports=reports))
     return ReportDoc(title=d.get("title", ""), sections=sections, all_idx_ids=set(d.get("all_idx_ids", [])))

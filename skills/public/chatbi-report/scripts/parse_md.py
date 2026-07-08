@@ -65,6 +65,47 @@ class ComputedSpec:
 
 
 @dataclass
+class ChartSpec:
+    标题: str
+    类型: str           # bar | line | pie | bar_line
+    x轴: str
+    y轴: list[str] | None = None          # 单轴图
+    y轴左: list[str] | None = None        # bar_line
+    y轴右: list[str] | None = None        # bar_line
+    系列: str | None = None               # 行社 | 指标 (line 图用)
+    单位: str | None = None               # 单轴图
+    左轴单位: str | None = None
+    右轴单位: str | None = None
+    条形配色: list[str] | None = None     # ["#3498db", "#2ecc71"]
+    折线配色: list[str] | None = None     # ["#e74c3c", "#f39c12"]
+    输出: str | None = None              # slug
+
+    def to_dict(self) -> dict:
+        d = {"标题": self.标题, "类型": self.类型, "x轴": self.x轴}
+        if self.y轴 is not None:
+            d["y轴"] = self.y轴
+        if self.y轴左 is not None:
+            d["y轴左"] = self.y轴左
+        if self.y轴右 is not None:
+            d["y轴右"] = self.y轴右
+        if self.系列 is not None:
+            d["系列"] = self.系列
+        if self.单位 is not None:
+            d["单位"] = self.单位
+        if self.左轴单位 is not None:
+            d["左轴单位"] = self.左轴单位
+        if self.右轴单位 is not None:
+            d["右轴单位"] = self.右轴单位
+        if self.条形配色 is not None:
+            d["条形配色"] = self.条形配色
+        if self.折线配色 is not None:
+            d["折线配色"] = self.折线配色
+        if self.输出 is not None:
+            d["输出"] = self.输出
+        return d
+
+
+@dataclass
 class OrgContext:
     branch_num: str
     branch_short_name: str
@@ -79,6 +120,7 @@ class Report:
     data_rows: list[dict] = field(default_factory=list)
     computed_specs: list[ComputedSpec] = field(default_factory=list)
     description_prompt: str | None = None  # `> 描述:` 块内容；step 8c 消费
+    chart_specs: list[ChartSpec] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -93,6 +135,7 @@ class Report:
                 {"name": s.name, "prompt": s.prompt, "examples": s.examples}
                 for s in self.computed_specs
             ],
+            "chart_specs": [c.to_dict() for c in self.chart_specs],
             **({"description_prompt": self.description_prompt}
                if self.description_prompt is not None else {}),
         }
@@ -317,6 +360,7 @@ def _parse_one_report(report_title: str, body: str) -> Report:
     computed_specs = [s for s in computed_specs if s.name in header_computed_names]
 
     description_prompt = _parse_description_block(body)
+    chart_specs = _parse_chart_blocks(body)
 
     return Report(
         title=report_title,
@@ -326,6 +370,7 @@ def _parse_one_report(report_title: str, body: str) -> Report:
         data_rows=data_rows,
         computed_specs=computed_specs,
         description_prompt=description_prompt,
+        chart_specs=chart_specs,
     )
 
 
@@ -425,6 +470,81 @@ def _parse_description_block(body: str) -> str | None:
         if line:
             lines.append(line)
     return "\n".join(lines) if lines else None
+
+
+def _split_chart_value(value: str | None) -> list[str] | None:
+    """将逗号分隔的字符串转为列表，或返回 None。"""
+    if value is None:
+        return None
+    return [v.strip() for v in value.split(",") if v.strip()]
+
+
+def _parse_chart_blocks(body: str) -> list[ChartSpec]:
+    """解析 > 图表: 块，返回 ChartSpec 列表。
+
+    块格式（与 `> 机构:` 一致的多行 `>` 缩进块）：
+        > 图表:
+        >   标题: 贷款余额对比
+        >   类型: bar
+        >   x轴: 行社
+        >   y轴: 贷款余额
+        >   单位: 万元
+        >   输出: loan-balance-bar
+
+    兄弟块（`> 时期:` / `> 描述:` / 下一个 `> 图表:` 等非缩进 `> X` 行）
+    或 `<table>` 起始作为终止边界。
+    """
+    results: list[ChartSpec] = []
+    pattern = re.compile(r"^>\s*图表:\s*$", re.MULTILINE)
+    for match in pattern.finditer(body):
+        start = match.end()
+        block_lines: list[str] = []
+        for line in body[start:].splitlines():
+            if not line:
+                continue
+            if re.match(r"^>\s?\S", line) and not re.match(r"^>\s{2,}\S", line):
+                break
+            if line.lstrip().startswith("<"):
+                break
+            # 去除行首 `> ` 标记符，与 _parse_org_block / _parse_description_block 一致
+            stripped = line.lstrip("> ").rstrip()
+            if not stripped:
+                continue
+            block_lines.append(stripped)
+
+        chart_dict: dict[str, str] = {}
+        for line in block_lines:
+            if ": " in line:
+                key, value = line.split(": ", 1)
+            elif ":" in line:
+                key, value = line.split(":", 1)
+            else:
+                continue
+            chart_dict[key.strip()] = value.strip()
+
+        required_fields = ["标题", "类型", "x轴"]
+        for field in required_fields:
+            if field not in chart_dict:
+                raise ValueError(f"图表配置缺少必需字段: {field}")
+
+        spec = ChartSpec(
+            标题=chart_dict.get("标题", ""),
+            类型=chart_dict.get("类型", ""),
+            x轴=chart_dict.get("x轴", ""),
+            y轴=_split_chart_value(chart_dict.get("y轴")),
+            y轴左=_split_chart_value(chart_dict.get("y轴左")),
+            y轴右=_split_chart_value(chart_dict.get("y轴右")),
+            系列=chart_dict.get("系列"),
+            单位=chart_dict.get("单位"),
+            左轴单位=chart_dict.get("左轴单位"),
+            右轴单位=chart_dict.get("右轴单位"),
+            条形配色=_split_chart_value(chart_dict.get("条形配色")),
+            折线配色=_split_chart_value(chart_dict.get("折线配色")),
+            输出=chart_dict.get("输出"),
+        )
+        results.append(spec)
+
+    return results
 
 
 def main(argv: list[str] | None = None) -> int:

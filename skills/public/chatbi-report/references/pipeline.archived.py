@@ -6,8 +6,6 @@ docx/superpowers/specs/2026-07-06-chatbi-report-rewrite-design.md.
 from __future__ import annotations
 
 import json
-import os
-import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -18,6 +16,7 @@ class OrchestratorConfig:
     """Single-run immutable config. CLI parsing produces this."""
     md_path: Path
     out_dir: Path
+    mock_fixture: Path | None = None
     skip_docx: bool = False
     style_path: Path | None = None
 
@@ -207,7 +206,7 @@ class Orchestrator:
         self,
         parsed: dict,
         wide: list[dict],
-        compute_sources: dict[str, tuple[str, str]],
+        compute_sources: dict[str, str],
         descriptions_dir: str,
         stem: str,
     ) -> CheckpointSignal | RunResult:
@@ -216,27 +215,16 @@ class Orchestrator:
         metrics: dict[str, Any] = {
             "8a_validate": {"ok": 0, "total": 0},
         }
-        # Helper: extract function name from .py source AST (handles Chinese func names)
-        import ast
-
-        def _get_func_name(source: str) -> str:
-            tree = ast.parse(source)
-            for node in ast.walk(tree):
-                if isinstance(node, ast.FunctionDef):
-                    return node.name
-            raise ValueError("No function definition found in compute source")
-
         sentinel_cols: set[str] = set()
 
-        for col_name, (python_func, src_path_str) in compute_sources.items():
+        for col_name, src_path_str in compute_sources.items():
             src_path = Path(src_path_str)
             source = src_path.read_text(encoding="utf-8")
             metrics["8a_validate"]["total"] += 1
             ok = True
             try:
-                func_name = python_func  # use alias if provided, else col_name
                 validate_ast(source)
-                validate_signature(source, func_name)
+                validate_signature(source, col_name)
             except Exception:
                 ok = False
                 sentinel_cols.add(col_name)
@@ -257,25 +245,22 @@ class Orchestrator:
         computed: dict[str, dict] = {}
         eval_ok = 0
         eval_total = 0
-        for col_name, (python_func, src_path_str) in compute_sources.items():
+        for col_name, src_path_str in compute_sources.items():
             if col_name in sentinel_cols:
                 continue
             eval_total += 1
             try:
-                source = Path(src_path_str).read_text(encoding="utf-8")
-                func_name = python_func  # use alias if provided, else col_name
+                # Build a DataFrame from wide rows (flat). Missing columns yield NaN;
+                # sentinel-marked cells already short-circuit via 8a.
                 df = pd.DataFrame(wide)
-                if "branch_num" in df.columns:
-                    df = df.set_index("branch_num")
                 series = evaluate_column(
-                    source=source,
-                    function_name=func_name,
+                    source=Path(src_path_str).read_text(encoding="utf-8"),
+                    function_name=col_name,
                     df=df,
                 )
                 computed[col_name] = {
-                    "name": col_name,
-                    "index": [str(i) for i in series.index],
-                    "values": [str(v) for v in series.values],
+                    str(idx): (None if pd.isna(v) else v)
+                    for idx, v in series.items()
                 }
                 eval_ok += 1
             except Exception:
@@ -285,48 +270,6 @@ class Orchestrator:
         # Step 8c: apply-computed (in-place, preserves section_idx/report_idx)
         wide = apply_computed_results(wide, computed)
         metrics["8c_apply"] = {"n_columns": len(computed)}
-
-        # Persist updated wide to disk (needed because Phase 2 reads from disk)
-        wide_path = self._cfg.out_dir / f"{stem}.wide.json"
-        wide_path.write_text(
-            json.dumps(wide, ensure_ascii=False, indent=2, default=str),
-            encoding="utf-8",
-        )
-
-        # Step 8c.5: chart generation (post-compute, description-independent).
-        # Computed columns are written into wide in-place by apply_computed_results
-        # and re-persisted above; charts consume the post-compute wide so y-axis
-        # labels referencing `{{computed_name}}` resolve to real values, not empty
-        # cells. Placed BEFORE Step 8d (attach-description) so a missing description
-        # file does not block PNG emission; placed BEFORE _finish_phase_2 so the
-        # manifest is on disk for render_docx to embed.
-        from chart_gen import generate_charts
-
-        chart_dir = self._cfg.out_dir / f"{stem}.charts"
-        chart_manifest_path = self._cfg.out_dir / f"{stem}.charts.json"
-        try:
-            chart_manifest = generate_charts(
-                parsed=parsed,
-                wide=wide,
-                out_dir=str(chart_dir),
-                manifest_path=str(chart_manifest_path),
-                stem=stem,
-            )
-            summary = (chart_manifest or {}).get("summary", {})
-            metrics["chart_gen"] = {
-                "status": summary.get("status", "OK"),
-                "ok": summary.get("ok", 0),
-                "failed": summary.get("failed", 0),
-                "manifest_path": str(chart_manifest_path),
-                "out_dir": str(chart_dir),
-            }
-        except Exception as exc:
-            metrics["chart_gen"] = {
-                "status": "ERROR",
-                "error": str(exc),
-                "manifest_path": str(chart_manifest_path),
-                "out_dir": str(chart_dir),
-            }
 
         # Step 8d: attach descriptions via render_markdown's standard API
         # (sets report.description_text, NOT _description_text — see render_markdown:96-112).
@@ -405,60 +348,6 @@ class Orchestrator:
         )
         report_md_path.write_text(md_text, encoding="utf-8")
 
-        # Step 9: render DOCX with embedded chart PNGs.
-        # chart_manifest was written by Step 8c.5 to disk; load it if present so
-        # render_docx can pull each chart PNG into the matching report's section.
-        chart_dir_for_docx = self._cfg.out_dir / f"{stem}.charts"
-        chart_manifest_path = self._cfg.out_dir / f"{stem}.charts.json"
-        chart_manifest: dict | None = None
-        if chart_manifest_path.exists():
-            try:
-                chart_manifest = json.loads(
-                    chart_manifest_path.read_text(encoding="utf-8")
-                )
-            except Exception as exc:
-                print(
-                    f"WARN: chart_manifest unreadable, embedding skipped: {exc}",
-                    file=sys.stderr,
-                )
-                chart_manifest = None
-        else:
-            # Defect 1 fix: chart_manifest expected after Step 8c.5 but missing.
-            # Surface WHY: sidecar orchestrator-metrics.json carries the 8c.5
-            # exception if Step 8c.5 raised — quote it so the user knows the
-            # DOCX has no charts because generation failed, not by design.
-            sidecar_path = self._cfg.out_dir / "orchestrator-metrics.json"
-            cg_err: str | None = None
-            if sidecar_path.exists():
-                try:
-                    sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
-                    cg = sidecar.get("metrics", {}).get("chart_gen") or {}
-                    cg_err = cg.get("error")
-                    cg_status = cg.get("status")
-                except Exception:
-                    cg_status = None
-            else:
-                cg_status = None
-            if cg_err:
-                print(
-                    f"WARN: chart_manifest missing at {chart_manifest_path}; "
-                    f"Step 8c.5 raised: {cg_err}. DOCX will not embed charts.",
-                    file=sys.stderr,
-                )
-            elif cg_status and cg_status not in ("SKIPPED", "NO_CHARTS"):
-                print(
-                    f"WARN: chart_manifest missing at {chart_manifest_path}; "
-                    f"Step 8c.5 status={cg_status}. DOCX will not embed charts.",
-                    file=sys.stderr,
-                )
-            else:
-                print(
-                    f"WARN: chart_manifest missing at {chart_manifest_path} "
-                    f"(no charts declared or Step 8c.5 was skipped). "
-                    f"DOCX will not embed charts.",
-                    file=sys.stderr,
-                )
-
         report_docx_path: Path | None = None
         if not self._cfg.skip_docx:
             report_docx_path = self._cfg.out_dir / "report.docx"
@@ -471,8 +360,6 @@ class Orchestrator:
                 wide_by_report,
                 out_path=str(report_docx_path),
                 style_path=str(resolved_style),
-                chart_manifest=chart_manifest,
-                chart_dir=str(chart_dir_for_docx),
             )
 
         # Translate orchestrator-shaped metrics → write_status schema (8 flat keys,
@@ -581,30 +468,13 @@ def _emit_wire_format(result: Phase1Result | CheckpointSignal | RunResult) -> No
     print(json.dumps(payload, ensure_ascii=False, default=str))
 
 
-def _parse_kv_list(items: list[str]) -> dict[str, tuple[str, str]]:
-    """Parse --compute-source items.
-
-    Format: col_name[:python_func]=source_path
-    - col_name: the business column name (e.g. "2023利润同比")
-    - python_func: optional Python function name (if omitted, uses col_name)
-    - source_path: path to the compute source .py file
-
-    Returns: {col_name: (python_func_name, source_path)}
-    """
-    out: dict[str, tuple[str, str]] = {}
+def _parse_kv_list(items: list[str]) -> dict[str, str]:
+    out: dict[str, str] = {}
     for item in items:
         if "=" not in item:
-            raise ValueError(f"expected col[:func]=path, got: {item!r}")
-        key, value = item.split("=", 1)
-        if ":" in key:
-            col_name, python_func = key.rsplit(":", 1)
-            col_name = col_name.strip()
-            python_func = python_func.strip()
-        else:
-            col_name = key.strip()
-            # Match compute_codegen.md convention: snake_case and prefixed with compute_
-            python_func = f"compute_{col_name}"
-        out[col_name] = (python_func, value.strip())
+            raise ValueError(f"expected key=value, got: {item!r}")
+        k, v = item.split("=", 1)
+        out[k.strip()] = v.strip()
     return out
 
 
@@ -620,10 +490,7 @@ def main(argv: list[str] | None = None) -> int:
     p1 = sub.add_parser("phase1", help="Run Phase 1 (steps 1–6).")
     p1.add_argument("--md", required=True)
     p1.add_argument("--out-dir", required=True)
-    p1.add_argument("--mock", action="store_true",
-                    help="Use mock mode with built-in profit_yoy.json fixture.")
-    p1.add_argument("--mock-fixture", default=None,
-                    help="Path to mock fixture JSON file (overrides --mock).")
+    p1.add_argument("--mock-fixture", default=None)
     # force_continue flags — set when the user has already acknowledged the
     # checkpoint at 1.5 / 3.5 (see spec §"用户回复路由" — agent re-invokes
     # `phase1` with these set after user picks "继续").
@@ -649,19 +516,15 @@ def main(argv: list[str] | None = None) -> int:
     cfg = OrchestratorConfig(
         md_path=Path(args.md),
         out_dir=Path(args.out_dir),
+        mock_fixture=Path(args.mock_fixture) if getattr(args, "mock_fixture", None) else None,
         skip_docx=getattr(args, "skip_docx", False),
         style_path=Path(args.style_path) if getattr(args, "style_path", None) else None,
     )
     try:
         if args.cmd == "phase1":
             sqlbot: Any
-            if args.mock_fixture:
-                sqlbot = MockSQLBotClient(str(args.mock_fixture))
-            elif args.mock:
-                # Auto-resolve built-in fixture relative to this script's location.
-                script_dir = Path(__file__).resolve().parents[0]
-                fixture_path = script_dir / ".." / "example" / "mock_sqlbot" / "profit_yoy.json"
-                sqlbot = MockSQLBotClient(str(fixture_path))
+            if cfg.mock_fixture is not None:
+                sqlbot = MockSQLBotClient(str(cfg.mock_fixture))
             else:
                 sqlbot = RealSQLBotClient()
             orch = Orchestrator(cfg, sqlbot)
@@ -673,7 +536,9 @@ def main(argv: list[str] | None = None) -> int:
         else:
             # Phase 2 doesn't invoke SQLBot (parsed + wide are read from disk).
             # Use a dummy client to satisfy the Orchestrator constructor.
-            orch = Orchestrator(cfg, _NullSQLBotClient())
+            orch = Orchestrator(cfg, MockSQLBotClient(str(FIXTURE))) if False else Orchestrator(
+                cfg, _NullSQLBotClient()
+            )
             stem = cfg.md_path.stem
             parsed = json.loads(
                 (cfg.out_dir / f"{stem}.parsed.json").read_text(encoding="utf-8")

@@ -306,7 +306,7 @@ def test_generate_charts_writes_manifest(tmp_path):
                         "data_rows": [],
                         "computed_specs": [],
                         "chart_specs": [
-                            {"title": "利润趋势", "type": "line", "x": "时期", "y": "利润总额", "series": "行社", "unit": "万元", "output": "profit-trend"}
+                            {"标题": "利润趋势", "类型": "line", "x轴": "时期", "y轴": "利润总额", "系列": "行社", "单位": "万元", "输出": "profit-trend"}
                         ],
                     }
                 ],
@@ -323,10 +323,10 @@ def test_generate_charts_writes_manifest(tmp_path):
     with _w.catch_warnings():
         _w.simplefilter("ignore")
         manifest = cg.generate_charts(parsed, wide, str(out_dir), str(manifest_path))
-    assert (out_dir / "profit-trend.png").exists()
+    assert (out_dir / "s0r0-profit-trend.png").exists()
     assert manifest["summary"]["status"] == "OK"
     assert manifest["summary"]["ok"] == 1
-    assert manifest["reports"][0]["charts"][0]["relative_path"] == "input.charts/profit-trend.png"
+    assert manifest["reports"][0]["charts"][0]["relative_path"] == "input.charts/s0r0-profit-trend.png"
 
 
 def test_generate_charts_no_specs_writes_no_charts(tmp_path):

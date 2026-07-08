@@ -29,24 +29,20 @@ import matplotlib.pyplot as plt  # noqa: E402
 
 
 _FONT_CANDIDATES = [
-    "/mnt/skills/public/matplotlib/fonts/wqy-microhei.ttc",
-    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/mnt/skills/public/chatbi-report/fonts/wqy-microhei.ttc",
+    "/mnt/persistent/reports/fonts/wqy-microhei.ttc",
 ]
 
 
 def _configure_font() -> None:
-    """Register a CJK font so Chinese labels render correctly (no tofu boxes).
+    """Register the bundled CJK font so Chinese labels render correctly.
 
-    Falls back silently if no candidate font exists; the caller's glyph-warning
+    Falls back silently if the font file is missing; the caller's glyph-warning
     test (test_render_line_png) catches the missing-font case.
     """
     from matplotlib import font_manager
 
-    font_path = None
-    for candidate in _FONT_CANDIDATES:
-        if os.path.exists(candidate):
-            font_path = candidate
-            break
+    font_path = next((c for c in _FONT_CANDIDATES if os.path.exists(c)), None)
     if font_path is None:
         return
     font_manager.fontManager.addfont(font_path)
@@ -509,6 +505,64 @@ def _safe_filename(slug: str) -> str:
     return slug
 
 
+# Chinese → English key map for ChartSpec dict (parse_md emits 中文 keys; the
+# rest of the pipeline — extract_series, render_chart — reads English keys).
+_CHART_KEY_MAP = {
+    "标题": "title",
+    "类型": "type",
+    "x轴": "x",
+    "y轴": "y",
+    "y轴左": "y_left",
+    "y轴右": "y_right",
+    "系列": "series",
+    "单位": "unit",
+    "左轴单位": "left_unit",
+    "右轴单位": "right_unit",
+    "条形配色": "bar_colors",
+    "折线配色": "line_colors",
+    "输出": "output",
+}
+
+
+def _translate_spec(spec: dict) -> dict:
+    """Translate a Chinese-keyed ChartSpec dict to English keys.
+
+    Required fields: 标题, 类型, x轴. Returns a new dict; original is untouched.
+    Raises if any required key is missing.
+
+    Single-axis fields (`y`, `unit`) accept either string or single-element
+    list; we coerce list-of-1 to scalar to keep downstream code (resolve_y_axis)
+    working without list-handling everywhere. Dual-axis fields (`y_left`,
+    `y_right`) MUST remain lists.
+    """
+    out: dict[str, Any] = {}
+    for zh, en in _CHART_KEY_MAP.items():
+        if zh in spec:
+            out[en] = spec[zh]
+    for required in ("title", "type", "x"):
+        if required not in out:
+            raise ValueError(
+                f"chart spec missing required field `{required}` "
+                f"(Chinese: 标题/类型/x轴). Got keys: {sorted(spec.keys())}"
+            )
+
+    # Single-axis coercion: chart_gen's resolve_y_axis expects a string for `y`.
+    # parse_md always returns a list (split-on-comma), but the user's input
+    # for a single-axis chart is a single value — normalize list[1] → str.
+    if "y" in out:
+        y_val = out["y"]
+        if isinstance(y_val, list):
+            if len(y_val) != 1:
+                raise ValueError(
+                    f"single-axis chart type `{out.get('type')}` requires "
+                    f"exactly one y value (got {len(y_val)}: {y_val}); "
+                    f"use `y轴左`/`y轴右` (y_left/y_right) for multi-axis charts"
+                )
+            out["y"] = y_val[0]
+
+    return out
+
+
 def _filter_wide_by_report(wide: list[dict], section_idx: int, report_idx: int) -> list[dict]:
     """Filter global wide rows down to a single (section_idx, report_idx)."""
     return [
@@ -544,26 +598,45 @@ def generate_charts(
             wide_rows = _filter_wide_by_report(wide, section_idx, report_idx)
             chart_idx = 0
             for spec in report.get("chart_specs", []):
-                slug = spec.get("output") or f"report-{section_idx}-{report_idx}-{chart_idx}"
+                try:
+                    en_spec = _translate_spec(spec)
+                except Exception as exc:
+                    report_entry["charts"].append({
+                        "title": "",
+                        "type": "",
+                        "status": "failed",
+                        "path": "",
+                        "relative_path": "",
+                        "error": f"spec translation: {exc}",
+                    })
+                    failed += 1
+                    chart_idx += 1
+                    continue
+                # Defect 3 fix: namespace user-provided slugs by section/report to
+                # prevent two reports with the same `输出:` clobbering each other's PNG.
+                # Fallback slug when user did not provide `输出:` already includes
+                # section/report indices, so the prefix is a no-op for those.
+                user_slug = en_spec.get("output") or f"chart-{chart_idx}"
+                slug = f"s{section_idx}r{report_idx}-{user_slug}"
                 slug = _safe_filename(slug)
                 png_path = Path(out_dir) / f"{slug}.png"
                 rel_path = f"{stem}.charts/{slug}.png"
                 try:
-                    resolved = extract_series(spec, report, wide_rows)
+                    resolved = extract_series(en_spec, report, wide_rows)
                     if not resolved.series_list:
                         raise ValueError("no series extracted")
                     render_chart(
-                        title=spec["title"],
-                        chart_type=spec["type"],
+                        title=en_spec["title"],
+                        chart_type=en_spec["type"],
                         series_list=resolved.series_list,
                         out_path=str(png_path),
                         bar_count=resolved.bar_count,
-                        bar_colors=spec.get("bar_colors"),
-                        line_colors=spec.get("line_colors"),
+                        bar_colors=en_spec.get("bar_colors"),
+                        line_colors=en_spec.get("line_colors"),
                     )
                     report_entry["charts"].append({
-                        "title": spec["title"],
-                        "type": spec["type"],
+                        "title": en_spec["title"],
+                        "type": en_spec["type"],
                         "status": "ok",
                         "path": str(png_path),
                         "relative_path": rel_path,
@@ -572,8 +645,8 @@ def generate_charts(
                     ok += 1
                 except Exception as exc:
                     report_entry["charts"].append({
-                        "title": spec.get("title", ""),
-                        "type": spec.get("type", ""),
+                        "title": en_spec.get("title", ""),
+                        "type": en_spec.get("type", ""),
                         "status": "failed",
                         "path": "",
                         "relative_path": "",
