@@ -15,11 +15,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-<<<<<<< HEAD
 config_version: 19
-=======
-config_version: 12
->>>>>>> 348cebc8 (chore: update config.example.yaml)
 
 # ============================================================================
 # Logging
@@ -609,7 +605,6 @@ tools:
   #   # wait_for_timeout_ms: 2000        # Extra wait after page load in milliseconds
   #   # wait_for_selector: "article"     # CSS selector to wait for before returning
 
-<<<<<<< HEAD
   # Web fetch tool (uses Crawl4AI - self-hosted headless Chromium, no API key)
   # Crawl4AI returns server-cleaned "fit" markdown directly (no readability step needed),
   # ideal for JavaScript-heavy sites. Self-host (JWT auth is off by default, no key):
@@ -649,8 +644,6 @@ tools:
   #   # allow_private_addresses: false      # SSRF guard: keep false in production. Set true ONLY to
   #   #                                     # capture internal/private targets (loopback, RFC1918, etc.)
 
-=======
->>>>>>> 348cebc8 (chore: update config.example.yaml)
   # Web fetch tool (uses Exa)
   # NOTE: Only one web_fetch provider can be active at a time.
   # Comment out the Jina AI web_fetch entry below before enabling this one.
@@ -686,7 +679,6 @@ tools:
   #   use: deerflow.community.firecrawl.tools:web_fetch_tool
   #   # api_key: $FIRECRAWL_API_KEY
 
-<<<<<<< HEAD
   # Web fetch tool (uses GroundRoute, requires GROUNDROUTE_API_KEY)
   # Fetches a page's extracted text via GroundRoute mode=page.
   # NOTE: Only one web_fetch provider can be active at a time.
@@ -695,7 +687,7 @@ tools:
   #   group: web
   #   use: deerflow.community.groundroute.tools:web_fetch_tool
   #   # api_key: $GROUNDROUTE_API_KEY
-  
+
   # Web fetch tool (uses fastCRW - Firecrawl-compatible web scraper, single binary,
   # self-host or cloud. Cloud requires CRW_API_KEY; self-host may need no key.)
   # NOTE: Only one web_fetch provider can be active at a time.
@@ -707,8 +699,6 @@ tools:
   #   # base_url: https://fastcrw.com/api   # default cloud; set to e.g. http://localhost:3000 for self-host
   #   # allow_private_addresses: false      # SSRF guard: keep false in production. Set true ONLY for intentional internal targets.
 
-=======
->>>>>>> 348cebc8 (chore: update config.example.yaml)
   # Image search tool (uses DuckDuckGo)
   # Use this to find reference images before image generation
   - name: image_search
@@ -1265,7 +1255,6 @@ memory:
   #   char - network-free CJK-aware character-based estimate; never touches
   #     tiktoken. Slightly less precise budgeting, zero network I/O.
   token_counting: tiktoken
-<<<<<<< HEAD
   # Guaranteed injection: fact categories that bypass the regular token budget
   # and draw from a reserved allowance, so high-signal corrections (e.g.
   # "don't use `pip`, use `uv`") survive even when the budget is tight.
@@ -1300,8 +1289,6 @@ memory:
   staleness_max_removals_per_cycle: 10
   staleness_protected_categories:
     - correction
-=======
->>>>>>> 348cebc8 (chore: update config.example.yaml)
 
 # ============================================================================
 # Custom Agent Management API
