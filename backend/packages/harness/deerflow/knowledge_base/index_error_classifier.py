@@ -25,6 +25,7 @@ def classify_index_error(error_message: str | None) -> str:
         ("unsupported_format", "UNSUPPORTED_FORMAT"),
         ("unsupported file", "UNSUPPORTED_FORMAT"),
         ("markitdown_unavailable", "MARKITDOWN_UNAVAILABLE"),
+        ("ocr_unavailable", "OCR_UNAVAILABLE"),
         ("dimension mismatch", "DIMENSION_MISMATCH"),
         ("embedding dimension", "DIMENSION_MISMATCH"),
         ("internal_error", "INTERNAL_ERROR"),

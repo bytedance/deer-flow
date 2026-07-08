@@ -377,6 +377,16 @@ def test_warm_enabled_skills_cache_logs_on_timeout(monkeypatch, caplog):
     assert warmed is False
 
 
+def test_apply_prompt_template_includes_knowledge_base_citations(monkeypatch):
+    _patch_minimal_prompt_dependencies(monkeypatch)
+
+    prompt = prompt_module.apply_prompt_template()
+
+    assert "<knowledge_base_citations>" in prompt
+    assert "[kb:Doc Title](kb://KB_ID)" in prompt
+    assert "kb_id" in prompt
+
+
 def test_apply_prompt_template_includes_assistant_persona(monkeypatch):
     _patch_minimal_prompt_dependencies(monkeypatch)
 

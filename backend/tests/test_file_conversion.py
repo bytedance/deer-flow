@@ -7,6 +7,8 @@ import sys
 from types import ModuleType
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from deerflow.utils.file_conversion import (
     _ASYNC_THRESHOLD_BYTES,
     _MIN_CHARS_PER_PAGE,
@@ -401,6 +403,483 @@ class TestConversionResult:
         assert ConversionErrorCode.UNSUPPORTED_FORMAT.value == "UNSUPPORTED_FORMAT"
         assert ConversionErrorCode.MARKITDOWN_UNAVAILABLE.value == "MARKITDOWN_UNAVAILABLE"
         assert ConversionErrorCode.INTERNAL_ERROR.value == "INTERNAL_ERROR"
+        assert ConversionErrorCode.OCR_UNAVAILABLE.value == "OCR_UNAVAILABLE"
+
+
+# ---------------------------------------------------------------------------
+# OCR fallback tests
+# ---------------------------------------------------------------------------
+
+
+class TestIsTesseractAvailable:
+    """Tests for _is_tesseract_available()."""
+
+    def test_returns_false_when_tesseract_not_on_path(self):
+        """When tesseract binary is not on PATH, returns False."""
+        import deerflow.utils.file_conversion as fcm
+
+        fcm._tesseract_available_cache = None
+
+        with patch("shutil.which", return_value=None):
+            from deerflow.utils.file_conversion import _is_tesseract_available
+
+            result = _is_tesseract_available()
+        assert result is False
+
+    def test_returns_true_when_smoke_test_passes(self):
+        """When tesseract is on PATH and smoke test succeeds, returns True."""
+        import deerflow.utils.file_conversion as fcm
+
+        fcm._tesseract_available_cache = None
+
+        mock_doc2 = MagicMock()
+        mock_page2 = MagicMock()
+        mock_tp = MagicMock()
+        mock_page2.get_textpage_ocr.return_value = mock_tp
+        mock_page2.get_text.return_value = "Test"
+        mock_doc2.__getitem__.return_value = mock_page2
+        mock_doc2.close = MagicMock()
+
+        mock_doc = MagicMock()
+        mock_page = MagicMock()
+        mock_doc.new_page.return_value = mock_page
+        mock_doc.tobytes.return_value = b"%PDF-1.4"
+        mock_doc.close = MagicMock()
+        mock_pymupdf = MagicMock()
+        mock_pymupdf.open.side_effect = [mock_doc, mock_doc2]
+        mock_pymupdf.Rect = MagicMock()
+
+        with (
+            patch("shutil.which", return_value="/usr/bin/tesseract"),
+            patch.dict(sys.modules, {"pymupdf": mock_pymupdf}),
+        ):
+            fcm._tesseract_available_cache = None
+            from deerflow.utils.file_conversion import _is_tesseract_available
+
+            result = _is_tesseract_available()
+        assert result is True
+
+    def test_uses_cache_on_second_call(self):
+        """Second call returns cached result without re-probing."""
+        import deerflow.utils.file_conversion as fcm
+
+        fcm._tesseract_available_cache = True
+        from deerflow.utils.file_conversion import _is_tesseract_available
+
+        with patch("shutil.which") as mock_which:
+            result = _is_tesseract_available()
+        mock_which.assert_not_called()
+        assert result is True
+
+
+class TestConvertPdfWithOcr:
+    """Tests for _convert_pdf_with_ocr()."""
+
+    def test_raises_tesseract_not_found_when_unavailable(self, tmp_path):
+        """When Tesseract is not available, raises _TesseractNotFoundError."""
+        pdf = tmp_path / "scanned.pdf"
+        pdf.write_bytes(b"%PDF-1.4 fake")
+
+        from deerflow.utils.file_conversion import _convert_pdf_with_ocr, _TesseractNotFoundError
+
+        mock_doc = MagicMock()
+        mock_doc.close = MagicMock()
+        mock_pymupdf = MagicMock()
+        mock_pymupdf.open.return_value = mock_doc
+
+        with (
+            patch.dict(sys.modules, {"pymupdf": mock_pymupdf}),
+            patch("deerflow.utils.file_conversion._is_tesseract_available", return_value=False),
+        ):
+            with pytest.raises(_TesseractNotFoundError, match="Tesseract"):
+                _convert_pdf_with_ocr(pdf, "eng", 50, 300)
+
+    def test_returns_none_when_pymupdf_not_installed(self, tmp_path):
+        """When pymupdf is not installed, returns None."""
+        pdf = tmp_path / "scanned.pdf"
+        pdf.write_bytes(b"%PDF-1.4 fake")
+
+        from deerflow.utils.file_conversion import _convert_pdf_with_ocr
+
+        with patch.dict(sys.modules, {"pymupdf": None}):
+            result = _convert_pdf_with_ocr(pdf, "eng", 50, 300)
+        assert result is None
+
+    def test_successful_ocr_returns_text(self, tmp_path):
+        """OCR successfully extracts text from all pages."""
+        pdf = tmp_path / "scanned.pdf"
+        pdf.write_bytes(b"%PDF-1.4 fake")
+
+        mock_page = MagicMock()
+        mock_tp = MagicMock()
+        mock_page.get_textpage_ocr.return_value = mock_tp
+        mock_page.get_text.return_value = "Page text content"
+
+        mock_doc = MagicMock()
+        mock_doc.__iter__.return_value = iter([mock_page, mock_page, mock_page])
+        mock_doc.__len__ = MagicMock(return_value=3)
+        mock_doc.close = MagicMock()
+
+        mock_pymupdf = MagicMock()
+        mock_pymupdf.open.return_value = mock_doc
+
+        from deerflow.utils.file_conversion import _convert_pdf_with_ocr
+
+        with (
+            patch("deerflow.utils.file_conversion._is_tesseract_available", return_value=True),
+            patch.dict(sys.modules, {"pymupdf": mock_pymupdf}),
+        ):
+            result = _convert_pdf_with_ocr(pdf, "eng", 50, 300)
+
+        assert result is not None
+        assert result.count("Page text content") == 3
+
+    def test_per_page_error_skipped(self, tmp_path):
+        """When a single page fails, it is skipped and others continue."""
+        pdf = tmp_path / "scanned.pdf"
+        pdf.write_bytes(b"%PDF-1.4 fake")
+
+        good_page = MagicMock()
+        good_tp = MagicMock()
+        good_page.get_textpage_ocr.return_value = good_tp
+        good_page.get_text.return_value = "Good page"
+
+        bad_page = MagicMock()
+        bad_page.get_textpage_ocr.side_effect = RuntimeError("Tesseract crash")
+
+        mock_doc = MagicMock()
+        mock_doc.__iter__.return_value = iter([good_page, bad_page, good_page])
+        mock_doc.__len__ = MagicMock(return_value=3)
+        mock_doc.close = MagicMock()
+
+        mock_pymupdf = MagicMock()
+        mock_pymupdf.open.return_value = mock_doc
+
+        from deerflow.utils.file_conversion import _convert_pdf_with_ocr
+
+        with (
+            patch("deerflow.utils.file_conversion._is_tesseract_available", return_value=True),
+            patch.dict(sys.modules, {"pymupdf": mock_pymupdf}),
+        ):
+            result = _convert_pdf_with_ocr(pdf, "eng", 50, 300)
+
+        assert result is not None
+        assert result.count("Good page") == 2
+
+    def test_max_pages_cap(self, tmp_path):
+        """OCR stops after max_pages."""
+        pdf = tmp_path / "scanned.pdf"
+        pdf.write_bytes(b"%PDF-1.4 fake")
+
+        mock_page = MagicMock()
+        mock_tp = MagicMock()
+        mock_page.get_textpage_ocr.return_value = mock_tp
+        mock_page.get_text.return_value = "Page text"
+
+        pages = [mock_page] * 10
+        mock_doc = MagicMock()
+        mock_doc.__iter__.return_value = iter(pages)
+        mock_doc.__len__ = MagicMock(return_value=10)
+        mock_doc.close = MagicMock()
+
+        mock_pymupdf = MagicMock()
+        mock_pymupdf.open.return_value = mock_doc
+
+        from deerflow.utils.file_conversion import _convert_pdf_with_ocr
+
+        with (
+            patch("deerflow.utils.file_conversion._is_tesseract_available", return_value=True),
+            patch.dict(sys.modules, {"pymupdf": mock_pymupdf}),
+        ):
+            result = _convert_pdf_with_ocr(pdf, "eng", max_pages=3, timeout_seconds=300)
+
+        assert result is not None
+        assert result.count("Page text") == 3
+
+    def test_timeout_truncation(self, tmp_path):
+        """OCR stops when timeout is exceeded, returns partial text."""
+        pdf = tmp_path / "scanned.pdf"
+        pdf.write_bytes(b"%PDF-1.4 fake")
+
+        mock_page = MagicMock()
+        mock_tp = MagicMock()
+        mock_page.get_textpage_ocr.return_value = mock_tp
+        mock_page.get_text.return_value = "Page text"
+
+        pages = [mock_page] * 20
+        mock_doc = MagicMock()
+        mock_doc.__iter__.return_value = iter(pages)
+        mock_doc.__len__ = MagicMock(return_value=20)
+        mock_doc.close = MagicMock()
+
+        mock_pymupdf = MagicMock()
+        mock_pymupdf.open.return_value = mock_doc
+
+        from deerflow.utils.file_conversion import _convert_pdf_with_ocr
+
+        # Simulate elapsed time: first iteration takes 0.0s, subsequent exceed timeout
+        call_count = [0]
+
+        def fake_monotonic():
+            call_count[0] += 1
+            if call_count[0] <= 4:
+                return 0.0
+            return 500.0
+
+        with (
+            patch("deerflow.utils.file_conversion._is_tesseract_available", return_value=True),
+            patch("deerflow.utils.file_conversion.time.monotonic", side_effect=fake_monotonic),
+            patch.dict(sys.modules, {"pymupdf": mock_pymupdf}),
+        ):
+            result = _convert_pdf_with_ocr(pdf, "eng", max_pages=50, timeout_seconds=300)
+
+        assert result is not None
+        assert "Page text" in result
+
+    def test_all_pages_fail_returns_none(self, tmp_path):
+        """When every page crashes, returns None."""
+        pdf = tmp_path / "scanned.pdf"
+        pdf.write_bytes(b"%PDF-1.4 fake")
+
+        bad_page = MagicMock()
+        bad_page.get_textpage_ocr.side_effect = RuntimeError("Crash")
+
+        mock_doc = MagicMock()
+        mock_doc.__iter__.return_value = iter([bad_page, bad_page])
+        mock_doc.__len__ = MagicMock(return_value=2)
+        mock_doc.close = MagicMock()
+
+        mock_pymupdf = MagicMock()
+        mock_pymupdf.open.return_value = mock_doc
+
+        from deerflow.utils.file_conversion import _convert_pdf_with_ocr
+
+        with (
+            patch("deerflow.utils.file_conversion._is_tesseract_available", return_value=True),
+            patch.dict(sys.modules, {"pymupdf": mock_pymupdf}),
+        ):
+            result = _convert_pdf_with_ocr(pdf, "eng", 50, 300)
+
+        assert result is None
+
+
+class TestDoConvertOcr:
+    """Tests for _do_convert() OCR routing."""
+
+    def test_auto_with_ocr_skips_markitdown_when_sparse(self, tmp_path):
+        """auto-with-ocr: when pymupdf4llm is sparse, goes to OCR, NOT MarkItDown."""
+        pdf = tmp_path / "scanned.pdf"
+        pdf.write_bytes(b"%PDF-1.4 fake")
+
+        with (
+            patch(
+                "deerflow.utils.file_conversion._convert_pdf_with_pymupdf4llm",
+                return_value="x" * 100,
+            ),
+            patch(
+                "deerflow.utils.file_conversion._pymupdf_output_too_sparse",
+                return_value=True,
+            ),
+            patch(
+                "deerflow.utils.file_conversion._get_uploads_config_value",
+                side_effect=lambda key, default: {
+                    "ocr_languages": "eng+chi_sim",
+                    "ocr_max_pages": 50,
+                    "ocr_timeout_seconds": 300,
+                }.get(key, default),
+            ),
+            patch(
+                "deerflow.utils.file_conversion._convert_pdf_with_ocr",
+                return_value="OCR extracted text",
+            ) as mock_ocr,
+            patch("deerflow.utils.file_conversion._convert_with_markitdown") as mock_md,
+        ):
+            result = _do_convert(pdf, "auto-with-ocr")
+
+        mock_ocr.assert_called_once()
+        mock_md.assert_not_called()
+        assert result == "OCR extracted text"
+
+    def test_auto_with_ocr_dense_text_no_ocr(self, tmp_path):
+        """auto-with-ocr: dense pymupdf4llm output does NOT trigger OCR."""
+        pdf = tmp_path / "text.pdf"
+        pdf.write_bytes(b"%PDF-1.4 fake")
+
+        dense_text = "# Report\n" + "text " * 1000
+
+        with (
+            patch(
+                "deerflow.utils.file_conversion._convert_pdf_with_pymupdf4llm",
+                return_value=dense_text,
+            ),
+            patch(
+                "deerflow.utils.file_conversion._pymupdf_output_too_sparse",
+                return_value=False,
+            ),
+            patch("deerflow.utils.file_conversion._convert_pdf_with_ocr") as mock_ocr,
+        ):
+            result = _do_convert(pdf, "auto-with-ocr")
+
+        mock_ocr.assert_not_called()
+        assert result == dense_text
+
+    def test_auto_mode_does_not_trigger_ocr(self, tmp_path):
+        """auto mode: OCR is never called."""
+        pdf = tmp_path / "scanned.pdf"
+        pdf.write_bytes(b"%PDF-1.4 fake")
+
+        with (
+            patch(
+                "deerflow.utils.file_conversion._convert_pdf_with_pymupdf4llm",
+                return_value="x" * 100,
+            ),
+            patch(
+                "deerflow.utils.file_conversion._pymupdf_output_too_sparse",
+                return_value=True,
+            ),
+            patch("deerflow.utils.file_conversion._convert_pdf_with_ocr") as mock_ocr,
+            patch(
+                "deerflow.utils.file_conversion._convert_with_markitdown",
+                return_value="MarkItDown fallback",
+            ),
+        ):
+            result = _do_convert(pdf, "auto")
+
+        mock_ocr.assert_not_called()
+        assert result == "MarkItDown fallback"
+
+    def test_pymupdf4llm_mode_does_not_trigger_ocr(self, tmp_path):
+        """pymupdf4llm mode: OCR is never called."""
+        pdf = tmp_path / "text.pdf"
+        pdf.write_bytes(b"%PDF-1.4 fake")
+
+        with (
+            patch(
+                "deerflow.utils.file_conversion._convert_pdf_with_pymupdf4llm",
+                return_value="short",
+            ),
+            patch("deerflow.utils.file_conversion._convert_pdf_with_ocr") as mock_ocr,
+        ):
+            result = _do_convert(pdf, "pymupdf4llm")
+
+        mock_ocr.assert_not_called()
+        assert result == "short"
+
+    def test_auto_with_ocr_pymupdf_not_installed_falls_back_to_markitdown(self, tmp_path):
+        """auto-with-ocr: when pymupdf4llm AND OCR fail, falls through to MarkItDown."""
+        pdf = tmp_path / "scanned.pdf"
+        pdf.write_bytes(b"%PDF-1.4 fake")
+
+        with (
+            patch(
+                "deerflow.utils.file_conversion._convert_pdf_with_pymupdf4llm",
+                return_value=None,
+            ),
+            patch(
+                "deerflow.utils.file_conversion._get_uploads_config_value",
+                side_effect=lambda key, default: {
+                    "ocr_languages": "eng+chi_sim",
+                    "ocr_max_pages": 50,
+                    "ocr_timeout_seconds": 300,
+                }.get(key, default),
+            ),
+            patch(
+                "deerflow.utils.file_conversion._convert_pdf_with_ocr",
+                return_value=None,
+            ),
+            patch(
+                "deerflow.utils.file_conversion._convert_with_markitdown",
+                return_value="MarkItDown fallback",
+            ) as mock_md,
+        ):
+            result = _do_convert(pdf, "auto-with-ocr")
+
+        mock_md.assert_called_once_with(pdf)
+        assert result == "MarkItDown fallback"
+
+
+class TestClassifyErrorOcr:
+    """Tests for _classify_error() with OCR_UNAVAILABLE."""
+
+    def test_tesseract_not_found_maps_to_ocr_unavailable(self):
+        """Exception mentioning tesseract maps to OCR_UNAVAILABLE."""
+        from deerflow.utils.file_conversion import _classify_error
+
+        exc = RuntimeError("Tesseract not found on PATH")
+        assert _classify_error(exc) == ConversionErrorCode.OCR_UNAVAILABLE
+
+    def test_tesseract_not_installed_maps_to_ocr_unavailable(self):
+        """Exception mentioning tesseract and not installed maps to OCR_UNAVAILABLE."""
+        from deerflow.utils.file_conversion import _classify_error
+
+        exc = RuntimeError("tesseract is not installed")
+        assert _classify_error(exc) == ConversionErrorCode.OCR_UNAVAILABLE
+
+
+class TestResolvedPdfConverterOcr:
+    """Tests for ResolvedPdfConverter with OCR fields."""
+
+    def test_ocr_fields_present_in_auto_mode(self):
+        """When configured=auto, OCR fields are present with defaults."""
+        from deerflow.utils.file_conversion import resolve_pdf_converter
+
+        cfg = MagicMock()
+        cfg.uploads = {"pdf_converter": "auto"}
+
+        with (
+            patch("deerflow.utils.file_conversion.get_app_config", return_value=cfg),
+            patch("deerflow.utils.file_conversion._is_pymupdf4llm_available", return_value=True),
+            patch("deerflow.utils.file_conversion._is_markitdown_available", return_value=True),
+        ):
+            snapshot = resolve_pdf_converter()
+
+        assert snapshot.ocr_available is False
+        assert snapshot.ocr_languages is None
+        assert snapshot.ocr_max_pages == 50
+        assert snapshot.ocr_timeout_seconds == 300
+
+    def test_ocr_probed_when_auto_with_ocr(self):
+        """When configured=auto-with-ocr, OCR is probed."""
+        from deerflow.utils.file_conversion import resolve_pdf_converter
+
+        cfg = MagicMock()
+        cfg.uploads = {
+            "pdf_converter": "auto-with-ocr",
+            "ocr_languages": "eng+chi_sim",
+            "ocr_max_pages": 30,
+            "ocr_timeout_seconds": 120,
+        }
+
+        with (
+            patch("deerflow.utils.file_conversion.get_app_config", return_value=cfg),
+            patch("deerflow.utils.file_conversion._is_pymupdf4llm_available", return_value=True),
+            patch("deerflow.utils.file_conversion._is_markitdown_available", return_value=True),
+            patch("deerflow.utils.file_conversion._is_tesseract_available", return_value=True),
+        ):
+            snapshot = resolve_pdf_converter()
+
+        assert snapshot.ocr_available is True
+        assert snapshot.ocr_languages == "eng+chi_sim"
+        assert snapshot.ocr_max_pages == 30
+        assert snapshot.ocr_timeout_seconds == 120
+
+    def test_ocr_unavailable_generates_warning(self):
+        """When auto-with-ocr but Tesseract missing, warning includes install instructions."""
+        from deerflow.utils.file_conversion import resolve_pdf_converter
+
+        cfg = MagicMock()
+        cfg.uploads = {"pdf_converter": "auto-with-ocr"}
+
+        with (
+            patch("deerflow.utils.file_conversion.get_app_config", return_value=cfg),
+            patch("deerflow.utils.file_conversion._is_pymupdf4llm_available", return_value=True),
+            patch("deerflow.utils.file_conversion._is_markitdown_available", return_value=True),
+            patch("deerflow.utils.file_conversion._is_tesseract_available", return_value=False),
+        ):
+            snapshot = resolve_pdf_converter()
+
+        assert snapshot.ocr_available is False
+        assert "tesseract" in snapshot.warning.lower()
 
 
 # ---------------------------------------------------------------------------

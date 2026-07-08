@@ -16,6 +16,7 @@ export type ConversionErrorCode =
   | "ENCRYPTED_PDF"
   | "UNSUPPORTED_FORMAT"
   | "MARKITDOWN_UNAVAILABLE"
+  | "OCR_UNAVAILABLE"
   | "INTERNAL_ERROR";
 
 export interface ConversionErrorBody {
@@ -47,6 +48,8 @@ const TOAST_TEXT_EN: Record<ConversionErrorCode, string> = {
     "This file type is not supported. Convert to PDF / DOCX / XLSX / PPTX first.",
   MARKITDOWN_UNAVAILABLE:
     "The server's MarkItDown converter is not installed. Ask your administrator to install `markitdown`.",
+  OCR_UNAVAILABLE:
+    "OCR engine not installed on server. Ask your administrator to install Tesseract (tesseract-ocr).",
   INTERNAL_ERROR:
     "We could not convert this document. Try a different file, or contact support if it keeps failing.",
 };
@@ -59,6 +62,8 @@ const TOAST_TEXT_ZH: Record<ConversionErrorCode, string> = {
     "暂不支持此文件类型,请先转为 PDF / DOCX / XLSX / PPTX 后再上传。",
   MARKITDOWN_UNAVAILABLE:
     "服务器未安装 MarkItDown 转换器,请联系管理员安装 `markitdown`。",
+  OCR_UNAVAILABLE:
+    "服务器未安装 OCR 引擎,请联系管理员安装 Tesseract (tesseract-ocr)。",
   INTERNAL_ERROR: "文档转换失败,请换个文件再试,或联系管理员。",
 };
 

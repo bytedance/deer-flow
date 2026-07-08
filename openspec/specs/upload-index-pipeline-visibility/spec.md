@@ -47,7 +47,7 @@ The system SHALL aggregate per-document indexing status into knowledge-base-leve
 - **THEN** the response SHALL include per-status document counts, last index timestamp, and recent failure entries
 
 ### Requirement: Failure classification in pipeline visibility
-The system SHALL classify index failures displayed in the pipeline view by standardized error categories.
+The system SHALL classify index failures displayed in the pipeline view by standardized error categories, including OCR-specific errors.
 
 #### Scenario: Failed document shows classified error type
 - **WHEN** a document's index_status is "failed"
@@ -55,7 +55,11 @@ The system SHALL classify index failures displayed in the pipeline view by stand
 
 #### Scenario: KB detail groups failures by type
 - **WHEN** a knowledge base has multiple failed documents
-- **THEN** the index stats SHALL group failures by category (e.g., "EMPTY_RESULT: 3, ENCRYPTED_PDF: 1")
+- **THEN** the index stats SHALL group failures by category (e.g., "EMPTY_RESULT: 3, ENCRYPTED_PDF: 1, OCR_UNAVAILABLE: 2")
+
+#### Scenario: OCR_UNAVAILABLE is distinguished from EMPTY_RESULT
+- **WHEN** a document fails with `OCR_UNAVAILABLE`
+- **THEN** the UI SHALL display a distinct message about server OCR misconfiguration, not the image-based/scanned document message
 
 ### Requirement: Large file upload timeout resilience
 The system SHALL support file uploads up to 20 MB without gateway timeout errors under typical network conditions.
@@ -67,3 +71,18 @@ The system SHALL support file uploads up to 20 MB without gateway timeout errors
 #### Scenario: Upload timeout is consistent with other long-running endpoints
 - **WHEN** configuring the reverse proxy for any upload endpoint
 - **THEN** the proxy timeout settings SHALL match the existing 600-second timeout used for streaming and LangGraph endpoints
+
+### Requirement: OCR availability visible in admin converter status
+The system SHALL report OCR availability and configuration in the admin converter status endpoint.
+
+#### Scenario: Admin checks converter status with OCR available
+- **WHEN** an admin queries `resolve_pdf_converter()`
+- **AND** pdf_converter is `"auto-with-ocr"`
+- **AND** Tesseract is installed and accessible
+- **THEN** the response SHALL include `ocr_available: true`, `ocr_languages: "<configured>"`, `ocr_max_pages: <configured>`, and `ocr_timeout_seconds: <configured>`
+
+#### Scenario: Admin checks converter status with OCR unavailable
+- **WHEN** an admin queries `resolve_pdf_converter()`
+- **AND** pdf_converter is `"auto-with-ocr"`
+- **AND** Tesseract is not installed
+- **THEN** the response SHALL include `ocr_available: false` and a warning message with Tesseract installation instructions

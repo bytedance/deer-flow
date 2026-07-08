@@ -71,6 +71,36 @@ make setup-sandbox
 
 If you skip this step, the image will be automatically pulled on first agent execution, which may take several minutes depending on your network speed.
 
+## OCR Setup (Optional)
+
+To enable OCR-based text extraction for scanned/image-based PDFs, install Tesseract and configure `pdf_converter`:
+
+1. **Install Tesseract system package**:
+   ```bash
+   # Debian/Ubuntu
+   apt install tesseract-ocr tesseract-ocr-eng tesseract-ocr-chi-sim
+
+   # macOS
+   brew install tesseract tesseract-lang
+
+   # Windows
+   # Download from https://github.com/UB-Mannheim/tesseract/wiki
+   ```
+
+2. **Enable OCR in config.yaml**:
+   ```yaml
+   uploads:
+     pdf_converter: auto-with-ocr
+     ocr_languages: eng+chi_sim
+     ocr_max_pages: 50
+     ocr_timeout_seconds: 300
+   ```
+
+3. **Verify OCR availability**:
+   The admin endpoint `resolve_pdf_converter()` reports `ocr_available: true` when Tesseract is detected at startup. Check the Gateway startup log for `pdf_converter status: ... ocr=True`.
+
+OCR is opt-in — the default `pdf_converter: auto` does not use OCR. Only `auto-with-ocr` triggers the OCR fallback path.
+
 ## Troubleshooting
 
 ### Config file not found

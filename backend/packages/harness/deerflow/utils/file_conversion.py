@@ -27,6 +27,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import shutil
+import time
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -60,6 +62,14 @@ class ConversionErrorCode(StrEnum):
     # Anything else that escaped the converter — corrupt file, bad encoding,
     # OS-level read error. The detail string carries the original message.
     INTERNAL_ERROR = "INTERNAL_ERROR"
+    # Tesseract OCR is configured (pdf_converter=auto-with-ocr) but the
+    # tesseract binary or required language packs are not installed on the host.
+    OCR_UNAVAILABLE = "OCR_UNAVAILABLE"
+
+
+class _TesseractNotFoundError(Exception):
+    """Raised when Tesseract is not installed but OCR was requested via auto-with-ocr mode."""
+    pass
 
 
 @dataclass(frozen=True)
@@ -108,6 +118,8 @@ def _classify_error(exc: BaseException) -> ConversionErrorCode:
         return ConversionErrorCode.ENCRYPTED_PDF
     if "markitdown" in msg and "no module" in msg:
         return ConversionErrorCode.MARKITDOWN_UNAVAILABLE
+    if "tesseract" in msg:
+        return ConversionErrorCode.OCR_UNAVAILABLE
     return ConversionErrorCode.INTERNAL_ERROR
 
 # File extensions that should be converted to markdown
@@ -195,17 +207,139 @@ def _convert_with_markitdown(file_path: Path) -> str:
     return md.convert(str(file_path)).text_content
 
 
+# ---------------------------------------------------------------------------
+# OCR fallback (PyMuPDF + Tesseract)
+# ---------------------------------------------------------------------------
+
+_tesseract_available_cache: bool | None = None
+
+
+def _is_tesseract_available() -> bool:
+    """Check whether Tesseract OCR is available via PyMuPDF.
+
+    Uses a two-tier probe (cached at module level):
+    1. Fast path: ``shutil.which("tesseract")`` checks the binary is on PATH.
+    2. Smoke test: OCR a minimal 1-page in-memory PDF to confirm the binary
+       and the English language pack are functional.
+    """
+    global _tesseract_available_cache
+    if _tesseract_available_cache is not None:
+        return _tesseract_available_cache
+
+    if not shutil.which("tesseract"):
+        _tesseract_available_cache = False
+        return False
+
+    try:
+        import pymupdf
+
+        doc = pymupdf.open()
+        page = doc.new_page(width=100, height=100)
+        page.insert_textbox(pymupdf.Rect(10, 10, 90, 90), "Test", fontsize=10)
+        pdf_bytes = doc.tobytes()
+        doc.close()
+
+        doc2 = pymupdf.open("pdf", pdf_bytes)
+        page2 = doc2[0]
+        tp = page2.get_textpage_ocr(language="eng")
+        text = page2.get_text(textpage=tp)
+        doc2.close()
+        _tesseract_available_cache = len(text.strip()) > 0
+    except Exception:
+        _tesseract_available_cache = False
+
+    return _tesseract_available_cache
+
+
+def _convert_pdf_with_ocr(
+    file_path: Path,
+    languages: str,
+    max_pages: int,
+    timeout_seconds: int,
+) -> str | None:
+    """Extract text from a PDF via PyMuPDF + Tesseract OCR.
+
+    Args:
+        file_path: Path to the PDF file.
+        languages: Tesseract language string (e.g. ``"eng+chi_sim"``).
+        max_pages: Maximum number of pages to OCR.
+        timeout_seconds: Wall-clock time budget; returns partial text if exceeded.
+
+    Returns:
+        Extracted text, ``None`` if PyMuPDF is not installed or all pages failed,
+        or raises :class:`_TesseractNotFoundError` if Tesseract is unavailable.
+    """
+    try:
+        import pymupdf
+    except ImportError:
+        return None
+
+    if not _is_tesseract_available():
+        raise _TesseractNotFoundError(
+            "Tesseract OCR is not installed or language packs are missing. "
+            "Install with: apt install tesseract-ocr tesseract-ocr-eng tesseract-ocr-chi-sim"
+        )
+
+    text_parts: list[str] = []
+    start = time.monotonic()
+    pages_processed = 0
+
+    try:
+        doc = pymupdf.open(str(file_path))
+        total_pages = len(doc)
+    except Exception:
+        logger.exception("Failed to open %s for OCR", file_path.name)
+        return None
+
+    try:
+        for page_num, page in enumerate(doc):
+            if page_num >= max_pages:
+                logger.warning(
+                    "OCR truncated: %d/%d pages processed (limit=%d)",
+                    pages_processed, total_pages, max_pages,
+                )
+                break
+            if time.monotonic() - start > timeout_seconds:
+                logger.warning(
+                    "OCR truncated: %d/%d pages processed (limit=%ds timeout)",
+                    pages_processed, total_pages, timeout_seconds,
+                )
+                break
+
+            try:
+                tp = page.get_textpage_ocr(language=languages)
+                page_text = page.get_text(textpage=tp)
+                text_parts.append(page_text)
+                pages_processed += 1
+            except Exception:
+                logger.warning(
+                    "OCR failed on page %d of %s; skipping",
+                    page_num + 1, file_path.name,
+                )
+                continue
+    finally:
+        try:
+            doc.close()
+        except Exception:
+            pass
+
+    if pages_processed == 0:
+        return None
+
+    return "\n".join(text_parts)
+
+
 def _do_convert(file_path: Path, pdf_converter: str) -> str:
     """Synchronous conversion — called directly or via asyncio.to_thread.
 
     Args:
         file_path: Path to the file.
-        pdf_converter: "auto" | "pymupdf4llm" | "markitdown"
+        pdf_converter: "auto" | "pymupdf4llm" | "markitdown" | "auto-with-ocr"
     """
     is_pdf = file_path.suffix.lower() == ".pdf"
 
     if is_pdf and pdf_converter != "markitdown":
-        # Try pymupdf4llm first (auto or explicit)
+        # Try pymupdf4llm first (auto / auto-with-ocr / explicit)
         pymupdf_text = _convert_pdf_with_pymupdf4llm(file_path)
 
         if pymupdf_text is not None:
@@ -213,17 +347,34 @@ def _do_convert(file_path: Path, pdf_converter: str) -> str:
             if pdf_converter == "pymupdf4llm":
                 # Explicit — use as-is regardless of output length
                 return pymupdf_text
-            # auto mode: fall back if output looks like a failed parse.
-            # Use chars-per-page to distinguish image-based PDFs (near 0) from
-            # legitimately short documents.
+            # auto / auto-with-ocr mode: fall back if output looks like a failed parse
             if not _pymupdf_output_too_sparse(pymupdf_text, file_path):
                 return pymupdf_text
             logger.warning(
-                "pymupdf4llm produced only %d chars for %s (likely image-based PDF); falling back to MarkItDown",
+                "pymupdf4llm produced only %d chars for %s (likely image-based PDF); falling back",
                 len(pymupdf_text.strip()),
                 file_path.name,
             )
-        # pymupdf4llm not installed or fallback triggered → use MarkItDown
+            # Sparse output — route based on mode
+            if pdf_converter == "auto-with-ocr":
+                ocr_languages = str(_get_uploads_config_value("ocr_languages", "eng+chi_sim"))
+                ocr_max_pages = int(_get_uploads_config_value("ocr_max_pages", 50))
+                ocr_timeout = int(_get_uploads_config_value("ocr_timeout_seconds", 300))
+                ocr_text = _convert_pdf_with_ocr(file_path, ocr_languages, ocr_max_pages, ocr_timeout)
+                if ocr_text is not None:
+                    return ocr_text
+                return ""  # OCR produced nothing → caller emits EMPTY_RESULT
+            # auto mode: fall through to MarkItDown
+        elif pdf_converter == "auto-with-ocr":
+            # pymupdf4llm not installed — attempt OCR directly
+            ocr_languages = str(_get_uploads_config_value("ocr_languages", "eng+chi_sim"))
+            ocr_max_pages = int(_get_uploads_config_value("ocr_max_pages", 50))
+            ocr_timeout = int(_get_uploads_config_value("ocr_timeout_seconds", 300))
+            ocr_text = _convert_pdf_with_ocr(file_path, ocr_languages, ocr_max_pages, ocr_timeout)
+            if ocr_text is not None:
+                return ocr_text
+            # OCR failed — fall through to MarkItDown (edge case per design)
+        # pymupdf4llm not installed, auto mode → use MarkItDown
 
     return _convert_with_markitdown(file_path)
 
@@ -322,7 +473,7 @@ _SPLIT_BOLD_HEADING_RE = re.compile(r"^\*\*[\dA-Z][\d\.]*\*\*\s+\*\*(?!\d[\d\s.,
 # Keeps prompt size bounded even for very long documents.
 MAX_OUTLINE_ENTRIES = 50
 
-_ALLOWED_PDF_CONVERTERS = {"auto", "pymupdf4llm", "markitdown"}
+_ALLOWED_PDF_CONVERTERS = {"auto", "pymupdf4llm", "markitdown", "auto-with-ocr"}
 
 
 def _clean_bold_title(raw: str) -> str:
@@ -462,12 +613,18 @@ class ResolvedPdfConverter:
     "why are my PDF uploads failing?" without grepping logs:
 
     * ``configured`` — what config.yaml asked for ("auto" / "pymupdf4llm" /
-      "markitdown"). Survives lowercasing + allowlist validation.
+      "markitdown" / "auto-with-ocr"). Survives lowercasing + allowlist validation.
     * ``effective`` — the converter the runtime will actually attempt
       first. Differs from ``configured`` when the requested backend is
       missing on the host (auto with no pymupdf4llm → "markitdown").
     * ``pymupdf4llm_available`` / ``markitdown_available`` — pip install
       probes. Both False is the "no PDFs work" misconfig.
+    * ``ocr_available`` — whether Tesseract is installed and functional.
+      Only probed when configured mode includes OCR.
+    * ``ocr_languages`` — configured Tesseract language string (or None if
+      OCR is not configured).
+    * ``ocr_max_pages`` / ``ocr_timeout_seconds`` — configured OCR resource
+      limits.
     * ``warning`` — short English string the admin endpoint surfaces
       when the configuration is broken (e.g. configured=pymupdf4llm but
       the package is missing). Empty when everything is fine.
@@ -477,6 +634,10 @@ class ResolvedPdfConverter:
     effective: str
     pymupdf4llm_available: bool
     markitdown_available: bool
+    ocr_available: bool = False
+    ocr_languages: str | None = None
+    ocr_max_pages: int = 50
+    ocr_timeout_seconds: int = 300
     warning: str = ""
 
 
@@ -498,6 +659,17 @@ def resolve_pdf_converter() -> ResolvedPdfConverter:
     configured = _get_pdf_converter()
     has_pymupdf = _is_pymupdf4llm_available()
     has_markitdown = _is_markitdown_available()
+
+    # Probe OCR only when the configured mode includes it
+    ocr_available = False
+    ocr_languages: str | None = None
+    ocr_max_pages = 50
+    ocr_timeout_seconds = 300
+    if "ocr" in configured:
+        ocr_languages = str(_get_uploads_config_value("ocr_languages", "eng+chi_sim"))
+        ocr_max_pages = int(_get_uploads_config_value("ocr_max_pages", 50))
+        ocr_timeout_seconds = int(_get_uploads_config_value("ocr_timeout_seconds", 300))
+        ocr_available = _is_tesseract_available()
 
     warning = ""
     if configured == "pymupdf4llm":
@@ -524,6 +696,24 @@ def resolve_pdf_converter() -> ResolvedPdfConverter:
                 "pdf_converter=markitdown but markitdown is not installed; "
                 "PDF uploads will fail. Install with: uv add markitdown"
             )
+    elif configured == "auto-with-ocr":
+        if has_pymupdf:
+            effective = "pymupdf4llm"
+        elif has_markitdown:
+            effective = "markitdown"
+        else:
+            effective = "none"
+            warning = (
+                "pdf_converter=auto-with-ocr but neither pymupdf4llm nor "
+                "markitdown is installed; PDF uploads will fail."
+            )
+        if not ocr_available:
+            ocr_warning = (
+                "pdf_converter=auto-with-ocr but Tesseract is not installed; "
+                "OCR will be unavailable. Install with: apt install tesseract-ocr "
+                "tesseract-ocr-eng tesseract-ocr-chi-sim"
+            )
+            warning = f"{warning}; {ocr_warning}" if warning else ocr_warning
     else:  # auto
         if has_pymupdf:
             effective = "pymupdf4llm"
@@ -541,6 +731,10 @@ def resolve_pdf_converter() -> ResolvedPdfConverter:
         effective=effective,
         pymupdf4llm_available=has_pymupdf,
         markitdown_available=has_markitdown,
+        ocr_available=ocr_available,
+        ocr_languages=ocr_languages,
+        ocr_max_pages=ocr_max_pages,
+        ocr_timeout_seconds=ocr_timeout_seconds,
         warning=warning,
     )
 
@@ -556,20 +750,22 @@ def log_pdf_converter_status() -> ResolvedPdfConverter:
     if snapshot.warning:
         logger.warning(
             "pdf_converter status: configured=%s effective=%s pymupdf4llm=%s "
-            "markitdown=%s — %s",
+            "markitdown=%s ocr=%s — %s",
             snapshot.configured,
             snapshot.effective,
             snapshot.pymupdf4llm_available,
             snapshot.markitdown_available,
+            snapshot.ocr_available,
             snapshot.warning,
         )
     else:
         logger.info(
             "pdf_converter status: configured=%s effective=%s pymupdf4llm=%s "
-            "markitdown=%s",
+            "markitdown=%s ocr=%s",
             snapshot.configured,
             snapshot.effective,
             snapshot.pymupdf4llm_available,
             snapshot.markitdown_available,
+            snapshot.ocr_available,
         )
     return snapshot

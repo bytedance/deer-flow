@@ -113,7 +113,10 @@ tools:
 tool_search:
   enabled: false
 uploads:
-  pdf_converter: auto
+  pdf_converter: auto-with-ocr
+  ocr_languages: eng+chi_sim
+  ocr_max_pages: 50
+  ocr_timeout_seconds: 300
   max_files: 10
   max_file_size: 52428800
   max_total_size: 104857600

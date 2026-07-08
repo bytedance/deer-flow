@@ -574,7 +574,19 @@ uploads:
   # pymupdf4llm — always use pymupdf4llm (must be installed: uv add pymupdf4llm).
   #               Better heading/table extraction; faster on most files.
   # markitdown  — always use MarkItDown (original behaviour, no extra dependency).
+  # auto-with-ocr — like auto, but when pymupdf4llm output is sparse, skip
+  #               MarkItDown and go directly to PyMuPDF + Tesseract OCR. Requires
+  #               tesseract-ocr system package and language packs.
   pdf_converter: auto
+  # OCR settings — only used when pdf_converter includes "ocr" (e.g. auto-with-ocr).
+  # Tesseract language string. Install matching packs, e.g.:
+  #   apt install tesseract-ocr-eng tesseract-ocr-chi-sim
+  ocr_languages: eng+chi_sim
+  # Maximum pages to OCR per document. Pages beyond this are skipped.
+  ocr_max_pages: 50
+  # Wall-clock time budget in seconds for OCR processing. Returns partial text
+  # if exceeded (any completed pages are kept).
+  ocr_timeout_seconds: 300
 
 sandbox:
   use: deerflow.sandbox.local:LocalSandboxProvider
@@ -940,6 +952,22 @@ insights:
   cluster_threshold: 5                       # Negative feedback cluster threshold (count per hour)
   low_confidence_threshold: 0.3              # Suppress suggestions below this confidence
   # improvement_model_name: null             # Model for LLM-based suggestion generation (null = default)
+
+# ============================================================================
+# Scheduled Jobs Engine
+# ============================================================================
+# Periodic execution engine for scheduled report templates.
+# Polls the ``scheduled_jobs`` table at a configurable interval, acquires a
+# distributed lock (PostgreSQL advisory lock or SQLite lock table), and
+# dispatches due jobs with random jitter to spread load.
+#
+# Missed-execution grace window: if the engine is down when a job is due,
+# jobs whose ``next_run_at`` falls within ``missed_grace_minutes`` of now
+# are still executed once. Older jobs are marked ``missed``.
+scheduled_jobs:
+  poll_interval_seconds: 30                  # How often to check for due jobs
+  max_jitter_seconds: 30                     # Random delay (0 to this) before each execution
+  missed_grace_minutes: 30                   # Grace window for catching up missed runs
 
 # ============================================================================
 # RAG Configuration (Embedding + Vector Store)

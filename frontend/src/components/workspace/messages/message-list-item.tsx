@@ -43,6 +43,7 @@ import {
   stripDeepLinkParams,
   stripUploadedFilesTag,
   type FileInMessage,
+  type RetrievalSource,
 } from "@/core/messages/utils";
 import { useRehypeSplitWordsIntoSpans } from "@/core/rehype";
 import { humanMessagePlugins } from "@/core/streamdown";
@@ -144,6 +145,7 @@ export function MessageListItem({
   runId,
   threadId,
   showCopyButton = true,
+  sources,
 }: {
   className?: string;
   message: Message;
@@ -152,6 +154,7 @@ export function MessageListItem({
   feedback?: FeedbackData | null;
   runId?: string;
   showCopyButton?: boolean;
+  sources?: RetrievalSource[] | null;
 }) {
   const isHuman = message.type === "human";
   return (
@@ -164,6 +167,7 @@ export function MessageListItem({
         message={message}
         isLoading={isLoading}
         threadId={threadId}
+        sources={sources}
       />
       {!isLoading && showCopyButton && (
         <MessageToolbar
@@ -183,7 +187,11 @@ export function MessageListItem({
               }
             />
             {!isHuman && runId && (
-              <FeedbackButtons threadId={threadId} runId={runId} initialFeedback={feedback ?? null} />
+              <FeedbackButtons
+                threadId={threadId}
+                runId={runId}
+                initialFeedback={feedback ?? null}
+              />
             )}
           </div>
         </MessageToolbar>
@@ -227,11 +235,13 @@ function MessageContent_({
   message,
   isLoading = false,
   threadId,
+  sources,
 }: {
   className?: string;
   message: Message;
   isLoading?: boolean;
   threadId: string;
+  sources?: RetrievalSource[] | null;
 }) {
   const rehypePlugins = useRehypeSplitWordsIntoSpans(isLoading);
   const isHuman = message.type === "human";
@@ -275,9 +285,8 @@ function MessageContent_({
 
   const contentToDisplay = useMemo(() => {
     if (isHuman) {
-      const humanContent = getHumanDisplayContent(message, rawContent);
-      return humanContent
-        ? stripDeepLinkParams(stripUploadedFilesTag(humanContent))
+      return rawContent
+        ? stripDeepLinkParams(stripUploadedFilesTag(rawContent))
         : "";
     }
     return rawContent ?? "";
@@ -348,6 +357,7 @@ function MessageContent_({
         rehypePlugins={[...rehypePlugins, [rehypeKatex, { output: "html" }]]}
         className="my-3"
         components={components}
+        sources={sources}
       />
     </AIElementMessageContent>
   );
