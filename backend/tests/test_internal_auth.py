@@ -33,3 +33,18 @@ def test_internal_auth_generates_process_local_fallback(monkeypatch):
         assert reloaded.is_valid_internal_auth_token(token) is True
     finally:
         importlib.reload(reloaded)
+
+
+def test_internal_auth_uses_overridable_internal_user_id(monkeypatch):
+    import app.gateway.internal_auth as internal_auth
+
+    monkeypatch.setenv("ZBR_DEERFLOW_INTERNAL_USER_ID", "zbr-user-42")
+    reloaded = importlib.reload(internal_auth)
+    try:
+        user = reloaded.get_internal_user()
+
+        assert user.id == "zbr-user-42"
+        assert user.system_role == "internal"
+    finally:
+        monkeypatch.delenv("ZBR_DEERFLOW_INTERNAL_USER_ID", raising=False)
+        importlib.reload(reloaded)

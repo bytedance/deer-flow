@@ -17,6 +17,15 @@ def local_echo(text: str) -> str:
     return text
 
 
+@as_tool
+def fleet_status() -> str:
+    "Read-only fleet status."
+    return "ok"
+
+
+fleet_status.name = "fleet_status"  # type: ignore[attr-defined]
+
+
 def test_is_mcp_tool_reads_metadata():
     assert is_mcp_tool(tag_mcp_tool(mcp_calc)) is True
     assert is_mcp_tool(local_echo) is False
@@ -41,6 +50,12 @@ def test_setup_builds_from_mcp_survivors():
     assert setup.tool_search_tool is not None
     assert setup.tool_search_tool.name == "tool_search"
     assert setup.catalog_hash
+
+
+def test_setup_keeps_always_active_read_tools_out_of_deferred_set():
+    setup = build_deferred_tool_setup([tag_mcp_tool(fleet_status), tag_mcp_tool(mcp_calc)], enabled=True)
+    assert "fleet_status" not in setup.deferred_names
+    assert "mcp_calc" in setup.deferred_names
 
 
 def test_tool_search_returns_command_with_hash_scoped_promotion():

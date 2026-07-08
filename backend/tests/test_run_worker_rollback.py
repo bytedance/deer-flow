@@ -15,6 +15,7 @@ from deerflow.runtime.runs.worker import (
     _build_runtime_context,
     _extract_llm_error_fallback_message,
     _install_runtime_context,
+    _zbr_target_artifact_written,
     _rollback_to_pre_run_checkpoint,
     _try_extract_from_message,
     run_agent,
@@ -672,3 +673,22 @@ def test_extract_llm_error_fallback_message_updates_mode_no_fallback():
         ]
     }
     assert _extract_llm_error_fallback_message(update_chunk) is None
+
+
+def test_zbr_target_artifact_written_detects_fresh_artifact(tmp_path, monkeypatch):
+    run_manager = RunManager()
+    record = asyncio.run(run_manager.create(
+        "thread-1",
+        metadata={
+            "zbr_finish_on_artifact": True,
+            "artifact": "/mnt/zbr-autonomy/output.md",
+        },
+    ))
+    monkeypatch.setenv("ZBR_DEERFLOW_AUTONOMY_STATE_DIR", str(tmp_path))
+    artifact_path = tmp_path / "output.md"
+    artifact_path.write_text("ready", encoding="utf-8")
+    record.created_at = "2020-01-01T00:00:00Z"
+
+    assert _zbr_target_artifact_written(record) is True
+    record.created_at = "2030-01-01T00:00:00Z"
+    assert _zbr_target_artifact_written(record) is False
