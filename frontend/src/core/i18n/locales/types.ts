@@ -98,6 +98,12 @@ export interface Translations {
     placeholder: string;
     createSkillPrompt: string;
     addAttachments: string;
+    inputPolish: string;
+    inputPolishing: string;
+    inputPolishNoChanges: string;
+    inputPolishFailed: string;
+    inputPolishUndo: string;
+    inputPolishCancel: string;
     mode: string;
     flashMode: string;
     flashModeDescription: string;

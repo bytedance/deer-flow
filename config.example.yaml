@@ -15,7 +15,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 19
+config_version: 20
 
 # ============================================================================
 # Logging
@@ -909,6 +909,20 @@ tool_output:
 
 suggestions:
   enabled: true
+
+
+# ============================================================================
+# Input Polish Configuration
+# ============================================================================
+# Configure whether the composer can rewrite draft input before sending.
+
+input_polish:
+  enabled: true
+  # Maximum draft length accepted by /api/input-polish.
+  max_chars: 4000
+  # Optional fast model for draft polishing. Leave null to use the default chat model.
+  # For best UX, set this to your lowest-latency inexpensive model.
+  model_name: null
 
 
 # ============================================================================

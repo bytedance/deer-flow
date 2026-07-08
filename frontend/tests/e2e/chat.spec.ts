@@ -25,6 +25,159 @@ test.describe("Chat workspace", () => {
     await expect(textarea).toHaveValue("Hello, DeerFlow!");
   });
 
+  test("polishes draft input before sending", async ({ page }) => {
+    let polishRequest: { text?: string; model_name?: string } | undefined;
+    let submittedText: string | undefined;
+    let finishPolish!: () => void;
+    const polishCanFinish = new Promise<void>((resolve) => {
+      finishPolish = resolve;
+    });
+
+    await page.route("**/api/input-polish", async (route) => {
+      polishRequest = route.request().postDataJSON() as {
+        text?: string;
+        model_name?: string;
+      };
+      await polishCanFinish;
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          rewritten_text: "Please summarize the uploaded report clearly.",
+          changed: true,
+        }),
+      });
+    });
+    await page.route("**/runs/stream", (route) => {
+      const body = route.request().postDataJSON() as {
+        input?: { messages?: Array<{ content?: unknown }> };
+      };
+      const content = body.input?.messages?.at(-1)?.content;
+      if (typeof content === "string") {
+        submittedText = content;
+      } else if (Array.isArray(content)) {
+        submittedText = content
+          .map((block) =>
+            typeof block === "object" &&
+            block !== null &&
+            "text" in block &&
+            typeof block.text === "string"
+              ? block.text
+              : "",
+          )
+          .join("");
+      }
+      return handleRunStream(route);
+    });
+
+    await page.goto("/workspace/chats/new");
+
+    const textarea = page.getByPlaceholder(/how can i assist you/i);
+    await expect(textarea).toBeVisible({ timeout: 15_000 });
+
+    await textarea.fill("summarize report");
+    await page.getByTestId("polish-input-button").click();
+
+    await expect
+      .poll(() => polishRequest?.text, { timeout: 10_000 })
+      .toBe("summarize report");
+    expect(polishRequest?.model_name).toBeUndefined();
+    await expect(textarea).toBeDisabled();
+    await expect(page.getByText("Polishing input...")).toBeVisible();
+
+    finishPolish();
+
+    await expect(textarea).toHaveValue(
+      "Please summarize the uploaded report clearly.",
+    );
+    await expect(textarea).toBeEnabled();
+    await expect(page.getByTestId("polish-input-button")).toHaveAccessibleName(
+      "Undo polish",
+    );
+
+    await textarea.press("Enter");
+
+    await expect
+      .poll(() => submittedText, { timeout: 10_000 })
+      .toBe("Please summarize the uploaded report clearly.");
+  });
+
+  test("undoes polished draft from the polish button", async ({ page }) => {
+    await page.route("**/api/input-polish", (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          rewritten_text: "Please summarize the uploaded report clearly.",
+          changed: true,
+        }),
+      }),
+    );
+
+    await page.goto("/workspace/chats/new");
+
+    const textarea = page.getByPlaceholder(/how can i assist you/i);
+    await expect(textarea).toBeVisible({ timeout: 15_000 });
+
+    await textarea.fill("summarize report");
+    await page.getByTestId("polish-input-button").click();
+
+    await expect(textarea).toHaveValue(
+      "Please summarize the uploaded report clearly.",
+    );
+
+    const polishButton = page.getByTestId("polish-input-button");
+    await expect(polishButton).toHaveAccessibleName("Undo polish");
+    await polishButton.click();
+
+    await expect(textarea).toHaveValue("summarize report");
+    await expect(polishButton).toHaveAccessibleName("Polish input");
+  });
+
+  test("cancels an in-flight polish request", async ({ page }) => {
+    // Hold the polish response open so the request stays in flight while we
+    // exercise the cancel affordance.
+    let releasePolish!: () => void;
+    const polishHeld = new Promise<void>((resolve) => {
+      releasePolish = resolve;
+    });
+    await page.route("**/api/input-polish", async (route) => {
+      await polishHeld;
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          rewritten_text: "Please summarize the uploaded report clearly.",
+          changed: true,
+        }),
+      });
+    });
+
+    await page.goto("/workspace/chats/new");
+
+    const textarea = page.getByPlaceholder(/how can i assist you/i);
+    await expect(textarea).toBeVisible({ timeout: 15_000 });
+
+    await textarea.fill("summarize report");
+    await page.getByTestId("polish-input-button").click();
+
+    await expect(page.getByText("Polishing input...")).toBeVisible();
+    await expect(textarea).toBeDisabled();
+
+    await page.getByTestId("cancel-polish-input-button").click();
+
+    // Cancelling aborts the request, re-enables the composer, and leaves the
+    // original draft untouched (no rewrite applied).
+    await expect(page.getByText("Polishing input...")).toBeHidden();
+    await expect(textarea).toBeEnabled();
+    await expect(textarea).toHaveValue("summarize report");
+    await expect(page.getByTestId("polish-input-button")).toHaveAccessibleName(
+      "Polish input",
+    );
+
+    releasePolish();
+  });
+
   test("suggests matching skills after a leading slash", async ({ page }) => {
     await page.goto("/workspace/chats/new");
 
