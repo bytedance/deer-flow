@@ -1,0 +1,10 @@
+{
+  "logic": "and",
+  "conditions": [
+    {
+      "name": "author",
+      "comparison_operator": "=",
+      "value": "InfiniFlow"
+    }
+  ]
+}

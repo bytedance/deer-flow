@@ -1,0 +1,11 @@
+{
+  "method": "manual",
+  "logic": "and",
+  "manual": [
+    {
+      "key": "author",
+      "op": "=",
+      "value": "InfiniFlow"
+    }
+  ]
+}

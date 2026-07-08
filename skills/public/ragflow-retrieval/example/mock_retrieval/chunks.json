@@ -1,0 +1,42 @@
+{
+  "datasets": [
+    {
+      "id": "kb-demo-001",
+      "name": "demo_knowledge_base",
+      "description": "Mock dataset for ragflow-retrieval skill"
+    }
+  ],
+  "labels": ["policy", "faq"],
+  "chunks": [
+    {
+      "id": "chunk-001",
+      "content": "RAGFlow supports metadata filtering during retrieval. You can filter documents by author, department, or custom fields before vector search.",
+      "document_id": "doc-001",
+      "document_keyword": "ragflow_guide.txt",
+      "kb_id": "kb-demo-001",
+      "similarity": 0.86,
+      "vector_similarity": 0.82,
+      "term_similarity": 0.91,
+      "meta_fields": {
+        "author": "InfiniFlow",
+        "department": "engineering",
+        "year": "2025"
+      }
+    },
+    {
+      "id": "chunk-002",
+      "content": "Manual metadata filters use key/op/value tuples. Auto mode lets the LLM infer filters from the question.",
+      "document_id": "doc-002",
+      "document_keyword": "metadata_filter.md",
+      "kb_id": "kb-demo-001",
+      "similarity": 0.79,
+      "vector_similarity": 0.75,
+      "term_similarity": 0.84,
+      "meta_fields": {
+        "author": "QA Team",
+        "department": "support",
+        "year": "2025"
+      }
+    }
+  ]
+}

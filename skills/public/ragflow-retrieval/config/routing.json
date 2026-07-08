@@ -1,0 +1,102 @@
+{
+  "version": 1,
+  "defaults": {
+    "filter_mode": "search",
+    "filters_dir": "config/filters",
+    "department_metadata_field": "department",
+    "department_top_k": 3,
+    "department_min_score": 1,
+    "rerank_enabled": true,
+    "rerank_id": "auto",
+    "recall_top_k": 64,
+    "page_size": 10,
+    "max_citations": 10,
+    "similarity_threshold": 0.2
+  },
+  "routes": [
+    {
+      "intent": "信贷",
+      "label": "信贷知识库",
+      "dataset_id": "",
+      "dataset_name": "信贷",
+      "filter_mode": "search",
+      "department_filter_enabled": true,
+      "department_top_k": 3,
+      "department_metadata_field": "department",
+      "metadata_condition": "信贷.metadata_condition.json",
+      "meta_data_filter": "信贷.meta_data_filter.json",
+      "description": "贷款、授信、利率、还款、抵押、担保、信用卡、普惠贷款、征信、逾期、贷后管理等信贷业务问题",
+      "keywords": [
+        "贷款", "信贷", "授信", "利率", "还款", "抵押", "担保", "信用卡",
+        "借款", "逾期", "征信", "贷后", "放款", "提款", "结清", "展期",
+        "LPR", "房贷", "车贷", "消费贷", "经营贷", "普惠"
+      ],
+      "departments": [
+        {
+          "id": "安全保卫部",
+          "label": "安全保卫部",
+          "metadata_value": "安全保卫部"
+        },
+        {
+          "id": "办公室",
+          "label": "办公室",
+          "metadata_value": "办公室"
+        },
+        {
+          "id": "电子银行部",
+          "label": "电子银行部",
+          "metadata_value": "电子银行部"
+        },
+        {
+          "id": "督查室",
+          "label": "督查室",
+          "metadata_value": "督查室"
+        }
+      ]
+    },
+    {
+      "intent": "制度",
+      "label": "制度知识库",
+      "dataset_id": "",
+      "dataset_name": "制度",
+      "filter_mode": "search",
+      "department_filter_enabled": true,
+      "department_top_k": 3,
+      "department_metadata_field": "department",
+      "metadata_condition": "制度.metadata_condition.json",
+      "meta_data_filter": "制度.meta_data_filter.json",
+      "description": "规章制度、管理办法、内控合规、审批流程、权限矩阵、人事考勤、行政制度等非信贷业务制度问题",
+      "keywords": [
+        "制度", "规章", "办法", "规定", "细则", "内控", "合规", "流程",
+        "审批", "权限", "人事", "考勤", "休假", "报销", "采购", "印章",
+        "保密", "问责", "处分", "履职"
+      ],
+      "departments": [
+        {
+          "id": "安全保卫部",
+          "label": "安全保卫部",
+          "metadata_value": "安全保卫部"
+        },
+        {
+          "id": "办公室",
+          "label": "办公室",
+          "metadata_value": "办公室"
+        },
+        {
+          "id": "电子银行部",
+          "label": "电子银行部",
+          "metadata_value": "电子银行部"
+        },
+        {
+          "id": "督查室",
+          "label": "督查室",
+          "metadata_value": "督查室"
+        }
+      ]
+    }
+  ],
+  "fallback": {
+    "action": "ask_user",
+    "message": "无法判断应检索「信贷」还是「制度」知识库，请用户说明问题属于哪类业务。"
+  }
+}
