@@ -1,5 +1,9 @@
 from .features import Next, Prev, RuntimeFeatures
 
+from monocle_apptrace import setup_monocle_telemetry
+
+setup_monocle_telemetry(workflow_name="deer-flow", monocle_exporters_list="file")
+
 __all__ = [
     "create_deerflow_agent",
     "RuntimeFeatures",
