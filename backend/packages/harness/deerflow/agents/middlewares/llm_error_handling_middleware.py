@@ -354,6 +354,13 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
                 )
                 if retriable:
                     self._record_failure()
+                else:
+                    # A non-retriable error consumed the half-open probe without
+                    # recording a failure; release the probe so the circuit can
+                    # admit the next probe instead of fast-failing forever.
+                    with self._circuit_lock:
+                        if self._circuit_state == "half_open":
+                            self._circuit_probe_in_flight = False
                 return self._build_user_fallback_message(exc, reason)
 
     @override
@@ -406,6 +413,13 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
                 )
                 if retriable:
                     self._record_failure()
+                else:
+                    # A non-retriable error consumed the half-open probe without
+                    # recording a failure; release the probe so the circuit can
+                    # admit the next probe instead of fast-failing forever.
+                    with self._circuit_lock:
+                        if self._circuit_state == "half_open":
+                            self._circuit_probe_in_flight = False
                 return self._build_user_fallback_message(exc, reason)
 
 
