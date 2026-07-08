@@ -1,0 +1,23 @@
+# =============================================================================
+# echart-skill Core Dependencies
+# =============================================================================
+# These are required for all basic functionality:
+#   data import/export, SQL queries, chart generation, dashboard, local server.
+# Install:  pip install -r requirements-core.txt
+# =============================================================================
+
+# --- Data engine & processing ---
+pandas
+openpyxl
+duckdb
+
+# --- Logging & structured data ---
+structlog>=25.5.0
+pydantic>=2.12.0
+
+# --- Async HTTP & retry (Baidu geocoding in chart_generator) ---
+httpx==0.28.1
+tenacity==9.1.4
+
+# --- Fuzzy matching (data_merger for semantic joins) ---
+thefuzz

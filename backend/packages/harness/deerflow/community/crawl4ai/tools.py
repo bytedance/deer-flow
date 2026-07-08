@@ -2,6 +2,7 @@ import logging
 
 from langchain.tools import tool
 
+from deerflow.community.url_safety import validate_public_http_url
 from deerflow.config import get_app_config
 
 from .crawl4ai_client import Crawl4AiClient
@@ -40,6 +41,18 @@ def _coerce_timeout(value: object, default: int) -> float:
         except ValueError:
             logger.warning("Crawl4AI web_fetch: invalid timeout %r in config; using %ss", value, default)
     return float(default)
+
+
+def _coerce_bool(value: object, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+    return default
 
 
 def _coerce_filter(value: object) -> str:
@@ -86,6 +99,10 @@ async def web_fetch_tool(url: str) -> str:
     """
     try:
         cfg = _get_tool_config("web_fetch")  # read config once; pass the values down
+        allow_private_addresses = _coerce_bool(cfg.get("allow_private_addresses") if cfg is not None else None, False)
+        url_error = validate_public_http_url(url, allow_private_addresses=allow_private_addresses)
+        if url_error:
+            return url_error
         filter_mode = _coerce_filter(cfg.get("filter") if cfg is not None else None)
         client = _build_client(cfg)
         markdown = await client.fetch_markdown(url, filter_mode=filter_mode)

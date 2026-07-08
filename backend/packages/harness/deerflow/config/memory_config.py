@@ -98,6 +98,40 @@ class MemoryConfig(BaseModel):
             "safety-truncation ceiling is raised accordingly."
         ),
     )
+    # ── Staleness review ────────────────────────────────────────────────
+    staleness_review_enabled: bool = Field(
+        default=True,
+        description=(
+            "Enable staleness review for aged facts. When enabled, facts older "
+            "than ``staleness_age_days`` are surfaced in the memory-update prompt "
+            "so the LLM can semantically judge whether each is still valid or "
+            "should be removed. This solves the 'silent staleness' problem where "
+            "outdated facts persist because no future conversation explicitly "
+            "contradicts them."
+        ),
+    )
+    staleness_age_days: int = Field(
+        default=90,
+        ge=30,
+        le=365,
+        description=("Facts older than this many days become candidates for staleness review. 90 days (~one quarter) balances between catching genuine changes (job switches, tech-stack migrations) and avoiding noise on stable facts."),
+    )
+    staleness_min_candidates: int = Field(
+        default=3,
+        ge=1,
+        le=50,
+        description=("Minimum number of stale facts required to trigger a review cycle. Below this threshold the prompt overhead is not justified."),
+    )
+    staleness_max_removals_per_cycle: int = Field(
+        default=10,
+        ge=1,
+        le=50,
+        description=("Maximum number of facts the staleness review can remove in a single update cycle. Prevents the LLM from over-pruning when reviewing a large backlog of aged facts."),
+    )
+    staleness_protected_categories: list[str] = Field(
+        default_factory=lambda: ["correction"],
+        description=("Fact categories exempt from staleness review. Correction facts represent explicit user feedback and should not be auto-pruned based on age alone."),
+    )
 
 
 # Global configuration instance

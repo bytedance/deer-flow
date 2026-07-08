@@ -5,6 +5,9 @@
 #   - nginx: Reverse proxy (port 2026)
 #   - frontend: Frontend Next.js dev server (port 3000)
 #   - gateway: Backend Gateway API + agent runtime (port 8001)
+#   - redis: Redis Streams backend for cross-worker SSE stream bridge
+#   - postgres: PostgreSQL database
+#   - provisioner (optional): Sandbox provisioner (creates Pods in host Kubernetes)
 #
 # Prerequisites:
 #   - Uses LocalSandboxProvider (no Kubernetes required)
@@ -12,6 +15,82 @@
 # Access: http://localhost:2026
 
 services:
+  # ── PostgreSQL Database ─────────────────────────────────────────────────
+  postgres:
+    image: docker.io/library/postgres:16-alpine
+    platform: linux/amd64
+    container_name: deer-flow-postgres-dev
+    restart: unless-stopped
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      POSTGRES_USER: ${POSTGRES_USER:-pgsql}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-pgsql}
+      POSTGRES_DB: ${POSTGRES_DB:-pgsql}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - /Users/raidery/data/postgres15:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-pgsql} -d ${POSTGRES_DB:-pgsql}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - deer-flow-dev
+
+  # ── Redis Stream Bridge ────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: deer-flow-redis-dev
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data-dev:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - deer-flow-dev
+    restart: unless-stopped
+
+  # ── Sandbox Provisioner (optional) ────────────────────────────────────
+  # Manages per-sandbox Pod + Service lifecycle in the host Kubernetes
+  # cluster via the K8s API.
+  # Backend accesses sandboxes directly via host.docker.internal:{NodePort}.
+  # Uncomment to enable when using AioSandboxProvider with Kubernetes.
+  # provisioner:
+  #   build:
+  #     context: ./provisioner
+  #     dockerfile: Dockerfile
+  #     args:
+  #       APT_MIRROR: ${APT_MIRROR:-}
+  #   container_name: deer-flow-provisioner
+  #   volumes:
+  #     - ~/.kube/config:/root/.kube/config:ro
+  #   environment:
+  #     - K8S_NAMESPACE=deer-flow
+  #     - SANDBOX_IMAGE=enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest
+  #     - SKILLS_HOST_PATH=${DEER_FLOW_ROOT}/skills
+  #     - THREADS_HOST_PATH=${DEER_FLOW_ROOT}/backend/.deer-flow/threads
+  #     - DEER_FLOW_HOST_BASE_DIR=${DEER_FLOW_ROOT}/backend/.deer-flow
+  #     - KUBECONFIG_PATH=/root/.kube/config
+  #     - NODE_HOST=host.docker.internal
+  #     - K8S_API_SERVER=https://host.docker.internal:26443
+  #   env_file:
+  #     - ../.env
+  #   extra_hosts:
+  #     - "host.docker.internal:host-gateway"
+  #   networks:
+  #     - deer-flow-dev
+  #   restart: unless-stopped
+  #   healthcheck:
+  #     test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
+  #     interval: 10s
+  #     timeout: 5s
+  #     retries: 6
+  #     start_period: 15s
   # ── Reverse Proxy ──────────────────────────────────────────────────────
   # Routes API traffic to gateway.
   nginx:
@@ -91,8 +170,10 @@ services:
       # Preserve the .venv built during Docker image build — mounting the full backend/
       # directory above would otherwise shadow it with the (empty) host directory.
       - gateway-venv:/app/backend/.venv
-      - ../config.yaml:/app/config.yaml
-      - ../extensions_config.json:/app/extensions_config.json
+      # Mount the project directory instead of its mutable config files individually.
+      # Host editors commonly replace files on save; a directory bind keeps those
+      # replacements visible inside Docker Desktop/WSL containers.
+      - ../:/app/project
       - ../skills:/app/skills
       - ../logs:/app/logs
       # Use a Docker-managed uv cache volume instead of a host bind mount.
@@ -130,6 +211,10 @@ services:
       - CI=true
       - DEER_FLOW_PROJECT_ROOT=/app
       - DEER_FLOW_HOME=/app/backend/.deer-flow
+      - DEER_FLOW_CONFIG_PATH=/app/project/config.yaml
+      - DEER_FLOW_EXTENSIONS_CONFIG_PATH=/app/project/extensions_config.json
+      - DEER_FLOW_STREAM_BRIDGE_REDIS_URL=${DEER_FLOW_STREAM_BRIDGE_REDIS_URL:-redis://redis:6379/0}
+      - DEER_FLOW_DATABASE_URL=${DEER_FLOW_DATABASE_URL:-postgresql://${POSTGRES_USER:-pgsql}:${POSTGRES_PASSWORD:-pgsql}@postgres:5432/${POSTGRES_DB:-pgsql}}
       - DEER_FLOW_CHANNELS_LANGGRAPH_URL=${DEER_FLOW_CHANNELS_LANGGRAPH_URL:-http://gateway:8001/api}
       - DEER_FLOW_CHANNELS_GATEWAY_URL=${DEER_FLOW_CHANNELS_GATEWAY_URL:-http://gateway:8001}
       - DEER_FLOW_INTERNAL_AUTH_TOKEN=${DEER_FLOW_INTERNAL_AUTH_TOKEN:-}
@@ -138,13 +223,18 @@ services:
       - DEER_FLOW_SANDBOX_HOST=host.docker.internal
       # Proxy values (HTTP_PROXY/HTTPS_PROXY/ALL_PROXY) are inherited from ../.env via env_file.
       # Only NO_PROXY is declared here so internal service hostnames are always exempt from the proxy.
-      - NO_PROXY=${NO_PROXY:-}${NO_PROXY:+,}localhost,127.0.0.1,::1,gateway,frontend,nginx,provisioner,host.docker.internal
-      - no_proxy=${no_proxy:-}${no_proxy:+,}localhost,127.0.0.1,::1,gateway,frontend,nginx,provisioner,host.docker.internal
+      - NO_PROXY=${NO_PROXY:-}${NO_PROXY:+,}localhost,127.0.0.1,::1,gateway,frontend,nginx,postgres,redis,provisioner,host.docker.internal
+      - no_proxy=${no_proxy:-}${no_proxy:+,}localhost,127.0.0.1,::1,gateway,frontend,nginx,postgres,redis,provisioner,host.docker.internal
     env_file:
       - ../.env
     extra_hosts:
       # For Linux: map host.docker.internal to host gateway
       - "host.docker.internal:host-gateway"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     networks:
       - deer-flow-dev
     restart: unless-stopped
@@ -154,6 +244,7 @@ volumes:
   # image build are not shadowed by the host backend/ directory mount.
   gateway-venv:
   gateway-uv-cache:
+  redis-data-dev:
 
 networks:
   deer-flow-dev:

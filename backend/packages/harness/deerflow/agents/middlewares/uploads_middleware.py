@@ -1,6 +1,8 @@
 """Middleware to inject uploaded files information into agent context."""
 
 import logging
+import re
+from collections import Counter
 from pathlib import Path
 from typing import NotRequired, override
 
@@ -14,12 +16,53 @@ from deerflow.config.paths import Paths, get_paths
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.uploads.manager import is_upload_staging_file
 from deerflow.utils.file_conversion import extract_outline
-from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, message_content_to_text
+from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, get_original_user_content_text, message_content_to_text
 
 logger = logging.getLogger(__name__)
 
 
 _OUTLINE_PREVIEW_LINES = 5
+_MAX_FILES_PER_CONTEXT_SECTION = 10
+_QUERY_TOKEN_RE = re.compile(r"[a-z0-9]+")
+
+
+def _extension_label(file: dict) -> str:
+    extension = str(file.get("extension") or Path(str(file.get("filename") or "")).suffix).lower()
+    return extension or "(no extension)"
+
+
+def _format_omitted_file_types(files: list[dict]) -> str:
+    counts = Counter(_extension_label(file) for file in files)
+    parts = [f"{count} {extension}" for extension, count in sorted(counts.items())]
+    return ", ".join(parts)
+
+
+def _query_match_strength(file: dict, query_text: str) -> int:
+    query = query_text.lower()
+    if not query:
+        return 0
+
+    filename = str(file.get("filename") or "").lower()
+    stem = Path(filename).stem
+    extension_label = _extension_label(file)
+    extension = extension_label[1:] if extension_label.startswith(".") else ""
+
+    if filename and filename in query:
+        return 3
+    if len(stem) >= 3 and stem in query:
+        return 3
+
+    token_match = False
+    for token in _QUERY_TOKEN_RE.findall(stem):
+        if len(token) >= 3 and token in query:
+            token_match = True
+            break
+    if token_match:
+        return 2
+
+    if extension and re.search(rf"\b{re.escape(extension)}s?\b", query):
+        return 1
+    return 0
 
 
 def _extract_outline_for_file(file_path: Path) -> tuple[list[dict], list[str]]:
@@ -76,14 +119,24 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
 
     state_schema = UploadsMiddlewareState
 
-    def __init__(self, base_dir: str | None = None):
+    def __init__(
+        self,
+        base_dir: str | None = None,
+        *,
+        max_files_per_context_section: int = _MAX_FILES_PER_CONTEXT_SECTION,
+    ):
         """Initialize the middleware.
 
         Args:
             base_dir: Base directory for thread data. Defaults to Paths resolution.
+            max_files_per_context_section: Maximum number of files listed in
+                each uploaded-files prompt section.
         """
         super().__init__()
+        if max_files_per_context_section < 1:
+            raise ValueError("max_files_per_context_section must be at least 1")
         self._paths = Paths(base_dir) if base_dir else get_paths()
+        self._max_files_per_context_section = max_files_per_context_section
 
     def _format_file_entry(self, file: dict, lines: list[str]) -> None:
         """Append a single file entry (name, size, path, optional outline) to lines."""
@@ -91,6 +144,8 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
         size_str = f"{size_kb:.1f} KB" if size_kb < 1024 else f"{size_kb / 1024:.1f} MB"
         lines.append(f"- {file['filename']} ({size_str})")
         lines.append(f"  Path: {file['path']}")
+        if file.get("selection_reason") == "query_match":
+            lines.append("  Selected because: matched the current query.")
         outline = file.get("outline") or []
         if outline:
             truncated = outline[-1].get("truncated", False)
@@ -109,7 +164,41 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
             lines.append("  Use `grep` to search for keywords (e.g. `grep(pattern='keyword', path='/mnt/user-data/uploads/')`).")
         lines.append("")
 
-    def _create_files_message(self, new_files: list[dict], historical_files: list[dict]) -> str:
+    def _select_files_for_context(
+        self,
+        files: list[dict],
+        query_text: str,
+        *,
+        recency_key: str | None = None,
+    ) -> tuple[list[dict], list[dict]]:
+        """Return bounded context files, prioritizing current-query matches."""
+        ranked: list[tuple[tuple, dict]] = []
+        for index, file in enumerate(files):
+            selected_file = dict(file)
+            match_strength = _query_match_strength(selected_file, query_text)
+            query_match = match_strength > 0
+            if query_match:
+                selected_file["selection_reason"] = "query_match"
+
+            if recency_key:
+                sort_key = (-match_strength, -float(selected_file.get(recency_key) or 0), selected_file["filename"])
+            else:
+                sort_key = (-match_strength, index)
+            ranked.append((sort_key, selected_file))
+
+        ranked.sort(key=lambda item: item[0])
+        selected = [file for _, file in ranked[: self._max_files_per_context_section]]
+        omitted = [file for _, file in ranked[self._max_files_per_context_section :]]
+        return selected, omitted
+
+    def _create_files_message(
+        self,
+        new_files: list[dict],
+        historical_files: list[dict],
+        *,
+        omitted_new_files: list[dict] | None = None,
+        omitted_historical_files: list[dict] | None = None,
+    ) -> str:
         """Create a formatted message listing uploaded files.
 
         Args:
@@ -117,6 +206,8 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
             historical_files: Files uploaded in previous messages.
                 Each file dict may contain an optional ``outline`` key — a list of
                 ``{title, line}`` dicts extracted from the converted Markdown file.
+            omitted_new_files: Current-message files omitted from the prompt context.
+            omitted_historical_files: Older historical files omitted from the prompt context.
 
         Returns:
             Formatted string inside <uploaded_files> tags.
@@ -128,6 +219,12 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
         if new_files:
             for file in new_files:
                 self._format_file_entry(file, lines)
+            if omitted_new_files:
+                lines.append(f"... ({len(omitted_new_files)} more file(s) from this message omitted from this context.)")
+                lines.append(f"  Omitted file types: {_format_omitted_file_types(omitted_new_files)}")
+                lines.append("  Use `glob(pattern='**/*', path='/mnt/user-data/uploads/')` to list all uploads.")
+                lines.append("  Use `grep(pattern='keyword', path='/mnt/user-data/uploads/')` to search across uploads.")
+                lines.append("")
         else:
             lines.append("(empty)")
             lines.append("")
@@ -137,6 +234,12 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
             lines.append("")
             for file in historical_files:
                 self._format_file_entry(file, lines)
+            if omitted_historical_files:
+                lines.append(f"... ({len(omitted_historical_files)} more historical file(s) omitted from this context.)")
+                lines.append(f"  Omitted file types: {_format_omitted_file_types(omitted_historical_files)}")
+                lines.append("  Use `glob(pattern='**/*', path='/mnt/user-data/uploads/')` to list all uploads.")
+                lines.append("  Use `grep(pattern='keyword', path='/mnt/user-data/uploads/')` to search across uploads.")
+                lines.append("")
 
         lines.append("To work with these files:")
         lines.append("- Read from the file first — use the outline line numbers and `read_file` to locate relevant sections.")
@@ -227,45 +330,68 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
                 pass  # get_config() raises outside a runnable context (e.g. unit tests)
         uploads_dir = self._paths.sandbox_uploads_dir(thread_id, user_id=get_effective_user_id()) if thread_id else None
 
+        query_text = get_original_user_content_text(last_message.content, last_message.additional_kwargs)
+
         # Get newly uploaded files from the current message's additional_kwargs.files
         new_files = self._files_from_kwargs(last_message, uploads_dir) or []
+        context_new_files, omitted_new_files = self._select_files_for_context(new_files, query_text)
 
         # Collect historical files from the uploads directory (all except the new ones)
         new_filenames = {f["filename"] for f in new_files}
-        historical_files: list[dict] = []
+        historical_candidates: list[dict] = []
         if uploads_dir and uploads_dir.exists():
             for file_path in sorted(uploads_dir.iterdir()):
                 if is_upload_staging_file(file_path.name):
                     continue
                 if file_path.is_file() and file_path.name not in new_filenames:
                     stat = file_path.stat()
-                    outline, preview = _extract_outline_for_file(file_path)
-                    historical_files.append(
+                    historical_candidates.append(
                         {
                             "filename": file_path.name,
                             "size": stat.st_size,
                             "path": f"/mnt/user-data/uploads/{file_path.name}",
                             "extension": file_path.suffix,
-                            "outline": outline,
-                            "outline_preview": preview,
+                            "_mtime": stat.st_mtime,
+                            "_host_path": file_path,
                         }
                     )
 
+        historical_files, omitted_historical_files = self._select_files_for_context(
+            historical_candidates,
+            query_text,
+            recency_key="_mtime",
+        )
+        for file in historical_files:
+            file_path = file.pop("_host_path")
+            file.pop("_mtime", None)
+            outline, preview = _extract_outline_for_file(file_path)
+            file["outline"] = outline
+            file["outline_preview"] = preview
+
         # Attach outlines to new files as well
         if uploads_dir:
-            for file in new_files:
+            new_files_by_name = {file["filename"]: file for file in new_files}
+            for file in context_new_files:
                 phys_path = uploads_dir / file["filename"]
                 outline, preview = _extract_outline_for_file(phys_path)
                 file["outline"] = outline
                 file["outline_preview"] = preview
+                if original_file := new_files_by_name.get(file["filename"]):
+                    original_file["outline"] = outline
+                    original_file["outline_preview"] = preview
 
-        if not new_files and not historical_files:
+        if not context_new_files and not historical_files:
             return None
 
         logger.debug(f"New files: {[f['filename'] for f in new_files]}, historical: {[f['filename'] for f in historical_files]}")
 
         # Create files message and prepend to the last human message content
-        files_message = self._create_files_message(new_files, historical_files)
+        files_message = self._create_files_message(
+            context_new_files,
+            historical_files,
+            omitted_new_files=omitted_new_files,
+            omitted_historical_files=omitted_historical_files,
+        )
 
         # Extract original content - handle both string and list formats
         original_content = last_message.content

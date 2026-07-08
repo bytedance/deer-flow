@@ -14,13 +14,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from deerflow.config.runtime_paths import resolve_path
+from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
 from deerflow.skills.permissions import make_skill_written_path_sandbox_readable
 from deerflow.skills.storage.skill_storage import SKILL_MD_FILE, SkillStorage
 from deerflow.skills.types import SkillCategory
 
 logger = logging.getLogger(__name__)
-
-DEFAULT_SKILLS_CONTAINER_PATH = "/mnt/skills"
 
 # Bound for the best-effort temp-dir cleanup so a stalled filesystem (e.g. NFS)
 # cannot hold back the install outcome propagating out of the finally block.
@@ -48,8 +47,15 @@ class LocalSkillStorage(SkillStorage):
             from deerflow.config import get_app_config
 
             config = app_config or get_app_config()
+            self._app_config = config
             self._host_root: Path = config.skills.get_skills_path()
         else:
+            # Keep app_config as-is (may be None). This host_path constructor is used by
+            # tests and non-user-scoped storage; eagerly calling get_app_config() here would
+            # break config-free environments (e.g. CI). The skill_scan.enabled kill switch is
+            # resolved lazily at scan time by skill_scan_enabled(), which also picks up
+            # hot-reloaded config, so a None here is honored, not ignored.
+            self._app_config = app_config
             self._host_root = resolve_path(host_path)
 
     # ------------------------------------------------------------------
@@ -111,7 +117,7 @@ class LocalSkillStorage(SkillStorage):
         try:
             skill_dir, skill_name, target = await asyncio.to_thread(self._prepare_skill_archive, path, Path(tmp), custom_dir, archive_path)
 
-            await _scan_skill_archive_contents_or_raise(skill_dir, skill_name)
+            await _scan_skill_archive_contents_or_raise(skill_dir, skill_name, app_config=self._app_config)
 
             await asyncio.to_thread(self._commit_skill_install, skill_dir, skill_name, custom_dir, target)
             logger.info("Skill %r installed to %s", skill_name, target)
@@ -146,6 +152,7 @@ class LocalSkillStorage(SkillStorage):
             SkillAlreadyExistsError,
             resolve_skill_dir_from_archive,
             safe_extract_skill_archive,
+            scan_archive_preflight_or_raise,
         )
         from deerflow.skills.validation import _validate_skill_frontmatter
 
@@ -166,6 +173,7 @@ class LocalSkillStorage(SkillStorage):
             raise ValueError("File is not a valid ZIP archive") from None
 
         with zf:
+            scan_archive_preflight_or_raise(path, app_config=self._app_config)
             safe_extract_skill_archive(zf, tmp_path)
 
         skill_dir = resolve_skill_dir_from_archive(tmp_path)
@@ -190,6 +198,7 @@ class LocalSkillStorage(SkillStorage):
             staging_target = Path(staging_root) / skill_name
             shutil.copytree(skill_dir, staging_target)
             _move_staged_skill_into_reserved_target(staging_target, target)
+        make_skill_written_path_sandbox_readable(custom_dir, target)
 
     def delete_custom_skill(self, name: str, *, history_meta: dict | None = None) -> None:
         self.validate_skill_name(name)

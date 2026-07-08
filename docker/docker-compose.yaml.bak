@@ -1,0 +1,272 @@
+# DeerFlow Production Environment
+# Usage: make up
+#
+# Services:
+#   - nginx:       Reverse proxy (port 2026, configurable via PORT env var)
+#   - frontend:    Next.js production server
+#   - gateway:     FastAPI Gateway API + agent runtime
+<<<<<<< HEAD
+#   - postgres:    PostgreSQL 16 (pgvector)
+=======
+#   - redis:       Redis Streams backend for cross-worker SSE stream bridge
+>>>>>>> upstream-sync
+#   - provisioner: (optional) Sandbox provisioner for Kubernetes mode
+#
+# Key environment variables (set via environment/.env or scripts/deploy.sh):
+#   DEER_FLOW_PROJECT_ROOT           — project root for relative runtime paths
+#   DEER_FLOW_HOME                   — runtime data dir, default .deer-flow under $DEER_FLOW_PROJECT_ROOT (or cwd)
+#   DEER_FLOW_CONFIG_PATH            — path to config.yaml
+#   DEER_FLOW_EXTENSIONS_CONFIG_PATH — path to extensions_config.json
+#   DEER_FLOW_SKILLS_PATH            — skills dir, default $DEER_FLOW_PROJECT_ROOT/skills
+#   DEER_FLOW_DOCKER_SOCKET          — Docker socket path for aio/DooD mode, default /var/run/docker.sock (used only by the opt-in docker-compose.dood.yaml overlay)
+#   DEER_FLOW_REPO_ROOT              — repo root (used for skills host path in DooD)
+#   BETTER_AUTH_SECRET               — required for frontend auth/session security
+#   DEER_FLOW_INTERNAL_AUTH_TOKEN    — shared internal Gateway auth token for multi-worker IM channels
+#   POSTGRES_USER/PASSWORD/DB/PORT   — PostgreSQL connection settings
+#
+# LangSmith tracing is disabled by default (LANGSMITH_TRACING=false).
+# Set LANGSMITH_TRACING=true and LANGSMITH_API_KEY in .env to enable it.
+#
+# Access: http://localhost:${PORT:-2026}
+
+services:
+<<<<<<< HEAD
+  # ── PostgreSQL 16 ───────────────────────────────────────────────────────────
+  postgres:
+    image: docker.io/library/postgres:16-alpine
+    platform: linux/amd64
+    container_name: deer-flow-postgres
+    restart: unless-stopped
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      POSTGRES_USER: ${POSTGRES_USER:-pgsql}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-pgsql}
+      POSTGRES_DB: ${POSTGRES_DB:-pgsql}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - /Users/raidery/data/postgres15:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-pgsql} -d ${POSTGRES_DB:-pgsql}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - deer-flow
+=======
+  # ── Redis Stream Bridge ────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: deer-flow-redis
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - deer-flow
+    restart: unless-stopped
+>>>>>>> upstream-sync
+
+  # ── Reverse Proxy ──────────────────────────────────────────────────────────
+  nginx:
+    image: nginx:alpine
+    container_name: deer-flow-nginx
+    environment:
+      - TZ=${TZ:-Asia/Shanghai}
+    ports:
+      - "${PORT:-2026}:2026"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf.template:ro
+    command: >
+      sh -c "cp /etc/nginx/nginx.conf.template /etc/nginx/nginx.conf
+      && nginx -g 'daemon off;'"
+    depends_on:
+      - frontend
+      - gateway
+    networks:
+      - deer-flow
+    restart: unless-stopped
+
+  # ── Frontend: Next.js Production ───────────────────────────────────────────
+  frontend:
+    build:
+      context: ../
+      dockerfile: frontend/Dockerfile
+      target: prod
+      args:
+        PNPM_STORE_PATH: ${PNPM_STORE_PATH:-/root/.local/share/pnpm/store}
+        NPM_REGISTRY: ${NPM_REGISTRY:-}
+    container_name: deer-flow-frontend
+    environment:
+      - BETTER_AUTH_SECRET=${BETTER_AUTH_SECRET}
+      - DEER_FLOW_INTERNAL_GATEWAY_BASE_URL=http://gateway:8001
+      - TZ=${TZ:-Asia/Shanghai}
+    env_file:
+      - ../frontend/.env
+    networks:
+      - deer-flow
+    restart: unless-stopped
+
+  # ── Gateway API ────────────────────────────────────────────────────────────
+  gateway:
+    build:
+      context: ../
+      dockerfile: backend/Dockerfile
+      args:
+        APT_MIRROR: ${APT_MIRROR:-}
+        UV_IMAGE: ${UV_IMAGE:-ghcr.io/astral-sh/uv:0.7.20}
+        UV_INDEX_URL: ${UV_INDEX_URL:-https://pypi.org/simple}
+        UV_EXTRAS: ${UV_EXTRAS:-postgres,pymupdf}
+    container_name: deer-flow-gateway
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # Gateway hosts the agent runtime with in-process RunManager + StreamBridge
+    # singletons -- run state lives in this worker's memory. Default to a single
+<<<<<<< HEAD
+    # worker: with >1 worker and no nginx sticky sessions, run cancel, SSE
+    # reconnect, request dedup, and per-worker IM channel services all break
+    # across workers until a shared (e.g. redis) stream bridge lands, which is
+    # not yet implemented. Override GATEWAY_WORKERS only once that is in place.
+    command: sh -c "cd backend && PYTHONPATH=. uv run --no-sync uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 --workers ${GATEWAY_WORKERS:-1}"
+=======
+    # worker: the Redis stream bridge solves cross-worker SSE delivery and
+    # reconnect, but run cancel, request dedup, and per-worker IM channel
+    # services remain worker-local. Override GATEWAY_WORKERS only when the
+    # Redis stream bridge is enabled and those limitations are acceptable.
+    command: sh -c "cd backend && PYTHONPATH=. uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 --workers ${GATEWAY_WORKERS:-1}"
+>>>>>>> upstream-sync
+    volumes:
+      - ${DEER_FLOW_CONFIG_PATH}:/app/backend/config.yaml:ro
+      - ${DEER_FLOW_EXTENSIONS_CONFIG_PATH}:/app/backend/extensions_config.json:ro
+      #- ../skills:/app/skills:ro
+      - ../skills:/app/skills
+      - ${DEER_FLOW_HOME}:/app/backend/.deer-flow
+# raidery fork deviation: upstream moved these mounts to opt-in overlays
+# (docker-compose.dood.yaml / docker-compose.cli-auth.yaml, see upstream
+# commits 5d61718c / 474c89ba). We keep them inline because DooD +
+# Claude CLI auto-auth are core dev workflow here. Revisit if the
+# opt-in pattern lands cleanly via scripts/deploy.sh.
+# DooD: AioSandboxProvider starts sandbox containers via host Docker daemon
+      - ${DEER_FLOW_DOCKER_SOCKET}:/var/run/docker.sock
+      # CLI auth directories for auto-auth (Claude Code + Codex CLI)
+      # ~/.claude.json — claude CLI 凭证 / session state (JSON 文件)
+      # ~/.claude/     — claude CLI 历史 / 缓存 / 扩展 / skills 等目录
+      # 两者都 bind-mount 到 host 的 docker/claude/ 下，recreate 容器不丢状态。
+      - ./claude/.claude.json:/root/.claude.json
+      - ./claude/.claude/:/root/.claude/
+      # ~/.pi/agent/  — pi / pi-acp settings (defaultProvider/defaultModel)、sessions、bin
+      # bind-mount 到 host 的 docker/pi-agent/ 下，recreate 容器不丢状态。
+      - ./pi-agent/:/root/.pi/agent/
+      # Dev: mount gateway source code for hot-reload
+      - ../backend/app/gateway:/app/backend/app/gateway
+      - ../backend/packages/harness:/app/backend/packages/harness
+      - ../offline-claude:/root/offline-claude
+    working_dir: /app
+    environment:
+      - CI=true
+      - HOME=/root
+      - TZ=${TZ:-Asia/Shanghai}
+      - DEER_FLOW_PROJECT_ROOT=/app
+      - DEER_FLOW_HOME=/app/backend/.deer-flow
+      - DEER_FLOW_CONFIG_PATH=/app/backend/config.yaml
+      - DEER_FLOW_EXTENSIONS_CONFIG_PATH=/app/backend/extensions_config.json
+      - DEER_FLOW_STREAM_BRIDGE_REDIS_URL=${DEER_FLOW_STREAM_BRIDGE_REDIS_URL:-redis://redis:6379/0}
+      - DEER_FLOW_CHANNELS_LANGGRAPH_URL=${DEER_FLOW_CHANNELS_LANGGRAPH_URL:-http://gateway:8001/api}
+      - DEER_FLOW_CHANNELS_GATEWAY_URL=${DEER_FLOW_CHANNELS_GATEWAY_URL:-http://gateway:8001}
+      - DEER_FLOW_INTERNAL_AUTH_TOKEN=${DEER_FLOW_INTERNAL_AUTH_TOKEN}
+      # DooD path/network translation
+      - DEER_FLOW_HOST_BASE_DIR=${DEER_FLOW_HOME}
+      - DEER_FLOW_HOST_SKILLS_PATH=${DEER_FLOW_REPO_ROOT}/skills
+      - DEER_FLOW_SANDBOX_HOST=host.docker.internal
+      # Proxy values (HTTP_PROXY/HTTPS_PROXY/ALL_PROXY) are inherited from ../.env via env_file.
+      # Only NO_PROXY is declared here so internal service hostnames are always exempt from the proxy.
+      - NO_PROXY=${NO_PROXY:-}${NO_PROXY:+,}localhost,127.0.0.1,::1,gateway,frontend,nginx,provisioner,host.docker.internal
+      - no_proxy=${no_proxy:-}${no_proxy:+,}localhost,127.0.0.1,::1,gateway,frontend,nginx,provisioner,host.docker.internal
+    env_file:
+      - ../.env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - deer-flow
+    restart: unless-stopped
+
+  # ── Sandbox Provisioner (optional, Kubernetes mode) ────────────────────────
+<<<<<<< HEAD
+  # provisioner:
+  #   build:
+  #     context: ./provisioner
+  #     dockerfile: Dockerfile
+  #     args:
+  #       APT_MIRROR: ${APT_MIRROR:-}
+  #       PIP_INDEX_URL: ${PIP_INDEX_URL:-}
+  #   container_name: deer-flow-provisioner
+  #   volumes:
+  #     - ~/.kube/config:/root/.kube/config:ro
+  #   environment:
+  #     - K8S_NAMESPACE=deer-flow
+  #     - SANDBOX_IMAGE=enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest
+  #     - SKILLS_HOST_PATH=${DEER_FLOW_REPO_ROOT}/skills
+  #     - THREADS_HOST_PATH=${DEER_FLOW_HOME}/threads
+  #     - KUBECONFIG_PATH=/root/.kube/config
+  #     - NODE_HOST=host.docker.internal
+  #     - K8S_API_SERVER=https://host.docker.internal:26443
+  #   env_file:
+  #     - ../.env
+  #   extra_hosts:
+  #     - "host.docker.internal:host-gateway"
+  #   networks:
+  #     - deer-flow
+  #   restart: unless-stopped
+  #   healthcheck:
+  #     test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
+  #     interval: 10s
+  #     timeout: 5s
+  #     retries: 6
+=======
+  provisioner:
+    build:
+      context: ./provisioner
+      dockerfile: Dockerfile
+      args:
+        APT_MIRROR: ${APT_MIRROR:-}
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-}
+    container_name: deer-flow-provisioner
+    volumes:
+      - ~/.kube/config:/root/.kube/config:ro
+    environment:
+      - K8S_NAMESPACE=deer-flow
+      - SANDBOX_IMAGE=enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest
+      - SKILLS_HOST_PATH=${DEER_FLOW_REPO_ROOT}/skills
+      - THREADS_HOST_PATH=${DEER_FLOW_HOME}/threads
+      - DEER_FLOW_HOST_BASE_DIR=${DEER_FLOW_HOME}
+      - KUBECONFIG_PATH=/root/.kube/config
+      - NODE_HOST=host.docker.internal
+      - K8S_API_SERVER=https://host.docker.internal:26443
+    env_file:
+      - ../.env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - deer-flow
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+volumes:
+  redis-data:
+
+>>>>>>> upstream-sync
+networks:
+  deer-flow:
+    driver: bridge

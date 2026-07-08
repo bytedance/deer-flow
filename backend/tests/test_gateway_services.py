@@ -132,6 +132,37 @@ def test_normalize_input_preserves_additional_kwargs_and_id():
     assert msg.additional_kwargs == {"files": files, "custom": "keep-me"}
 
 
+def test_normalize_input_preserves_human_input_response_metadata():
+    from langchain_core.messages import HumanMessage
+
+    from app.gateway.services import normalize_input
+
+    response = {
+        "version": 1,
+        "kind": "human_input_response",
+        "source": "ask_clarification",
+        "request_id": "clarification:call-abc",
+        "response_kind": "option",
+        "option_id": "option-2",
+        "value": "staging",
+    }
+    result = normalize_input(
+        {
+            "messages": [
+                {
+                    "type": "human",
+                    "content": [{"type": "text", "text": "For your clarification, my answer is: staging"}],
+                    "additional_kwargs": {"human_input_response": response},
+                }
+            ]
+        }
+    )
+
+    msg = result["messages"][0]
+    assert isinstance(msg, HumanMessage)
+    assert msg.additional_kwargs["human_input_response"] == response
+
+
 def test_normalize_input_passes_through_basemessage_instances():
     from langchain_core.messages import HumanMessage
 
@@ -206,6 +237,21 @@ def test_build_run_config_with_overrides():
     assert config["configurable"]["model_name"] == "gpt-4"
     assert config["tags"] == ["test"]
     assert config["metadata"]["user"] == "alice"
+
+
+def test_build_run_config_context_path_still_sets_configurable_thread_id(_stub_app_config):
+    """A caller-supplied context (e.g. request-scoped secrets, #3861) must not
+    deprive the checkpointer of configurable.thread_id, which it always needs to
+    scope checkpoints. Secrets stay in context; thread_id is mirrored into
+    configurable for the checkpointer."""
+    from app.gateway.services import build_run_config
+
+    config = build_run_config("thread-1", {"context": {"secrets": {"ERP_TOKEN": "v"}}}, None)
+    assert config["context"]["secrets"] == {"ERP_TOKEN": "v"}
+    assert config["context"]["thread_id"] == "thread-1"
+    assert config["configurable"]["thread_id"] == "thread-1"
+    # Secrets must NOT be mirrored into configurable.
+    assert "secrets" not in config["configurable"]
 
 
 # ---------------------------------------------------------------------------
@@ -401,6 +447,29 @@ def test_build_run_config_dual_write_matches_merge_run_context_overrides_shape()
     assert via_assistant_id["context"]["agent_name"] == via_context["context"]["agent_name"]
 
 
+def test_non_interactive_context_override_is_internal_only():
+    """Client-supplied ``non_interactive`` must be dropped: it strips the
+    ``ask_clarification`` tool, so only the internal scheduler path may set it."""
+    from app.gateway.services import build_run_config, merge_run_context_overrides
+
+    config = build_run_config("thread-1", None, None)
+    merge_run_context_overrides(config, {"non_interactive": True})
+
+    assert "non_interactive" not in config["configurable"]
+    assert "non_interactive" not in config["context"]
+
+
+def test_non_interactive_context_override_honored_for_internal_caller():
+    from app.gateway.services import build_run_config, merge_run_context_overrides
+
+    config = build_run_config("thread-1", None, None)
+    merge_run_context_overrides(config, {"non_interactive": True, "model_name": "gpt"}, internal=True)
+
+    assert config["configurable"]["non_interactive"] is True
+    assert config["context"]["non_interactive"] is True
+    assert config["configurable"]["model_name"] == "gpt"
+
+
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
@@ -581,6 +650,52 @@ def test_merge_run_context_overrides_noop_for_empty_context():
     assert config == before
 
 
+def test_merge_run_context_overrides_forwards_context_only_keys():
+    """``github_token`` and ``disable_clarification`` must reach ``config['context']``
+    (runtime context → ``runtime.context``) so the bash tool and ClarificationMiddleware
+    can read them. They must NOT be written to ``config['configurable']`` — that dict is
+    persisted in checkpoints, and ``github_token`` is a (short-lived) secret.
+
+    Regression for the GitHub channel: without this, the installation token minted by
+    ``ChannelManager._apply_channel_policy`` was silently dropped here, so ``gh``
+    fell back to the host's stored keyring creds and authored issues/PRs as the host
+    user instead of the App bot.
+    """
+    from app.gateway.services import build_run_config, merge_run_context_overrides
+
+    config = build_run_config("thread-1", None, None)
+    merge_run_context_overrides(
+        config,
+        {
+            "github_token": "ghs_installation_token",
+            "disable_clarification": True,
+            "agent_name": "coding-llm-gateway",
+        },
+    )
+
+    # Forwarded into runtime context — what tools/middlewares read.
+    assert config["context"]["github_token"] == "ghs_installation_token"
+    assert config["context"]["disable_clarification"] is True
+    assert config["context"]["agent_name"] == "coding-llm-gateway"
+
+    # NOT written into configurable (checkpoint-persisted).
+    assert "github_token" not in config.get("configurable", {})
+    assert "disable_clarification" not in config.get("configurable", {})
+
+
+def test_merge_run_context_overrides_context_only_keys_do_not_override_existing():
+    """A token already in ``config['context']`` must not be clobbered by a
+    client-supplied one (defense in depth — the manager is the only legitimate
+    source, but ``setdefault`` keeps the contract explicit)."""
+    from app.gateway.services import build_run_config, merge_run_context_overrides
+
+    config = build_run_config("thread-1", None, None)
+    config["context"] = {"github_token": "pre-existing"}
+    merge_run_context_overrides(config, {"github_token": "attacker-supplied"})
+
+    assert config["context"]["github_token"] == "pre-existing"
+
+
 def test_context_does_not_override_existing_configurable():
     """Values already in config.configurable must NOT be overridden by context."""
     from app.gateway.services import build_run_config
@@ -674,6 +789,36 @@ def test_inject_authenticated_user_context_skips_internal_role():
     inject_authenticated_user_context(config, request)
 
     assert config["context"]["user_id"] == "channel-user-7"
+
+
+def test_inject_authenticated_user_context_strips_internal_spoofed_attribution():
+    """Internal callers must not carry role/oauth attribution from request config
+    unless the gateway resolved a trusted owner user server-side.
+    """
+    from types import SimpleNamespace
+
+    from app.gateway.services import build_run_config, inject_authenticated_user_context
+
+    config = build_run_config(
+        "thread-1",
+        {
+            "context": {
+                "user_id": "channel-user-7",
+                "user_role": "admin",
+                "oauth_provider": "spoofed-provider",
+                "oauth_id": "spoofed-subject",
+            }
+        },
+        None,
+    )
+    request = SimpleNamespace(state=SimpleNamespace(user=SimpleNamespace(id="internal-bot", system_role="internal")))
+
+    inject_authenticated_user_context(config, request)
+
+    assert config["context"]["user_id"] == "channel-user-7"
+    assert "user_role" not in config["context"]
+    assert "oauth_provider" not in config["context"]
+    assert "oauth_id" not in config["context"]
 
 
 async def _capture_start_run_graph_input(body):
@@ -836,6 +981,125 @@ def test_start_run_uses_internal_owner_header_for_persistence(_stub_app_config):
     assert task_context["user_id"] == "owner-1"
 
 
+def test_start_run_stamps_internal_owner_guardrail_attribution(_stub_app_config):
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from langgraph.checkpoint.memory import InMemorySaver
+    from langgraph.store.memory import InMemoryStore
+
+    from app.gateway.internal_auth import INTERNAL_OWNER_USER_ID_HEADER_NAME, INTERNAL_SYSTEM_ROLE
+    from app.gateway.services import start_run
+    from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
+    from deerflow.runtime import RunManager
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    class _Provider:
+        async def get_user(self, user_id: str):
+            assert user_id == "owner-1"
+            return SimpleNamespace(
+                id="owner-1",
+                system_role="user",
+                oauth_provider="keycloak",
+                oauth_id="subject-123",
+            )
+
+    async def _scenario():
+        thread_store = MemoryThreadMetaStore(InMemoryStore())
+        await thread_store.create("channel-thread", user_id="owner-1", metadata={})
+        run_manager = RunManager(store=MemoryRunStore())
+        state = SimpleNamespace(
+            stream_bridge=SimpleNamespace(),
+            run_manager=run_manager,
+            checkpointer=InMemorySaver(),
+            store=InMemoryStore(),
+            run_event_store=SimpleNamespace(),
+            run_events_config=None,
+            thread_store=thread_store,
+        )
+        request = SimpleNamespace(
+            headers={INTERNAL_OWNER_USER_ID_HEADER_NAME: "owner-1"},
+            state=SimpleNamespace(user=SimpleNamespace(id="default", system_role=INTERNAL_SYSTEM_ROLE)),
+            app=SimpleNamespace(state=state),
+        )
+        body = SimpleNamespace(
+            assistant_id="lead_agent",
+            input={"messages": [{"role": "human", "content": "hi"}]},
+            metadata={},
+            config={
+                "context": {
+                    "user_role": "admin",
+                    "oauth_provider": "spoofed-provider",
+                    "oauth_id": "spoofed-subject",
+                }
+            },
+            context={"user_id": "spoofed-client"},
+            on_disconnect="cancel",
+            multitask_strategy="reject",
+            stream_mode=None,
+            stream_subgraphs=False,
+            interrupt_before=None,
+            interrupt_after=None,
+        )
+        captured_context: dict[str, object] = {}
+
+        async def fake_run_agent(*args, **kwargs):
+            captured_context.update(kwargs["config"]["context"])
+
+        with (
+            patch("app.gateway.services.get_local_provider", return_value=_Provider()),
+            patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+            patch("app.gateway.services.run_agent", side_effect=fake_run_agent),
+        ):
+            record = await start_run(body, "channel-thread", request)
+            await record.task
+
+        return captured_context
+
+    context = asyncio.run(_scenario())
+
+    assert context["user_id"] == "owner-1"
+    assert context["user_role"] == "user"
+    assert context["oauth_provider"] == "keycloak"
+    assert context["oauth_id"] == "subject-123"
+
+
+def test_launch_scheduled_thread_run_marks_context_non_interactive(_stub_app_config):
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from app.gateway.services import launch_scheduled_thread_run
+
+    async def _scenario():
+        captured: dict[str, object] = {}
+
+        async def fake_start_run(body, thread_id, request):
+            captured["thread_id"] = thread_id
+            captured["context"] = body.context
+            captured["metadata"] = body.metadata
+            return SimpleNamespace(run_id="run-1", thread_id=thread_id)
+
+        with patch("app.gateway.services.start_run", side_effect=fake_start_run):
+            result = await launch_scheduled_thread_run(
+                thread_id="thread-scheduled",
+                assistant_id="lead_agent",
+                prompt="Run in background",
+                app=SimpleNamespace(state=SimpleNamespace()),
+                owner_user_id="user-1",
+                metadata={"scheduled_task_id": "task-1"},
+            )
+        return captured, result
+
+    captured, result = asyncio.run(_scenario())
+
+    assert captured["thread_id"] == "thread-scheduled"
+    assert captured["context"] == {"non_interactive": True, "user_id": "user-1"}
+    assert captured["metadata"] == {"scheduled_task_id": "task-1"}
+    assert result == {"run_id": "run-1", "thread_id": "thread-scheduled"}
+
+
 # ---------------------------------------------------------------------------
 # build_run_config — context / configurable precedence (LangGraph >= 0.6.0)
 # ---------------------------------------------------------------------------
@@ -853,7 +1117,8 @@ def test_build_run_config_with_context():
     assert "context" in config
     assert config["context"]["user_id"] == "u-42"
     assert config["context"]["thread_id"] == "thread-1"
-    assert "configurable" not in config
+    # configurable carries thread_id for the checkpointer; user context stays in context.
+    assert config["configurable"] == {"thread_id": "thread-1"}
     assert config["recursion_limit"] == 100
 
 
@@ -869,7 +1134,7 @@ def test_build_run_config_context_injects_thread_id():
     assert config["context"]["user_id"] == "u-1"
     assert config["context"]["thinking_enabled"] is True
     assert config["context"]["thread_id"] == "T-deadbeef-42"
-    assert "configurable" not in config
+    assert config["configurable"] == {"thread_id": "T-deadbeef-42"}
 
 
 def test_build_run_config_null_context_becomes_empty_context():
@@ -879,7 +1144,7 @@ def test_build_run_config_null_context_becomes_empty_context():
     config = build_run_config("thread-1", {"context": None}, None)
 
     assert config["context"] == {"thread_id": "thread-1"}
-    assert "configurable" not in config
+    assert config["configurable"] == {"thread_id": "thread-1"}
 
 
 def test_build_run_config_rejects_non_mapping_context():
@@ -921,7 +1186,10 @@ def test_build_run_config_context_plus_configurable_warns(caplog):
         )
     assert "context" in config
     assert config["context"]["user_id"] == "u-42"
-    assert "configurable" not in config
+    # context wins: caller's configurable (model_name) is dropped, but thread_id is
+    # still set for the checkpointer.
+    assert config["configurable"] == {"thread_id": "thread-1"}
+    assert "model_name" not in config["configurable"]
     assert any("both 'context' and 'configurable'" in r.message for r in caplog.records)
 
 
@@ -935,7 +1203,7 @@ def test_build_run_config_context_passthrough_other_keys():
         None,
     )
     assert config["context"]["thread_id"] == "thread-1"
-    assert "configurable" not in config
+    assert config["configurable"] == {"thread_id": "thread-1"}
     assert config["tags"] == ["prod"]
 
 
@@ -946,3 +1214,19 @@ def test_build_run_config_no_request_config():
     config = build_run_config("thread-abc", None, None)
     assert config["configurable"] == {"thread_id": "thread-abc"}
     assert "context" not in config
+
+
+def test_strip_internal_context_keys_scrubs_config_smuggled_non_interactive():
+    """A non-internal client must not force ``non_interactive`` via the free-form
+    ``body.config`` either — ``build_run_config`` copies ``config.context`` and
+    ``config.configurable`` verbatim, so the assembled config gets scrubbed."""
+    from app.gateway.services import build_run_config, strip_internal_context_keys
+
+    via_context = build_run_config("thread-1", {"context": {"non_interactive": True, "model_name": "gpt"}}, None)
+    strip_internal_context_keys(via_context)
+    assert "non_interactive" not in via_context["context"]
+    assert via_context["context"]["model_name"] == "gpt"
+
+    via_configurable = build_run_config("thread-1", {"configurable": {"non_interactive": True}}, None)
+    strip_internal_context_keys(via_configurable)
+    assert "non_interactive" not in via_configurable["configurable"]

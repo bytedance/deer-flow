@@ -1,0 +1,24 @@
+{
+  "8a_validate": {
+    "ok": 0,
+    "total": 0
+  },
+  "8b_evaluate": {
+    "ok": 0,
+    "total": 0
+  },
+  "8c_apply": {
+    "n_columns": 0
+  },
+  "chart_gen": {
+    "status": "OK",
+    "ok": 1,
+    "failed": 0,
+    "manifest_path": "/Users/raidery/bench/harness/raidery/deer-flow/skills/public/chatbi-report/example/input-bar-line-colors.charts.json",
+    "out_dir": "/Users/raidery/bench/harness/raidery/deer-flow/skills/public/chatbi-report/example/input-bar-line-colors.charts"
+  },
+  "8d_describe": {
+    "ok": 1,
+    "total": 1
+  }
+}

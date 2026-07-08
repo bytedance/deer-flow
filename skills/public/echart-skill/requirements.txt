@@ -1,0 +1,9 @@
+# =============================================================================
+# echart-skill — Full Install (Core + Optional)
+# =============================================================================
+# For a minimal install use:  pip install -r requirements-core.txt
+# For optional features use:  pip install -r requirements-optional.txt
+# =============================================================================
+
+-r requirements-core.txt
+#-r requirements-optional.txt

@@ -131,6 +131,11 @@ class MemoryConfigResponse(BaseModel):
         ...,
         description="Token ceiling for guaranteed-category facts (displaces regular lines in the common case; additive only when guaranteed alone overflows max_injection_tokens)",
     )
+    staleness_review_enabled: bool = Field(..., description="Whether staleness review is enabled for aged facts")
+    staleness_age_days: int = Field(..., description="Facts older than this many days are candidates for staleness review")
+    staleness_min_candidates: int = Field(..., description="Minimum stale facts required to trigger a review cycle")
+    staleness_max_removals_per_cycle: int = Field(..., description="Maximum number of facts staleness review can remove per cycle")
+    staleness_protected_categories: list[str] = Field(..., description="Fact categories exempt from staleness review")
 
 
 class MemoryStatusResponse(BaseModel):
@@ -360,6 +365,11 @@ async def get_memory_config_endpoint() -> MemoryConfigResponse:
         token_counting=config.token_counting,
         guaranteed_categories=config.guaranteed_categories,
         guaranteed_token_budget=config.guaranteed_token_budget,
+        staleness_review_enabled=config.staleness_review_enabled,
+        staleness_age_days=config.staleness_age_days,
+        staleness_min_candidates=config.staleness_min_candidates,
+        staleness_max_removals_per_cycle=config.staleness_max_removals_per_cycle,
+        staleness_protected_categories=config.staleness_protected_categories,
     )
 
 
@@ -391,6 +401,11 @@ async def get_memory_status(http_request: Request) -> MemoryStatusResponse:
             token_counting=config.token_counting,
             guaranteed_categories=config.guaranteed_categories,
             guaranteed_token_budget=config.guaranteed_token_budget,
+            staleness_review_enabled=config.staleness_review_enabled,
+            staleness_age_days=config.staleness_age_days,
+            staleness_min_candidates=config.staleness_min_candidates,
+            staleness_max_removals_per_cycle=config.staleness_max_removals_per_cycle,
+            staleness_protected_categories=config.staleness_protected_categories,
         ),
         data=MemoryResponse(**memory_data),
     )

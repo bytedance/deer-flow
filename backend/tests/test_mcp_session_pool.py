@@ -1,6 +1,7 @@
 """Tests for the MCP persistent-session pool."""
 
 import asyncio
+import logging
 import stat
 import threading
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -916,6 +917,134 @@ async def test_http_transport_tools_not_pooled():
     assert stdio_tools[0].coroutine is not stdio_tool.coroutine
 
 
+@pytest.mark.asyncio
+async def test_non_stdio_tool_call_timeout_warns_that_it_is_ignored(caplog):
+    """HTTP/SSE servers should not silently ignore stdio-only tool_call_timeout."""
+    from langchain_core.tools import StructuredTool
+    from pydantic import BaseModel, Field
+
+    from deerflow.config.extensions_config import McpServerConfig
+    from deerflow.mcp.tools import get_mcp_tools
+
+    class Args(BaseModel):
+        query: str = Field(..., description="query")
+
+    http_tool = StructuredTool(
+        name="remote_search",
+        description="Search tool",
+        args_schema=Args,
+        coroutine=AsyncMock(),
+        response_format="content_and_artifact",
+    )
+
+    server_cfg = McpServerConfig(
+        type="http",
+        url="https://example.com/mcp",
+        tool_call_timeout=30.0,
+    )
+    extensions_config = MagicMock()
+    extensions_config.get_enabled_mcp_servers.return_value = {"remote": server_cfg}
+    extensions_config.mcp_servers = {"remote": server_cfg}
+    extensions_config.model_extra = {}
+
+    servers_config = {
+        "remote": {"transport": "http", "url": "https://example.com/mcp"},
+    }
+
+    with (
+        patch("deerflow.mcp.tools.ExtensionsConfig.from_file", return_value=extensions_config),
+        patch("deerflow.mcp.tools.build_servers_config", return_value=servers_config),
+        patch("deerflow.mcp.tools.get_initial_oauth_headers", return_value={}),
+        patch("deerflow.mcp.tools.build_oauth_tool_interceptor", return_value=None),
+        patch("langchain_mcp_adapters.client.MultiServerMCPClient") as MockClient,
+        caplog.at_level(logging.WARNING, logger="deerflow.mcp.tools"),
+    ):
+        mock_client_instance = MockClient.return_value
+        mock_client_instance.get_tools = AsyncMock(return_value=[http_tool])
+
+        tools = await get_mcp_tools()
+
+    assert tools == [http_tool]
+    assert any(record.levelno == logging.WARNING and "remote" in record.getMessage() and "tool_call_timeout" in record.getMessage() and "stdio" in record.getMessage() for record in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# Regression for PR #3843: tool_call_timeout must not leak into connection dict
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_stdio_tool_call_timeout_does_not_raise_typeerror():
+    """A stdio server with tool_call_timeout must load tools without TypeError.
+
+    The timeout must be read from McpServerConfig (extensions_config), NOT from
+    the connection dict that langchain's create_session receives.  If it leaks
+    into the connection dict, _create_stdio_session() raises TypeError.
+    Regression for PR #3843 P1 bug.
+    """
+    from langchain_core.tools import StructuredTool
+    from pydantic import BaseModel, Field
+
+    from deerflow.config.extensions_config import McpServerConfig
+    from deerflow.mcp.tools import get_mcp_tools
+
+    class Args(BaseModel):
+        query: str = Field(..., description="query")
+
+    stdio_tool = StructuredTool(
+        name="biomcp_search",
+        description="Search biomedical data",
+        args_schema=Args,
+        coroutine=AsyncMock(),
+        response_format="content_and_artifact",
+    )
+
+    mock_session = AsyncMock()
+    mock_cm = MagicMock()
+    mock_cm.__aenter__ = AsyncMock(return_value=mock_session)
+    mock_cm.__aexit__ = AsyncMock(return_value=False)
+
+    # Use real McpServerConfig so tool_call_timeout is a real field value,
+    # not a MagicMock that might accidentally work.
+    server_cfg = McpServerConfig(
+        type="stdio",
+        command="biomcp",
+        args=["serve"],
+        tool_call_timeout=60.0,
+    )
+
+    extensions_config = MagicMock()
+    extensions_config.get_enabled_mcp_servers.return_value = {"biomcp": server_cfg}
+    extensions_config.mcp_servers = {"biomcp": server_cfg}
+    extensions_config.model_extra = {}
+
+    # Connection dict must NOT contain tool_call_timeout — this is the key assertion.
+    servers_config = {
+        "biomcp": {"transport": "stdio", "command": "biomcp", "args": ["serve"]},
+    }
+
+    with (
+        patch("deerflow.mcp.tools.ExtensionsConfig.from_file", return_value=extensions_config),
+        patch("deerflow.mcp.tools.build_servers_config", return_value=servers_config),
+        patch("deerflow.mcp.tools.get_initial_oauth_headers", return_value={}),
+        patch("deerflow.mcp.tools.build_oauth_tool_interceptor", return_value=None),
+        patch("langchain_mcp_adapters.client.MultiServerMCPClient") as MockClient,
+        patch("langchain_mcp_adapters.sessions.create_session", return_value=mock_cm),
+    ):
+        mock_client_instance = MockClient.return_value
+        mock_client_instance.get_tools = AsyncMock(return_value=[stdio_tool])
+
+        # This must NOT raise TypeError from _create_stdio_session()
+        tools = await get_mcp_tools()
+
+    assert len(tools) == 1
+    # The tool should be wrapped with session pool (it's stdio)
+    assert tools[0].coroutine is not stdio_tool.coroutine
+
+    # Verify the connection dict passed to the pool does NOT contain tool_call_timeout
+    assert "tool_call_timeout" not in servers_config["biomcp"]
+
+
 # ---------------------------------------------------------------------------
 # Regression for #3379: cancel scope must be exited in the entering task
 # ---------------------------------------------------------------------------
@@ -1496,3 +1625,80 @@ def test_reset_mcp_tools_cache_from_running_loop_is_bounded():
 
     assert done.is_set(), "reset_mcp_tools_cache() deadlocked inside a running loop"
     assert cm.closed is True, "owner task must run __aexit__ once the loop regains control"
+
+
+# ---------------------------------------------------------------------------
+# get_mcp_tools: routing when one server name is a prefix of another
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_mcp_tools_routed_to_source_server_with_prefix_overlap():
+    """Regression: tools must be routed to the server that produced them, not the first
+    server whose name is a string prefix of the (prefixed) tool name.
+
+    With `tool_name_prefix=True`, a tool from server `web_scraper` is named
+    `web_scraper_search`. When a server `web` is also configured, prefix-matching the tool
+    name picks `web` first (`"web_scraper_search".startswith("web_")`), mis-routing the
+    tool and stripping it to the wrong original name. Routing by the source grouping fixes it.
+    """
+    from langchain_core.tools import StructuredTool
+    from pydantic import BaseModel, Field
+
+    from deerflow.mcp.tools import get_mcp_tools
+
+    class Args(BaseModel):
+        query: str = Field(..., description="query")
+
+    web_tool = StructuredTool(
+        name="web_open",
+        description="d",
+        args_schema=Args,
+        coroutine=AsyncMock(),
+        response_format="content_and_artifact",
+    )
+    scraper_tool = StructuredTool(
+        name="web_scraper_search",
+        description="d",
+        args_schema=Args,
+        coroutine=AsyncMock(),
+        response_format="content_and_artifact",
+    )
+
+    extensions_config = MagicMock()
+    extensions_config.model_extra = {}
+
+    # `web` is inserted before `web_scraper`, so a first-prefix-match mis-routes
+    # `web_scraper_search` to `web`.
+    servers_config = {
+        "web": {"transport": "stdio", "command": "npx", "args": ["web"]},
+        "web_scraper": {"transport": "stdio", "command": "npx", "args": ["scraper"]},
+    }
+
+    routed: list[tuple[str, str]] = []
+
+    def fake_wrap(tool, server_name, connection, interceptors, tool_call_timeout=None):
+        routed.append((tool.name, server_name))
+        return tool
+
+    async def get_tools_for_server(*, server_name: str | None = None):
+        if server_name == "web":
+            return [web_tool]
+        if server_name == "web_scraper":
+            return [scraper_tool]
+        raise AssertionError(f"unexpected server_name: {server_name}")
+
+    with (
+        patch("deerflow.mcp.tools.ExtensionsConfig.from_file", return_value=extensions_config),
+        patch("deerflow.mcp.tools.build_servers_config", return_value=servers_config),
+        patch("deerflow.mcp.tools.get_initial_oauth_headers", return_value={}),
+        patch("deerflow.mcp.tools.build_oauth_tool_interceptor", return_value=None),
+        patch("langchain_mcp_adapters.client.MultiServerMCPClient") as MockClient,
+        patch("deerflow.mcp.tools._make_session_pool_tool", side_effect=fake_wrap),
+    ):
+        MockClient.return_value.get_tools = AsyncMock(side_effect=get_tools_for_server)
+        await get_mcp_tools()
+
+    routing = dict(routed)
+    assert routing["web_scraper_search"] == "web_scraper", f"tool mis-routed to {routing.get('web_scraper_search')!r}, expected 'web_scraper'"
+    assert routing["web_open"] == "web"

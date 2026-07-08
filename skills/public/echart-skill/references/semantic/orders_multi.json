@@ -1,0 +1,140 @@
+{
+  "name": "orders_multi",
+  "table": "orders",
+  "description": "从 orders 表自动生成的业务模型",
+  "synonyms": [],
+  "created_at": "2026-06-29T02:09:00.534468",
+  "updated_at": "2026-06-29T02:09:00.534507",
+  "columns": [
+    {
+      "name": "order_date",
+      "role": "date",
+      "description": "时间维度，跨度517天",
+      "dtype": "date",
+      "aliases": [],
+      "unit": "",
+      "agg_default": null,
+      "is_nullable": false,
+      "format": "date",
+      "tags": []
+    },
+    {
+      "name": "region",
+      "role": "geo",
+      "description": "地理维度",
+      "dtype": "varchar",
+      "aliases": [],
+      "unit": "",
+      "agg_default": null,
+      "is_nullable": false,
+      "format": "",
+      "tags": []
+    },
+    {
+      "name": "channel",
+      "role": "dimension",
+      "description": "分类维度，3个不同值",
+      "dtype": "varchar",
+      "aliases": [],
+      "unit": "",
+      "agg_default": null,
+      "is_nullable": false,
+      "format": "",
+      "tags": []
+    },
+    {
+      "name": "category",
+      "role": "dimension",
+      "description": "分类维度，3个不同值",
+      "dtype": "varchar",
+      "aliases": [],
+      "unit": "",
+      "agg_default": null,
+      "is_nullable": false,
+      "format": "",
+      "tags": []
+    },
+    {
+      "name": "product",
+      "role": "dimension",
+      "description": "分类维度，11个不同值",
+      "dtype": "varchar",
+      "aliases": [],
+      "unit": "",
+      "agg_default": null,
+      "is_nullable": false,
+      "format": "",
+      "tags": []
+    },
+    {
+      "name": "amount",
+      "role": "metric",
+      "description": "数值指标，均值9538.3",
+      "dtype": "double",
+      "aliases": [],
+      "unit": "",
+      "agg_default": "SUM",
+      "is_nullable": false,
+      "format": "",
+      "tags": []
+    },
+    {
+      "name": "quantity",
+      "role": "metric",
+      "description": "数值指标，均值28.7",
+      "dtype": "integer",
+      "aliases": [],
+      "unit": "件",
+      "agg_default": "SUM",
+      "is_nullable": false,
+      "format": "",
+      "tags": []
+    },
+    {
+      "name": "customer_type",
+      "role": "dimension",
+      "description": "分类维度，2个不同值",
+      "dtype": "varchar",
+      "aliases": [],
+      "unit": "",
+      "agg_default": null,
+      "is_nullable": false,
+      "format": "",
+      "tags": []
+    }
+  ],
+  "metrics": [
+    {
+      "name": "总amount",
+      "description": "数值指标，均值9538.3的SUM聚合",
+      "sql_expr": "SUM(amount)",
+      "unit": "",
+      "format": "",
+      "depends_on": [
+        "amount"
+      ],
+      "category": ""
+    },
+    {
+      "name": "总quantity",
+      "description": "数值指标，均值28.7的SUM聚合",
+      "sql_expr": "SUM(quantity)",
+      "unit": "件",
+      "format": "",
+      "depends_on": [
+        "quantity"
+      ],
+      "category": ""
+    },
+    {
+      "name": "orders_multi记录数",
+      "description": "从 orders 表自动生成的业务模型的总记录数",
+      "sql_expr": "COUNT(*)",
+      "unit": "",
+      "format": "",
+      "depends_on": [],
+      "category": "基础"
+    }
+  ],
+  "relationships": []
+}

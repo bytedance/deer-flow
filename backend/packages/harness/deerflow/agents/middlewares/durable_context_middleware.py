@@ -23,9 +23,9 @@ from langgraph.runtime import Runtime
 from deerflow.agents.middlewares.delegation_ledger import extract_delegations, render_delegation_ledger
 from deerflow.agents.middlewares.skill_context import extract_skills, render_skill_context
 from deerflow.agents.thread_state import _DELEGATION_LEDGER_MAX_ENTRIES, TERMINAL_STATUSES
+from deerflow.config.summarization_config import DEFAULT_SKILL_FILE_READ_TOOL_NAMES
+from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
 
-_DEFAULT_SKILLS_ROOT = "/mnt/skills"
-_DEFAULT_SKILL_READ_TOOL_NAMES = frozenset({"read_file", "read", "view", "cat"})
 _DURABLE_CONTEXT_DATA_KEY = "durable_context_data"
 _SUMMARY_RENDER_CHAR_BUDGET = 6000
 _AUTHORITY_CONTRACT = "\n".join(
@@ -40,7 +40,7 @@ _DELEGATION_STABLE_FIELDS = ("description", "subagent_type", "status", "result_b
 
 
 def _normalize_skills_root(skills_container_path: str | None) -> str:
-    return posixpath.normpath(skills_container_path or _DEFAULT_SKILLS_ROOT)
+    return posixpath.normpath(skills_container_path or DEFAULT_SKILLS_CONTAINER_PATH)
 
 
 def _bound_text(text: str, cap: int) -> str:
@@ -124,7 +124,7 @@ class DurableContextMiddleware(AgentMiddleware[AgentState]):
     ) -> None:
         super().__init__()
         self._skills_root = _normalize_skills_root(skills_container_path)
-        self._skill_read_tool_names = frozenset(_DEFAULT_SKILL_READ_TOOL_NAMES if skill_file_read_tool_names is None else skill_file_read_tool_names)
+        self._skill_read_tool_names = frozenset(DEFAULT_SKILL_FILE_READ_TOOL_NAMES if skill_file_read_tool_names is None else skill_file_read_tool_names)
 
     @override
     def before_model(self, state: AgentState, runtime: Runtime) -> dict | None:

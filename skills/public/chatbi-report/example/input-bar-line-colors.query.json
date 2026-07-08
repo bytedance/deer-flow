@@ -1,0 +1,156 @@
+{
+  "results": [
+    {
+      "section_idx": 0,
+      "report_idx": 0,
+      "idx_id": "BAS_0128",
+      "period": "2025",
+      "results": [
+        {
+          "branch_num": "27020199",
+          "raw_value": "85000.50",
+          "success": true
+        },
+        {
+          "branch_num": "27020100",
+          "raw_value": "72340.20",
+          "success": true
+        },
+        {
+          "branch_num": "27020101",
+          "raw_value": "68120.75",
+          "success": true
+        },
+        {
+          "branch_num": "27020102",
+          "raw_value": "45670.30",
+          "success": true
+        },
+        {
+          "branch_num": "99999901",
+          "raw_value": "67800.44",
+          "success": true
+        },
+        {
+          "branch_num": "99999902",
+          "raw_value": "1250000.00",
+          "success": true
+        }
+      ]
+    },
+    {
+      "section_idx": 0,
+      "report_idx": 0,
+      "idx_id": "BAS_0130",
+      "period": "2025",
+      "results": [
+        {
+          "branch_num": "27020199",
+          "raw_value": "1250.50",
+          "success": true
+        },
+        {
+          "branch_num": "27020100",
+          "raw_value": "980.20",
+          "success": true
+        },
+        {
+          "branch_num": "27020101",
+          "raw_value": "850.75",
+          "success": true
+        },
+        {
+          "branch_num": "27020102",
+          "raw_value": "420.30",
+          "success": true
+        },
+        {
+          "branch_num": "99999901",
+          "raw_value": "875.44",
+          "success": true
+        },
+        {
+          "branch_num": "99999902",
+          "raw_value": "28500.00",
+          "success": true
+        }
+      ]
+    },
+    {
+      "section_idx": 0,
+      "report_idx": 0,
+      "idx_id": "BAS_0129",
+      "period": "2025",
+      "results": [
+        {
+          "branch_num": "27020199",
+          "raw_value": "0.0235",
+          "success": true
+        },
+        {
+          "branch_num": "27020100",
+          "raw_value": "0.0280",
+          "success": true
+        },
+        {
+          "branch_num": "27020101",
+          "raw_value": "0.0310",
+          "success": true
+        },
+        {
+          "branch_num": "27020102",
+          "raw_value": "0.0345",
+          "success": true
+        },
+        {
+          "branch_num": "99999901",
+          "raw_value": "0.0290",
+          "success": true
+        },
+        {
+          "branch_num": "99999902",
+          "raw_value": "0.0185",
+          "success": true
+        }
+      ]
+    },
+    {
+      "section_idx": 0,
+      "report_idx": 0,
+      "idx_id": "BAS_0131",
+      "period": "2025",
+      "results": [
+        {
+          "branch_num": "27020199",
+          "raw_value": "0.3135",
+          "success": true
+        },
+        {
+          "branch_num": "27020100",
+          "raw_value": "0.2668",
+          "success": true
+        },
+        {
+          "branch_num": "27020101",
+          "raw_value": "0.2512",
+          "success": true
+        },
+        {
+          "branch_num": "27020102",
+          "raw_value": "0.1685",
+          "success": true
+        },
+        {
+          "branch_num": "99999901",
+          "raw_value": "1.0000",
+          "success": true
+        },
+        {
+          "branch_num": "99999902",
+          "raw_value": "0.2169",
+          "success": true
+        }
+      ]
+    }
+  ]
+}

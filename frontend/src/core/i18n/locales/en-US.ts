@@ -51,6 +51,8 @@ export const enUS: Translations = {
     exportAsJSON: "Export as JSON",
     exportSuccess: "Conversation exported",
     regenerate: "Regenerate",
+    branch: "Branch conversation",
+    showArtifacts: "Show artifacts of this conversation",
   },
 
   // Home
@@ -76,6 +78,36 @@ export const enUS: Translations = {
     copiedToClipboard: "Copied to clipboard",
     failedToCopyToClipboard: "Failed to copy to clipboard",
     linkCopied: "Link copied to clipboard",
+  },
+
+  // Citations
+  citations: {
+    sourcesSummary: (count) =>
+      `Used ${count} ${count === 1 ? "source" : "sources"}`,
+    citeCount: (count) => `${count} ${count === 1 ? "cite" : "cites"}`,
+    copyReference: (title) => `Copy ${title} reference`,
+    copiedReference: (title) => `Copied ${title} reference`,
+  },
+
+  // Workspace Changes
+  workspaceChanges: {
+    title: "Workspace changes",
+    editedTitle: (count) => `Edited ${count} ${count === 1 ? "file" : "files"}`,
+    badge: (count, additions, deletions) =>
+      `${count} ${count === 1 ? "file" : "files"} changed +${additions} -${deletions}`,
+    viewChanges: "View changes",
+    created: "Created",
+    modified: "Modified",
+    deleted: "Deleted",
+    openFile: "Open file",
+    loading: "Loading workspace changes...",
+    noChanges: "No workspace changes recorded.",
+    diffUnavailable: "Diff unavailable",
+    binaryUnavailable: "Binary file. Diff unavailable.",
+    largeUnavailable: "Large file. Diff omitted.",
+    sensitiveUnavailable: "Sensitive path. Content hidden.",
+    truncatedUnavailable: "Diff omitted because the change set is too large.",
+    truncatedSummary: "Some changes were truncated.",
   },
 
   // Input Box
@@ -118,6 +150,22 @@ export const enUS: Translations = {
     followupConfirmReplace: "Replace & send",
     suggestionPlaceholderRequired:
       "Replace the suggestion placeholder before sending.",
+    goalCommandDescription: "Set, show, or clear an active goal",
+    compactCommandDescription:
+      "Compact earlier context while keeping the full chat visible",
+    goalLabel: "Goal",
+    goalContinuing: "Continuing {count}/{max}",
+    goalContinuationTooltip:
+      "Auto-continued {count}/{max} times toward the goal; stops at the limit.",
+    goalSet: "Goal set.",
+    goalCleared: "Goal cleared.",
+    goalNone: "No active goal.",
+    goalActive: "Active goal: {goal}",
+    goalFailed: "Goal command failed.",
+    compactSuccess:
+      "Earlier context compacted. The full chat remains visible; future model calls will use the summary and recent messages.",
+    compactSkipped: "The current context does not need compaction yet.",
+    compactFailed: "Context compaction failed.",
     suggestions: [
       {
         suggestion: "Write",
@@ -167,6 +215,7 @@ export const enUS: Translations = {
         icon: SparklesIcon,
       },
     ],
+    pleaseWaitStreaming: "Please wait for the current response to finish.",
   },
 
   // Sidebar
@@ -177,7 +226,142 @@ export const enUS: Translations = {
     recentChats: "Recent chats",
     demoChats: "Demo chats",
     agents: "Agents",
+    scheduledTasks: "Scheduled tasks",
     agentsDisabledTooltip: "Feature not enabled",
+  },
+
+  // Scheduled tasks
+  scheduledTasks: {
+    scheduleType: {
+      cron: "Recurring",
+      once: "One-time",
+    },
+    preset: {
+      label: "Repeat",
+      hourly: "Hourly",
+      daily: "Daily",
+      weekly: "Weekly",
+      monthly: "Monthly",
+      custom: "Custom cron",
+    },
+    fields: {
+      minute: "Minute",
+      time: "Time",
+      weekday: "On",
+      dayOfMonth: "Day of month",
+      cron: "Cron expression",
+      cronPlaceholder: "0 9 * * *",
+      runAt: "Run at",
+      timezone: "Timezone",
+    },
+    weekdays: {
+      mon: "Mon",
+      tue: "Tue",
+      wed: "Wed",
+      thu: "Thu",
+      fri: "Fri",
+      sat: "Sat",
+      sun: "Sun",
+    },
+    preview: "Preview",
+    cronHelp: "Open crontab.guru",
+    create: {
+      title: "Create scheduled task",
+      taskTitle: "Task title",
+      prompt: "Prompt",
+      submit: "Create",
+      fillRequired: "Fill all required fields",
+    },
+    context: {
+      fresh: "Fresh thread",
+      reuse: "Reuse thread",
+      threadIdPlaceholder: "Thread ID",
+    },
+    filters: {
+      allStatuses: "All statuses",
+      enabled: "Enabled",
+      paused: "Paused",
+      completed: "Completed",
+      failed: "Failed",
+      allTypes: "All types",
+      cron: "Cron",
+      once: "Once",
+    },
+    detail: {
+      contextMode: "Context mode",
+      thread: "Thread",
+      lastThread: "Last thread",
+      schedule: "Schedule",
+      nextRun: "Next run",
+      lastRun: "Last run",
+      lastRunId: "Last run id",
+      lastError: "Last error",
+      runsCount: "{count} runs",
+      runsCountOne: "{count} run",
+      noRuns: "No runs yet",
+      noSelection: "No scheduled task selected",
+      filteredByThread: "Filtered by thread: {id}",
+      loadFailed: "Failed to load scheduled tasks",
+    },
+    actions: {
+      edit: "Edit",
+      cancelEdit: "Cancel edit",
+      pause: "Pause",
+      resume: "Resume",
+      trigger: "Trigger now",
+      delete: "Delete",
+    },
+    deleteConfirm:
+      "Are you sure you want to delete this scheduled task? This action cannot be undone.",
+    errors: {
+      create: "Failed to create scheduled task",
+      update: "Failed to update scheduled task",
+      pause: "Failed to pause scheduled task",
+      resume: "Failed to resume scheduled task",
+      trigger: "Failed to trigger scheduled task",
+      delete: "Failed to delete scheduled task",
+    },
+    edit: {
+      titlePlaceholder: "Edit title",
+      promptPlaceholder: "Edit prompt",
+      submit: "Save edit",
+    },
+    status: {
+      enabled: "Enabled",
+      paused: "Paused",
+      running: "Running",
+      completed: "Completed",
+      failed: "Failed",
+      cancelled: "Cancelled",
+    },
+    runTrigger: { scheduled: "scheduled", manual: "manual" },
+    runStatus: {
+      queued: "Queued",
+      running: "Running",
+      success: "Success",
+      failed: "Failed",
+      skipped: "Skipped",
+      interrupted: "Interrupted",
+    },
+    recipes: {
+      label: "Quick create",
+      trending: {
+        title: "GitHub Trending daily",
+        desc: "Summarize today's top 10 trending repos",
+      },
+      news: {
+        title: "Daily tech news digest",
+        desc: "Collect and summarize the day's top tech news",
+      },
+      issues: {
+        title: "GitHub Issue triage",
+        desc: "Triage a repo's open issues (fill in {{repo}})",
+      },
+      weekly: {
+        title: "Weekly report",
+        desc: "Compile a weekly summary, every Monday",
+      },
+    },
   },
 
   // Agents
@@ -242,10 +426,10 @@ export const enUS: Translations = {
   // Workspace
   workspace: {
     officialWebsite: "DeerFlow's official website",
-    githubTooltip: "DeerFlow on Github",
+    githubTooltip: "DeerFlow on GitHub",
     settingsAndMore: "Settings and more",
     visitGithub: "DeerFlow on GitHub",
-    reportIssue: "Report a issue",
+    reportIssue: "Report an issue",
     contactUs: "Contact us",
     about: "About DeerFlow",
     logout: "Log out",
@@ -257,6 +441,8 @@ export const enUS: Translations = {
   conversation: {
     noMessages: "No messages yet",
     startConversation: "Start a conversation to see messages here",
+    branchCreated: "Conversation branch created",
+    branchFailed: "Failed to branch conversation.",
   },
 
   // Chats
@@ -265,6 +451,33 @@ export const enUS: Translations = {
     loadMoreToSearch: "Load more to search older conversations",
     loadingMore: "Loading more...",
     loadOlderChats: "Load older chats",
+  },
+
+  // Sidecar
+  sidecar: {
+    title: "Side chat",
+    open: "Open side chat",
+    close: "Close side chat",
+    delete: "Delete side chat",
+    deleteConfirm:
+      "Are you sure you want to delete this side chat? This action cannot be undone. To simply hide it, use the side chat toggle in the header instead.",
+    deleteSuccess: "Side chat deleted",
+    deleteFailed: "Failed to delete side chat.",
+    addToConversation: "Add to conversation",
+    askInSideChat: "Ask in side chat",
+    reference: "Reference",
+    selectedTextFragment: "{count} selected text fragment",
+    selectedTextFragments: "{count} selected text fragments",
+    clearReferences: "Clear selected references",
+    emptyTitle: "Ask a follow-up",
+    emptyDescription: "Ask a follow-up grounded in the referenced text.",
+    placeholder: "Ask a deeper follow-up...",
+    send: "Send",
+    sendFailed: "Failed to send side chat message.",
+    noContext: "No context selected",
+    continuing: "Continue in this side chat",
+    selectionCrossesMessages:
+      "Selection spans multiple messages. Select text within a single reply to quote it.",
   },
 
   // Channels
@@ -329,6 +542,17 @@ export const enUS: Translations = {
     clickToViewContent: "Click to view file content",
     writeTodos: "Update to-do list",
     skillInstallTooltip: "Install skill and make it available to DeerFlow",
+  },
+
+  humanInput: {
+    answered: "Answered",
+    pending: "Sending...",
+    readOnly: "Read only",
+    otherLabel: "Other answer",
+    otherPlaceholder: "Type another answer...",
+    submit: "Submit",
+    emptyError: "Enter an answer before submitting.",
+    answeredValue: (value: string) => `Answered: ${value}`,
   },
 
   // Subtasks

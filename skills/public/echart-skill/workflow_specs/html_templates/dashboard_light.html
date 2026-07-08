@@ -1,0 +1,450 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{{DASHBOARD_TITLE}}</title>
+  <style>
+    :root {
+      --page: #edf1f7;
+      --surface: #ffffff;
+      --surface-soft: #f8fafc;
+      --surface-elevated: #ffffff;
+      --ink: #111827;
+      --ink-soft: #344054;
+      --muted: #667085;
+      --line: #d9e0ea;
+      --accent: #1d4ed8;
+      --accent-soft: #e8efff;
+      --header-bg: rgba(255, 255, 255, 0.94);
+      --green: #157347;
+      --amber: #b25e09;
+      --red: #b42318;
+      --radius: 6px;
+      --shadow: 0 18px 60px rgba(16, 24, 40, 0.11);
+    }
+    html[data-theme="dark"] {
+      --page: #0b1220;
+      --surface: #111827;
+      --surface-soft: #182235;
+      --surface-elevated: #1f2937;
+      --ink: #f8fafc;
+      --ink-soft: #d0d5dd;
+      --muted: #98a2b3;
+      --line: #344054;
+      --accent: #7aa2ff;
+      --accent-soft: #1d2b4f;
+      --header-bg: rgba(17, 24, 39, 0.94);
+      --green: #6ee7b7;
+      --amber: #fbbf24;
+      --red: #f97066;
+      --shadow: 0 22px 70px rgba(0, 0, 0, 0.36);
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--page);
+      color: var(--ink);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", Arial, sans-serif;
+      line-height: 1.55;
+      letter-spacing: 0;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    .dashboard-container {
+      width: min(1560px, calc(100vw - 32px));
+      min-height: 100vh;
+      margin: 24px auto;
+      background: var(--surface);
+      border: 1px solid var(--line);
+      box-shadow: var(--shadow);
+    }
+    .dashboard-header {
+      position: sticky;
+      top: 0;
+      z-index: 20;
+      border-bottom: 1px solid var(--line);
+      background: var(--header-bg);
+      backdrop-filter: blur(12px);
+    }
+    .header-content {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 18px;
+      align-items: center;
+      padding: 22px 28px 18px;
+    }
+    .dashboard-kicker {
+      color: var(--accent);
+      font-size: 12px;
+      font-weight: 800;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+    }
+    .dashboard-title {
+      margin: 5px 0 0;
+      color: var(--ink);
+      font-size: 28px;
+      line-height: 1.2;
+      font-weight: 820;
+    }
+    .dashboard-subtitle {
+      margin: 8px 0 0;
+      color: var(--muted);
+      font-size: 13px;
+    }
+    .header-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 34px;
+      padding: 0 12px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--surface-elevated);
+      color: var(--ink-soft);
+      font-size: 13px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    .btn-primary {
+      border-color: var(--accent);
+      background: var(--accent);
+      color: var(--surface);
+    }
+
+    .dashboard-toolbar {
+      border-top: 1px solid #eef2f7;
+      padding: 12px 28px;
+      background: var(--surface-soft);
+    }
+    .toolbar-content {
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    .toolbar-filters,
+    .toolbar-actions {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    .filter-chip {
+      display: inline-flex;
+      align-items: center;
+      min-height: 30px;
+      padding: 0 10px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: var(--surface-elevated);
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 680;
+    }
+
+    .dashboard-body {
+      padding: 24px 28px 34px;
+    }
+    .dashboard-summary {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 14px;
+      margin-bottom: 18px;
+    }
+    .kpi-card {
+      min-height: 116px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--surface-elevated);
+      padding: 15px 16px;
+    }
+    .kpi-label {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
+    }
+    .kpi-value {
+      margin-top: 8px;
+      color: var(--ink);
+      font-size: 28px;
+      line-height: 1.1;
+      font-weight: 830;
+    }
+    .kpi-delta {
+      margin-top: 9px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 650;
+    }
+    .kpi-delta.positive { color: var(--green); }
+    .kpi-delta.negative { color: var(--red); }
+
+    .insight-strip {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 14px;
+      margin: 0 0 18px;
+    }
+    .insight-card {
+      border: 1px solid var(--line);
+      border-left: 4px solid var(--accent);
+      border-radius: var(--radius);
+      background: var(--surface-elevated);
+      padding: 14px 15px;
+    }
+    .insight-title {
+      color: var(--ink);
+      font-size: 13px;
+      font-weight: 800;
+    }
+    .insight-text {
+      margin-top: 6px;
+      color: var(--ink-soft);
+      font-size: 13px;
+    }
+
+    .dashboard-grid {
+      display: grid;
+      grid-template-columns: repeat({{GRID_COLUMNS}}, minmax(0, 1fr));
+      grid-auto-rows: {{ROW_HEIGHT}}px;
+      gap: {{GRID_GAP}}px;
+    }
+    .chart-card {
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
+      min-height: 0;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--surface-elevated);
+      overflow: hidden;
+    }
+    .chart-card-header {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: flex-start;
+      padding: 14px 16px 10px;
+      border-bottom: 1px solid var(--line);
+      background: var(--surface-soft);
+    }
+    .chart-title {
+      color: var(--ink);
+      font-size: 14px;
+      font-weight: 820;
+    }
+    .chart-subtitle {
+      margin-top: 3px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .chart-actions {
+      display: flex;
+      gap: 6px;
+      flex: 0 0 auto;
+    }
+    .icon-btn {
+      width: 28px;
+      height: 28px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--surface-elevated);
+      color: var(--muted);
+      cursor: pointer;
+    }
+    .chart-body {
+      position: relative;
+      flex: 1 1 auto;
+      min-height: 260px;
+      padding: 10px 12px 12px;
+    }
+    .chart {
+      width: 100%;
+      height: 100%;
+      min-height: 240px;
+    }
+
+    .diagnostic-panel {
+      margin-top: 18px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--surface-soft);
+      padding: 16px;
+    }
+    .diagnostic-title {
+      color: var(--ink);
+      font-size: 15px;
+      font-weight: 830;
+    }
+    .diagnostic-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+      margin-top: 12px;
+    }
+    .diagnostic-item {
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--surface-elevated);
+      padding: 12px;
+      color: var(--ink-soft);
+      font-size: 13px;
+    }
+
+    .toast-container {
+      position: fixed;
+      right: 18px;
+      bottom: 18px;
+      z-index: 1000;
+    }
+
+    @media print {
+      body { background: #ffffff; }
+      .dashboard-container {
+        width: 100%;
+        margin: 0;
+        border: 0;
+        box-shadow: none;
+      }
+      .dashboard-header { position: static; }
+      .btn,
+      .chart-actions { display: none; }
+      .chart-card,
+      .kpi-card,
+      .insight-card,
+      .diagnostic-panel { break-inside: avoid; }
+    }
+    @media (max-width: 1100px) {
+      .dashboard-summary,
+      .insight-strip,
+      .diagnostic-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .dashboard-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+    @media (max-width: 760px) {
+      .dashboard-container { width: min(100vw, calc(100vw - 16px)); margin: 8px auto; }
+      .header-content { grid-template-columns: 1fr; }
+      .dashboard-title { font-size: 23px; }
+      .dashboard-summary,
+      .insight-strip,
+      .diagnostic-grid,
+      .dashboard-grid { grid-template-columns: 1fr; }
+      .dashboard-body,
+      .dashboard-toolbar,
+      .header-content { padding-left: 16px; padding-right: 16px; }
+    }
+  </style>
+</head>
+<body>
+  <main class="dashboard-container" id="dashboardRoot">
+    <header class="dashboard-header">
+      <div class="header-content">
+        <div>
+          <div class="dashboard-kicker">Enterprise Dashboard</div>
+          <h1 class="dashboard-title">{{DASHBOARD_TITLE}}</h1>
+          <p class="dashboard-subtitle">{{DASHBOARD_SUBTITLE}}</p>
+        </div>
+        <div class="header-actions">
+          <button class="btn" id="theme-toggle" data-global-handler="true" onclick="window.dashboardToggleTheme()">主题</button>
+          <button class="btn" id="refresh-dashboard" data-global-handler="true" onclick="window.dashboardRefresh()">刷新</button>
+          <button class="btn btn-primary" id="export-dashboard" data-global-handler="true" onclick="window.dashboardExportPDF()">导出 PDF</button>
+        </div>
+      </div>
+      <div class="dashboard-toolbar">
+        <div class="toolbar-content">
+          <div class="toolbar-filters">{{FILTER_CHIPS}}</div>
+          <div class="toolbar-actions">{{DASHBOARD_ACTIONS}}</div>
+        </div>
+      </div>
+    </header>
+
+    <section class="dashboard-body">
+      <div class="dashboard-summary">{{KPI_CARDS}}</div>
+      <div class="insight-strip">{{INSIGHT_CARDS}}</div>
+      <div class="dashboard-grid">{{CHART_CARDS}}</div>
+      <section class="diagnostic-panel">
+        <div class="diagnostic-title">诊断与数据边界</div>
+        <div class="diagnostic-grid">{{DIAGNOSTIC_CARDS}}</div>
+      </section>
+    </section>
+  </main>
+  <div class="toast-container" id="toast-container"></div>
+  <script>{{ECHARTS_JS}}</script>
+  <script>{{HTML2CANVAS_JS}}</script>
+  <script>{{JSPDF_JS}}</script>
+  <script>{{DASHBOARD_JS}}</script>
+  <script>{{CHART_BOOTSTRAP}}</script>
+  <script>
+    (function () {
+      function getDashboard() {
+        if (window.dashboard && typeof window.dashboard === "object") {
+          return window.dashboard;
+        }
+        if (window.DashboardController) {
+          try {
+            window.dashboard = new DashboardController({
+              charts: window.dashboardCharts || window.charts || [],
+              config: { title: "{{DASHBOARD_TITLE}}" }
+            });
+            return window.dashboard;
+          } catch (error) {
+            console.warn("DashboardController fallback init failed:", error);
+          }
+        }
+        return null;
+      }
+
+      function printFallback() {
+        const chartList = window.dashboardCharts || window.charts || [];
+        chartList.forEach(function (chart) {
+          try { chart.resize(); } catch (error) {}
+        });
+        window.setTimeout(function () { window.print(); }, 120);
+      }
+
+      window.dashboardExportPDF = function dashboardExportPDF() {
+        const instance = getDashboard();
+        if (instance && typeof instance.exportDashboard === "function") {
+          instance.exportDashboard();
+          return;
+        }
+        printFallback();
+      };
+
+      window.dashboardRefresh = function dashboardRefresh() {
+        const instance = getDashboard();
+        if (instance && typeof instance.refreshAllCharts === "function") {
+          instance.refreshAllCharts();
+          return;
+        }
+        const chartList = window.dashboardCharts || window.charts || [];
+        chartList.forEach(function (chart) {
+          try { chart.resize(); } catch (error) {}
+        });
+      };
+
+      window.dashboardToggleTheme = function dashboardToggleTheme() {
+        const instance = getDashboard();
+        if (instance && typeof instance.toggleTheme === "function") {
+          instance.toggleTheme();
+          return;
+        }
+        const html = document.documentElement;
+        const next = html.getAttribute("data-theme") === "dark" ? "light" : "dark";
+        html.setAttribute("data-theme", next);
+        document.body.setAttribute("data-theme", next);
+        const root = document.querySelector(".dashboard-container");
+        if (root) root.setAttribute("data-theme", next);
+      };
+    })();
+  </script>
+</body>
+</html>

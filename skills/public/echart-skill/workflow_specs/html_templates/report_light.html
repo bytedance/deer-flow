@@ -1,0 +1,495 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{{REPORT_TITLE}}</title>
+  <style>
+    :root {
+      --page: #edf1f7;
+      --paper: #ffffff;
+      --paper-soft: #f8fafc;
+      --ink: #111827;
+      --ink-soft: #344054;
+      --muted: #667085;
+      --faint: #98a2b3;
+      --line: #d9e0ea;
+      --line-strong: #b8c2d1;
+      --accent: #1d4ed8;
+      --accent-soft: #e8efff;
+      --green: #157347;
+      --amber: #b25e09;
+      --red: #b42318;
+      --shadow: 0 24px 80px rgba(16, 24, 40, 0.14);
+      --radius: 6px;
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      background: var(--page);
+      color: var(--ink);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", Arial, sans-serif;
+      line-height: 1.68;
+      letter-spacing: 0;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    .paper {
+      width: min(1160px, calc(100vw - 40px));
+      margin: 32px auto;
+      background: var(--paper);
+      border: 1px solid var(--line);
+      box-shadow: var(--shadow);
+    }
+
+    .cover {
+      position: relative;
+      padding: 58px 72px 34px;
+      border-bottom: 1px solid var(--line);
+      background:
+        linear-gradient(90deg, rgba(29, 78, 216, 0.08), rgba(255, 255, 255, 0) 44%),
+        #ffffff;
+    }
+    .cover::before {
+      content: "";
+      position: absolute;
+      inset: 0 0 auto;
+      height: 6px;
+      background: linear-gradient(90deg, #1d4ed8, #2563eb 38%, #0891b2 72%, #16a34a);
+    }
+    .kicker {
+      margin-bottom: 14px;
+      color: var(--accent);
+      font-size: 12px;
+      font-weight: 800;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+    }
+    h1 {
+      max-width: 860px;
+      margin: 0;
+      font-size: 38px;
+      line-height: 1.16;
+      font-weight: 820;
+      letter-spacing: 0;
+    }
+    .subtitle {
+      max-width: 780px;
+      margin: 16px 0 0;
+      color: var(--ink-soft);
+      font-size: 15px;
+    }
+
+    .meta {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 12px;
+      margin-top: 34px;
+    }
+    .meta-card {
+      min-height: 76px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: rgba(255, 255, 255, 0.82);
+      padding: 13px 14px;
+    }
+    .meta-label {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 650;
+    }
+    .meta-value {
+      margin-top: 5px;
+      color: var(--ink);
+      font-size: 14px;
+      font-weight: 780;
+      overflow-wrap: anywhere;
+    }
+    .report-actions {
+      display: flex;
+      gap: 10px;
+      margin-top: 24px;
+    }
+    .report-btn {
+      min-height: 36px;
+      padding: 0 14px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: #ffffff;
+      color: var(--ink-soft);
+      font-size: 13px;
+      font-weight: 760;
+      cursor: pointer;
+    }
+    .report-btn-primary {
+      border-color: var(--accent);
+      background: var(--accent);
+      color: #ffffff;
+    }
+
+    .content {
+      padding: 34px 72px 64px;
+    }
+    .toc {
+      display: grid;
+      grid-template-columns: 180px 1fr;
+      gap: 22px;
+      margin-bottom: 34px;
+      padding: 20px 22px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--paper-soft);
+    }
+    .toc h2 {
+      margin: 0;
+      padding: 0;
+      border: 0;
+      font-size: 15px;
+      color: var(--ink);
+    }
+    .toc ol {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px 22px;
+      margin: 0;
+      padding-left: 20px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+    .toc a {
+      color: var(--ink-soft);
+      text-decoration: none;
+    }
+    .toc a:hover { color: var(--accent); }
+
+    section {
+      margin-top: 28px;
+      padding-top: 30px;
+      border-top: 1px solid var(--line);
+      break-inside: avoid;
+    }
+    section:first-of-type {
+      margin-top: 0;
+    }
+    h2 {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin: 0 0 16px;
+      color: var(--ink);
+      font-size: 22px;
+      line-height: 1.32;
+      font-weight: 820;
+      letter-spacing: 0;
+    }
+    h2::before {
+      content: "";
+      width: 5px;
+      height: 22px;
+      border-radius: 3px;
+      background: var(--accent);
+      flex: 0 0 auto;
+    }
+    h3 {
+      margin: 24px 0 10px;
+      color: var(--ink);
+      font-size: 16px;
+      line-height: 1.4;
+      font-weight: 760;
+    }
+    p {
+      margin: 0 0 12px;
+      color: var(--ink-soft);
+      font-size: 14px;
+    }
+    p strong:first-child {
+      color: var(--ink);
+    }
+    .section-body > p:first-child {
+      padding: 13px 15px;
+      border: 1px solid var(--line);
+      border-left: 4px solid var(--accent);
+      border-radius: var(--radius);
+      background: #f8fbff;
+      color: var(--ink-soft);
+    }
+    .section-body ul,
+    .section-body ol {
+      margin: 8px 0 16px;
+      padding-left: 24px;
+      color: var(--ink-soft);
+      font-size: 14px;
+    }
+    .section-body li {
+      margin-bottom: 7px;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: separate;
+      border-spacing: 0;
+      margin: 16px 0 20px;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      font-size: 13px;
+    }
+    th,
+    td {
+      padding: 9px 11px;
+      border-right: 1px solid var(--line);
+      border-bottom: 1px solid var(--line);
+      text-align: left;
+      vertical-align: top;
+    }
+    th:last-child,
+    td:last-child { border-right: 0; }
+    tr:last-child td { border-bottom: 0; }
+    th {
+      background: #eef3fb;
+      color: #24324b;
+      font-weight: 760;
+    }
+    td {
+      color: var(--ink-soft);
+      background: #ffffff;
+    }
+    tr:nth-child(even) td {
+      background: #fbfcff;
+    }
+
+    .finding {
+      position: relative;
+      margin: 16px 0;
+      padding: 16px 18px 16px 20px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: #ffffff;
+      box-shadow: 0 1px 0 rgba(16, 24, 40, 0.04);
+    }
+    .finding::before {
+      content: "";
+      position: absolute;
+      left: 0;
+      top: 0;
+      bottom: 0;
+      width: 4px;
+      background: var(--accent);
+      border-radius: var(--radius) 0 0 var(--radius);
+    }
+    .finding-title {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 8px;
+      color: var(--ink);
+      font-size: 14px;
+      font-weight: 820;
+    }
+    .finding p {
+      margin-bottom: 0;
+    }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      min-height: 22px;
+      padding: 2px 8px;
+      border: 1px solid #c8d7ff;
+      border-radius: 999px;
+      background: var(--accent-soft);
+      color: var(--accent);
+      font-size: 11px;
+      font-weight: 780;
+      white-space: nowrap;
+    }
+
+    .chart-panel {
+      margin: 20px 0 24px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: #ffffff;
+      overflow: hidden;
+      page-break-inside: avoid;
+    }
+    .chart-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 16px 18px 12px;
+      border-bottom: 1px solid var(--line);
+      background: var(--paper-soft);
+    }
+    .chart-title {
+      color: var(--ink);
+      font-size: 15px;
+      font-weight: 820;
+    }
+    .chart-note {
+      max-width: 420px;
+      color: var(--muted);
+      font-size: 12px;
+      text-align: right;
+    }
+    .chart {
+      width: 100%;
+      height: 360px;
+    }
+    .chart-error {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 100%;
+      height: 100%;
+      padding: 18px;
+      color: var(--red);
+      background: #fff5f5;
+      font-size: 13px;
+      font-weight: 760;
+      text-align: center;
+    }
+
+    .footer {
+      display: flex;
+      justify-content: space-between;
+      gap: 18px;
+      border-top: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 12px;
+      padding: 18px 72px;
+      background: #fbfcff;
+    }
+
+    @media print {
+      body { background: #fff; }
+      .paper {
+        width: 100%;
+        margin: 0;
+        border: 0;
+        box-shadow: none;
+      }
+      .cover,
+      .content,
+      .footer {
+        padding-left: 28px;
+        padding-right: 28px;
+      }
+      .toc { grid-template-columns: 1fr; }
+      .chart { height: 300px; }
+      .report-actions { display: none; }
+      section,
+      .finding,
+      .chart-panel,
+      table { break-inside: avoid; }
+    }
+    body.is-exporting .report-actions {
+      display: none;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --page: #e5ebf4;
+        --paper: #ffffff;
+        --ink: #111827;
+        --ink-soft: #344054;
+        --paper-soft: #f8fafc;
+      }
+    }
+    @media (max-width: 860px) {
+      .paper { width: min(100vw, calc(100vw - 20px)); margin: 10px auto; }
+      .cover,
+      .content,
+      .footer { padding-left: 20px; padding-right: 20px; }
+      h1 { font-size: 28px; }
+      .meta { grid-template-columns: 1fr 1fr; }
+      .toc { grid-template-columns: 1fr; }
+      .toc ol { grid-template-columns: 1fr; }
+      .chart-head { display: block; }
+      .chart-note { max-width: none; text-align: left; margin-top: 4px; }
+      .chart { height: 310px; }
+      .footer { display: block; }
+    }
+  </style>
+</head>
+<body>
+  <main class="paper">
+    <header class="cover">
+      <div class="kicker">Enterprise Analysis Report</div>
+      <h1>{{REPORT_TITLE}}</h1>
+      <p class="subtitle">{{REPORT_SUBTITLE}}</p>
+      <div class="meta">
+        <div class="meta-card"><div class="meta-label">生成时间</div><div class="meta-value">{{GENERATED_AT}}</div></div>
+        <div class="meta-card"><div class="meta-label">数据表</div><div class="meta-value">{{TABLE_NAME}}</div></div>
+        <div class="meta-card"><div class="meta-label">记录数</div><div class="meta-value">{{ROW_COUNT}}</div></div>
+        <div class="meta-card"><div class="meta-label">输出类型</div><div class="meta-value">HTML / PDF-like</div></div>
+      </div>
+      <div class="report-actions">
+        <button class="report-btn report-btn-primary" type="button" onclick="window.exportReportPDF && window.exportReportPDF()">导出 PDF</button>
+        <button class="report-btn" type="button" onclick="window.print()">打印</button>
+      </div>
+    </header>
+    <div class="content">
+      {{TABLE_OF_CONTENTS}}
+      {{REPORT_BODY}}
+    </div>
+    <footer class="footer">
+      <span>报告由 Agent BI 生成。图表使用 ECharts md 配方上下文生成。</span>
+      <span>可直接打印或导出为 PDF。</span>
+    </footer>
+  </main>
+  <script>{{ECHARTS_JS}}</script>
+  <script>{{PDF_EXPORT_JS}}</script>
+  <script>
+  {{CHART_BOOTSTRAP}}
+  window.exportReportPDF = async function exportReportPDF() {
+    const charts = Array.isArray(window.reportCharts) ? window.reportCharts : [];
+    charts.forEach(function(chart) {
+      try { chart.resize(); } catch (error) {}
+    });
+    await new Promise(function(resolve) { window.setTimeout(resolve, 180); });
+
+    const paper = document.querySelector(".paper");
+    const JsPDF = window.jspdf && window.jspdf.jsPDF ? window.jspdf.jsPDF : window.jsPDF;
+    if (!paper || typeof window.html2canvas !== "function" || !JsPDF) {
+      window.print();
+      return;
+    }
+
+    document.body.classList.add("is-exporting");
+    try {
+      const canvas = await window.html2canvas(paper, {
+        scale: 2,
+        backgroundColor: "#ffffff",
+        useCORS: true,
+        logging: false
+      });
+      const pdf = new JsPDF("p", "pt", "a4");
+      const pageWidth = pdf.internal.pageSize.getWidth();
+      const pageHeight = pdf.internal.pageSize.getHeight();
+      const imageWidth = pageWidth;
+      const imageHeight = canvas.height * imageWidth / canvas.width;
+      const imageData = canvas.toDataURL("image/png");
+
+      let heightLeft = imageHeight;
+      let position = 0;
+      pdf.addImage(imageData, "PNG", 0, position, imageWidth, imageHeight);
+      heightLeft -= pageHeight;
+      while (heightLeft > 0) {
+        position = heightLeft - imageHeight;
+        pdf.addPage();
+        pdf.addImage(imageData, "PNG", 0, position, imageWidth, imageHeight);
+        heightLeft -= pageHeight;
+      }
+      const safeTitle = (document.title || "report").replace(/[\\/:*?"<>|]+/g, "_");
+      pdf.save(safeTitle + ".pdf");
+    } catch (error) {
+      console.error("Report PDF export failed, falling back to print.", error);
+      window.print();
+    } finally {
+      document.body.classList.remove("is-exporting");
+    }
+  };
+  </script>
+</body>
+</html>

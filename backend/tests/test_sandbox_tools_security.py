@@ -306,29 +306,39 @@ def test_resolve_and_validate_user_data_path_blocks_traversal(tmp_path: Path) ->
 # ---------- replace_virtual_paths_in_command ----------
 
 
-def test_replace_virtual_paths_in_command_replaces_skills_paths() -> None:
-    """Skills virtual paths in commands should be resolved to host paths."""
+def test_replace_virtual_paths_in_command_does_not_replace_skills_paths() -> None:
+    """Skills virtual paths in commands should NOT be resolved by replace_virtual_paths_in_command.
+
+    Skills and ACP workspace paths are resolved by the sandbox's
+    PathMapping at execution time, not by pre-resolving in
+    replace_virtual_paths_in_command, because the sandbox's user_id
+    (from acquire time) may differ from the contextvar user_id used by
+    _resolve_skills_path / _resolve_acp_workspace_path.
+    """
     with (
         patch("deerflow.sandbox.tools._get_skills_container_path", return_value="/mnt/skills"),
         patch("deerflow.sandbox.tools._get_skills_host_path", return_value="/home/user/deer-flow/skills"),
     ):
         cmd = "cat /mnt/skills/public/bootstrap/SKILL.md"
         result = replace_virtual_paths_in_command(cmd, _THREAD_DATA)
-        assert "/mnt/skills" not in result
-        assert "/home/user/deer-flow/skills/public/bootstrap/SKILL.md" in result
+        # Skills paths should remain as virtual paths (not resolved)
+        assert "/mnt/skills/public/bootstrap/SKILL.md" in result
+        assert "/home/user/deer-flow/skills" not in result
 
 
-def test_replace_virtual_paths_in_command_replaces_both() -> None:
-    """Both user-data and skills paths should be replaced in the same command."""
+def test_replace_virtual_paths_in_command_replaces_user_data_only() -> None:
+    """Only user-data paths should be replaced; skills and ACP paths stay virtual."""
     with (
         patch("deerflow.sandbox.tools._get_skills_container_path", return_value="/mnt/skills"),
         patch("deerflow.sandbox.tools._get_skills_host_path", return_value="/home/user/skills"),
     ):
         cmd = "cat /mnt/skills/public/SKILL.md > /mnt/user-data/workspace/out.txt"
         result = replace_virtual_paths_in_command(cmd, _THREAD_DATA)
-        assert "/mnt/skills" not in result
+        # Skills paths should remain virtual
+        assert "/mnt/skills/public/SKILL.md" in result
+        assert "/home/user/skills" not in result
+        # User-data paths should still be resolved
         assert "/mnt/user-data" not in result
-        assert "/home/user/skills/public/SKILL.md" in result
         assert "/tmp/deer-flow/threads/t1/user-data/workspace/out.txt" in result
 
 
@@ -769,14 +779,22 @@ def test_resolve_acp_workspace_path_blocks_traversal(tmp_path: Path) -> None:
             _resolve_acp_workspace_path("/mnt/acp-workspace/../../etc/passwd")
 
 
-def test_replace_virtual_paths_in_command_replaces_acp_workspace() -> None:
-    """ACP workspace virtual paths in commands should be resolved to host paths."""
+def test_replace_virtual_paths_in_command_does_not_replace_acp_workspace() -> None:
+    """ACP workspace virtual paths should NOT be resolved by replace_virtual_paths_in_command.
+
+    Like skills paths, ACP workspace paths are resolved by the sandbox's
+    PathMapping at execution time, not pre-resolved, to ensure user_id
+    consistency with the sandbox mapping.
+    """
     acp_host = "/home/user/.deer-flow/acp-workspace"
     with patch("deerflow.sandbox.tools._get_acp_workspace_host_path", return_value=acp_host):
         cmd = "cp /mnt/acp-workspace/hello.py /mnt/user-data/outputs/hello.py"
         result = replace_virtual_paths_in_command(cmd, _THREAD_DATA)
-        assert "/mnt/acp-workspace" not in result
-        assert f"{acp_host}/hello.py" in result
+        # ACP workspace path should remain as virtual path (not resolved)
+        assert "/mnt/acp-workspace/hello.py" in result
+        assert acp_host not in result
+        # User-data paths should still be resolved
+        assert "/mnt/user-data" not in result
         assert "/tmp/deer-flow/threads/t1/user-data/outputs/hello.py" in result
 
 

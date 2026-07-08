@@ -60,8 +60,20 @@ SANDBOX_IMAGE = os.environ.get(
 )
 SKILLS_HOST_PATH = os.environ.get("SKILLS_HOST_PATH", "/skills")
 THREADS_HOST_PATH = os.environ.get("THREADS_HOST_PATH", "/.deer-flow/threads")
+DEER_FLOW_HOST_BASE_DIR = os.environ.get("DEER_FLOW_HOST_BASE_DIR", "/.deer-flow")
 SKILLS_PVC_NAME = os.environ.get("SKILLS_PVC_NAME", "")
 USERDATA_PVC_NAME = os.environ.get("USERDATA_PVC_NAME", "")
+SANDBOX_CONTAINER_PORT_RAW = os.environ.get("SANDBOX_CONTAINER_PORT", "8080")
+try:
+    SANDBOX_CONTAINER_PORT = int(SANDBOX_CONTAINER_PORT_RAW)
+except ValueError as exc:
+    raise RuntimeError(
+        f"Invalid SANDBOX_CONTAINER_PORT={SANDBOX_CONTAINER_PORT_RAW!r}; expected an integer TCP port"
+    ) from exc
+if not (1 <= SANDBOX_CONTAINER_PORT <= 65535):
+    raise RuntimeError(
+        f"Invalid SANDBOX_CONTAINER_PORT={SANDBOX_CONTAINER_PORT}; expected a value in [1, 65535]"
+    )
 SAFE_THREAD_ID_PATTERN = r"^[A-Za-z0-9_\-]+$"
 SAFE_USER_ID_PATTERN = r"^[A-Za-z0-9_\-]+$"
 DEFAULT_USER_ID = "default"
@@ -216,6 +228,7 @@ class CreateSandboxRequest(BaseModel):
     sandbox_id: str
     thread_id: str = Field(pattern=SAFE_THREAD_ID_PATTERN)
     user_id: str = Field(default=DEFAULT_USER_ID, pattern=SAFE_USER_ID_PATTERN)
+    include_legacy_skills: bool = False
 
 
 class SandboxResponse(BaseModel):
@@ -239,25 +252,78 @@ def _sandbox_url(node_port: int) -> str:
     """Build the sandbox URL using the configured NODE_HOST."""
     return f"http://{NODE_HOST}:{node_port}"
 
+def _build_volumes(
+    thread_id: str,
+    user_id: str = DEFAULT_USER_ID,
+    *,
+    include_legacy_skills: bool = False,
+) -> list[k8s_client.V1Volume]:
+    """Build volume list: PVC when configured, otherwise hostPath.
 
-def _build_volumes(thread_id: str) -> list[k8s_client.V1Volume]:
-    """Build volume list: PVC when configured, otherwise hostPath."""
+    Skills are split into public, per-user custom, and legacy (global-custom)
+    volumes so that ``/mnt/skills/{public,custom,legacy}/`` paths resolve
+    correctly inside the sandbox — matching the hostPath layout produced by
+    ``LocalSandboxProvider`` and ``AioSandboxProvider``.
+    """
+    volumes: list[k8s_client.V1Volume] = []
+
+    # ── Skills volumes ────────────────────────────────────────────────
+
     if SKILLS_PVC_NAME:
-        skills_vol = k8s_client.V1Volume(
-            name="skills",
-            persistent_volume_claim=k8s_client.V1PersistentVolumeClaimVolumeSource(
-                claim_name=SKILLS_PVC_NAME,
-                read_only=True,
-            ),
+        # PVC mode: three-way subPath not yet supported; fall back to
+        # single-volume mount for backward compatibility.
+        logger.warning(
+            "SKILLS_PVC_NAME is set — three-way skills layout is not "
+            "supported in PVC mode yet; falling back to single /mnt/skills mount"
+        )
+        volumes.append(
+            k8s_client.V1Volume(
+                name="skills",
+                persistent_volume_claim=k8s_client.V1PersistentVolumeClaimVolumeSource(
+                    claim_name=SKILLS_PVC_NAME,
+                    read_only=True,
+                ),
+            )
         )
     else:
-        skills_vol = k8s_client.V1Volume(
-            name="skills",
-            host_path=k8s_client.V1HostPathVolumeSource(
-                path=SKILLS_HOST_PATH,
-                type="Directory",
-            ),
+        # hostPath mode: three-way layout
+        public_path = join_host_path(SKILLS_HOST_PATH, "public")
+        volumes.append(
+            k8s_client.V1Volume(
+                name="skills-public",
+                host_path=k8s_client.V1HostPathVolumeSource(
+                    path=public_path,
+                    type="Directory",
+                ),
+            )
         )
+
+        user_custom_path = join_host_path(
+            DEER_FLOW_HOST_BASE_DIR, "users", user_id, "skills", "custom",
+        )
+        volumes.append(
+            k8s_client.V1Volume(
+                name="skills-custom",
+                host_path=k8s_client.V1HostPathVolumeSource(
+                    path=user_custom_path,
+                    type="DirectoryOrCreate",
+                ),
+            )
+        )
+
+        if include_legacy_skills:
+            legacy_path = join_host_path(SKILLS_HOST_PATH, "custom")
+            volumes.append(
+                k8s_client.V1Volume(
+                    name="skills-legacy",
+                    host_path=k8s_client.V1HostPathVolumeSource(
+                        path=legacy_path,
+                        type="Directory",
+                    ),
+                )
+            )
+
+    # ── User-data volume ──────────────────────────────────────────────
 
     if USERDATA_PVC_NAME:
         userdata_vol = k8s_client.V1Volume(
@@ -275,30 +341,77 @@ def _build_volumes(thread_id: str) -> list[k8s_client.V1Volume]:
             ),
         )
 
-    return [skills_vol, userdata_vol]
+    volumes.append(userdata_vol)
+    return volumes
 
 
-def _build_volume_mounts(thread_id: str, user_id: str = DEFAULT_USER_ID) -> list[k8s_client.V1VolumeMount]:
-    """Build volume mount list, using subPath for PVC user-data."""
+def _build_volume_mounts(
+    thread_id: str,
+    user_id: str = DEFAULT_USER_ID,
+    *,
+    include_legacy_skills: bool = False,
+) -> list[k8s_client.V1VolumeMount]:
+    """Build volume mount list, mirroring three-way skills layout.
+
+    Skills are mounted to ``/mnt/skills/{public,custom,legacy}/`` so that
+    category-aware ``Skill.get_container_path()`` paths resolve correctly.
+    PVC mode falls back to a single ``/mnt/skills`` mount.
+    """
+    mounts: list[k8s_client.V1VolumeMount] = []
+
+    if SKILLS_PVC_NAME:
+        mounts.append(
+            k8s_client.V1VolumeMount(
+                name="skills",
+                mount_path="/mnt/skills",
+                read_only=True,
+            )
+        )
+    else:
+        mounts.extend(
+            [
+                k8s_client.V1VolumeMount(
+                    name="skills-public",
+                    mount_path="/mnt/skills/public",
+                    read_only=True,
+                ),
+                k8s_client.V1VolumeMount(
+                    name="skills-custom",
+                    mount_path="/mnt/skills/custom",
+                    read_only=True,
+                ),
+            ]
+        )
+        if include_legacy_skills:
+            mounts.append(
+                k8s_client.V1VolumeMount(
+                    name="skills-legacy",
+                    mount_path="/mnt/skills/legacy",
+                    read_only=True,
+                )
+            )
+
     userdata_mount = k8s_client.V1VolumeMount(
         name="user-data",
         mount_path="/mnt/user-data",
         read_only=False,
     )
     if USERDATA_PVC_NAME:
-        userdata_mount.sub_path = f"deer-flow/users/{user_id}/threads/{thread_id}/user-data"
+        userdata_mount.sub_path = (
+            f"deer-flow/users/{user_id}/threads/{thread_id}/user-data"
+        )
+    mounts.append(userdata_mount)
 
-    return [
-        k8s_client.V1VolumeMount(
-            name="skills",
-            mount_path="/mnt/skills",
-            read_only=True,
-        ),
-        userdata_mount,
-    ]
+    return mounts
 
 
-def _build_pod(sandbox_id: str, thread_id: str, user_id: str = DEFAULT_USER_ID) -> k8s_client.V1Pod:
+def _build_pod(
+    sandbox_id: str,
+    thread_id: str,
+    user_id: str = DEFAULT_USER_ID,
+    *,
+    include_legacy_skills: bool = False,
+) -> k8s_client.V1Pod:
     """Construct a Pod manifest for a single sandbox."""
     return k8s_client.V1Pod(
         metadata=k8s_client.V1ObjectMeta(
@@ -320,14 +433,14 @@ def _build_pod(sandbox_id: str, thread_id: str, user_id: str = DEFAULT_USER_ID) 
                     ports=[
                         k8s_client.V1ContainerPort(
                             name="http",
-                            container_port=8080,
+                            container_port=SANDBOX_CONTAINER_PORT,
                             protocol="TCP",
                         )
                     ],
                     readiness_probe=k8s_client.V1Probe(
                         http_get=k8s_client.V1HTTPGetAction(
                             path="/v1/sandbox",
-                            port=8080,
+                            port=SANDBOX_CONTAINER_PORT,
                         ),
                         initial_delay_seconds=5,
                         period_seconds=5,
@@ -337,7 +450,7 @@ def _build_pod(sandbox_id: str, thread_id: str, user_id: str = DEFAULT_USER_ID) 
                     liveness_probe=k8s_client.V1Probe(
                         http_get=k8s_client.V1HTTPGetAction(
                             path="/v1/sandbox",
-                            port=8080,
+                            port=SANDBOX_CONTAINER_PORT,
                         ),
                         initial_delay_seconds=10,
                         period_seconds=10,
@@ -356,14 +469,22 @@ def _build_pod(sandbox_id: str, thread_id: str, user_id: str = DEFAULT_USER_ID) 
                             "ephemeral-storage": "500Mi",
                         },
                     ),
-                    volume_mounts=_build_volume_mounts(thread_id, user_id=user_id),
+                    volume_mounts=_build_volume_mounts(
+                        thread_id,
+                        user_id=user_id,
+                        include_legacy_skills=include_legacy_skills,
+                    ),
                     security_context=k8s_client.V1SecurityContext(
                         privileged=False,
                         allow_privilege_escalation=True,
                     ),
                 )
             ],
-            volumes=_build_volumes(thread_id),
+            volumes=_build_volumes(
+                thread_id,
+                user_id=user_id,
+                include_legacy_skills=include_legacy_skills,
+            ),
             restart_policy="Always",
         ),
     )
@@ -387,8 +508,8 @@ def _build_service(sandbox_id: str) -> k8s_client.V1Service:
             ports=[
                 k8s_client.V1ServicePort(
                     name="http",
-                    port=8080,
-                    target_port=8080,
+                    port=SANDBOX_CONTAINER_PORT,
+                    target_port=SANDBOX_CONTAINER_PORT,
                     protocol="TCP",
                     # nodePort omitted → K8s auto-allocates from the range
                 )
@@ -431,7 +552,7 @@ async def health():
 
 
 @app.post("/api/sandboxes", response_model=SandboxResponse)
-async def create_sandbox(req: CreateSandboxRequest):
+def create_sandbox(req: CreateSandboxRequest):
     """Create a sandbox Pod + NodePort Service for *sandbox_id*.
 
     If the sandbox already exists, returns the existing information
@@ -440,12 +561,14 @@ async def create_sandbox(req: CreateSandboxRequest):
     sandbox_id = req.sandbox_id
     thread_id = req.thread_id
     user_id = req.user_id
+    include_legacy_skills = req.include_legacy_skills
 
     logger.info(
-        "Received request to create sandbox '%s' for thread '%s' user '%s'",
+        "Received request to create sandbox '%s' for thread '%s' user '%s' include_legacy_skills=%s",
         sandbox_id,
         thread_id,
         user_id,
+        include_legacy_skills,
     )
 
     # ── Fast path: sandbox already exists ────────────────────────────
@@ -459,7 +582,15 @@ async def create_sandbox(req: CreateSandboxRequest):
 
     # ── Create Pod ───────────────────────────────────────────────────
     try:
-        core_v1.create_namespaced_pod(K8S_NAMESPACE, _build_pod(sandbox_id, thread_id, user_id=user_id))
+        core_v1.create_namespaced_pod(
+            K8S_NAMESPACE,
+            _build_pod(
+                sandbox_id,
+                thread_id,
+                user_id=user_id,
+                include_legacy_skills=include_legacy_skills,
+            ),
+        )
         logger.info(f"Created Pod {_pod_name(sandbox_id)}")
     except ApiException as exc:
         if exc.status != 409:  # 409 = AlreadyExists
@@ -503,7 +634,7 @@ async def create_sandbox(req: CreateSandboxRequest):
 
 
 @app.delete("/api/sandboxes/{sandbox_id}")
-async def destroy_sandbox(sandbox_id: str):
+def destroy_sandbox(sandbox_id: str):
     """Destroy a sandbox Pod + Service."""
     errors: list[str] = []
 
@@ -532,7 +663,7 @@ async def destroy_sandbox(sandbox_id: str):
 
 
 @app.get("/api/sandboxes/{sandbox_id}", response_model=SandboxResponse)
-async def get_sandbox(sandbox_id: str):
+def get_sandbox(sandbox_id: str):
     """Return current status and URL for a sandbox."""
     node_port = _get_node_port(sandbox_id)
     if not node_port:
@@ -546,7 +677,7 @@ async def get_sandbox(sandbox_id: str):
 
 
 @app.get("/api/sandboxes")
-async def list_sandboxes():
+def list_sandboxes():
     """List every sandbox currently managed in the namespace."""
     try:
         services = core_v1.list_namespaced_service(

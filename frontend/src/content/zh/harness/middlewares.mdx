@@ -127,6 +127,8 @@ token_usage:
 
 在摘要压缩原始 transcript 之前，将长期运行事实捕获到明确的线程状态 channel 中。它记录压缩摘要、已委托任务的状态/结果，以及已加载的 `SKILL.md` 引用，并在后续模型调用中作为隐藏 durable context 数据投影进去。
 
+后端会在 durable context 捕获之前写入有界的结构化 task 结果和技能读取元数据。前端 task card 读取结构化 task status/result 字段；task 结果文本只作为展示内容，不再作为 wire protocol 解析。
+
 **配置**：内置。`summarization.skill_file_read_tool_names` 控制哪些读取工具会被视为技能引用读取；设为 `[]` 可关闭 durable 技能引用捕获。
 
 ---

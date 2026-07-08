@@ -1,0 +1,30 @@
+# =============================================================================
+# echart-skill Optional Dependencies
+# =============================================================================
+# Install these only if you need the corresponding features.
+#
+#   External DB connections:  pip install -r requirements-optional.txt
+#   (installs all optional deps below)
+#
+# Or pick what you need:
+#   MySQL:       pip install sqlalchemy pymysql
+#   PostgreSQL:  pip install sqlalchemy psycopg2-binary
+#   MongoDB:     pip install pymongo
+#   Polling:     pip install apscheduler
+#   Testing:     pip install pytest pytest-cov pytest-asyncio respx
+# =============================================================================
+
+# --- Database Connections (external DBs: MySQL, PostgreSQL, MongoDB) ---
+sqlalchemy>=2.0.0
+pymysql>=1.1.0
+psycopg2-binary>=2.9.0
+pymongo>=4.6.0
+
+# --- Polling / scheduled tasks ---
+apscheduler>=3.10.0
+
+# --- Testing & development ---
+pytest>=9.0.0
+pytest-cov>=7.1.0
+pytest-asyncio==1.3.0
+respx==0.22.0

@@ -1,0 +1,24 @@
+{
+  "reports": [
+    {
+      "section_idx": 0,
+      "report_idx": 0,
+      "charts": [
+        {
+          "title": "贷款余额、存款净增与不良率综合分析",
+          "type": "bar_line",
+          "status": "ok",
+          "path": "/Users/raidery/bench/harness/raidery/deer-flow/skills/public/chatbi-report/example/input-bar-line-colors.charts/s0r0-loan-multi-combo-colors.png",
+          "relative_path": "input-bar-line-colors.charts/s0r0-loan-multi-combo-colors.png",
+          "warnings": []
+        }
+      ]
+    }
+  ],
+  "summary": {
+    "ok": 1,
+    "failed": 0,
+    "skipped": 0,
+    "status": "OK"
+  }
+}

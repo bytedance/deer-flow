@@ -5,7 +5,8 @@
 #   - nginx:       Reverse proxy (port 2026, configurable via PORT env var)
 #   - frontend:    Next.js production server
 #   - gateway:     FastAPI Gateway API + agent runtime
-#   - postgres:    PostgreSQL 16 (pgvector)
+#   - postgres:    PostgreSQL 16 database
+#   - redis:       Redis Streams backend for cross-worker SSE stream bridge
 #   - provisioner: (optional) Sandbox provisioner for Kubernetes mode
 #
 # Key environment variables (set via environment/.env or scripts/deploy.sh):
@@ -49,6 +50,22 @@ services:
       retries: 5
     networks:
       - deer-flow
+
+  # ── Redis Stream Bridge ────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: deer-flow-redis
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - deer-flow
+    restart: unless-stopped
 
   # ── Reverse Proxy ──────────────────────────────────────────────────────────
   nginx:
@@ -104,13 +121,15 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      redis:
+        condition: service_healthy
     # Gateway hosts the agent runtime with in-process RunManager + StreamBridge
     # singletons -- run state lives in this worker's memory. Default to a single
-    # worker: with >1 worker and no nginx sticky sessions, run cancel, SSE
-    # reconnect, request dedup, and per-worker IM channel services all break
-    # across workers until a shared (e.g. redis) stream bridge lands, which is
-    # not yet implemented. Override GATEWAY_WORKERS only once that is in place.
-    command: sh -c "cd backend && PYTHONPATH=. uv run --no-sync uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 --workers ${GATEWAY_WORKERS:-1}"
+    # worker: the Redis stream bridge solves cross-worker SSE delivery and
+    # reconnect, but run cancel, request dedup, and per-worker IM channel
+    # services remain worker-local. Override GATEWAY_WORKERS only when the
+    # Redis stream bridge is enabled and those limitations are acceptable.
+    command: sh -c "cd backend && PYTHONPATH=. uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 --workers ${GATEWAY_WORKERS:-1}"
     volumes:
       - ${DEER_FLOW_CONFIG_PATH}:/app/backend/config.yaml:ro
       - ${DEER_FLOW_EXTENSIONS_CONFIG_PATH}:/app/backend/extensions_config.json:ro
@@ -121,7 +140,7 @@ services:
 # (docker-compose.dood.yaml / docker-compose.cli-auth.yaml, see upstream
 # commits 5d61718c / 474c89ba). We keep them inline because DooD +
 # Claude CLI auto-auth are core dev workflow here. Revisit if the
-# opt-in pattern lands cleanly via scripts/deploy.sh.
+# opt-in pattern lands cleanly via scripts/docker.sh.
 # DooD: AioSandboxProvider starts sandbox containers via host Docker daemon
       - ${DEER_FLOW_DOCKER_SOCKET}:/var/run/docker.sock
       # CLI auth directories for auto-auth (Claude Code + Codex CLI)
@@ -146,6 +165,7 @@ services:
       - DEER_FLOW_HOME=/app/backend/.deer-flow
       - DEER_FLOW_CONFIG_PATH=/app/backend/config.yaml
       - DEER_FLOW_EXTENSIONS_CONFIG_PATH=/app/backend/extensions_config.json
+      - DEER_FLOW_STREAM_BRIDGE_REDIS_URL=${DEER_FLOW_STREAM_BRIDGE_REDIS_URL:-redis://redis:6379/0}
       - DEER_FLOW_CHANNELS_LANGGRAPH_URL=${DEER_FLOW_CHANNELS_LANGGRAPH_URL:-http://gateway:8001/api}
       - DEER_FLOW_CHANNELS_GATEWAY_URL=${DEER_FLOW_CHANNELS_GATEWAY_URL:-http://gateway:8001}
       - DEER_FLOW_INTERNAL_AUTH_TOKEN=${DEER_FLOW_INTERNAL_AUTH_TOKEN}
@@ -155,8 +175,8 @@ services:
       - DEER_FLOW_SANDBOX_HOST=host.docker.internal
       # Proxy values (HTTP_PROXY/HTTPS_PROXY/ALL_PROXY) are inherited from ../.env via env_file.
       # Only NO_PROXY is declared here so internal service hostnames are always exempt from the proxy.
-      - NO_PROXY=${NO_PROXY:-}${NO_PROXY:+,}localhost,127.0.0.1,::1,gateway,frontend,nginx,provisioner,host.docker.internal
-      - no_proxy=${no_proxy:-}${no_proxy:+,}localhost,127.0.0.1,::1,gateway,frontend,nginx,provisioner,host.docker.internal
+      - NO_PROXY=${NO_PROXY:-}${NO_PROXY:+,}localhost,127.0.0.1,::1,gateway,frontend,nginx,postgres,redis,provisioner,host.docker.internal
+      - no_proxy=${no_proxy:-}${no_proxy:+,}localhost,127.0.0.1,::1,gateway,frontend,nginx,postgres,redis,provisioner,host.docker.internal
     env_file:
       - ../.env
     extra_hosts:
@@ -166,6 +186,7 @@ services:
     restart: unless-stopped
 
   # ── Sandbox Provisioner (optional, Kubernetes mode) ────────────────────────
+  # Uncomment to enable when using AioSandboxProvider with Kubernetes.
   # provisioner:
   #   build:
   #     context: ./provisioner
@@ -181,6 +202,7 @@ services:
   #     - SANDBOX_IMAGE=enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest
   #     - SKILLS_HOST_PATH=${DEER_FLOW_REPO_ROOT}/skills
   #     - THREADS_HOST_PATH=${DEER_FLOW_HOME}/threads
+  #     - DEER_FLOW_HOST_BASE_DIR=${DEER_FLOW_HOME}
   #     - KUBECONFIG_PATH=/root/.kube/config
   #     - NODE_HOST=host.docker.internal
   #     - K8S_API_SERVER=https://host.docker.internal:26443
@@ -196,6 +218,10 @@ services:
   #     interval: 10s
   #     timeout: 5s
   #     retries: 6
+
+volumes:
+  redis-data:
+
 networks:
   deer-flow:
     driver: bridge

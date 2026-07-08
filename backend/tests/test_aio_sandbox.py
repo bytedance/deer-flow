@@ -161,6 +161,90 @@ class TestErrorObservationRetry:
         assert call_count == 1
 
 
+class TestBashExecUnsupportedFailFast:
+    """Regression tests for #3921: sandbox images older than all-in-one-sandbox
+    1.9.x have no ``/v1/bash/exec`` route, so every env-bearing command (skills
+    declaring ``required-secrets``) hit a bare nginx 404 that the model kept
+    retrying. The sandbox must fail fast with an actionable, operator-facing
+    error instead."""
+
+    def _api_error_404(self):
+        from agent_sandbox.core.api_error import ApiError
+
+        return ApiError(
+            headers={"server": "nginx/1.18.0 (Ubuntu)"},
+            status_code=404,
+            body={"success": False, "message": "Not Found", "data": None},
+        )
+
+    def test_bash_exec_404_returns_actionable_error(self, sandbox):
+        """A 404 from bash.exec must explain the image capability gap and the
+        remediation (upgrade image), not surface the raw nginx error."""
+        sandbox._client.bash.exec = MagicMock(side_effect=self._api_error_404())
+
+        out = sandbox.execute_command("echo $TOK", env={"TOK": "secret-v"})
+
+        assert out.startswith("Error:")
+        # Actionable: names the missing capability and the minimum image version.
+        assert "/v1/bash/exec" in out
+        assert "1.9.3" in out
+        assert "required-secrets" in out
+        # Not the raw upstream 404 body the model can't act on.
+        assert "nginx" not in out
+
+    def test_bash_exec_404_is_cached_and_stops_retry_storm(self, sandbox):
+        """After one 404 the capability gap is remembered on the instance:
+        follow-up env-bearing calls return the same actionable error without
+        another HTTP round-trip (the original bug produced 4 consecutive 404s
+        as the model retried variants of the command)."""
+        sandbox._client.bash.exec = MagicMock(side_effect=self._api_error_404())
+
+        first = sandbox.execute_command("cmd-1", env={"TOK": "v"})
+        second = sandbox.execute_command("cmd-2", env={"TOK": "v"})
+
+        assert sandbox._client.bash.exec.call_count == 1
+        assert first == second
+        assert "1.9.3" in second
+
+    def test_bash_exec_non_404_error_is_not_cached(self, sandbox):
+        """Transient failures (e.g. 500) must not permanently disable the env
+        path — the next env-bearing call should try bash.exec again."""
+        from agent_sandbox.core.api_error import ApiError
+
+        sandbox._client.bash.exec = MagicMock(side_effect=ApiError(status_code=500, body="boom"))
+
+        first = sandbox.execute_command("cmd-1", env={"TOK": "v"})
+        second = sandbox.execute_command("cmd-2", env={"TOK": "v"})
+
+        assert sandbox._client.bash.exec.call_count == 2
+        assert first.startswith("Error:")
+        assert "1.9.3" not in first
+        assert second.startswith("Error:")
+
+    def test_env_less_path_unaffected_after_404(self, sandbox):
+        """The legacy persistent-shell path must keep working on an image
+        without bash.exec — only env injection is unavailable there."""
+        sandbox._client.bash.exec = MagicMock(side_effect=self._api_error_404())
+        sandbox._client.shell.exec_command = MagicMock(return_value=SimpleNamespace(data=SimpleNamespace(output="plain ok")))
+
+        sandbox.execute_command("cmd", env={"TOK": "v"})
+        out = sandbox.execute_command("echo plain")
+
+        assert out == "plain ok"
+        sandbox._client.shell.exec_command.assert_called_once()
+
+    def test_bash_exec_success_does_not_mark_unsupported(self, sandbox):
+        """A healthy bash.exec keeps the env path fully enabled."""
+        sandbox._client.bash.exec = MagicMock(return_value=SimpleNamespace(data=SimpleNamespace(stdout="ok", stderr=None)))
+
+        first = sandbox.execute_command("cmd-1", env={"TOK": "v"})
+        second = sandbox.execute_command("cmd-2", env={"TOK": "v"})
+
+        assert first == "ok"
+        assert second == "ok"
+        assert sandbox._client.bash.exec.call_count == 2
+
+
 class TestListDirSerialization:
     """Verify that list_dir also acquires the lock."""
 

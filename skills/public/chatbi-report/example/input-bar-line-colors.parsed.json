@@ -1,0 +1,190 @@
+{
+  "title": "王益联社 2026 年 3 月经营分析报告 — 双轴配色定制",
+  "sections": [
+    {
+      "title": "一、行社风险与规模分析",
+      "reports": [
+        {
+          "title": "1.1 贷款余额、存款净增与不良率综合分析",
+          "org_contexts": [
+            {
+              "branch_num": "27020199",
+              "branch_short_name": "王益联社"
+            },
+            {
+              "branch_num": "27020100",
+              "branch_short_name": "印台联社"
+            },
+            {
+              "branch_num": "27020101",
+              "branch_short_name": "耀州联社"
+            },
+            {
+              "branch_num": "27020102",
+              "branch_short_name": "宜君联社"
+            },
+            {
+              "branch_num": "99999901",
+              "branch_short_name": "市平均"
+            },
+            {
+              "branch_num": "99999902",
+              "branch_short_name": "省平均"
+            }
+          ],
+          "time_info": [
+            "2025"
+          ],
+          "headers": [
+            [
+              {
+                "text": "行社",
+                "is_indicator": false,
+                "is_computed": false,
+                "rowspan": 2
+              },
+              {
+                "text": "资产规模",
+                "is_indicator": false,
+                "is_computed": false,
+                "data_unit": "万元",
+                "colspan": 2
+              },
+              {
+                "text": "风险指标",
+                "is_indicator": false,
+                "is_computed": false,
+                "data_unit": "%",
+                "colspan": 2
+              }
+            ],
+            [
+              {
+                "text": "贷款余额",
+                "is_indicator": true,
+                "is_computed": false,
+                "idx_id": "BAS_0128",
+                "data_unit": "万元",
+                "period": "2025"
+              },
+              {
+                "text": "存款日均净增",
+                "is_indicator": true,
+                "is_computed": false,
+                "idx_id": "BAS_0130",
+                "data_unit": "万元",
+                "period": "2025"
+              },
+              {
+                "text": "不良率",
+                "is_indicator": true,
+                "is_computed": false,
+                "idx_id": "BAS_0129",
+                "data_unit": "%",
+                "period": "2025"
+              },
+              {
+                "text": "占比",
+                "is_indicator": true,
+                "is_computed": false,
+                "idx_id": "BAS_0131",
+                "data_unit": "%",
+                "period": "2025"
+              }
+            ]
+          ],
+          "data_rows": [
+            {
+              "data_dt": "王益",
+              "raw_cells": [
+                "",
+                "",
+                "",
+                ""
+              ]
+            },
+            {
+              "data_dt": "印台",
+              "raw_cells": [
+                "",
+                "",
+                "",
+                ""
+              ]
+            },
+            {
+              "data_dt": "耀州",
+              "raw_cells": [
+                "",
+                "",
+                "",
+                ""
+              ]
+            },
+            {
+              "data_dt": "宜君",
+              "raw_cells": [
+                "",
+                "",
+                "",
+                ""
+              ]
+            },
+            {
+              "data_dt": "市平均",
+              "raw_cells": [
+                "",
+                "",
+                "",
+                ""
+              ]
+            },
+            {
+              "data_dt": "省平均",
+              "raw_cells": [
+                "",
+                "",
+                "",
+                ""
+              ]
+            }
+          ],
+          "computed_specs": [],
+          "chart_specs": [
+            {
+              "标题": "贷款余额、存款净增与不良率综合分析",
+              "类型": "bar_line",
+              "x轴": "行社",
+              "y轴左": [
+                "贷款余额",
+                "存款日均净增"
+              ],
+              "y轴右": [
+                "不良率",
+                "占比"
+              ],
+              "左轴单位": "万元",
+              "右轴单位": "%",
+              "条形配色": [
+                "#3498db",
+                "#2ecc71"
+              ],
+              "折线配色": [
+                "#e74c3c",
+                "#f39c12"
+              ],
+              "输出": "loan-multi-combo-colors"
+            }
+          ],
+          "description_prompt": "请基于表格数据生成经营分析描述，重点关注规模指标（贷款余额、存款净增）与风险指标（不良率、占比）的相互印证关系，并对比市平均、省平均。"
+        }
+      ]
+    }
+  ],
+  "all_idx_ids": [
+    "BAS_0128",
+    "BAS_0129",
+    "BAS_0130",
+    "BAS_0131"
+  ]
+}

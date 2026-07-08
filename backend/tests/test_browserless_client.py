@@ -286,6 +286,41 @@ class TestBrowserlessTools:
         assert result.startswith("Error:")
 
     @patch("deerflow.community.browserless.tools._get_browserless_client")
+    async def test_web_fetch_tool_rejects_metadata_ip(self, mock_get_client):
+        """web_fetch_tool blocks the cloud-metadata link-local endpoint."""
+        with patch("deerflow.community.browserless.tools._get_tool_config", return_value=None):
+            result = await tools.web_fetch_tool.ainvoke("http://169.254.169.254/latest/meta-data/")
+
+        assert "private, loopback, or metadata" in result
+        mock_get_client.assert_not_called()
+
+    @patch("deerflow.community.browserless.tools._get_browserless_client")
+    async def test_web_fetch_tool_rejects_dns_resolving_to_private(self, mock_get_client):
+        """web_fetch_tool blocks hostnames that resolve to internal IPs."""
+        with patch("deerflow.community.browserless.tools._get_tool_config", return_value=None):
+            with patch(
+                "deerflow.community.browserless.tools._resolve_host_addresses",
+                return_value=[ipaddress.ip_address("10.0.0.5")],
+            ):
+                result = await tools.web_fetch_tool.ainvoke("https://internal.example.com/")
+
+        assert "private, loopback, or metadata" in result
+        mock_get_client.assert_not_called()
+
+    @patch("deerflow.community.browserless.tools._get_browserless_client")
+    async def test_web_fetch_tool_allows_private_when_opted_in(self, mock_get_client):
+        """web_fetch_tool allows internal targets only when explicitly configured."""
+        mock_client = MagicMock()
+        mock_client.fetch_html = AsyncMock(return_value="<html><body><article><p>internal</p></article></body></html>")
+        mock_get_client.return_value = mock_client
+
+        with patch("deerflow.community.browserless.tools._get_tool_config", return_value={"allow_private_addresses": True}):
+            result = await tools.web_fetch_tool.ainvoke("http://10.0.0.5/dashboard")
+
+        assert "Error:" not in result
+        mock_client.fetch_html.assert_called_once()
+
+    @patch("deerflow.community.browserless.tools._get_browserless_client")
     async def test_web_capture_tool_writes_artifact(self, mock_get_client, tmp_path):
         """web_capture_tool writes screenshots into thread outputs and presents the artifact."""
         outputs_dir = tmp_path / "outputs"
