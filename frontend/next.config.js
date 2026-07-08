@@ -25,10 +25,9 @@ const config = {
     defaultLocale: "en",
   },
   devIndicators: false,
-  // ZBR: opt-in skip of the memory-heavy tsc/eslint phases (earlyoom kills the build
+  // ZBR: opt-in skip of the memory-heavy tsc phase (earlyoom kills the build
   // during type-check because the 120B is oom-protected). Default OFF; set ZBR_SKIP_TSC=1.
   typescript: { ignoreBuildErrors: process.env.ZBR_SKIP_TSC === "1" },
-  eslint: { ignoreDuringBuilds: process.env.ZBR_SKIP_TSC === "1" },
   // ZBR: cap build worker pool — 20 cores → 19 workers spiked RAM and earlyoom
   // killed the build (120B is oom-protected). Few workers fit the ~10GB headroom.
   experimental: { cpus: 1, memoryBasedWorkersCount: true },
