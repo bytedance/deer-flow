@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 
 @dataclass
@@ -26,6 +26,9 @@ class LLMProvider:
     auth_hint: str | None = None
     base_url_prompt: str | None = None
     model_prompt: str | None = None
+    # For generic OpenAI-compatible gateways the wizard cannot infer whether the
+    # user-supplied model supports thinking/reasoning, so prompt for it explicitly.
+    ask_thinking_support: bool = False
 
     def extra_config_for(self, model_name: str) -> dict:
         """Return extra_config for a selected model, applying per-model overrides.
@@ -92,6 +95,22 @@ ANTHROPIC_THINKING_CONFIG = {
         }
     },
 }
+
+
+def with_thinking_support(provider: LLMProvider, supports_thinking: bool) -> LLMProvider:
+    """Return a copy of *provider* with thinking-capability flags applied.
+
+    For generic OpenAI-compatible gateways the wizard cannot infer whether the
+    user-supplied model supports thinking/reasoning. When the user confirms
+    support we also wire the common OpenAI-compatible enable/disable toggles so
+    the runtime can switch thinking on and off; otherwise we record the
+    capability as unsupported. The shared provider definition is never mutated.
+    """
+    if supports_thinking:
+        extra_config = {**provider.extra_config, **OPENAI_COMPAT_THINKING_CONFIG}
+    else:
+        extra_config = {**provider.extra_config, "supports_thinking": False}
+    return replace(provider, extra_config=extra_config)
 
 
 LLM_PROVIDERS: list[LLMProvider] = [
@@ -167,10 +186,10 @@ LLM_PROVIDERS: list[LLMProvider] = [
     LLMProvider(
         name="deepseek",
         display_name="DeepSeek",
-        description="DeepSeek Reasoner with thinking support",
+        description="DeepSeek V4 with thinking support",
         use="deerflow.models.patched_deepseek:PatchedChatDeepSeek",
-        models=["deepseek-reasoner", "deepseek-chat"],
-        default_model="deepseek-reasoner",
+        models=["deepseek-v4-pro", "deepseek-v4-flash"],
+        default_model="deepseek-v4-pro",
         env_var="DEEPSEEK_API_KEY",
         package="langchain-deepseek",
         extra_config={
@@ -462,6 +481,7 @@ LLM_PROVIDERS: list[LLMProvider] = [
         package="langchain-openai",
         base_url_prompt="Base URL (e.g. https://api.openai.com/v1)",
         model_prompt="Model name",
+        ask_thinking_support=True,
     ),
 ]
 

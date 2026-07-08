@@ -11,9 +11,20 @@ from langgraph.errors import GraphBubbleUp
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
 
+from deerflow.agents.middlewares.skill_context import (
+    SKILL_CONTEXT_ENTRY_KEY,
+    _tool_call_path,
+    build_skill_entry_metadata_from_read,
+)
+from deerflow.agents.middlewares.tool_result_meta import (
+    normalize_tool_result,
+    stamp_exception_meta,
+)
 from deerflow.config.app_config import AppConfig
+from deerflow.config.summarization_config import DEFAULT_SKILL_FILE_READ_TOOL_NAMES
+from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
 from deerflow.subagents.status_contract import (
-    extract_subagent_status,
+    format_subagent_result_message,
     make_subagent_additional_kwargs,
 )
 
@@ -24,40 +35,35 @@ logger = logging.getLogger(__name__)
 
 _MISSING_TOOL_CALL_ID = "missing_tool_call_id"
 _TASK_TOOL_NAME = "task"
+_RECOVERY_HINT = "Continue with available context, or choose an alternative tool."
 
 
-def _stamp_task_subagent_status(message: ToolMessage, *, tool_name: str, error: str | None = None) -> ToolMessage:
-    """Centralised stamping of ``additional_kwargs.subagent_status``.
-
-    Bytedance/deer-flow issue #3146: the frontend now reads the subagent
-    status from a structured field instead of parsing the leading text of
-    the task tool's return string. That contract is enforced here, in the
-    one place every task tool result flows through, rather than at the 5
-    normal-return + 3 ``Error:`` pre-execution branches inside
-    ``task_tool.py``. Centralisation prevents the "added a new return
-    path, forgot the stamp" drift mode.
-
-    For non-``task`` tools this is a no-op so other tools' additional_kwargs
-    conventions are untouched.
-    """
+def _stamp_task_exception_status(message: ToolMessage, *, tool_name: str, error: str) -> ToolMessage:
+    """Stamp failed metadata on task exception wrappers produced here."""
     if tool_name != _TASK_TOOL_NAME:
         return message
-    content = message.content if isinstance(message.content, str) else ""
-    status = extract_subagent_status(content)
-    if status is None:
-        # Non-terminal streaming chunks or unrecognised shapes leave the
-        # field unset so the frontend can keep the card on its in-progress
-        # placeholder until a real terminal frame arrives.
-        return message
-    stamp = make_subagent_additional_kwargs(status, error=error)
+    content, metadata_error = format_subagent_result_message("failed", error=error)
+    if not content.endswith((".", "!", "?")):
+        content += "."
+    message.content = f"{content} {_RECOVERY_HINT}"
     existing = dict(message.additional_kwargs or {})
-    existing.update(stamp)
+    existing.update(make_subagent_additional_kwargs("failed", error=metadata_error))
     message.additional_kwargs = existing
     return message
 
 
 class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
     """Convert tool exceptions into error ToolMessages so the run can continue."""
+
+    def __init__(self, *, app_config: AppConfig | None = None) -> None:
+        super().__init__()
+        self._app_config = app_config
+        if app_config is None:
+            self._skill_read_tool_names = frozenset(DEFAULT_SKILL_FILE_READ_TOOL_NAMES)
+            self._skills_root = DEFAULT_SKILLS_CONTAINER_PATH
+        else:
+            self._skill_read_tool_names = frozenset(app_config.summarization.skill_file_read_tool_names)
+            self._skills_root = app_config.skills.container_path
 
     def _build_error_message(self, request: ToolCallRequest, exc: Exception) -> ToolMessage:
         tool_name = str(request.tool_call.get("name") or "unknown_tool")
@@ -66,32 +72,51 @@ class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         if len(detail) > 500:
             detail = detail[:497] + "..."
 
-        content = f"Error: Tool '{tool_name}' failed with {exc.__class__.__name__}: {detail}. Continue with available context, or choose an alternative tool."
+        content = f"Error: Tool '{tool_name}' failed with {exc.__class__.__name__}: {detail}. {_RECOVERY_HINT}"
         message = ToolMessage(
             content=content,
             tool_call_id=tool_call_id,
             name=tool_name,
             status="error",
         )
-        # Stamp the structured subagent status on the wrapper too: the
-        # frontend would otherwise have to fall back to prefix-matching
-        # ``Error: Tool 'task' failed ...`` on the wire. The ``subagent_error``
-        # carries the same ``ExcClass: detail`` shape the wrapper string
-        # uses so debugging artifacts stay aligned.
+        # This middleware is the producer for exception wrappers, so task
+        # failures raised before task_tool can build its own Command still
+        # carry the same structured metadata.
         structured_error = f"{exc.__class__.__name__}: {detail}"
-        return _stamp_task_subagent_status(message, tool_name=tool_name, error=structured_error)
+        message = _stamp_task_exception_status(message, tool_name=tool_name, error=structured_error)
+        return stamp_exception_meta(message, structured_error)
 
-    @staticmethod
-    def _maybe_stamp(result: ToolMessage | Command, request: ToolCallRequest) -> ToolMessage | Command:
-        """Apply the subagent stamp to successful task tool returns.
+    def _stamp_skill_read_metadata(
+        self,
+        message: ToolMessage,
+        request: ToolCallRequest,
+        *,
+        tool_name: str,
+    ) -> ToolMessage:
+        if tool_name not in self._skill_read_tool_names:
+            return message
+        if getattr(message, "status", "success") == "error":
+            return message
+        content = message.content if isinstance(message.content, str) else None
+        if content is None:
+            return message
+        path = _tool_call_path(request.tool_call)
+        if path is None:
+            return message
+        entry = build_skill_entry_metadata_from_read(path, content, skills_root=self._skills_root)
+        if entry is None:
+            return message
+        existing = dict(message.additional_kwargs or {})
+        existing[SKILL_CONTEXT_ENTRY_KEY] = dict(entry)
+        message.additional_kwargs = existing
+        return message
 
-        ``Command`` results bypass the stamp — they encode LangGraph
-        control flow rather than user-facing tool output.
-        """
+    def _maybe_stamp(self, result: ToolMessage | Command, request: ToolCallRequest) -> ToolMessage | Command:
+        """Apply producer-bound metadata for tool results that need it."""
         if not isinstance(result, ToolMessage):
             return result
         tool_name = str(request.tool_call.get("name") or "")
-        return _stamp_task_subagent_status(result, tool_name=tool_name)
+        return self._stamp_skill_read_metadata(result, request, tool_name=tool_name)
 
     @override
     def wrap_tool_call(
@@ -107,7 +132,7 @@ class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         except Exception as exc:
             logger.exception("Tool execution failed (sync): name=%s id=%s", request.tool_call.get("name"), request.tool_call.get("id"))
             return self._build_error_message(request, exc)
-        return self._maybe_stamp(result, request)
+        return normalize_tool_result(self._maybe_stamp(result, request))
 
     @override
     async def awrap_tool_call(
@@ -123,7 +148,7 @@ class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         except Exception as exc:
             logger.exception("Tool execution failed (async): name=%s id=%s", request.tool_call.get("name"), request.tool_call.get("id"))
             return self._build_error_message(request, exc)
-        return self._maybe_stamp(result, request)
+        return normalize_tool_result(self._maybe_stamp(result, request))
 
 
 def _build_runtime_middlewares(
@@ -192,9 +217,43 @@ def _build_runtime_middlewares(
     from deerflow.agents.middlewares.sandbox_audit_middleware import SandboxAuditMiddleware
 
     tail.append(SandboxAuditMiddleware())
-    tail.append(ToolErrorHandlingMiddleware())
 
-    return [*outer_wrappers, *thread_hooks, *tail]
+    # ReadBeforeWriteMiddleware is the outermost write gate: it blocks writes to files
+    # the model hasn't read in their current version.  It must sit outside ToolProgress
+    # and ToolErrorHandling so that a blocked write returns immediately without consuming
+    # a ToolProgress slot.  The middleware stamps deerflow_tool_meta on the blocked
+    # ToolMessage itself so downstream callers receive a well-formed result.
+    if app_config.read_before_write.enabled:
+        from deerflow.agents.middlewares.read_before_write_middleware import ReadBeforeWriteMiddleware
+
+        tail.append(ReadBeforeWriteMiddleware())
+
+    # ToolProgressMiddleware must be outer (lower index) so its wrap_tool_call handler
+    # chain includes ToolErrorHandlingMiddleware (inner), which stamps deerflow_tool_meta
+    # on every result before ToolProgressMiddleware reads it in _update_state_from_result.
+    # Framework rule: first in list = outermost (types.py: "compose with first in list as outermost layer").
+    tool_progress_config = app_config.tool_progress
+    _ToolProgressMiddleware = None
+    if tool_progress_config.enabled:
+        from deerflow.agents.middlewares.tool_progress_middleware import ToolProgressMiddleware as _ToolProgressMiddleware
+
+        tail.append(_ToolProgressMiddleware.from_config(tool_progress_config))
+
+    tail.append(ToolErrorHandlingMiddleware(app_config=app_config))
+
+    middlewares = [*outer_wrappers, *thread_hooks, *tail]
+
+    # Guard: ToolProgressMiddleware (outer) must appear before ToolErrorHandlingMiddleware (inner)
+    # so that its wrap_tool_call chain encloses the stamping step.  Fail loudly at build time
+    # rather than silently no-oping at runtime if a future insertion reverses the order.
+    # Uses isinstance (not type().__name__) so subclasses and renames are covered.
+    if _ToolProgressMiddleware is not None:
+        _progress_idx = next((i for i, m in enumerate(middlewares) if isinstance(m, _ToolProgressMiddleware)), None)
+        _error_idx = next((i for i, m in enumerate(middlewares) if isinstance(m, ToolErrorHandlingMiddleware)), None)
+        if _progress_idx is not None and _error_idx is not None and _progress_idx > _error_idx:
+            raise RuntimeError(f"ToolProgressMiddleware must be outer (index {_progress_idx}) of ToolErrorHandlingMiddleware (index {_error_idx}) — check middleware append order")
+
+    return middlewares
 
 
 def build_lead_runtime_middlewares(*, app_config: AppConfig, lazy_init: bool = True) -> list[AgentMiddleware]:
@@ -245,6 +304,26 @@ def build_subagent_runtime_middlewares(
         from deerflow.agents.middlewares.deferred_tool_filter_middleware import DeferredToolFilterMiddleware
 
         middlewares.append(DeferredToolFilterMiddleware(deferred_setup.deferred_names, deferred_setup.catalog_hash))
+
+    # LoopDetectionMiddleware — subagents inherit none of the lead's runaway
+    # guards today (see #3875): with no loop detection a degenerate subagent tool
+    # loop runs unchecked until ``max_turns``, re-sending a growing context each
+    # turn (the reported 4.4M-token burn). Mirror the lead chain so the loop is
+    # detected and broken. Subagents disallow ``task``, so only the tool-loop
+    # heuristic can fire here — no recursive-delegation path to false-positive on.
+    # Registered before SafetyFinishReasonMiddleware (earlier in the list).
+    # LangChain dispatches after_model hooks in REVERSE registration order, so
+    # SafetyFinishReasonMiddleware (appended below) executes first and strips
+    # safety-terminated tool_calls; LoopDetectionMiddleware then accounts on the
+    # cleaned message. This is the placement SafetyFinishReasonMiddleware's
+    # docstring requires ("register after LoopDetection") and mirrors the lead
+    # chain (``lead_agent/agent.py``). Phase 1 of #3875; a deterministic
+    # turn/token budget with lead-visible stop reason is Phase 2.
+    loop_detection_config = app_config.loop_detection
+    if loop_detection_config.enabled:
+        from deerflow.agents.middlewares.loop_detection_middleware import LoopDetectionMiddleware
+
+        middlewares.append(LoopDetectionMiddleware.from_config(loop_detection_config))
 
     # Same provider safety-termination guard the lead agent uses — subagents
     # are equally exposed to truncated tool_calls returned with

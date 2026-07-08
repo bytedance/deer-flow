@@ -9,7 +9,7 @@ import threading
 from e2b_code_interpreter import Sandbox as E2BClientSandbox
 
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
-from deerflow.sandbox.sandbox import Sandbox
+from deerflow.sandbox.sandbox import Sandbox, _validate_extra_env
 from deerflow.sandbox.search import GrepMatch, path_matches, should_ignore_path, truncate_line
 
 logger = logging.getLogger(__name__)
@@ -118,13 +118,29 @@ class E2BSandbox(Sandbox):
             return f"{self._home_dir}/{tail}".rstrip("/") if tail else self._home_dir
         return normalised
 
-    def execute_command(self, command: str) -> str:
+    def execute_command(
+        self,
+        command: str,
+        env: dict[str, str] | None = None,
+        timeout: float | None = None,
+    ) -> str:
         """Execute a shell command via ``sandbox.commands.run``.
 
         Returns the combined stdout/stderr.
         The lock serialises concurrent calls on the same instance
         because the e2b SDK shares a single HTTP/2 connection per sandbox.
+
+        Args:
+            command: The command to execute.
+            env: Optional per-call environment variables (request-scoped secrets,
+                issue #3861). Validated against the POSIX env-var name rule
+                (shared with the local and AIO sandboxes) and passed through to
+                e2b as ``envs``, which are scoped to this command only and never
+                placed in the command string.
+            timeout: Optional per-call command timeout in seconds. ``None`` keeps
+                the e2b SDK default (60s).
         """
+        _validate_extra_env(env)
         with self._lock:
             client = self._client
             if client is None:
@@ -132,7 +148,12 @@ class E2BSandbox(Sandbox):
             if self._dead:
                 return "Error: e2b sandbox has been reaped by the control plane (idle timeout or explicit pause). The provider will rebuild a fresh sandbox on the next tool call."
             try:
-                result = client.commands.run(command)
+                kwargs: dict[str, object] = {}
+                if env is not None:
+                    kwargs["envs"] = env
+                if timeout is not None:
+                    kwargs["timeout"] = timeout
+                result = client.commands.run(command, **kwargs)
                 stdout = getattr(result, "stdout", "") or ""
                 stderr = getattr(result, "stderr", "") or ""
                 exit_code = getattr(result, "exit_code", 0)

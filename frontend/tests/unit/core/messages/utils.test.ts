@@ -5,6 +5,7 @@ import {
   extractContentFromMessage,
   extractTextFromMessage,
   extractReasoningContentFromMessage,
+  getMessageCopyData,
   getAssistantTurnCopyData,
   getAssistantTurnUsageMessages,
   getMessageGroups,
@@ -246,6 +247,17 @@ describe("inline <think> tag splitting", () => {
 });
 
 describe("human message internal context stripping", () => {
+  test("strips uploaded file context from copy data", () => {
+    const message = {
+      id: "human-with-upload",
+      type: "human",
+      content:
+        "<uploaded_files>\nThe following files were uploaded in this message:\n\n- paper.pdf (1.0 MB)\n  Path: /mnt/user-data/uploads/paper.pdf\n</uploaded_files>\n\nSummarize this paper",
+    } as Message;
+
+    expect(getMessageCopyData(message)).toBe("Summarize this paper");
+  });
+
   test("strips slash skill activation context from display content", () => {
     const content =
       "<slash_skill_activation>\n<skill_content># Secret SKILL.md</skill_content>\n</slash_skill_activation>\nreal user task";

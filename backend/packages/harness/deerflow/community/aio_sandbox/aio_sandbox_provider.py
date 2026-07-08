@@ -27,11 +27,20 @@ except ImportError:  # pragma: no cover - Windows fallback
     fcntl = None  # type: ignore[assignment]
     import msvcrt
 
+from deerflow.community.warm_pool_lifecycle import (
+    DEFAULT_IDLE_TIMEOUT,
+    DEFAULT_REPLICAS,
+    WarmPoolLifecycleMixin,
+)
+from deerflow.community.warm_pool_lifecycle import (
+    IDLE_CHECK_INTERVAL as _SHARED_IDLE_CHECK_INTERVAL,
+)
 from deerflow.config import get_app_config
-from deerflow.config.paths import VIRTUAL_PATH_PREFIX, get_paths
+from deerflow.config.paths import VIRTUAL_PATH_PREFIX, get_paths, join_host_path
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.sandbox_provider import SandboxProvider
+from deerflow.skills.storage import user_should_see_legacy_skills
 
 from .aio_sandbox import AioSandbox
 from .backend import SandboxBackend, wait_for_sandbox_ready, wait_for_sandbox_ready_async
@@ -45,9 +54,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_IMAGE = "enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest"
 DEFAULT_PORT = 8080
 DEFAULT_CONTAINER_PREFIX = "deer-flow-sandbox"
-DEFAULT_IDLE_TIMEOUT = 600  # 10 minutes in seconds
-DEFAULT_REPLICAS = 3  # Maximum concurrent sandbox containers
-IDLE_CHECK_INTERVAL = 60  # Check every 60 seconds
+IDLE_CHECK_INTERVAL = _SHARED_IDLE_CHECK_INTERVAL
 THREAD_LOCK_EXECUTOR_WORKERS = min(32, (os.cpu_count() or 1) + 4)
 _THREAD_LOCK_EXECUTOR = ThreadPoolExecutor(max_workers=THREAD_LOCK_EXECUTOR_WORKERS, thread_name_prefix="sandbox-lock-wait")
 atexit.register(_THREAD_LOCK_EXECUTOR.shutdown, wait=False, cancel_futures=True)
@@ -105,7 +112,7 @@ def _release_cancelled_lock_acquire(lock: threading.Lock, task: asyncio.Future[b
         lock.release()
 
 
-class AioSandboxProvider(SandboxProvider):
+class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
     """Sandbox provider that manages containers running the AIO sandbox.
 
     Architecture:
@@ -302,10 +309,10 @@ class AioSandboxProvider(SandboxProvider):
             mounts.extend(self._get_thread_mounts(thread_id, user_id=user_id))
             logger.info(f"Adding thread mounts for thread {thread_id}: {mounts}")
 
-        skills_mount = self._get_skills_mount()
-        if skills_mount:
-            mounts.append(skills_mount)
-            logger.info(f"Adding skills mount: {skills_mount}")
+        skills_mounts = self._get_skills_mounts(user_id=user_id)
+        if skills_mounts:
+            mounts.extend(skills_mounts)
+            logger.info(f"Adding skills mounts: {skills_mounts}")
 
         return mounts
 
@@ -331,49 +338,86 @@ class AioSandboxProvider(SandboxProvider):
         ]
 
     @staticmethod
-    def _get_skills_mount() -> tuple[str, str, bool] | None:
-        """Get the skills directory mount configuration.
+    def _get_skills_mounts(*, user_id: str | None = None) -> list[tuple[str, str, bool]]:
+        """Get skills directory mount configurations for three-way skills layout.
 
-        Mount source uses DEER_FLOW_HOST_SKILLS_PATH when running inside Docker (DooD)
-        so the host Docker daemon can resolve the path.
+        Mirrors ``LocalSandboxProvider._build_thread_path_mappings`` for AIO
+        sandboxes: public, per-user custom, and legacy (pre-migration
+        global-custom) skills are mounted to separate container subdirectories so
+        that ``Skill.get_container_path()`` category-aware paths resolve
+        correctly inside the sandbox.
+
+        Mount sources use ``DEER_FLOW_HOST_SKILLS_PATH`` and
+        ``DEER_FLOW_HOST_BASE_DIR`` when running inside Docker (DooD) so the
+        host Docker daemon can resolve the paths.
         """
+        mounts: list[tuple[str, str, bool]] = []
         try:
             config = get_app_config()
             skills_path = config.skills.get_skills_path()
             container_path = config.skills.container_path
 
-            if skills_path.exists():
-                # When running inside Docker with DooD, use host-side skills path.
-                host_skills = os.environ.get("DEER_FLOW_HOST_SKILLS_PATH") or str(skills_path)
-                return (host_skills, container_path, True)  # Read-only for security
+            # When running inside Docker with DooD, use host-side skills path.
+            host_skills_root = os.environ.get("DEER_FLOW_HOST_SKILLS_PATH") or str(skills_path)
+
+            # 1. Public skills: global, read-only — static, shared by all threads
+            public_skills_path = skills_path / "public"
+            if public_skills_path.exists():
+                mounts.append(
+                    (
+                        join_host_path(host_skills_root, "public"),
+                        f"{container_path}/public",
+                        True,
+                    )
+                )
+
+            # 2. Per-user custom skills: read-only, per-thread/per-user
+            effective_user_id = AioSandboxProvider._effective_acquire_user_id(user_id)
+            paths = get_paths()
+            user_custom_path = paths.user_custom_skills_dir(effective_user_id)
+            user_custom_path.mkdir(parents=True, exist_ok=True)
+
+            host_user_custom = join_host_path(
+                str(paths.host_base_dir),
+                "users",
+                effective_user_id,
+                "skills",
+                "custom",
+            )
+            mounts.append(
+                (
+                    host_user_custom,
+                    f"{container_path}/custom",
+                    True,
+                )
+            )
+
+            # 3. Legacy (pre-migration global-custom) skills: only mount for
+            #    users who have no per-user custom skills yet, mirroring
+            #    ``UserScopedSkillStorage._iter_skill_files`` visibility rule.
+            legacy_skills_path = skills_path / "custom"
+            if user_should_see_legacy_skills(effective_user_id, host_path=str(skills_path)) and legacy_skills_path.exists():
+                mounts.append(
+                    (
+                        join_host_path(host_skills_root, "custom"),
+                        f"{container_path}/legacy",
+                        True,
+                    )
+                )
         except Exception as e:
-            logger.warning(f"Could not setup skills mount: {e}")
-        return None
+            logger.warning("Could not setup skills mounts: %s", e)
+
+        return mounts
 
     # ── Idle timeout management ──────────────────────────────────────────
 
-    def _start_idle_checker(self) -> None:
-        """Start the background thread that checks for idle sandboxes."""
-        self._idle_checker_thread = threading.Thread(
-            target=self._idle_checker_loop,
-            name="sandbox-idle-checker",
-            daemon=True,
-        )
-        self._idle_checker_thread.start()
-        logger.info(f"Started idle checker thread (timeout: {self._config.get('idle_timeout', DEFAULT_IDLE_TIMEOUT)}s)")
-
-    def _idle_checker_loop(self) -> None:
-        idle_timeout = self._config.get("idle_timeout", DEFAULT_IDLE_TIMEOUT)
-        while not self._idle_checker_stop.wait(timeout=IDLE_CHECK_INTERVAL):
-            try:
-                self._cleanup_idle_sandboxes(idle_timeout)
-            except Exception as e:
-                logger.error(f"Error in idle checker loop: {e}")
+    def _cleanup_idle_resources(self, idle_timeout: float) -> None:
+        """Clean AIO resources idle longer than ``idle_timeout`` seconds."""
+        self._cleanup_idle_sandboxes(idle_timeout)
 
     def _cleanup_idle_sandboxes(self, idle_timeout: float) -> None:
         current_time = time.time()
         active_to_destroy = []
-        warm_to_destroy: list[tuple[str, SandboxInfo]] = []
 
         with self._lock:
             # Active sandboxes: tracked via _last_activity
@@ -382,14 +426,6 @@ class AioSandboxProvider(SandboxProvider):
                 if idle_duration > idle_timeout:
                     active_to_destroy.append(sandbox_id)
                     logger.info(f"Sandbox {sandbox_id} idle for {idle_duration:.1f}s, marking for destroy")
-
-            # Warm pool: tracked via release_timestamp stored in _warm_pool
-            for sandbox_id, (info, release_ts) in list(self._warm_pool.items()):
-                warm_duration = current_time - release_ts
-                if warm_duration > idle_timeout:
-                    warm_to_destroy.append((sandbox_id, info))
-                    del self._warm_pool[sandbox_id]
-                    logger.info(f"Warm-pool sandbox {sandbox_id} idle for {warm_duration:.1f}s, marking for destroy")
 
         # Destroy active sandboxes (re-verify still idle before acting)
         for sandbox_id in active_to_destroy:
@@ -412,13 +448,7 @@ class AioSandboxProvider(SandboxProvider):
             except Exception as e:
                 logger.error(f"Failed to destroy idle sandbox {sandbox_id}: {e}")
 
-        # Destroy warm-pool sandboxes (already removed from _warm_pool under lock above)
-        for sandbox_id, info in warm_to_destroy:
-            try:
-                self._backend.destroy(info)
-                logger.info(f"Destroyed idle warm-pool sandbox {sandbox_id}")
-            except Exception as e:
-                logger.error(f"Failed to destroy idle warm-pool sandbox {sandbox_id}: {e}")
+        self._reap_expired_warm(idle_timeout)
 
     # ── Signal handling ──────────────────────────────────────────────────
 
@@ -650,23 +680,29 @@ class AioSandboxProvider(SandboxProvider):
 
         logger.warning(f"Dropped unhealthy sandbox {sandbox_id}: {reason}")
 
-    def _replica_count(self) -> tuple[int, int]:
-        """Return configured replicas and currently tracked sandbox count."""
-        replicas = self._config.get("replicas", DEFAULT_REPLICAS)
-        with self._lock:
-            total = len(self._sandboxes) + len(self._warm_pool)
-        return replicas, total
+    def _active_count_locked(self) -> int:
+        """Return active AIO sandbox count while ``_lock`` is held."""
+        return len(self._sandboxes)
 
-    def _log_replicas_soft_cap(self, replicas: int, sandbox_id: str, evicted: str | None) -> None:
-        """Log the result of enforcing the warm-pool replica budget."""
-        if evicted:
-            logger.info(f"Evicted warm-pool sandbox {evicted} to stay within replicas={replicas}")
+    def _destroy_warm_entry(self, sandbox_id: str, entry: SandboxInfo, *, reason: str) -> None:
+        """Destroy a warm-pool sandbox using AIO-specific backend logging."""
+        try:
+            self._backend.destroy(entry)
+        except Exception as e:
+            if reason == "idle_timeout":
+                logger.error(f"Failed to destroy idle warm-pool sandbox {sandbox_id}: {e}")
+            elif reason == "replica_enforcement":
+                logger.error(f"Failed to destroy warm-pool sandbox {sandbox_id}: {e}")
+            else:
+                logger.error(f"Failed to destroy warm-pool sandbox {sandbox_id} for {reason}: {e}")
             return
 
-        # All slots are occupied by active sandboxes — proceed anyway and log.
-        # The replicas limit is a soft cap; we never forcibly stop a container
-        # that is actively serving a thread.
-        logger.warning(f"All {replicas} replica slots are in active use; creating sandbox {sandbox_id} beyond the soft limit")
+        if reason == "idle_timeout":
+            logger.info(f"Destroyed idle warm-pool sandbox {sandbox_id}")
+        elif reason == "replica_enforcement":
+            logger.info(f"Destroyed warm-pool sandbox {sandbox_id}")
+        else:
+            logger.info(f"Destroyed warm-pool sandbox {sandbox_id} for {reason}")
 
     # ── Core: acquire / get / release / shutdown ─────────────────────────
 
@@ -822,26 +858,6 @@ class AioSandboxProvider(SandboxProvider):
                 await asyncio.to_thread(_unlock_file, lock_file)
             await asyncio.to_thread(lock_file.close)
 
-    def _evict_oldest_warm(self) -> str | None:
-        """Destroy the oldest container in the warm pool to free capacity.
-
-        Returns:
-            The evicted sandbox_id, or None if warm pool is empty.
-        """
-        with self._lock:
-            if not self._warm_pool:
-                return None
-            oldest_id = min(self._warm_pool, key=lambda sid: self._warm_pool[sid][1])
-            info, _ = self._warm_pool.pop(oldest_id)
-
-        try:
-            self._backend.destroy(info)
-            logger.info(f"Destroyed warm-pool sandbox {oldest_id}")
-        except Exception as e:
-            logger.error(f"Failed to destroy warm-pool sandbox {oldest_id}: {e}")
-            return None
-        return oldest_id
-
     def _create_sandbox(self, thread_id: str | None, sandbox_id: str, *, user_id: str | None = None) -> str:
         """Create a new sandbox via the backend.
 
@@ -989,11 +1005,7 @@ class AioSandboxProvider(SandboxProvider):
             warm_items = list(self._warm_pool.items())
             self._warm_pool.clear()
 
-        # Stop idle checker
-        self._idle_checker_stop.set()
-        if self._idle_checker_thread is not None and self._idle_checker_thread.is_alive():
-            self._idle_checker_thread.join(timeout=5)
-            logger.info("Stopped idle checker thread")
+        self._stop_idle_checker()
 
         logger.info(f"Shutting down {len(sandbox_ids)} active + {len(warm_items)} warm-pool sandbox(es)")
 

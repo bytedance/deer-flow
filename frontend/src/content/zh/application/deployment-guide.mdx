@@ -116,6 +116,32 @@ BETTER_AUTH_SECRET=your-secret-here-min-32-chars
 
 对于有多个并发用户的任何部署，使用基于容器的沙箱，防止用户之间的执行环境相互干扰。
 
+### 数据库后端
+
+SQLite 适合本地开发和单用户部署，但不适合作为多用户生产环境的数据库后端。
+
+在 SQLite 模式下，DeerFlow 会把 LangGraph 检查点数据和应用数据写入同一个 `deerflow.db` 文件。WAL 模式可以支持并发读取，但 SQLite 同一时间仍然只有一个写入者。多个用户同时运行 Agent 时，检查点写入和应用写入会竞争同一个文件锁，可能触发 `sqlite3.OperationalError: database is locked`。
+
+生产环境或任何多用户部署请使用 Postgres：
+
+```bash
+# .env
+DATABASE_URL=postgresql://user:password@postgres:5432/deerflow
+UV_EXTRAS=postgres
+```
+
+```yaml
+# config.yaml
+database:
+  backend: postgres
+  postgres_url: $DATABASE_URL
+
+run_events:
+  backend: db
+```
+
+SQLite 部署应限制在本地、单节点或短期评估场景。
+
 ### K8s Provisioner 配置
 
 <Steps>

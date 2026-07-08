@@ -153,6 +153,30 @@ sandbox:
   <code>/mnt/user-data</code>。
 </Callout>
 
+当 `LocalSandboxProvider` 运行在生产 Docker（`make up`）中时，它实际运行在
+`deer-flow-gateway` 容器里。此时 `host_path` 是从 gateway
+容器的文件系统解析，而不是直接从 Docker 宿主机解析。需要先把宿主机目录 bind
+mount 到 gateway 服务，再在 `config.yaml` 中使用容器内路径：
+
+```yaml
+# docker/docker-compose.yaml 或 override 文件
+services:
+  gateway:
+    volumes:
+      - ${DEER_FLOW_REPO_ROOT}/.deer-flow/knowledge:/app/.deer-flow/knowledge:ro
+```
+
+```yaml
+sandbox:
+  use: deerflow.sandbox.local:LocalSandboxProvider
+  mounts:
+    - host_path: /app/.deer-flow/knowledge
+      container_path: /mnt/knowledge
+      read_only: true
+```
+
+如果配置的 `host_path` 对 gateway 进程不可见，DeerFlow 会记录错误日志并忽略该挂载。
+
 ## 输出截断
 
 沙箱工具限制输出大小以保持 Agent 上下文可控。这些限制可配置：

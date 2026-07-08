@@ -1,5 +1,6 @@
 """Tests for Crawl4AI community tools."""
 
+import ipaddress
 import json
 from unittest.mock import MagicMock, patch
 
@@ -214,6 +215,44 @@ class TestCrawl4AiTools:
             result = await tools.web_fetch_tool.ainvoke("https://example.com")
 
         assert result.startswith("Error:")
+
+    @patch("deerflow.community.crawl4ai.tools._build_client")
+    async def test_web_fetch_tool_rejects_metadata_ip(self, mock_build):
+        from deerflow.community.crawl4ai import tools
+
+        with patch("deerflow.community.crawl4ai.tools._get_tool_config", return_value=None):
+            result = await tools.web_fetch_tool.ainvoke("http://169.254.169.254/latest/meta-data/")
+
+        assert "private, loopback, or metadata" in result
+        mock_build.assert_not_called()
+
+    @patch("deerflow.community.crawl4ai.tools._build_client")
+    async def test_web_fetch_tool_rejects_dns_resolving_to_private(self, mock_build):
+        from deerflow.community.crawl4ai import tools
+
+        with patch("deerflow.community.crawl4ai.tools._get_tool_config", return_value=None):
+            with patch(
+                "deerflow.community.url_safety.resolve_host_addresses",
+                return_value=[ipaddress.ip_address("10.0.0.5")],
+            ):
+                result = await tools.web_fetch_tool.ainvoke("https://internal.example.com/")
+
+        assert "private, loopback, or metadata" in result
+        mock_build.assert_not_called()
+
+    @patch("deerflow.community.crawl4ai.tools._build_client")
+    async def test_web_fetch_tool_allows_private_when_opted_in(self, mock_build):
+        from deerflow.community.crawl4ai import tools
+
+        mock_client = MagicMock()
+        mock_client.fetch_markdown = AsyncMock(return_value="# internal")
+        mock_build.return_value = mock_client
+
+        with patch("deerflow.community.crawl4ai.tools._get_tool_config", return_value={"allow_private_addresses": True}):
+            result = await tools.web_fetch_tool.ainvoke("http://10.0.0.5/dashboard")
+
+        assert result == "# internal"
+        mock_client.fetch_markdown.assert_called_once()
 
     @patch("deerflow.community.crawl4ai.tools._build_client")
     async def test_web_fetch_tool_reads_config_once(self, mock_build):

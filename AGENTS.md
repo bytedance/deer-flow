@@ -51,7 +51,7 @@ deer-flow/
 ├── docker/                         # docker-compose files, nginx config, provisioner
 ├── skills/                         # Agent skills: public/ (committed), custom/ (gitignored)
 ├── contracts/                      # Cross-component JSON contracts (e.g. subagent status)
-├── scripts/                        # Root orchestration scripts invoked by the Makefile (check, configure, doctor, support_bundle, serve, docker, deploy, setup_wizard)
+├── scripts/                        # Root orchestration scripts invoked by the Makefile (check, configure, doctor, support_bundle, serve, nginx, docker, deploy, setup_wizard)
 ├── tests/                          # Root-level tests (currently tests/skills/ — public skill tests)
 └── docs/                           # Cross-cutting docs, plans, and design notes
 ```
@@ -61,6 +61,10 @@ Runtime config lives at the **repo root**: copy `config.example.yaml` → `confi
 servers + skills). Both real files are gitignored and may be edited at runtime via the
 Gateway API. Config schema and resolution order are documented in
 [backend/AGENTS.md](backend/AGENTS.md).
+
+Scheduled-task note:
+- The scheduled-task MVP adds a workspace page at `/workspace/scheduled-tasks` plus a background scheduler service gated by `config.yaml -> scheduler.enabled`.
+- Scheduled background runs are intentionally non-interactive: they execute through the normal run lifecycle, but the lead-agent toolset excludes `ask_clarification` when `context.non_interactive=true`. The key is honored only for internally-authenticated callers (the scheduler launch path); client-supplied `context.non_interactive` is dropped.
 
 ## Commands: Root vs. Module
 

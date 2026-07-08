@@ -44,6 +44,73 @@ test.describe("Chat workspace", () => {
     await expect(textarea).toHaveValue("/data-analysis ");
   });
 
+  test("goal command sets a goal and starts an agent run", async ({ page }) => {
+    let streamCalls = 0;
+    await page.goto("/workspace/chats/new");
+    await page.route("**/runs/stream", (route) => {
+      streamCalls += 1;
+      return route.fallback();
+    });
+
+    const textarea = page.getByPlaceholder(/how can i assist you/i);
+    await expect(textarea).toBeVisible({ timeout: 15_000 });
+
+    await textarea.fill("/go");
+    await expect(page.getByRole("option", { name: /goal/i })).toBeVisible();
+
+    await textarea.fill("/goal finish all tests");
+    await textarea.press("Enter");
+
+    await expect(
+      page.locator("span.font-medium", { hasText: "finish all tests" }),
+    ).toBeVisible();
+    await expect.poll(() => streamCalls).toBe(1);
+    await expect(page.getByText("Hello from DeerFlow!")).toBeVisible();
+  });
+
+  test("goal command keeps the welcome header clear of the goal status", async ({
+    page,
+  }) => {
+    await page.goto("/workspace/chats/new");
+
+    const textarea = page.getByPlaceholder(/how can i assist you/i);
+    await expect(textarea).toBeVisible({ timeout: 15_000 });
+
+    await textarea.fill(
+      "/goal finish a small repo check and report the result",
+    );
+    await textarea.press("Enter");
+
+    const goal = page.locator("span.font-medium", {
+      hasText: "finish a small repo check",
+    });
+    await expect(goal).toBeVisible();
+    await expect(page.getByText(/welcome to/i)).toBeHidden();
+
+    const overlaps = await page.evaluate(() => {
+      const welcome = [...document.querySelectorAll("p")].find((el) =>
+        el.textContent?.toLowerCase().includes("welcome to"),
+      );
+      const goal = [...document.querySelectorAll("span")].find((el) =>
+        el.textContent?.includes(
+          "finish a small repo check and report the result",
+        ),
+      );
+      if (!welcome || !goal) {
+        return false;
+      }
+      const welcomeRect = welcome.getBoundingClientRect();
+      const goalRect = goal.getBoundingClientRect();
+      return !(
+        welcomeRect.right < goalRect.left ||
+        goalRect.right < welcomeRect.left ||
+        welcomeRect.bottom < goalRect.top ||
+        goalRect.bottom < welcomeRect.top
+      );
+    });
+    expect(overlaps).toBe(false);
+  });
+
   test("uses arrow keys to navigate skill suggestions before prompt history", async ({
     page,
   }) => {
