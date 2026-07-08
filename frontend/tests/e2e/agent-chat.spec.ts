@@ -1,6 +1,7 @@
 import { expect, test } from "@playwright/test";
 
 import { mockLangGraphAPI } from "./utils/mock-api";
+import { prettyAgentName } from "@/lib/utils";
 
 const MOCK_AGENTS = [
   {
@@ -17,9 +18,11 @@ test.describe("Agent chat", () => {
     await page.goto("/workspace/agents");
 
     // The agent card should appear with the agent name
-    await expect(page.getByText("test-agent")).toBeVisible({
-      timeout: 15_000,
-    });
+    await expect(
+      page.locator('[data-slot="card-title"]', {
+        hasText: prettyAgentName("test-agent"),
+      }),
+    ).toBeVisible({ timeout: 15_000 });
   });
 
   test("agent chat page loads with input box", async ({ page }) => {
