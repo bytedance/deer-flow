@@ -13,8 +13,8 @@ The **Sandbox Provisioner** is a FastAPI service that dynamically manages sandbo
                                                         │
                           ┌─────────────┐         ┌────▼─────┐
                           │   Backend   │ ──────▸ │  Sandbox │
-                          │ (via Docker │ NodePort│  Pod(s)  │
-                          │   network)  │         └──────────┘
+                          │ (NodePort   │ or DNS  │  Pod(s)  │
+                          │  /ClusterIP)│         └──────────┘
                           └─────────────┘
 ```
 
@@ -30,16 +30,16 @@ The **Sandbox Provisioner** is a FastAPI service that dynamically manages sandbo
    - Resource limits (CPU, memory, ephemeral storage)
    - Readiness/liveness probes
 
-3. **Service Creation**: A NodePort Service is created to expose the Pod, with Kubernetes auto-allocating a port from the NodePort range (typically 30000-32767).
+3. **Service Creation**: A Service is created to expose the Pod. By default this is a NodePort Service for Docker Compose compatibility. Set `SANDBOX_SERVICE_TYPE=ClusterIP` when the backend runs inside the Kubernetes cluster.
 
-4. **Access URL**: The provisioner returns `http://host.docker.internal:{NodePort}` to the backend, which the backend containers can reach directly.
+4. **Access URL**: In NodePort mode, the provisioner returns `http://{NODE_HOST}:{NodePort}`. In ClusterIP mode, it returns a Kubernetes service DNS URL like `http://sandbox-{sandbox_id}-svc.{namespace}.svc.cluster.local:8080`.
 
 5. **Cleanup**: When the session ends, `DELETE /api/sandboxes/{sandbox_id}` removes both the Pod and Service.
 
 The sandbox business endpoints are implemented as synchronous FastAPI handlers
 because the Kubernetes Python client used here is synchronous. Starlette runs
 sync handlers in its worker pool, keeping create/read/list/delete K8s API calls
-and the NodePort polling sleep off the ASGI event-loop thread. Keep `/health`
+and service access polling off the ASGI event-loop thread. Keep `/health`
 lightweight; do not move the sandbox CRUD handlers back to `async def` unless
 the K8s client path is also made async or explicitly offloaded.
 
@@ -150,7 +150,8 @@ The provisioner is configured via environment variables (set in [docker-compose-
 | `SKILLS_PVC_NAME` | empty (use hostPath) | PVC name for skills volume; when set, sandbox Pods use PVC instead of hostPath |
 | `USERDATA_PVC_NAME` | empty (use hostPath) | PVC name for user-data volume; when set, uses PVC with `subPath: deer-flow/users/{user_id}/threads/{thread_id}/user-data` |
 | `KUBECONFIG_PATH` | `/root/.kube/config` | Path to kubeconfig **inside** the provisioner container |
-| `NODE_HOST` | `host.docker.internal` | Hostname that backend containers use to reach host NodePorts |
+| `SANDBOX_SERVICE_TYPE` | `NodePort` | Service type for sandbox access. Use `ClusterIP` when backend and provisioner run inside the same Kubernetes cluster |
+| `NODE_HOST` | `host.docker.internal` | Hostname that backend containers use to reach host NodePorts; ignored when `SANDBOX_SERVICE_TYPE=ClusterIP` |
 | `K8S_API_SERVER` | (from kubeconfig) | Override K8s API server URL (e.g., `https://host.docker.internal:26443`) |
 
 ### Custom sandbox image
@@ -333,13 +334,13 @@ docker exec deer-flow-gateway curl -s $SANDBOX_URL/v1/sandbox
 
 ### Issue: Cannot access sandbox URL from backend
 
-**Cause**: NodePort not reachable or `NODE_HOST` misconfigured.
+**Cause**: The backend cannot resolve or reach the sandbox ClusterIP Service DNS. This usually means the backend is not running inside the same Kubernetes cluster/network or cluster DNS/network policy is blocking access.
 
 **Solution**:
 - Verify the Service exists: `kubectl get svc -n deer-flow`
-- Test from host: `curl http://localhost:NODE_PORT/v1/sandbox`
-- Ensure `extra_hosts` is set in docker-compose (Linux)
-- Check `NODE_HOST` env var matches how backend reaches host
+- In NodePort mode, test from the backend container: `curl http://$NODE_HOST:NODE_PORT/v1/sandbox`
+- In ClusterIP mode, test from the backend Pod: `curl http://sandbox-XXX-svc.deer-flow.svc.cluster.local:8080/v1/sandbox`
+- Check `NODE_HOST` for NodePort deployments, or cluster DNS / NetworkPolicy / service mesh rules for ClusterIP deployments
 
 ## Security Considerations
 
@@ -347,7 +348,7 @@ docker exec deer-flow-gateway curl -s $SANDBOX_URL/v1/sandbox
 
 2. **Resource Limits**: Each sandbox Pod has CPU, memory, and storage limits to prevent resource exhaustion.
 
-3. **Network Isolation**: Sandbox Pods run in the `deer-flow` namespace but share the host's network namespace via NodePort. Consider NetworkPolicies for stricter isolation.
+3. **Network Isolation**: Sandbox Pods run in the configured namespace and are exposed through NodePort or ClusterIP Services. Prefer ClusterIP with NetworkPolicies for in-cluster deployments.
 
 4. **kubeconfig Access**: The provisioner has full access to your Kubernetes cluster via the mounted kubeconfig. Run it only in trusted environments.
 
