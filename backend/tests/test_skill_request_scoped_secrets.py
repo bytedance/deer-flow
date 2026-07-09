@@ -160,6 +160,13 @@ class TestEnvPolicy:
             "POSTGRES_DSN",
             "CONN_STR",
             "GH_PAT",
+            # Password vars for services whose connection strings are already blocked
+            # above. These carry no KEY/SECRET/TOKEN/PASSWORD/PASSWD substring, and a
+            # blanket ``*PWD*`` / ``*AUTH*`` pattern would strip benign vars (``PWD``,
+            # ``OLDPWD``), so they need exact entries.
+            "MYSQL_PWD",  # read directly by mysql / libmysqlclient
+            "REDISCLI_AUTH",  # read directly by redis-cli
+            "REDIS_AUTH",
         ],
     )
     def test_secret_like_names_are_blocked(self, name):
@@ -177,6 +184,7 @@ class TestEnvPolicy:
             "LANG",
             "LC_ALL",
             "PWD",
+            "OLDPWD",
             "TMPDIR",
             "VIRTUAL_ENV",
             "PYTHONPATH",
@@ -191,6 +199,24 @@ class TestEnvPolicy:
         from deerflow.sandbox.env_policy import is_blocked_env_name
 
         assert is_blocked_env_name(name) is False
+
+    def test_db_password_vars_do_not_reach_the_subprocess_env(self, monkeypatch):
+        """The URL forms are scrubbed; the password vars for the same services must be too.
+
+        ``mysql`` reads ``MYSQL_PWD`` and ``redis-cli`` reads ``REDISCLI_AUTH`` as the
+        password with no further configuration, so inheriting them hands a skill
+        subprocess the credential the connection-string block already withholds.
+        """
+        from deerflow.sandbox.env_policy import build_sandbox_env
+
+        monkeypatch.setenv("MYSQL_URL", "mysql://user:pw@host/db")
+        monkeypatch.setenv("MYSQL_PWD", "prod-db-password")
+        monkeypatch.setenv("REDISCLI_AUTH", "prod-redis-auth")
+        env = build_sandbox_env()
+        assert "MYSQL_URL" not in env
+        assert "MYSQL_PWD" not in env
+        assert "REDISCLI_AUTH" not in env
+        assert env.get("PWD")  # the working directory must survive the added entries
 
     def test_build_sandbox_env_scrubs_inherited_and_layers_injected(self, monkeypatch):
         from deerflow.sandbox.env_policy import build_sandbox_env
