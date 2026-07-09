@@ -325,7 +325,7 @@ export function MessageList({
       updateSubtask(task);
     }
   }, [renderedSubtasks, updateSubtask]);
- 
+
   const humanInputState = useMemo(
     () =>
       deriveHumanInputThreadState(
