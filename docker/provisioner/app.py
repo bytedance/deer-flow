@@ -63,6 +63,7 @@ THREADS_HOST_PATH = os.environ.get("THREADS_HOST_PATH", "/.deer-flow/threads")
 DEER_FLOW_HOST_BASE_DIR = os.environ.get("DEER_FLOW_HOST_BASE_DIR", "/.deer-flow")
 SKILLS_PVC_NAME = os.environ.get("SKILLS_PVC_NAME", "")
 USERDATA_PVC_NAME = os.environ.get("USERDATA_PVC_NAME", "")
+SKILLS_PVC_SUBPATH_TEMPLATE = os.environ.get("SKILLS_PVC_SUBPATH_TEMPLATE", "")
 SANDBOX_CONTAINER_PORT_RAW = os.environ.get("SANDBOX_CONTAINER_PORT", "8080")
 SANDBOX_SERVICE_TYPE = os.environ.get("SANDBOX_SERVICE_TYPE", "NodePort")
 try:
@@ -343,18 +344,23 @@ def _build_volume_mounts(
 
     Skills are mounted to ``/mnt/skills/{public,custom,legacy}/`` so that
     category-aware ``Skill.get_container_path()`` paths resolve correctly.
-    PVC mode falls back to a single ``/mnt/skills`` mount.
+    PVC mode falls back to a single ``/mnt/skills`` mount and can optionally
+    scope that mount with ``SKILLS_PVC_SUBPATH_TEMPLATE``.
     """
     mounts: list[k8s_client.V1VolumeMount] = []
 
     if SKILLS_PVC_NAME:
-        mounts.append(
-            k8s_client.V1VolumeMount(
-                name="skills",
-                mount_path="/mnt/skills",
-                read_only=True,
-            )
+        skills_mount = k8s_client.V1VolumeMount(
+            name="skills",
+            mount_path="/mnt/skills",
+            read_only=True,
         )
+        if SKILLS_PVC_SUBPATH_TEMPLATE:
+            skills_mount.sub_path = SKILLS_PVC_SUBPATH_TEMPLATE.format(
+                user_id=user_id,
+                thread_id=thread_id,
+            )
+        mounts.append(skills_mount)
     else:
         mounts.extend(
             [

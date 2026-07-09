@@ -148,6 +148,7 @@ The provisioner is configured via environment variables (set in [docker-compose-
 | `SKILLS_HOST_PATH` | - | **Host machine** path to skills directory (must be absolute) |
 | `THREADS_HOST_PATH` | - | **Host machine** path to threads data directory (must be absolute) |
 | `SKILLS_PVC_NAME` | empty (use hostPath) | PVC name for skills volume; when set, sandbox Pods use PVC instead of hostPath |
+| `SKILLS_PVC_SUBPATH_TEMPLATE` | empty | Optional `subPath` template for `SKILLS_PVC_NAME`. Supports `{user_id}` and `{thread_id}`. When empty, the skills PVC root is mounted unchanged |
 | `USERDATA_PVC_NAME` | empty (use hostPath) | PVC name for user-data volume; when set, uses PVC with `subPath: deer-flow/users/{user_id}/threads/{thread_id}/user-data` |
 | `KUBECONFIG_PATH` | `/root/.kube/config` | Path to kubeconfig **inside** the provisioner container |
 | `SANDBOX_SERVICE_TYPE` | `NodePort` | Service type for sandbox access. Use `ClusterIP` when backend and provisioner run inside the same Kubernetes cluster |
@@ -175,6 +176,8 @@ PYTHONPATH=. python scripts/migrate_user_isolation.py --user-id <target-user-id>
 ```
 
 This moves legacy `threads/{thread_id}/user-data` data under `users/<target-user-id>/threads/{thread_id}/user-data`, which matches the new provisioner PVC subPath when the gateway base directory is mounted at `deer-flow/` on the PVC. Use `default` as the target user only when the legacy data should remain in the default no-auth user namespace. Run the migration while no gateway or sandbox Pods are writing to those paths.
+
+When skills are materialized per thread on the same PVC, set `SKILLS_PVC_NAME` to that PVC and configure `SKILLS_PVC_SUBPATH_TEMPLATE=deer-flow/users/{user_id}/threads/{thread_id}/skills`. Leaving the template empty preserves the legacy behavior of mounting the skills PVC root at `/mnt/skills`.
 
 ### Important: K8S_API_SERVER Override
 
