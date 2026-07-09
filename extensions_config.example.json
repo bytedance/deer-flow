@@ -27,7 +27,31 @@
         "postgresql://localhost/mydb"
       ],
       "env": {},
-      "description": "PostgreSQL database access"
+      "description": "PostgreSQL database access",
+      "routing": {
+        "mode": "prefer",
+        "priority": 50,
+        "keywords": [
+          "database",
+          "SQL",
+          "table",
+          "订单",
+          "用户"
+        ]
+      },
+      "tools": {
+        "query": {
+          "routing": {
+            "mode": "prefer",
+            "priority": 100,
+            "keywords": [
+              "查库",
+              "订单表",
+              "指标"
+            ]
+          }
+        }
+      }
     }
   },
   "skills": {}

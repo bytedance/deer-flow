@@ -44,6 +44,11 @@ import {
 } from "@/core/messages/utils";
 import { useRehypeSplitWordsIntoSpans } from "@/core/rehype";
 import { readReferenceMessageContexts } from "@/core/sidecar";
+import {
+  parseSlashSkillReference,
+  resolveSlashSkillDisplay,
+} from "@/core/skills";
+import { useSkills } from "@/core/skills/hooks";
 import { SafeReasoningContent } from "@/core/streamdown/components";
 import { cn } from "@/lib/utils";
 
@@ -51,6 +56,7 @@ import { WorkspaceChangeBadge } from "../changes";
 import { CitationSourcesPanel } from "../citations/citation-sources-panel";
 import { CopyButton } from "../copy-button";
 import { ReferenceAttachmentSummary } from "../sidecar/reference-attachments";
+import { SlashSkillChip } from "../slash-skill-chip";
 
 import { MarkdownContent } from "./markdown-content";
 import { createMarkdownLinkComponent } from "./markdown-link";
@@ -211,6 +217,42 @@ function MessageImage({
 }
 
 const clientTurnDurations = new Map<string, number>();
+
+function HumanMessageText({ content }: { content: string }) {
+  // `parseSlashSkillReference` is a pure regex gate (no data subscription), so
+  // the overwhelmingly common plain-text human message never subscribes to the
+  // skills query. Only a message that literally looks like a `/skill …`
+  // activation mounts `HumanSlashSkillText`, which owns the `useSkills()`
+  // lookup. This keeps a skill-enabled toggle from re-rendering every human
+  // turn — only the few slash-candidate turns react to catalog changes.
+  const reference = useMemo(() => parseSlashSkillReference(content), [content]);
+
+  if (!reference) {
+    return <div className="break-words whitespace-pre-wrap">{content}</div>;
+  }
+
+  return <HumanSlashSkillText content={content} />;
+}
+
+function HumanSlashSkillText({ content }: { content: string }) {
+  const { skills } = useSkills();
+  const slashSkill = resolveSlashSkillDisplay(content, skills);
+
+  if (!slashSkill) {
+    return <div className="break-words whitespace-pre-wrap">{content}</div>;
+  }
+
+  return (
+    <div className="flex max-w-full min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+      <SlashSkillChip name={slashSkill.name} />
+      {slashSkill.remainingText && (
+        <span className="min-w-0 flex-1 break-words whitespace-pre-wrap">
+          {slashSkill.remainingText}
+        </span>
+      )}
+    </div>
+  );
+}
 
 function MessageContent_({
   className,
@@ -378,9 +420,7 @@ function MessageContent_({
         {filesList}
         {contentToDisplay && (
           <AIElementMessageContent className="w-full max-w-full">
-            <div className="break-words whitespace-pre-wrap">
-              {contentToDisplay}
-            </div>
+            <HumanMessageText content={contentToDisplay} />
           </AIElementMessageContent>
         )}
       </div>

@@ -17,4 +17,11 @@ export interface Subtask {
   prompt: string;
   result?: string;
   error?: string;
+  /**
+   * Why a guardrail cap ended the run early (``token_capped`` / ``turn_capped``
+   * / ``loop_capped``), or ``undefined`` for a clean run. The pill status stays
+   * normal (``completed``/``failed``); this carries the cap detail so a future
+   * badge can show "capped" without parsing result text (#3875 Phase 2).
+   */
+  stopReason?: string;
 }

@@ -115,6 +115,12 @@ export const zhCN: Translations = {
     createSkillPrompt:
       "我们一起用 skill-creator 技能来创建一个技能吧。先问问我希望这个技能能做什么。",
     addAttachments: "添加附件",
+    inputPolish: "优化输入",
+    inputPolishing: "正在优化输入...",
+    inputPolishNoChanges: "当前输入已经足够清晰。",
+    inputPolishFailed: "优化输入失败。",
+    inputPolishUndo: "撤销优化",
+    inputPolishCancel: "取消优化",
     mode: "模式",
     flashMode: "闪速",
     flashModeDescription: "快速且高效的完成任务，但可能不够精准",

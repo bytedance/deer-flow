@@ -3,8 +3,11 @@ from __future__ import annotations
 import pytest
 import requests
 
+import deerflow.skills.storage as storage_mod
+from deerflow.community.aio_sandbox import remote_backend as remote_backend_mod
 from deerflow.community.aio_sandbox.remote_backend import RemoteSandboxBackend
 from deerflow.community.aio_sandbox.sandbox_info import SandboxInfo
+from deerflow.skills.types import SkillCategory
 
 
 class _StubResponse:
@@ -123,6 +126,25 @@ def test_provisioner_list_skips_non_dict_sandbox_entries(monkeypatch):
     assert infos[0].sandbox_url == "http://k3s:31001"
 
 
+@pytest.mark.parametrize(
+    ("categories", "expected"),
+    [
+        ([SkillCategory.LEGACY], True),
+        (["legacy"], True),
+        ([SkillCategory.CUSTOM], False),
+    ],
+)
+def test_user_should_see_legacy_skills_follows_storage_visibility_rule(monkeypatch, categories, expected):
+    class _Storage:
+        def load_skills(self, *, enabled_only: bool = False):
+            assert enabled_only is False
+            return [type("SkillStub", (), {"category": category})() for category in categories]
+
+    monkeypatch.setattr(storage_mod, "get_or_new_user_skill_storage", lambda user_id: _Storage())
+
+    assert storage_mod.user_should_see_legacy_skills("user-1") is expected
+
+
 @pytest.mark.parametrize("expected_user_id", [None, "owner-1"])
 def test_create_delegates_to_provisioner_create(monkeypatch, expected_user_id):
     backend = RemoteSandboxBackend("http://provisioner:8002")
@@ -148,6 +170,7 @@ def test_create_delegates_to_provisioner_create(monkeypatch, expected_user_id):
 
 def test_provisioner_create_returns_sandbox_info(monkeypatch):
     backend = RemoteSandboxBackend("http://provisioner:8002")
+    monkeypatch.setattr(remote_backend_mod, "user_should_see_legacy_skills", lambda user_id: True)
 
     def mock_post(url: str, json: dict, timeout: int):
         assert url == "http://provisioner:8002/api/sandboxes"
@@ -155,6 +178,7 @@ def test_provisioner_create_returns_sandbox_info(monkeypatch):
             "sandbox_id": "abc123",
             "thread_id": "thread-1",
             "user_id": "test-user-autouse",
+            "include_legacy_skills": True,
         }
         assert timeout == 30
         return _StubResponse(payload={"sandbox_id": "abc123", "sandbox_url": "http://k3s:31001"})
@@ -168,6 +192,7 @@ def test_provisioner_create_returns_sandbox_info(monkeypatch):
 
 def test_provisioner_create_accepts_anonymous_thread_id(monkeypatch):
     backend = RemoteSandboxBackend("http://provisioner:8002")
+    monkeypatch.setattr(remote_backend_mod, "user_should_see_legacy_skills", lambda user_id: False)
 
     def mock_post(url: str, json: dict, timeout: int):
         assert url == "http://provisioner:8002/api/sandboxes"
@@ -175,6 +200,7 @@ def test_provisioner_create_accepts_anonymous_thread_id(monkeypatch):
             "sandbox_id": "anon123",
             "thread_id": None,
             "user_id": "test-user-autouse",
+            "include_legacy_skills": False,
         }
         assert timeout == 30
         return _StubResponse(payload={"sandbox_id": "anon123", "sandbox_url": "http://k3s:31002"})
@@ -188,6 +214,7 @@ def test_provisioner_create_accepts_anonymous_thread_id(monkeypatch):
 
 def test_provisioner_create_raises_runtime_error_on_request_exception(monkeypatch):
     backend = RemoteSandboxBackend("http://provisioner:8002")
+    monkeypatch.setattr(remote_backend_mod, "user_should_see_legacy_skills", lambda user_id: False)
 
     def mock_post(url: str, json: dict, timeout: int):
         raise requests.RequestException("boom")

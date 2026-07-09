@@ -7,11 +7,13 @@ import {
   CheckIcon,
   GraduationCapIcon,
   LightbulbIcon,
+  Loader2Icon,
   PaperclipIcon,
   PlusIcon,
-  SparklesIcon,
   RocketIcon,
+  SparklesIcon,
   TargetIcon,
+  Undo2Icon,
   XIcon,
   ZapIcon,
 } from "lucide-react";
@@ -23,6 +25,8 @@ import {
   useRef,
   useState,
   type ComponentProps,
+  type ClipboardEvent,
+  type FormEvent,
   type KeyboardEvent,
 } from "react";
 import { toast } from "sonner";
@@ -35,7 +39,6 @@ import {
   PromptInputActionMenuTrigger,
   PromptInputAttachment,
   PromptInputAttachments,
-  PromptInputBody,
   PromptInputButton,
   PromptInputFooter,
   PromptInputHeader,
@@ -64,6 +67,8 @@ import {
 import { fetch } from "@/core/api/fetcher";
 import { getBackendBaseURL } from "@/core/config";
 import { useI18n } from "@/core/i18n/hooks";
+import { polishInputDraft } from "@/core/input-polish/api";
+import { hasOpenHumanInputRequest } from "@/core/messages/human-input";
 import { isHiddenFromUIMessage } from "@/core/messages/utils";
 import { useModels } from "@/core/models/hooks";
 import {
@@ -78,6 +83,7 @@ import { threadTokenUsageQueryKey } from "@/core/threads/token-usage";
 import { textOfMessage } from "@/core/threads/utils";
 import {
   formatUploadSize,
+  splitUnsupportedUploadFiles,
   useUploadLimits,
   validateUploadLimits,
   type UploadLimits,
@@ -106,6 +112,7 @@ import {
 import {
   abortGoalRequest,
   beginGoalRequest,
+  canPolishInput,
   createGoalRequestState,
   findSuggestionTemplatePlaceholder,
   finishGoalRequest,
@@ -121,9 +128,50 @@ import {
 import { useThread } from "./messages/context";
 import { ModeHoverGuide } from "./mode-hover-guide";
 import { ReferenceAttachmentSummary, useMaybeSidecar } from "./sidecar";
+import { SlashSkillChip } from "./slash-skill-chip";
 import { Tooltip } from "./tooltip";
 
 type InputMode = "flash" | "thinking" | "pro" | "ultra";
+
+function focusContentEditableEnd(element: HTMLElement | null) {
+  if (!element) {
+    return;
+  }
+
+  element.focus();
+  const selection = window.getSelection();
+  if (!selection) {
+    return;
+  }
+
+  const range = document.createRange();
+  range.selectNodeContents(element);
+  range.collapse(false);
+  selection.removeAllRanges();
+  selection.addRange(range);
+}
+
+function insertPlainTextAtSelection(container: HTMLElement, text: string) {
+  const selection = window.getSelection();
+  if (!selection || selection.rangeCount === 0) {
+    return false;
+  }
+
+  const range = selection.getRangeAt(0);
+  const ancestor = range.commonAncestorContainer;
+  if (ancestor !== container && !container.contains(ancestor)) {
+    return false;
+  }
+
+  range.deleteContents();
+  const node = document.createTextNode(text);
+  range.insertNode(node);
+  range.setStartAfter(node);
+  range.setEndAfter(node);
+  selection.removeAllRanges();
+  selection.addRange(range);
+  return true;
+}
 
 function getResolvedMode(
   mode: InputMode | undefined,
@@ -253,7 +301,7 @@ export function InputBox({
   ) => void | Promise<void>;
   onStop?: () => void;
 }) {
-  const { t } = useI18n();
+  const { locale, t } = useI18n();
   const queryClient = useQueryClient();
   const searchParams = useSearchParams();
   const [modelDialogOpen, setModelDialogOpen] = useState(false);
@@ -267,8 +315,17 @@ export function InputBox({
   const { data: uploadLimits } = useUploadLimits(threadId);
   const promptRootRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const inlineSkillTextRef = useRef<HTMLSpanElement | null>(null);
+  const inlineSkillComposingRef = useRef(false);
   const goalRequestStateRef = useRef(createGoalRequestState());
   const compactRequestStateRef = useRef(createGoalRequestState());
+  const inputPolishRequestRef = useRef<{
+    controller: AbortController | null;
+    sequence: number;
+  }>({
+    controller: null,
+    sequence: 0,
+  });
   const promptHistoryIndexRef = useRef<number | null>(null);
   const promptHistoryDraftRef = useRef("");
 
@@ -278,8 +335,15 @@ export function InputBox({
   const suggestionsEnabled = suggestionsConfig?.enabled;
   const [followupsHidden, setFollowupsHidden] = useState(false);
   const [followupsLoading, setFollowupsLoading] = useState(false);
+  const [polishingInput, setPolishingInput] = useState(false);
+  const [inputPolishUndo, setInputPolishUndo] = useState<{
+    originalText: string;
+    rewrittenText: string;
+  } | null>(null);
   const [textareaFocused, setTextareaFocused] = useState(false);
   const [skillSuggestionIndex, setSkillSuggestionIndex] = useState(0);
+  const [selectedSlashSkill, setSelectedSlashSkill] =
+    useState<SlashSuggestion | null>(null);
   const [dismissedSkillSuggestionValue, setDismissedSkillSuggestionValue] =
     useState<string | null>(null);
   const lastGeneratedForAiIdRef = useRef<string | null>(null);
@@ -434,6 +498,8 @@ export function InputBox({
   useEffect(() => {
     promptHistoryIndexRef.current = null;
     promptHistoryDraftRef.current = "";
+    setSelectedSlashSkill(null);
+    setInputPolishUndo(null);
   }, [threadId]);
 
   useEffect(() => {
@@ -445,6 +511,17 @@ export function InputBox({
     };
   }, [threadId]);
 
+  const abortInputPolishRequest = useCallback(() => {
+    inputPolishRequestRef.current.controller?.abort();
+    inputPolishRequestRef.current.controller = null;
+    inputPolishRequestRef.current.sequence += 1;
+    setPolishingInput(false);
+  }, []);
+
+  useEffect(() => {
+    return () => abortInputPolishRequest();
+  }, [abortInputPolishRequest, threadId]);
+
   useEffect(() => {
     const currentIndex = promptHistoryIndexRef.current;
     if (currentIndex !== null && currentIndex >= promptHistory.length) {
@@ -455,6 +532,9 @@ export function InputBox({
 
   const handleModelSelect = useCallback(
     (model_name: string) => {
+      if (disabled || polishingInput) {
+        return;
+      }
       const model = models.find((m) => m.name === model_name);
       if (!model) {
         return;
@@ -467,11 +547,14 @@ export function InputBox({
       });
       setModelDialogOpen(false);
     },
-    [onContextChange, context, models],
+    [disabled, onContextChange, context, models, polishingInput],
   );
 
   const handleModeSelect = useCallback(
     (mode: InputMode) => {
+      if (disabled || polishingInput) {
+        return;
+      }
       onContextChange?.({
         ...context,
         mode: getResolvedMode(mode, supportThinking),
@@ -485,17 +568,20 @@ export function InputBox({
                 : "minimal",
       });
     },
-    [onContextChange, context, supportThinking],
+    [disabled, onContextChange, context, polishingInput, supportThinking],
   );
 
   const handleReasoningEffortSelect = useCallback(
     (effort: "minimal" | "low" | "medium" | "high") => {
+      if (disabled || polishingInput) {
+        return;
+      }
       onContextChange?.({
         ...context,
         reasoning_effort: effort,
       });
     },
-    [onContextChange, context],
+    [disabled, onContextChange, context, polishingInput],
   );
 
   const handleGoalCommand = useCallback(
@@ -702,6 +788,7 @@ export function InputBox({
       }
       promptHistoryIndexRef.current = null;
       promptHistoryDraftRef.current = "";
+      setInputPolishUndo(null);
       setFollowups([]);
       setFollowupsHidden(false);
       setFollowupsLoading(false);
@@ -765,9 +852,15 @@ export function InputBox({
         toast.info(t.inputBox.pleaseWaitStreaming);
         return Promise.reject(new Error("streaming"));
       }
+      const messageWithSlashSkill = selectedSlashSkill
+        ? {
+            ...message,
+            text: `/${selectedSlashSkill.name} ${message.text}`,
+          }
+        : message;
       const submitAction = getInputSubmitAction({
-        text: message.text,
-        fileCount: message.files.length,
+        text: messageWithSlashSkill.text,
+        fileCount: messageWithSlashSkill.files.length,
         status,
       });
       if (submitAction.kind === "goal") {
@@ -797,12 +890,16 @@ export function InputBox({
       if (submitAction.kind === "empty") {
         return;
       }
-      return submitThreadMessage(message);
+      await submitThreadMessage(messageWithSlashSkill);
+      if (selectedSlashSkill) {
+        setSelectedSlashSkill(null);
+      }
     },
     [
       handleCompactCommand,
       handleGoalCommand,
       onStop,
+      selectedSlashSkill,
       status,
       submitThreadMessage,
       t.inputBox.pleaseWaitStreaming,
@@ -878,9 +975,34 @@ export function InputBox({
   const showSkillSuggestions =
     !disabled &&
     textareaFocused &&
+    !selectedSlashSkill &&
     slashSkillQuery !== null &&
     skillSuggestions.length > 0 &&
     dismissedSkillSuggestionValue !== textInput.value;
+  const isComposerDisabled = disabled === true;
+  const isMockThread = isMock === true;
+  const hasOpenHumanInputCard = useMemo(
+    () =>
+      hasOpenHumanInputRequest(
+        thread.messages,
+        (message) => !isHiddenFromUIMessage(message),
+      ),
+    [thread.messages],
+  );
+  const composerLocked = isComposerDisabled || polishingInput;
+  const inputPolishUndoAvailable =
+    !polishingInput &&
+    inputPolishUndo !== null &&
+    (textInput.value ?? "") === inputPolishUndo.rewrittenText;
+  const inputPolishDisabled =
+    isComposerDisabled ||
+    isMockThread ||
+    hasOpenHumanInputCard ||
+    polishingInput ||
+    (!inputPolishUndoAvailable &&
+      (status === "streaming" ||
+        slashSkillQuery !== null ||
+        !canPolishInput(textInput.value ?? "")));
 
   useEffect(() => {
     setSkillSuggestionIndex(0);
@@ -888,6 +1010,16 @@ export function InputBox({
 
   const applySkillSuggestion = useCallback(
     (suggestion: SlashSuggestion) => {
+      if (suggestion.kind === "skill") {
+        setSelectedSlashSkill(suggestion);
+        textInput.setInput("");
+        setDismissedSkillSuggestionValue(null);
+        requestAnimationFrame(() => {
+          focusContentEditableEnd(inlineSkillTextRef.current);
+        });
+        return;
+      }
+
       const nextValue = `/${suggestion.name} `;
       textInput.setInput(nextValue);
       setDismissedSkillSuggestionValue(nextValue);
@@ -904,7 +1036,7 @@ export function InputBox({
   );
 
   const handleSkillSuggestionKeyDown = useCallback(
-    (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    (event: KeyboardEvent<HTMLElement>) => {
       if (!showSkillSuggestions) {
         return;
       }
@@ -967,14 +1099,103 @@ export function InputBox({
     [textInput],
   );
 
+  const handlePolishInput = useCallback(async () => {
+    if (inputPolishDisabled) {
+      return;
+    }
+
+    const originalText = textInput.value ?? "";
+    const controller = new AbortController();
+    inputPolishRequestRef.current.controller?.abort();
+    const sequence = inputPolishRequestRef.current.sequence + 1;
+    inputPolishRequestRef.current = {
+      controller,
+      sequence,
+    };
+    setPolishingInput(true);
+
+    try {
+      const result = await polishInputDraft(
+        {
+          text: originalText,
+          locale,
+          thread_id: threadId,
+        },
+        { signal: controller.signal },
+      );
+
+      const isCurrentRequest =
+        inputPolishRequestRef.current.controller === controller &&
+        inputPolishRequestRef.current.sequence === sequence &&
+        !controller.signal.aborted;
+      if (!isCurrentRequest || (textInput.value ?? "") !== originalText) {
+        return;
+      }
+
+      const rewrittenText = result.rewritten_text.trim();
+      if (!rewrittenText || !result.changed) {
+        toast.info(t.inputBox.inputPolishNoChanges);
+        return;
+      }
+
+      // Applying the rewrite replaces the draft outside the textarea change
+      // handler, so clear any in-progress history browse state; otherwise a
+      // stale index would let the next ArrowDown overwrite the rewrite.
+      promptHistoryIndexRef.current = null;
+      promptHistoryDraftRef.current = "";
+      setPromptHistoryValue(rewrittenText);
+      setInputPolishUndo({
+        originalText,
+        rewrittenText,
+      });
+    } catch (error) {
+      const isCurrentRequest =
+        inputPolishRequestRef.current.controller === controller &&
+        inputPolishRequestRef.current.sequence === sequence;
+      if (isAbortError(error) || !isCurrentRequest) {
+        return;
+      }
+      toast.error(
+        error instanceof Error ? error.message : t.inputBox.inputPolishFailed,
+      );
+    } finally {
+      if (
+        inputPolishRequestRef.current.controller === controller &&
+        inputPolishRequestRef.current.sequence === sequence
+      ) {
+        inputPolishRequestRef.current.controller = null;
+        setPolishingInput(false);
+      }
+    }
+  }, [
+    inputPolishDisabled,
+    locale,
+    setPromptHistoryValue,
+    t.inputBox.inputPolishFailed,
+    t.inputBox.inputPolishNoChanges,
+    textInput,
+    threadId,
+  ]);
+
+  const handleUndoInputPolish = useCallback(() => {
+    if (!inputPolishUndoAvailable || inputPolishUndo === null) {
+      return;
+    }
+    promptHistoryIndexRef.current = null;
+    promptHistoryDraftRef.current = "";
+    setPromptHistoryValue(inputPolishUndo.originalText);
+    setInputPolishUndo(null);
+  }, [inputPolishUndo, inputPolishUndoAvailable, setPromptHistoryValue]);
+
   const handlePromptHistoryKeyDown = useCallback(
-    (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    (event: KeyboardEvent<HTMLElement>) => {
       if (
         event.altKey ||
         event.ctrlKey ||
         event.metaKey ||
         event.shiftKey ||
         isIMEComposing(event) ||
+        selectedSlashSkill ||
         promptHistory.length === 0 ||
         (event.key !== "ArrowUp" && event.key !== "ArrowDown")
       ) {
@@ -1018,29 +1239,157 @@ export function InputBox({
       promptHistoryIndexRef.current = nextIndex;
       setPromptHistoryValue(promptHistory[nextIndex] ?? "");
     },
-    [promptHistory, setPromptHistoryValue, textInput.value],
+    [promptHistory, selectedSlashSkill, setPromptHistoryValue, textInput.value],
+  );
+
+  const handleSelectedSlashSkillKeyDown = useCallback(
+    (event: KeyboardEvent<HTMLElement>) => {
+      if (
+        event.key !== "Backspace" ||
+        !selectedSlashSkill ||
+        textInput.value.length > 0 ||
+        isIMEComposing(event)
+      ) {
+        return;
+      }
+
+      event.preventDefault();
+      setSelectedSlashSkill(null);
+      requestAnimationFrame(() => {
+        textareaRef.current?.focus();
+      });
+    },
+    [selectedSlashSkill, textInput.value],
   );
 
   const handlePromptTextareaKeyDown = useCallback(
-    (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    (event: KeyboardEvent<HTMLElement>) => {
       handleSkillSuggestionKeyDown(event);
+      if (event.defaultPrevented) {
+        return;
+      }
+      handleSelectedSlashSkillKeyDown(event);
       if (event.defaultPrevented) {
         return;
       }
       handlePromptHistoryKeyDown(event);
     },
-    [handlePromptHistoryKeyDown, handleSkillSuggestionKeyDown],
+    [
+      handlePromptHistoryKeyDown,
+      handleSelectedSlashSkillKeyDown,
+      handleSkillSuggestionKeyDown,
+    ],
   );
 
   const handlePromptTextareaChange = useCallback(() => {
+    abortInputPolishRequest();
+    setInputPolishUndo(null);
     promptHistoryIndexRef.current = null;
     promptHistoryDraftRef.current = "";
+  }, [abortInputPolishRequest]);
+
+  const updateInlineSkillTextInput = useCallback(
+    (element: HTMLElement) => {
+      promptHistoryIndexRef.current = null;
+      promptHistoryDraftRef.current = "";
+      textInput.setInput(element.textContent ?? "");
+    },
+    [textInput],
+  );
+
+  useEffect(() => {
+    if (!selectedSlashSkill) {
+      return;
+    }
+
+    const element = inlineSkillTextRef.current;
+    if (element && element.textContent !== textInput.value) {
+      element.textContent = textInput.value;
+    }
+  }, [selectedSlashSkill, textInput.value]);
+
+  const handleInlineSkillInput = useCallback(
+    (event: FormEvent<HTMLSpanElement>) => {
+      updateInlineSkillTextInput(event.currentTarget);
+    },
+    [updateInlineSkillTextInput],
+  );
+
+  const handleInlineSkillPaste = useCallback(
+    (event: ClipboardEvent<HTMLSpanElement>) => {
+      const pastedFiles = Array.from(event.clipboardData.items)
+        .filter((item) => item.kind === "file")
+        .flatMap((item) => {
+          const file = item.getAsFile();
+          return file ? [file] : [];
+        });
+
+      if (pastedFiles.length > 0) {
+        event.preventDefault();
+        const { accepted, message } = splitUnsupportedUploadFiles(pastedFiles);
+        if (message) {
+          toast.error(message);
+        }
+        if (accepted.length > 0) {
+          attachments.add(accepted);
+        }
+        return;
+      }
+
+      const text = event.clipboardData.getData("text/plain");
+      if (!text) {
+        return;
+      }
+
+      event.preventDefault();
+      if (insertPlainTextAtSelection(event.currentTarget, text)) {
+        updateInlineSkillTextInput(event.currentTarget);
+      }
+    },
+    [attachments, updateInlineSkillTextInput],
+  );
+
+  const handleInlineSkillKeyDown = useCallback(
+    (event: KeyboardEvent<HTMLSpanElement>) => {
+      handleSelectedSlashSkillKeyDown(event);
+      if (event.defaultPrevented) {
+        return;
+      }
+
+      if (event.key !== "Enter") {
+        return;
+      }
+
+      if (isIMEComposing(event, inlineSkillComposingRef.current)) {
+        return;
+      }
+
+      event.preventDefault();
+
+      if (event.shiftKey) {
+        if (insertPlainTextAtSelection(event.currentTarget, "\n")) {
+          updateInlineSkillTextInput(event.currentTarget);
+        }
+        return;
+      }
+
+      event.currentTarget.closest("form")?.requestSubmit();
+    },
+    [handleSelectedSlashSkillKeyDown, updateInlineSkillTextInput],
+  );
+
+  const clearSelectedSlashSkill = useCallback(() => {
+    setSelectedSlashSkill(null);
+    requestAnimationFrame(() => {
+      textareaRef.current?.focus();
+    });
   }, []);
 
   const showFollowups =
     !disabled &&
     !isWelcomeMode &&
     !showSkillSuggestions &&
+    !selectedSlashSkill &&
     !followupsHidden &&
     (followupsLoading || followups.length > 0);
 
@@ -1247,14 +1596,22 @@ export function InputBox({
       <PromptInput
         className={cn(
           "bg-background/85 relative z-10 rounded-2xl backdrop-blur-sm transition-all duration-300 ease-out *:data-[slot='input-group']:rounded-2xl",
+          polishingInput &&
+            "shadow-primary/10 ring-primary/25 shadow-lg ring-1",
           className,
         )}
-        disabled={disabled}
+        disabled={composerLocked}
         globalDrop
         multiple
         onSubmit={handleSubmit}
         {...props}
       >
+        {polishingInput && (
+          <div
+            aria-hidden="true"
+            className="border-primary/30 bg-primary/5 pointer-events-auto absolute inset-0 z-20 animate-pulse cursor-wait rounded-2xl border opacity-80"
+          />
+        )}
         {extraHeader && (
           <div className="absolute top-0 right-0 left-0 z-10">
             <div className="absolute right-0 bottom-0 left-0 flex items-center justify-center">
@@ -1270,6 +1627,25 @@ export function InputBox({
               </div>
             )}
           </PromptInputAttachments>
+          {polishingInput && (
+            <div
+              aria-live="polite"
+              className="text-primary bg-primary/10 border-primary/20 relative z-30 flex h-7 items-center gap-1.5 rounded-full border py-0 pr-1 pl-2.5 text-xs font-medium"
+              role="status"
+            >
+              <Loader2Icon className="size-3 animate-spin" />
+              {t.inputBox.inputPolishing}
+              <button
+                aria-label={t.inputBox.inputPolishCancel}
+                className="hover:bg-primary/20 focus-visible:ring-primary/40 -mr-0.5 ml-0.5 flex size-5 shrink-0 cursor-pointer items-center justify-center rounded-full transition-colors focus-visible:ring-2 focus-visible:outline-none"
+                data-testid="cancel-polish-input-button"
+                onClick={abortInputPolishRequest}
+                type="button"
+              >
+                <XIcon className="size-3" />
+              </button>
+            </div>
+          )}
           {sidecar && sidecar.conversationQuotes.length > 0 && (
             <ReferenceAttachmentSummary
               references={sidecar.conversationQuotes}
@@ -1278,20 +1654,67 @@ export function InputBox({
             />
           )}
         </PromptInputHeader>
-        <PromptInputBody className="absolute top-0 right-0 left-0 z-3">
-          <PromptInputTextarea
-            className={cn("size-full")}
-            disabled={disabled}
-            placeholder={t.inputBox.placeholder}
-            autoFocus={autoFocus}
-            defaultValue={initialValue}
-            onBlur={() => setTextareaFocused(false)}
-            onChange={handlePromptTextareaChange}
-            onFocus={() => setTextareaFocused(true)}
-            onKeyDown={handlePromptTextareaKeyDown}
-            ref={textareaRef}
-          />
-        </PromptInputBody>
+        <div className="min-h-16 w-full min-w-0 px-3 py-3">
+          {selectedSlashSkill ? (
+            <div
+              className="max-h-48 min-h-6 w-full min-w-0 cursor-text overflow-y-auto text-base leading-6 break-all whitespace-pre-wrap md:text-sm"
+              onClick={(event) => {
+                if (event.target === event.currentTarget) {
+                  focusContentEditableEnd(inlineSkillTextRef.current);
+                }
+              }}
+            >
+              <SlashSkillChip
+                name={selectedSlashSkill.name}
+                className="mr-2 max-w-[min(11rem,45%)] align-top"
+                onRemove={clearSelectedSlashSkill}
+              />
+              <span
+                aria-label={t.inputBox.placeholder}
+                aria-multiline="true"
+                contentEditable={!composerLocked}
+                data-empty={textInput.value.length === 0}
+                data-placeholder={t.inputBox.placeholder}
+                data-slot="input-group-control"
+                onBlur={() => setTextareaFocused(false)}
+                onCompositionEnd={() => {
+                  inlineSkillComposingRef.current = false;
+                }}
+                onCompositionStart={() => {
+                  inlineSkillComposingRef.current = true;
+                }}
+                onFocus={() => setTextareaFocused(true)}
+                onInput={handleInlineSkillInput}
+                onKeyDown={handleInlineSkillKeyDown}
+                onPaste={handleInlineSkillPaste}
+                aria-placeholder={t.inputBox.placeholder}
+                ref={inlineSkillTextRef}
+                role="textbox"
+                suppressContentEditableWarning
+                className={cn(
+                  "outline-none",
+                  "before:text-muted-foreground before:pointer-events-none",
+                  "data-[empty=true]:before:content-[attr(data-placeholder)]",
+                  composerLocked && "cursor-not-allowed opacity-50",
+                )}
+                tabIndex={composerLocked ? -1 : 0}
+              />
+            </div>
+          ) : (
+            <PromptInputTextarea
+              className="min-h-6! w-full min-w-0 p-0! leading-6!"
+              disabled={composerLocked}
+              placeholder={t.inputBox.placeholder}
+              autoFocus={autoFocus}
+              defaultValue={initialValue}
+              onBlur={() => setTextareaFocused(false)}
+              onChange={handlePromptTextareaChange}
+              onFocus={() => setTextareaFocused(true)}
+              onKeyDown={handlePromptTextareaKeyDown}
+              ref={textareaRef}
+            />
+          )}
+        </div>
         <PromptInputFooter className="flex flex-wrap gap-2 sm:flex-nowrap">
           <PromptInputTools className="min-w-0 flex-1 flex-wrap">
             {/* TODO: Add more connectors here
@@ -1305,8 +1728,42 @@ export function InputBox({
           </PromptInputActionMenu> */}
             <AddAttachmentsButton
               className="px-2!"
+              disabled={composerLocked}
               uploadLimits={uploadLimits}
             />
+            <Tooltip
+              content={
+                polishingInput
+                  ? t.inputBox.inputPolishing
+                  : inputPolishUndoAvailable
+                    ? t.inputBox.inputPolishUndo
+                    : t.inputBox.inputPolish
+              }
+            >
+              <PromptInputButton
+                aria-label={
+                  inputPolishUndoAvailable
+                    ? t.inputBox.inputPolishUndo
+                    : t.inputBox.inputPolish
+                }
+                className="px-2!"
+                data-testid="polish-input-button"
+                disabled={inputPolishDisabled}
+                onClick={
+                  inputPolishUndoAvailable
+                    ? handleUndoInputPolish
+                    : handlePolishInput
+                }
+              >
+                {polishingInput ? (
+                  <Loader2Icon className="size-3 animate-spin" />
+                ) : inputPolishUndoAvailable ? (
+                  <Undo2Icon className="size-3" />
+                ) : (
+                  <SparklesIcon className="size-3" />
+                )}
+              </PromptInputButton>
+            </Tooltip>
             <PromptInputActionMenu>
               <ModeHoverGuide
                 mode={
@@ -1318,7 +1775,10 @@ export function InputBox({
                     : "flash"
                 }
               >
-                <PromptInputActionMenuTrigger className="max-w-28 gap-1! px-2! sm:max-w-none">
+                <PromptInputActionMenuTrigger
+                  className="max-w-28 gap-1! px-2! sm:max-w-none"
+                  disabled={composerLocked}
+                >
                   <div>
                     {context.mode === "flash" && <ZapIcon className="size-3" />}
                     {context.mode === "thinking" && (
@@ -1480,7 +1940,10 @@ export function InputBox({
             </PromptInputActionMenu>
             {supportReasoningEffort && context.mode !== "flash" && (
               <PromptInputActionMenu>
-                <PromptInputActionMenuTrigger className="hidden gap-1! px-2! sm:inline-flex">
+                <PromptInputActionMenuTrigger
+                  className="hidden gap-1! px-2! sm:inline-flex"
+                  disabled={composerLocked}
+                >
                   <div className="text-xs font-normal">
                     {t.inputBox.reasoningEffort}:
                     {context.reasoning_effort === "minimal" &&
@@ -1601,7 +2064,10 @@ export function InputBox({
               onOpenChange={setModelDialogOpen}
             >
               <ModelSelectorTrigger asChild>
-                <PromptInputButton className="max-w-40 min-w-0 sm:max-w-56">
+                <PromptInputButton
+                  className="max-w-40 min-w-0 sm:max-w-56"
+                  disabled={composerLocked}
+                >
                   <div className="flex min-w-0 flex-col items-start text-left">
                     <ModelSelectorName className="text-xs font-normal">
                       {selectedModel?.display_name}
@@ -1636,7 +2102,7 @@ export function InputBox({
             </ModelSelector>
             <PromptInputSubmit
               className="rounded-full"
-              disabled={disabled}
+              disabled={composerLocked}
               variant="outline"
               status={status}
               onClick={(e) => {
@@ -1655,6 +2121,7 @@ export function InputBox({
 
       {isWelcomeMode &&
         searchParams.get("mode") !== "skill" &&
+        !selectedSlashSkill &&
         !showSkillSuggestions && (
           <div className="flex items-center justify-center pt-2">
             <SuggestionList onSelectPlaceholder={onSelectPlaceholder} />
@@ -1749,9 +2216,11 @@ function SuggestionList({
 
 function AddAttachmentsButton({
   className,
+  disabled,
   uploadLimits,
 }: {
   className?: string;
+  disabled?: boolean;
   uploadLimits?: UploadLimits;
 }) {
   const { t } = useI18n();
@@ -1769,6 +2238,7 @@ function AddAttachmentsButton({
         aria-label={t.inputBox.addAttachments}
         className={cn("px-2!", className)}
         data-testid="add-attachments-button"
+        disabled={disabled}
         onClick={() => attachments.openFileDialog()}
       >
         <PaperclipIcon className="size-3" />

@@ -4,7 +4,23 @@ import logging
 
 from pydantic import BaseModel, Field
 
+from deerflow.config.token_budget_config import TokenBudgetConfig
+
 logger = logging.getLogger(__name__)
+
+
+def default_subagent_token_budget() -> TokenBudgetConfig:
+    """Default per-run token budget for subagents (#3875 Phase 2).
+
+    Enabled by default so the pathological-token-burn backstop actually
+    engages (per umbrella #3857 point 4 — backstops must engage, not just
+    exist). ``max_tokens`` is a deliberately loose ceiling: the reported 4.4M
+    burn would have been cut roughly in half, while legitimate deep-research
+    runs (``max_turns=150``, no summarization yet) can genuinely accumulate
+    >1M cumulative input today. Tighten after Phase 3 lands subagent
+    summarization. Flagged tunable in the PR description.
+    """
+    return TokenBudgetConfig(enabled=True, max_tokens=2_000_000, warn_threshold=0.7)
 
 
 class SubagentOverrideConfig(BaseModel):
@@ -28,6 +44,10 @@ class SubagentOverrideConfig(BaseModel):
     skills: list[str] | None = Field(
         default=None,
         description="Skill names whitelist for this subagent (None = inherit all enabled skills, [] = no skills)",
+    )
+    token_budget: TokenBudgetConfig | None = Field(
+        default=None,
+        description="Per-run token budget override for this subagent (None = use the global subagents.token_budget default). Symmetric with timeout_seconds/max_turns.",
     )
 
 
@@ -80,6 +100,10 @@ class SubagentsAppConfig(BaseModel):
         default=None,
         ge=1,
         description="Optional default max-turn override for all subagents (None = keep builtin defaults)",
+    )
+    token_budget: TokenBudgetConfig = Field(
+        default_factory=default_subagent_token_budget,
+        description="Default per-run token budget for subagents — a cost-ceiling backstop that engages by default (#3875 Phase 2). Set enabled: false to disable, or override per agent via agents.<name>.token_budget.",
     )
     agents: dict[str, SubagentOverrideConfig] = Field(
         default_factory=dict,
@@ -140,6 +164,20 @@ class SubagentsAppConfig(BaseModel):
         if override is not None and override.skills is not None:
             return override.skills
         return None
+
+    def get_token_budget_for(self, agent_name: str) -> TokenBudgetConfig:
+        """Get the effective token-budget config for a specific agent.
+
+        Unlike ``max_turns``/``timeout_seconds`` (which keep a custom agent's
+        own value), the token budget is a safety backstop that must engage for
+        every subagent unless explicitly disabled — so the per-agent override
+        wins when set, otherwise the global default applies to built-in AND
+        custom agents alike (#3875 Phase 2 / umbrella #3857 point 4).
+        """
+        override = self.agents.get(agent_name)
+        if override is not None and override.token_budget is not None:
+            return override.token_budget
+        return self.token_budget
 
 
 _subagents_config: SubagentsAppConfig = SubagentsAppConfig()

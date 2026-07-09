@@ -12,6 +12,7 @@ from collections import OrderedDict
 from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
 from deerflow.skills.storage.skill_storage import SkillStorage
 from deerflow.skills.storage.user_scoped_skill_storage import UserScopedSkillStorage
+from deerflow.skills.types import SkillCategory
 
 logger = logging.getLogger(__name__)
 
@@ -142,6 +143,22 @@ def get_or_new_user_skill_storage(user_id: str, **kwargs) -> SkillStorage:
         return cached
 
 
+def user_should_see_legacy_skills(user_id: str, **kwargs) -> bool:
+    """Return whether discovery exposes any LEGACY skills for this user.
+
+    Sandbox mounts must not be more permissive than skill discovery. This
+    helper centralizes that contract so local, AIO, and remote providers all
+    follow the same visibility rule.
+    """
+    if kwargs:
+        from deerflow.config.paths import make_safe_user_id
+
+        storage = UserScopedSkillStorage(make_safe_user_id(user_id), **kwargs)
+    else:
+        storage = get_or_new_user_skill_storage(user_id)
+    return any((skill.category.value if hasattr(skill.category, "value") else skill.category) == SkillCategory.LEGACY.value for skill in storage.load_skills(enabled_only=False))
+
+
 def reset_skill_storage() -> None:
     """Clear all cached storage instances (used in tests and hot-reload scenarios)."""
     global _default_skill_storage, _default_skill_storage_config
@@ -180,6 +197,7 @@ __all__ = [
     "UserScopedSkillStorage",
     "get_or_new_skill_storage",
     "get_or_new_user_skill_storage",
+    "user_should_see_legacy_skills",
     "reset_skill_storage",
     "reset_user_skill_storage",
 ]
