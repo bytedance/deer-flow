@@ -61,7 +61,7 @@ def _resolve_checkpointer_config(app_config: AppConfig) -> CheckpointerConfig:
         return app_config.checkpointer
 
     database = app_config.database
-    if database.backend == "memory":
+    if database is None or database.backend == "memory":
         return CheckpointerConfig(type="memory")
     if database.backend == "sqlite":
         return CheckpointerConfig(type="sqlite", connection_string=database.checkpointer_sqlite_path)
