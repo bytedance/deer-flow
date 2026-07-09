@@ -574,8 +574,7 @@ def _build_consolidation_section(
         lines: list[str] = []
         for fact in group[:max_sources]:
             fid = fact.get("id", "?")
-            raw_conf = fact.get("confidence", 0.0)
-            conf = float(raw_conf) if isinstance(raw_conf, (int, float)) and not isinstance(raw_conf, bool) else 0.0
+            conf = _coerce_source_confidence(fact)
             content = str(fact.get("content", ""))
             lines.append(f'- [{fid} | {conf:.2f}] "{content}"')
         shown = min(len(group), max_sources)
@@ -1053,12 +1052,18 @@ class MemoryUpdater:
                     if fact_confidence < config.fact_confidence_threshold:
                         continue
 
+                    # Carry the newest source's createdAt so the staleness clock
+                    # reflects the age of the underlying information, not when
+                    # synthesis happened.  consolidatedAt records the merge time
+                    # for audit without resetting staleness eligibility.
+                    source_created_at = max(fact_index[sid].get("createdAt") or now for sid in source_ids)
                     new_fact: dict[str, Any] = {
                         "id": f"fact_{uuid.uuid4().hex[:8]}",
                         "content": content.strip(),
                         "category": consolidated.get("category", "context"),
                         "confidence": fact_confidence,
-                        "createdAt": now,
+                        "createdAt": source_created_at,
+                        "consolidatedAt": now,
                         "source": "consolidation",
                         "consolidatedFrom": list(source_ids),
                     }

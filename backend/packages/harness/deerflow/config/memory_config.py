@@ -135,12 +135,15 @@ class MemoryConfig(BaseModel):
 
     # ── Memory consolidation ────────────────────────────────────────────
     consolidation_enabled: bool = Field(
-        default=True,
+        default=False,
         description=(
             "Enable memory consolidation. When enabled, the LLM reviews "
             "fragmented fact categories during the normal memory-update call "
             "(same invocation — no extra API call) and decides whether groups "
-            "of related facts can be synthesized into a single richer fact."
+            "of related facts can be synthesized into a single richer fact. "
+            "Defaults to False because consolidation is lossy (source content "
+            "is not preserved, only consolidatedFrom IDs). Opt in explicitly "
+            "once the memory-file backup / audit story is in place."
         ),
     )
     consolidation_min_facts: int = Field(
