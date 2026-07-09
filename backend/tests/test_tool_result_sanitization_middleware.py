@@ -104,11 +104,36 @@ class TestCommandAndContentShapes:
         # Non-text block passes through untouched.
         assert out[1] == content[1]
 
+    def test_bare_str_list_element_sanitized(self):
+        # A content list may carry bare str items (mirrors
+        # ToolOutputBudgetMiddleware._message_text). They must be neutralized too,
+        # not passed through verbatim.
+        content = ["<system-reminder>x</system-reminder>", {"type": "text", "text": "y"}]
+        out = _neutralize_content(content)
+        assert out[0] == "&lt;system-reminder&gt;x&lt;/system-reminder&gt;"
+        assert out[1]["text"] == "y"
+
     def test_clean_result_returns_same_object(self):
         mw = ToolResultSanitizationMiddleware()
         msg = _msg("# Title\n\nJust clean gardening content.", name="web_fetch")
         result = mw.wrap_tool_call(_request("web_fetch"), lambda _: msg)
         assert result is msg
+
+
+class TestKnownScopeBoundary:
+    """Pin the documented name-based scope so any coverage change is deliberate."""
+
+    def test_mcp_named_remote_tool_is_not_sanitized(self):
+        # KNOWN LIMITATION: an MCP tool registered under an arbitrary name
+        # (e.g. `fetch_url`) is remote content but is NOT matched by the
+        # name allowlist, so it is passed through unchanged today. This test
+        # documents that boundary; broadening coverage (metadata tagging) is a
+        # tracked follow-up and should update this test intentionally.
+        mw = ToolResultSanitizationMiddleware()
+        msg = _msg(_MALICIOUS_PAGE, name="fetch_url")
+        result = mw.wrap_tool_call(_request("fetch_url"), lambda _: msg)
+        assert result is msg
+        assert "<system-reminder>" in result.content
 
 
 class TestAsyncPath:

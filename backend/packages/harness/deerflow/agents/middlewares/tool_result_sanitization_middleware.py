@@ -8,12 +8,16 @@ it entered the model context verbatim. A page the attacker controls could embed
 a forged ``<system-reminder>`` block (or a ``--- END USER INPUT ---`` marker) and
 have it reach the model as authoritative framework context.
 
-This middleware closes that gap by applying the *same* structural neutralization
-(``neutralize_untrusted_tags``) to the results of network-sourced tools, so a
-fetched ``<system-reminder>`` is escaped to ``&lt;system-reminder&gt;`` exactly
-like it would be in direct user input. It deliberately targets only the
-remote-content tools: local tool output (bash, file reads) is left untouched so
-legitimate code/log content is never mangled.
+This middleware narrows that gap by applying the *same* structural
+neutralization (``neutralize_untrusted_tags``) to the results of the first-party
+network tools, so a fetched ``<system-reminder>`` is escaped to
+``&lt;system-reminder&gt;`` exactly like it would be in direct user input. It
+deliberately targets only the remote-content tools: local tool output (bash,
+file reads) is left untouched so legitimate code/log content is never mangled.
+
+Scope note: matching is a name-based allowlist, so MCP-provided remote-content
+tools registered under other names are not yet covered — see
+``_REMOTE_CONTENT_TOOL_NAMES``.
 """
 
 from __future__ import annotations
@@ -31,9 +35,18 @@ from langgraph.types import Command
 
 logger = logging.getLogger(__name__)
 
-# Tool names whose results are attacker-influenceable remote content. All web
-# providers normalize to these three names (see community/*/tools.py), so the
-# set stays provider-agnostic.
+# Tool names whose results are attacker-influenceable remote content. All
+# first-party web providers normalize to these three names (see
+# community/*/tools.py), so the set stays provider-agnostic.
+#
+# Known limitation: the gate is name-based. An MCP server may expose a
+# remote-content tool under an arbitrary name (e.g. ``fetch_url`` /
+# ``scrape_page``); its results are equally untrusted but are NOT matched here,
+# so they reach the model unneutralized. A name heuristic (matching
+# fetch/search/crawl substrings) is intentionally avoided because it would also
+# mangle legitimate *local* tool output (e.g. a ``file_search`` result). Robust
+# MCP coverage should tag remote-content tools via metadata at registration
+# rather than by name; tracked as a follow-up.
 _REMOTE_CONTENT_TOOL_NAMES: frozenset[str] = frozenset(
     {
         "web_fetch",
@@ -49,8 +62,11 @@ def _neutralize_content(content: object) -> object:
     Handles the two shapes a ToolMessage content can take:
 
     * plain ``str`` (what every web tool returns today);
-    * a list of content blocks — only ``{"type": "text", "text": ...}`` blocks
-      are rewritten; non-text blocks (images, etc.) pass through untouched.
+    * a list of content blocks — bare ``str`` elements and
+      ``{"type": "text", "text": ...}`` text blocks are rewritten; non-text
+      blocks (images, etc.) pass through untouched. The bare-``str`` case
+      mirrors ``ToolOutputBudgetMiddleware._message_text``, which already
+      anticipates ``str`` items inside a content list.
     """
     # Imported lazily so this module can be loaded even when a test stubs the
     # input-sanitization module, and to mirror the codebase's deferred-import style.
@@ -61,7 +77,9 @@ def _neutralize_content(content: object) -> object:
     if isinstance(content, list):
         rebuilt: list[object] = []
         for block in content:
-            if isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str):
+            if isinstance(block, str):
+                rebuilt.append(neutralize_untrusted_tags(block))
+            elif isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str):
                 rebuilt.append({**block, "text": neutralize_untrusted_tags(block["text"])})
             else:
                 rebuilt.append(block)
@@ -94,10 +112,16 @@ def _sanitize_result(result: ToolMessage | Command) -> ToolMessage | Command:
 class ToolResultSanitizationMiddleware(AgentMiddleware[AgentState]):
     """Escape injection/framework tags in remote tool results before the model sees them.
 
-    Only results of network-sourced tools (``web_fetch`` / ``web_search`` /
+    Results of the first-party network tools (``web_fetch`` / ``web_search`` /
     ``image_search``) are rewritten; every other tool's output is returned
     unchanged. Mirrors the user-input guardrail so untrusted remote content and
     untrusted user input receive the same structural neutralization.
+
+    Scope is a name-based allowlist (``_REMOTE_CONTENT_TOOL_NAMES``): it reliably
+    covers the built-in web tools without false positives on local tools. It does
+    NOT cover MCP-provided remote-content tools registered under other names —
+    see the note on ``_REMOTE_CONTENT_TOOL_NAMES`` for why a name heuristic is
+    avoided and the metadata-tagging follow-up.
     """
 
     def _should_sanitize(self, request: ToolCallRequest) -> bool:
