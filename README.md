@@ -354,7 +354,7 @@ See the [Sandbox Configuration Guide](backend/docs/CONFIGURATION.md#sandbox) to 
 DeerFlow supports configurable MCP servers and skills to extend its capabilities.
 For HTTP/SSE MCP servers, OAuth token flows are supported (`client_credentials`, `refresh_token`).
 For stdio MCP servers, per-tool call timeouts can be configured with `tool_call_timeout`.
-MCP routing hints can also prefer a specific MCP tool for matching requests without changing tool binding; when `tool_search` defers MCP schemas, the hint directs the agent to fetch the tool first.
+MCP routing hints can also prefer a specific MCP tool for matching requests without forbidding other tools. When `tool_search` defers MCP schemas, matching routing metadata can auto-promote up to `tool_search.auto_promote_top_k` deferred schemas before the model call.
 See the [MCP Server Guide](backend/docs/MCP_SERVER.md) for detailed instructions.
 
 #### IM Channels

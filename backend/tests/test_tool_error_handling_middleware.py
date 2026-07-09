@@ -548,6 +548,23 @@ def test_subagent_runtime_middlewares_attach_deferred_filter_when_setup_has_name
     assert filter_idx < safety_idx
 
 
+def test_subagent_runtime_middlewares_place_mcp_routing_before_deferred_filter(monkeypatch):
+    from deerflow.agents.middlewares.deferred_tool_filter_middleware import DeferredToolFilterMiddleware
+    from deerflow.agents.middlewares.mcp_routing_middleware import McpRoutingMiddleware
+    from deerflow.tools.builtins.tool_search import DeferredToolSetup
+
+    app_config = _make_app_config()
+    _stub_runtime_middleware_imports(monkeypatch)
+    routing = McpRoutingMiddleware({"mcp_thing": {"priority": 100, "keywords": ["orders"]}}, "hash123", 3)
+    setup = DeferredToolSetup(object(), frozenset({"mcp_thing"}), "hash123")
+
+    middlewares = build_subagent_runtime_middlewares(app_config=app_config, deferred_setup=setup, mcp_routing_middleware=routing)
+
+    routing_idx = next(i for i, middleware in enumerate(middlewares) if isinstance(middleware, McpRoutingMiddleware))
+    filter_idx = next(i for i, middleware in enumerate(middlewares) if isinstance(middleware, DeferredToolFilterMiddleware))
+    assert routing_idx < filter_idx
+
+
 def test_subagent_runtime_middlewares_skip_deferred_filter_without_names(monkeypatch):
     """No deferred setup (disabled / no MCP tool) -> no DeferredToolFilterMiddleware."""
     from deerflow.agents.middlewares.deferred_tool_filter_middleware import DeferredToolFilterMiddleware

@@ -649,7 +649,7 @@ class TestAgentConstruction:
         from deerflow.tools.builtins.tool_search import DeferredToolSetup
 
         SubagentExecutor = classes["SubagentExecutor"]
-        app_config = SimpleNamespace(models=[SimpleNamespace(name="default-model")])
+        app_config = SimpleNamespace(models=[SimpleNamespace(name="default-model")], tool_search=SimpleNamespace(enabled=True, auto_promote_top_k=3))
         captured: dict[str, object] = {}
 
         def fake_build_subagent_runtime_middlewares(**kwargs):

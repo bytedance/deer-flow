@@ -280,6 +280,7 @@ def build_subagent_runtime_middlewares(
     model_name: str | None = None,
     lazy_init: bool = True,
     deferred_setup: "DeferredToolSetup | None" = None,
+    mcp_routing_middleware: AgentMiddleware | None = None,
     agent_name: str | None = None,
 ) -> list[AgentMiddleware]:
     """Middlewares shared by subagent runtime before subagent-only middlewares."""
@@ -304,6 +305,9 @@ def build_subagent_runtime_middlewares(
 
         middlewares.append(ViewImageMiddleware())
 
+    if mcp_routing_middleware is not None:
+        middlewares.append(mcp_routing_middleware)
+
     # Hide deferred (MCP) tool schemas from the subagent's model binding until
     # tool_search promotes them. This is the same wiring the lead agent gets. The deferred
     # set + catalog hash come from the build-time setup (assembled after
@@ -313,6 +317,9 @@ def build_subagent_runtime_middlewares(
         from deerflow.agents.middlewares.deferred_tool_filter_middleware import DeferredToolFilterMiddleware
 
         middlewares.append(DeferredToolFilterMiddleware(deferred_setup.deferred_names, deferred_setup.catalog_hash))
+        from deerflow.agents.middlewares.mcp_routing_middleware import assert_mcp_routing_before_deferred_filter
+
+        assert_mcp_routing_before_deferred_filter(middlewares)
 
     # LoopDetectionMiddleware — subagents inherit none of the lead's runaway
     # guards today (see #3875): with no loop detection a degenerate subagent tool

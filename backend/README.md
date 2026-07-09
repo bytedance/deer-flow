@@ -346,10 +346,10 @@ MCP servers and skill states in a single file:
 ```
 
 `routing` adds soft MCP preference hints to the agent prompt. It helps the
-model prefer a configured MCP tool for matching requests without changing the
-bound tool schemas or forbidding other tools. When `tool_search.enabled=true`
-defers MCP schemas, the hint tells the model to fetch the deferred tool with
-`tool_search` before preferring it.
+model prefer a configured MCP tool for matching requests without forbidding
+other tools. When `tool_search.enabled=true` defers MCP schemas, matching
+routing metadata can auto-promote up to `tool_search.auto_promote_top_k`
+deferred schemas before the model call.
 
 ### Environment Variables
 
