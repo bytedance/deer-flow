@@ -1,0 +1,320 @@
+# DeerFlow Helm chart values
+#
+# Copy to my-values.yaml, edit, and install with:
+#   helm install deer-flow deploy/helm/deer-flow -n deer-flow --create-namespace -f my-values.yaml
+
+# -- Target namespace (also used as the K8s sandbox namespace for provisioner-spawned Pods).
+namespace: deer-flow
+
+# -- Image registry & tag for the three DeerFlow images you build+push.
+#    Required: set `registry` to your registry (e.g. ghcr.io/yourorg).
+image:
+  registry: ""              # REQUIRED, e.g. ghcr.io/yourorg
+  tag: "latest"
+  pullPolicy: IfNotPresent
+  # -- Existing image pull secrets, e.g. [{ name: regcred }]
+  pullSecrets: []
+
+  # Image names match what .github/workflows/container.yaml publishes on GHCR
+  # as ${repository}-<name> (e.g. ghcr.io/<owner>/deer-flow-backend). Set
+  # `registry` to the owner prefix (e.g. ghcr.io/<owner>) and `tag` to consume
+  # the published images.
+  gatewayImage: deer-flow-backend
+  frontendImage: deer-flow-frontend
+  provisionerImage: deer-flow-provisioner
+
+# -- Gateway (backend) deployment.
+gateway:
+  replicas: 1               # Safe default. Postgres + the Redis stream bridge are
+                            # wired, but multi-replica needs issue #3948's run-control
+                            # work (cancel/dedup/reconcile) — see README "Gateway replicas".
+  resources:
+    requests:
+      cpu: 200m
+      memory: 512Mi
+    limits:
+      cpu: "2"
+      memory: 2Gi
+
+# -- Frontend (Next.js) deployment.
+frontend:
+  replicas: 1
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 512Mi
+
+# -- nginx reverse-proxy deployment (preserves compose routing).
+nginx:
+  replicas: 1
+  image:
+    repository: nginx
+    tag: alpine
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+  service:
+    # -- Service type fronting nginx. `LoadBalancer` on Docker Desktop / kind /
+    #    OrbStack routes to localhost (no Ingress controller needed). `ClusterIP`
+    #    pairs with the Ingress resource. `NodePort` exposes on a node port.
+    type: ClusterIP
+    port: 2026
+    loadBalancerIP: ""
+    nodePort: ""
+
+# -- Sandbox provisioner (K8s-native code execution). Creates sandbox Pods in
+#    this namespace via a ServiceAccount + RBAC.
+provisioner:
+  enabled: true
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  # -- AIO-compatible sandbox container image used for sandbox Pods.
+  sandboxImage: "enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest"
+  # -- Host the gateway uses to reach sandbox NodePorts. Empty (default) falls
+  #    back to the provisioner pod's node IP via the Kubernetes downward API,
+  #    which routes on most clusters because a NodePort is exposed on every
+  #    node. Set explicitly only when pod->node-IP traffic is blocked by your
+  #    CNI/network policy. In Docker Compose this is `host.docker.internal`.
+  nodeHost: ""
+  # -- Sandbox container port (must match the sandboxImage's listening port).
+  sandboxPort: 8080
+
+# -- PostgreSQL database. Bundled mode (default) deploys a single-instance
+#    postgres StatefulSet; set `enabled: false` to use an external managed DB.
+#    The gateway reads DATABASE_URL from the resolved Secret and config.yaml
+#    references it as $DATABASE_URL in database.postgres_url.
+postgresql:
+  # -- Deploy a bundled postgres StatefulSet. Disable to use an external DB.
+  enabled: true
+  image:
+    repository: postgres
+    tag: "16"
+  auth:
+    database: deerflow
+    username: deerflow
+    # -- Password auto-generated (32 chars, persisted across upgrades) when
+    #    empty. Ignored if existingSecret is set.
+    password: ""
+  # -- Use an existing Secret (key `database-url`, plus `postgres-password`
+  #    in bundled mode) instead of generating one. Skips Secret creation.
+  existingSecret: ""
+  primary:
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: "1"
+        memory: 1Gi
+    persistence:
+      enabled: true
+      storageClass: ""           # "" = cluster default
+      accessMode: ReadWriteOnce  # RWX (NFS) only needed if postgres itself is HA
+      size: 20Gi
+  # -- External postgres (used when `enabled: false`). Provide either a full
+  #    `databaseUrl` (chart wraps it into a Secret for you) or an
+  #    `existingSecret` you manage (key `database-url`).
+  external:
+    # -- Full DSN, e.g. postgresql://user:pass@host:5432/deerflow. Chart
+    #    writes it into the Secret so it never touches the gateway env directly.
+    databaseUrl: ""
+    # -- Secret you manage (key `database-url`). Use this with External Secrets
+    #    / Vault / Sealed Secrets so the DSN never appears in values files.
+    existingSecret: ""
+
+# -- Redis stream bridge. The gateway stores per-run SSE events in Redis Streams
+#    so live run events reach a client connected to any gateway pod (cross-pod
+#    SSE delivery + reconnect replay, PR #3191). Bundled mode (default) deploys
+#    a single-instance redis StatefulSet; set `enabled: false` to use an external
+#    managed Redis. The gateway reads DEER_FLOW_STREAM_BRIDGE_REDIS_URL from the
+#    resolved Secret; config.yaml's stream_bridge.type is `redis` by default.
+redis:
+  # -- Deploy a bundled redis StatefulSet. Disable to use an external Redis.
+  enabled: true
+  image:
+    repository: redis
+    tag: "7-alpine"
+  auth:
+    # -- Empty (default) = no auth, matching the compose deployment (ClusterIP
+    #    isolation only). Set a password to enable AUTH; the DSN becomes
+    #    redis://:<password>@host:6379/0. Ignored if existingSecret is set.
+    password: ""
+  # -- Use an existing Secret (key `redis-url`, plus `redis-password` if auth)
+  #    instead of generating one. Skips Secret creation.
+  existingSecret: ""
+  primary:
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+      limits:
+        cpu: "1"
+        memory: 512Mi
+    persistence:
+      enabled: true
+      storageClass: ""           # "" = cluster default
+      accessMode: ReadWriteOnce  # RWX (NFS) only needed if redis itself is HA
+      size: 5Gi
+  # -- External redis (used when `enabled: false`). Provide either a full
+  #    `redisUrl` (chart wraps it into a Secret for you) or an `existingSecret`
+  #    you manage (key `redis-url`).
+  external:
+    # -- Full URL, e.g. redis://:pass@myredis.example:6379/0. Chart writes it
+    #    into the Secret so it never touches the gateway env directly.
+    redisUrl: ""
+    # -- Secret you manage (key `redis-url`). Use with External Secrets / Vault
+    #    / Sealed Secrets so the URL never appears in values files.
+    existingSecret: ""
+
+# -- Persistent volume for runtime state (.deer-flow): sqlite DB, memory,
+#    custom agents, and per-thread user-data. Also mounted (PVC mode) into
+#    provisioner-spawned sandbox Pods.
+persistence:
+  home:
+    enabled: true
+    storageClass: ""         # "" = cluster default
+    accessMode: ReadWriteOnce  # Use ReadWriteMany (NFS/etc.) for multi-node
+    size: 10Gi
+
+# -- Skills library mounted at /app/skills. Default: emptyDir (skills disabled).
+#    Populate via an existing PVC or ConfigMap, or bake skills into a custom
+#    gateway image. Provisioner PVC mode references this same claim when set.
+skills:
+  enabled: false
+  existingClaim: ""
+  configMap: ""
+
+# -- Provider/channel/search secrets injected as env vars into the gateway.
+#    Reference them from config.yaml as $VAR. Example:
+#      secrets:
+#        OPENAI_API_KEY: "sk-..."
+#        FEISHU_APP_ID: "cli_xxx"
+#        FEISHU_APP_SECRET: "xxx"
+#        GITHUB_TOKEN: "ghp_xxx"
+secrets: {}
+# -- Use an existing Secret instead of creating one from `secrets` above.
+existingSecret: ""
+
+# -- Ingress in front of nginx (port 2026). nginx preserves all internal routing.
+ingress:
+  enabled: true
+  className: "nginx"
+  host: "deer-flow.example.com"
+  annotations: {}
+  tls:
+    enabled: false
+    secretName: ""
+    # hosts: []   # defaults to [ingress.host]
+
+# -- DeerFlow config.yaml content. Secrets MUST stay as $VAR references — never
+#    inline literal secret values here. The default enables provisioner sandbox.
+config: |
+  config_version: 20
+  log_level: info
+
+  models: []
+  # Example (uncomment & set the matching secret in `secrets`):
+  #   - name: gpt-4
+  #     display_name: GPT-4
+  #     use: langchain_openai:ChatOpenAI
+  #     model: gpt-4
+  #     api_key: $OPENAI_API_KEY
+  #     request_timeout: 600.0
+
+  sandbox:
+    use: deerflow.community.aio_sandbox:AioSandboxProvider
+    provisioner_url: http://provisioner:8002
+    image: enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest
+    port: 8080
+    replicas: 3
+
+  database:
+    # PostgreSQL is the default backend (bundled StatefulSet, or external).
+    # DATABASE_URL is injected from the postgres Secret; $DATABASE_URL is
+    # resolved by the harness before the config is instantiated.
+    backend: postgres
+    postgres_url: $DATABASE_URL
+
+  # The LangGraph Store (cross-thread memory + thread list) reads this legacy
+  # `checkpointer:` section — it does NOT fall back to `database:` the way the
+  # checkpointer does. Point it at the same postgres so the Store is shared
+  # across gateway pods (required for multi-replica operation).
+  checkpointer:
+    type: postgres
+    connection_string: $DATABASE_URL
+
+  # Stream bridge: `redis` (default) stores per-run SSE events in Redis Streams
+  # so live run events reach a client on any gateway pod (cross-pod SSE delivery
+  # + reconnect replay, PR #3191). The URL is read from the
+  # DEER_FLOW_STREAM_BRIDGE_REDIS_URL env var injected from the redis Secret.
+  # Set `type: memory` (and disable the redis chart) for single-pod-only mode.
+  stream_bridge:
+    type: redis
+
+  memory:
+    storage_path: memory.json
+
+  # -- Tools configuration. The agent gets NO tools unless they're listed here
+  # (BUILTIN_TOOLS only adds present_file + ask_clarification). The file/bash
+  # tools run inside the AIO sandbox configured above. The web tools
+  # (web_search, web_fetch, image_search) need no API key but require outbound
+  # internet from the gateway pod - swap backends or remove entries for
+  # air-gapped clusters (see config.example.yaml).
+  tool_groups:
+    - name: web
+    - name: file:read
+    - name: file:write
+    - name: bash
+
+  tools:
+    - name: web_search
+      group: web
+      use: deerflow.community.ddg_search.tools:web_search_tool
+      max_results: 5
+    - name: web_fetch
+      group: web
+      use: deerflow.community.jina_ai.tools:web_fetch_tool
+      timeout: 10
+    - name: image_search
+      group: web
+      use: deerflow.community.image_search.tools:image_search_tool
+      max_results: 5
+    - name: ls
+      group: file:read
+      use: deerflow.sandbox.tools:ls_tool
+    - name: read_file
+      group: file:read
+      use: deerflow.sandbox.tools:read_file_tool
+    - name: glob
+      group: file:read
+      use: deerflow.sandbox.tools:glob_tool
+      max_results: 200
+    - name: grep
+      group: file:read
+      use: deerflow.sandbox.tools:grep_tool
+      max_results: 100
+    - name: write_file
+      group: file:write
+      use: deerflow.sandbox.tools:write_file_tool
+    - name: str_replace
+      group: file:write
+      use: deerflow.sandbox.tools:str_replace_tool
+    - name: bash
+      group: bash
+      use: deerflow.sandbox.tools:bash_tool
+
+# -- DeerFlow extensions_config.json content (MCP servers + skill state).
+extensionsConfig: |
+  {"mcpServers":{},"skills":{}}

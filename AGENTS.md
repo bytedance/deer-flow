@@ -113,6 +113,7 @@ Rule of thumb: **root `make` = the full application**; **`backend/Makefile` and 
   `README_ja.md`, `README_fr.md`, `README_ru.md`)
 - Security policy → **[SECURITY.md](SECURITY.md)**
 - Changes → **[CHANGELOG.md](CHANGELOG.md)**
+- Cutting a release → **[RELEASING.md](RELEASING.md)**
 
 ## Cross-Cutting Conventions
 

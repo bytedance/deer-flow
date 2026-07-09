@@ -93,7 +93,7 @@ services:
       - |
         set -e
         cp /etc/nginx/nginx.conf.template /etc/nginx/nginx.conf
-        test -e /proc/net/if_inet6 || sed -i '/^[[:space:]]*listen[[:space:]]\+\[::\]:2026;/d' /etc/nginx/nginx.conf
+        test -e /proc/net/if_inet6 || sed -i '/^[[:space:]]*listen[[:space:]]\+\[::\]:2026[[:space:]]/d' /etc/nginx/nginx.conf
         exec nginx -g 'daemon off;'
     depends_on:
       - frontend
