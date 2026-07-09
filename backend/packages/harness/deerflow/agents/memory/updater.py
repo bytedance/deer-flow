@@ -350,7 +350,9 @@ def _normalize_memory_update_data(update_data: dict[str, Any]) -> dict[str, Any]
             source_ids = entry.get("sourceIds")
             if not isinstance(source_ids, list) or not source_ids:
                 continue
-            clean_ids = [sid for sid in source_ids if isinstance(sid, str) and sid]
+            # dict.fromkeys preserves order while deduplicating so ["f1","f1"]
+            # collapses to ["f1"] and is correctly rejected as a single-source merge.
+            clean_ids = list(dict.fromkeys(sid for sid in source_ids if isinstance(sid, str) and sid))
             if len(clean_ids) < 2:
                 continue
             consolidated = entry.get("consolidated")
@@ -368,12 +370,14 @@ def _normalize_memory_update_data(update_data: dict[str, Any]) -> dict[str, Any]
             else:
                 _f = float(_raw_conf)
                 _norm_conf = _f if math.isfinite(_f) else 0.9
+            _raw_cat = consolidated.get("category")
+            _norm_cat = _raw_cat.strip() if isinstance(_raw_cat, str) and _raw_cat.strip() else "context"
             normalized_consolidation.append(
                 {
                     "sourceIds": clean_ids,
                     "consolidated": {
                         "content": content.strip(),
-                        "category": consolidated.get("category", "context") if isinstance(consolidated.get("category"), str) else "context",
+                        "category": _norm_cat,
                         "confidence": _norm_conf,
                     },
                 }
@@ -546,7 +550,8 @@ def _select_consolidation_candidates(
         if isinstance(cat, str) and cat.strip():
             by_category.setdefault(cat.strip(), []).append(fact)
     threshold = config.consolidation_min_facts
-    return {cat: group for cat, group in by_category.items() if len(group) >= threshold}
+    protected = set(config.staleness_protected_categories)
+    return {cat: group for cat, group in by_category.items() if len(group) >= threshold and cat not in protected}
 
 
 def _build_consolidation_section(
@@ -573,7 +578,8 @@ def _build_consolidation_section(
             conf = float(raw_conf) if isinstance(raw_conf, (int, float)) and not isinstance(raw_conf, bool) else 0.0
             content = str(fact.get("content", ""))
             lines.append(f'- [{fid} | {conf:.2f}] "{content}"')
-        parts.append(f'<consolidation_candidates category="{cat}" count="{len(group)}">\n' + "\n".join(lines) + "\n</consolidation_candidates>")
+        shown = min(len(group), max_sources)
+        parts.append(f'<consolidation_candidates category="{cat}" count="{shown}">\n' + "\n".join(lines) + "\n</consolidation_candidates>")
     return CONSOLIDATION_PROMPT.format(consolidation_groups="\n\n".join(parts), max_groups=max_groups)
 
 
@@ -932,81 +938,6 @@ class MemoryUpdater:
                         entry.get("reason", "no reason provided"),
                     )
 
-        # ── Memory consolidation ──
-        # Gate on the feature flag at apply time so a config change that races
-        # with a debounced update does not silently merge facts the operator
-        # intended to keep separate.
-        if config.consolidation_enabled:
-            consolidation_decisions = update_data.get("factsToConsolidate", [])
-            if isinstance(consolidation_decisions, list) and consolidation_decisions:
-                fact_index = {f.get("id"): f for f in current_memory.get("facts", []) if isinstance(f, dict)}
-                max_groups = config.consolidation_max_groups_per_cycle
-                max_sources = config.consolidation_max_sources
-                ids_consumed: set[str] = set()
-                new_consolidated: list[dict[str, Any]] = []
-                merge_count = 0
-
-                # Iterate all decisions and count successes rather than pre-slicing,
-                # so guard failures on early decisions cannot silently starve valid
-                # later ones from the configured merge budget.
-                for decision in consolidation_decisions:
-                    if merge_count >= max_groups:
-                        break
-
-                    source_ids = decision.get("sourceIds", [])
-                    consolidated = decision.get("consolidated", {})
-
-                    # Guardrail: all source IDs must exist and not already consumed
-                    if any(sid in ids_consumed or sid not in fact_index for sid in source_ids):
-                        continue
-                    # Guardrail: 2..max_sources per group
-                    if not (2 <= len(source_ids) <= max_sources):
-                        continue
-
-                    content = consolidated.get("content", "")
-                    if not isinstance(content, str) or not content.strip():
-                        continue
-
-                    source_confidences = [_coerce_source_confidence(fact_index[sid]) for sid in source_ids]
-                    max_source_conf = min(max(source_confidences), 1.0)
-
-                    # Use the LLM's returned confidence (already validated by normalization),
-                    # capped at the source maximum so consolidation cannot inflate confidence.
-                    # Falls back to max_source_conf when the field is absent or malformed.
-                    raw_llm_conf = consolidated.get("confidence")
-                    if isinstance(raw_llm_conf, (int, float)) and not isinstance(raw_llm_conf, bool) and math.isfinite(float(raw_llm_conf)):
-                        fact_confidence = min(float(raw_llm_conf), max_source_conf)
-                    else:
-                        fact_confidence = max_source_conf
-
-                    # Skip merges whose result would fall below the storage threshold —
-                    # same gate applied to newFacts, so consolidation never admits
-                    # facts that the normal ingestion path would reject.
-                    if fact_confidence < config.fact_confidence_threshold:
-                        continue
-
-                    new_fact = {
-                        "id": f"fact_{uuid.uuid4().hex[:8]}",
-                        "content": content.strip(),
-                        "category": consolidated.get("category", "context"),
-                        "confidence": fact_confidence,
-                        "createdAt": now,
-                        "source": "consolidation",
-                        "consolidatedFrom": list(source_ids),
-                    }
-                    ids_consumed.update(source_ids)
-                    new_consolidated.append(new_fact)
-                    merge_count += 1
-                    logger.info(
-                        "Consolidation merged %d facts into: %s",
-                        len(source_ids),
-                        content.strip()[:80],
-                    )
-
-                if ids_consumed:
-                    current_memory["facts"] = [f for f in current_memory.get("facts", []) if f.get("id") not in ids_consumed]
-                    current_memory["facts"].extend(new_consolidated)
-
         # Add new facts
         existing_fact_keys = {fact_key for fact_key in (_fact_content_key(fact.get("content")) for fact in current_memory.get("facts", [])) if fact_key is not None}
         new_facts = update_data.get("newFacts", [])
@@ -1051,6 +982,95 @@ class MemoryUpdater:
                 key=lambda f: f.get("confidence", 0),
                 reverse=True,
             )[: config.max_facts]
+
+        # ── Memory consolidation ──
+        # Runs after the max_facts trim so source facts that were just evicted
+        # (low confidence, pushed out by high-confidence newFacts) are absent
+        # from fact_index and rejected by the existence guardrail — preventing
+        # the only real data-loss scenario where sources are deleted but the
+        # merged replacement is itself trimmed away.  Because consolidation
+        # always removes ≥2 facts and adds 1, running it after trim cannot push
+        # the total above max_facts.
+        # Gate on the feature flag at apply time so a config change that races
+        # with a debounced update does not silently merge facts the operator
+        # intended to keep separate.
+        if config.consolidation_enabled:
+            consolidation_decisions = update_data.get("factsToConsolidate", [])
+            if isinstance(consolidation_decisions, list) and consolidation_decisions:
+                fact_index = {f.get("id"): f for f in current_memory.get("facts", []) if isinstance(f, dict)}
+                max_groups = config.consolidation_max_groups_per_cycle
+                max_sources = config.consolidation_max_sources
+                ids_consumed: set[str] = set()
+                new_consolidated: list[dict[str, Any]] = []
+                merge_count = 0
+
+                # Iterate all decisions and count successes rather than pre-slicing,
+                # so guard failures on early decisions cannot silently starve valid
+                # later ones from the configured merge budget.
+                for decision in consolidation_decisions:
+                    if merge_count >= max_groups:
+                        break
+
+                    source_ids = decision.get("sourceIds", [])
+                    consolidated = decision.get("consolidated", {})
+
+                    # Guardrail: all source IDs must exist in the post-trim index
+                    # and not already consumed by an earlier merge this cycle.
+                    if any(sid in ids_consumed or sid not in fact_index for sid in source_ids):
+                        continue
+                    # Guardrail: 2..max_sources per group
+                    if not (2 <= len(source_ids) <= max_sources):
+                        continue
+
+                    content = consolidated.get("content", "")
+                    if not isinstance(content, str) or not content.strip():
+                        continue
+
+                    source_confidences = [_coerce_source_confidence(fact_index[sid]) for sid in source_ids]
+                    max_source_conf = min(max(source_confidences), 1.0)
+
+                    # Use the LLM's returned confidence (already validated by normalization),
+                    # capped at the source maximum so consolidation cannot inflate confidence.
+                    # Falls back to max_source_conf when the field is absent or malformed.
+                    raw_llm_conf = consolidated.get("confidence")
+                    if isinstance(raw_llm_conf, (int, float)) and not isinstance(raw_llm_conf, bool) and math.isfinite(float(raw_llm_conf)):
+                        fact_confidence = min(float(raw_llm_conf), max_source_conf)
+                    else:
+                        fact_confidence = max_source_conf
+
+                    # Skip merges whose result would fall below the storage threshold —
+                    # same gate applied to newFacts, so consolidation never admits
+                    # facts that the normal ingestion path would reject.
+                    if fact_confidence < config.fact_confidence_threshold:
+                        continue
+
+                    new_fact: dict[str, Any] = {
+                        "id": f"fact_{uuid.uuid4().hex[:8]}",
+                        "content": content.strip(),
+                        "category": consolidated.get("category", "context"),
+                        "confidence": fact_confidence,
+                        "createdAt": now,
+                        "source": "consolidation",
+                        "consolidatedFrom": list(source_ids),
+                    }
+                    # Propagate sourceError from any source fact so correction
+                    # context (what went wrong and why) is not silently lost.
+                    source_errors = list(dict.fromkeys(e for sid in source_ids if isinstance((e := fact_index[sid].get("sourceError")), str) and e.strip()))
+                    if source_errors:
+                        new_fact["sourceError"] = "\n".join(source_errors)
+
+                    ids_consumed.update(source_ids)
+                    new_consolidated.append(new_fact)
+                    merge_count += 1
+                    logger.info(
+                        "Consolidation merged %d facts into: %s",
+                        len(source_ids),
+                        content.strip()[:80],
+                    )
+
+                if ids_consumed:
+                    current_memory["facts"] = [f for f in current_memory.get("facts", []) if f.get("id") not in ids_consumed]
+                    current_memory["facts"].extend(new_consolidated)
 
         return current_memory
 

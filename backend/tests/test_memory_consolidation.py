@@ -473,6 +473,153 @@ class TestApplyUpdatesConsolidation:
         assert result["facts"][0]["content"] == "React + Python"
 
 
+# ── Regression tests for reviewer findings ────────────────────────────────
+
+
+class TestReviewerFindings:
+    def test_duplicate_source_ids_rejected(self):
+        """#1: ["f1","f1"] must not bypass the ≥2-distinct-sources check."""
+        data = {
+            "user": {},
+            "history": {},
+            "newFacts": [],
+            "factsToRemove": [],
+            "staleFactsToRemove": [],
+            "factsToConsolidate": [
+                {
+                    "sourceIds": ["fact_a", "fact_a"],
+                    "consolidated": {"content": "Rewritten", "category": "knowledge", "confidence": 0.9},
+                },
+            ],
+        }
+        result = _normalize_memory_update_data(data)
+        assert result["factsToConsolidate"] == [], "duplicate IDs should collapse to 1 and be rejected"
+
+    def test_protected_category_not_selected(self):
+        """#4: staleness_protected_categories must be exempt from consolidation candidates."""
+        correction_facts = [_make_fact(f"c_{i}", category="correction") for i in range(10)]
+        knowledge_facts = [_make_fact(f"k_{i}", category="knowledge") for i in range(10)]
+        memory = _make_memory(correction_facts + knowledge_facts)
+        config = _memory_config(consolidation_min_facts=8, consolidation_enabled=True)
+        result = _select_consolidation_candidates(memory, config)
+        assert "correction" not in result, "protected category must not appear in consolidation candidates"
+        assert "knowledge" in result
+
+    def test_count_attribute_capped_at_max_sources(self):
+        """#3: count= must reflect the number of facts shown, not the full category size."""
+        big_group = [_make_fact(f"f_{i}", category="knowledge") for i in range(20)]
+        candidates = {"knowledge": big_group}
+        section = _build_consolidation_section(candidates, max_groups=3, max_sources=8)
+        # The XML attribute count must be 8 (shown), not 20 (total)
+        assert 'count="8"' in section
+        assert 'count="20"' not in section
+
+    def test_category_stripped_in_normalization(self):
+        """#5: padded/empty category must be normalised, not stored verbatim."""
+        data = {
+            "user": {},
+            "history": {},
+            "newFacts": [],
+            "factsToRemove": [],
+            "staleFactsToRemove": [],
+            "factsToConsolidate": [
+                {
+                    "sourceIds": ["fact_a", "fact_b"],
+                    "consolidated": {"content": "Merged", "category": "  knowledge  ", "confidence": 0.9},
+                },
+                {
+                    "sourceIds": ["fact_c", "fact_d"],
+                    "consolidated": {"content": "Also merged", "category": "   ", "confidence": 0.85},
+                },
+            ],
+        }
+        result = _normalize_memory_update_data(data)
+        assert result["factsToConsolidate"][0]["consolidated"]["category"] == "knowledge"
+        assert result["factsToConsolidate"][1]["consolidated"]["category"] == "context"
+
+    def test_consolidation_runs_after_trim(self):
+        """#2: sources trimmed away before consolidation must be rejected, not deleted."""
+        updater = MemoryUpdater()
+        # 3 low-confidence facts that consolidation wants to merge
+        facts = [
+            _make_fact("low_a", "Low conf A", "knowledge", 0.71),
+            _make_fact("low_b", "Low conf B", "knowledge", 0.71),
+            # 1 fact that will survive the trim
+            _make_fact("high_keep", "High conf fact", "preference", 0.99),
+        ]
+        current_memory = _make_memory(facts)
+        update_data = {
+            "user": {},
+            "history": {},
+            "newFacts": [
+                # 2 high-confidence new facts that push us to max_facts=3,
+                # forcing the trim to evict low_a and low_b
+                {"content": "New high 1", "category": "knowledge", "confidence": 0.98},
+                {"content": "New high 2", "category": "knowledge", "confidence": 0.97},
+            ],
+            "factsToRemove": [],
+            "staleFactsToRemove": [],
+            "factsToConsolidate": [
+                {
+                    "sourceIds": ["low_a", "low_b"],
+                    "consolidated": {"content": "Merged low", "category": "knowledge", "confidence": 0.9},
+                },
+            ],
+        }
+        with patch(
+            "deerflow.agents.memory.updater.get_memory_config",
+            return_value=_memory_config(
+                max_facts=3,
+                fact_confidence_threshold=0.7,
+                consolidation_max_groups_per_cycle=3,
+                consolidation_max_sources=8,
+            ),
+        ):
+            result = updater._apply_updates(current_memory, update_data)
+
+        # After trim: high_keep(0.99) + new_high_1(0.98) + new_high_2(0.97) = 3 facts.
+        # low_a and low_b were evicted by the trim, so consolidation is rejected
+        # (source IDs no longer exist) — neither low_a/low_b nor "Merged low" appear.
+        ids = {f["id"] for f in result["facts"]}
+        contents = {f["content"] for f in result["facts"]}
+        assert "Merged low" not in contents, "consolidated fact must not appear when sources were trimmed"
+        assert "Low conf A" not in contents, "evicted source must not reappear"
+        assert "Low conf B" not in contents, "evicted source must not reappear"
+        assert len(result["facts"]) == 3
+        assert "high_keep" in ids
+
+    def test_source_error_propagated(self):
+        """#6: sourceError from source facts must be carried into the consolidated fact."""
+        updater = MemoryUpdater()
+        facts = [
+            {**_make_fact("fact_a", "Fact A", "knowledge", 0.9), "sourceError": "Agent used wrong approach"},
+            _make_fact("fact_b", "Fact B", "knowledge", 0.85),
+        ]
+        current_memory = _make_memory(facts)
+        update_data = {
+            "user": {},
+            "history": {},
+            "newFacts": [],
+            "factsToRemove": [],
+            "staleFactsToRemove": [],
+            "factsToConsolidate": [
+                {
+                    "sourceIds": ["fact_a", "fact_b"],
+                    "consolidated": {"content": "Merged AB", "category": "knowledge", "confidence": 0.9},
+                },
+            ],
+        }
+        with patch(
+            "deerflow.agents.memory.updater.get_memory_config",
+            return_value=_memory_config(max_facts=100, consolidation_max_groups_per_cycle=3, consolidation_max_sources=8),
+        ):
+            result = updater._apply_updates(current_memory, update_data)
+
+        merged = [f for f in result["facts"] if f.get("source") == "consolidation"]
+        assert len(merged) == 1
+        assert merged[0].get("sourceError") == "Agent used wrong approach"
+
+
 # ── Integration: _prepare_update_prompt ────────────────────────────────────
 
 
