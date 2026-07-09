@@ -58,6 +58,10 @@ class _FakeRedis:
                 except TimeoutError:
                     return []
 
+    async def xrevrange(self, name, max="+", min="-", count=None):
+        entries = list(reversed(self.streams.get(name, [])))
+        return entries[:count] if count is not None else entries
+
     async def delete(self, name):
         self.deleted.append(name)
         self.streams.pop(name, None)
@@ -480,6 +484,76 @@ async def test_redis_replays_after_last_event_id(redis_bridge: RedisStreamBridge
 
 
 @pytest.mark.anyio
+async def test_redis_invalid_last_event_id_tails_live_events(redis_bridge: RedisStreamBridge):
+    """Malformed reconnect ids should not replay retained Redis events."""
+    run_id = "redis-run-invalid-last-event-id"
+
+    await redis_bridge.publish(run_id, "metadata", {"run_id": run_id})
+    received = []
+
+    async def publish_later() -> None:
+        await anyio.sleep(0.05)
+        await redis_bridge.publish(run_id, "values", {"step": 1})
+        await redis_bridge.publish_end(run_id)
+
+    with anyio.fail_after(2):
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(publish_later)
+            async for entry in redis_bridge.subscribe(run_id, last_event_id="-1", heartbeat_interval=0.01):
+                if entry is HEARTBEAT_SENTINEL:
+                    continue
+                received.append(entry)
+                if entry is END_SENTINEL:
+                    break
+
+    assert [entry.event for entry in received[:-1]] == ["values"]
+    assert received[-1] is END_SENTINEL
+
+
+@pytest.mark.anyio
+async def test_redis_invalid_last_event_id_tails_empty_stream(redis_bridge: RedisStreamBridge):
+    """Malformed reconnect ids should still wait for the first Redis event."""
+    run_id = "redis-run-invalid-empty"
+    received = []
+
+    async def publish_later() -> None:
+        await anyio.sleep(0.05)
+        await redis_bridge.publish(run_id, "metadata", {"run_id": run_id})
+        await redis_bridge.publish_end(run_id)
+
+    with anyio.fail_after(2):
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(publish_later)
+            async for entry in redis_bridge.subscribe(run_id, last_event_id="-1", heartbeat_interval=0.01):
+                if entry is HEARTBEAT_SENTINEL:
+                    continue
+                received.append(entry)
+                if entry is END_SENTINEL:
+                    break
+
+    assert [entry.event for entry in received[:-1]] == ["metadata"]
+    assert received[-1] is END_SENTINEL
+
+
+@pytest.mark.anyio
+async def test_redis_invalid_last_event_id_on_terminal_run_replays_end(redis_bridge: RedisStreamBridge):
+    """Malformed reconnect ids on terminal streams should drain END instead of hanging."""
+    run_id = "redis-run-invalid-terminal"
+
+    await redis_bridge.publish(run_id, "metadata", {"run_id": run_id})
+    await redis_bridge.publish_end(run_id)
+
+    received = []
+    async for entry in redis_bridge.subscribe(run_id, last_event_id="-1", heartbeat_interval=1.0):
+        received.append(entry)
+        if entry is END_SENTINEL:
+            break
+
+    assert [entry.event for entry in received[:-1]] == ["metadata"]
+    assert received[-1] is END_SENTINEL
+
+
+@pytest.mark.anyio
 async def test_redis_heartbeat(redis_bridge: RedisStreamBridge):
     """Redis bridge should yield heartbeats when XREAD times out on an existing stream."""
     run_id = "redis-run-heartbeat"
@@ -787,9 +861,9 @@ async def test_make_stream_bridge_passes_redis_options(monkeypatch):
 # `make test` stays green without Redis. Point at a server with
 # DEER_FLOW_TEST_REDIS_URL (defaults to redis://localhost:6379/15 — DB 15 to
 # avoid clobbering real data) and select with `pytest -m integration`. They
-# cover what _FakeRedis cannot: the real ResponseError fallback for a malformed
-# Last-Event-ID, real XADD/XREAD semantics, the server <ms>-<seq> ID format,
-# and MAXLEN trimming.
+# cover what _FakeRedis only approximates: real XADD/XREAD semantics, live-tail
+# reconnects for malformed Last-Event-ID values, the server <ms>-<seq> ID
+# format, and MAXLEN trimming.
 
 REDIS_TEST_URL = os.environ.get("DEER_FLOW_TEST_REDIS_URL", "redis://localhost:6379/15")
 
@@ -878,25 +952,28 @@ async def test_redis_integration_replays_after_last_event_id(real_redis_bridge):
 @pytest.mark.integration
 @requires_redis
 @pytest.mark.anyio
-async def test_redis_integration_invalid_last_event_id_falls_back(real_redis_bridge):
-    """A malformed Last-Event-ID must trigger the ResponseError fallback.
-
-    Real Redis raises ``ResponseError`` for a syntactically-invalid stream ID;
-    ``_FakeRedis`` cannot reproduce this path, so the ``except ResponseError``
-    branch in ``subscribe`` is only exercised here.
-    """
+async def test_redis_integration_invalid_last_event_id_tails_live_events(real_redis_bridge):
+    """A malformed Last-Event-ID should wait at the live tail."""
     run_id = "integ-bad-leid"
     await real_redis_bridge.publish(run_id, "metadata", {"run_id": run_id})
-    await real_redis_bridge.publish_end(run_id)
-
     received = []
-    async for entry in real_redis_bridge.subscribe(run_id, last_event_id="not-a-valid-id", heartbeat_interval=1.0):
-        received.append(entry)
-        if entry is END_SENTINEL:
-            break
 
-    # Falls back to replaying from the earliest retained event instead of raising.
-    assert [e.event for e in received[:-1]] == ["metadata"]
+    async def publish_later() -> None:
+        await anyio.sleep(0.05)
+        await real_redis_bridge.publish(run_id, "values", {"step": 1})
+        await real_redis_bridge.publish_end(run_id)
+
+    with anyio.fail_after(2):
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(publish_later)
+            async for entry in real_redis_bridge.subscribe(run_id, last_event_id="not-a-valid-id", heartbeat_interval=0.01):
+                if entry is HEARTBEAT_SENTINEL:
+                    continue
+                received.append(entry)
+                if entry is END_SENTINEL:
+                    break
+
+    assert [e.event for e in received[:-1]] == ["values"]
     assert received[-1] is END_SENTINEL
 
 
