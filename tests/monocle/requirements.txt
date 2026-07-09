@@ -1,0 +1,7 @@
+# Installing monocle_test_tools pulls in everything this suite needs
+# (pytest, pytest-asyncio, and monocle_apptrace come transitively).
+# Pinned to 0.8.8: the file trace source (with_trace_source("file", trace_path=...))
+# used by the offline tests does not exist in 0.7.x.
+monocle_test_tools==0.8.8
+# Auto-loads the repo .env for the live experiment (optional).
+python-dotenv
