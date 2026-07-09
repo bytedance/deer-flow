@@ -1176,11 +1176,26 @@ sandbox:
 #   # Built-in defaults: general-purpose=150, bash=60. Leave unset to keep them.
 #   # max_turns: 120
 #
+#   # Per-run token ceiling for subagents (#3875 Phase 2). A backstop against a
+#   # subagent that burns tokens on trivial work. At the hard-stop threshold the
+#   # in-flight turn is capped (tool calls stripped, finish_reason forced to
+#   # "stop") so the run completes naturally with a final answer; the result is
+#   # stamped `completed` + `subagent_stop_reason=token_capped` so the lead and
+#   # UI can tell a budget-capped completion from a clean one. The 2,000,000
+#   # default is a generous ceiling — lower it to tighten cost controls. A
+#   # per-agent `token_budget` override (see `agents:` below) wins over this.
+#   # token_budget:
+#   #   enabled: true
+#   #   max_tokens: 2000000
+#   #   warn_threshold: 0.7     # log a warning once this fraction of the budget is spent
+#
 #   # Optional per-agent overrides (applies to both built-in and custom agents)
 #   agents:
 #     general-purpose:
 #       timeout_seconds: 2700  # 45 minutes for very long deep-research tasks
 #       max_turns: 250         # raise above the 150 default for very deep tasks
+#       # token_budget:        # per-agent override of the global token_budget above
+#       #   max_tokens: 3000000  # raise the ceiling for deep-research tasks
 #       # model: qwen3:32b     # Use a specific model (default: inherit from lead agent)
 #       # skills:               # Skill whitelist (default: inherit all enabled skills)
 #       #   - web-search

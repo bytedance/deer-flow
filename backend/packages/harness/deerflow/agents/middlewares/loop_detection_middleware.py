@@ -36,6 +36,17 @@ next model request drains a queued warning, ``after_agent`` drops it
 instead of carrying it into a later invocation for the same thread. The
 hard-stop path still forces termination when the configured safety limit
 is reached.
+
+Stop-reason surfacing (#3875 Phase 2):
+  Like the token-budget guard, the loop hard stop does NOT raise — it
+  strips ``tool_calls`` so the agent loop terminates naturally with a
+  final answer. To let the caller (the subagent executor) distinguish a
+  loop-capped completion from a clean one, the run that triggered the hard
+  stop is recorded in ``_stop_reason`` and exposed via
+  :meth:`consume_stop_reason`. The executor collects that reason alongside
+  the token-budget guard's so a loop-capped run surfaces as
+  ``completed + loop_capped`` and the lead/ledger can tell it was capped
+  without parsing result text.
 """
 
 from __future__ import annotations
@@ -54,6 +65,8 @@ from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.middleware.types import ModelCallResult, ModelRequest, ModelResponse
 from langchain_core.messages import HumanMessage
 from langgraph.runtime import Runtime
+
+from deerflow.agents.middlewares._bounded_dict import BoundedDict
 
 if TYPE_CHECKING:
     from deerflow.config.loop_detection_config import LoopDetectionConfig
@@ -231,6 +244,14 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
         self._pending_warnings: dict[tuple[str, str], list[str]] = defaultdict(list)
         self._pending_warning_touch_order: OrderedDict[tuple[str, str], None] = OrderedDict()
         self._max_pending_warning_keys = max(1, self.max_tracked_threads * 2)
+        # Stop reason set when a hard-stop fires (#3875 Phase 2). Keyed by run_id
+        # (matching ``TokenBudgetMiddleware``) and bounded — the lead agent's
+        # middleware instance is long-lived across many runs, so without a cap
+        # an entry would accumulate for every looped lead run. Intentionally NOT
+        # cleared by ``after_agent``/``_clear_current_run_pending_warnings`` so
+        # the subagent executor can consume it after the run returns; ``reset()``
+        # still drops it.
+        self._stop_reason: BoundedDict[str, str] = BoundedDict(1000)
 
     @classmethod
     def from_config(cls, config: LoopDetectionConfig) -> LoopDetectionMiddleware:
@@ -258,6 +279,20 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
         if run_id:
             return str(run_id)
         return "default"
+
+    def consume_stop_reason(self, run_id: str | None) -> str | None:
+        """Pop and return the stop reason the hard-stop set for this run.
+
+        Returns ``"loop_capped"`` when a repeated tool-call loop tripped the hard
+        stop during the run — the run still completed with a forced final answer
+        (the hard stop strips ``tool_calls`` rather than raising). The subagent
+        executor calls this after the run returns so a loop-capped completion
+        carries ``stop_reason=loop_capped`` to the lead instead of looking like
+        a clean ``completed``. Mirrors ``TokenBudgetMiddleware.consume_stop_reason``;
+        popping keeps the dict from accumulating on a reused instance.
+        """
+        with self._lock:
+            return self._stop_reason.pop(run_id, None)
 
     def _pending_key(self, runtime: Runtime) -> tuple[str, str]:
         """Return the pending-warning key for the current thread/run."""
@@ -478,6 +513,17 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
         warning, hard_stop = self._track_and_check(state, runtime)
 
         if hard_stop:
+            # Record the stop reason so the executor can surface
+            # ``stop_reason=loop_capped`` after the run returns (#3875 Phase 2).
+            # The hard stop does not raise — it strips tool_calls and lets the
+            # run finish with a forced final answer — so without this the caller
+            # would see a clean ``completed``. See ``consume_stop_reason``.
+            # Written under the lock to match ``TokenBudgetMiddleware``: the lead
+            # agent's middleware instance is shared across concurrent Gateway
+            # threads, so the bounded-dict write needs the same guard.
+            run_id = self._get_run_id(runtime)
+            with self._lock:
+                self._stop_reason[run_id] = "loop_capped"
             # Strip tool_calls from the last AIMessage to force text output.
             # Once tool_calls are stripped, the AIMessage no longer requires
             # matching ToolMessage responses, so mutating it in place here
@@ -610,3 +656,4 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
                 self._tool_freq_warned.clear()
                 self._pending_warnings.clear()
                 self._pending_warning_touch_order.clear()
+                self._stop_reason.clear()
