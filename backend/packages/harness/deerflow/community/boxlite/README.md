@@ -13,12 +13,15 @@ the default AIO Docker sandbox in
 ```yaml
 sandbox:
   use: deerflow.community.boxlite:BoxliteProvider
-  image: python:3.12-slim   # any OCI image, run unchanged (default: python:3.12-slim)
-  memory_mib: 1024          # per-box memory cap (optional)
-  cpus: 2                   # per-box vCPUs (optional)
-  replicas: 3              # active + warm VM cap per gateway process (default: 3)
-  idle_timeout: 600        # warm VM idle seconds before stop; 0 disables reaping
-  environment:              # injected into every command
+  image: python:3.12-slim         # any OCI image (default: python:3.12-slim)
+  memory_mib: 1024                # per-box memory cap (optional)
+  cpus: 2                         # per-box vCPUs (optional)
+  replicas: 3                     # active + warm VM cap per gateway process (default: 3)
+  idle_timeout: 600               # warm VM idle seconds before stop; 0 disables
+  health_check_skip_seconds: 0.0  # optional low-latency mode: skip reclaim
+                                  #   health checks for recent releases; 0 keeps
+                                  #   reliability-first validation (default: 0.0)
+  environment:                    # injected into every command
     PYTHONUNBUFFERED: "1"
 ```
 

@@ -15,7 +15,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 20
+config_version: 21
 
 # ============================================================================
 # Logging
@@ -1148,6 +1148,10 @@ sandbox:
 #   # Optional: Seconds before an idle warm-pool VM is stopped (default: 600).
 #   # Set to 0 to keep warm VMs until shutdown or replica eviction.
 #   # idle_timeout: 600
+#
+#   # Optional: Skip the reclaim health check for very recently released VMs.
+#   # Default 0.0 keeps reliability-first validation before warm reuse.
+#   # health_check_skip_seconds: 0.0
 #
 #   # Optional: Environment variables to inject into every command.
 #   # environment:

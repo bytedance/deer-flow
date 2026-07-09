@@ -559,7 +559,7 @@ class SubagentExecutor:
         # Lazy import: see the TYPE_CHECKING note at the top of this module -
         # importing tool_search runs tools/builtins/__init__, which would
         # re-enter this package during its own initialization.
-        from deerflow.tools.builtins.tool_search import assemble_deferred_tools, get_deferred_tools_prompt_section
+        from deerflow.tools.builtins.tool_search import assemble_deferred_tools, get_deferred_tools_prompt_section, get_mcp_routing_hints_prompt_section
 
         # Load skills as conversation items (Codex pattern)
         skills = await self._load_skills()
@@ -587,6 +587,9 @@ class SubagentExecutor:
         deferred_section = get_deferred_tools_prompt_section(deferred_names=deferred_setup.deferred_names)
         if deferred_section:
             system_parts.append(deferred_section)
+        mcp_routing_hints_section = get_mcp_routing_hints_prompt_section(filtered_tools, deferred_names=deferred_setup.deferred_names)
+        if mcp_routing_hints_section:
+            system_parts.append(mcp_routing_hints_section)
 
         messages: list[Any] = []
         if system_parts:

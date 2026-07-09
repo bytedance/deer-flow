@@ -88,6 +88,42 @@ def _escape_tag_match(match: re.Match) -> str:
     return match.group(0).replace("<", "&lt;").replace(">", "&gt;")
 
 
+def _neutralize_boundary_tokens(text: str) -> str:
+    """Replace real BEGIN/END USER INPUT markers with look-alike inert forms."""
+    return _BOUNDARY_TOKEN_RE.sub(
+        lambda m: _NEUTRALIZED_BEGIN if m.group(0) == _USER_INPUT_BEGIN else _NEUTRALIZED_END,
+        text,
+    )
+
+
+def neutralize_untrusted_tags(text: str) -> str:
+    """Neutralize framework/injection control tokens in untrusted text.
+
+    Shared primitive for any content that originates outside the trust boundary
+    and is about to enter the model context as *data* — currently the genuine
+    user message (via :func:`_check_user_content`) and remote tool results
+    (web_fetch / web_search and friends, via
+    :class:`ToolResultSanitizationMiddleware`).
+
+    Applies exactly the two structural defenses, and nothing else:
+
+    * blocked framework/injection tags (e.g. ``<system-reminder>``) are
+      HTML-escaped to ``&lt;system-reminder&gt;`` so they lose their structural
+      meaning while staying human-readable;
+    * the plain-text ``--- BEGIN/END USER INPUT ---`` boundary markers are
+      neutralized so untrusted content cannot forge or break out of the
+      user-input boundary.
+
+    It intentionally does **not** wrap the text in boundary markers: that
+    framing is specific to the user message. Empty/whitespace-only text is
+    returned unchanged so callers do not emit marker noise.
+    """
+    if not text.strip():
+        return text
+    text = _BLOCKED_TAG_PATTERN.sub(_escape_tag_match, text)
+    return _neutralize_boundary_tokens(text)
+
+
 def _is_genuine_user_message(message: object) -> bool:
     """Return True for real user messages, excluding system-injected HumanMessages.
 
@@ -122,20 +158,14 @@ def _check_user_content(text: str) -> str:
         # can forge the outer wrapping to bypass the neutralization below
         # and inject inner boundary markers (break-out attack).
         inner = text[len(_USER_INPUT_BEGIN) : -len(_USER_INPUT_END)]
-        neutralized_inner = _BOUNDARY_TOKEN_RE.sub(
-            lambda m: _NEUTRALIZED_BEGIN if m.group(0) == _USER_INPUT_BEGIN else _NEUTRALIZED_END,
-            inner,
-        )
+        neutralized_inner = _neutralize_boundary_tokens(inner)
         if neutralized_inner == inner:
             return text
         return f"{_USER_INPUT_BEGIN}{neutralized_inner}{_USER_INPUT_END}"
     # Neutralize any boundary tokens the user may have embedded, preventing
     # both self-suppression (begin token skips wrapping) and break-out
     # (end token creates a premature boundary inside the payload).
-    text = _BOUNDARY_TOKEN_RE.sub(
-        lambda m: _NEUTRALIZED_BEGIN if m.group(0) == _USER_INPUT_BEGIN else _NEUTRALIZED_END,
-        text,
-    )
+    text = _neutralize_boundary_tokens(text)
     return f"{_USER_INPUT_BEGIN}\n{text}\n{_USER_INPUT_END}"
 
 

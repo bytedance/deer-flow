@@ -20,6 +20,12 @@ __pycache__/
 .venv
 venv/
 
+# Benchmark outputs
+bench_results.jsonl
+bench_optimized.jsonl
+results.jsonl
+backend/scripts/benchmark/*.jsonl
+
 # Environment variables
 .env
 
