@@ -329,6 +329,21 @@ class TestBuildFallback:
             result = _build_fallback(content, tool_name="bash", max_chars=30_000, head_chars=8_000, tail_chars=3_000)
             assert len(result) <= 30_000, f"total={total}: got {len(result)}"
 
+    def test_fallback_forward_snaps_tail_onto_line_boundary(self):
+        """The tail must begin *after* the newline, never before it.
+
+        The bound test above never moves the tail offset: its content has no
+        newline inside the snap window, so it would pass even with the snap
+        removed. Placing a newline in the window pins the direction instead —
+        a backward snap leaves the tail starting mid-line.
+        """
+        total, newline_pos = 100_000, 98_000  # window is [97_000, 98_500)
+        content = "A" * newline_pos + "\n" + "B" * (total - newline_pos - 1)
+        result = _build_fallback(content, tool_name="bash", max_chars=30_000, head_chars=8_000, tail_chars=3_000)
+        assert len(result) <= 30_000
+        tail = result.rsplit("]\n\n", 1)[1]
+        assert tail.startswith("B"), f"tail begins mid-line: {tail[:20]!r}"
+
     def test_very_small_max_chars_does_not_crash(self):
         content = "x" * 1000
         result = _build_fallback(content, tool_name="t", max_chars=50, head_chars=20, tail_chars=10)
