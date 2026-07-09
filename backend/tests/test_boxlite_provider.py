@@ -7,6 +7,7 @@ which need a live box.
 from __future__ import annotations
 
 import asyncio
+import logging
 import sys
 import threading
 import time
@@ -156,6 +157,99 @@ def test_execute_command_forwards_timeout_to_sdk_and_loop_runner() -> None:
     assert "ok" in output
     assert fake._exec_history[-1] == (("sh", "-lc", "echo ok"), None, 5)
     assert run_timeouts == [5]
+
+
+def test_execute_command_invalidates_box_on_terminal_transport_error() -> None:
+    invalidated: list[tuple[str, str]] = []
+
+    def _failing_run(coro, *, timeout=None):
+        coro.close()
+        raise RuntimeError("vsock disconnected")
+
+    box = BoxliteBox(
+        "box-id",
+        box=_FakeBox(name="box-id"),
+        run=_failing_run,
+        on_terminal_failure=lambda sandbox_id, reason: invalidated.append((sandbox_id, reason)),
+    )
+
+    output = box.execute_command("echo hi")
+
+    assert output == "Error: vsock disconnected"
+    assert invalidated == [("box-id", "vsock disconnected")]
+
+
+def test_execute_command_does_not_invalidate_on_regular_command_error() -> None:
+    invalidated: list[tuple[str, str]] = []
+
+    def _failing_run(coro, *, timeout=None):
+        coro.close()
+        raise RuntimeError("user command failed")
+
+    box = BoxliteBox(
+        "box-id",
+        box=_FakeBox(name="box-id"),
+        run=_failing_run,
+        on_terminal_failure=lambda sandbox_id, reason: invalidated.append((sandbox_id, reason)),
+    )
+
+    output = box.execute_command("echo hi")
+
+    assert output == "Error: user command failed"
+    assert invalidated == []
+
+
+def test_execute_command_does_not_invalidate_on_retryable_transport_message() -> None:
+    invalidated: list[tuple[str, str]] = []
+
+    def _failing_run(coro, *, timeout=None):
+        coro.close()
+        raise RuntimeError("transport not ready, retry later")
+
+    box = BoxliteBox(
+        "box-id",
+        box=_FakeBox(name="box-id"),
+        run=_failing_run,
+        on_terminal_failure=lambda sandbox_id, reason: invalidated.append((sandbox_id, reason)),
+    )
+
+    output = box.execute_command("echo hi")
+
+    assert output == "Error: transport not ready, retry later"
+    assert invalidated == []
+
+
+def test_execute_command_uses_overridable_terminal_markers(monkeypatch: pytest.MonkeyPatch) -> None:
+    invalidated: list[tuple[str, str]] = []
+    monkeypatch.setattr(BoxliteBox, "TERMINAL_ERROR_MARKERS", ("custom terminal marker",))
+    monkeypatch.setattr(BoxliteBox, "RETRYABLE_ERROR_MARKERS", ())
+
+    def _failing_run(coro, *, timeout=None):
+        coro.close()
+        raise RuntimeError("custom terminal marker")
+
+    box = BoxliteBox(
+        "box-id",
+        box=_FakeBox(name="box-id"),
+        run=_failing_run,
+        on_terminal_failure=lambda sandbox_id, reason: invalidated.append((sandbox_id, reason)),
+    )
+
+    output = box.execute_command("echo hi")
+
+    assert output == "Error: custom terminal marker"
+    assert invalidated == [("box-id", "custom terminal marker")]
+
+
+def test_execute_command_closed_box_returns_without_error_log(caplog) -> None:
+    box = BoxliteBox("box-id", box=_FakeBox(name="box-id"), run=_fake_run)
+    box.close()
+
+    with caplog.at_level(logging.ERROR, logger="deerflow.community.boxlite.box"):
+        output = box.execute_command("echo hi")
+
+    assert output == "Error: sandbox has been closed"
+    assert "Failed to execute command in BoxLite box" not in caplog.text
 
 
 def test_sandbox_id_deterministic(monkeypatch):
@@ -343,6 +437,244 @@ def test_acquire_reclaims_from_warm_pool(monkeypatch):
     assert sid2 not in provider._warm_pool
 
 
+def test_explicit_recent_reclaim_skip_avoids_health_check(monkeypatch):
+    """A configured skip window can reclaim recently released boxes without a ping."""
+    monkeypatch.setattr(
+        "deerflow.community.boxlite.provider.get_app_config",
+        lambda: _stub_config({"health_check_skip_seconds": 5}),
+    )
+    monkeypatch.setattr(
+        "deerflow.community.boxlite.provider._import_simplebox",
+        lambda: _FakeBox,
+    )
+
+    provider = BoxliteProvider()
+    provider._loop.run = _fake_run
+
+    sid = provider.acquire("thread-1", user_id="u1")
+    provider.release(sid)
+    box, _ = provider._warm_pool[sid]
+
+    def _fail_if_called(*args, **kwargs):
+        raise AssertionError("health check should be skipped for recently released boxes")
+
+    monkeypatch.setattr(box, "execute_command", _fail_if_called)
+
+    reclaimed = provider._reclaim_warm_pool(sid)
+    assert reclaimed == sid
+    assert sid in provider._boxes
+    assert sid not in provider._warm_pool
+
+    provider.shutdown()
+
+
+def test_recent_reclaim_validates_by_default(monkeypatch):
+    monkeypatch.setattr(
+        "deerflow.community.boxlite.provider.get_app_config",
+        lambda: _stub_config(),
+    )
+    monkeypatch.setattr(
+        "deerflow.community.boxlite.provider._import_simplebox",
+        lambda: _FakeBox,
+    )
+
+    provider = BoxliteProvider()
+    provider._loop.run = _fake_run
+
+    sid = provider.acquire("thread-1", user_id="u1")
+    provider.release(sid)
+    box, _ = provider._warm_pool[sid]
+    calls = 0
+    original_execute = box.execute_command
+
+    def _record_health_check(command: str, *args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original_execute(command, *args, **kwargs)
+
+    monkeypatch.setattr(box, "execute_command", _record_health_check)
+
+    reclaimed = provider._reclaim_warm_pool(sid)
+    assert reclaimed == sid
+    assert calls == 1
+    assert sid in provider._boxes
+    assert sid not in provider._warm_pool
+
+    provider.shutdown()
+
+
+def test_default_recent_reclaim_drops_dead_warm_box(monkeypatch):
+    monkeypatch.setattr(
+        "deerflow.community.boxlite.provider.get_app_config",
+        lambda: _stub_config(),
+    )
+    monkeypatch.setattr(
+        "deerflow.community.boxlite.provider._import_simplebox",
+        lambda: _FakeBox,
+    )
+
+    provider = BoxliteProvider()
+    provider._loop.run = _fake_run
+
+    sid = provider.acquire("thread-1", user_id="u1")
+    provider.release(sid)
+    box, _ = provider._warm_pool[sid]
+
+    def _dead_health_check(command: str, *args, **kwargs):
+        assert command == "echo ok"
+        return "Error: vsock disconnected"
+
+    monkeypatch.setattr(box, "execute_command", _dead_health_check)
+
+    reclaimed = provider._reclaim_warm_pool(sid)
+    assert reclaimed is None
+    assert sid not in provider._boxes
+    assert sid not in provider._warm_pool
+    assert sid not in provider._skip_health_check_warm_ids
+    assert box.is_closed is True
+
+    provider.shutdown()
+
+
+def test_dead_active_box_invalidation_closes_adapter(monkeypatch):
+    monkeypatch.setattr(
+        "deerflow.community.boxlite.provider.get_app_config",
+        lambda: _stub_config({"health_check_skip_seconds": 5}),
+    )
+    monkeypatch.setattr(
+        "deerflow.community.boxlite.provider._import_simplebox",
+        lambda: _FakeBox,
+    )
+
+    provider = BoxliteProvider()
+    provider._loop.run = _fake_run
+
+    sid = provider.acquire("thread-1", user_id="u1")
+    box = provider.get(sid)
+    assert box is not None
+
+    def _dead_run(coro, *, timeout=None):
+        coro.close()
+        raise RuntimeError("vsock disconnected")
+
+    box._run = _dead_run
+
+    output = box.execute_command("echo hi")
+    assert output == "Error: vsock disconnected"
+    assert box._closed is True
+    assert provider.get(sid) is None
+
+    provider.shutdown()
+
+
+def test_adopted_warm_pool_box_still_health_checks(monkeypatch):
+    """Startup-adopted boxes must still pass a health check before reclaim."""
+    monkeypatch.setattr(
+        "deerflow.community.boxlite.provider.get_app_config",
+        lambda: _stub_config({"health_check_skip_seconds": 5}),
+    )
+
+    provider = BoxliteProvider()
+    adopted = BoxliteBox(
+        "adopted",
+        _FakeBox(name="deer-flow-boxlite-adopted"),
+        _fake_run,
+        default_env={},
+    )
+    provider._warm_pool["adopted"] = (adopted, time.time())
+    calls = 0
+    original_execute = adopted.execute_command
+
+    def _record_health_check(command: str, *args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original_execute(command, *args, **kwargs)
+
+    monkeypatch.setattr(adopted, "execute_command", _record_health_check)
+
+    reclaimed = provider._reclaim_warm_pool("adopted")
+    assert reclaimed == "adopted"
+    assert calls == 1
+    assert "adopted" in provider._boxes
+    assert "adopted" not in provider._warm_pool
+
+    provider.shutdown()
+
+
+def test_dead_active_box_is_invalidated_after_command_failure(monkeypatch):
+    monkeypatch.setattr(
+        "deerflow.community.boxlite.provider.get_app_config",
+        lambda: _stub_config({"health_check_skip_seconds": 5}),
+    )
+    monkeypatch.setattr(
+        "deerflow.community.boxlite.provider._import_simplebox",
+        lambda: _FakeBox,
+    )
+
+    provider = BoxliteProvider()
+    provider._loop.run = _fake_run
+
+    sid = provider.acquire("thread-1", user_id="u1")
+    box = provider.get(sid)
+    assert box is not None
+
+    def _dead_run(coro, *, timeout=None):
+        coro.close()
+        raise RuntimeError("vsock disconnected")
+
+    box._run = _dead_run
+
+    output = box.execute_command("echo hi")
+    assert output == "Error: vsock disconnected"
+    assert provider.get(sid) is None
+
+    sid2 = provider.acquire("thread-1", user_id="u1")
+    assert sid2 == sid
+    assert provider.get(sid2) is not None
+
+    provider.shutdown()
+
+
+def test_stale_closed_adapter_cannot_invalidate_recreated_box(monkeypatch):
+    monkeypatch.setattr(
+        "deerflow.community.boxlite.provider.get_app_config",
+        lambda: _stub_config({"health_check_skip_seconds": 5}),
+    )
+    monkeypatch.setattr(
+        "deerflow.community.boxlite.provider._import_simplebox",
+        lambda: _FakeBox,
+    )
+
+    provider = BoxliteProvider()
+    provider._loop.run = _fake_run
+
+    sid = provider.acquire("thread-1", user_id="u1")
+    stale_box = provider.get(sid)
+    assert stale_box is not None
+
+    def _dead_run(coro, *, timeout=None):
+        coro.close()
+        raise RuntimeError("vsock disconnected")
+
+    stale_box._run = _dead_run
+    stale_box.execute_command("echo hi")
+    assert provider.get(sid) is None
+
+    provider._loop.run = _fake_run
+    sid2 = provider.acquire("thread-1", user_id="u1")
+    replacement = provider.get(sid2)
+    assert sid2 == sid
+    assert replacement is not None
+    assert replacement is not stale_box
+
+    stale_box.execute_command("echo again")
+
+    assert provider.get(sid) is replacement
+    assert replacement._closed is False
+
+    provider.shutdown()
+
+
 def test_acquire_different_threads_dont_reclaim_each_other(monkeypatch):
     """Thread A's box can't be reclaimed by thread B."""
     monkeypatch.setattr(
@@ -394,6 +726,10 @@ def test_warm_pool_reclaim_failed_health_check_creates_new(monkeypatch):
     sid2 = provider.acquire("thread-1", user_id="u1")
     assert sid2 == sid1  # Same deterministic ID
     assert sid2 in provider._boxes
+    replacement = provider.get(sid2)
+    assert replacement is not None
+    assert replacement is not box
+    assert replacement._closed is False
 
 
 def test_concurrent_same_thread_acquire_creates_one_box(monkeypatch):

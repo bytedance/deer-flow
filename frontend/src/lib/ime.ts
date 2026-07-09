@@ -1,6 +1,6 @@
 import type { KeyboardEvent } from "react";
 
-type IMEKeyboardEvent = KeyboardEvent<HTMLInputElement | HTMLTextAreaElement>;
+type IMEKeyboardEvent = KeyboardEvent<HTMLElement>;
 
 export function isIMEComposing(
   event: IMEKeyboardEvent,

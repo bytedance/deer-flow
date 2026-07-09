@@ -116,6 +116,12 @@ export const enUS: Translations = {
     createSkillPrompt:
       "We're going to build a new skill step by step with `skill-creator`. To start, what do you want this skill to do?",
     addAttachments: "Add attachments",
+    inputPolish: "Polish input",
+    inputPolishing: "Polishing input...",
+    inputPolishNoChanges: "This input is already clear.",
+    inputPolishFailed: "Failed to polish input.",
+    inputPolishUndo: "Undo polish",
+    inputPolishCancel: "Cancel polishing",
     mode: "Mode",
     flashMode: "Flash",
     flashModeDescription: "Fast and efficient, but may not be accurate",
@@ -151,6 +157,8 @@ export const enUS: Translations = {
     suggestionPlaceholderRequired:
       "Replace the suggestion placeholder before sending.",
     goalCommandDescription: "Set, show, or clear an active goal",
+    compactCommandDescription:
+      "Compact earlier context while keeping the full chat visible",
     goalLabel: "Goal",
     goalContinuing: "Continuing {count}/{max}",
     goalContinuationTooltip:
@@ -160,6 +168,10 @@ export const enUS: Translations = {
     goalNone: "No active goal.",
     goalActive: "Active goal: {goal}",
     goalFailed: "Goal command failed.",
+    compactSuccess:
+      "Earlier context compacted. The full chat remains visible; future model calls will use the summary and recent messages.",
+    compactSkipped: "The current context does not need compaction yet.",
+    compactFailed: "Context compaction failed.",
     suggestions: [
       {
         suggestion: "Write",

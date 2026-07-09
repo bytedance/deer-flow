@@ -42,6 +42,7 @@ from deerflow.runtime import (
     UnsupportedStrategyError,
     run_agent,
 )
+from deerflow.runtime.goal import goal_thread_lock
 from deerflow.runtime.runs.naming import resolve_root_run_name
 from deerflow.runtime.secret_context import redact_config_secrets
 from deerflow.runtime.user_context import reset_current_user, set_current_user
@@ -612,20 +613,21 @@ async def start_run(
     owner_context_token = set_current_user(SimpleNamespace(id=owner_user_id)) if owner_user_id else None
     try:
         try:
-            record = await run_mgr.create_or_reject(
-                thread_id,
-                body.assistant_id,
-                on_disconnect=disconnect,
-                metadata=body.metadata or {},
-                # Persist a secret-redacted copy of the config: the run record is
-                # written to runs.kwargs_json and echoed by the run API, so a
-                # request-scoped secret (#3861) must not ride along. The live
-                # config built below keeps the secrets for the actual run.
-                kwargs={"input": body.input, "config": redact_config_secrets(body.config)},
-                multitask_strategy=body.multitask_strategy,
-                model_name=model_name,
-                user_id=owner_user_id,
-            )
+            async with goal_thread_lock(thread_id):
+                record = await run_mgr.create_or_reject(
+                    thread_id,
+                    body.assistant_id,
+                    on_disconnect=disconnect,
+                    metadata=body.metadata or {},
+                    # Persist a secret-redacted copy of the config: the run record is
+                    # written to runs.kwargs_json and echoed by the run API, so a
+                    # request-scoped secret (#3861) must not ride along. The live
+                    # config built below keeps the secrets for the actual run.
+                    kwargs={"input": body.input, "config": redact_config_secrets(body.config)},
+                    multitask_strategy=body.multitask_strategy,
+                    model_name=model_name,
+                    user_id=owner_user_id,
+                )
         except ConflictError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         except UnsupportedStrategyError as exc:

@@ -163,14 +163,22 @@ def _build_runtime_middlewares(
     from deerflow.agents.middlewares.llm_error_handling_middleware import LLMErrorHandlingMiddleware
     from deerflow.agents.middlewares.thread_data_middleware import ThreadDataMiddleware
     from deerflow.agents.middlewares.tool_output_budget_middleware import ToolOutputBudgetMiddleware
+    from deerflow.agents.middlewares.tool_result_sanitization_middleware import ToolResultSanitizationMiddleware
     from deerflow.sandbox.middleware import SandboxMiddleware
 
     # Layer 1 — outermost wrap_model_call wrappers (listed outer→inner).
     # InputSanitizationMiddleware is first so it becomes the outermost
     # wrapper — sanitised messages are what every inner middleware sees.
+    # ToolResultSanitizationMiddleware mirrors that guardrail for the other
+    # untrusted-content entry point: remote tool results (web_fetch /
+    # web_search) get the same framework/injection-tag neutralization. It sits
+    # inner of ToolOutputBudgetMiddleware (listed after it) so it neutralizes
+    # the raw tool output first; the budget wrapper then truncates the already
+    # neutralized text.
     outer_wrappers: list[AgentMiddleware] = [
         InputSanitizationMiddleware(),
         ToolOutputBudgetMiddleware.from_app_config(app_config),
+        ToolResultSanitizationMiddleware(),
     ]
 
     # Layer 2 — before_agent hooks that read/annotate thread-scoped data.
@@ -272,6 +280,7 @@ def build_subagent_runtime_middlewares(
     model_name: str | None = None,
     lazy_init: bool = True,
     deferred_setup: "DeferredToolSetup | None" = None,
+    agent_name: str | None = None,
 ) -> list[AgentMiddleware]:
     """Middlewares shared by subagent runtime before subagent-only middlewares."""
     if app_config is None:
@@ -324,6 +333,24 @@ def build_subagent_runtime_middlewares(
         from deerflow.agents.middlewares.loop_detection_middleware import LoopDetectionMiddleware
 
         middlewares.append(LoopDetectionMiddleware.from_config(loop_detection_config))
+
+    # TokenBudgetMiddleware — subagents inherit none of the lead's cost backstops
+    # today (#3875 Phase 2): a degenerate subagent can burn pathological token
+    # volume (the reported 4.4M run) before max_turns/timeout engage. Mirror the
+    # lead chain so the per-run budget hard-stop engages. ``subagents.token_budget``
+    # is enabled by default; per-agent override via
+    # ``subagents.agents.<name>.token_budget``. The hard-stop does not raise —
+    # it strips tool_calls so the run completes with a final answer — and the
+    # executor reads ``consume_stop_reason`` to mark the completed result
+    # ``token_capped`` for the lead. State is keyed by run_id and each task run
+    # builds a fresh middleware instance (see ``executor._create_agent``), so
+    # parallel subagents cannot cross-contaminate even though they share the
+    # parent thread_id/run_id in context.
+    token_budget_config = app_config.subagents.get_token_budget_for(agent_name) if agent_name is not None else app_config.subagents.token_budget
+    if token_budget_config.enabled:
+        from deerflow.agents.middlewares.token_budget_middleware import TokenBudgetMiddleware
+
+        middlewares.append(TokenBudgetMiddleware.from_config(token_budget_config))
 
     # Same provider safety-termination guard the lead agent uses — subagents
     # are equally exposed to truncated tool_calls returned with

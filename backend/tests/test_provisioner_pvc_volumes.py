@@ -1,39 +1,83 @@
-"""Regression tests for provisioner PVC volume support."""
+"""Regression tests for provisioner three-way skills + PVC volume support."""
 
 
 # ── _build_volumes ─────────────────────────────────────────────────────
 
 
 class TestBuildVolumes:
-    """Tests for _build_volumes: PVC vs hostPath selection."""
+    """Tests for _build_volumes: hostPath three-way vs PVC fallback."""
 
-    def test_default_uses_hostpath_for_skills(self, provisioner_module):
-        """When SKILLS_PVC_NAME is empty, skills volume should use hostPath."""
+    # ── hostPath mode (default) ────────────────────────────────────────
+
+    def test_hostpath_without_legacy_returns_three_volumes(self, provisioner_module):
+        """hostPath mode omits legacy volume unless the backend requests it."""
         provisioner_module.SKILLS_PVC_NAME = ""
-        volumes = provisioner_module._build_volumes("thread-1")
-        skills_vol = volumes[0]
-        assert skills_vol.host_path is not None
-        assert skills_vol.host_path.path == provisioner_module.SKILLS_HOST_PATH
-        assert skills_vol.host_path.type == "Directory"
-        assert skills_vol.persistent_volume_claim is None
-
-    def test_default_uses_hostpath_for_userdata(self, provisioner_module):
-        """When USERDATA_PVC_NAME is empty, user-data volume should use hostPath."""
         provisioner_module.USERDATA_PVC_NAME = ""
         volumes = provisioner_module._build_volumes("thread-1")
-        userdata_vol = volumes[1]
-        assert userdata_vol.host_path is not None
-        assert userdata_vol.persistent_volume_claim is None
+        assert len(volumes) == 3
+
+    def test_hostpath_skills_public_volume(self, provisioner_module):
+        """First skills volume mounts public/ subdirectory."""
+        provisioner_module.SKILLS_PVC_NAME = ""
+        volumes = provisioner_module._build_volumes("thread-1")
+        pub = volumes[0]
+        assert pub.name == "skills-public"
+        assert pub.host_path is not None
+        assert pub.host_path.path.endswith("/public")
+        assert pub.host_path.type == "Directory"
+        assert pub.persistent_volume_claim is None
+
+    def test_hostpath_skills_custom_volume(self, provisioner_module):
+        """Second skills volume mounts per-user custom directory."""
+        provisioner_module.SKILLS_PVC_NAME = ""
+        volumes = provisioner_module._build_volumes("thread-1", user_id="user-7")
+        custom = volumes[1]
+        assert custom.name == "skills-custom"
+        assert custom.host_path is not None
+        assert "users/user-7/skills/custom" in custom.host_path.path
+        assert custom.host_path.type == "DirectoryOrCreate"
+
+    def test_hostpath_skills_legacy_volume(self, provisioner_module):
+        """Legacy global-custom directory is mounted only when requested."""
+        provisioner_module.SKILLS_PVC_NAME = ""
+        volumes = provisioner_module._build_volumes(
+            "thread-1",
+            include_legacy_skills=True,
+        )
+        legacy = volumes[2]
+        assert legacy.name == "skills-legacy"
+        assert legacy.host_path is not None
+        assert legacy.host_path.path.endswith("/custom")
+        assert legacy.host_path.type == "Directory"
+
+    def test_hostpath_without_legacy_has_no_legacy_volume(self, provisioner_module):
+        """Fresh installs should not require a missing global legacy directory."""
+        provisioner_module.SKILLS_PVC_NAME = ""
+        volumes = provisioner_module._build_volumes("thread-1")
+        assert [volume.name for volume in volumes] == [
+            "skills-public",
+            "skills-custom",
+            "user-data",
+        ]
 
     def test_hostpath_userdata_includes_thread_id(self, provisioner_module):
         """hostPath user-data path should include thread_id."""
         provisioner_module.USERDATA_PVC_NAME = ""
         volumes = provisioner_module._build_volumes("my-thread-42")
-        userdata_vol = volumes[1]
+        userdata_vol = volumes[-1]
         path = userdata_vol.host_path.path
         assert "my-thread-42" in path
         assert path.endswith("user-data")
         assert userdata_vol.host_path.type == "DirectoryOrCreate"
+
+    # ── PVC mode (single-volume fallback) ──────────────────────────────
+
+    def test_pvc_returns_two_volumes(self, provisioner_module):
+        """PVC mode falls back to 1 skills volume + 1 user-data volume."""
+        provisioner_module.SKILLS_PVC_NAME = "my-skills-pvc"
+        provisioner_module.USERDATA_PVC_NAME = ""
+        volumes = provisioner_module._build_volumes("thread-1")
+        assert len(volumes) == 2
 
     def test_skills_pvc_overrides_hostpath(self, provisioner_module):
         """When SKILLS_PVC_NAME is set, skills volume should use PVC."""
@@ -49,7 +93,7 @@ class TestBuildVolumes:
         """When USERDATA_PVC_NAME is set, user-data volume should use PVC."""
         provisioner_module.USERDATA_PVC_NAME = "my-userdata-pvc"
         volumes = provisioner_module._build_volumes("thread-1")
-        userdata_vol = volumes[1]
+        userdata_vol = volumes[-1]
         assert userdata_vol.persistent_volume_claim is not None
         assert userdata_vol.persistent_volume_claim.claim_name == "my-userdata-pvc"
         assert userdata_vol.host_path is None
@@ -60,77 +104,111 @@ class TestBuildVolumes:
         provisioner_module.USERDATA_PVC_NAME = "userdata-pvc"
         volumes = provisioner_module._build_volumes("thread-1")
         assert volumes[0].persistent_volume_claim is not None
-        assert volumes[1].persistent_volume_claim is not None
+        assert volumes[-1].persistent_volume_claim is not None
 
-    def test_returns_two_volumes(self, provisioner_module):
-        """Should always return exactly two volumes."""
-        provisioner_module.SKILLS_PVC_NAME = ""
-        provisioner_module.USERDATA_PVC_NAME = ""
-        assert len(provisioner_module._build_volumes("t")) == 2
-
-        provisioner_module.SKILLS_PVC_NAME = "a"
-        provisioner_module.USERDATA_PVC_NAME = "b"
-        assert len(provisioner_module._build_volumes("t")) == 2
-
-    def test_volume_names_are_stable(self, provisioner_module):
-        """Volume names must stay 'skills' and 'user-data'."""
+    def test_pvc_volume_names_are_stable(self, provisioner_module):
+        """PVC mode volume names must stay 'skills' and 'user-data'."""
+        provisioner_module.SKILLS_PVC_NAME = "x"
         volumes = provisioner_module._build_volumes("thread-1")
         assert volumes[0].name == "skills"
-        assert volumes[1].name == "user-data"
+        assert volumes[-1].name == "user-data"
 
 
 # ── _build_volume_mounts ───────────────────────────────────────────────
 
 
 class TestBuildVolumeMounts:
-    """Tests for _build_volume_mounts: mount paths and subPath behavior."""
+    """Tests for _build_volume_mounts: three-way mount paths and subPath."""
 
-    def test_default_no_subpath(self, provisioner_module):
+    # ── hostPath mode ──────────────────────────────────────────────────
+
+    def test_hostpath_without_legacy_returns_three_mounts(self, provisioner_module):
+        """hostPath mode omits legacy mount unless the backend requests it."""
+        provisioner_module.SKILLS_PVC_NAME = ""
+        provisioner_module.USERDATA_PVC_NAME = ""
+        mounts = provisioner_module._build_volume_mounts("thread-1")
+        assert len(mounts) == 3
+
+    def test_hostpath_skills_public_mount(self, provisioner_module):
+        """Public skills mount at /mnt/skills/public, read-only."""
+        provisioner_module.SKILLS_PVC_NAME = ""
+        mounts = provisioner_module._build_volume_mounts("thread-1")
+        assert mounts[0].name == "skills-public"
+        assert mounts[0].mount_path == "/mnt/skills/public"
+        assert mounts[0].read_only is True
+
+    def test_hostpath_skills_custom_mount(self, provisioner_module):
+        """Per-user custom skills mount at /mnt/skills/custom, read-only."""
+        provisioner_module.SKILLS_PVC_NAME = ""
+        mounts = provisioner_module._build_volume_mounts("thread-1")
+        assert mounts[1].name == "skills-custom"
+        assert mounts[1].mount_path == "/mnt/skills/custom"
+        assert mounts[1].read_only is True
+
+    def test_hostpath_skills_legacy_mount(self, provisioner_module):
+        """Legacy skills mount at /mnt/skills/legacy, read-only."""
+        provisioner_module.SKILLS_PVC_NAME = ""
+        mounts = provisioner_module._build_volume_mounts(
+            "thread-1",
+            include_legacy_skills=True,
+        )
+        assert mounts[2].name == "skills-legacy"
+        assert mounts[2].mount_path == "/mnt/skills/legacy"
+        assert mounts[2].read_only is True
+
+    def test_hostpath_without_legacy_has_no_legacy_mount(self, provisioner_module):
+        """Users with custom skills should not see hidden legacy content in the sandbox."""
+        provisioner_module.SKILLS_PVC_NAME = ""
+        mounts = provisioner_module._build_volume_mounts("thread-1")
+        assert [mount.name for mount in mounts] == [
+            "skills-public",
+            "skills-custom",
+            "user-data",
+        ]
+
+    def test_hostpath_userdata_read_write(self, provisioner_module):
+        """User-data mount should always be read-write."""
+        provisioner_module.SKILLS_PVC_NAME = ""
+        mounts = provisioner_module._build_volume_mounts("thread-1")
+        userdata = mounts[-1]
+        assert userdata.name == "user-data"
+        assert userdata.mount_path == "/mnt/user-data"
+        assert userdata.read_only is False
+
+    # ── PVC mode ───────────────────────────────────────────────────────
+
+    def test_pvc_returns_two_mounts(self, provisioner_module):
+        """PVC mode falls back to 1 skills mount + 1 user-data mount."""
+        provisioner_module.SKILLS_PVC_NAME = "x"
+        mounts = provisioner_module._build_volume_mounts("thread-1")
+        assert len(mounts) == 2
+
+    def test_pvc_skills_mount_is_single_root(self, provisioner_module):
+        """PVC mode skills mount is at /mnt/skills."""
+        provisioner_module.SKILLS_PVC_NAME = "x"
+        mounts = provisioner_module._build_volume_mounts("thread-1")
+        assert mounts[0].mount_path == "/mnt/skills"
+
+    def test_pvc_no_subpath_on_userdata(self, provisioner_module):
         """hostPath mode should not set sub_path on user-data mount."""
         provisioner_module.USERDATA_PVC_NAME = ""
         mounts = provisioner_module._build_volume_mounts("thread-1")
-        userdata_mount = mounts[1]
+        userdata_mount = mounts[-1]
         assert userdata_mount.sub_path is None
 
     def test_pvc_sets_user_scoped_subpath(self, provisioner_module):
         """PVC mode should include user_id in the user-data subPath."""
         provisioner_module.USERDATA_PVC_NAME = "my-pvc"
         mounts = provisioner_module._build_volume_mounts("thread-42", user_id="user-7")
-        userdata_mount = mounts[1]
+        userdata_mount = mounts[-1]
         assert userdata_mount.sub_path == "deer-flow/users/user-7/threads/thread-42/user-data"
 
     def test_pvc_defaults_to_default_user_subpath(self, provisioner_module):
         """Older callers should still land under a stable default user namespace."""
         provisioner_module.USERDATA_PVC_NAME = "my-pvc"
         mounts = provisioner_module._build_volume_mounts("thread-42")
-        userdata_mount = mounts[1]
+        userdata_mount = mounts[-1]
         assert userdata_mount.sub_path == "deer-flow/users/default/threads/thread-42/user-data"
-
-    def test_skills_mount_read_only(self, provisioner_module):
-        """Skills mount should always be read-only."""
-        mounts = provisioner_module._build_volume_mounts("thread-1")
-        assert mounts[0].read_only is True
-
-    def test_userdata_mount_read_write(self, provisioner_module):
-        """User-data mount should always be read-write."""
-        mounts = provisioner_module._build_volume_mounts("thread-1")
-        assert mounts[1].read_only is False
-
-    def test_mount_paths_are_stable(self, provisioner_module):
-        """Mount paths must stay /mnt/skills and /mnt/user-data."""
-        mounts = provisioner_module._build_volume_mounts("thread-1")
-        assert mounts[0].mount_path == "/mnt/skills"
-        assert mounts[1].mount_path == "/mnt/user-data"
-
-    def test_mount_names_match_volumes(self, provisioner_module):
-        """Mount names should match the volume names."""
-        mounts = provisioner_module._build_volume_mounts("thread-1")
-        assert mounts[0].name == "skills"
-        assert mounts[1].name == "user-data"
-
-    def test_returns_two_mounts(self, provisioner_module):
-        """Should always return exactly two mounts."""
-        assert len(provisioner_module._build_volume_mounts("t")) == 2
 
 
 # ── _build_pod integration ─────────────────────────────────────────────
@@ -139,16 +217,52 @@ class TestBuildVolumeMounts:
 class TestBuildPodVolumes:
     """Integration: _build_pod should wire volumes and mounts correctly."""
 
-    def test_pod_spec_has_volumes(self, provisioner_module):
-        """Pod spec should contain exactly 2 volumes."""
+    def test_pod_hostpath_without_legacy_has_three_volumes(self, provisioner_module):
+        """hostPath Pod spec should omit legacy volume by default."""
         provisioner_module.SKILLS_PVC_NAME = ""
+        provisioner_module.USERDATA_PVC_NAME = ""
+        pod = provisioner_module._build_pod("sandbox-1", "thread-1")
+        assert len(pod.spec.volumes) == 3
+
+    def test_pod_hostpath_without_legacy_has_three_mounts(self, provisioner_module):
+        """hostPath container should omit legacy mount by default."""
+        provisioner_module.SKILLS_PVC_NAME = ""
+        provisioner_module.USERDATA_PVC_NAME = ""
+        pod = provisioner_module._build_pod("sandbox-1", "thread-1")
+        assert len(pod.spec.containers[0].volume_mounts) == 3
+
+    def test_pod_hostpath_with_legacy_has_four_volumes(self, provisioner_module):
+        """Legacy volume should be present when the backend requests it."""
+        provisioner_module.SKILLS_PVC_NAME = ""
+        provisioner_module.USERDATA_PVC_NAME = ""
+        pod = provisioner_module._build_pod(
+            "sandbox-1",
+            "thread-1",
+            include_legacy_skills=True,
+        )
+        assert len(pod.spec.volumes) == 4
+
+    def test_pod_hostpath_with_legacy_has_four_mounts(self, provisioner_module):
+        """Legacy mount should be present when the backend requests it."""
+        provisioner_module.SKILLS_PVC_NAME = ""
+        provisioner_module.USERDATA_PVC_NAME = ""
+        pod = provisioner_module._build_pod(
+            "sandbox-1",
+            "thread-1",
+            include_legacy_skills=True,
+        )
+        assert len(pod.spec.containers[0].volume_mounts) == 4
+
+    def test_pod_pvc_has_two_volumes(self, provisioner_module):
+        """PVC Pod spec should contain exactly 2 volumes."""
+        provisioner_module.SKILLS_PVC_NAME = "skills-pvc"
         provisioner_module.USERDATA_PVC_NAME = ""
         pod = provisioner_module._build_pod("sandbox-1", "thread-1")
         assert len(pod.spec.volumes) == 2
 
-    def test_pod_spec_has_volume_mounts(self, provisioner_module):
-        """Container should have exactly 2 volume mounts."""
-        provisioner_module.SKILLS_PVC_NAME = ""
+    def test_pod_pvc_has_two_mounts(self, provisioner_module):
+        """PVC container should have exactly 2 volume mounts."""
+        provisioner_module.SKILLS_PVC_NAME = "skills-pvc"
         provisioner_module.USERDATA_PVC_NAME = ""
         pod = provisioner_module._build_pod("sandbox-1", "thread-1")
         assert len(pod.spec.containers[0].volume_mounts) == 2
@@ -159,6 +273,20 @@ class TestBuildPodVolumes:
         provisioner_module.USERDATA_PVC_NAME = "userdata-pvc"
         pod = provisioner_module._build_pod("sandbox-1", "thread-1", user_id="user-7")
         assert pod.spec.volumes[0].persistent_volume_claim is not None
-        assert pod.spec.volumes[1].persistent_volume_claim is not None
-        userdata_mount = pod.spec.containers[0].volume_mounts[1]
+        assert pod.spec.volumes[-1].persistent_volume_claim is not None
+        userdata_mount = pod.spec.containers[0].volume_mounts[-1]
         assert userdata_mount.sub_path == "deer-flow/users/user-7/threads/thread-1/user-data"
+
+    def test_pod_three_way_skills_mount_paths(self, provisioner_module):
+        """Ensure public/custom/legacy mount paths are correct."""
+        provisioner_module.SKILLS_PVC_NAME = ""
+        provisioner_module.USERDATA_PVC_NAME = ""
+        pod = provisioner_module._build_pod(
+            "sandbox-1",
+            "thread-1",
+            include_legacy_skills=True,
+        )
+        mount_paths = {m.name: m.mount_path for m in pod.spec.containers[0].volume_mounts}
+        assert mount_paths["skills-public"] == "/mnt/skills/public"
+        assert mount_paths["skills-custom"] == "/mnt/skills/custom"
+        assert mount_paths["skills-legacy"] == "/mnt/skills/legacy"

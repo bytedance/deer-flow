@@ -17,6 +17,14 @@ Run `make config-upgrade` to merge new fields into your config.
 
 ## Configuration Sections
 
+### Extensions
+
+MCP servers and skill enabled states live in `extensions_config.json`, separate
+from `config.yaml`. Use `mcpServers.<server>.routing` to add soft MCP tool
+preference hints for requests that should prefer a specific MCP server or tool.
+See [MCP Server Configuration](MCP_SERVER.md#routing-hints) for the schema,
+example, and soft-vs-hard routing boundary.
+
 ### Models
 
 Configure the LLM models available to the agent:
@@ -540,6 +548,15 @@ skills:
 - Each skill has a `SKILL.md` file with metadata
 - Skills are automatically discovered and loaded
 - Available in both local and Docker sandbox via path mapping
+
+Skill installs and agent-managed skill writes also run through native deterministic SkillScan before the LLM scanner:
+
+```yaml
+skill_scan:
+  enabled: true
+```
+
+Set `skill_scan.enabled: false` to disable only the deterministic analyzers. Safe archive extraction and the LLM-based skill scanner still run.
 
 **Per-Agent Skill Filtering**:
 Custom agents can restrict which skills they load by defining a `skills` field in their `config.yaml` (located at `workspace/agents/<agent_name>/config.yaml`):
