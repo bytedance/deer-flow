@@ -1,0 +1,226 @@
+---
+title: Sandbox
+description: Sandbox cung cấp cho Lead Agent một môi trường được kiểm soát để đọc file, ghi kết quả đầu ra, thực thi lệnh shell, và tạo ra các artifact. Nếu không có sandbox, agent chỉ có thể tạo ra văn bản. Có sandbox, nó có thể tự viết và thực thi mã nguồn, xử lý các file dữ liệu, tạo biểu đồ và xây dựng các sản phẩm bàn giao hoàn chỉnh.
+---
+
+import { Callout, Tabs } from "nextra/components";
+
+# Sandbox
+
+<Callout type="info" emoji="📦">
+  Sandbox là workspace cô lập nơi agent thực thi các công việc liên quan đến file và câu lệnh. Đây là yếu tố giúp DeerFlow có khả năng thực hiện các hành động thực tế, thay vì chỉ trò chuyện thông thường.
+</Callout>
+
+Sandbox cung cấp cho Lead Agent một môi trường được kiểm soát để đọc file, ghi kết quả đầu ra, thực thi lệnh shell, và tạo ra các artifact. Nếu không có sandbox, agent chỉ có thể tạo ra văn bản. Có sandbox, nó có thể tự viết và thực thi mã nguồn, xử lý các file dữ liệu, tạo biểu đồ và xây dựng các sản phẩm bàn giao hoàn chỉnh.
+
+## Các chế độ Sandbox
+
+DeerFlow hỗ trợ bốn chế độ sandbox. Hãy chọn chế độ phù hợp với mô hình triển khai của bạn:
+
+### LocalSandbox (mặc định)
+
+Các câu lệnh được chạy trực tiếp trên hệ thống file của máy host. Không có sự cô lập bằng container.
+
+- **Phù hợp nhất cho**: các quy trình phát triển cục bộ một người dùng và đáng tin cậy.
+- **Rủi ro**: agent có quyền truy cập vào hệ thống file của host. Sử dụng thuộc tính `allow_host_bash: false` (mặc định) để ngăn chặn việc thực thi câu lệnh tùy ý.
+
+```yaml
+sandbox:
+  use: deerflow.sandbox.local:LocalSandboxProvider
+  allow_host_bash: false # mặc định; chỉ đặt thành true đối với các workflow hoàn toàn đáng tin cậy
+```
+
+### Container-based AIO Sandbox
+
+Các câu lệnh được thực thi trong một container cô lập (Docker trên Linux/Windows, hoặc Apple Container trên macOS). Mỗi session của sandbox nhận được một môi trường container mới hoàn toàn.
+
+- **Phù hợp nhất cho**: môi trường nhiều người dùng, triển khai production, hoặc bất kỳ trường hợp nào bạn yêu cầu sự cô lập thực thi.
+
+```yaml
+sandbox:
+  use: deerflow.community.aio_sandbox:AioSandboxProvider
+
+  # Tùy chọn: container image (mặc định hiển thị bên dưới)
+  image: enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest
+
+  # Tùy chọn: số lượng container đồng thời tối đa (mặc định: 3, áp dụng cơ chế giải phóng LRU khi vượt quá)
+  replicas: 3
+
+  # Tùy chọn: tiền tố tên container (mặc định: deer-flow-sandbox)
+  container_prefix: deer-flow-sandbox
+
+  # Tùy chọn: thời gian chờ nhàn rỗi tính bằng giây (mặc định: 600)
+  idle_timeout: 600
+
+  # Tùy chọn: gắn kết thư mục tùy chỉnh (custom mounts)
+  mounts:
+    - host_path: /path/on/host
+      container_path: /home/user/shared
+      read_only: false
+
+  # Tùy chọn: các biến môi trường được chèn vào container
+  environment:
+    API_KEY: $MY_API_KEY
+```
+
+Cài đặt: `cd backend && uv add 'deerflow-harness[aio-sandbox]'`
+
+### E2B Cloud Sandbox
+
+Các câu lệnh được thực thi trong một micro-VM đám mây của [E2B](https://e2b.dev). Mỗi thread được liên kết với sandbox riêng của nó thông qua metadata, vì vậy cùng một thread DeerFlow sẽ tiếp tục truy cập cùng một e2b sandbox ngay cả khi gateway khởi động lại hoặc chạy qua nhiều tiến trình khác nhau. Máy ảo đám mây sẽ được e2b tự động thu hồi khi hết thời gian chờ nhàn rỗi được cấu hình.
+
+- **Phù hợp nhất cho**: các mô hình triển khai dạng hosted/serverless, các nhóm không muốn tự vận hành Docker hay Kubernetes, các công việc yêu cầu nhân Jupyter thực tế ngay khi khởi động.
+- **Đánh đổi**: yêu cầu quyền truy cập mạng tới control plane của e2b và một API key. Các liên kết thư mục (mounts) chỉ là **tải lên một lần (one-shot upload)** khi bắt đầu khởi động sandbox (không thể liên kết host bind-mount vì sandbox nằm trên đám mây).
+
+```yaml
+sandbox:
+  use: deerflow.community.e2b_sandbox:E2BSandboxProvider
+
+  # Bắt buộc: e2b API key. Tự động chuyển về biến môi trường E2B_API_KEY nếu bỏ trống.
+  api_key: $E2B_API_KEY
+
+  # Tùy chọn: e2b sandbox template id (mặc định: code-interpreter-v1)
+  template: code-interpreter-v1
+
+  # Tùy chọn: domain triển khai e2b self-hosted
+  # domain: e2b.dev
+
+  # Tùy chọn: thư mục bên trong sandbox để làm phân vùng cho /mnt/user-data
+  # (mặc định: /home/user)
+  home_dir: /home/user
+
+  # Tùy chọn: thời gian chờ nhàn rỗi do server áp đặt tính bằng giây (mặc định: 600, tối đa 86400).
+  # Nhà cung cấp sẽ refresh thuộc tính này ở mỗi lượt release để giữ sandbox ấm luôn hoạt động.
+  idle_timeout: 600
+
+  # Tùy chọn: số lượng sandbox đồng thời tối đa trên mỗi tiến trình gateway (mặc định: 3).
+  # Khi vượt quá, sandbox ấm ít được sử dụng nhất sẽ bị tắt.
+  replicas: 3
+
+  # Tùy chọn: tải lên một lần các file của host vào sandbox khi bắt đầu.
+  # Các mount chỉ đọc (read-only) sẽ được chmod thành chỉ đọc sau khi tải lên.
+  mounts:
+    - host_path: /path/on/host
+      container_path: /home/user/shared
+      read_only: false
+
+  # Tùy chọn: các biến môi trường được chuyển tiếp tới sandbox khi tạo.
+  # Các giá trị bắt đầu bằng "$" được giải quyết từ môi trường của host.
+  environment:
+    OPENAI_API_KEY: $OPENAI_API_KEY
+```
+
+Cài đặt: `e2b-code-interpreter` đã là một thư viện phụ thuộc cốt lõi của `deerflow-harness`, vì vậy không cần bước cài đặt bổ sung nào — chỉ cần cung cấp API key của bạn và chuyển đổi nhà cung cấp trong file `config.yaml`.
+
+Lấy API key tại [e2b.dev/dashboard](https://e2b.dev/dashboard) và thiết lập `sandbox.api_key` trực tiếp trong `config.yaml` hoặc export `E2B_API_KEY` trong file `.env` của bạn.
+
+<Callout type="info">
+  Vì e2b là một sandbox từ xa (remote sandbox), tiền tố ảo `/mnt/user-data` của DeerFlow sẽ được tự động ánh xạ lại thành `home_dir` (mặc định `/home/user`) bên trong máy ảo đám mây. Các tool đọc hoặc ghi dưới thư mục `/mnt/user-data/...` tiếp tục hoạt động một cách trong suốt.
+</Callout>
+
+### Provisioner-managed Sandbox (Kubernetes)
+
+Mỗi sandbox nhận được một Pod chuyên dụng trong cụm Kubernetes, được quản lý bởi dịch vụ provisioner. Mô hình này cung cấp sự cô lập mạnh mẽ nhất và được khuyến nghị cho môi trường production có nhiều người dùng đồng thời.
+
+```yaml
+sandbox:
+  use: deerflow.community.aio_sandbox:AioSandboxProvider
+  provisioner_url: http://provisioner:8002
+```
+
+Dịch vụ provisioner được tích hợp sẵn trong file `docker/docker-compose-dev.yaml` và quản lý vòng đời của Pod cũng như Service cho mỗi ID sandbox.
+
+## Ánh xạ đường dẫn (Path mappings)
+
+Sandbox sử dụng ánh xạ đường dẫn để làm cầu nối giữa hệ thống file của host và hệ thống file ảo của container. Hai ánh xạ then chốt luôn được cấu hình:
+
+| Đường dẫn Host | Đường dẫn Container | Quyền truy cập |
+| ------------------------------------------- | -------------------------------------------- | ---------- |
+| `skills/` (từ `skills.path`) | `/mnt/skills` (từ `skills.container_path`) | Chỉ đọc (Read-only) |
+| `.deer-flow/threads/{thread_id}/user-data/` | `/mnt/user-data/` | Đọc-ghi (Read-write) |
+
+Thư mục skills luôn được mount dưới dạng chỉ đọc. Các thread ghi dữ liệu làm việc của chúng (file upload, output, các file trung gian) vào thư mục `/mnt/user-data/`.
+
+### Gắn kết thư mục tùy chỉnh (Custom mounts)
+
+Bạn có thể chèn thêm các liên kết thư mục bổ sung cho sandbox cục bộ bằng cấu hình `mounts:`:
+
+```yaml
+sandbox:
+  use: deerflow.sandbox.local:LocalSandboxProvider
+  mounts:
+    - host_path: /home/user/my-project
+      container_path: /mnt/my-project
+      read_only: true
+```
+
+<Callout type="warning">
+  Các giá trị `container_path` của custom mount không được trùng lặp với các tiền tố đã được hệ thống giữ trước (reserved prefixes): `/mnt/skills`, `/mnt/acp-workspace`, hoặc `/mnt/user-data`.
+</Callout>
+
+Khi `LocalSandboxProvider` chạy dưới Docker môi trường production (`make up`), nhà cung cấp sandbox sẽ chạy bên trong container `deer-flow-gateway`. Ở chế độ đó, `host_path` được phân giải từ hệ thống file của container gateway, chứ không phải trực tiếp từ host Docker của bạn. Hãy gắn kết thư mục host vào dịch vụ gateway trước, sau đó sử dụng đường dẫn trong container đó trong file `config.yaml`:
+
+```yaml
+# docker/docker-compose.yaml hoặc một file ghi đè (override)
+services:
+  gateway:
+    volumes:
+      - ${DEER_FLOW_REPO_ROOT}/.deer-flow/knowledge:/app/.deer-flow/knowledge:ro
+```
+
+```yaml
+sandbox:
+  use: deerflow.sandbox.local:LocalSandboxProvider
+  mounts:
+    - host_path: /app/.deer-flow/knowledge
+      container_path: /mnt/knowledge
+      read_only: true
+```
+
+Nếu cấu hình `host_path` không hiển thị đối với tiến trình gateway, DeerFlow sẽ ghi log lỗi và bỏ qua mount đó.
+
+## Cắt bớt kết quả đầu ra (Output truncation)
+
+Các sandbox tools giới hạn kích thước đầu ra để giữ cho ngữ cảnh của agent trong tầm kiểm soát. Các giới hạn này có thể cấu hình được:
+
+```yaml
+sandbox:
+  use: deerflow.sandbox.local:LocalSandboxProvider
+
+  # bash sử dụng cắt bớt ở giữa (head + tail)
+  bash_output_max_chars: 20000
+
+  # read_file sử dụng cắt bớt ở đầu
+  read_file_output_max_chars: 50000
+
+  # ls sử dụng cắt bớt ở đầu
+  ls_output_max_chars: 20000
+```
+
+Đặt thành `0` để tắt tính năng cắt bớt kết quả đầu ra.
+
+## Bảo mật
+
+### LocalSandbox
+
+`LocalSandbox` chạy các câu lệnh trực tiếp trên host. Theo mặc định, tool `bash` bị **tắt** để ngăn việc thực thi lệnh tùy ý trên host. Chỉ bật nó đối với các quy trình làm việc một người dùng hoàn toàn đáng tin cậy:
+
+```yaml
+sandbox:
+  allow_host_bash: true # Nguy hiểm: cấp cho agent quyền truy cập shell vào máy của bạn
+```
+
+Ngay cả khi không có `bash`, agent vẫn có thể đọc và ghi file thông qua các tool xử lý file chuyên dụng.
+
+### Container sandbox
+
+Các sandbox dựa trên container cung cấp sự cô lập về hệ thống file và tiến trình. Agent không thể nhìn thấy hoặc sửa đổi hệ thống file của host ngoại trừ thông qua các mount được chỉ định rõ ràng. Chế độ provisioner-managed bổ sung thêm một lớp bảo vệ: mỗi thread nhận được một Pod cô lập riêng của nó.
+
+### Middleware kiểm tra (Audit middleware)
+
+`SandboxAuditMiddleware` chạy trên mỗi lượt của agent và ghi lại tất cả các hoạt động của sandbox. Điều này cung cấp lịch sử kiểm tra (audit trail) về việc file nào đã được truy cập và câu lệnh nào đã được chạy trong một session.
+
+<Cards num={2}>
+  <Cards.Card title="Công cụ (Tools)" href="/docs/harness/tools" />
+  <Cards.Card title="Tác nhân phụ (Subagents)" href="/docs/harness/subagents" />
+</Cards>

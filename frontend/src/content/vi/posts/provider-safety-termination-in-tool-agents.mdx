@@ -1,0 +1,124 @@
+---
+title: Các Agent sử dụng Tool phải xử lý chính xác tín hiệu ngắt bảo mật của nhà cung cấp
+description: Tại sao các cuộc gọi tool còn sót lại trong phản hồi bị ngắt do bảo mật của model không được phép thực thi, và cách cấu hình các bộ phát hiện của nhà cung cấp trong DeerFlow.
+date: 2026-05-22
+tags:
+  - An toàn
+  - Agent
+  - Nhà cung cấp mô hình
+---
+
+## Các Agent sử dụng Tool phải xử lý chính xác tín hiệu ngắt bảo mật của nhà cung cấp
+
+Khi một nhà cung cấp (provider) model lớn quyết định rằng đầu vào hoặc đầu ra đã kích hoạt chính sách bảo mật, kết quả quan trọng không chỉ đơn thuần là model đưa ra ít phản hồi hơn. Ứng dụng cần biết rằng lượt tạo hiện tại đã bị chấm dứt. Trong một giao diện chat thông thường, điều này có thể hiển thị dưới dạng một lời từ chối, văn bản bị lọc hoặc phản hồi lỗi. Đối với một Agent có khả năng gọi tool, rủi ro sẽ cao hơn: nếu nhà cung cấp đã dừng quá trình tạo trong khi phản hồi vẫn chứa `tool_calls`, các đối số của các cuộc gọi tool đó có thể chỉ được tạo ra một phần (incompleted).
+
+Các cuộc gọi tool bị tạo dở dang này tuyệt đối không được thực thi như một ý định (intent) bình thường. Một cuộc gọi `write_file` bị cắt ngắn có thể ghi một báo cáo không đầy đủ. Một cuộc gọi `bash` bị cắt ngắn có thể được đưa vào sandbox với các đối số dở dang. Sau khi thấy kết quả thất bại, Agent có thể thử lại và kích hoạt cùng một quy tắc bảo mật lặp đi lặp lại.
+
+[PR #3035](https://github.com/bytedance/deer-flow/pull/3035) giải quyết ranh giới này: khi một nhà cung cấp dừng quá trình tạo với một tín hiệu bảo mật trong khi phản hồi vẫn chứa các cuộc gọi tool, DeerFlow sẽ chặn (suppress) các cuộc gọi tool đó trước và ghi nhận lượt đó như một sự kiện kết thúc do bảo mật (safety termination event).
+
+## Tại sao việc kết thúc do bảo mật cần cơ chế xử lý chuyên dụng
+
+Việc kết thúc do bảo mật không phải là một lý do kết thúc gọi tool thông thường.
+
+Trong một lượt gọi tool bình thường, nhà cung cấp thông báo rõ ràng cho ứng dụng biết rằng nó nên gọi các tool. Việc kết thúc do bảo mật lại mang một thông điệp khác: kết quả đầu ra đã bị chặn bởi chính sách của nhà cung cấp, hoặc quá trình tạo stream đã bị cắt ngắn sớm. Ngay cả khi các mảnh vụn gọi tool (tool-call fragments) vẫn còn trong đối tượng phản hồi, ứng dụng không thể giả định rằng các đối số JSON, nội dung file hoặc văn bản câu lệnh của chúng đã hoàn chỉnh.
+
+Trong một lượt chạy Agent thực tế, điều này tạo ra hai loại rủi ro:
+
+| Rủi ro | Tác động |
+| --- | --- |
+| Rủi ro runtime | Việc thực thi các đối số tool bị cắt ngắn có thể tạo ra các file bị hỏng, các câu lệnh bị lỗi cú pháp, việc thử lại liên tục, hoặc các vòng lặp gọi tool vô hạn |
+| Rủi ro nhà cung cấp | Việc liên tục gửi các đầu vào hoặc đầu ra vi phạm tương tự tới nhà cung cấp sẽ làm tăng áp lực kiểm duyệt bảo mật và kiểm soát lạm dụng tài khoản |
+
+Rủi ro thứ hai rất quan trọng. Các nhà cung cấp thực thi chính sách của họ khác nhau, nhưng các tài liệu chính thức của họ đã nêu rõ rằng chính sách bảo mật có thể ảnh hưởng đến nhiều thứ hơn là một lượt hoàn thành duy nhất. Nó cũng có thể ảnh hưởng đến người dùng cuối, quyền truy cập API, hoặc trạng thái hoạt động của tài khoản.
+
+## Những gì các Nhà cung cấp hiển thị và cách họ phản hồi
+
+Các nhà cung cấp không sử dụng chung một tên trường (field name) và họ không chia sẻ chung một quy trình thực thi. Các mô hình triển khai cần phân biệt ít nhất hai lớp:
+
+1. Tín hiệu nào trong phản hồi này cho biết quá trình tạo đã bị dừng bởi chính sách bảo mật.
+2. Các hành động tiếp theo mà nhà cung cấp đã mô tả công khai khi các vấn đề bảo mật tiếp tục lặp lại.
+
+| Nhà cung cấp | Tín hiệu runtime | Phản hồi hoặc khuyến nghị được tài liệu hóa công khai |
+| --- | --- | --- |
+| GLM | Các cuộc gọi đồng bộ có thể trả về lỗi kiểm tra bảo mật; đầu ra stream có thể kết thúc với `finish_reason="sensitive"` | Truyền `user_id` để phân biệt người dùng cuối; nền tảng có thể chặn các yêu cầu vi phạm của người dùng cuối để tài khoản doanh nghiệp không bị ảnh hưởng bởi sự lạm dụng của người dùng cuối |
+| OpenAI | Chat Completions có thể trả về `finish_reason="content_filter"` | Sử dụng Moderation và `safety_identifier`; các vi phạm chính sách sử dụng lặp đi lặp lại có thể dẫn đến cảnh báo, hạn chế hoặc vô hiệu hóa tài khoản |
+| Anthropic | Các lời từ chối dạng stream có thể hiển thị qua `stop_reason="refusal"` | Reset, viết lại hoặc thu hẹp ngữ cảnh sau một lời từ chối; tài liệu AUP mô tả việc giới hạn request, sửa đổi đầu ra, đình chỉ hoặc chấm dứt quyền truy cập |
+| Gemini | Một ứng viên bị lọc do bảo mật có thể trả về `finishReason=SAFETY`, và nội dung bị chặn sẽ không được trả về | Việc giám sát lạm dụng bao gồm cả prompt và kết quả đầu ra; các hành động tiếp theo có thể leo thang từ việc liên hệ với nhà phát triển đến các hạn chế tạm thời, đình chỉ hoặc đóng tài khoản |
+| DeepSeek | Trường `finish_reason` của chat completion bao gồm `content_filter` | Trường `user` có thể giúp ích cho việc kiểm duyệt an toàn nội dung; các vi phạm hướng dẫn sử dụng tiềm ẩn có thể kích hoạt giao thức đình chỉ tạm thời |
+
+GLM là ví dụ trực tiếp nhất. Tài liệu kiểm tra bảo mật của nó mô tả tín hiệu kết thúc bảo mật dạng stream, khuyến nghị xác định người dùng cuối và khả năng chặn các request từ người dùng cuối vi phạm. [Tài liệu kiểm tra bảo mật của GLM](https://docs.bigmodel.cn/cn/guide/platform/securityaudit)
+
+OpenAI định nghĩa `content_filter` là một lý do kết thúc (finish reason) của Chat Completions. Các thực hành tốt nhất về bảo mật của nó khuyến nghị sử dụng `safety_identifier` cho người dùng cuối để có thể quy kết vi phạm chính sách chính xác hơn là chỉ sử dụng một API key dùng chung. Tài liệu trợ giúp của OpenAI cũng cho biết các vi phạm chính sách sử dụng lặp đi lặp lại có thể dẫn đến việc tài khoản bị vô hiệu hóa. [Thực hành tốt nhất về bảo mật](https://developers.openai.com/api/docs/guides/safety-best-practices/) [Tại sao tài khoản OpenAI của tôi bị vô hiệu hóa?](https://help.openai.com/en/articles/10562188)
+
+Anthropic phân biệt các điểm dừng thông thường với các lời từ chối bảo mật trong hướng dẫn từ chối dạng stream của Claude: khi bộ phân loại stream can thiệp, phản hồi có thể mang thuộc tính `stop_reason="refusal"`. Nó cũng khuyến nghị các ứng dụng không tiếp tục đưa nội dung bị từ chối trở lại ngữ cảnh sau đó, mà thay vào đó hãy reset cuộc trò chuyện, viết lại prompt hoặc thu hẹp tác vụ. Chính sách AUP của Anthropic cho biết họ có thể giới hạn request, chặn hoặc sửa đổi đầu ra, và đình chỉ hoặc chấm dứt quyền truy cập khi cần thiết. [Xử lý từ chối dạng stream](https://platform.claude.com/docs/en/test-and-evaluate/strengthen-guardrails/handle-streaming-refusals) [Chính sách sử dụng được chấp nhận (AUP)](https://www.anthropic.com/legal/aup)
+
+Tài liệu bảo mật của Gemini nhấn mạnh một hình thức can thiệp khác. Một prompt có thể bị chặn trước khi tạo, và một ứng viên có thể bị lọc sau khi tạo. Khi một ứng viên phản hồi bị dừng bởi chính sách bảo mật, phản hồi có thể hiển thị `finishReason=SAFETY` mà không trả về bản thân nội dung bị chặn. Các điều khoản API của Gemini cũng cho biết việc giám sát lạm dụng bao gồm cả prompt và kết quả đầu ra, đồng thời liệt kê các hành động xử lý mạnh mẽ hơn theo cấp độ. [Cài đặt bảo mật Gemini](https://ai.google.dev/gemini-api/docs/safety-settings) [Điều khoản dịch vụ bổ sung của Gemini API](https://ai.google.dev/gemini-api/terms)
+
+DeepSeek liệt kê `content_filter` là một lý do kết thúc chat completion và mô tả trường `user` trong request là hữu ích cho việc kiểm duyệt an toàn nội dung. Các câu hỏi thường gặp của nó cũng cho biết các vi phạm hướng dẫn sử dụng tiềm ẩn có thể kích hoạt quy trình đình chỉ tạm thời. [Tạo Chat Completion](https://api-docs.deepseek.com/api/create-chat-completion)
+
+Một số nhà cung cấp can thiệp sớm hơn hoặc ở một lớp bên ngoài tin nhắn của model. Ví dụ: Azure OpenAI yêu cầu các ứng dụng kiểm tra `finish_reason` vì `content_filter` có thể khiến một lượt tạo không hoàn chỉnh. Amazon Bedrock Guardrails có thể trả về `stopReason="guardrail_intervened"` trong một phản hồi. Trong các ví dụ guardrail của Alibaba Cloud Model Studio, việc chặn ở phía đầu ra cũng có thể xuất hiện trực tiếp dưới dạng lỗi `DataInspectionFailed`. Cùng với nhau, các ví dụ này chỉ ra rằng một sự can thiệp bảo mật có thể là một tín hiệu dừng trong tin nhắn của model hoặc một lỗi ở cấp độ API. Các ứng dụng cần nhiều hơn một đường dẫn xử lý. [Lọc nội dung Azure OpenAI](https://learn.microsoft.com/en-us/azure/ai-services/openai/concepts/content-filter) [Amazon Bedrock Guardrails](https://docs.aws.amazon.com/bedrock/latest/userguide/guardrails-use-converse-api.html)
+
+## Những gì DeerFlow thực hiện ở ranh giới này
+
+`SafetyFinishReasonMiddleware` có một nhiệm vụ cụ thể và giới hạn. Nó không thay thế việc kiểm duyệt nội dung của nhà cung cấp, và nó không viết lại mọi lời từ chối thành cùng một lỗi. Nó chỉ can thiệp khi cả hai điều kiện dưới đây đều đúng:
+
+1. Phản hồi của nhà cung cấp mang một tín hiệu kết thúc do bảo mật được cấu hình.
+2. Tin nhắn `AIMessage` hiện tại vẫn chứa các trường `tool_calls` không rỗng.
+
+Khi can thiệp, nó sẽ:
+
+1. Xóa các cuộc gọi tool có cấu trúc và các trường gọi tool còn sót lại trong metadata thô của nhà cung cấp.
+2. Ngăn không cho các đối số của tool đó chuyển đến tool node để thực thi.
+3. Giữ lại phần văn bản dở dang đã được tạo ra và thêm vào một lời giải thích thân thiện với người dùng.
+4. Ghi lại bộ phát hiện (detector), trường lý do (reason field), giá trị lý do (reason value), cùng tên và số lượng các tool bị chặn.
+5. Tránh việc ghi các đối số của tool (mà bản thân chúng có thể chứa nội dung bị lọc) vào các sự kiện kiểm tra (audit events) một lần nữa.
+
+Điều này giúp tín hiệu kết thúc do bảo mật được ưu tiên cao hơn việc các cuộc gọi tool có mặt trong phản hồi. Đối với Agent runtime, đó là luồng kiểm soát thận trọng và chính xác hơn.
+
+## Cấu hình mặc định
+
+Cấu hình mặc định chỉ cần bật `safety_finish_reason`:
+
+```yaml
+safety_finish_reason:
+  enabled: true
+```
+
+Khi `detectors` không được cấu hình rõ ràng, DeerFlow sẽ sử dụng tập hợp các bộ phát hiện tích hợp sẵn:
+
+| Bộ phát hiện (Detector) | Khớp mặc định (Default match) |
+| --- | --- |
+| `OpenAICompatibleContentFilterDetector` | `finish_reason="content_filter"` |
+| `AnthropicRefusalDetector` | `stop_reason="refusal"` |
+| `GeminiSafetyDetector` | Các giá trị `finish_reason` liên quan đến bảo mật của Gemini như `SAFETY`, `BLOCKLIST`, `PROHIBITED_CONTENT`, `SPII`, và `RECITATION` |
+
+Tập hợp mặc định này bao gồm các đường dẫn DeerFlow phổ biến cho các nhà cung cấp tương thích với OpenAI, Anthropic, và Gemini. Nó không coi một kết quả bình thường `finish_reason="tool_calls"` là một lần kết thúc do bảo mật, và nó không gộp việc cắt ngắn độ dài như `length` hoặc `max_tokens` vào danh mục bảo mật.
+
+## Ví dụ: Mở rộng tín hiệu kết thúc bảo mật dạng stream cho GLM
+
+Các phản hồi stream của GLM sử dụng `sensitive` làm giá trị kết thúc bảo mật. Nếu adapter hiện tại giữ nguyên giá trị đó trong `AIMessage.response_metadata.finish_reason` hoặc `additional_kwargs.finish_reason`, nó có thể được xử lý thông qua tập hợp finish reason cấu hình được trên bộ phát hiện tương thích với OpenAI:
+
+```yaml
+safety_finish_reason:
+  enabled: true
+  detectors:
+    - use: deerflow.agents.middlewares.safety_termination_detectors:OpenAICompatibleContentFilterDetector
+      config:
+        finish_reasons: ["content_filter", "sensitive"]
+
+    - use: deerflow.agents.middlewares.safety_termination_detectors:AnthropicRefusalDetector
+
+    - use: deerflow.agents.middlewares.safety_termination_detectors:GeminiSafetyDetector
+```
+
+Hai chi tiết cấu hình cần lưu ý ở đây:
+
+Thứ nhất, `detectors` sẽ thay thế danh sách mặc định, chứ nó không thêm một mục vào danh sách đó. Do đó, ví dụ trên giữ lại các bộ phát hiện của Anthropic và Gemini trong khi thêm giá trị `sensitive` của GLM.
+
+Thứ hai, middleware này xử lý các tín hiệu kết thúc do bảo mật đã đến được tin nhắn của model. Nếu nhà cung cấp trả về một lỗi kiểm tra bảo mật ở lớp API, chẳng hạn như mã lỗi kiểm tra bảo mật GLM đồng bộ, người gọi vẫn cần xử lý nó trong đường dẫn lỗi LLM hoặc API.
+
+## Ranh giới hoạt động
+
+`SafetyFinishReasonMiddleware` giải quyết một vấn đề cụ thể về luồng kiểm soát của Agent. Nó không phải là một giải pháp an toàn nội dung toàn diện. Nó không thay thế việc kiểm duyệt (moderation), cô lập quyền hạn, quản trị người dùng, hoặc việc kiểm duyệt phía nhà cung cấp, và nó không bao gồm mọi lời từ chối bằng văn bản thông thường.
+
+Ranh giới này vẫn rất đáng để bảo vệ một cách rõ ràng: khi một nhà cung cấp đã dừng đầu ra vì lý do bảo mật, một Agent sử dụng tool nên coi lượt đó là đầu ra bị gián đoạn, chứ không phải là một ý định gọi tool có thể thực thi.

@@ -54,7 +54,7 @@ function formatTimestamp(value: string | null, locale: string): string {
   }
   // Use a locale-aware short format like "2026-07-03 09:00". Future timestamps
   // (next_run_at) render as an absolute time, not a relative "ago" string.
-  const intlLocale = locale === "zh-CN" ? "zh-CN" : "en-US";
+  const intlLocale = ["zh-CN", "vi-VN"].includes(locale) ? locale : "en-US";
   return new Intl.DateTimeFormat(intlLocale, {
     year: "numeric",
     month: "2-digit",

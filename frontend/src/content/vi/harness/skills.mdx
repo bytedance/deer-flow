@@ -1,0 +1,161 @@
+---
+title: Kỹ năng (Skills)
+description: Một skill không chỉ đơn thuần là một prompt. Nó là một gói khả năng tự chứa (self-contained) bao gồm các hướng dẫn có cấu trúc, các workflow từng bước, các thực hành tốt nhất đặc thù của miền nghiệp vụ, các tài nguyên hỗ trợ và các cấu hình tool. Các skill được tải theo yêu cầu — chúng chèn nội dung khi một tác vụ cần đến và nằm ngoài ngữ cảnh trong các trường hợp ngược lại.
+---
+
+import { Callout, FileTree, Steps } from "nextra/components";
+
+# Kỹ năng (Skills)
+
+<Callout type="info" emoji="🎯">
+  Skills là các gói khả năng hướng tác vụ nhằm hướng dẫn agent cách thực hiện một nhóm công việc cụ thể. Agent cơ bản (base agent) giữ vai trò tổng quát; các skill mang lại sự chuyên biệt hóa chỉ khi cần thiết.
+</Callout>
+
+Một skill không chỉ đơn thuần là một prompt. Nó là một gói khả năng tự chứa (self-contained) bao gồm các hướng dẫn có cấu trúc, các workflow từng bước, các thực hành tốt nhất đặc thù của miền nghiệp vụ, các tài nguyên hỗ trợ và các cấu hình tool. Các skill được tải theo yêu cầu — chúng chèn nội dung khi một tác vụ cần đến và nằm ngoài ngữ cảnh trong các trường hợp ngược lại.
+
+## Thành phần của một Skill
+
+Mỗi skill nằm trong thư mục con riêng dưới `skills/public/` (hoặc `skills/custom/` đối với các skill do người dùng tự tạo). Thư mục chứa một file `SKILL.md` định nghĩa metadata, hướng dẫn và workflow của skill đó.
+
+<FileTree>
+  <FileTree.Folder name="skills/" defaultOpen>
+    <FileTree.Folder name="public/" defaultOpen>
+      <FileTree.Folder name="deep-research/" defaultOpen>
+        <FileTree.File name="SKILL.md" />
+      </FileTree.Folder>
+      <FileTree.Folder name="data-analysis/">
+        <FileTree.File name="SKILL.md" />
+      </FileTree.Folder>
+      <FileTree.Folder name="chart-visualization/">
+        <FileTree.File name="SKILL.md" />
+      </FileTree.Folder>
+    </FileTree.Folder>
+    <FileTree.Folder name="custom/">
+      <FileTree.File name="(các skill tùy chỉnh của bạn nằm ở đây)" />
+    </FileTree.Folder>
+  </FileTree.Folder>
+</FileTree>
+
+File `SKILL.md` là định nghĩa chính thức của một skill. Nó được parse bởi `skills/parser.py` để trích xuất tên skill, mô tả, danh mục, hướng dẫn, và bất kỳ thư viện phụ thuộc hay yêu cầu về tool nào.
+
+## Các Skill tích hợp sẵn (Built-in skills)
+
+DeerFlow đi kèm với các skill công khai sau:
+
+| Tên Skill | Mô tả |
+| ------------------------------ | ---------------------------------------------------------------- |
+| `deep-research`                | Nghiên cứu nhiều bước với việc thu thập nguồn tin, đối chiếu chéo và đầu ra có cấu trúc |
+| `data-analysis`                | Khám phá dữ liệu, phân tích thống kê và tạo thông tin chi tiết (insight) |
+| `chart-visualization`          | Tạo biểu đồ và đồ thị từ dữ liệu |
+| `ppt-generation`               | Tạo các slide trình chiếu thuyết trình |
+| `image-generation`             | Quy trình công việc tạo hình ảnh AI |
+| `code-documentation`           | Tự động tạo tài liệu hướng dẫn cho mã nguồn |
+| `newsletter-generation`        | Tạo nội dung bản tin (newsletter) |
+| `podcast-generation`           | Tạo kịch bản và dàn ý cho podcast |
+| `academic-paper-review`        | Phân tích có cấu trúc bài báo học thuật |
+| `consulting-analysis`          | Các framework phân tích và tư vấn doanh nghiệp |
+| `systematic-literature-review` | Phương pháp luận và tổng hợp đánh giá tài liệu |
+| `github-deep-research`         | Nghiên cứu sâu về mã nguồn và repository |
+| `frontend-design`              | Thiết kế frontend và workflow UI |
+| `web-design-guidelines`        | Tiêu chuẩn và đánh giá thiết kế web |
+| `video-generation`             | Lên kế hoạch và sản xuất nội dung video |
+
+## Vòng đời của một Skill (Skill lifecycle)
+
+<Steps>
+
+### Khám phá và tải (Discovery and loading)
+
+Hàm `load_skills()` trong `skills/loader.py` quét cả hai thư mục `public/` và `custom/` dưới đường dẫn skills được cấu hình. Nó đọc lại `ExtensionsConfig.from_file()` ở mỗi lượt gọi, điều này có nghĩa là việc bật hoặc tắt một skill thông qua Gateway API sẽ có hiệu lực ngay lập tức trong agent runtime đang chạy mà không cần khởi động lại máy chủ.
+
+### Phân tích (Parsing)
+
+File `parser.py` đọc mỗi file `SKILL.md` và trích xuất metadata có cấu trúc: tên, mô tả, danh mục, hướng dẫn và bất kỳ yêu cầu nào về tool hay tài nguyên đi kèm.
+
+### Quét bảo mật (Security scanning)
+
+File `security_scanner.py` kiểm tra nội dung skill để phát hiện các mẫu nguy hiểm tiềm tàng trước khi nó được tải vào ngữ cảnh của agent. Bước này chạy trong quá trình tải skill để ngăn chặn nội dung skill độc hại bị chèn vào hệ thống.
+
+### Cài đặt thư viện phụ thuộc (Dependency installation)
+
+File `installer.py` xử lý bất kỳ thư viện phụ thuộc Python hoặc hệ thống nào được khai báo bởi skill. Các thư viện phụ thuộc được cài đặt vào môi trường runtime khi skill được tải lần đầu tiên.
+
+### Chèn ngữ cảnh (Context injection)
+
+Khi agent được gọi với một skill cụ thể nằm trong phạm vi sử dụng, các hướng dẫn của skill đó được chèn vào system prompt. Agent sau đó có quyền truy cập vào workflow, thực hành tốt nhất, và kiến thức chuyên môn của skill đó trong suốt thời gian diễn ra cuộc hội thoại.
+
+</Steps>
+
+## Cấu hình
+
+Hệ thống skill được cấu hình dưới mục `skills:` trong file `config.yaml`:
+
+```yaml
+skills:
+  # Đường dẫn tới thư mục skills trên host.
+  # Mặc định: ../skills tương đối với thư mục backend.
+  # Bỏ comment để tùy chỉnh:
+  # path: /absolute/path/to/custom/skills
+
+  # Đường dẫn nơi skills được gắn (mount) trong sandbox container.
+  # Agent sử dụng đường dẫn này để truy cập các file skill trong quá trình thực thi.
+  container_path: /mnt/skills
+```
+
+Đường dẫn `container_path` rất quan trọng: nó chỉ cho agent nơi tìm kiếm các tài nguyên skill bên trong sandbox. Harness tự động mount thư mục skills của host vào đường dẫn container này.
+
+## Bật và tắt các Skill
+
+Trạng thái khả dụng của skill được theo dõi trong file `extensions_config.json` (tách biệt với `config.yaml`). Bạn có thể quản lý trạng thái của skill:
+
+- **Thông qua giao diện DeerFlow App UI**: bảng điều khiển skills cho phép bạn chuyển đổi bật/tắt các skill.
+- **Thông qua Gateway API**: sử dụng các endpoint `POST /api/extensions/skills/{name}/enable` và `/disable`.
+- **Bằng cách chỉnh sửa trực tiếp file `extensions_config.json`**.
+
+Vì `load_skills()` đọc lại cấu hình extensions trên mỗi lượt gọi, các thay đổi sẽ có hiệu lực ngay lập tức — không cần khởi động lại server.
+
+## Giới hạn Skill cho từng Custom Agent
+
+Một custom agent có thể bị giới hạn chỉ được sử dụng một tập hợp con các skill cụ thể. Trong cấu hình của agent (được lưu tại `agents/{name}/config.yaml`), hãy thiết lập danh sách `skills`:
+
+```yaml
+# agents/my-researcher/config.yaml
+name: my-researcher
+skills:
+  - deep-research
+  - academic-paper-review
+  # Bỏ qua tất cả các skill khác
+```
+
+- **Bỏ qua hoặc null**: agent tải tất cả các skill được bật toàn cục.
+- **Danh sách rỗng `[]`**: agent không có skill nào.
+- **Danh sách được đặt tên cụ thể**: agent chỉ tải các skill được liệt kê đó.
+
+## Tiến hóa kỹ năng (Skill evolution)
+
+DeerFlow tích hợp tính năng **tiến hóa kỹ năng (skill evolution)** tùy chọn cho phép agent tự động tạo và cải tiến các skill trong thư mục `skills/custom/`:
+
+```yaml
+skill_evolution:
+  enabled: false # Đặt thành true để cho phép agent tự động tạo skill
+  moderation_model_name: null # Model cho việc quét bảo mật (null = dùng model mặc định)
+```
+
+<Callout type="warning">
+  Chỉ bật tính năng skill evolution trong các môi trường mà bạn tin tưởng hoàn toàn kết quả đầu ra của agent. Các skill mới được tạo sẽ được quét bảo mật trước khi tải, nhưng tính năng này cấp cho agent quyền ghi trực tiếp vào thư mục skills.
+</Callout>
+
+## Viết một Skill tùy chỉnh
+
+Để tạo một skill tùy chỉnh:
+
+1. Tạo một thư mục mới dưới đường dẫn `skills/custom/your-skill-name/`
+2. Thêm file `SKILL.md` để định nghĩa metadata và hướng dẫn của skill đó
+3. Skill sẽ tự động được phát hiện trong lần gọi `load_skills()` tiếp theo
+
+Định dạng của file `SKILL.md` tuân theo cấu trúc giống như các skill tích hợp sẵn. Hãy sử dụng một trong các skill công khai hiện có làm tài liệu tham khảo cho định dạng yêu cầu.
+
+<Cards num={2}>
+  <Cards.Card title="Sandbox" href="/docs/harness/sandbox" />
+  <Cards.Card title="Công cụ (Tools)" href="/docs/harness/tools" />
+</Cards>

@@ -1,0 +1,71 @@
+---
+title: Làm việc với Bộ nhớ
+description: Hướng dẫn này chỉ ra cách bật và sử dụng hệ thống memory của DeerFlow để agent có thể ghi nhớ các thông tin quan trọng về bạn xuyên suốt nhiều session khác nhau.
+---
+
+import { Callout } from "nextra/components";
+
+# Làm việc với Bộ nhớ
+
+Hướng dẫn này chỉ ra cách bật và sử dụng hệ thống memory của DeerFlow để agent có thể ghi nhớ các thông tin quan trọng về bạn xuyên suốt nhiều session khác nhau.
+
+## Bật tính năng Memory
+
+Khai báo trong file `config.yaml`:
+
+```yaml
+memory:
+  enabled: true
+  injection_enabled: true
+  max_injection_tokens: 2000
+  debounce_seconds: 30
+```
+
+## Cơ chế hoạt động của Memory
+
+Memory tự động hoạt động thông qua `MemoryMiddleware`:
+
+1. **Cuộc hội thoại đầu tiên**: chia sẻ với agent về các tùy chọn cá nhân, dự án, hoặc thông tin nền của bạn.
+2. **Tự động học hỏi**: agent tự động trích xuất và lưu trữ các thông tin thực tế quan trọng dưới nền.
+3. **Các cuộc hội thoại tương lai**: các thông tin thực tế trong memory sẽ tự động được chèn vào system prompt — bạn không cần phải lặp lại ngữ cảnh cũ cho agent.
+
+## Ví dụ minh họa
+
+**Cuộc hội thoại đầu tiên:**
+
+```
+I am a Python backend developer primarily using FastAPI and PostgreSQL.
+My team follows PEP 8 and prefers type annotations everywhere.
+Please remember this for future code suggestions.
+```
+
+**Cuộc hội thoại sau đó** (không cần lặp lại thông tin nền):
+
+```
+Help me write a user authentication module
+```
+
+Agent sẽ tự động tạo ra mã nguồn theo cấu trúc FastAPI đi kèm các type annotations đầy đủ theo chuẩn PEP 8.
+
+## Kiểm tra Memory
+
+Memory được lưu trữ trong file `backend/.deer-flow/memory.json`:
+
+```bash
+cat backend/.deer-flow/memory.json
+```
+
+## Bộ nhớ riêng cho từng Agent (Per-agent memory)
+
+Khi một custom agent đang hoạt động, nó sẽ tự động duy trì file memory của riêng mình tại đường dẫn:
+
+```
+backend/.deer-flow/agents/{agent_name}/memory.json
+```
+
+Điều này giúp giữ cho kiến thức học hỏi được của từng agent được cô lập và tách biệt.
+
+## Các bước tiếp theo
+
+- [Triển khai DeerFlow của riêng bạn](/docs/tutorials/deploy-your-own-deerflow)
+- [Tham chiếu Hệ thống Bộ nhớ (Memory System Reference)](/docs/harness/memory)

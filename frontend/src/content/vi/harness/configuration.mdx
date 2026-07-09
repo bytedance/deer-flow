@@ -1,0 +1,166 @@
+---
+title: Cấu hình
+description: "Hệ thống cấu hình của DeerFlow được thiết kế xoay quanh một mục tiêu: mọi hành vi có ý nghĩa đều phải biểu diễn được trong file cấu hình, thay vì hardcode trong ứng dụng. Điều này giúp việc triển khai có tính tái lặp, dễ kiểm tra và dễ dàng tùy chỉnh theo từng môi trường."
+---
+
+import { Callout } from "nextra/components";
+
+# Cấu hình
+
+<Callout type="info" emoji="⚙️">
+  Tất cả các hành vi của DeerFlow Harness đều được điều khiển bởi <code>config.yaml</code>. File này kiểm soát model nào khả dụng, sandbox chạy như thế nào, các tool nào được tải và hành vi của từng phân hệ.
+</Callout>
+
+Hệ thống cấu hình của DeerFlow được thiết kế xoay quanh một mục tiêu: mọi hành vi có ý nghĩa đều phải biểu diễn được trong file cấu hình, thay vì hardcode trong ứng dụng. Điều này giúp việc triển khai có tính tái lặp, dễ kiểm tra và dễ dàng tùy chỉnh theo từng môi trường.
+
+## Vị trí file cấu hình
+
+DeerFlow xác định vị trí của `config.yaml` theo thứ tự ưu tiên như sau:
+
+1. Đường dẫn được truyền rõ ràng vào hàm `AppConfig.from_file(config_path)`.
+2. Biến môi trường `DEER_FLOW_CONFIG_PATH`.
+3. File `backend/config.yaml` (tương đối với thư mục backend).
+4. File `config.yaml` ở thư mục gốc của repository.
+
+Nếu không có đường dẫn nào ở trên tồn tại, ứng dụng sẽ báo lỗi khi khởi động.
+
+Để chỉ định một vị trí tùy chỉnh:
+
+```bash
+export DEER_FLOW_CONFIG_PATH=/path/to/my-config.yaml
+```
+
+## Nội suy biến môi trường (Environment variable interpolation)
+
+Mọi giá trị trường cấu hình đều có thể tham chiếu đến một biến môi trường bằng cú pháp `$VAR_NAME`:
+
+```yaml
+models:
+  - name: gpt-4o
+    api_key: $OPENAI_API_KEY
+```
+
+Điều này giúp giữ các thông tin nhạy cảm (như API key) ra khỏi file cấu hình. Biến môi trường sẽ được giải quyết tại runtime từ môi trường tiến trình (process environment).
+
+## Trường `use`
+
+Nhiều mục trong file cấu hình sử dụng trường `use:` để chỉ định lớp (class) Python hoặc đối tượng cần khởi tạo. Định dạng như sau:
+
+```
+package.subpackage.module:ClassName
+```
+
+hoặc đối với các đối tượng ở cấp độ module:
+
+```
+package.subpackage.module:variable_name
+```
+
+Ví dụ:
+
+```yaml
+sandbox:
+  use: deerflow.sandbox.local:LocalSandboxProvider
+
+tools:
+  - use: deerflow.community.tavily.tools:web_search_tool
+    api_key: $TAVILY_API_KEY
+```
+
+Mô hình này giúp DeerFlow đạt được tính cắm lắp (pluggability) mà không cần phải hardcode các tham chiếu class.
+
+## Các trường bổ sung được truyền trực tiếp (Pass-through)
+
+Đối với cấu hình model, `ModelConfig` sử dụng `pydantic ConfigDict(extra="allow")`. Điều này có nghĩa là bất kỳ trường bổ sung nào bạn thêm vào dưới mục model sẽ được truyền trực tiếp vào hàm khởi tạo (constructor) của model đó. Cơ chế này cho phép các tùy chọn đặc thù của nhà cung cấp model (như `extra_body`, `reasoning` hoặc các key tùy chỉnh timeout) hoạt động bình thường mà không cần chỉnh sửa code của Harness:
+
+```yaml
+models:
+  - name: my-model
+    use: langchain_openai:ChatOpenAI
+    model: gpt-4o
+    api_key: $OPENAI_API_KEY
+    some_provider_specific_option: value # được truyền trực tiếp vào constructor ChatOpenAI
+```
+
+## Phiên bản cấu hình (Configuration version)
+
+File `config.yaml` chứa một trường `config_version` để theo dõi phiên bản của schema:
+
+```yaml
+config_version: 6
+```
+
+Khi schema thay đổi (thêm trường mới, đổi tên các mục), số phiên bản này sẽ được tăng lên. Nếu file `config.yaml` cục bộ của bạn thấp hơn phiên bản hiện tại, hãy chạy:
+
+```bash
+make config-upgrade
+```
+
+Lệnh này sẽ tự động gộp các trường mới từ file `config.example.yaml` vào file `config.yaml` hiện tại của bạn mà không ghi đè lên các tùy chỉnh của bạn.
+
+## Tham chiếu cấu hình module
+
+Bảng dưới đây ánh xạ từng phần cấu hình cấp cao nhất trong `config.yaml` tới trang tài liệu tương ứng:
+
+| Phần cấu hình | Mô tả | Trang tài liệu |
+| :--- | :--- | :--- |
+| `log_level` | Cấp độ ghi log (`debug`/`info`/`warning`/`error`) | — |
+| `models` | Các LLM model khả dụng | [Tác nhân chính (Lead Agent)](/docs/harness/lead-agent) |
+| `token_usage` | Theo dõi lượng token tiêu tốn trên mỗi lượt gọi model | [Middleware](/docs/harness/middlewares) |
+| `tools` | Các tool khả dụng cho agent | [Công cụ (Tools)](/docs/harness/tools) |
+| `tool_groups` | Các nhóm tool được đặt tên | [Công cụ (Tools)](/docs/harness/tools) |
+| `tool_search` | Tải tool theo yêu cầu / trì hoãn | [Công cụ (Tools)](/docs/harness/tools) |
+| `sandbox` | Nhà cung cấp sandbox và các tùy chọn | [Sandbox](/docs/harness/sandbox) |
+| `skills` | Thư mục lưu trữ skills và đường dẫn container | [Kỹ năng (Skills)](/docs/harness/skills) |
+| `skill_evolution` | Tính năng tự tạo skill do agent quản lý | [Kỹ năng (Skills)](/docs/harness/skills) |
+| `subagents` | Thời gian timeout và số lượt gọi tối đa của subagent | [Tác nhân phụ (Subagents)](/docs/harness/subagents) |
+| `acp_agents` | Tích hợp các ACP agent bên ngoài | [Tác nhân phụ (Subagents)](/docs/harness/subagents) |
+| `memory` | Kho lưu trữ memory xuyên suốt các session | [Bộ nhớ (Memory)](/docs/harness/memory) |
+| `summarization` | Tóm tắt ngữ cảnh cuộc hội thoại | [Middleware](/docs/harness/middlewares) |
+| `title` | Tự động tạo tiêu đề cho thread | [Middleware](/docs/harness/middlewares) |
+| `checkpointer` | Lưu trữ trạng thái của thread (Thread state persistence) | [Agent & Thread](/docs/application/agents-and-threads) |
+| `guardrails` | Ủy quyền cuộc gọi tool (Tool call authorization) | — |
+| `stream_bridge` | Cấu hình cho việc stream kết quả | — |
+| `uploads` | Cấu hình upload file (bộ chuyển đổi PDF) | — |
+| `channels` | Tích hợp các kênh IM (Feishu, Slack, v.v.) | — |
+
+## Cấu hình tối giản để bắt đầu
+
+Một file `config.yaml` tối giản và hợp lệ yêu cầu ít nhất một model và một sandbox:
+
+```yaml
+config_version: 6
+
+models:
+  - name: gpt-4o
+    use: langchain_openai:ChatOpenAI
+    model: gpt-4o
+    api_key: $OPENAI_API_KEY
+    request_timeout: 600.0
+    max_retries: 2
+    supports_vision: true
+
+sandbox:
+  use: deerflow.sandbox.local:LocalSandboxProvider
+
+tools:
+  - use: deerflow.community.ddg_search.tools:web_search_tool
+  - use: deerflow.community.jina_ai.tools:web_fetch_tool
+  - use: deerflow.sandbox.tools:ls_tool
+  - use: deerflow.sandbox.tools:read_file_tool
+  - use: deerflow.sandbox.tools:write_file_tool
+  - use: deerflow.sandbox.tools:bash_tool
+```
+
+Hãy bắt đầu từ file `config.example.yaml` ở thư mục gốc của repository và bỏ comment (uncomment) các phần bạn cần.
+
+<Cards num={2}>
+  <Cards.Card
+    title="Hướng dẫn triển khai"
+    href="/docs/application/deployment-guide"
+  />
+  <Cards.Card
+    title="Cấu hình ứng dụng"
+    href="/docs/application/configuration"
+  />
+</Cards>

@@ -1,0 +1,77 @@
+---
+title: Tại sao chọn DeerFlow
+description: DeerFlow tồn tại vì các hệ thống tác nhân hiện đại cần nhiều hơn là một vòng lặp trò chuyện đơn thuần. Một tác nhân hữu ích phải lập kế hoạch dài hạn, chia nhỏ công việc thành các tác vụ phụ, sử dụng công cụ, thao tác với tệp, chạy mã một cách an toàn và bảo toàn đủ ngữ cảnh để duy trì tính mạch lạc xuyên suốt một tác vụ phức tạp. DeerFlow được xây dựng để cung cấp nền tảng runtime đó.
+---
+
+import { Callout } from "nextra/components";
+
+# Tại sao chọn DeerFlow
+
+<Callout type="info" emoji="🦌">
+  DeerFlow bắt đầu từ nghiên cứu chuyên sâu, nhưng đã phát triển thành một runtime chung cho các tác nhân chạy đường dài cần kỹ năng, bộ nhớ, công cụ và sự điều phối.
+</Callout>
+
+DeerFlow tồn tại vì các hệ thống tác nhân hiện đại cần nhiều hơn là một vòng lặp trò chuyện đơn thuần. Một tác nhân hữu ích phải lập kế hoạch dài hạn, chia nhỏ công việc thành các tác vụ phụ, sử dụng công cụ, thao tác với tệp, chạy mã một cách an toàn và bảo toàn đủ ngữ cảnh để duy trì tính mạch lạc xuyên suốt một tác vụ phức tạp. DeerFlow được xây dựng để cung cấp nền tảng runtime đó.
+
+## Nó bắt đầu như một nghiên cứu chuyên sâu
+
+Phiên bản đầu tiên của DeerFlow được thiết kế xoay quanh một mục tiêu cụ thể: tạo ra các sản phẩm nghiên cứu thực tế thay vì các bản tóm tắt chatbot nhẹ nhàng thông thường. Ý tưởng là để hệ thống AI hoạt động giống như một nhóm nghiên cứu hơn: lập kế hoạch, thu thập nguồn tài liệu, đối chiếu các phát hiện và phân phối kết quả có cấu trúc với chiều sâu hữu ích.
+
+Mô hình định hình đó đã hoạt động hiệu quả, nhưng dự án đã nhanh chóng bộc lộ một điểm quan trọng hơn. Các nhóm phát triển không chỉ sử dụng DeerFlow cho mục đích nghiên cứu. Họ đang điều chỉnh nó để phân tích dữ liệu, tạo báo cáo, tự động hóa nội bộ, quy trình vận hành và các tác vụ khác cũng yêu cầu thực thi nhiều bước.
+
+Điểm chung cốt lõi rất rõ ràng: phần giá trị không chỉ là bản thân quy trình nghiên cứu, mà là các khả năng runtime bên dưới nó.
+
+## Nghiên cứu chỉ là kỹ năng đầu tiên, không phải toàn bộ hệ thống
+
+Sự chuyển dịch trong cách sử dụng đó dẫn đến một kết luận then chốt: nghiên cứu chuyên sâu nên được coi là một khả năng bên trong một runtime tác nhân rộng lớn hơn, chứ không phải là định nghĩa của toàn bộ sản phẩm.
+
+Do đó, DeerFlow đã phát triển từ một dự án tập trung vào một mô hình nghiên cứu duy nhất thành một harness đa dụng cho các tác nhân chạy đường dài. Trong mô hình này, nghiên cứu vẫn đóng vai trò quan trọng, nhưng nó trở thành một kỹ năng trong số nhiều kỹ năng khác thay vì là hình dạng cố định của hệ thống.
+
+Đây là lý do tại sao DeerFlow được mô tả là một **harness** thay vì chỉ đơn thuần là một framework hoặc một ứng dụng.
+
+## Tại sao một harness lại quan trọng
+
+Một harness là một runtime có định hướng dành cho các tác nhân. Nó không chỉ hiển thị các lớp trừu tượng mà đóng gói toàn bộ hạ tầng mà một tác nhân cần để thực hiện công việc hữu ích trong các môi trường thực tế.
+
+Đối với DeerFlow, điều đó có nghĩa là kết hợp các phần cốt lõi cần thiết cho việc thực thi chạy đường dài:
+
+- **Kỹ năng (Skills)** cho các khả năng chuyên biệt của tác vụ mà chỉ có thể tải khi cần thiết.
+- **Thực thi hộp cát (Sandboxed execution)** để các tác nhân có thể làm việc với các tệp, chạy lệnh và tạo ra các tạo tác (artifacts) một cách an toàn.
+- **Tác nhân phụ (Subagents)** để công việc phức tạp có thể được phân rã và thực thi song song.
+- **Bộ nhớ (Memory)** để hệ thống có thể giữ lại các tùy chọn của người dùng và ngữ cảnh lặp lại qua các phiên làm việc.
+- **Quản lý ngữ cảnh (Context management)** để các tác vụ dài hạn vẫn có thể xử lý được ngay cả khi các cuộc hội thoại và kết quả đầu ra phình to.
+
+Đây là những khối xây dựng giúp tác nhân trở nên hữu ích vượt ra ngoài một lượt trao đổi yêu cầu-phản hồi đơn lẻ.
+
+## Tại sao DeerFlow vượt ra ngoài các sơ đồ đa tác nhân cố định
+
+Các hệ thống tác nhân trước đây thường mô hình hóa công việc dưới dạng một sơ đồ cố định gồm các vai trò chuyên biệt. Cách tiếp cận đó có thể hiệu quả cho một quy trình công việc hẹp, nhưng nó trở nên cứng nhắc khi người dùng muốn hệ thống xử lý phạm vi tác vụ rộng hơn.
+
+DeerFlow đã chuyển sang một kiến trúc khác: một tác nhân chính (lead agent) đi kèm các middleware, công cụ và các tác nhân phụ được gọi động. Điều này giúp hệ thống dễ mở rộng hơn vì các khả năng mới có thể được giới thiệu dưới dạng kỹ năng, công cụ hoặc chính sách runtime thay vì yêu cầu phải thiết kế lại toàn bộ sơ đồ điều phối.
+
+Sự chuyển dịch kiến trúc đó phản ánh động lực chính đằng sau DeerFlow: xây dựng lớp runtime có thể tái sử dụng trước, sau đó cho phép nhiều quy trình công việc chạy trên nền tảng đó.
+
+## DeerFlow được xây dựng cho các công việc chạy đường dài
+
+DeerFlow được thúc đẩy bởi một góc nhìn cụ thể về tác nhân: các hệ thống có giá trị nhất không phải là các hệ thống tạo ra một câu trả lời duy nhất nhanh nhất, mà là các hệ thống có thể duy trì năng suất làm việc qua một chuỗi hành động dài hơn.
+
+Một tác nhân chạy đường dài cần làm nhiều việc hơn là phản hồi đơn thuần. Nó cần phải:
+
+1. quyết định nên làm gì tiếp theo,
+2. theo dõi trạng thái trung gian,
+3. lưu trữ công việc bên ngoài ngữ cảnh mô hình khi cần thiết,
+4. phục hồi từ sự phức tạp mà không bị mất phương hướng, và
+5. trả về một tạo tác (artifact) mà con người có thể xem xét, tinh chỉnh hoặc tiếp tục thực hiện từ đó.
+
+Đó chính là danh mục vấn đề mà DeerFlow được thiết kế để giải quyết.
+
+## Mục tiêu
+
+Mục tiêu của DeerFlow là cung cấp một nền tảng vững chắc để xây dựng và vận hành các hệ thống tác nhân có thể thực sự làm việc.
+
+Nếu bạn đang đánh giá DeerFlow, ý tưởng quan trọng là: DeerFlow không chỉ là một bản demo nghiên cứu và không chỉ là một giao diện UI bọc quanh một LLM. Nó là một runtime harness dành cho các tác nhân cần kỹ năng, bộ nhớ, công cụ, sự cô lập và điều phối để hoàn thành các tác vụ thực tế.
+
+<Cards num={2}>
+  <Cards.Card title="Khái niệm cốt lõi" href="/docs/introduction/core-concepts" />
+  <Cards.Card title="Harness so với App" href="/docs/introduction/harness-vs-app" />
+</Cards>

@@ -10,6 +10,7 @@ import "nextra-theme-docs/style.css";
 const i18n = [
   { locale: "en", name: "English" },
   { locale: "zh", name: "中文" },
+  { locale: "vi", name: "Tiếng Việt" },
 ];
 
 function formatPageRoute(base: string, items: PageMapItem[]): PageMapItem[] {

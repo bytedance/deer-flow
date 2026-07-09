@@ -1,0 +1,106 @@
+---
+title: Harness so với App
+description: "DeerFlow có hai lớp liên kết chặt chẽ với nhau nhưng phục vụ các mục đích khác nhau."
+---
+
+import { Callout } from "nextra/components";
+
+# Harness so với App
+
+<Callout type="info" emoji="⚙️">
+  DeerFlow App là ứng dụng Tác nhân Siêu cấp (Super Agent) theo các thực hành tốt nhất được xây dựng trên nền tảng DeerFlow Harness, trong khi DeerFlow Harness là Python SDK và nền tảng runtime để tự xây dựng hệ thống tác nhân của riêng bạn.
+</Callout>
+
+DeerFlow có hai lớp liên kết chặt chẽ với nhau nhưng phục vụ các mục đích khác nhau:
+
+- **DeerFlow Harness** là nền tảng runtime.
+- **DeerFlow App** là ứng dụng theo thực hành tốt nhất được xây dựng trên nền tảng đó.
+
+Hiểu rõ sự khác biệt này giúp bạn dễ dàng tìm hiểu phần còn lại của tài liệu hướng dẫn hơn.
+
+## Harness là lớp runtime
+
+**DeerFlow Harness** là hệ thống có thể tái sử dụng để xây dựng và vận hành các tác nhân chạy đường dài.
+
+Nó cũng được cung cấp dưới dạng một **Python SDK (thư viện)**, giúp các lập trình viên có thể sử dụng DeerFlow như một nền tảng lập trình được để xây dựng các hệ thống Super Agent của riêng mình thay vì phải bắt đầu từ con số không.
+
+Nó cung cấp các khả năng runtime cốt lõi giúp một tác nhân hoạt động hiệu quả trong công việc thực tế:
+
+- các kỹ năng (skills),
+- sử dụng công cụ (tool use),
+- thực thi hộp cát (sandboxed execution),
+- bộ nhớ (memory),
+- điều phối tác nhân phụ (subagent orchestration),
+- quản lý ngữ cảnh (context management), và
+- hành vi runtime có thể cấu hình.
+
+Nếu bạn muốn tự xây dựng sản phẩm tác nhân của riêng mình, tích hợp DeerFlow vào hệ thống hiện tại hoặc tùy chỉnh sâu hệ thống runtime, Harness là phần bạn nên tập trung vào.
+
+Harness là nền tảng. Đó là phần giúp cho DeerFlow có khả năng lập trình, mở rộng và tái sử dụng.
+
+## App là phiên bản triển khai tham chiếu
+
+**DeerFlow App** là một ứng dụng Super Agent hoàn chỉnh được xây dựng dựa trên Harness.
+
+Thay vì chỉ cung cấp các lớp runtime nguyên bản, nó chỉ ra một trải nghiệm DeerFlow định hướng môi trường sản xuất sẽ trông như thế nào khi các khối nguyên bản đó được lắp ráp thành một sản phẩm thực tế hữu dụng. Nói cách khác, App không tách rời khỏi Harness. Nó là sản phẩm triển khai theo các thực hành tốt nhất của những gì mà Harness mang lại.
+
+Đó là lý do tại sao App là cách dễ nhất để hiểu về cách hoạt động của hệ thống DeerFlow: nó mô tả cách runtime, giao diện người dùng, quy trình công việc và các phần vận hành kết hợp lại với nhau tại một nơi.
+
+## Tại sao App lại quan trọng
+
+Nhiều đội ngũ phát triển không chỉ muốn có hạ tầng tác nhân. Họ muốn một ứng dụng có thể sử dụng được ngay, giúp giải quyết các vấn đề vận hành và sản phẩm phổ biến khi chạy tác nhân.
+
+DeerFlow App đáp ứng nhu cầu đó.
+
+Nó giới thiệu DeerFlow dưới dạng một **ứng dụng Super Agent** chứ không chỉ đơn thuần là tập hợp các khối xây dựng cấp thấp. Điều đó có nghĩa là người dùng sẽ tương tác với một hệ thống hoàn chỉnh có thể quản lý các cuộc hội thoại, chạy tác vụ, tạo các tạo tác (artifacts) và thể hiện các khả năng cốt lõi của DeerFlow thông qua một giao diện sản phẩm có định hướng.
+
+Do đó, App hữu ích theo hai cách khác nhau:
+
+1. như một sản phẩm sẵn sàng chạy cho các nhóm muốn triển khai DeerFlow trực tiếp, và
+2. như một kiến trúc tham chiếu cho các nhóm muốn tự xây dựng ứng dụng riêng của họ trên nền tảng Harness.
+
+## Các thực hành tốt nhất được mã hóa trong App
+
+App là nơi các mẫu thiết kế được khuyên dùng của DeerFlow trở nên cụ thể.
+
+Nó phản ánh các thực hành tốt nhất cho:
+
+- cách người dùng tương tác với tác nhân chính (lead agent),
+- cách tổ chức các luồng trò chuyện (threads) và tạo tác (artifacts),
+- cách thể hiện các khả năng runtime trong một quy trình sản phẩm,
+- cách cấu hình và vận hành hệ thống, và
+- cách cấu trúc một triển khai tự lưu trữ (self-hosted) của DeerFlow.
+
+Vì vậy, khi chúng tôi nói App được xây dựng trên Harness, điều đó không chỉ có nghĩa là nó import thư viện runtime. Nó có nghĩa là nó đóng gói cách thức ưa thích của DeerFlow để mang lại trải nghiệm Super Agent từ đầu đến cuối.
+
+## Tự lưu trữ và triển khai
+
+Một thuộc tính quan trọng của DeerFlow App là nó có thể được **tự lưu trữ (self-hosted)**.
+
+Điều đó quan trọng đối với các nhóm muốn kiểm soát cơ sở hạ tầng, xử lý dữ liệu, cấu hình runtime và tích hợp với môi trường của chính họ. App được thiết kế để bạn có thể chạy DeerFlow trong thiết lập của riêng mình thay vì coi nó như một dịch vụ lưu trữ đóng.
+
+Điều này làm cho DeerFlow trở nên thực tế cho các công cụ nội bộ, quy trình làm việc của nhóm và các triển khai riêng của tổ chức, nơi quyền kiểm soát và khả năng mở rộng quan trọng ngang bằng với khả năng thô của mô hình.
+
+## Cách lựa chọn giữa Harness và App
+
+Quy tắc đơn giản nhất là:
+
+- Chọn **Harness** nếu bạn muốn tự xây dựng hệ thống tác nhân của riêng mình.
+- Chọn **App** nếu bạn muốn DeerFlow như một sản phẩm Super Agent hoàn chỉnh.
+- Sử dụng cả hai nếu bạn muốn bắt đầu từ App trong khi vẫn giữ quyền truy cập vào runtime bên dưới.
+
+Hai lớp này bổ sung cho nhau. Harness cung cấp cho bạn agent runtime. App biến runtime đó thành một sản phẩm cụ thể với việc triển khai, vận hành và quy trình làm việc của người dùng đã được tính toán kỹ lượng.
+
+<Cards num={2}>
+  <Cards.Card title="DeerFlow Harness" href="/docs/harness" />
+  <Cards.Card title="DeerFlow App" href="/docs/app" />
+</Cards>
+
+## Một nền tảng, hai điểm bắt đầu
+
+DeerFlow không bị chia thành hai sản phẩm không liên quan. Nó là một hệ thống duy nhất với hai điểm bắt đầu.
+
+**Harness** là runtime cốt lõi dành cho lập trình viên.
+**App** là ứng dụng Super Agent theo thực hành tốt nhất được xây dựng trên runtime đó.
+
+If you want to go deeper into the runtime itself, continue with the [DeerFlow Harness](/docs/harness). If you want to run DeerFlow as a product, continue with the [DeerFlow App](/docs/app).

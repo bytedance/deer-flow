@@ -1,0 +1,197 @@
+---
+title: Vận hành và Khắc phục sự cố
+description: "Trang này bao gồm thông tin vận hành khi chạy ứng dụng DeerFlow: ghi nhật ký, các vấn đề thường gặp và các tác vụ bảo trì."
+---
+
+import { Callout } from "nextra/components";
+
+# Vận hành và Khắc phục sự cố
+
+Trang này bao gồm thông tin vận hành khi chạy ứng dụng DeerFlow: ghi nhật ký, các vấn đề thường gặp và các tác vụ bảo trì.
+
+## Nhật ký (Logs)
+
+DeerFlow App ghi nhật ký hoạt động của từng dịch vụ vào thư mục `logs/`:
+
+| Tệp | Nội dung |
+| :--- | :--- |
+| `logs/gateway.log` | Các yêu cầu/phản hồi API, hoạt động của Agent runtime và lỗi Gateway |
+| `logs/frontend.log` | Nhật ký hoạt động của Next.js server |
+| `logs/nginx.log` | Nhật ký truy cập và lỗi của nginx proxy |
+
+**Theo dõi nhật ký hoạt động trong thời gian thực**:
+
+```bash
+tail -f logs/gateway.log     # Xem các yêu cầu API và hoạt động của Agent
+```
+
+**Điều chỉnh cấp độ nhật ký (Log level)**:
+
+```yaml
+# config.yaml
+log_level: debug # debug | info | warning | error
+```
+
+## Kiểm tra sức khỏe (Health check)
+
+DeerFlow cung cấp các điểm cuối (endpoints) kiểm tra sức khỏe:
+
+```bash
+# Kiểm tra sức khỏe Gateway
+curl http://localhost:8001/health
+
+# Xác minh chuỗi proxy hoàn chỉnh thông qua nginx
+curl http://localhost:2026/api/models
+```
+
+## Nâng cấp cấu hình (Config upgrade)
+
+Khi cấu trúc schema của `config.yaml` thay đổi (được xác định bằng trường `config_version`), hãy chạy lệnh:
+
+```bash
+make config-upgrade
+```
+
+Lệnh này sẽ hợp nhất các trường mới trong tệp `config.example.yaml` vào tệp `config.yaml` hiện có của bạn mà không ghi đè lên các nội dung tùy chỉnh.
+
+## Các vấn đề thường gặp
+
+### Lỗi cấu hình mô hình
+
+**Triệu chứng**: Agent báo lỗi ngay khi phản hồi tin nhắn đầu tiên, nhật ký hiển thị lỗi xác thực API (API authentication error).
+
+**Chẩn đoán**:
+
+```bash
+# Kiểm tra lỗi mô hình trong nhật ký Gateway
+grep -i "error\|apikey\|unauthorized" logs/gateway.log | tail -20
+```
+
+**Giải pháp**:
+
+1. Xác minh tên trường API key trong tệp `config.yaml` là chính xác (ví dụ: `$OPENAI_API_KEY`).
+2. Xác nhận biến môi trường tương ứng đã được thiết lập (`echo $OPENAI_API_KEY`).
+3. Kiểm tra xem `base_url` (nếu có) có khớp với điểm cuối thực tế của nhà cung cấp hay không.
+
+---
+
+### Vấn đề quyền hạn Sandbox
+
+**Triệu chứng**: Các công cụ báo lỗi "không tìm thấy tệp" hoặc lỗi quyền hạn, mặc dù Agent xác nhận đã tạo tệp.
+
+**Chẩn đoán**:
+
+```bash
+# Kiểm tra xem thư mục dữ liệu người dùng của luồng trò chuyện có tồn tại và có quyền ghi hay không
+ls -la backend/.deer-flow/threads/
+```
+
+**Giải pháp**:
+
+1. Đảm bảo thư mục `backend/.deer-flow/` có quyền ghi cho tiến trình đang chạy DeerFlow.
+2. Trong triển khai Docker, xác minh đường dẫn gắn volume là chính xác (`DEER_FLOW_ROOT` được thiết lập thành đường dẫn tuyệt đối).
+3. Nếu sử dụng sandbox dựa trên container, hãy xác nhận Docker đang chạy và hình ảnh container đã được tải về.
+
+---
+
+### SQLite báo lỗi `database is locked`
+
+**Triệu chứng**: Trong triển khai Docker hoặc môi trường làm việc nhóm, lỗi `sqlite3.OperationalError: database is locked` xuất hiện khi nhiều người dùng sử dụng đồng thời.
+
+**Nguyên nhân**: SQLite hỗ trợ đọc đồng thời, nhưng tại một thời điểm chỉ cho phép một người ghi. Các hoạt động ghi điểm kiểm tra và ghi ứng dụng của DeerFlow dùng chung một tệp cơ sở dữ liệu SQLite, điều này có thể gây ra tranh chấp khóa tệp khi có nhiều người dùng đồng thời.
+
+**Giải pháp**: Chuyển đổi sang Postgres cho môi trường sản xuất hoặc triển khai nhiều người dùng:
+
+```yaml
+database:
+  backend: postgres
+  postgres_url: $DATABASE_URL
+
+run_events:
+  backend: db
+```
+
+Chỉ nên sử dụng SQLite cho phát triển cục bộ, triển khai một người dùng hoặc môi trường đánh giá ngắn hạn.
+
+---
+
+### Build frontend thất bại
+
+**Triệu chứng**: Lệnh `make install` hoặc bước build frontend thất bại với thông báo lỗi `BETTER_AUTH_SECRET`.
+
+**Giải pháp**:
+
+```bash
+# Tùy chọn 1: Thiết lập biến môi trường (khuyên dùng)
+export BETTER_AUTH_SECRET=your-secret-here-at-least-32-chars
+cd frontend && pnpm build
+
+# Tùy chọn 2: Bỏ qua xác thực khi build (chỉ dành cho phát triển)
+SKIP_ENV_VALIDATION=1 pnpm build
+```
+
+---
+
+### Kết nối MCP server thất bại
+
+**Triệu chứng**: Các công cụ MCP không xuất hiện, nhật ký `logs/gateway.log` báo lỗi quá thời gian chờ (timeout).
+
+**Chẩn đoán**:
+
+```bash
+# Kiểm tra các lỗi liên quan đến MCP
+grep -i "mcp\|timeout" logs/gateway.log | tail -20
+```
+
+**Giải pháp**:
+
+1. Xác minh lệnh `command` và các đối số `args` của MCP server trong `extensions_config.json` hoạt động bình thường bên ngoài máy chủ (chạy lệnh thủ công).
+2. Xác nhận các gói phụ thuộc của MCP server (như `npx`, `uvx`) đã được cài đặt và có trong biến môi trường PATH.
+3. Kiểm tra xem MCP server có yêu cầu truy cập mạng hoặc các biến môi trường cụ thể hay không.
+
+---
+
+### Kết nối K8s Provisioner thất bại
+
+**Triệu chứng**: Yêu cầu công cụ sandbox bị treo, nhật ký báo lỗi từ chối kết nối.
+
+**Giải pháp**:
+
+1. Xác minh `provisioner_url` trong tệp `config.yaml` là chính xác và Provisioner Pod đang chạy bình thường.
+2. Kiểm tra xem cấu hình `K8S_NAMESPACE` và RBAC có cho phép Provisioner tạo Pod hay không.
+3. Xác minh có thể tải về `SANDBOX_IMAGE` từ các nút K8s.
+
+## Sao lưu dữ liệu
+
+Thực hiện sao lưu theo backend lưu trữ bạn đã kích hoạt:
+
+- `backend/.deer-flow/threads/`: Các thư mục làm việc của luồng trò chuyện, tệp tải lên và tạo tác.
+- `backend/.deer-flow/memory.json` và `backend/.deer-flow/agents/`: Bộ nhớ toàn cục và bộ nhớ của Agent.
+- `${database.sqlite_dir}/deerflow.db`: Sao lưu khi sử dụng `database.backend: sqlite`, đường dẫn mặc định là `.deer-flow/data/deerflow.db`.
+- Cơ sở dữ liệu Postgres: Xuất dữ liệu định kỳ khi sử dụng `database.backend: postgres`.
+- Tệp `checkpointer.connection_string` cũ: Nếu triển khai của bạn vẫn cấu hình `checkpointer` độc lập.
+- `backend/agents/*/config.yaml`: Cấu hình Agent tùy chỉnh.
+
+Trong triển khai Docker, hãy sao lưu đường dẫn thư mục lưu trữ trên宿主机 (host machine) được liên kết-gắn, thay vì hệ thống tệp bên trong container.
+
+## Dừng và khởi động lại dịch vụ
+
+```bash
+# Dừng tất cả dịch vụ cục bộ
+make stop
+
+# Khởi động lại (dừng sau đó chạy lại)
+make stop && make dev
+```
+
+Trong Docker:
+
+```bash
+docker compose -f docker/docker-compose-dev.yaml down
+docker compose -f docker/docker-compose-dev.yaml up
+```
+
+<Cards num={2}>
+  <Cards.Card title="Hướng dẫn triển khai" href="/docs/application/deployment-guide" />
+  <Cards.Card title="Cấu hình" href="/docs/application/configuration" />
+</Cards>

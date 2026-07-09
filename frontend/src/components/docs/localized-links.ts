@@ -1,4 +1,4 @@
-const SUPPORTED_DOC_LANGUAGES = new Set(["en", "zh"]);
+const SUPPORTED_DOC_LANGUAGES = new Set(["en", "zh", "vi"]);
 const UNLOCALIZED_DOCS_PATH = /^\/docs(?=\/|[?#]|$)/;
 
 export function localizeDocsHref(

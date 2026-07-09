@@ -1,0 +1,67 @@
+---
+title: Cuộc hội thoại đầu tiên
+description: Hướng dẫn này dẫn dắt bạn qua cuộc hội thoại hoàn chỉnh đầu tiên với agent trong DeerFlow — từ việc khởi chạy ứng dụng đến việc hoàn thành một công việc thực tế cùng agent.
+---
+
+import { Callout, Steps } from "nextra/components";
+
+# Cuộc hội thoại đầu tiên
+
+Hướng dẫn này dẫn dắt bạn qua cuộc hội thoại hoàn chỉnh đầu tiên với agent trong DeerFlow — từ việc khởi chạy ứng dụng đến việc hoàn thành một công việc thực tế cùng agent.
+
+## Yêu cầu chuẩn bị
+
+- Ứng dụng DeerFlow đang chạy (xem [Bắt đầu nhanh](/docs/application/quick-start))
+- Ít nhất một model đã được cấu hình trong `config.yaml`
+
+## Các bước thực hiện
+
+<Steps>
+
+### Mở workspace
+
+Mở địa chỉ [http://localhost:2026](http://localhost:2026) trên trình duyệt của bạn. Bạn sẽ thấy không gian làm việc trò chuyện (conversation workspace).
+
+### Gửi tin nhắn đầu tiên của bạn
+
+Nhập một câu hỏi vào ô nhập liệu, ví dụ:
+
+```
+Research the top 3 most popular open-source LLM frameworks in 2024 and compare their strengths and weaknesses.
+```
+
+Nhấn Enter để gửi đi.
+
+### Theo dõi agent hoạt động
+
+Bạn sẽ thấy agent bắt đầu làm việc:
+
+- Mở rộng phần **các bước suy nghĩ (thinking steps)** để xem các tool nào đang được gọi
+- Theo dõi các kết quả tìm kiếm được stream trực tiếp
+- Chờ đợi báo cáo cuối cùng được tạo ra
+
+### Tương tác với kết quả
+
+Sau khi báo cáo được tạo ra, bạn có thể:
+
+- Yêu cầu thêm thông tin chi tiết về một phần cụ thể
+- Yêu cầu xuất báo cáo thành một file (agent sẽ sử dụng tool `present_files`)
+- Yêu cầu tạo một biểu đồ dựa trên các kết quả nghiên cứu
+
+</Steps>
+
+## Điều gì vừa xảy ra
+
+Agent đã sử dụng DeerFlow Harness để:
+
+1. Nhận tin nhắn của bạn và thêm nó vào thread state
+2. Chạy chuỗi middleware (chèn memory, tạo tiêu đề thread)
+3. Gọi LLM, lúc này model đã quyết định thực hiện tìm kiếm web
+4. Thực thi các cuộc gọi tool tìm kiếm web
+5. Tổng hợp các kết quả thành một phản hồi có cấu trúc
+6. Cập nhật thread state với các artifact đã được tạo ra
+
+## Các bước tiếp theo
+
+- [Sử dụng Công cụ và Kỹ năng](/docs/tutorials/use-tools-and-skills)
+- [Cách sử dụng Workspace](/docs/application/workspace-usage)

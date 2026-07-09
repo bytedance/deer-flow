@@ -1,0 +1,118 @@
+---
+title: Bắt đầu nhanh
+description: Học cách khởi tạo và chạy một DeerFlow agent bằng create_deerflow_agent, từ thiết lập model đến stream kết quả.
+---
+
+import { Callout, Steps } from "nextra/components";
+
+# Bắt đầu nhanh
+
+<Callout type="info" emoji="🚀">
+  Hướng dẫn này chỉ ra cách xây dựng và chạy một DeerFlow agent bằng Python sử dụng
+  <code>create_deerflow_agent</code>.
+</Callout>
+
+Cách nhanh nhất để hiểu về DeerFlow Harness là khởi tạo một agent trực tiếp trong code. Hướng dẫn bắt đầu nhanh này sẽ đi qua các bước thiết lập model, tạo agent, và stream kết quả trả về.
+
+## Yêu cầu hệ thống
+
+DeerFlow Harness yêu cầu Python 3.12 trở lên. Package nằm trong thư mục `backend/packages/harness` của repository `deerflow`.
+
+Nếu bạn đang làm việc trực tiếp từ bản clone của repository:
+
+```bash
+cd backend
+uv sync
+```
+
+Bạn cũng cần có một instance của chat model từ các package nhà cung cấp (provider) của LangChain mà bạn muốn sử dụng.
+
+## Tạo agent đầu tiên của bạn
+
+<Steps>
+
+### Import factory và model
+
+```python
+from deerflow.agents import create_deerflow_agent
+from langchain_openai import ChatOpenAI
+```
+
+### Tạo model
+
+```python
+model = ChatOpenAI(
+    model="gpt-4o",
+    api_key="YOUR_OPENAI_API_KEY",
+)
+```
+
+### Tạo agent
+
+```python
+agent = create_deerflow_agent(model)
+```
+
+Hàm này trả về một compiled LangGraph agent với chuỗi middleware mặc định của DeerFlow.
+
+### Stream kết quả trả về
+
+```python
+for event in agent.stream(
+    {"messages": [{"role": "user", "content": "Explain what DeerFlow Harness is."}]},
+    stream_mode=["messages", "values"],
+):
+    print(event)
+```
+
+</Steps>
+
+## Thêm tools hoặc tùy chỉnh hành vi
+
+Bạn có thể tùy chỉnh agent bằng cách truyền vào các tools, system prompt, các tính năng runtime, middleware hoặc checkpointer.
+
+```python
+from deerflow.agents import RuntimeFeatures, create_deerflow_agent
+
+agent = create_deerflow_agent(
+    model,
+    system_prompt="You are a concise research assistant.",
+    features=RuntimeFeatures(subagent=True, memory=False),
+    plan_mode=True,
+    name="research-agent",
+)
+```
+
+Các tham số phổ biến:
+
+| Tham số | Mô tả |
+| ------------------ | ----------------------------------------------- |
+| `tools`            | Các tool bổ sung cho agent sử dụng |
+| `system_prompt`    | System prompt tùy chỉnh |
+| `features`         | Bật hoặc thay thế các tính năng runtime được tích hợp sẵn |
+| `extra_middleware` | Chèn thêm middleware tùy chỉnh vào chuỗi mặc định |
+| `plan_mode`        | Bật tính năng theo dõi tác vụ kiểu Todo |
+| `checkpointer`     | Lưu trữ và khôi phục trạng thái (state) của agent qua các lượt chạy |
+| `name`             | Tên logic của agent |
+
+## Khi nào nên dùng DeerFlowClient thay thế
+
+`create_deerflow_agent()` là SDK factory mức thấp (low-level) khi bạn muốn làm việc trực tiếp với agent graph đã được compile.
+
+Hãy sử dụng `DeerFlowClient` khi bạn muốn một giao diện ứng dụng nhúng (embedded app) ở mức cao hơn (higher-level), ví dụ như:
+
+- Các helper trò chuyện hướng thread (thread-oriented chat helpers),
+- Các API quản lý model / skills / memory,
+- Upload file và quản lý artifact,
+- Các định dạng kết quả trả về kiểu Gateway.
+
+## Các bước tiếp theo
+
+<Cards num={3}>
+  <Cards.Card
+    title="Nguyên tắc thiết kế"
+    href="/docs/harness/design-principles"
+  />
+  <Cards.Card title="Tác nhân chính (Lead Agent)" href="/docs/harness/lead-agent" />
+  <Cards.Card title="Cấu hình" href="/docs/harness/configuration" />
+</Cards>

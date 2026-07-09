@@ -1,0 +1,131 @@
+---
+title: Tác nhân phụ (Subagents)
+description: Khi một tác vụ quá rộng đối với một luồng lập luận đơn lẻ, hoặc khi các phần của nó có thể được thực hiện song song, Lead Agent sẽ ủy quyền công việc cho các **subagents**. Một subagent là một lần gọi agent tự chứa (self-contained) nhận một tác vụ cụ thể, thực thi nó và trả về kết quả.
+---
+
+import { Callout } from "nextra/components";
+
+# Tác nhân phụ (Subagents)
+
+<Callout type="info" emoji="👥">
+  Subagents là các trình thực thi tập trung được Lead Agent ủy quyền các tác vụ phụ. Chúng chạy với ngữ cảnh cô lập (isolated context), giữ cho cuộc hội thoại chính luôn sạch sẽ trong khi xử lý công việc song song hoặc chuyên biệt hóa.
+</Callout>
+
+Khi một tác vụ quá rộng đối với một luồng lập luận đơn lẻ, hoặc khi các phần của nó có thể được thực hiện song song, Lead Agent sẽ ủy quyền công việc cho các **subagents**. Một subagent là một lần gọi agent tự chứa (self-contained) nhận một tác vụ cụ thể, thực thi nó và trả về kết quả.
+
+## Tại sao subagents lại quan trọng
+
+Subagents giải quyết hai vấn đề then chốt trong các quy trình làm việc chạy đường dài (long-horizon workflows):
+
+1. **Cô lập ngữ cảnh (Context isolation)**: một subagent chỉ nhìn thấy thông tin cần thiết cho phần tác vụ của nó, chứ không nhìn thấy toàn bộ cuộc hội thoại của parent agent. Điều này giúp ngữ cảnh làm việc của mỗi agent luôn tập trung và trong tầm kiểm soát.
+2. **Tính song song (Parallelism)**: nhiều subagents có thể chạy đồng thời, cho phép các phần độc lập của tác vụ (ví dụ: nghiên cứu nhiều chủ đề cùng một lúc) được xử lý song song.
+
+## Các subagent tích hợp sẵn
+
+DeerFlow đi kèm với hai subagent tích hợp sẵn:
+
+### general-purpose
+
+Một agent lập luận và thực thi đa năng. Thích hợp cho việc ủy quyền các tác vụ phụ phức tạp yêu cầu lập luận nhiều bước, tìm kiếm web, thao tác với file, và tạo ra các artifact.
+
+- **Thời gian chờ mặc định (Default timeout)**: 900 giây (15 phút)
+- **Số lượt tối đa mặc định (Default max turns)**: 160
+
+### bash
+
+Một subagent chuyên biệt cho việc thực thi tác vụ dòng lệnh bên trong sandbox. Thích hợp cho các công việc viết script, xử lý dữ liệu, chuyển đổi file, và thiết lập môi trường.
+
+- **Thời gian chờ mặc định (Default timeout)**: 900 giây (15 phút)
+- **Số lượt tối đa mặc định (Default max turns)**: 80
+- **Trạng thái khả dụng**: chỉ hiển thị khi sandbox có tool `bash` (hoặc `allow_host_bash: true` hoặc một container sandbox được cấu hình)
+
+## Luồng ủy quyền (Delegation flow)
+
+Lead Agent ủy quyền công việc cho một subagent bằng cách sử dụng tool tích hợp sẵn `task`:
+
+```
+task(
+  agent="general-purpose",
+  task="Research the top 5 competitors of Acme Corp and summarize their pricing",
+  context="Focus on B2B SaaS pricing models"
+)
+```
+
+Quy trình runtime sau đó sẽ:
+
+1. Tra cứu cấu hình của subagent từ registry, áp dụng bất kỳ ghi đè (override) nào từ file `config.yaml`.
+2. Tạo ra một thực thể gọi agent mới với prompt và các tool riêng của subagent đó.
+3. Chạy subagent cho đến khi hoàn thành (hoặc cho đến khi timeout / đạt số lượt tối đa).
+4. Trả về kết quả đầu ra cuối cùng của subagent cho Lead Agent dưới dạng kết quả gọi tool.
+
+## Cấu hình
+
+Thời gian timeout và số lượt tối đa (max turns) của subagent được kiểm soát thông qua mục `subagents:` trong file `config.yaml`:
+
+```yaml
+subagents:
+  # Thời gian timeout mặc định tính bằng giây cho tất cả các subagents (mặc định: 900 = 15 phút)
+  timeout_seconds: 900
+
+  # Tùy chọn: ghi đè số lượt tối đa (max turns) cho tất cả các subagents
+  # max_turns: 120
+
+  # Tùy chọn: ghi đè cho từng agent
+  agents:
+    general-purpose:
+      timeout_seconds: 1800 # 30 phút cho tác vụ phức tạp
+      max_turns: 160
+    bash:
+      timeout_seconds: 300 # 5 phút cho các câu lệnh nhanh
+      max_turns: 80
+```
+
+Các cấu hình ghi đè cho từng agent cụ thể có độ ưu tiên cao hơn các thiết lập toàn cục `timeout_seconds` và `max_turns`.
+
+## Giới hạn xử lý song song (Concurrency limits)
+
+`SubagentLimitMiddleware` kiểm soát số lượng subagent mà Lead Agent có thể gọi song song trong một lượt duy nhất. Điều này được điều khiển thông qua cấu hình trên mỗi request:
+
+- `subagent_enabled`: chỉ ra ủy quyền subagent có hoạt động cho session này hay không
+- `max_concurrent_subagents`: số lượng gọi tác vụ song song tối đa trong một lượt (mặc định: 3)
+
+Nếu agent cố gắng gọi nhiều subagents hơn giới hạn cho phép, middleware sẽ tự động cắt giảm các cuộc gọi vượt ngưỡng.
+
+## ACP agents (các tác nhân bên ngoài)
+
+Bên cạnh các subagent tích hợp sẵn, DeerFlow hỗ trợ ủy quyền cho các agent bên ngoài thông qua **Agent Connect Protocol (ACP)**. Giao thức ACP cho phép DeerFlow gọi các agent chạy dưới dạng tiến trình riêng biệt (bao gồm cả các công cụ CLI của bên thứ ba được bao bọc bởi một ACP adapter).
+
+Cấu hình ACP agents trong file `config.yaml`:
+
+```yaml
+acp_agents:
+  claude_code:
+    command: npx
+    args: ["-y", "@zed-industries/claude-agent-acp"]
+    description: Claude Code phục vụ triển khai, tái cấu trúc và gỡ lỗi
+    model: null
+    # auto_approve_permissions: false
+    # env:
+    #   ANTHROPIC_API_KEY: $ANTHROPIC_API_KEY
+
+  codex:
+    command: npx
+    args: ["-y", "@zed-industries/codex-acp"]
+    description: Codex CLI cho các tác vụ repository và tạo mã nguồn
+    model: null
+```
+
+Lead Agent gọi các ACP agents thông qua tool tích hợp sẵn `invoke_acp_agent`.
+
+<Callout type="tip">
+  ACP agents chạy dưới dạng các tiến trình con được quản lý bởi DeerFlow. Chúng giao tiếp thông qua giao thức truyền tin ACP wire protocol. Các công cụ CLI tiêu chuẩn (như các lệnh `claude` hoặc `codex` thông thường) mặc định không tương thích với ACP — hãy sử dụng các package adapter được liệt kê ở trên hoặc một bộ bao bọc ACP tương thích.
+</Callout>
+
+## Sử dụng Custom Agent như một Subagent
+
+Các custom agents được tạo thông qua giao diện DeerFlow App UI cũng có thể được gọi như một subagent bằng tool `task`. Khi bạn chỉ định `agent="my-custom-agent"`, runtime sẽ tự động tải cấu hình của agent đó (skills, nhóm tool, model) và chạy nó như một subagent cho tác vụ được ủy quyền.
+
+<Cards num={2}>
+  <Cards.Card title="Sandbox" href="/docs/harness/sandbox" />
+  <Cards.Card title="Tích hợp MCP" href="/docs/harness/mcp" />
+</Cards>
