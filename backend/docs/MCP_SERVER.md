@@ -14,6 +14,53 @@ DeerFlow supports configurable MCP servers and skills to extend its capabilities
 3. Configure each server’s command, arguments, and environment variables as needed.
 4. Restart the application to load and register MCP tools.
 
+## Routing Hints
+
+Use `routing` when an MCP server should be preferred for specific requests, such
+as internal database questions that should use a PostgreSQL MCP tool before web
+search. Routing hints are soft model guidance: they add a
+`<mcp_routing_hints>` prompt section, but they do not forbid other tools. Use
+agent-level allow/deny policy for hard restrictions. If `tool_search.enabled`
+defers MCP tool schemas, the hint references `tool_search` so the model fetches
+the deferred tool before preferring it.
+
+```json
+{
+   "mcpServers": {
+      "postgres": {
+         "enabled": true,
+         "type": "stdio",
+         "command": "npx",
+         "args": ["-y", "@modelcontextprotocol/server-postgres", "postgresql://localhost/mydb"],
+         "routing": {
+            "mode": "prefer",
+            "priority": 50,
+            "keywords": ["orders", "users", "SQL", "database", "table"]
+         },
+         "tools": {
+            "query": {
+               "routing": {
+                  "mode": "prefer",
+                  "priority": 100,
+                  "keywords": ["query database", "orders table", "metrics"]
+               }
+            }
+         }
+      }
+   }
+}
+```
+
+- `routing.mode`: `off` disables hints; `prefer` emits hints.
+- `routing.priority`: `0` to `100`; higher-priority hints are rendered first.
+- `routing.keywords`: operator-authored terms that describe when to prefer the
+  MCP tool. Empty keywords are allowed but do not emit a hint line.
+- `tools.<original_tool_name>.routing`: overrides only the fields explicitly
+  set for that tool. The key is the MCP server's original tool name, before the
+  `<server>_` prefix added for model binding. If the server-level
+  `routing.mode` is `off`, a tool override must set `mode: "prefer"`; setting
+  only `priority` or `keywords` still inherits `off` and emits no hint.
+
 ## Per-Tool Timeout (Stdio MCP Servers)
 
 For `stdio` MCP servers, set `tool_call_timeout` to limit each individual MCP tool call in seconds:
