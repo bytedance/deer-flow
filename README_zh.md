@@ -55,6 +55,8 @@ DeerFlow 新近集成了 BytePlus 自研的智能搜索与抓取工具集——[
       - [MCP Server](#mcp-server)
       - [IM 渠道](#im-渠道)
       - [LangSmith 链路追踪](#langsmith-链路追踪)
+      - [Langfuse 链路追踪](#langfuse-链路追踪)
+      - [同时使用两种追踪服务](#同时使用两种追踪服务)
   - [从 Deep Research 到 Super Agent Harness](#从-deep-research-到-super-agent-harness)
   - [核心特性](#核心特性)
     - [Skills 与 Tools](#skills-与-tools)
@@ -484,6 +486,37 @@ LANGSMITH_ENDPOINT=https://api.smith.langchain.com
 LANGSMITH_API_KEY=lsv2_pt_xxxxxxxxxxxxxxxx
 LANGSMITH_PROJECT=xxx
 ```
+
+#### Langfuse 链路追踪
+
+DeerFlow 同样支持 [Langfuse](https://langfuse.com) 可观测性，适用于兼容 LangChain 的运行。
+
+在 `.env` 文件中添加以下配置：
+
+```bash
+LANGFUSE_TRACING=true
+LANGFUSE_PUBLIC_KEY=pk-lf-xxxxxxxxxxxxxxxx
+LANGFUSE_SECRET_KEY=sk-lf-xxxxxxxxxxxxxxxx
+LANGFUSE_BASE_URL=https://cloud.langfuse.com
+```
+
+如果你使用自托管的 Langfuse 实例，请将 `LANGFUSE_BASE_URL` 设置为你的部署地址。
+
+**链路关联字段。** 每次 agent 运行都会标注 Langfuse 的保留追踪属性，这样 Sessions 和 Users 页面就能自动填充数据：
+
+- `session_id` = LangGraph 的 `thread_id`——将同一会话的所有 trace 归为一组
+- `user_id` = 来自 `get_effective_user_id()` 的有效用户（在无鉴权模式下回退为 `default`）
+- `trace_name` = assistant id（默认为 `lead-agent`）
+- `tags` = `[env:<DEER_FLOW_ENV>, model:<model_name>]`（未设置时省略）
+- `metadata.deerflow_trace_id` = DeerFlow 的请求关联 id，当启用请求链路关联（request trace correlation）时与 `X-Trace-Id` 一致
+
+这些字段会在图（graph）调用的根部注入到 `RunnableConfig.metadata`，同时覆盖 gateway 路径（`runtime/runs/worker.py::run_agent`）和内嵌路径（`client.py::DeerFlowClient.stream`），因此任何兼容 LangChain 的 callback 都能读取到它们。设置 `DEER_FLOW_ENV`（或 `ENVIRONMENT`）可按部署环境为 trace 打标签。
+
+#### 同时使用两种追踪服务
+
+如果同时启用 LangSmith 和 Langfuse，DeerFlow 会挂载两个追踪 callback，并将相同的模型活动上报到两个系统。
+
+如果某个 provider 被显式启用但缺少必要的凭据，或其 callback 初始化失败，DeerFlow 会在创建模型、初始化追踪时快速失败（fail fast），错误信息会指明导致失败的 provider。
 
 Docker 部署时，追踪默认关闭。在 `.env` 中设置 `LANGSMITH_TRACING=true` 和 `LANGSMITH_API_KEY` 即可启用。
 
