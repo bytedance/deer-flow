@@ -628,6 +628,57 @@ def test_subagent_runtime_middlewares_place_loop_detection_before_safety_finish(
     assert loop_idx < safety_idx
 
 
+def test_subagent_runtime_middlewares_attach_summarization_when_enabled(monkeypatch):
+    """Subagents must inherit the lead's DeerFlowSummarizationMiddleware so a
+    long-running deep-research subagent compacts its context before it
+    accumulates pathological input (#3875 Phase 3). Gated on the SAME
+    ``summarization.enabled`` switch the lead reads — one config covers both
+    chains. The factory is patched at its source module so the test does not
+    depend on a real chat model; only the gating + wiring is asserted."""
+    from deerflow.agents.middlewares import summarization_middleware as sm
+
+    sentinel = object()
+    captured: dict[str, object] = {}
+
+    def fake_create_summarization_middleware(*, app_config=None, keep=None, skip_memory_flush=False):
+        captured["app_config"] = app_config
+        captured["keep"] = keep
+        captured["skip_memory_flush"] = skip_memory_flush
+        return sentinel
+
+    # summarization is enabled by default False; flip it on so the factory path
+    # is taken (the factory early-returns None when disabled).
+    from deerflow.config.summarization_config import SummarizationConfig
+
+    app_config = _make_app_config().model_copy(update={"summarization": SummarizationConfig(enabled=True)})
+    monkeypatch.setattr(sm, "create_summarization_middleware", fake_create_summarization_middleware)
+    _stub_runtime_middleware_imports(monkeypatch)
+
+    middlewares = build_subagent_runtime_middlewares(app_config=app_config, model_name="test-model")
+
+    # The shared factory received the same app_config the builder did (no lead
+    # wrapper, no config drift between the two chains).
+    assert captured["app_config"] is app_config
+    # skip_memory_flush=True so subagent-internal turns are not flushed into the
+    # PARENT thread's durable memory (#3875 Phase 3 review).
+    assert captured["skip_memory_flush"] is True
+    assert sentinel in middlewares
+
+
+def test_subagent_runtime_middlewares_omit_summarization_when_factory_returns_none(monkeypatch):
+    """When ``summarization.enabled`` is False the shared factory returns None and
+    the subagent chain must NOT carry a summarization middleware — the default
+    state, since SummarizationConfig.enabled defaults to False."""
+    from deerflow.agents.middlewares.summarization_middleware import DeerFlowSummarizationMiddleware
+
+    app_config = _make_app_config()  # summarization.enabled defaults to False
+    _stub_runtime_middleware_imports(monkeypatch)
+
+    middlewares = build_subagent_runtime_middlewares(app_config=app_config, model_name="test-model")
+
+    assert not any(isinstance(m, DeerFlowSummarizationMiddleware) for m in middlewares)
+
+
 def test_lead_runtime_chain_finds_historical_uploads_under_lazy_init_false(tmp_path, monkeypatch):
     """Integration anchor for the ThreadData → Uploads ordering.
 
@@ -680,3 +731,108 @@ def test_lead_runtime_chain_finds_historical_uploads_under_lazy_init_false(tmp_p
     assert "<uploaded_files>" in injected_content
     assert "prior-report.txt" in injected_content
     assert "previous messages" in injected_content  # historical section header
+
+
+def test_subagent_summarization_fires_mid_run_and_produces_usable_result(monkeypatch):
+    """Integration coverage for #3875 Phase 3 review gap: drive the REAL
+    ``DeerFlowSummarizationMiddleware`` (the exact instance the subagent chain
+    gets via ``create_summarization_middleware(skip_memory_flush=True)``) through
+    a ``create_agent`` run, and assert that (a) compaction actually fires mid-run
+    (messages channel contracts via ``RemoveMessage``) and (b) the run still
+    completes with a usable final answer — not just wiring.
+
+    The builder-wiring test above proves the middleware lands on the chain; this
+    proves the live middleware triggers and the run survives it. We bypass the
+    full ``build_subagent_runtime_middlewares`` chain (whose sandbox/thread-data
+    stubs aren't AgentMiddleware-compatible for a live run) and use the factory
+    directly — the same instance the builder appends."""
+    from langchain.agents import create_agent
+    from langchain_core.language_models import BaseChatModel
+    from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage
+    from langchain_core.outputs import ChatGeneration, ChatResult
+
+    from deerflow.agents.middlewares.summarization_middleware import (
+        DeerFlowSummarizationMiddleware,
+        create_summarization_middleware,
+    )
+    from deerflow.agents.thread_state import ThreadState
+    from deerflow.config.memory_config import MemoryConfig
+    from deerflow.config.summarization_config import ContextSize, SummarizationConfig
+
+    # A model that always emits a plain AIMessage — no tools, so the run is a
+    # single turn but the input already exceeds the trigger threshold, forcing
+    # before_model compaction on the first (and only) model call.
+    class _StaticModel(BaseChatModel):
+        text: str = "final answer after compaction"
+
+        @property
+        def _llm_type(self) -> str:
+            return "static"
+
+        def bind_tools(self, tools, **kwargs):
+            return self
+
+        def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+            return ChatResult(generations=[ChatGeneration(message=AIMessage(content=self.text))])
+
+    static_model = _StaticModel()
+    # The factory resolves its summary model via create_chat_model; point it at
+    # the same static model so no real provider is contacted.
+    monkeypatch.setattr(
+        "deerflow.agents.middlewares.summarization_middleware.create_chat_model",
+        lambda **kwargs: static_model,
+    )
+
+    app_config = SimpleNamespace(
+        summarization=SummarizationConfig(
+            enabled=True,
+            trigger=ContextSize(type="messages", value=4),
+            keep=ContextSize(type="messages", value=2),
+        ),
+        # memory disabled + skip_memory_flush=True mirrors the subagent path:
+        # no memory_flush_hook is attached.
+        memory=MemoryConfig(enabled=False),
+    )
+    middleware = create_summarization_middleware(
+        app_config=app_config,
+        skip_memory_flush=True,
+    )
+    assert isinstance(middleware, DeerFlowSummarizationMiddleware), "the real middleware must be built"
+    # Subagent invariant: skip_memory_flush means no durable-memory hook.
+    assert not middleware._before_summarization_hooks
+
+    agent = create_agent(
+        model=static_model,
+        tools=[],
+        middleware=[middleware],
+        state_schema=ThreadState,
+    )
+
+    # 6 messages > trigger(4) → compaction must fire in before_model.
+    seed = [
+        HumanMessage(content="q1", id="h1"),
+        AIMessage(content="a1", id="a1"),
+        HumanMessage(content="q2", id="h2"),
+        AIMessage(content="a2", id="a2"),
+        HumanMessage(content="q3", id="h3"),
+        AIMessage(content="a3", id="a3"),
+    ]
+    chunks = list(agent.stream({"messages": seed}, stream_mode="updates"))
+
+    # (a) Compaction fired: the middleware's before_model emitted a summary + RemoveMessage.
+    before_model_chunks = [c for c in chunks if "DeerFlowSummarizationMiddleware.before_model" in c]
+    assert before_model_chunks, "summarization before_model must fire when messages exceed the trigger"
+    summary_update = before_model_chunks[0]["DeerFlowSummarizationMiddleware.before_model"]
+    assert summary_update.get("summary_text"), "a summary must be produced"
+    emitted = summary_update["messages"]
+    assert isinstance(emitted[0], RemoveMessage), "compaction must lead with RemoveMessage"
+
+    # (b) The run completed with a usable final AIMessage despite compaction.
+    # The model's output surfaces under the "model" node key in updates mode.
+    final_messages: list = []
+    for chunk in chunks:
+        node_msg = chunk.get("model") or chunk.get("agent") or {}
+        final_messages = node_msg.get("messages", final_messages)
+    ai_finals = [m for m in final_messages if isinstance(m, AIMessage)]
+    assert ai_finals, "the run must produce a final AIMessage after compaction"
+    assert ai_finals[-1].content == "final answer after compaction"

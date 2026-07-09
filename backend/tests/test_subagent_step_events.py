@@ -243,6 +243,52 @@ def test_capture_new_step_messages_is_noop_on_values_reyield():
     assert len(captured) == 1
 
 
+def test_capture_new_step_messages_handles_history_contraction():
+    # Regression for #3875 Phase 3: DeerFlowSummarizationMiddleware rewrites the
+    # messages channel via RemoveMessage(id=REMOVE_ALL_MESSAGES), which shrinks
+    # len(messages) below the cursor we were tracking. Without a contraction
+    # reset, every step appended AFTER the compaction is dropped until total
+    # overtakes the stale cursor.
+    #
+    # Faithful to the real middleware: compaction puts the summary into a
+    # SEPARATE ``summary_text`` state key — the messages channel after
+    # compaction holds only the preserved recent tail (already-seen messages),
+    # NOT a synthetic summary AIMessage. So the contraction chunk is the
+    # already-seen tail, deduped by id; the real regression coverage is that
+    # POST-compaction growth is still captured.
+    captured: list[dict] = []
+    seen: set[str] = set()
+
+    # Pre-compaction: a normal growing turn captures 3 steps (cursor → 4).
+    ai1 = AIMessage(content="searching", id="ai-1")
+    tool1 = ToolMessage(content="r1", tool_call_id="c1", name="web_search", id="tool-1")
+    ai2 = AIMessage(content="done turn", id="ai-2")
+    before = [HumanMessage(content="do research", id="h-1"), ai1, tool1, ai2]
+    processed = capture_new_step_messages(before, captured, seen, 0)
+    assert processed == 4
+    assert [c["id"] for c in captured] == ["ai-1", "tool-1", "ai-2"]
+
+    # Compaction rewrites the channel to just the preserved tail (ai2) —
+    # length drops from 4 to 1, below the cursor. ai2 is already seen, so the
+    # dedup makes it a no-op; no new step is emitted. (The summary itself lives
+    # in summary_text and is never a capturable AIMessage — see step_events.py
+    # INVARIANT.)
+    compacted = [ai2]
+    processed = capture_new_step_messages(compacted, captured, seen, processed)
+    assert processed == 1
+    assert [c["id"] for c in captured] == ["ai-1", "tool-1", "ai-2"]  # unchanged
+
+    # Post-compaction growth: a new turn appends after the preserved tail. This
+    # is the bug the fix targets — without the reset, processed_count stays at
+    # 4, total (3) never exceeds it, and tool-2/ai-3 are silently dropped.
+    tool2 = ToolMessage(content="r2", tool_call_id="c2", name="read_file", id="tool-2")
+    ai3 = AIMessage(content="final answer", id="ai-3")
+    after = [ai2, tool2, ai3]
+    processed = capture_new_step_messages(after, captured, seen, processed)
+    assert processed == 3
+    assert [c["id"] for c in captured] == ["ai-1", "tool-1", "ai-2", "tool-2", "ai-3"]
+
+
 def test_run_event_for_task_started():
     record = subagent_run_event({"type": "task_started", "task_id": "call_1", "description": "research X"})
 
