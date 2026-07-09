@@ -139,6 +139,39 @@ class TestTokenBudgetHardStop:
         assert "Thinking" in msgs[0].content
         assert "TOKEN BUDGET EXCEEDED" in msgs[0].content
 
+    def test_hard_stop_stamps_token_capped_stop_reason_consumed_once(self):
+        """#3875 Phase 2: a hard-stop stamps ``token_capped`` on a per-run
+        accessor the executor reads post-run. It pops on read so a second read
+        (e.g. a retry over the same executor) does not double-report, and a
+        non-capped run yields ``None``."""
+        config = TokenBudgetConfig(max_tokens=100000, hard_stop_threshold=1.0, enabled=True)
+        mw = TokenBudgetMiddleware.from_config(config)
+
+        runtime = _make_runtime(run_id="capped-run")
+        tool_calls = [{"name": "bash", "args": {"command": "ls"}, "id": "call_1"}]
+        state = _make_state_with_usage(total=105000, tool_calls=tool_calls, content="partial answer")
+        mw._apply(state, runtime)
+
+        # First read pops the reason.
+        assert mw.consume_stop_reason("capped-run") == "token_capped"
+        # Second read is None — the reason is per-run and consumed once.
+        assert mw.consume_stop_reason("capped-run") is None
+        # A run that never hit the cap has no stop reason.
+        assert mw.consume_stop_reason("uncapped-run") is None
+
+    def test_below_threshold_does_not_stamp_stop_reason(self):
+        """A run that only crosses the warn threshold (not the hard stop) keeps
+        running and must not stamp ``token_capped`` — the run is not capped."""
+        config = TokenBudgetConfig(max_tokens=100000, warn_threshold=0.7, hard_stop_threshold=1.0, enabled=True)
+        mw = TokenBudgetMiddleware.from_config(config)
+
+        runtime = _make_runtime(run_id="warn-run")
+        # 80k of 100k -> crosses warn (0.7) but not hard stop (1.0).
+        state = _make_state_with_usage(total=80000)
+        mw._apply(state, runtime)
+
+        assert mw.consume_stop_reason("warn-run") is None
+
 
 class TestIndependentDimensions:
     def test_input_tokens_trigger_limit(self):

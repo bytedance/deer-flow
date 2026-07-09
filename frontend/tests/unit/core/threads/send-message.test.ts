@@ -60,3 +60,39 @@ test("keeps uploaded files on the visible user message only", () => {
     ],
   });
 });
+
+test("keeps human input response metadata on the hidden user message", () => {
+  const response = {
+    version: 1,
+    kind: "human_input_response",
+    source: "ask_clarification",
+    request_id: "clarification:call-abc",
+    response_kind: "option",
+    option_id: "option-2",
+    value: "staging",
+  };
+
+  const messages = buildThreadSubmitMessages({
+    text: 'For your clarification "Which environment?", my answer is: staging',
+    additionalKwargs: {
+      hide_from_ui: true,
+      human_input_response: response,
+    },
+  });
+
+  expect(messages).toEqual([
+    {
+      type: "human",
+      content: [
+        {
+          type: "text",
+          text: 'For your clarification "Which environment?", my answer is: staging',
+        },
+      ],
+      additional_kwargs: {
+        hide_from_ui: true,
+        human_input_response: response,
+      },
+    },
+  ]);
+});

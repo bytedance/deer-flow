@@ -18,6 +18,7 @@ from deerflow.subagents.status_contract import (
     SUBAGENT_RESULT_BRIEF_KEY,
     SUBAGENT_RESULT_SHA256_KEY,
     SUBAGENT_STATUS_KEY,
+    SUBAGENT_STOP_REASON_KEY,
 )
 
 # Use module import so tests can patch the exact symbols referenced inside task_tool().
@@ -32,7 +33,6 @@ class FakeSubagentStatus(Enum):
     FAILED = "failed"
     CANCELLED = "cancelled"
     TIMED_OUT = "timed_out"
-    MAX_TURNS_REACHED = "max_turns_reached"
 
 
 def _make_runtime(*, app_config=None) -> SimpleNamespace:
@@ -70,6 +70,7 @@ def _make_result(
     ai_messages: list[dict] | None = None,
     result: str | None = None,
     error: str | None = None,
+    stop_reason: str | None = None,
     token_usage_records: list[dict] | None = None,
 ) -> SimpleNamespace:
     return SimpleNamespace(
@@ -77,6 +78,7 @@ def _make_result(
         ai_messages=ai_messages or [],
         result=result,
         error=error,
+        stop_reason=stop_reason,
         token_usage_records=token_usage_records or [],
         usage_reported=False,
     )
@@ -159,23 +161,61 @@ def test_task_result_command_derives_content_from_status_payload():
     assert timed_out_without_detail.additional_kwargs[SUBAGENT_STATUS_KEY] == "timed_out"
     assert timed_out_without_detail.additional_kwargs[SUBAGENT_ERROR_KEY] == "Task timed out."
 
-    # #3875 Phase 2: a turn-capped run is the one status that carries BOTH a
-    # recovered partial result (result_brief + sha256) and a cap notice
-    # (error), and the model-visible content leads with the partial work.
-    max_turns = _task_tool_message(
+    # #3875 Phase 2: a capped run keeps a normal status and carries the cap on
+    # the additive ``subagent_stop_reason`` field; the model-visible text folds
+    # a ``(capped: ...)`` note in. The recovered partial work still travels on
+    # ``result_brief`` like a clean success.
+    capped = _task_tool_message(
         task_tool_module._task_result_command(
-            tool_call_id="tc-max-turns",
-            status="max_turns_reached",
+            tool_call_id="tc-capped",
+            status="completed",
             result="investigated 3 of 5 sources",
-            error="Reached max_turns=150",
+            stop_reason="token_capped",
         )
     )
-    assert max_turns.content.startswith("Task reached max turns")
-    assert "investigated 3 of 5 sources" in max_turns.content
-    assert max_turns.additional_kwargs[SUBAGENT_STATUS_KEY] == "max_turns_reached"
-    assert max_turns.additional_kwargs[SUBAGENT_RESULT_BRIEF_KEY] == "investigated 3 of 5 sources"
-    assert len(max_turns.additional_kwargs[SUBAGENT_RESULT_SHA256_KEY]) == 64
-    assert max_turns.additional_kwargs[SUBAGENT_ERROR_KEY] == "Reached max_turns=150"
+    assert capped.content == "Task Succeeded (capped: token budget). Result: investigated 3 of 5 sources"
+    assert capped.additional_kwargs[SUBAGENT_STATUS_KEY] == "completed"
+    assert capped.additional_kwargs[SUBAGENT_RESULT_BRIEF_KEY] == "investigated 3 of 5 sources"
+    assert len(capped.additional_kwargs[SUBAGENT_RESULT_SHA256_KEY]) == 64
+    assert capped.additional_kwargs[SUBAGENT_STOP_REASON_KEY] == "token_capped"
+
+
+def test_task_result_command_carries_loop_capped_from_real_loop_detection():
+    """Real-path (#3875 Phase 2, ggnnggez review): drive the actual
+    ``LoopDetectionMiddleware`` to a hard stop with repeated identical tool
+    calls, feed the produced ``loop_capped`` through ``_task_result_command``,
+    and assert the final task ``ToolMessage`` carries
+    ``subagent_stop_reason=loop_capped`` — proving the loop cap reaches the wire
+    the lead/ledger read, not just the in-memory result."""
+    from langchain_core.messages import AIMessage
+
+    from deerflow.agents.middlewares.loop_detection_middleware import LoopDetectionMiddleware
+
+    # Drive the real middleware to a hard stop (4 identical calls, hard_limit=4).
+    mw = LoopDetectionMiddleware(warn_threshold=2, hard_limit=4)
+    runtime = SimpleNamespace(context={"thread_id": "t", "run_id": "r1"})
+    tool_calls = [{"name": "bash", "args": {"command": "ls"}, "id": "c1", "type": "tool_call"}]
+    for _ in range(3):
+        mw._apply({"messages": [AIMessage(content="", tool_calls=tool_calls)]}, runtime)
+    hard_stop = mw._apply({"messages": [AIMessage(content="", tool_calls=tool_calls)]}, runtime)
+    assert hard_stop is not None  # hard stop fired
+
+    stop_reason = mw.consume_stop_reason("r1")
+    assert stop_reason == "loop_capped"
+
+    # The produced reason flows through the task-tool result path onto the wire.
+    message = _task_tool_message(
+        task_tool_module._task_result_command(
+            tool_call_id="tc-loop",
+            status="completed",
+            result="partial work before the loop was broken",
+            stop_reason=stop_reason,
+        )
+    )
+    assert message.additional_kwargs[SUBAGENT_STATUS_KEY] == "completed"
+    assert message.additional_kwargs[SUBAGENT_STOP_REASON_KEY] == "loop_capped"
+    assert message.additional_kwargs[SUBAGENT_RESULT_BRIEF_KEY] == "partial work before the loop was broken"
+    assert "capped: repeated tool-call loop" in message.content
 
 
 async def _no_sleep(_: float) -> None:
@@ -732,12 +772,11 @@ def test_task_tool_returns_timed_out_message(monkeypatch):
     assert events[-1]["error"] == "timeout"
 
 
-def test_task_tool_returns_max_turns_reached_message(monkeypatch):
-    """#3875 Phase 2: a MAX_TURNS_REACHED subagent surfaces a distinct
-    ``Task reached max turns`` message that carries the recovered partial
-    result, and stamps ``result_brief`` + the cap notice on ``error`` — the
-    one status that carries both. The polling loop emits ``task_failed`` so
-    the card transitions out of running; the structured status is the reason."""
+def test_task_tool_surfaces_stop_reason_for_capped_run(monkeypatch):
+    """#3875 Phase 2: a capped run keeps a normal status (``completed`` when it
+    produced a final answer) and carries the cap on ``subagent_stop_reason``.
+    The polling loop threads ``result.stop_reason`` through so the lead's
+    ToolMessage carries it without parsing the result text."""
     config = _make_subagent_config()
     events = []
 
@@ -746,7 +785,7 @@ def test_task_tool_returns_max_turns_reached_message(monkeypatch):
     monkeypatch.setattr(
         task_tool_module,
         "get_background_task_result",
-        lambda _: _make_result(FakeSubagentStatus.MAX_TURNS_REACHED, result="investigated 3 of 5 sources", error="Reached max_turns=50"),
+        lambda _: _make_result(FakeSubagentStatus.COMPLETED, result="investigated 3 of 5 sources", stop_reason="token_capped"),
     )
     monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: events.append)
     monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
@@ -757,18 +796,19 @@ def test_task_tool_returns_max_turns_reached_message(monkeypatch):
         description="执行任务",
         prompt="do capped work",
         subagent_type="general-purpose",
-        tool_call_id="tc-max-turns",
+        tool_call_id="tc-capped",
     )
 
     message = _task_tool_message(output)
-    assert message.content.startswith("Task reached max turns")
+    # The cap is folded into the model-visible text...
+    assert message.content.startswith("Task Succeeded (capped: token budget)")
     assert "investigated 3 of 5 sources" in message.content
-    assert str(config.max_turns) in message.content
-    assert message.additional_kwargs[SUBAGENT_STATUS_KEY] == "max_turns_reached"
+    # ...and carried structurally on the additive field.
+    assert message.additional_kwargs[SUBAGENT_STATUS_KEY] == "completed"
+    assert message.additional_kwargs[SUBAGENT_STOP_REASON_KEY] == "token_capped"
     assert message.additional_kwargs[SUBAGENT_RESULT_BRIEF_KEY] == "investigated 3 of 5 sources"
     assert len(message.additional_kwargs[SUBAGENT_RESULT_SHA256_KEY]) == 64
-    assert message.additional_kwargs[SUBAGENT_ERROR_KEY] == f"Reached max_turns={config.max_turns}"
-    assert events[-1]["type"] == "task_failed"
+    assert events[-1]["type"] == "task_completed"
 
 
 def test_task_tool_polling_safety_timeout(monkeypatch):

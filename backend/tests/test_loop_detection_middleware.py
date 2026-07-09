@@ -402,6 +402,52 @@ class TestLoopDetection:
         assert msgs[0].tool_calls == []
         assert _HARD_STOP_MSG in msgs[0].content
 
+    def test_hard_stop_stamps_loop_capped_stop_reason(self):
+        """#3875 Phase 2 (ggnnggez review): the loop hard-stop stamps
+        ``loop_capped`` on ``consume_stop_reason`` so the executor can surface
+        ``completed + loop_capped`` instead of a clean completion. Mirrors
+        ``TokenBudgetMiddleware.consume_stop_reason``."""
+        mw = LoopDetectionMiddleware(warn_threshold=2, hard_limit=4)
+        runtime = _make_runtime()  # run_id="test-run"
+        call = [_bash_call("ls")]
+
+        for _ in range(3):
+            mw._apply(_make_state(tool_calls=call), runtime)
+        # Fourth call triggers the hard stop -> stamps loop_capped.
+        hard_stop_result = mw._apply(_make_state(tool_calls=call), runtime)
+        assert hard_stop_result is not None
+
+        assert mw.consume_stop_reason("test-run") == "loop_capped"
+        # Popped on read — a second read is None (no double-report on reuse).
+        assert mw.consume_stop_reason("test-run") is None
+
+    def test_warn_only_does_not_stamp_stop_reason(self):
+        """Crossing the warn threshold (not the hard limit) keeps the run going
+        and must NOT stamp ``loop_capped`` — the run is not capped."""
+        mw = LoopDetectionMiddleware(warn_threshold=2, hard_limit=10)
+        runtime = _make_runtime()
+        call = [_bash_call("ls")]
+
+        # Two identical calls cross warn (2) but not hard (10).
+        mw._apply(_make_state(tool_calls=call), runtime)
+        mw._apply(_make_state(tool_calls=call), runtime)
+
+        assert mw.consume_stop_reason("test-run") is None
+
+    def test_tool_frequency_hard_stop_stamps_loop_capped(self):
+        """The per-tool frequency hard-stop also stamps ``loop_capped`` — it is
+        the same hard-stop path, just a different detector catching the same
+        tool *type* called many times with varying arguments."""
+        mw = LoopDetectionMiddleware(tool_freq_warn=2, tool_freq_hard_limit=3)
+        runtime = _make_runtime()
+        # Same tool type, varying args -> frequency detector, not hash detector.
+        for i in range(3):
+            result = mw._apply(_make_state(tool_calls=[_bash_call(f"cmd_{i}")]), runtime)
+            if i < 2:
+                assert result is None, f"unexpected hard stop at call {i}"
+
+        assert mw.consume_stop_reason("test-run") == "loop_capped"
+
     def test_different_calls_dont_trigger(self):
         mw = LoopDetectionMiddleware(warn_threshold=2)
         runtime = _make_runtime()

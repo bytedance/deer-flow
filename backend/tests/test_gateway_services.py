@@ -132,6 +132,37 @@ def test_normalize_input_preserves_additional_kwargs_and_id():
     assert msg.additional_kwargs == {"files": files, "custom": "keep-me"}
 
 
+def test_normalize_input_preserves_human_input_response_metadata():
+    from langchain_core.messages import HumanMessage
+
+    from app.gateway.services import normalize_input
+
+    response = {
+        "version": 1,
+        "kind": "human_input_response",
+        "source": "ask_clarification",
+        "request_id": "clarification:call-abc",
+        "response_kind": "option",
+        "option_id": "option-2",
+        "value": "staging",
+    }
+    result = normalize_input(
+        {
+            "messages": [
+                {
+                    "type": "human",
+                    "content": [{"type": "text", "text": "For your clarification, my answer is: staging"}],
+                    "additional_kwargs": {"human_input_response": response},
+                }
+            ]
+        }
+    )
+
+    msg = result["messages"][0]
+    assert isinstance(msg, HumanMessage)
+    assert msg.additional_kwargs["human_input_response"] == response
+
+
 def test_normalize_input_passes_through_basemessage_instances():
     from langchain_core.messages import HumanMessage
 
@@ -760,6 +791,36 @@ def test_inject_authenticated_user_context_skips_internal_role():
     assert config["context"]["user_id"] == "channel-user-7"
 
 
+def test_inject_authenticated_user_context_strips_internal_spoofed_attribution():
+    """Internal callers must not carry role/oauth attribution from request config
+    unless the gateway resolved a trusted owner user server-side.
+    """
+    from types import SimpleNamespace
+
+    from app.gateway.services import build_run_config, inject_authenticated_user_context
+
+    config = build_run_config(
+        "thread-1",
+        {
+            "context": {
+                "user_id": "channel-user-7",
+                "user_role": "admin",
+                "oauth_provider": "spoofed-provider",
+                "oauth_id": "spoofed-subject",
+            }
+        },
+        None,
+    )
+    request = SimpleNamespace(state=SimpleNamespace(user=SimpleNamespace(id="internal-bot", system_role="internal")))
+
+    inject_authenticated_user_context(config, request)
+
+    assert config["context"]["user_id"] == "channel-user-7"
+    assert "user_role" not in config["context"]
+    assert "oauth_provider" not in config["context"]
+    assert "oauth_id" not in config["context"]
+
+
 async def _capture_start_run_graph_input(body):
     from types import SimpleNamespace
     from unittest.mock import patch
@@ -918,6 +979,90 @@ def test_start_run_uses_internal_owner_header_for_persistence(_stub_app_config):
     assert owner_thread["metadata"] == {"legacy": True}
     assert default_thread is None
     assert task_context["user_id"] == "owner-1"
+
+
+def test_start_run_stamps_internal_owner_guardrail_attribution(_stub_app_config):
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from langgraph.checkpoint.memory import InMemorySaver
+    from langgraph.store.memory import InMemoryStore
+
+    from app.gateway.internal_auth import INTERNAL_OWNER_USER_ID_HEADER_NAME, INTERNAL_SYSTEM_ROLE
+    from app.gateway.services import start_run
+    from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
+    from deerflow.runtime import RunManager
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    class _Provider:
+        async def get_user(self, user_id: str):
+            assert user_id == "owner-1"
+            return SimpleNamespace(
+                id="owner-1",
+                system_role="user",
+                oauth_provider="keycloak",
+                oauth_id="subject-123",
+            )
+
+    async def _scenario():
+        thread_store = MemoryThreadMetaStore(InMemoryStore())
+        await thread_store.create("channel-thread", user_id="owner-1", metadata={})
+        run_manager = RunManager(store=MemoryRunStore())
+        state = SimpleNamespace(
+            stream_bridge=SimpleNamespace(),
+            run_manager=run_manager,
+            checkpointer=InMemorySaver(),
+            store=InMemoryStore(),
+            run_event_store=SimpleNamespace(),
+            run_events_config=None,
+            thread_store=thread_store,
+        )
+        request = SimpleNamespace(
+            headers={INTERNAL_OWNER_USER_ID_HEADER_NAME: "owner-1"},
+            state=SimpleNamespace(user=SimpleNamespace(id="default", system_role=INTERNAL_SYSTEM_ROLE)),
+            app=SimpleNamespace(state=state),
+        )
+        body = SimpleNamespace(
+            assistant_id="lead_agent",
+            input={"messages": [{"role": "human", "content": "hi"}]},
+            metadata={},
+            config={
+                "context": {
+                    "user_role": "admin",
+                    "oauth_provider": "spoofed-provider",
+                    "oauth_id": "spoofed-subject",
+                }
+            },
+            context={"user_id": "spoofed-client"},
+            on_disconnect="cancel",
+            multitask_strategy="reject",
+            stream_mode=None,
+            stream_subgraphs=False,
+            interrupt_before=None,
+            interrupt_after=None,
+        )
+        captured_context: dict[str, object] = {}
+
+        async def fake_run_agent(*args, **kwargs):
+            captured_context.update(kwargs["config"]["context"])
+
+        with (
+            patch("app.gateway.services.get_local_provider", return_value=_Provider()),
+            patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+            patch("app.gateway.services.run_agent", side_effect=fake_run_agent),
+        ):
+            record = await start_run(body, "channel-thread", request)
+            await record.task
+
+        return captured_context
+
+    context = asyncio.run(_scenario())
+
+    assert context["user_id"] == "owner-1"
+    assert context["user_role"] == "user"
+    assert context["oauth_provider"] == "keycloak"
+    assert context["oauth_id"] == "subject-123"
 
 
 def test_launch_scheduled_thread_run_marks_context_non_interactive(_stub_app_config):

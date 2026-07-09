@@ -15,7 +15,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 18
+config_version: 20
 
 # ============================================================================
 # Logging
@@ -912,6 +912,20 @@ suggestions:
 
 
 # ============================================================================
+# Input Polish Configuration
+# ============================================================================
+# Configure whether the composer can rewrite draft input before sending.
+
+input_polish:
+  enabled: true
+  # Maximum draft length accepted by /api/input-polish.
+  max_chars: 4000
+  # Optional fast model for draft polishing. Leave null to use the default chat model.
+  # For best UX, set this to your lowest-latency inexpensive model.
+  model_name: null
+
+
+# ============================================================================
 # Loop Detection Configuration
 # ============================================================================
 # Detect and interrupt repeated identical tool-call loops.
@@ -933,6 +947,31 @@ loop_detection:
   #   bash:
   #     warn: 150
   #     hard_limit: 300
+
+# ============================================================================
+# Tool Progress State Machine Configuration (RFC #3177)
+# ============================================================================
+# Detects tool stagnation and repetition at the (thread, tool) level.
+# Tracks consecutive "no-new-info" calls (error, partial_success, near-duplicate success).
+# Three transition paths (determined by deerflow_tool_meta.recoverable_by_model):
+#   recoverable=true  (no_results, not_found, permission): ACTIVE → WARNED (terminal; hint re-injected each call)
+#   recoverable=false (rate_limited, transient):           ACTIVE → WARNED → BLOCKED after warn_escalation_count more
+#   recoverable=false + action=stop (auth, config):        ACTIVE → BLOCKED immediately
+# Requires ToolErrorHandlingMiddleware to be active (always on).
+
+# tool_progress:
+#   enabled: false
+#   stagnation_threshold: 3        # Consecutive problems before WARNED
+#   warn_escalation_count: 2       # More problems after WARNED before BLOCKED
+#   inject_assessment: true
+#   jaccard_similarity_threshold: 0.8  # Word-set similarity threshold for near-duplicate detection
+#   min_word_count_for_similarity: 10  # Min unique words to apply Jaccard check
+#   max_tracked_threads: 100
+#   exempt_tools:
+#     - ask_clarification
+#     - write_todos
+#     - present_files
+#     - task
 
 # ============================================================================
 # Read-Before-Write File Gate (issue #3857)
@@ -1051,10 +1090,13 @@ sandbox:
 #
 #   # Optional: Container image to use (works with both Docker and Apple Container)
 #   # Default: enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest
-#   # Recommended: enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest (works on both x86_64 and arm64)
-#   # Custom images should extend the default image or implement the same AIO
-#   # sandbox HTTP API used by agent-sandbox. See backend/docs/CONFIGURATION.md.
-#   # image: enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest
+#   # The mirror's `:latest` tag is frozen on an old pre-1.9.3 digest that lacks
+#   # the /v1/bash/* routes required-secrets skills need (see #3921/#3922), so
+#   # pin an explicit version instead — recommended: 1.11.0 (multi-arch, works
+#   # on both x86_64 and arm64). Custom images should extend the default image
+#   # or implement the same AIO sandbox HTTP API used by agent-sandbox. See
+#   # backend/docs/CONFIGURATION.md.
+#   # image: enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:1.11.0
 #
 #   # Optional: Base port for sandbox containers (default: 8080)
 #   # port: 8080
@@ -1134,11 +1176,26 @@ sandbox:
 #   # Built-in defaults: general-purpose=150, bash=60. Leave unset to keep them.
 #   # max_turns: 120
 #
+#   # Per-run token ceiling for subagents (#3875 Phase 2). A backstop against a
+#   # subagent that burns tokens on trivial work. At the hard-stop threshold the
+#   # in-flight turn is capped (tool calls stripped, finish_reason forced to
+#   # "stop") so the run completes naturally with a final answer; the result is
+#   # stamped `completed` + `subagent_stop_reason=token_capped` so the lead and
+#   # UI can tell a budget-capped completion from a clean one. The 2,000,000
+#   # default is a generous ceiling — lower it to tighten cost controls. A
+#   # per-agent `token_budget` override (see `agents:` below) wins over this.
+#   # token_budget:
+#   #   enabled: true
+#   #   max_tokens: 2000000
+#   #   warn_threshold: 0.7     # log a warning once this fraction of the budget is spent
+#
 #   # Optional per-agent overrides (applies to both built-in and custom agents)
 #   agents:
 #     general-purpose:
 #       timeout_seconds: 2700  # 45 minutes for very long deep-research tasks
 #       max_turns: 250         # raise above the 150 default for very deep tasks
+#       # token_budget:        # per-agent override of the global token_budget above
+#       #   max_tokens: 3000000  # raise the ceiling for deep-research tasks
 #       # model: qwen3:32b     # Use a specific model (default: inherit from lead agent)
 #       # skills:               # Skill whitelist (default: inherit all enabled skills)
 #       #   - web-search
@@ -1225,6 +1282,16 @@ skills:
   # This keeps the system prompt compact and prefix-cache friendly when many
   # skills are installed.
   # deferred_discovery: true
+
+# ============================================================================
+# SkillScan Configuration
+# ============================================================================
+# Native deterministic skill safety scanning. This runs before the LLM skill
+# scanner on skill install/update and agent-managed skill writes.
+skill_scan:
+  # Set false to disable the new deterministic analyzers. Safe archive
+  # extraction and the LLM skill scanner still run.
+  enabled: true
 
 # Note: To restrict which skills are loaded for a specific custom agent,
 # define a `skills` list in that agent's `config.yaml` (e.g. `agents/my-agent/config.yaml`):
@@ -1342,6 +1409,26 @@ memory:
   guaranteed_categories:
     - correction
   guaranteed_token_budget: 500
+  # Staleness review: periodically prune aged facts that may no longer reflect
+  # the user's current situation.  When triggered, the LLM reviews facts older
+  # than ``staleness_age_days`` during the normal memory-update call (same LLM
+  # invocation — no extra API call) and decides KEEP or REMOVE for each.
+  #   staleness_review_enabled - master switch (default: true)
+  #   staleness_age_days       - facts older than this are candidates (default: 90)
+  #   staleness_min_candidates - minimum stale facts required to trigger a review
+  #                              cycle; avoids wasteful LLM calls when there are
+  #                              very few candidates (default: 3)
+  #   staleness_max_removals_per_cycle - safety cap on removals per cycle; when
+  #                                      exceeded, the lowest-confidence entries
+  #                                      are kept (default: 10)
+  #   staleness_protected_categories - fact categories exempt from review
+  #                                    (default: ["correction"])
+  staleness_review_enabled: true
+  staleness_age_days: 90
+  staleness_min_candidates: 3
+  staleness_max_removals_per_cycle: 10
+  staleness_protected_categories:
+    - correction
 
 # ============================================================================
 # Custom Agent Management API

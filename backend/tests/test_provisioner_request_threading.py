@@ -27,6 +27,7 @@ class _RecordingCoreV1:
         self.ready_after_service_reads = ready_after_service_reads or {}
         self.service_read_counts: dict[str, int] = {}
         self.created_pods: list[str] = []
+        self.created_pod_specs: dict[str, object] = {}
         self.created_services: list[str] = []
 
     def _record_k8s_call(self) -> None:
@@ -58,6 +59,7 @@ class _RecordingCoreV1:
         self._record_k8s_call()
         sandbox_id = pod.metadata.labels["sandbox-id"]
         self.created_pods.append(sandbox_id)
+        self.created_pod_specs[sandbox_id] = pod
 
     def create_namespaced_service(self, _namespace: str, service) -> None:
         self._record_k8s_call()
@@ -157,3 +159,46 @@ async def test_sandbox_business_routes_run_k8s_client_off_event_loop_thread(
     if expected_created_sandbox is not None:
         assert fake_core_v1.created_pods == [expected_created_sandbox]
         assert fake_core_v1.created_services == [expected_created_sandbox]
+
+
+@pytest.mark.parametrize(
+    ("include_legacy_skills", "expected_mount_names"),
+    [
+        (
+            False,
+            ["skills-public", "skills-custom", "user-data"],
+        ),
+        (
+            True,
+            ["skills-public", "skills-custom", "skills-legacy", "user-data"],
+        ),
+    ],
+    ids=["without-legacy", "with-legacy"],
+)
+def test_create_sandbox_route_builds_expected_skills_mount_layout(
+    include_legacy_skills: bool,
+    expected_mount_names: list[str],
+    monkeypatch: pytest.MonkeyPatch,
+    provisioner_module,
+) -> None:
+    fake_core_v1 = _RecordingCoreV1(
+        event_loop_thread_id=-1,
+        ready_after_service_reads={"sandbox-layout": 1},
+    )
+    monkeypatch.setattr(provisioner_module, "core_v1", fake_core_v1)
+
+    response = provisioner_module.create_sandbox(
+        provisioner_module.CreateSandboxRequest(
+            sandbox_id="sandbox-layout",
+            thread_id="thread-1",
+            user_id="user-1",
+            include_legacy_skills=include_legacy_skills,
+        )
+    )
+
+    assert response.status == "Running"
+    pod = fake_core_v1.created_pod_specs["sandbox-layout"]
+    volume_names = [volume.name for volume in pod.spec.volumes]
+    mount_names = [mount.name for mount in pod.spec.containers[0].volume_mounts]
+    assert volume_names == expected_mount_names
+    assert mount_names == expected_mount_names

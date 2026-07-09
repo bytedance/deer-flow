@@ -115,6 +115,12 @@ export const zhCN: Translations = {
     createSkillPrompt:
       "我们一起用 skill-creator 技能来创建一个技能吧。先问问我希望这个技能能做什么。",
     addAttachments: "添加附件",
+    inputPolish: "优化输入",
+    inputPolishing: "正在优化输入...",
+    inputPolishNoChanges: "当前输入已经足够清晰。",
+    inputPolishFailed: "优化输入失败。",
+    inputPolishUndo: "撤销优化",
+    inputPolishCancel: "取消优化",
     mode: "模式",
     flashMode: "闪速",
     flashModeDescription: "快速且高效的完成任务，但可能不够精准",
@@ -144,6 +150,7 @@ export const zhCN: Translations = {
     followupConfirmReplace: "替换并发送",
     suggestionPlaceholderRequired: "发送前请先填写建议模板中的占位内容。",
     goalCommandDescription: "设置、查看或清除当前目标",
+    compactCommandDescription: "压缩早期上下文，保留完整聊天记录",
     goalLabel: "目标",
     goalContinuing: "续跑中 {count}/{max}",
     goalContinuationTooltip:
@@ -153,6 +160,10 @@ export const zhCN: Translations = {
     goalNone: "当前没有目标。",
     goalActive: "当前目标：{goal}",
     goalFailed: "目标命令执行失败。",
+    compactSuccess:
+      "已压缩早期上下文。完整聊天记录仍保留，后续模型将基于摘要和最近消息继续。",
+    compactSkipped: "当前上下文还不需要压缩。",
+    compactFailed: "上下文压缩失败。",
     suggestions: [
       {
         suggestion: "写作",
@@ -436,6 +447,11 @@ export const zhCN: Translations = {
     title: "侧边对话",
     open: "打开侧边对话",
     close: "关闭侧边对话",
+    delete: "删除侧边对话",
+    deleteConfirm:
+      "确定要删除该侧边对话吗？此操作不可撤销。如果只是想隐藏，请使用顶部的侧边对话开关。",
+    deleteSuccess: "侧边对话已删除",
+    deleteFailed: "删除侧边对话失败。",
     addToConversation: "添加到对话",
     askInSideChat: "在侧边聊天中提问",
     reference: "引用",
@@ -514,6 +530,17 @@ export const zhCN: Translations = {
     clickToViewContent: "点击查看文件内容",
     writeTodos: "更新 To-do 列表",
     skillInstallTooltip: "安装技能并使其可在 DeerFlow 中使用",
+  },
+
+  humanInput: {
+    answered: "已回答",
+    pending: "发送中...",
+    readOnly: "只读",
+    otherLabel: "其他回答",
+    otherPlaceholder: "输入其他回答...",
+    submit: "提交",
+    emptyError: "请输入回答后再提交。",
+    answeredValue: (value: string) => `已回答：${value}`,
   },
 
   uploads: {

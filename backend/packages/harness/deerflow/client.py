@@ -46,7 +46,7 @@ from deerflow.runtime.goal import DEFAULT_MAX_GOAL_CONTINUATIONS, build_goal_sta
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.skills.describe import build_skill_search_setup
 from deerflow.skills.storage import get_or_new_user_skill_storage
-from deerflow.tools.builtins.tool_search import assemble_deferred_tools
+from deerflow.tools.builtins.tool_search import assemble_deferred_tools, get_mcp_routing_hints_prompt_section
 from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, generate_trace_id, get_current_trace_id, reset_current_trace_id, set_current_trace_id
 from deerflow.tracing import build_tracing_callbacks, inject_langfuse_metadata
 from deerflow.uploads.manager import (
@@ -257,6 +257,7 @@ class DeerFlowClient:
 
         tools = self._get_tools(model_name=model_name, subagent_enabled=subagent_enabled)
         final_tools, deferred_setup = assemble_deferred_tools(tools, enabled=self._app_config.tool_search.enabled)
+        mcp_routing_hints_section = get_mcp_routing_hints_prompt_section(tools, deferred_names=deferred_setup.deferred_names)
 
         # Wire deferred skill discovery — mirrors agent.py so config flag works on both paths.
         skills_list = get_enabled_skills_for_config(self._app_config)
@@ -294,6 +295,7 @@ class DeerFlowClient:
                 available_skills=self._available_skills,
                 app_config=self._app_config,
                 deferred_names=deferred_setup.deferred_names,
+                mcp_routing_hints_section=mcp_routing_hints_section,
                 user_id=get_effective_user_id(),
                 skill_names=skill_setup.skill_names or None,
             ),
@@ -1319,6 +1321,11 @@ class DeerFlowClient:
             "token_counting": config.token_counting,
             "guaranteed_categories": config.guaranteed_categories,
             "guaranteed_token_budget": config.guaranteed_token_budget,
+            "staleness_review_enabled": config.staleness_review_enabled,
+            "staleness_age_days": config.staleness_age_days,
+            "staleness_min_candidates": config.staleness_min_candidates,
+            "staleness_max_removals_per_cycle": config.staleness_max_removals_per_cycle,
+            "staleness_protected_categories": config.staleness_protected_categories,
         }
 
     def get_memory_status(self) -> dict:

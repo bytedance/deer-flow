@@ -2044,7 +2044,12 @@ async function deleteLocalThreadData(threadId: string) {
     },
   );
 
-  if (!response.ok) {
+  // A 404 means the thread is already gone — the desired end state. The prior
+  // `apiClient.threads.delete` call hits the same gateway handler (nginx
+  // rewrites /api/langgraph/threads/* to /api/threads/*) and removes the
+  // thread_meta row, so this second delete's ownership guard 404s. Treat it as
+  // success to keep the delete idempotent.
+  if (!response.ok && response.status !== 404) {
     const error = await response
       .json()
       .catch(() => ({ detail: "Failed to delete local thread data." }));

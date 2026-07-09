@@ -18,6 +18,7 @@ import hashlib
 import json
 import logging
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 from functools import cached_property
 from typing import Annotated
@@ -28,7 +29,7 @@ from langchain_core.tools import InjectedToolCallId, tool
 from langchain_core.utils.function_calling import convert_to_openai_function
 from langgraph.types import Command
 
-from deerflow.tools.mcp_metadata import is_mcp_tool
+from deerflow.tools.mcp_metadata import get_mcp_routing, is_mcp_tool
 
 logger = logging.getLogger(__name__)
 
@@ -219,3 +220,40 @@ def get_deferred_tools_prompt_section(*, deferred_names: frozenset[str] = frozen
         return ""
     names = "\n".join(sorted(deferred_names))
     return f"<available-deferred-tools>\n{names}\n</available-deferred-tools>"
+
+
+def _format_keyword_list(keywords: list[str]) -> str:
+    if len(keywords) == 1:
+        return keywords[0]
+    return f"{', '.join(keywords[:-1])}, or {keywords[-1]}"
+
+
+def get_mcp_routing_hints_prompt_section(tools: Iterable[BaseTool], *, deferred_names: frozenset[str] = frozenset()) -> str:
+    """Render <mcp_routing_hints> from MCP tools carrying routing metadata.
+
+    When tool_search has deferred an MCP tool, the hint must point the model at
+    promotion first; otherwise it may try to call a schema that is hidden from
+    the bound model request.
+    """
+    hints: list[tuple[int, str, list[str]]] = []
+    for candidate in tools:
+        routing = get_mcp_routing(candidate)
+        if routing is None or routing.get("mode") != "prefer":
+            continue
+        keywords = routing.get("keywords") or []
+        if not keywords:
+            continue
+        hints.append((int(routing.get("priority", 0)), candidate.name, [str(keyword) for keyword in keywords]))
+
+    if not hints:
+        return ""
+
+    lines = ["<mcp_routing_hints>"]
+    for priority, tool_name, keywords in sorted(hints, key=lambda item: (-item[0], item[1])):
+        lines.append(f"When the user's request involves {_format_keyword_list(keywords)}:")
+        if tool_name in deferred_names:
+            lines.append(f"  use `tool_search` to fetch `{tool_name}`, then prefer that MCP tool.")
+        else:
+            lines.append(f"  prefer the `{tool_name}` tool.")
+    lines.append("</mcp_routing_hints>")
+    return "\n".join(lines)
