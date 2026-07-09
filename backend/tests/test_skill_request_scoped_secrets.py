@@ -218,6 +218,18 @@ class TestEnvPolicy:
         assert "REDISCLI_AUTH" not in env
         assert env.get("PWD")  # the working directory must survive the added entries
 
+    def test_injection_still_wins_for_the_newly_blocked_names(self, monkeypatch):
+        """``required-secrets`` stays the escape hatch for the names added here.
+
+        The request-scoped value must also override the host's, which is the
+        per-user-key-overrides-shared-key case from #3861.
+        """
+        from deerflow.sandbox.env_policy import build_sandbox_env
+
+        monkeypatch.setenv("MYSQL_PWD", "host-value-must-not-leak")
+        env = build_sandbox_env(injected={"MYSQL_PWD": "request-scoped-value"})
+        assert env["MYSQL_PWD"] == "request-scoped-value"
+
     def test_build_sandbox_env_scrubs_inherited_and_layers_injected(self, monkeypatch):
         from deerflow.sandbox.env_policy import build_sandbox_env
 
