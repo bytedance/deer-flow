@@ -8,6 +8,14 @@ export interface SubtaskResultUpdate {
   status: SubtaskStatus;
   result?: string;
   error?: string;
+  /**
+   * Why a guardrail cap ended the run early (``token_capped`` / ``turn_capped``
+   * / ``loop_capped``), when the backend stamps ``subagent_stop_reason``. A
+   * capped run keeps a normal pill status — ``completed`` when it produced a
+   * final answer, ``failed`` when it did not — so this field is the only
+   * signal that distinguishes "finished" from "capped" (#3875 Phase 2).
+   */
+  stopReason?: string;
 }
 
 /**
@@ -25,11 +33,24 @@ export interface SubtaskResultUpdate {
  * pins both sides to the same values.
  */
 export const SUBAGENT_STATUS_KEY = "subagent_status";
+export const SUBAGENT_STOP_REASON_KEY = "subagent_stop_reason";
 export const SUBAGENT_ERROR_KEY = "subagent_error";
 export const SUBAGENT_RESULT_BRIEF_KEY = "subagent_result_brief";
 export const SUBAGENT_RESULT_SHA256_KEY = "subagent_result_sha256";
+/**
+ * Why a guardrail cap ended a subagent run early (#3875 Phase 2). Mirrors the
+ * Python ``SUBAGENT_STOP_REASON_VALUES`` and the shared fixture's
+ * ``valid_stop_reason_values``. The field is optional/additive — older
+ * frontends that only read ``subagent_status`` simply never see it.
+ */
+const SUBAGENT_STOP_REASON_VALUES = [
+  "token_capped",
+  "turn_capped",
+  "loop_capped",
+] as const;
 const STRUCTURED_SUBAGENT_KEYS = [
   SUBAGENT_STATUS_KEY,
+  SUBAGENT_STOP_REASON_KEY,
   SUBAGENT_ERROR_KEY,
   SUBAGENT_RESULT_BRIEF_KEY,
   SUBAGENT_RESULT_SHA256_KEY,
@@ -49,6 +70,16 @@ const ERROR_WRAPPER_PATTERN = /^Error\b/i;
  * subtask card only renders three pill states. The richer backend
  * vocabulary still survives on ``error`` for tooling that wants the
  * detail.
+ *
+ * ``max_turns_reached`` is kept as a **deprecated read-only alias**: Phase 1
+ * (#3949) wrote it into ``ToolMessage.additional_kwargs``, which is checkpointed
+ * in thread history, so old turns still carry it. Phase 2 (#3980) stopped
+ * producing it (the cap now rides on ``subagent_stop_reason``), but without this
+ * alias those historical cards would strand as a spinning ``in_progress`` pill
+ * forever (``readStructuredStatus`` would return null yet
+ * ``hasStructuredSubagentMetadata`` stays true from the sibling keys). Mapping
+ * it to ``failed`` keeps them terminal, matching how Phase 1 itself rendered it.
+ * No code path produces this value anymore; it is read-side tolerance only.
  */
 const STRUCTURED_STATUS_TO_SUBTASK: Record<string, SubtaskStatus> = {
   completed: "completed",
@@ -93,6 +124,10 @@ export function parseSubtaskResult(
   const structuredResult = readStructuredResultBrief(additionalKwargs);
   if (structured.status === "completed" && structuredResult) {
     update.result = structuredResult;
+  }
+  const stopReason = readStructuredStopReason(additionalKwargs);
+  if (stopReason) {
+    update.stopReason = stopReason;
   }
   return update;
 }
@@ -191,4 +226,16 @@ function readStructuredResultBrief(
 ): string | undefined {
   const value = additionalKwargs?.[SUBAGENT_RESULT_BRIEF_KEY];
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function readStructuredStopReason(
+  additionalKwargs: Record<string, unknown> | null | undefined,
+): string | undefined {
+  const value = additionalKwargs?.[SUBAGENT_STOP_REASON_KEY];
+  if (typeof value !== "string") return undefined;
+  return SUBAGENT_STOP_REASON_VALUES.includes(
+    value as (typeof SUBAGENT_STOP_REASON_VALUES)[number],
+  )
+    ? value
+    : undefined;
 }

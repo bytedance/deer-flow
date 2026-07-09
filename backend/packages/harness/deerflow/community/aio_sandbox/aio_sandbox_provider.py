@@ -36,10 +36,11 @@ from deerflow.community.warm_pool_lifecycle import (
     IDLE_CHECK_INTERVAL as _SHARED_IDLE_CHECK_INTERVAL,
 )
 from deerflow.config import get_app_config
-from deerflow.config.paths import VIRTUAL_PATH_PREFIX, get_paths
+from deerflow.config.paths import VIRTUAL_PATH_PREFIX, get_paths, join_host_path
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.sandbox_provider import SandboxProvider
+from deerflow.skills.storage import user_should_see_legacy_skills
 
 from .aio_sandbox import AioSandbox
 from .backend import SandboxBackend, wait_for_sandbox_ready, wait_for_sandbox_ready_async
@@ -308,10 +309,10 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             mounts.extend(self._get_thread_mounts(thread_id, user_id=user_id))
             logger.info(f"Adding thread mounts for thread {thread_id}: {mounts}")
 
-        skills_mount = self._get_skills_mount()
-        if skills_mount:
-            mounts.append(skills_mount)
-            logger.info(f"Adding skills mount: {skills_mount}")
+        skills_mounts = self._get_skills_mounts(user_id=user_id)
+        if skills_mounts:
+            mounts.extend(skills_mounts)
+            logger.info(f"Adding skills mounts: {skills_mounts}")
 
         return mounts
 
@@ -337,24 +338,76 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         ]
 
     @staticmethod
-    def _get_skills_mount() -> tuple[str, str, bool] | None:
-        """Get the skills directory mount configuration.
+    def _get_skills_mounts(*, user_id: str | None = None) -> list[tuple[str, str, bool]]:
+        """Get skills directory mount configurations for three-way skills layout.
 
-        Mount source uses DEER_FLOW_HOST_SKILLS_PATH when running inside Docker (DooD)
-        so the host Docker daemon can resolve the path.
+        Mirrors ``LocalSandboxProvider._build_thread_path_mappings`` for AIO
+        sandboxes: public, per-user custom, and legacy (pre-migration
+        global-custom) skills are mounted to separate container subdirectories so
+        that ``Skill.get_container_path()`` category-aware paths resolve
+        correctly inside the sandbox.
+
+        Mount sources use ``DEER_FLOW_HOST_SKILLS_PATH`` and
+        ``DEER_FLOW_HOST_BASE_DIR`` when running inside Docker (DooD) so the
+        host Docker daemon can resolve the paths.
         """
+        mounts: list[tuple[str, str, bool]] = []
         try:
             config = get_app_config()
             skills_path = config.skills.get_skills_path()
             container_path = config.skills.container_path
 
-            if skills_path.exists():
-                # When running inside Docker with DooD, use host-side skills path.
-                host_skills = os.environ.get("DEER_FLOW_HOST_SKILLS_PATH") or str(skills_path)
-                return (host_skills, container_path, True)  # Read-only for security
+            # When running inside Docker with DooD, use host-side skills path.
+            host_skills_root = os.environ.get("DEER_FLOW_HOST_SKILLS_PATH") or str(skills_path)
+
+            # 1. Public skills: global, read-only — static, shared by all threads
+            public_skills_path = skills_path / "public"
+            if public_skills_path.exists():
+                mounts.append(
+                    (
+                        join_host_path(host_skills_root, "public"),
+                        f"{container_path}/public",
+                        True,
+                    )
+                )
+
+            # 2. Per-user custom skills: read-only, per-thread/per-user
+            effective_user_id = AioSandboxProvider._effective_acquire_user_id(user_id)
+            paths = get_paths()
+            user_custom_path = paths.user_custom_skills_dir(effective_user_id)
+            user_custom_path.mkdir(parents=True, exist_ok=True)
+
+            host_user_custom = join_host_path(
+                str(paths.host_base_dir),
+                "users",
+                effective_user_id,
+                "skills",
+                "custom",
+            )
+            mounts.append(
+                (
+                    host_user_custom,
+                    f"{container_path}/custom",
+                    True,
+                )
+            )
+
+            # 3. Legacy (pre-migration global-custom) skills: only mount for
+            #    users who have no per-user custom skills yet, mirroring
+            #    ``UserScopedSkillStorage._iter_skill_files`` visibility rule.
+            legacy_skills_path = skills_path / "custom"
+            if user_should_see_legacy_skills(effective_user_id, host_path=str(skills_path)) and legacy_skills_path.exists():
+                mounts.append(
+                    (
+                        join_host_path(host_skills_root, "custom"),
+                        f"{container_path}/legacy",
+                        True,
+                    )
+                )
         except Exception as e:
-            logger.warning(f"Could not setup skills mount: {e}")
-        return None
+            logger.warning("Could not setup skills mounts: %s", e)
+
+        return mounts
 
     # ── Idle timeout management ──────────────────────────────────────────
 

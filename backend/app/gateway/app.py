@@ -22,6 +22,7 @@ from app.gateway.routers import (
     features,
     feedback,
     github_webhooks,
+    input_polish,
     mcp,
     memory,
     models,
@@ -363,6 +364,10 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
                 "description": "Generate follow-up question suggestions for conversations",
             },
             {
+                "name": "input-polish",
+                "description": "Polish composer draft input before sending",
+            },
+            {
                 "name": "channels",
                 "description": "Manage IM channel integrations (Feishu, Slack, Telegram)",
             },
@@ -444,6 +449,9 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
 
     # Suggestions API is mounted at /api/threads/{thread_id}/suggestions
     app.include_router(suggestions.router)
+
+    # Input polishing API is mounted at /api/input-polish
+    app.include_router(input_polish.router)
 
     # User-facing IM channel connection API is mounted at /api/channels
     app.include_router(channel_connections.router)

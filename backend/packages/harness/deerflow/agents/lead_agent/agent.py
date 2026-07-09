@@ -386,7 +386,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
     # Lazy import to avoid circular dependency
     from deerflow.tools import get_available_tools
     from deerflow.tools.builtins import setup_agent, update_agent
-    from deerflow.tools.builtins.tool_search import assemble_deferred_tools
+    from deerflow.tools.builtins.tool_search import assemble_deferred_tools, get_mcp_routing_hints_prompt_section
 
     cfg = _get_runtime_config(config)
     resolved_app_config = app_config
@@ -546,6 +546,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
     if non_interactive:
         filtered = [tool for tool in filtered if tool.name not in _NON_INTERACTIVE_DISABLED_TOOL_NAMES]
     final_tools, setup = assemble_deferred_tools(filtered, enabled=resolved_app_config.tool_search.enabled)
+    mcp_routing_hints_section = get_mcp_routing_hints_prompt_section(filtered, deferred_names=setup.deferred_names)
     if skill_setup.describe_skill_tool:
         final_tools.append(skill_setup.describe_skill_tool)
     return create_agent(
@@ -567,6 +568,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
             available_skills=available_skills,
             app_config=resolved_app_config,
             deferred_names=setup.deferred_names,
+            mcp_routing_hints_section=mcp_routing_hints_section,
             user_id=resolved_user_id,
             skill_names=skill_setup.skill_names or None,
         ),

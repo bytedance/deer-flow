@@ -1,13 +1,52 @@
 """Unified extensions configuration for MCP servers and skills."""
 
 import json
+import logging
 import os
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from deerflow.config.runtime_paths import existing_project_file
+
+logger = logging.getLogger(__name__)
+
+
+class McpRoutingConfig(BaseModel):
+    """Soft routing hints for MCP tool preference."""
+
+    mode: Literal["off", "prefer"] = Field(
+        default="off",
+        description="Whether to emit prompt hints preferring this MCP tool for matching requests.",
+    )
+    priority: int = Field(
+        default=0,
+        description="Ordering key for routing hints. Higher values are rendered first.",
+    )
+    keywords: list[str] = Field(
+        default_factory=list,
+        description="Operator-authored keywords that describe when this MCP tool should be preferred.",
+    )
+    model_config = ConfigDict(extra="forbid")
+
+    @field_validator("priority")
+    @classmethod
+    def _clamp_priority(cls, value: int) -> int:
+        if value < 0:
+            logger.warning("MCP routing priority %s is below 0; clamping to 0.", value)
+            return 0
+        if value > 100:
+            logger.warning("MCP routing priority %s is above 100; clamping to 100.", value)
+            return 100
+        return value
+
+
+class McpToolOverride(BaseModel):
+    """Per-tool MCP configuration overrides."""
+
+    routing: McpRoutingConfig = Field(default_factory=McpRoutingConfig)
+    model_config = ConfigDict(extra="allow")
 
 
 class McpOAuthConfig(BaseModel):
@@ -45,6 +84,8 @@ class McpServerConfig(BaseModel):
     headers: dict[str, str] = Field(default_factory=dict, description="HTTP headers to send (for sse or http type)")
     oauth: McpOAuthConfig | None = Field(default=None, description="OAuth configuration (for sse or http type)")
     description: str = Field(default="", description="Human-readable description of what this MCP server provides")
+    routing: McpRoutingConfig = Field(default_factory=McpRoutingConfig, description="Soft routing hints for tools from this MCP server")
+    tools: dict[str, McpToolOverride] = Field(default_factory=dict, description="Per-original-tool MCP configuration overrides")
     tool_call_timeout: float | None = Field(
         default=None,
         description="Timeout in seconds for individual stdio MCP tool calls. HTTP/SSE servers use transport-level timeouts. None means no timeout.",
@@ -68,6 +109,18 @@ class McpServerConfig(BaseModel):
             if transport and not data.get("type"):
                 data = {**data, "type": transport}
         return data
+
+
+def resolve_effective_mcp_routing(server_config: McpServerConfig | None, original_tool_name: str) -> dict[str, Any]:
+    """Merge server-level routing with per-tool overrides for one MCP tool."""
+    if server_config is None:
+        return McpRoutingConfig().model_dump(mode="json")
+
+    effective = server_config.routing.model_dump(mode="json")
+    override = server_config.tools.get(original_tool_name)
+    if override is not None and "routing" in override.model_fields_set:
+        effective.update(override.routing.model_dump(mode="json", exclude_unset=True))
+    return effective
 
 
 class SkillStateConfig(BaseModel):

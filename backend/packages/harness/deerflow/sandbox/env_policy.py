@@ -37,6 +37,15 @@ _SECRET_NAME_PATTERNS: tuple[str, ...] = (
 # avoided — it would strip benign service URLs a skill may legitimately read.
 # A skill that genuinely needs one of these must declare it via required-secrets
 # (the caller then supplies it through context.secrets, and injection wins).
+#
+# The same reasoning covers the password variables those clients read directly.
+# ``MYSQL_PWD`` and ``REDISCLI_AUTH`` are the documented no-flag credential
+# sources for ``mysql`` and ``redis-cli``. ``REDIS_AUTH`` is *not* canonical for
+# any standard Redis client — it is blocked defensively because client libraries
+# and deployment charts commonly set it.
+# All three need exact entries: ``PWD``/``AUTH`` cannot be wildcarded, since
+# ``*PWD*`` would strip ``PWD`` and ``OLDPWD``. (``*PASSWORD*``/``*PASSWD*``
+# already cover ``PGPASSWORD``, ``MYSQL_PASSWORD``, ``REDIS_PASSWORD``, ...)
 _BLOCKED_EXACT_NAMES: frozenset[str] = frozenset(
     {
         "DATABASE_URL",
@@ -54,6 +63,9 @@ _BLOCKED_EXACT_NAMES: frozenset[str] = frozenset(
         "CONN_STR",
         "GH_PAT",
         "GITHUB_PAT",
+        "MYSQL_PWD",
+        "REDISCLI_AUTH",
+        "REDIS_AUTH",
     }
 )
 
