@@ -1004,6 +1004,14 @@ class MemoryUpdater:
                 new_consolidated: list[dict[str, Any]] = []
                 merge_count = 0
 
+                # Mirror the staleness-pass guardrail: build the set of IDs the LLM
+                # was legitimately allowed to see as candidates (excludes protected
+                # categories and categories below the threshold).  Any LLM slip that
+                # proposes a protected or ineligible fact ID is rejected here regardless
+                # of model behaviour, matching how staleness intersects with
+                # _select_stale_candidates before applying removals.
+                allowed_source_ids = {f["id"] for group in _select_consolidation_candidates(current_memory, config).values() for f in group}
+
                 # Iterate all decisions and count successes rather than pre-slicing,
                 # so guard failures on early decisions cannot silently starve valid
                 # later ones from the configured merge budget.
@@ -1014,9 +1022,10 @@ class MemoryUpdater:
                     source_ids = decision.get("sourceIds", [])
                     consolidated = decision.get("consolidated", {})
 
-                    # Guardrail: all source IDs must exist in the post-trim index
-                    # and not already consumed by an earlier merge this cycle.
-                    if any(sid in ids_consumed or sid not in fact_index for sid in source_ids):
+                    # Guardrail: all source IDs must exist in the post-trim index,
+                    # must be in the candidate set (not a protected category), and
+                    # must not already be consumed by an earlier merge this cycle.
+                    if any(sid in ids_consumed or sid not in fact_index or sid not in allowed_source_ids for sid in source_ids):
                         continue
                     # Guardrail: 2..max_sources per group
                     if not (2 <= len(source_ids) <= max_sources):
