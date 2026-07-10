@@ -11,6 +11,7 @@ from fastapi.responses import FileResponse, PlainTextResponse, Response
 from app.gateway.authz import require_permission
 from app.gateway.internal_auth import get_trusted_internal_owner_user_id
 from app.gateway.path_utils import resolve_thread_virtual_path
+from deerflow.config.paths import make_safe_user_id
 
 logger = logging.getLogger(__name__)
 
@@ -184,10 +185,13 @@ async def get_artifact(thread_id: str, path: str, request: Request, download: bo
     """
     # Trusted internal callers may act on behalf of a thread's owner via the
     # owner-user-id header (honored only after the internal token validates).
-    # Resolve artifacts under that owner so internal callers read the same
-    # user-scoped storage the run wrote to, rather than the synthetic internal
-    # user. Browser/API callers get None here and fall back to the effective user.
-    owner_user_id = get_trusted_internal_owner_user_id(request)
+    # The header carries the raw platform owner id, while runs store files
+    # under the make_safe_user_id bucket (the same normalization the channel
+    # file pipeline and the memory router apply), so resolution uses the
+    # normalized id. Browser/API callers get None here and fall back to the
+    # effective user.
+    raw_owner_user_id = get_trusted_internal_owner_user_id(request)
+    owner_user_id = make_safe_user_id(raw_owner_user_id) if raw_owner_user_id else None
 
     # Check if this is a request for a file inside a .skill archive (e.g., xxx.skill/SKILL.md)
     if ".skill/" in path:

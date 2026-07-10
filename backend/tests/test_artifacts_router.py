@@ -12,6 +12,7 @@ from starlette.responses import FileResponse
 
 import app.gateway.routers.artifacts as artifacts_router
 from app.gateway.internal_auth import INTERNAL_OWNER_USER_ID_HEADER_NAME, INTERNAL_SYSTEM_ROLE
+from deerflow.config.paths import make_safe_user_id
 
 ACTIVE_ARTIFACT_CASES = [
     ("poc.html", "<html><body><script>alert('xss')</script></body></html>"),
@@ -145,6 +146,21 @@ def test_get_artifact_scopes_to_trusted_owner_header(tmp_path, monkeypatch) -> N
     asyncio.run(call_unwrapped(artifacts_router.get_artifact, "thread-1", "mnt/user-data/outputs/index.html", request))
 
     assert seen["user_id"] == "owner-123"
+
+
+def test_get_artifact_normalizes_raw_owner_id_from_trusted_header(tmp_path, monkeypatch) -> None:
+    # The trusted header carries the raw platform owner id (channel workers
+    # send it unsanitized; see ChannelManager._owner_headers), while run files
+    # live under the make_safe_user_id bucket — so a raw id with chars outside
+    # [A-Za-z0-9_-] must resolve to the normalized bucket, not the raw one.
+    seen = _capture_resolved_user_id(monkeypatch, tmp_path)
+    raw_owner = "ou_7d8a.6e6d@example:id"
+    request = _make_internal_request(raw_owner)
+
+    asyncio.run(call_unwrapped(artifacts_router.get_artifact, "thread-1", "mnt/user-data/outputs/index.html", request))
+
+    assert seen["user_id"] == make_safe_user_id(raw_owner)
+    assert seen["user_id"] != raw_owner
 
 
 def test_get_artifact_without_owner_header_falls_back_to_effective_user(tmp_path, monkeypatch) -> None:
