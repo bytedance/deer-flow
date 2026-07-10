@@ -27,7 +27,7 @@ from deerflow.skills.slash import parse_slash_skill_reference, resolve_slash_ski
 from deerflow.skills.storage import get_or_new_skill_storage, get_or_new_user_skill_storage
 from deerflow.skills.storage.skill_storage import SkillStorage
 from deerflow.skills.types import SKILL_MD_FILE, SecretRequirement, Skill, SkillCategory
-from deerflow.utils.messages import get_original_user_content_text
+from deerflow.utils.messages import get_original_user_content_text, is_real_user_message
 
 if TYPE_CHECKING:
     from deerflow.config.app_config import AppConfig
@@ -36,7 +36,6 @@ logger = logging.getLogger(__name__)
 
 _SLASH_SKILL_ACTIVATION_KEY = "slash_skill_activation"
 _SLASH_SKILL_ACTIVATION_TARGET_ID_KEY = "slash_skill_activation_target_id"
-_SUMMARY_MESSAGE_NAME = "summary"
 
 # _SECRETS_BINDING_AUDIT_KEY: last audited binding (skill and secret names only,
 # never values) so unchanged bindings are not re-recorded each call.
@@ -73,13 +72,7 @@ def is_slash_skill_activation_reminder(message: object) -> bool:
 
 
 def _is_user_activation_target(message: object) -> bool:
-    if not isinstance(message, HumanMessage):
-        return False
-    if message.name == _SUMMARY_MESSAGE_NAME:
-        return False
-    if message.additional_kwargs.get("hide_from_ui"):
-        return False
-    return True
+    return is_real_user_message(message)
 
 
 class SkillActivationMiddleware(AgentMiddleware):

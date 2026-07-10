@@ -280,6 +280,7 @@ def build_subagent_runtime_middlewares(
     model_name: str | None = None,
     lazy_init: bool = True,
     deferred_setup: "DeferredToolSetup | None" = None,
+    mcp_routing_middleware: AgentMiddleware | None = None,
     agent_name: str | None = None,
 ) -> list[AgentMiddleware]:
     """Middlewares shared by subagent runtime before subagent-only middlewares."""
@@ -304,6 +305,9 @@ def build_subagent_runtime_middlewares(
 
         middlewares.append(ViewImageMiddleware())
 
+    if mcp_routing_middleware is not None:
+        middlewares.append(mcp_routing_middleware)
+
     # Hide deferred (MCP) tool schemas from the subagent's model binding until
     # tool_search promotes them. This is the same wiring the lead agent gets. The deferred
     # set + catalog hash come from the build-time setup (assembled after
@@ -313,6 +317,9 @@ def build_subagent_runtime_middlewares(
         from deerflow.agents.middlewares.deferred_tool_filter_middleware import DeferredToolFilterMiddleware
 
         middlewares.append(DeferredToolFilterMiddleware(deferred_setup.deferred_names, deferred_setup.catalog_hash))
+        from deerflow.agents.middlewares.mcp_routing_middleware import assert_mcp_routing_before_deferred_filter
+
+        assert_mcp_routing_before_deferred_filter(middlewares)
 
     # LoopDetectionMiddleware — subagents inherit none of the lead's runaway
     # guards today (see #3875): with no loop detection a degenerate subagent tool
@@ -346,7 +353,17 @@ def build_subagent_runtime_middlewares(
     # builds a fresh middleware instance (see ``executor._create_agent``), so
     # parallel subagents cannot cross-contaminate even though they share the
     # parent thread_id/run_id in context.
-    token_budget_config = app_config.subagents.get_token_budget_for(agent_name) if agent_name is not None else app_config.subagents.token_budget
+    #
+    # Default-ceiling coupling (#3875 Phase 3 review): the default ``max_tokens``
+    # is re-coupled to ``summarization.enabled`` — 1M when compaction is on, 2M
+    # when off. This ONLY applies to the default; a user-set budget (global or
+    # per-agent) always wins, so a deployment that pinned a value is never
+    # silently changed by flipping the summarization switch.
+    summarization_enabled = app_config.summarization.enabled
+    if agent_name is not None:
+        token_budget_config = app_config.subagents.get_token_budget_for(agent_name, summarization_enabled=summarization_enabled)
+    else:
+        token_budget_config = app_config.subagents.token_budget
     if token_budget_config.enabled:
         from deerflow.agents.middlewares.token_budget_middleware import TokenBudgetMiddleware
 
@@ -361,5 +378,46 @@ def build_subagent_runtime_middlewares(
         from deerflow.agents.middlewares.safety_finish_reason_middleware import SafetyFinishReasonMiddleware
 
         middlewares.append(SafetyFinishReasonMiddleware.from_config(safety_config))
+
+    # DeerFlowSummarizationMiddleware — subagents inherit none of the lead's
+    # context compaction today (#3875 Phase 3): a deep-research subagent
+    # (``max_turns`` up to 150) can accumulate >1M cumulative input before
+    # max_turns/timeout/token_budget engage, even though Phase 2's budget now
+    # caps the pathological tail. Gated on the SAME
+    # ``app_config.summarization.enabled`` switch the lead reads (per
+    # maintainer guidance in #3875) so a single config covers both chains —
+    # no separate ``subagents.summarization`` field. The shared factory
+    # returns ``None`` when summarization is disabled, so this is a pure
+    # no-op when the switch is off. Trigger/keep/model/prompt all come from
+    # the same ``summarization`` config the lead reads, so the two chains
+    # cannot drift.
+    #
+    # Placement differs from the lead chain: the lead appends summarization
+    # BEFORE the guard trio (loop/token/safety), here it is appended AFTER.
+    # This is benign — compaction runs in ``before_model`` regardless of
+    # relative position, and the guard middlewares account in ``after_model``
+    # — but noted because the relative order is not an exact mirror.
+    #
+    # ``skip_memory_flush=True``: the factory otherwise attaches
+    # ``memory_flush_hook`` (when ``memory.enabled``), which flushes
+    # pre-compaction messages into the durable memory queue keyed by
+    # ``thread_id``. Subagents share the parent's ``thread_id`` in context, so
+    # without skipping the hook a subagent's internal turns would be written
+    # into the PARENT thread's durable memory (#3875 Phase 3 review).
+    #
+    # The middleware rewrites history via ``RemoveMessage(id=REMOVE_ALL_MESSAGES)``,
+    # which shrinks the messages channel mid-run;
+    # ``capture_new_step_messages`` must tolerate that contraction (see
+    # ``step_events.py``) or it drops steps captured after the compaction
+    # point. It does not implement ``consume_stop_reason``, so it does not
+    # interfere with the Phase 2 guard-cap stop-reason channel.
+    from deerflow.agents.middlewares.summarization_middleware import create_summarization_middleware
+
+    summarization_middleware = create_summarization_middleware(
+        app_config=app_config,
+        skip_memory_flush=True,
+    )
+    if summarization_middleware is not None:
+        middlewares.append(summarization_middleware)
 
     return middlewares

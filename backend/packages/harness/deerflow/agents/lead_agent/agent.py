@@ -223,6 +223,7 @@ def build_middlewares(
     available_skills: set[str] | None = None,
     app_config: AppConfig | None = None,
     deferred_setup=None,
+    mcp_routing_middleware: AgentMiddleware | None = None,
     user_id: str | None = None,
 ):
     """Build the lead-agent middleware chain based on runtime configuration.
@@ -240,6 +241,8 @@ def build_middlewares(
         app_config: Explicit AppConfig; falls back to ``get_app_config()`` when omitted.
         deferred_setup: Optional deferred-MCP-tool setup that attaches
             ``DeferredToolFilterMiddleware`` when ``tool_search`` is enabled.
+        mcp_routing_middleware: Optional PR2 middleware that auto-promotes
+            deferred MCP schemas before the deferred filter runs.
         user_id: Effective user ID for user-scoped skill loading. Passed through
             to ``SkillActivationMiddleware`` so it can resolve per-user custom skills.
 
@@ -302,6 +305,11 @@ def build_middlewares(
     if model_config is not None and model_config.supports_vision:
         middlewares.append(ViewImageMiddleware())
 
+    # Auto-promote deferred MCP schemas from PR1 routing metadata before the
+    # deferred filter decides which schemas to hide for this model call.
+    if mcp_routing_middleware is not None:
+        middlewares.append(mcp_routing_middleware)
+
     # Hide deferred tool schemas from model binding until tool_search promotes them.
     # The deferred set + catalog hash come from the build-time setup (assembled
     # after tool-policy filtering); promotion is read from graph state.
@@ -309,6 +317,9 @@ def build_middlewares(
         from deerflow.agents.middlewares.deferred_tool_filter_middleware import DeferredToolFilterMiddleware
 
         middlewares.append(DeferredToolFilterMiddleware(deferred_setup.deferred_names, deferred_setup.catalog_hash))
+        from deerflow.agents.middlewares.mcp_routing_middleware import assert_mcp_routing_before_deferred_filter
+
+        assert_mcp_routing_before_deferred_filter(middlewares)
 
     # Coalesce every SystemMessage into a single leading one before the request
     # reaches the provider. Strict backends (vLLM, SGLang, Qwen, Anthropic)
@@ -386,7 +397,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
     # Lazy import to avoid circular dependency
     from deerflow.tools import get_available_tools
     from deerflow.tools.builtins import setup_agent, update_agent
-    from deerflow.tools.builtins.tool_search import assemble_deferred_tools, get_mcp_routing_hints_prompt_section
+    from deerflow.tools.builtins.tool_search import assemble_deferred_tools, build_mcp_routing_middleware, get_mcp_routing_hints_prompt_section
 
     cfg = _get_runtime_config(config)
     resolved_app_config = app_config
@@ -490,6 +501,11 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
         if non_interactive:
             filtered = [tool for tool in filtered if tool.name not in _NON_INTERACTIVE_DISABLED_TOOL_NAMES]
         final_tools, setup = assemble_deferred_tools(filtered, enabled=resolved_app_config.tool_search.enabled)
+        mcp_routing_middleware = build_mcp_routing_middleware(
+            final_tools,
+            setup,
+            top_k=resolved_app_config.tool_search.auto_promote_top_k,
+        )
         if skill_setup.describe_skill_tool:
             final_tools.append(skill_setup.describe_skill_tool)
         return create_agent(
@@ -501,6 +517,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
                 available_skills=set(_BOOTSTRAP_SKILL_NAMES),
                 app_config=resolved_app_config,
                 deferred_setup=setup,
+                mcp_routing_middleware=mcp_routing_middleware,
                 user_id=resolved_user_id,
             ),
             system_prompt=apply_prompt_template(
@@ -546,6 +563,11 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
     if non_interactive:
         filtered = [tool for tool in filtered if tool.name not in _NON_INTERACTIVE_DISABLED_TOOL_NAMES]
     final_tools, setup = assemble_deferred_tools(filtered, enabled=resolved_app_config.tool_search.enabled)
+    mcp_routing_middleware = build_mcp_routing_middleware(
+        final_tools,
+        setup,
+        top_k=resolved_app_config.tool_search.auto_promote_top_k,
+    )
     mcp_routing_hints_section = get_mcp_routing_hints_prompt_section(filtered, deferred_names=setup.deferred_names)
     if skill_setup.describe_skill_tool:
         final_tools.append(skill_setup.describe_skill_tool)
@@ -559,6 +581,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
             available_skills=available_skills,
             app_config=resolved_app_config,
             deferred_setup=setup,
+            mcp_routing_middleware=mcp_routing_middleware,
             user_id=resolved_user_id,
         ),
         system_prompt=apply_prompt_template(
