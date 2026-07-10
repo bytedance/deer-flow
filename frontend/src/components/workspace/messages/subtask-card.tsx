@@ -26,6 +26,7 @@ import type { Subtask } from "@/core/tasks";
 import { fetchSubtaskSteps } from "@/core/tasks/api";
 import { useSubtask, useUpdateSubtask } from "@/core/tasks/context";
 import { stepsForDisplay } from "@/core/tasks/steps";
+import { resolveRenderedSubtask } from "@/core/tasks/subtask-render";
 import { explainLastToolCall } from "@/core/tools/utils";
 import { cn } from "@/lib/utils";
 
@@ -52,7 +53,8 @@ export function SubtaskCard({
   const { t } = useI18n();
   const [collapsed, setCollapsed] = useState(true);
   const rehypePlugins = useRehypeSplitWordsIntoSpans(isLoading);
-  const task = useSubtask(taskId) ?? fallbackTask;
+  const liveTask = useSubtask(taskId);
+  const task = resolveRenderedSubtask(liveTask, fallbackTask);
   const updateSubtask = useUpdateSubtask();
 
   // The card shows the subagent's step timeline (#3779): its reasoning turns

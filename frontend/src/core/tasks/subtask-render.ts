@@ -6,6 +6,7 @@ import {
   derivePendingSubtaskStatus,
   parseSubtaskResult,
 } from "./subtask-result";
+import { isTerminalSubtaskStatus } from "./subtask-update";
 import type { Subtask } from "./types";
 
 interface MessageGroupLike {
@@ -16,6 +17,29 @@ interface MessageGroupLike {
 export interface RenderedSubtasks {
   tasks: Map<string, Subtask>;
   updates: Array<Partial<Subtask> & { id: string }>;
+}
+
+export function resolveRenderedSubtask(
+  liveTask: Subtask | undefined,
+  fallbackTask: Subtask | undefined,
+): Subtask | undefined {
+  if (!fallbackTask) {
+    return liveTask;
+  }
+
+  if (!liveTask) {
+    return fallbackTask;
+  }
+
+  if (!isTerminalSubtaskStatus(fallbackTask.status)) {
+    return liveTask;
+  }
+
+  return {
+    ...fallbackTask,
+    steps: liveTask.steps ?? fallbackTask.steps,
+    latestMessage: liveTask.latestMessage ?? fallbackTask.latestMessage,
+  };
 }
 
 export function collectRenderedSubtasks(

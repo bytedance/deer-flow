@@ -1,7 +1,22 @@
 import type { Message } from "@langchain/langgraph-sdk";
 import { describe, expect, it } from "@rstest/core";
 
-import { collectRenderedSubtasks } from "@/core/tasks/subtask-render";
+import {
+  collectRenderedSubtasks,
+  resolveRenderedSubtask,
+} from "@/core/tasks/subtask-render";
+import type { Subtask } from "@/core/tasks/types";
+
+function baseTask(overrides: Partial<Subtask> = {}): Subtask {
+  return {
+    id: "task-1",
+    status: "in_progress",
+    subagent_type: "researcher",
+    description: "Research the topic",
+    prompt: "Find sources",
+    ...overrides,
+  };
+}
 
 function subagentGroup(messages: Message[]) {
   return {
@@ -115,5 +130,38 @@ describe("collectRenderedSubtasks", () => {
       result: "done",
     });
     expect(rendered.updates).toHaveLength(2);
+  });
+});
+
+describe("resolveRenderedSubtask", () => {
+  it("prefers a terminal fallback snapshot over a stale live task", () => {
+    const resolved = resolveRenderedSubtask(
+      baseTask({
+        status: "in_progress",
+        latestMessage: { id: "live-1" } as Subtask["latestMessage"],
+      }),
+      baseTask({
+        status: "failed",
+        error: "Subtask failed",
+      }),
+    );
+
+    expect(resolved).toMatchObject({
+      status: "failed",
+      error: "Subtask failed",
+      latestMessage: { id: "live-1" },
+    });
+  });
+
+  it("keeps the live task when the fallback snapshot is still in progress", () => {
+    const resolved = resolveRenderedSubtask(
+      baseTask({ status: "in_progress", description: "live" }),
+      baseTask({ status: "in_progress", description: "fallback" }),
+    );
+
+    expect(resolved).toMatchObject({
+      status: "in_progress",
+      description: "live",
+    });
   });
 });
