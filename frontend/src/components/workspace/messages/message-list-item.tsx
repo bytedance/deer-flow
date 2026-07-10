@@ -31,7 +31,10 @@ import {
   upsertFeedback,
   type FeedbackData,
 } from "@/core/api/feedback";
-import { resolveArtifactURL } from "@/core/artifacts/utils";
+import {
+  resolveArtifactURL,
+  resolveMessageImageURL,
+} from "@/core/artifacts/utils";
 import { extractCitationSources } from "@/core/citations/sources";
 import { useI18n } from "@/core/i18n/hooks";
 import {
@@ -135,6 +138,7 @@ export function MessageListItem({
   feedback,
   runId,
   threadId,
+  artifactPaths = [],
   showCopyButton = true,
   turnStartTime,
 }: {
@@ -142,6 +146,7 @@ export function MessageListItem({
   message: Message;
   isLoading?: boolean;
   threadId: string;
+  artifactPaths?: readonly string[];
   feedback?: FeedbackData | null;
   runId?: string;
   showCopyButton?: boolean;
@@ -158,6 +163,7 @@ export function MessageListItem({
         message={message}
         isLoading={isLoading}
         threadId={threadId}
+        artifactPaths={artifactPaths}
         runId={runId}
         turnStartTime={turnStartTime}
       />
@@ -193,10 +199,12 @@ function MessageImage({
   src,
   alt,
   threadId,
+  artifactPaths,
   maxWidth = "90%",
   ...props
 }: React.ImgHTMLAttributes<HTMLImageElement> & {
   threadId: string;
+  artifactPaths: readonly string[];
   maxWidth?: string;
 }) {
   if (!src) return null;
@@ -207,7 +215,7 @@ function MessageImage({
     return <img className={imgClassName} src={src} alt={alt} {...props} />;
   }
 
-  const url = src.startsWith("/mnt/") ? resolveArtifactURL(src, threadId) : src;
+  const url = resolveMessageImageURL(src, threadId, artifactPaths);
 
   return (
     <a href={url} target="_blank" rel="noopener noreferrer">
@@ -259,6 +267,7 @@ function MessageContent_({
   message,
   isLoading = false,
   threadId,
+  artifactPaths,
   runId,
   turnStartTime,
 }: {
@@ -266,6 +275,7 @@ function MessageContent_({
   message: Message;
   isLoading?: boolean;
   threadId: string;
+  artifactPaths: readonly string[];
   runId?: string;
   turnStartTime?: number | null;
 }) {
@@ -317,11 +327,16 @@ function MessageContent_({
   const components = useMemo(
     () => ({
       img: (props: ImgHTMLAttributes<HTMLImageElement>) => (
-        <MessageImage {...props} threadId={threadId} maxWidth="90%" />
+        <MessageImage
+          {...props}
+          threadId={threadId}
+          artifactPaths={artifactPaths}
+          maxWidth="90%"
+        />
       ),
       a: createMarkdownLinkComponent(threadId),
     }),
-    [threadId],
+    [artifactPaths, threadId],
   );
 
   const rawContent = extractContentFromMessage(message);

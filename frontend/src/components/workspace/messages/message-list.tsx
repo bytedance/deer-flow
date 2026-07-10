@@ -730,6 +730,7 @@ export function MessageList({
                           groupIndex === groupedMessages.length - 1
                         }
                         threadId={threadId}
+                        artifactPaths={thread.values.artifacts ?? []}
                         runId={
                           group.type === "assistant"
                             ? (msg as { run_id?: string }).run_id
