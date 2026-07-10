@@ -167,6 +167,28 @@ class TestEnvPolicy:
             "MYSQL_PWD",  # read directly by mysql / libmysqlclient
             "REDISCLI_AUTH",  # read directly by redis-cli
             "REDIS_AUTH",
+            # Abbreviated ``_PASS`` password vars: value-bearing plaintext passwords
+            # that the full-spelling ``*PASSWORD*`` / ``*PASSWD*`` patterns miss.
+            "DB_PASS",
+            "SMTP_PASS",
+            "MYSQL_PASS",
+            "REDIS_PASS",
+            "FTP_PASS",
+            "MAIL_PASS",
+            # Postgres file-based credential sources read by libpq/psql with no flag,
+            # the direct analog of MYSQL_PWD/REDISCLI_AUTH above. PGPASSFILE names a
+            # .pgpass (host:port:db:user:password); PGSERVICEFILE names a
+            # pg_service.conf that may carry a password field.
+            "PGPASSFILE",
+            "PGSERVICEFILE",
+            # Credential *helpers*: each names a program that dispenses a credential
+            # on demand. Inheriting the pointer is the same leak class as inheriting
+            # the value, so ``*PASS*`` scrubbing them is intended. Pinned here so the
+            # behaviour is a deliberate decision rather than a side effect of the
+            # pattern's shape.
+            "GIT_ASKPASS",
+            "SSH_ASKPASS",
+            "SUDO_ASKPASS",
         ],
     )
     def test_secret_like_names_are_blocked(self, name):
@@ -196,6 +218,16 @@ class TestEnvPolicy:
         ],
     )
     def test_benign_names_are_allowed(self, name):
+        """Names here must survive the scrub.
+
+        Note what this list does *not* contain: any name carrying a ``PASS``
+        substring. That is deliberate, not an oversight — ``*PASS*`` scrubs every
+        such name, including the ``*_ASKPASS`` credential helpers pinned in
+        ``test_secret_like_names_are_blocked`` above. Over-scrubbing is this
+        module's fail-safe direction; a skill that needs a scrubbed name declares
+        it via ``required-secrets``. ``PWD``/``OLDPWD`` are the boundary this list
+        does pin: they carry no ``PASS`` substring and must never be stripped.
+        """
         from deerflow.sandbox.env_policy import is_blocked_env_name
 
         assert is_blocked_env_name(name) is False
