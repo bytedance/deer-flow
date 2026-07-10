@@ -1,3 +1,4 @@
+import posixpath
 import sys
 from types import ModuleType, SimpleNamespace
 
@@ -149,20 +150,28 @@ def test_build_subagent_runtime_middlewares_threads_app_config_to_llm_middleware
     # + 1 ReadBeforeWriteMiddleware + 1 LoopDetectionMiddleware
     # + 1 TokenBudgetMiddleware (subagents.token_budget enabled by default, #3875 Phase 2)
     # + 1 SafetyFinishReasonMiddleware + 1 DurableContextMiddleware
-    # (all enabled by default).
+    # + 1 SystemMessageCoalescingMiddleware (all enabled by default).
     from deerflow.agents.middlewares.durable_context_middleware import DurableContextMiddleware
     from deerflow.agents.middlewares.safety_finish_reason_middleware import SafetyFinishReasonMiddleware
+    from deerflow.agents.middlewares.system_message_coalescing_middleware import SystemMessageCoalescingMiddleware
     from deerflow.agents.middlewares.token_budget_middleware import TokenBudgetMiddleware
     from deerflow.agents.middlewares.tool_output_budget_middleware import ToolOutputBudgetMiddleware
 
-    assert len(middlewares) == 14
+    assert len(middlewares) == 15
     assert isinstance(middlewares[0], FakeMiddleware)  # InputSanitizationMiddleware stub
     assert isinstance(middlewares[1], ToolOutputBudgetMiddleware)
     assert any(isinstance(m, ToolErrorHandlingMiddleware) for m in middlewares)
     # The token-budget backstop is attached by default so the cap engages (#3875).
     assert any(isinstance(m, TokenBudgetMiddleware) for m in middlewares)
     assert any(isinstance(m, SafetyFinishReasonMiddleware) for m in middlewares)
-    assert isinstance(middlewares[-1], DurableContextMiddleware)
+    # DurableContextMiddleware is present but not last: the coalescer (#4040) is
+    # appended innermost so it can merge the SystemMessage DurableContext injects.
+    # The coalescer is appended unconditionally (after the optional summarization
+    # middleware), so it is the last element regardless of summarization.enabled —
+    # unlike DurableContextMiddleware, which is only last when summarization is off.
+    durable_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, DurableContextMiddleware))
+    assert isinstance(middlewares[-1], SystemMessageCoalescingMiddleware)
+    assert durable_idx < len(middlewares) - 1
 
 
 def test_tool_progress_middleware_is_outer_relative_to_error_handling(monkeypatch: pytest.MonkeyPatch):
@@ -672,7 +681,10 @@ def test_subagent_runtime_middlewares_attach_durable_context_before_summarizatio
     assert captured["skip_memory_flush"] is True
     durable = [middleware for middleware in middlewares if isinstance(middleware, DurableContextMiddleware)]
     assert len(durable) == 1
-    assert durable[0]._skills_root == app_config.skills.container_path
+    # ``_skills_root`` is ``posixpath.normpath(container_path)``, so compare against
+    # the normalized form — a trailing slash / ``.`` / ``..`` in config would fail
+    # a raw equality even though the wiring is correct.
+    assert durable[0]._skills_root == posixpath.normpath(app_config.skills.container_path)
     assert durable[0]._skill_read_tool_names == frozenset(app_config.summarization.skill_file_read_tool_names)
     assert middlewares.index(durable[0]) < middlewares.index(sentinel)
 
@@ -692,6 +704,7 @@ def test_subagent_compaction_injects_summary_before_assistant_tool_tail(monkeypa
 
     from deerflow.agents.middlewares.durable_context_middleware import DurableContextMiddleware
     from deerflow.agents.middlewares.summarization_middleware import DeerFlowSummarizationMiddleware
+    from deerflow.agents.middlewares.system_message_coalescing_middleware import SystemMessageCoalescingMiddleware
     from deerflow.agents.thread_state import ThreadState
     from deerflow.config.summarization_config import ContextSize, SummarizationConfig
 
@@ -713,6 +726,12 @@ def test_subagent_compaction_injects_summary_before_assistant_tool_tail(monkeypa
                 assert durable, "compacted summary must be injected into the subagent request"
                 assert durable[0][0] < first_ai, "durable summary must precede the assistant/tool tail"
                 assert "COMPRESSED_SUBAGENT_HISTORY" in durable[0][1].content
+                # DurableContext injects a SystemMessage(authority); without the
+                # coalescer the request would carry it as a second/non-leading
+                # system message, which strict providers reject (#4040). Assert the
+                # outgoing request is provider-valid: a single leading SystemMessage.
+                system_indices = [i for i, message in enumerate(messages) if isinstance(message, SystemMessage)]
+                assert system_indices == [0], f"request must have exactly one leading SystemMessage, got {system_indices}"
             return ChatResult(generations=[ChatGeneration(message=AIMessage(content=self.text))])
 
     summary_model = _StaticModel(text="COMPRESSED_SUBAGENT_HISTORY")
@@ -736,7 +755,7 @@ def test_subagent_compaction_injects_summary_before_assistant_tool_tail(monkeypa
         model_name="test-model",
         agent_name="general-purpose",
     )
-    compaction_middlewares = [middleware for middleware in runtime_middlewares if isinstance(middleware, (DurableContextMiddleware, DeerFlowSummarizationMiddleware))]
+    compaction_middlewares = [middleware for middleware in runtime_middlewares if isinstance(middleware, (DurableContextMiddleware, DeerFlowSummarizationMiddleware, SystemMessageCoalescingMiddleware))]
     agent = create_agent(
         model=strict_model,
         tools=[],
@@ -756,6 +775,72 @@ def test_subagent_compaction_injects_summary_before_assistant_tool_tail(monkeypa
 
     assert result["summary_text"] == "COMPRESSED_SUBAGENT_HISTORY"
     assert result["messages"][-1].content == "final answer"
+
+
+def test_subagent_chain_coalesces_durable_authority_system_message(monkeypatch):
+    """The durable-context authority SystemMessage must not survive as a second one.
+
+    Subagents carry their system prompt as a leading ``SystemMessage`` in
+    ``messages`` (``create_agent(system_prompt=None)``), and
+    ``DurableContextMiddleware`` inserts ``SystemMessage(authority_contract)``
+    directly after it whenever durable data (summary / delegations / skills) is
+    present. That leaves two adjacent system messages — the exact non-leading /
+    duplicate-system shape strict OpenAI-compatible providers reject and the
+    same #4039 failure class the durable fix set out to avoid.
+
+    ``build_subagent_runtime_middlewares`` must therefore pair durable context
+    with ``SystemMessageCoalescingMiddleware`` (#4040). This drives the real
+    builder output through a strict model and asserts the outgoing request keeps
+    exactly one leading ``SystemMessage``. Remove the coalescer from the builder
+    and the model sees ``[System(base), System(authority), ...]`` and this fails.
+    """
+    from langchain.agents import create_agent
+    from langchain_core.language_models import BaseChatModel
+    from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
+    from langchain_core.outputs import ChatGeneration, ChatResult
+
+    from deerflow.agents.middlewares.durable_context_middleware import DurableContextMiddleware
+    from deerflow.agents.middlewares.system_message_coalescing_middleware import SystemMessageCoalescingMiddleware
+    from deerflow.agents.thread_state import ThreadState
+
+    seen: dict[str, list[int]] = {}
+
+    class _StrictModel(BaseChatModel):
+        @property
+        def _llm_type(self) -> str:
+            return "strict"
+
+        def bind_tools(self, tools, **kwargs):
+            return self
+
+        def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+            seen["system_indices"] = [i for i, message in enumerate(messages) if isinstance(message, SystemMessage)]
+            return ChatResult(generations=[ChatGeneration(message=AIMessage(content="ok"))])
+
+    app_config = _make_app_config()
+    runtime_middlewares = build_subagent_runtime_middlewares(
+        app_config=app_config,
+        model_name="test-model",
+        agent_name="general-purpose",
+    )
+    # Isolate the two middlewares under test, preserving builder order. The
+    # coalescer must come after (inner of) durable context to observe the
+    # injected system message.
+    chain = [m for m in runtime_middlewares if isinstance(m, (DurableContextMiddleware, SystemMessageCoalescingMiddleware))]
+    assert [type(m).__name__ for m in chain] == ["DurableContextMiddleware", "SystemMessageCoalescingMiddleware"]
+
+    agent = create_agent(model=_StrictModel(), tools=[], middleware=chain, state_schema=ThreadState)
+
+    # A leading system prompt plus an assistant tool-call tail, with a summary
+    # already in state so durable context injects its authority SystemMessage.
+    seed = [
+        SystemMessage(content="subagent instructions", id="system"),
+        AIMessage(content="searching", tool_calls=[{"name": "web_search", "args": {"query": "x"}, "id": "call_0", "type": "tool_call"}], id="assistant"),
+        ToolMessage(content="result", tool_call_id="call_0", id="tool_0"),
+    ]
+    agent.invoke({"messages": seed, "summary_text": "COMPRESSED_SUBAGENT_HISTORY"})
+
+    assert seen["system_indices"] == [0], f"request must have a single leading SystemMessage, got {seen['system_indices']}"
 
 
 def test_subagent_runtime_middlewares_omit_summarization_when_factory_returns_none(monkeypatch):

@@ -436,4 +436,20 @@ def build_subagent_runtime_middlewares(
     if summarization_middleware is not None:
         middlewares.append(summarization_middleware)
 
+    # SystemMessageCoalescingMiddleware (#4040) — DurableContextMiddleware above
+    # inserts a second ``SystemMessage(authority_contract)`` after the leading
+    # system prompt (subagents carry their prompt as a leading ``SystemMessage``
+    # in ``messages``, not via ``create_agent(system_prompt=...)``). Two system
+    # messages — or a non-leading one — are exactly what the strict backends this
+    # targets (vLLM/SGLang/Qwen/Anthropic) reject, so the durable fix would trade
+    # #4039's assistant-first 400 for a duplicate-system 400. Mirror the lead
+    # chain: append the coalescer innermost so it merges every SystemMessage into
+    # one leading ``system_message`` on the outgoing request. It only rewrites the
+    # per-request payload (no ``after_model``/``consume_stop_reason``), so it is
+    # inert to the Phase 2 guard-cap channel, and must sit inner of
+    # DurableContextMiddleware to observe the injected system message.
+    from deerflow.agents.middlewares.system_message_coalescing_middleware import SystemMessageCoalescingMiddleware
+
+    middlewares.append(SystemMessageCoalescingMiddleware())
+
     return middlewares
