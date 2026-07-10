@@ -379,6 +379,22 @@ def build_subagent_runtime_middlewares(
 
         middlewares.append(SafetyFinishReasonMiddleware.from_config(safety_config))
 
+    # DurableContextMiddleware (#4039) — summarization stores compacted history in the
+    # ``summary_text`` state channel instead of writing a summary message back
+    # into ``messages``. Mirror the lead chain so subagents project that summary
+    # into subsequent model requests; otherwise a message-count keep policy can
+    # leave an assistant tool-call + tool-result tail with no leading user
+    # context, which strict providers reject. The same middleware also keeps
+    # skill references durable when their original read results are compacted.
+    from deerflow.agents.middlewares.durable_context_middleware import DurableContextMiddleware
+
+    middlewares.append(
+        DurableContextMiddleware(
+            skills_container_path=app_config.skills.container_path,
+            skill_file_read_tool_names=app_config.summarization.skill_file_read_tool_names,
+        )
+    )
+
     # DeerFlowSummarizationMiddleware — subagents inherit none of the lead's
     # context compaction today (#3875 Phase 3): a deep-research subagent
     # (``max_turns`` up to 150) can accumulate >1M cumulative input before
