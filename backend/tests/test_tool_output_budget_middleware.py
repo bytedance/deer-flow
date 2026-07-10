@@ -27,6 +27,7 @@ from deerflow.agents.middlewares.tool_output_budget_middleware import (
     _needs_budget,
     _patch_model_messages,
     _sanitize_tool_name,
+    _snap_start_to_line_boundary,
     _snap_to_line_boundary,
     _tool_message_over_budget,
 )
@@ -37,6 +38,20 @@ from deerflow.config.tool_output_config import ToolOutputConfig
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _lines_then_long_line(total: int, newline_ratio: float = 0.6) -> str:
+    """Content that is line-oriented for the first *newline_ratio*, then one unbroken line.
+
+    Mirrors real bash/web_fetch output that logs progress lines and then dumps a
+    single-line artifact (minified JSON, base64 blob). The last newline lands in
+    the second half of the content, which is what exercises line snapping around
+    the tail offset.
+    """
+    head_len = int(total * newline_ratio)
+    lines = "".join(f"[info] step {i} ok\n" for i in range(head_len // 18 + 1))[:head_len]
+    lines = lines[:-1] + "\n" if not lines.endswith("\n") else lines
+    return lines + "A" * (total - len(lines))
 
 
 def _make_request(tool_name: str = "remote_executor", tool_call_id: str = "tc-1", outputs_path: str | None = None) -> SimpleNamespace:
@@ -97,6 +112,28 @@ class TestSnapToLineBoundary:
 
     def test_pos_beyond_length(self):
         assert _snap_to_line_boundary("abc", 10) == 10
+
+
+class TestSnapStartToLineBoundary:
+    def test_snaps_forward_to_newline(self):
+        text = "line1\nline2\nline3"
+        result = _snap_start_to_line_boundary(text, 2)  # inside "line1"
+        assert text[result - 1] == "\n"
+        assert result >= 2
+
+    def test_never_moves_backwards(self):
+        text = "aaaa\n" + "b" * 20
+        for pos in range(1, len(text)):
+            assert _snap_start_to_line_boundary(text, pos) >= pos
+
+    def test_no_snap_when_no_newline_in_range(self):
+        assert _snap_start_to_line_boundary("abcdefghij", 2) == 2
+
+    def test_zero_pos(self):
+        assert _snap_start_to_line_boundary("a\nbc", 0) == 0
+
+    def test_pos_beyond_length(self):
+        assert _snap_start_to_line_boundary("abc", 10) == 10
 
 
 class TestExternalize:
@@ -280,6 +317,32 @@ class TestBuildFallback:
             content = "x" * 50000
             result = _build_fallback(content, tool_name="long_tool_name", max_chars=max_chars, head_chars=max_chars // 2, tail_chars=max_chars // 4)
             assert len(result) <= max_chars, f"max_chars={max_chars}: got {len(result)}"
+
+    def test_result_never_exceeds_max_chars_with_newlines(self):
+        """Same guarantee as above, on content that actually exercises line snapping.
+
+        ``test_result_never_exceeds_max_chars`` passes newline-free content, so the
+        tail offset is never snapped. Real bash/web_fetch output has newlines.
+        """
+        for total in [50_000, 200_000, 1_000_000]:
+            content = _lines_then_long_line(total)
+            result = _build_fallback(content, tool_name="bash", max_chars=30_000, head_chars=8_000, tail_chars=3_000)
+            assert len(result) <= 30_000, f"total={total}: got {len(result)}"
+
+    def test_fallback_forward_snaps_tail_onto_line_boundary(self):
+        """The tail must begin *after* the newline, never before it.
+
+        The bound test above never moves the tail offset: its content has no
+        newline inside the snap window, so it would pass even with the snap
+        removed. Placing a newline in the window pins the direction instead —
+        a backward snap leaves the tail starting mid-line.
+        """
+        total, newline_pos = 100_000, 98_000  # window is [97_000, 98_500)
+        content = "A" * newline_pos + "\n" + "B" * (total - newline_pos - 1)
+        result = _build_fallback(content, tool_name="bash", max_chars=30_000, head_chars=8_000, tail_chars=3_000)
+        assert len(result) <= 30_000
+        tail = result.rsplit("]\n\n", 1)[1]
+        assert tail.startswith("B"), f"tail begins mid-line: {tail[:20]!r}"
 
     def test_very_small_max_chars_does_not_crash(self):
         content = "x" * 1000
