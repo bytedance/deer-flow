@@ -28,8 +28,18 @@ _SECRET_NAME_PATTERNS: tuple[str, ...] = (
     # ``*PASS*`` subsumes the full ``PASSWORD``/``PASSWD`` spellings *and* the
     # ubiquitous abbreviated form (``DB_PASS``, ``SMTP_PASS``, ``MYSQL_PASS``, ...),
     # whose plaintext value is the password itself. It also covers ``PGPASSFILE``
-    # (libpq's ``.pgpass`` locator). It does not touch benign ``PWD``/``OLDPWD``,
-    # which carry no ``PASS`` substring.
+    # (libpq's ``.pgpass`` locator).
+    #
+    # It deliberately also catches the ``*_ASKPASS`` credential helpers
+    # (``GIT_ASKPASS``, ``SSH_ASKPASS``, ``SUDO_ASKPASS``). Those name a *program*
+    # rather than a secret, but that program exists to hand the caller a
+    # credential — inheriting the pointer is the same leak class this module
+    # closes, so scrubbing them is intended, not incidental.
+    #
+    # Incidental names that merely contain ``PASS`` (``COMPASS_*``, ``BYPASS_*``)
+    # are scrubbed too. That is the fail-safe direction for this module: a skill
+    # that genuinely needs any scrubbed name declares it via required-secrets.
+    # Benign ``PWD``/``OLDPWD`` carry no ``PASS`` substring and are unaffected.
     "*PASS*",
     "*CREDENTIAL*",
     "*DSN*",  # data source name — almost always a connection string with a password
