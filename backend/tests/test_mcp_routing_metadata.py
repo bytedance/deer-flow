@@ -106,7 +106,8 @@ async def test_get_mcp_tools_tags_effective_routing_metadata(transport: str):
     with (
         patch("deerflow.mcp.tools.ExtensionsConfig.from_file", return_value=extensions_config),
         patch(
-            "deerflow.mcp.tools.build_servers_config",
+            "deerflow.mcp.tools.build_servers_config_async",
+            new_callable=AsyncMock,
             return_value={"postgres": {"transport": transport, "url": "http://localhost:8000/mcp", "command": "npx"}},
         ),
         patch("deerflow.mcp.tools.get_initial_oauth_headers", return_value={}),

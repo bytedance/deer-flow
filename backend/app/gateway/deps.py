@@ -134,6 +134,7 @@ def _log_recovered_stream_cleanup_result(task: asyncio.Task[None], run_id: str) 
 if TYPE_CHECKING:
     from app.gateway.auth.local_provider import LocalAuthProvider
     from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
+    from deerflow.mcp.credentials import McpUserCredentialStore
     from deerflow.persistence.thread_meta.base import ThreadMetaStore
     from deerflow.runtime import RunRecord
 
@@ -252,16 +253,22 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         # Initialize repositories — one get_session_factory() call for all.
         sf = get_session_factory()
         if sf is not None:
+            from deerflow.mcp.credentials import SQLMcpUserCredentialStore, set_mcp_credential_store
             from deerflow.persistence.feedback import FeedbackRepository
             from deerflow.persistence.run import RunRepository
 
             app.state.run_store = RunRepository(sf)
             app.state.feedback_repo = FeedbackRepository(sf)
+            app.state.mcp_credential_store = SQLMcpUserCredentialStore(sf)
+            set_mcp_credential_store(app.state.mcp_credential_store)
         else:
+            from deerflow.mcp.credentials import InMemoryMcpUserCredentialStore, set_mcp_credential_store
             from deerflow.runtime.runs.store.memory import MemoryRunStore
 
             app.state.run_store = MemoryRunStore()
             app.state.feedback_repo = None
+            app.state.mcp_credential_store = InMemoryMcpUserCredentialStore()
+            set_mcp_credential_store(app.state.mcp_credential_store)
 
         from deerflow.persistence.thread_meta import make_thread_store
 
@@ -313,6 +320,10 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
             run_manager = getattr(app.state, "run_manager", None)
             if run_manager is not None:
                 await _drain_inflight_runs(run_manager)
+
+            from deerflow.mcp.credentials import reset_mcp_credential_store
+
+            reset_mcp_credential_store()
             await close_engine()
 
 
@@ -340,6 +351,7 @@ get_checkpointer: Callable[[Request], Checkpointer] = _require("checkpointer", "
 get_run_event_store: Callable[[Request], RunEventStore] = _require("run_event_store", "Run event store")
 get_feedback_repo: Callable[[Request], FeedbackRepository] = _require("feedback_repo", "Feedback")
 get_run_store: Callable[[Request], RunStore] = _require("run_store", "Run store")
+get_mcp_credential_store_dep: Callable[[Request], McpUserCredentialStore] = _require("mcp_credential_store", "MCP credential store")
 
 
 def get_store(request: Request):

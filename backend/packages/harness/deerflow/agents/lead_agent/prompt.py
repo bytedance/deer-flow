@@ -643,7 +643,7 @@ combined with a FastAPI gateway for REST API access [citation:FastAPI](https://f
   into sections: the first `write_file` call creates the file, then use
   `write_file` with append=True to extend it section by section. This
   keeps each tool call small and avoids mid-stream chunk-gap timeouts
-  on oversized single-shot writes. (See issue #3189.)  
+  on oversized single-shot writes. (See issue #3189.)
 - Clarity: Be direct and helpful, avoid unnecessary meta-commentary
 - Including Images and Mermaid: Images and Mermaid diagrams are always welcomed in the Markdown format, and you're encouraged to use `![Image Description](image_path)\n\n` or "```mermaid" to display images in response or Markdown files
 - Multi-task: Better utilize parallel tool calling to call multiple tools at one time for better performance

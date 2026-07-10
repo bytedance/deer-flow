@@ -8,10 +8,13 @@ from langchain_core.tools import BaseTool
 
 logger = logging.getLogger(__name__)
 
-_mcp_tools_cache: list[BaseTool] | None = None
-_cache_initialized = False
+_mcp_tools_cache: dict[str, list[BaseTool]] = {}
 _initialization_lock = asyncio.Lock()
 _config_mtime: float | None = None  # Track config file modification time
+
+
+def _scope_key(user_id: str | None = None) -> str:
+    return str(user_id) if user_id else "default"
 
 
 def _get_config_mtime() -> float | None:
@@ -36,7 +39,7 @@ def _is_cache_stale() -> bool:
     """
     global _config_mtime
 
-    if not _cache_initialized:
+    if not _mcp_tools_cache:
         return False  # Not initialized yet, not stale
 
     current_mtime = _get_config_mtime()
@@ -53,7 +56,7 @@ def _is_cache_stale() -> bool:
     return False
 
 
-async def initialize_mcp_tools() -> list[BaseTool]:
+async def initialize_mcp_tools(user_id: str | None = None) -> list[BaseTool]:
     """Initialize and cache MCP tools.
 
     This should be called once at application startup.
@@ -61,25 +64,30 @@ async def initialize_mcp_tools() -> list[BaseTool]:
     Returns:
         List of LangChain tools from all enabled MCP servers.
     """
-    global _mcp_tools_cache, _cache_initialized, _config_mtime
+    global _config_mtime
 
     async with _initialization_lock:
-        if _cache_initialized:
-            logger.info("MCP tools already initialized")
-            return _mcp_tools_cache or []
+        key = _scope_key(user_id)
+        if key in _mcp_tools_cache:
+            logger.info("MCP tools already initialized for scope=%s", key)
+            return _mcp_tools_cache[key]
 
         from deerflow.mcp.tools import get_mcp_tools
 
-        logger.info("Initializing MCP tools...")
-        _mcp_tools_cache = await get_mcp_tools()
-        _cache_initialized = True
+        logger.info("Initializing MCP tools for scope=%s...", key)
+        _mcp_tools_cache[key] = await get_mcp_tools(user_id=user_id)
         _config_mtime = _get_config_mtime()  # Record config file mtime
-        logger.info(f"MCP tools initialized: {len(_mcp_tools_cache)} tool(s) loaded (config mtime: {_config_mtime})")
+        logger.info(
+            "MCP tools initialized for scope=%s: %d tool(s) loaded (config mtime: %s)",
+            key,
+            len(_mcp_tools_cache[key]),
+            _config_mtime,
+        )
 
-        return _mcp_tools_cache
+        return _mcp_tools_cache[key]
 
 
-def get_cached_mcp_tools() -> list[BaseTool]:
+def get_cached_mcp_tools(user_id: str | None = None) -> list[BaseTool]:
     """Get cached MCP tools with lazy initialization.
 
     If tools are not initialized, automatically initializes them.
@@ -92,33 +100,36 @@ def get_cached_mcp_tools() -> list[BaseTool]:
     Returns:
         List of cached MCP tools.
     """
-    global _cache_initialized
-
     # Check if cache is stale due to config file changes
     if _is_cache_stale():
         logger.info("MCP cache is stale, resetting for re-initialization...")
         reset_mcp_tools_cache()
 
-    if not _cache_initialized:
-        logger.info("MCP tools not initialized, performing lazy initialization...")
+    key = _scope_key(user_id)
+    if key not in _mcp_tools_cache:
+        logger.info("MCP tools not initialized for scope=%s, performing lazy initialization...", key)
         try:
             # Try to initialize in the current event loop
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
+            try:
+                asyncio.get_running_loop()
+                loop_is_running = True
+            except RuntimeError:
+                loop_is_running = False
+
+            if loop_is_running:
                 # If loop is already running (e.g., in LangGraph Studio),
                 # we need to create a new loop in a thread
                 import concurrent.futures
 
                 with concurrent.futures.ThreadPoolExecutor() as executor:
-                    future = executor.submit(asyncio.run, initialize_mcp_tools())
+                    future = executor.submit(asyncio.run, initialize_mcp_tools(user_id=user_id))
                     future.result()
             else:
-                # If no loop is running, we can use the current loop
-                loop.run_until_complete(initialize_mcp_tools())
+                asyncio.run(initialize_mcp_tools(user_id=user_id))
         except RuntimeError:
             # No event loop exists, create one
             try:
-                asyncio.run(initialize_mcp_tools())
+                asyncio.run(initialize_mcp_tools(user_id=user_id))
             except Exception:
                 logger.exception("Failed to lazy-initialize MCP tools")
                 return []
@@ -126,7 +137,7 @@ def get_cached_mcp_tools() -> list[BaseTool]:
             logger.exception("Failed to lazy-initialize MCP tools")
             return []
 
-    return _mcp_tools_cache or []
+    return _mcp_tools_cache.get(key, [])
 
 
 def reset_mcp_tools_cache() -> None:
@@ -136,9 +147,8 @@ def reset_mcp_tools_cache() -> None:
     Also closes all persistent MCP sessions so they are recreated on
     the next tool load.
     """
-    global _mcp_tools_cache, _cache_initialized, _config_mtime
-    _mcp_tools_cache = None
-    _cache_initialized = False
+    global _config_mtime
+    _mcp_tools_cache.clear()
     _config_mtime = None
 
     # Close persistent sessions – they will be recreated by the next

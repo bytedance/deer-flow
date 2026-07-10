@@ -7,6 +7,11 @@ import pytest
 
 from deerflow.config.acp_config import ACPAgentConfig
 from deerflow.config.extensions_config import ExtensionsConfig, McpServerConfig, set_extensions_config
+from deerflow.mcp.credentials import (
+    InMemoryMcpUserCredentialStore,
+    push_mcp_credential_store,
+    reset_mcp_credential_store_context,
+)
 from deerflow.tools.builtins.invoke_acp_agent_tool import (
     _build_acp_mcp_servers,
     _build_mcp_servers,
@@ -78,6 +83,62 @@ def test_build_acp_mcp_servers_formats_list_payload():
     finally:
         monkeypatch.undo()
         set_extensions_config(ExtensionsConfig(mcp_servers={}, skills={}))
+
+
+def test_build_acp_mcp_servers_uses_current_user_credentials(monkeypatch):
+    fresh_config = ExtensionsConfig(
+        mcp_servers={
+            "stdio": McpServerConfig(
+                enabled=True,
+                type="stdio",
+                command="npx",
+                args=["srv"],
+                env={"TOKEN": "global-token"},
+            ),
+            "http": McpServerConfig(
+                enabled=True,
+                type="http",
+                url="https://example.com/mcp",
+                headers={"Authorization": "Bearer global"},
+            ),
+        },
+        skills={},
+    )
+    monkeypatch.setattr(
+        "deerflow.config.extensions_config.ExtensionsConfig.from_file",
+        classmethod(lambda cls: fresh_config),
+    )
+
+    store = InMemoryMcpUserCredentialStore()
+    token = push_mcp_credential_store(store)
+    try:
+        import asyncio
+
+        asyncio.run(store.upsert("user-a", "stdio", env={"TOKEN": "user-a-token"}))
+        asyncio.run(store.upsert("user-a", "http", headers={"Authorization": "Bearer user-a"}))
+        asyncio.run(store.upsert("user-b", "stdio", env={"TOKEN": "user-b-token"}))
+        asyncio.run(store.upsert("user-b", "http", headers={"Authorization": "Bearer user-b"}))
+
+        from deerflow.runtime.user_context import reset_current_user, set_current_user
+
+        user_a = set_current_user(SimpleNamespace(id="user-a"))
+        try:
+            user_a_servers = _build_acp_mcp_servers()
+        finally:
+            reset_current_user(user_a)
+
+        user_b = set_current_user(SimpleNamespace(id="user-b"))
+        try:
+            user_b_servers = _build_acp_mcp_servers()
+        finally:
+            reset_current_user(user_b)
+
+        assert user_a_servers[0]["env"] == [{"name": "TOKEN", "value": "user-a-token"}]
+        assert user_b_servers[0]["env"] == [{"name": "TOKEN", "value": "user-b-token"}]
+        assert user_a_servers[1]["headers"] == [{"name": "Authorization", "value": "Bearer user-a"}]
+        assert user_b_servers[1]["headers"] == [{"name": "Authorization", "value": "Bearer user-b"}]
+    finally:
+        reset_mcp_credential_store_context(token)
 
 
 def test_build_permission_response_prefers_allow_once():

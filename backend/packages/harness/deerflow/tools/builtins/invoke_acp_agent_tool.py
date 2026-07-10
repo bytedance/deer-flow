@@ -54,8 +54,9 @@ def _build_mcp_servers() -> dict[str, dict[str, Any]]:
     """Build ACP ``mcpServers`` config from DeerFlow's enabled MCP servers."""
     from deerflow.config.extensions_config import ExtensionsConfig
     from deerflow.mcp.client import build_servers_config
+    from deerflow.runtime.user_context import get_effective_user_id
 
-    return build_servers_config(ExtensionsConfig.from_file())
+    return build_servers_config(ExtensionsConfig.from_file(), user_id=get_effective_user_id())
 
 
 def _build_acp_mcp_servers() -> list[dict[str, Any]]:
@@ -65,27 +66,26 @@ def _build_acp_mcp_servers() -> list[dict[str, Any]]:
     returns a name -> config mapping for the LangChain MCP adapter. This helper
     converts the enabled servers into the ACP wire format.
     """
-    from deerflow.config.extensions_config import ExtensionsConfig
-
-    extensions_config = ExtensionsConfig.from_file()
-    enabled_servers = extensions_config.get_enabled_mcp_servers()
+    resolved_servers = _build_mcp_servers()
 
     mcp_servers: list[dict[str, Any]] = []
-    for name, server_config in enabled_servers.items():
-        transport_type = server_config.type or "stdio"
+    for name, server_config in resolved_servers.items():
+        transport_type = server_config.get("transport") or "stdio"
         payload: dict[str, Any] = {"name": name, "type": transport_type}
 
         if transport_type == "stdio":
-            if not server_config.command:
+            command = server_config.get("command")
+            if not command:
                 raise ValueError(f"MCP server '{name}' with stdio transport requires 'command' field")
-            payload["command"] = server_config.command
-            payload["args"] = server_config.args
-            payload["env"] = [{"name": key, "value": value} for key, value in server_config.env.items()]
+            payload["command"] = command
+            payload["args"] = server_config.get("args") or []
+            payload["env"] = [{"name": key, "value": value} for key, value in (server_config.get("env") or {}).items()]
         elif transport_type in ("http", "sse"):
-            if not server_config.url:
+            url = server_config.get("url")
+            if not url:
                 raise ValueError(f"MCP server '{name}' with {transport_type} transport requires 'url' field")
-            payload["url"] = server_config.url
-            payload["headers"] = [{"name": key, "value": value} for key, value in server_config.headers.items()]
+            payload["url"] = url
+            payload["headers"] = [{"name": key, "value": value} for key, value in (server_config.get("headers") or {}).items()]
         else:
             raise ValueError(f"MCP server '{name}' has unsupported transport type: {transport_type}")
 

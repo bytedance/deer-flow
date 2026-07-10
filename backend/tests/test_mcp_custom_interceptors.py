@@ -31,7 +31,8 @@ def _make_patches(*, interceptor_paths=None):
             ),
         ),
         "build_servers": patch(
-            "deerflow.mcp.tools.build_servers_config",
+            "deerflow.mcp.tools.build_servers_config_async",
+            new_callable=AsyncMock,
             return_value={"test-server": {}},
         ),
         "oauth_headers": patch(
