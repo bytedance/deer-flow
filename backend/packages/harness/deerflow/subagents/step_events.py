@@ -95,8 +95,27 @@ def capture_new_step_messages(
     grow, re-examine only the trailing message so an id-less in-place replacement
     (same length, new content) is still captured — ``capture_step_message``'s
     dedup makes an unchanged re-yield a no-op. Returns the new cursor.
+
+    When the history *contracted* (``total < processed_count``) — which happens
+    when ``DeerFlowSummarizationMiddleware`` rewrites the channel via
+    ``RemoveMessage(id=REMOVE_ALL_MESSAGES)`` (#3875 Phase 3) — reset the cursor
+    to the new tail and let ``capture_step_message``'s id/content dedup prevent
+    re-emitting steps captured before the compaction. Without this reset, every
+    step appended after the compaction point is dropped until ``total`` overtakes
+    the stale cursor.
+
+    INVARIANT: after the reset the no-growth branch only re-examines
+    ``messages[-1]``, so a genuinely new AIMessage/ToolMessage inserted at an
+    index BELOW the reset cursor in a compacted list would be missed. This is
+    not reachable today: the summarization middleware puts the summary into a
+    separate ``summary_text`` state key, and the messages channel after
+    compaction holds only already-seen preserved tail messages — compaction
+    never inserts a NEW capturable message below the cursor. If a future
+    middleware violates this invariant, the reset branch needs a full re-scan.
     """
     total = len(messages)
+    if total < processed_count:
+        processed_count = total
     if total > processed_count:
         for message in messages[processed_count:total]:
             capture_step_message(message, captured, seen_ids)

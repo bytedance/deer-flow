@@ -437,15 +437,22 @@ def create_summarization_middleware(
     *,
     app_config: Any | None = None,
     keep: tuple[str, int | float] | None = None,
+    skip_memory_flush: bool = False,
 ) -> DeerFlowSummarizationMiddleware | None:
     """Create the configured summarization middleware.
 
     Both the lead-agent automatic path and the manual context-compaction path
     use this factory so model resolution, hooks, prompt config, and retention
     defaults cannot drift.
-    """
-    from deerflow.agents.memory.summarization_hook import memory_flush_hook
 
+    ``skip_memory_flush`` omits the ``memory_flush_hook`` that otherwise
+    flushes pre-compaction messages into the durable memory queue. The lead
+    chain keeps it (research should persist); the subagent chain sets it so a
+    subagent's INTERNAL turns (the "Task" human message + intermediate AI/tool
+    turns) are not written into the PARENT thread's durable memory — the hook
+    is keyed by ``thread_id`` and subagents share the parent's ``thread_id``
+    (#3875 Phase 3 review).
+    """
     resolved_app_config = app_config or get_app_config()
     config = resolved_app_config.summarization
 
@@ -485,7 +492,9 @@ def create_summarization_middleware(
         kwargs["summary_prompt"] = config.summary_prompt
 
     hooks: list[BeforeSummarizationHook] = []
-    if resolved_app_config.memory.enabled:
+    if resolved_app_config.memory.enabled and not skip_memory_flush:
+        from deerflow.agents.memory.summarization_hook import memory_flush_hook
+
         hooks.append(memory_flush_hook)
 
     return DeerFlowSummarizationMiddleware(

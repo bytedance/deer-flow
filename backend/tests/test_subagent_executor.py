@@ -842,6 +842,60 @@ class TestAsyncExecutionPath:
         assert [m["id"] for m in result.ai_messages] == ["ai-1", "tool-1", "tool-2", "tool-3", "ai-2"]
 
     @pytest.mark.anyio
+    async def test_aexecute_step_capture_survives_history_contraction(self, classes, base_config, mock_agent, msg):
+        """Regression for #3875 Phase 3: DeerFlowSummarizationMiddleware rewrites the
+        messages channel mid-run via ``RemoveMessage(id=REMOVE_ALL_MESSAGES)``,
+        so a later ``values`` snapshot hands the executor a SHORTER message list
+        than the cursor it was tracking. Without the contraction reset in
+        ``capture_new_step_messages``, every step appended after the compaction
+        is dropped until the list length overtakes the stale cursor.
+
+        Faithful to the real middleware: compaction puts the summary into a
+        SEPARATE ``summary_text`` state key — the messages channel after
+        compaction holds only the preserved recent tail (already-seen
+        messages), NOT a synthetic summary AIMessage. So the contraction chunk
+        is the already-seen tail (deduped, no new step); the real regression
+        coverage is that POST-compaction growth is still captured."""
+        SubagentExecutor = classes["SubagentExecutor"]
+
+        human = msg.human("Task")
+        ai1 = msg.ai("turn one", "ai-1")
+        tool1 = msg.tool("r1", "call_1", name="web_search", msg_id="tool-1")
+        ai2 = msg.ai("turn two", "ai-2")  # also the preserved tail after compaction
+        tool2 = msg.tool("r2", "call_2", name="read_file", msg_id="tool-2")
+        final = msg.ai("final answer", "ai-3")
+
+        chunks = [
+            # Pre-compaction growth (cursor → 4).
+            {"messages": [human, ai1]},
+            {"messages": [human, ai1, tool1]},
+            {"messages": [human, ai1, tool1, ai2]},
+            # Compaction: channel rewrites to just the preserved tail (ai2) —
+            # length drops from 4 to 1, below the cursor. ai2 is already seen
+            # (deduped), so no new step is emitted. (The summary lives in
+            # summary_text, out of channel.)
+            {"messages": [ai2]},
+            # Post-compaction growth — the bug: tool-2/final were dropped.
+            {"messages": [ai2, tool2]},
+            {"messages": [ai2, tool2, final]},
+        ]
+        mock_agent.astream = lambda *args, **kwargs: async_iterator(chunks)
+
+        executor = SubagentExecutor(config=base_config, tools=[], thread_id="test-thread")
+        with patch.object(executor, "_create_agent", return_value=mock_agent):
+            result = await executor._aexecute("Task")
+
+        # Pre-compaction steps survive (ai2 not re-emitted — deduped), and
+        # crucially the post-compaction tool + final answer are NOT dropped.
+        assert [m["id"] for m in result.ai_messages] == [
+            "ai-1",
+            "tool-1",
+            "ai-2",
+            "tool-2",
+            "ai-3",
+        ]
+
+    @pytest.mark.anyio
     async def test_aexecute_handles_list_content(self, classes, base_config, mock_agent, msg):
         """Test handling of list-type content in AIMessage."""
         SubagentExecutor = classes["SubagentExecutor"]
