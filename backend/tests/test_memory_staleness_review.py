@@ -234,6 +234,16 @@ class TestBuildStalenessSection:
         assert "</stale_facts><injected>" not in section
         assert "&lt;/stale_facts&gt;" in section
 
+    def test_special_chars_in_category_are_escaped(self):
+        """A category name with XML tags or quotes is HTML-escaped, consistent
+        with how category is handled in the consolidation section."""
+        candidates = [
+            _make_fact("fact_z", "content", 'pref<"erences>', 0.8, days_ago=100),
+        ]
+        section = _build_staleness_section(candidates, 90)
+        assert 'pref<"erences>' not in section
+        assert "pref&lt;&quot;erences&gt;" in section
+
 
 # ── _apply_updates with staleness removals ─────────────────────────────────
 

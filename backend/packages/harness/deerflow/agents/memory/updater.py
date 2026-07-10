@@ -516,7 +516,7 @@ def _build_staleness_section(
     lines: list[str] = []
     for fact in stale_candidates:
         fid = fact.get("id", "?")
-        cat = str(fact.get("category", "context")).strip() or "context"
+        cat = html.escape(str(fact.get("category", "context")).strip() or "context")
         conf = fact.get("confidence", 0.0)
         created_raw = fact.get("createdAt", "")
         created_short = created_raw[:10] if isinstance(created_raw, str) and len(created_raw) >= 10 else created_raw
@@ -672,6 +672,9 @@ class MemoryUpdater:
                     max_sources=config.consolidation_max_sources,
                 )
 
+        # conscious accept: json.dumps escapes " and \ but not < > & — lower-risk than
+        # staleness/consolidation (read-only context, not delete/merge instructions).
+        # If revisited, escape at fact-content insert time rather than blanket-escaping the JSON blob.
         prompt = MEMORY_UPDATE_PROMPT.format(
             current_memory=json.dumps(current_memory, indent=2, ensure_ascii=False),
             conversation=conversation_text,
