@@ -47,11 +47,27 @@ class LangfuseTracingConfig(BaseModel):
             raise ValueError(f"Langfuse tracing is enabled but required settings are missing: {', '.join(missing)}")
 
 
+class MonocleTracingConfig(BaseModel):
+    """Configuration for Monocle telemetry."""
+
+    enabled: bool = Field(...)
+    exporters: str = Field(...)
+
+    @property
+    def is_configured(self) -> bool:
+        return self.enabled
+
+    def validate(self) -> None:
+        # No external credentials are required; the "file" exporter writes locally.
+        return None
+
+
 class TracingConfig(BaseModel):
     """Tracing configuration for supported providers."""
 
     langsmith: LangSmithTracingConfig = Field(...)
     langfuse: LangfuseTracingConfig = Field(...)
+    monocle: MonocleTracingConfig = Field(...)
 
     @property
     def is_configured(self) -> bool:
@@ -125,6 +141,10 @@ def get_tracing_config() -> TracingConfig:
                 secret_key=_first_env_value("LANGFUSE_SECRET_KEY"),
                 host=_first_env_value("LANGFUSE_BASE_URL") or "https://cloud.langfuse.com",
             ),
+            monocle=MonocleTracingConfig(
+                enabled=_env_flag_preferred("MONOCLE_TRACING"),
+                exporters=_first_env_value("MONOCLE_EXPORTERS") or "file",
+            ),
         )
         return _tracing_config
 
@@ -147,6 +167,16 @@ def validate_enabled_tracing_providers() -> None:
 def is_tracing_enabled() -> bool:
     """Check if any tracing provider is enabled and fully configured."""
     return get_tracing_config().is_configured
+
+
+def is_monocle_tracing_enabled() -> bool:
+    """Whether Monocle OTel observability is enabled (via ``MONOCLE_TRACING``).
+
+    Kept separate from :func:`get_enabled_tracing_providers` because Monocle is a
+    process-global instrumentor activated at startup, not a per-run LangChain
+    callback.
+    """
+    return get_tracing_config().monocle.is_configured
 
 
 def reset_tracing_config() -> None:

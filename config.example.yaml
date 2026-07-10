@@ -31,6 +31,31 @@ logging:
     format: text
 
 # ============================================================================
+# Monocle telemetry
+# ============================================================================
+# Optional agent tracing via Monocle. Configured through environment variables
+# (like LangSmith/Langfuse), not a config.yaml key, and OFF by default. When
+# enabled, Monocle is initialized once at Gateway startup and auto-instruments
+# the LLM/agent clients; a plain library import does not start tracing.
+#
+#   MONOCLE_TRACING=true            # enable (default: off)
+#   MONOCLE_EXPORTERS=file          # file, console, okahu, s3, blob, gcs (default: file)
+#   OKAHU_API_KEY=okh_...           # required only for the `okahu` exporter
+#
+# The `file` exporter writes one trace JSON per run to `.monocle/` under the
+# process working directory (git-ignored). Each trace captures the workflow and
+# per-agent/LLM/tool spans, including span inputs and outputs (prompts, tool
+# arguments, and model responses), token usage, and timings.
+#
+# Data-exfiltration note: `file` persists prompts and model outputs to local
+# disk; non-file exporters (e.g. `okahu`) send that same span data off-box to an
+# external collector. Enable only exporters whose data handling you trust, and
+# be aware that prompts/outputs may contain sensitive content.
+#
+# Note: Monocle and Langfuse both install a global OpenTelemetry TracerProvider;
+# enable only one OTel-based tracer at a time (see backend/AGENTS.md → Tracing).
+
+# ============================================================================
 # Token Usage
 # ============================================================================
 # Enable token usage collection and display.

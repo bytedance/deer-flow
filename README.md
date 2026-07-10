@@ -58,7 +58,8 @@ DeerFlow has newly integrated the intelligent search and crawling toolset indepe
       - [IM Channels](#im-channels)
       - [LangSmith Tracing](#langsmith-tracing)
       - [Langfuse Tracing](#langfuse-tracing)
-      - [Using Both Providers](#using-both-providers)
+      - [Monocle Tracing](#monocle-tracing)
+      - [Using Multiple Providers](#using-multiple-providers)
   - [From Deep Research to Super Agent Harness](#from-deep-research-to-super-agent-harness)
   - [Core Features](#core-features)
     - [Skills \& Tools](#skills--tools)
@@ -592,11 +593,25 @@ If you are using a self-hosted Langfuse instance, set `LANGFUSE_BASE_URL` to you
 
 These are injected into `RunnableConfig.metadata` at the graph invocation root for both the gateway path (`runtime/runs/worker.py::run_agent`) and the embedded path (`client.py::DeerFlowClient.stream`), so any LangChain-compatible callback can read them. Set `DEER_FLOW_ENV` (or `ENVIRONMENT`) to tag traces by deployment environment.
 
-#### Using Both Providers
+#### Monocle Tracing
 
-If both LangSmith and Langfuse are enabled, DeerFlow attaches both tracing callbacks and reports the same model activity to both systems.
+DeerFlow also supports [Monocle](https://github.com/monocle2ai/monocle) telemetry for its LangGraph/LangChain runs.
 
-If a provider is explicitly enabled but missing required credentials, or if its callback fails to initialize, DeerFlow fails fast when tracing is initialized during model creation and the error message names the provider that caused the failure.
+Add the following to your `.env` file:
+
+```bash
+MONOCLE_TRACING=true
+MONOCLE_EXPORTERS=file          # file, console, okahu, s3, blob, gcs (default: file)
+OKAHU_API_KEY=okh_xxxxxxxx      # required only for the `okahu` exporter
+```
+
+Monocle is off by default and is initialized at Gateway startup when enabled. The `file` exporter writes one trace per run to `.monocle/`; open those in the [Monocle VS Code extension](https://marketplace.visualstudio.com/items?itemName=OkahuAI.monocle-apptrace) to inspect the span timeline and token counts.
+
+Send your Monocle traces to [Okahu](https://www.okahu.ai), an agent-observability platform, to analyze them across many runs.
+
+#### Using Multiple Providers
+
+LangSmith and Langfuse attach as LangChain callbacks, so you can enable both and DeerFlow reports each run to both. If an enabled provider is missing required credentials or fails to initialize, DeerFlow fails fast and names it. Monocle uses a global OpenTelemetry provider rather than a callback, so it runs alongside LangSmith but not Langfuse.
 
 For Docker deployments, tracing is disabled by default. Set `LANGSMITH_TRACING=true` and `LANGSMITH_API_KEY` in your `.env` to enable it.
 
