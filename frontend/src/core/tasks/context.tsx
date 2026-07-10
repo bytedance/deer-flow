@@ -81,7 +81,7 @@ export function useUpdateSubtask() {
 
       current[task.id] = next;
 
-      if (task.latestMessage || task.steps) {
+      if (task.latestMessage || task.steps || task.modelName || task.usage) {
         setTasks({ ...current });
       } else if (becameTerminal) {
         // Defer the render to the after-render effect so a terminal-only update

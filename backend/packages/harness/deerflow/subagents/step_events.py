@@ -19,6 +19,7 @@ the streaming and persistence call sites share one definition of a "step".
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from typing import Any
 
 from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
@@ -223,6 +224,12 @@ def subagent_run_event(chunk: Any) -> dict[str, Any] | None:
     status = _TERMINAL_EVENT_STATUS.get(event)
     if status is not None:
         content: dict[str, Any] = {"task_id": task_id, "status": status}
+        model_name = chunk.get("model_name")
+        if isinstance(model_name, str) and model_name.strip():
+            content["model_name"] = model_name.strip()
+        usage = _normalized_usage(chunk.get("usage"))
+        if usage is not None:
+            content["usage"] = usage
         # The final result/error can be a multi-page report; cap it so the
         # persisted run-event row stays bounded (it is also kept verbatim on the
         # terminal ToolMessage, which the card reads separately).
@@ -244,3 +251,15 @@ def subagent_run_event(chunk: Any) -> dict[str, Any] | None:
         }
 
     return None
+
+
+def _normalized_usage(value: Any) -> dict[str, int] | None:
+    if not isinstance(value, Mapping):
+        return None
+    normalized: dict[str, int] = {}
+    for key in ("input_tokens", "output_tokens", "total_tokens"):
+        amount = value.get(key)
+        if isinstance(amount, bool) or not isinstance(amount, int) or amount < 0:
+            return None
+        normalized[key] = amount
+    return normalized

@@ -15,6 +15,10 @@ consumers read the structured facts carried inside
   backend recorded.
 - ``subagent_result_brief`` / ``subagent_result_sha256`` (optional):
   bounded completed-result metadata plus a digest of the full result.
+- ``subagent_model_name`` (optional): effective DeerFlow model identifier used
+  by this delegated run.
+- ``subagent_token_usage`` (optional): final cumulative ``input_tokens`` /
+  ``output_tokens`` / ``total_tokens`` snapshot when the provider reported it.
 
 The shared fixture at ``contracts/subagent_status_contract.json`` pins
 the enum values across Python and TypeScript.
@@ -32,6 +36,8 @@ SUBAGENT_STOP_REASON_KEY = "subagent_stop_reason"
 SUBAGENT_ERROR_KEY = "subagent_error"
 SUBAGENT_RESULT_BRIEF_KEY = "subagent_result_brief"
 SUBAGENT_RESULT_SHA256_KEY = "subagent_result_sha256"
+SUBAGENT_MODEL_NAME_KEY = "subagent_model_name"
+SUBAGENT_TOKEN_USAGE_KEY = "subagent_token_usage"
 SUBAGENT_METADATA_TEXT_MAX_CHARS = 2000
 
 #: The producer always emits ``hashlib.sha256(...).hexdigest()`` — 64
@@ -127,7 +133,9 @@ def make_subagent_additional_kwargs(
     result: str | None = None,
     error: str | None = None,
     stop_reason: SubagentStopReasonValue | None = None,
-) -> dict[str, str]:
+    model_name: str | None = None,
+    token_usage: Mapping[str, object] | None = None,
+) -> dict[str, object]:
     """Build the ``additional_kwargs`` payload the middleware stamps.
 
     Drops the error field when blank so the JSON wire format never carries
@@ -145,7 +153,7 @@ def make_subagent_additional_kwargs(
         raise ValueError(f"invalid subagent status {status!r}; expected one of {SUBAGENT_STATUS_VALUES}")
     if stop_reason is not None and stop_reason not in SUBAGENT_STOP_REASON_VALUES:
         raise ValueError(f"invalid subagent stop_reason {stop_reason!r}; expected one of {SUBAGENT_STOP_REASON_VALUES}")
-    payload: dict[str, str] = {SUBAGENT_STATUS_KEY: status}
+    payload: dict[str, object] = {SUBAGENT_STATUS_KEY: status}
     if status in _RESULT_BEARING_STATUSES and isinstance(result, str) and result.strip():
         payload[SUBAGENT_RESULT_BRIEF_KEY] = _bound_metadata_text(result)
         payload[SUBAGENT_RESULT_SHA256_KEY] = hashlib.sha256(result.encode("utf-8")).hexdigest()
@@ -155,7 +163,26 @@ def make_subagent_additional_kwargs(
         payload[SUBAGENT_ERROR_KEY] = _bound_metadata_text(error)
     if stop_reason is not None:
         payload[SUBAGENT_STOP_REASON_KEY] = stop_reason
+    if isinstance(model_name, str) and model_name.strip():
+        payload[SUBAGENT_MODEL_NAME_KEY] = model_name.strip()
+    normalized_usage = _normalize_token_usage(token_usage)
+    if normalized_usage is not None:
+        payload[SUBAGENT_TOKEN_USAGE_KEY] = normalized_usage
     return payload
+
+
+def _normalize_token_usage(
+    token_usage: Mapping[str, object] | None,
+) -> dict[str, int] | None:
+    if token_usage is None:
+        return None
+    normalized: dict[str, int] = {}
+    for key in ("input_tokens", "output_tokens", "total_tokens"):
+        value = token_usage.get(key)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            return None
+        normalized[key] = value
+    return normalized
 
 
 def format_subagent_result_message(

@@ -40,6 +40,16 @@ export function computeNextSubtask(
     next.steps = mergeSteps(previous?.steps ?? [], task.steps);
   }
 
+  // Usage events are cumulative snapshots. A delayed older frame must never
+  // make the folded card appear to spend fewer tokens than it already did.
+  if (
+    task.usage &&
+    previous?.usage &&
+    task.usage.totalTokens < previous.usage.totalTokens
+  ) {
+    next.usage = previous.usage;
+  }
+
   const becameTerminal =
     isTerminalSubtaskStatus(next.status) && previousStatus !== next.status;
 

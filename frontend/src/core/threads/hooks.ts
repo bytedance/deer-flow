@@ -23,6 +23,7 @@ import type { FileInMessage } from "../messages/utils";
 import type { LocalSettings } from "../settings";
 import { isSidecarThread, SIDECAR_METADATA_KEY } from "../sidecar/thread";
 import { useUpdateSubtask } from "../tasks/context";
+import { taskEventToSubtaskUpdate } from "../tasks/lifecycle";
 import { messageToStep } from "../tasks/steps";
 import type { UploadedFileInfo } from "../uploads";
 import { promptInputFilePartToFile, uploadFiles } from "../uploads";
@@ -1016,6 +1017,19 @@ export function useThreadStream({
       }
     },
     onCustomEvent(event: unknown) {
+      const taskUpdate = taskEventToSubtaskUpdate(event);
+      if (taskUpdate) {
+        updateSubtask(taskUpdate);
+        if (
+          typeof event === "object" &&
+          event !== null &&
+          "type" in event &&
+          event.type === "task_started"
+        ) {
+          return;
+        }
+      }
+
       if (
         typeof event === "object" &&
         event !== null &&

@@ -56,6 +56,23 @@ describe("computeNextSubtask", () => {
     expect(next.steps?.map((s) => s.message_index)).toEqual([1, 2, 3]);
   });
 
+  it("keeps the latest cumulative token snapshot when an older event arrives late", () => {
+    const previous = baseTask({
+      usage: { inputTokens: 200, outputTokens: 40, totalTokens: 240 },
+    });
+
+    const { next } = computeNextSubtask(previous, {
+      id: "t1",
+      usage: { inputTokens: 100, outputTokens: 20, totalTokens: 120 },
+    });
+
+    expect(next.usage).toEqual({
+      inputTokens: 200,
+      outputTokens: 40,
+      totalTokens: 240,
+    });
+  });
+
   it("keeps a terminal status stable against a late in_progress write", () => {
     const previous = baseTask({ status: "completed" });
 

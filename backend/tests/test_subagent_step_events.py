@@ -315,11 +315,21 @@ def test_run_event_for_task_running_carries_step_payload():
 
 
 def test_run_event_for_terminal_status():
-    record = subagent_run_event({"type": "task_completed", "task_id": "call_1", "result": "done"})
+    record = subagent_run_event(
+        {
+            "type": "task_completed",
+            "task_id": "call_1",
+            "result": "done",
+            "model_name": "claude-3-7-sonnet",
+            "usage": {"input_tokens": 100, "output_tokens": 20, "total_tokens": 120},
+        }
+    )
 
     assert record["event_type"] == "subagent.end"
     assert record["content"]["status"] == "completed"
     assert record["content"]["result"] == "done"
+    assert record["content"]["model_name"] == "claude-3-7-sonnet"
+    assert record["content"]["usage"]["total_tokens"] == 120
 
     failed = subagent_run_event({"type": "task_failed", "task_id": "call_1", "error": "boom"})
     assert failed["content"]["status"] == "failed"
