@@ -192,6 +192,41 @@ def _extract_final_result(final_state: Any, *, trace_id: str, name: str) -> str:
     return "No response generated"
 
 
+def _extract_llm_error_fallback(final_state: Any) -> str | None:
+    """Return the user-facing error for a terminal LLM fallback message.
+
+    ``LLMErrorHandlingMiddleware`` converts provider exceptions into marked
+    ``AIMessage`` objects so the graph can terminate cleanly. Clean graph
+    termination is not task success, however: subagent callers need the
+    structured marker translated into the existing failed terminal state.
+
+    Only the last assistant message is authoritative. Earlier handled errors
+    may have been recovered from by a later assistant turn, and error-looking
+    message text without the marker remains ordinary output.
+    """
+    if final_state is None:
+        return None
+
+    for message in reversed(final_state.get("messages", [])):
+        if not isinstance(message, AIMessage):
+            continue
+
+        metadata = message.additional_kwargs
+        if metadata.get("deerflow_error_fallback") is not True:
+            return None
+
+        content = message_content_to_text(message.content).strip()
+        if content:
+            return content
+
+        detail = metadata.get("error_detail")
+        if isinstance(detail, str) and detail.strip():
+            return detail.strip()
+        return "LLM request failed"
+
+    return None
+
+
 # Global storage for background task results
 _background_tasks: dict[str, SubagentResult] = {}
 _background_tasks_lock = threading.Lock()
@@ -777,12 +812,20 @@ class SubagentExecutor:
             # happened so we can mark the completed result with the cap reason
             # (token_capped / loop_capped) for the lead (#3875 Phase 2).
             stop_reason = self._consume_guard_stop_reason()
-            result.try_set_terminal(
-                SubagentStatus.COMPLETED,
-                result=final_result,
-                stop_reason=stop_reason,
-                token_usage_records=token_usage_records,
-            )
+            llm_error = _extract_llm_error_fallback(final_state)
+            if llm_error is not None:
+                result.try_set_terminal(
+                    SubagentStatus.FAILED,
+                    error=llm_error,
+                    token_usage_records=token_usage_records,
+                )
+            else:
+                result.try_set_terminal(
+                    SubagentStatus.COMPLETED,
+                    result=final_result,
+                    stop_reason=stop_reason,
+                    token_usage_records=token_usage_records,
+                )
 
         except GraphRecursionError:
             # ``recursion_limit`` on run_config == ``self.config.max_turns``
