@@ -672,10 +672,8 @@ class MemoryUpdater:
                     max_sources=config.consolidation_max_sources,
                 )
 
-        # conscious accept: json.dumps escapes " and \ but not < > & — lower-risk than
-        # staleness/consolidation (read-only context, not delete/merge instructions).
-        # If revisited, escape at fact-content insert time rather than blanket-escaping the JSON blob.
-        # Tracked in #4044.
+        # conscious accept: json.dumps leaves < > & unescaped in fact content (tracked in #4044);
+        # lower-risk than staleness/consolidation — read-only context, not delete/merge instructions.
         prompt = MEMORY_UPDATE_PROMPT.format(
             current_memory=json.dumps(current_memory, indent=2, ensure_ascii=False),
             conversation=conversation_text,
