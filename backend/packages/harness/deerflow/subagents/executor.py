@@ -437,13 +437,25 @@ class SubagentExecutor:
 
         # Reuse shared middleware composition with lead agent. ``agent_name``
         # lets the builder resolve the per-agent token_budget override.
-        middlewares = build_subagent_runtime_middlewares(
-            app_config=app_config,
-            model_name=self.model_name,
-            lazy_init=True,
-            deferred_setup=deferred_setup,
-            agent_name=self.config.name,
-        )
+        mcp_routing_middleware = None
+        if deferred_setup is not None and deferred_setup.deferred_names:
+            from deerflow.tools.builtins.tool_search import build_mcp_routing_middleware
+
+            mcp_routing_middleware = build_mcp_routing_middleware(
+                tools if tools is not None else self.tools,
+                deferred_setup,
+                top_k=app_config.tool_search.auto_promote_top_k,
+            )
+        middleware_kwargs = {
+            "app_config": app_config,
+            "model_name": self.model_name,
+            "lazy_init": True,
+            "deferred_setup": deferred_setup,
+            "agent_name": self.config.name,
+        }
+        if mcp_routing_middleware is not None:
+            middleware_kwargs["mcp_routing_middleware"] = mcp_routing_middleware
+        middlewares = build_subagent_runtime_middlewares(**middleware_kwargs)
         # Collect every guard middleware that exposes ``consume_stop_reason``
         # (TokenBudgetMiddleware, LoopDetectionMiddleware) so _aexecute can read
         # each after the run and surface whichever cap fired. Duck-typed

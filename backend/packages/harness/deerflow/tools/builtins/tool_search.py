@@ -6,6 +6,8 @@ Contains:
   catalog; it records promotions into graph state via ``Command``.
 - build_deferred_tool_setup: assembles the catalog + tool from a
   policy-filtered tool list (call AFTER tool-policy filtering).
+- build_mcp_routing_middleware: builds the PR2 auto-promote middleware from
+  serialized routing metadata on policy-filtered deferred tools.
 
 The agent sees deferred tool names in <available-deferred-tools> but cannot
 call them until it fetches their full schema via the tool_search tool. The
@@ -21,7 +23,7 @@ import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 from functools import cached_property
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated, Any
 
 from langchain.tools import BaseTool
 from langchain_core.messages import ToolMessage
@@ -30,6 +32,9 @@ from langchain_core.utils.function_calling import convert_to_openai_function
 from langgraph.types import Command
 
 from deerflow.tools.mcp_metadata import get_mcp_routing, is_mcp_tool
+
+if TYPE_CHECKING:
+    from langchain.agents.middleware import AgentMiddleware
 
 logger = logging.getLogger(__name__)
 
@@ -200,6 +205,64 @@ def assemble_deferred_tools(filtered_tools: list[BaseTool], *, enabled: bool) ->
     if deferred_setup.tool_search_tool:
         final_tools.append(deferred_setup.tool_search_tool)
     return final_tools, deferred_setup
+
+
+def _routing_priority(value: Any) -> int:
+    # Produces the typed priority stored in the routing index. McpRoutingMiddleware
+    # ._normalize_index re-parses this defensively (it is built to accept arbitrary
+    # serialized data), so keep the two coercion rules in sync if either changes.
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _routing_keywords(value: Any) -> list[str]:
+    # See _routing_priority: McpRoutingMiddleware._normalize_index re-normalizes
+    # keywords defensively; keep both coercion rules aligned.
+    if not isinstance(value, list):
+        return []
+    return [keyword for keyword in (str(item).strip() for item in value) if keyword]
+
+
+def build_mcp_routing_middleware(
+    tools: Iterable[BaseTool],
+    deferred_setup: DeferredToolSetup,
+    *,
+    top_k: int,
+) -> "AgentMiddleware | None":
+    """Build PR2 auto-promotion middleware from policy-filtered deferred tools.
+
+    The builder may inspect ``BaseTool.metadata`` at construction time, but the
+    returned middleware receives only a flat serializable routing index.
+    """
+    if deferred_setup.catalog_hash is None or not deferred_setup.deferred_names:
+        return None
+
+    routing_index: dict[str, dict[str, Any]] = {}
+    for candidate in tools:
+        tool_name = getattr(candidate, "name", "")
+        if tool_name not in deferred_setup.deferred_names:
+            continue
+        routing = get_mcp_routing(candidate)
+        if routing is None or routing.get("mode") != "prefer":
+            continue
+        keywords = _routing_keywords(routing.get("keywords"))
+        if not keywords:
+            continue
+        if routing.get("auto_promote_top_k") is not None:
+            logger.debug("Ignoring per-tool MCP routing auto_promote_top_k for %s in PR2", tool_name)
+        routing_index[str(tool_name)] = {
+            "priority": _routing_priority(routing.get("priority", 0)),
+            "keywords": keywords,
+        }
+
+    if not routing_index:
+        return None
+
+    from deerflow.agents.middlewares.mcp_routing_middleware import McpRoutingMiddleware
+
+    return McpRoutingMiddleware(routing_index, deferred_setup.catalog_hash, top_k)
 
 
 # Prompt rendering

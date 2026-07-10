@@ -160,6 +160,35 @@ class TestEnvPolicy:
             "POSTGRES_DSN",
             "CONN_STR",
             "GH_PAT",
+            # Password vars for services whose connection strings are already blocked
+            # above. These carry no KEY/SECRET/TOKEN/PASSWORD/PASSWD substring, and a
+            # blanket ``*PWD*`` / ``*AUTH*`` pattern would strip benign vars (``PWD``,
+            # ``OLDPWD``), so they need exact entries.
+            "MYSQL_PWD",  # read directly by mysql / libmysqlclient
+            "REDISCLI_AUTH",  # read directly by redis-cli
+            "REDIS_AUTH",
+            # Abbreviated ``_PASS`` password vars: value-bearing plaintext passwords
+            # that the full-spelling ``*PASSWORD*`` / ``*PASSWD*`` patterns miss.
+            "DB_PASS",
+            "SMTP_PASS",
+            "MYSQL_PASS",
+            "REDIS_PASS",
+            "FTP_PASS",
+            "MAIL_PASS",
+            # Postgres file-based credential sources read by libpq/psql with no flag,
+            # the direct analog of MYSQL_PWD/REDISCLI_AUTH above. PGPASSFILE names a
+            # .pgpass (host:port:db:user:password); PGSERVICEFILE names a
+            # pg_service.conf that may carry a password field.
+            "PGPASSFILE",
+            "PGSERVICEFILE",
+            # Credential *helpers*: each names a program that dispenses a credential
+            # on demand. Inheriting the pointer is the same leak class as inheriting
+            # the value, so ``*PASS*`` scrubbing them is intended. Pinned here so the
+            # behaviour is a deliberate decision rather than a side effect of the
+            # pattern's shape.
+            "GIT_ASKPASS",
+            "SSH_ASKPASS",
+            "SUDO_ASKPASS",
         ],
     )
     def test_secret_like_names_are_blocked(self, name):
@@ -177,6 +206,7 @@ class TestEnvPolicy:
             "LANG",
             "LC_ALL",
             "PWD",
+            "OLDPWD",
             "TMPDIR",
             "VIRTUAL_ENV",
             "PYTHONPATH",
@@ -188,9 +218,49 @@ class TestEnvPolicy:
         ],
     )
     def test_benign_names_are_allowed(self, name):
+        """Names here must survive the scrub.
+
+        Note what this list does *not* contain: any name carrying a ``PASS``
+        substring. That is deliberate, not an oversight — ``*PASS*`` scrubs every
+        such name, including the ``*_ASKPASS`` credential helpers pinned in
+        ``test_secret_like_names_are_blocked`` above. Over-scrubbing is this
+        module's fail-safe direction; a skill that needs a scrubbed name declares
+        it via ``required-secrets``. ``PWD``/``OLDPWD`` are the boundary this list
+        does pin: they carry no ``PASS`` substring and must never be stripped.
+        """
         from deerflow.sandbox.env_policy import is_blocked_env_name
 
         assert is_blocked_env_name(name) is False
+
+    def test_db_password_vars_do_not_reach_the_subprocess_env(self, monkeypatch):
+        """The URL forms are scrubbed; the password vars for the same services must be too.
+
+        ``mysql`` reads ``MYSQL_PWD`` and ``redis-cli`` reads ``REDISCLI_AUTH`` as the
+        password with no further configuration, so inheriting them hands a skill
+        subprocess the credential the connection-string block already withholds.
+        """
+        from deerflow.sandbox.env_policy import build_sandbox_env
+
+        monkeypatch.setenv("MYSQL_URL", "mysql://user:pw@host/db")
+        monkeypatch.setenv("MYSQL_PWD", "prod-db-password")
+        monkeypatch.setenv("REDISCLI_AUTH", "prod-redis-auth")
+        env = build_sandbox_env()
+        assert "MYSQL_URL" not in env
+        assert "MYSQL_PWD" not in env
+        assert "REDISCLI_AUTH" not in env
+        assert env.get("PWD")  # the working directory must survive the added entries
+
+    def test_injection_still_wins_for_the_newly_blocked_names(self, monkeypatch):
+        """``required-secrets`` stays the escape hatch for the names added here.
+
+        The request-scoped value must also override the host's, which is the
+        per-user-key-overrides-shared-key case from #3861.
+        """
+        from deerflow.sandbox.env_policy import build_sandbox_env
+
+        monkeypatch.setenv("MYSQL_PWD", "host-value-must-not-leak")
+        env = build_sandbox_env(injected={"MYSQL_PWD": "request-scoped-value"})
+        assert env["MYSQL_PWD"] == "request-scoped-value"
 
     def test_build_sandbox_env_scrubs_inherited_and_layers_injected(self, monkeypatch):
         from deerflow.sandbox.env_policy import build_sandbox_env

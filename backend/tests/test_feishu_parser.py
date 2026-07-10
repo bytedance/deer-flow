@@ -328,7 +328,13 @@ def test_feishu_batches_top_level_file_messages_from_same_user(monkeypatch):
         assert inbound.metadata["message_id"] == "msg_file_1"
         assert inbound.metadata["topic_id"] == "msg_file_1"
         assert inbound.metadata["batched_message_ids"] == ["msg_file_1", "msg_file_2"]
-        channel._ensure_running_card_started.assert_called_once_with("msg_file_1")
+        channel._ensure_running_card_started.assert_called_once()
+        assert channel._ensure_running_card_started.call_args.args == ("msg_file_1",)
+        assert channel._ensure_running_card_started.call_args.kwargs["metadata"]["message_id"] == "msg_file_1"
+        assert channel._ensure_running_card_started.call_args.kwargs["metadata"]["batched_message_ids"] == [
+            "msg_file_1",
+            "msg_file_2",
+        ]
         assert [call.args for call in channel._add_reaction.call_args_list] == [
             ("msg_file_1", "OK"),
             ("msg_file_2", "OK"),
@@ -390,6 +396,8 @@ def test_feishu_file_batch_window_expiry_starts_new_topic(monkeypatch):
         assert second.files == [{"file_key": "file_b"}]
         assert channel._ensure_running_card_started.call_args_list[0].args == ("msg_file_1",)
         assert channel._ensure_running_card_started.call_args_list[1].args == ("msg_file_2",)
+        assert channel._ensure_running_card_started.call_args_list[0].kwargs["metadata"]["message_id"] == "msg_file_1"
+        assert channel._ensure_running_card_started.call_args_list[1].kwargs["metadata"]["message_id"] == "msg_file_2"
 
     _run(go())
 

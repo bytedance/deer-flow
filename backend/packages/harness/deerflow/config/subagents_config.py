@@ -9,18 +9,34 @@ from deerflow.config.token_budget_config import TokenBudgetConfig
 logger = logging.getLogger(__name__)
 
 
-def default_subagent_token_budget() -> TokenBudgetConfig:
-    """Default per-run token budget for subagents (#3875 Phase 2).
+def default_subagent_token_budget(*, summarization_enabled: bool = False) -> TokenBudgetConfig:
+    """Default per-run token budget for subagents (#3875 Phase 2 → Phase 3 coupling).
 
     Enabled by default so the pathological-token-burn backstop actually
     engages (per umbrella #3857 point 4 — backstops must engage, not just
-    exist). ``max_tokens`` is a deliberately loose ceiling: the reported 4.4M
-    burn would have been cut roughly in half, while legitimate deep-research
-    runs (``max_turns=150``, no summarization yet) can genuinely accumulate
-    >1M cumulative input today. Tighten after Phase 3 lands subagent
-    summarization. Flagged tunable in the PR description.
+    exist). ``max_tokens`` is **coupled to whether subagent summarization is
+    on** (#3875 Phase 3 review point):
+
+    - ``summarization_enabled=True`` (Phase 3 compacts the running context
+      before it reaches pathological size): **1M** — tighter ceiling still
+      covers legitimate deep research while catching degenerate runs earlier.
+    - ``summarization_enabled=False``: **2M** — the Phase 2 ceiling. Phase 2's
+      own docstring noted legitimate deep-research runs (``max_turns=150``,
+      no summarization) "can genuinely accumulate >1M cumulative input," so a
+      1M ceiling without compaction would prematurely cap them. Keeping 2M
+      here preserves that headroom; the tighter 1M only applies when the
+      compaction that justifies it is actually running.
+
+    The model-level ``default_factory`` (``SubagentsAppConfig.token_budget``)
+    cannot read ``summarization.enabled`` (a sibling top-level field), so it
+    falls back to the 2M no-compaction default; the builder
+    (``build_subagent_runtime_middlewares``) recomputes via
+    ``get_token_budget_for(..., summarization_enabled=...)`` so the live value
+    reflects the actual switch. A user-set ``token_budget`` (global or
+    per-agent) always wins regardless of the switch. Flagged tunable.
     """
-    return TokenBudgetConfig(enabled=True, max_tokens=2_000_000, warn_threshold=0.7)
+    max_tokens = 1_000_000 if summarization_enabled else 2_000_000
+    return TokenBudgetConfig(enabled=True, max_tokens=max_tokens, warn_threshold=0.7)
 
 
 class SubagentOverrideConfig(BaseModel):
@@ -114,6 +130,20 @@ class SubagentsAppConfig(BaseModel):
         description="User-defined subagent types keyed by agent name",
     )
 
+    # True when ``token_budget`` was NOT explicitly provided by the user, i.e.
+    # the field fell back to its default_factory. ``get_token_budget_for`` uses
+    # this to decide whether the ceiling may be re-coupled to
+    # ``summarization.enabled`` (#3875 Phase 3): a user-set budget is always
+    # respected as-is. Set by ``__init__`` from ``model_fields_set`` and
+    # preserved across the app-config reload path (which drops a default
+    # ``token_budget`` before re-constructing — see
+    # ``load_subagents_config_from_dict``).
+    _token_budget_is_default: bool = True
+
+    def __init__(self, **data):
+        super().__init__(**data)
+        self._token_budget_is_default = "token_budget" not in self.model_fields_set
+
     def get_timeout_for(self, agent_name: str) -> int:
         """Get the effective timeout for a specific agent.
 
@@ -165,7 +195,12 @@ class SubagentsAppConfig(BaseModel):
             return override.skills
         return None
 
-    def get_token_budget_for(self, agent_name: str) -> TokenBudgetConfig:
+    def get_token_budget_for(
+        self,
+        agent_name: str,
+        *,
+        summarization_enabled: bool = False,
+    ) -> TokenBudgetConfig:
         """Get the effective token-budget config for a specific agent.
 
         Unlike ``max_turns``/``timeout_seconds`` (which keep a custom agent's
@@ -173,10 +208,21 @@ class SubagentsAppConfig(BaseModel):
         every subagent unless explicitly disabled — so the per-agent override
         wins when set, otherwise the global default applies to built-in AND
         custom agents alike (#3875 Phase 2 / umbrella #3857 point 4).
+
+        ``summarization_enabled`` couples the DEFAULT ceiling to whether
+        subagent summarization is on (#3875 Phase 3 review): 1M when
+        compaction is running, 2M otherwise. It ONLY affects the default —
+        any explicitly configured ``token_budget`` (global or per-agent)
+        wins regardless, so a deployment that pinned a value is never
+        silently changed by flipping the summarization switch.
         """
         override = self.agents.get(agent_name)
         if override is not None and override.token_budget is not None:
             return override.token_budget
+        # Only recompute when the caller is using the default (no explicit
+        # global token_budget was set). A user-set global is respected as-is.
+        if self._token_budget_is_default:
+            return default_subagent_token_budget(summarization_enabled=summarization_enabled)
         return self.token_budget
 
 
@@ -191,6 +237,18 @@ def get_subagents_app_config() -> SubagentsAppConfig:
 def load_subagents_config_from_dict(config_dict: dict) -> None:
     """Load subagents configuration from a dictionary."""
     global _subagents_config
+    # The app-config reload path (app_config.py) round-trips via
+    # ``config.subagents.model_dump()``, which serializes a default
+    # ``token_budget`` into the dict. Re-constructing from that dict would make
+    # ``model_fields_set`` contain ``token_budget`` and flip
+    # ``_token_budget_is_default`` to False — breaking the
+    # summarization-coupled recompute in ``get_token_budget_for`` (#3875 Phase
+    # 3). Drop the key when its value still equals the no-compaction default so
+    # the default_factory fires on reconstruction and the "user did not set
+    # this" signal is preserved.
+    tb = config_dict.get("token_budget")
+    if tb is not None and tb == default_subagent_token_budget(summarization_enabled=False).model_dump():
+        config_dict = {k: v for k, v in config_dict.items() if k != "token_budget"}
     _subagents_config = SubagentsAppConfig(**config_dict)
 
     overrides_summary = {}

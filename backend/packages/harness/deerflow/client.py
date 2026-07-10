@@ -46,7 +46,7 @@ from deerflow.runtime.goal import DEFAULT_MAX_GOAL_CONTINUATIONS, build_goal_sta
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.skills.describe import build_skill_search_setup
 from deerflow.skills.storage import get_or_new_user_skill_storage
-from deerflow.tools.builtins.tool_search import assemble_deferred_tools, get_mcp_routing_hints_prompt_section
+from deerflow.tools.builtins.tool_search import assemble_deferred_tools, build_mcp_routing_middleware, get_mcp_routing_hints_prompt_section
 from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, generate_trace_id, get_current_trace_id, reset_current_trace_id, set_current_trace_id
 from deerflow.tracing import build_tracing_callbacks, inject_langfuse_metadata
 from deerflow.uploads.manager import (
@@ -257,6 +257,11 @@ class DeerFlowClient:
 
         tools = self._get_tools(model_name=model_name, subagent_enabled=subagent_enabled)
         final_tools, deferred_setup = assemble_deferred_tools(tools, enabled=self._app_config.tool_search.enabled)
+        mcp_routing_middleware = build_mcp_routing_middleware(
+            final_tools,
+            deferred_setup,
+            top_k=self._app_config.tool_search.auto_promote_top_k,
+        )
         mcp_routing_hints_section = get_mcp_routing_hints_prompt_section(tools, deferred_names=deferred_setup.deferred_names)
 
         # Wire deferred skill discovery — mirrors agent.py so config flag works on both paths.
@@ -286,6 +291,7 @@ class DeerFlowClient:
                 custom_middlewares=self._middlewares,
                 app_config=self._app_config,
                 deferred_setup=deferred_setup,
+                mcp_routing_middleware=mcp_routing_middleware,
                 user_id=get_effective_user_id(),
             ),
             "system_prompt": apply_prompt_template(

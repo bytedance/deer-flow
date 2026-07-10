@@ -424,6 +424,33 @@ def test_build_middlewares_passes_explicit_app_config_to_shared_factory(monkeypa
     assert middlewares[0] == "base-middleware"
 
 
+def test_build_middlewares_places_mcp_routing_before_deferred_filter(monkeypatch):
+    from deerflow.agents.middlewares.deferred_tool_filter_middleware import DeferredToolFilterMiddleware
+    from deerflow.agents.middlewares.mcp_routing_middleware import McpRoutingMiddleware
+    from deerflow.tools.builtins.tool_search import DeferredToolSetup
+
+    app_config = _make_app_config([_make_model("safe-model", supports_thinking=False)], loop_detection=LoopDetectionConfig(enabled=False))
+    routing = McpRoutingMiddleware({"mcp_thing": {"priority": 100, "keywords": ["orders"]}}, "hash123", 3)
+    setup = DeferredToolSetup(object(), frozenset({"mcp_thing"}), "hash123")
+
+    monkeypatch.setattr(lead_agent_module, "get_app_config", lambda: app_config)
+    monkeypatch.setattr(lead_agent_module, "build_lead_runtime_middlewares", lambda *, app_config, lazy_init=True: [])
+    monkeypatch.setattr(lead_agent_module, "_create_summarization_middleware", lambda *, app_config=None: None)
+    monkeypatch.setattr(lead_agent_module, "_create_todo_list_middleware", lambda is_plan_mode: None)
+
+    middlewares = lead_agent_module.build_middlewares(
+        {"configurable": {"is_plan_mode": False, "subagent_enabled": False}},
+        model_name="safe-model",
+        app_config=app_config,
+        deferred_setup=setup,
+        mcp_routing_middleware=routing,
+    )
+
+    routing_idx = next(i for i, middleware in enumerate(middlewares) if isinstance(middleware, McpRoutingMiddleware))
+    filter_idx = next(i for i, middleware in enumerate(middlewares) if isinstance(middleware, DeferredToolFilterMiddleware))
+    assert routing_idx < filter_idx
+
+
 def test_build_middlewares_uses_loop_detection_config(monkeypatch):
     app_config = _make_app_config(
         [_make_model("safe-model", supports_thinking=False)],
