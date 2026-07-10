@@ -767,6 +767,42 @@ class TestAsyncExecutionPath:
         assert result.error is None
 
     @pytest.mark.anyio
+    async def test_aexecute_ignores_stale_parent_history_fallback_marker(self, classes, base_config, mock_agent, msg):
+        """A stale fallback marker replayed from parent history is not terminal.
+
+        Subagents share the parent's ``thread_id`` and LangGraph replays the
+        full parent message history, so ``final_state`` can carry a fallback
+        ``AIMessage`` left by an earlier parent turn. Because the subagent
+        always appends its own terminal assistant message, ``_extract_llm_error_fallback``
+        inspects only the last ``AIMessage`` and must treat this run as a
+        normal completion — this locks the "no masking needed" invariant that
+        justifies scanning the tail instead of all messages.
+        """
+        AIMessage = classes["AIMessage"]
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentStatus = classes["SubagentStatus"]
+
+        stale_fallback = AIMessage(
+            content="LLM request failed: an earlier parent-history error",
+            additional_kwargs={
+                "deerflow_error_fallback": True,
+                "error_type": "BadRequestError",
+                "error_reason": "generic",
+                "error_detail": "Error code: 400 - InvalidParameter",
+            },
+        )
+        final_state = {"messages": [stale_fallback, msg.human("Do something"), msg.ai("real result")]}
+        mock_agent.astream = lambda *args, **kwargs: async_iterator([final_state])
+
+        executor = SubagentExecutor(config=base_config, tools=[], thread_id="test-thread")
+        with patch.object(executor, "_create_agent", return_value=mock_agent):
+            result = await executor._aexecute("Do something")
+
+        assert result.status == SubagentStatus.COMPLETED
+        assert result.result == "real result"
+        assert result.error is None
+
+    @pytest.mark.anyio
     async def test_aexecute_collects_ai_messages(self, classes, base_config, mock_agent, msg):
         """Test that AI messages are collected during streaming."""
         SubagentExecutor = classes["SubagentExecutor"]
