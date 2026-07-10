@@ -9,7 +9,9 @@ export function resolveSubtaskModelLabel(
   if (!modelName) {
     return undefined;
   }
-  return models.find((model) => model.name === modelName)?.display_name ?? modelName;
+  return (
+    models.find((model) => model.name === modelName)?.display_name ?? modelName
+  );
 }
 
 export function formatSubtaskTokenUsage(

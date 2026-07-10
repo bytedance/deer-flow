@@ -160,7 +160,10 @@ export function SubtaskCard({
                       </span>
                     )}
                     {runtimeUsageLabel && (
-                      <span className="max-w-28 truncate" title={runtimeUsageLabel}>
+                      <span
+                        className="max-w-28 truncate"
+                        title={runtimeUsageLabel}
+                      >
                         {runtimeUsageLabel}
                       </span>
                     )}
