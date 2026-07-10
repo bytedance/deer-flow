@@ -909,7 +909,12 @@ class MemoryUpdater:
             # non-aged fact id is silently rejected.  Runs unconditionally
             # so the apply-layer protection is independent of model behavior
             # AND of the staleness_review_enabled flag.
-            candidate_ids = {f["id"] for f in _select_stale_candidates(current_memory, config)}
+            # Guard against legacy / hand-edited facts that predate the id
+            # field: an aged, non-protected fact with no "id" is a valid
+            # staleness candidate but has no id to intersect against, so skip
+            # it here instead of raising KeyError (id-less facts can never be
+            # targeted by the id-based removal set anyway).
+            candidate_ids = {f["id"] for f in _select_stale_candidates(current_memory, config) if f.get("id") is not None}
             stale_ids_to_remove &= candidate_ids
 
             if not stale_ids_to_remove:

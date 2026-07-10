@@ -244,6 +244,44 @@ class TestApplyUpdatesStaleness:
         assert len(result["facts"]) == 1
         assert result["facts"][0]["id"] == "fact_keep"
 
+    def test_stale_candidate_without_id_does_not_raise(self):
+        """A legacy / hand-edited fact that lacks an ``id`` must not crash the
+        staleness apply path.
+
+        Regression: ``candidate_ids`` was built with a direct ``f["id"]``
+        access over ``_select_stale_candidates`` output, but every other fact
+        access in the module uses ``f.get("id")``. An aged, non-protected fact
+        with no ``id`` key (common in legacy / migrated ``memory.json``) is a
+        valid staleness candidate, so it reached ``f["id"]`` and raised
+        ``KeyError: 'id'``, aborting the whole memory-update cycle.
+        """
+        updater = MemoryUpdater()
+        aged = (datetime.now(UTC) - timedelta(days=120)).isoformat().replace("+00:00", "Z")
+        # An aged, non-protected fact deliberately missing the "id" key.
+        idless_fact = {"content": "User uses Vue.js", "category": "knowledge", "confidence": 0.8, "createdAt": aged}
+        current_memory = _make_memory([_make_fact("fact_keep", days_ago=100), idless_fact])
+        update_data = {
+            "user": {},
+            "history": {},
+            "newFacts": [],
+            "factsToRemove": [],
+            "staleFactsToRemove": [
+                {"id": "fact_keep", "reason": "outdated"},
+            ],
+        }
+
+        with patch(
+            "deerflow.agents.memory.updater.get_memory_config",
+            return_value=_memory_config(max_facts=100, staleness_max_removals_per_cycle=10),
+        ):
+            # Must not raise KeyError: 'id'.
+            result = updater._apply_updates(current_memory, update_data)
+
+        # The id-less fact survives (it can never be targeted by the id-based
+        # removal set), and the id-based removal of fact_keep still applies.
+        contents = {f.get("content") for f in result["facts"]}
+        assert "User uses Vue.js" in contents
+
     def test_safety_cap_limits_removals(self):
         updater = MemoryUpdater()
         # 5 stale facts, but cap is 2 → only 2 lowest-confidence should be removed
