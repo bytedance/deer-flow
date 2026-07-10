@@ -1387,7 +1387,7 @@ summarization:
 # Stores user context and conversation history for personalized responses
 memory:
   enabled: true
-  storage_path: memory.json # Path relative to backend directory
+  storage_path: memory.json # Absolute path opts out of per-user isolation; a relative path resolves under the data base_dir, not the backend directory
   debounce_seconds: 30 # Wait time before processing queued updates
   model_name: null # Use default model
   max_facts: 100 # Maximum number of facts to store
