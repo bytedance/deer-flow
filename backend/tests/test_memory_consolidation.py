@@ -9,8 +9,9 @@ Covers:
 - Integration with _prepare_update_prompt
 """
 
-import pytest
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 from deerflow.agents.memory.updater import (
     MemoryUpdater,
@@ -872,6 +873,45 @@ class TestReviewerFindings:
         assert "consolidatedAt" in merged[0], "consolidatedAt must be set for auditability"
         # consolidatedAt should be more recent than the source dates
         assert merged[0]["consolidatedAt"] > newer_date
+
+    def test_confidence_fallback_to_max_source_when_llm_omits_field(self):
+        """Finding 5: when LLM omits confidence field entirely, merged fact uses max_source_conf."""
+        updater = MemoryUpdater()
+        facts = [
+            _make_fact("fact_a", "Fact A", "knowledge", 0.85),
+            _make_fact("fact_b", "Fact B", "knowledge", 0.75),
+        ]
+        current_memory = _make_memory(facts)
+        update_data = {
+            "user": {},
+            "history": {},
+            "newFacts": [],
+            "factsToRemove": [],
+            "staleFactsToRemove": [],
+            "factsToConsolidate": [
+                {
+                    "sourceIds": ["fact_a", "fact_b"],
+                    # LLM omits the confidence field entirely
+                    "consolidated": {"content": "Merged without confidence", "category": "knowledge"},
+                },
+            ],
+        }
+        with patch(
+            "deerflow.agents.memory.updater.get_memory_config",
+            return_value=_memory_config(
+                max_facts=100,
+                consolidation_enabled=True,
+                consolidation_min_facts=2,
+                consolidation_max_groups_per_cycle=3,
+                consolidation_max_sources=8,
+            ),
+        ):
+            result = updater._apply_updates(current_memory, update_data)
+
+        merged = [f for f in result["facts"] if f.get("source") == "consolidation"]
+        assert len(merged) == 1, "merge should succeed"
+        # fallback: max(coerce(0.85), coerce(0.75)) = 0.85
+        assert merged[0]["confidence"] == pytest.approx(0.85)
 
 
 # ── Integration: _prepare_update_prompt ────────────────────────────────────

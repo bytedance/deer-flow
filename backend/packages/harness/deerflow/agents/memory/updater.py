@@ -1022,8 +1022,12 @@ class MemoryUpdater:
                     consolidated = decision.get("consolidated", {})
 
                     # Guardrail: all source IDs must exist in the post-trim index,
-                    # must be in the candidate set (not a protected category), and
-                    # must not already be consumed by an earlier merge this cycle.
+                    # must not already be consumed by an earlier merge this cycle,
+                    # and must be in allowed_source_ids — the set built from
+                    # _select_consolidation_candidates, which excludes categories in
+                    # staleness_protected_categories (default: "correction").  This
+                    # mirrors the staleness apply-time check and ensures explicit user
+                    # feedback is never silently merged away regardless of model behaviour.
                     if any(sid in ids_consumed or sid not in fact_index or sid not in allowed_source_ids for sid in source_ids):
                         continue
                     # Guardrail: 2..max_sources per group
@@ -1035,14 +1039,17 @@ class MemoryUpdater:
                         continue
 
                     source_confidences = [_coerce_source_confidence(fact_index[sid]) for sid in source_ids]
-                    max_source_conf = min(max(source_confidences), 1.0)
+                    # _coerce_source_confidence already clamps each value to [0, 1],
+                    # so max(source_confidences) ≤ 1.0 by contract.
+                    max_source_conf = max(source_confidences)
 
-                    # Use the LLM's returned confidence (already validated by normalization),
-                    # capped at the source maximum so consolidation cannot inflate confidence.
-                    # Falls back to max_source_conf when the field is absent or malformed.
+                    # Use the LLM's returned confidence, capped at the source maximum so
+                    # consolidation cannot inflate confidence.  Clamp to [0, 1] first so
+                    # out-of-range values (e.g. 1.5) never leak even if the cap is later
+                    # relaxed.  Falls back to max_source_conf when absent or malformed.
                     raw_llm_conf = consolidated.get("confidence")
                     if isinstance(raw_llm_conf, (int, float)) and not isinstance(raw_llm_conf, bool) and math.isfinite(float(raw_llm_conf)):
-                        fact_confidence = min(float(raw_llm_conf), max_source_conf)
+                        fact_confidence = min(max(0.0, min(float(raw_llm_conf), 1.0)), max_source_conf)
                     else:
                         fact_confidence = max_source_conf
 
@@ -1056,7 +1063,13 @@ class MemoryUpdater:
                     # reflects the age of the underlying information, not when
                     # synthesis happened.  consolidatedAt records the merge time
                     # for audit without resetting staleness eligibility.
-                    source_created_at = max(fact_index[sid].get("createdAt") or now for sid in source_ids)
+                    # Use _parse_fact_datetime for crash-safe, timezone-aware comparison:
+                    # a numeric createdAt would make string max() raise TypeError, and
+                    # mixed Z/+00:00 formats sort wrong lexicographically.
+                    _fallback_dt = _parse_fact_datetime(now) or datetime.now(UTC)
+                    _source_dts = [_parse_fact_datetime(fact_index[sid].get("createdAt") or "") or _fallback_dt for sid in source_ids]
+                    _newest_dt = max(_source_dts)
+                    source_created_at = _newest_dt.isoformat().removesuffix("+00:00") + "Z"
                     new_fact: dict[str, Any] = {
                         "id": f"fact_{uuid.uuid4().hex[:8]}",
                         "content": content.strip(),
