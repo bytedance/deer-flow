@@ -167,6 +167,20 @@ class TestEnvPolicy:
             "MYSQL_PWD",  # read directly by mysql / libmysqlclient
             "REDISCLI_AUTH",  # read directly by redis-cli
             "REDIS_AUTH",
+            # Abbreviated ``_PASS`` password vars: value-bearing plaintext passwords
+            # that the full-spelling ``*PASSWORD*`` / ``*PASSWD*`` patterns miss.
+            "DB_PASS",
+            "SMTP_PASS",
+            "MYSQL_PASS",
+            "REDIS_PASS",
+            "FTP_PASS",
+            "MAIL_PASS",
+            # Postgres file-based credential sources read by libpq/psql with no flag,
+            # the direct analog of MYSQL_PWD/REDISCLI_AUTH above. PGPASSFILE names a
+            # .pgpass (host:port:db:user:password); PGSERVICEFILE names a
+            # pg_service.conf that may carry a password field.
+            "PGPASSFILE",
+            "PGSERVICEFILE",
         ],
     )
     def test_secret_like_names_are_blocked(self, name):
