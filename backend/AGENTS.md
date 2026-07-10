@@ -574,6 +574,7 @@ The cached value is reused for both the blocking (`runs.wait`) and streaming (`_
 3. Background thread invokes LLM to extract context updates and facts, using the stored `user_id` (not the contextvar, which is unavailable on timer threads)
 4. Applies updates atomically (temp file + rename) with cache invalidation, skipping duplicate fact content before append
 5. **Staleness pass** (same LLM invocation as step 3, no extra API call): when `staleness_review_enabled` is `true` and at least `staleness_min_candidates` aged facts exist, `_select_stale_candidates` selects facts older than `staleness_age_days` that are not in `staleness_protected_categories` (default: `correction`), surfaces them in the prompt, and the LLM judges each as KEEP or REMOVE. `_apply_updates` enforces the guardrail unconditionally at apply time: it intersects the LLM-returned removal set with `_select_stale_candidates` output before applying the per-cycle cap (`staleness_max_removals_per_cycle`), so protected and non-aged facts can never be deleted regardless of model behavior or the feature flag setting.
+5b. **Consolidation pass** (same LLM invocation as step 3, no extra API call): when `consolidation_enabled` is `true` and at least one category holds `consolidation_min_facts` or more facts, `_select_consolidation_candidates` identifies fragmented categories and surfaces at most `consolidation_max_groups_per_cycle` of them (largest first) in the prompt. The LLM decides which groups to merge and proposes a synthesised fact per group. `_apply_updates` enforces guardrails: source IDs must exist and must not overlap across groups, group size is capped at `consolidation_max_sources`, the merged fact's confidence cannot exceed the source maximum, and facts below `fact_confidence_threshold` are not written.
 6. Next interaction injects top 15 facts + context into `<memory>` tags in system prompt
 
 **Token counting** (`packages/harness/deerflow/agents/memory/prompt.py`):
@@ -597,6 +598,10 @@ Focused regression coverage for the updater lives in `backend/tests/test_memory_
 - `staleness_min_candidates` - Minimum aged candidates required to trigger a review cycle (default: 3; range: 1–50)
 - `staleness_max_removals_per_cycle` - Maximum facts removed in a single cycle; lowest-confidence entries are kept when the LLM requests more (default: 5; range: 1–20)
 - `staleness_protected_categories` - Fact categories that are never pruned by staleness review (default: `["correction"]`)
+- `consolidation_enabled` - Enable memory consolidation (default: `true`; no extra API call — runs in the same LLM invocation as the normal memory update)
+- `consolidation_min_facts` - Minimum facts in a category to trigger consolidation review (default: 8; range: 3–30)
+- `consolidation_max_groups_per_cycle` - Maximum categories the LLM can merge in one cycle (default: 3; range: 1–10; also controls the LLM's prompt instruction)
+- `consolidation_max_sources` - Maximum source facts per merge group; prevents over-merging (default: 8; range: 2–20)
 
 ### Reflection System (`packages/harness/deerflow/reflection/`)
 

@@ -15,6 +15,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from deerflow.agents.memory.prompt import (
+    CONSOLIDATION_PROMPT,
     MEMORY_UPDATE_PROMPT,
     STALENESS_REVIEW_PROMPT,
     format_conversation_for_update,
@@ -92,6 +93,24 @@ def _validate_confidence(confidence: float) -> float:
     if not math.isfinite(confidence) or confidence < 0 or confidence > 1:
         raise ValueError("confidence")
     return confidence
+
+
+def _coerce_source_confidence(fact: dict[str, Any]) -> float:
+    """Return a stored fact's confidence as a finite float in [0, 1], defaulting to 0.5.
+
+    dict.get(key, default) returns the stored value (including None) when the key
+    exists, so a fact written with "confidence": null would propagate None into
+    arithmetic and crash max(). This helper guards against null, bool, non-numeric,
+    and non-finite values from corrupted or manually edited memory files.
+    """
+    raw = fact.get("confidence")
+    if raw is None or isinstance(raw, bool):
+        return 0.5
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        return 0.5
+    return max(0.0, min(val, 1.0)) if math.isfinite(val) else 0.5
 
 
 def create_memory_fact(
@@ -321,12 +340,56 @@ def _normalize_memory_update_data(update_data: dict[str, Any]) -> dict[str, Any]
                 }
             )
 
+    # ── Normalize consolidation decisions ──
+    consolidation_raw = update_data.get("factsToConsolidate")
+    normalized_consolidation: list[dict[str, Any]] = []
+    if isinstance(consolidation_raw, list):
+        for entry in consolidation_raw:
+            if not isinstance(entry, dict):
+                continue
+            source_ids = entry.get("sourceIds")
+            if not isinstance(source_ids, list) or not source_ids:
+                continue
+            # dict.fromkeys preserves order while deduplicating so ["f1","f1"]
+            # collapses to ["f1"] and is correctly rejected as a single-source merge.
+            clean_ids = list(dict.fromkeys(sid for sid in source_ids if isinstance(sid, str) and sid))
+            if len(clean_ids) < 2:
+                continue
+            consolidated = entry.get("consolidated")
+            if not isinstance(consolidated, dict):
+                continue
+            content = consolidated.get("content")
+            if not isinstance(content, str) or not content.strip():
+                continue
+            # Normalize confidence: reject booleans (bool subclasses int, so the
+            # isinstance check alone would silently accept True/False), coerce to float,
+            # and reject non-finite values — matching _normalize_memory_update_fact.
+            _raw_conf = consolidated.get("confidence", 0.9)
+            if isinstance(_raw_conf, bool) or not isinstance(_raw_conf, (int, float)):
+                _norm_conf = 0.9
+            else:
+                _f = float(_raw_conf)
+                _norm_conf = _f if math.isfinite(_f) else 0.9
+            _raw_cat = consolidated.get("category")
+            _norm_cat = _raw_cat.strip() if isinstance(_raw_cat, str) and _raw_cat.strip() else "context"
+            normalized_consolidation.append(
+                {
+                    "sourceIds": clean_ids,
+                    "consolidated": {
+                        "content": content.strip(),
+                        "category": _norm_cat,
+                        "confidence": _norm_conf,
+                    },
+                }
+            )
+
     return {
         "user": user if isinstance(user, dict) else {},
         "history": history if isinstance(history, dict) else {},
         "newFacts": normalized_new_facts,
         "factsToRemove": normalized_facts_to_remove,
         "staleFactsToRemove": normalized_stale_removals,
+        "factsToConsolidate": normalized_consolidation,
     }
 
 
@@ -464,6 +527,61 @@ def _build_staleness_section(
     )
 
 
+# ── Consolidation helpers ───────────────────────────────────────────────
+
+
+def _select_consolidation_candidates(
+    current_memory: dict[str, Any],
+    config: Any,
+) -> dict[str, list[dict[str, Any]]]:
+    """Return fact categories that exceed the fragmentation threshold.
+
+    Groups facts by category; only categories with at least
+    ``consolidation_min_facts`` entries are returned.
+    """
+    facts = current_memory.get("facts", [])
+    if not facts:
+        return {}
+    by_category: dict[str, list[dict[str, Any]]] = {}
+    for fact in facts:
+        if not isinstance(fact, dict):
+            continue
+        cat = fact.get("category", "context")
+        if isinstance(cat, str) and cat.strip():
+            by_category.setdefault(cat.strip(), []).append(fact)
+    threshold = config.consolidation_min_facts
+    protected = set(config.staleness_protected_categories)
+    return {cat: group for cat, group in by_category.items() if len(group) >= threshold and cat not in protected}
+
+
+def _build_consolidation_section(
+    candidates: dict[str, list[dict[str, Any]]],
+    max_groups: int = 3,
+    max_sources: int = 8,
+) -> str:
+    """Format consolidation candidate groups into the prompt section.
+
+    Surfaces at most ``max_groups`` categories (largest fragmented groups first)
+    and at most ``max_sources`` facts per group, matching the caps enforced at
+    apply time so the LLM is never shown groups it cannot act on.
+    """
+    if not candidates:
+        return ""
+    # Prioritise the most fragmented categories; alphabetical tiebreak for stability.
+    sorted_candidates = sorted(candidates.items(), key=lambda kv: (-len(kv[1]), kv[0]))
+    parts: list[str] = []
+    for cat, group in sorted_candidates[:max_groups]:
+        lines: list[str] = []
+        for fact in group[:max_sources]:
+            fid = fact.get("id", "?")
+            conf = _coerce_source_confidence(fact)
+            content = str(fact.get("content", ""))
+            lines.append(f'- [{fid} | {conf:.2f}] "{content}"')
+        shown = min(len(group), max_sources)
+        parts.append(f'<consolidation_candidates category="{cat}" count="{shown}">\n' + "\n".join(lines) + "\n</consolidation_candidates>")
+    return CONSOLIDATION_PROMPT.format(consolidation_groups="\n\n".join(parts), max_groups=max_groups)
+
+
 class MemoryUpdater:
     """Updates memory using LLM based on conversation context."""
 
@@ -542,11 +660,23 @@ class MemoryUpdater:
                     config.staleness_age_days,
                 )
 
+        # ── Build consolidation section ──
+        consolidation_section = ""
+        if config.consolidation_enabled:
+            consolidation_candidates = _select_consolidation_candidates(current_memory, config)
+            if consolidation_candidates:
+                consolidation_section = _build_consolidation_section(
+                    consolidation_candidates,
+                    max_groups=config.consolidation_max_groups_per_cycle,
+                    max_sources=config.consolidation_max_sources,
+                )
+
         prompt = MEMORY_UPDATE_PROMPT.format(
             current_memory=json.dumps(current_memory, indent=2, ensure_ascii=False),
             conversation=conversation_text,
             correction_hint=correction_hint,
             staleness_review_section=staleness_section,
+            consolidation_section=consolidation_section,
         )
         return current_memory, prompt
 
@@ -851,6 +981,123 @@ class MemoryUpdater:
                 key=lambda f: f.get("confidence", 0),
                 reverse=True,
             )[: config.max_facts]
+
+        # ── Memory consolidation ──
+        # Runs after the max_facts trim so source facts that were just evicted
+        # (low confidence, pushed out by high-confidence newFacts) are absent
+        # from fact_index and rejected by the existence guardrail — preventing
+        # the only real data-loss scenario where sources are deleted but the
+        # merged replacement is itself trimmed away.  Because consolidation
+        # always removes ≥2 facts and adds 1, running it after trim cannot push
+        # the total above max_facts.
+        # Gate on the feature flag at apply time so a config change that races
+        # with a debounced update does not silently merge facts the operator
+        # intended to keep separate.
+        if config.consolidation_enabled:
+            consolidation_decisions = update_data.get("factsToConsolidate", [])
+            if isinstance(consolidation_decisions, list) and consolidation_decisions:
+                fact_index = {f.get("id"): f for f in current_memory.get("facts", []) if isinstance(f, dict)}
+                max_groups = config.consolidation_max_groups_per_cycle
+                max_sources = config.consolidation_max_sources
+                ids_consumed: set[str] = set()
+                new_consolidated: list[dict[str, Any]] = []
+                merge_count = 0
+
+                # Mirror the staleness-pass guardrail: build the set of IDs the LLM
+                # was legitimately allowed to see as candidates (excludes protected
+                # categories and categories below the threshold).  Any LLM slip that
+                # proposes a protected or ineligible fact ID is rejected here regardless
+                # of model behaviour, matching how staleness intersects with
+                # _select_stale_candidates before applying removals.
+                allowed_source_ids = {f["id"] for group in _select_consolidation_candidates(current_memory, config).values() for f in group}
+
+                # Iterate all decisions and count successes rather than pre-slicing,
+                # so guard failures on early decisions cannot silently starve valid
+                # later ones from the configured merge budget.
+                for decision in consolidation_decisions:
+                    if merge_count >= max_groups:
+                        break
+
+                    source_ids = decision.get("sourceIds", [])
+                    consolidated = decision.get("consolidated", {})
+
+                    # Guardrail: all source IDs must exist in the post-trim index,
+                    # must not already be consumed by an earlier merge this cycle,
+                    # and must be in allowed_source_ids — the set built from
+                    # _select_consolidation_candidates, which excludes categories in
+                    # staleness_protected_categories (default: "correction").  This
+                    # mirrors the staleness apply-time check and ensures explicit user
+                    # feedback is never silently merged away regardless of model behaviour.
+                    if any(sid in ids_consumed or sid not in fact_index or sid not in allowed_source_ids for sid in source_ids):
+                        continue
+                    # Guardrail: 2..max_sources per group
+                    if not (2 <= len(source_ids) <= max_sources):
+                        continue
+
+                    content = consolidated.get("content", "")
+                    if not isinstance(content, str) or not content.strip():
+                        continue
+
+                    source_confidences = [_coerce_source_confidence(fact_index[sid]) for sid in source_ids]
+                    # _coerce_source_confidence already clamps each value to [0, 1],
+                    # so max(source_confidences) ≤ 1.0 by contract.
+                    max_source_conf = max(source_confidences)
+
+                    # Use the LLM's returned confidence, capped at the source maximum so
+                    # consolidation cannot inflate confidence.  Clamp to [0, 1] first so
+                    # out-of-range values (e.g. 1.5) never leak even if the cap is later
+                    # relaxed.  Falls back to max_source_conf when absent or malformed.
+                    raw_llm_conf = consolidated.get("confidence")
+                    if isinstance(raw_llm_conf, (int, float)) and not isinstance(raw_llm_conf, bool) and math.isfinite(float(raw_llm_conf)):
+                        fact_confidence = min(max(0.0, min(float(raw_llm_conf), 1.0)), max_source_conf)
+                    else:
+                        fact_confidence = max_source_conf
+
+                    # Skip merges whose result would fall below the storage threshold —
+                    # same gate applied to newFacts, so consolidation never admits
+                    # facts that the normal ingestion path would reject.
+                    if fact_confidence < config.fact_confidence_threshold:
+                        continue
+
+                    # Carry the newest source's createdAt so the staleness clock
+                    # reflects the age of the underlying information, not when
+                    # synthesis happened.  consolidatedAt records the merge time
+                    # for audit without resetting staleness eligibility.
+                    # Use _parse_fact_datetime for crash-safe, timezone-aware comparison:
+                    # a numeric createdAt would make string max() raise TypeError, and
+                    # mixed Z/+00:00 formats sort wrong lexicographically.
+                    _fallback_dt = _parse_fact_datetime(now) or datetime.now(UTC)
+                    _source_dts = [_parse_fact_datetime(fact_index[sid].get("createdAt") or "") or _fallback_dt for sid in source_ids]
+                    _newest_dt = max(_source_dts)
+                    source_created_at = _newest_dt.isoformat().removesuffix("+00:00") + "Z"
+                    new_fact: dict[str, Any] = {
+                        "id": f"fact_{uuid.uuid4().hex[:8]}",
+                        "content": content.strip(),
+                        "category": consolidated.get("category", "context"),
+                        "confidence": fact_confidence,
+                        "createdAt": source_created_at,
+                        "consolidatedAt": now,
+                        "source": "consolidation",
+                        "consolidatedFrom": list(source_ids),
+                    }
+                    # Propagate sourceError from any source fact so correction
+                    # context (what went wrong and why) is not silently lost.
+                    source_errors = list(dict.fromkeys(e for sid in source_ids if isinstance((e := fact_index[sid].get("sourceError")), str) and e.strip()))
+                    if source_errors:
+                        new_fact["sourceError"] = "\n".join(source_errors)
+
+                    ids_consumed.update(source_ids)
+                    new_consolidated.append(new_fact)
+                    merge_count += 1
+                    logger.info(
+                        "Consolidation merged %d facts into: %s",
+                        len(source_ids),
+                        content.strip()[:80],
+                    )
+
+                if ids_consumed:
+                    current_memory["facts"] = [f for f in current_memory.get("facts", []) if f.get("id") not in ids_consumed]
+                    current_memory["facts"].extend(new_consolidated)
 
         return current_memory
 

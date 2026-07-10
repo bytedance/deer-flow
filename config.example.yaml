@@ -1438,6 +1438,26 @@ memory:
   staleness_protected_categories:
     - correction
 
+  # Memory consolidation: when a single category accumulates many fragmented
+  # facts, the LLM reviews them during the normal memory-update call (same
+  # invocation — no extra API call) and decides whether groups of related facts
+  # can be synthesized into a single richer fact.
+  # consolidation_enabled defaults to false because consolidation is lossy:
+  # source fact content is permanently replaced by the LLM-synthesized fact
+  # (only the source IDs are kept in consolidatedFrom). Enable explicitly once
+  # you are comfortable with that trade-off.
+  #   consolidation_enabled          - master switch (default: false)
+  #   consolidation_min_facts        - minimum facts in a category to trigger
+  #                                    consolidation review (default: 8)
+  #   consolidation_max_groups_per_cycle - safety cap on merges per cycle
+  #                                        (default: 3)
+  #   consolidation_max_sources      - max source facts per merge group;
+  #                                    prevents over-merging (default: 8)
+  consolidation_enabled: false
+  consolidation_min_facts: 8
+  consolidation_max_groups_per_cycle: 3
+  consolidation_max_sources: 8
+
 # ============================================================================
 # Custom Agent Management API
 # ============================================================================

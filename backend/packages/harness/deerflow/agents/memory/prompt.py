@@ -116,7 +116,13 @@ Output Format (JSON):
     {{ "content": "...", "category": "preference|knowledge|context|behavior|goal|correction", "confidence": 0.0-1.0 }}
   ],
   "factsToRemove": ["fact_id_1", "fact_id_2"],
-  "staleFactsToRemove": [{{ "id": "fact_id", "reason": "brief explanation" }}]
+  "staleFactsToRemove": [{{ "id": "fact_id", "reason": "brief explanation" }}],
+  "factsToConsolidate": [
+    {{
+      "sourceIds": ["fact_id_1", "fact_id_2"],
+      "consolidated": {{ "content": "synthesized fact", "category": "knowledge", "confidence": 0.9 }}
+    }}
+  ]
 }}
 
 Important Rules:
@@ -137,6 +143,8 @@ Important Rules:
   Recording upload events causes confusion in subsequent conversations.
 
 {staleness_review_section}
+
+{consolidation_section}
 
 Return ONLY valid JSON, no explanation or markdown."""
 
@@ -168,6 +176,33 @@ supports the removal.
 
 Be conservative — when in doubt, KEEP. Removing a valid fact is worse than
 keeping a slightly stale one, because the next review cycle will re-evaluate it."""
+
+
+# Prompt section injected into MEMORY_UPDATE_PROMPT when consolidation triggers.
+# Surfaces fact groups that have accumulated many entries in the same category
+# so the LLM can synthesize them into fewer, richer facts.
+CONSOLIDATION_PROMPT = """## Memory Consolidation
+
+The following fact categories have accumulated many individual entries.
+Review each group and identify facts that can be synthesized into a single,
+richer consolidated fact that preserves all key information.
+
+{consolidation_groups}
+
+For each group, decide:
+- CONSOLIDATE: Multiple facts can be merged into one richer fact.
+  Specify the source fact IDs and the consolidated content.
+- SKIP: Facts are distinct enough to remain separate.
+
+Add consolidation decisions to "factsToConsolidate" in your output JSON.
+Each entry: {{"sourceIds": ["fact_id_1", "fact_id_2"], "consolidated": {{"content": "...", "category": "...", "confidence": 0.9}}}}
+
+Rules:
+- The consolidated fact must preserve ALL key details from source facts
+- Only consolidate facts that describe the same aspect of the user
+- Confidence of consolidated fact = max of source confidences
+- Be conservative — when in doubt, keep facts separate
+- Maximum {max_groups} consolidation groups per cycle"""
 
 
 # Prompt template for extracting facts from a single message
