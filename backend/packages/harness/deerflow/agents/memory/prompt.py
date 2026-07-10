@@ -589,6 +589,13 @@ def format_memory_for_injection(
     #   performs a single-pass confidence-only ranking.
     facts_data = memory_data.get("facts", [])
     guaranteed_line_tokens = 0  # used later for the effective truncation limit
+    # Initialise the facts-block markers at function scope (alongside
+    # ``guaranteed_line_tokens`` above) so the structure-aware truncation at the
+    # bottom can reference them even when there are no facts and the block below
+    # never runs. Otherwise the overflow path raises ``UnboundLocalError`` when a
+    # user has sizeable context/history but an empty ``facts`` list.
+    facts_header = "Facts:\n"
+    all_fact_lines: list[str] = []
     if isinstance(facts_data, list) and facts_data:
         # Token cost of sections built above (user context, history).
         base_text = "\n\n".join(sections)
@@ -598,13 +605,6 @@ def format_memory_for_injection(
         # path can pass the same list straight into the fallback without
         # redoing validation work on the hot prompt-injection path.
         valid_facts = [f for f in facts_data if isinstance(f, dict) and isinstance(f.get("content"), str) and f.get("content", "").strip()]
-
-        # Initialise the facts-block markers *before* the try so the
-        # structure-aware truncation at the bottom of the function can
-        # reason about them regardless of whether the primary path or
-        # the except/fallback path produced the final Facts section.
-        facts_header = "Facts:\n"
-        all_fact_lines: list[str] = []
 
         try:
             # Partition valid facts into guaranteed vs regular groups.
