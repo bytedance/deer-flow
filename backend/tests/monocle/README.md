@@ -4,7 +4,20 @@ Trace-based tests for DeerFlow. Monocle records each run as a structured trace
 (the agent invocation, every tool call, token usage, timings), and these tests
 assert against that trace with [Monocle Test Tools](https://github.com/monocle2ai/monocle).
 
-The suite has two layers:
+## How this is meant to be used
+
+Instrument the agent with Monocle and run it against a question. Once it answers
+the way you expect and makes the agent and tool calls you expect, capture that
+run as a trace. That trace is a golden, labelled reference for the question: a
+record of correct behaviour, not just sample data. You turn it into assertions
+(the offline example shows how), and then you point those same assertions at the
+live agent for the same question, so every later run has to reproduce that
+behaviour. The offline test is where you pin down what good looks like; the live
+test is what enforces it against a real run.
+
+## Layers
+
+The suite has two:
 
 - **One offline example** (`test_assertion_api_example`) loads a recorded trace
   from file and shows the full fluent vocabulary in one place. It needs no keys
@@ -15,9 +28,6 @@ The suite has two layers:
   run emits. These are the behavioural guards: a change that alters routing, tool
   selection, or token cost is caught here. They need `OPENAI_API_KEY` and the
   DeerFlow app, so they skip by default.
-
-To make a check actually behavioural, point it at a live run (the run-agent
-mechanism the live tests use), not at a recorded file.
 
 ## Layout
 
