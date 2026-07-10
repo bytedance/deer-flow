@@ -115,6 +115,26 @@ def test_reverse_resolve_still_matches_root_before_non_slash_boundaries(tmp_path
     assert out == f"/mnt/skills{expected_trailer}"
 
 
+@pytest.mark.parametrize("prefix", ["", "cwd: ", "see "])
+def test_reverse_resolve_translates_a_bare_root_at_end_of_output(tmp_path, prefix):
+    """The lookahead's ``$`` alternative, pinned on its own.
+
+    Output ending exactly at a mount root (no trailing separator, no newline —
+    ``printf '%s' "$PWD"``, a stripped last line, a truncated buffer) satisfies
+    neither ``/`` nor ``[^\\w./-]``. Drop ``$`` and the match fails, so the raw
+    host path is handed to the model instead of the container path: the leak
+    this whole function exists to prevent. The suite is otherwise blind to it —
+    removing ``$`` leaves all 6866 tests green.
+    """
+    sb = _make_sandbox(tmp_path)
+    skills_local = str((tmp_path / "skills").resolve())
+
+    out = sb._reverse_resolve_paths_in_output(f"{prefix}{skills_local}")
+
+    assert out == f"{prefix}/mnt/skills"
+    assert skills_local not in out
+
+
 def test_resolved_paths_and_sorted_views_are_cached(tmp_path):
     sb = _make_sandbox(tmp_path)
     # Resolved-local map and sorted views are computed once and reused.

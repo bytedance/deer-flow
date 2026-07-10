@@ -231,7 +231,12 @@ class LocalSandbox(Sandbox):
         # this runs over arbitrary command output, where a root can legitimately be
         # followed by ``,`` ``:`` or ``\`` — all of which the shell-oriented class
         # would reject. The trailing group keeps ``[/\\]`` so Windows paths still match.
-        return [re.compile(re.escape(self._resolved_local_paths[m]) + r"(?=/|$|[^\w./-])(?:[/\\][^\s\"';&|<>()]*)?") for m in self._mappings_by_local_specificity]
+        #
+        # ``$`` is load-bearing: output ending exactly at a mount root would
+        # otherwise fail the lookahead and be emitted as the raw host path.
+        boundary = r"(?=/|$|[^\w./-])"
+        tail = r"(?:[/\\][^\s\"';&|<>()]*)?"
+        return [re.compile(re.escape(self._resolved_local_paths[m]) + boundary + tail) for m in self._mappings_by_local_specificity]
 
     @cached_property
     def _resolved_local_paths(self) -> dict[PathMapping, str]:
