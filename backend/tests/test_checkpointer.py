@@ -739,6 +739,26 @@ class TestCheckpointerDatabaseConfig:
         assert resolved.type == "postgres"
         assert resolved.connection_string == "postgresql://localhost/db"
 
+    def test_sync_checkpointer_context_uses_sqlite_database_config(self, tmp_path):
+        """The one-shot sync checkpointer factory must resolve the sqlite branch too, not just postgres."""
+        from deerflow.runtime.checkpointer.provider import checkpointer_context
+
+        db_config = DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path))
+        app_config = SimpleNamespace(checkpointer=None, database=db_config)
+        expected = object()
+        factory = MagicMock(return_value=nullcontext(expected))
+
+        with (
+            patch("deerflow.runtime.checkpointer.provider.get_app_config", return_value=app_config),
+            patch("deerflow.runtime.checkpointer.provider._sync_checkpointer_cm", factory),
+            checkpointer_context() as cp,
+        ):
+            assert cp is expected
+
+        resolved = factory.call_args.args[0]
+        assert resolved.type == "sqlite"
+        assert resolved.connection_string == db_config.checkpointer_sqlite_path
+
     def test_sync_checkpointer_singleton_uses_database_config(self):
         """The cached sync checkpointer factory must resolve database config before locking."""
         app_config = SimpleNamespace(
