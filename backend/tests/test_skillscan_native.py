@@ -132,6 +132,63 @@ def test_python_subprocess_without_shell_warns(tmp_path: Path) -> None:
     assert not [item for item in findings if item["severity"] == "CRITICAL"]
 
 
+def test_python_subprocess_shell_false_literal_warns_not_block(tmp_path: Path) -> None:
+    skill_dir = tmp_path / "demo-skill"
+    _write_skill(skill_dir)
+    scripts_dir = skill_dir / "scripts"
+    scripts_dir.mkdir()
+    (scripts_dir / "run.py").write_text("import subprocess\nsubprocess.run(['whoami'], shell=False)\n", encoding="utf-8")
+
+    findings = scan_skill_dir(skill_dir)["findings"]
+
+    finding = _finding_by_rule(findings, "python-subprocess")
+    assert finding["severity"] == "HIGH"
+    assert not [item for item in findings if item["severity"] == "CRITICAL"]
+
+
+def test_python_subprocess_shell_via_variable_blocks(tmp_path: Path) -> None:
+    # A non-literal shell= value (a variable) is statically indistinguishable
+    # from shell=True in its effect at runtime, so it must be classified and
+    # blocked the same way, not silently downgraded to the non-blocking
+    # python-subprocess warning.
+    skill_dir = tmp_path / "demo-skill"
+    _write_skill(skill_dir)
+    scripts_dir = skill_dir / "scripts"
+    scripts_dir.mkdir()
+    (scripts_dir / "run.py").write_text(
+        "import subprocess\nshell_flag = True\nsubprocess.run(['whoami'], shell=shell_flag)\n",
+        encoding="utf-8",
+    )
+
+    findings = scan_skill_dir(skill_dir)["findings"]
+
+    assert _finding_by_rule(findings, "python-shell-exec")["severity"] == "CRITICAL"
+    assert not [item for item in findings if item["rule_id"] == "python-subprocess"]
+
+    with pytest.raises(StaticScanBlockedError) as excinfo:
+        enforce_static_scan(skill_dir, skill_name="demo-skill")
+    assert _finding_by_rule(excinfo.value.findings, "python-shell-exec")["severity"] == "CRITICAL"
+
+
+def test_python_subprocess_shell_via_expression_blocks(tmp_path: Path) -> None:
+    # Same bypass shape as the variable case above, but via a call expression
+    # (shell=bool(1)) instead of a bare name.
+    skill_dir = tmp_path / "demo-skill"
+    _write_skill(skill_dir)
+    scripts_dir = skill_dir / "scripts"
+    scripts_dir.mkdir()
+    (scripts_dir / "run.py").write_text("import subprocess\nsubprocess.run(['whoami'], shell=bool(1))\n", encoding="utf-8")
+
+    findings = scan_skill_dir(skill_dir)["findings"]
+
+    assert _finding_by_rule(findings, "python-shell-exec")["severity"] == "CRITICAL"
+    assert not [item for item in findings if item["rule_id"] == "python-subprocess"]
+
+    with pytest.raises(StaticScanBlockedError) as excinfo:
+        enforce_static_scan(skill_dir, skill_name="demo-skill")
+    assert _finding_by_rule(excinfo.value.findings, "python-shell-exec")["severity"] == "CRITICAL"
+
+
 def test_cloud_metadata_access_is_reported_by_one_rule(tmp_path: Path) -> None:
     skill_dir = tmp_path / "demo-skill"
     _write_skill(skill_dir)
