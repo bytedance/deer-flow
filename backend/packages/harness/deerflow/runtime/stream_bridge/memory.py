@@ -86,6 +86,10 @@ class MemoryStreamBridge(StreamBridge):
             )
         return stream.start_offset
 
+    async def stream_exists(self, run_id: str) -> bool:
+        """Return whether the in-process event log still has data for *run_id*."""
+        return run_id in self._streams
+
     # -- StreamBridge API ------------------------------------------------------
 
     async def publish(self, run_id: str, event: str, data: Any) -> None:

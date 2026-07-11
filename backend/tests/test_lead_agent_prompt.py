@@ -433,6 +433,14 @@ def test_system_prompt_template_contains_file_editing_workflow_rule():
     assert "append=True" in template
 
 
+def test_system_prompt_template_requires_virtual_paths_for_output_images():
+    template = prompt_module.SYSTEM_PROMPT_TEMPLATE
+
+    assert "![Chart](/mnt/user-data/outputs/chart.png)" in template
+    assert "Never use a bare or workspace-relative filename" in template
+    assert "Call `present_files` for the image before referencing it" in template
+
+
 def test_system_prompt_template_preserves_placeholders():
     """Ensure the chunking-rule edit didn't drop any f-string placeholder
     consumed by apply_prompt_template(). A missing placeholder would

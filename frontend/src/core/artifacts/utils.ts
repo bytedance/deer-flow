@@ -1,6 +1,6 @@
 import { getBackendBaseURL } from "../config";
 import { isStaticWebsiteOnly } from "../static-mode";
-import type { AgentThread } from "../threads";
+import type { AgentThreadState } from "../threads";
 
 export function urlOfArtifact({
   filepath,
@@ -22,7 +22,9 @@ export function urlOfArtifact({
   return `${getBackendBaseURL()}/api/threads/${threadId}/artifacts${filepath}${download ? "?download=true" : ""}`;
 }
 
-export function extractArtifactsFromThread(thread: AgentThread) {
+export function extractArtifactsFromThread(thread: {
+  values: Pick<AgentThreadState, "artifacts">;
+}) {
   return thread.values.artifacts ?? [];
 }
 
@@ -31,6 +33,37 @@ export function resolveArtifactURL(absolutePath: string, threadId: string) {
     return staticDemoArtifactURL({ filepath: absolutePath, threadId });
   }
   return `${getBackendBaseURL()}/api/threads/${threadId}/artifacts${absolutePath}`;
+}
+
+export function resolveMessageImageURL(
+  src: string,
+  threadId: string,
+  artifactPaths: readonly string[],
+) {
+  if (src.startsWith("/mnt/")) {
+    return resolveArtifactURL(src, threadId);
+  }
+
+  const [relativePath = ""] = src.split(/[?#]/, 1);
+  const normalizedPath = relativePath.replace(/^(?:\.\/)+/, "");
+  if (
+    !normalizedPath ||
+    normalizedPath.startsWith("/") ||
+    /^[a-z][a-z\d+.-]*:/i.test(normalizedPath) ||
+    normalizedPath.startsWith("//") ||
+    normalizedPath.split("/").includes("..")
+  ) {
+    return src;
+  }
+
+  const matches = artifactPaths.filter((path) =>
+    path.endsWith(`/${normalizedPath}`),
+  );
+  if (matches.length !== 1) {
+    return src;
+  }
+
+  return `${resolveArtifactURL(matches[0]!, threadId)}${src.slice(relativePath.length)}`;
 }
 
 function staticDemoArtifactURL({
