@@ -36,6 +36,7 @@ from langchain_core.runnables import RunnableConfig
 
 from deerflow.agents.lead_agent.agent import build_middlewares
 from deerflow.agents.lead_agent.prompt import apply_prompt_template, get_enabled_skills_for_config
+from deerflow.agents.middlewares.subagent_limit_middleware import _clamp_subagent_limit
 from deerflow.agents.thread_state import ThreadState
 from deerflow.config.agents_config import AGENT_NAME_PATTERN
 from deerflow.config.app_config import get_app_config, is_trace_correlation_enabled, reload_app_config
@@ -255,7 +256,7 @@ class DeerFlowClient:
         thinking_enabled = cfg.get("thinking_enabled", True)
         model_name = cfg.get("model_name")
         subagent_enabled = cfg.get("subagent_enabled", False)
-        max_concurrent_subagents = cfg.get("max_concurrent_subagents", 3)
+        max_concurrent_subagents = _clamp_subagent_limit(cfg.get("max_concurrent_subagents", 3))
         max_total_subagents = cfg.get("max_total_subagents", self._app_config.subagents.max_total_per_run)
 
         tools = self._get_tools(model_name=model_name, subagent_enabled=subagent_enabled)
