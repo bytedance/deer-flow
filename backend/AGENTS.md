@@ -548,6 +548,7 @@ The cached value is reused for both the blocking (`runs.wait`) and streaming (`_
 - The `/api/memory*` endpoints resolve the owner through `_resolve_memory_user_id(request)`: trusted internal callers (IM channel workers carrying the `X-DeerFlow-Owner-User-Id` header, e.g. a bound `/memory` command) act for the connection owner; browser/API callers fall back to `get_effective_user_id()`. The header is only honored after `AuthMiddleware` validated the internal token, mirroring `get_trusted_internal_owner_user_id` used by the threads router
 - In no-auth mode, `user_id` defaults to `"default"` (constant `DEFAULT_USER_ID`)
 - Absolute `storage_path` in config opts out of per-user isolation
+- `UserRepository.list_user_ids()` returns registered IDs in deterministic creation order for explicit administrative workflows such as `scripts/load_memory_sample.py --all-users`. It returns identifiers only, never emails, credentials, or browser-session data. The bulk loader must run inside the backend environment, backs up current memory before replacement by default, and is unavailable with `database.backend: memory`.
 - **Migration**: Run `PYTHONPATH=. python scripts/migrate_user_isolation.py` to move legacy `memory.json`, `threads/`, and `agents/` into per-user layout. Supports `--dry-run` (preview changes) and `--user-id USER_ID` (assign unowned legacy data to a user, defaults to `default`).
 
 **Data Structure** (stored in `{base_dir}/users/{user_id}/memory.json`):

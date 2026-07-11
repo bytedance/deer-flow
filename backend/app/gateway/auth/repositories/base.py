@@ -84,6 +84,11 @@ class UserRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    async def list_user_ids(self) -> list[str]:
+        """Return every registered user ID in deterministic creation order."""
+        raise NotImplementedError
+
+    @abstractmethod
     async def count_admin_users(self) -> int:
         """Return number of users with system_role == 'admin'."""
         raise NotImplementedError

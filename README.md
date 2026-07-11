@@ -290,19 +290,23 @@ On Windows, run the local development flow from Git Bash. Native `cmd.exe` and P
    make setup-sandbox
    ```
 
-4. **(Optional) Load sample memory data for local review**:
-   ```bash
-   python scripts/load_memory_sample.py
-   ```
-   This copies the sample fixture into the default local runtime memory file so reviewers can immediately test `Settings > Memory`.
-   See [backend/docs/MEMORY_SETTINGS_REVIEW.md](backend/docs/MEMORY_SETTINGS_REVIEW.md) for the shortest review flow.
-
-5. **Start services**:
+4. **Start services**:
    ```bash
    make dev
    ```
 
-6. **Access**: http://localhost:2026
+5. **Access**: http://localhost:2026
+
+6. **(Optional) Load sample memory data for local review**: open `Settings > Memory`, click **Import memory**, and select `backend/docs/memory-settings-sample.json`. The browser imports into the signed-in user's memory.
+
+   To replace memory for every registered user in a disposable review environment:
+
+   ```bash
+   cd backend
+   uv run python ../scripts/load_memory_sample.py --all-users
+   ```
+
+   Bulk mode supports SQLite/PostgreSQL user registries, creates timestamped backups under `.deer-flow/memory-sample-backups/`, and rejects the non-persistent `database.backend: memory` mode. See [backend/docs/MEMORY_SETTINGS_REVIEW.md](backend/docs/MEMORY_SETTINGS_REVIEW.md) for the complete review flow.
 
 #### Startup Modes
 

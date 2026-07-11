@@ -425,6 +425,33 @@ def test_sqlite_round_trip_new_fields():
     asyncio.run(_run())
 
 
+def test_user_repository_lists_registered_user_ids():
+    import asyncio
+    import tempfile
+
+    from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
+
+    async def _run() -> None:
+        from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            await init_engine(
+                "sqlite",
+                url=f"sqlite+aiosqlite:///{tmpdir}/scratch.db",
+                sqlite_dir=tmpdir,
+            )
+            try:
+                repo = SQLiteUserRepository(get_session_factory())
+                first = await repo.create_user(User(email="first@test.com", password_hash="hash"))
+                second = await repo.create_user(User(email="second@test.com", password_hash="hash"))
+
+                assert await repo.list_user_ids() == [str(first.id), str(second.id)]
+            finally:
+                await close_engine()
+
+    asyncio.run(_run())
+
+
 def test_update_user_raises_when_row_concurrently_deleted(tmp_path):
     """Concurrent-delete during update_user must hard-fail, not silently no-op.
 

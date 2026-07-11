@@ -114,6 +114,12 @@ class SQLiteUserRepository(UserRepository):
         async with self._sf() as session:
             return await session.scalar(stmt) or 0
 
+    async def list_user_ids(self) -> list[str]:
+        stmt = select(UserRow.id).order_by(UserRow.created_at, UserRow.id)
+        async with self._sf() as session:
+            result = await session.scalars(stmt)
+            return list(result)
+
     async def count_admin_users(self) -> int:
         stmt = select(func.count()).select_from(UserRow).where(UserRow.system_role == "admin")
         async with self._sf() as session:

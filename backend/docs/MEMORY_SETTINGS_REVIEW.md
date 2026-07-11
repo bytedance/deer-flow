@@ -20,17 +20,37 @@ Use this when reviewing the Memory Settings add/edit flow locally with the fewes
 
    If you already have DeerFlow running locally, you can reuse that existing setup.
 
-2. Load the sample memory fixture.
-
-   ```bash
-   python scripts/load_memory_sample.py
-   ```
-
-3. Open `Settings > Memory`.
+2. Open `Settings > Memory`.
 
    Default local URLs:
    - App: `http://localhost:2026`
    - Local frontend-only fallback: `http://localhost:3000`
+
+3. Click **Import memory** and select:
+
+   ```text
+   backend/docs/memory-settings-sample.json
+   ```
+
+   The browser imports the fixture into the currently signed-in user's memory.
+
+## Bulk Local Review
+
+To replace memory for every registered user in a disposable review environment:
+
+```bash
+cd backend
+uv run python ../scripts/load_memory_sample.py --all-users
+```
+
+This command:
+
+- supports SQLite and PostgreSQL registered-user databases;
+- creates timestamped backups under `.deer-flow/memory-sample-backups/` before replacing memory;
+- imports through the configured memory storage provider; and
+- rejects `database.backend: memory`, which has no persistent user registry.
+
+Bulk loading replaces every registered user's memory. Do not run it against an environment containing memory you need to preserve. Pass `--no-backup` only when losing the existing memory is acceptable.
 
 ## Minimal Manual Test
 
@@ -58,6 +78,7 @@ Use this when reviewing the Memory Settings add/edit flow locally with the fewes
 ## Fixture Files
 
 - Sample fixture: `backend/docs/memory-settings-sample.json`
-- Default local runtime target: `backend/.deer-flow/memory.json`
+- Per-user file-storage target: `backend/.deer-flow/users/{user_id}/memory.json`
+- Bulk backups: `backend/.deer-flow/memory-sample-backups/{timestamp}/{user_id}.json`
 
-The loader script creates a timestamped backup automatically before overwriting an existing runtime memory file.
+For an explicit one-file copy, pass `--target PATH` to the loader. There is no implicit target because authenticated sessions use different per-user paths.
