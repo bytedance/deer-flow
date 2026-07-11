@@ -52,6 +52,12 @@ class MemoryConfig(BaseModel):
         le=1.0,
         description="Minimum confidence threshold for storing facts",
     )
+    mode: Literal["middleware", "tool"] = Field(
+        default="middleware",
+        description=(
+            "Memory operation mode. 'middleware': passive LLM summarization after each turn (current behavior). 'tool': model calls memory tools (memory_search, memory_add, etc.) directly. Mutually exclusive — only one mode runs at a time."
+        ),
+    )
     injection_enabled: bool = Field(
         default=True,
         description="Whether to inject memory into system prompt",
@@ -164,6 +170,11 @@ class MemoryConfig(BaseModel):
         le=20,
         description=("Maximum number of source facts per consolidation group. Prevents the LLM from merging too many facts into one and losing important details."),
     )
+
+
+def should_use_memory_tools(config: MemoryConfig) -> bool:
+    """Return True when memory should use model-directed tools."""
+    return config.enabled and config.mode == "tool"
 
 
 # Global configuration instance

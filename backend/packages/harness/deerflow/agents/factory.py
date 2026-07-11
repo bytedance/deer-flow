@@ -31,6 +31,8 @@ if TYPE_CHECKING:
     from langgraph.checkpoint.base import BaseCheckpointSaver
     from langgraph.graph.state import CompiledStateGraph
 
+    from deerflow.config.memory_config import MemoryConfig
+
 logger = logging.getLogger(__name__)
 
 
@@ -242,9 +244,27 @@ def _assemble_from_features(
         if isinstance(feat.memory, AgentMiddleware):
             chain.append(feat.memory)
         else:
-            from deerflow.agents.middlewares.memory_middleware import MemoryMiddleware
+            from deerflow.config.memory_config import get_memory_config, should_use_memory_tools
 
-            chain.append(MemoryMiddleware(agent_name=name))
+            memory_cfg: MemoryConfig = feat.memory_config or get_memory_config()
+            if should_use_memory_tools(memory_cfg):
+                from deerflow.agents.memory.tools import get_memory_tools
+
+                existing_names = {tool.name for tool in extra_tools}
+                for memory_tool in get_memory_tools():
+                    if memory_tool.name in existing_names:
+                        logger.warning("Memory tool name %r already exists and was skipped.", memory_tool.name)
+                        continue
+                    extra_tools.append(memory_tool)
+                    existing_names.add(memory_tool.name)
+                # MemoryMiddleware is intentionally NOT appended in tool mode.
+                # The model drives memory via tools instead of passive middleware.
+            else:
+                if memory_cfg.mode == "tool" and not memory_cfg.enabled:
+                    logger.warning("memory.mode is 'tool' but memory.enabled is false; memory tools will not be registered.")
+                from deerflow.agents.middlewares.memory_middleware import MemoryMiddleware
+
+                chain.append(MemoryMiddleware(agent_name=name, memory_config=memory_cfg))
 
     # --- [10] Vision ---
     if feat.vision is not False:

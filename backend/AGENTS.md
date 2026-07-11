@@ -553,12 +553,13 @@ The cached value is reused for both the blocking (`runs.wait`) and streaming (`_
 - `queue.py` - Debounced update queue (per-thread deduplication, configurable wait time); captures `user_id` at enqueue time so it survives the `threading.Timer` boundary
 - `prompt.py` - Prompt templates for memory updates
 - `storage.py` - File-based storage with per-user isolation; cache keyed by `(user_id, agent_name)` tuple
+- `tools.py` - Tool-driven memory mode (`memory_search`, `memory_add`, `memory_update`, `memory_delete`) using the same storage/update primitives
 
 **Per-User Isolation**:
 - Memory is stored per-user at `{base_dir}/users/{user_id}/memory.json`
 - Per-agent per-user memory at `{base_dir}/users/{user_id}/agents/{agent_name}/memory.json`
 - Custom agent definitions (`SOUL.md` + `config.yaml`) are also per-user at `{base_dir}/users/{user_id}/agents/{agent_name}/`. The legacy shared layout `{base_dir}/agents/{agent_name}/` remains read-only fallback for unmigrated installations
-- `user_id` is resolved via `get_effective_user_id()` from `deerflow.runtime.user_context`
+- Middleware mode captures `user_id` via `get_effective_user_id()` at enqueue time; tool mode resolves `user_id` and `agent_name` from `ToolRuntime.context` via `resolve_runtime_user_id(runtime)` so tool calls stay scoped to the authenticated user and active custom agent
 - The `/api/memory*` endpoints resolve the owner through `_resolve_memory_user_id(request)`: trusted internal callers (IM channel workers carrying the `X-DeerFlow-Owner-User-Id` header, e.g. a bound `/memory` command) act for the connection owner; browser/API callers fall back to `get_effective_user_id()`. The header is only honored after `AuthMiddleware` validated the internal token, mirroring `get_trusted_internal_owner_user_id` used by the threads router
 - In no-auth mode, `user_id` defaults to `"default"` (constant `DEFAULT_USER_ID`)
 - Absolute `storage_path` in config opts out of per-user isolation
@@ -570,13 +571,13 @@ The cached value is reused for both the blocking (`runs.wait`) and streaming (`_
 - **Facts**: Discrete facts with `id`, `content`, `category` (preference/knowledge/context/behavior/goal), `confidence` (0-1), `createdAt`, `source`
 
 **Workflow**:
-1. `MemoryMiddleware` filters messages (user inputs + final AI responses), captures `user_id` via `get_effective_user_id()`, and queues conversation with the captured `user_id`
-2. Queue debounces (30s default), batches updates, deduplicates per-thread
-3. Background thread invokes LLM to extract context updates and facts, using the stored `user_id` (not the contextvar, which is unavailable on timer threads)
-4. Applies updates atomically (temp file + rename) with cache invalidation, skipping duplicate fact content before append
-5. **Staleness pass** (same LLM invocation as step 3, no extra API call): when `staleness_review_enabled` is `true` and at least `staleness_min_candidates` aged facts exist, `_select_stale_candidates` selects facts older than `staleness_age_days` that are not in `staleness_protected_categories` (default: `correction`), surfaces them in the prompt, and the LLM judges each as KEEP or REMOVE. `_apply_updates` enforces the guardrail unconditionally at apply time: it intersects the LLM-returned removal set with `_select_stale_candidates` output before applying the per-cycle cap (`staleness_max_removals_per_cycle`), so protected and non-aged facts can never be deleted regardless of model behavior or the feature flag setting.
-5b. **Consolidation pass** (same LLM invocation as step 3, no extra API call): when `consolidation_enabled` is `true` and at least one category holds `consolidation_min_facts` or more facts, `_select_consolidation_candidates` identifies fragmented categories and surfaces at most `consolidation_max_groups_per_cycle` of them (largest first) in the prompt. The LLM decides which groups to merge and proposes a synthesised fact per group. `_apply_updates` enforces guardrails: source IDs must exist and must not overlap across groups, group size is capped at `consolidation_max_sources`, the merged fact's confidence cannot exceed the source maximum, and facts below `fact_confidence_threshold` are not written.
-6. Next interaction injects top 15 facts + context into `<memory>` tags in system prompt
+- `memory.mode: middleware` (default) keeps the passive path: `MemoryMiddleware` filters messages (user inputs + final AI responses), captures `user_id` via `get_effective_user_id()`, queues conversation with the captured `user_id`, and the debounced background thread invokes the LLM to extract context updates and facts using the stored `user_id`.
+- `memory.mode: tool` skips `MemoryMiddleware` and registers `memory_search`, `memory_add`, `memory_update`, and `memory_delete` on the agent. The model decides when to search, add, update, or delete facts; this is opt-in/experimental and should not be described as better than middleware mode without eval evidence.
+- Both modes share `FileMemoryStorage`, per-user/per-agent isolation, prompt injection, manual CRUD primitives, and the updater backend.
+- Middleware mode queue debounces (30s default), batches updates, deduplicates per-thread, applies updates atomically (temp file + rename) with cache invalidation, and skips duplicate fact content before append.
+- Staleness pass (same LLM invocation as the regular updater, no extra API call): when `staleness_review_enabled` is `true` and at least `staleness_min_candidates` aged facts exist, `_select_stale_candidates` selects facts older than `staleness_age_days` that are not in `staleness_protected_categories` (default: `correction`), surfaces them in the prompt, and the LLM judges each as KEEP or REMOVE. `_apply_updates` enforces the guardrail unconditionally at apply time: it intersects the LLM-returned removal set with `_select_stale_candidates` output before applying the per-cycle cap (`staleness_max_removals_per_cycle`), so protected and non-aged facts can never be deleted regardless of model behavior or the feature flag setting.
+- Consolidation pass (same LLM invocation as the regular updater, no extra API call): when `consolidation_enabled` is `true` and at least one category holds `consolidation_min_facts` or more facts, `_select_consolidation_candidates` identifies fragmented categories and surfaces at most `consolidation_max_groups_per_cycle` of them (largest first) in the prompt. The LLM decides which groups to merge and proposes a synthesised fact per group. `_apply_updates` enforces guardrails: source IDs must exist and must not overlap across groups, group size is capped at `consolidation_max_sources`, the merged fact's confidence cannot exceed the source maximum, and facts below `fact_confidence_threshold` are not written.
+- Next interaction injects selected facts + context into `<memory>` tags in the system prompt when `injection_enabled` is true.
 
 **Token counting** (`packages/harness/deerflow/agents/memory/prompt.py`):
 - `_count_tokens` budgets the injection. In default `tiktoken` mode, the encoding is loaded lazily and cached.
@@ -588,6 +589,7 @@ Focused regression coverage for the updater lives in `backend/tests/test_memory_
 
 **Configuration** (`config.yaml` → `memory`):
 - `enabled` / `injection_enabled` - Master switches
+- `mode` - Operation mode: `middleware` (default passive background extraction) or `tool` (experimental model-driven memory tools). Modes are mutually exclusive.
 - `storage_path` - Path to memory.json (absolute path opts out of per-user isolation)
 - `debounce_seconds` - Wait time before processing (default: 30)
 - `model_name` - LLM for updates (null = default model)

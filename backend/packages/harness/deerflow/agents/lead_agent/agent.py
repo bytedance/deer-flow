@@ -41,6 +41,7 @@ from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddlewar
 from deerflow.agents.thread_state import ThreadState
 from deerflow.config.agents_config import load_agent_config, validate_agent_name
 from deerflow.config.app_config import AppConfig, get_app_config
+from deerflow.config.memory_config import should_use_memory_tools
 from deerflow.models import create_chat_model
 from deerflow.skills.tool_policy import SKILL_LOADING_TOOL_NAMES, filter_tools_by_skill_allowed_tools
 from deerflow.skills.types import Skill
@@ -58,6 +59,19 @@ _NON_INTERACTIVE_DISABLED_TOOL_NAMES = frozenset({"ask_clarification"})
 # itself is plumbed into ``run_context`` by
 # ``ChannelManager._resolve_run_params``.
 _WEBHOOK_CHANNELS: frozenset[str] = frozenset({"github"})
+
+
+def _append_memory_tools_without_name_conflicts(tools: list) -> None:
+    """Append memory tools without dropping unrelated duplicate-named tools."""
+    from deerflow.agents.memory.tools import get_memory_tools
+
+    existing_names = {getattr(tool, "name", None) for tool in tools}
+    for memory_tool in get_memory_tools():
+        if memory_tool.name in existing_names:
+            logger.warning("Memory tool name %r already exists and was skipped.", memory_tool.name)
+            continue
+        tools.append(memory_tool)
+        existing_names.add(memory_tool.name)
 
 
 def _get_runtime_config(config: RunnableConfig) -> dict:
@@ -296,8 +310,13 @@ def build_middlewares(
     # Add TitleMiddleware
     middlewares.append(TitleMiddleware(app_config=resolved_app_config))
 
-    # Add MemoryMiddleware (after TitleMiddleware)
-    middlewares.append(MemoryMiddleware(agent_name=agent_name, memory_config=resolved_app_config.memory))
+    # Add MemoryMiddleware (after TitleMiddleware) — skipped in enabled tool mode
+    if should_use_memory_tools(resolved_app_config.memory):
+        pass
+    else:
+        if resolved_app_config.memory.mode == "tool" and not resolved_app_config.memory.enabled:
+            logger.warning("memory.mode is 'tool' but memory.enabled is false; memory tools will not be registered.")
+        middlewares.append(MemoryMiddleware(agent_name=agent_name, memory_config=resolved_app_config.memory))
 
     # Add ViewImageMiddleware only if the current model supports vision.
     # Use the resolved runtime model_name from make_lead_agent to avoid stale config values.
@@ -508,6 +527,8 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
         )
         if skill_setup.describe_skill_tool:
             final_tools.append(skill_setup.describe_skill_tool)
+        if should_use_memory_tools(resolved_app_config.memory):
+            _append_memory_tools_without_name_conflicts(final_tools)
         return create_agent(
             model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, app_config=resolved_app_config, attach_tracing=False),
             tools=final_tools,
@@ -571,6 +592,8 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
     mcp_routing_hints_section = get_mcp_routing_hints_prompt_section(filtered, deferred_names=setup.deferred_names)
     if skill_setup.describe_skill_tool:
         final_tools.append(skill_setup.describe_skill_tool)
+    if should_use_memory_tools(resolved_app_config.memory):
+        _append_memory_tools_without_name_conflicts(final_tools)
     return create_agent(
         model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, reasoning_effort=reasoning_effort, app_config=resolved_app_config, attach_tracing=False),
         tools=final_tools,

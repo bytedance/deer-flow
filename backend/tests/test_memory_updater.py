@@ -8,6 +8,7 @@ from deerflow.agents.memory.updater import (
     _extract_text,
     clear_memory_data,
     create_memory_fact,
+    create_memory_fact_with_created_fact,
     delete_memory_fact,
     import_memory_data,
     update_memory_fact,
@@ -309,6 +310,52 @@ def test_create_memory_fact_appends_manual_fact() -> None:
     assert result["facts"][0]["category"] == "preference"
     assert result["facts"][0]["confidence"] == 0.88
     assert result["facts"][0]["source"] == "manual"
+
+
+def test_create_memory_fact_trims_to_max_facts_by_confidence() -> None:
+    existing = _make_memory(
+        facts=[
+            {"id": "fact_keep", "content": "High confidence", "category": "context", "confidence": 0.95},
+            {"id": "fact_drop", "content": "Low confidence", "category": "context", "confidence": 0.2},
+        ]
+    )
+    saved: dict[str, object] = {}
+
+    def capture_save(memory_data, agent_name=None, *, user_id=None):
+        saved["memory"] = memory_data
+        return True
+
+    with (
+        patch("deerflow.agents.memory.updater.get_memory_data", return_value=existing),
+        patch("deerflow.agents.memory.updater.get_memory_config", return_value=_memory_config(max_facts=2)),
+        patch("deerflow.agents.memory.updater._save_memory_to_file", side_effect=capture_save),
+    ):
+        result = create_memory_fact(content="Medium confidence", confidence=0.8)
+
+    fact_ids = [fact["id"] for fact in result["facts"]]
+    assert len(fact_ids) == 2
+    assert fact_ids == ["fact_keep", result["facts"][1]["id"]]
+    assert all(fact["id"] != "fact_drop" for fact in result["facts"])
+    assert saved["memory"] == result
+
+
+def test_create_memory_fact_with_created_fact_returns_new_fact_after_sorting() -> None:
+    existing = _make_memory(
+        facts=[
+            {"id": "fact_existing", "content": "Higher confidence", "category": "context", "confidence": 0.95},
+        ]
+    )
+
+    with (
+        patch("deerflow.agents.memory.updater.get_memory_data", return_value=existing),
+        patch("deerflow.agents.memory.updater.get_memory_config", return_value=_memory_config(max_facts=2)),
+        patch("deerflow.agents.memory.updater._save_memory_to_file", return_value=True),
+    ):
+        result, created_fact = create_memory_fact_with_created_fact(content="Lower confidence", confidence=0.7)
+
+    assert result["facts"][0]["id"] == "fact_existing"
+    assert created_fact["content"] == "Lower confidence"
+    assert created_fact["id"] == result["facts"][1]["id"]
 
 
 def test_create_memory_fact_rejects_empty_content() -> None:

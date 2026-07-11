@@ -114,15 +114,27 @@ def _coerce_source_confidence(fact: dict[str, Any]) -> float:
     return max(0.0, min(val, 1.0)) if math.isfinite(val) else 0.5
 
 
-def create_memory_fact(
+def _trim_facts_to_max(facts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep the highest-confidence facts within the configured max_facts cap."""
+    config = get_memory_config()
+    if len(facts) <= config.max_facts:
+        return facts
+    return sorted(
+        facts,
+        key=_coerce_source_confidence,
+        reverse=True,
+    )[: config.max_facts]
+
+
+def create_memory_fact_with_created_fact(
     content: str,
     category: str = "context",
     confidence: float = 0.5,
     agent_name: str | None = None,
     *,
     user_id: str | None = None,
-) -> dict[str, Any]:
-    """Create a new fact and persist the updated memory data."""
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Create a new fact, persist memory, and return both memory and fact."""
     normalized_content = content.strip()
     if not normalized_content:
         raise ValueError("content")
@@ -133,21 +145,39 @@ def create_memory_fact(
     memory_data = get_memory_data(agent_name, user_id=user_id)
     updated_memory = dict(memory_data)
     facts = list(memory_data.get("facts", []))
-    facts.append(
-        {
-            "id": f"fact_{uuid.uuid4().hex[:8]}",
-            "content": normalized_content,
-            "category": normalized_category,
-            "confidence": validated_confidence,
-            "createdAt": now,
-            "source": "manual",
-        }
-    )
-    updated_memory["facts"] = facts
+    created_fact = {
+        "id": f"fact_{uuid.uuid4().hex[:8]}",
+        "content": normalized_content,
+        "category": normalized_category,
+        "confidence": validated_confidence,
+        "createdAt": now,
+        "source": "manual",
+    }
+    facts.append(created_fact)
+    updated_memory["facts"] = _trim_facts_to_max(facts)
 
     if not _save_memory_to_file(updated_memory, agent_name, user_id=user_id):
         raise OSError("Failed to save memory data after creating fact")
 
+    return updated_memory, created_fact
+
+
+def create_memory_fact(
+    content: str,
+    category: str = "context",
+    confidence: float = 0.5,
+    agent_name: str | None = None,
+    *,
+    user_id: str | None = None,
+) -> dict[str, Any]:
+    """Create a new fact and persist the updated memory data."""
+    updated_memory, _created_fact = create_memory_fact_with_created_fact(
+        content,
+        category=category,
+        confidence=confidence,
+        agent_name=agent_name,
+        user_id=user_id,
+    )
     return updated_memory
 
 
@@ -166,6 +196,51 @@ def delete_memory_fact(fact_id: str, agent_name: str | None = None, *, user_id: 
         raise OSError(f"Failed to save memory data after deleting fact '{fact_id}'")
 
     return updated_memory
+
+
+def search_memory_facts(
+    query: str,
+    category: str | None = None,
+    limit: int = 10,
+    *,
+    agent_name: str | None = None,
+    user_id: str | None = None,
+) -> list[dict[str, Any]]:
+    """Search facts by case-insensitive substring match against content.
+
+    Args:
+        query: Substring to match (case-insensitive). Empty query returns [].
+        category: Optional category filter. If provided, only facts matching
+            this category are considered.
+        limit: Maximum results to return (default 10).
+        agent_name: Per-agent scope, or global memory if None.
+        user_id: Per-user scope within agent.
+
+    Returns:
+        List of matching fact dicts, sorted by confidence descending.
+    """
+    if not query or not query.strip():
+        return []
+    if limit <= 0:
+        return []
+
+    query_lower = query.strip().lower()
+    memory_data = get_memory_data(agent_name, user_id=user_id)
+    facts = memory_data.get("facts", [])
+
+    matched = []
+    for fact in facts:
+        content = fact.get("content", "")
+        if not isinstance(content, str):
+            continue
+        if query_lower not in content.lower():
+            continue
+        if category is not None and fact.get("category") != category:
+            continue
+        matched.append(fact)
+
+    matched.sort(key=lambda f: f.get("confidence", 0), reverse=True)
+    return matched[:limit]
 
 
 def update_memory_fact(
@@ -981,14 +1056,7 @@ class MemoryUpdater:
                 if fact_key is not None:
                     existing_fact_keys.add(fact_key)
 
-        # Enforce max facts limit
-        if len(current_memory["facts"]) > config.max_facts:
-            # Sort by confidence and keep top ones
-            current_memory["facts"] = sorted(
-                current_memory["facts"],
-                key=lambda f: f.get("confidence", 0),
-                reverse=True,
-            )[: config.max_facts]
+        current_memory["facts"] = _trim_facts_to_max(current_memory["facts"])
 
         # ── Memory consolidation ──
         # Runs after the max_facts trim so source facts that were just evicted
