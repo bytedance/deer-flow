@@ -7306,3 +7306,62 @@ class TestHandleGoalCommand:
             assert reply == "Failed to set goal."
 
         _run(go())
+
+
+# ---------------------------------------------------------------------------
+# _merge_stream_text regression: CJK reduplication, repeated tokens, suffix
+# matching tails.  Proves that the fixed function does not drop legitimate
+# deltas that happen to match the accumulated buffer or its suffix.
+# Import is deferred because app.channels.manager pulls in fastapi.
+# ---------------------------------------------------------------------------
+
+
+def _get_merge_stream_text():
+    from app.channels.manager import _merge_stream_text
+
+    return _merge_stream_text
+
+
+def test_merge_stream_text_cjk_reduplication():
+    """Two identical CJK tokens ('谢','谢') -> '谢谢', not '谢'."""
+    _merge = _get_merge_stream_text()
+    assert _merge("谢", "谢") == "谢谢"
+
+
+def test_merge_stream_text_repeated_token_append():
+    """Identical repeated tokens ('go','go') -> 'gogo', not 'go'."""
+    _merge = _get_merge_stream_text()
+    assert _merge("go", "go") == "gogo"
+
+
+def test_merge_stream_text_suffix_tail_not_dropped():
+    """Delta equal to buffer suffix ('l' after 'hel') -> 'hell', not 'hel'."""
+    _merge = _get_merge_stream_text()
+    assert _merge("hel", "l") == "hell"
+
+
+def test_merge_stream_text_cumulative_strictly_longer_replaces():
+    """A strictly longer cumulative snapshot that starts with existing replaces it."""
+    _merge = _get_merge_stream_text()
+    assert _merge("Hel", "Hel lo world") == "Hel lo world"
+
+
+def test_merge_stream_text_empty_chunk_noop():
+    _merge = _get_merge_stream_text()
+    assert _merge("Hello", "") == "Hello"
+
+
+def test_merge_stream_text_empty_existing_returns_chunk():
+    _merge = _get_merge_stream_text()
+    assert _merge("", "Hello") == "Hello"
+
+
+def test_merge_stream_text_newline_split():
+    """'\\n\\n' split across two '\\n' deltas accumulates to two newlines."""
+    _merge = _get_merge_stream_text()
+    assert _merge("\n", "\n") == "\n\n"
+
+
+def test_merge_stream_text_normal_append():
+    _merge = _get_merge_stream_text()
+    assert _merge("Hello ", "world") == "Hello world"
