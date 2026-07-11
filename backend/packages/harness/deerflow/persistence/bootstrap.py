@@ -299,6 +299,19 @@ def _run_baseline_create_all_sync(sync_conn: Any) -> None:
     baseline_tables = [Base.metadata.tables[name] for name in _BASELINE_TABLE_NAMES if name in Base.metadata.tables]
     Base.metadata.create_all(sync_conn, tables=baseline_tables, checkfirst=True)
 
+    # ``create_all`` with ``checkfirst=True`` skips a table and all its
+    # subordinate ``Index`` objects when the table already exists.  An index
+    # that was added to the ORM model after the table was first provisioned
+    # would therefore never be created, and because the legacy branch stamps
+    # ``0001_baseline`` before running upgrade, alembic's own
+    # ``batch_op.create_index`` for baseline-era indexes is skipped too.
+    # Explicitly creating every ``Index`` on every baseline table (each with
+    # its own ``checkfirst=True``) guarantees each index exists regardless of
+    # whether its parent table was just created or already present.
+    for table in baseline_tables:
+        for idx in table.indexes:
+            idx.create(sync_conn, checkfirst=True)
+
 
 def _stamp(cfg: AlembicConfig, revision: str) -> None:
     """Synchronous alembic stamp; callers must wrap in ``asyncio.to_thread``."""

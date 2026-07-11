@@ -592,6 +592,71 @@ async def test_legacy_backfill_skips_non_baseline_tables(tmp_path: Path) -> None
 
 
 # ---------------------------------------------------------------------------
+# Legacy backfill: an index added to the ORM model after the table was first
+# provisioned must also be created by the backfill helper, not only when the
+# table itself is missing. ``create_all`` with ``checkfirst=True`` skips a
+# table and all its ``Index`` objects when the table already exists (it only
+# checks the table, not each index). The backfill must therefore create every
+# baseline table's indexes explicitly, covering the case where the table is
+# present but one of its indexes was added in a later model change.
+# ---------------------------------------------------------------------------
+
+
+async def _channel_connections_index_names(engine) -> set[str]:
+    async with engine.connect() as conn:
+        return await conn.run_sync(lambda c: {ix["name"] for ix in sa.inspect(c).get_indexes("channel_connections")})
+
+
+@asyncio_test
+async def test_legacy_backfill_creates_missing_index_on_existing_table(tmp_path: Path) -> None:
+    engine = create_async_engine(_url(tmp_path))
+    try:
+        # Simulate a legacy DB where ``channel_connections`` was provisioned
+        # before the ``uq_channel_connection_active_identity`` partial unique
+        # index was added to the model -- create everything, then drop just
+        # that index.
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        async with engine.begin() as conn:
+            await conn.execute(sa.text("DROP INDEX IF EXISTS uq_channel_connection_active_identity"))
+
+        # Confirm the index is gone.
+        indexes_before = await _channel_connections_index_names(engine)
+        assert "uq_channel_connection_active_identity" not in indexes_before, indexes_before
+
+        # Run the backfill helper -- this is what the legacy branch calls.
+        async with engine.begin() as conn:
+            await conn.run_sync(_run_baseline_create_all_sync)
+
+        # The index must now exist.
+        indexes_after = await _channel_connections_index_names(engine)
+        assert "uq_channel_connection_active_identity" in indexes_after, indexes_after
+    finally:
+        await engine.dispose()
+
+
+@asyncio_test
+async def test_legacy_backfill_idempotent_when_index_already_exists(tmp_path: Path) -> None:
+    """The explicit index-creation pass must not raise when the index is already present."""
+    engine = create_async_engine(_url(tmp_path))
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+
+        indexes_before = await _channel_connections_index_names(engine)
+        assert "uq_channel_connection_active_identity" in indexes_before
+
+        # Running the backfill helper over an already-correct DB must succeed.
+        async with engine.begin() as conn:
+            await conn.run_sync(_run_baseline_create_all_sync)
+
+        indexes_after = await _channel_connections_index_names(engine)
+        assert "uq_channel_connection_active_identity" in indexes_after
+    finally:
+        await engine.dispose()
+
+
+# ---------------------------------------------------------------------------
 # _decide_state unit tests (pure function, no DB needed)
 # ---------------------------------------------------------------------------
 
