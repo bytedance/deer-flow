@@ -21,6 +21,7 @@ from collections.abc import Iterable
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
+from deerflow.skills.package_paths import is_eval_fixture_skill_md
 from deerflow.skills.skillscan.models import (
     FindingSeverity,
     RuleSpec,
@@ -248,7 +249,7 @@ def _scan_archive_member_metadata(info: zipfile.ZipInfo, normalized: str) -> lis
     if _is_symlink_member(info):
         findings.append(_finding("package-symlink", file=normalized, evidence=info.filename))
     parts = PurePosixPath(normalized).parts
-    if parts and parts[-1] == "SKILL.md" and len(parts) > 2:
+    if parts and parts[-1] == "SKILL.md" and len(parts) > 2 and not is_eval_fixture_skill_md(PurePosixPath(normalized)):
         findings.append(_finding("package-nested-skill-md", file=normalized, evidence=normalized))
     return findings
 
@@ -256,7 +257,7 @@ def _scan_archive_member_metadata(info: zipfile.ZipInfo, normalized: str) -> lis
 def _scan_file_package_properties(rel_path: str, file_bytes: bytes, file_size: int) -> list[SecurityFinding]:
     findings: list[SecurityFinding] = []
     path = PurePosixPath(rel_path)
-    if path.name == "SKILL.md" and len(path.parts) > 1:
+    if path.name == "SKILL.md" and len(path.parts) > 1 and not is_eval_fixture_skill_md(path):
         findings.append(_finding("package-nested-skill-md", file=rel_path, evidence=rel_path))
     if file_size > MAX_FILE_BYTES:
         findings.append(_finding("package-oversized-file", file=rel_path, evidence=f"{file_size} bytes"))

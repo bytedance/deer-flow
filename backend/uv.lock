@@ -809,6 +809,7 @@ redis = [
 [package.dev-dependencies]
 dev = [
     { name = "blockbuster" },
+    { name = "jsonschema" },
     { name = "prompt-toolkit" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
@@ -845,6 +846,7 @@ provides-extras = ["postgres", "redis", "discord"]
 [package.metadata.requires-dev]
 dev = [
     { name = "blockbuster", specifier = ">=1.5.26,<1.6" },
+    { name = "jsonschema", specifier = ">=4.26.0" },
     { name = "prompt-toolkit", specifier = ">=3.0.0" },
     { name = "pytest", specifier = ">=9.0.3" },
     { name = "pytest-asyncio", specifier = ">=1.3.0" },
