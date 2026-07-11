@@ -115,6 +115,78 @@ def test_mask_local_paths_in_output_hides_skills_host_paths() -> None:
         assert "/mnt/skills/public/bootstrap/SKILL.md" in masked
 
 
+@pytest.mark.parametrize("suffix", ["-extra/data.txt", "2/x", ".bak", "foo", "_backup/y"])
+def test_mask_local_paths_does_not_match_inside_longer_sibling(suffix: str) -> None:
+    """A host base must not match inside a sibling that merely shares its prefix.
+
+    The trailing group needs a separator to consume anything, so without a
+    segment-boundary lookahead the regex matches the bare base and
+    ``replace_match`` takes its ``matched_path == base`` branch -- rewriting
+    ``.../skills-extra/data.txt`` to ``/mnt/skills-extra/data.txt``, a container
+    path forward resolution refuses to map back. Reverse-direction mirror of
+    ``LocalSandbox._reverse_output_patterns`` (#4035).
+    """
+    with (
+        patch("deerflow.sandbox.tools._get_skills_container_path", return_value="/mnt/skills"),
+        patch("deerflow.sandbox.tools._get_skills_host_path", return_value="/home/user/deer-flow/skills"),
+    ):
+        output = f"found /home/user/deer-flow/skills{suffix}"
+        masked = mask_local_paths_in_output(output, None)
+
+        assert masked == output
+        assert "/mnt/skills" not in masked
+
+
+@pytest.mark.parametrize(
+    ("boundary", "expected"),
+    [
+        (", done", "/mnt/skills, done"),
+        (":/other", "/mnt/skills:/other"),
+        (" tail", "/mnt/skills tail"),
+        ('"quoted', '/mnt/skills"quoted'),
+        # A backslash is consumed by the trailing group (Windows paths match in
+        # full, separator normalised) rather than acting as a terminator -- but
+        # it must still reach the trailing group, which needs the lookahead to
+        # admit it first.
+        ("\\win", "/mnt/skills/win"),
+    ],
+)
+def test_mask_local_paths_still_matches_base_before_non_slash_boundaries(boundary: str, expected: str) -> None:
+    """The lookahead must not narrow away boundaries that translate today.
+
+    This runs over arbitrary command output, where a base can legitimately be
+    followed by a comma (prose), a colon (PATH-style concatenation) or a
+    backslash (Windows separator). Borrowing the shell-oriented class from
+    ``_command_pattern`` -- ``(?=/|$|[\\s"';&|<>()])`` -- admits none of the
+    three, so the lookahead would fail and the raw host path would be emitted.
+    """
+    with (
+        patch("deerflow.sandbox.tools._get_skills_container_path", return_value="/mnt/skills"),
+        patch("deerflow.sandbox.tools._get_skills_host_path", return_value="/home/user/deer-flow/skills"),
+    ):
+        masked = mask_local_paths_in_output(f"root is /home/user/deer-flow/skills{boundary}", None)
+
+        assert masked == f"root is {expected}"
+        assert "/home/user/deer-flow/skills" not in masked
+
+
+@pytest.mark.parametrize("prefix", ["", "cwd: ", "see "])
+def test_mask_local_paths_translates_a_bare_base_at_end_of_output(prefix: str) -> None:
+    """``$`` is load-bearing: output ending exactly at a host base still masks.
+
+    Without it the lookahead fails and the raw host path is handed to the model
+    -- the leak this function exists to prevent.
+    """
+    with (
+        patch("deerflow.sandbox.tools._get_skills_container_path", return_value="/mnt/skills"),
+        patch("deerflow.sandbox.tools._get_skills_host_path", return_value="/home/user/deer-flow/skills"),
+    ):
+        masked = mask_local_paths_in_output(f"{prefix}/home/user/deer-flow/skills", None)
+
+        assert masked == f"{prefix}/mnt/skills"
+        assert "/home/user/deer-flow/skills" not in masked
+
+
 def test_mask_local_paths_compiled_patterns_are_cached() -> None:
     """The compiled patterns for a given source set are built once and reused
     (mask runs once per glob/grep match, so this avoids per-match recompiles)."""
