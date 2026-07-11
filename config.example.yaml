@@ -1597,6 +1597,30 @@ scheduler:
   min_once_delay_seconds: 60
 
 # ============================================================================
+# Run Ownership Configuration
+# ============================================================================
+# Controls cross-process run ownership for multi-worker deployments.
+# When GATEWAY_WORKERS > 1, each worker claims runs with a lease; the heartbeat
+# renews leases, and reconciliation recovers orphaned runs from crashed workers.
+#
+# CLOCK-SYNC REQUIREMENT (multi-worker only): reconciliation compares another
+# worker's UTC lease timestamp against this worker's datetime.now(UTC). Worker
+# clocks MUST be synced (NTP / chrony / systemd-timesyncd — default on K8s and
+# cloud VMs) within a few seconds. grace_seconds is the skew budget; worst case
+# (owning worker's heartbeat just about to fire), a peer whose clock is more
+# than grace_seconds ahead can mis-reclaim a still-live run as an orphan. Raise
+# grace_seconds if your environment cannot keep clocks within a few seconds;
+# the trade-off is longer recovery latency for genuinely dead workers
+# (lease_seconds + grace_seconds from last heartbeat to reclaim).
+
+run_ownership:
+  lease_seconds: 30           # Seconds before a run lease expires if not renewed.
+                              # Heartbeat renews every lease_seconds / 3.
+  grace_seconds: 10           # Extra seconds past expiry before reclaiming an orphaned run.
+                              # Also the cross-worker clock-skew budget — see note above.
+  heartbeat_enabled: false    # Set to true for GATEWAY_WORKERS > 1
+
+# ============================================================================
 # Stream Bridge Configuration
 # ============================================================================
 # The stream bridge carries live agent events from gateway workers to SSE

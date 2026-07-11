@@ -643,7 +643,7 @@ async def test_create_or_reject_does_not_interrupt_old_run_when_new_run_store_wr
     manager = RunManager(store=store)
     old = await manager.create("thread-1")
     await manager.set_status(old.run_id, RunStatus.running)
-    store.put = AsyncMock(side_effect=RuntimeError("db down"))
+    store.create_run_atomic = AsyncMock(side_effect=RuntimeError("db down"))
 
     with pytest.raises(RuntimeError, match="db down"):
         await manager.create_or_reject("thread-1", multitask_strategy="interrupt")
@@ -664,10 +664,10 @@ async def test_create_or_reject_does_not_interrupt_old_run_when_new_run_store_wr
     old = await manager.create("thread-1")
     await manager.set_status(old.run_id, RunStatus.running)
 
-    async def cancelled_put(run_id, **kwargs):
+    async def cancelled_create(run_id, **kwargs):
         raise asyncio.CancelledError
 
-    store.put = cancelled_put
+    store.create_run_atomic = cancelled_create
 
     with pytest.raises(asyncio.CancelledError):
         await manager.create_or_reject("thread-1", multitask_strategy="interrupt")
@@ -881,9 +881,12 @@ async def test_list_by_thread_falls_back_to_store_with_user_filter():
 
 
 class _FailingPutRunStore(MemoryRunStore):
-    """Memory run store whose every ``put`` fails (non-retryably)."""
+    """Memory run store whose every ``put`` and ``create_run_atomic`` fails (non-retryably)."""
 
     async def put(self, run_id, **kwargs):
+        raise ValueError("simulated persist failure")
+
+    async def create_run_atomic(self, run_id, **kwargs):
         raise ValueError("simulated persist failure")
 
 
