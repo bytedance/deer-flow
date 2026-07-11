@@ -692,6 +692,20 @@ def _compiled_mask_patterns(sources: tuple[tuple[str, str], ...]) -> tuple[tuple
     glob/grep match, so without this the same patterns are recompiled per
     match.
     """
+    # Same segment-boundary lookahead as ``LocalSandbox._reverse_output_patterns``
+    # (#4035), so a host base does not match inside a sibling that merely shares
+    # its prefix (``.../skills`` inside ``.../skills-extra``). Without it the
+    # regex yields the bare base, which then *equals* ``base`` in
+    # ``replace_match`` and so the sibling is rewritten to a container path that
+    # forward resolution refuses to map back.
+    #
+    # The class mirrors ``_content_pattern``'s: this runs over arbitrary command
+    # output, where a base can legitimately be followed by ``,`` ``:`` or ``\``.
+    # ``$`` is load-bearing — output ending exactly at a base would otherwise
+    # fail the lookahead and be emitted as the raw host path.
+    boundary = r"(?=/|$|[^\w./-])"
+    tail = r"(?:[/\\][^\s\"';&|<>()]*)?"
+
     compiled: list[tuple[re.Pattern[str], str, str]] = []
     for host_base, virtual_base in sources:
         seen: set[str] = set()
@@ -705,7 +719,7 @@ def _compiled_mask_patterns(sources: tuple[tuple[str, str], ...]) -> tuple[tuple
                     continue
                 seen.add(variant)
                 escaped = re.escape(variant).replace(r"\\", r"[/\\]")
-                compiled.append((re.compile(escaped + r"(?:[/\\][^\s\"';&|<>()]*)?"), variant, virtual_base))
+                compiled.append((re.compile(escaped + boundary + tail), variant, virtual_base))
     return tuple(compiled)
 
 
