@@ -178,25 +178,33 @@ def test_okahu_exporter_with_api_key_ok(monkeypatch):
     assert setup_monocle_tracing_if_enabled() is True
 
 
-def test_no_import_time_setup(monkeypatch):
+def test_no_import_time_setup():
     """Regression: importing deerflow.agents must not install telemetry.
 
     The setup call used to live at module import in ``deerflow/agents/__init__``.
-    It now happens only via the gateway lifespan, so re-importing the package
-    must neither expose ``setup_monocle_telemetry`` nor replace the global OTel
-    ``TracerProvider`` (which is what ``setup_monocle_telemetry`` does).
+    It now happens only via the gateway lifespan, so a plain import must neither
+    expose ``setup_monocle_telemetry`` nor install a global OTel
+    ``TracerProvider`` (which is what ``setup_monocle_telemetry`` does). Runs in
+    a subprocess so the import is genuinely fresh and, unlike deleting
+    ``sys.modules`` entries in-process, cannot corrupt module identity for the
+    rest of the suite.
     """
-    from opentelemetry import trace
+    script = textwrap.dedent(
+        """
+        from opentelemetry import trace
+        from opentelemetry.trace import ProxyTracerProvider
 
-    provider_before = trace.get_tracer_provider()
+        import deerflow.agents as agents
 
-    # Force a fresh import so ``__init__`` actually re-executes.
-    for name in [m for m in list(sys.modules) if m == "deerflow.agents" or m.startswith("deerflow.agents.")]:
-        monkeypatch.delitem(sys.modules, name, raising=False)
-    import deerflow.agents as agents
-
-    assert not hasattr(agents, "setup_monocle_telemetry")
-    assert trace.get_tracer_provider() is provider_before
+        assert not hasattr(agents, "setup_monocle_telemetry")
+        # Still the SDK-less default proxy: no provider was installed on import.
+        assert isinstance(trace.get_tracer_provider(), ProxyTracerProvider)
+        print("IMPORT_CLEAN_OK")
+        """
+    )
+    result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert "IMPORT_CLEAN_OK" in result.stdout
 
 
 def test_double_invoke_is_idempotent():
