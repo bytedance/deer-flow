@@ -3,13 +3,16 @@ import logging
 import mimetypes
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, PlainTextResponse, Response
 
 from app.gateway.authz import require_permission
+from app.gateway.internal_auth import INTERNAL_OWNER_USER_ID_HEADER_NAME
 from app.gateway.path_utils import resolve_thread_virtual_path
+from deerflow.runtime.user_context import reset_current_user, set_current_user
 
 logger = logging.getLogger(__name__)
 
@@ -181,7 +184,21 @@ async def get_artifact(thread_id: str, path: str, request: Request, download: bo
         - Download file: `/api/threads/abc123/artifacts/mnt/user-data/outputs/data.csv?download=true`
         - Active web content such as `.html`, `.xhtml`, and `.svg` artifacts is always downloaded
     """
-    # Check if this is a request for a file inside a .skill archive (e.g., xxx.skill/SKILL.md)
+    # Issue #3539: Set user context from X-DeerFlow-Owner-User-Id header so that
+    # resolve_thread_virtual_path → get_effective_user_id() resolves to the correct
+    # user directory instead of 'default'. This mirrors start_run()'s user context
+    # override in services.py.
+    owner_user_id = (request.headers.get(INTERNAL_OWNER_USER_ID_HEADER_NAME) or "").strip()
+    owner_context_token = set_current_user(SimpleNamespace(id=owner_user_id)) if owner_user_id else None
+    try:
+        return await _serve_artifact(thread_id, path, request, download)
+    finally:
+        if owner_context_token is not None:
+            reset_current_user(owner_context_token)
+
+
+async def _serve_artifact(thread_id: str, path: str, request: Request, download: bool) -> Response:
+    """Internal handler that serves the artifact after user context is set."""
     if ".skill/" in path:
         # Split the path at ".skill/" to get the ZIP file path and internal path
         skill_marker = ".skill/"

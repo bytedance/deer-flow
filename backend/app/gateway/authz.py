@@ -37,6 +37,8 @@ from typing import TYPE_CHECKING, Any, ParamSpec, TypeVar
 
 from fastapi import HTTPException, Request
 
+from deerflow.runtime.user_context import reset_current_user, set_current_user
+
 if TYPE_CHECKING:
     from app.gateway.auth.models import User
 
@@ -275,6 +277,7 @@ def require_permission(
             # ``user_id`` is NULL (shared / pre-auth data), so this is
             # strict-deny rather than strict-allow — only an *existing*
             # row with a *different* user_id triggers 404.
+            resolved_owner: str | None = None
             if owner_check:
                 from app.gateway.internal_auth import INTERNAL_OWNER_USER_ID_HEADER_NAME, INTERNAL_SYSTEM_ROLE
 
@@ -290,15 +293,17 @@ def require_permission(
                     str(auth.user.id),
                     require_existing=require_existing,
                 )
-                if not allowed and getattr(auth.user, "system_role", None) == INTERNAL_SYSTEM_ROLE:
-                    # Trusted internal callers (channel workers) also act for
-                    # the connection owner carried in X-DeerFlow-Owner-User-Id.
-                    # Scope the check to that owner instead of bypassing it; a
-                    # leaked internal token must not grant cross-user thread
-                    # access. The header is honored only after ``auth`` proved
-                    # the caller holds the internal token (mirrors
-                    # get_trusted_internal_owner_user_id, which keys off the
-                    # middleware-stamped ``request.state.user``).
+                if not allowed:
+                    # Try X-DeerFlow-Owner-User-Id header as fallback.
+                    # This covers two cases:
+                    # 1. Internal callers (system_role="internal") acting on
+                    #    behalf of the connection owner.
+                    # 2. AUTH_DISABLED mode (system_role="admin") where the
+                    #    synthetic 'default' user doesn't own the thread but
+                    #    the real owner is specified via the header.
+                    # The header is safe to honor here because either:
+                    # - The caller proved they hold the internal token, or
+                    # - Auth is explicitly disabled (dev/test environment).
                     header_owner = (request.headers.get(INTERNAL_OWNER_USER_ID_HEADER_NAME) or "").strip()
                     if header_owner:
                         allowed = await thread_store.check_access(
@@ -306,11 +311,25 @@ def require_permission(
                             header_owner,
                             require_existing=require_existing,
                         )
+                        if allowed:
+                            resolved_owner = header_owner
                 if not allowed:
                     raise HTTPException(
                         status_code=404,
                         detail=f"Thread {thread_id} not found",
                     )
+
+            # Issue #3539: When an internal caller acts on behalf of a user
+            # via X-DeerFlow-Owner-User-Id, set the contextvar so downstream
+            # path resolution (get_effective_user_id) resolves to the owner's
+            # directory instead of 'default'. This mirrors start_run()'s
+            # set_current_user() call in services.py.
+            if resolved_owner:
+                token = set_current_user(SimpleNamespace(id=resolved_owner))
+                try:
+                    return await func(*args, **kwargs)
+                finally:
+                    reset_current_user(token)
 
             return await func(*args, **kwargs)
 
