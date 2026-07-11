@@ -610,7 +610,7 @@ Each run writes one trace file to `.monocle/`; open it in the [Monocle VS Code e
 
 #### Using Multiple Providers
 
-LangSmith and Langfuse attach as LangChain callbacks, so you can enable both and DeerFlow reports each run to both. If an enabled provider is missing required credentials or fails to initialize, DeerFlow fails fast and names it. Monocle uses a global OpenTelemetry provider rather than a callback, so it runs alongside LangSmith but not Langfuse.
+LangSmith and Langfuse attach as LangChain callbacks, so you can enable both and DeerFlow reports each run to both. If an enabled provider is missing required credentials or fails to initialize, DeerFlow fails fast and names it. Monocle uses a global OpenTelemetry provider rather than a callback; Langfuse shares that provider, so all three can run together. With both Monocle and Langfuse enabled, Monocle's exporters also capture Langfuse's spans.
 
 For Docker deployments, tracing is disabled by default. Set `LANGSMITH_TRACING=true` and `LANGSMITH_API_KEY` in your `.env` to enable it.
 

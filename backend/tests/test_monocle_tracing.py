@@ -1,19 +1,27 @@
 """Tests for Monocle telemetry setup.
 
 Covers the config gate (``MONOCLE_TRACING`` default off / toggle on), the setup
-helper's behavior (off-box exporter warning, Langfuse-conflict warning, exporter
-validation, idempotency), and the regression that importing ``deerflow.agents``
-no longer sets up telemetry at import time.
+helper's behavior (off-box exporter warning, exporter validation, idempotency,
+Langfuse coexistence), the Gateway-lifespan wiring, and the regression that
+importing ``deerflow.agents`` no longer sets up telemetry at import time.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import subprocess
 import sys
 import textwrap
+from contextlib import asynccontextmanager
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+
+# monocle_apptrace is an optional extra (pinned in the dev group); skip the whole
+# module in minimal installs instead of erroring at collection.
+pytest.importorskip("monocle_apptrace")
 
 from deerflow.config import is_monocle_tracing_enabled
 from deerflow.config.tracing_config import get_tracing_config, reset_tracing_config
@@ -104,29 +112,44 @@ def test_no_off_box_warning_for_file_exporter(monkeypatch, caplog):
     assert not any("beyond the local" in r.message for r in caplog.records)
 
 
-def test_warns_when_langfuse_also_enabled(monkeypatch, caplog):
-    monkeypatch.setenv("MONOCLE_TRACING", "true")
-    monkeypatch.setenv("LANGFUSE_TRACING", "true")
-    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-test")
-    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-test")
-    reset_tracing_config()
-    monkeypatch.setattr("monocle_apptrace.setup_monocle_telemetry", lambda **kw: None)
+def test_coexists_with_langfuse():
+    """Monocle and Langfuse (v4, OTel-based) share the global provider without span loss.
 
-    with caplog.at_level(logging.WARNING):
+    Verified against the installed langfuse: whichever library initializes second
+    reuses the existing global ``TracerProvider`` and attaches its own span
+    processor, so both sides keep exporting. Runs the real setup (no mocks) in a
+    subprocess so the process-global provider never leaks into the suite.
+    """
+    script = textwrap.dedent(
+        """
+        import os
+        os.environ["MONOCLE_TRACING"] = "true"
+        os.environ["MONOCLE_EXPORTERS"] = "console"
+        os.environ["LANGFUSE_PUBLIC_KEY"] = "pk-lf-test"
+        os.environ["LANGFUSE_SECRET_KEY"] = "sk-lf-test"
+        os.environ["LANGFUSE_HOST"] = "http://127.0.0.1:9"  # unreachable; offline test
+
+        from opentelemetry import trace
+
+        from deerflow.tracing.monocle import setup_monocle_tracing_if_enabled
+
+        # Gateway order: Monocle at startup, Langfuse per-run afterwards.
         assert setup_monocle_tracing_if_enabled() is True
+        provider = trace.get_tracer_provider()
 
-    assert any("Langfuse" in r.message and "OpenTelemetry" in r.message for r in caplog.records)
+        from langfuse import Langfuse
 
+        Langfuse(tracing_enabled=True)
 
-def test_no_langfuse_warning_when_only_monocle(monkeypatch, caplog):
-    monkeypatch.setenv("MONOCLE_TRACING", "true")
-    reset_tracing_config()
-    monkeypatch.setattr("monocle_apptrace.setup_monocle_telemetry", lambda **kw: None)
-
-    with caplog.at_level(logging.WARNING):
-        assert setup_monocle_tracing_if_enabled() is True
-
-    assert not any("Langfuse" in r.message for r in caplog.records)
+        assert trace.get_tracer_provider() is provider  # provider not replaced
+        names = [type(p).__name__ for p in provider._active_span_processor._span_processors]
+        assert any("Langfuse" in n for n in names), names  # Langfuse attached alongside Monocle
+        print("COEXIST_OK")
+        """
+    )
+    result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert "COEXIST_OK" in result.stdout
 
 
 def test_rejects_unknown_exporter(monkeypatch):
@@ -202,3 +225,45 @@ def test_double_invoke_is_idempotent():
     result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
     assert "IDEMPOTENT_OK" in result.stdout
+
+
+def test_gateway_lifespan_initializes_monocle():
+    """The Gateway lifespan is the sole Monocle call site; pin that wiring.
+
+    Mirrors the patching in ``test_gateway_lifespan_shutdown.py`` so the lifespan
+    can be driven directly, and asserts the setup helper runs during startup.
+    """
+    from fastapi import FastAPI
+
+    from app.gateway.app import lifespan
+
+    @asynccontextmanager
+    async def _noop_langgraph_runtime(_app, _startup_config):
+        yield
+
+    startup_config = SimpleNamespace(log_level="INFO", memory=SimpleNamespace(token_counting="char"))
+    fake_service = MagicMock()
+    fake_service.get_status = MagicMock(return_value={})
+
+    async def fake_start(_startup_config):
+        return fake_service
+
+    setup_spy = MagicMock(return_value=False)
+
+    with (
+        patch("app.gateway.app.get_app_config", return_value=startup_config),
+        patch("app.gateway.app.get_gateway_config", return_value=MagicMock(host="x", port=0)),
+        patch("app.gateway.app.langgraph_runtime", _noop_langgraph_runtime),
+        patch("app.gateway.app.setup_monocle_tracing_if_enabled", setup_spy),
+        patch("app.gateway.app.auth.close_oidc_service", AsyncMock()),
+        patch("app.channels.service.start_channel_service", side_effect=fake_start),
+        patch("app.channels.service.stop_channel_service", AsyncMock()),
+    ):
+
+        async def drive() -> None:
+            async with lifespan(FastAPI()):
+                pass
+
+        asyncio.run(drive())
+
+    setup_spy.assert_called_once_with()

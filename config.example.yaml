@@ -52,8 +52,9 @@ logging:
 # external collector. Enable only exporters whose data handling you trust, and
 # be aware that prompts/outputs may contain sensitive content.
 #
-# Note: Monocle and Langfuse both install a global OpenTelemetry TracerProvider;
-# enable only one OTel-based tracer at a time (see backend/AGENTS.md → Tracing).
+# Note: Monocle shares the global OpenTelemetry TracerProvider with Langfuse, so
+# both can be enabled together; Monocle's exporters then also capture Langfuse's
+# spans (see backend/AGENTS.md → Tracing).
 
 # ============================================================================
 # Token Usage

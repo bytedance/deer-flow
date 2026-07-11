@@ -5,7 +5,6 @@ from __future__ import annotations
 import logging
 
 from deerflow.config import (
-    get_enabled_tracing_providers,
     get_tracing_config,
     is_monocle_tracing_enabled,
 )
@@ -28,12 +27,11 @@ def setup_monocle_tracing_if_enabled() -> bool:
     # per-run callback path) so a config typo never breaks agent runs.
     monocle.validate()
 
-    # Only one OpenTelemetry provider can own the process. Monocle initializes here (at
-    # startup), before Langfuse's per-run handler, so enabling both means Langfuse loses
-    # its spans — warn so the operator turns one off.
-    if "langfuse" in get_enabled_tracing_providers():
-        logger.warning("MONOCLE_TRACING is enabled alongside Langfuse; both need the global OpenTelemetry provider and only one can win. Enable only one of them.")
-
+    # Coexistence with Langfuse (v4, also OTel-based) is verified: whichever
+    # library initializes second reuses the existing global TracerProvider and
+    # attaches its own span processor, so neither side loses spans (see
+    # test_coexists_with_langfuse). Both processors see all spans, so Monocle's
+    # exporters also capture Langfuse's spans when both are enabled.
     exporters = monocle.exporters
 
     # Any exporter other than `file` moves trace data (prompts, tool inputs and
@@ -52,6 +50,7 @@ def setup_monocle_tracing_if_enabled() -> bool:
     except ImportError as exc:
         raise RuntimeError("MONOCLE_TRACING is enabled but monocle_apptrace is not installed. Install the 'monocle' extra: `uv sync --extra monocle` in backend/, or `pip install 'deerflow-harness[monocle]'`.") from exc
 
+    # monocle_exporters_list takes the comma-separated string as-is (monocle_apptrace's API).
     setup_monocle_telemetry(workflow_name="deer-flow", monocle_exporters_list=exporters)
     logger.info("Monocle telemetry enabled (exporters=%s)", exporters)
     return True

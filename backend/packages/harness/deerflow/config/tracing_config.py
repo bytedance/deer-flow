@@ -59,6 +59,10 @@ class MonocleTracingConfig(BaseModel):
 
     @property
     def is_configured(self) -> bool:
+        # Intentionally coarser than LangSmith/Langfuse (which fold credential
+        # presence in): whether Monocle needs credentials depends on the exporter
+        # mix, so that composite check lives in validate(), called from setup at
+        # Gateway startup — where a bad config fails loudly without touching runs.
         return self.enabled
 
     def validate(self) -> None:
