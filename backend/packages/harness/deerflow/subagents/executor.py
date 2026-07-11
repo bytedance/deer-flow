@@ -192,6 +192,57 @@ def _extract_final_result(final_state: Any, *, trace_id: str, name: str) -> str:
     return "No response generated"
 
 
+def _extract_llm_error_fallback(final_state: Any) -> str | None:
+    """Return the user-facing error for a terminal LLM fallback message.
+
+    ``LLMErrorHandlingMiddleware`` converts provider exceptions into marked
+    ``AIMessage`` objects so the graph can terminate cleanly. Clean graph
+    termination is not task success, however: subagent callers need the
+    structured marker translated into the existing failed terminal state.
+
+    Only the last assistant message is authoritative, and scanning just the
+    tail (rather than all messages) is deliberate. Subagents share the
+    parent's ``thread_id`` (see ``_aexecute``'s ``run_config``), and LangGraph
+    replays the full parent message history through ``stream_mode="values"``,
+    so ``final_state`` can contain a *stale* fallback marker left by an earlier
+    parent-history turn. The lead-agent run path scans every message and must
+    mask those stale markers via ``pre_existing_message_ids``
+    (``runtime/runs/worker.py::_extract_llm_error_fallback_message``). Here no
+    masking is needed: a fallback ``AIMessage`` carries no ``tool_calls``, so it
+    always terminates the run, and a subagent always appends at least its own
+    terminal assistant message — the last ``AIMessage`` is therefore never a
+    stale parent-history marker. Do not "fix" this by scanning all messages;
+    that reintroduces the stale-marker false positive worker.py guards against.
+
+    Error-looking message text without the marker remains ordinary output.
+    """
+    if final_state is None:
+        return None
+
+    for message in reversed(final_state.get("messages", [])):
+        if not isinstance(message, AIMessage):
+            continue
+
+        metadata = message.additional_kwargs
+        if metadata.get("deerflow_error_fallback") is not True:
+            return None
+
+        content = message_content_to_text(message.content).strip()
+        if content:
+            return content
+
+        # Defensive: ``_build_error_fallback_message`` always sets a non-empty
+        # user-facing ``content`` (and ``error_detail`` via ``_extract_error_detail``,
+        # which falls back to the exception class name). These branches only
+        # guard against a future middleware that emits an empty fallback.
+        detail = metadata.get("error_detail")
+        if isinstance(detail, str) and detail.strip():
+            return detail.strip()
+        return "LLM request failed"
+
+    return None
+
+
 # Global storage for background task results
 _background_tasks: dict[str, SubagentResult] = {}
 _background_tasks_lock = threading.Lock()
@@ -770,19 +821,30 @@ class SubagentExecutor:
 
             logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} completed async execution")
             token_usage_records = collector.snapshot_records()
-            final_result = _extract_final_result(final_state, trace_id=self.trace_id, name=self.config.name)
-            # A guard hard-stop (token budget or loop detection) does not raise
-            # — it strips tool_calls so the run completes with a final answer.
-            # ``consume_stop_reason`` on each guard tells us whether that
-            # happened so we can mark the completed result with the cap reason
-            # (token_capped / loop_capped) for the lead (#3875 Phase 2).
-            stop_reason = self._consume_guard_stop_reason()
-            result.try_set_terminal(
-                SubagentStatus.COMPLETED,
-                result=final_result,
-                stop_reason=stop_reason,
-                token_usage_records=token_usage_records,
-            )
+            llm_error = _extract_llm_error_fallback(final_state)
+            if llm_error is not None:
+                result.try_set_terminal(
+                    SubagentStatus.FAILED,
+                    error=llm_error,
+                    token_usage_records=token_usage_records,
+                )
+            else:
+                final_result = _extract_final_result(final_state, trace_id=self.trace_id, name=self.config.name)
+                # A guard hard-stop (token budget or loop detection) does not raise
+                # — it strips tool_calls so the run completes with a final answer.
+                # ``consume_stop_reason`` on each guard tells us whether that
+                # happened so we can mark the completed result with the cap reason
+                # (token_capped / loop_capped) for the lead (#3875 Phase 2). It
+                # pops the reason, so keep it on the branch that consumes it — a
+                # fallback carries no tool_calls, so no guard hard-stop can have
+                # co-occurred on the FAILED branch anyway.
+                stop_reason = self._consume_guard_stop_reason()
+                result.try_set_terminal(
+                    SubagentStatus.COMPLETED,
+                    result=final_result,
+                    stop_reason=stop_reason,
+                    token_usage_records=token_usage_records,
+                )
 
         except GraphRecursionError:
             # ``recursion_limit`` on run_config == ``self.config.max_turns``
