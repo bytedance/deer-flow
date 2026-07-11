@@ -110,6 +110,12 @@ class SubagentResult:
         if self.ai_messages is None:
             self.ai_messages = []
 
+    def update_token_usage_records(self, records: list[dict[str, int | str | None]]) -> None:
+        """Publish the latest cumulative collector snapshot while still running."""
+        with self._state_lock:
+            if not self.status.is_terminal:
+                self.token_usage_records = list(records)
+
     def try_set_terminal(
         self,
         status: SubagentStatus,
@@ -807,6 +813,7 @@ class SubagentExecutor:
                     return result
 
                 final_state = chunk
+                result.update_token_usage_records(collector.snapshot_records())
 
                 # Capture every step message (assistant turns AND tool outputs)
                 # appended since the last chunk. A single super-step can append

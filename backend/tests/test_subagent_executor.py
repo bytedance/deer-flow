@@ -803,6 +803,67 @@ class TestAsyncExecutionPath:
         assert result.error is None
 
     @pytest.mark.anyio
+    async def test_aexecute_exposes_collected_usage_before_subagent_finishes(self, classes, base_config, mock_agent, msg, monkeypatch):
+        """Polling callers can read a cumulative token snapshot while running."""
+        from deerflow.subagents import executor as executor_module
+
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentResult = classes["SubagentResult"]
+        SubagentStatus = classes["SubagentStatus"]
+        collectors = []
+        yielded = asyncio.Event()
+        release = asyncio.Event()
+
+        class Collector:
+            def __init__(self, caller):
+                self.records = []
+                collectors.append(self)
+
+            def snapshot_records(self):
+                return list(self.records)
+
+        async def streaming_agent(*args, **kwargs):
+            collectors[0].records = [
+                {
+                    "source_run_id": "subagent-llm-1",
+                    "caller": "subagent:test-agent",
+                    "input_tokens": 100,
+                    "output_tokens": 20,
+                    "total_tokens": 120,
+                }
+            ]
+            yielded.set()
+            yield {"messages": [msg.human("Task"), msg.ai("Working", "m1")]}
+            await release.wait()
+
+        monkeypatch.setattr(executor_module, "SubagentTokenCollector", Collector)
+        mock_agent.astream = streaming_agent
+        executor = SubagentExecutor(config=base_config, tools=[], thread_id="test-thread")
+        result_holder = SubagentResult(
+            task_id="task-1",
+            trace_id="trace-1",
+            status=SubagentStatus.RUNNING,
+        )
+
+        with patch.object(executor, "_create_agent", return_value=mock_agent):
+            running = asyncio.create_task(executor._aexecute("Task", result_holder=result_holder))
+            await yielded.wait()
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            assert result_holder.status == SubagentStatus.RUNNING
+            assert result_holder.token_usage_records == [
+                {
+                    "source_run_id": "subagent-llm-1",
+                    "caller": "subagent:test-agent",
+                    "input_tokens": 100,
+                    "output_tokens": 20,
+                    "total_tokens": 120,
+                }
+            ]
+            release.set()
+            await running
+
+    @pytest.mark.anyio
     async def test_aexecute_collects_ai_messages(self, classes, base_config, mock_agent, msg):
         """Test that AI messages are collected during streaming."""
         SubagentExecutor = classes["SubagentExecutor"]

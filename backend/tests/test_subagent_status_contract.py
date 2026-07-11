@@ -8,12 +8,14 @@ from pathlib import Path
 from deerflow.subagents.status_contract import (
     SUBAGENT_ERROR_KEY,
     SUBAGENT_METADATA_TEXT_MAX_CHARS,
+    SUBAGENT_MODEL_NAME_KEY,
     SUBAGENT_RESULT_BRIEF_KEY,
     SUBAGENT_RESULT_SHA256_KEY,
     SUBAGENT_STATUS_KEY,
     SUBAGENT_STATUS_VALUES,
     SUBAGENT_STOP_REASON_KEY,
     SUBAGENT_STOP_REASON_VALUES,
+    SUBAGENT_TOKEN_USAGE_KEY,
     _bound_metadata_text,
     format_subagent_result_message,
     make_subagent_additional_kwargs,
@@ -47,6 +49,22 @@ def test_stop_reason_values_match_contract():
 def test_make_subagent_additional_kwargs_includes_status():
     kwargs = make_subagent_additional_kwargs("completed")
     assert kwargs == {SUBAGENT_STATUS_KEY: "completed"}
+
+
+def test_make_subagent_additional_kwargs_carries_terminal_runtime_metadata():
+    kwargs = make_subagent_additional_kwargs(
+        "completed",
+        result="done",
+        model_name="claude-3-7-sonnet",
+        token_usage={"input_tokens": 100, "output_tokens": 20, "total_tokens": 120},
+    )
+
+    assert kwargs[SUBAGENT_MODEL_NAME_KEY] == "claude-3-7-sonnet"
+    assert kwargs[SUBAGENT_TOKEN_USAGE_KEY] == {
+        "input_tokens": 100,
+        "output_tokens": 20,
+        "total_tokens": 120,
+    }
 
 
 def test_make_subagent_additional_kwargs_includes_error_when_present():
