@@ -137,6 +137,43 @@ def test_mask_local_paths_does_not_match_inside_longer_sibling(suffix: str) -> N
         assert "/mnt/skills" not in masked
 
 
+@pytest.mark.parametrize("suffix", ["-backup/hello.py", "2/hello.py", ".old", "_tmp/x"])
+def test_mask_local_paths_does_not_match_inside_longer_acp_sibling(suffix: str) -> None:
+    """Same bug, second source: the ACP workspace has no enclosing virtual root.
+
+    ``_compiled_mask_patterns`` builds every source's matcher, so the ACP
+    workspace carried the same defect as skills -- and unlike user-data (see
+    below) nothing maps its parent, so ``/mnt/acp-workspace-backup/hello.py``
+    is unresolvable in both directions.
+    """
+    acp_host = "/home/user/.deer-flow/acp-workspace"
+    with patch("deerflow.sandbox.tools._get_acp_workspace_host_path", return_value=acp_host):
+        output = f"copied {acp_host}{suffix}"
+        masked = mask_local_paths_in_output(output, _THREAD_DATA)
+
+        assert masked == output
+        assert "/mnt/acp-workspace" not in masked
+
+
+@pytest.mark.parametrize("suffix", ["2/report.txt", ".bak/report.txt", "-old"])
+def test_mask_local_paths_user_data_sibling_is_carried_by_the_virtual_root(suffix: str) -> None:
+    """User-data siblings are benign -- and must stay that way.
+
+    ``_thread_virtual_to_actual_mappings`` also maps the virtual root
+    ``/mnt/user-data`` to the three dirs' common parent, so a sibling of
+    ``outputs`` is still *inside* a mount and has a real virtual path. Whichever
+    pattern wins -- the bare ``outputs`` base (pre-#4053) or the root (post-) --
+    the string is the same, so the boundary changes nothing here.
+
+    Green on ``main`` too: this is not a bug anchor, it guards the boundary from
+    being narrowed into one that would stop translating a mapped path.
+    """
+    masked = mask_local_paths_in_output(f"wrote /tmp/deer-flow/threads/t1/user-data/outputs{suffix}", _THREAD_DATA)
+
+    assert masked == f"wrote /mnt/user-data/outputs{suffix}"
+    assert replace_virtual_path(f"/mnt/user-data/outputs{suffix}", _THREAD_DATA) == f"/tmp/deer-flow/threads/t1/user-data/outputs{suffix}"
+
+
 @pytest.mark.parametrize(
     ("boundary", "expected"),
     [
