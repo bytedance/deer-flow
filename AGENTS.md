@@ -50,7 +50,7 @@ deer-flow/
 ├── frontend/                       # Next.js frontend (pnpm) — see frontend/AGENTS.md
 ├── docker/                         # docker-compose files, nginx config, provisioner
 ├── skills/                         # Agent skills: public/ (committed), custom/ (gitignored)
-├── contracts/                      # Cross-component JSON contracts (e.g. subagent status)
+├── contracts/                      # Cross-component JSON contracts (e.g. subagent status, skill review)
 ├── scripts/                        # Root orchestration scripts invoked by the Makefile (check, configure, doctor, support_bundle, serve, nginx, docker, deploy, setup_wizard)
 ├── tests/                          # Root-level tests (currently tests/skills/ — public skill tests)
 └── docs/                           # Cross-cutting docs, plans, and design notes
@@ -61,6 +61,14 @@ Runtime config lives at the **repo root**: copy `config.example.yaml` → `confi
 servers + skills). Both real files are gitignored and may be edited at runtime via the
 Gateway API. Config schema and resolution order are documented in
 [backend/AGENTS.md](backend/AGENTS.md).
+
+Skill quality review note:
+- `skills/public/skill-reviewer/` is the built-in read-only skill quality reviewer.
+  It uses the harness-layer `review_skill_package` tool and contracts in
+  `contracts/skill_review/`. Model-visible review data is compact and
+  tag-neutralized; full raw payloads stay in tool artifacts. See
+  [backend/AGENTS.md](backend/AGENTS.md) for the non-activation, SkillScan, and
+  `skill-creator` ownership boundaries.
 
 Scheduled-task note:
 - The scheduled-task MVP adds a workspace page at `/workspace/scheduled-tasks` plus a background scheduler service gated by `config.yaml -> scheduler.enabled`.

@@ -47,7 +47,7 @@ from deerflow.persistence.migrations._helpers import _normalize_default
 asyncio_test = pytest.mark.asyncio
 
 
-HEAD = "0003_scheduled_tasks"
+HEAD = "0004_run_ownership"
 BASELINE = "0001_baseline"
 
 
@@ -72,6 +72,11 @@ async def _runs_column_meta(engine, column_name: str) -> dict:
         if c["name"] == column_name:
             return c
     raise AssertionError(f"column {column_name!r} not found in runs")
+
+
+async def _runs_index_names(engine) -> set[str]:
+    async with engine.connect() as conn:
+        return await conn.run_sync(lambda c: {ix["name"] for ix in sa.inspect(c).get_indexes("runs")})
 
 
 async def _alembic_version(engine) -> str | None:
@@ -142,6 +147,12 @@ async def test_empty_branch_creates_all_and_stamps_head(tmp_path: Path) -> None:
             assert required in tables, f"missing table: {required}"
         assert "token_usage_by_model" in await _runs_columns(engine)
         assert await _alembic_version(engine) == HEAD
+        # The partial unique index on (thread_id WHERE status IN pending/running)
+        # must exist on a fresh DB because the empty-branch stamps head without
+        # running migrations, so the index has to come from ``Base.metadata``.
+        indexes = await _runs_index_names(engine)
+        assert "uq_runs_thread_active" in indexes, indexes
+        assert "ix_runs_lease" in indexes, indexes
     finally:
         await engine.dispose()
 

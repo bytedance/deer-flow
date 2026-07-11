@@ -25,6 +25,8 @@ from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
 
 from deerflow.utils.messages import message_content_to_text
 
+from .status_contract import normalize_token_usage
+
 #: Default per-step character cap for the ``text`` field. Tool outputs (web
 #: search results, file contents) can be large; this cap bounds the persisted
 #: run-event row and the streamed frame. It only affects display/storage — the
@@ -223,6 +225,12 @@ def subagent_run_event(chunk: Any) -> dict[str, Any] | None:
     status = _TERMINAL_EVENT_STATUS.get(event)
     if status is not None:
         content: dict[str, Any] = {"task_id": task_id, "status": status}
+        model_name = chunk.get("model_name")
+        if isinstance(model_name, str) and model_name.strip():
+            content["model_name"] = model_name.strip()
+        usage = normalize_token_usage(chunk.get("usage"))
+        if usage is not None:
+            content["usage"] = usage
         # The final result/error can be a multi-page report; cap it so the
         # persisted run-event row stays bounded (it is also kept verbatim on the
         # terminal ToolMessage, which the card reads separately).

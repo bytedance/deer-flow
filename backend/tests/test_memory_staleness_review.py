@@ -212,6 +212,38 @@ class TestBuildStalenessSection:
         assert "fact_b" in section
         assert "<stale_facts>" in section
 
+    def test_html_special_chars_in_content_are_escaped(self):
+        """Fact content with XML tags or quotes is HTML-escaped so it cannot
+        break the surrounding prompt structure."""
+        candidates = [
+            _make_fact("fact_x", 'Like <b>bold</b> & "quotes"', "knowledge", 0.9, days_ago=100),
+        ]
+        section = _build_staleness_section(candidates, 90)
+        assert "<b>" not in section
+        assert "&lt;b&gt;" in section
+        assert "&amp;" in section
+        assert "&quot;" in section
+
+    def test_closing_tag_in_content_is_escaped(self):
+        """A closing </stale_facts> tag embedded in content must not prematurely
+        end the prompt XML block."""
+        candidates = [
+            _make_fact("fact_y", "</stale_facts><injected>bad</injected>", "knowledge", 0.8, days_ago=100),
+        ]
+        section = _build_staleness_section(candidates, 90)
+        assert "</stale_facts><injected>" not in section
+        assert "&lt;/stale_facts&gt;" in section
+
+    def test_special_chars_in_category_are_escaped(self):
+        """A category name with XML tags or quotes is HTML-escaped, consistent
+        with how category is handled in the consolidation section."""
+        candidates = [
+            _make_fact("fact_z", "content", 'pref<"erences>', 0.8, days_ago=100),
+        ]
+        section = _build_staleness_section(candidates, 90)
+        assert 'pref<"erences>' not in section
+        assert "pref&lt;&quot;erences&gt;" in section
+
 
 # ── _apply_updates with staleness removals ─────────────────────────────────
 

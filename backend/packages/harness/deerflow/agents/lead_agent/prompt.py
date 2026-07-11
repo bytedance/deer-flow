@@ -538,6 +538,8 @@ You: "Deploying to staging..." [proceed]
 </clarification_system>
 
 {skills_section}
+{memory_tool_section}
+
 
 {deferred_tools_section}
 
@@ -896,6 +898,33 @@ def _build_custom_mounts_section(*, app_config: AppConfig | None = None) -> str:
     return f"\n**Custom Mounted Directories:**\n{mounts_list}\n- If the user needs files outside `/mnt/user-data`, use these absolute container paths directly when they match the requested directory"
 
 
+def _build_memory_tool_section(*, app_config: AppConfig | None = None) -> str:
+    """Build tool-mode memory guidance for the static system prompt."""
+    try:
+        if app_config is None:
+            from deerflow.config.memory_config import get_memory_config
+
+            memory_config = get_memory_config()
+        else:
+            memory_config = app_config.memory
+
+        from deerflow.config.memory_config import should_use_memory_tools
+
+        if not should_use_memory_tools(memory_config):
+            return ""
+    except Exception:
+        logger.exception("Failed to build memory tool prompt section")
+        return ""
+
+    return """<memory_tool_system>
+Memory is running in tool mode. Use the injected <memory> block as current context, and use the memory tools to keep durable user memory accurate:
+- Call `memory_search` before relying on memory that may be absent, stale, or too broad for the injected context.
+- Call `memory_add` only for stable facts useful in future sessions: explicit user preferences, corrections, personal/work context, or durable project context.
+- Call `memory_update` when an existing fact is outdated or imprecise; prefer updating over adding a near-duplicate.
+- Call `memory_delete` only when a fact is clearly wrong or no longer relevant.
+</memory_tool_system>"""
+
+
 def apply_prompt_template(
     subagent_enabled: bool = False,
     max_concurrent_subagents: int = 3,
@@ -954,6 +983,8 @@ def apply_prompt_template(
         else "- Skill First: Always load the relevant skill before starting **complex** tasks.\n"
     )
 
+    memory_tool_section = _build_memory_tool_section(app_config=app_config)
+
     # Build and return the fully static system prompt.
     # Memory and current date are injected per-turn via DynamicContextMiddleware
     # as a <system-reminder> in the first HumanMessage, keeping this prompt
@@ -966,6 +997,7 @@ def apply_prompt_template(
         deferred_tools_section=deferred_tools_section,
         mcp_routing_hints_section=mcp_routing_hints_section,
         subagent_section=subagent_section,
+        memory_tool_section=memory_tool_section,
         subagent_reminder=subagent_reminder,
         skill_first_reminder=skill_first_reminder,
         subagent_thinking=subagent_thinking,

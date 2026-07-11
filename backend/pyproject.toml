@@ -33,6 +33,7 @@ monocle = ["deerflow-harness[monocle]"]
 [dependency-groups]
 dev = [
     "blockbuster>=1.5.26,<1.6",
+    "jsonschema>=4.26.0",
     "prompt-toolkit>=3.0.0",
     "pytest>=9.0.3",
     "pytest-asyncio>=1.3.0",

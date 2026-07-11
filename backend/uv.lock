@@ -812,6 +812,7 @@ redis = [
 [package.dev-dependencies]
 dev = [
     { name = "blockbuster" },
+    { name = "jsonschema" },
     { name = "monocle-apptrace" },
     { name = "prompt-toolkit" },
     { name = "pytest" },
@@ -850,6 +851,7 @@ provides-extras = ["postgres", "redis", "discord", "monocle"]
 [package.metadata.requires-dev]
 dev = [
     { name = "blockbuster", specifier = ">=1.5.26,<1.6" },
+    { name = "jsonschema", specifier = ">=4.26.0" },
     { name = "monocle-apptrace", specifier = ">=0.8.8" },
     { name = "prompt-toolkit", specifier = ">=3.0.0" },
     { name = "pytest", specifier = ">=9.0.3" },
