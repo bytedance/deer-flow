@@ -239,7 +239,11 @@ class DanglingToolCallMiddleware(AgentMiddleware[AgentState]):
         patched: list = []
         patch_count = 0
         for msg in messages:
-            if isinstance(msg, ToolMessage) and msg.tool_call_id in tool_call_ids:
+            if isinstance(msg, ToolMessage):
+                if msg.tool_call_id in tool_call_ids:
+                    continue  # Will be re-emitted after its AIMessage
+                # Orphan: no matching AIMessage tool_call — drop it
+                logger.debug("Dropping orphan ToolMessage tool_call_id=%s", msg.tool_call_id)
                 continue
 
             sanitized_msg = self._sanitize_ai_message_tool_names(msg)
