@@ -19,12 +19,13 @@ the streaming and persistence call sites share one definition of a "step".
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
 from typing import Any
 
 from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
 
 from deerflow.utils.messages import message_content_to_text
+
+from .status_contract import normalize_token_usage
 
 #: Default per-step character cap for the ``text`` field. Tool outputs (web
 #: search results, file contents) can be large; this cap bounds the persisted
@@ -227,7 +228,7 @@ def subagent_run_event(chunk: Any) -> dict[str, Any] | None:
         model_name = chunk.get("model_name")
         if isinstance(model_name, str) and model_name.strip():
             content["model_name"] = model_name.strip()
-        usage = _normalized_usage(chunk.get("usage"))
+        usage = normalize_token_usage(chunk.get("usage"))
         if usage is not None:
             content["usage"] = usage
         # The final result/error can be a multi-page report; cap it so the
@@ -251,15 +252,3 @@ def subagent_run_event(chunk: Any) -> dict[str, Any] | None:
         }
 
     return None
-
-
-def _normalized_usage(value: Any) -> dict[str, int] | None:
-    if not isinstance(value, Mapping):
-        return None
-    normalized: dict[str, int] = {}
-    for key in ("input_tokens", "output_tokens", "total_tokens"):
-        amount = value.get(key)
-        if isinstance(amount, bool) or not isinstance(amount, int) or amount < 0:
-            return None
-        normalized[key] = amount
-    return normalized

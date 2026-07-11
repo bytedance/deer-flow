@@ -1,3 +1,5 @@
+import { normalizeTokenUsage } from "../messages/usage";
+
 import type { Subtask } from "./types";
 
 type TaskStartedEvent = {
@@ -40,7 +42,7 @@ export function taskEventToSubtaskUpdate(
 
   if (event.type === "task_running") {
     const running = event as TaskRunningEvent;
-    const usage = normalizeUsage(running.usage);
+    const usage = normalizeTokenUsage(running.usage);
     const modelName = normalizeModelName(running.model_name);
     return usage || modelName
       ? {
@@ -56,29 +58,6 @@ export function taskEventToSubtaskUpdate(
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
-}
-
-function normalizeUsage(value: unknown) {
-  if (!isRecord(value)) {
-    return undefined;
-  }
-  const inputTokens = nonNegativeNumber(value.input_tokens);
-  const outputTokens = nonNegativeNumber(value.output_tokens);
-  const totalTokens = nonNegativeNumber(value.total_tokens);
-  if (
-    inputTokens === undefined ||
-    outputTokens === undefined ||
-    totalTokens === undefined
-  ) {
-    return undefined;
-  }
-  return { inputTokens, outputTokens, totalTokens };
-}
-
-function nonNegativeNumber(value: unknown): number | undefined {
-  return typeof value === "number" && Number.isFinite(value) && value >= 0
-    ? value
-    : undefined;
 }
 
 function normalizeModelName(value: unknown): string | undefined {

@@ -1017,25 +1017,20 @@ export function useThreadStream({
       }
     },
     onCustomEvent(event: unknown) {
+      // Narrow `event.type` once; taskEventToSubtaskUpdate already validated the
+      // task_* events, so the per-branch re-narrowing below reads this single
+      // source of truth instead of re-checking the object shape each time.
+      const eventType =
+        typeof event === "object" && event !== null && "type" in event
+          ? (event as { type: unknown }).type
+          : undefined;
+
       const taskUpdate = taskEventToSubtaskUpdate(event);
       if (taskUpdate) {
         updateSubtask(taskUpdate);
-        if (
-          typeof event === "object" &&
-          event !== null &&
-          "type" in event &&
-          event.type === "task_started"
-        ) {
-          return;
-        }
       }
 
-      if (
-        typeof event === "object" &&
-        event !== null &&
-        "type" in event &&
-        event.type === "task_running"
-      ) {
+      if (eventType === "task_running") {
         const e = event as {
           type: "task_running";
           task_id: string;
@@ -1053,17 +1048,11 @@ export function useThreadStream({
         return;
       }
 
-      if (
-        typeof event === "object" &&
-        event !== null &&
-        "type" in event &&
-        event.type === "llm_retry" &&
-        "message" in event &&
-        typeof event.message === "string" &&
-        event.message.trim()
-      ) {
-        const e = event as { type: "llm_retry"; message: string };
-        toast(e.message);
+      if (eventType === "llm_retry") {
+        const e = event as { type: "llm_retry"; message?: unknown };
+        if (typeof e.message === "string" && e.message.trim()) {
+          toast(e.message);
+        }
       }
     },
     onError(error) {

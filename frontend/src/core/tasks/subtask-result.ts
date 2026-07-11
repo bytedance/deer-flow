@@ -1,5 +1,7 @@
 import type { Message } from "@langchain/langgraph-sdk";
 
+import { normalizeTokenUsage } from "../messages/usage";
+
 import type { Subtask } from "./types";
 
 export type SubtaskStatus = Subtask["status"];
@@ -265,26 +267,5 @@ function readStructuredModelName(
 function readStructuredTokenUsage(
   additionalKwargs: Record<string, unknown> | null | undefined,
 ): Subtask["usage"] | undefined {
-  const value = additionalKwargs?.[SUBAGENT_TOKEN_USAGE_KEY];
-  if (!value || typeof value !== "object") {
-    return undefined;
-  }
-  const record = value as Record<string, unknown>;
-  const inputTokens = nonNegativeNumber(record.input_tokens);
-  const outputTokens = nonNegativeNumber(record.output_tokens);
-  const totalTokens = nonNegativeNumber(record.total_tokens);
-  if (
-    inputTokens === undefined ||
-    outputTokens === undefined ||
-    totalTokens === undefined
-  ) {
-    return undefined;
-  }
-  return { inputTokens, outputTokens, totalTokens };
-}
-
-function nonNegativeNumber(value: unknown): number | undefined {
-  return typeof value === "number" && Number.isFinite(value) && value >= 0
-    ? value
-    : undefined;
+  return normalizeTokenUsage(additionalKwargs?.[SUBAGENT_TOKEN_USAGE_KEY]);
 }

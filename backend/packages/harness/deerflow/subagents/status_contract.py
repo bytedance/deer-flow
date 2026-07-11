@@ -29,7 +29,7 @@ from __future__ import annotations
 import hashlib
 import re
 from collections.abc import Mapping
-from typing import Literal, NotRequired, TypedDict
+from typing import Any, Literal, NotRequired, TypedDict
 
 SUBAGENT_STATUS_KEY = "subagent_status"
 SUBAGENT_STOP_REASON_KEY = "subagent_stop_reason"
@@ -165,23 +165,31 @@ def make_subagent_additional_kwargs(
         payload[SUBAGENT_STOP_REASON_KEY] = stop_reason
     if isinstance(model_name, str) and model_name.strip():
         payload[SUBAGENT_MODEL_NAME_KEY] = model_name.strip()
-    normalized_usage = _normalize_token_usage(token_usage)
+    normalized_usage = normalize_token_usage(token_usage)
     if normalized_usage is not None:
         payload[SUBAGENT_TOKEN_USAGE_KEY] = normalized_usage
     return payload
 
 
-def _normalize_token_usage(
-    token_usage: Mapping[str, object] | None,
-) -> dict[str, int] | None:
-    if token_usage is None:
+def normalize_token_usage(value: Any) -> dict[str, int] | None:
+    """Validate a cumulative token-usage mapping into the contract shape.
+
+    The single shared validator for both metadata surfaces — the terminal
+    ``ToolMessage`` metadata (here) and the persisted ``subagent.step`` /
+    ``subagent.end`` run events (``step_events.py``). Keeping one function
+    prevents the two from drifting (e.g. one later accepting an extra token
+    field the other rejects, silently dropping usage on one path). Requires
+    non-negative ``int`` values for all three keys — ``bool`` is rejected — and
+    returns ``None`` for any non-mapping or malformed input.
+    """
+    if not isinstance(value, Mapping):
         return None
     normalized: dict[str, int] = {}
     for key in ("input_tokens", "output_tokens", "total_tokens"):
-        value = token_usage.get(key)
-        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        amount = value.get(key)
+        if isinstance(amount, bool) or not isinstance(amount, int) or amount < 0:
             return None
-        normalized[key] = value
+        normalized[key] = amount
     return normalized
 
 
