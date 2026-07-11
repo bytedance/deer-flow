@@ -658,6 +658,15 @@ def _call_shell_may_be_true(node: ast.Call) -> bool:
     # explicit ``shell=True`` rather than silently falling through to the
     # non-blocking ``python-subprocess`` classification.
     for keyword in node.keywords:
+        if keyword.arg is None:
+            # ``**mapping`` / ``**kwargs`` unpacking: represented in the AST as a
+            # keyword with ``arg is None``. The mapping's contents (and whether it
+            # even carries a ``shell`` key) are not knowable by static analysis, so
+            # this fails closed the same as a variable/expression shell= value.
+            # Deliberate, documented over-block: a harmless kwargs-unpack with no
+            # ``shell`` key also blocks, since the alternative (inspecting the
+            # unpacked mapping's contents) is not generally possible statically.
+            return True
         if keyword.arg == "shell":
             return not (isinstance(keyword.value, ast.Constant) and keyword.value.value is False)
     return False
