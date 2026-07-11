@@ -73,4 +73,51 @@ describe("artifact URL helpers", () => {
       resolveArtifactURL("/mnt/user-data/outputs/style.css", "thread-1"),
     ).toBe("/demo/threads/thread-1/user-data/outputs/style.css");
   });
+
+  test("resolves a relative message image when it uniquely matches an artifact", async () => {
+    const { resolveMessageImageURL } = await loadFreshArtifactUtils();
+    const artifacts = [
+      "/mnt/user-data/outputs/aws-agent-overview.png",
+      "/mnt/user-data/outputs/aws-agent-console-config.png",
+    ];
+
+    expect(
+      resolveMessageImageURL("aws-agent-overview.png", "thread-1", artifacts),
+    ).toBe(
+      "/api/threads/thread-1/artifacts/mnt/user-data/outputs/aws-agent-overview.png",
+    );
+    expect(
+      resolveMessageImageURL(
+        "./aws-agent-overview.png#detail",
+        "thread-1",
+        artifacts,
+      ),
+    ).toBe(
+      "/api/threads/thread-1/artifacts/mnt/user-data/outputs/aws-agent-overview.png#detail",
+    );
+  });
+
+  test("does not rewrite unregistered, ambiguous, or external message images", async () => {
+    const { resolveMessageImageURL } = await loadFreshArtifactUtils();
+
+    expect(resolveMessageImageURL("missing.png", "thread-1", [])).toBe(
+      "missing.png",
+    );
+    expect(
+      resolveMessageImageURL("shared.png", "thread-1", [
+        "/mnt/user-data/outputs/first/shared.png",
+        "/mnt/user-data/outputs/second/shared.png",
+      ]),
+    ).toBe("shared.png");
+    expect(
+      resolveMessageImageURL("../etc/secret.png", "thread-1", [
+        "/mnt/user-data/outputs/secret.png",
+      ]),
+    ).toBe("../etc/secret.png");
+    expect(
+      resolveMessageImageURL("https://example.com/image.png", "thread-1", [
+        "/mnt/user-data/outputs/image.png",
+      ]),
+    ).toBe("https://example.com/image.png");
+  });
 });
