@@ -122,6 +122,24 @@ export const enUS: Translations = {
     inputPolishFailed: "Failed to polish input.",
     inputPolishUndo: "Undo polish",
     inputPolishCancel: "Cancel polishing",
+    voiceInputStartLabel: "Dictate with voice",
+    voiceInputStopLabel: "Stop voice input",
+    voiceInputStart:
+      "Dictate with voice. DeerFlow receives only transcribed text; audio is handled by your browser or system speech service.",
+    voiceInputStop: "Stop voice input",
+    voiceInputListening: "Listening... Click to stop voice input.",
+    voiceInputUnsupported:
+      "Voice input is not supported in this browser. Try Chrome or Edge.",
+    voiceInputPermissionDenied:
+      "Microphone access was denied. Allow microphone access and try again.",
+    voiceInputMicrophoneUnavailable:
+      "No microphone was detected. Check your device input and try again.",
+    voiceInputUnsupportedLanguage:
+      "Voice input does not support the current language in this browser.",
+    voiceInputNetworkError:
+      "Voice input could not reach the browser speech service.",
+    voiceInputNoSpeech: "No speech was detected. Please try again.",
+    voiceInputFailed: "Voice input failed. Please try again.",
     mode: "Mode",
     flashMode: "Flash",
     flashModeDescription: "Fast and efficient, but may not be accurate",
