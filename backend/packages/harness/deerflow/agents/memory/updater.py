@@ -658,6 +658,34 @@ def _build_consolidation_section(
     return CONSOLIDATION_PROMPT.format(consolidation_groups="\n\n".join(parts), max_groups=max_groups)
 
 
+def _escape_memory_for_prompt(memory: Any) -> Any:
+    """Return a copy of ``memory`` with every string leaf HTML-escaped.
+
+    ``MEMORY_UPDATE_PROMPT`` embeds the full memory state as a ``json.dumps``
+    blob inside a ``<current_memory>...</current_memory>`` block. ``json.dumps``
+    escapes ``"`` and ``\\`` but leaves ``<``, ``>`` and ``&`` intact, so a
+    user-influenced field — e.g. a fact ``content`` of
+    ``</current_memory><evil>...`` — would otherwise reach the model verbatim
+    and break out of the block (prompt injection, #4044).
+
+    Escaping each string *value* before serialization (rather than the
+    serialized blob) cannot corrupt the JSON structure, because ``json.dumps``
+    re-quotes the already-safe values. Escaping every leaf — not just known
+    fields — guarantees no current or future user-influenced field can carry a
+    raw ``<``/``>``/``&``; controlled fields such as ids and timestamps contain
+    none of those characters, so escaping them is a harmless no-op. This mirrors
+    the ``html.escape`` treatment already applied to the staleness and
+    consolidation sections (#4028).
+    """
+    if isinstance(memory, str):
+        return html.escape(memory)
+    if isinstance(memory, dict):
+        return {key: _escape_memory_for_prompt(value) for key, value in memory.items()}
+    if isinstance(memory, list):
+        return [_escape_memory_for_prompt(item) for item in memory]
+    return memory
+
+
 class MemoryUpdater:
     """Updates memory using LLM based on conversation context."""
 
@@ -747,10 +775,14 @@ class MemoryUpdater:
                     max_sources=config.consolidation_max_sources,
                 )
 
-        # conscious accept: json.dumps leaves < > & unescaped in fact content (tracked in #4044);
-        # lower-risk than staleness/consolidation — read-only context, not delete/merge instructions.
+        # HTML-escape user-influenced string values before embedding the memory
+        # state as a JSON blob inside <current_memory>...</current_memory>, so a
+        # fact/summary containing </current_memory> cannot break out of the block
+        # (prompt injection, #4044). Escaping values — not the serialized blob —
+        # keeps the JSON well-formed because json.dumps re-quotes safe values.
+        # The unescaped current_memory is returned unchanged for the apply path.
         prompt = MEMORY_UPDATE_PROMPT.format(
-            current_memory=json.dumps(current_memory, indent=2, ensure_ascii=False),
+            current_memory=json.dumps(_escape_memory_for_prompt(current_memory), indent=2, ensure_ascii=False),
             conversation=conversation_text,
             correction_hint=correction_hint,
             staleness_review_section=staleness_section,
