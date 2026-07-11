@@ -321,6 +321,14 @@ class DbRunEventStore(RunEventStore):
             if count > 0:
                 await session.execute(delete(RunEventRow).where(*count_conditions))
                 await session.commit()
+            # Evict the per-thread seq-assignment lock so ``_write_locks`` does
+            # not grow unbounded over the (long-lived, singleton) store's
+            # lifetime. Only pop when no writer is mid-flight; a later write
+            # recreates the lock lazily and seq restarts correctly from the
+            # now-deleted thread.
+            lock = self._write_locks.get(thread_id)
+            if lock is not None and not lock.locked():
+                self._write_locks.pop(thread_id, None)
             return count
 
     async def delete_by_run(
