@@ -4,6 +4,7 @@ import asyncio
 import atexit
 import concurrent.futures
 import copy
+import html
 import json
 import logging
 import math
@@ -515,11 +516,11 @@ def _build_staleness_section(
     lines: list[str] = []
     for fact in stale_candidates:
         fid = fact.get("id", "?")
-        cat = str(fact.get("category", "context")).strip() or "context"
+        cat = html.escape(str(fact.get("category", "context")).strip() or "context")
         conf = fact.get("confidence", 0.0)
         created_raw = fact.get("createdAt", "")
         created_short = created_raw[:10] if isinstance(created_raw, str) and len(created_raw) >= 10 else created_raw
-        content = str(fact.get("content", ""))
+        content = html.escape(str(fact.get("content", "")))
         lines.append(f'- [{fid} | {cat} | {conf:.2f} | {created_short}] "{content}"')
     return STALENESS_REVIEW_PROMPT.format(
         stale_facts="\n".join(lines),
@@ -575,10 +576,10 @@ def _build_consolidation_section(
         for fact in group[:max_sources]:
             fid = fact.get("id", "?")
             conf = _coerce_source_confidence(fact)
-            content = str(fact.get("content", ""))
+            content = html.escape(str(fact.get("content", "")))
             lines.append(f'- [{fid} | {conf:.2f}] "{content}"')
         shown = min(len(group), max_sources)
-        parts.append(f'<consolidation_candidates category="{cat}" count="{shown}">\n' + "\n".join(lines) + "\n</consolidation_candidates>")
+        parts.append(f'<consolidation_candidates category="{html.escape(cat)}" count="{shown}">\n' + "\n".join(lines) + "\n</consolidation_candidates>")
     return CONSOLIDATION_PROMPT.format(consolidation_groups="\n\n".join(parts), max_groups=max_groups)
 
 
@@ -671,6 +672,8 @@ class MemoryUpdater:
                     max_sources=config.consolidation_max_sources,
                 )
 
+        # conscious accept: json.dumps leaves < > & unescaped in fact content (tracked in #4044);
+        # lower-risk than staleness/consolidation — read-only context, not delete/merge instructions.
         prompt = MEMORY_UPDATE_PROMPT.format(
             current_memory=json.dumps(current_memory, indent=2, ensure_ascii=False),
             conversation=conversation_text,
