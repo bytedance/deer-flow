@@ -20,6 +20,7 @@ on:
       - "deploy/helm/deer-flow/**"
       - "config.example.yaml"
       - ".github/workflows/chart.yaml"
+      - "scripts/check_config_version.sh"
 
 jobs:
   validate-chart:
@@ -47,22 +48,10 @@ jobs:
       # never warns) but means the chart's config is authored against an older
       # schema. Bump it in values.yaml and the README example. config_version
       # gates no runtime behavior - it only drives the outdated-warning - so a
-      # bare version bump needs no field changes.
+      # bare version bump needs no field changes. Logic lives in
+      # scripts/check_config_version.sh (shared with nightly.yaml).
       - name: config_version drift check
-        run: |
-          set -eu
-          example=$(grep -E '^config_version:[[:space:]]+[0-9]+' config.example.yaml | head -1 | awk '{print $2}')
-          chart=$(awk '/^config:[[:space:]]*\|/{f=1; next} f && /^[[:space:]]+config_version:[[:space:]]+[0-9]+/ {print $2; exit}' deploy/helm/deer-flow/values.yaml)
-          echo "config.example.yaml config_version=$example"
-          echo "chart values.yaml     config_version=$chart"
-          if [ -z "$example" ] || [ -z "$chart" ]; then
-            echo "::error::could not parse config_version from one of the files"
-            exit 1
-          fi
-          if [ "$chart" -lt "$example" ]; then
-            echo "::error::chart config_version ($chart) is behind config.example.yaml ($example). Bump 'config_version' in deploy/helm/deer-flow/values.yaml (and the README example) to $example."
-            exit 1
-          fi
+        run: bash scripts/check_config_version.sh
 
   verify-versions:
     # Gate the release: every version source must match the v* tag. A forgotten
