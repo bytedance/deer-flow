@@ -1205,3 +1205,36 @@ class TestFromConfig:
         queued = mw._pending_warnings.get(_pending_key(), [])
         assert queued
         assert "LOOP DETECTED" in queued[0]
+
+    def test_freq_window_sized_to_hard_limit_under_defaults(self):
+        """Regression for #4072: the Layer-2 frequency window must be >= the
+        largest threshold, or the warn/hard branches are dead code. With the
+        shipped defaults (window 20 < warn 30 < hard 50) the freq deque must be
+        sized to 50, not 20."""
+        mw = LoopDetectionMiddleware.from_config(self._config())
+        assert mw._tool_freq_window >= mw.tool_freq_hard_limit
+        assert mw._tool_freq_window >= mw.tool_freq_warn
+
+    def test_freq_window_covers_largest_override_hard_limit(self):
+        mw = LoopDetectionMiddleware.from_config(self._config(tool_freq_overrides={"bash": {"warn": 60, "hard_limit": 120}}))
+        assert mw._tool_freq_window >= 120
+
+    def test_tight_burst_hard_stops_under_default_config(self):
+        """Under the real default config, one tool type called many times with
+        *distinct* args (which Layer 1's name+args hash never catches) must still
+        be hard-stopped by Layer 2. This fails if the freq window is capped at
+        ``window_size`` (20) below the hard limit (50)."""
+        mw = LoopDetectionMiddleware.from_config(self._config())
+        runtime = _make_runtime()
+        hard = mw.tool_freq_hard_limit  # 50 by default
+
+        # Distinct args every call -> unique hashes -> Layer 1 (hash) never trips.
+        # Only Layer 2 (per-tool-type frequency) can catch this tight burst.
+        for i in range(hard - 1):
+            result = mw._apply(_make_state(tool_calls=[_bash_call(f"cmd_{i}")]), runtime)
+            assert result is None, f"unexpected hard stop before the limit at call {i}"
+
+        # The call that pushes freq_count to the hard limit fires the stop.
+        result = mw._apply(_make_state(tool_calls=[_bash_call(f"cmd_{hard}")]), runtime)
+        assert result is not None
+        assert mw.consume_stop_reason("test-run") == "loop_capped"

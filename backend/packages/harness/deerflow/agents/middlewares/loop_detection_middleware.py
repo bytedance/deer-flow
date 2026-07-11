@@ -233,6 +233,22 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
         self.tool_freq_warn = tool_freq_warn
         self.tool_freq_hard_limit = tool_freq_hard_limit
         self._tool_freq_overrides: dict[str, tuple[int, int]] = tool_freq_overrides or {}
+        # Layer 2's windowed frequency count can never exceed the deque length,
+        # so the deque MUST be at least as long as the largest hard limit it is
+        # compared against — otherwise the hard-stop branch is dead code. Do NOT
+        # reuse Layer 1's ``window_size`` (which is unrelated and defaults below
+        # the freq thresholds, e.g. 20 < hard 50); size the frequency window to
+        # the largest hard limit in play (global + every per-tool override) so a
+        # tight burst can actually reach it while spread-out calls still decay
+        # out of the window. Warn thresholds are intentionally excluded: a sane
+        # config has warn <= hard (covered by sizing to hard), and a misconfig
+        # with warn > hard would hard-stop first anyway, so an unreachable warn
+        # is harmless and must not inflate the window.
+        self._tool_freq_window = max(
+            self.window_size,
+            self.tool_freq_hard_limit,
+            *(hard for _, hard in self._tool_freq_overrides.values()),
+        )
         self._lock = threading.Lock()
         self._history: OrderedDict[str, list[str]] = OrderedDict()
         self._warned: dict[str, set[str]] = defaultdict(set)
@@ -463,10 +479,12 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
                 name = tc.get("name", "")
                 if not name:
                     continue
-                # Windowed counting: append the name and trim to window_size so
-                # the frequency decays instead of accumulating forever.
+                # Windowed counting: append the name and trim to the frequency
+                # window (>= the largest threshold) so the count can reach the
+                # warn/hard limits on a tight burst yet still decay for
+                # spread-out calls.
                 tool_name_history.append(name)
-                while len(tool_name_history) > self.window_size:
+                while len(tool_name_history) > self._tool_freq_window:
                     tool_name_history.popleft()
                 freq_count = sum(1 for n in tool_name_history if n == name)
 
