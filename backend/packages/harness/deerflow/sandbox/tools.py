@@ -1994,8 +1994,17 @@ def read_file_tool(
         content = read_current_file_content(runtime, path)
         if not content:
             return "(empty)"
-        if start_line is not None and end_line is not None:
-            content = "\n".join(content.splitlines()[start_line - 1 : end_line])
+        if start_line is not None or end_line is not None:
+            lines = content.splitlines()
+            s = max(start_line, 1) if start_line is not None else 1
+            e = end_line if end_line is not None else len(lines)
+            if e < 1:
+                return "(end_line must be >= 1)"
+            if s > len(lines):
+                return "(start_line exceeds file length)"
+            if s > e:
+                return "(start_line > end_line — no lines in range)"
+            content = "\n".join(lines[s - 1 : e])
         try:
             from deerflow.config.app_config import get_app_config
 
