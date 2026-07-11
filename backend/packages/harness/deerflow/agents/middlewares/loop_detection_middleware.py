@@ -55,7 +55,7 @@ import hashlib
 import json
 import logging
 import threading
-from collections import OrderedDict, defaultdict
+from collections import OrderedDict, defaultdict, deque
 from collections.abc import Awaitable, Callable
 from copy import deepcopy
 from typing import TYPE_CHECKING, override
@@ -236,7 +236,14 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
         self._lock = threading.Lock()
         self._history: OrderedDict[str, list[str]] = OrderedDict()
         self._warned: dict[str, set[str]] = defaultdict(set)
-        self._tool_freq: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+        # Windowed per-tool-type frequency: recent tool names per thread,
+        # trimmed to ``window_size`` so the count decays instead of growing
+        # monotonically (replaces the old monotonic ``_tool_freq`` integer).
+        self._tool_name_history: dict[str, deque[str]] = {}
+        # Per-thread set of tool names already warned about in Layer 2, so a
+        # frequency warning is enqueued once rather than on every subsequent
+        # call. Cleared per name when the windowed count decays back below the
+        # warn threshold, mirroring the hash-layer ``_warned`` pruning.
         self._tool_freq_warned: dict[str, set[str]] = defaultdict(set)
         # Per-thread/run queue of warnings to inject at the next model call.
         # Populated by ``after_model`` (detection) and drained by
@@ -325,7 +332,7 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
         while len(self._history) > self.max_tracked_threads:
             evicted_id, _ = self._history.popitem(last=False)
             self._warned.pop(evicted_id, None)
-            self._tool_freq.pop(evicted_id, None)
+            self._tool_name_history.pop(evicted_id, None)
             self._tool_freq_warned.pop(evicted_id, None)
             for key in list(self._pending_warnings):
                 if key[0] == evicted_id:
@@ -450,44 +457,52 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
                     )
                     return _WARNING_MSG, False
 
-            # --- Layer 2: per-tool-type frequency ---
-            freq = self._tool_freq[thread_id]
+            # --- Layer 2: per-tool-type frequency (windowed) ---
+            tool_name_history = self._tool_name_history.setdefault(thread_id, deque())
             for tc in tool_calls:
                 name = tc.get("name", "")
                 if not name:
                     continue
-                freq[name] += 1
-                tc_count = freq[name]
+                # Windowed counting: append the name and trim to window_size so
+                # the frequency decays instead of accumulating forever.
+                tool_name_history.append(name)
+                while len(tool_name_history) > self.window_size:
+                    tool_name_history.popleft()
+                freq_count = sum(1 for n in tool_name_history if n == name)
 
                 if name in self._tool_freq_overrides:
                     eff_warn, eff_hard = self._tool_freq_overrides[name]
                 else:
                     eff_warn, eff_hard = self.tool_freq_warn, self.tool_freq_hard_limit
 
-                if tc_count >= eff_hard:
+                if freq_count >= eff_hard:
                     logger.error(
                         "Tool frequency hard limit reached — forcing stop",
                         extra={
                             "thread_id": thread_id,
                             "tool_name": name,
-                            "count": tc_count,
+                            "count": freq_count,
                         },
                     )
-                    return _TOOL_FREQ_HARD_STOP_MSG.format(tool_name=name, count=tc_count), True
+                    return _TOOL_FREQ_HARD_STOP_MSG.format(tool_name=name, count=freq_count), True
 
-                if tc_count >= eff_warn:
-                    warned = self._tool_freq_warned[thread_id]
-                    if name not in warned:
-                        warned.add(name)
+                if freq_count >= eff_warn:
+                    freq_warned = self._tool_freq_warned[thread_id]
+                    if name not in freq_warned:
+                        freq_warned.add(name)
                         logger.warning(
                             "Tool frequency warning — too many calls to same tool type",
                             extra={
                                 "thread_id": thread_id,
                                 "tool_name": name,
-                                "count": tc_count,
+                                "count": freq_count,
                             },
                         )
-                        return _TOOL_FREQ_WARNING_MSG.format(tool_name=name, count=tc_count), False
+                        return _TOOL_FREQ_WARNING_MSG.format(tool_name=name, count=freq_count), False
+                else:
+                    # Windowed count decayed below the warn threshold; allow a
+                    # future burst of this tool to warn again.
+                    self._tool_freq_warned[thread_id].discard(name)
 
         return None, False
 
@@ -663,7 +678,7 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
             if thread_id:
                 self._history.pop(thread_id, None)
                 self._warned.pop(thread_id, None)
-                self._tool_freq.pop(thread_id, None)
+                self._tool_name_history.pop(thread_id, None)
                 self._tool_freq_warned.pop(thread_id, None)
                 for key in list(self._pending_warnings):
                     if key[0] == thread_id:
@@ -671,7 +686,7 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
             else:
                 self._history.clear()
                 self._warned.clear()
-                self._tool_freq.clear()
+                self._tool_name_history.clear()
                 self._tool_freq_warned.clear()
                 self._pending_warnings.clear()
                 self._pending_warning_touch_order.clear()
