@@ -20,6 +20,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 from deerflow.runtime.secret_context import (
     _SECRETS_BINDING_AUDIT_KEY,
     _SLASH_SECRET_SOURCE_KEY,
+    _SLASH_SKILL_ACTIVATION_RUN_KEY,
     ACTIVE_SECRETS_CONTEXT_KEY,
     extract_request_secrets,
 )
@@ -44,8 +45,15 @@ _SLASH_SKILL_ACTIVATION_TARGET_ID_KEY = "slash_skill_activation_target_id"
 # secrets — those are read from the live registry on each call, #3938). The
 # injection set is recomputed every model call, but a slash-activated skill must
 # stay bound for the rest of the run — the model's tool loop issues many model
-# calls after the single activation call (#3861 semantics). Both live in
-# secret_context so they are covered by REDACTED_CONTEXT_KEYS in one place.
+# calls after the single activation call (#3861 semantics).
+# _SLASH_SKILL_ACTIVATION_RUN_KEY: identity of the slash message already activated
+# in this run, so the reminder injection + skill disk read + "activate" audit event
+# fire once per user slash command instead of on every model call. The reminder is
+# added via request.override(messages=...) for a single model call and never
+# persisted to graph state, so the 2nd..Nth model call of a turn rebuilds
+# request.messages from state without it — the run context is the only signal that
+# survives the tool loop. All three live in secret_context so they are covered by
+# REDACTED_CONTEXT_KEYS in one place.
 
 
 @dataclass(frozen=True, slots=True)
@@ -207,7 +215,27 @@ Follow this skill before choosing a general workflow. Load supporting resources 
         previous = messages[target_index - 1]
         return is_slash_skill_activation_reminder(previous)
 
-    def _find_activation_target(self, messages: list) -> tuple[int, HumanMessage, _ActivationResolution] | None:
+    @staticmethod
+    def _activation_run_key(target: HumanMessage) -> str:
+        """Stable identity for a user slash message, used to activate once per run.
+
+        Prefers the message id (LangGraph assigns and preserves a stable id once a
+        message is in graph state); falls back to a digest of the genuine user text
+        so an id-less message still dedupes within a run. A new user slash message
+        (new id / new text) yields a new key, so it is not suppressed.
+        """
+        if target.id:
+            return target.id
+        content = get_original_user_content_text(target.content, target.additional_kwargs)
+        return "sha256:" + hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _run_context(request: ModelRequest) -> dict | None:
+        runtime = getattr(request, "runtime", None)
+        context = getattr(runtime, "context", None)
+        return context if isinstance(context, dict) else None
+
+    def _find_activation_target(self, messages: list, *, run_context: dict | None = None) -> tuple[int, HumanMessage, _ActivationResolution] | None:
         if not messages:
             return None
 
@@ -219,6 +247,13 @@ Follow this skill before choosing a general workflow. Load supporting resources 
         if target is None:
             return None
         if self._has_existing_activation_for_target(messages, target_index, target):
+            return None
+        # This exact slash message already activated earlier in the run. The message
+        # scan above cannot catch it because the reminder lives only in a per-call
+        # request override, never in state; the run context is the durable signal
+        # (see _SLASH_SKILL_ACTIVATION_RUN_KEY). Skipping here avoids the redundant
+        # skill disk read, reminder re-injection, and duplicate "activate" audit.
+        if isinstance(run_context, dict) and run_context.get(_SLASH_SKILL_ACTIVATION_RUN_KEY) == self._activation_run_key(target):
             return None
 
         content = get_original_user_content_text(target.content, target.additional_kwargs)
@@ -251,7 +286,8 @@ Follow this skill before choosing a general workflow. Load supporting resources 
             logger.debug("Failed to record slash skill activation audit event", exc_info=True)
 
     def _prepare_model_request(self, request: ModelRequest, *, hook: str) -> tuple[ModelRequest | AIMessage | None, _Activation | None]:
-        target_and_resolution = self._find_activation_target(list(request.messages))
+        run_context = self._run_context(request)
+        target_and_resolution = self._find_activation_target(list(request.messages), run_context=run_context)
         if target_and_resolution is None:
             return None, None
 
@@ -271,6 +307,12 @@ Follow this skill before choosing a general workflow. Load supporting resources 
             activation.content_hash,
         )
         self._record_activation(request, activation, hook=hook)
+        # Mark this slash message as activated for the run so the tool loop's later
+        # model calls skip the redundant re-activation (#3861: one activation call,
+        # many follow-up model calls). A new user slash message keys differently and
+        # still activates.
+        if run_context is not None:
+            run_context[_SLASH_SKILL_ACTIVATION_RUN_KEY] = self._activation_run_key(target)
         activation_msg = self._make_activation_message(target, self._build_activation_reminder(activation))
         messages = list(request.messages)
         messages.insert(target_index, activation_msg)
