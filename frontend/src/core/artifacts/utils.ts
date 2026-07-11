@@ -1,6 +1,6 @@
 import { getBackendBaseURL } from "../config";
 import { isStaticWebsiteOnly } from "../static-mode";
-import type { AgentThread } from "../threads";
+import type { AgentThreadState } from "../threads";
 
 export function urlOfArtifact({
   filepath,
@@ -22,7 +22,9 @@ export function urlOfArtifact({
   return `${getBackendBaseURL()}/api/threads/${threadId}/artifacts${filepath}${download ? "?download=true" : ""}`;
 }
 
-export function extractArtifactsFromThread(thread: AgentThread) {
+export function extractArtifactsFromThread(thread: {
+  values: Pick<AgentThreadState, "artifacts">;
+}) {
   return thread.values.artifacts ?? [];
 }
 

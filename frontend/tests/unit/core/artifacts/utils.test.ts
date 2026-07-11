@@ -110,6 +110,11 @@ describe("artifact URL helpers", () => {
       ]),
     ).toBe("shared.png");
     expect(
+      resolveMessageImageURL("../etc/secret.png", "thread-1", [
+        "/mnt/user-data/outputs/secret.png",
+      ]),
+    ).toBe("../etc/secret.png");
+    expect(
       resolveMessageImageURL("https://example.com/image.png", "thread-1", [
         "/mnt/user-data/outputs/image.png",
       ]),
