@@ -33,6 +33,7 @@ from deerflow.agents.middlewares.memory_middleware import MemoryMiddleware
 from deerflow.agents.middlewares.safety_finish_reason_middleware import SafetyFinishReasonMiddleware
 from deerflow.agents.middlewares.subagent_limit_middleware import SubagentLimitMiddleware
 from deerflow.agents.middlewares.summarization_middleware import DeerFlowSummarizationMiddleware, create_summarization_middleware
+from deerflow.agents.middlewares.terminal_response_middleware import TerminalResponseMiddleware
 from deerflow.agents.middlewares.title_middleware import TitleMiddleware
 from deerflow.agents.middlewares.todo_middleware import TodoMiddleware
 from deerflow.agents.middlewares.token_usage_middleware import TokenUsageMiddleware
@@ -369,11 +370,16 @@ def build_middlewares(
     if custom_middlewares:
         middlewares.extend(custom_middlewares)
 
+    # A provider may return an empty AIMessage after tool execution. Retry the
+    # final response once, then persist a visible error fallback rather than
+    # allowing LangChain's no-tool-call router to end a silent successful run.
+    middlewares.append(TerminalResponseMiddleware())
+
     # SafetyFinishReasonMiddleware — suppress tool execution when the provider
-    # safety-terminated the response. Registered after custom middlewares so
-    # that LangChain's reverse-order after_model dispatch runs Safety first;
-    # cleared tool_calls then flow through Loop/Subagent accounting without
-    # firing extra alarms. See safety_finish_reason_middleware.py docstring.
+    # safety-terminated the response. Registered after the terminal-response
+    # and custom middlewares so LangChain's reverse-order after_model dispatch
+    # runs Safety first; cleared tool_calls then flow through the remaining
+    # accounting/terminal guards without firing extra alarms.
     safety_config = resolved_app_config.safety_finish_reason
     if safety_config.enabled:
         middlewares.append(SafetyFinishReasonMiddleware.from_config(safety_config))
