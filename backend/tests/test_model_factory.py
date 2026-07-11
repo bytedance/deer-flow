@@ -10,6 +10,7 @@ from deerflow.config.model_config import ModelConfig
 from deerflow.config.sandbox_config import SandboxConfig
 from deerflow.models import factory as factory_module
 from deerflow.models import openai_codex_provider as codex_provider_module
+from deerflow.reflection import resolve_class
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -76,6 +77,26 @@ def _patch_factory(monkeypatch, app_config: AppConfig, model_class=FakeChatModel
     monkeypatch.setattr(factory_module, "get_app_config", lambda: app_config)
     monkeypatch.setattr(factory_module, "resolve_class", lambda path, base: model_class)
     monkeypatch.setattr(factory_module, "build_tracing_callbacks", lambda: [])
+
+
+def _capturing_class(base_cls: type, captured: dict) -> type:
+    """Build a kwargs-capturing subclass of a REAL provider class.
+
+    ``_apply_stream_chunk_timeout_default`` gates on ``issubclass(model_class,
+    BaseChatOpenAI)``, so the resolved class must genuinely subclass the real
+    provider for the test to exercise that gate. ``__init__`` only records the
+    constructor kwargs and deliberately skips the provider's real ``__init__`` (so no
+    api_key / network / event loop is required); the factory never reads the returned
+    instance's fields when tracing is patched to ``[]``, so a bare instance is safe
+    for these config-level assertions.
+    """
+
+    class _Capturing(base_cls):  # type: ignore[valid-type,misc]
+        def __init__(self, **kwargs):
+            captured.clear()
+            captured.update(kwargs)
+
+    return _Capturing
 
 
 # ---------------------------------------------------------------------------
@@ -1094,21 +1115,17 @@ def test_no_duplicate_kwarg_when_reasoning_effort_in_config_and_thinking_disable
 
 
 def test_stream_chunk_timeout_defaults_to_240_for_openai_compatible_model(monkeypatch):
-    """OpenAI-compatible clients must receive a generous 240s chunk-gap budget by
+    """A bare ChatOpenAI client must receive a generous 240s chunk-gap budget by
     default, so reasoning models with long thinking pauses don't trip
-    langchain-openai's aggressive 60s built-in default.
+    langchain-openai's aggressive built-in default.
     """
+    from langchain_openai import ChatOpenAI
+
     model = _make_model(use="langchain_openai:ChatOpenAI")
     cfg = _make_app_config([model])
 
     captured: dict = {}
-
-    class CapturingModel(FakeChatModel):
-        def __init__(self, **kwargs):
-            captured.update(kwargs)
-            BaseChatModel.__init__(self, **kwargs)
-
-    _patch_factory(monkeypatch, cfg, model_class=CapturingModel)
+    _patch_factory(monkeypatch, cfg, model_class=_capturing_class(ChatOpenAI, captured))
     factory_module.create_chat_model(name="test-model")
 
     assert captured.get("stream_chunk_timeout") == 240.0
@@ -1119,6 +1136,8 @@ def test_stream_chunk_timeout_user_value_not_overridden(monkeypatch):
     factory must not overwrite it with the default — even if the value is
     smaller (60s) or larger (600s) than the default.
     """
+    from langchain_openai import ChatOpenAI
+
     model = ModelConfig(
         name="custom-timeout-model",
         display_name="Custom Timeout",
@@ -1130,33 +1149,24 @@ def test_stream_chunk_timeout_user_value_not_overridden(monkeypatch):
     cfg = _make_app_config([model])
 
     captured: dict = {}
-
-    class CapturingModel(FakeChatModel):
-        def __init__(self, **kwargs):
-            captured.update(kwargs)
-            BaseChatModel.__init__(self, **kwargs)
-
-    _patch_factory(monkeypatch, cfg, model_class=CapturingModel)
+    _patch_factory(monkeypatch, cfg, model_class=_capturing_class(ChatOpenAI, captured))
     factory_module.create_chat_model(name="custom-timeout-model")
 
     assert captured.get("stream_chunk_timeout") == 60.0
 
 
 def test_stream_chunk_timeout_not_injected_for_non_openai_provider(monkeypatch):
-    """Only langchain_openai:ChatOpenAI receives the default. Anthropic / Vertex /
-    other clients that don't understand this kwarg must not be polluted with it.
+    """Only BaseChatOpenAI subclasses receive the default. A genuinely non-OpenAI
+    client (ChatAnthropic) that does not declare this kwarg must not be polluted
+    with it.
     """
+    from langchain_anthropic import ChatAnthropic
+
     model = _make_model(use="langchain_anthropic:ChatAnthropic")
     cfg = _make_app_config([model])
 
     captured: dict = {}
-
-    class CapturingModel(FakeChatModel):
-        def __init__(self, **kwargs):
-            captured.update(kwargs)
-            BaseChatModel.__init__(self, **kwargs)
-
-    _patch_factory(monkeypatch, cfg, model_class=CapturingModel)
+    _patch_factory(monkeypatch, cfg, model_class=_capturing_class(ChatAnthropic, captured))
     factory_module.create_chat_model(name="test-model")
 
     assert "stream_chunk_timeout" not in captured
@@ -1172,12 +1182,13 @@ def test_stream_chunk_timeout_default_constant_is_documented():
 
 def test_stream_chunk_timeout_popped_for_non_openai_provider_when_user_set_it(monkeypatch):
     """Regression for CR feedback on issue #3189: if a user accidentally sets
-    ``stream_chunk_timeout`` on a non-OpenAI provider, the factory must drop
-    the kwarg before forwarding it to the model constructor. Otherwise the
-    third-party client raises ``TypeError: unexpected keyword argument
-    'stream_chunk_timeout'`` because the parameter is specific to
-    ``langchain_openai:ChatOpenAI``.
+    ``stream_chunk_timeout`` on a non-OpenAI provider, the factory must drop the
+    kwarg before forwarding it to the model constructor. ChatAnthropic does not
+    declare the field, so it would otherwise divert the value into ``model_kwargs``
+    and fail at request time.
     """
+    from langchain_anthropic import ChatAnthropic
+
     model = ModelConfig(
         name="anthropic-with-stray-timeout",
         display_name="Anthropic With Stray Timeout",
@@ -1189,16 +1200,94 @@ def test_stream_chunk_timeout_popped_for_non_openai_provider_when_user_set_it(mo
     cfg = _make_app_config([model])
 
     captured: dict = {}
-
-    class CapturingModel(FakeChatModel):
-        def __init__(self, **kwargs):
-            captured.update(kwargs)
-            BaseChatModel.__init__(self, **kwargs)
-
-    _patch_factory(monkeypatch, cfg, model_class=CapturingModel)
+    _patch_factory(monkeypatch, cfg, model_class=_capturing_class(ChatAnthropic, captured))
     factory_module.create_chat_model(name="anthropic-with-stray-timeout")
 
     assert "stream_chunk_timeout" not in captured
+
+
+# ---------------------------------------------------------------------------
+# stream_chunk_timeout applies to ALL BaseChatOpenAI subclasses, not just the
+# ChatOpenAI/PatchedChatOpenAI class-path allowlist (issue #3189 was reported on
+# mimo-v2.5 → PatchedChatMiMo, which the original #3195 allowlist excluded).
+# ---------------------------------------------------------------------------
+
+# Every in-repo provider that subclasses BaseChatOpenAI (and therefore inherits the
+# stream_chunk_timeout mechanism) but was NOT in the original ChatOpenAI /
+# PatchedChatOpenAI allowlist.
+_STREAM_TIMEOUT_OPENAI_SUBCLASS_USE_PATHS = [
+    "deerflow.models.vllm_provider:VllmChatModel",
+    "deerflow.models.mindie_provider:MindIEChatModel",
+    "deerflow.models.patched_deepseek:PatchedChatDeepSeek",
+    "deerflow.models.patched_mimo:PatchedChatMiMo",
+    "deerflow.models.patched_stepfun:PatchedChatStepFun",
+    "deerflow.models.patched_minimax:PatchedChatMiniMax",
+]
+
+
+@pytest.mark.parametrize("use_path", _STREAM_TIMEOUT_OPENAI_SUBCLASS_USE_PATHS)
+def test_stream_chunk_timeout_defaults_to_240_for_all_openai_subclasses(monkeypatch, use_path):
+    """Every BaseChatOpenAI subclass provider — not just ChatOpenAI — must receive
+    the 240s default when the user leaves stream_chunk_timeout unset. These classes
+    were silently excluded by the original class-path allowlist and fell back to
+    langchain-openai's aggressive built-in gap timeout.
+    """
+    real_cls = resolve_class(use_path, BaseChatModel)
+    model = _make_model(use=use_path)
+    cfg = _make_app_config([model])
+
+    captured: dict = {}
+    _patch_factory(monkeypatch, cfg, model_class=_capturing_class(real_cls, captured))
+    factory_module.create_chat_model(name="test-model")
+
+    assert captured.get("stream_chunk_timeout") == 240.0
+
+
+@pytest.mark.parametrize("use_path", _STREAM_TIMEOUT_OPENAI_SUBCLASS_USE_PATHS)
+def test_stream_chunk_timeout_user_override_honored_for_all_openai_subclasses(monkeypatch, use_path):
+    """A user's explicit stream_chunk_timeout must survive for every BaseChatOpenAI
+    subclass provider. The original allowlist popped it unconditionally for these
+    classes, silently discarding a config.yaml override with no warning.
+    """
+    real_cls = resolve_class(use_path, BaseChatModel)
+    model = ModelConfig(
+        name="override-model",
+        display_name="Override",
+        description=None,
+        use=use_path,
+        model="reasoning-model",
+        stream_chunk_timeout=300.0,  # explicit user override
+    )
+    cfg = _make_app_config([model])
+
+    captured: dict = {}
+    _patch_factory(monkeypatch, cfg, model_class=_capturing_class(real_cls, captured))
+    factory_module.create_chat_model(name="override-model")
+
+    assert captured.get("stream_chunk_timeout") == 300.0
+
+
+def test_stream_chunk_timeout_240_reaches_real_mimo_constructor(monkeypatch):
+    """End-to-end anchor for issue #3189 (reported on mimo-v2.5): the 240s default
+    must be accepted as a genuine ``stream_chunk_timeout`` field by the real
+    ``PatchedChatMiMo`` constructor — not diverted into ``model_kwargs`` — so the
+    streaming layer actually honors it. Builds the real class (no network / dummy
+    key) instead of a capturing stub.
+    """
+    model = _make_model_with_extras(
+        "mimo",
+        use="deerflow.models.patched_mimo:PatchedChatMiMo",
+        api_key="sk-dummy",
+        base_url="http://localhost:8000/v1",
+    )
+    cfg = _make_app_config([model])
+    # Do NOT patch resolve_class — construct the real PatchedChatMiMo class.
+    monkeypatch.setattr(factory_module, "get_app_config", lambda: cfg)
+    monkeypatch.setattr(factory_module, "build_tracing_callbacks", lambda: [])
+
+    instance = factory_module.create_chat_model(name="mimo")
+
+    assert instance.stream_chunk_timeout == 240.0
 
 
 # ---------------------------------------------------------------------------
