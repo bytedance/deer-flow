@@ -74,3 +74,21 @@ def test_start_line_beyond_eof_returns_clean_error(tmp_path, monkeypatch) -> Non
 def test_both_bounds_still_slice_inclusive_range(tmp_path, monkeypatch) -> None:
     result = _read(tmp_path, monkeypatch, start_line=2, end_line=4)
     assert result == "line2\nline3\nline4"
+
+
+def test_only_end_line_zero_returns_clean_error(tmp_path, monkeypatch) -> None:
+    result = _read(tmp_path, monkeypatch, end_line=0)
+    assert "end_line must be >= 1" in result
+    # No leaked line content in the error.
+    assert "line1" not in result
+
+
+def test_only_end_line_negative_returns_clean_error(tmp_path, monkeypatch) -> None:
+    result = _read(tmp_path, monkeypatch, end_line=-1)
+    assert "end_line must be >= 1" in result
+    assert "line4" not in result
+
+
+def test_end_line_past_eof_clamps_to_last_line(tmp_path, monkeypatch) -> None:
+    result = _read(tmp_path, monkeypatch, end_line=99)
+    assert result == _FIVE_LINES
