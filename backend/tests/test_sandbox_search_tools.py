@@ -1,7 +1,9 @@
+import json
 from types import SimpleNamespace
 from unittest.mock import patch
 
 from deerflow.community.aio_sandbox.aio_sandbox import AioSandbox
+from deerflow.config.paths import Paths
 from deerflow.sandbox.local.local_sandbox import LocalSandbox, PathMapping
 from deerflow.sandbox.search import GrepMatch, find_glob_matches, find_grep_matches
 from deerflow.sandbox.tools import glob_tool, grep_tool, ls_tool
@@ -500,16 +502,33 @@ def test_ls_tool_skills_path_uses_sandbox_mapping_user_id_not_contextvar(tmp_pat
     )
     monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: sandbox)
 
+    # Listing a category root descends into the skills below it, so the
+    # disabled-skill gate now resolves each one's enabled state. That lookup
+    # needs app config; without it the gate fails closed (see PR #3889) and the
+    # listing would be empty for a reason unrelated to what this test asserts.
+    skills_root = tmp_path / "skills"
+    (skills_root / "custom").mkdir(parents=True)
+    app_config = SimpleNamespace(
+        skills=SimpleNamespace(
+            get_skills_path=lambda: skills_root,
+            container_path="/mnt/skills",
+            use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage",
+        ),
+        skill_evolution=SimpleNamespace(enabled=False),
+    )
+
     # Leave contextvar unset → get_effective_user_id() returns "default"
     # Before the fix, _resolve_skills_path would resolve to default_custom (empty)
     # After the fix, the sandbox PathMapping resolves to user-abc_custom (has my-skill)
     token = set_current_user(SimpleNamespace(id="default"))  # contextvar says "default"
     try:
-        result = ls_tool.func(
-            runtime=_make_runtime(tmp_path),
-            description="list custom skills",
-            path="/mnt/skills/custom",
-        )
+        with patch("deerflow.config.paths.get_paths", return_value=Paths(base_dir=base_dir)):
+            with patch("deerflow.config.get_app_config", return_value=app_config):
+                result = ls_tool.func(
+                    runtime=_make_runtime(tmp_path),
+                    description="list custom skills",
+                    path="/mnt/skills/custom",
+                )
 
         # Must show user-abc's skill (sandbox mapping), NOT default's empty dir (contextvar)
         assert "my-skill" in result
@@ -536,3 +555,112 @@ def test_ls_tool_filters_upload_staging_files(tmp_path, monkeypatch) -> None:
     assert "/mnt/user-data/uploads/report.txt" in result
     assert "/mnt/user-data/uploads/.upload-note.txt" in result
     assert ".upload-active.part" not in result
+
+
+def _make_skills_sandbox(tmp_path, monkeypatch, *, disabled: str):
+    """Skills tree with one disabled and one enabled public skill.
+
+    Drives the real `_is_disabled_skill_path` gate through a real
+    extensions_config.json rather than stubbing the gate out.
+    """
+    skills_dir = tmp_path / "skills"
+    for name, body in [(disabled, "SECRET_PROCEDURE = step-1-step-2\n"), ("open-skill", "PUBLIC_PROCEDURE = hello\n")]:
+        (skills_dir / "public" / name).mkdir(parents=True)
+        (skills_dir / "public" / name / "SKILL.md").write_text(f"---\nname: {name}\n---\n\n{body}", encoding="utf-8")
+
+    ext = tmp_path / "extensions_config.json"
+    ext.write_text(
+        json.dumps({"mcpServers": {}, "skills": {disabled: {"enabled": False}, "open-skill": {"enabled": True}}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(ext))
+
+    sandbox = LocalSandbox(
+        id="local",
+        path_mappings=[PathMapping(container_path="/mnt/skills", local_path=str(skills_dir), read_only=True)],
+    )
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: sandbox)
+    return sandbox
+
+
+def test_glob_tool_blocks_disabled_skill_root(tmp_path, monkeypatch) -> None:
+    """glob must refuse a disabled skill's own directory, like ls and read_file do."""
+    runtime = _make_runtime(tmp_path)
+    _make_skills_sandbox(tmp_path, monkeypatch, disabled="secret-skill")
+
+    result = glob_tool.func(
+        runtime=runtime,
+        description="list skill files",
+        pattern="**/*.md",
+        path="/mnt/skills/public/secret-skill",
+    )
+
+    assert "Skill 'secret-skill' is disabled" in result
+    assert "SKILL.md" not in result
+
+
+def test_grep_tool_blocks_disabled_skill_root(tmp_path, monkeypatch) -> None:
+    """grep must refuse a disabled skill's own directory, like ls and read_file do."""
+    runtime = _make_runtime(tmp_path)
+    _make_skills_sandbox(tmp_path, monkeypatch, disabled="secret-skill")
+
+    result = grep_tool.func(
+        runtime=runtime,
+        description="search skill files",
+        pattern="SECRET_PROCEDURE",
+        path="/mnt/skills/public/secret-skill",
+    )
+
+    assert "Skill 'secret-skill' is disabled" in result
+    assert "SECRET_PROCEDURE = step-1-step-2" not in result
+
+
+def test_glob_tool_does_not_surface_disabled_skill_from_ancestor_root(tmp_path, monkeypatch) -> None:
+    """A root above the skill must not surface it: glob descends past the path gate."""
+    runtime = _make_runtime(tmp_path)
+    _make_skills_sandbox(tmp_path, monkeypatch, disabled="secret-skill")
+
+    result = glob_tool.func(
+        runtime=runtime,
+        description="find skills",
+        pattern="**/SKILL.md",
+        path="/mnt/skills",
+    )
+
+    assert "secret-skill" not in result
+    # ...while the enabled sibling is still returned.
+    assert "/mnt/skills/public/open-skill/SKILL.md" in result
+
+
+def test_grep_tool_does_not_surface_disabled_skill_content_from_ancestor_root(tmp_path, monkeypatch) -> None:
+    """The strongest leak: grep from /mnt/skills printed a disabled skill's file contents."""
+    runtime = _make_runtime(tmp_path)
+    _make_skills_sandbox(tmp_path, monkeypatch, disabled="secret-skill")
+
+    result = grep_tool.func(
+        runtime=runtime,
+        description="search skills",
+        pattern="PROCEDURE",
+        path="/mnt/skills",
+    )
+
+    assert "SECRET_PROCEDURE = step-1-step-2" not in result
+    assert "secret-skill" not in result
+    # ...while the enabled sibling still matches.
+    assert "PUBLIC_PROCEDURE = hello" in result
+
+
+def test_ls_tool_does_not_surface_disabled_skill_from_category_root(tmp_path, monkeypatch) -> None:
+    """ls gates the requested path but descends two levels, so the category root leaked."""
+    runtime = _make_runtime(tmp_path)
+    _make_skills_sandbox(tmp_path, monkeypatch, disabled="secret-skill")
+
+    result = ls_tool.func(
+        runtime=runtime,
+        description="list public skills",
+        path="/mnt/skills/public",
+    )
+
+    assert "secret-skill" not in result
+    # ...while the enabled sibling is still listed.
+    assert "open-skill" in result
