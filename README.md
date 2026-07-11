@@ -596,7 +596,7 @@ These are injected into `RunnableConfig.metadata` at the graph invocation root f
 
 #### Monocle Tracing
 
-DeerFlow also supports [Monocle](https://github.com/monocle2ai/monocle), an OpenTelemetry-based tracer for agentic applications. It records each run end-to-end — LLM calls, agent steps, tool and MCP invocations — with their inputs, outputs, timings, and token counts.
+DeerFlow also supports [Monocle](https://github.com/monocle2ai/monocle), an OpenTelemetry-based tracer for agentic applications. It records each run end-to-end: LLM calls, agent steps, and tool and MCP invocations, with their inputs, outputs, timings, and token counts.
 
 Add the following to your `.env` file:
 
