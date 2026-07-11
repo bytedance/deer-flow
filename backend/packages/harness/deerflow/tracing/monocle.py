@@ -22,14 +22,35 @@ def setup_monocle_tracing_if_enabled() -> bool:
     if not is_monocle_tracing_enabled():
         return False
 
+    monocle = get_tracing_config().monocle
+    # Fail fast on an unknown MONOCLE_EXPORTERS value or a missing OKAHU_API_KEY,
+    # with a clear message, before instrumenting. Validated here (not in the
+    # per-run callback path) so a config typo never breaks agent runs.
+    monocle.validate()
+
     # Only one OpenTelemetry provider can own the process. Monocle initializes here (at
     # startup), before Langfuse's per-run handler, so enabling both means Langfuse loses
     # its spans — warn so the operator turns one off.
     if "langfuse" in get_enabled_tracing_providers():
         logger.warning("MONOCLE_TRACING is enabled alongside Langfuse; both need the global OpenTelemetry provider and only one can win. Enable only one of them.")
 
-    exporters = get_tracing_config().monocle.exporters
-    from monocle_apptrace import setup_monocle_telemetry
+    exporters = monocle.exporters
+
+    # Any exporter other than `file` moves trace data (prompts, tool inputs and
+    # outputs, completions) beyond the local .monocle/ directory, e.g. to an
+    # external collector (okahu, s3, ...). Warn loudly so it can't happen
+    # unnoticed.
+    non_file = [e.strip() for e in exporters.split(",") if e.strip() and e.strip() != "file"]
+    if non_file:
+        logger.warning(
+            "Monocle is exporting trace data (prompts, tool inputs/outputs, completions) beyond the local .monocle/ file via: %s. Make sure that destination is trusted.",
+            ", ".join(non_file),
+        )
+
+    try:
+        from monocle_apptrace import setup_monocle_telemetry
+    except ImportError as exc:
+        raise RuntimeError("MONOCLE_TRACING is enabled but monocle_apptrace is not installed. Install the optional extra: pip install 'deer-flow[monocle]'.") from exc
 
     setup_monocle_telemetry(workflow_name="deer-flow", monocle_exporters_list=exporters)
     logger.info("Monocle telemetry enabled (exporters=%s)", exporters)

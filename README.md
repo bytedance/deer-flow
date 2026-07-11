@@ -596,9 +596,13 @@ These are injected into `RunnableConfig.metadata` at the graph invocation root f
 
 #### Monocle Tracing
 
-DeerFlow also supports [Monocle](https://github.com/monocle2ai/monocle) telemetry for its LangGraph/LangChain runs.
+DeerFlow also supports [Monocle](https://github.com/monocle2ai/monocle) telemetry for its LangGraph/LangChain runs. Monocle is an optional extra, so install it when you want tracing:
 
-Add the following to your `.env` file:
+```bash
+pip install "deer-flow[monocle]"
+```
+
+Then add the following to your `.env` file:
 
 ```bash
 MONOCLE_TRACING=true
@@ -606,7 +610,7 @@ MONOCLE_EXPORTERS=file          # file, console, okahu, s3, blob, gcs (default: 
 OKAHU_API_KEY=okh_xxxxxxxx      # required only for the `okahu` exporter
 ```
 
-Monocle is off by default and is initialized at Gateway startup when enabled. The `file` exporter writes one trace per run to `.monocle/`; open those in the [Monocle VS Code extension](https://marketplace.visualstudio.com/items?itemName=OkahuAI.monocle-apptrace) to inspect the span timeline and token counts.
+Monocle is off by default and is initialized at Gateway startup when enabled, so it covers runs served by the Gateway (the embedded `DeerFlowClient` and the TUI do not start it). The `file` exporter writes one trace per run to `.monocle/`; open those in the [Monocle VS Code extension](https://marketplace.visualstudio.com/items?itemName=OkahuAI.monocle-apptrace) to inspect the span timeline and token counts.
 
 Send your Monocle traces to [Okahu](https://www.okahu.ai), an agent-observability platform, to analyze them across many runs.
 

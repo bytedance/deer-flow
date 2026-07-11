@@ -47,19 +47,29 @@ class LangfuseTracingConfig(BaseModel):
             raise ValueError(f"Langfuse tracing is enabled but required settings are missing: {', '.join(missing)}")
 
 
+_MONOCLE_EXPORTERS = ("file", "console", "okahu", "s3", "blob", "gcs")
+
+
 class MonocleTracingConfig(BaseModel):
     """Configuration for Monocle telemetry."""
 
     enabled: bool = Field(...)
     exporters: str = Field(...)
+    okahu_api_key: str | None = Field(...)
 
     @property
     def is_configured(self) -> bool:
         return self.enabled
 
     def validate(self) -> None:
-        # No external credentials are required; the "file" exporter writes locally.
-        return None
+        if not self.enabled:
+            return
+        selected = [e.strip() for e in self.exporters.split(",") if e.strip()]
+        unknown = [e for e in selected if e not in _MONOCLE_EXPORTERS]
+        if unknown:
+            raise ValueError(f"MONOCLE_EXPORTERS has unknown exporter(s): {', '.join(unknown)}. Allowed: {', '.join(_MONOCLE_EXPORTERS)}.")
+        if "okahu" in selected and not self.okahu_api_key:
+            raise ValueError("Monocle 'okahu' exporter is selected but OKAHU_API_KEY is not set.")
 
 
 class TracingConfig(BaseModel):
@@ -144,6 +154,7 @@ def get_tracing_config() -> TracingConfig:
             monocle=MonocleTracingConfig(
                 enabled=_env_flag_preferred("MONOCLE_TRACING"),
                 exporters=_first_env_value("MONOCLE_EXPORTERS") or "file",
+                okahu_api_key=_first_env_value("OKAHU_API_KEY"),
             ),
         )
         return _tracing_config

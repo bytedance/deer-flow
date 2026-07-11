@@ -31,7 +31,7 @@ logging:
     format: text
 
 # ============================================================================
-# Monocle telemetry
+# Tracing / Observability (Monocle)
 # ============================================================================
 # Optional agent tracing via Monocle. Configured through environment variables
 # (like LangSmith/Langfuse), not a config.yaml key, and OFF by default. When
