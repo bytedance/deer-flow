@@ -94,6 +94,35 @@ class TestSearchMemoryFacts:
         assert results[1]["confidence"] == 0.6
         assert results[2]["confidence"] == 0.3
 
+    def test_null_confidence_does_not_crash_sort(self, tmp_path, monkeypatch):
+        """A fact stored with ``"confidence": null`` (corrupted/hand-edited memory)
+        must not break the confidence sort. ``.get("confidence", 0)`` returns the
+        stored ``None`` and comparing None with floats raises TypeError; the coerce
+        helper defaults null to a finite midpoint instead."""
+        null_fact = {
+            "id": "fact_null",
+            "content": "Fact with null confidence",
+            "category": "context",
+            "confidence": None,
+            "createdAt": "2026-07-09T00:00:00Z",
+            "source": "test",
+        }
+        facts = [
+            _make_fact("Fact high", confidence=0.9),
+            null_fact,
+            _make_fact("Fact low", confidence=0.2),
+        ]
+        _setup_memory(tmp_path, monkeypatch, facts)
+
+        # Must not raise TypeError during the confidence sort.
+        results = search_memory_facts("Fact")
+
+        assert len(results) == 3
+        # Highest real confidence still sorts first; null (coerced to 0.5) sits
+        # between the 0.9 and 0.2 facts.
+        assert results[0]["content"] == "Fact high"
+        assert {r["content"] for r in results} == {"Fact high", "Fact with null confidence", "Fact low"}
+
     def test_respects_limit(self, tmp_path, monkeypatch):
         """Should return at most `limit` results."""
         facts = [_make_fact(f"Fact {i}", confidence=0.5) for i in range(20)]
