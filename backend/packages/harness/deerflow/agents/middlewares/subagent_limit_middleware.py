@@ -8,17 +8,25 @@ from langchain.agents.middleware import AgentMiddleware
 from langgraph.runtime import Runtime
 
 from deerflow.agents.middlewares.tool_call_metadata import clone_ai_message_with_tool_calls
-from deerflow.config.subagents_config import DEFAULT_MAX_TOTAL_SUBAGENTS_PER_RUN
+from deerflow.config.subagents_config import (
+    DEFAULT_MAX_TOTAL_SUBAGENTS_PER_RUN,
+    MAX_CONCURRENT_SUBAGENT_CALLS,
+    MAX_TOTAL_SUBAGENTS_PER_RUN,
+    MIN_CONCURRENT_SUBAGENT_CALLS,
+    MIN_TOTAL_SUBAGENTS_PER_RUN,
+    clamp_subagent_concurrency,
+    clamp_total_subagents_per_run,
+)
 from deerflow.subagents.executor import MAX_CONCURRENT_SUBAGENTS
 
 logger = logging.getLogger(__name__)
 
 # Valid range for max_concurrent_subagents
-MIN_SUBAGENT_LIMIT = 2
-MAX_SUBAGENT_LIMIT = 4
+MIN_SUBAGENT_LIMIT = MIN_CONCURRENT_SUBAGENT_CALLS
+MAX_SUBAGENT_LIMIT = MAX_CONCURRENT_SUBAGENT_CALLS
 DEFAULT_MAX_TOTAL_SUBAGENTS = DEFAULT_MAX_TOTAL_SUBAGENTS_PER_RUN
-MIN_SUBAGENT_TOTAL_LIMIT = 1
-MAX_SUBAGENT_TOTAL_LIMIT = 50
+MIN_SUBAGENT_TOTAL_LIMIT = MIN_TOTAL_SUBAGENTS_PER_RUN
+MAX_SUBAGENT_TOTAL_LIMIT = MAX_TOTAL_SUBAGENTS_PER_RUN
 
 _TOTAL_LIMIT_STOP_MSG = (
     "[SUBAGENT LIMIT REACHED] The subagent delegation limit for this run has been reached. "
@@ -29,12 +37,12 @@ _TOTAL_LIMIT_STOP_MSG = (
 
 def _clamp_subagent_limit(value: int) -> int:
     """Clamp subagent limit to valid range [2, 4]."""
-    return max(MIN_SUBAGENT_LIMIT, min(MAX_SUBAGENT_LIMIT, value))
+    return clamp_subagent_concurrency(value)
 
 
 def _clamp_total_subagent_limit(value: int) -> int:
     """Clamp total subagent limit to a bounded positive range."""
-    return max(MIN_SUBAGENT_TOTAL_LIMIT, min(MAX_SUBAGENT_TOTAL_LIMIT, value))
+    return clamp_total_subagents_per_run(value)
 
 
 def _append_text(content: Any, text: str) -> Any:

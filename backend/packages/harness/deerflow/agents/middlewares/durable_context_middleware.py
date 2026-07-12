@@ -132,7 +132,7 @@ def _current_run_messages(messages: list[AnyMessage], run_id: str | None) -> lis
         if message_run_id is None or message_run_id == run_id:
             return messages[index + 1 :]
         return []
-    return messages
+    return []
 
 
 def _with_run_id(delegations: list[dict], run_id: str | None) -> list[dict]:

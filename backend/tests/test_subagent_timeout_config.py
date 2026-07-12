@@ -135,6 +135,10 @@ class TestSubagentsAppConfigDefaults:
         with pytest.raises(ValueError):
             SubagentsAppConfig(max_total_per_run=-1)
 
+    def test_rejects_above_max_total_per_run(self):
+        with pytest.raises(ValueError):
+            SubagentsAppConfig(max_total_per_run=51)
+
     def test_default_token_budget_coupled_to_summarization_switch(self):
         """The token-budget backstop engages by default (#3857 point 4). Its
         ``max_tokens`` ceiling is coupled to whether subagent summarization is

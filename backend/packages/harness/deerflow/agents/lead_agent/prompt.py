@@ -8,7 +8,11 @@ from functools import lru_cache
 from typing import TYPE_CHECKING
 
 from deerflow.config.agents_config import load_agent_soul
-from deerflow.config.subagents_config import DEFAULT_MAX_TOTAL_SUBAGENTS_PER_RUN
+from deerflow.config.subagents_config import (
+    DEFAULT_MAX_TOTAL_SUBAGENTS_PER_RUN,
+    clamp_subagent_concurrency,
+    clamp_total_subagents_per_run,
+)
 from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
 from deerflow.skills.storage import get_or_new_skill_storage, get_or_new_user_skill_storage
 from deerflow.skills.types import Skill, SkillCategory
@@ -298,8 +302,8 @@ def _build_subagent_section(
     Returns:
         Formatted subagent section string.
     """
-    n = max_concurrent
-    total = max_total
+    n = clamp_subagent_concurrency(max_concurrent)
+    total = clamp_total_subagents_per_run(max_total)
     available_names = get_available_subagent_names(app_config=app_config) if app_config is not None else get_available_subagent_names()
     bash_available = "bash" in available_names
 
@@ -952,11 +956,12 @@ def apply_prompt_template(
     skill_names: frozenset[str] | None = None,
 ) -> str:
     # Include subagent section only if enabled (from runtime parameter)
-    n = max_concurrent_subagents
+    n = clamp_subagent_concurrency(max_concurrent_subagents)
     total = max_total_subagents
     if total is None:
         subagents_config = getattr(app_config, "subagents", None) if app_config is not None else None
         total = getattr(subagents_config, "max_total_per_run", DEFAULT_MAX_TOTAL_SUBAGENTS_PER_RUN)
+    total = clamp_total_subagents_per_run(total)
     subagent_section = _build_subagent_section(n, total, app_config=app_config) if subagent_enabled else ""
 
     # Add subagent reminder to critical_reminders if enabled

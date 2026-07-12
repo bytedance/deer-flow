@@ -129,6 +129,7 @@ class TestBeforeModelCapture:
         middleware = DurableContextMiddleware()
         runtime = SimpleNamespace(context={"run_id": "run-42"})
         messages = [
+            HumanMessage(content="research auth", additional_kwargs={"run_id": "run-42"}),
             AIMessage(
                 content="",
                 tool_calls=[
@@ -139,7 +140,7 @@ class TestBeforeModelCapture:
                         "type": "tool_call",
                     }
                 ],
-            )
+            ),
         ]
 
         out = middleware.after_model({"messages": messages}, runtime)
@@ -199,6 +200,35 @@ class TestBeforeModelCapture:
                     }
                 ],
             ),
+        ]
+        existing = [
+            {
+                "id": "old-call",
+                "run_id": "run-old",
+                "description": "old work",
+                "subagent_type": "general-purpose",
+                "status": "in_progress",
+                "created_at": "2026-07-11T00:00:00Z",
+            }
+        ]
+
+        assert middleware.before_model({"messages": messages, "delegations": existing}, runtime) is None
+
+    def test_run_id_without_human_boundary_does_not_retag_existing_delegations(self):
+        middleware = DurableContextMiddleware()
+        runtime = SimpleNamespace(context={"run_id": "run-new"})
+        messages = [
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "task",
+                        "args": {"description": "old work", "prompt": "do old", "subagent_type": "general-purpose"},
+                        "id": "old-call",
+                        "type": "tool_call",
+                    }
+                ],
+            )
         ]
         existing = [
             {
