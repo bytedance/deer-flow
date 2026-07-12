@@ -737,10 +737,33 @@ def test_format_memory_escapes_correction_source_error_breakout() -> None:
 
 def test_format_memory_leaves_benign_fact_content_byte_identical() -> None:
     """Escaping must not disturb ordinary facts: content with no <, >, & is
-    rendered exactly as before (no over-escaping)."""
-    benign = "User prefers dark mode and 2-space indentation."
+    rendered exactly as before (no over-escaping). Apostrophes and quotation
+    marks are element-text-safe and must survive verbatim (quote=False)."""
+    benign = 'User\'s preference: dark mode, 2-space indentation, said "use Python".'
     memory_data = {"facts": [{"content": benign, "category": "preference", "confidence": 0.9}]}
 
     result = format_memory_for_injection(memory_data, max_tokens=2000)
 
     assert benign in result
+    assert "&quot;" not in result
+    assert "&#x27;" not in result
+
+
+def test_format_memory_leaves_benign_source_error_byte_identical() -> None:
+    """The correction sourceError suffix shares the same element-text position
+    and must not over-escape quotes either."""
+    source_error = 'The agent said "npm start" works; it doesn\'t.'
+    memory_data = {
+        "facts": [
+            {
+                "content": "Use make dev.",
+                "category": "correction",
+                "confidence": 0.95,
+                "sourceError": source_error,
+            }
+        ]
+    }
+
+    result = format_memory_for_injection(memory_data, max_tokens=2000)
+
+    assert f"(avoid: {source_error})" in result
