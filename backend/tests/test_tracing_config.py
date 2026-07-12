@@ -28,6 +28,7 @@ def clear_tracing_env(monkeypatch):
         "LANGFUSE_PUBLIC_KEY",
         "LANGFUSE_SECRET_KEY",
         "LANGFUSE_BASE_URL",
+        "LANGFUSE_TRACING_ENVIRONMENT",
     ):
         monkeypatch.delenv(name, raising=False)
     _reset_tracing_cache()
@@ -145,3 +146,26 @@ def test_langfuse_enabled_requires_public_and_secret_keys(monkeypatch):
 
     with pytest.raises(ValueError, match="LANGFUSE_PUBLIC_KEY"):
         tracing_module.validate_enabled_tracing_providers()
+
+
+def test_langfuse_environment_is_loaded_from_env(monkeypatch):
+    monkeypatch.setenv("LANGFUSE_TRACING", "true")
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-lf-test")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-lf-test")
+    monkeypatch.setenv("LANGFUSE_TRACING_ENVIRONMENT", "production")
+
+    _reset_tracing_cache()
+    cfg = tracing_module.get_tracing_config()
+
+    assert cfg.langfuse.environment == "production"
+
+
+def test_langfuse_environment_defaults_to_none(monkeypatch):
+    monkeypatch.setenv("LANGFUSE_TRACING", "true")
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-lf-test")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-lf-test")
+
+    _reset_tracing_cache()
+    cfg = tracing_module.get_tracing_config()
+
+    assert cfg.langfuse.environment is None

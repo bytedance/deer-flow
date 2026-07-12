@@ -21,11 +21,14 @@ def _create_langfuse_handler(config) -> Any:
 
     # langfuse>=4 initializes project-specific credentials through the client
     # singleton; the LangChain callback then attaches to that configured client.
-    Langfuse(
-        secret_key=config.secret_key,
-        public_key=config.public_key,
-        host=config.host,
-    )
+    client_kwargs: dict[str, Any] = {
+        "secret_key": config.secret_key,
+        "public_key": config.public_key,
+        "host": config.host,
+    }
+    if config.environment is not None:
+        client_kwargs["environment"] = config.environment
+    Langfuse(**client_kwargs)
     return LangfuseCallbackHandler(public_key=config.public_key)
 
 
