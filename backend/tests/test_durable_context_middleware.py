@@ -458,7 +458,13 @@ class TestBeforeModelCapture:
             None,
         )
 
-        assert out is None
+        # No new delegation entries to capture, but the observed count exceeds
+        # the cap so the parallel ``delegations_truncated_count`` channel must
+        # surface the dropped entry so the renderer can mark it. Without this
+        # signal the lead has no way to know history was silently clipped (D2).
+        assert out is not None
+        assert "delegations" not in out
+        assert out.get("delegations_truncated_count") == 1
 
     def test_durable_context_uses_structured_task_metadata_when_content_disagrees(self):
         middleware = DurableContextMiddleware()

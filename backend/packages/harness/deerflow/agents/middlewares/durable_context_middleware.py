@@ -66,13 +66,13 @@ def _insert_after_leading_system_messages(messages: list, injected: list) -> lis
     return [*messages[:index], *injected, *messages[index:]]
 
 
-def _render_durable_context_data(summary_text: str | None, ledger: list, skills: list) -> str:
+def _render_durable_context_data(summary_text: str | None, ledger: list, skills: list, truncated_count: int = 0) -> str:
     data_parts: list[str] = []
     if summary_text:
         bounded_summary = _bound_text(str(summary_text), _SUMMARY_RENDER_CHAR_BUDGET)
         data_parts.append(f"## Conversation summary so far\n{escape(bounded_summary, quote=False)}")
 
-    ledger_block = render_delegation_ledger(ledger or [])
+    ledger_block = render_delegation_ledger(ledger or [], truncated_count=truncated_count)
     if ledger_block:
         data_parts.append(ledger_block)
 
@@ -232,7 +232,23 @@ class DurableContextMiddleware(AgentMiddleware[AgentState]):
             existing,
         )
         if delegations:
-            return {"delegations": delegations}
+            updates: dict = {"delegations": delegations}
+            return updates
+        return None
+
+    def _compute_truncated_count(self, state: AgentState) -> int | None:
+        """Compute the number of delegation entries silently dropped from the ledger.
+
+        Only emits a non-None count when the channel currently holds exactly the
+        cap of entries AND the in-message observation exceeds the cap. This keeps
+        the parallel ``delegations_truncated_count`` channel stable across
+        checkpoint round-trips: it does not regress when the ledger shrinks back
+        below the cap on a fresh thread. (D2 in the agent-core hunt.)
+        """
+        observed = extract_delegations(state["messages"])
+        existing = state.get("delegations") or []
+        if len(observed) > _DELEGATION_LEDGER_MAX_ENTRIES and len(existing) >= _DELEGATION_LEDGER_MAX_ENTRIES:
+            return len(observed) - _DELEGATION_LEDGER_MAX_ENTRIES
         return None
 
     def _capture(self, state: AgentState, runtime: Runtime | None) -> dict | None:
@@ -241,6 +257,10 @@ class DurableContextMiddleware(AgentMiddleware[AgentState]):
         delegation_update = self._capture_delegations(state, runtime)
         if delegation_update:
             updates.update(delegation_update)
+        truncated_count = self._compute_truncated_count(state)
+        if truncated_count is not None:
+            existing_count = state.get("delegations_truncated_count") or 0
+            updates["delegations_truncated_count"] = max(existing_count, truncated_count)
         skills = extract_skills(messages, skills_root=self._skills_root, read_tool_names=self._skill_read_tool_names)
         if skills:
             updates["skill_context"] = skills
@@ -252,6 +272,7 @@ class DurableContextMiddleware(AgentMiddleware[AgentState]):
             state.get("summary_text"),
             state.get("delegations") or [],
             state.get("skill_context") or [],
+            truncated_count=int(state.get("delegations_truncated_count") or 0),
         )
         if not data_block:
             return request

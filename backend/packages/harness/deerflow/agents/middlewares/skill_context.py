@@ -12,7 +12,11 @@ from typing import Any, TypedDict
 import yaml
 from langchain_core.messages import AIMessage, AnyMessage, ToolMessage
 
-from deerflow.agents.thread_state import _SKILL_DESCRIPTION_MAX_CHARS, SkillEntry
+from deerflow.agents.thread_state import (
+    _SKILL_DESCRIPTION_MAX_CHARS,
+    SkillEntry,
+    description_for_skill_entry,
+)
 
 _SKILL_FILE_NAME = "SKILL.md"
 _FRONT_MATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
@@ -81,7 +85,8 @@ def _parse_description(content: str) -> str:
     description = metadata.get("description")
     if not isinstance(description, str):
         return ""
-    return " ".join(description.split())[:_SKILL_DESCRIPTION_MAX_CHARS]
+    text, _truncated = description_for_skill_entry(" ".join(description.split()))
+    return text
 
 
 def _is_tool_error_text(content: str) -> bool:
@@ -114,9 +119,13 @@ def read_skill_entry_metadata(additional_kwargs: Mapping[str, object] | None) ->
     description = raw.get("description")
     if not isinstance(path, str):
         return None
+    if isinstance(description, str):
+        text, _truncated = description_for_skill_entry(" ".join(description.split()))
+    else:
+        text = ""
     return {
         "path": path,
-        "description": " ".join(description.split())[:_SKILL_DESCRIPTION_MAX_CHARS] if isinstance(description, str) else "",
+        "description": text,
     }
 
 
@@ -193,8 +202,10 @@ def render_skill_context(entries: list[SkillEntry]) -> str:
         path = _escape_context_text(entry["path"])
         raw_description = entry.get("description") or ""
         if isinstance(raw_description, str):
-            raw_description = " ".join(raw_description.split())[:_SKILL_DESCRIPTION_MAX_CHARS]
-        description = _escape_context_text(raw_description)
+            description_text, _truncated = description_for_skill_entry(" ".join(raw_description.split()))
+        else:
+            description_text = ""
+        description = _escape_context_text(description_text)
         suffix = f": {description}" if description else ""
         lines.append(f"- {name}{suffix} -> {path}")
     return "\n".join(lines)
