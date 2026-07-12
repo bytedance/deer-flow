@@ -28,6 +28,7 @@ import {
   ReasoningTrigger,
 } from "@/components/ai-elements/reasoning";
 import { Button } from "@/components/ui/button";
+import { extractArtifactsFromThread } from "@/core/artifacts/utils";
 import { useI18n } from "@/core/i18n/hooks";
 import {
   deriveHumanInputThreadState,
@@ -690,6 +691,8 @@ export function MessageList({
     return <MessageListSkeleton />;
   }
 
+  const artifactPaths = extractArtifactsFromThread(thread);
+
   return (
     <>
       <Conversation
@@ -730,6 +733,7 @@ export function MessageList({
                           groupIndex === groupedMessages.length - 1
                         }
                         threadId={threadId}
+                        artifactPaths={artifactPaths}
                         runId={
                           group.type === "assistant"
                             ? (msg as { run_id?: string }).run_id

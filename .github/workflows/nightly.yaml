@@ -42,12 +42,37 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       date: ${{ steps.date.outputs.date }}
+      nightly_version: ${{ steps.nightly_version.outputs.nightly_version }}
     steps:
       - name: Set nightly date (UTC)
         id: date
         # Shared by build-images (image tag) and publish-chart (chart version)
         # so the two stay in sync for a given run.
         run: echo "date=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
+      - name: Checkout repository
+        # Needed to read Chart.yaml's base version for the nightly version
+        # string computed below.
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 #v6.0.3
+      - name: Compute nightly version
+        id: nightly_version
+        # Single source of truth for the nightly version string:
+        # <base>-nightly.<YYYYMMDD>-<short_sha> (mirrors the chart's nightly
+        # scheme). build-images injects it into the frontend image (About-page
+        # version) and publish-chart stamps it on Chart.yaml, so the version
+        # users see and the chart version can't drift apart.
+        run: |
+          set -euo pipefail
+          BASE=$(grep -m1 '^version:' deploy/helm/deer-flow/Chart.yaml | awk '{print $2}')
+          # A malformed/missing Chart.yaml version would yield an empty BASE ->
+          # `-nightly.<date>-<sha>` (invalid semver) that now flows into both
+          # the chart publish and the frontend About-page version. Fail loudly.
+          # `pipefail` matters: without it the pipeline's exit code is awk's,
+          # so `set -e` alone wouldn't catch a grep miss.
+          test -n "$BASE" || { echo "::error::empty base version from Chart.yaml"; exit 1; }
+          SHORT_SHA="${GITHUB_SHA::7}"
+          NIGHTLY="${BASE}-nightly.${{ steps.date.outputs.date }}-${SHORT_SHA}"
+          echo "nightly_version=${NIGHTLY}" >> "$GITHUB_OUTPUT"
+          echo "Nightly version: ${NIGHTLY}"
 
   validate-chart:
     if: github.repository == 'bytedance/deer-flow'
@@ -132,7 +157,13 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          build-args: ${{ matrix.build-args }}
+          # APP_VERSION is consumed only by the frontend Dockerfile (it stamps
+          # the About-page version); backend/provisioner Dockerfiles don't
+          # declare it. Passed via build-arg because build-push-action doesn't
+          # forward host env into the BuildKit build.
+          build-args: |
+            ${{ matrix.build-args }}
+            ${{ matrix.component == 'frontend' && format('APP_VERSION={0}', needs.prepare.outputs.nightly_version) || '' }}
       - name: Generate artifact attestation
         uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be #v2.4.0
         with:
@@ -151,25 +182,25 @@ jobs:
       contents: read
       packages: write
     env:
-      DATE: ${{ needs.prepare.outputs.date }}
       OWNER: ${{ github.repository_owner }}
+      NIGHTLY: ${{ needs.prepare.outputs.nightly_version }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 #v6.0.3
 
       - name: Patch chart to a nightly version + nightly image defaults
-        # Bumps Chart.yaml version/appVersion to <base>-nightly.<date>-<sha>
-        # (valid semver prerelease; the short SHA makes each dispatch's version
-        # unique, so a same-day re-dispatch re-publishes cleanly - OCI chart
-        # versions are immutable and otherwise can't be overwritten). Repoints
-        # the chart's default image registry/tag at the nightly build. Patches
-        # are in-workflow only - nothing is committed back.
+        # Bumps Chart.yaml version/appVersion to the nightly version computed in
+        # the prepare job (<base>-nightly.<date>-<sha>, a valid semver
+        # prerelease; the short SHA makes each dispatch's version unique, so a
+        # same-day re-dispatch re-publishes cleanly - OCI chart versions are
+        # immutable and otherwise can't be overwritten). The same string is
+        # injected into the frontend image, so the About-page version and the
+        # chart version match. Repoints the chart's default image registry/tag
+        # at the nightly build. Patches are in-workflow only - nothing is
+        # committed back.
         run: |
           set -eu
           CHART=deploy/helm/deer-flow
-          BASE=$(grep -m1 '^version:' "$CHART/Chart.yaml" | awk '{print $2}')
-          SHORT_SHA="${GITHUB_SHA::7}"
-          NIGHTLY="${BASE}-nightly.${DATE}-${SHORT_SHA}"
           echo "Nightly chart version: ${NIGHTLY}"
           sed -i "s|^version:.*|version: ${NIGHTLY}|" "$CHART/Chart.yaml"
           sed -i "s|^appVersion:.*|appVersion: \"${NIGHTLY}\"|" "$CHART/Chart.yaml"

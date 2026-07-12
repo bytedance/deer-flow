@@ -6,6 +6,7 @@ at ``max_trace_content`` bytes to avoid bloating the database.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from datetime import UTC, datetime
@@ -26,6 +27,20 @@ class DbRunEventStore(RunEventStore):
     def __init__(self, session_factory: async_sessionmaker[AsyncSession], *, max_trace_content: int = 10240):
         self._sf = session_factory
         self._max_trace_content = max_trace_content
+        # Per-thread asyncio locks serialize seq assignment for concurrent
+        # in-process writers on the same thread. The DB-level FOR UPDATE /
+        # advisory lock guards cross-process races; this guards the common
+        # single-process case where two coroutines interleave between the
+        # max(seq) read and the INSERT and would otherwise collide on seq.
+        self._write_locks: dict[str, asyncio.Lock] = {}
+
+    def _get_write_lock(self, thread_id: str) -> asyncio.Lock:
+        """Return (creating if needed) the per-thread seq-assignment lock."""
+        lock = self._write_locks.get(thread_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._write_locks[thread_id] = lock
+        return lock
 
     @staticmethod
     def _row_to_dict(row: RunEventRow) -> dict:
@@ -123,23 +138,24 @@ class DbRunEventStore(RunEventStore):
         content, metadata = self._truncate_trace(category, content, metadata)
         db_content, metadata = self._content_to_db(content, metadata)
         user_id = self._user_id_from_context()
-        async with self._sf() as session:
-            async with session.begin():
-                max_seq = await self._max_seq_for_thread(session, thread_id)
-                seq = (max_seq or 0) + 1
-                row = RunEventRow(
-                    thread_id=thread_id,
-                    run_id=run_id,
-                    user_id=user_id,
-                    event_type=event_type,
-                    category=category,
-                    content=db_content,
-                    event_metadata=metadata,
-                    seq=seq,
-                    created_at=datetime.fromisoformat(created_at) if created_at else datetime.now(UTC),
-                )
-                session.add(row)
-            return self._row_to_dict(row)
+        async with self._get_write_lock(thread_id):
+            async with self._sf() as session:
+                async with session.begin():
+                    max_seq = await self._max_seq_for_thread(session, thread_id)
+                    seq = (max_seq or 0) + 1
+                    row = RunEventRow(
+                        thread_id=thread_id,
+                        run_id=run_id,
+                        user_id=user_id,
+                        event_type=event_type,
+                        category=category,
+                        content=db_content,
+                        event_metadata=metadata,
+                        seq=seq,
+                        created_at=datetime.fromisoformat(created_at) if created_at else datetime.now(UTC),
+                    )
+                    session.add(row)
+                return self._row_to_dict(row)
 
     async def put_batch(self, events):
         if not events:
@@ -148,34 +164,35 @@ class DbRunEventStore(RunEventStore):
         if len(thread_ids) > 1:
             raise ValueError(f"put_batch requires all events to belong to the same thread; got {thread_ids!r}")
         user_id = self._user_id_from_context()
-        async with self._sf() as session:
-            async with session.begin():
-                # All events belong to the same thread (validated above).
-                thread_id = events[0]["thread_id"]
-                max_seq = await self._max_seq_for_thread(session, thread_id)
-                seq = max_seq or 0
-                rows = []
-                for e in events:
-                    seq += 1
-                    content = e.get("content", "")
-                    category = e.get("category", "trace")
-                    metadata = e.get("metadata")
-                    content, metadata = self._truncate_trace(category, content, metadata)
-                    db_content, metadata = self._content_to_db(content, metadata)
-                    row = RunEventRow(
-                        thread_id=e["thread_id"],
-                        run_id=e["run_id"],
-                        user_id=e.get("user_id", user_id),
-                        event_type=e["event_type"],
-                        category=category,
-                        content=db_content,
-                        event_metadata=metadata,
-                        seq=seq,
-                        created_at=datetime.fromisoformat(e["created_at"]) if e.get("created_at") else datetime.now(UTC),
-                    )
-                    session.add(row)
-                    rows.append(row)
-            return [self._row_to_dict(r) for r in rows]
+        # All events belong to the same thread (validated above).
+        thread_id = events[0]["thread_id"]
+        async with self._get_write_lock(thread_id):
+            async with self._sf() as session:
+                async with session.begin():
+                    max_seq = await self._max_seq_for_thread(session, thread_id)
+                    seq = max_seq or 0
+                    rows = []
+                    for e in events:
+                        seq += 1
+                        content = e.get("content", "")
+                        category = e.get("category", "trace")
+                        metadata = e.get("metadata")
+                        content, metadata = self._truncate_trace(category, content, metadata)
+                        db_content, metadata = self._content_to_db(content, metadata)
+                        row = RunEventRow(
+                            thread_id=e["thread_id"],
+                            run_id=e["run_id"],
+                            user_id=e.get("user_id", user_id),
+                            event_type=e["event_type"],
+                            category=category,
+                            content=db_content,
+                            event_metadata=metadata,
+                            seq=seq,
+                            created_at=datetime.fromisoformat(e["created_at"]) if e.get("created_at") else datetime.now(UTC),
+                        )
+                        session.add(row)
+                        rows.append(row)
+                return [self._row_to_dict(r) for r in rows]
 
     async def list_messages(
         self,
@@ -304,6 +321,14 @@ class DbRunEventStore(RunEventStore):
             if count > 0:
                 await session.execute(delete(RunEventRow).where(*count_conditions))
                 await session.commit()
+            # Evict the per-thread seq-assignment lock so ``_write_locks`` does
+            # not grow unbounded over the (long-lived, singleton) store's
+            # lifetime. Only pop when no writer is mid-flight; a later write
+            # recreates the lock lazily and seq restarts correctly from the
+            # now-deleted thread.
+            lock = self._write_locks.get(thread_id)
+            if lock is not None and not lock.locked():
+                self._write_locks.pop(thread_id, None)
             return count
 
     async def delete_by_run(

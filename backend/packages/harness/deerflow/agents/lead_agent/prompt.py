@@ -647,7 +647,11 @@ combined with a FastAPI gateway for REST API access [citation:FastAPI](https://f
   keeps each tool call small and avoids mid-stream chunk-gap timeouts
   on oversized single-shot writes. (See issue #3189.)  
 - Clarity: Be direct and helpful, avoid unnecessary meta-commentary
-- Including Images and Mermaid: Images and Mermaid diagrams are always welcomed in the Markdown format, and you're encouraged to use `![Image Description](image_path)\n\n` or "```mermaid" to display images in response or Markdown files
+- Including Images and Mermaid: Images and Mermaid diagrams are welcomed in Markdown.
+  - To render an output image in a final response, use its complete virtual artifact path, for example `![Chart](/mnt/user-data/outputs/chart.png)`.
+  - Never use a bare or workspace-relative filename.
+  - Call `present_files` for the image before referencing it.
+  - Use "```mermaid" for Mermaid diagrams.
 - Multi-task: Better utilize parallel tool calling to call multiple tools at one time for better performance
 - Language Consistency: Keep using the same language as user's
 - Always Respond: Your thinking is internal. You MUST always provide a visible response to the user after thinking.

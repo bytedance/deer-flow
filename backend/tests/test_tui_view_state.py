@@ -14,6 +14,7 @@ from deerflow.tui.view_state import (
     ToolResult,
     ToolStarted,
     UserSubmitted,
+    _merge_stream_text,
     initial_state,
     reduce,
 )
@@ -197,3 +198,46 @@ def test_reduce_is_pure_does_not_mutate_input_state():
     # Reducing again must not mutate the previous state object.
     _ = reduce(state, UserSubmitted("second"))
     assert len(state.rows) == before_len
+
+
+# ---------------------------------------------------------------------------
+# _merge_stream_text regression: CJK reduplication and repeated-token deltas
+# ---------------------------------------------------------------------------
+
+
+def test_merge_stream_text_cjk_reduplication_not_dropped():
+    """Two identical CJK tokens must both accumulate, not collapse to one."""
+    assert _merge_stream_text("谢", "谢") == "谢谢"
+
+
+def test_merge_stream_text_repeated_token_not_dropped():
+    """Repeated tokens (e.g. 'go' + 'go') must accumulate."""
+    assert _merge_stream_text("go", "go") == "gogo"
+
+
+def test_merge_stream_text_suffix_matching_tail_not_dropped():
+    """A delta equal to the buffer suffix must append, not be dropped."""
+    assert _merge_stream_text("hel", "l") == "hell"
+
+
+def test_merge_stream_text_cumulative_longer_snapshot_still_works():
+    """A strictly longer chunk starting with existing is a cumulative re-delivery."""
+    assert _merge_stream_text("Hel", "Hel lo world") == "Hel lo world"
+
+
+def test_merge_stream_text_empty_existing_returns_incoming():
+    assert _merge_stream_text("", "Hello") == "Hello"
+
+
+def test_merge_stream_text_empty_incoming_returns_existing():
+    assert _merge_stream_text("Hello", "") == "Hello"
+
+
+def test_merge_stream_text_newline_split_across_chunks():
+    """'\\n\\n' split into two '\\n' deltas must accumulate."""
+    assert _merge_stream_text("\n", "\n") == "\n\n"
+
+
+def test_merge_stream_text_genuine_delta_append():
+    """Normal deltas that don't overlap still append."""
+    assert _merge_stream_text("Hello ", "world") == "Hello world"

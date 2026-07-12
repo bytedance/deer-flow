@@ -239,7 +239,7 @@ def search_memory_facts(
             continue
         matched.append(fact)
 
-    matched.sort(key=lambda f: f.get("confidence", 0), reverse=True)
+    matched.sort(key=_coerce_source_confidence, reverse=True)
     return matched[:limit]
 
 
@@ -323,7 +323,7 @@ def _extract_text(content: Any) -> str:
     return str(content)
 
 
-_REQUIRED_MEMORY_UPDATE_TOP_LEVEL_KEYS = frozenset({"user", "history", "newFacts", "factsToRemove"})
+_REQUIRED_MEMORY_UPDATE_TOP_LEVEL_KEYS = frozenset({"user", "history", "newFacts"})
 
 
 def _normalize_memory_update_fact(fact: Any) -> dict[str, Any] | None:
