@@ -111,4 +111,9 @@ class SandboxConfig(BaseModel):
         ),
     )
 
+    provisioner_api_key: str | None = Field(
+        default=None,
+        description="API key sent as X-API-Key header to the provisioner service. Must match PROVISIONER_API_KEY on the provisioner. Leave unset to disable authentication.",
+    )
+
     model_config = ConfigDict(extra="allow")
