@@ -1741,6 +1741,7 @@ def bash_tool(runtime: Runtime, description: str, command: str) -> str:
                 max_chars,
             )
         ensure_thread_directories_exist(runtime)
+        command = f"cd {VIRTUAL_PATH_PREFIX}/workspace; {command}"
         if identity_prefix:
             command = identity_prefix + command
         try:
