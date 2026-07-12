@@ -325,6 +325,36 @@ def test_skill_activation_middleware_reactivates_on_new_user_slash_command(monke
     assert sum(1 for kwargs in recorded if kwargs.get("action") == "activate") == 2
 
 
+def test_skill_activation_middleware_activates_per_call_when_run_context_is_none(monkeypatch, tmp_path):
+    # Regression for the degraded-path contract: when runtime.context is None
+    # (e.g. no run-scoped context is threaded through - the #3989 case), _run_context()
+    # normalizes it to None and the run-scoped dedup guard (_already_activated) must
+    # treat that as "nothing recorded yet" rather than crashing or wrongly skipping
+    # activation. The middleware should gracefully fall back to the original
+    # per-call activation behavior - no worse than before the run-context dedup
+    # was introduced.
+    skill = _make_skill(tmp_path, "data-analysis", content="# Data Analysis\nUse pandas.")
+    monkeypatch.setattr(middleware_module, "get_or_new_skill_storage", lambda **kwargs: _make_storage(tmp_path, [skill]))
+
+    middleware = SkillActivationMiddleware()
+    original = HumanMessage(content="/data-analysis analyze uploads/foo.csv", id="msg-1")
+    runtime = SimpleNamespace(context=None)
+    captured = {}
+
+    def handler(model_request: ModelRequest):
+        captured["messages"] = model_request.messages
+        return AIMessage(content="ok")
+
+    result = middleware.wrap_model_call(_make_model_request([original], runtime=runtime), handler)
+
+    assert isinstance(result, AIMessage)
+    assert result.content == "ok"
+    activation_msg, user_msg = captured["messages"]
+    assert is_slash_skill_activation_reminder(activation_msg)
+    assert "Use pandas." in activation_msg.content
+    assert user_msg.content == original.content
+
+
 def test_skill_activation_middleware_async_injects_hidden_human_context_for_model_call(monkeypatch, tmp_path):
     skill = _make_skill(tmp_path, "data-analysis", content="# Data Analysis\nUse pandas.")
     monkeypatch.setattr(middleware_module, "get_or_new_skill_storage", lambda **kwargs: _make_storage(tmp_path, [skill]))
