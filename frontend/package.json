@@ -64,6 +64,7 @@
     "dotenv": "^17.2.3",
     "embla-carousel-react": "^8.6.0",
     "gsap": "^3.13.0",
+    "h3": "1.15.6",
     "hast": "^1.0.0",
     "katex": "^0.16.28",
     "lucide-react": "^0.562.0",
