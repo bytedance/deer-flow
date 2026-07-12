@@ -67,6 +67,11 @@ def run_single_query(
         )
         command_file.write_text(command_content)
 
+        # Validate model to prevent argument injection via attacker-controlled input
+        _valid_model_chars = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._:-/")
+        if model and not all(c in _valid_model_chars for c in model):
+            raise ValueError(f"Invalid model name: {model!r}")
+
         cmd = [
             "claude",
             "-p", query,
