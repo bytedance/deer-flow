@@ -1034,3 +1034,185 @@ async def test_coder_and_reviewer_on_same_pr_get_distinct_threads(base_dir: Path
     # Each metadata mirrors its own thread id.
     assert coder.metadata["preferred_thread_id"] == coder.metadata["github"]["thread_id"]
     assert reviewer.metadata["preferred_thread_id"] == reviewer.metadata["github"]["thread_id"]
+
+
+# ---------------------------------------------------------------------------
+# Redundant review-comment fan-out suppression (issue #4121, narrower slice)
+#
+# GitHub fires one `pull_request_review_comment` webhook per inline comment
+# attached to a review submission, IN ADDITION to the single
+# `pull_request_review` event for the review as a whole. A bot reviewer like
+# CodeRabbit routinely leaves 20-30 inline comments per review, so this
+# floods the webhook with near-duplicate deliveries that carry nothing the
+# agent doesn't already have -- it fetches every inline comment itself (via
+# `gh api`) when it processes the parent `pull_request_review` event. Each
+# such companion comment carries `pull_request_review_id` and (unless it is
+# itself a reply within an existing thread) no `in_reply_to_id`.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_review_comment_companion_to_review_is_suppressed(base_dir: Path) -> None:
+    """A `pull_request_review_comment` that is pure fan-out from a parent
+    `pull_request_review` submission must be suppressed before it reaches
+    any agent binding -- even one that would otherwise match.
+
+    ``pull_request_review_id`` is set (this comment belongs to a review)
+    and ``in_reply_to_id`` is absent (this is not a reply-to-a-reply), so
+    this is the classic "CodeRabbit storm" companion event.
+    """
+    bus = MessageBus()
+    _write_agent(
+        base_dir,
+        "default",
+        "reviewer",
+        {
+            "name": "reviewer",
+            "github": {
+                "bindings": [
+                    {
+                        "repo": "a/b",
+                        "triggers": {"pull_request_review_comment": {"require_mention": False}},
+                    }
+                ],
+            },
+        },
+    )
+    payload = {
+        "action": "created",
+        "pull_request": {"number": 7},
+        "comment": {
+            "body": "nit: consider renaming this variable.",
+            "user": {"login": "coderabbitai[bot]"},
+            "pull_request_review_id": 999001,
+            "in_reply_to_id": None,
+        },
+        "repository": {"full_name": "a/b"},
+        "sender": {"login": "coderabbitai[bot]"},
+    }
+    result = await fanout_event(bus, "pull_request_review_comment", "del-storm-1", payload)
+    # Filtered before the registry lookup even runs -- matched_agents stays
+    # empty, exactly like the existing "no_target" early-return shape.
+    assert result["matched_agents"] == [], result
+    assert result["fired_agents"] == [], result
+    assert any(s["reason"] == "redundant_review_comment" for s in result["skipped"]), result
+    assert await _drain(bus) == []
+
+
+@pytest.mark.asyncio
+async def test_review_comment_reply_within_thread_still_fires(base_dir: Path) -> None:
+    """A genuine reply within an existing review-comment thread is a
+    distinct interaction, not fan-out noise -- it must still fire even
+    though ``pull_request_review_id`` is set, because ``in_reply_to_id``
+    marks it as a reply rather than a fresh review-companion comment.
+    """
+    bus = MessageBus()
+    _write_agent(
+        base_dir,
+        "default",
+        "reviewer",
+        {
+            "name": "reviewer",
+            "github": {
+                "bindings": [
+                    {
+                        "repo": "a/b",
+                        "triggers": {"pull_request_review_comment": {"require_mention": False}},
+                    }
+                ],
+            },
+        },
+    )
+    payload = {
+        "action": "created",
+        "pull_request": {"number": 7},
+        "comment": {
+            "body": "Good catch, fixed in the latest push.",
+            "user": {"login": "alice"},
+            "pull_request_review_id": 999001,
+            "in_reply_to_id": 555002,
+        },
+        "repository": {"full_name": "a/b"},
+        "sender": {"login": "alice"},
+    }
+    result = await fanout_event(bus, "pull_request_review_comment", "del-reply-1", payload)
+    assert result["fired_agents"] == ["reviewer"], result
+    assert result["skipped"] == []
+    messages = await _drain(bus)
+    assert len(messages) == 1
+
+
+@pytest.mark.asyncio
+async def test_review_comment_without_review_id_still_fires(base_dir: Path) -> None:
+    """A `pull_request_review_comment` with no `pull_request_review_id` at
+    all is not part of any review fan-out and must still fire.
+
+    (Every real GitHub `pull_request_review_comment` carries this field,
+    but the filter must key off its actual presence rather than assume
+    it, so a malformed/legacy payload is never silently swallowed.)
+    """
+    bus = MessageBus()
+    _write_agent(
+        base_dir,
+        "default",
+        "reviewer",
+        {
+            "name": "reviewer",
+            "github": {
+                "bindings": [
+                    {
+                        "repo": "a/b",
+                        "triggers": {"pull_request_review_comment": {"require_mention": False}},
+                    }
+                ],
+            },
+        },
+    )
+    payload = {
+        "action": "created",
+        "pull_request": {"number": 7},
+        "comment": {
+            "body": "Standalone inline comment, no parent review.",
+            "user": {"login": "alice"},
+        },
+        "repository": {"full_name": "a/b"},
+        "sender": {"login": "alice"},
+    }
+    result = await fanout_event(bus, "pull_request_review_comment", "del-noreviewid-1", payload)
+    assert result["fired_agents"] == ["reviewer"], result
+    assert result["skipped"] == []
+
+
+@pytest.mark.asyncio
+async def test_issue_comment_unaffected_by_review_comment_filter(base_dir: Path) -> None:
+    """A standalone top-level `issue_comment` must be completely unaffected
+    by the review-comment redundancy filter -- it is a different event
+    name entirely, so the filter must not touch it.
+    """
+    bus = MessageBus()
+    _write_agent(
+        base_dir,
+        "default",
+        "assistant",
+        {
+            "name": "assistant",
+            "github": {
+                "bindings": [
+                    {
+                        "repo": "a/b",
+                        "triggers": {"issue_comment": {"require_mention": False}},
+                    }
+                ],
+            },
+        },
+    )
+    payload = {
+        "action": "created",
+        "issue": {"number": 3, "pull_request": {"url": "..."}},
+        "comment": {"body": "just a regular comment", "user": {"login": "alice"}},
+        "repository": {"full_name": "a/b"},
+        "sender": {"login": "alice"},
+    }
+    result = await fanout_event(bus, "issue_comment", "del-issue-1", payload)
+    assert result["fired_agents"] == ["assistant"], result
+    assert result["skipped"] == []

@@ -7,6 +7,7 @@ first-class :class:`Channel` (see ``app/channels/github.py``):
     POST /api/webhooks/github
         → verify HMAC (route)
         → :func:`fanout_event` (this module)
+            • drop redundant review-comment webhook noise
             • filter bots
             • look up bound agents
             • apply per-binding trigger filter
@@ -100,6 +101,37 @@ def _is_self_event(
     return sender_login.lower() in {s.lower() for s in self_logins}
 
 
+def _is_redundant_review_comment(payload: dict[str, Any]) -> bool:
+    """Return True if this ``pull_request_review_comment`` is fan-out noise
+    from a ``pull_request_review`` submission the agent already saw.
+
+    GitHub fires one ``pull_request_review_comment`` webhook per inline
+    comment attached to a review submission, ON TOP OF the single
+    ``pull_request_review`` event for the review as a whole. A bot
+    reviewer (CodeRabbit routinely posts 20-30 inline comments per review)
+    therefore floods the webhook with 20-30 near-duplicate deliveries that
+    carry nothing the agent doesn't already have: it fetches every inline
+    comment itself (via ``gh api``) when it processes the parent
+    ``pull_request_review`` event.
+
+    Each such companion comment carries ``pull_request_review_id`` (the id
+    of the review it belongs to) and — the discriminator — no
+    ``in_reply_to_id``. ``in_reply_to_id`` is only set when a human (or
+    bot) is replying *within* an existing review-comment thread, which is
+    a genuine new interaction, not fan-out, and must still fire.
+
+    This mirrors the shape GitHub's REST API has always used for
+    review-thread comments (``GET /repos/{owner}/{repo}/pulls/comments``),
+    which the webhook ``comment`` object is drawn from:
+    ``pull_request_review_id`` is present on every review-thread comment;
+    ``in_reply_to_id`` is present only on replies.
+    """
+    comment = payload.get("comment")
+    if not isinstance(comment, dict):
+        return False
+    return comment.get("pull_request_review_id") is not None and comment.get("in_reply_to_id") is None
+
+
 async def fanout_event(
     bus: MessageBus,
     event: str,
@@ -141,7 +173,22 @@ async def fanout_event(
 
     repo, number = target
 
-    # 2. Bound-agent lookup. The registry is mtime-cached internally so
+    # 2. Redundant review-comment fan-out filter. Checked here — before
+    #    the registry lookup / per-agent loop below — because redundancy
+    #    is a property of the EVENT itself, not of any specific agent
+    #    binding: filtering once up front avoids resolving the registry
+    #    and iterating every matched binding for an event no binding
+    #    should ever need to see. See :func:`_is_redundant_review_comment`.
+    if event == "pull_request_review_comment" and _is_redundant_review_comment(payload):
+        logger.info(
+            "github_fanout: skipped (reason=redundant_review_comment, repo=%s#%s, delivery=%s)",
+            repo,
+            number,
+            delivery_id,
+        )
+        return {"matched_agents": [], "fired_agents": [], "skipped": [{"reason": "redundant_review_comment"}]}
+
+    # 3. Bound-agent lookup. The registry is mtime-cached internally so
     #    the warm path is iterdir + stat only — but the cold path (and
     #    every first call after an operator edit) parses every
     #    config.yaml on disk. Run it off the event loop in both cases so
@@ -165,7 +212,7 @@ async def fanout_event(
         assert github is not None
         trigger = match.trigger
 
-        # 3. Self-event gate — skip events triggered by this agent's own
+        # 4. Self-event gate — skip events triggered by this agent's own
         #    bot account. Other bots (Copilot, CodeRabbit, Dependabot, …)
         #    are legitimate signals and pass through. The identity set is
         #    derived from the agent's whole ``github`` config (bot_login
@@ -180,7 +227,7 @@ async def fanout_event(
             skipped.append({"agent": agent.name, "reason": "self_event"})
             continue
 
-        # 4. Trigger filter.
+        # 5. Trigger filter.
         # ``default_mention_login`` mirrors the precedence used by
         # ``_is_self_event`` above, then extended with the operator
         # default from ``channels.github.default_mention_login``:
@@ -221,7 +268,7 @@ async def fanout_event(
             skipped.append({"agent": agent.name, "reason": reason})
             continue
 
-        # 5. Build prompt + publish inbound message onto the bus.
+        # 6. Build prompt + publish inbound message onto the bus.
         prompt = build_prompt(event, payload)
         thread_id = resolve_thread_id(repo, number, agent.name)
 
