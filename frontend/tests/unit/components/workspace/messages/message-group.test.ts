@@ -89,6 +89,37 @@ describe("MessageGroup", () => {
     );
     expect(html).not.toContain("first hidden query");
     expect(html).toContain("Inspect message rendering");
+    expect(html).toContain("1 more step");
+  });
+
+  it("keeps tool-calling assistant text visible when reasoning is also present", () => {
+    const html = renderGroup([
+      {
+        id: "ai-1",
+        type: "ai",
+        content: "I found a likely cause, so I will inspect the renderer next.",
+        additional_kwargs: {
+          reasoning_content: "Check how processing groups convert messages.",
+        },
+        tool_calls: [
+          {
+            id: "call-1",
+            name: "bash",
+            args: {
+              description: "Inspect renderer conversion",
+              command: "sed -n '720,780p' message-group.tsx",
+            },
+          },
+        ],
+      } as Message,
+    ]);
+
+    expect(html).toContain(
+      "I found a likely cause, so I will inspect the renderer next.",
+    );
+    expect(html).toContain("Inspect renderer conversion");
+    expect(html).toContain("1 more step");
+    expect(html).not.toContain("Check how processing groups convert messages.");
   });
 });
 
