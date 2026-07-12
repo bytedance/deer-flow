@@ -960,9 +960,9 @@ async def test_delivery_id_populates_inbound_dedupe_identity(base_dir: Path) -> 
     top-level ``metadata["message_id"]`` plus a workspace id. The GitHub
     channel added later (PR #3754) never populated either, so a redelivered
     webhook (native "Redeliver" button / retry-on-timeout) re-ran the agent.
-    Fan-out now stamps the ``X-GitHub-Delivery`` GUID (scoped per agent) as the
-    message id and the repo as the workspace id, exactly where
-    ``ChannelManager._inbound_dedupe_key`` looks.
+    Fan-out now stamps the ``X-GitHub-Delivery`` GUID (scoped per owning
+    user + agent) as the message id and the repo as the workspace id,
+    exactly where ``ChannelManager._inbound_dedupe_key`` looks.
     """
     bus = MessageBus()
     _write_agent(
@@ -982,9 +982,11 @@ async def test_delivery_id_populates_inbound_dedupe_identity(base_dir: Path) -> 
 
     # Workspace id: the manager fails closed without one; repo is stable + unique.
     assert msg.workspace_id == "zhfeng/llm-gateway"
-    # Stable per-(delivery, agent) message id the manager keys dedupe on, read
-    # from the top level of metadata (not the nested ``github`` block).
-    assert msg.metadata["message_id"] == "del-abc:reviewer"
+    # Stable per-(delivery, user, agent) message id the manager keys dedupe
+    # on, read from the top level of metadata (not the nested ``github``
+    # block). ``user_id`` here is "default" — the owning user this agent
+    # config lives under.
+    assert msg.metadata["message_id"] == "del-abc:default:reviewer"
 
 
 @pytest.mark.asyncio
@@ -1021,6 +1023,66 @@ async def test_dedupe_identity_stable_across_redelivery_and_distinct_per_agent(b
     # New delivery: every id changes, so both agents fire again.
     assert second["coder"] != first["coder"]
     assert second["reviewer"] != first["reviewer"]
+
+
+@pytest.mark.asyncio
+async def test_dedupe_identity_distinguishes_same_agent_name_across_users(base_dir: Path) -> None:
+    """Two different users' same-named agents must not collide (willem-bd, PR #4104).
+
+    ``ChannelManager._inbound_dedupe_key`` indexes on
+    ``(channel, workspace_id, chat_id, message_id)``. For GitHub both
+    ``workspace_id`` and ``chat_id`` are the repo, so ``owner_user_id`` was
+    never represented anywhere in the key. Before folding ``match.user_id``
+    into the per-message id, two users each binding an agent named
+    ``reviewer`` to the same repo+event produced the *identical* id
+    ``f"{delivery_id}:reviewer"`` for both fan-out messages, so
+    ``ChannelManager._is_duplicate_inbound`` silently dropped the second
+    user's run as a false-positive duplicate of the first — even though
+    GitHub only delivered the webhook once and both users' agents matched.
+    """
+    bus = MessageBus()
+    for user_id in ("alice", "bob"):
+        _write_agent(
+            base_dir,
+            user_id,
+            "reviewer",
+            {
+                "name": "reviewer",
+                "github": {
+                    "bindings": [
+                        {"repo": "a/b", "triggers": {"pull_request": {"actions": ["opened"]}}},
+                    ],
+                },
+            },
+        )
+    payload = {
+        "action": "opened",
+        "pull_request": {"number": 1, "title": "x", "user": {"login": "u"}, "body": ""},
+        "repository": {"full_name": "a/b"},
+        "sender": {"login": "u"},
+    }
+    result = await fanout_event(bus, "pull_request", "del-cross-user", payload)
+    assert result["fired_agents"] == ["reviewer", "reviewer"]
+
+    messages = await _drain(bus)
+    assert len(messages) == 2
+    by_owner = {m.owner_user_id: m for m in messages}
+    assert set(by_owner) == {"alice", "bob"}
+
+    # The dedupe id must differ even though the agent name is identical —
+    # otherwise the two users' fan-out messages are indistinguishable to
+    # the manager's dedupe.
+    assert by_owner["alice"].metadata["message_id"] != by_owner["bob"].metadata["message_id"]
+
+    # Prove the actual observable consequence, not just that the raw ids
+    # differ: neither user's message is treated as a duplicate of the
+    # other inside the same ChannelManager dedupe window.
+    from app.channels.manager import ChannelManager
+    from app.channels.store import ChannelStore
+
+    manager = ChannelManager(bus=MessageBus(), store=ChannelStore(path=base_dir / "dedupe-store.json"))
+    assert manager._is_duplicate_inbound(by_owner["alice"]) is False
+    assert manager._is_duplicate_inbound(by_owner["bob"]) is False
 
 
 @pytest.mark.asyncio

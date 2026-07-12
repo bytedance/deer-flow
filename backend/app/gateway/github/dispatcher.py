@@ -235,13 +235,19 @@ async def fanout_event(
         # delivery is retried after a timeout or replayed via the repo/App
         # "Redeliver" button, so keying on it lets the manager absorb those
         # replays instead of re-running the agent (and its real side effects,
-        # e.g. a duplicate PR comment). One delivery fans out to N agents, so
-        # the per-message id is scoped to (delivery, agent): an identical
-        # redelivery reproduces the same pairs (deduped) while two agents
-        # matching the same delivery keep distinct ids and both still fire.
+        # e.g. a duplicate PR comment). One delivery fans out to N agents
+        # across potentially N different owning users, so the per-message id
+        # is scoped to (delivery, user, agent): an identical redelivery
+        # reproduces the same triples (deduped) while two agents matching the
+        # same delivery — including two different users who each bind an
+        # agent of the same name to the same repo+event — keep distinct ids
+        # and both still fire. ``ChannelManager._inbound_dedupe_key`` indexes
+        # on (channel, workspace_id, chat_id, message_id); workspace_id and
+        # chat_id are both the repo here, so match.user_id is the only thing
+        # that can separate two users in that key (willem-bd, PR #4104).
         # Left None when the header is absent, so the manager fails open (no
         # dedupe) exactly as before rather than collapsing distinct deliveries.
-        dedupe_message_id = f"{delivery_id}:{agent.name}" if delivery_id else None
+        dedupe_message_id = f"{delivery_id}:{match.user_id}:{agent.name}" if delivery_id else None
         msg = InboundMessage(
             channel_name="github",
             chat_id=repo,
