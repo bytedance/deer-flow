@@ -109,6 +109,9 @@ test.describe("Artifact preview stability", () => {
     await expect(
       artifactsPanel.locator('iframe[title="Artifact preview"]'),
     ).toBeVisible();
+    await expect(
+      artifactsPanel.locator('iframe[title="Artifact preview"]'),
+    ).toHaveAttribute("sandbox", "");
   });
 
   test("renders preview iframe after the write artifact succeeds", async ({

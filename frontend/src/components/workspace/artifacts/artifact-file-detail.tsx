@@ -360,6 +360,7 @@ export function ArtifactFileDetail({
         {!isCodeFile && canPreviewInBrowser && (
           <iframe
             className="size-full"
+            sandbox=""
             src={urlOfArtifact({ filepath, threadId, isMock })}
           />
         )}
@@ -528,7 +529,8 @@ export function ArtifactFilePreview({
         ref={iframeRef}
         className="size-full"
         title="Artifact preview"
-        sandbox="allow-scripts allow-forms"
+        // Artifact HTML is untrusted. Keep all iframe capabilities disabled.
+        sandbox=""
         src={htmlPreviewUrl}
       />
     );
