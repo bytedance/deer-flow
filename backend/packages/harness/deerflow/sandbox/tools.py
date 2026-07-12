@@ -2268,7 +2268,9 @@ def str_replace_tool(
         with get_file_operation_lock(sandbox, path):
             content = sandbox.read_file(path)
             if not content:
-                return "OK"
+                if not old_str:
+                    return "OK"
+                return f"Error: String to replace not found in file: {requested_path}"
             if old_str not in content:
                 return f"Error: String to replace not found in file: {requested_path}"
             if replace_all:
