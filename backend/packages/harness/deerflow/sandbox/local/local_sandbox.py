@@ -344,9 +344,20 @@ class LocalSandbox(Sandbox):
         # Try each mapping (longest local path first for more specific matches)
         for mapping in self._mappings_by_local_specificity:
             local_path_resolved = self._resolved_local_paths[mapping]
-            if path_str == local_path_resolved or path_str.startswith(local_path_resolved + "/"):
-                # Replace the local path prefix with container path
-                relative = path_str[len(local_path_resolved) :].lstrip("/")
+            # ``Path.resolve()`` always renders with the native separator
+            # (backslash on Windows), regardless of the forward-slash
+            # normalization above, so the containment check must compare with
+            # ``os.sep`` here too -- mirroring ``_is_read_only_path`` -- instead
+            # of a hardcoded "/". A hardcoded "/" can never match a
+            # backslash-joined nested path on Windows, so every nested path
+            # silently fell through to the "no mapping found" branch below and
+            # leaked the raw host path (real username, full directory tree).
+            if path_str == local_path_resolved or path_str.startswith(local_path_resolved + os.sep):
+                # Replace the local path prefix with container path. Container
+                # paths are always POSIX-style, so the extracted relative
+                # portion (native-separated on Windows) is normalized to
+                # forward slashes before being spliced in.
+                relative = path_str[len(local_path_resolved) :].lstrip(os.sep).replace(os.sep, "/")
                 resolved = f"{mapping.container_path}/{relative}" if relative else mapping.container_path
                 return resolved
 
@@ -650,8 +661,14 @@ class LocalSandbox(Sandbox):
             # 2. It is NOT already present in the result (was skipped by list_dir)
             if mapping.container_path.startswith(container_path + "/"):
                 child_rel = mapping.container_path[len(container_path) + 1 :]
-                # Only direct children (no further slashes), e.g. "public", "custom"
-                if "/" not in child_rel and child_rel not in existing_dirs:
+                # Only direct children (no further slashes), e.g. "public", "custom".
+                # Compare the mapping's full container path -- not the bare child
+                # name -- against existing_dirs, which holds full paths (e.g.
+                # "/mnt/user-data/workspace"). Comparing the bare name here would
+                # never match, so an already-listed mount (the common case: real
+                # nested workspace/uploads/outputs subdirectories under
+                # /mnt/user-data) would be appended a second time.
+                if "/" not in child_rel and mapping.container_path.rstrip("/") not in existing_dirs:
                     # Verify the host path exists so we don't add phantom entries
                     try:
                         if Path(mapping.local_path).resolve().is_dir():
