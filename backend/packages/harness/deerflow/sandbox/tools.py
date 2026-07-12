@@ -1244,7 +1244,21 @@ def replace_virtual_paths_in_command(command: str, thread_data: ThreadDataState 
 
     # Replace user-data paths
     if VIRTUAL_PATH_PREFIX in result and thread_data is not None:
-        pattern = re.compile(rf"{re.escape(VIRTUAL_PATH_PREFIX)}(/[^\s\"';&|<>()]*)?")
+        # The segment-boundary lookahead is what keeps the virtual root from
+        # matching inside a sibling that merely shares its prefix
+        # (``/mnt/user-data`` inside ``/mnt/user-data-backup``). The trailing
+        # group needs a ``/`` to consume anything, so without the lookahead the
+        # bare root still matches and the sibling is rewritten into the thread's
+        # host directory — a real path outside the mount contract. Same defect as
+        # #4035 (reverse patterns) and #4053 (masking patterns), mirrored into
+        # this direction.
+        #
+        # The class mirrors ``LocalSandbox._content_pattern``'s rather than
+        # ``_command_pattern``'s: a virtual root can legitimately be followed by
+        # ``:`` (PATH-style concatenation) or ``,``, which the shell-oriented
+        # class rejects — narrowing to it would stop translating paths that
+        # translate today. ``$`` covers a command ending exactly at the root.
+        pattern = re.compile(rf"{re.escape(VIRTUAL_PATH_PREFIX)}(?=/|$|[^\w./-])(/[^\s\"';&|<>()]*)?")
 
         def replace_user_data_match(match: re.Match) -> str:
             return replace_virtual_path(match.group(0), thread_data).replace("\\", "/")
