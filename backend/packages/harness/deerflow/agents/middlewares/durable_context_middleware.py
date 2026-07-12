@@ -164,8 +164,12 @@ def _current_run_messages(messages: list[AnyMessage], run_id: str | None, pre_ex
         if not isinstance(message, HumanMessage):
             continue
         message_run_id = message.additional_kwargs.get("run_id")
-        if message_run_id is None or message_run_id == run_id:
+        if message_run_id == run_id:
             return messages[index + 1 :]
+        if message_run_id is None:
+            message_id = _message_id(message)
+            if not pre_existing_message_ids or (message_id is not None and message_id not in pre_existing_message_ids):
+                return messages[index + 1 :]
         return _messages_after_pre_existing_boundary(messages, pre_existing_message_ids)
     return _messages_after_pre_existing_boundary(messages, pre_existing_message_ids)
 

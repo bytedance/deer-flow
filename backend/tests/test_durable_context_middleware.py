@@ -375,6 +375,43 @@ class TestBeforeModelCapture:
         assert [entry["id"] for entry in out["delegations"]] == ["new-call"]
         assert out["delegations"][0]["run_id"] == "run-new"
 
+    def test_resume_boundary_does_not_treat_legacy_human_without_run_id_as_current(self):
+        middleware = DurableContextMiddleware()
+        runtime = SimpleNamespace(context={"run_id": "run-new", CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY: {"old-human", "old-ai"}})
+        messages = [
+            HumanMessage(id="old-human", content="old request"),
+            AIMessage(
+                id="old-ai",
+                content="",
+                tool_calls=[
+                    {
+                        "name": "task",
+                        "args": {"description": "old work", "prompt": "do old", "subagent_type": "general-purpose"},
+                        "id": "old-call",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            AIMessage(
+                id="new-ai",
+                content="",
+                tool_calls=[
+                    {
+                        "name": "task",
+                        "args": {"description": "new work", "prompt": "do new", "subagent_type": "general-purpose"},
+                        "id": "new-call",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+        ]
+
+        out = middleware.before_model({"messages": messages, "delegations": []}, runtime)
+
+        assert out is not None
+        assert [entry["id"] for entry in out["delegations"]] == ["new-call"]
+        assert out["delegations"][0]["run_id"] == "run-new"
+
     def test_returns_none_when_no_delegations(self):
         middleware = DurableContextMiddleware()
 
