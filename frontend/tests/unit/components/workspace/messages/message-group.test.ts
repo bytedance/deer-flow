@@ -42,6 +42,54 @@ describe("MessageGroup", () => {
     );
     expect(html).toContain("DeerFlow issue 4027");
   });
+
+  it("keeps assistant text visible while older tool steps stay collapsed", () => {
+    const html = renderGroup([
+      {
+        id: "ai-1",
+        type: "ai",
+        content: "The first tool failed; I will try a narrower search.",
+        tool_calls: [
+          {
+            id: "call-1",
+            name: "web_search",
+            args: { query: "first hidden query" },
+          },
+        ],
+      } as Message,
+      {
+        id: "tool-1",
+        type: "tool",
+        name: "web_search",
+        tool_call_id: "call-1",
+        content: "[]",
+      } as Message,
+      {
+        id: "ai-2",
+        type: "ai",
+        content: "The second approach should reveal the missing context.",
+        tool_calls: [
+          {
+            id: "call-2",
+            name: "bash",
+            args: {
+              description: "Inspect message rendering",
+              command: "rg assistantText frontend/src",
+            },
+          },
+        ],
+      } as Message,
+    ]);
+
+    expect(html).toContain(
+      "The first tool failed; I will try a narrower search.",
+    );
+    expect(html).toContain(
+      "The second approach should reveal the missing context.",
+    );
+    expect(html).not.toContain("first hidden query");
+    expect(html).toContain("Inspect message rendering");
+  });
 });
 
 function renderGroup(messages: Message[]) {
