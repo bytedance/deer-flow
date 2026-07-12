@@ -59,7 +59,6 @@ class SubagentStatus(Enum):
     FAILED = "failed"
     CANCELLED = "cancelled"
     TIMED_OUT = "timed_out"
-    MAX_TURNS_REACHED = "max_turns_reached"
 
     @property
     def is_terminal(self) -> bool:
@@ -68,7 +67,6 @@ class SubagentStatus(Enum):
             type(self).FAILED,
             type(self).CANCELLED,
             type(self).TIMED_OUT,
-            type(self).MAX_TURNS_REACHED,
         }
 
 
@@ -82,6 +80,12 @@ class SubagentResult:
         status: Current status of the execution.
         result: The final result message (if completed).
         error: Error message (if failed).
+        stop_reason: Why a guardrail cap ended the run early
+            (``token_capped`` / ``turn_capped`` / ``loop_capped``), or ``None``
+            for a clean run. A capped run keeps a normal status — ``completed``
+            when it produced usable output (the partial work survives on
+            ``result``), ``failed`` when it did not — and carries the cap here
+            so the lead can tell "finished" from "capped" (#3875 Phase 2).
         started_at: When execution started.
         completed_at: When execution completed.
         ai_messages: List of complete AI messages (as dicts) generated during execution.
@@ -92,6 +96,7 @@ class SubagentResult:
     status: SubagentStatus
     result: str | None = None
     error: str | None = None
+    stop_reason: str | None = None
     started_at: datetime | None = None
     completed_at: datetime | None = None
     ai_messages: list[dict[str, Any]] | None = None
@@ -105,12 +110,19 @@ class SubagentResult:
         if self.ai_messages is None:
             self.ai_messages = []
 
+    def update_token_usage_records(self, records: list[dict[str, int | str | None]]) -> None:
+        """Publish the latest cumulative collector snapshot while still running."""
+        with self._state_lock:
+            if not self.status.is_terminal:
+                self.token_usage_records = list(records)
+
     def try_set_terminal(
         self,
         status: SubagentStatus,
         *,
         result: str | None = None,
         error: str | None = None,
+        stop_reason: str | None = None,
         completed_at: datetime | None = None,
         ai_messages: list[dict[str, Any]] | None = None,
         token_usage_records: list[dict[str, int | str | None]] | None = None,
@@ -132,6 +144,8 @@ class SubagentResult:
                 self.result = result
             if error is not None:
                 self.error = error
+            if stop_reason is not None:
+                self.stop_reason = stop_reason
             if ai_messages is not None:
                 self.ai_messages = ai_messages
             if token_usage_records is not None:
@@ -182,6 +196,57 @@ def _extract_final_result(final_state: Any, *, trace_id: str, name: str) -> str:
 
     logger.warning(f"[trace={trace_id}] Subagent {name} no messages in final state")
     return "No response generated"
+
+
+def _extract_llm_error_fallback(final_state: Any) -> str | None:
+    """Return the user-facing error for a terminal LLM fallback message.
+
+    ``LLMErrorHandlingMiddleware`` converts provider exceptions into marked
+    ``AIMessage`` objects so the graph can terminate cleanly. Clean graph
+    termination is not task success, however: subagent callers need the
+    structured marker translated into the existing failed terminal state.
+
+    Only the last assistant message is authoritative, and scanning just the
+    tail (rather than all messages) is deliberate. Subagents share the
+    parent's ``thread_id`` (see ``_aexecute``'s ``run_config``), and LangGraph
+    replays the full parent message history through ``stream_mode="values"``,
+    so ``final_state`` can contain a *stale* fallback marker left by an earlier
+    parent-history turn. The lead-agent run path scans every message and must
+    mask those stale markers via ``pre_existing_message_ids``
+    (``runtime/runs/worker.py::_extract_llm_error_fallback_message``). Here no
+    masking is needed: a fallback ``AIMessage`` carries no ``tool_calls``, so it
+    always terminates the run, and a subagent always appends at least its own
+    terminal assistant message — the last ``AIMessage`` is therefore never a
+    stale parent-history marker. Do not "fix" this by scanning all messages;
+    that reintroduces the stale-marker false positive worker.py guards against.
+
+    Error-looking message text without the marker remains ordinary output.
+    """
+    if final_state is None:
+        return None
+
+    for message in reversed(final_state.get("messages", [])):
+        if not isinstance(message, AIMessage):
+            continue
+
+        metadata = message.additional_kwargs
+        if metadata.get("deerflow_error_fallback") is not True:
+            return None
+
+        content = message_content_to_text(message.content).strip()
+        if content:
+            return content
+
+        # Defensive: ``_build_error_fallback_message`` always sets a non-empty
+        # user-facing ``content`` (and ``error_detail`` via ``_extract_error_detail``,
+        # which falls back to the exception class name). These branches only
+        # guard against a future middleware that emits an empty fallback.
+        detail = metadata.get("error_detail")
+        if isinstance(detail, str) and detail.strip():
+            return detail.strip()
+        return "LLM request failed"
+
+    return None
 
 
 # Global storage for background task results
@@ -402,6 +467,14 @@ class SubagentExecutor:
             config.disallowed_tools,
         )
         self.tools = self._base_tools
+        # Guard middlewares that expose ``consume_stop_reason`` (currently
+        # ``TokenBudgetMiddleware`` and ``LoopDetectionMiddleware``), captured in
+        # ``_create_agent`` so ``_aexecute`` can read each after the run and
+        # surface whichever cap fired (token_capped / loop_capped) to the lead
+        # (#3875 Phase 2). Collected as a list — every guard must be checked,
+        # not just the first — because the v2 contract advertises more than one
+        # cap reason.
+        self._stop_reason_middlewares: list[Any] = []
 
         logger.info(f"[trace={self.trace_id}] SubagentExecutor initialized: {config.name} with {len(self.tools)} tools")
 
@@ -419,8 +492,34 @@ class SubagentExecutor:
 
         from deerflow.agents.middlewares.tool_error_handling_middleware import build_subagent_runtime_middlewares
 
-        # Reuse shared middleware composition with lead agent.
-        middlewares = build_subagent_runtime_middlewares(app_config=app_config, model_name=self.model_name, lazy_init=True, deferred_setup=deferred_setup)
+        # Reuse shared middleware composition with lead agent. ``agent_name``
+        # lets the builder resolve the per-agent token_budget override.
+        mcp_routing_middleware = None
+        if deferred_setup is not None and deferred_setup.deferred_names:
+            from deerflow.tools.builtins.tool_search import build_mcp_routing_middleware
+
+            mcp_routing_middleware = build_mcp_routing_middleware(
+                tools if tools is not None else self.tools,
+                deferred_setup,
+                top_k=app_config.tool_search.auto_promote_top_k,
+            )
+        middleware_kwargs = {
+            "app_config": app_config,
+            "model_name": self.model_name,
+            "lazy_init": True,
+            "deferred_setup": deferred_setup,
+            "agent_name": self.config.name,
+        }
+        if mcp_routing_middleware is not None:
+            middleware_kwargs["mcp_routing_middleware"] = mcp_routing_middleware
+        middlewares = build_subagent_runtime_middlewares(**middleware_kwargs)
+        # Collect every guard middleware that exposes ``consume_stop_reason``
+        # (TokenBudgetMiddleware, LoopDetectionMiddleware) so _aexecute can read
+        # each after the run and surface whichever cap fired. Duck-typed
+        # (``hasattr``) so this file needs no import of the middleware classes;
+        # a list (not ``next(...)``) so every guard is checked and a later one
+        # is picked up automatically.
+        self._stop_reason_middlewares = [m for m in middlewares if hasattr(m, "consume_stop_reason")]
 
         # system_prompt is included in initial state messages (see _build_initial_state)
         # to avoid multiple SystemMessages which some LLM APIs don't support.
@@ -432,6 +531,24 @@ class SubagentExecutor:
             state_schema=ThreadState,
             checkpointer=False,
         )
+
+    def _consume_guard_stop_reason(self) -> str | None:
+        """Pop and return the guard-cap stop reason set during the last run.
+
+        Checks every guard middleware that exposes ``consume_stop_reason``
+        (collected in :meth:`_create_agent`) and returns the first non-``None``
+        reason — ``"token_capped"`` when the token-budget hard stop fired,
+        ``"loop_capped"`` when loop detection forced a stop, otherwise ``None``.
+        Each guard's cap does not raise (the run still completes with a final
+        answer), so this is how the executor learns a completion was actually
+        capped. Typically at most one guard fires per run, but checking all of
+        them keeps the contract's full cap vocabulary reachable.
+        """
+        for mw in self._stop_reason_middlewares:
+            reason = mw.consume_stop_reason(self.run_id)
+            if reason is not None:
+                return reason
+        return None
 
     async def _load_skills(self) -> list[Skill]:
         """Load enabled skill metadata based on config.skills."""
@@ -511,7 +628,7 @@ class SubagentExecutor:
         # Lazy import: see the TYPE_CHECKING note at the top of this module -
         # importing tool_search runs tools/builtins/__init__, which would
         # re-enter this package during its own initialization.
-        from deerflow.tools.builtins.tool_search import assemble_deferred_tools, get_deferred_tools_prompt_section
+        from deerflow.tools.builtins.tool_search import assemble_deferred_tools, get_deferred_tools_prompt_section, get_mcp_routing_hints_prompt_section
 
         # Load skills as conversation items (Codex pattern)
         skills = await self._load_skills()
@@ -539,6 +656,9 @@ class SubagentExecutor:
         deferred_section = get_deferred_tools_prompt_section(deferred_names=deferred_setup.deferred_names)
         if deferred_section:
             system_parts.append(deferred_section)
+        mcp_routing_hints_section = get_mcp_routing_hints_prompt_section(filtered_tools, deferred_names=deferred_setup.deferred_names)
+        if mcp_routing_hints_section:
+            system_parts.append(mcp_routing_hints_section)
 
         messages: list[Any] = []
         if system_parts:
@@ -693,6 +813,7 @@ class SubagentExecutor:
                     return result
 
                 final_state = chunk
+                result.update_token_usage_records(collector.snapshot_records())
 
                 # Capture every step message (assistant turns AND tool outputs)
                 # appended since the last chunk. A single super-step can append
@@ -707,33 +828,74 @@ class SubagentExecutor:
 
             logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} completed async execution")
             token_usage_records = collector.snapshot_records()
-            final_result = _extract_final_result(final_state, trace_id=self.trace_id, name=self.config.name)
-            result.try_set_terminal(
-                SubagentStatus.COMPLETED,
-                result=final_result,
-                token_usage_records=token_usage_records,
-            )
+            llm_error = _extract_llm_error_fallback(final_state)
+            if llm_error is not None:
+                result.try_set_terminal(
+                    SubagentStatus.FAILED,
+                    error=llm_error,
+                    token_usage_records=token_usage_records,
+                )
+            else:
+                final_result = _extract_final_result(final_state, trace_id=self.trace_id, name=self.config.name)
+                # A guard hard-stop (token budget or loop detection) does not raise
+                # — it strips tool_calls so the run completes with a final answer.
+                # ``consume_stop_reason`` on each guard tells us whether that
+                # happened so we can mark the completed result with the cap reason
+                # (token_capped / loop_capped) for the lead (#3875 Phase 2). It
+                # pops the reason, so keep it on the branch that consumes it — a
+                # fallback carries no tool_calls, so no guard hard-stop can have
+                # co-occurred on the FAILED branch anyway.
+                stop_reason = self._consume_guard_stop_reason()
+                result.try_set_terminal(
+                    SubagentStatus.COMPLETED,
+                    result=final_result,
+                    stop_reason=stop_reason,
+                    token_usage_records=token_usage_records,
+                )
 
         except GraphRecursionError:
             # ``recursion_limit`` on run_config == ``self.config.max_turns``
             # (set above). Hitting it means the subagent exhausted its turn
-            # budget before producing a final answer — previously this fell
-            # through to the generic ``except Exception`` and was
-            # misclassified as FAILED, so the lead agent could not tell
-            # "broken subagent" from "out of budget" and the partial work
-            # already streamed into ``final_state`` was discarded (#3875).
-            # ``final_state`` holds the last chunk yielded before the limit
-            # fired, so recover whatever the subagent had produced and surface
-            # a distinct terminal status the lead can act on.
+            # budget. Route into the additive ``stop_reason`` channel (#3875
+            # Phase 2) rather than a dedicated status enum (which would break v1
+            # contract consumers). If the run streamed usable partial work,
+            # surface it as ``completed``; otherwise ``failed``. Either way the
+            # lead can tell "out of budget" from "broken subagent" without
+            # parsing result text.
+            #
+            # Prefer a guard's stop reason if one already fired this run: a
+            # token-budget / loop hard-stop strips tool_calls to force a final
+            # answer, and if ``recursion_limit`` then trips on the next
+            # super-step before that answer lands, the guard was the binding
+            # constraint — not the turn budget. Consulting the guards here (same
+            # lookup as the normal-completion path above) keeps the two paths
+            # consistent and pops the reason so it is not orphaned in the dict.
             max_turns = self.config.max_turns
             logger.warning(f"[trace={self.trace_id}] Subagent {self.config.name} reached max_turns={max_turns} (GraphRecursionError); recovering partial result")
-            partial = _extract_final_result(final_state, trace_id=self.trace_id, name=self.config.name)
-            result.try_set_terminal(
-                SubagentStatus.MAX_TURNS_REACHED,
-                result=partial,
-                error=f"Reached max_turns={max_turns}",
-                token_usage_records=collector.snapshot_records() if collector is not None else None,
-            )
+            messages = (final_state or {}).get("messages", [])
+            usable_partial: str | None = None
+            for m in reversed(messages):
+                if isinstance(m, AIMessage):
+                    text = message_content_to_text(m.content).strip()
+                    if text:
+                        usable_partial = text
+                    break
+            records = collector.snapshot_records() if collector is not None else None
+            stop_reason = self._consume_guard_stop_reason() or "turn_capped"
+            if usable_partial is not None:
+                result.try_set_terminal(
+                    SubagentStatus.COMPLETED,
+                    result=usable_partial,
+                    stop_reason=stop_reason,
+                    token_usage_records=records,
+                )
+            else:
+                result.try_set_terminal(
+                    SubagentStatus.FAILED,
+                    error=f"Reached max_turns={max_turns}",
+                    stop_reason=stop_reason,
+                    token_usage_records=records,
+                )
 
         except Exception as e:
             logger.exception(f"[trace={self.trace_id}] Subagent {self.config.name} async execution failed")

@@ -182,6 +182,17 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
                         self.circuit_recovery_timeout_sec,
                     )
 
+    def _release_half_open_probe(self) -> None:
+        """Release the in-flight half-open probe without recording a failure.
+
+        Used when something other than a classified success/failure consumes the probe (a
+        GraphBubbleUp control-flow signal, or a non-retriable error), so the circuit can admit
+        the next probe instead of fast-failing forever.
+        """
+        with self._circuit_lock:
+            if self._circuit_state == "half_open":
+                self._circuit_probe_in_flight = False
+
     def _classify_error(self, exc: BaseException) -> tuple[bool, str]:
         detail = _extract_error_detail(exc)
         lowered = detail.lower()
@@ -326,9 +337,7 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
                 return response
             except GraphBubbleUp:
                 # Preserve LangGraph control-flow signals (interrupt/pause/resume).
-                with self._circuit_lock:
-                    if self._circuit_state == "half_open":
-                        self._circuit_probe_in_flight = False
+                self._release_half_open_probe()
                 raise
             except Exception as exc:
                 retriable, reason = self._classify_error(exc)
@@ -354,6 +363,9 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
                 )
                 if retriable:
                     self._record_failure()
+                else:
+                    # Non-retriable: release the probe without recording a failure.
+                    self._release_half_open_probe()
                 return self._build_user_fallback_message(exc, reason)
 
     @override
@@ -378,9 +390,7 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
                 return response
             except GraphBubbleUp:
                 # Preserve LangGraph control-flow signals (interrupt/pause/resume).
-                with self._circuit_lock:
-                    if self._circuit_state == "half_open":
-                        self._circuit_probe_in_flight = False
+                self._release_half_open_probe()
                 raise
             except Exception as exc:
                 retriable, reason = self._classify_error(exc)
@@ -406,6 +416,9 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
                 )
                 if retriable:
                     self._record_failure()
+                else:
+                    # Non-retriable: release the probe without recording a failure.
+                    self._release_half_open_probe()
                 return self._build_user_fallback_message(exc, reason)
 
 

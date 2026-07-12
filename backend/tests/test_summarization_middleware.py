@@ -13,9 +13,10 @@ from langgraph.constants import TAG_NOSTREAM
 
 from deerflow.agents.memory.summarization_hook import memory_flush_hook
 from deerflow.agents.middlewares.dynamic_context_middleware import _DYNAMIC_CONTEXT_REMINDER_KEY, DynamicContextMiddleware, is_dynamic_context_reminder
-from deerflow.agents.middlewares.summarization_middleware import DeerFlowSummarizationMiddleware, SummarizationEvent
+from deerflow.agents.middlewares.summarization_middleware import DeerFlowSummarizationMiddleware, SummarizationEvent, create_summarization_middleware
 from deerflow.agents.thread_state import ThreadState
 from deerflow.config.memory_config import MemoryConfig
+from deerflow.config.summarization_config import SummarizationConfig
 
 
 def _messages() -> list:
@@ -629,3 +630,42 @@ def test_multiple_id_swap_triplets_preserve_chronological_order() -> None:
         f"{base2}__memory",
         f"{base2}__user",
     ]
+
+
+def test_factory_attaches_memory_flush_hook_by_default(monkeypatch):
+    """The lead path keeps ``memory_flush_hook`` so pre-compaction messages
+    persist into durable memory. Verified via the factory with memory enabled
+    and the default ``skip_memory_flush=False``."""
+    fake_model = MagicMock()
+    fake_model.with_config.return_value = fake_model
+    monkeypatch.setattr("deerflow.agents.middlewares.summarization_middleware.create_chat_model", lambda **kw: fake_model)
+
+    app_config = SimpleNamespace(
+        summarization=SummarizationConfig(enabled=True),
+        memory=MemoryConfig(enabled=True),
+    )
+    middleware = create_summarization_middleware(app_config=app_config)
+
+    assert middleware is not None
+    assert memory_flush_hook in middleware._before_summarization_hooks
+
+
+def test_factory_skip_memory_flush_omits_hook(monkeypatch):
+    """``skip_memory_flush=True`` (the subagent path) must omit
+    ``memory_flush_hook``: subagents share the parent's ``thread_id``, so
+    without skipping the hook a subagent's internal turns would flush into the
+    PARENT thread's durable memory (#3875 Phase 3 review)."""
+    fake_model = MagicMock()
+    fake_model.with_config.return_value = fake_model
+    monkeypatch.setattr("deerflow.agents.middlewares.summarization_middleware.create_chat_model", lambda **kw: fake_model)
+
+    app_config = SimpleNamespace(
+        summarization=SummarizationConfig(enabled=True),
+        memory=MemoryConfig(enabled=True),
+    )
+    middleware = create_summarization_middleware(app_config=app_config, skip_memory_flush=True)
+
+    assert middleware is not None
+    # memory.enabled is True but the hook is skipped — the whole point.
+    assert memory_flush_hook not in middleware._before_summarization_hooks
+    assert middleware._before_summarization_hooks == []

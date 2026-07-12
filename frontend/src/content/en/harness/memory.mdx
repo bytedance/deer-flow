@@ -29,17 +29,25 @@ Each category is updated over time as the agent learns from ongoing conversation
 
 ## How it works
 
-Memory is managed by `MemoryMiddleware`, which runs on every Lead Agent turn:
+Memory has two operation modes:
 
-1. **Injection**: at the start of each conversation, the agent's current memory is injected into the system prompt at a controlled token budget (`max_injection_tokens`).
-2. **Learning**: after a conversation, a background job extracts new facts and updates the relevant memory categories. Updates are debounced by `debounce_seconds` to batch rapid changes.
-3. **Per-agent memory**: when a custom agent is active, its memory is stored separately from the global memory. This keeps different agents' knowledge isolated.
+1. **Injection in both modes**: at the start of each conversation, the agent's current memory is injected into the system prompt at a controlled token budget (`max_injection_tokens`).
+2. **Middleware mode (default)**: `MemoryMiddleware` runs after each Lead Agent turn. It filters the conversation, queues a background update, and extracts new facts automatically. Updates are debounced by `debounce_seconds` to batch rapid changes.
+3. **Tool mode (experimental)**: DeerFlow registers `memory_search`, `memory_add`, `memory_update`, and `memory_delete` as agent tools and skips `MemoryMiddleware`. The model decides when to search or write memory, so effectiveness depends on model tool-use behavior. These explicit CRUD tools are not the passive staleness-review path; operators who enable tool mode are opting into model-directed updates/deletes instead of the middleware staleness guardrails.
+4. **Per-agent memory**: when a custom agent is active, its memory is stored separately from the global memory. This keeps different agents' knowledge isolated.
+
+In tool mode, the four `memory_*` tool names are reserved. If an MCP server or custom tool already uses `memory_search`, `memory_add`, `memory_update`, or `memory_delete`, the existing tool keeps that name and the colliding memory tool is skipped with a warning.
 
 ## Configuration
 
 ```yaml
 memory:
   enabled: true
+
+  # Operation mode:
+  #   middleware - default; passive background extraction after each turn
+  #   tool - experimental; model calls memory_* tools directly
+  mode: middleware
 
   # Storage path for the global memory file.
   # Default: {base_dir}/memory.json  (resolves to backend/.deer-flow/memory.json)

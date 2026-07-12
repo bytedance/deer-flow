@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from deerflow.sandbox.local.local_sandbox import LocalSandbox, PathMapping
 
 
@@ -65,6 +67,72 @@ def test_reverse_resolve_output_maps_local_back_to_container(tmp_path):
     ws_local = str((tmp_path / "workspace").resolve())
     out = sb._reverse_resolve_paths_in_output(f"wrote {ws_local}/foo.txt ok")
     assert out == "wrote /mnt/user-data/workspace/foo.txt ok"
+
+
+@pytest.mark.parametrize("suffix", ["-extra/data.txt", "2/x", ".bak", "foo", "_backup/y"])
+def test_reverse_resolve_does_not_match_inside_longer_sibling(tmp_path, suffix):
+    """Mirror of test_segment_boundary_not_matched_inside_longer_name, reverse direction.
+
+    Without a segment-boundary lookahead the pattern matches the bare mount root
+    inside a sibling that shares its prefix. The extracted text then *equals* the
+    mount root, so ``_reverse_resolve_path``'s own ``+ "/"`` guard is satisfied and
+    the sibling is rewritten to ``/mnt/skills<suffix>`` — a container path forward
+    resolution refuses to map back, so the model can never read it.
+    """
+    sb = _make_sandbox(tmp_path)
+    skills_local = str((tmp_path / "skills").resolve())
+    sibling = f"{skills_local}{suffix}"
+
+    out = sb._reverse_resolve_paths_in_output(f"see {sibling}")
+
+    assert out == f"see {sibling}"
+    assert "/mnt/skills" not in out
+
+
+@pytest.mark.parametrize(
+    ("trailer", "expected_trailer"),
+    [
+        (", ok", ", ok"),  # comma — a path can end a clause in prose output
+        (":/other", ":/other"),  # colon — PATH-style concatenation
+        ("\\win\\p", "/win/p"),  # backslash — Windows-style separator
+        (" done", " done"),  # whitespace
+        ("' ", "' "),  # quote
+    ],
+)
+def test_reverse_resolve_still_matches_root_before_non_slash_boundaries(tmp_path, trailer, expected_trailer):
+    """The narrowing must not drop boundaries the old pattern accepted.
+
+    ``_reverse_output_patterns`` runs over arbitrary command output, so the mount
+    root can legitimately be followed by ``,``, ``:`` or ``\\``. Copying
+    ``_command_pattern``'s shell-oriented boundary class here would silently stop
+    translating all three; this pins the ``_content_pattern`` class that does not.
+    """
+    sb = _make_sandbox(tmp_path)
+    skills_local = str((tmp_path / "skills").resolve())
+
+    out = sb._reverse_resolve_paths_in_output(f"{skills_local}{trailer}")
+
+    assert out == f"/mnt/skills{expected_trailer}"
+
+
+@pytest.mark.parametrize("prefix", ["", "cwd: ", "see "])
+def test_reverse_resolve_translates_a_bare_root_at_end_of_output(tmp_path, prefix):
+    """The lookahead's ``$`` alternative, pinned on its own.
+
+    Output ending exactly at a mount root (no trailing separator, no newline —
+    ``printf '%s' "$PWD"``, a stripped last line, a truncated buffer) satisfies
+    neither ``/`` nor ``[^\\w./-]``. Drop ``$`` and the match fails, so the raw
+    host path is handed to the model instead of the container path: the leak
+    this whole function exists to prevent. The suite is otherwise blind to it —
+    removing ``$`` leaves all 6866 tests green.
+    """
+    sb = _make_sandbox(tmp_path)
+    skills_local = str((tmp_path / "skills").resolve())
+
+    out = sb._reverse_resolve_paths_in_output(f"{prefix}{skills_local}")
+
+    assert out == f"{prefix}/mnt/skills"
+    assert skills_local not in out
 
 
 def test_resolved_paths_and_sorted_views_are_cached(tmp_path):

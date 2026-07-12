@@ -538,8 +538,12 @@ You: "Deploying to staging..." [proceed]
 </clarification_system>
 
 {skills_section}
+{memory_tool_section}
+
 
 {deferred_tools_section}
+
+{mcp_routing_hints_section}
 
 {subagent_section}
 
@@ -643,7 +647,11 @@ combined with a FastAPI gateway for REST API access [citation:FastAPI](https://f
   keeps each tool call small and avoids mid-stream chunk-gap timeouts
   on oversized single-shot writes. (See issue #3189.)  
 - Clarity: Be direct and helpful, avoid unnecessary meta-commentary
-- Including Images and Mermaid: Images and Mermaid diagrams are always welcomed in the Markdown format, and you're encouraged to use `![Image Description](image_path)\n\n` or "```mermaid" to display images in response or Markdown files
+- Including Images and Mermaid: Images and Mermaid diagrams are welcomed in Markdown.
+  - To render an output image in a final response, use its complete virtual artifact path, for example `![Chart](/mnt/user-data/outputs/chart.png)`.
+  - Never use a bare or workspace-relative filename.
+  - Call `present_files` for the image before referencing it.
+  - Use "```mermaid" for Mermaid diagrams.
 - Multi-task: Better utilize parallel tool calling to call multiple tools at one time for better performance
 - Language Consistency: Keep using the same language as user's
 - Always Respond: Your thinking is internal. You MUST always provide a visible response to the user after thinking.
@@ -894,6 +902,33 @@ def _build_custom_mounts_section(*, app_config: AppConfig | None = None) -> str:
     return f"\n**Custom Mounted Directories:**\n{mounts_list}\n- If the user needs files outside `/mnt/user-data`, use these absolute container paths directly when they match the requested directory"
 
 
+def _build_memory_tool_section(*, app_config: AppConfig | None = None) -> str:
+    """Build tool-mode memory guidance for the static system prompt."""
+    try:
+        if app_config is None:
+            from deerflow.config.memory_config import get_memory_config
+
+            memory_config = get_memory_config()
+        else:
+            memory_config = app_config.memory
+
+        from deerflow.config.memory_config import should_use_memory_tools
+
+        if not should_use_memory_tools(memory_config):
+            return ""
+    except Exception:
+        logger.exception("Failed to build memory tool prompt section")
+        return ""
+
+    return """<memory_tool_system>
+Memory is running in tool mode. Use the injected <memory> block as current context, and use the memory tools to keep durable user memory accurate:
+- Call `memory_search` before relying on memory that may be absent, stale, or too broad for the injected context.
+- Call `memory_add` only for stable facts useful in future sessions: explicit user preferences, corrections, personal/work context, or durable project context.
+- Call `memory_update` when an existing fact is outdated or imprecise; prefer updating over adding a near-duplicate.
+- Call `memory_delete` only when a fact is clearly wrong or no longer relevant.
+</memory_tool_system>"""
+
+
 def apply_prompt_template(
     subagent_enabled: bool = False,
     max_concurrent_subagents: int = 3,
@@ -902,6 +937,7 @@ def apply_prompt_template(
     available_skills: set[str] | None = None,
     app_config: AppConfig | None = None,
     deferred_names: frozenset[str] = frozenset(),
+    mcp_routing_hints_section: str = "",
     user_id: str | None = None,
     skill_names: frozenset[str] | None = None,
 ) -> str:
@@ -951,6 +987,8 @@ def apply_prompt_template(
         else "- Skill First: Always load the relevant skill before starting **complex** tasks.\n"
     )
 
+    memory_tool_section = _build_memory_tool_section(app_config=app_config)
+
     # Build and return the fully static system prompt.
     # Memory and current date are injected per-turn via DynamicContextMiddleware
     # as a <system-reminder> in the first HumanMessage, keeping this prompt
@@ -961,7 +999,9 @@ def apply_prompt_template(
         self_update_section=_build_self_update_section(agent_name),
         skills_section=skills_section,
         deferred_tools_section=deferred_tools_section,
+        mcp_routing_hints_section=mcp_routing_hints_section,
         subagent_section=subagent_section,
+        memory_tool_section=memory_tool_section,
         subagent_reminder=subagent_reminder,
         skill_first_reminder=skill_first_reminder,
         subagent_thinking=subagent_thinking,

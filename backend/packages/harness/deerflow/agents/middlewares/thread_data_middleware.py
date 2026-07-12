@@ -107,7 +107,7 @@ class ThreadDataMiddleware(AgentMiddleware[ThreadDataMiddlewareState]):
                 content=last_message.content,
                 id=last_message.id,
                 name=last_message.name or "user-input",
-                additional_kwargs={**last_message.additional_kwargs, "run_id": runtime.context.get("run_id"), "timestamp": datetime.now(UTC).isoformat()},
+                additional_kwargs={**last_message.additional_kwargs, "run_id": context.get("run_id"), "timestamp": datetime.now(UTC).isoformat()},
             )
 
         return {

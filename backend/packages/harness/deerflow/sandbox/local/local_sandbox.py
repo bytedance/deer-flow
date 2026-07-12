@@ -220,7 +220,23 @@ class LocalSandbox(Sandbox):
     @cached_property
     def _reverse_output_patterns(self) -> list[re.Pattern[str]]:
         """Compiled matchers for local paths in command output (longest local path first)."""
-        return [re.compile(re.escape(self._resolved_local_paths[m]) + r"(?:[/\\][^\s\"';&|<>()]*)?") for m in self._mappings_by_local_specificity]
+        # Same segment-boundary lookahead as the forward patterns above, so a mount
+        # root does not match inside a sibling that merely shares its prefix
+        # (``.../skills`` inside ``.../skills-extra``). Without it the regex yields
+        # the bare root, which then *equals* the mount root and so satisfies
+        # ``_reverse_resolve_path``'s own ``+ "/"`` guard — the sibling is rewritten
+        # to a container path that forward resolution refuses to map back.
+        #
+        # The boundary class mirrors ``_content_pattern``'s, not ``_command_pattern``'s:
+        # this runs over arbitrary command output, where a root can legitimately be
+        # followed by ``,`` ``:`` or ``\`` — all of which the shell-oriented class
+        # would reject. The trailing group keeps ``[/\\]`` so Windows paths still match.
+        #
+        # ``$`` is load-bearing: output ending exactly at a mount root would
+        # otherwise fail the lookahead and be emitted as the raw host path.
+        boundary = r"(?=/|$|[^\w./-])"
+        tail = r"(?:[/\\][^\s\"';&|<>()]*)?"
+        return [re.compile(re.escape(self._resolved_local_paths[m]) + boundary + tail) for m in self._mappings_by_local_specificity]
 
     @cached_property
     def _resolved_local_paths(self) -> dict[PathMapping, str]:

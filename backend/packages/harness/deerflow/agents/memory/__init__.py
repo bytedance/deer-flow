@@ -23,12 +23,20 @@ from deerflow.agents.memory.storage import (
     MemoryStorage,
     get_memory_storage,
 )
+from deerflow.agents.memory.tools import (
+    get_memory_tools,
+    memory_add_tool,
+    memory_delete_tool,
+    memory_search_tool,
+    memory_update_tool,
+)
 from deerflow.agents.memory.updater import (
     MemoryUpdater,
     clear_memory_data,
     delete_memory_fact,
     get_memory_data,
     reload_memory_data,
+    search_memory_facts,
     update_memory_from_conversation,
 )
 
@@ -38,6 +46,7 @@ __all__ = [
     "FACT_EXTRACTION_PROMPT",
     "format_memory_for_injection",
     "format_conversation_for_update",
+    "search_memory_facts",
     # Queue
     "ConversationContext",
     "MemoryUpdateQueue",
@@ -54,4 +63,10 @@ __all__ = [
     "get_memory_data",
     "reload_memory_data",
     "update_memory_from_conversation",
+    # Tools (tool-driven mode)
+    "get_memory_tools",
+    "memory_search_tool",
+    "memory_add_tool",
+    "memory_update_tool",
+    "memory_delete_tool",
 ]

@@ -103,6 +103,38 @@ def test_apply_prompt_template_includes_relative_path_guidance(monkeypatch):
     assert "`hello.txt`, `../uploads/data.csv`, and `../outputs/report.md`" in prompt
 
 
+def test_apply_prompt_template_includes_memory_tool_guidance_only_in_tool_mode(monkeypatch):
+    tool_config = SimpleNamespace(
+        sandbox=SimpleNamespace(mounts=[]),
+        skills=SimpleNamespace(container_path="/mnt/skills", use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage", get_skills_path=lambda: Path("/tmp/skills")),
+        skill_evolution=SimpleNamespace(enabled=False),
+        tool_search=SimpleNamespace(enabled=False),
+        memory=SimpleNamespace(enabled=True, mode="tool"),
+        acp_agents={},
+    )
+    middleware_config = SimpleNamespace(
+        sandbox=SimpleNamespace(mounts=[]),
+        skills=tool_config.skills,
+        skill_evolution=SimpleNamespace(enabled=False),
+        tool_search=SimpleNamespace(enabled=False),
+        memory=SimpleNamespace(enabled=True, mode="middleware"),
+        acp_agents={},
+    )
+    monkeypatch.setattr(prompt_module, "get_or_new_skill_storage", lambda app_config=None: SimpleNamespace(load_skills=lambda enabled_only=True: []))
+    monkeypatch.setattr(prompt_module, "get_or_new_user_skill_storage", lambda user_id, app_config=None: SimpleNamespace(load_skills=lambda *, enabled_only: []))
+    monkeypatch.setattr(prompt_module, "get_deferred_tools_prompt_section", lambda **kwargs: "")
+    monkeypatch.setattr(prompt_module, "_build_acp_section", lambda **kwargs: "")
+    monkeypatch.setattr(prompt_module, "get_agent_soul", lambda agent_name=None: "")
+
+    tool_prompt = prompt_module.apply_prompt_template(app_config=tool_config)
+    middleware_prompt = prompt_module.apply_prompt_template(app_config=middleware_config)
+
+    assert "<memory_tool_system>" in tool_prompt
+    assert "memory_search" in tool_prompt
+    assert "memory_add" in tool_prompt
+    assert "<memory_tool_system>" not in middleware_prompt
+
+
 def test_apply_prompt_template_threads_explicit_app_config_without_global_config(monkeypatch):
     mounts = [SimpleNamespace(container_path="/home/user/shared", read_only=False)]
     explicit_config = SimpleNamespace(
@@ -399,6 +431,14 @@ def test_system_prompt_template_contains_file_editing_workflow_rule():
     # silently regress to single-shot write_file calls for long content.
     assert "str_replace" in template
     assert "append=True" in template
+
+
+def test_system_prompt_template_requires_virtual_paths_for_output_images():
+    template = prompt_module.SYSTEM_PROMPT_TEMPLATE
+
+    assert "![Chart](/mnt/user-data/outputs/chart.png)" in template
+    assert "Never use a bare or workspace-relative filename" in template
+    assert "Call `present_files` for the image before referencing it" in template
 
 
 def test_system_prompt_template_preserves_placeholders():
