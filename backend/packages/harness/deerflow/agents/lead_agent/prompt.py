@@ -8,6 +8,7 @@ from functools import lru_cache
 from typing import TYPE_CHECKING
 
 from deerflow.config.agents_config import load_agent_soul
+from deerflow.config.subagents_config import DEFAULT_MAX_TOTAL_SUBAGENTS_PER_RUN
 from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
 from deerflow.skills.storage import get_or_new_skill_storage, get_or_new_user_skill_storage
 from deerflow.skills.types import Skill, SkillCategory
@@ -282,16 +283,23 @@ def _build_available_subagents_description(available_names: list[str], bash_avai
     return "\n".join(lines)
 
 
-def _build_subagent_section(max_concurrent: int, *, app_config: AppConfig | None = None) -> str:
-    """Build the subagent system prompt section with dynamic concurrency limit.
+def _build_subagent_section(
+    max_concurrent: int,
+    max_total: int = DEFAULT_MAX_TOTAL_SUBAGENTS_PER_RUN,
+    *,
+    app_config: AppConfig | None = None,
+) -> str:
+    """Build the subagent system prompt section with dynamic subagent limits.
 
     Args:
         max_concurrent: Maximum number of concurrent subagent calls allowed per response.
+        max_total: Maximum number of subagent calls allowed per run.
 
     Returns:
         Formatted subagent section string.
     """
     n = max_concurrent
+    total = max_total
     available_names = get_available_subagent_names(app_config=app_config) if app_config is not None else get_available_subagent_names()
     bash_available = "bash" in available_names
 
@@ -319,6 +327,11 @@ You are running with subagent capabilities enabled. Your role is to be a **task 
 - **Before launching subagents, you MUST count your sub-tasks in your thinking:**
   - If count ≤ {n}: Launch all in this response.
   - If count > {n}: **Pick the {n} most important/foundational sub-tasks for this turn.** Save the rest for the next turn.
+- **HARD TOTAL LIMIT: MAXIMUM {total} `task` CALLS PER RUN. THIS IS NOT OPTIONAL.**
+  - Before each batch, count `task` delegations already launched for the current user request/run.
+  - "Work already delegated" may include older thread history; reuse it when helpful, but do not count older runs against this run's {total} total.
+  - Do not launch a new batch if it would exceed {total} total subagents for this run.
+  - When the total limit is reached, synthesize with existing results or continue directly with ordinary tools.
 - **Multi-batch execution** (for >{n} sub-tasks):
   - Turn 1: Launch sub-tasks 1-{n} in parallel → wait for results
   - Turn 2: Launch next batch in parallel → wait for results
@@ -928,6 +941,7 @@ Memory is running in tool mode. Use the injected <memory> block as current conte
 def apply_prompt_template(
     subagent_enabled: bool = False,
     max_concurrent_subagents: int = 3,
+    max_total_subagents: int | None = None,
     *,
     agent_name: str | None = None,
     available_skills: set[str] | None = None,
@@ -939,13 +953,17 @@ def apply_prompt_template(
 ) -> str:
     # Include subagent section only if enabled (from runtime parameter)
     n = max_concurrent_subagents
-    subagent_section = _build_subagent_section(n, app_config=app_config) if subagent_enabled else ""
+    total = max_total_subagents
+    if total is None:
+        subagents_config = getattr(app_config, "subagents", None) if app_config is not None else None
+        total = getattr(subagents_config, "max_total_per_run", DEFAULT_MAX_TOTAL_SUBAGENTS_PER_RUN)
+    subagent_section = _build_subagent_section(n, total, app_config=app_config) if subagent_enabled else ""
 
     # Add subagent reminder to critical_reminders if enabled
     subagent_reminder = (
         "- **Orchestrator Mode**: You are a task orchestrator - decompose complex tasks into parallel sub-tasks. "
-        f"**HARD LIMIT: max {n} `task` calls per response.** "
-        f"If >{n} sub-tasks, split into sequential batches of ≤{n}. Synthesize after ALL batches complete.\n"
+        f"**HARD LIMITS: max {n} `task` calls per response, max {total} per run.** "
+        f"If >{n} sub-tasks, split into sequential batches of ≤{n} without exceeding {total} total. Synthesize after batches complete.\n"
         if subagent_enabled
         else ""
     )
@@ -954,7 +972,7 @@ def apply_prompt_template(
     subagent_thinking = (
         "- **DECOMPOSITION CHECK: Can this task be broken into 2+ parallel sub-tasks? If YES, COUNT them. "
         f"If count > {n}, you MUST plan batches of ≤{n} and only launch the FIRST batch now. "
-        f"NEVER launch more than {n} `task` calls in one response.**\n"
+        f"NEVER launch more than {n} `task` calls in one response or {total} total in this run.**\n"
         if subagent_enabled
         else ""
     )

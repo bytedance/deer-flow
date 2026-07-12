@@ -1,3 +1,4 @@
+from types import SimpleNamespace
 from typing import Annotated
 
 from _agent_e2e_helpers import FakeToolCallingModel
@@ -123,6 +124,64 @@ class TestBeforeModelCapture:
         assert out is not None
         assert out["delegations"][0]["id"] == "call_1"
         assert out["delegations"][0]["status"] == "in_progress"
+
+    def test_captured_delegations_include_runtime_run_id(self):
+        middleware = DurableContextMiddleware()
+        runtime = SimpleNamespace(context={"run_id": "run-42"})
+        messages = [
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "task",
+                        "args": {"description": "research auth", "prompt": "do it", "subagent_type": "general-purpose"},
+                        "id": "call_1",
+                        "type": "tool_call",
+                    }
+                ],
+            )
+        ]
+
+        out = middleware.after_model({"messages": messages}, runtime)
+
+        assert out is not None
+        assert out["delegations"][0]["run_id"] == "run-42"
+
+    def test_runtime_run_id_capture_starts_at_current_run_message(self):
+        middleware = DurableContextMiddleware()
+        runtime = SimpleNamespace(context={"run_id": "run-new"})
+        messages = [
+            HumanMessage(content="old request", additional_kwargs={"run_id": "run-old"}),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "task",
+                        "args": {"description": "old work", "prompt": "do old", "subagent_type": "general-purpose"},
+                        "id": "old-call",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            HumanMessage(content="new request", additional_kwargs={"run_id": "run-new"}),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "task",
+                        "args": {"description": "new work", "prompt": "do new", "subagent_type": "general-purpose"},
+                        "id": "new-call",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+        ]
+
+        out = middleware.before_model({"messages": messages, "delegations": []}, runtime)
+
+        assert out is not None
+        assert [entry["id"] for entry in out["delegations"]] == ["new-call"]
+        assert out["delegations"][0]["run_id"] == "run-new"
 
     def test_returns_none_when_no_delegations(self):
         middleware = DurableContextMiddleware()

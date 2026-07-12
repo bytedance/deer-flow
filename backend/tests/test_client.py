@@ -1003,13 +1003,46 @@ class TestEnsureAgent:
         """_ensure_agent does not recreate if config key unchanged."""
         mock_agent = MagicMock()
         client._agent = mock_agent
-        client._agent_config_key = (None, True, False, False, None, None)
+        client._agent_config_key = (None, True, False, False, None, None, None, None)
 
         config = client._get_runnable_config("t1")
         client._ensure_agent(config)
 
         # Should still be the same mock — no recreation
         assert client._agent is mock_agent
+
+    def test_recreates_agent_when_subagent_limits_change(self, client):
+        """Subagent limit changes alter prompt/middleware and must invalidate the cached agent."""
+        config1 = client._get_runnable_config("t1")
+        config1["configurable"].update(
+            {
+                "subagent_enabled": True,
+                "max_concurrent_subagents": 2,
+                "max_total_subagents": 5,
+            }
+        )
+        config2 = client._get_runnable_config("t1")
+        config2["configurable"].update(
+            {
+                "subagent_enabled": True,
+                "max_concurrent_subagents": 4,
+                "max_total_subagents": 5,
+            }
+        )
+
+        with (
+            patch("deerflow.client.create_chat_model"),
+            patch("deerflow.client.create_agent", side_effect=[MagicMock(), MagicMock()]) as mock_create_agent,
+            patch("deerflow.client.build_middlewares", return_value=[]),
+            patch("deerflow.client.apply_prompt_template", return_value="prompt"),
+            patch("deerflow.client.get_enabled_skills_for_config", return_value=[]),
+            patch.object(client, "_get_tools", return_value=[]),
+            patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=None),
+        ):
+            client._ensure_agent(config1)
+            client._ensure_agent(config2)
+
+        assert mock_create_agent.call_count == 2
 
     def test_deferred_skill_discovery_wired_when_enabled(self, client, mock_app_config):
         """When skills.deferred_discovery=True, skill_names reaches apply_prompt_template
