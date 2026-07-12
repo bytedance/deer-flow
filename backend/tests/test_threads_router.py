@@ -278,6 +278,87 @@ def test_create_thread_returns_existing_when_insert_loses_race() -> None:
     assert body["metadata"] == {"k": "v"}
 
 
+def test_insert_race_recovery_claims_unscoped_row_for_trusted_owner() -> None:
+    """The insert-race recovery mirrors the fast path's owner reconciliation.
+
+    When a competing request commits a legacy unscoped (``user_id=None``) row
+    between our idempotency read and our insert, and our insert then loses the
+    duplicate-key race, a trusted internal owner must still claim the row rather
+    than return it unowned — otherwise ownership of the same thread would depend
+    on whether the fast path or the recovery path resolved it.
+    """
+    import asyncio
+
+    from sqlalchemy.exc import IntegrityError
+
+    from app.gateway.internal_auth import INTERNAL_OWNER_USER_ID_HEADER_NAME, INTERNAL_SYSTEM_ROLE
+
+    store = InMemoryStore()
+    checkpointer = InMemorySaver()
+
+    class _RacingOwnerStore(MemoryThreadMetaStore):
+        """Our insert loses to a competing create that already wrote an
+        unscoped row, exactly the interleaving the recovery path exists for."""
+
+        async def create(self, thread_id, *, assistant_id=None, user_id=None, display_name=None, metadata=None):  # type: ignore[override]
+            # The competing request commits its (owner-less) row here, then our
+            # insert loses the primary-key race.
+            await super().create(thread_id, user_id=None, metadata=metadata)
+            raise IntegrityError(
+                "INSERT INTO threads_meta",
+                {},
+                Exception("UNIQUE constraint failed: threads_meta.thread_id"),
+            )
+
+    thread_store = _RacingOwnerStore(store)
+    request = SimpleNamespace(
+        headers={INTERNAL_OWNER_USER_ID_HEADER_NAME: "owner-1"},
+        state=SimpleNamespace(user=SimpleNamespace(id="default", system_role=INTERNAL_SYSTEM_ROLE)),
+        app=SimpleNamespace(state=SimpleNamespace(checkpointer=checkpointer, thread_store=thread_store)),
+    )
+
+    async def _scenario():
+        response = await threads.create_thread(
+            threads.ThreadCreateRequest(thread_id="channel-thread", metadata={"k": "v"}),
+            request,
+        )
+        owner_row = await thread_store.get("channel-thread", user_id="owner-1")
+        unscoped_lookup = await thread_store.get("channel-thread", user_id=None)
+        return response, owner_row, unscoped_lookup
+
+    response, owner_row, unscoped_lookup = asyncio.run(_scenario())
+
+    assert response.thread_id == "channel-thread"
+    # Recovery claimed the legacy row for the trusted owner, same as the fast path.
+    assert owner_row is not None
+    assert owner_row["user_id"] == "owner-1"
+    assert unscoped_lookup["user_id"] == "owner-1"
+
+
+def test_create_thread_does_not_swallow_non_integrity_errors() -> None:
+    """A non-race insert failure must surface as 500, even when a row now exists.
+
+    The recovery path only rescues the duplicate-key ``IntegrityError`` race; an
+    arbitrary failure that happens to coincide with an existing row must not be
+    silently returned as a 200 (previously the broad ``except`` did exactly that).
+    """
+    app, store, _checkpointer = _build_thread_app()
+
+    class _BrokenAfterWriteStore(_PermissiveThreadMetaStore):
+        async def create(self, thread_id, *, assistant_id=None, user_id=None, display_name=None, metadata=None):  # type: ignore[override]
+            # A row exists after this call, but the insert failed for a reason
+            # unrelated to the idempotency race.
+            await super().create(thread_id, metadata=metadata)
+            raise RuntimeError("unexpected store failure")
+
+    app.state.thread_store = _BrokenAfterWriteStore(store)
+
+    with TestClient(app) as client:
+        response = client.post("/api/threads", json={"thread_id": "broken-thread", "metadata": {}})
+
+    assert response.status_code == 500, response.text
+
+
 def test_put_goal_creates_missing_thread_checkpoint_and_returns_goal() -> None:
     app, _store, _checkpointer = _build_thread_app()
 
