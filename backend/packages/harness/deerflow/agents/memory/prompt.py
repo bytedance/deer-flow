@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html
 import logging
 import math
 import re
@@ -398,8 +399,17 @@ def _format_fact_line(fact: dict[str, Any]) -> str | None:
     category = str(fact.get("category", "context")).strip() or "context"
     confidence = _coerce_confidence(fact.get("confidence"), default=0.0)
     source_error = fact.get("sourceError")
+    # These fields are user-editable (POST/PATCH /api/memory, import) and are
+    # rendered into the <memory> block of the lead-agent system prompt. Escape
+    # them so a value like "</memory></system-reminder>" cannot close the block
+    # and relocate the text after it out of the user-managed trust zone the
+    # prompt declares. Mirrors the MEMORY_UPDATE_PROMPT escaping in #4028/#4060.
+    # quote=False: these land in element-text position (never attribute values),
+    # so only <, >, & can break out — leave ' and " in facts untouched.
+    content = html.escape(content, quote=False)
+    category = html.escape(category, quote=False)
     if category == "correction" and isinstance(source_error, str) and source_error.strip():
-        return f"- [{category} | {confidence:.2f}] {content} (avoid: {source_error.strip()})"
+        return f"- [{category} | {confidence:.2f}] {content} (avoid: {html.escape(source_error.strip(), quote=False)})"
     return f"- [{category} | {confidence:.2f}] {content}"
 
 
