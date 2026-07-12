@@ -723,7 +723,11 @@ def _compiled_mask_patterns(sources: tuple[tuple[str, str], ...]) -> tuple[tuple
     return tuple(compiled)
 
 
-def mask_local_paths_in_output(output: str, thread_data: ThreadDataState | None) -> str:
+def mask_local_paths_in_output(
+    output: str,
+    thread_data: ThreadDataState | None,
+    extra_mappings: dict[str, str] | None = None,
+) -> str:
     """Mask host absolute paths from local sandbox output using virtual paths.
 
     Handles user-data paths (per-thread), skills paths (global + per-user
@@ -761,10 +765,13 @@ def mask_local_paths_in_output(output: str, thread_data: ThreadDataState | None)
     if acp_host:
         sources.append((acp_host, _ACP_WORKSPACE_VIRTUAL_PATH))
 
+    mappings: dict[str, str] = {}
     if thread_data is not None:
-        mappings = _thread_actual_to_virtual_mappings(thread_data)
-        for actual_base, virtual_base in sorted(mappings.items(), key=lambda item: len(item[0]), reverse=True):
-            sources.append((actual_base, virtual_base))
+        mappings.update(_thread_actual_to_virtual_mappings(thread_data))
+    if extra_mappings:
+        mappings.update(extra_mappings)
+    for actual_base, virtual_base in sorted(mappings.items(), key=lambda item: len(item[0]), reverse=True):
+        sources.append((actual_base, virtual_base))
 
     if not sources:
         return output
@@ -847,27 +854,50 @@ def validate_local_tool_path(path: str, thread_data: ThreadDataState | None, *, 
     raise PermissionError(f"Only paths under {VIRTUAL_PATH_PREFIX}/, {_get_skills_container_path()}/, {_ACP_WORKSPACE_VIRTUAL_PATH}/, or configured mount paths are allowed")
 
 
-def _validate_resolved_user_data_path(resolved: Path, thread_data: ThreadDataState) -> None:
-    """Verify that a resolved host path stays inside allowed per-thread roots.
+def _is_virtual_workspace_path(path: str) -> bool:
+    workspace_root = f"{VIRTUAL_PATH_PREFIX}/workspace"
+    return path == workspace_root or path.startswith(f"{workspace_root}/")
 
-    Raises PermissionError if the path escapes workspace/uploads/outputs.
+
+def _validate_resolved_user_data_path(
+    resolved: Path,
+    thread_data: ThreadDataState,
+    *,
+    allow_workspace_symlinks: bool = False,
+) -> None:
+    """Verify that a host path stays inside allowed per-thread roots.
+
+    Workspace paths may be checked lexically when they are reached through the
+    virtual workspace root, because sandbox workspaces may contain symlinks to
+    checked-out repositories or mounted task data. Uploads and outputs continue
+    to resolve symlinks before validation so uploaded-file escape checks remain
+    effective.
     """
+    # abspath normalizes '..' without following symlinks for workspace checks.
+    lexical_path = Path(os.path.abspath(str(resolved)))
+    resolved_path = lexical_path.resolve()
     allowed_roots = [
-        Path(p).resolve()
-        for p in (
-            thread_data.get("workspace_path"),
-            thread_data.get("uploads_path"),
-            thread_data.get("outputs_path"),
+        (key, value)
+        for key, value in (
+            ("workspace_path", thread_data.get("workspace_path")),
+            ("uploads_path", thread_data.get("uploads_path")),
+            ("outputs_path", thread_data.get("outputs_path")),
         )
-        if p is not None
+        if value is not None
     ]
 
     if not allowed_roots:
         raise SandboxRuntimeError("No allowed local sandbox directories configured")
 
-    for root in allowed_roots:
+    for key, raw_root in allowed_roots:
+        if allow_workspace_symlinks and key == "workspace_path":
+            normalized = lexical_path
+            root = Path(os.path.abspath(str(raw_root)))
+        else:
+            normalized = resolved_path
+            root = Path(os.path.abspath(str(raw_root))).resolve()
         try:
-            resolved.relative_to(root)
+            normalized.relative_to(root)
             return
         except ValueError:
             continue
@@ -881,9 +911,25 @@ def _resolve_and_validate_user_data_path(path: str, thread_data: ThreadDataState
     Returns the resolved host path string.
     """
     resolved_str = replace_virtual_path(path, thread_data)
-    resolved = Path(resolved_str).resolve()
-    _validate_resolved_user_data_path(resolved, thread_data)
+    resolved = Path(os.path.abspath(resolved_str))
+    _validate_resolved_user_data_path(
+        resolved,
+        thread_data,
+        allow_workspace_symlinks=_is_virtual_workspace_path(path),
+    )
     return str(resolved)
+
+
+def _resolved_symlink_output_mapping(actual_path: str, virtual_path: str) -> dict[str, str]:
+    """Map a resolved symlink target back to the virtual path that reached it."""
+    lexical = Path(os.path.abspath(actual_path))
+    try:
+        resolved = lexical.resolve()
+    except OSError:
+        return {}
+    if str(resolved) == str(lexical):
+        return {}
+    return {str(resolved): virtual_path.rstrip("/") or virtual_path}
 
 
 def _is_non_file_url_token(token: str) -> bool:
@@ -1761,12 +1807,13 @@ def ls_tool(runtime: Runtime, description: str, path: str) -> str:
             elif not _is_custom_mount_path(path):
                 path = _resolve_and_validate_user_data_path(path, thread_data)
             # Custom mount paths and skills/ACP paths are resolved by LocalSandbox._resolve_path()
+        output_mappings = _resolved_symlink_output_mapping(path, requested_path) if thread_data is not None else None
         children = sandbox.list_dir(path)
         if not children:
             return "(empty)"
         output = "\n".join(children)
         if thread_data is not None:
-            output = mask_local_paths_in_output(output, thread_data)
+            output = mask_local_paths_in_output(output, thread_data, extra_mappings=output_mappings)
         try:
             from deerflow.config.app_config import get_app_config
 
@@ -1826,9 +1873,10 @@ def glob_tool(
             if thread_data is None:
                 raise SandboxRuntimeError("Thread data not available for local sandbox")
             path = _resolve_local_read_path(path, thread_data)
+        output_mappings = _resolved_symlink_output_mapping(path, requested_path) if thread_data is not None else None
         matches, truncated = sandbox.glob(path, pattern, include_dirs=include_dirs, max_results=effective_max_results)
         if thread_data is not None:
-            matches = [mask_local_paths_in_output(match, thread_data) for match in matches]
+            matches = [mask_local_paths_in_output(match, thread_data, extra_mappings=output_mappings) for match in matches]
         return _format_glob_results(requested_path, matches, truncated)
     except SandboxError as e:
         return f"Error: {e}"
@@ -1902,6 +1950,7 @@ def grep_tool(
             if thread_data is None:
                 raise SandboxRuntimeError("Thread data not available for local sandbox")
             path = _resolve_local_read_path(path, thread_data)
+        output_mappings = _resolved_symlink_output_mapping(path, requested_path) if thread_data is not None else None
         matches, truncated = sandbox.grep(
             path,
             pattern,
@@ -1913,7 +1962,7 @@ def grep_tool(
         if thread_data is not None:
             matches = [
                 GrepMatch(
-                    path=mask_local_paths_in_output(match.path, thread_data),
+                    path=mask_local_paths_in_output(match.path, thread_data, extra_mappings=output_mappings),
                     line_number=match.line_number,
                     line=match.line,
                 )
