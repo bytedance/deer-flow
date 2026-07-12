@@ -79,20 +79,35 @@ def merge_artifacts(existing: list[str] | None, new: list[str] | None) -> list[s
     return list(dict.fromkeys(existing + new))
 
 
+# Sentinel callers must pass to opt into clearing viewed_images. The default
+# "no-op writes are a no-op" invariant (matching merge_todos / merge_goal /
+# merge_promoted / merge_delegations / merge_skill_context) is restored so a
+# reducer-write of ``{}`` does NOT silently wipe the agent's vision context.
+# The legacy "empty dict clears" behavior was a footgun: any node returning
+# ``viewed_images={}`` accidentally wiped the entire image history with no log
+# line and no compensating re-fetch (D1 in the agent-core hunt).
+CLEAR_VIEWED_IMAGES: dict[str, ViewedImageData] = {"__deerflow_clear__": {"base64": "", "mime_type": ""}}
+_CLEAR_VIEWED_IMAGES_SENTINEL_KEY = next(iter(CLEAR_VIEWED_IMAGES))
+
+
 def merge_viewed_images(existing: dict[str, ViewedImageData] | None, new: dict[str, ViewedImageData] | None) -> dict[str, ViewedImageData]:
     """Reducer for viewed_images dict - merges image dictionaries.
 
-    Special case: If new is an empty dict {}, it clears the existing images.
-    This allows middlewares to clear the viewed_images state after processing.
+    - new is None -> preserve existing (no-op invariant shared with sibling
+      reducers like merge_todos / merge_goal / merge_promoted /
+      merge_delegations / merge_skill_context).
+    - new is an empty dict -> preserve existing (no-op; accidental
+      ``Command(update={"viewed_images": {}})`` no longer wipes vision context).
+    - new contains the :data:`CLEAR_VIEWED_IMAGES` sentinel key -> caller is
+      explicitly opting into clearing the channel; returns ``{}``.
+    - otherwise -> merge dicts, new values override existing for same keys.
     """
     if existing is None:
-        return new or {}
-    if new is None:
+        existing = {}
+    if new is None or len(new) == 0:
         return existing
-    # Special case: empty dict means clear all viewed images
-    if len(new) == 0:
+    if _CLEAR_VIEWED_IMAGES_SENTINEL_KEY in new:
         return {}
-    # Merge dictionaries, new values override existing ones for same keys
     return {**existing, **new}
 
 
@@ -169,6 +184,14 @@ def merge_delegations(existing: list[DelegationEntry] | None, new: list[Delegati
     - append entries, replacing same id with the latest version while preserving
       first-seen order.
     - terminal status is never overwritten by a non-terminal status.
+    - capped at ``_DELEGATION_LEDGER_MAX_ENTRIES``; the truncation is exposed
+      to the renderer via the parallel
+      :func:`merge_delegations_truncated_count` channel so the model-visible
+      rendering can append a "... (+N earlier delegations dropped from this
+      ledger)" marker. Without that marker the lead has no signal that
+      history was silently dropped and may re-delegate a task whose prior
+      completion is no longer in the visible ledger (D2 in the agent-core
+      hunt).
     """
     if not new:
         return existing or []
@@ -193,8 +216,50 @@ def merge_delegations(existing: list[DelegationEntry] | None, new: list[Delegati
     return merged
 
 
+def merge_delegations_truncated_count(existing: int | None, new: int | None) -> int:
+    """Reducer for the parallel ``delegations_truncated_count`` channel.
+
+    Tracks how many delegation entries have been silently dropped from the
+    durable ledger because the channel exceeded its cap. Without this signal
+    the renderer has no way to tell the model that history was clipped and
+    it may re-delegate work it had already completed (D2 in the agent-core
+    hunt). The reducer takes the maximum of the two values so older drop
+    counts survive a checkpoint round-trip; a node that explicitly declares
+    ``new=0`` only zeros the count when the existing count is also 0.
+    """
+    if existing is None:
+        existing = 0
+    if new is None:
+        return existing
+    return max(existing, new)
+
+
 _SKILL_CONTEXT_MAX_ENTRIES = 8
 _SKILL_DESCRIPTION_MAX_CHARS = 500
+_SKILL_DESCRIPTION_TRUNCATION_SUFFIX = " ... [truncated]"
+
+
+def description_for_skill_entry(raw: str) -> tuple[str, bool]:
+    """Bound a skill description and surface whether truncation occurred.
+
+    Centralizes the cap that was copy-pasted at four sites in two files:
+    ``_normalize_skill_entry`` (reducer), ``_parse_description`` /
+    ``read_skill_entry_metadata`` (capture), and ``render_skill_context``
+    (render). Without this helper, any new caller that forgets the cap
+    leaves the description unbounded (state leak); any unrelated cap bump
+    has to touch multiple files. The returned ``truncated`` flag lets the
+    caller surface ``... [truncated]`` on render so the model knows the
+    description it is reading was clipped (D5 in the agent-core hunt).
+    """
+    if not isinstance(raw, str):
+        return ("", False)
+    if len(raw) <= _SKILL_DESCRIPTION_MAX_CHARS:
+        return (raw, False)
+    cap = _SKILL_DESCRIPTION_MAX_CHARS
+    if cap <= len(_SKILL_DESCRIPTION_TRUNCATION_SUFFIX):
+        return (raw[:cap], True)
+    head = cap - len(_SKILL_DESCRIPTION_TRUNCATION_SUFFIX)
+    return (f"{raw[:head]}{_SKILL_DESCRIPTION_TRUNCATION_SUFFIX}", True)
 
 
 class SkillEntry(TypedDict):
@@ -208,10 +273,14 @@ def _normalize_skill_entry(entry: Mapping[str, object]) -> SkillEntry:
     """Drop legacy payload keys before storing skill_context back to state."""
     description = entry.get("description")
     loaded_at = entry.get("loaded_at")
+    if isinstance(description, str):
+        normalized_description, _truncated = description_for_skill_entry(" ".join(description.split()))
+    else:
+        normalized_description = ""
     return {
         "name": str(entry.get("name") or ""),
         "path": str(entry["path"]),
-        "description": " ".join(description.split())[:_SKILL_DESCRIPTION_MAX_CHARS] if isinstance(description, str) else "",
+        "description": normalized_description,
         "loaded_at": loaded_at if isinstance(loaded_at, int) else 0,
     }
 
@@ -261,6 +330,12 @@ class ThreadState(AgentState):
     viewed_images: Annotated[dict[str, ViewedImageData], merge_viewed_images]  # image_path -> metadata (no base64)
     promoted: Annotated[PromotedTools | None, merge_promoted]
     delegations: Annotated[list[DelegationEntry], merge_delegations]
+    # Parallel channel that surfaces how many entries have been silently dropped
+    # from :attr:`delegations` because the ledger exceeded its cap. The renderer
+    # reads this to append a model-visible "... (+N earlier delegations dropped
+    # from this ledger)" marker so the lead does not re-delegate work whose
+    # completion is no longer in the visible ledger (D2 in the agent-core hunt).
+    delegations_truncated_count: Annotated[int, merge_delegations_truncated_count]
     skill_context: Annotated[list[SkillEntry], merge_skill_context]
     summary_text: NotRequired[str | None]
 

@@ -24,6 +24,7 @@ _STATUS_ONLY_RESULT_BRIEFS = {
     "timed_out": "Task timed out.",
     "polling_timed_out": "Task polling timed out.",
 }
+_DESCRIPTION_TRUNCATION_SUFFIX = " ... [truncated]"
 
 
 def _utc_now_iso() -> str:
@@ -48,6 +49,24 @@ def _bound_text(text: str, cap: int = _RESULT_BRIEF_CAP) -> str:
 
 def _escape_context_text(value: object) -> str:
     return escape(" ".join(str(value).split()), quote=False)
+
+
+def _bound_description(description: str, cap: int = _DESCRIPTION_CAP) -> str:
+    """Bound a delegation description to ``cap`` chars with an ellipsis marker.
+
+    The model that reads the durable ledger (AGENTS.md Item 16) uses the
+    description to decide whether to re-delegate, reuse the result, or
+    escalate. A ``summarize the Q3 payroll report by department`` prompt
+    silently became ``summarize the Q3 payroll repo`` on the 201st character
+    before this helper existed - exactly the kind of semantic drift the ledger
+    is supposed to prevent. (D3 in the agent-core hunt.)
+    """
+    if len(description) <= cap:
+        return description
+    if cap <= len(_DESCRIPTION_TRUNCATION_SUFFIX):
+        return description[:cap]
+    head = cap - len(_DESCRIPTION_TRUNCATION_SUFFIX)
+    return f"{description[:head]}{_DESCRIPTION_TRUNCATION_SUFFIX}"
 
 
 def _status_guidance(status: str, stop_reason: str | None = None) -> str:
@@ -110,7 +129,7 @@ def extract_delegations(messages: list[AnyMessage]) -> list[DelegationEntry]:
             if tool_call_id is None:
                 continue
             args = _tool_call_args(tool_call)
-            description = str(args.get("description") or args.get("prompt") or "")[:_DESCRIPTION_CAP]
+            description = _bound_description(str(args.get("description") or args.get("prompt") or ""))
             if tool_call_id not in entries_by_id:
                 order.append(tool_call_id)
             entries_by_id[tool_call_id] = {
@@ -164,9 +183,19 @@ def _render_entry_line(entry: DelegationEntry) -> str:
     return line
 
 
-def render_delegation_ledger(entries: list[DelegationEntry], *, max_chars: int = _LEDGER_RENDER_CHAR_BUDGET) -> str:
-    """Render the delegation ledger as model-visible system context."""
-    if not entries:
+def render_delegation_ledger(entries: list[DelegationEntry], *, max_chars: int = _LEDGER_RENDER_CHAR_BUDGET, truncated_count: int = 0) -> str:
+    """Render the delegation ledger as model-visible system context.
+
+    ``truncated_count`` is the number of entries that have been silently
+    dropped from the durable ledger because the channel exceeded its cap.
+    Without surfacing this on the rendered output, the lead has no signal
+    that history was clipped and may re-delegate a task whose prior
+    completion is no longer in the visible ledger (D2 in the agent-core
+    hunt). When ``truncated_count > 0``, the renderer appends a single
+    model-visible "... (+N earlier delegations dropped from this ledger)"
+    marker so the loss is observable.
+    """
+    if not entries and not truncated_count:
         return ""
 
     lines = [
@@ -190,6 +219,16 @@ def render_delegation_ledger(entries: list[DelegationEntry], *, max_chars: int =
             omitted_line = f"- ... {omitted} older delegation entries omitted from this model view because of context budget"
         if _fits_budget(lines, omitted_line, max_chars):
             lines.append(omitted_line)
+
+    if truncated_count > 0:
+        marker_line = f"- ... (+{truncated_count} earlier delegations dropped from this ledger because of cap)"
+        if _fits_budget(lines, marker_line, max_chars):
+            lines.append(marker_line)
+        else:
+            # Budget exhausted: at least emit a short marker so the loss is visible.
+            short_marker = f"- ... (+{truncated_count} earlier dropped)"
+            if _fits_budget(lines, short_marker, max_chars):
+                lines.append(short_marker)
 
     rendered = "\n".join(lines)
     if len(rendered) <= max_chars:
