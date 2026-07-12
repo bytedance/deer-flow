@@ -18,6 +18,7 @@ from deerflow.agents.thread_state import ThreadState, merge_delegations
 from deerflow.config.app_config import AppConfig
 from deerflow.config.model_config import ModelConfig
 from deerflow.config.sandbox_config import SandboxConfig
+from deerflow.runtime.context_keys import CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY
 from deerflow.subagents.status_contract import make_subagent_additional_kwargs
 
 
@@ -214,6 +215,53 @@ class TestBeforeModelCapture:
 
         assert middleware.before_model({"messages": messages, "delegations": existing}, runtime) is None
 
+    def test_resume_run_captures_new_delegation_after_pre_existing_boundary(self):
+        middleware = DurableContextMiddleware()
+        runtime = SimpleNamespace(context={"run_id": "run-new", CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY: {"old-ai"}})
+        messages = [
+            HumanMessage(content="old request", additional_kwargs={"run_id": "run-old"}),
+            AIMessage(
+                id="old-ai",
+                content="",
+                tool_calls=[
+                    {
+                        "name": "task",
+                        "args": {"description": "old work", "prompt": "do old", "subagent_type": "general-purpose"},
+                        "id": "old-call",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            AIMessage(
+                id="new-ai",
+                content="",
+                tool_calls=[
+                    {
+                        "name": "task",
+                        "args": {"description": "new work", "prompt": "do new", "subagent_type": "general-purpose"},
+                        "id": "new-call",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+        ]
+        existing = [
+            {
+                "id": "old-call",
+                "run_id": "run-old",
+                "description": "old work",
+                "subagent_type": "general-purpose",
+                "status": "in_progress",
+                "created_at": "2026-07-11T00:00:00Z",
+            }
+        ]
+
+        out = middleware.after_model({"messages": messages, "delegations": existing}, runtime)
+
+        assert out is not None
+        assert [entry["id"] for entry in out["delegations"]] == ["new-call"]
+        assert out["delegations"][0]["run_id"] == "run-new"
+
     def test_run_id_without_human_boundary_does_not_retag_existing_delegations(self):
         middleware = DurableContextMiddleware()
         runtime = SimpleNamespace(context={"run_id": "run-new"})
@@ -242,6 +290,90 @@ class TestBeforeModelCapture:
         ]
 
         assert middleware.before_model({"messages": messages, "delegations": existing}, runtime) is None
+
+    def test_resume_without_human_boundary_uses_pre_existing_message_ids(self):
+        middleware = DurableContextMiddleware()
+        runtime = SimpleNamespace(context={"run_id": "run-new", CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY: {"old-ai"}})
+        messages = [
+            HumanMessage(content="old request", additional_kwargs={"run_id": "run-old"}),
+            AIMessage(
+                id="old-ai",
+                content="",
+                tool_calls=[
+                    {
+                        "name": "task",
+                        "args": {"description": "old work", "prompt": "do old", "subagent_type": "general-purpose"},
+                        "id": "old-call",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            AIMessage(
+                id="new-ai",
+                content="",
+                tool_calls=[
+                    {
+                        "name": "task",
+                        "args": {"description": "new work", "prompt": "do new", "subagent_type": "general-purpose"},
+                        "id": "new-call",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+        ]
+        existing = [
+            {
+                "id": "old-call",
+                "run_id": "run-old",
+                "description": "old work",
+                "subagent_type": "general-purpose",
+                "status": "in_progress",
+                "created_at": "2026-07-11T00:00:00Z",
+            }
+        ]
+
+        out = middleware.before_model({"messages": messages, "delegations": existing}, runtime)
+
+        assert out is not None
+        assert [entry["id"] for entry in out["delegations"]] == ["new-call"]
+        assert out["delegations"][0]["run_id"] == "run-new"
+
+    def test_resume_boundary_does_not_retag_pre_existing_task_missing_from_ledger(self):
+        middleware = DurableContextMiddleware()
+        runtime = SimpleNamespace(context={"run_id": "run-new", CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY: {"old-ai"}})
+        messages = [
+            HumanMessage(content="old request", additional_kwargs={"run_id": "run-old"}),
+            AIMessage(
+                id="old-ai",
+                content="",
+                tool_calls=[
+                    {
+                        "name": "task",
+                        "args": {"description": "old work", "prompt": "do old", "subagent_type": "general-purpose"},
+                        "id": "old-call",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            AIMessage(
+                id="new-ai",
+                content="",
+                tool_calls=[
+                    {
+                        "name": "task",
+                        "args": {"description": "new work", "prompt": "do new", "subagent_type": "general-purpose"},
+                        "id": "new-call",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+        ]
+
+        out = middleware.before_model({"messages": messages, "delegations": []}, runtime)
+
+        assert out is not None
+        assert [entry["id"] for entry in out["delegations"]] == ["new-call"]
+        assert out["delegations"][0]["run_id"] == "run-new"
 
     def test_returns_none_when_no_delegations(self):
         middleware = DurableContextMiddleware()

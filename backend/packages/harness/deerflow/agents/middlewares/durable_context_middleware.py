@@ -25,6 +25,7 @@ from deerflow.agents.middlewares.skill_context import extract_skills, render_ski
 from deerflow.agents.thread_state import _DELEGATION_LEDGER_MAX_ENTRIES, TERMINAL_STATUSES
 from deerflow.config.summarization_config import DEFAULT_SKILL_FILE_READ_TOOL_NAMES
 from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
+from deerflow.runtime.context_keys import CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY
 
 _DURABLE_CONTEXT_DATA_KEY = "durable_context_data"
 _SUMMARY_RENDER_CHAR_BUDGET = 6000
@@ -121,7 +122,41 @@ def _runtime_run_id(runtime: Runtime | None) -> str | None:
     return str(run_id) if run_id else None
 
 
-def _current_run_messages(messages: list[AnyMessage], run_id: str | None) -> list[AnyMessage]:
+def _runtime_pre_existing_message_ids(runtime: Runtime | None) -> frozenset[str]:
+    context = getattr(runtime, "context", None)
+    if not isinstance(context, dict):
+        return frozenset()
+    raw_ids = context.get(CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY)
+    if not isinstance(raw_ids, (frozenset, set, list, tuple)):
+        return frozenset()
+    return frozenset(str(message_id) for message_id in raw_ids if message_id)
+
+
+def _message_id(message: object) -> str | None:
+    if isinstance(message, dict):
+        message_id = message.get("id")
+    else:
+        message_id = getattr(message, "id", None)
+    return str(message_id) if message_id else None
+
+
+def _messages_after_pre_existing_boundary(messages: list[AnyMessage], pre_existing_message_ids: frozenset[str]) -> list[AnyMessage]:
+    if not pre_existing_message_ids:
+        return []
+    for index in range(len(messages) - 1, -1, -1):
+        if _message_id(messages[index]) in pre_existing_message_ids:
+            return messages[index + 1 :]
+    return []
+
+
+def _current_run_messages(messages: list[AnyMessage], run_id: str | None, pre_existing_message_ids: frozenset[str]) -> list[AnyMessage]:
+    """Return the message tail where this invocation may have emitted tasks.
+
+    A resumed run may not append a new HumanMessage marker. In that case the
+    latest HumanMessage can belong to an older run. The worker supplies the
+    message ids that existed before this run so we can capture only newly
+    appended messages instead of re-tagging old task calls.
+    """
     if run_id is None:
         return messages
     for index in range(len(messages) - 1, -1, -1):
@@ -131,14 +166,27 @@ def _current_run_messages(messages: list[AnyMessage], run_id: str | None) -> lis
         message_run_id = message.additional_kwargs.get("run_id")
         if message_run_id is None or message_run_id == run_id:
             return messages[index + 1 :]
-        return []
-    return []
+        return _messages_after_pre_existing_boundary(messages, pre_existing_message_ids)
+    return _messages_after_pre_existing_boundary(messages, pre_existing_message_ids)
 
 
-def _with_run_id(delegations: list[dict], run_id: str | None) -> list[dict]:
+def _with_run_id(delegations: list[dict], run_id: str | None, existing: list[dict]) -> list[dict]:
+    """Tag only new delegation ids with the current run_id."""
     if run_id is None:
         return delegations
-    return [{**entry, "run_id": run_id} for entry in delegations]
+    existing_by_id = {entry.get("id"): entry for entry in existing if isinstance(entry, dict)}
+    tagged: list[dict] = []
+    for entry in delegations:
+        previous = existing_by_id.get(entry.get("id"))
+        if previous is not None:
+            previous_run_id = previous.get("run_id")
+            if previous_run_id:
+                tagged.append({**entry, "run_id": previous_run_id})
+            else:
+                tagged.append({key: value for key, value in entry.items() if key != "run_id"})
+            continue
+        tagged.append({**entry, "run_id": run_id})
+    return tagged
 
 
 class DurableContextMiddleware(AgentMiddleware[AgentState]):
@@ -172,10 +220,12 @@ class DurableContextMiddleware(AgentMiddleware[AgentState]):
 
     def _capture_delegations(self, state: AgentState, runtime: Runtime | None) -> dict | None:
         run_id = _runtime_run_id(runtime)
-        messages = _current_run_messages(state["messages"], run_id)
+        pre_existing_message_ids = _runtime_pre_existing_message_ids(runtime)
+        messages = _current_run_messages(state["messages"], run_id, pre_existing_message_ids)
+        existing = state.get("delegations") or []
         delegations = _filter_changed_delegations(
-            _with_run_id(extract_delegations(messages), run_id),
-            state.get("delegations") or [],
+            _with_run_id(extract_delegations(messages), run_id, existing),
+            existing,
         )
         if delegations:
             return {"delegations": delegations}
