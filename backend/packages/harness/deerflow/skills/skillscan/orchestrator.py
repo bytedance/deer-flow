@@ -360,7 +360,7 @@ def _scan_python(rel_path: str, text: str) -> list[SecurityFinding]:
                 has_network_sink = True
                 network_node = network_node or node
 
-        if isinstance(node, ast.Attribute) and _python_name(node, aliases) == "os.environ":
+        if isinstance(node, (ast.Attribute, ast.Name)) and _python_name(node, aliases) == "os.environ":
             has_env_dump = True
             env_node = env_node or node
 
