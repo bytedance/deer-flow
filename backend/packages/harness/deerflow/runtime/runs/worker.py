@@ -201,6 +201,9 @@ class _SubagentEventBuffer:
         try:
             await self._event_store.put_batch(batch)
         except Exception:
+            # Re-buffer the failed batch (ahead of any events queued since) so a
+            # transient store error does not silently drop subagent step events.
+            self._pending = batch + self._pending
             logger.warning("Run %s: failed to persist %d subagent step event(s)", self._run_id, len(batch), exc_info=True)
 
 
