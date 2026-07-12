@@ -201,6 +201,14 @@ async def fanout_event(
         # ``coder`` with ``require_mention: true`` and no per-trigger or
         # per-agent override silently required ``@coder`` mentions instead
         # of ``@deerflow-bot``.
+        #
+        # ``github.bot_login`` is normalized (whitespace-only -> None) by
+        # ``GitHubAgentConfig``'s field validator, so this ``or`` chain
+        # correctly falls through a misconfigured ``bot_login: "   "``
+        # instead of comparing mentions against a literal whitespace
+        # string. ``operator_default_mention_login`` is a plain function
+        # argument (not a validated model field), so it is normalized here
+        # explicitly.
         operator_default = (operator_default_mention_login or "").strip() or None
         default_mention_login = github.bot_login or operator_default or agent.name
         fire, reason = event_should_fire(event, payload, trigger, default_mention_login)
