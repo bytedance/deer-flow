@@ -173,8 +173,10 @@ def _extract_skill_name_from_skills_path(path: str) -> str | None:
     if not relative:
         return None
     # Expected patterns: "public/<name>/...", "custom/<name>/...", "legacy/<name>/..."
-    # or "<name>/..." (direct skill access)
-    parts = relative.split("/")
+    # or "<name>/..." (direct skill access). Empty segments are dropped so a
+    # directory entry ("public/", as `ls` emits for dirs) is still recognized as
+    # a category root rather than yielding an empty skill name.
+    parts = [part for part in relative.split("/") if part]
     if len(parts) >= 2 and parts[0] in ("public", "custom", "legacy"):
         return parts[1]
     if len(parts) == 1 and parts[0] in ("public", "custom", "legacy"):
@@ -1773,8 +1775,9 @@ def ls_tool(runtime: Runtime, description: str, path: str) -> str:
         path: The **absolute** path to the directory to list.
     """
     try:
+        user_id = resolve_runtime_user_id(runtime)
         # Block access to disabled skill directories
-        if _is_disabled_skill_path(path, user_id=resolve_runtime_user_id(runtime)):
+        if _is_disabled_skill_path(path, user_id=user_id):
             skill_name = _extract_skill_name_from_skills_path(path) or "unknown"
             return f"Error: Skill '{skill_name}' is disabled. Access to its files is blocked. Enable the skill in settings before using it."
         sandbox = ensure_sandbox_initialized(runtime)
@@ -1802,7 +1805,7 @@ def ls_tool(runtime: Runtime, description: str, path: str) -> str:
             output = mask_local_paths_in_output(output, thread_data)
         # The gate above only covers `path` itself; the listing descends into
         # children, so a root above a disabled skill still exposes its files.
-        entries = _drop_disabled_skill_paths(output.splitlines(), user_id=resolve_runtime_user_id(runtime))
+        entries = _drop_disabled_skill_paths(output.splitlines(), user_id=user_id)
         if not entries:
             return "(empty)"
         output = "\n".join(entries)

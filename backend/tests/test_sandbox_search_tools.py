@@ -664,3 +664,139 @@ def test_ls_tool_does_not_surface_disabled_skill_from_category_root(tmp_path, mo
     assert "secret-skill" not in result
     # ...while the enabled sibling is still listed.
     assert "open-skill" in result
+
+
+def test_ls_tool_keeps_category_dirs_when_listing_skills_root(tmp_path, monkeypatch) -> None:
+    """`ls /mnt/skills` lists dirs with a trailing slash ("public/"), which the
+    skill-name extractor must read as a category root, not as a skill named "".
+
+    An empty name skips the `skill_name is None` short-circuit and falls through
+    to a config read; it currently lands on "keep" only because unknown skills
+    default to enabled. This pins the intended outcome directly: category dirs
+    stay visible while the disabled skill below them does not.
+    """
+    runtime = _make_runtime(tmp_path)
+    _make_skills_sandbox(tmp_path, monkeypatch, disabled="secret-skill")
+
+    result = ls_tool.func(
+        runtime=runtime,
+        description="list skills root",
+        path="/mnt/skills",
+    )
+
+    assert "/mnt/skills/public" in result
+    assert "open-skill" in result
+    assert "secret-skill" not in result
+
+
+def test_extract_skill_name_treats_category_dir_with_trailing_slash_as_root() -> None:
+    """LocalSandbox.list_dir appends "/" to directories, so the gate sees
+    "/mnt/skills/public/" — which must resolve to None (category root), not "".
+    """
+    from deerflow.sandbox.tools import _extract_skill_name_from_skills_path as extract
+
+    # Changed direction: trailing-slash category roots used to yield "".
+    assert extract("/mnt/skills/public/") is None
+    assert extract("/mnt/skills/custom/") is None
+    assert extract("/mnt/skills/legacy/") is None
+    # Unchanged directions: real skills still resolve, with or without the slash.
+    assert extract("/mnt/skills/public") is None
+    assert extract("/mnt/skills/public/bootstrap") == "bootstrap"
+    assert extract("/mnt/skills/public/bootstrap/") == "bootstrap"
+    assert extract("/mnt/skills/public/bootstrap/SKILL.md") == "bootstrap"
+    assert extract("/mnt/skills/my-skill/") == "my-skill"
+    assert extract("/mnt/user-data/workspace/file.md") is None
+
+
+def _make_custom_skills_sandbox(tmp_path, monkeypatch, *, user_id: str, disabled: str):
+    """Per-user CUSTOM skills tree with one disabled and one enabled skill.
+
+    CUSTOM/LEGACY enabled state lives in the per-user ``_skill_states.json``
+    (``UserScopedSkillStorage``), a different store from the public skills'
+    ``extensions_config.json`` — so the public fixture above does not exercise
+    this branch of ``_is_disabled_skill_path``.
+    """
+    from deerflow.skills.storage import reset_skill_storage
+
+    base_dir = tmp_path / ".deer-flow"
+    user_skills = base_dir / "users" / user_id / "skills"
+    user_custom = user_skills / "custom"
+    for name, body in [(disabled, "SECRET_PROCEDURE = step-1-step-2\n"), ("open-custom", "PUBLIC_PROCEDURE = hello\n")]:
+        (user_custom / name).mkdir(parents=True)
+        (user_custom / name / "SKILL.md").write_text(f"---\nname: {name}\n---\n\n{body}", encoding="utf-8")
+
+    (user_skills / "_skill_states.json").write_text(
+        json.dumps({disabled: {"enabled": False}, "open-custom": {"enabled": True}}),
+        encoding="utf-8",
+    )
+
+    skills_root = tmp_path / "skills"
+    (skills_root / "public").mkdir(parents=True)
+    (skills_root / "custom").mkdir(parents=True)
+    app_config = SimpleNamespace(
+        skills=SimpleNamespace(
+            get_skills_path=lambda: skills_root,
+            container_path="/mnt/skills",
+            use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage",
+        ),
+        skill_evolution=SimpleNamespace(enabled=False),
+    )
+
+    sandbox = LocalSandbox(
+        id=f"local:{user_id}:thread-1",
+        path_mappings=[PathMapping(container_path="/mnt/skills/custom", local_path=str(user_custom), read_only=True)],
+    )
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: sandbox)
+    # The storage cache is keyed by user id, not by base_dir: a cached instance
+    # from another test would read the wrong _skill_states.json.
+    reset_skill_storage()
+    monkeypatch.setattr("deerflow.sandbox.tools.resolve_runtime_user_id", lambda runtime: user_id)
+    return base_dir, app_config
+
+
+def test_grep_tool_does_not_surface_disabled_custom_skill(tmp_path, monkeypatch) -> None:
+    """CUSTOM skills resolve enabled state through the per-user _skill_states.json,
+    not extensions_config.json — the store the public-skill tests never touch."""
+    from deerflow.skills.storage import reset_skill_storage
+
+    runtime = _make_runtime(tmp_path)
+    base_dir, app_config = _make_custom_skills_sandbox(tmp_path, monkeypatch, user_id="user-abc", disabled="secret-custom")
+
+    try:
+        with patch("deerflow.config.paths.get_paths", return_value=Paths(base_dir=base_dir)):
+            with patch("deerflow.config.get_app_config", return_value=app_config):
+                result = grep_tool.func(
+                    runtime=runtime,
+                    description="search custom skills",
+                    pattern="PROCEDURE",
+                    path="/mnt/skills/custom",
+                )
+    finally:
+        reset_skill_storage()
+
+    assert "SECRET_PROCEDURE = step-1-step-2" not in result
+    assert "secret-custom" not in result
+    # ...while the enabled sibling still matches.
+    assert "PUBLIC_PROCEDURE = hello" in result
+
+
+def test_ls_tool_does_not_surface_disabled_custom_skill(tmp_path, monkeypatch) -> None:
+    """Same per-user store, via the descending ls listing."""
+    from deerflow.skills.storage import reset_skill_storage
+
+    runtime = _make_runtime(tmp_path)
+    base_dir, app_config = _make_custom_skills_sandbox(tmp_path, monkeypatch, user_id="user-abc", disabled="secret-custom")
+
+    try:
+        with patch("deerflow.config.paths.get_paths", return_value=Paths(base_dir=base_dir)):
+            with patch("deerflow.config.get_app_config", return_value=app_config):
+                result = ls_tool.func(
+                    runtime=runtime,
+                    description="list custom skills",
+                    path="/mnt/skills/custom",
+                )
+    finally:
+        reset_skill_storage()
+
+    assert "secret-custom" not in result
+    assert "open-custom" in result
