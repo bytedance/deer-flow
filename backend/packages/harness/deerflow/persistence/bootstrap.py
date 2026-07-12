@@ -308,6 +308,15 @@ def _run_baseline_create_all_sync(sync_conn: Any) -> None:
     # Explicitly creating every ``Index`` on every baseline table (each with
     # its own ``checkfirst=True``) guarantees each index exists regardless of
     # whether its parent table was just created or already present.
+    #
+    # Forward-looking note: this index-level backfill has the same shape risk
+    # the module already documents for tables (``_BASELINE_TABLE_NAMES``
+    # restriction). If a future post-baseline revision adds an index to a
+    # baseline table via ``op.create_index(...)`` without ``checkfirst=True``,
+    # that revision will collide with ``"index already exists"`` on ``upgrade
+    # head`` because the backfill above already pre-created it. Use
+    # ``checkfirst=True`` (or a future ``safe_create_index`` helper) in such a
+    # revision, mirroring ``safe_add_column``.
     for table in baseline_tables:
         for idx in table.indexes:
             idx.create(sync_conn, checkfirst=True)
