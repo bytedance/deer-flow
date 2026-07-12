@@ -767,3 +767,56 @@ def test_format_memory_leaves_benign_source_error_byte_identical() -> None:
     result = format_memory_for_injection(memory_data, max_tokens=2000)
 
     assert f"(avoid: {source_error})" in result
+
+
+# Context summaries (workContext/personalContext/topOfMind + history) are
+# user-editable via /api/memory import and render into the same <memory> block
+# as facts, so they must be escaped like the fact fields in #4097.
+_SUMMARY_CASES = [
+    ("workContext", {"user": {"workContext": {"summary": _BREAKOUT}}}),
+    ("personalContext", {"user": {"personalContext": {"summary": _BREAKOUT}}}),
+    ("topOfMind", {"user": {"topOfMind": {"summary": _BREAKOUT}}}),
+    ("recentMonths", {"history": {"recentMonths": {"summary": _BREAKOUT}}}),
+    ("earlierContext", {"history": {"earlierContext": {"summary": _BREAKOUT}}}),
+    ("longTermBackground", {"history": {"longTermBackground": {"summary": _BREAKOUT}}}),
+]
+
+
+@pytest.mark.parametrize("field, memory_data", _SUMMARY_CASES, ids=[c[0] for c in _SUMMARY_CASES])
+def test_format_memory_escapes_context_summary_breakout(field: str, memory_data: dict) -> None:
+    """A context summary that closes the <memory> block must be HTML-escaped, so
+    it cannot relocate the text after it out of the user-managed trust zone the
+    lead-agent system prompt declares — same gap as the fact fields (#4097),
+    across all six summary sites."""
+    result = format_memory_for_injection(memory_data, max_tokens=2000)
+
+    assert "</memory>" not in result
+    assert "</system-reminder>" not in result
+    assert "&lt;/memory&gt;&lt;/system-reminder&gt;" in result
+
+
+def test_format_memory_leaves_benign_summary_byte_identical() -> None:
+    """Escaping must not disturb an ordinary summary: with no <, >, & it is
+    rendered exactly as before. Apostrophes and quotation marks are
+    element-text-safe and must survive verbatim (quote=False)."""
+    benign = 'User\'s focus: dark mode, 2-space indentation, said "use uv".'
+    memory_data = {"user": {"workContext": {"summary": benign}}}
+
+    result = format_memory_for_injection(memory_data, max_tokens=2000)
+
+    assert f"Work: {benign}" in result
+    assert "&quot;" not in result
+    assert "&#x27;" not in result
+    assert "&amp;" not in result
+
+
+def test_format_memory_tolerates_non_string_summary() -> None:
+    """A non-string summary an import can plant is str-coerced, not raised on:
+    escaping via html.escape() requires a str, and the whole renderer is wrapped
+    in a broad except at the call site, so a raise would silently disable all
+    memory injection. Preserves the prior f-string coercion behavior."""
+    memory_data = {"user": {"topOfMind": {"summary": 12345}}}
+
+    result = format_memory_for_injection(memory_data, max_tokens=2000)
+
+    assert "Current Focus: 12345" in result
