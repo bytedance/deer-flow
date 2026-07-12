@@ -15,6 +15,7 @@ from typing import NamedTuple
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
 from deerflow.sandbox.env_policy import build_sandbox_env
 from deerflow.sandbox.local.list_dir import list_dir
+from deerflow.sandbox.path_patterns import build_output_mask_pattern
 from deerflow.sandbox.sandbox import Sandbox, _validate_extra_env
 from deerflow.sandbox.search import GrepMatch, find_glob_matches, find_grep_matches
 
@@ -234,9 +235,15 @@ class LocalSandbox(Sandbox):
         #
         # ``$`` is load-bearing: output ending exactly at a mount root would
         # otherwise fail the lookahead and be emitted as the raw host path.
-        boundary = r"(?=/|$|[^\w./-])"
-        tail = r"(?:[/\\][^\s\"';&|<>()]*)?"
-        return [re.compile(re.escape(self._resolved_local_paths[m]) + boundary + tail) for m in self._mappings_by_local_specificity]
+        #
+        # Both are owned by ``deerflow.sandbox.path_patterns`` and shared with
+        # ``sandbox.tools._compiled_mask_patterns``, the other site that rewrites host
+        # paths back to virtual ones — one copy of the rule, so the two cannot drift
+        # again (#4035 added the boundary here and missed that site; #4053 added it
+        # there). Bases stay separator-*sensitive* here: they come from
+        # ``Path.resolve()`` and already carry the platform's separator, so relaxing
+        # them would widen what this masks.
+        return [build_output_mask_pattern(self._resolved_local_paths[m]) for m in self._mappings_by_local_specificity]
 
     @cached_property
     def _resolved_local_paths(self) -> dict[PathMapping, str]:
