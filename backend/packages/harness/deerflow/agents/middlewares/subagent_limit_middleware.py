@@ -132,6 +132,7 @@ class SubagentLimitMiddleware(AgentMiddleware[AgentState]):
         # Build set of indices to drop (excess task calls beyond the limit)
         indices_to_drop = set(task_indices[allowed_task_calls:])
         truncated_tool_calls = [tc for i, tc in enumerate(tool_calls) if i not in indices_to_drop]
+        total_limited = len(task_indices) > remaining_total
 
         dropped_count = len(indices_to_drop)
         logger.warning(
@@ -143,7 +144,7 @@ class SubagentLimitMiddleware(AgentMiddleware[AgentState]):
         )
 
         # Replace the AIMessage with truncated tool_calls (same id triggers replacement)
-        content = _append_text(last_msg.content, _TOTAL_LIMIT_STOP_MSG) if not truncated_tool_calls and tool_calls else None
+        content = _append_text(last_msg.content, _TOTAL_LIMIT_STOP_MSG) if total_limited else None
         updated_msg = clone_ai_message_with_tool_calls(last_msg, truncated_tool_calls, content=content)
         return {"messages": [updated_msg]}
 

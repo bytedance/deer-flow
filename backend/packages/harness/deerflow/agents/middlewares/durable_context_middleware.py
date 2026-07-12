@@ -126,8 +126,12 @@ def _current_run_messages(messages: list[AnyMessage], run_id: str | None) -> lis
         return messages
     for index in range(len(messages) - 1, -1, -1):
         message = messages[index]
-        if isinstance(message, HumanMessage) and message.additional_kwargs.get("run_id") == run_id:
+        if not isinstance(message, HumanMessage):
+            continue
+        message_run_id = message.additional_kwargs.get("run_id")
+        if message_run_id is None or message_run_id == run_id:
             return messages[index + 1 :]
+        return []
     return messages
 
 

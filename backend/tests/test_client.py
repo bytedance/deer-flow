@@ -276,6 +276,32 @@ class TestStream:
         assert call_kwargs["context"]["thread_id"] == "t1"
         assert call_kwargs["context"]["agent_name"] == "test-agent-1"
 
+    def test_stream_assigns_unique_run_id_per_call(self, client):
+        """Each embedded client stream call has a run identity for per-run middleware."""
+        agent = MagicMock()
+        agent.stream.side_effect = [
+            iter([{"messages": [AIMessage(content="one", id="ai-1")]}]),
+            iter([{"messages": [AIMessage(content="two", id="ai-2")]}]),
+        ]
+
+        with (
+            patch.object(client, "_ensure_agent"),
+            patch.object(client, "_agent", agent),
+        ):
+            list(client.stream("first", thread_id="t1"))
+            list(client.stream("second", thread_id="t1"))
+
+        first_args, first_call = agent.stream.call_args_list[0].args, agent.stream.call_args_list[0].kwargs
+        second_args, second_call = agent.stream.call_args_list[1].args, agent.stream.call_args_list[1].kwargs
+        first_run_id = first_call["context"]["run_id"]
+        second_run_id = second_call["context"]["run_id"]
+
+        assert first_run_id
+        assert second_run_id
+        assert first_run_id != second_run_id
+        assert first_args[0]["messages"][0].additional_kwargs["run_id"] == first_run_id
+        assert second_args[0]["messages"][0].additional_kwargs["run_id"] == second_run_id
+
     def test_custom_mode_is_normalized_to_string(self, client):
         """stream() forwards custom events even when the mode is not a plain string."""
 

@@ -183,6 +183,36 @@ class TestBeforeModelCapture:
         assert [entry["id"] for entry in out["delegations"]] == ["new-call"]
         assert out["delegations"][0]["run_id"] == "run-new"
 
+    def test_missing_current_run_marker_does_not_retag_old_run_delegations(self):
+        middleware = DurableContextMiddleware()
+        runtime = SimpleNamespace(context={"run_id": "run-new"})
+        messages = [
+            HumanMessage(content="old request", additional_kwargs={"run_id": "run-old"}),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "task",
+                        "args": {"description": "old work", "prompt": "do old", "subagent_type": "general-purpose"},
+                        "id": "old-call",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+        ]
+        existing = [
+            {
+                "id": "old-call",
+                "run_id": "run-old",
+                "description": "old work",
+                "subagent_type": "general-purpose",
+                "status": "in_progress",
+                "created_at": "2026-07-11T00:00:00Z",
+            }
+        ]
+
+        assert middleware.before_model({"messages": messages, "delegations": existing}, runtime) is None
+
     def test_returns_none_when_no_delegations(self):
         middleware = DurableContextMiddleware()
 

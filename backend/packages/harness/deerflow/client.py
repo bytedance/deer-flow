@@ -762,8 +762,9 @@ class DeerFlowClient:
 
         self._ensure_agent(config)
 
-        state: dict[str, Any] = {"messages": [HumanMessage(content=message)]}
-        context = {"thread_id": thread_id}
+        run_id = str(uuid.uuid4())
+        state: dict[str, Any] = {"messages": [HumanMessage(content=message, additional_kwargs={"run_id": run_id})]}
+        context = {"thread_id": thread_id, "run_id": run_id}
         if deerflow_trace_id:
             context[DEERFLOW_TRACE_METADATA_KEY] = deerflow_trace_id
         if self._agent_name:

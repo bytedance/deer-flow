@@ -239,6 +239,27 @@ class TestTruncateTaskCalls:
         assert [tc["id"] for tc in updated_msg.tool_calls] == ["current-t3"]
         assert [tc["id"] for tc in updated_msg.additional_kwargs["tool_calls"]] == ["current-t3"]
 
+    def test_total_limit_reached_with_non_task_calls_still_adds_visible_notice(self):
+        mw = SubagentLimitMiddleware(max_concurrent=3, max_total=1)
+        msg = AIMessage(
+            content="",
+            tool_calls=[_task_call("blocked-task"), _other_call("bash", "allowed-bash")],
+            additional_kwargs={"tool_calls": [_raw_tool_call("blocked-task"), _raw_tool_call("allowed-bash", name="bash")]},
+            response_metadata={"finish_reason": "tool_calls"},
+        )
+        state = {
+            "messages": [msg],
+            "delegations": [_delegation("already-used", run_id="run-1")],
+        }
+
+        result = mw.after_model(state, _make_runtime(run_id="run-1"))
+
+        assert result is not None
+        updated_msg = result["messages"][0]
+        assert [tc["id"] for tc in updated_msg.tool_calls] == ["allowed-bash"]
+        assert [tc["id"] for tc in updated_msg.additional_kwargs["tool_calls"]] == ["allowed-bash"]
+        assert "subagent delegation limit" in updated_msg.content
+
     def test_only_non_task_calls_returns_none(self):
         mw = SubagentLimitMiddleware()
         msg = AIMessage(
