@@ -239,7 +239,7 @@ def search_memory_facts(
             continue
         matched.append(fact)
 
-    matched.sort(key=lambda f: f.get("confidence", 0), reverse=True)
+    matched.sort(key=_coerce_source_confidence, reverse=True)
     return matched[:limit]
 
 
