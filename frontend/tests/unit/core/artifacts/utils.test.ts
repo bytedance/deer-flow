@@ -74,6 +74,19 @@ describe("artifact URL helpers", () => {
     ).toBe("/demo/threads/thread-1/user-data/outputs/style.css");
   });
 
+  test("returns stable artifact path references", async () => {
+    const { extractArtifactsFromThread } = await loadFreshArtifactUtils();
+    const threadWithoutArtifacts = { values: {} };
+    const artifacts = ["/mnt/user-data/outputs/chart.png"];
+
+    expect(extractArtifactsFromThread(threadWithoutArtifacts)).toBe(
+      extractArtifactsFromThread(threadWithoutArtifacts),
+    );
+    expect(extractArtifactsFromThread({ values: { artifacts } })).toBe(
+      artifacts,
+    );
+  });
+
   test("resolves a relative message image when it uniquely matches an artifact", async () => {
     const { resolveMessageImageURL } = await loadFreshArtifactUtils();
     const artifacts = [

@@ -691,6 +691,8 @@ export function MessageList({
     return <MessageListSkeleton />;
   }
 
+  const artifactPaths = extractArtifactsFromThread(thread);
+
   return (
     <>
       <Conversation
@@ -731,7 +733,7 @@ export function MessageList({
                           groupIndex === groupedMessages.length - 1
                         }
                         threadId={threadId}
-                        artifactPaths={extractArtifactsFromThread(thread)}
+                        artifactPaths={artifactPaths}
                         runId={
                           group.type === "assistant"
                             ? (msg as { run_id?: string }).run_id
