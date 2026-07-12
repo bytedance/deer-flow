@@ -5,6 +5,12 @@ The rule these pin is not "the regex is correct" — that is #4035/#4053 — but
 site's matching". The two sites differ on one axis only (separator handling),
 and that asymmetry is load-bearing: erasing it would widen ``LocalSandbox``'s
 masking or narrow ``sandbox.tools``'s.
+
+The move itself was cleared by a differential against the *real* pre-extraction
+expressions, run once on the parent commit. That run cannot be committed: after
+this lands there is no old inline expression left to diff against, only the
+frozen copies below. So the committed guard is the weaker snapshot, and its
+red-ness rests on those literals — not on the length of ``_BASES``.
 """
 
 from __future__ import annotations
@@ -38,6 +44,10 @@ _BASES = [
     "/Users/a/.deer-flow/users/u1/threads/t1/user-data",
     "C:\\host\\skills",
     "/host/技能",
+    # Drive root: the only base either caller can hand the helper that still ends in a
+    # separator (``Path.resolve()`` strips them everywhere else), so it is the one shape
+    # that goes red if the helper starts normalizing the base it is given.
+    "C:\\",
 ]
 
 
