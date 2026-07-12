@@ -1204,6 +1204,56 @@ class TestAsyncExecutionPath:
         assert result.completed_at is not None
 
     @pytest.mark.anyio
+    async def test_aexecute_recursion_error_with_llm_error_fallback_surfaces_failed(self, classes, base_config, mock_agent, msg):
+        """A structured LLM error fallback that coincides with hitting
+        ``max_turns`` must still classify as ``failed``, not ``completed``.
+
+        ``_extract_llm_error_fallback`` (#4042) marks a terminal ``AIMessage``
+        as a handled provider failure via
+        ``additional_kwargs.deerflow_error_fallback``, and the
+        normal-completion branch above already consults it before falling
+        back to ``_extract_final_result``. This except-block must apply the
+        same check before recovering ``usable_partial`` from raw non-empty
+        ``AIMessage`` text: a fallback message always carries non-empty
+        user-facing text, so without checking the marker first it is
+        indistinguishable from genuine partial output and gets misclassified
+        as a completed task rather than the failed provider error it is.
+        """
+        from langgraph.errors import GraphRecursionError
+
+        AIMessage = classes["AIMessage"]
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentStatus = classes["SubagentStatus"]
+
+        fallback_text = "LLM request failed: provider rejected the request"
+        fallback_message = AIMessage(
+            content=fallback_text,
+            additional_kwargs={
+                "deerflow_error_fallback": True,
+                "error_type": "BadRequestError",
+                "error_reason": "generic",
+                "error_detail": "Error code: 400 - InvalidParameter",
+            },
+        )
+        fallback_state = {"messages": [msg.human("Task"), fallback_message]}
+
+        async def mock_astream(*args, **kwargs):
+            yield fallback_state
+            raise GraphRecursionError("Recursion limit reached right after the LLM error fallback")
+
+        mock_agent.astream = mock_astream
+
+        executor = SubagentExecutor(config=base_config, tools=[], thread_id="test-thread")
+
+        with patch.object(executor, "_create_agent", return_value=mock_agent):
+            result = await executor._aexecute("Task")
+
+        assert result.status == SubagentStatus.FAILED
+        assert result.error == fallback_text
+        assert result.result is None
+        assert result.stop_reason == "turn_capped"
+
+    @pytest.mark.anyio
     async def test_aexecute_token_capped_surfaces_completed_token_capped(self, classes, base_config, mock_agent, msg):
         """#3875 Phase 2: the token-budget hard-stop does not raise — it strips
         tool_calls so the run completes with a final answer. When the captured
