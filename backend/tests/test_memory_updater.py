@@ -6,6 +6,7 @@ from deerflow.agents.memory.prompt import format_conversation_for_update
 from deerflow.agents.memory.updater import (
     MemoryUpdater,
     _extract_text,
+    _parse_memory_update_response,
     clear_memory_data,
     create_memory_fact,
     create_memory_fact_with_created_fact,
@@ -1443,3 +1444,32 @@ class TestSyncUpdateBindsTraceContextVar:
 
             assert captured == ["inner-trace"]
             assert get_current_trace_id() == "outer-trace"
+
+
+class TestParseMemoryUpdateFactsToRemoveGate:
+    """``factsToRemove`` is optional in the memory-update JSON acceptance gate.
+
+    When there is nothing to remove, a well-behaved model omits ``factsToRemove``
+    entirely. The parser must still accept such an update (keeping ``newFacts``
+    intact) while continuing to reject unrelated JSON that lacks the load-bearing
+    ``history`` + ``newFacts`` keys.
+    """
+
+    def test_accepts_update_without_facts_to_remove(self):
+        text = '{"user": {}, "history": {}, "newFacts": [{"content": "User likes Rust", "category": "preference", "confidence": 0.9}]}'
+
+        parsed = _parse_memory_update_response(text)
+
+        assert isinstance(parsed, dict)
+        assert any(fact.get("content") == "User likes Rust" for fact in parsed.get("newFacts", []))
+
+    def test_still_rejects_decoy_object_missing_history_and_new_facts(self):
+        import json
+
+        # ``{"user": "alice"}`` has only the ``user`` key — missing history+newFacts,
+        # so it must never be mistaken for a memory update.
+        try:
+            _parse_memory_update_response('{"user": "alice"}')
+        except json.JSONDecodeError:
+            return
+        raise AssertionError('decoy object {"user": "alice"} must be rejected')
