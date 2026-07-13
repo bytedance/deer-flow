@@ -39,6 +39,7 @@ import { stepsForDisplay } from "@/core/tasks/steps";
 import { resolveRenderedSubtask } from "@/core/tasks/subtask-render";
 import { explainLastToolCall } from "@/core/tools/utils";
 import { cn } from "@/lib/utils";
+import { useToolStreaming } from "@/core/tasks/tool-streaming";
 
 import { CitationLink } from "../citations/citation-link";
 import { FlipDisplay } from "../flip-display";
@@ -65,6 +66,7 @@ export function SubtaskCard({
   const task = resolveRenderedSubtask(useSubtask(taskId), fallbackTask)!;
   const { models, tokenUsageEnabled } = useModels();
   const updateSubtask = useUpdateSubtask();
+  const { state: { output: streamingOutput } } = useToolStreaming();
   const modelLabel = resolveSubtaskModelLabel(task.modelName, models);
   const tokenLabel = tokenUsageEnabled
     ? formatSubtaskTokenUsage(task.usage)
@@ -246,6 +248,30 @@ export function SubtaskCard({
               />
             );
           })}
+          {/* Streaming tool output: show real-time output from the currently executing tool */}
+          {task.status === "in_progress" && streamingOutput && (
+            <ChainOfThoughtStep
+              key="streaming-output"
+              label={
+                <div className="text-muted-foreground text-sm">
+                  <div className="mb-1 flex items-center gap-1 font-medium">
+                    <Loader2Icon className="size-3 animate-spin" />
+                    {streamingOutput.toolName}
+                  </div>
+                  {streamingOutput.text ? (
+                    <pre className="bg-muted/50 max-h-64 overflow-auto rounded p-2 text-xs whitespace-pre-wrap font-mono">
+                      {streamingOutput.text}
+                    </pre>
+                  ) : (
+                    <Shimmer duration={2} spread={2}>
+                      {t.subtasks[task.status]}
+                    </Shimmer>
+                  )}
+                </div>
+              }
+              icon={<WrenchIcon className="size-4" />}
+            />
+          )}
           {task.status === "completed" && (
             <>
               <ChainOfThoughtStep

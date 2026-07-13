@@ -41,7 +41,14 @@ def normalize_stream_modes(raw: list[str] | str | None) -> list[str]:
 
 
 def to_langgraph_stream_modes(raw: list[str] | str | None) -> list[str]:
-    """Map public run modes to ``graph.astream`` modes without silent fallback."""
+    """Map public run modes to ``graph.astream`` modes without silent fallback.
+
+    Always includes ``custom`` so middlewares can emit custom stream events
+    (e.g. ToolStreamingMiddleware). Including it adds zero overhead when no
+    middleware writes to the custom channel — LangGraph only emits events
+    when get_stream_writer() is called.
+    """
     modes = normalize_stream_modes(raw)
     mapped = ["messages" if mode == "messages-tuple" else mode for mode in modes]
+    mapped.append("custom")
     return list(dict.fromkeys(mapped))
