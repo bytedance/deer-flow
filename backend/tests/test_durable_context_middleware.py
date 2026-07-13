@@ -12,6 +12,7 @@ from langgraph.types import Command
 from deerflow.agents import thread_state as thread_state_module
 from deerflow.agents.lead_agent import agent as lead_agent_module
 from deerflow.agents.middlewares.durable_context_middleware import DurableContextMiddleware
+from deerflow.agents.middlewares.subagent_limit_middleware import SubagentLimitMiddleware
 from deerflow.agents.middlewares.summarization_middleware import DeerFlowSummarizationMiddleware
 from deerflow.agents.middlewares.tool_error_handling_middleware import ToolErrorHandlingMiddleware
 from deerflow.agents.thread_state import ThreadState, merge_delegations
@@ -567,6 +568,57 @@ def fake_read_file(path: str) -> str:
 
 
 class TestGraphIntegration:
+    def test_subagent_limit_counts_only_prior_delegations_in_real_middleware_chain(self):
+        model = RecordingFakeModel(
+            responses=[
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "task",
+                            "args": {"description": "new work 1", "prompt": "do it", "subagent_type": "general-purpose"},
+                            "id": "new-call-1",
+                            "type": "tool_call",
+                        },
+                        {
+                            "name": "task",
+                            "args": {"description": "new work 2", "prompt": "do it", "subagent_type": "general-purpose"},
+                            "id": "new-call-2",
+                            "type": "tool_call",
+                        },
+                    ],
+                ),
+                AIMessage(content="all done"),
+            ]
+        )
+        agent = create_agent(
+            model=model,
+            tools=[fake_task],
+            middleware=[DurableContextMiddleware(), SubagentLimitMiddleware(max_concurrent=3, max_total=3)],
+            state_schema=ThreadState,
+        )
+        prior_delegations = [
+            {
+                "id": f"prior-call-{index}",
+                "description": "prior work",
+                "subagent_type": "general-purpose",
+                "status": "completed",
+                "created_at": "2026-07-11T00:00:00Z",
+            }
+            for index in range(2)
+        ]
+
+        result = agent.invoke(
+            {
+                "messages": [HumanMessage(content="delegate the remaining work")],
+                "delegations": prior_delegations,
+            }
+        )
+
+        assert [entry["id"] for entry in result["delegations"]] == ["prior-call-0", "prior-call-1", "new-call-1"]
+        executed_task_results = [message for message in result["messages"] if isinstance(message, ToolMessage) and message.name == "task"]
+        assert [message.tool_call_id for message in executed_task_results] == ["new-call-1"]
+
     def test_delegation_captured_and_injected(self):
         model = RecordingFakeModel(
             responses=[

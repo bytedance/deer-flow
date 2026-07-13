@@ -129,7 +129,12 @@ class SubagentLimitMiddleware(AgentMiddleware[AgentState]):
 
         # Count task tool calls
         task_indices = [i for i, tc in enumerate(tool_calls) if tc.get("name") == "task"]
+        if not task_indices:
+            return None
+
         run_id = _runtime_run_id(runtime)
+        if run_id is None:
+            logger.warning("Subagent limit middleware received no run_id; counting all thread delegations as prior usage. Pass run_id in runtime context to enforce the total cap per run.")
         prior_delegation_count = _count_prior_delegations(state.get("delegations"), run_id=run_id)
         remaining_total = max(0, self.max_total - prior_delegation_count)
         allowed_task_calls = min(self.max_concurrent, remaining_total)
@@ -140,8 +145,6 @@ class SubagentLimitMiddleware(AgentMiddleware[AgentState]):
         # Build set of indices to drop (excess task calls beyond the limit)
         indices_to_drop = set(task_indices[allowed_task_calls:])
         truncated_tool_calls = [tc for i, tc in enumerate(tool_calls) if i not in indices_to_drop]
-        total_limited = len(task_indices) > remaining_total
-
         dropped_count = len(indices_to_drop)
         logger.warning(
             "Truncated %s excess task tool call(s) from model response (concurrent limit: %s; total limit: %s; prior delegations: %s)",
@@ -152,7 +155,7 @@ class SubagentLimitMiddleware(AgentMiddleware[AgentState]):
         )
 
         # Replace the AIMessage with truncated tool_calls (same id triggers replacement)
-        content = _append_text(last_msg.content, _TOTAL_LIMIT_STOP_MSG) if total_limited else None
+        content = _append_text(last_msg.content, _TOTAL_LIMIT_STOP_MSG) if remaining_total == 0 else None
         updated_msg = clone_ai_message_with_tool_calls(last_msg, truncated_tool_calls, content=content)
         return {"messages": [updated_msg]}
 

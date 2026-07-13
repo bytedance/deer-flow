@@ -1,5 +1,6 @@
 """Tests for SubagentLimitMiddleware."""
 
+import logging
 from unittest.mock import MagicMock
 
 from langchain_core.messages import AIMessage, HumanMessage
@@ -177,6 +178,20 @@ class TestTruncateTaskCalls:
         updated_msg = result["messages"][0]
         assert [tc["id"] for tc in updated_msg.tool_calls] == ["t4"]
         assert [tc["id"] for tc in updated_msg.additional_kwargs["tool_calls"]] == ["t4"]
+        assert "subagent delegation limit" not in updated_msg.content
+
+    def test_missing_run_id_logs_fail_restrictive_fallback(self, caplog):
+        mw = SubagentLimitMiddleware(max_concurrent=3, max_total=1)
+        msg = AIMessage(content="", tool_calls=[_task_call("t2")])
+        state = {"messages": [msg], "delegations": [_delegation("t1")]}
+
+        with caplog.at_level(logging.WARNING, logger="deerflow.agents.middlewares.subagent_limit_middleware"):
+            result = mw._truncate_task_calls(state)
+
+        assert result is not None
+        assert result["messages"][0].tool_calls == []
+        assert "received no run_id" in caplog.text
+        assert "counting all thread delegations" in caplog.text
 
     def test_total_limit_reached_forces_terminal_message(self):
         mw = SubagentLimitMiddleware(max_concurrent=3, max_total=3)
