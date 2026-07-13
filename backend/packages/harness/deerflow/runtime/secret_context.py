@@ -59,6 +59,16 @@ def read_active_secrets(context: Any) -> dict[str, str]:
 _SLASH_SECRET_SOURCE_KEY = "__slash_skill_secret_source"
 _SECRETS_BINDING_AUDIT_KEY = "__skill_secrets_binding_audit"
 
+# Identity of the latest slash activation that has already fired in this run, so
+# the reminder injection, skill disk read, and ``activate`` audit event happen
+# once per user slash command rather than on every model call of the tool loop.
+# The reminder is injected into the per-call model request only and never written
+# back to graph state, so a scan of ``request.messages`` cannot detect a prior
+# activation on the 2nd..Nth model call — the run context is the only signal that
+# survives (mirroring ``_SLASH_SECRET_SOURCE_KEY``). Holds a message id / content
+# digest, never a secret value; listed below to keep the redaction guard complete.
+_SLASH_SKILL_ACTIVATION_RUN_KEY = "__slash_skill_activation_run"
+
 # Run-context keys whose values are request-scoped secrets and must be stripped
 # before a context mapping is serialized anywhere observable (traces, logs).
 REDACTED_CONTEXT_KEYS = frozenset(
@@ -67,6 +77,7 @@ REDACTED_CONTEXT_KEYS = frozenset(
         ACTIVE_SECRETS_CONTEXT_KEY,
         _SLASH_SECRET_SOURCE_KEY,
         _SECRETS_BINDING_AUDIT_KEY,
+        _SLASH_SKILL_ACTIVATION_RUN_KEY,
     }
 )
 

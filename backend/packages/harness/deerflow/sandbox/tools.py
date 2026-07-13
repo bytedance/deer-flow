@@ -23,6 +23,7 @@ from deerflow.sandbox.exceptions import (
     SandboxRuntimeError,
 )
 from deerflow.sandbox.file_operation_lock import get_file_operation_lock
+from deerflow.sandbox.path_patterns import build_output_mask_pattern
 from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.sandbox_provider import get_sandbox_provider
 from deerflow.sandbox.search import GrepMatch
@@ -727,20 +728,16 @@ def _compiled_mask_patterns(sources: tuple[tuple[str, str], ...]) -> tuple[tuple
     glob/grep match, so without this the same patterns are recompiled per
     match.
     """
-    # Same segment-boundary lookahead as ``LocalSandbox._reverse_output_patterns``
-    # (#4035), so a host base does not match inside a sibling that merely shares
-    # its prefix (``.../skills`` inside ``.../skills-extra``). Without it the
-    # regex yields the bare base, which then *equals* ``base`` in
-    # ``replace_match`` and so the sibling is rewritten to a container path that
-    # forward resolution refuses to map back.
+    # The segment boundary and path tail are shared with
+    # ``LocalSandbox._reverse_output_patterns`` — see
+    # ``deerflow.sandbox.path_patterns``, which owns that rule so the two copies
+    # cannot drift again (#4035 fixed one and missed the other; #4053 fixed the
+    # other).
     #
-    # The class mirrors ``_content_pattern``'s: this runs over arbitrary command
-    # output, where a base can legitimately be followed by ``,`` ``:`` or ``\``.
-    # ``$`` is load-bearing — output ending exactly at a base would otherwise
-    # fail the lookahead and be emitted as the raw host path.
-    boundary = r"(?=/|$|[^\w./-])"
-    tail = r"(?:[/\\][^\s\"';&|<>()]*)?"
-
+    # ``separator_agnostic=True`` is the one thing this site does differently:
+    # its bases come from ``_path_variants``, which yields Windows-style
+    # spellings, and they are matched against output whose separators this layer
+    # does not control.
     compiled: list[tuple[re.Pattern[str], str, str]] = []
     for host_base, virtual_base in sources:
         seen: set[str] = set()
@@ -753,8 +750,7 @@ def _compiled_mask_patterns(sources: tuple[tuple[str, str], ...]) -> tuple[tuple
                 if variant in seen:
                     continue
                 seen.add(variant)
-                escaped = re.escape(variant).replace(r"\\", r"[/\\]")
-                compiled.append((re.compile(escaped + boundary + tail), variant, virtual_base))
+                compiled.append((build_output_mask_pattern(variant, separator_agnostic=True), variant, virtual_base))
     return tuple(compiled)
 
 
