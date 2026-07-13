@@ -1062,7 +1062,11 @@ class ChannelManager:
         if not isinstance(agent_name, str) or not agent_name.strip():
             return None
 
-        agent_config = load_agent_config(_normalize_custom_agent_name(agent_name))
+        # Read the agent config from the same owner bucket the run uses:
+        # ``run_context["user_id"]`` is the resolved owner (``_channel_storage_user_id``),
+        # but without it ``load_agent_config`` falls back to the dispatch loop's unset
+        # contextvar (``"default"``), reading the wrong user's per-user custom agent.
+        agent_config = load_agent_config(_normalize_custom_agent_name(agent_name), user_id=run_context.get("user_id"))
         if agent_config and agent_config.skills is not None:
             return set(agent_config.skills)
         return None

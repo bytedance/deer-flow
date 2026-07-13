@@ -655,7 +655,23 @@ def _call_has_shell_true(node: ast.Call) -> bool:
 
 
 def _call_is_network_sink(call_name: str) -> bool:
-    return call_name in {"requests.get", "requests.post", "requests.put", "requests.request", "urllib.request.urlopen", "httpx.get", "httpx.post", "socket.socket"}
+    return call_name in {
+        "requests.get",
+        "requests.post",
+        "requests.put",
+        "requests.patch",
+        "requests.delete",
+        "requests.request",
+        "httpx.get",
+        "httpx.post",
+        "httpx.put",
+        "httpx.patch",
+        "httpx.delete",
+        "httpx.request",
+        "httpx.stream",
+        "urllib.request.urlopen",
+        "socket.socket",
+    }
 
 
 def _yaml_load_uses_safe_loader(node: ast.Call) -> bool:
