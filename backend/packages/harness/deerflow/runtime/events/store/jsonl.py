@@ -28,6 +28,7 @@ import logging
 import re
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from deerflow.runtime.events.store.base import RunEventStore
 
@@ -154,13 +155,56 @@ class JsonlRunEventStore(RunEventStore):
             return record
 
     async def put_batch(self, events):
+        """Persist a batch of events atomically per-thread.
+
+        All seq numbers for the batch are reserved under a single per-thread
+        write lock and every record is appended in one file write so a
+        mid-batch failure cannot leave a partial set of records on disk that
+        a retry would then duplicate. Callers (e.g. worker.py's flush-retry
+        path) may safely re-buffer the entire batch on failure.
+        """
         if not events:
             return []
-        results = []
+
+        # Group by thread_id; each thread has its own write lock and seq counter.
+        by_thread: dict[str, list[dict[str, Any]]] = {}
         for ev in events:
-            record = await self.put(**ev)
-            results.append(record)
+            by_thread.setdefault(ev["thread_id"], []).append(ev)
+
+        results: list[dict[str, Any]] = []
+        for thread_id, batch in by_thread.items():
+            records = await self._write_batch_async(thread_id, batch)
+            results.extend(records)
         return results
+
+    async def _write_batch_async(self, thread_id: str, batch: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        async with self._get_write_lock(thread_id):
+            await self._ensure_seq_loaded(thread_id)
+            records: list[dict[str, Any]] = []
+            for ev in batch:
+                seq = self._next_seq(thread_id)
+                record = {
+                    "thread_id": thread_id,
+                    "run_id": ev["run_id"],
+                    "event_type": ev["event_type"],
+                    "category": ev["category"],
+                    "content": ev.get("content", ""),
+                    "metadata": ev.get("metadata") or {},
+                    "seq": seq,
+                    "created_at": ev.get("created_at") or datetime.now(UTC).isoformat(),
+                }
+                records.append(record)
+            path = self._run_file(thread_id, batch[0]["run_id"])
+            # Single append/write per thread. If this raises, no records were
+            # persisted; the caller's re-buffer reproduces no duplicates.
+            await asyncio.to_thread(self._append_records, path, records)
+            return records
+
+    def _append_records(self, path: Path, records: list[dict[str, Any]]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        lines = "".join(json.dumps(r, default=str, ensure_ascii=False) + "\n" for r in records)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(lines)
 
     async def list_messages(self, thread_id, *, limit=50, before_seq=None, after_seq=None):
         all_events = await asyncio.to_thread(self._read_thread_events, thread_id)

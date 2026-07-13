@@ -52,6 +52,12 @@ class MemoryConfig(BaseModel):
         le=1.0,
         description="Minimum confidence threshold for storing facts",
     )
+    mode: Literal["middleware", "tool"] = Field(
+        default="middleware",
+        description=(
+            "Memory operation mode. 'middleware': passive LLM summarization after each turn (current behavior). 'tool': model calls memory tools (memory_search, memory_add, etc.) directly. Mutually exclusive — only one mode runs at a time."
+        ),
+    )
     injection_enabled: bool = Field(
         default=True,
         description="Whether to inject memory into system prompt",
@@ -98,6 +104,77 @@ class MemoryConfig(BaseModel):
             "safety-truncation ceiling is raised accordingly."
         ),
     )
+    # ── Staleness review ────────────────────────────────────────────────
+    staleness_review_enabled: bool = Field(
+        default=True,
+        description=(
+            "Enable staleness review for aged facts. When enabled, facts older "
+            "than ``staleness_age_days`` are surfaced in the memory-update prompt "
+            "so the LLM can semantically judge whether each is still valid or "
+            "should be removed. This solves the 'silent staleness' problem where "
+            "outdated facts persist because no future conversation explicitly "
+            "contradicts them."
+        ),
+    )
+    staleness_age_days: int = Field(
+        default=90,
+        ge=30,
+        le=365,
+        description=("Facts older than this many days become candidates for staleness review. 90 days (~one quarter) balances between catching genuine changes (job switches, tech-stack migrations) and avoiding noise on stable facts."),
+    )
+    staleness_min_candidates: int = Field(
+        default=3,
+        ge=1,
+        le=50,
+        description=("Minimum number of stale facts required to trigger a review cycle. Below this threshold the prompt overhead is not justified."),
+    )
+    staleness_max_removals_per_cycle: int = Field(
+        default=10,
+        ge=1,
+        le=50,
+        description=("Maximum number of facts the staleness review can remove in a single update cycle. Prevents the LLM from over-pruning when reviewing a large backlog of aged facts."),
+    )
+    staleness_protected_categories: list[str] = Field(
+        default_factory=lambda: ["correction"],
+        description=("Fact categories exempt from staleness review. Correction facts represent explicit user feedback and should not be auto-pruned based on age alone."),
+    )
+
+    # ── Memory consolidation ────────────────────────────────────────────
+    consolidation_enabled: bool = Field(
+        default=False,
+        description=(
+            "Enable memory consolidation. When enabled, the LLM reviews "
+            "fragmented fact categories during the normal memory-update call "
+            "(same invocation — no extra API call) and decides whether groups "
+            "of related facts can be synthesized into a single richer fact. "
+            "Defaults to False because consolidation is lossy (source content "
+            "is not preserved, only consolidatedFrom IDs). Opt in explicitly "
+            "once the memory-file backup / audit story is in place."
+        ),
+    )
+    consolidation_min_facts: int = Field(
+        default=8,
+        ge=3,
+        le=30,
+        description=("Minimum number of facts in a single category to trigger consolidation review. Below this threshold the overhead of surfacing the group is not justified."),
+    )
+    consolidation_max_groups_per_cycle: int = Field(
+        default=3,
+        ge=1,
+        le=10,
+        description=("Maximum number of consolidation groups the LLM can merge in a single update cycle. Prevents over-consolidation."),
+    )
+    consolidation_max_sources: int = Field(
+        default=8,
+        ge=2,
+        le=20,
+        description=("Maximum number of source facts per consolidation group. Prevents the LLM from merging too many facts into one and losing important details."),
+    )
+
+
+def should_use_memory_tools(config: MemoryConfig) -> bool:
+    """Return True when memory should use model-directed tools."""
+    return config.enabled and config.mode == "tool"
 
 
 # Global configuration instance

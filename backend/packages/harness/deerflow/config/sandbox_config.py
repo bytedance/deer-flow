@@ -36,6 +36,9 @@ class SandboxConfig(BaseModel):
         idle_timeout: Idle timeout in seconds before released warm sandboxes/VMs are stopped (default: 600 = 10 minutes). Set to 0 to disable.
         environment: Environment variables to inject into the sandbox (values starting with $ are resolved from host env)
 
+    BoxliteProvider specific options:
+        health_check_skip_seconds: Optional reclaim-time skip window in seconds for recently released warm VMs. Default behavior is 0.0 = always validate before reuse.
+
     AioSandboxProvider specific options:
         port: Base port for sandbox containers (default: 8080)
         container_prefix: Prefix for container names (default: deer-flow-sandbox)
@@ -69,6 +72,11 @@ class SandboxConfig(BaseModel):
     idle_timeout: int | None = Field(
         default=None,
         description="Idle timeout in seconds before released warm sandboxes/VMs are stopped (default: 600 = 10 minutes). Set to 0 to disable.",
+    )
+    health_check_skip_seconds: float | None = Field(
+        default=None,
+        ge=0,
+        description="BoxLite-only reclaim skip window in seconds for boxes recently released by this provider instance. Set to 0 to always validate before warm reuse.",
     )
     mounts: list[VolumeMountConfig] = Field(
         default_factory=list,

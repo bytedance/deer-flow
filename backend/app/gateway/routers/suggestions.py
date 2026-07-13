@@ -1,18 +1,14 @@
 import json
 import logging
-import os
 
 from fastapi import APIRouter, Depends, Request
-from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
 import deerflow.utils.llm_text as llm_text
 from app.gateway.authz import require_permission
 from app.gateway.deps import get_config
 from deerflow.config.app_config import AppConfig
-from deerflow.models import create_chat_model
-from deerflow.runtime.user_context import get_effective_user_id
-from deerflow.tracing import inject_langfuse_metadata
+from deerflow.utils.oneshot_llm import run_oneshot_llm
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +34,6 @@ class SuggestionsConfigResponse(BaseModel):
     enabled: bool = Field(..., description="Whether follow-up suggestions are enabled globally")
 
 
-_extract_response_text = llm_text.extract_response_text
 _strip_markdown_code_fence = llm_text.strip_markdown_code_fence
 _strip_think_blocks = llm_text.strip_think_blocks
 
@@ -129,18 +124,14 @@ async def generate_suggestions(
     user_content = f"Conversation Context:\n{conversation}\n\nGenerate {n} follow-up questions"
 
     try:
-        model = create_chat_model(name=body.model_name, thinking_enabled=False, app_config=config)
-        invoke_config: dict = {"run_name": "suggest_agent"}
-        inject_langfuse_metadata(
-            invoke_config,
-            thread_id=thread_id,
-            user_id=get_effective_user_id(),
-            assistant_id="suggest_agent",
+        raw = await run_oneshot_llm(
+            system_instruction=system_instruction,
+            user_content=user_content,
+            run_name="suggest_agent",
+            app_config=config,
             model_name=body.model_name,
-            environment=os.environ.get("DEER_FLOW_ENV") or os.environ.get("ENVIRONMENT"),
+            thread_id=thread_id,
         )
-        response = await model.ainvoke([SystemMessage(content=system_instruction), HumanMessage(content=user_content)], config=invoke_config)
-        raw = _extract_response_text(response.content)
         suggestions = _parse_json_string_list(raw) or []
         cleaned = [s.replace("\n", " ").strip() for s in suggestions if s.strip()]
         cleaned = cleaned[:n]

@@ -6,6 +6,7 @@ import asyncio
 import inspect
 import json
 import logging
+import re
 from collections.abc import AsyncIterator, Mapping
 from typing import Any
 
@@ -32,6 +33,7 @@ logger = logging.getLogger(__name__)
 
 _KIND_EVENT = "event"
 _KIND_END = "end"
+_REDIS_STREAM_ID_RE = re.compile(r"\d+(-\d+)?")
 
 # Batch size for ``XREAD``. Reading more than one entry per round-trip collapses
 # a large ``Last-Event-ID`` replay into far fewer calls; live tailing still
@@ -162,6 +164,20 @@ class RedisStreamBridge(StreamBridge):
         """Return whether Redis still has retained stream data for *run_id*."""
         return bool(await self._redis.exists(self._stream_key(run_id)))
 
+    async def _resolve_start_stream_id(self, key: str, last_event_id: str | None) -> str:
+        if last_event_id is None:
+            return "0-0"
+        if _REDIS_STREAM_ID_RE.fullmatch(last_event_id):
+            return last_event_id
+        entries = await self._redis.xrevrange(key, count=1)
+        if not entries:
+            return "0-0"
+        event_id, fields = entries[0]
+        payload = self._normalise_fields(fields)
+        if payload.get("kind") == _KIND_END:
+            return "0-0"
+        return self._decode(event_id)
+
     async def subscribe(
         self,
         run_id: str,
@@ -170,7 +186,7 @@ class RedisStreamBridge(StreamBridge):
         heartbeat_interval: float = 15.0,
     ) -> AsyncIterator[StreamEvent]:
         key = self._stream_key(run_id)
-        stream_id = last_event_id or "0-0"
+        stream_id = await self._resolve_start_stream_id(key, last_event_id)
         block_ms = max(1, int(heartbeat_interval * 1000)) if heartbeat_interval > 0 else 1
         consecutive_errors = 0
 
@@ -178,22 +194,15 @@ class RedisStreamBridge(StreamBridge):
             try:
                 response = await self._redis.xread({key: stream_id}, count=_XREAD_COUNT, block=block_ms)
             except ResponseError:
-                # The only client-controllable stream ID is the Last-Event-ID
-                # header, so a rejected ID means a malformed reconnect token:
-                # fall back to replaying from the earliest retained event. We key
-                # off the control flow rather than the error wording, which is the
-                # server's text (Redis/Valkey/Dragonfly) and not a stable API. If
-                # the reset read from "0-0" also fails, the stream/connection is
-                # genuinely broken, so re-raise.
-                if stream_id == "0-0":
-                    raise
+                # Last-Event-ID is client-controlled and validated before XREAD.
+                # If Redis still rejects the id, fail instead of resetting to
+                # 0-0, which would replay the whole retained buffer on reconnect.
                 logger.warning(
-                    "Redis rejected Last-Event-ID %r for stream bridge; replaying from earliest retained event",
+                    "Redis rejected stream id %r for stream bridge subscription",
                     stream_id,
                     exc_info=True,
                 )
-                stream_id = "0-0"
-                continue
+                raise
             except RedisError:
                 consecutive_errors += 1
                 if consecutive_errors > _MAX_SUBSCRIBE_RETRIES:

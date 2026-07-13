@@ -201,6 +201,9 @@ class _SubagentEventBuffer:
         try:
             await self._event_store.put_batch(batch)
         except Exception:
+            # Re-buffer the failed batch (ahead of any events queued since) so a
+            # transient store error does not silently drop subagent step events.
+            self._pending = batch + self._pending
             logger.warning("Run %s: failed to persist %d subagent step event(s)", self._run_id, len(batch), exc_info=True)
 
 
@@ -732,6 +735,12 @@ async def _persist_goal_evaluation(
             current_goal = _read_checkpoint_goal(checkpoint_tuple)
             if current_goal is None or not _goal_instance_matches(goal, current_goal):
                 return None
+            # Defensive: compute continuation_count from the fresh current_goal
+            # inside the lock.  The caller computed it from a possibly-stale goal
+            # snapshot; a racing continuation may have already bumped the count.
+            if continuation_count is not None:
+                current_count = int(current_goal.get("continuation_count", 0))
+                continuation_count = max(continuation_count, current_count + 1)
             expected_checkpoint_id = _checkpoint_id(checkpoint_tuple)
             updated_goal = attach_goal_evaluation(
                 current_goal,

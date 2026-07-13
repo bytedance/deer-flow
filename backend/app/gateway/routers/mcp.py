@@ -1,14 +1,15 @@
 import json
 import logging
 import os
+import re
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Request, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.gateway.deps import require_admin_user
-from deerflow.config.extensions_config import ExtensionsConfig, get_extensions_config, reload_extensions_config
+from deerflow.config.extensions_config import ExtensionsConfig, McpRoutingConfig, McpToolOverride, get_extensions_config, reload_extensions_config
 from deerflow.mcp.cache import reset_mcp_tools_cache
 
 logger = logging.getLogger(__name__)
@@ -53,6 +54,10 @@ class McpServerConfigResponse(BaseModel):
     headers: dict[str, str] = Field(default_factory=dict, description="HTTP headers to send (for sse or http type)")
     oauth: McpOAuthConfigResponse | None = Field(default=None, description="OAuth configuration for MCP HTTP/SSE servers")
     description: str = Field(default="", description="Human-readable description of what this MCP server provides")
+    routing: McpRoutingConfig = Field(default_factory=McpRoutingConfig, description="Soft routing hints for tools from this MCP server")
+    tools: dict[str, McpToolOverride] = Field(default_factory=dict, description="Per-original-tool MCP configuration overrides")
+    tool_call_timeout: float | None = Field(default=None, description="Timeout in seconds for individual stdio MCP tool calls")
+    model_config = ConfigDict(extra="allow")
 
 
 class McpConfigResponse(BaseModel):
@@ -81,6 +86,55 @@ class McpCacheResetResponse(BaseModel):
 
 
 _MASKED_VALUE = "***"
+_SENSITIVE_EXTRA_KEY_RE = re.compile(
+    r"(^|_)(api_key|apikey|access_key|private_key|client_secret|secret|token|password|passwd|credential|credentials|authorization|bearer)(_|$)",
+    re.IGNORECASE,
+)
+
+
+def _normalize_config_key(key: str) -> str:
+    with_boundaries = re.sub(r"(.)([A-Z][a-z]+)", r"\1_\2", key)
+    with_boundaries = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", with_boundaries)
+    return re.sub(r"[^a-z0-9]+", "_", with_boundaries.lower()).strip("_")
+
+
+def _is_sensitive_extra_key(key: str) -> bool:
+    return bool(_SENSITIVE_EXTRA_KEY_RE.search(_normalize_config_key(key)))
+
+
+def _mask_sensitive_extra_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: _MASKED_VALUE if _is_sensitive_extra_key(str(key)) else _mask_sensitive_extra_value(nested) for key, nested in value.items()}
+    if isinstance(value, list):
+        return [_mask_sensitive_extra_value(item) for item in value]
+    return value
+
+
+def _merge_extra_value_preserving_masked(key: str, incoming_value: Any, existing_value: Any, *, existing_present: bool) -> Any:
+    if incoming_value == _MASKED_VALUE and _is_sensitive_extra_key(key):
+        if existing_present:
+            return existing_value
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot set extra config key '{key}' to masked value '***'; provide a real value.",
+        )
+
+    if isinstance(incoming_value, dict) and isinstance(existing_value, dict):
+        merged: dict[str, Any] = {}
+        for nested_key, nested_value in incoming_value.items():
+            nested_present = nested_key in existing_value
+            merged[nested_key] = _merge_extra_value_preserving_masked(
+                str(nested_key),
+                nested_value,
+                existing_value.get(nested_key),
+                existing_present=nested_present,
+            )
+        return merged
+
+    if isinstance(incoming_value, list) and isinstance(existing_value, list) and len(incoming_value) == len(existing_value):
+        return [_merge_extra_value_preserving_masked(key, nested_value, existing_value[index], existing_present=True) for index, nested_value in enumerate(incoming_value)]
+
+    return incoming_value
 
 
 def _allowed_stdio_commands() -> set[str]:
@@ -150,11 +204,13 @@ def _mask_server_config(server: McpServerConfigResponse) -> McpServerConfigRespo
                 "refresh_token": None,
             }
         )
+    masked_extra = {key: _MASKED_VALUE if _is_sensitive_extra_key(key) else _mask_sensitive_extra_value(value) for key, value in (server.model_extra or {}).items()}
     return server.model_copy(
         update={
             "env": masked_env,
             "headers": masked_headers,
             "oauth": masked_oauth,
+            **masked_extra,
         }
     )
 
@@ -215,13 +271,28 @@ def _merge_preserving_secrets(
                 "refresh_token": merged_refresh_token,
             }
         )
-    return incoming.model_copy(
-        update={
-            "env": merged_env,
-            "headers": merged_headers,
-            "oauth": merged_oauth,
-        }
-    )
+    update = {
+        "env": merged_env,
+        "headers": merged_headers,
+        "oauth": merged_oauth,
+    }
+    if "routing" not in incoming.model_fields_set:
+        update["routing"] = existing.routing
+    if "tools" not in incoming.model_fields_set:
+        update["tools"] = existing.tools
+    incoming_extra = incoming.model_extra or {}
+    existing_extra = existing.model_extra or {}
+    for key, value in incoming_extra.items():
+        update[key] = _merge_extra_value_preserving_masked(
+            key,
+            value,
+            existing_extra.get(key),
+            existing_present=key in existing_extra,
+        )
+    for key, value in (existing.model_extra or {}).items():
+        if key not in (incoming.model_extra or {}):
+            update[key] = value
+    return incoming.model_copy(update=update)
 
 
 @router.get(

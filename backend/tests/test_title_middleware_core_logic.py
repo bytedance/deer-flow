@@ -4,6 +4,7 @@ import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.constants import TAG_NOSTREAM
 
@@ -319,6 +320,51 @@ class TestTitleMiddlewareCoreLogic:
         result = middleware._generate_title_result(state)
         assert result["title"].endswith("...")
         assert result["title"].startswith("这是一个非常长的问题描述")
+        assert len(result["title"]) <= 50
+
+    @pytest.mark.parametrize("max_chars", [10, 20, 40, 49, 50, 52, 53, 60, 200])
+    def test_fallback_title_never_exceeds_max_chars(self, max_chars):
+        """``max_chars`` bounds the fallback title, not just its body.
+
+        The ellipsis is part of the returned title, so a body of exactly
+        ``min(max_chars, 50)`` characters overshot the configured cap by three.
+        ``model_name: null`` is the shipped default, so this is the path every
+        title takes out of the box -- not an error branch.
+        """
+        _set_test_title_config(max_chars=max_chars, model_name=None)
+        middleware = TitleMiddleware()
+
+        title = middleware._fallback_title("x" * 200)
+
+        assert len(title) <= max_chars
+        assert title.endswith("...")
+
+    @pytest.mark.parametrize("max_chars", [10, 20, 50])
+    def test_fallback_title_honours_the_same_cap_as_the_model_path(self, max_chars):
+        """Both title paths read ``config.max_chars``; both must respect it.
+
+        ``_parse_title`` slices the model's answer to ``max_chars`` exactly. The
+        local path is the other half of the same contract.
+        """
+        _set_test_title_config(max_chars=max_chars, model_name=None)
+        middleware = TitleMiddleware()
+        long_text = "x" * 200
+
+        assert len(middleware._parse_title(long_text)) <= max_chars
+        assert len(middleware._fallback_title(long_text)) <= max_chars
+
+    def test_fallback_title_keeps_default_config_output_unchanged(self):
+        """The default ``max_chars=60`` leaves room for the ellipsis already.
+
+        Reserving that room must not shorten titles that were never over the
+        cap, so the shipped configuration keeps emitting a 50-character body.
+        """
+        _set_test_title_config(max_chars=60, model_name=None)
+        middleware = TitleMiddleware()
+
+        title = middleware._fallback_title("x" * 200)
+
+        assert title == "x" * 50 + "..."
 
     def test_parse_title_strips_think_tags(self):
         """Title model responses with <think>...</think> blocks are stripped before use."""

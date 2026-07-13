@@ -30,6 +30,8 @@ class RunStore(abc.ABC):
         kwargs: dict[str, Any] | None = None,
         error: str | None = None,
         created_at: str | None = None,
+        owner_worker_id: str | None = None,
+        lease_expires_at: str | None = None,
     ) -> None:
         pass
 
@@ -140,5 +142,50 @@ class RunStore(abc.ABC):
         Returns a dict with keys: total_tokens, total_input_tokens,
         total_output_tokens, total_runs, by_model (model_name → {tokens, runs}),
         by_caller ({lead_agent, subagent, middleware}).
+        """
+        pass
+
+    @abc.abstractmethod
+    async def update_lease(
+        self,
+        run_id: str,
+        *,
+        owner_worker_id: str,
+        lease_expires_at: str,
+    ) -> bool:
+        """Renew the lease on an active run. Returns ``False`` when no row matched."""
+        pass
+
+    @abc.abstractmethod
+    async def list_inflight_with_expired_lease(
+        self,
+        *,
+        before: str | None = None,
+        grace_seconds: int = 10,
+    ) -> list[dict[str, Any]]:
+        """Return active runs whose lease has expired (or is NULL for pre-ownership rows)."""
+        pass
+
+    @abc.abstractmethod
+    async def create_run_atomic(
+        self,
+        run_id: str,
+        *,
+        thread_id: str,
+        owner_worker_id: str,
+        lease_expires_at: str | None,
+        multitask_strategy: str = "reject",
+        assistant_id: str | None = None,
+        user_id: str | None = None,
+        model_name: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        kwargs: dict[str, Any] | None = None,
+        created_at: str | None = None,
+        grace_seconds: int = 10,
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        """Atomically create a run row with cross-process thread-uniqueness.
+
+        Returns ``(new_run_dict, claimed_run_dicts)``.
+        Raises ``IntegrityError`` on conflict for ``reject`` strategy.
         """
         pass

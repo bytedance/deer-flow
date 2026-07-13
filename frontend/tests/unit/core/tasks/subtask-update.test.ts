@@ -4,6 +4,7 @@ import type { SubtaskStep } from "@/core/tasks/steps";
 import {
   computeNextSubtask,
   isTerminalSubtaskStatus,
+  subtaskNotification,
 } from "@/core/tasks/subtask-update";
 import type { Subtask } from "@/core/tasks/types";
 
@@ -56,6 +57,23 @@ describe("computeNextSubtask", () => {
     expect(next.steps?.map((s) => s.message_index)).toEqual([1, 2, 3]);
   });
 
+  it("keeps the latest cumulative token snapshot when an older event arrives late", () => {
+    const previous = baseTask({
+      usage: { inputTokens: 200, outputTokens: 40, totalTokens: 240 },
+    });
+
+    const { next } = computeNextSubtask(previous, {
+      id: "t1",
+      usage: { inputTokens: 100, outputTokens: 20, totalTokens: 120 },
+    });
+
+    expect(next.usage).toEqual({
+      inputTokens: 200,
+      outputTokens: 40,
+      totalTokens: 240,
+    });
+  });
+
   it("keeps a terminal status stable against a late in_progress write", () => {
     const previous = baseTask({ status: "completed" });
 
@@ -95,6 +113,96 @@ describe("computeNextSubtask", () => {
     expect(next.id).toBe("t1");
     expect(next.steps?.map((s) => s.message_index)).toEqual([1]);
     expect(becameTerminal).toBe(false);
+  });
+
+  it("reports changed=false when a terminal update carries identical runtime metadata", () => {
+    // The terminal ToolMessage is re-parsed on every MessageList render, so the
+    // same modelName/usage arrive again as a *new* object each time. Value-equal
+    // re-application must not be flagged as a change or the card loops forever.
+    const previous = baseTask({
+      status: "completed",
+      result: "done",
+      modelName: "opus",
+      usage: { inputTokens: 100, outputTokens: 20, totalTokens: 120 },
+    });
+
+    const { changed } = computeNextSubtask(previous, {
+      id: "t1",
+      status: "completed",
+      result: "done",
+      modelName: "opus",
+      usage: { inputTokens: 100, outputTokens: 20, totalTokens: 120 },
+    });
+
+    expect(changed).toBe(false);
+  });
+
+  it("reports changed=true when runtime metadata actually differs", () => {
+    const previous = baseTask({
+      status: "completed",
+      modelName: "opus",
+      usage: { inputTokens: 100, outputTokens: 20, totalTokens: 120 },
+    });
+
+    const { changed } = computeNextSubtask(previous, {
+      id: "t1",
+      status: "completed",
+      modelName: "opus",
+      usage: { inputTokens: 300, outputTokens: 60, totalTokens: 360 },
+    });
+
+    expect(changed).toBe(true);
+  });
+});
+
+describe("subtaskNotification", () => {
+  it("defers a terminal transition (arrives during render, must not setState mid-render)", () => {
+    expect(
+      subtaskNotification(
+        { id: "t1", status: "completed", modelName: "opus" },
+        { becameTerminal: true, changed: true },
+      ),
+    ).toBe("deferred");
+  });
+
+  it("eagerly reflects a live SSE update that actually changed", () => {
+    expect(
+      subtaskNotification(
+        {
+          id: "t1",
+          usage: { inputTokens: 300, outputTokens: 60, totalTokens: 360 },
+        },
+        { becameTerminal: false, changed: true },
+      ),
+    ).toBe("eager");
+  });
+
+  it("does nothing when a re-parsed terminal result carries unchanged metadata", () => {
+    // Regression: modelName/usage are present on every terminal re-parse, but the
+    // state did not change. Firing setTasks here is the render loop (P1).
+    expect(
+      subtaskNotification(
+        {
+          id: "t1",
+          status: "completed",
+          modelName: "opus",
+          usage: { inputTokens: 100, outputTokens: 20, totalTokens: 120 },
+        },
+        { becameTerminal: false, changed: false },
+      ),
+    ).toBe("none");
+  });
+
+  it("does nothing when a replayed SSE usage snapshot did not change state", () => {
+    expect(
+      subtaskNotification(
+        {
+          id: "t1",
+          usage: { inputTokens: 100, outputTokens: 20, totalTokens: 120 },
+        },
+        { becameTerminal: false, changed: false },
+      ),
+    ).toBe("none");
   });
 });
 

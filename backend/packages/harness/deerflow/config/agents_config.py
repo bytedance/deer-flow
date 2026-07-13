@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from deerflow.config.paths import get_paths
 from deerflow.runtime.user_context import get_effective_user_id
@@ -22,6 +22,25 @@ logger = logging.getLogger(__name__)
 
 SOUL_FILENAME = "SOUL.md"
 AGENT_NAME_PATTERN = re.compile(r"^[A-Za-z0-9-]+$")
+
+
+def _blank_to_none(value: str | None) -> str | None:
+    """Normalize a whitespace-only string to ``None``; leave real values untouched.
+
+    A whitespace-only string (e.g. ``"   "``) is truthy in Python, so an
+    unstripped ``value or fallback`` expression never falls through to the
+    fallback. The ``require_mention`` precedence chain (``trigger.mention_login``
+    -> ``github.bot_login`` -> ``channels.github.default_mention_login`` ->
+    ``agent.name``, see AGENTS.md) relies on exactly that fallthrough, so both
+    of the config-sourced links are normalized here, once, at the model layer
+    — every reader downstream (today's and any future one) sees an honest
+    "unset" instead of a literal whitespace string that can never match a
+    real ``@mention``.
+    """
+    if value is None:
+        return None
+    stripped = value.strip()
+    return stripped or None
 
 
 class GitHubTriggerConfig(BaseModel):
@@ -38,8 +57,16 @@ class GitHubTriggerConfig(BaseModel):
     # talk to the bot without typing the handle every time.
     allow_authors: list[str] = Field(default_factory=list)
     # Override the global default bot mention login for this trigger only.
-    # Useful when one agent answers as @bot-a and another as @bot-b.
+    # Useful when one agent answers as @bot-a and another as @bot-b. A
+    # whitespace-only value is normalized to None (see ``_blank_to_none``) so
+    # it is treated as unset and falls through to ``github.bot_login`` instead
+    # of being compared against literally.
     mention_login: str | None = None
+
+    @field_validator("mention_login")
+    @classmethod
+    def _normalize_mention_login(cls, value: str | None) -> str | None:
+        return _blank_to_none(value)
 
 
 class GitHubBinding(BaseModel):
@@ -71,6 +98,8 @@ class GitHubAgentConfig(BaseModel):
     # ``mention_login`` the agent uses for trigger matching. None means
     # "fall back to mention_login / agent name", which is fine when those
     # match the bot identity, but should be set explicitly when they differ.
+    # A whitespace-only value is normalized to None (see ``_blank_to_none``)
+    # so it is treated as unset and falls through the rest of the chain.
     bot_login: str | None = None
     # Override the default github-channel ``recursion_limit`` (250). GitHub
     # runs are autonomous and long-running by nature — clone, explore, edit,
@@ -86,6 +115,11 @@ class GitHubAgentConfig(BaseModel):
     # Repos this agent is bound to. Empty list = bound to nothing = the agent
     # never fires from a webhook, even if it has a ``github:`` block.
     bindings: list[GitHubBinding] = Field(default_factory=list)
+
+    @field_validator("bot_login")
+    @classmethod
+    def _normalize_bot_login(cls, value: str | None) -> str | None:
+        return _blank_to_none(value)
 
     @model_validator(mode="after")
     def _unique_binding_repos(self) -> "GitHubAgentConfig":

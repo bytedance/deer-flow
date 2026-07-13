@@ -105,6 +105,32 @@ async function selectTextAndClickToolbarButton(
   throw lastError;
 }
 
+async function expectSidecarSelectionToolbarActions(page: Page, text: string) {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      await selectTextOnPage(page, text, "sidecar-message-list");
+      const labels = await page.evaluate(() =>
+        Array.from(
+          document.querySelectorAll<HTMLButtonElement>(
+            "[data-sidecar-selection-toolbar] button",
+          ),
+        ).map((button) => button.textContent?.trim() ?? ""),
+      );
+      expect(labels.some((label) => /add to conversation/i.test(label))).toBe(
+        true,
+      );
+      expect(labels.some((label) => /ask in side chat/i.test(label))).toBe(
+        false,
+      );
+      return;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError;
+}
+
 async function expectComposerHeightsEqual(page: Page) {
   const metrics = await page.evaluate(() => {
     const findFormByPlaceholder = (pattern: RegExp) => {
@@ -755,6 +781,10 @@ test.describe("Side chat", () => {
     await expect(
       page.getByRole("heading", { name: "Ask a follow-up" }),
     ).toBeVisible();
+    // Draft state (no thread created yet): the header shows a plain close (X),
+    // not the destructive delete — there is nothing persisted to delete.
+    await expect(page.getByTestId("sidecar-close-button")).toBeVisible();
+    await expect(page.getByTestId("sidecar-delete-button")).toBeHidden();
     const sidecarReference = page.getByTestId("sidecar-reference-attachment");
     const sidecarInputForm = page.locator("form").filter({
       has: page.getByPlaceholder(/deeper follow-up/i),
@@ -917,14 +947,8 @@ test.describe("Side chat", () => {
     await expectComposerHeightsEqual(page);
     await expect(page.getByTestId("sidecar-header-trigger")).toBeVisible();
 
-    await page
-      .getByTestId("sidecar-panel")
-      .getByRole("button", { name: /close/i })
-      .click();
-    await expect(page.getByTestId("sidecar-panel")).toBeHidden();
-    await expect(page.getByTestId("sidecar-header-trigger")).toBeVisible();
-    await page.getByTestId("sidecar-header-trigger").click();
-    await expect(page.getByTestId("sidecar-panel")).toBeVisible();
+    // Hiding the side chat is owned by the header trigger; the panel's own
+    // button deletes the side chat instead of hiding it.
     await expect(
       page.getByTestId("sidecar-header-trigger"),
     ).toHaveAccessibleName("Close side chat");
@@ -943,28 +967,14 @@ test.describe("Side chat", () => {
         .first(),
     ).toBeVisible();
 
+    // Selecting text inside the side chat itself only offers "Add to
+    // conversation" (no "Ask in side chat"), and the snippet attaches to the
+    // side chat's own composer rather than the main composer's quotes.
+    await expectSidecarSelectionToolbarActions(page, "Hello from DeerFlow!");
     await selectTextAndClickToolbarButton(
       page,
       "Hello from DeerFlow!",
       "Add to conversation",
-      "sidecar-message-list",
-    );
-    await expect(
-      mainInputForm.getByTestId("conversation-quote-attachment"),
-    ).toContainText("1 selected text fragment");
-    await expect(sidecarReference).toBeHidden();
-    await mainInputForm
-      .getByTestId("conversation-quote-attachment")
-      .getByRole("button", { name: /clear selected references/i })
-      .click();
-    await expect(
-      mainInputForm.getByTestId("conversation-quote-attachment"),
-    ).toBeHidden();
-
-    await selectTextAndClickToolbarButton(
-      page,
-      "Hello from DeerFlow!",
-      "Ask in side chat",
       "sidecar-message-list",
     );
     await expect(sidecarReference).toContainText("1 selected text fragment");
@@ -1266,5 +1276,274 @@ test.describe("Side chat", () => {
     await expect(page.getByTestId("sidecar-header-trigger")).toBeHidden({
       timeout: 10_000,
     });
+  });
+
+  test("deletes the side chat from the panel's own button", async ({
+    page,
+  }) => {
+    mockLangGraphAPI(page, {
+      threads: [
+        {
+          thread_id: MOCK_THREAD_ID,
+          title: "Main conversation",
+          messages: [
+            {
+              type: "human",
+              id: "parent-human-1",
+              content: [{ type: "text", text: "Plan the feature." }],
+            },
+            {
+              type: "ai",
+              id: "parent-ai-1",
+              content: "Build it as a side conversation.",
+            },
+          ],
+        },
+        {
+          thread_id: MOCK_SIDECAR_THREAD_ID,
+          title: "Restored side chat",
+          updated_at: "2025-01-01T00:00:01Z",
+          metadata: {
+            deerflow_sidecar: true,
+            parent_thread_id: MOCK_THREAD_ID,
+            sidecar_context_type: "referenced_message",
+            sidecar_context_label: "Selected assistant text #2",
+            sidecar_context_count: 1,
+            referenced_message_id: "parent-ai-1",
+            referenced_message_ids: ["parent-ai-1"],
+            referenced_message_role: "assistant",
+            referenced_message_roles: ["assistant"],
+          },
+          messages: [
+            {
+              type: "ai",
+              id: "side-ai-1",
+              content: "Restored side answer.",
+            },
+          ],
+        },
+      ],
+    });
+
+    await page.goto(`/workspace/chats/${MOCK_THREAD_ID}`);
+    await expect(
+      page.getByText("Build it as a side conversation."),
+    ).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByTestId("sidecar-header-trigger")).toBeVisible({
+      timeout: 10_000,
+    });
+
+    // Open the side chat panel via the header trigger.
+    await page.getByTestId("sidecar-header-trigger").click();
+    await expect(page.getByTestId("sidecar-panel")).toBeVisible();
+
+    // The panel's own button deletes the side chat (it does not merely hide it).
+    await page.getByTestId("sidecar-delete-button").click();
+    await expect(
+      page.getByText("This action cannot be undone", { exact: false }),
+    ).toBeVisible();
+
+    const deleteRequestPromise = page.waitForRequest(
+      (request) =>
+        request.method() === "DELETE" &&
+        request.url().includes(`/threads/${MOCK_SIDECAR_THREAD_ID}`),
+    );
+    await page.getByTestId("sidecar-delete-confirm-button").click();
+    await deleteRequestPromise;
+
+    // The panel closes and, because the sidecar thread is gone, the header
+    // trigger unmounts too — hiding is owned by the trigger, deleting by this.
+    await expect(page.getByTestId("sidecar-panel")).toBeHidden();
+    await expect(page.getByTestId("sidecar-header-trigger")).toBeHidden({
+      timeout: 10_000,
+    });
+  });
+
+  test("keeps the delete dialog open while the delete is in flight", async ({
+    page,
+  }) => {
+    mockLangGraphAPI(page, {
+      threads: [
+        {
+          thread_id: MOCK_THREAD_ID,
+          title: "Main conversation",
+          messages: [
+            {
+              type: "human",
+              id: "parent-human-1",
+              content: [{ type: "text", text: "Plan the feature." }],
+            },
+            {
+              type: "ai",
+              id: "parent-ai-1",
+              content: "Build it as a side conversation.",
+            },
+          ],
+        },
+        {
+          thread_id: MOCK_SIDECAR_THREAD_ID,
+          title: "Restored side chat",
+          updated_at: "2025-01-01T00:00:01Z",
+          metadata: {
+            deerflow_sidecar: true,
+            parent_thread_id: MOCK_THREAD_ID,
+            sidecar_context_type: "referenced_message",
+            sidecar_context_label: "Selected assistant text #2",
+            sidecar_context_count: 1,
+            referenced_message_id: "parent-ai-1",
+            referenced_message_ids: ["parent-ai-1"],
+            referenced_message_role: "assistant",
+            referenced_message_roles: ["assistant"],
+          },
+          messages: [
+            {
+              type: "ai",
+              id: "side-ai-1",
+              content: "Restored side answer.",
+            },
+          ],
+        },
+      ],
+    });
+
+    // Hold the local-delete step open so the mutation stays pending while we
+    // probe every dismissal path Radix would otherwise honor.
+    let releaseDelete: (() => void) | undefined;
+    const deleteGate = new Promise<void>((resolve) => {
+      releaseDelete = resolve;
+    });
+    await page.route(/\/api\/threads\/[^/]+$/, async (route) => {
+      if (route.request().method() !== "DELETE") {
+        return route.fallback();
+      }
+      await deleteGate;
+      return route.fallback();
+    });
+
+    await page.goto(`/workspace/chats/${MOCK_THREAD_ID}`);
+    await expect(
+      page.getByText("Build it as a side conversation."),
+    ).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByTestId("sidecar-header-trigger")).toBeVisible({
+      timeout: 10_000,
+    });
+
+    await page.getByTestId("sidecar-header-trigger").click();
+    await expect(page.getByTestId("sidecar-panel")).toBeVisible();
+
+    await page.getByTestId("sidecar-delete-button").click();
+    const dialogTitle = page.getByRole("heading", { name: "Delete side chat" });
+    await expect(dialogTitle).toBeVisible();
+    // The built-in Radix close (X) is present before the delete starts.
+    await expect(
+      page.locator('[data-slot="dialog-content"] [data-slot="dialog-close"]'),
+    ).toHaveCount(1);
+
+    await page.getByTestId("sidecar-delete-confirm-button").click();
+
+    // Delete is in flight: confirm shows the loading label and Cancel disables.
+    await expect(
+      page.getByTestId("sidecar-delete-confirm-button"),
+    ).toBeDisabled();
+    await expect(page.getByRole("button", { name: "Cancel" })).toBeDisabled();
+    // The built-in close (X) is removed so it can't imply a cancel.
+    await expect(
+      page.locator('[data-slot="dialog-content"] [data-slot="dialog-close"]'),
+    ).toHaveCount(0);
+
+    // Esc and overlay clicks must not dismiss the dialog mid-delete.
+    await page.keyboard.press("Escape");
+    await expect(dialogTitle).toBeVisible();
+    await page
+      .locator('[data-slot="dialog-overlay"]')
+      .click({ position: { x: 5, y: 5 } });
+    await expect(dialogTitle).toBeVisible();
+
+    // Once the delete resolves the dialog closes and the panel goes away.
+    releaseDelete?.();
+    await expect(dialogTitle).toBeHidden({ timeout: 10_000 });
+    await expect(page.getByTestId("sidecar-panel")).toBeHidden();
+  });
+
+  test("closes the draft side chat without deleting when no conversation exists", async ({
+    page,
+  }) => {
+    mockLangGraphAPI(page, {
+      threads: [
+        {
+          thread_id: MOCK_THREAD_ID,
+          title: "Main conversation",
+          messages: [
+            {
+              type: "human",
+              id: "parent-human-1",
+              content: [{ type: "text", text: "Plan the feature." }],
+            },
+            {
+              type: "ai",
+              id: "parent-ai-1",
+              content: "Build it as a side conversation.",
+            },
+          ],
+        },
+      ],
+    });
+    await page.route("**/api/models", (route) => {
+      if (route.request().method() !== "GET") {
+        return route.fallback();
+      }
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          models: [
+            {
+              id: "deepseek-v4-pro",
+              name: "deepseek-v4-pro",
+              model: "deepseek-v4-pro",
+              display_name: "DeepSeek V4 Pro",
+              supports_thinking: true,
+              supports_reasoning_effort: true,
+            },
+          ],
+          token_usage: { enabled: false },
+        }),
+      });
+    });
+
+    let deleteRequestFired = false;
+    page.on("request", (request) => {
+      if (
+        request.method() === "DELETE" &&
+        request.url().includes("/threads/")
+      ) {
+        deleteRequestFired = true;
+      }
+    });
+
+    await page.goto(`/workspace/chats/${MOCK_THREAD_ID}`);
+    await expect(
+      page.getByText("Build it as a side conversation."),
+    ).toBeVisible({ timeout: 15_000 });
+
+    // Open the side chat as a draft (references only, no thread created yet).
+    await selectTextAndClickToolbarButton(
+      page,
+      "Build it as a side conversation.",
+      "Ask in side chat",
+    );
+    await expect(page.getByTestId("sidecar-panel")).toBeVisible();
+    await expect(
+      page.getByTestId("sidecar-reference-attachment"),
+    ).toBeVisible();
+
+    // The draft has no persisted thread, so the header offers a plain close (X)
+    // instead of the destructive delete button.
+    await expect(page.getByTestId("sidecar-delete-button")).toBeHidden();
+    await page.getByTestId("sidecar-close-button").click();
+
+    await expect(page.getByTestId("sidecar-panel")).toBeHidden();
+    // No thread was ever created, so closing must not issue a DELETE request.
+    expect(deleteRequestFired).toBe(false);
   });
 });
