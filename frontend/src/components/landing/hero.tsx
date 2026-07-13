@@ -32,7 +32,7 @@ export function Hero({ className }: { className?: string }) {
   return (
     <div
       className={cn(
-        "flex size-full flex-col items-center justify-center",
+        "relative flex size-full flex-col items-center justify-center",
         className,
       )}
     >
@@ -47,7 +47,7 @@ export function Hero({ className }: { className?: string }) {
         />
       </div>
       <FlickeringGrid
-        className="absolute inset-0 z-0 translate-y-8 mask-[url(/images/deer.svg)] mask-size-[100vw] mask-center mask-no-repeat md:mask-size-[72vh]"
+        className="absolute inset-0 z-0 mask-[url(/images/deer.svg)] mask-size-[100vw] mask-center mask-no-repeat md:mask-size-[72vh]"
         squareSize={4}
         gridGap={4}
         color={"white"}
