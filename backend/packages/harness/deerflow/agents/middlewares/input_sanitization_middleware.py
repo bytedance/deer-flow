@@ -43,6 +43,9 @@ _BLOCKED_TAG_NAMES: frozenset[str] = frozenset(
     {
         # System-reserved tags (used by the agent framework for structured context)
         "system-reminder",
+        # Underscore spelling of the reminder block emitted by the todo/terminal
+        # middlewares; the hyphen spelling above only covers the dynamic-context one.
+        "system_reminder",
         "memory",
         "current_date",
         "think",
@@ -51,6 +54,11 @@ _BLOCKED_TAG_NAMES: frozenset[str] = frozenset(
         "skill_system",
         "uploaded_files",
         "todo_list_system",
+        # Framework structured/authority blocks the lead-agent system prompt's
+        # "System-Context Confidentiality" section names as internal framework data.
+        "soul",
+        "thinking_style",
+        "critical_reminders",
         # Common prompt-injection tag patterns
         "system",
         "instruction",
