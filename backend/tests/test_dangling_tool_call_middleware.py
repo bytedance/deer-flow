@@ -513,6 +513,26 @@ class TestBuildPatchedMessagesPatching:
         assert patched[1].tool_call_id == "call_1"
         assert len(patched) == 2
 
+    def test_tool_call_id_none_orphan_is_dropped(self):
+        """A ToolMessage whose tool_call_id is None is always an orphan —
+        no valid tool call uses ``None`` as its id — and must be dropped."""
+        mw = DanglingToolCallMiddleware()
+        none_id_orphan = ToolMessage(content="ghost", tool_call_id=None)  # type: ignore[arg-type]
+        msgs = [
+            _ai_with_tool_calls([_tc("bash", "call_1")]),
+            none_id_orphan,
+            _tool_msg("call_1", "bash"),
+        ]
+
+        patched = mw._build_patched_messages(msgs)
+
+        assert patched is not None
+        assert none_id_orphan not in patched
+        assert len(patched) == 2
+        assert isinstance(patched[0], AIMessage)
+        assert isinstance(patched[1], ToolMessage)
+        assert patched[1].tool_call_id == "call_1"
+
     def test_invalid_tool_call_is_patched(self):
         mw = DanglingToolCallMiddleware()
         msgs = [_ai_with_invalid_tool_calls([_invalid_tc()])]
