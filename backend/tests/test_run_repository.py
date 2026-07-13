@@ -3,11 +3,13 @@
 Uses a temp SQLite DB to test ORM-backed CRUD operations.
 """
 
+from datetime import UTC, datetime, timedelta
+
 import pytest
 from sqlalchemy.dialects import postgresql
 
 from deerflow.persistence.run import RunRepository
-from deerflow.runtime import RunManager, RunStatus
+from deerflow.runtime import CancelOutcome, RunManager, RunStatus
 from deerflow.runtime.runs.manager import ConflictError
 from deerflow.runtime.runs.store.base import RunStore
 
@@ -65,6 +67,9 @@ class _CustomRunStoreWithoutProgress(RunStore):
 
     async def create_run_atomic(self, *args, **kwargs):
         return {}, []
+
+    async def claim_for_takeover(self, *args, **kwargs):
+        return False
 
 
 @pytest.mark.anyio
@@ -578,7 +583,7 @@ class TestRunRepository:
         cancelled = await manager.cancel(record.run_id)
         row = await repo.get(record.run_id)
 
-        assert cancelled is True
+        assert cancelled == CancelOutcome.cancelled
         assert row is not None
         assert row["status"] == "interrupted"
         await _cleanup()
@@ -817,4 +822,65 @@ class TestRunRepository:
                 created_at=datetime.now(UTC).isoformat(),
             )
 
+        await _cleanup()
+
+    # ------------------------------------------------------------------
+    # claim_for_takeover SQL path
+    # ------------------------------------------------------------------
+
+    @pytest.mark.anyio
+    async def test_claim_for_takeover_succeeds_with_expired_lease(self, tmp_path):
+        repo = await _make_repo(tmp_path)
+        grace = 10
+        expired = (datetime.now(UTC) - timedelta(seconds=grace + 5)).isoformat()
+        await repo.put("run-1", thread_id="t1", status="running", owner_worker_id="w-a", lease_expires_at=expired, created_at=datetime.now(UTC).isoformat())
+
+        ok = await repo.claim_for_takeover("run-1", grace_seconds=grace, error="claimed")
+        assert ok is True
+
+        row = await repo.get("run-1")
+        assert row["status"] == "error"
+        assert row["error"] == "claimed"
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_claim_for_takeover_fails_on_valid_lease(self, tmp_path):
+        repo = await _make_repo(tmp_path)
+        grace = 10
+        valid = (datetime.now(UTC) + timedelta(seconds=30)).isoformat()
+        await repo.put("run-1", thread_id="t1", status="running", owner_worker_id="w-a", lease_expires_at=valid, created_at=datetime.now(UTC).isoformat())
+
+        ok = await repo.claim_for_takeover("run-1", grace_seconds=grace, error="claimed")
+        assert ok is False
+
+        row = await repo.get("run-1")
+        assert row["status"] == "running"
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_claim_for_takeover_succeeds_with_null_lease(self, tmp_path):
+        repo = await _make_repo(tmp_path)
+        await repo.put("run-null", thread_id="t1", status="running", created_at=datetime.now(UTC).isoformat())
+
+        ok = await repo.claim_for_takeover("run-null", grace_seconds=10, error="claimed")
+        assert ok is True
+
+        row = await repo.get("run-null")
+        assert row["status"] == "error"
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_claim_for_takeover_fails_on_terminal_row(self, tmp_path):
+        repo = await _make_repo(tmp_path)
+        await repo.put("run-done", thread_id="t1", status="success", created_at=datetime.now(UTC).isoformat())
+
+        ok = await repo.claim_for_takeover("run-done", grace_seconds=10, error="claimed")
+        assert ok is False
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_claim_for_takeover_nonexistent_run(self, tmp_path):
+        repo = await _make_repo(tmp_path)
+        ok = await repo.claim_for_takeover("no-such-run", grace_seconds=10, error="claimed")
+        assert ok is False
         await _cleanup()

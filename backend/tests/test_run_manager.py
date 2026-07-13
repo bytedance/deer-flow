@@ -10,7 +10,7 @@ import pytest
 from sqlalchemy.exc import DatabaseError as SQLAlchemyDatabaseError
 
 from deerflow.runtime import DisconnectMode, RunManager, RunStatus
-from deerflow.runtime.runs.manager import ConflictError, PersistenceRetryPolicy
+from deerflow.runtime.runs.manager import CancelOutcome, ConflictError, PersistenceRetryPolicy
 from deerflow.runtime.runs.store.memory import MemoryRunStore
 
 ISO_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}")
@@ -151,7 +151,7 @@ async def test_cancel(manager: RunManager):
     await manager.set_status(record.run_id, RunStatus.running)
 
     cancelled = await manager.cancel(record.run_id)
-    assert cancelled is True
+    assert cancelled == CancelOutcome.cancelled
     assert record.abort_event.is_set()
     assert record.status == RunStatus.interrupted
 
@@ -167,7 +167,7 @@ async def test_cancel_persists_interrupted_status_to_store():
     cancelled = await manager.cancel(record.run_id)
 
     stored = await store.get(record.run_id)
-    assert cancelled is True
+    assert cancelled == CancelOutcome.cancelled
     assert stored is not None
     assert stored["status"] == "interrupted"
 
@@ -323,12 +323,12 @@ async def test_reconcile_orphaned_inflight_runs_skips_rows_when_error_status_is_
 
 @pytest.mark.anyio
 async def test_cancel_not_inflight(manager: RunManager):
-    """Cancelling a completed run should return False."""
+    """Cancelling a completed run should return not_cancellable."""
     record = await manager.create("thread-1")
     await manager.set_status(record.run_id, RunStatus.success)
 
     cancelled = await manager.cancel(record.run_id)
-    assert cancelled is False
+    assert cancelled == CancelOutcome.not_cancellable
 
 
 @pytest.mark.anyio
