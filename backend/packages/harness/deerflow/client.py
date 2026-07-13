@@ -243,6 +243,8 @@ class DeerFlowClient:
             cfg.get("thinking_enabled"),
             cfg.get("is_plan_mode"),
             cfg.get("subagent_enabled"),
+            cfg.get("max_concurrent_subagents"),
+            cfg.get("max_total_subagents"),
             self._agent_name,
             frozenset(self._available_skills) if self._available_skills is not None else None,
         )
@@ -254,6 +256,7 @@ class DeerFlowClient:
         model_name = cfg.get("model_name")
         subagent_enabled = cfg.get("subagent_enabled", False)
         max_concurrent_subagents = cfg.get("max_concurrent_subagents", 3)
+        max_total_subagents = cfg.get("max_total_subagents", self._app_config.subagents.max_total_per_run)
 
         tools = self._get_tools(model_name=model_name, subagent_enabled=subagent_enabled)
         final_tools, deferred_setup = assemble_deferred_tools(tools, enabled=self._app_config.tool_search.enabled)
@@ -297,6 +300,7 @@ class DeerFlowClient:
             "system_prompt": apply_prompt_template(
                 subagent_enabled=subagent_enabled,
                 max_concurrent_subagents=max_concurrent_subagents,
+                max_total_subagents=max_total_subagents,
                 agent_name=self._agent_name,
                 available_skills=self._available_skills,
                 app_config=self._app_config,
@@ -758,8 +762,9 @@ class DeerFlowClient:
 
         self._ensure_agent(config)
 
-        state: dict[str, Any] = {"messages": [HumanMessage(content=message)]}
-        context = {"thread_id": thread_id}
+        run_id = str(uuid.uuid4())
+        state: dict[str, Any] = {"messages": [HumanMessage(content=message, additional_kwargs={"run_id": run_id})]}
+        context = {"thread_id": thread_id, "run_id": run_id}
         if deerflow_trace_id:
             context[DEERFLOW_TRACE_METADATA_KEY] = deerflow_trace_id
         if self._agent_name:

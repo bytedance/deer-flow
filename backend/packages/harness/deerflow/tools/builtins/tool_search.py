@@ -81,8 +81,12 @@ class DeferredToolCatalog:
             return []
 
         if query.startswith("select:"):
+            # No cap: ``select:`` names the tools explicitly, so returning a
+            # subset silently drops schemas the model asked for by name. Mirrors
+            # ``SkillCatalog.search`` (``skills/catalog.py``); the ranked modes
+            # below stay capped at ``MAX_RESULTS``.
             wanted = {n.strip() for n in query[7:].split(",")}
-            return [t for t in self.tools if t.name in wanted][:MAX_RESULTS]
+            return [t for t in self.tools if t.name in wanted]
 
         if query.startswith("+"):
             parts = query[1:].split(None, 1)
@@ -150,7 +154,7 @@ def build_tool_search_tool(catalog: DeferredToolCatalog) -> BaseTool:
           - "notebook jupyter" -- keyword search, up to max_results best matches
           - "+slack send" -- require "slack" in the name, rank by remaining terms
         """
-        matched = catalog.search(query)[:MAX_RESULTS]
+        matched = catalog.search(query)
         if not matched:
             content, names = f"No tools found matching: {query}", []
         else:

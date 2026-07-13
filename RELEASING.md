@@ -23,6 +23,13 @@ Container images are tagged from the git tag (not from these files), and the
 Helm chart version is validated against the tag — so if any source lags the
 tag, the release is blocked (see [Version gate](#version-gate)).
 
+The frontend's in-app About page (Settings ▸ About) is a *derived* consumer, not
+a fifth source: it reads `frontend/package.json`'s version at build time, so it
+tracks the table above automatically with no bump needed. Nightly builds override
+it with the chart's nightly string (`<base>-nightly.<YYYYMMDD>-<short_sha>`) via
+the `APP_VERSION` build-arg in `nightly.yaml`, so a nightly image's About page
+distinguishes it from a release.
+
 ## Helper scripts
 
 - `scripts/bump_version.sh <version>` — set all four fields at once, then

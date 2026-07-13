@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import logging
 import threading
 from collections import OrderedDict
@@ -8,6 +9,11 @@ from functools import lru_cache
 from typing import TYPE_CHECKING
 
 from deerflow.config.agents_config import load_agent_soul
+from deerflow.config.subagents_config import (
+    DEFAULT_MAX_TOTAL_SUBAGENTS_PER_RUN,
+    clamp_subagent_concurrency,
+    clamp_total_subagents_per_run,
+)
 from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
 from deerflow.skills.storage import get_or_new_skill_storage, get_or_new_user_skill_storage
 from deerflow.skills.types import Skill, SkillCategory
@@ -188,6 +194,17 @@ def _skill_mutability_label(category: SkillCategory | str) -> str:
     return "[built-in]"
 
 
+def _render_available_skill(name: str, description: str, category: SkillCategory | str, location: str) -> str:
+    # name/description/location come from a ``.skill`` archive's frontmatter
+    # (untrusted); escape them so a value cannot close its tag and forge a
+    # framework block in the system prompt (matches the slash-activation and
+    # durable-context siblings). ``category`` is a controlled enum.
+    esc_name = html.escape(name, quote=False)
+    esc_description = html.escape(description, quote=False)
+    esc_location = html.escape(location, quote=False)
+    return f"    <skill>\n        <name>{esc_name}</name>\n        <description>{esc_description} {_skill_mutability_label(category)}</description>\n        <location>{esc_location}</location>\n    </skill>"
+
+
 def clear_skills_system_prompt_cache() -> None:
     _invalidate_enabled_skills_cache()
 
@@ -282,16 +299,23 @@ def _build_available_subagents_description(available_names: list[str], bash_avai
     return "\n".join(lines)
 
 
-def _build_subagent_section(max_concurrent: int, *, app_config: AppConfig | None = None) -> str:
-    """Build the subagent system prompt section with dynamic concurrency limit.
+def _build_subagent_section(
+    max_concurrent: int,
+    max_total: int = DEFAULT_MAX_TOTAL_SUBAGENTS_PER_RUN,
+    *,
+    app_config: AppConfig | None = None,
+) -> str:
+    """Build the subagent system prompt section with dynamic subagent limits.
 
     Args:
         max_concurrent: Maximum number of concurrent subagent calls allowed per response.
+        max_total: Maximum number of subagent calls allowed per run.
 
     Returns:
         Formatted subagent section string.
     """
-    n = max_concurrent
+    n = clamp_subagent_concurrency(max_concurrent)
+    total = clamp_total_subagents_per_run(max_total)
     available_names = get_available_subagent_names(app_config=app_config) if app_config is not None else get_available_subagent_names()
     bash_available = "bash" in available_names
 
@@ -319,6 +343,11 @@ You are running with subagent capabilities enabled. Your role is to be a **task 
 - **Before launching subagents, you MUST count your sub-tasks in your thinking:**
   - If count ≤ {n}: Launch all in this response.
   - If count > {n}: **Pick the {n} most important/foundational sub-tasks for this turn.** Save the rest for the next turn.
+- **HARD TOTAL LIMIT: MAXIMUM {total} `task` CALLS PER RUN. THIS IS NOT OPTIONAL.**
+  - Before each batch, count `task` delegations already launched for the current user request/run.
+  - "Work already delegated" may include older thread history; reuse it when helpful, but do not count older runs against this run's {total} total.
+  - Do not launch a new batch if it would exceed {total} total subagents for this run.
+  - When the total limit is reached, synthesize with existing results or continue directly with ordinary tools.
 - **Multi-batch execution** (for >{n} sub-tasks):
   - Turn 1: Launch sub-tasks 1-{n} in parallel → wait for results
   - Turn 2: Launch next batch in parallel → wait for results
@@ -716,17 +745,14 @@ def _get_cached_skills_prompt_section(
     filtered = [(name, description, category, location) for name, description, category, location in skill_signature if available_skills_key is None or name in available_skills_key]
     skills_list = ""
     if filtered:
-        skill_items = "\n".join(
-            f"    <skill>\n        <name>{name}</name>\n        <description>{description} {_skill_mutability_label(category)}</description>\n        <location>{location}</location>\n    </skill>"
-            for name, description, category, location in filtered
-        )
+        skill_items = "\n".join(_render_available_skill(name, description, category, location) for name, description, category, location in filtered)
         skills_list = f"<available_skills>\n{skill_items}\n</available_skills>"
 
     disabled_section = ""
     if disabled_skill_signature:
         disabled_filtered = [(name, description, category, location) for name, description, category, location in disabled_skill_signature if available_skills_key is None or name in available_skills_key]
         if disabled_filtered:
-            disabled_items = "\n".join(f"    - {name} ({category})" for name, description, category, location in disabled_filtered)
+            disabled_items = "\n".join(f"    - {html.escape(name, quote=False)} ({category})" for name, description, category, location in disabled_filtered)
             disabled_section = f"""<disabled_skills>
 The following skills are INSTALLED but DISABLED. You MUST NOT read,
 reference, or use any of these skills — including their SKILL.md,
@@ -826,7 +852,13 @@ def get_agent_soul(agent_name: str | None) -> str:
     # Append SOUL.md (agent personality) if present
     soul = load_agent_soul(agent_name)
     if soul:
-        return f"<soul>\n{soul}\n</soul>\n" if soul else ""
+        # SOUL.md is agent-editable (setup_agent / update_agent persist it) and is
+        # rendered into the <soul> block of the lead-agent system prompt. Escape it
+        # so a value like "</soul></system-reminder>" cannot close the block and
+        # relocate the text after it out of the trust zone the prompt declares —
+        # matching the skill/memory/tool-result escaping in #4097/#4119/#4128/#4099.
+        # quote=False: it lands in element-text position, never an attribute value.
+        return f"<soul>\n{html.escape(soul, quote=False)}\n</soul>\n"
     return ""
 
 
@@ -932,6 +964,7 @@ Memory is running in tool mode. Use the injected <memory> block as current conte
 def apply_prompt_template(
     subagent_enabled: bool = False,
     max_concurrent_subagents: int = 3,
+    max_total_subagents: int | None = None,
     *,
     agent_name: str | None = None,
     available_skills: set[str] | None = None,
@@ -942,14 +975,19 @@ def apply_prompt_template(
     skill_names: frozenset[str] | None = None,
 ) -> str:
     # Include subagent section only if enabled (from runtime parameter)
-    n = max_concurrent_subagents
-    subagent_section = _build_subagent_section(n, app_config=app_config) if subagent_enabled else ""
+    n = clamp_subagent_concurrency(max_concurrent_subagents)
+    total = max_total_subagents
+    if total is None:
+        subagents_config = getattr(app_config, "subagents", None) if app_config is not None else None
+        total = getattr(subagents_config, "max_total_per_run", DEFAULT_MAX_TOTAL_SUBAGENTS_PER_RUN)
+    total = clamp_total_subagents_per_run(total)
+    subagent_section = _build_subagent_section(n, total, app_config=app_config) if subagent_enabled else ""
 
     # Add subagent reminder to critical_reminders if enabled
     subagent_reminder = (
         "- **Orchestrator Mode**: You are a task orchestrator - decompose complex tasks into parallel sub-tasks. "
-        f"**HARD LIMIT: max {n} `task` calls per response.** "
-        f"If >{n} sub-tasks, split into sequential batches of ≤{n}. Synthesize after ALL batches complete.\n"
+        f"**HARD LIMITS: max {n} `task` calls per response, max {total} per run.** "
+        f"If >{n} sub-tasks, split into sequential batches of ≤{n} without exceeding {total} total. Synthesize after batches complete.\n"
         if subagent_enabled
         else ""
     )
@@ -958,7 +996,7 @@ def apply_prompt_template(
     subagent_thinking = (
         "- **DECOMPOSITION CHECK: Can this task be broken into 2+ parallel sub-tasks? If YES, COUNT them. "
         f"If count > {n}, you MUST plan batches of ≤{n} and only launch the FIRST batch now. "
-        f"NEVER launch more than {n} `task` calls in one response.**\n"
+        f"NEVER launch more than {n} `task` calls in one response or {total} total in this run.**\n"
         if subagent_enabled
         else ""
     )

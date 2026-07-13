@@ -5,7 +5,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from deerflow.agents.memory.prompt import format_conversation_for_update
 from deerflow.agents.memory.updater import (
     MemoryUpdater,
+    _build_staleness_section,
+    _coerce_source_confidence,
     _extract_text,
+    _parse_memory_update_response,
     clear_memory_data,
     create_memory_fact,
     create_memory_fact_with_created_fact,
@@ -1443,3 +1446,96 @@ class TestSyncUpdateBindsTraceContextVar:
 
             assert captured == ["inner-trace"]
             assert get_current_trace_id() == "outer-trace"
+
+
+class TestNullConfidenceDoesNotBlockUpdates:
+    """A fact persisted with ``"confidence": null`` (corrupted or hand-edited
+    memory file) must not crash confidence-sensitive code paths.
+
+    ``dict.get("confidence", 0.0)`` returns the stored ``None`` when the key is
+    present, which then propagates into ``f"{conf:.2f}"`` formatting and into
+    ``list.sort`` comparisons and raises ``TypeError``. ``_coerce_source_confidence``
+    guards both call sites.
+    """
+
+    def test_build_staleness_section_handles_null_confidence(self) -> None:
+        stale = [
+            {
+                "id": "fact_null",
+                "content": "User prefers concise answers",
+                "category": "preference",
+                "confidence": None,
+                "createdAt": "2000-01-01T00:00:00Z",
+            }
+        ]
+
+        # Must not raise TypeError on ``f"{None:.2f}"``.
+        section = _build_staleness_section(stale, age_days=90)
+
+        assert isinstance(section, str)
+        assert "fact_null" in section
+
+    def test_apply_updates_staleness_sort_handles_null_confidence(self) -> None:
+        updater = MemoryUpdater()
+        aged = "2000-01-01T00:00:00Z"  # far older than staleness_age_days
+        facts = [
+            {"id": "f_null", "content": "a", "category": "context", "confidence": None, "createdAt": aged},
+            {"id": "f_high", "content": "b", "category": "context", "confidence": 0.9, "createdAt": aged},
+            {"id": "f_low", "content": "c", "category": "context", "confidence": 0.2, "createdAt": aged},
+        ]
+        memory = _make_memory(facts)
+        update_data = {
+            "user": {},
+            "history": {},
+            "newFacts": [],
+            "factsToRemove": [],
+            # LLM asks to remove all three; the per-cycle cap keeps only the
+            # lowest-confidence one, which forces the sort over null confidence.
+            "staleFactsToRemove": [{"id": "f_null"}, {"id": "f_high"}, {"id": "f_low"}],
+        }
+
+        with patch(
+            "deerflow.agents.memory.updater.get_memory_config",
+            return_value=_memory_config(staleness_max_removals_per_cycle=1, staleness_age_days=90),
+        ):
+            # Must not raise TypeError comparing None with floats during sort.
+            result = updater._apply_updates(memory, update_data)
+
+        remaining_ids = {fact["id"] for fact in result["facts"]}
+        # Lowest confidence (0.2) is removed first; null coerces to 0.5, so it stays.
+        assert "f_low" not in remaining_ids
+        assert remaining_ids == {"f_null", "f_high"}
+
+    def test_coerce_source_confidence_defaults_null_to_midpoint(self) -> None:
+        assert _coerce_source_confidence({"confidence": None}) == 0.5
+        assert _coerce_source_confidence({}) == 0.5
+        assert _coerce_source_confidence({"confidence": 0.83}) == 0.83
+
+
+class TestParseMemoryUpdateFactsToRemoveGate:
+    """``factsToRemove`` is optional in the memory-update JSON acceptance gate.
+
+    When there is nothing to remove, a well-behaved model omits ``factsToRemove``
+    entirely. The parser must still accept such an update (keeping ``newFacts``
+    intact) while continuing to reject unrelated JSON that lacks the load-bearing
+    ``history`` + ``newFacts`` keys.
+    """
+
+    def test_accepts_update_without_facts_to_remove(self):
+        text = '{"user": {}, "history": {}, "newFacts": [{"content": "User likes Rust", "category": "preference", "confidence": 0.9}]}'
+
+        parsed = _parse_memory_update_response(text)
+
+        assert isinstance(parsed, dict)
+        assert any(fact.get("content") == "User likes Rust" for fact in parsed.get("newFacts", []))
+
+    def test_still_rejects_decoy_object_missing_history_and_new_facts(self):
+        import json
+
+        # ``{"user": "alice"}`` has only the ``user`` key — missing history+newFacts,
+        # so it must never be mistaken for a memory update.
+        try:
+            _parse_memory_update_response('{"user": "alice"}')
+        except json.JSONDecodeError:
+            return
+        raise AssertionError('decoy object {"user": "alice"} must be rejected')

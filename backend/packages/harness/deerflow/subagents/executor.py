@@ -2,6 +2,7 @@
 
 import asyncio
 import atexit
+import html
 import logging
 import os
 import threading
@@ -605,7 +606,10 @@ class SubagentExecutor:
                 content = await asyncio.to_thread(skill.skill_file.read_text, encoding="utf-8")
                 content = content.strip()
                 if content:
-                    messages.append(SystemMessage(content=f'<skill name="{skill.name}">\n{content}\n</skill>'))
+                    # name/body are untrusted (installable ``.skill`` archive); escape
+                    # both so the body cannot forge a framework tag, matching the
+                    # slash-activation sibling (name quote=True attribute, body quote=False).
+                    messages.append(SystemMessage(content=f'<skill name="{html.escape(skill.name, quote=True)}">\n{html.escape(content, quote=False)}\n</skill>'))
                     logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} loaded skill: {skill.name}")
             except Exception:
                 logger.debug(f"[trace={self.trace_id}] Failed to read skill {skill.name}", exc_info=True)
@@ -872,30 +876,46 @@ class SubagentExecutor:
             # consistent and pops the reason so it is not orphaned in the dict.
             max_turns = self.config.max_turns
             logger.warning(f"[trace={self.trace_id}] Subagent {self.config.name} reached max_turns={max_turns} (GraphRecursionError); recovering partial result")
-            messages = (final_state or {}).get("messages", [])
-            usable_partial: str | None = None
-            for m in reversed(messages):
-                if isinstance(m, AIMessage):
-                    text = message_content_to_text(m.content).strip()
-                    if text:
-                        usable_partial = text
-                    break
             records = collector.snapshot_records() if collector is not None else None
             stop_reason = self._consume_guard_stop_reason() or "turn_capped"
-            if usable_partial is not None:
+
+            # A handled LLM provider failure (#4042) carries non-empty
+            # user-facing text on its terminal ``AIMessage`` just like genuine
+            # partial output, so it must be checked here too or it is
+            # indistinguishable from the raw-text scan below and gets
+            # misclassified as a completed task. Consult the same marker the
+            # normal-completion path above uses, before falling back to that scan.
+            llm_error = _extract_llm_error_fallback(final_state)
+            if llm_error is not None:
                 result.try_set_terminal(
-                    SubagentStatus.COMPLETED,
-                    result=usable_partial,
+                    SubagentStatus.FAILED,
+                    error=llm_error,
                     stop_reason=stop_reason,
                     token_usage_records=records,
                 )
             else:
-                result.try_set_terminal(
-                    SubagentStatus.FAILED,
-                    error=f"Reached max_turns={max_turns}",
-                    stop_reason=stop_reason,
-                    token_usage_records=records,
-                )
+                messages = (final_state or {}).get("messages", [])
+                usable_partial: str | None = None
+                for m in reversed(messages):
+                    if isinstance(m, AIMessage):
+                        text = message_content_to_text(m.content).strip()
+                        if text:
+                            usable_partial = text
+                        break
+                if usable_partial is not None:
+                    result.try_set_terminal(
+                        SubagentStatus.COMPLETED,
+                        result=usable_partial,
+                        stop_reason=stop_reason,
+                        token_usage_records=records,
+                    )
+                else:
+                    result.try_set_terminal(
+                        SubagentStatus.FAILED,
+                        error=f"Reached max_turns={max_turns}",
+                        stop_reason=stop_reason,
+                        token_usage_records=records,
+                    )
 
         except Exception as e:
             logger.exception(f"[trace={self.trace_id}] Subagent {self.config.name} async execution failed")

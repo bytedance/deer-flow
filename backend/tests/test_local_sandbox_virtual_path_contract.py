@@ -143,6 +143,31 @@ def test_execute_command_lists_aggregate_user_data_root(provider):
     assert "outputs" in output
 
 
+def test_list_dir_on_user_data_root_does_not_duplicate_subdir_mounts(provider):
+    """Regression: ``list_dir``'s virtual sub-directory overlay must not
+    double-list a mount that the underlying scan already found.
+
+    The overlay compared a bare child name (e.g. "workspace") against
+    ``existing_dirs``, which holds full container paths (e.g.
+    "/mnt/user-data/workspace") -- so the containment guard never matched and
+    each of workspace/uploads/outputs (real nested subdirectories the plain
+    scan already discovers) was appended a second time.
+    """
+    sandbox_id = provider.acquire("alpha")
+    sbx = provider.get(sandbox_id)
+    # Touch all three subdirs so they materialise on disk and are found by the
+    # underlying (non-overlay) directory scan.
+    sbx.write_file("/mnt/user-data/workspace/.keep", "")
+    sbx.write_file("/mnt/user-data/uploads/.keep", "")
+    sbx.write_file("/mnt/user-data/outputs/.keep", "")
+
+    entries = sbx.list_dir("/mnt/user-data")
+
+    for subdir in ("workspace", "uploads", "outputs"):
+        matches = [e for e in entries if e.rstrip("/") == f"/mnt/user-data/{subdir}"]
+        assert len(matches) == 1, f"{subdir} listed {len(matches)} time(s), expected exactly 1: {entries}"
+
+
 def test_update_file_with_virtual_path_for_remote_sync_scenario(provider):
     """This is the exact code path used by ``uploads.py:282`` and ``feishu.py:389``.
 

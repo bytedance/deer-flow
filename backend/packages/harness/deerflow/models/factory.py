@@ -1,6 +1,7 @@
 import logging
 
 from langchain.chat_models import BaseChatModel
+from langchain_openai.chat_models.base import BaseChatOpenAI
 
 from deerflow.config import get_app_config
 from deerflow.config.app_config import AppConfig
@@ -133,7 +134,7 @@ def _warn_unknown_model_settings(model_use_path: str, model_class, model_name: s
 # Default chunk-gap budget for OpenAI-compatible streaming responses.
 #
 # langchain-openai raises ``StreamChunkTimeoutError`` after this many seconds
-# without receiving a chunk. Its own default is 60s, which is too aggressive for
+# without receiving a chunk. Its own default is 120s, which is too aggressive for
 # reasoning models (DeepSeek-R1, Doubao-thinking, GPT-5) whose first chunk can
 # legitimately take 90~150s. We default to 240s so the streaming layer rarely
 # trips on long thinking pauses; the LLMErrorHandlingMiddleware still retries
@@ -141,20 +142,36 @@ def _warn_unknown_model_settings(model_use_path: str, model_class, model_name: s
 _DEFAULT_STREAM_CHUNK_TIMEOUT_SECONDS: float = 240.0
 
 
-def _apply_stream_chunk_timeout_default(model_use_path: str, model_settings_from_config: dict) -> None:
+def _apply_stream_chunk_timeout_default(model_class: type, model_settings_from_config: dict) -> None:
     """Inject a generous ``stream_chunk_timeout`` for OpenAI-compatible clients.
 
-    The ``stream_chunk_timeout`` kwarg is specific to ``langchain_openai:ChatOpenAI``
-    and is rejected by other providers' constructors as an unexpected keyword
-    argument. Behaviour:
+    ``stream_chunk_timeout`` is a field of langchain-openai's ``BaseChatOpenAI``, so
+    it is accepted by ``ChatOpenAI`` and by every DeerFlow provider that subclasses
+    it: ``PatchedChatOpenAI`` plus the self-hosted / reasoning adapters
+    ``VllmChatModel``, ``MindIEChatModel``, ``PatchedChatDeepSeek``,
+    ``PatchedChatMiMo``, ``PatchedChatStepFun`` and ``PatchedChatMiniMax``. We gate on
+    ``issubclass(model_class, BaseChatOpenAI)`` rather than an explicit class-path
+    allowlist so any OpenAI-compatible subclass inherits the default (and honors an
+    explicit override) automatically. Issue #3189 was reported against ``mimo-v2.5``
+    (``PatchedChatMiMo``); the original fix (#3195) matched only ``ChatOpenAI`` /
+    ``PatchedChatOpenAI``, so those subclasses kept langchain-openai's aggressive
+    built-in chunk-gap timeout and — worse — silently discarded a user's explicit
+    ``stream_chunk_timeout``.
 
-    * OpenAI-compatible path: an explicit value in ``config.yaml`` is preserved.
+    Behaviour:
+
+    * ``BaseChatOpenAI`` subclass: an explicit value in ``config.yaml`` is preserved.
       An explicit ``null`` is dropped upstream by ``model_dump(exclude_none=True)``
       and therefore treated as "unset", so the default is injected.
-    * Non-OpenAI path: drop the key so it is never forwarded to an incompatible
-      constructor (which would raise ``TypeError: unexpected keyword argument``).
+    * Any other client (e.g. ``ChatAnthropic``): drop the key so it is never
+      forwarded to a constructor that does not declare it. The kwarg is not a
+      declared field of these clients: depending on the client it is either
+      silently dropped (``ChatAnthropic`` declares ``extra="ignore"``) or, for
+      other OpenAI-style clients, diverted into ``model_kwargs`` and rejected
+      at request time. Either way the user's intent is lost, so we drop it
+      proactively instead.
     """
-    if model_use_path not in _OPENAI_COMPAT_USE_PATHS:
+    if not issubclass(model_class, BaseChatOpenAI):
         model_settings_from_config.pop("stream_chunk_timeout", None)
         return
     if "stream_chunk_timeout" in model_settings_from_config:
@@ -250,7 +267,7 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
     # heuristics (stream_usage / stream_chunk_timeout) see the canonical endpoint key.
     _normalize_openai_base_url(model_config.use, model_settings_from_config)
     _enable_stream_usage_by_default(model_config.use, model_settings_from_config)
-    _apply_stream_chunk_timeout_default(model_config.use, model_settings_from_config)
+    _apply_stream_chunk_timeout_default(model_class, model_settings_from_config)
 
     # For Codex Responses API models: map thinking mode to reasoning_effort
     from deerflow.models.openai_codex_provider import CodexChatModel

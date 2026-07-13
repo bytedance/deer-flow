@@ -10,11 +10,13 @@ import pytest
 from deerflow.agents.lead_agent import agent as lead_agent_module
 from deerflow.agents.middlewares import summarization_middleware as summarization_middleware_module
 from deerflow.agents.middlewares.loop_detection_middleware import LoopDetectionMiddleware
+from deerflow.agents.middlewares.subagent_limit_middleware import SubagentLimitMiddleware
 from deerflow.config.app_config import AppConfig
 from deerflow.config.loop_detection_config import LoopDetectionConfig
 from deerflow.config.memory_config import MemoryConfig
 from deerflow.config.model_config import ModelConfig
 from deerflow.config.sandbox_config import SandboxConfig
+from deerflow.config.subagents_config import SubagentsAppConfig
 from deerflow.config.summarization_config import SummarizationConfig
 
 
@@ -510,6 +512,58 @@ def test_build_middlewares_omits_loop_detection_when_disabled(monkeypatch):
     )
 
     assert not any(isinstance(m, LoopDetectionMiddleware) for m in middlewares)
+
+
+def test_build_middlewares_passes_subagent_total_limit_from_app_config(monkeypatch):
+    app_config = _make_app_config(
+        [_make_model("safe-model", supports_thinking=False)],
+        loop_detection=LoopDetectionConfig(enabled=False),
+    )
+    app_config.subagents = SubagentsAppConfig(max_total_per_run=7)
+
+    monkeypatch.setattr(lead_agent_module, "get_app_config", lambda: app_config)
+    monkeypatch.setattr(lead_agent_module, "build_lead_runtime_middlewares", lambda *, app_config, lazy_init=True: [])
+    monkeypatch.setattr(lead_agent_module, "_create_summarization_middleware", lambda *, app_config=None: None)
+    monkeypatch.setattr(lead_agent_module, "_create_todo_list_middleware", lambda is_plan_mode: None)
+
+    middlewares = lead_agent_module.build_middlewares(
+        {"configurable": {"is_plan_mode": False, "subagent_enabled": True, "max_concurrent_subagents": 3}},
+        model_name="safe-model",
+        app_config=app_config,
+    )
+
+    limit = next(m for m in middlewares if isinstance(m, SubagentLimitMiddleware))
+    assert limit.max_concurrent == 3
+    assert limit.max_total == 7
+
+
+def test_build_middlewares_allows_runtime_subagent_total_limit_override(monkeypatch):
+    app_config = _make_app_config(
+        [_make_model("safe-model", supports_thinking=False)],
+        loop_detection=LoopDetectionConfig(enabled=False),
+    )
+    app_config.subagents = SubagentsAppConfig(max_total_per_run=7)
+
+    monkeypatch.setattr(lead_agent_module, "get_app_config", lambda: app_config)
+    monkeypatch.setattr(lead_agent_module, "build_lead_runtime_middlewares", lambda *, app_config, lazy_init=True: [])
+    monkeypatch.setattr(lead_agent_module, "_create_summarization_middleware", lambda *, app_config=None: None)
+    monkeypatch.setattr(lead_agent_module, "_create_todo_list_middleware", lambda is_plan_mode: None)
+
+    middlewares = lead_agent_module.build_middlewares(
+        {
+            "configurable": {
+                "is_plan_mode": False,
+                "subagent_enabled": True,
+                "max_concurrent_subagents": 3,
+                "max_total_subagents": 5,
+            }
+        },
+        model_name="safe-model",
+        app_config=app_config,
+    )
+
+    limit = next(m for m in middlewares if isinstance(m, SubagentLimitMiddleware))
+    assert limit.max_total == 5
 
 
 def test_create_summarization_middleware_uses_configured_model_alias(monkeypatch):

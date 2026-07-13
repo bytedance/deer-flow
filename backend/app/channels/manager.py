@@ -370,12 +370,17 @@ def _merge_stream_text(existing: str, chunk: str) -> str:
     """Merge either delta text or cumulative text into a single snapshot."""
     if not chunk:
         return existing
-    if not existing or chunk == existing:
-        return chunk or existing
-    if chunk.startswith(existing):
+    if not existing:
         return chunk
-    if existing.endswith(chunk):
-        return existing
+    # Cumulative re-delivery: strictly longer and starts with existing.
+    if len(chunk) > len(existing) and chunk.startswith(existing):
+        return chunk
+    # Everything else is a delta — always append, even when the delta
+    # happens to match the buffer suffix (e.g. 'hel' + 'l') or equals
+    # the buffer (CJK reduplication: '谢' + '谢' = '谢谢'). Channels feed
+    # only delta ('messages-tuple') events to this function; 'values'
+    # snapshots are consumed via a separate branch, so a same-content
+    # delta (chunk == existing) still represents a fresh token to keep.
     return existing + chunk
 
 
@@ -1057,7 +1062,11 @@ class ChannelManager:
         if not isinstance(agent_name, str) or not agent_name.strip():
             return None
 
-        agent_config = load_agent_config(_normalize_custom_agent_name(agent_name))
+        # Read the agent config from the same owner bucket the run uses:
+        # ``run_context["user_id"]`` is the resolved owner (``_channel_storage_user_id``),
+        # but without it ``load_agent_config`` falls back to the dispatch loop's unset
+        # contextvar (``"default"``), reading the wrong user's per-user custom agent.
+        agent_config = load_agent_config(_normalize_custom_agent_name(agent_name), user_id=run_context.get("user_id"))
         if agent_config and agent_config.skills is not None:
             return set(agent_config.skills)
         return None
