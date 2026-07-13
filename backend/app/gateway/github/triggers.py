@@ -186,6 +186,11 @@ def event_should_fire(
             return True, f"allow_authors:{author}"
 
     if trigger.require_mention:
+        # ``trigger.mention_login`` is normalized (whitespace-only -> None)
+        # by ``GitHubTriggerConfig``'s field validator, so this ``or`` falls
+        # through a misconfigured ``mention_login: "   "`` to
+        # ``default_mention_login`` instead of gating on a literal
+        # whitespace string that no real ``@mention`` could ever match.
         login = trigger.mention_login or default_mention_login
         body = _comment_body(event, payload)
         # Boundary-aware @-mention match: ``@deerflow`` must NOT match

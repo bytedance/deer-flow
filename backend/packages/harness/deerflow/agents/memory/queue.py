@@ -42,6 +42,7 @@ class MemoryUpdateQueue:
         self._lock = threading.Lock()
         self._timer: threading.Timer | None = None
         self._processing = False
+        self._reprocess_pending = False
 
     @staticmethod
     def _queue_key(
@@ -181,8 +182,12 @@ class MemoryUpdateQueue:
 
         with self._lock:
             if self._processing:
-                # Preserve immediate flush semantics even if another worker is active.
-                self._schedule_timer(0)
+                # Another worker is already draining the queue. Instead of
+                # spawning a tight timer spin (repeatedly re-scheduling a
+                # 0-delay Timer thread while busy), defer a single re-run: the
+                # active worker checks this flag in its finally block and
+                # reschedules once if work remains.
+                self._reprocess_pending = True
                 return
 
             if not self._queue:
@@ -232,6 +237,10 @@ class MemoryUpdateQueue:
         finally:
             with self._lock:
                 self._processing = False
+                if self._reprocess_pending:
+                    self._reprocess_pending = False
+                    if self._queue:
+                        self._schedule_timer(0)
 
     def flush(self) -> None:
         """Force immediate processing of the queue.
@@ -263,6 +272,7 @@ class MemoryUpdateQueue:
                 self._timer = None
             self._queue.clear()
             self._processing = False
+            self._reprocess_pending = False
 
     @property
     def pending_count(self) -> int:

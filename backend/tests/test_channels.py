@@ -2412,7 +2412,7 @@ class TestChannelManager:
     def test_handle_command_slash_skill_respects_custom_agent_skill_whitelist(self, monkeypatch, tmp_path):
         from app.channels.manager import ChannelManager
 
-        monkeypatch.setattr("app.channels.manager.load_agent_config", lambda name: SimpleNamespace(skills=["frontend-design"]))
+        monkeypatch.setattr("app.channels.manager.load_agent_config", lambda name, *, user_id=None: SimpleNamespace(skills=["frontend-design"]))
 
         async def go():
             bus = MessageBus()
@@ -2450,6 +2450,47 @@ class TestChannelManager:
             assert outbound_received[0].text == "Skill `/data-analysis` is not available for this agent."
 
         _run(go())
+
+    def test_slash_skill_whitelist_loads_agent_config_for_the_resolved_owner(self, monkeypatch):
+        """The per-user custom agent whitelist must be read from the same owner
+        bucket the run uses. ``_resolve_run_params`` resolves that owner into
+        ``run_context["user_id"]`` (per ``_channel_storage_user_id``, the single
+        source of truth for run identity and storage), but the whitelist
+        pre-check dropped it, so ``load_agent_config`` fell back to the dispatch
+        loop's unset contextvar (``"default"``) — reading, or failing to find,
+        the wrong user's agent config.
+        """
+        from app.channels.manager import ChannelManager
+
+        captured: dict[str, object] = {}
+
+        def spy_load_agent_config(name, *, user_id=None):
+            captured["name"] = name
+            captured["user_id"] = user_id
+            return SimpleNamespace(skills=["data-analysis"])
+
+        monkeypatch.setattr("app.channels.manager.load_agent_config", spy_load_agent_config)
+
+        bus = MessageBus()
+        store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+        manager = ChannelManager(bus=bus, store=store, default_session={"assistant_id": "analyst-agent"})
+
+        # A bound connection: the owner resolves to a real, non-default bucket.
+        msg = InboundMessage(
+            channel_name="test",
+            chat_id="chat1",
+            user_id="platform-user",
+            owner_user_id="owner-alice",
+            text="/data-analysis go",
+            msg_type=InboundMessageType.COMMAND,
+        )
+
+        expected_owner = manager._resolve_run_params(msg, "")[2].get("user_id")
+
+        manager._resolve_available_skill_names(msg)
+
+        assert expected_owner and expected_owner != "default"
+        assert captured["user_id"] == expected_owner
 
     def test_handle_command_slash_skill_reports_disabled_skill(self, tmp_path):
         from app.channels.manager import ChannelManager
@@ -7306,3 +7347,62 @@ class TestHandleGoalCommand:
             assert reply == "Failed to set goal."
 
         _run(go())
+
+
+# ---------------------------------------------------------------------------
+# _merge_stream_text regression: CJK reduplication, repeated tokens, suffix
+# matching tails.  Proves that the fixed function does not drop legitimate
+# deltas that happen to match the accumulated buffer or its suffix.
+# Import is deferred because app.channels.manager pulls in fastapi.
+# ---------------------------------------------------------------------------
+
+
+def _get_merge_stream_text():
+    from app.channels.manager import _merge_stream_text
+
+    return _merge_stream_text
+
+
+def test_merge_stream_text_cjk_reduplication():
+    """Two identical CJK tokens ('谢','谢') -> '谢谢', not '谢'."""
+    _merge = _get_merge_stream_text()
+    assert _merge("谢", "谢") == "谢谢"
+
+
+def test_merge_stream_text_repeated_token_append():
+    """Identical repeated tokens ('go','go') -> 'gogo', not 'go'."""
+    _merge = _get_merge_stream_text()
+    assert _merge("go", "go") == "gogo"
+
+
+def test_merge_stream_text_suffix_tail_not_dropped():
+    """Delta equal to buffer suffix ('l' after 'hel') -> 'hell', not 'hel'."""
+    _merge = _get_merge_stream_text()
+    assert _merge("hel", "l") == "hell"
+
+
+def test_merge_stream_text_cumulative_strictly_longer_replaces():
+    """A strictly longer cumulative snapshot that starts with existing replaces it."""
+    _merge = _get_merge_stream_text()
+    assert _merge("Hel", "Hel lo world") == "Hel lo world"
+
+
+def test_merge_stream_text_empty_chunk_noop():
+    _merge = _get_merge_stream_text()
+    assert _merge("Hello", "") == "Hello"
+
+
+def test_merge_stream_text_empty_existing_returns_chunk():
+    _merge = _get_merge_stream_text()
+    assert _merge("", "Hello") == "Hello"
+
+
+def test_merge_stream_text_newline_split():
+    """'\\n\\n' split across two '\\n' deltas accumulates to two newlines."""
+    _merge = _get_merge_stream_text()
+    assert _merge("\n", "\n") == "\n\n"
+
+
+def test_merge_stream_text_normal_append():
+    _merge = _get_merge_stream_text()
+    assert _merge("Hello ", "world") == "Hello world"
