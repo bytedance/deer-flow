@@ -134,7 +134,7 @@ def _warn_unknown_model_settings(model_use_path: str, model_class, model_name: s
 # Default chunk-gap budget for OpenAI-compatible streaming responses.
 #
 # langchain-openai raises ``StreamChunkTimeoutError`` after this many seconds
-# without receiving a chunk. Its own default is 60s, which is too aggressive for
+# without receiving a chunk. Its own default is 120s, which is too aggressive for
 # reasoning models (DeepSeek-R1, Doubao-thinking, GPT-5) whose first chunk can
 # legitimately take 90~150s. We default to 240s so the streaming layer rarely
 # trips on long thinking pauses; the LLMErrorHandlingMiddleware still retries
@@ -164,11 +164,14 @@ def _apply_stream_chunk_timeout_default(model_class: type, model_settings_from_c
       An explicit ``null`` is dropped upstream by ``model_dump(exclude_none=True)``
       and therefore treated as "unset", so the default is injected.
     * Any other client (e.g. ``ChatAnthropic``): drop the key so it is never
-      forwarded to a constructor that does not declare it. Such clients do not reject
-      the unknown kwarg outright — they divert it into ``model_kwargs`` and then fail
-      at request time.
+      forwarded to a constructor that does not declare it. The kwarg is not a
+      declared field of these clients: depending on the client it is either
+      silently dropped (``ChatAnthropic`` declares ``extra="ignore"``) or, for
+      other OpenAI-style clients, diverted into ``model_kwargs`` and rejected
+      at request time. Either way the user's intent is lost, so we drop it
+      proactively instead.
     """
-    if not (isinstance(model_class, type) and issubclass(model_class, BaseChatOpenAI)):
+    if not issubclass(model_class, BaseChatOpenAI):
         model_settings_from_config.pop("stream_chunk_timeout", None)
         return
     if "stream_chunk_timeout" in model_settings_from_config:
