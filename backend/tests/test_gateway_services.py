@@ -589,6 +589,7 @@ def test_context_merges_into_configurable():
         "is_plan_mode": True,
         "subagent_enabled": True,
         "max_concurrent_subagents": 5,
+        "max_total_subagents": 8,
         "thread_id": "should-be-ignored",
     }
 
@@ -600,6 +601,7 @@ def test_context_merges_into_configurable():
         "is_plan_mode",
         "subagent_enabled",
         "max_concurrent_subagents",
+        "max_total_subagents",
     }
     configurable = config.setdefault("configurable", {})
     for key in _CONTEXT_CONFIGURABLE_KEYS:
@@ -611,6 +613,7 @@ def test_context_merges_into_configurable():
     assert config["configurable"]["is_plan_mode"] is True
     assert config["configurable"]["subagent_enabled"] is True
     assert config["configurable"]["max_concurrent_subagents"] == 5
+    assert config["configurable"]["max_total_subagents"] == 8
     assert config["configurable"]["reasoning_effort"] == "high"
     assert config["configurable"]["mode"] == "ultra"
     # thread_id from context should NOT override the one from build_run_config
@@ -638,6 +641,16 @@ def test_merge_run_context_overrides_propagates_to_runtime_context():
     assert config["context"]["is_bootstrap"] is True
     # Non-whitelisted keys are not forwarded.
     assert "thread_id" not in config["context"]
+
+
+def test_merge_run_context_overrides_forwards_subagent_total_limit():
+    from app.gateway.services import build_run_config, merge_run_context_overrides
+
+    config = build_run_config("thread-1", None, None)
+    merge_run_context_overrides(config, {"max_total_subagents": 8})
+
+    assert config["configurable"]["max_total_subagents"] == 8
+    assert config["context"]["max_total_subagents"] == 8
 
 
 def test_merge_run_context_overrides_noop_for_empty_context():
@@ -720,6 +733,7 @@ def test_context_does_not_override_existing_configurable():
         "is_plan_mode",
         "subagent_enabled",
         "max_concurrent_subagents",
+        "max_total_subagents",
     }
     configurable = config.setdefault("configurable", {})
     for key in _CONTEXT_CONFIGURABLE_KEYS:

@@ -15,7 +15,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 22
+config_version: 24
 
 # ============================================================================
 # Logging
@@ -1183,6 +1183,14 @@ sandbox:
 #   # Optional global max-turn override for all subagents.
 #   # Built-in defaults: general-purpose=150, bash=60. Leave unset to keep them.
 #   # max_turns: 120
+#
+#   # Total number of subagent delegations allowed in one lead-agent run.
+#   # This is a deterministic backstop against repeated planning checkpoints
+#   # launching legal-sized batches forever. The default 6 allows two full
+#   # batches at the default concurrency of 3. Valid config range: 1-50.
+#   # Per-request runtime context can temporarily override this with
+#   # `max_total_subagents`, clamped to the same 1-50 range.
+#   max_total_per_run: 6
 #
 #   # Per-run token ceiling for subagents (#3875 Phase 2). A backstop against a
 #   # subagent that burns tokens on trivial work. At the hard-stop threshold the

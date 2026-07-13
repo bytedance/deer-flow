@@ -80,9 +80,9 @@ memory:
 
 ### SubagentLimitMiddleware
 
-限制 Agent 在单次轮次中可以进行的并行子 Agent 任务调用数量。这防止 Agent 生成无限数量的并发子 Agent。
+限制 Agent 在单次轮次中可以进行的并行子 Agent 任务调用数量，也限制一次 Lead Agent run 内的子 Agent 委派总数。这防止 Agent 在重复规划 checkpoint 中持续启动无边界批次。
 
-**配置**：每次请求配置中的 `subagent_enabled` 和 `max_concurrent_subagents`。
+**配置**：每次请求配置中的 `subagent_enabled`、`max_concurrent_subagents`，以及可选的 `max_total_subagents`。总量上限默认使用 `config.yaml` 中的 `subagents.max_total_per_run`。
 
 ---
 
