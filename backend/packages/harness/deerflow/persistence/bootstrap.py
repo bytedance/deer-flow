@@ -139,6 +139,45 @@ _BASELINE_TABLE_NAMES: frozenset[str] = frozenset(
     }
 )
 
+# ``test_baseline_index_names_constant_matches_0001`` pins this set against
+# what 0001 actually creates -- editing 0001 without updating this constant
+# (or vice versa) fires that test.
+_BASELINE_INDEX_NAMES: frozenset[str] = frozenset(
+    {
+        # channel_connections
+        "idx_channel_connections_event_lookup",
+        "ix_channel_connections_owner_user_id",
+        "ix_channel_connections_provider",
+        "uq_channel_connection_active_identity",
+        # channel_conversations
+        "ix_channel_conversations_connection_id",
+        "ix_channel_conversations_owner_user_id",
+        "ix_channel_conversations_provider",
+        "ix_channel_conversations_thread_id",
+        # channel_oauth_states
+        "ix_channel_oauth_states_owner_user_id",
+        "ix_channel_oauth_states_provider",
+        # feedback
+        "ix_feedback_run_id",
+        "ix_feedback_thread_id",
+        "ix_feedback_user_id",
+        # run_events
+        "ix_events_run",
+        "ix_events_thread_cat_seq",
+        "ix_run_events_user_id",
+        # runs
+        "ix_runs_thread_id",
+        "ix_runs_thread_status",
+        "ix_runs_user_id",
+        # threads_meta
+        "ix_threads_meta_assistant_id",
+        "ix_threads_meta_user_id",
+        # users
+        "idx_users_oauth_identity",
+        "ix_users_email",
+    }
+)
+
 
 # Per-engine SQLite bootstrap locks. Per-engine (not module-global) so each
 # engine instance pairs with a lock bound to the event loop that uses that
@@ -305,21 +344,36 @@ def _run_baseline_create_all_sync(sync_conn: Any) -> None:
     # would therefore never be created, and because the legacy branch stamps
     # ``0001_baseline`` before running upgrade, alembic's own
     # ``batch_op.create_index`` for baseline-era indexes is skipped too.
-    # Explicitly creating every ``Index`` on every baseline table (each with
-    # its own ``checkfirst=True``) guarantees each index exists regardless of
-    # whether its parent table was just created or already present.
+    # Explicitly creating every baseline-era ``Index`` on every baseline table
+    # (each with its own ``checkfirst=True``) guarantees each index exists
+    # regardless of whether its parent table was just created or already
+    # present.
     #
-    # Forward-looking note: this index-level backfill has the same shape risk
-    # the module already documents for tables (``_BASELINE_TABLE_NAMES``
-    # restriction). If a future post-baseline revision adds an index to a
-    # baseline table via ``op.create_index(...)`` without ``checkfirst=True``,
-    # that revision will collide with ``"index already exists"`` on ``upgrade
-    # head`` because the backfill above already pre-created it. Use
-    # ``checkfirst=True`` (or a future ``safe_create_index`` helper) in such a
-    # revision, mirroring ``safe_add_column``.
+    # **Scope**: Only indexes in ``_BASELINE_INDEX_NAMES`` are created.
+    # ``table.indexes`` is the *current* ORM model's full index set, which
+    # includes post-baseline indexes added by later revisions (e.g.
+    # ``uq_runs_thread_active`` from 0004).  Creating those prematurely would
+    # collide with their owning revision's data prerequisites (dedup steps,
+    # column migrations) and raise ``IntegrityError`` on legacy DBs.
+    #
+    # Post-baseline revisions that add an index to a baseline table must use
+    # the existing ``sa.inspect(bind).get_indexes(...)`` + ``if name not in
+    # existing`` guard pattern (see 0004_run_ownership.py:99-103), or a future
+    # ``safe_create_index`` helper -- mirroring ``safe_add_column``.
     for table in baseline_tables:
         for idx in table.indexes:
-            idx.create(sync_conn, checkfirst=True)
+            if idx.name not in _BASELINE_INDEX_NAMES:
+                continue
+            try:
+                idx.create(sync_conn, checkfirst=True)
+            except Exception:
+                logger.warning(
+                    "bootstrap: failed to create baseline index %r on %r -- "
+                    "the DB may contain rows that violate the index constraint. "
+                    "Address the duplicate data, then re-run bootstrap.",
+                    idx.name,
+                    table.name,
+                )
 
 
 def _stamp(cfg: AlembicConfig, revision: str) -> None:
