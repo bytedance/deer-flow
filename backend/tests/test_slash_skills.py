@@ -4,7 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from langchain.agents.middleware.types import ModelRequest
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from app.channels.commands import KNOWN_CHANNEL_COMMANDS
 from deerflow.agents.middlewares import skill_activation_middleware as middleware_module
@@ -219,6 +219,140 @@ def test_skill_activation_middleware_dedupes_immediately_previous_activation_wit
     assert isinstance(result, AIMessage)
     assert captured["messages"] == [legacy_activation_msg, target]
     assert sum(is_slash_skill_activation_reminder(message) for message in captured["messages"]) == 1
+
+
+def test_skill_activation_middleware_activates_once_across_tool_loop(monkeypatch, tmp_path):
+    # Regression for the re-activation bug: within a single run the model node is
+    # invoked once per tool-loop step, each time rebuilding request.messages fresh
+    # from persisted graph state. The activation reminder is added via
+    # request.override(messages=...) for one model call only and is NEVER written
+    # back to state, so the 2nd model call's state is [user, ai(tool_call), tool]
+    # with no reminder to scan. Dedup must therefore key off the run context, which
+    # LangGraph threads through every model-node call of the run.
+    skill = _make_skill(tmp_path, "data-analysis", content="# Data Analysis\nUse pandas.")
+    disk_reads = {"n": 0}
+    real_read = SkillActivationMiddleware._read_skill_content
+
+    def counting_read(skill_file, skills_root, *, storage=None):
+        disk_reads["n"] += 1
+        return real_read(skill_file, skills_root, storage=storage)
+
+    monkeypatch.setattr(middleware_module, "get_or_new_skill_storage", lambda **kwargs: _make_storage(tmp_path, [skill]))
+    monkeypatch.setattr(SkillActivationMiddleware, "_read_skill_content", staticmethod(counting_read))
+
+    recorded = []
+    journal = SimpleNamespace(record_middleware=lambda *args, **kwargs: recorded.append(kwargs))
+    # One run context object, shared across every model call of the turn.
+    runtime = SimpleNamespace(context={"__run_journal": journal})
+    middleware = SkillActivationMiddleware()
+    user = HumanMessage(content="/data-analysis analyze uploads/foo.csv", id="msg-1")
+
+    # --- model call 1: the single activation call ---
+    first_capture = {}
+
+    def first_handler(model_request: ModelRequest):
+        first_capture["messages"] = model_request.messages
+        return AIMessage(content="", tool_calls=[{"name": "echo", "args": {}, "id": "call-1"}], id="ai-1")
+
+    first_result = middleware.wrap_model_call(_make_model_request([user], runtime=runtime), first_handler)
+    assert isinstance(first_result, AIMessage)
+    assert sum(is_slash_skill_activation_reminder(message) for message in first_capture["messages"]) == 1
+
+    # --- model call 2: same turn, real state after the tool result comes back.
+    # The reminder from call 1 is gone (never persisted), exactly as create_agent
+    # rebuilds it. It must NOT be re-injected. ---
+    ai_tool_call = first_result
+    tool_result = ToolMessage(content="echoed", tool_call_id="call-1", id="tool-1")
+    second_capture = {}
+
+    def second_handler(model_request: ModelRequest):
+        second_capture["messages"] = model_request.messages
+        return AIMessage(content="final answer", id="ai-2")
+
+    second_result = middleware.wrap_model_call(_make_model_request([user, ai_tool_call, tool_result], runtime=runtime), second_handler)
+    assert isinstance(second_result, AIMessage)
+    assert second_capture["messages"] == [user, ai_tool_call, tool_result]
+    assert sum(is_slash_skill_activation_reminder(message) for message in second_capture["messages"]) == 0
+
+    # Skill read from disk once and the activation audit event recorded once for the
+    # whole multi-call turn.
+    assert disk_reads["n"] == 1
+    assert sum(1 for kwargs in recorded if kwargs.get("action") == "activate") == 1
+
+
+def test_skill_activation_middleware_reactivates_on_new_user_slash_command(monkeypatch, tmp_path):
+    # The run-scoped dedup must not suppress a genuinely new activation: a later
+    # user slash message (distinct id / text) keys differently, so it still
+    # activates even though an earlier slash message already activated in this run.
+    skill_a = _make_skill(tmp_path, "data-analysis", content="# Data Analysis\nUse pandas.")
+    skill_b = _make_skill(tmp_path, "frontend-design", content="# Frontend Design\nUse react.")
+    monkeypatch.setattr(middleware_module, "get_or_new_skill_storage", lambda **kwargs: _make_storage(tmp_path, [skill_a, skill_b]))
+
+    recorded = []
+    journal = SimpleNamespace(record_middleware=lambda *args, **kwargs: recorded.append(kwargs))
+    runtime = SimpleNamespace(context={"__run_journal": journal})
+    middleware = SkillActivationMiddleware()
+
+    first_msg = HumanMessage(content="/data-analysis analyze uploads/foo.csv", id="msg-1")
+    first_capture = {}
+
+    def first_handler(model_request: ModelRequest):
+        first_capture["messages"] = model_request.messages
+        return AIMessage(content="done", id="ai-1")
+
+    middleware.wrap_model_call(_make_model_request([first_msg], runtime=runtime), first_handler)
+    first_reminders = [message for message in first_capture["messages"] if is_slash_skill_activation_reminder(message)]
+    assert len(first_reminders) == 1
+    assert "Use pandas." in first_reminders[0].content
+
+    # New user turn in the same run context: a different slash command must activate.
+    second_msg = HumanMessage(content="/frontend-design build a form", id="msg-2")
+    second_capture = {}
+
+    def second_handler(model_request: ModelRequest):
+        second_capture["messages"] = model_request.messages
+        return AIMessage(content="done", id="ai-2")
+
+    middleware.wrap_model_call(
+        _make_model_request([first_msg, AIMessage(content="done", id="ai-1"), second_msg], runtime=runtime),
+        second_handler,
+    )
+    second_reminders = [message for message in second_capture["messages"] if is_slash_skill_activation_reminder(message)]
+    assert len(second_reminders) == 1
+    assert "Use react." in second_reminders[0].content
+
+    # Two distinct activations recorded across the run.
+    assert sum(1 for kwargs in recorded if kwargs.get("action") == "activate") == 2
+
+
+def test_skill_activation_middleware_activates_per_call_when_run_context_is_none(monkeypatch, tmp_path):
+    # Regression for the degraded-path contract: when runtime.context is None
+    # (e.g. no run-scoped context is threaded through - the #3989 case), _run_context()
+    # normalizes it to None and the run-scoped dedup guard (_already_activated) must
+    # treat that as "nothing recorded yet" rather than crashing or wrongly skipping
+    # activation. The middleware should gracefully fall back to the original
+    # per-call activation behavior - no worse than before the run-context dedup
+    # was introduced.
+    skill = _make_skill(tmp_path, "data-analysis", content="# Data Analysis\nUse pandas.")
+    monkeypatch.setattr(middleware_module, "get_or_new_skill_storage", lambda **kwargs: _make_storage(tmp_path, [skill]))
+
+    middleware = SkillActivationMiddleware()
+    original = HumanMessage(content="/data-analysis analyze uploads/foo.csv", id="msg-1")
+    runtime = SimpleNamespace(context=None)
+    captured = {}
+
+    def handler(model_request: ModelRequest):
+        captured["messages"] = model_request.messages
+        return AIMessage(content="ok")
+
+    result = middleware.wrap_model_call(_make_model_request([original], runtime=runtime), handler)
+
+    assert isinstance(result, AIMessage)
+    assert result.content == "ok"
+    activation_msg, user_msg = captured["messages"]
+    assert is_slash_skill_activation_reminder(activation_msg)
+    assert "Use pandas." in activation_msg.content
+    assert user_msg.content == original.content
 
 
 def test_skill_activation_middleware_async_injects_hidden_human_context_for_model_call(monkeypatch, tmp_path):
