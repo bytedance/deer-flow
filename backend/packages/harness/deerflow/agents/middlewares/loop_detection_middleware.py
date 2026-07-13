@@ -55,7 +55,7 @@ import hashlib
 import json
 import logging
 import threading
-from collections import OrderedDict, defaultdict, deque
+from collections import Counter, OrderedDict, defaultdict, deque
 from collections.abc import Awaitable, Callable
 from copy import deepcopy
 from typing import TYPE_CHECKING, override
@@ -199,12 +199,14 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
             Default: 20.
         max_tracked_threads: Maximum number of threads to track before
             evicting the least recently used. Default: 100.
-        tool_freq_warn: Number of calls to the same tool *type* (regardless
-            of arguments) before injecting a frequency warning. Catches
-            cross-file read loops that hash-based detection misses.
-            Default: 30.
-        tool_freq_hard_limit: Number of calls to the same tool type before
-            forcing a stop. Default: 50.
+        tool_freq_warn: Maximum number of same-tool-type calls within a
+            sliding window of ``_tool_freq_window`` before injecting a
+            frequency warning. Catches cross-file read loops that
+            hash-based detection misses. Default: 30 (within a window
+            of 50).
+        tool_freq_hard_limit: Maximum number of same-tool-type calls within
+            a sliding window of ``_tool_freq_window`` before forcing a
+            stop. Default: 50 (within a window of 50).
         tool_freq_overrides: Per-tool overrides for frequency thresholds,
             keyed by tool name. Each value is a ``(warn, hard_limit)`` tuple
             that replaces ``tool_freq_warn`` / ``tool_freq_hard_limit`` for
@@ -241,7 +243,7 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
         # the largest hard limit in play (global + every per-tool override) so a
         # tight burst can actually reach it while spread-out calls still decay
         # out of the window. Warn thresholds are intentionally excluded: a sane
-        # config has warn <= hard (covered by sizing to hard), and a misconfig
+        # config enforces warn <= hard (covered by sizing to hard), and a misconfig
         # with warn > hard would hard-stop first anyway, so an unreachable warn
         # is harmless and must not inflate the window.
         self._tool_freq_window = max(
@@ -255,7 +257,13 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
         # Windowed per-tool-type frequency: recent tool names per thread,
         # trimmed to ``window_size`` so the count decays instead of growing
         # monotonically (replaces the old monotonic ``_tool_freq`` integer).
-        self._tool_name_history: dict[str, deque[str]] = {}
+        self._tool_name_history: defaultdict[str, deque[str]] = defaultdict(deque)
+        # Per-thread Counter mirroring the deque so freq_count is O(1) instead
+        # of scanning the whole window on every tool call. A single high
+        # per-tool override (e.g. bash: {hard_limit: 1000}) inflates the window
+        # globally, so the scan would cost 1000 per call for every tool; Counter
+        # increments on append and decrements on popleft.
+        self._tool_name_counter: defaultdict[str, Counter[str]] = defaultdict(Counter)
         # Per-thread set of tool names already warned about in Layer 2, so a
         # frequency warning is enqueued once rather than on every subsequent
         # call. Cleared per name when the windowed count decays back below the
@@ -474,7 +482,8 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
                     return _WARNING_MSG, False
 
             # --- Layer 2: per-tool-type frequency (windowed) ---
-            tool_name_history = self._tool_name_history.setdefault(thread_id, deque())
+            tool_name_history = self._tool_name_history[thread_id]
+            name_counter = self._tool_name_counter[thread_id]
             for tc in tool_calls:
                 name = tc.get("name", "")
                 if not name:
@@ -482,11 +491,18 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
                 # Windowed counting: append the name and trim to the frequency
                 # window (>= the largest threshold) so the count can reach the
                 # warn/hard limits on a tight burst yet still decay for
-                # spread-out calls.
+                # spread-out calls. A mirrored Counter gives O(1) freq_count
+                # even when a per-tool override inflates the window globally.
                 tool_name_history.append(name)
+                name_counter[name] += 1
                 while len(tool_name_history) > self._tool_freq_window:
-                    tool_name_history.popleft()
-                freq_count = sum(1 for n in tool_name_history if n == name)
+                    old = tool_name_history.popleft()
+                    c = name_counter[old] - 1
+                    if c <= 0:
+                        del name_counter[old]
+                    else:
+                        name_counter[old] = c
+                freq_count = name_counter.get(name, 0)
 
                 if name in self._tool_freq_overrides:
                     eff_warn, eff_hard = self._tool_freq_overrides[name]
