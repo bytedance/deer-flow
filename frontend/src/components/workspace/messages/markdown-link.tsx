@@ -16,7 +16,7 @@ import { CitationLink } from "../citations/citation-link";
  * branch below and ``resolveArtifactURL``) — relative ``/…`` URLs are
  * inherently safe and pass through ``URL.protocol === ""``.
  */
-const SAFE_HREF_PROTOCOLS = ["http:", "https:"] as const;
+const SAFE_HREF_PROTOCOLS = ["http:", "https:", "mailto:", "tel:"] as const;
 
 export function isSafeHref(href: string | undefined): boolean {
   if (typeof href !== "string" || href.length === 0) {
@@ -57,22 +57,14 @@ export function createMarkdownLinkComponent(threadId?: string) {
     href,
     ...props
   }: AnchorHTMLAttributes<HTMLAnchorElement>) {
-    if (typeof props.children === "string") {
-      const match = /^citation:(.+)$/.exec(props.children);
-      if (match) {
-        const [, text] = match;
-        return (
-          <CitationLink {...props} href={href}>
-            {text}
-          </CitationLink>
-        );
-      }
-    }
     // Reject unsafe schemes up front so a prompt-injected / pasted href can
-    // never reach the rendered anchor. Keep the visible label so the user
-    // can still see what the link claimed to point at.
+    // never reach the rendered anchor — including through the citation
+    // branch (which renders <a href={href}> directly). Check before the
+    // citation block so prompt-injected [citation:x](javascript:...) is
+    // blocked. Keep the visible label so the user can still see what the
+    // link claimed to point at.
     if (href !== undefined && !isSafeHref(href)) {
-      const { className, children, ...rest } = props;
+      const { className, children, target, rel, ...rest } = props;
       return (
         <span
           {...rest}
@@ -86,6 +78,18 @@ export function createMarkdownLinkComponent(threadId?: string) {
           {children}
         </span>
       );
+    }
+    // Safe-href check passed — citation links now route through CitationLink.
+    if (typeof props.children === "string") {
+      const match = /^citation:(.+)$/.exec(props.children);
+      if (match) {
+        const [, text] = match;
+        return (
+          <CitationLink {...props} href={href}>
+            {text}
+          </CitationLink>
+        );
+      }
     }
     if (threadId && href?.startsWith("/mnt/")) {
       return (

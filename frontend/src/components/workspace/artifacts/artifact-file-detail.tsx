@@ -529,8 +529,12 @@ export function ArtifactFilePreview({
         ref={iframeRef}
         className="size-full"
         title="Artifact preview"
-        // Artifact HTML is untrusted. Keep all iframe capabilities disabled.
-        sandbox=""
+        // allow-scripts is needed for the scroll-restoration injected
+        // script (appendHtmlPreviewScrollRestoration) which communicates
+        // via postMessage. allow-same-origin is deliberately omitted: the
+        // opaque origin prevents access to parent.document and cookies,
+        // and postMessage(..., "*") works fine from it.
+        sandbox="allow-scripts allow-forms"
         src={htmlPreviewUrl}
       />
     );
