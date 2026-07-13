@@ -176,7 +176,7 @@ class SkillActivationMiddleware(AgentMiddleware):
         escaped_content_hash = html.escape(activation.content_hash, quote=True)
         editable_str = "true" if activation.editable else "false"
         return f"""<slash_skill_activation>
-The user explicitly activated the `{activation.skill_name}` skill for this turn.
+The user explicitly activated the `{escaped_skill_name}` skill for this turn.
 Treat the task text as:
 <user_request>
 {escaped_user_request}

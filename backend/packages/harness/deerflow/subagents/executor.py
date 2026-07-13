@@ -2,6 +2,7 @@
 
 import asyncio
 import atexit
+import html
 import logging
 import os
 import threading
@@ -605,7 +606,10 @@ class SubagentExecutor:
                 content = await asyncio.to_thread(skill.skill_file.read_text, encoding="utf-8")
                 content = content.strip()
                 if content:
-                    messages.append(SystemMessage(content=f'<skill name="{skill.name}">\n{content}\n</skill>'))
+                    # name/body are untrusted (installable ``.skill`` archive); escape
+                    # both so the body cannot forge a framework tag, matching the
+                    # slash-activation sibling (name quote=True attribute, body quote=False).
+                    messages.append(SystemMessage(content=f'<skill name="{html.escape(skill.name, quote=True)}">\n{html.escape(content, quote=False)}\n</skill>'))
                     logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} loaded skill: {skill.name}")
             except Exception:
                 logger.debug(f"[trace={self.trace_id}] Failed to read skill {skill.name}", exc_info=True)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import logging
 import threading
 from collections import OrderedDict
@@ -186,6 +187,17 @@ def _skill_mutability_label(category: SkillCategory | str) -> str:
     if category == SkillCategory.LEGACY:
         return "[legacy, read-only]"
     return "[built-in]"
+
+
+def _render_available_skill(name: str, description: str, category: SkillCategory | str, location: str) -> str:
+    # name/description/location come from a ``.skill`` archive's frontmatter
+    # (untrusted); escape them so a value cannot close its tag and forge a
+    # framework block in the system prompt (matches the slash-activation and
+    # durable-context siblings). ``category`` is a controlled enum.
+    esc_name = html.escape(name, quote=False)
+    esc_description = html.escape(description, quote=False)
+    esc_location = html.escape(location, quote=False)
+    return f"    <skill>\n        <name>{esc_name}</name>\n        <description>{esc_description} {_skill_mutability_label(category)}</description>\n        <location>{esc_location}</location>\n    </skill>"
 
 
 def clear_skills_system_prompt_cache() -> None:
@@ -716,17 +728,14 @@ def _get_cached_skills_prompt_section(
     filtered = [(name, description, category, location) for name, description, category, location in skill_signature if available_skills_key is None or name in available_skills_key]
     skills_list = ""
     if filtered:
-        skill_items = "\n".join(
-            f"    <skill>\n        <name>{name}</name>\n        <description>{description} {_skill_mutability_label(category)}</description>\n        <location>{location}</location>\n    </skill>"
-            for name, description, category, location in filtered
-        )
+        skill_items = "\n".join(_render_available_skill(name, description, category, location) for name, description, category, location in filtered)
         skills_list = f"<available_skills>\n{skill_items}\n</available_skills>"
 
     disabled_section = ""
     if disabled_skill_signature:
         disabled_filtered = [(name, description, category, location) for name, description, category, location in disabled_skill_signature if available_skills_key is None or name in available_skills_key]
         if disabled_filtered:
-            disabled_items = "\n".join(f"    - {name} ({category})" for name, description, category, location in disabled_filtered)
+            disabled_items = "\n".join(f"    - {html.escape(name, quote=False)} ({category})" for name, description, category, location in disabled_filtered)
             disabled_section = f"""<disabled_skills>
 The following skills are INSTALLED but DISABLED. You MUST NOT read,
 reference, or use any of these skills — including their SKILL.md,
