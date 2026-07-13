@@ -275,6 +275,16 @@ def _build_runtime_middlewares(
 
         tail.append(_ToolProgressMiddleware.from_config(tool_progress_config))
 
+    # ToolStreamingMiddleware sits between ToolProgress and ToolErrorHandling so
+    # it can emit lifecycle/error chunks around tool execution before
+    # ToolErrorHandlingMiddleware catches and wraps exceptions.  When the stream
+    # writer is unavailable (no "custom" stream_mode) it silently degrades to a
+    # pass-through with zero overhead.
+    if app_config.tool_streaming.enabled:
+        from deerflow.agents.middlewares.tool_streaming_middleware import ToolStreamingMiddleware
+
+        tail.append(ToolStreamingMiddleware.from_config(app_config.tool_streaming))
+
     tail.append(ToolErrorHandlingMiddleware(app_config=app_config))
 
     middlewares = [*outer_wrappers, *thread_hooks, *tail]
