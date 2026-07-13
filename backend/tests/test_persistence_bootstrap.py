@@ -615,6 +615,135 @@ class TestDecideState:
 # ---------------------------------------------------------------------------
 
 
+@asyncio_test
+async def test_migration_0004_cleans_up_duplicate_active_runs(tmp_path: Path) -> None:
+    """Seed duplicate active rows then upgrade: the migration must reconcile.
+
+    Pre-0004 a multi-worker race can leave two pending/running rows for the
+    same thread.  ``_cleanup_duplicate_active_runs`` in migration 0004
+    keeps the most-recently-created active run per thread and marks the
+    rest as ``interrupted``.  This test proves that path works end-to-end.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    from deerflow.persistence.run.model import RunRow
+
+    engine = create_async_engine(_url(tmp_path))
+    try:
+        # 1. Build the pre-0004 schema: upgrade only through 0003.
+        cfg = _get_alembic_config(engine)
+        pre_index_rev = "0003_scheduled_tasks"
+        await asyncio.to_thread(_upgrade, cfg, pre_index_rev)
+
+        # 2. Drop the partial unique index so we can seed duplicates.
+        #    ``create_all`` puts the index on the model, but migration 0003
+        #    does NOT create it — it was introduced in 0004.
+        #    Verify we're truly in a pre-index state.
+        async with engine.connect() as conn:
+            idx_rows = await conn.run_sync(lambda c: sa.inspect(c).get_indexes("runs"))
+        idx_names = {i["name"] for i in idx_rows if isinstance(i, dict)}
+        assert "ix_one_active_run_per_thread" not in idx_names, f"index unexpectedly present at rev {pre_index_rev}: {idx_names}"
+
+        # 3. Seed two active runs on the same thread via ORM insert so all
+        #    NOT NULL columns with Python-side defaults are filled.
+        thread_id = "thread-dup"
+        now = datetime.now(UTC)
+        older = now - timedelta(seconds=10)
+        async with engine.begin() as conn:
+            await conn.execute(
+                RunRow.__table__.insert(),
+                [
+                    {
+                        "run_id": "run-older",
+                        "thread_id": thread_id,
+                        "status": "pending",
+                        "multitask_strategy": "reject",
+                        "metadata_json": {},
+                        "kwargs_json": {},
+                        "message_count": 0,
+                        "created_at": older,
+                        "updated_at": older,
+                    },
+                    {
+                        "run_id": "run-newer",
+                        "thread_id": thread_id,
+                        "status": "pending",
+                        "multitask_strategy": "reject",
+                        "metadata_json": {},
+                        "kwargs_json": {},
+                        "message_count": 0,
+                        "created_at": now,
+                        "updated_at": now,
+                    },
+                ],
+            )
+
+        # Sanity: both runs visible before migration.
+        async with engine.connect() as conn:
+            rows = (await conn.execute(sa.text("SELECT run_id, status FROM runs WHERE thread_id = :tid"), {"tid": thread_id})).mappings().all()
+        assert len(rows) == 2
+        statuses = {r["run_id"]: r["status"] for r in rows}
+        assert statuses == {"run-older": "pending", "run-newer": "pending"}
+
+        # 4. Upgrade through 0004 — the migration must clean up the duplicate.
+        await asyncio.to_thread(_upgrade, cfg, HEAD)
+
+        # 5. Only the newer run stays pending; the older was reconciled.
+        async with engine.connect() as conn:
+            rows = (await conn.execute(sa.text("SELECT run_id, status, error FROM runs WHERE thread_id = :tid"), {"tid": thread_id})).mappings().all()
+        statuses = {r["run_id"]: r["status"] for r in rows}
+        assert statuses["run-newer"] == "pending", f"expected newer run pending, got {statuses}"
+        assert statuses["run-older"] == "interrupted", f"expected older run interrupted, got {statuses}"
+        assert any(r["error"] and "Cleaned up during migration 0004" in (r["error"] or "") for r in rows if r["run_id"] == "run-older"), "cleaned-up run missing error message"
+
+        # 6. The partial unique index exists and is functional.
+        async with engine.connect() as conn:
+            idx_rows = await conn.run_sync(lambda c: sa.inspect(c).get_indexes("runs"))
+        idx_names = {i["name"] for i in idx_rows if isinstance(i, dict)}
+        assert "ix_one_active_run_per_thread" in idx_names, f"index not found; indexes={idx_names}"
+
+        # Inserting another pending run on the same thread must fail.
+        async with engine.begin() as conn:
+            with pytest.raises(sa.exc.IntegrityError):
+                await conn.execute(
+                    RunRow.__table__.insert().values(
+                        run_id="run-third",
+                        thread_id=thread_id,
+                        status="pending",
+                        multitask_strategy="reject",
+                        metadata_json={},
+                        kwargs_json={},
+                        message_count=0,
+                        created_at=now,
+                        updated_at=now,
+                    ),
+                )
+
+        # But a run on a different thread is fine.
+        async with engine.begin() as conn:
+            await conn.execute(
+                RunRow.__table__.insert().values(
+                    run_id="run-other-thread",
+                    thread_id=f"{thread_id}-other",
+                    status="pending",
+                    multitask_strategy="reject",
+                    metadata_json={},
+                    kwargs_json={},
+                    message_count=0,
+                    created_at=now,
+                    updated_at=now,
+                ),
+            )
+
+    finally:
+        await engine.dispose()
+
+
+# ---------------------------------------------------------------------------
+# Sanity: head revision is the one this module expects
+# ---------------------------------------------------------------------------
+
+
 def test_head_revision_is_token_usage_revision() -> None:
     assert _get_head_revision() == HEAD
 

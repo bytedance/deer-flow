@@ -248,9 +248,7 @@ class RunManager:
                 lambda: self._store.put(record.run_id, **self._store_put_payload(record)),
             )
         except IntegrityError:
-            raise ConflictError(
-                f"Thread {record.thread_id} already has an active run"
-            ) from None
+            raise ConflictError(f"Thread {record.thread_id} already has an active run") from None
 
     async def _persist_to_store(self, record: RunRecord, *, error: str | None = None) -> bool:
         """Best-effort persist run record to backing store."""
@@ -660,6 +658,8 @@ class RunManager:
                 )
                 for r in inflight:
                     if r.finalizing:
+                        r.status = RunStatus.interrupted
+                        r.updated_at = now
                         continue
                     r.abort_action = multitask_strategy
                     r.abort_event.set()
@@ -669,11 +669,25 @@ class RunManager:
                         r.task.cancel()
                     r.status = RunStatus.interrupted
                     r.updated_at = now
-                # Persist interruptions before inserting the new run so
-                # the DB partial unique index won't see two active rows.
+                # Persist ALL inflight runs as interrupted before
+                # inserting the new run so the DB partial unique index
+                # won't see two active rows.  Runs that were already
+                # finalizing are included — writing ``interrupted`` is
+                # idempotent and the worker cleanup will write the final
+                # status later anyway.
+                failed_interruptions: list[str] = []
                 for r in inflight:
-                    if not r.finalizing:
-                        await self._persist_status(r, RunStatus.interrupted)
+                    ok = await self._persist_status(r, RunStatus.interrupted)
+                    if not ok:
+                        failed_interruptions.append(r.run_id)
+
+                if failed_interruptions:
+                    logger.error(
+                        "Failed to persist interrupted status for runs %s on thread %s; cannot safely create new run because old active runs may still be visible in the database",
+                        failed_interruptions,
+                        thread_id,
+                    )
+                    raise RuntimeError(f"Failed to interrupt active runs {failed_interruptions} for thread {thread_id}")
 
             record = RunRecord(
                 run_id=run_id,

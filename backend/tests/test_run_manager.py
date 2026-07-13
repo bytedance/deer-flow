@@ -691,6 +691,47 @@ async def test_create_or_reject_does_not_interrupt_old_run_when_new_run_store_wr
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("failure_mode", ["update_raises", "row_missing_and_recovery_fails"])
+async def test_create_or_reject_interrupt_raises_when_interrupted_persist_fails(failure_mode):
+    """A failed old-run status persist must surface as an explicit error, not a 409.
+
+    ``_persist_status`` is best-effort and returns ``False`` on failure.  If
+    the interrupted status cannot be committed to the store, the old run's
+    DB row would still be active and the new-run insert would trip the
+    partial unique index with a misleading ``ConflictError``.  Instead,
+    ``create_or_reject`` checks the persist result and raises a
+    ``RuntimeError`` before attempting the insert.
+
+    Both ``_persist_status`` failure modes are covered: ``update_status``
+    raising (e.g. transient SQLite lock), and ``update_status`` reporting a
+    missing row with the snapshot-recovery ``put`` also failing.
+    """
+    from unittest.mock import AsyncMock
+
+    store = MemoryRunStore()
+    manager = RunManager(store=store)
+    old = await manager.create("thread-1")
+    await manager.set_status(old.run_id, RunStatus.running)
+
+    if failure_mode == "update_raises":
+        store.update_status = AsyncMock(side_effect=RuntimeError("db down"))
+    else:
+        store.update_status = AsyncMock(return_value=False)
+        store.put = AsyncMock(side_effect=RuntimeError("db down"))
+
+    with pytest.raises(RuntimeError, match="Failed to interrupt active runs"):
+        await manager.create_or_reject("thread-1", multitask_strategy="interrupt")
+
+    # No phantom new run was inserted in memory.
+    assert list(manager._runs) == [old.run_id]
+    # The divergence is explicit: memory shows interrupted, store row untouched.
+    assert old.status == RunStatus.interrupted
+    stored_old = await store.get(old.run_id)
+    assert stored_old is not None
+    assert stored_old["status"] == "running"
+
+
+@pytest.mark.anyio
 async def test_create_or_reject_rollback_persists_interrupted_status_to_store():
     """rollback strategy should persist interrupted status for old runs."""
     store = MemoryRunStore()

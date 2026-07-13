@@ -111,9 +111,7 @@ class TestCrossWorkerAtomicCreate:
             await mgr.create_or_reject(thread_id)
 
         # The in-memory record created by the failed attempt should be rolled back
-        active_runs = [r for r in mgr._runs.values()
-                       if r.thread_id == thread_id
-                       and r.status in (RunStatus.pending, RunStatus.running)]
+        active_runs = [r for r in mgr._runs.values() if r.thread_id == thread_id and r.status in (RunStatus.pending, RunStatus.running)]
         assert len(active_runs) == 1
 
         await _cleanup()
@@ -180,5 +178,52 @@ class TestCrossWorkerAtomicCreate:
 
         rows = await repo.list_by_thread(thread_id)
         assert len(rows) == 2
+
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_interrupt_with_active_task_persists_interrupted_before_new_insert(self, tmp_path):
+        """Interrupt with a live asyncio task must write interrupted to the DB first.
+
+        The old run has an active task (the common real-world case: an
+        executing LLM call).  Cancelling the task sets ``finalizing=True``,
+        but the DB row must still be committed as ``interrupted`` *before*
+        the new run is inserted — otherwise the partial unique index fires
+        for the still-``running`` old row.
+        """
+        import asyncio as _asyncio
+
+        mgr, repo = await _make_repo_and_mgr(tmp_path)
+        thread_id = f"thread-{uuid.uuid4().hex[:8]}"
+
+        rec1 = await mgr.create_or_reject(thread_id)
+        await mgr.set_status(rec1.run_id, RunStatus.running)
+
+        # Attach a long-running task to simulate a live execution.
+        async def _spin() -> None:
+            try:
+                await _asyncio.sleep(999)
+            except _asyncio.CancelledError:
+                raise
+
+        live_task = _asyncio.create_task(_spin())
+        mgr._runs[rec1.run_id].task = live_task
+
+        rec2 = await mgr.create_or_reject(thread_id, multitask_strategy="interrupt")
+
+        # Task was cancelled and finalizing flag set.
+        assert live_task.cancelling()
+        assert rec1.finalizing is True
+        assert rec1.status == RunStatus.interrupted
+
+        # DB must reflect the interruption — the unique index is clear.
+        rows = await repo.list_by_thread(thread_id)
+        statuses = {r["run_id"]: r["status"] for r in rows}
+        assert statuses[rec1.run_id] == RunStatus.interrupted
+        assert statuses[rec2.run_id] == RunStatus.pending
+
+        # Let the cancelled task finish to avoid dangling-task warnings.
+        with pytest.raises(_asyncio.CancelledError):
+            await live_task
 
         await _cleanup()
