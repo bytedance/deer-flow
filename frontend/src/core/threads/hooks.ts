@@ -29,6 +29,7 @@ import type { UploadedFileInfo } from "../uploads";
 import { promptInputFilePartToFile, uploadFiles } from "../uploads";
 
 import { branchThreadFromTurn, fetchThreadTokenUsage } from "./api";
+import { messageIdentity } from "./message-identity";
 import {
   buildThreadsSearchQueryOptions,
   DEFAULT_THREAD_SEARCH_PARAMS,
@@ -139,20 +140,6 @@ const SUMMARIZATION_MIDDLEWARE_UPDATE_KEYS = new Set([
   "SummarizationMiddleware.before_model",
   "DeerFlowSummarizationMiddleware.before_model",
 ]);
-
-function messageIdentity(message: Message): string | undefined {
-  if (
-    "tool_call_id" in message &&
-    typeof message.tool_call_id === "string" &&
-    message.tool_call_id.length > 0
-  ) {
-    return `tool:${message.tool_call_id}`;
-  }
-  if (typeof message.id === "string" && message.id.length > 0) {
-    return `message:${message.id}`;
-  }
-  return undefined;
-}
 
 function dedupeMessagesByIdentity(messages: Message[]): Message[] {
   const lastIndexByIdentity = new Map<string, number>();
