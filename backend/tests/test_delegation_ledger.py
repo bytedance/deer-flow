@@ -458,3 +458,72 @@ class TestRenderDelegationLedger:
         assert "task 10" in out
         assert "task 0" not in out
         assert "omitted from this model view" in out
+
+    def test_truncated_count_zero_no_marker(self):
+        """When truncated_count is 0 (the default), the 'dropped from this
+        ledger' marker must not appear."""
+        out = render_delegation_ledger(
+            [_entry("a", "completed", description="research")],
+            truncated_count=0,
+        )
+        assert "dropped from this ledger" not in out
+
+    def test_truncated_count_single(self):
+        """truncated_count=1 must render a marker so the lead observes that
+        one delegation was silently dropped (D2 in the agent-core hunt)."""
+        out = render_delegation_ledger(
+            [_entry("a", "completed", description="research")],
+            truncated_count=1,
+        )
+        assert "(+1 earlier delegations dropped" in out
+
+    def test_truncated_count_multiple(self):
+        """truncated_count>1 must pluralize correctly in the marker."""
+        out = render_delegation_ledger(
+            [_entry("a", "completed", description="research")],
+            truncated_count=5,
+        )
+        assert "(+5 earlier delegations dropped" in out
+
+    def test_truncated_count_in_empty_ledger(self):
+        """Even an empty ledger with truncated_count>0 must render the marker,
+        because the loss is still observable."""
+        out = render_delegation_ledger([], truncated_count=3)
+        assert "(+3 earlier delegations dropped" in out
+
+
+class TestBoundDescription:
+    """Tests for ``_bound_description`` — the helper that caps delegation
+    descriptions with a truncation marker (D3 in agent-core hunt)."""
+
+    def test_short_description_passes_through(self):
+        from deerflow.agents.middlewares.delegation_ledger import _bound_description
+
+        result = _bound_description("short")
+        assert result == "short"
+        assert _bound_description.__kwdefaults__ is not None  # cap has a default
+
+    def test_long_description_is_truncated_with_suffix(self):
+        from deerflow.agents.middlewares.delegation_ledger import _bound_description
+
+        long = "x" * 201
+        result = _bound_description(long)
+        assert len(result) <= 201
+        assert result.endswith(" ... [truncated]"), (
+            f"Expected truncation suffix, got: {result[-50:]}"
+        )
+        assert result != long
+
+    def test_truncation_suffix_not_inserted_when_under_cap(self):
+        from deerflow.agents.middlewares.delegation_ledger import _bound_description
+
+        result = _bound_description("x" * 198)
+        assert result == "x" * 198
+        assert "truncated" not in result
+
+    def test_exact_cap_no_truncation(self):
+        from deerflow.agents.middlewares.delegation_ledger import _bound_description
+
+        result = _bound_description("x" * 200)
+        assert result == "x" * 200
+        assert "truncated" not in result
