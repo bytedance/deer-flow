@@ -11,6 +11,11 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import Any, Literal
 
+try:
+    from defusedxml import ElementTree as SafeET  # type: ignore[import-not-found]
+except ImportError:
+    SafeET = None  # Fall back to stdlib; risk is limited (agent-requested output).
+
 import yaml
 
 ToolOutputKind = Literal["json", "csv", "tsv", "yaml", "xml", "code", "text", "unknown"]
@@ -19,18 +24,21 @@ _KEY_LIMIT = 12
 _SCALAR_LIMIT = 6
 _TABLE_SAMPLE_ROWS = 50
 _TABLE_COLUMN_LIMIT = 18
-_TABLE_FIRST_ROW_CHARS = 220
 _TEXT_HEADER_LIMIT = 16
 _TEXT_EXCERPT_CHARS = 420
 _CODE_IMPORT_LIMIT = 12
 _CODE_SYMBOL_LIMIT = 24
+_JSON_SHAPE_MAX_DEPTH = 2
 _JSON_STRUCTURE_LIMIT = 24
 _JSON_STRUCTURE_DEPTH = 4
 
 _CODE_HINTS = (
     re.compile(r"^\s*(?:from\s+\S+\s+import|import\s+\S+)", re.MULTILINE),
     re.compile(r"^\s*(?:class|def|async\s+def|function|export\s+function)\s+[A-Za-z_]\w*", re.MULTILINE),
-    re.compile(r"^\s*(?:package|use|pub\s+fn|fn|public\s+class)\s+[A-Za-z_]\w*", re.MULTILINE),
+    # Require stronger signals for Rust/Java: `use ...;` (trailing semicolon),
+    # `fn ...(` (parenthesised), `pub fn ...(`, `public class ...`.  Bare
+    # `use <word>` or `fn <word>` misclassifies prose (e.g. "use the following …").
+    re.compile(r"^\s*(?:package\s+[A-Za-z_][\w.]*|use\s+[A-Za-z_][\w:]*\s*;|pub\s+fn\s+[A-Za-z_]\w*\s*\(|fn\s+[A-Za-z_]\w*\s*\(|public\s+class\s+[A-Za-z_]\w*)", re.MULTILINE),
 )
 
 
@@ -117,6 +125,10 @@ def render_tool_output_preview(
     synopsis = build_tool_output_synopsis(content, tool_name=tool_name)
     head_budget = max(0, head_chars)
     tail_budget = max(0, tail_chars)
+    # For text kind, skip excerpts in the synopsis when a raw sample will be
+    # appended (avoids duplicating head/tail bytes in both places).
+    if synopsis.kind == "text" and head_budget + tail_budget > 0 and len(content) > head_budget + tail_budget:
+        synopsis = _summarize_text(content, tool_name=tool_name, include_excerpts=False)
     lines = [
         f"[Full {tool_name} output saved to {virtual_path} ({total} chars, ~{total // 4} tokens).]",
         f"[Preview kind: {synopsis.kind}. This is a structured synopsis, not a raw head/tail truncation.]",
@@ -160,7 +172,8 @@ def _build_raw_sample(content: str, *, head_budget: int, tail_budget: int, exist
 
     If the synopsis already provides a sample (binary-like output), use
     it directly. Otherwise slice head_budget bytes from the start and
-    tail_budget bytes from the end, avoiding duplicate bytes when the
+    tail_budget bytes from the end, snapping to line boundaries so
+    previews end on clean line breaks. Avoids duplicate bytes when the
     two slices would overlap.
     """
     if existing:
@@ -171,9 +184,19 @@ def _build_raw_sample(content: str, *, head_budget: int, tail_budget: int, exist
         return content
     parts: list[str] = []
     if head_budget > 0:
-        parts.append(content[:head_budget])
+        head = content[:head_budget]
+        # Snap to the last newline within the budget for clean truncation.
+        snap = head.rfind("\n")
+        if snap > 0:
+            head = head[:snap]
+        parts.append(head)
     if tail_budget > 0 and head_budget + tail_budget < len(content):
-        parts.append(content[-tail_budget:])
+        tail = content[-tail_budget:]
+        # Snap to the first newline within the tail for clean truncation.
+        snap = tail.find("\n")
+        if snap >= 0 and snap < len(tail) - 1:
+            tail = tail[snap + 1:]
+        parts.append(tail)
     if len(parts) == 2:
         return f"{parts[0]}\n...\n{parts[1]}"
     return parts[0]
@@ -221,7 +244,7 @@ def _short_value(value: Any) -> str:
 
 
 def _json_shape(value: Any, *, depth: int = 0) -> str:
-    if depth >= 2:
+    if depth >= _JSON_SHAPE_MAX_DEPTH:
         return "..."
     if isinstance(value, dict):
         keys = [str(key) for key in list(value.keys())[:_KEY_LIMIT]]
@@ -353,7 +376,7 @@ def _try_xml(stripped: str) -> ToolOutputSynopsis | None:
     if not stripped.startswith("<"):
         return None
     try:
-        root = ET.fromstring(stripped)
+        root = (SafeET or ET).fromstring(stripped)
     except Exception:
         return None
 
@@ -386,10 +409,11 @@ def _try_table(content: str, *, delimiter: str, kind: Literal["csv", "tsv"]) -> 
 
     width = len(rows[0])
     consistent = [row for row in rows[1:11] if len(row) == width]
-    # Tab-delimited inputs see a lot of false positives (indented bash,
-    # `ls -l` listings, tree dumps). Require >= 5 same-width data rows
-    # for TSV; CSV is rare enough in practice that 2 rows is acceptable.
-    if kind == "tsv" and len(consistent) < _TABLE_MIN_DATA_ROWS:
+    # Require >= _TABLE_MIN_DATA_ROWS same-width data rows for both TSV and CSV.
+    # TSV sees a lot of false positives (indented bash, ls -l listings, tree
+    # dumps). CSV is rarer but prose with a comma in the first line also slips
+    # through without this gate.
+    if len(consistent) < _TABLE_MIN_DATA_ROWS:
         return None
 
     # Header row must look like identifiers (no whitespace, no leading ws).
@@ -531,7 +555,7 @@ def _summarize_code(content: str) -> ToolOutputSynopsis:
     )
 
 
-def _summarize_text(content: str, *, tool_name: str = "") -> ToolOutputSynopsis:
+def _summarize_text(content: str, *, tool_name: str = "", include_excerpts: bool = True) -> ToolOutputSynopsis:
     lines = content.splitlines()
     normalized = re.sub(r"\s+", " ", content).strip()
     headers: list[str] = []
@@ -550,24 +574,24 @@ def _summarize_text(content: str, *, tool_name: str = "") -> ToolOutputSynopsis:
         if len(headers) >= _TEXT_HEADER_LIMIT:
             break
 
-    opener = _one_line(content[:_TEXT_EXCERPT_CHARS], _TEXT_EXCERPT_CHARS)
-    # For inputs shorter than 2 * _TEXT_EXCERPT_CHARS the original opener
-    # and closer would overlap and duplicate text. Skip the closer in that
-    # case (and also when opener already covers the entire content).
-    if len(content) <= _TEXT_EXCERPT_CHARS:
-        closer = ""
-    else:
-        close_start = max(_TEXT_EXCERPT_CHARS, len(content) - _TEXT_EXCERPT_CHARS)
-        closer = _one_line(content[close_start:], _TEXT_EXCERPT_CHARS) if close_start < len(content) else ""
-    word_count = len(normalized.split()) if normalized else 0
     tool_hint = f" from {tool_name}" if tool_name else ""
     summary_lines = [
-        f"Text output{tool_hint} with {len(content)} characters, {word_count} words, and {len(lines)} lines.",
+        f"Text output{tool_hint} with {len(content)} characters, {len(normalized.split()) if normalized else 0} words, and {len(lines)} lines.",
         f"Detected section headers: {' | '.join(headers) if headers else 'none detected'}.",
-        f"Opening excerpt: {opener or '(empty)'}",
     ]
-    if closer:
-        summary_lines.append(f"Closing excerpt: {closer}")
+    # Include opening/closing excerpts only when no raw head/tail sample will
+    # be appended by render_tool_output_preview (avoids duplicating the same
+    # head/tail bytes in both the synopsis summary and the raw sample).
+    if include_excerpts:
+        opener = _one_line(content[:_TEXT_EXCERPT_CHARS], _TEXT_EXCERPT_CHARS)
+        if len(content) <= _TEXT_EXCERPT_CHARS:
+            closer = ""
+        else:
+            close_start = max(_TEXT_EXCERPT_CHARS, len(content) - _TEXT_EXCERPT_CHARS)
+            closer = _one_line(content[close_start:], _TEXT_EXCERPT_CHARS) if close_start < len(content) else ""
+        summary_lines.append(f"Opening excerpt: {opener or '(empty)'}")
+        if closer:
+            summary_lines.append(f"Closing excerpt: {closer}")
     return ToolOutputSynopsis(
         kind="text",
         title="Text output",

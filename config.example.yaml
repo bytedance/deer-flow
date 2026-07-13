@@ -892,8 +892,8 @@ tool_search:
 tool_output:
   enabled: true
   externalize_min_chars: 12000
-  # Kept for compatibility; typed previews only use these as sample budgets for
-  # unknown/binary-like content inside the structured synopsis.
+  # Sampling budget for the inline raw head/tail sample appended to every
+  # typed synopsis; ignored for binary-like output, which carries its own sample.
   preview_head_chars: 2000
   preview_tail_chars: 1000
   fallback_max_chars: 30000
