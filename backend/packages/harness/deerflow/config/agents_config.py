@@ -302,11 +302,17 @@ def load_agent_soul(agent_name: str | None, *, user_id: str | None = None) -> st
         soul_path = agent_dir / SOUL_FILENAME
         # Fallback: resolve_agent_dir requires config.yaml to be present
         # (see #3390), but SOUL.md loading does not depend on config.yaml.
-        # If the resolved dir doesn't contain SOUL.md, check the per-user
-        # and legacy directories directly so that agents configured via
-        # DEER_FLOW_CONFIG_PATH (or any setup where the agent dir has
-        # SOUL.md but no config.yaml) can still load their soul (#4135).
-        if not soul_path.exists():
+        # If the resolved dir doesn't have config.yaml (meaning the resolver
+        # returned its default path because no agent dir qualified) and also
+        # lacks SOUL.md, check the per-user and legacy directories directly
+        # so that agents configured via DEER_FLOW_CONFIG_PATH (or any setup
+        # where the agent dir has SOUL.md but no config.yaml) can still load
+        # their soul (#4135). The config.yaml guard ensures this fallback
+        # only fires for dirs the resolver couldn't resolve, not for a
+        # properly-resolved per-user agent that simply lacks SOUL.md -
+        # preserving the "per-user entries fully shadow legacy entries"
+        # invariant (agents_config.py:3-7, list_custom_agents).
+        if not soul_path.exists() and not (agent_dir / "config.yaml").exists():
             paths = get_paths()
             effective_user = user_id or get_effective_user_id()
             for candidate in (
