@@ -45,12 +45,15 @@ logging:
 # The `file` exporter writes one trace JSON per run to `.monocle/` under the
 # process working directory (git-ignored). Each trace captures the workflow and
 # per-agent/LLM/tool spans, including span inputs and outputs (prompts, tool
-# arguments, and model responses), token usage, and timings.
+# arguments, and model responses), token usage, and timings. Trace files are
+# never rotated or cleaned up automatically; prune `.monocle/` periodically if
+# you run with tracing enabled long-term.
 #
 # Data-exfiltration note: `file` persists prompts and model outputs to local
-# disk; non-file exporters (e.g. `okahu`) send that same span data off-box to an
-# external collector. Enable only exporters whose data handling you trust, and
-# be aware that prompts/outputs may contain sensitive content.
+# disk, and `console` prints them to stdout; the remote exporters (`okahu`,
+# `s3`, `blob`, `gcs`) send that same span data off-box to an external
+# collector. Enable only exporters whose data handling you trust, and be aware
+# that prompts/outputs may contain sensitive content.
 #
 # Note: Monocle shares the global OpenTelemetry TracerProvider with Langfuse, so
 # both can be enabled together; Monocle's exporters then also capture Langfuse's

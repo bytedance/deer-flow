@@ -193,6 +193,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Agent observability (Monocle). Off by default; enabled with
     # MONOCLE_TRACING. Initialized here at startup — not at import time — so a
     # plain `import deerflow.agents` never installs a process-global tracer.
+    # Unlike LangSmith/Langfuse, whose validation failures abort the agent run,
+    # a bad Monocle config only logs: the Gateway keeps serving without tracing.
     try:
         setup_monocle_tracing_if_enabled()
     except Exception:  # pragma: no cover - observability must never break startup

@@ -41,6 +41,9 @@ _TRACING_ENV = (
 def clear_monocle_env(monkeypatch):
     for name in _TRACING_ENV:
         monkeypatch.delenv(name, raising=False)
+    # The setup-completed flag is process-global; reset it so a test that runs
+    # (mocked) setup cannot change how later tests observe the embedded hint.
+    monkeypatch.setattr("deerflow.tracing.monocle._setup_completed", False)
     reset_tracing_config()
     yield
     reset_tracing_config()
@@ -112,6 +115,19 @@ def test_no_off_box_warning_for_file_exporter(monkeypatch, caplog):
     assert not any("beyond the local" in r.message for r in caplog.records)
 
 
+def test_no_off_box_warning_for_console_exporter(monkeypatch, caplog):
+    """``console`` writes to local stdout, so it must not trip the off-box warning."""
+    monkeypatch.setenv("MONOCLE_TRACING", "true")
+    monkeypatch.setenv("MONOCLE_EXPORTERS", "file,console")
+    reset_tracing_config()
+    monkeypatch.setattr("monocle_apptrace.setup_monocle_telemetry", lambda **kw: None)
+
+    with caplog.at_level(logging.WARNING):
+        assert setup_monocle_tracing_if_enabled() is True
+
+    assert not any("beyond the local" in r.message for r in caplog.records)
+
+
 def test_coexists_with_langfuse():
     """Monocle and Langfuse (v4, OTel-based) share the global provider without span loss.
 
@@ -142,6 +158,10 @@ def test_coexists_with_langfuse():
         Langfuse(tracing_enabled=True)
 
         assert trace.get_tracer_provider() is provider  # provider not replaced
+        # NOTE: reaches into OTel SDK internals (no public API lists a
+        # provider's span processors). The SDK is pinned by uv.lock; if a bump
+        # renames these attributes, update this introspection — the coexistence
+        # behavior itself is unaffected.
         names = [type(p).__name__ for p in provider._active_span_processor._span_processors]
         assert any("Langfuse" in n for n in names), names  # Langfuse attached alongside Monocle
         print("COEXIST_OK")
@@ -176,6 +196,40 @@ def test_okahu_exporter_with_api_key_ok(monkeypatch):
     monkeypatch.setattr("monocle_apptrace.setup_monocle_telemetry", lambda **kw: None)
 
     assert setup_monocle_tracing_if_enabled() is True
+
+
+def test_embedded_hint_when_enabled_but_uninitialized(monkeypatch, caplog):
+    """``build_tracing_callbacks()`` hints when Monocle is enabled but setup never ran.
+
+    The embedded ``DeerFlowClient`` and the TUI never hit the Gateway lifespan,
+    so this debug line is the only in-process signal explaining why no Monocle
+    traces appear.
+    """
+    from deerflow.tracing import build_tracing_callbacks
+
+    monkeypatch.setenv("MONOCLE_TRACING", "true")
+    reset_tracing_config()
+    monkeypatch.setattr("deerflow.tracing.monocle._setup_completed", False)
+
+    with caplog.at_level(logging.DEBUG):
+        assert build_tracing_callbacks() == []
+
+    assert any("not initialized in this process" in r.message for r in caplog.records)
+
+
+def test_no_embedded_hint_after_setup(monkeypatch, caplog):
+    from deerflow.tracing import build_tracing_callbacks
+
+    monkeypatch.setenv("MONOCLE_TRACING", "true")
+    reset_tracing_config()
+    monkeypatch.setattr("deerflow.tracing.monocle._setup_completed", False)
+    monkeypatch.setattr("monocle_apptrace.setup_monocle_telemetry", lambda **kw: None)
+    assert setup_monocle_tracing_if_enabled() is True
+
+    with caplog.at_level(logging.DEBUG):
+        build_tracing_callbacks()
+
+    assert not any("not initialized in this process" in r.message for r in caplog.records)
 
 
 def test_no_import_time_setup():

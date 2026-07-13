@@ -11,6 +11,15 @@ from deerflow.config import (
 
 logger = logging.getLogger(__name__)
 
+# Read by build_tracing_callbacks() to hint embedded/TUI processes that
+# enabled MONOCLE_TRACING but never ran the Gateway-lifespan setup.
+_setup_completed = False
+
+
+def is_monocle_setup_completed() -> bool:
+    """Whether :func:`setup_monocle_tracing_if_enabled` ran in this process."""
+    return _setup_completed
+
 
 def setup_monocle_tracing_if_enabled() -> bool:
     """Initialize Monocle telemetry when ``MONOCLE_TRACING`` is enabled; a no-op otherwise.
@@ -34,15 +43,12 @@ def setup_monocle_tracing_if_enabled() -> bool:
     # exporters also capture Langfuse's spans when both are enabled.
     exporters = monocle.exporters
 
-    # Any exporter other than `file` moves trace data (prompts, tool inputs and
-    # outputs, completions) beyond the local .monocle/ directory, e.g. to an
-    # external collector (okahu, s3, ...). Warn loudly so it can't happen
-    # unnoticed.
-    non_file = [e.strip() for e in exporters.split(",") if e.strip() and e.strip() != "file"]
-    if non_file:
+    # `console` stays on local stdout, so only the remote exporters are flagged.
+    off_box = [e.strip() for e in exporters.split(",") if e.strip() and e.strip() not in ("file", "console")]
+    if off_box:
         logger.warning(
             "Monocle is exporting trace data (prompts, tool inputs/outputs, completions) beyond the local .monocle/ file via: %s. Make sure that destination is trusted.",
-            ", ".join(non_file),
+            ", ".join(off_box),
         )
 
     try:
@@ -52,5 +58,7 @@ def setup_monocle_tracing_if_enabled() -> bool:
 
     # monocle_exporters_list takes the comma-separated string as-is (monocle_apptrace's API).
     setup_monocle_telemetry(workflow_name="deer-flow", monocle_exporters_list=exporters)
+    global _setup_completed
+    _setup_completed = True
     logger.info("Monocle telemetry enabled (exporters=%s)", exporters)
     return True

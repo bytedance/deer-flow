@@ -58,11 +58,9 @@ class MonocleTracingConfig(BaseModel):
     okahu_api_key: str | None = Field(...)
 
     @property
-    def is_configured(self) -> bool:
-        # Intentionally coarser than LangSmith/Langfuse (which fold credential
-        # presence in): whether Monocle needs credentials depends on the exporter
-        # mix, so that composite check lives in validate(), called from setup at
-        # Gateway startup — where a bad config fails loudly without touching runs.
+    def is_enabled(self) -> bool:
+        # Unlike the siblings' is_configured, no credential check here: that is
+        # exporter-dependent and lives in validate(), run at Gateway startup.
         return self.enabled
 
     def validate(self) -> None:
@@ -191,7 +189,7 @@ def is_monocle_tracing_enabled() -> bool:
     process-global instrumentor activated at startup, not a per-run LangChain
     callback.
     """
-    return get_tracing_config().monocle.is_configured
+    return get_tracing_config().monocle.is_enabled
 
 
 def reset_tracing_config() -> None:
