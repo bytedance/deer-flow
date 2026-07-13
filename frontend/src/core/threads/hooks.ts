@@ -32,6 +32,7 @@ import { isSidecarThread, SIDECAR_METADATA_KEY } from "../sidecar/thread";
 import { useSubtaskContext, useUpdateSubtask } from "../tasks/context";
 import { taskEventToSubtaskUpdate } from "../tasks/lifecycle";
 import { messageToStep } from "../tasks/steps";
+import { useToolStreaming } from "../tasks/tool-streaming";
 import type { UploadedFileInfo } from "../uploads";
 import { promptInputFilePartToFile, uploadFiles } from "../uploads";
 import { uuid } from "../utils/uuid";
@@ -1908,6 +1909,7 @@ export function useThreadStream({
   const queryClient = useQueryClient();
   const { tasksRef, setTasks } = useSubtaskContext();
   const updateSubtask = useUpdateSubtask();
+  const { updateToolStream } = useToolStreaming();
 
   const scheduleActiveRunRejoinRetry = useCallback(() => {
     const rejoin = activeRunRejoinRef.current;
@@ -2104,6 +2106,25 @@ export function useThreadStream({
           id: e.task_id,
           latestMessage: e.message,
           steps: [messageToStep(e.message, e.message_index ?? 0)],
+        });
+        return;
+      }
+
+      if (eventType === "tool_output_chunk") {
+        const e = event as {
+          type: "tool_output_chunk";
+          tool_call_id: string;
+          tool_name: string;
+          chunk: string;
+          is_partial: boolean;
+          is_final: boolean;
+          error?: boolean;
+        };
+        updateToolStream({
+          toolName: e.tool_name,
+          text: e.chunk,
+          isPartial: e.is_partial,
+          isError: !!e.error,
         });
         return;
       }
