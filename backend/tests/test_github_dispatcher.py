@@ -1048,14 +1048,32 @@ async def test_coder_and_reviewer_on_same_pr_get_distinct_threads(base_dir: Path
 # `gh api`) when it processes the parent `pull_request_review` event. Each
 # such companion comment carries `pull_request_review_id` and (unless it is
 # itself a reply within an existing thread) no `in_reply_to_id`.
+#
+# PR #4131 review (willem-bd, zhfeng -- "Request changes"): the first cut of
+# this filter suppressed every such companion comment unconditionally,
+# before the registry lookup / per-agent loop even ran. That is only safe
+# for a binding that ALSO subscribes to `pull_request_review` on the same
+# repo -- it has its own path to the review content, via
+# `_pr_review_prompt`, so the companion comment is genuinely redundant for
+# it. A binding that subscribes to `pull_request_review_comment` ALONE
+# never receives the parent review event at all (events are opt-in per
+# binding, see `triggers.py`), so the parent event was never a substitute
+# for it in the first place -- suppressing the companion comment too would
+# silently drop the entire review submission's inline content for that
+# binding, with no recovery path. The filter is now applied per matched
+# binding: it only suppresses when that SAME binding also has its own
+# `pull_request_review` trigger configured for this repo.
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
 async def test_review_comment_companion_to_review_is_suppressed(base_dir: Path) -> None:
     """A `pull_request_review_comment` that is pure fan-out from a parent
-    `pull_request_review` submission must be suppressed before it reaches
-    any agent binding -- even one that would otherwise match.
+    `pull_request_review` submission is suppressed for a binding that is
+    ALSO registered for `pull_request_review` on the same repo -- that
+    binding has its own path to the review content, so the companion
+    comment is genuinely redundant for it. This is the original bug fix's
+    value and must be preserved by the binding-scoped gate.
 
     ``pull_request_review_id`` is set (this comment belongs to a review)
     and ``in_reply_to_id`` is absent (this is not a reply-to-a-reply), so
@@ -1072,7 +1090,13 @@ async def test_review_comment_companion_to_review_is_suppressed(base_dir: Path) 
                 "bindings": [
                     {
                         "repo": "a/b",
-                        "triggers": {"pull_request_review_comment": {"require_mention": False}},
+                        "triggers": {
+                            # Dual-subscribed: this binding also listens for
+                            # the parent review event, so it has its own
+                            # path to the review's content.
+                            "pull_request_review": {},
+                            "pull_request_review_comment": {"require_mention": False},
+                        },
                     }
                 ],
             },
@@ -1091,12 +1115,121 @@ async def test_review_comment_companion_to_review_is_suppressed(base_dir: Path) 
         "sender": {"login": "coderabbitai[bot]"},
     }
     result = await fanout_event(bus, "pull_request_review_comment", "del-storm-1", payload)
-    # Filtered before the registry lookup even runs -- matched_agents stays
-    # empty, exactly like the existing "no_target" early-return shape.
-    assert result["matched_agents"] == [], result
+    # The binding-scoped gate runs inside the per-agent loop (after the
+    # registry lookup), so the agent DOES show up as matched -- it just
+    # doesn't fire. This is more informative than the old global early
+    # return (which reported `matched_agents: []` even when an agent would
+    # have matched -- PR #4131 review, zhfeng's "Minor" observability note).
+    assert result["matched_agents"] == ["reviewer"], result
     assert result["fired_agents"] == [], result
-    assert any(s["reason"] == "redundant_review_comment" for s in result["skipped"]), result
+    assert any(s["agent"] == "reviewer" and s["reason"] == "redundant_review_comment" for s in result["skipped"]), result
     assert await _drain(bus) == []
+
+
+@pytest.mark.asyncio
+async def test_review_comment_only_binding_not_suppressed(base_dir: Path) -> None:
+    """Regression fix (PR #4131 review, Concern 1 -- zhfeng, "Request
+    changes"): a binding registered for `pull_request_review_comment`
+    ALONE (no `pull_request_review` trigger) must still fire on a
+    companion comment, even though the payload has the exact same
+    fan-out shape as the previous test.
+
+    Such a binding never receives the parent `pull_request_review` event
+    at all -- events are opt-in per binding (`triggers.py`) -- so the
+    companion comment is its ONLY delivery of this review's inline
+    content. Unconditionally suppressing it (the as-reviewed behavior)
+    would be a silent, total loss of the review's inline comments for
+    this binding, not noise reduction. This is the same operator config
+    zhfeng's review used as the concrete failure scenario:
+    `pull_request_review_comment: {require_mention: false}` with no
+    `pull_request_review` binding, receiving a CodeRabbit-style inline
+    comment.
+    """
+    bus = MessageBus()
+    _write_agent(
+        base_dir,
+        "default",
+        "reviewer",
+        {
+            "name": "reviewer",
+            "github": {
+                "bindings": [
+                    {
+                        "repo": "a/b",
+                        # Single-subscribed: NO `pull_request_review` trigger.
+                        "triggers": {"pull_request_review_comment": {"require_mention": False}},
+                    }
+                ],
+            },
+        },
+    )
+    payload = {
+        "action": "created",
+        "pull_request": {"number": 7},
+        "comment": {
+            "body": "nit: consider renaming this variable.",
+            "user": {"login": "coderabbitai[bot]"},
+            "pull_request_review_id": 999001,
+            "in_reply_to_id": None,
+        },
+        "repository": {"full_name": "a/b"},
+        "sender": {"login": "coderabbitai[bot]"},
+    }
+    result = await fanout_event(bus, "pull_request_review_comment", "del-storm-2", payload)
+    assert result["matched_agents"] == ["reviewer"], result
+    assert result["fired_agents"] == ["reviewer"], result
+    assert result["skipped"] == [], result
+    messages = await _drain(bus)
+    assert len(messages) == 1
+    assert messages[0].metadata["agent_name"] == "reviewer"
+
+
+@pytest.mark.asyncio
+async def test_review_comment_not_suppressed_when_review_trigger_is_on_different_repo(base_dir: Path) -> None:
+    """The binding-scoped gate must key off the trigger on THIS repo, not
+    merely "does this agent have a `pull_request_review` trigger anywhere".
+
+    An agent can have multiple `github` bindings (one per repo). An agent
+    that listens for `pull_request_review` on repo X and
+    `pull_request_review_comment`-only on repo Y must still fire on Y's
+    companion comments -- the review coverage on X is irrelevant to Y.
+    """
+    bus = MessageBus()
+    _write_agent(
+        base_dir,
+        "default",
+        "multi-repo-bot",
+        {
+            "name": "multi-repo-bot",
+            "github": {
+                "bindings": [
+                    {
+                        "repo": "owner/x",
+                        "triggers": {"pull_request_review": {}},
+                    },
+                    {
+                        "repo": "owner/y",
+                        "triggers": {"pull_request_review_comment": {"require_mention": False}},
+                    },
+                ],
+            },
+        },
+    )
+    payload = {
+        "action": "created",
+        "pull_request": {"number": 3},
+        "comment": {
+            "body": "nit on repo Y.",
+            "user": {"login": "coderabbitai[bot]"},
+            "pull_request_review_id": 42,
+            "in_reply_to_id": None,
+        },
+        "repository": {"full_name": "owner/y"},
+        "sender": {"login": "coderabbitai[bot]"},
+    }
+    result = await fanout_event(bus, "pull_request_review_comment", "del-storm-3", payload)
+    assert result["fired_agents"] == ["multi-repo-bot"], result
+    assert result["skipped"] == [], result
 
 
 @pytest.mark.asyncio

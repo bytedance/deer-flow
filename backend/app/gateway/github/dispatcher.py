@@ -7,9 +7,9 @@ first-class :class:`Channel` (see ``app/channels/github.py``):
     POST /api/webhooks/github
         → verify HMAC (route)
         → :func:`fanout_event` (this module)
-            • drop redundant review-comment webhook noise
-            • filter bots
             • look up bound agents
+            • filter bots
+            • drop redundant review-comment webhook noise, per binding
             • apply per-binding trigger filter
             • publish one :class:`InboundMessage` per surviving agent
         → ChannelManager picks it up off the bus
@@ -102,17 +102,15 @@ def _is_self_event(
 
 
 def _is_redundant_review_comment(payload: dict[str, Any]) -> bool:
-    """Return True if this ``pull_request_review_comment`` is fan-out noise
-    from a ``pull_request_review`` submission the agent already saw.
+    """Return True if this ``pull_request_review_comment`` has the *shape*
+    of fan-out noise from a ``pull_request_review`` submission: a companion
+    inline comment that the review event already covers.
 
     GitHub fires one ``pull_request_review_comment`` webhook per inline
     comment attached to a review submission, ON TOP OF the single
     ``pull_request_review`` event for the review as a whole. A bot
     reviewer (CodeRabbit routinely posts 20-30 inline comments per review)
-    therefore floods the webhook with 20-30 near-duplicate deliveries that
-    carry nothing the agent doesn't already have: it fetches every inline
-    comment itself (via ``gh api``) when it processes the parent
-    ``pull_request_review`` event.
+    therefore floods the webhook with 20-30 near-duplicate deliveries.
 
     Each such companion comment carries ``pull_request_review_id`` (the id
     of the review it belongs to) and — the discriminator — no
@@ -125,6 +123,29 @@ def _is_redundant_review_comment(payload: dict[str, Any]) -> bool:
     which the webhook ``comment`` object is drawn from:
     ``pull_request_review_id`` is present on every review-thread comment;
     ``in_reply_to_id`` is present only on replies.
+
+    IMPORTANT: a ``True`` result is NOT by itself a "safe to drop" signal —
+    see the per-binding gate in :func:`fanout_event`, which only suppresses
+    a companion comment for a binding that *also* has its own
+    ``pull_request_review`` trigger on the same repo (and therefore an
+    independent path to the review). A binding that subscribes to
+    ``pull_request_review_comment`` alone never receives the parent review
+    event, so unconditionally dropping its companion comments would be a
+    silent, total loss of the review's inline content for it — not noise
+    reduction (PR #4131 review feedback from willem-bd / zhfeng).
+
+    Residual caveat (PR #4131 review, Concern 3, zhfeng): GitHub documents
+    ``pull_request_review_id`` on the review-comment schema as nullable
+    ("integer or null"), confirming *some* review comments can lack a
+    backing review, but public docs do not state whether the "Add single
+    comment" UI action (as opposed to a multi-comment review) can ever
+    produce a comment with ``pull_request_review_id`` set and
+    ``in_reply_to_id`` absent *without* a companion ``pull_request_review``
+    event also firing. If that combination is possible, a binding with its
+    own ``pull_request_review`` trigger could still lose such a comment
+    under the per-binding gate. Confirmed via a real/documented webhook
+    payload capture before ruling this out; treat it as an open,
+    low-probability risk rather than a settled non-issue.
     """
     comment = payload.get("comment")
     if not isinstance(comment, dict):
@@ -173,22 +194,7 @@ async def fanout_event(
 
     repo, number = target
 
-    # 2. Redundant review-comment fan-out filter. Checked here — before
-    #    the registry lookup / per-agent loop below — because redundancy
-    #    is a property of the EVENT itself, not of any specific agent
-    #    binding: filtering once up front avoids resolving the registry
-    #    and iterating every matched binding for an event no binding
-    #    should ever need to see. See :func:`_is_redundant_review_comment`.
-    if event == "pull_request_review_comment" and _is_redundant_review_comment(payload):
-        logger.info(
-            "github_fanout: skipped (reason=redundant_review_comment, repo=%s#%s, delivery=%s)",
-            repo,
-            number,
-            delivery_id,
-        )
-        return {"matched_agents": [], "fired_agents": [], "skipped": [{"reason": "redundant_review_comment"}]}
-
-    # 3. Bound-agent lookup. The registry is mtime-cached internally so
+    # 2. Bound-agent lookup. The registry is mtime-cached internally so
     #    the warm path is iterdir + stat only — but the cold path (and
     #    every first call after an operator edit) parses every
     #    config.yaml on disk. Run it off the event loop in both cases so
@@ -203,6 +209,24 @@ async def fanout_event(
     skipped: list[dict[str, str]] = []
 
     sender_login = (payload.get("sender") or {}).get("login")
+
+    # 3. Redundant review-comment fan-out filter — see
+    #    :func:`_is_redundant_review_comment`. Whether the PAYLOAD has the
+    #    shape of review fan-out is a property of the event and computed
+    #    once here, but whether that fan-out is safe to DROP is a property
+    #    of the individual binding: only a binding that also has its own
+    #    ``pull_request_review`` trigger on this repo has an independent
+    #    path to the review's content, so the actual suppression decision
+    #    is made per-agent below (next to the self-event gate), not here.
+    #    ``covered_by_review_trigger`` reuses :func:`lookup_agents` against
+    #    the registry we just built — a binding only appears in the
+    #    ``(repo, "pull_request_review")`` slot if it explicitly lists that
+    #    event under its own ``triggers:`` (opt-in per binding, see
+    #    ``triggers.py``) — so this does not duplicate any trigger-matching
+    #    logic, and it stays correctly scoped to this repo (an agent with a
+    #    second binding on a *different* repo does not count).
+    is_redundant_review_comment = event == "pull_request_review_comment" and _is_redundant_review_comment(payload)
+    covered_by_review_trigger: set[tuple[str, str]] = {(m.user_id, m.agent.name) for m in lookup_agents(registry, repo, "pull_request_review")} if is_redundant_review_comment else set()
 
     for match in matches:
         agent = match.agent
@@ -227,7 +251,26 @@ async def fanout_event(
             skipped.append({"agent": agent.name, "reason": "self_event"})
             continue
 
-        # 5. Trigger filter.
+        # 5. Redundant review-comment gate, per binding (PR #4131 review —
+        #    willem-bd / zhfeng). Only suppress THIS binding's companion
+        #    comment when it is also registered for ``pull_request_review``
+        #    on this repo — i.e. it has its own path to the review content
+        #    that makes the companion comment genuinely redundant *for it*.
+        #    A binding registered for ``pull_request_review_comment`` alone
+        #    never receives the parent review event at all, so it still
+        #    fires here even though the payload has the fan-out shape.
+        if is_redundant_review_comment and (match.user_id, agent.name) in covered_by_review_trigger:
+            logger.info(
+                "github_fanout: agent=%s skipped (reason=redundant_review_comment, repo=%s#%s, delivery=%s)",
+                agent.name,
+                repo,
+                number,
+                delivery_id,
+            )
+            skipped.append({"agent": agent.name, "reason": "redundant_review_comment"})
+            continue
+
+        # 6. Trigger filter.
         # ``default_mention_login`` mirrors the precedence used by
         # ``_is_self_event`` above, then extended with the operator
         # default from ``channels.github.default_mention_login``:
@@ -268,7 +311,7 @@ async def fanout_event(
             skipped.append({"agent": agent.name, "reason": reason})
             continue
 
-        # 6. Build prompt + publish inbound message onto the bus.
+        # 7. Build prompt + publish inbound message onto the bus.
         prompt = build_prompt(event, payload)
         thread_id = resolve_thread_id(repo, number, agent.name)
 
