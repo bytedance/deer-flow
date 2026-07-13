@@ -87,11 +87,12 @@ describe("artifact URL helpers", () => {
     );
   });
 
-  test("resolves a relative message image when it uniquely matches an artifact", async () => {
+  test("resolves absolute and relative message image paths", async () => {
     const { resolveMessageImageURL } = await loadFreshArtifactUtils();
     const artifacts = [
       "/mnt/user-data/outputs/aws-agent-overview.png",
       "/mnt/user-data/outputs/aws-agent-console-config.png",
+      "/mnt/user-data/outputs/chart.png",
     ];
 
     expect(
@@ -108,6 +109,16 @@ describe("artifact URL helpers", () => {
     ).toBe(
       "/api/threads/thread-1/artifacts/mnt/user-data/outputs/aws-agent-overview.png#detail",
     );
+    expect(
+      resolveMessageImageURL(
+        "/mnt/user-data/outputs/chart.png",
+        "thread-1",
+        artifacts,
+      ),
+    ).toBe("/api/threads/thread-1/artifacts/mnt/user-data/outputs/chart.png");
+    expect(
+      resolveMessageImageURL("outputs/chart.png", "thread-1", artifacts),
+    ).toBe("/api/threads/thread-1/artifacts/mnt/user-data/outputs/chart.png");
   });
 
   test("does not rewrite unregistered, ambiguous, or external message images", async () => {
