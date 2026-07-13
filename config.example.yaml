@@ -1801,6 +1801,14 @@ database:
   # Restart required. Use one value across every process sharing this database.
   # full: current full-message checkpoints; delta: DeltaChannel for messages.
   checkpoint_channel_mode: full
+  # Checkpoint retention prevents O(N^2) storage bloat from LangGraph's
+  # full-state-per-checkpoint persistence. When enabled, a background task
+  # prunes old checkpoints per thread, keeping only the most recent N.
+  # checkpoint_retention:
+  #   enabled: false
+  #   max_checkpoints_per_thread: 50  # keep only the N most recent per thread
+  #   max_age_hours: 168              # remove checkpoints older than 7 days
+  #   min_interval_seconds: 300       # run pruning at most every 5 minutes
 
 # ============================================================================
 # Run Events Configuration

@@ -350,6 +350,125 @@ def _assemble_from_features(
 
 
 # ---------------------------------------------------------------------------
+# Public: config-declared extension middleware loading
+# ---------------------------------------------------------------------------
+
+
+def load_extension_middlewares(app_config) -> list[AgentMiddleware]:
+    """Resolve and instantiate middleware classes declared in ``config.yaml``.
+
+    Reads ``app_config.extensions.middlewares`` — a list of dotted paths such as
+    ``"my_package.middleware:MyCustomMiddleware"`` — resolves each via
+    :func:`deerflow.reflection.resolvers.resolve_variable`, validates it is an
+    :class:`AgentMiddleware` subclass, instantiates it, and returns the list.
+
+    Error handling:
+    * ``ModuleNotFoundError`` / ``ImportError`` with missing module → logged at
+      INFO level and skipped (optional dependency pattern).
+    * Any other error → logged at ERROR level with traceback; that middleware
+      is skipped so the agent can still start.
+    * Resolved class not a subclass of ``AgentMiddleware`` → logged at ERROR
+      and skipped (the entry is misconfigured).
+
+    Returns an empty list when ``app_config.extensions.middlewares`` is empty or
+    ``app_config.extensions`` is absent.
+    """
+    try:
+        extensions = getattr(app_config, "extensions", None)
+    except Exception:
+        return []
+
+    if extensions is None:
+        return []
+
+    paths: list[str] = getattr(extensions, "middlewares", None) or []
+    if not paths:
+        return []
+
+    from deerflow.reflection.resolvers import resolve_variable
+
+    instances: list[AgentMiddleware] = []
+    for path in paths:
+        try:
+            cls = resolve_variable(path.strip(), expected_type=type)
+        except ImportError:
+            # Optional dependency: the module isn't installed.
+            logger.info("Extension middleware %r skipped: module not found — treat as optional dependency.", path)
+            continue
+        except Exception:
+            logger.error("Failed to resolve extension middleware %r", path, exc_info=True)
+            continue
+
+        if not issubclass(cls, AgentMiddleware):
+            logger.error(
+                "Extension middleware %r resolved to %s which is not an AgentMiddleware subclass — skipped.",
+                path,
+                cls.__name__,
+            )
+            continue
+
+        try:
+            instance = cls()
+        except Exception:
+            logger.error("Failed to instantiate extension middleware %r", path, exc_info=True)
+            continue
+
+        if not isinstance(instance, AgentMiddleware):
+            logger.error(
+                "Extension middleware %r instantiated to %s which is not an AgentMiddleware instance — skipped.",
+                path,
+                type(instance).__name__,
+            )
+            continue
+
+        instances.append(instance)
+
+    if instances:
+        logger.info("Loaded %d extension middleware(s) from config: %s", len(instances), [type(m).__name__ for m in instances])
+
+    return instances
+
+
+def resolve_extension_hooks(app_config) -> tuple[object | None, object | None]:
+    """Resolve ``sse_wrapper`` and ``run_model_override`` from config.
+
+    Returns a ``(sse_wrapper, run_model_override)`` tuple where each element is
+    the resolved object, or ``None`` if the corresponding config key is absent
+    or resolution fails.
+    """
+    try:
+        extensions = getattr(app_config, "extensions", None)
+    except Exception:
+        return None, None
+
+    if extensions is None:
+        return None, None
+
+    from deerflow.reflection.resolvers import resolve_variable
+
+    sse_wrapper = None
+    run_model_override = None
+
+    sse_path: str | None = getattr(extensions, "sse_wrapper", None)
+    if sse_path:
+        try:
+            sse_wrapper = resolve_variable(sse_path.strip())
+            logger.info("Resolved extensions.sse_wrapper: %s", sse_path)
+        except Exception:
+            logger.error("Failed to resolve extensions.sse_wrapper %r", sse_path, exc_info=True)
+
+    model_path: str | None = getattr(extensions, "run_model_override", None)
+    if model_path:
+        try:
+            run_model_override = resolve_variable(model_path.strip())
+            logger.info("Resolved extensions.run_model_override: %s", model_path)
+        except Exception:
+            logger.error("Failed to resolve extensions.run_model_override %r", model_path, exc_info=True)
+
+    return sse_wrapper, run_model_override
+
+
+# ---------------------------------------------------------------------------
 # Internal: extra middleware insertion with @Next/@Prev
 # ---------------------------------------------------------------------------
 

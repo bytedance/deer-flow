@@ -130,7 +130,13 @@ class SkillStateConfig(BaseModel):
 
 
 class ExtensionsConfig(BaseModel):
-    """Unified configuration for MCP servers and skills."""
+    """Unified configuration for MCP servers, skills, and user-registered middleware hooks.
+
+    The ``middlewares``, ``sse_wrapper``, and ``run_model_override`` fields let
+    downstream integrators inject custom behaviour via ``config.yaml`` without
+    forking the agent-assembly code.  Each value is a dotted path that is
+    resolved at agent-build time via :func:`deerflow.reflection.resolvers.resolve_variable`.
+    """
 
     middlewares: list[str] = Field(
         default_factory=list,
@@ -144,6 +150,18 @@ class ExtensionsConfig(BaseModel):
     skills: dict[str, SkillStateConfig] = Field(
         default_factory=dict,
         description="Map of skill name to state configuration",
+    )
+    middlewares: list[str] = Field(
+        default_factory=list,
+        description="List of dotted paths to AgentMiddleware subclasses to insert into the agent middleware chain.",
+    )
+    sse_wrapper: str | None = Field(
+        default=None,
+        description="Dotted path to an SSE event-stream wrapper callable or class.",
+    )
+    run_model_override: str | None = Field(
+        default=None,
+        description="Dotted path to a callable/class for overriding model resolution at the run level.",
     )
     model_config = ConfigDict(extra="allow", populate_by_name=True)
 
