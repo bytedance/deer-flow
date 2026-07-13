@@ -368,7 +368,7 @@ def test_remote_backend_create_forwards_effective_user_id(monkeypatch):
         def json(self):
             return {"sandbox_url": "http://sandbox.local"}
 
-    def _post(url, json, timeout):  # noqa: A002 - mirrors requests.post kwarg
+    def _post(url, json, timeout, headers=None):  # noqa: A002 - mirrors requests.post kwarg
         posted.update({"url": url, "json": json, "timeout": timeout})
         return _Response()
 
@@ -402,7 +402,7 @@ def test_remote_backend_create_prefers_explicit_user_id(monkeypatch):
         def json(self):
             return {"sandbox_url": "http://sandbox.local"}
 
-    def _post(url, json, timeout):  # noqa: A002 - mirrors requests.post kwarg
+    def _post(url, json, timeout, headers=None):  # noqa: A002 - mirrors requests.post kwarg
         posted.update({"url": url, "json": json, "timeout": timeout})
         return _Response()
 

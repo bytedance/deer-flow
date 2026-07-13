@@ -1167,6 +1167,11 @@ sandbox:
 # sandbox:
 #   use: deerflow.community.aio_sandbox:AioSandboxProvider
 #   provisioner_url: http://provisioner:8002
+#   # API key for provisioner authentication. Must match PROVISIONER_API_KEY
+#   # set on the provisioner container. Both sides must have the same value set;
+#   # the provisioner rejects all /api/* requests when PROVISIONER_API_KEY is unset.
+#   # Generate a strong key: openssl rand -hex 32
+#   # provisioner_api_key: $PROVISIONER_API_KEY
 #   # Note: provisioner-created Pods use the provisioner's SANDBOX_IMAGE
 #   # environment variable, not sandbox.image from this config file.
 
