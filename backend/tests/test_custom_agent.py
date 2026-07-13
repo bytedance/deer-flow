@@ -322,6 +322,34 @@ class TestLoadAgentSoul:
 
         assert soul is None
 
+    def test_loads_soul_without_config_yaml(self, tmp_path):
+        """SOUL.md should load even when the agent dir has no config.yaml (#4135)."""
+        agent_dir = tmp_path / "agents" / "soul-only"
+        agent_dir.mkdir(parents=True)
+        # Deliberately no config.yaml – the agent is configured externally
+        (agent_dir / "SOUL.md").write_text("You are a brave agent.", encoding="utf-8")
+
+        with patch("deerflow.config.agents_config.get_paths", return_value=_make_paths(tmp_path)):
+            from deerflow.config.agents_config import load_agent_soul
+
+            soul = load_agent_soul("soul-only")
+
+        assert soul == "You are a brave agent."
+
+    def test_loads_soul_from_user_dir_without_config_yaml(self, tmp_path):
+        """SOUL.md fallback should also check the per-user layout (#4135)."""
+        user_agent_dir = tmp_path / "users" / "test-user" / "agents" / "soul-only-user"
+        user_agent_dir.mkdir(parents=True)
+        # No config.yaml, only SOUL.md
+        (user_agent_dir / "SOUL.md").write_text("You are a user-scoped agent.", encoding="utf-8")
+
+        with patch("deerflow.config.agents_config.get_paths", return_value=_make_paths(tmp_path)), patch("deerflow.config.agents_config.get_effective_user_id", return_value="test-user"):
+            from deerflow.config.agents_config import load_agent_soul
+
+            soul = load_agent_soul("soul-only-user")
+
+        assert soul == "You are a user-scoped agent."
+
 
 # ===========================================================================
 # 5. list_custom_agents

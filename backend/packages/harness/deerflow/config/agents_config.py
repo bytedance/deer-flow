@@ -299,9 +299,26 @@ def load_agent_soul(agent_name: str | None, *, user_id: str | None = None) -> st
     """
     if agent_name:
         agent_dir = resolve_agent_dir(agent_name, user_id=user_id)
+        soul_path = agent_dir / SOUL_FILENAME
+        # Fallback: resolve_agent_dir requires config.yaml to be present
+        # (see #3390), but SOUL.md loading does not depend on config.yaml.
+        # If the resolved dir doesn't contain SOUL.md, check the per-user
+        # and legacy directories directly so that agents configured via
+        # DEER_FLOW_CONFIG_PATH (or any setup where the agent dir has
+        # SOUL.md but no config.yaml) can still load their soul (#4135).
+        if not soul_path.exists():
+            paths = get_paths()
+            effective_user = user_id or get_effective_user_id()
+            for candidate in (
+                paths.user_agent_dir(effective_user, agent_name),
+                paths.agent_dir(agent_name),
+            ):
+                if (candidate / SOUL_FILENAME).exists():
+                    soul_path = candidate / SOUL_FILENAME
+                    break
     else:
         agent_dir = get_paths().base_dir
-    soul_path = agent_dir / SOUL_FILENAME
+        soul_path = agent_dir / SOUL_FILENAME
     if not soul_path.exists():
         return None
     content = soul_path.read_text(encoding="utf-8").strip()
