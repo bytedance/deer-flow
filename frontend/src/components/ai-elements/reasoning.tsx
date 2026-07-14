@@ -170,7 +170,10 @@ const defaultGetThinkingMessage = (
   if (duration === undefined) {
     return <span>Thought for a few seconds</span>;
   }
-  return <span>Thought for {duration} seconds</span>;
+  // `duration` is the run's wall-clock elapsed time (backend `turn_duration`),
+  // which includes tool execution — "Thought for" would mislabel it as model
+  // thinking latency (#4152).
+  return <span>Worked for {duration} seconds</span>;
 };
 
 export const ReasoningTrigger = memo(
