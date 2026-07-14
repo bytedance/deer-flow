@@ -18,8 +18,17 @@ class ThreadDataState(TypedDict):
 
 
 class ViewedImageData(TypedDict):
-    base64: str
+    """Metadata for a viewed image file.
+
+    Only lightweight metadata is persisted in checkpoint state; the actual
+    image bytes are read on-demand from disk when the model needs them.
+    This avoids duplicating large base64 payloads across every checkpoint
+    (see #4138).
+    """
+
     mime_type: str
+    size: int
+    actual_path: str
 
 
 def merge_sandbox(existing: SandboxState | None, new: SandboxState | None) -> SandboxState | None:
@@ -235,7 +244,7 @@ class ThreadState(AgentState):
     todos: Annotated[list | None, merge_todos]
     goal: Annotated[GoalState | None, merge_goal]
     uploaded_files: NotRequired[list[dict] | None]
-    viewed_images: Annotated[dict[str, ViewedImageData], merge_viewed_images]  # image_path -> {base64, mime_type}
+    viewed_images: Annotated[dict[str, ViewedImageData], merge_viewed_images]  # image_path -> metadata (no base64)
     promoted: Annotated[PromotedTools | None, merge_promoted]
     delegations: Annotated[list[DelegationEntry], merge_delegations]
     skill_context: Annotated[list[SkillEntry], merge_skill_context]
