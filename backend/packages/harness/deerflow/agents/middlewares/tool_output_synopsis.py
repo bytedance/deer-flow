@@ -195,7 +195,7 @@ def _build_raw_sample(content: str, *, head_budget: int, tail_budget: int, exist
         # Snap to the first newline within the tail for clean truncation.
         snap = tail.find("\n")
         if snap >= 0 and snap < len(tail) - 1:
-            tail = tail[snap + 1:]
+            tail = tail[snap + 1 :]
         parts.append(tail)
     if len(parts) == 2:
         return f"{parts[0]}\n...\n{parts[1]}"

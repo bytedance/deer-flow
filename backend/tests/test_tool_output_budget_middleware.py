@@ -355,7 +355,7 @@ class TestBuildPreview:
         assert "byte offset " not in preview
 
     def test_table_preview_extracts_columns(self):
-        content = "name,score\n" + "\n".join(f"Ada{i},{90+i}" for i in range(10)) + "\n"
+        content = "name,score\n" + "\n".join(f"Ada{i},{90 + i}" for i in range(10)) + "\n"
         preview = _build_preview(
             content,
             tool_name="csv_tool",
@@ -442,7 +442,7 @@ class TestToolOutputSynopsis:
         # delimiter.join(rows[1]) silently re-split cells containing the
         # delimiter inside a quoted cell, misleading the model about
         # column count.
-        header = 'name,description,score'
+        header = "name,description,score"
         rows = [
             'Ada,"a fine, brilliant logician",98',
             'Grace,"a creator, of compilers",99',
@@ -451,7 +451,7 @@ class TestToolOutputSynopsis:
             'Ada2,"another, fine mind",97',
             'Grace2,"yet another, creator",93',
         ]
-        content = header + '\n' + '\n'.join(rows) + '\n'
+        content = header + "\n" + "\n".join(rows) + "\n"
         synopsis = build_tool_output_synopsis(content, tool_name="csv_tool")
         assert synopsis.kind == "csv"
         first_row = next((line for line in synopsis.structure if line.startswith("first data row:")), "")
