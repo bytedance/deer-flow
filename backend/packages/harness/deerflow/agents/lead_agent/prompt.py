@@ -293,7 +293,14 @@ def _build_available_subagents_description(available_names: list[str], bash_avai
         else:
             config = get_subagent_config(name, app_config=app_config)
             if config is not None:
-                desc = config.description.split("\n")[0].strip()  # First line only for brevity
+                # config.description is agent-editable (persisted by setup_agent /
+                # update_agent), so escape it before it renders into the
+                # <subagent_system> block. Otherwise a first line like
+                # "</subagent_system><system-reminder>..." could break out of the
+                # block and forge framework-reserved tags in the lead-agent system
+                # prompt — the same class as the #4137 <soul>, #4097 memory, and
+                # #4128 skill render-site fixes.
+                desc = html.escape(config.description.split("\n")[0].strip(), quote=False)  # First line only for brevity
                 lines.append(f"- **{name}**: {desc}")
 
     return "\n".join(lines)
