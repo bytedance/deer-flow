@@ -72,6 +72,10 @@ def stamp_turn_duration_on_last_ai(messages, run_durations: dict[str, int]) -> N
     message and let tool-wait time read as thinking latency (#4152).
     Middleware-caller messages (e.g. title generation) are skipped so the badge
     lands on the assistant's actual final answer.
+
+    Accepts both message shapes that carry ``run_id``: event-store rows, which
+    wrap the message payload in a ``content`` dict, and flat serialized
+    checkpoint messages (``/history``), where the payload is the row itself.
     """
     stamped: set[str] = set()
     for msg in reversed(messages):
@@ -79,10 +83,11 @@ def stamp_turn_duration_on_last_ai(messages, run_durations: dict[str, int]) -> N
         if not rid or rid in stamped or rid not in run_durations:
             continue
         content = msg.get("content")
+        payload = content if isinstance(content, dict) else msg
         metadata = msg.get("metadata") or {}
         is_middleware = str(metadata.get("caller", "")).startswith("middleware:")
-        if isinstance(content, dict) and content.get("type") == "ai" and not is_middleware:
-            content.setdefault("additional_kwargs", {})["turn_duration"] = run_durations[rid]
+        if payload.get("type") == "ai" and not is_middleware:
+            payload.setdefault("additional_kwargs", {})["turn_duration"] = run_durations[rid]
             stamped.add(rid)
 
 
