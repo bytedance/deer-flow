@@ -11,6 +11,11 @@ DeerFlow backend exposes two sets of APIs:
 
 All APIs are accessed through the Nginx reverse proxy at port 2026.
 
+For agent conversations, clients can either pre-create a thread
+(`POST /api/langgraph/threads`) or start immediately with the stateless stream
+endpoint (`POST /api/langgraph/runs/stream`). The latter auto-creates a thread
+and returns `thread_id` and `run_id` in the response `Content-Location` header.
+
 ## LangGraph-compatible API
 
 Base URL: `/api/langgraph`
@@ -160,6 +165,78 @@ Content-Type: application/json
 ```
 
 Same request body as Create Run. Returns SSE stream.
+
+#### Stateless Stream Run
+
+Start a conversation without creating a thread first. Gateway auto-creates a
+thread when `config.configurable.thread_id` is omitted, and returns both
+identifiers in the response `Content-Location` header.
+
+```http
+POST /api/langgraph/runs/stream
+Content-Type: application/json
+Accept: text/event-stream
+```
+
+Through Nginx, `/api/langgraph/runs/stream` is rewritten to the native Gateway
+path `POST /api/runs/stream`.
+
+**Request Body:** Same as [Create Run](#create-run). Omit `thread_id` to start a
+new conversation; include it to continue an existing one:
+
+```json
+{
+  "input": {
+    "messages": [
+      {
+        "role": "user",
+        "content": "Hello, can you help me?"
+      }
+    ]
+  },
+  "config": {
+    "recursion_limit": 100,
+    "configurable": {
+      "model_name": "gpt-4",
+      "thinking_enabled": false,
+      "is_plan_mode": false
+    }
+  },
+  "stream_mode": ["values", "messages-tuple", "custom"]
+}
+```
+
+**Response:** Server-Sent Events (SSE) stream with a `Content-Location` header:
+
+```http
+Content-Location: /api/threads/{thread_id}/runs/{run_id}
+```
+
+Clients should parse `thread_id` and `run_id` from this header (the path ends
+with `/runs/{run_id}`). Persist `thread_id` and send it back on the next turn
+via `config.configurable.thread_id` to keep conversation history.
+
+**Continuing a conversation:**
+
+```json
+{
+  "input": {
+    "messages": [
+      {
+        "role": "user",
+        "content": "What did I just ask?"
+      }
+    ]
+  },
+  "config": {
+    "configurable": {
+      "thread_id": "abc123",
+      "model_name": "gpt-4"
+    }
+  },
+  "stream_mode": ["values", "messages-tuple", "custom"]
+}
+```
 
 ---
 
@@ -611,12 +688,25 @@ location /api/ {
 
 ## Streaming Support
 
-Gateway's LangGraph-compatible API streams run events with Server-Sent Events (SSE):
+Gateway's LangGraph-compatible API streams run events with Server-Sent Events (SSE).
+
+**Thread-scoped streaming** (thread must exist):
 
 ```http
 POST /api/langgraph/threads/{thread_id}/runs/stream
 Accept: text/event-stream
 ```
+
+**Stateless streaming** (no pre-created thread; Gateway auto-creates one):
+
+```http
+POST /api/langgraph/runs/stream
+Accept: text/event-stream
+```
+
+Both endpoints return `Content-Location: /api/threads/{thread_id}/runs/{run_id}`.
+The DeerFlow web UI and LangGraph SDK clients rely on this header to discover the
+assigned `thread_id` and `run_id` on the first message of a new chat.
 
 ---
 
@@ -628,17 +718,50 @@ Accept: text/event-stream
 from langgraph_sdk import get_client
 
 client = get_client(url="http://localhost:2026/api/langgraph")
+run_meta: dict[str, str] = {}
 
-# Create thread
+
+def on_run_created(meta) -> None:
+    # langgraph-sdk 0.3.x parses Content-Location only when this callback is set.
+    if meta.thread_id:
+        run_meta["thread_id"] = meta.thread_id
+    run_meta["run_id"] = meta.run_id
+
+
+# Option A: stateless stream — no thread pre-creation
+# Gateway auto-creates a thread and returns thread_id/run_id in Content-Location.
+async for event in client.runs.stream(
+    None,
+    "lead_agent",
+    input={"messages": [{"role": "user", "content": "Hello"}]},
+    config={"configurable": {"model_name": "gpt-4"}},
+    stream_mode=["values", "messages-tuple", "custom"],
+    on_run_created=on_run_created,
+):
+    print(event)
+
+thread_id = run_meta["thread_id"]  # persist before the next turn
+
+# Option A (continued): same thread on the next turn
+async for event in client.runs.stream(
+    None,
+    "lead_agent",
+    input={"messages": [{"role": "user", "content": "What did I just ask?"}]},
+    config={"configurable": {"thread_id": thread_id, "model_name": "gpt-4"}},
+    stream_mode=["values", "messages-tuple", "custom"],
+    on_run_created=on_run_created,
+):
+    print(event)
+
+# Option B: thread-scoped stream — create thread first, then stream
 thread = await client.threads.create()
-
-# Run agent
 async for event in client.runs.stream(
     thread["thread_id"],
     "lead_agent",
     input={"messages": [{"role": "user", "content": "Hello"}]},
     config={"configurable": {"model_name": "gpt-4"}},
     stream_mode=["values", "messages-tuple", "custom"],
+    on_run_created=on_run_created,
 ):
     print(event)
 ```
@@ -651,7 +774,46 @@ const response = await fetch('/api/models');
 const data = await response.json();
 console.log(data.models);
 
-// Create a run and stream SSE events
+function parseRunLocation(contentLocation: string | null) {
+  if (!contentLocation) return null;
+  const match = /\/threads\/([^/]+)\/runs\/([^/]+)/.exec(contentLocation);
+  if (!match) return null;
+  return { threadId: match[1], runId: match[2] };
+}
+
+// Option A: stateless stream — no thread pre-creation
+let threadId: string | undefined;
+const firstResponse = await fetch("/api/langgraph/runs/stream", {
+  method: "POST",
+  headers: {
+    "Content-Type": "application/json",
+    Accept: "text/event-stream",
+  },
+  body: JSON.stringify({
+    input: { messages: [{ role: "user", content: "Hello" }] },
+    stream_mode: ["values", "messages-tuple", "custom"],
+  }),
+});
+
+const created = parseRunLocation(firstResponse.headers.get("Content-Location"));
+threadId = created?.threadId;
+console.log("thread_id:", created?.threadId, "run_id:", created?.runId);
+
+// Option B: continue the same thread on the next turn
+const followUpResponse = await fetch("/api/langgraph/runs/stream", {
+  method: "POST",
+  headers: {
+    "Content-Type": "application/json",
+    Accept: "text/event-stream",
+  },
+  body: JSON.stringify({
+    input: { messages: [{ role: "user", content: "What did I just ask?" }] },
+    config: { configurable: { thread_id: threadId } },
+    stream_mode: ["values", "messages-tuple", "custom"],
+  }),
+});
+
+// Option C: thread-scoped stream when you already have a thread_id
 const streamResponse = await fetch(`/api/langgraph/threads/${threadId}/runs/stream`, {
   method: "POST",
   headers: {
@@ -684,19 +846,47 @@ curl -X POST http://localhost:2026/api/threads/abc123/uploads \
 # Enable skill
 curl -X POST http://localhost:2026/api/skills/pdf-processing/enable
 
-# Create thread and run agent
-curl -X POST http://localhost:2026/api/langgraph/threads \
+# Stateless stream — no thread pre-creation
+curl -s -D - -N -X POST http://localhost:2026/api/langgraph/runs/stream \
   -H "Content-Type: application/json" \
-  -d '{}'
-
-curl -X POST http://localhost:2026/api/langgraph/threads/abc123/runs \
-  -H "Content-Type: application/json" \
+  -H "Accept: text/event-stream" \
   -d '{
     "input": {"messages": [{"role": "user", "content": "Hello"}]},
     "config": {
       "recursion_limit": 100,
       "configurable": {"model_name": "gpt-4"}
-    }
+    },
+    "stream_mode": ["values", "messages-tuple", "custom"]
+  }'
+# Read Content-Location: /api/threads/{thread_id}/runs/{run_id} from the headers.
+
+# Continue the same thread on the next turn
+curl -s -N -X POST http://localhost:2026/api/langgraph/runs/stream \
+  -H "Content-Type: application/json" \
+  -H "Accept: text/event-stream" \
+  -d '{
+    "input": {"messages": [{"role": "user", "content": "What did I just ask?"}]},
+    "config": {
+      "configurable": {"thread_id": "abc123", "model_name": "gpt-4"}
+    },
+    "stream_mode": ["values", "messages-tuple", "custom"]
+  }'
+
+# Thread-scoped flow — create thread first, then stream
+curl -X POST http://localhost:2026/api/langgraph/threads \
+  -H "Content-Type: application/json" \
+  -d '{}'
+
+curl -X POST http://localhost:2026/api/langgraph/threads/abc123/runs/stream \
+  -H "Content-Type: application/json" \
+  -H "Accept: text/event-stream" \
+  -d '{
+    "input": {"messages": [{"role": "user", "content": "Hello"}]},
+    "config": {
+      "recursion_limit": 100,
+      "configurable": {"model_name": "gpt-4"}
+    },
+    "stream_mode": ["values", "messages-tuple", "custom"]
   }'
 ```
 
