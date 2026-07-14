@@ -17,6 +17,7 @@ when it carries the ``deerflow_mcp`` metadata tag.
 """
 
 import hashlib
+import html
 import json
 import logging
 import re
@@ -285,7 +286,10 @@ def get_deferred_tools_prompt_section(*, deferred_names: frozenset[str] = frozen
     """
     if not deferred_names:
         return ""
-    names = "\n".join(sorted(deferred_names))
+    # Names come verbatim from external MCP servers; escape so a crafted tool
+    # name cannot close this block and forge a framework tag. Mirrors
+    # get_skill_index_prompt_section.
+    names = "\n".join(html.escape(name, quote=False) for name in sorted(deferred_names))
     return f"<available-deferred-tools>\n{names}\n</available-deferred-tools>"
 
 
@@ -310,17 +314,20 @@ def get_mcp_routing_hints_prompt_section(tools: Iterable[BaseTool], *, deferred_
         keywords = routing.get("keywords") or []
         if not keywords:
             continue
-        hints.append((int(routing.get("priority", 0)), candidate.name, [str(keyword) for keyword in keywords]))
+        hints.append((int(routing.get("priority", 0)), candidate.name, [html.escape(str(keyword), quote=False) for keyword in keywords]))
 
     if not hints:
         return ""
 
     lines = ["<mcp_routing_hints>"]
     for priority, tool_name, keywords in sorted(hints, key=lambda item: (-item[0], item[1])):
+        # tool_name comes verbatim from the external MCP server; escape at render
+        # (keep the raw name for the deferred_names membership check above).
+        esc_name = html.escape(tool_name, quote=False)
         lines.append(f"When the user's request involves {_format_keyword_list(keywords)}:")
         if tool_name in deferred_names:
-            lines.append(f"  use `tool_search` to fetch `{tool_name}`, then prefer that MCP tool.")
+            lines.append(f"  use `tool_search` to fetch `{esc_name}`, then prefer that MCP tool.")
         else:
-            lines.append(f"  prefer the `{tool_name}` tool.")
+            lines.append(f"  prefer the `{esc_name}` tool.")
     lines.append("</mcp_routing_hints>")
     return "\n".join(lines)
