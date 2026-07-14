@@ -53,12 +53,25 @@ export function ToolStreamingProvider({
           delete next[toolCallId];
           return { outputs: next };
         }
-        // Prevent a stale final chunk from overwriting a newer partial chunk
-        // from a subsequent tool call of the same subagent (late-arriving
-        // start/final sequence could race).
         const existing = prev.outputs[toolCallId];
-        if (existing && !output.isPartial && existing.isPartial) {
+        // If a late partial chunk arrives for a call that already received its
+        // final output, drop it — the completed entry must not regress.
+        if (existing && output.isPartial && !existing.isPartial) {
           return prev;
+        }
+        // Accumulate partial chunks so the streaming preview grows with each
+        // intermediate dispatch rather than flashing the last fragment only.
+        if (existing && output.isPartial && existing.isPartial) {
+          return {
+            outputs: {
+              ...prev.outputs,
+              [toolCallId]: {
+                ...existing,
+                text: existing.text + output.text,
+                isPartial: true,
+              },
+            },
+          };
         }
         return {
           outputs: { ...prev.outputs, [toolCallId]: output },
