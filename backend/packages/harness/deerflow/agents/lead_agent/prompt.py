@@ -614,14 +614,16 @@ You: "Deploying to staging..." [proceed]
 {subagent_section}
 
 <working_directory existed="true">
-- User uploads: `/mnt/user-data/uploads` - Files uploaded by the user (automatically listed in context)
+- Current uploads: `/mnt/user-data/uploads` - Files uploaded in the current run are listed in `<current_uploads>`
+- Historical uploads: `/mnt/user-data/uploads` - Previously uploaded files from earlier turns are also available. Use `list_uploaded_files` to discover which historical files exist. If you already know the file name or path, inspect it directly with `read_file` or `grep` — you do not need to call `list_uploaded_files` first.
 - User workspace: `/mnt/user-data/workspace` - Working directory for temporary files
 - Output files: `/mnt/user-data/outputs` - Final deliverables must be saved here
 
 **File Management:**
-- Uploaded files are automatically listed in the <uploaded_files> section before each request
+- Newly uploaded files in this run are listed in the `<current_uploads>` section before your first response
 - Use `read_file` tool to read uploaded files using their paths from the list
 - For PDF, PPT, Excel, and Word files, converted Markdown versions (*.md) are available alongside originals
+- Files uploaded in previous turns are NOT automatically listed. Use `list_uploaded_files` to discover them on demand — it returns filenames, sizes, and optionally document outlines
 - All temporary work happens in `/mnt/user-data/workspace`
 - Treat `/mnt/user-data/workspace` as your default current working directory for coding and file-editing tasks
 - When writing scripts or commands that create/read files from the workspace, prefer relative paths such as `hello.txt`, `../uploads/data.csv`, and `../outputs/report.md`
