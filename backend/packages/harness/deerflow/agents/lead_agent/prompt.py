@@ -615,7 +615,7 @@ You: "Deploying to staging..." [proceed]
 
 <working_directory existed="true">
 - Current uploads: `/mnt/user-data/uploads` - Files uploaded in the current run are listed in `<current_uploads>`
-- Historical uploads: `/mnt/user-data/uploads` - Previously uploaded files from earlier turns are also available. Use `list_uploaded_files` to discover which historical files exist. If you already know the file name or path, inspect it directly with `read_file` or `grep` — you do not need to call `list_uploaded_files` first.
+- Historical uploads: `/mnt/user-data/uploads` - Files from earlier turns. Use `list_uploaded_files` to discover which files exist. If you know the filename, access it directly with `read_file` or `grep`.
 - User workspace: `/mnt/user-data/workspace` - Working directory for temporary files
 - Output files: `/mnt/user-data/outputs` - Final deliverables must be saved here
 

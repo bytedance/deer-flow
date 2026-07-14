@@ -16,7 +16,6 @@ No FastAPI or HTTP dependencies — pure utility functions.
 
 import asyncio
 import logging
-import re
 from pathlib import Path
 
 from deerflow.config.app_config import get_app_config

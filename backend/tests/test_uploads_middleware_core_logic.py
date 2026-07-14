@@ -7,7 +7,6 @@ Covers:
   additional_kwargs, historical files from uploads dir, edge-cases)
 """
 
-import os
 import re
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -358,7 +357,7 @@ class TestBeforeAgent:
         assert result is not None
         updated_msg = result["messages"][-1]
         assert updated_msg.additional_kwargs[ORIGINAL_USER_CONTENT_KEY] == "/data-analysis run"
-        assert updated_msg.content.startswith("<uploaded_files>")
+        assert updated_msg.content.startswith("<current_uploads>")
 
     def test_uploaded_files_returned_in_state_update(self, tmp_path):
         mw = _middleware(tmp_path)

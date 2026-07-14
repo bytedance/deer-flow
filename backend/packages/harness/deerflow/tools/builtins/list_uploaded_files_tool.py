@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 from collections import Counter
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 from langchain.tools import InjectedToolArg, tool
 from langgraph.config import get_config
