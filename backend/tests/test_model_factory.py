@@ -616,17 +616,13 @@ def test_openai_compatible_provider_passes_base_url(monkeypatch):
         supports_vision=True,
         supports_thinking=False,
     )
+    from langchain_openai import ChatOpenAI
+
     cfg = _make_app_config([model])
-    _patch_factory(monkeypatch, cfg)
-
     captured: dict = {}
-
-    class CapturingModel(FakeChatModel):
-        def __init__(self, **kwargs):
-            captured.update(kwargs)
-            BaseChatModel.__init__(self, **kwargs)
-
-    monkeypatch.setattr(factory_module, "resolve_class", lambda path, base: CapturingModel)
+    # Real ChatOpenAI: it declares the stream_usage field, so the factory's
+    # class-field default path (not a use-path allowlist) enables it.
+    _patch_factory(monkeypatch, cfg, model_class=_capturing_class(ChatOpenAI, captured))
 
     factory_module.create_chat_model(name="minimax-m3")
 
@@ -682,17 +678,11 @@ def test_openai_compatible_provider_enables_stream_usage_for_openai_api_base(mon
         supports_vision=False,
         supports_thinking=False,
     )
+    from langchain_openai import ChatOpenAI
+
     cfg = _make_app_config([model])
-    _patch_factory(monkeypatch, cfg)
-
     captured: dict = {}
-
-    class CapturingModel(FakeChatModel):
-        def __init__(self, **kwargs):
-            captured.update(kwargs)
-            BaseChatModel.__init__(self, **kwargs)
-
-    monkeypatch.setattr(factory_module, "resolve_class", lambda path, base: CapturingModel)
+    _patch_factory(monkeypatch, cfg, model_class=_capturing_class(ChatOpenAI, captured))
 
     factory_module.create_chat_model(name="openai-compatible")
 
@@ -1444,7 +1434,7 @@ def test_no_unknown_key_warning_for_non_openai_class(monkeypatch, caplog):
 
     from langchain_anthropic import ChatAnthropic
 
-    cfg = _make_app_config([_make_model_with_extras("anthropic", use="langchain_anthropic:ChatAnthropic", frequency_penalty=0.5)])
+    cfg = _make_app_config([_make_model_with_extras("anthropic", use="langchain_anthropic:ChatAnthropic", frequency_penalty=0.5, api_base="http://x/v1")])
     captured: dict = {}
     _patch_factory(monkeypatch, cfg, model_class=_capturing_class(ChatAnthropic, captured))
 
@@ -1453,7 +1443,10 @@ def test_no_unknown_key_warning_for_non_openai_class(monkeypatch, caplog):
 
     assert not any("not recognized parameters" in rec.message for rec in caplog.records)
     # api_base normalization is likewise scoped to the OpenAI family: a non-BaseChatOpenAI
-    # provider must never have its keys rewritten.
+    # provider must never have its keys rewritten. The config sets api_base, so this
+    # actually exercises the normalization-skip path (not just its absence): the alias
+    # is passed through verbatim and never rewritten to base_url.
+    assert captured.get("api_base") == "http://x/v1"
     assert "base_url" not in captured
 
 

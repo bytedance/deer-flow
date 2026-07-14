@@ -32,32 +32,6 @@ def _vllm_disable_chat_template_kwargs(chat_template_kwargs: dict) -> dict:
     return disable_kwargs
 
 
-# The two stock OpenAI client paths. NOT "the OpenAI-compatible family": the harness ships six more
-# BaseChatOpenAI subclasses (VllmChatModel, MindIEChatModel, PatchedChatDeepSeek, PatchedChatMiMo,
-# PatchedChatStepFun, PatchedChatMiniMax). Anything that must hold for the whole family has to gate
-# on issubclass(model_class, BaseChatOpenAI) instead — see _normalize_openai_base_url.
-_OPENAI_COMPAT_USE_PATHS = (
-    "langchain_openai:ChatOpenAI",
-    "deerflow.models.patched_openai:PatchedChatOpenAI",
-)
-
-
-def _enable_stream_usage_by_default(model_use_path: str, model_settings_from_config: dict) -> None:
-    """Enable stream usage for OpenAI-compatible models unless explicitly configured.
-
-    LangChain only auto-enables ``stream_usage`` for OpenAI models when no custom
-    base URL or client is configured. DeerFlow frequently uses OpenAI-compatible
-    gateways, so token usage tracking would otherwise stay empty and the
-    TokenUsageMiddleware would have nothing to log.
-    """
-    if model_use_path not in _OPENAI_COMPAT_USE_PATHS:
-        return
-    if "stream_usage" in model_settings_from_config:
-        return
-    if "base_url" in model_settings_from_config or "openai_api_base" in model_settings_from_config:
-        model_settings_from_config["stream_usage"] = True
-
-
 def _declares_api_base(model_class: type) -> bool:
     """Whether *model_class* declares ``api_base`` as its own constructor field.
 
@@ -282,9 +256,8 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
         model_settings_from_config.pop("reasoning_effort", None)
 
     # Normalize the api_base -> base_url alias FIRST, so the downstream OpenAI-compatible
-    # heuristics (stream_usage / stream_chunk_timeout) see the canonical endpoint key.
+    # heuristics (stream_usage default below / stream_chunk_timeout) see the canonical endpoint key.
     _normalize_openai_base_url(model_class, model_settings_from_config)
-    _enable_stream_usage_by_default(model_config.use, model_settings_from_config)
     _apply_stream_chunk_timeout_default(model_class, model_settings_from_config)
 
     # For Codex Responses API models: map thinking mode to reasoning_effort
