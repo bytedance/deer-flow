@@ -88,13 +88,18 @@ class MemoryRunStore(RunStore):
         return results[:limit]
 
     async def update_status(self, run_id, status, *, error=None):
-        if run_id in self._runs:
-            self._runs[run_id]["status"] = status
-            if error is not None:
-                self._runs[run_id]["error"] = error
-            self._runs[run_id]["updated_at"] = datetime.now(UTC).isoformat()
-            return True
-        return False
+        run = self._runs.get(run_id)
+        if run is None:
+            return False
+        # Guard: only transition rows that are still active. ``interrupted``
+        # is included for the rollback path (``interrupted → error`` finalize).
+        if run["status"] not in ("pending", "running", "interrupted"):
+            return False
+        run["status"] = status
+        if error is not None:
+            run["error"] = error
+        run["updated_at"] = datetime.now(UTC).isoformat()
+        return True
 
     async def update_model_name(self, run_id, model_name):
         if run_id in self._runs:
@@ -191,6 +196,28 @@ class MemoryRunStore(RunStore):
             return False
         run["owner_worker_id"] = owner_worker_id
         run["lease_expires_at"] = lease_expires_at
+        run["updated_at"] = datetime.now(UTC).isoformat()
+        return True
+
+    async def claim_for_takeover(
+        self,
+        run_id: str,
+        *,
+        grace_seconds: int,
+        error: str,
+    ) -> bool:
+        from deerflow.utils.time import is_lease_expired
+
+        run = self._runs.get(run_id)
+        if run is None:
+            return False
+        if run["status"] not in ("pending", "running"):
+            return False
+        lease = run.get("lease_expires_at")
+        if not is_lease_expired(lease, grace_seconds=grace_seconds):
+            return False
+        run["status"] = "error"
+        run["error"] = error
         run["updated_at"] = datetime.now(UTC).isoformat()
         return True
 

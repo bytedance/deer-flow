@@ -12,6 +12,8 @@ Covers:
 from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from deerflow.agents.memory.updater import (
     MemoryUpdater,
     _build_staleness_section,
@@ -22,6 +24,10 @@ from deerflow.agents.memory.updater import (
 from deerflow.config.memory_config import MemoryConfig
 
 # ── Helpers ────────────────────────────────────────────────────────────────
+
+
+_ABSENT = object()
+"""Sentinel: the fact carries no ``confidence`` key at all."""
 
 
 def _memory_config(**overrides: object) -> MemoryConfig:
@@ -244,6 +250,65 @@ class TestBuildStalenessSection:
         assert 'pref<"erences>' not in section
         assert "pref&lt;&quot;erences&gt;" in section
 
+    @pytest.mark.parametrize("stored_confidence", ["0.9", None, "high", ""])
+    def test_non_float_confidence_does_not_raise(self, stored_confidence):
+        """A stored ``confidence`` that is not a float must not abort the update.
+
+        ``memory.json`` is user-editable and written across versions, which is why
+        ``_coerce_source_confidence`` exists. Formatting it raw raises ValueError on
+        a str and TypeError on None; ``_do_update_memory_sync``'s ``except Exception``
+        turns that into a silent ``return False`` that aborts the whole memory-update
+        cycle -- permanently, since the offending fact is then never rewritten.
+        """
+        fact = _make_fact("fact_x", "Some fact", "knowledge", 0.9, days_ago=120)
+        fact["confidence"] = stored_confidence
+
+        section = _build_staleness_section([fact], 90)
+
+        assert "fact_x" in section
+        assert "Some fact" in section
+
+    @pytest.mark.parametrize(
+        ("stored_confidence", "rendered"),
+        [
+            ("0.9", "0.90"),
+            ("high", "0.50"),
+            (None, "0.50"),
+            (True, "0.50"),
+            (1.5, "1.00"),
+            (-0.3, "0.00"),
+            (float("inf"), "0.50"),
+            (float("nan"), "0.50"),
+        ],
+    )
+    def test_confidence_is_normalised_like_every_other_stored_read(self, stored_confidence, rendered):
+        """Pins the mapping, not just the absence of a crash.
+
+        ``0.5`` is this module's default for an unknown confidence
+        (``create_memory_fact``, ``_normalize_memory_update_fact``,
+        ``_coerce_source_confidence``). Before this change the staleness prompt
+        rendered ``1.5`` as ``1.50``, ``inf`` as ``inf``, and a ``True`` as ``1.00``
+        -- disagreeing with the consolidation prompt, which reads the same field
+        through the same helper.
+        """
+        fact = _make_fact("fact_x", "Some fact", "knowledge", 0.9, days_ago=120)
+        fact["confidence"] = stored_confidence
+
+        section = _build_staleness_section([fact], 90)
+
+        assert f"| {rendered} |" in section
+
+    def test_missing_confidence_key_renders_unknown_not_zero(self):
+        """An absent key is *unknown* (0.50), not *worthless* (0.00).
+
+        The staleness cap removes the lowest-confidence facts first, so ranking an
+        unreadable confidence at 0.00 would make that fact the first one deleted.
+        """
+        fact = _make_fact("fact_x", "Some fact", "knowledge", 0.9, days_ago=120)
+        del fact["confidence"]
+
+        assert "| 0.50 |" in _build_staleness_section([fact], 90)
+
 
 # ── _apply_updates with staleness removals ─────────────────────────────────
 
@@ -352,6 +417,121 @@ class TestApplyUpdatesStaleness:
         assert "fact_high" in remaining_ids
         assert "fact_mid" in remaining_ids
         assert "fact_low1" in remaining_ids
+
+    def test_safety_cap_sort_survives_non_float_stored_confidence(self):
+        """The cap's ranking sort reads stored confidence and must coerce it.
+
+        ``sort(key=lambda f: f.get("confidence", 0))`` compares a str against a
+        float and raises ``TypeError``, which the caller swallows into an aborted
+        update. Fixing only the prompt formatter would move this crash rather than
+        remove it, so the sort is pinned here too. ``"0.95"`` must rank like 0.95.
+        """
+        updater = MemoryUpdater()
+        current_memory = _make_memory(
+            [
+                _make_fact("fact_str_high", confidence="0.95", days_ago=100),
+                _make_fact("fact_mid", confidence=0.80, days_ago=100),
+                _make_fact("fact_low", confidence=0.60, days_ago=100),
+            ]
+        )
+        update_data = {
+            "user": {},
+            "history": {},
+            "newFacts": [],
+            "factsToRemove": [],
+            "staleFactsToRemove": [
+                {"id": "fact_str_high", "reason": "outdated"},
+                {"id": "fact_mid", "reason": "outdated"},
+                {"id": "fact_low", "reason": "outdated"},
+            ],
+        }
+
+        with patch(
+            "deerflow.agents.memory.updater.get_memory_config",
+            return_value=_memory_config(max_facts=100, staleness_max_removals_per_cycle=1),
+        ):
+            result = updater._apply_updates(current_memory, update_data)
+
+        # Only the single lowest-confidence fact is removed; the string "0.95"
+        # ranks as the highest and survives.
+        remaining_ids = {f["id"] for f in result["facts"]}
+        assert remaining_ids == {"fact_str_high", "fact_mid"}
+
+    @pytest.mark.parametrize(
+        ("stored_confidence", "rival_confidence", "survivor"),
+        [
+            (_ABSENT, 0.1, "fact_x"),
+            (False, 0.1, "fact_x"),
+            (True, 0.9, "fact_rival"),
+            (float("inf"), 0.9, "fact_rival"),
+        ],
+    )
+    def test_safety_cap_ranks_unusable_confidence_as_unknown(self, stored_confidence, rival_confidence, survivor):
+        """The cap deletes the lowest-ranked fact, so a mis-ranked one deletes its neighbour.
+
+        Mirrors the max_facts trim's delta set with the sort reversed: here a
+        ``true``/``inf`` fact ranked *above* a genuine 0.9 and pushed it into
+        the removal slot. None of these raised under the old key, so the
+        string-coercion test above passes unchanged for all four.
+        """
+        fact_x = _make_fact("fact_x", days_ago=100)
+        if stored_confidence is _ABSENT:
+            del fact_x["confidence"]
+        else:
+            fact_x["confidence"] = stored_confidence
+        update_data = {
+            "user": {},
+            "history": {},
+            "newFacts": [],
+            "factsToRemove": [],
+            "staleFactsToRemove": [
+                {"id": "fact_x", "reason": "outdated"},
+                {"id": "fact_rival", "reason": "outdated"},
+            ],
+        }
+
+        with patch(
+            "deerflow.agents.memory.updater.get_memory_config",
+            return_value=_memory_config(max_facts=100, staleness_max_removals_per_cycle=1),
+        ):
+            result = MemoryUpdater()._apply_updates(
+                _make_memory([fact_x, _make_fact("fact_rival", confidence=rival_confidence, days_ago=100)]),
+                update_data,
+            )
+
+        assert [f["id"] for f in result["facts"]] == [survivor]
+
+    def test_safety_cap_with_nan_confidence_is_order_independent(self):
+        """Under the raw key the cap deleted either fact depending on their file order.
+
+        ``nan`` compares false against every score, so ``sort`` leaves the pair
+        untouched: with the corrupted fact stored *second*, the genuine 0.9 one
+        landed in the removal slot instead.
+        """
+        update_data = {
+            "user": {},
+            "history": {},
+            "newFacts": [],
+            "factsToRemove": [],
+            "staleFactsToRemove": [
+                {"id": "fact_nan", "reason": "outdated"},
+                {"id": "fact_rival", "reason": "outdated"},
+            ],
+        }
+
+        survivors = []
+        for nan_first in (True, False):
+            nan_fact = _make_fact("fact_nan", confidence=float("nan"), days_ago=100)
+            rival = _make_fact("fact_rival", confidence=0.9, days_ago=100)
+            facts = [nan_fact, rival] if nan_first else [rival, nan_fact]
+            with patch(
+                "deerflow.agents.memory.updater.get_memory_config",
+                return_value=_memory_config(max_facts=100, staleness_max_removals_per_cycle=1),
+            ):
+                result = MemoryUpdater()._apply_updates(_make_memory(facts), update_data)
+            survivors.append(result["facts"][0]["id"])
+
+        assert survivors == ["fact_rival", "fact_rival"]
 
     def test_empty_stale_removals_no_effect(self):
         updater = MemoryUpdater()

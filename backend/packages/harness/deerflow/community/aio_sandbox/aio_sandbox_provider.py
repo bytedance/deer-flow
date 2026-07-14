@@ -190,7 +190,8 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         provisioner_url = self._config.get("provisioner_url")
         if provisioner_url:
             logger.info(f"Using remote sandbox backend with provisioner at {provisioner_url}")
-            return RemoteSandboxBackend(provisioner_url=provisioner_url)
+            api_key = self._config.get("provisioner_api_key", "")
+            return RemoteSandboxBackend(provisioner_url=provisioner_url, api_key=api_key)
 
         logger.info("Using local container sandbox backend")
         return LocalContainerBackend(
@@ -221,6 +222,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             "environment": self._resolve_env_vars(sandbox_config.environment or {}),
             # provisioner URL for dynamic pod management (e.g. http://provisioner:8002)
             "provisioner_url": getattr(sandbox_config, "provisioner_url", None) or "",
+            "provisioner_api_key": getattr(sandbox_config, "provisioner_api_key", None) or "",
         }
 
     @staticmethod
