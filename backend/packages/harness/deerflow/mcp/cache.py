@@ -46,6 +46,12 @@ def _get_config_signature(config_path: Path) -> _ConfigSignature | None:
     except OSError:
         return None
 
+    # Always hash the full file here rather than short-circuiting when
+    # mtime/size already match a previously recorded signature: swapping in a
+    # different MCP server config of identical byte length within the same
+    # second leaves mtime *and* size unchanged, so only the sha256 catches
+    # that swap. Skipping the hash on an mtime/size match would reopen the
+    # narrow gap this signature was built to close.
     digest = hashlib.sha256()
     try:
         with config_path.open("rb") as f:
@@ -84,7 +90,14 @@ def _is_cache_stale() -> bool:
 
     # Preserve the original "config missing / not yet recorded" behavior: if
     # there was no readable config when the cache was populated, or there is
-    # none now, do not invalidate.
+    # none now, do not invalidate. This also covers the config being deleted
+    # entirely after a successful init (current_signature flips to None): the
+    # cache intentionally keeps serving its last-known-good MCP tools rather
+    # than invalidating into an unconfigured state, matching the pre-fix
+    # mtime-only contract (which also returned False once the file could no
+    # longer be stat-ed). Treat this as a deliberate fail-soft choice, not an
+    # oversight — a future change that wants "config deleted" to tear down
+    # MCP tools needs its own explicit signal here, not an inferred one.
     if _config_signature is None or current_signature is None:
         return False
 

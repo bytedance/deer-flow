@@ -190,3 +190,56 @@ def test_forward_edit_is_stale(cache_globals, monkeypatch, tmp_path):
     os.utime(cfg, (newer, newer))
 
     assert cache_module._is_cache_stale() is True
+
+
+def test_same_mtime_same_size_swap_is_stale(cache_globals, monkeypatch, tmp_path):
+    """Precise variant of failure mode 1: mtime *and* size both stay unchanged
+    (an equal-length server-name swap), so mtime/size alone are indistinguishable
+    and only the sha256 content digest can catch the change. Guards the content
+    digest itself: a future change that starts short-circuiting the hash
+    whenever mtime/size already match a recorded value must not make this test
+    pass without actually detecting the swap.
+    """
+    cfg = tmp_path / "extensions_config.json"
+    _write_extensions_config(cfg, {"srv1": _server()})
+    _initialize_against(monkeypatch, cfg)
+    recorded_mtime = cfg.stat().st_mtime
+    recorded_size = cfg.stat().st_size
+
+    _write_extensions_config(cfg, {"srv9": _server()})  # same-length key swap
+    os.utime(cfg, (recorded_mtime, recorded_mtime))
+    assert cfg.stat().st_mtime == recorded_mtime  # guard: mtime truly unchanged
+    assert cfg.stat().st_size == recorded_size  # guard: size truly unchanged too
+
+    assert cache_module._is_cache_stale() is True
+
+
+def test_config_deleted_after_init_is_not_stale(cache_globals, monkeypatch, tmp_path):
+    """Latent edge preserved by design: if the resolved config file is deleted
+    entirely after a successful init, ``current_signature`` becomes ``None`` and
+    the cache does NOT invalidate — it keeps serving its last-known-good MCP
+    tools instead of tearing down into an unconfigured state. This matches the
+    pre-fix mtime-only contract, which also returned ``False`` once the file
+    could no longer be stat-ed, so it is not a regression introduced by the
+    content-signature fix.
+
+    The resolver is monkeypatched to keep pointing at the (now-missing) path,
+    isolating ``_is_cache_stale``'s own stat-failure handling from
+    ``ExtensionsConfig.resolve_config_path``'s separate not-found contract for
+    explicit path/env-var configuration (that function raises
+    ``FileNotFoundError`` in that mode instead of returning ``None`` — a
+    distinct, pre-existing latent issue outside this module's scope).
+    """
+    cfg = tmp_path / "extensions_config.json"
+    _write_extensions_config(cfg, {"srv1": _server()})
+    _initialize_against(monkeypatch, cfg)
+    assert cache_module._config_signature is not None  # guard: had a real signature
+
+    cfg.unlink()  # the config file is deleted entirely, not just edited
+    monkeypatch.setattr(
+        ExtensionsConfig,
+        "resolve_config_path",
+        classmethod(lambda cls, config_path=None: cfg),
+    )
+
+    assert cache_module._is_cache_stale() is False
