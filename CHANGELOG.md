@@ -5,6 +5,18 @@ All notable changes to DeerFlow are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **models:** Honor `api_base` on every `BaseChatOpenAI` subclass (`VllmChatModel`,
+  `MindIEChatModel`, `PatchedChatMiMo`, `PatchedChatStepFun`, `PatchedChatMiniMax`),
+  not just `ChatOpenAI` / `PatchedChatOpenAI`. Those five previously dropped the
+  configured endpoint silently and then failed every request with an opaque
+  `unexpected keyword argument 'api_base'`; the unknown-config-key warning was
+  disabled for them as well. Both now gate on `issubclass(BaseChatOpenAI)`. ([#4146])
+
+
 ## [2.0.0] — 2026-06-15
 
 DeerFlow 2.0 is a ground-up rewrite around a "super agent" harness with
@@ -518,3 +530,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#3654]: https://github.com/bytedance/deer-flow/pull/3654
 [#3657]: https://github.com/bytedance/deer-flow/pull/3657
 [#3658]: https://github.com/bytedance/deer-flow/pull/3658
+[#4146]: https://github.com/bytedance/deer-flow/pull/4146
