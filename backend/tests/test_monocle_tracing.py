@@ -211,7 +211,10 @@ def test_embedded_hint_when_enabled_but_uninitialized(monkeypatch, caplog):
     reset_tracing_config()
     monkeypatch.setattr("deerflow.tracing.monocle._setup_completed", False)
 
-    with caplog.at_level(logging.DEBUG):
+    # Scoped to the factory's logger: earlier tests in the suite may have run
+    # configure_logging(), which pins an explicit INFO level on the hierarchy
+    # that a root-level caplog.at_level(DEBUG) would not override.
+    with caplog.at_level(logging.DEBUG, logger="deerflow.tracing.factory"):
         assert build_tracing_callbacks() == []
 
     assert any("not initialized in this process" in r.message for r in caplog.records)
@@ -226,7 +229,7 @@ def test_no_embedded_hint_after_setup(monkeypatch, caplog):
     monkeypatch.setattr("monocle_apptrace.setup_monocle_telemetry", lambda **kw: None)
     assert setup_monocle_tracing_if_enabled() is True
 
-    with caplog.at_level(logging.DEBUG):
+    with caplog.at_level(logging.DEBUG, logger="deerflow.tracing.factory"):
         build_tracing_callbacks()
 
     assert not any("not initialized in this process" in r.message for r in caplog.records)
