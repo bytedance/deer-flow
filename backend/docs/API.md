@@ -718,15 +718,38 @@ assigned `thread_id` and `run_id` on the first message of a new chat.
 from langgraph_sdk import get_client
 
 client = get_client(url="http://localhost:2026/api/langgraph")
+run_meta: dict[str, str] = {}
+
+
+def on_run_created(meta) -> None:
+    # langgraph-sdk 0.3.x parses Content-Location only when this callback is set.
+    if meta.thread_id:
+        run_meta["thread_id"] = meta.thread_id
+    run_meta["run_id"] = meta.run_id
+
 
 # Option A: stateless stream — no thread pre-creation
-# Gateway auto-creates a thread; SDK reads thread_id/run_id from Content-Location.
+# Gateway auto-creates a thread and returns thread_id/run_id in Content-Location.
 async for event in client.runs.stream(
     None,
     "lead_agent",
     input={"messages": [{"role": "user", "content": "Hello"}]},
     config={"configurable": {"model_name": "gpt-4"}},
     stream_mode=["values", "messages-tuple", "custom"],
+    on_run_created=on_run_created,
+):
+    print(event)
+
+thread_id = run_meta["thread_id"]  # persist before the next turn
+
+# Option A (continued): same thread on the next turn
+async for event in client.runs.stream(
+    None,
+    "lead_agent",
+    input={"messages": [{"role": "user", "content": "What did I just ask?"}]},
+    config={"configurable": {"thread_id": thread_id, "model_name": "gpt-4"}},
+    stream_mode=["values", "messages-tuple", "custom"],
+    on_run_created=on_run_created,
 ):
     print(event)
 
@@ -738,6 +761,7 @@ async for event in client.runs.stream(
     input={"messages": [{"role": "user", "content": "Hello"}]},
     config={"configurable": {"model_name": "gpt-4"}},
     stream_mode=["values", "messages-tuple", "custom"],
+    on_run_created=on_run_created,
 ):
     print(event)
 ```
