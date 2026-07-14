@@ -10,16 +10,21 @@ import {
 import type { ToolStreamOutput } from "./types";
 
 export interface ToolStreamingState {
-  output: ToolStreamOutput | null;
+  /** Streaming outputs keyed by ``tool_call_id`` (globally unique UUID). */
+  outputs: Readonly<Record<string, ToolStreamOutput>>;
 }
 
 export interface ToolStreamingContextValue {
   state: ToolStreamingState;
-  updateToolStream: (output: ToolStreamOutput | null) => void;
+  /** Upsert or remove a streaming output entry. */
+  updateToolStream: (
+    toolCallId: string,
+    output: ToolStreamOutput | null,
+  ) => void;
 }
 
 const ToolStreamingContext = createContext<ToolStreamingContextValue>({
-  state: { output: null },
+  state: { outputs: {} },
   updateToolStream: () => {
     /* noop */
   },
@@ -30,23 +35,38 @@ export function ToolStreamingProvider({
 }: {
   children: React.ReactNode;
 }) {
-  const [state, setState] = useState<ToolStreamingState>({ output: null });
+  const [state, setState] = useState<ToolStreamingState>({ outputs: {} });
   const stateRef = useRef(state);
   useEffect(() => {
     stateRef.current = state;
   }, [state]);
 
-  const updateToolStream = useCallback((output: ToolStreamOutput | null) => {
-    setState((prev) => {
-      // Don't replace a streaming output from a different tool with null
-      // (a late-arriving start→final sequence could race).
-      if (output === null && prev.output !== null) {
-        return { output: null };
-      }
-      // When the same tool sends multiple updates, merge them.
-      return { output };
-    });
-  }, []);
+  const updateToolStream = useCallback(
+    (toolCallId: string, output: ToolStreamOutput | null) => {
+      setState((prev) => {
+        if (output === null) {
+          // Remove this tool's entry from the map.
+          if (!(toolCallId in prev.outputs)) {
+            return prev;
+          }
+          const next = { ...prev.outputs };
+          delete next[toolCallId];
+          return { outputs: next };
+        }
+        // Prevent a stale final chunk from overwriting a newer partial chunk
+        // from a subsequent tool call of the same subagent (late-arriving
+        // start/final sequence could race).
+        const existing = prev.outputs[toolCallId];
+        if (existing && !output.isPartial && existing.isPartial) {
+          return prev;
+        }
+        return {
+          outputs: { ...prev.outputs, [toolCallId]: output },
+        };
+      });
+    },
+    [],
+  );
 
   return (
     <ToolStreamingContext.Provider value={{ state, updateToolStream }}>
@@ -60,10 +80,27 @@ export function useToolStreaming() {
 }
 
 /**
- * Hook that returns true while any tool is streaming output.
- * The subtask card uses this to show a streaming indicator.
+ * Return the streaming output for a specific tool call, or ``null``.
+ * Subtask cards call this with the tool_call_ids they are interested in
+ * so that two parallel in-progress subtasks never render each other's output.
  */
-export function useIsToolStreaming(): boolean {
+export function useToolCallStream(
+  toolCallId: string | undefined,
+): ToolStreamOutput | null {
   const { state } = useToolStreaming();
-  return state.output?.isPartial === true;
+  if (!toolCallId) {
+    return null;
+  }
+  return state.outputs[toolCallId] ?? null;
+}
+
+/**
+ * Return ``true`` while *any* tool is still streaming, keyed by its call id.
+ */
+export function useIsToolStreaming(toolCallId?: string): boolean {
+  const { state } = useToolStreaming();
+  if (toolCallId) {
+    return state.outputs[toolCallId]?.isPartial === true;
+  }
+  return Object.values(state.outputs).some((o) => o.isPartial === true);
 }

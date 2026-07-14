@@ -101,10 +101,7 @@ def _extract_content(result: ToolMessage | Command) -> str:
         if isinstance(content, str):
             return content
         if isinstance(content, list):
-            return "".join(
-                block.get("text", "") if isinstance(block, dict) else str(block)
-                for block in content
-            )
+            return "".join(block.get("text", "") if isinstance(block, dict) else str(block) for block in content)
         return str(content)
     return ""
 
@@ -184,7 +181,7 @@ class ToolStreamingMiddleware(AgentMiddleware[AgentState]):
 
         # Emit start-of-execution chunk so the frontend knows a tool is running.
         try:
-            writer((TOOL_OUTPUT_CHUNK_EVENT, _build_start_chunk(tool_call_id, tool_name)))
+            writer(_build_start_chunk(tool_call_id, tool_name))
         except Exception:
             logger.debug("Failed to emit tool start chunk for %s/%s", tool_name, tool_call_id, exc_info=True)
 
@@ -198,7 +195,7 @@ class ToolStreamingMiddleware(AgentMiddleware[AgentState]):
             if len(error_text) > 500:
                 error_text = error_text[:497] + "..."
             try:
-                writer((TOOL_OUTPUT_CHUNK_EVENT, _build_error_chunk(tool_call_id, tool_name, error_text)))
+                writer(_build_error_chunk(tool_call_id, tool_name, error_text))
             except Exception:
                 logger.debug("Failed to emit tool error chunk for %s/%s", tool_name, tool_call_id, exc_info=True)
             raise
@@ -206,7 +203,7 @@ class ToolStreamingMiddleware(AgentMiddleware[AgentState]):
         # Emit final chunk with the complete tool output.
         content = _extract_content(result)
         try:
-            writer((TOOL_OUTPUT_CHUNK_EVENT, _build_final_chunk(tool_call_id, tool_name, content)))
+            writer(_build_final_chunk(tool_call_id, tool_name, content))
         except Exception:
             logger.debug("Failed to emit tool final chunk for %s/%s", tool_name, tool_call_id, exc_info=True)
 
