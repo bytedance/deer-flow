@@ -145,6 +145,12 @@ def _clear_category(root: Path) -> None:
             path.unlink()
 
 
+def _clear_projection_scope(scope_root: Path, *category_roots: Path) -> None:
+    for category_root in category_roots:
+        _clear_category(category_root)
+    _manifest_path(scope_root).unlink(missing_ok=True)
+
+
 def _update_tree_digest(digest, root: Path, label: str) -> None:
     digest.update(f"root:{label}\0".encode())
     if not root.exists():
@@ -260,46 +266,51 @@ def _category_boundaries(skills: list[Skill], category: SkillCategory) -> set[Pa
 
 def _rebuild_public_locked(storage: SkillStorage, paths: SkillProjectionPaths) -> None:
     scope_root = paths.public.parent
-    for _attempt in range(_MAX_REBUILD_ATTEMPTS):
-        before = _source_signature(storage, "public")
-        all_public_skills = _load_public_skills(storage, enabled_only=False)
-        enabled_public_skills = _load_public_skills(storage, enabled_only=True)
-        _replace_category(
-            paths.public,
-            _by_relative_path(enabled_public_skills, SkillCategory.PUBLIC),
-            _category_boundaries(all_public_skills, SkillCategory.PUBLIC),
-        )
-        after = _source_signature(storage, "public")
-        if before == after:
-            _write_manifest(scope_root, after)
-            return
-    _clear_category(paths.public)
-    raise RuntimeError("Public skills changed repeatedly while rebuilding the sandbox projection")
+    try:
+        for _attempt in range(_MAX_REBUILD_ATTEMPTS):
+            before = _source_signature(storage, "public")
+            all_public_skills = _load_public_skills(storage, enabled_only=False)
+            enabled_public_skills = _load_public_skills(storage, enabled_only=True)
+            _replace_category(
+                paths.public,
+                _by_relative_path(enabled_public_skills, SkillCategory.PUBLIC),
+                _category_boundaries(all_public_skills, SkillCategory.PUBLIC),
+            )
+            after = _source_signature(storage, "public")
+            if before == after:
+                _write_manifest(scope_root, after)
+                return
+        raise RuntimeError("Public skills changed repeatedly while rebuilding the sandbox projection")
+    except Exception:
+        _clear_projection_scope(scope_root, paths.public)
+        raise
 
 
 def _rebuild_user_locked(storage: SkillStorage, paths: SkillProjectionPaths) -> None:
     scope_root = paths.custom.parent
-    for _attempt in range(_MAX_REBUILD_ATTEMPTS):
-        before = _source_signature(storage, "user")
-        all_user_skills = storage.load_skills(enabled_only=False)
-        enabled_user_skills = [skill for skill in all_user_skills if skill.enabled]
-        _replace_category(
-            paths.custom,
-            _by_relative_path(enabled_user_skills, SkillCategory.CUSTOM),
-            _category_boundaries(all_user_skills, SkillCategory.CUSTOM),
-        )
-        _replace_category(
-            paths.legacy,
-            _by_relative_path(enabled_user_skills, SkillCategory.LEGACY),
-            _category_boundaries(all_user_skills, SkillCategory.LEGACY),
-        )
-        after = _source_signature(storage, "user")
-        if before == after:
-            _write_manifest(scope_root, after)
-            return
-    _clear_category(paths.custom)
-    _clear_category(paths.legacy)
-    raise RuntimeError("User skills changed repeatedly while rebuilding the sandbox projection")
+    try:
+        for _attempt in range(_MAX_REBUILD_ATTEMPTS):
+            before = _source_signature(storage, "user")
+            all_user_skills = storage.load_skills(enabled_only=False)
+            enabled_user_skills = [skill for skill in all_user_skills if skill.enabled]
+            _replace_category(
+                paths.custom,
+                _by_relative_path(enabled_user_skills, SkillCategory.CUSTOM),
+                _category_boundaries(all_user_skills, SkillCategory.CUSTOM),
+            )
+            _replace_category(
+                paths.legacy,
+                _by_relative_path(enabled_user_skills, SkillCategory.LEGACY),
+                _category_boundaries(all_user_skills, SkillCategory.LEGACY),
+            )
+            after = _source_signature(storage, "user")
+            if before == after:
+                _write_manifest(scope_root, after)
+                return
+        raise RuntimeError("User skills changed repeatedly while rebuilding the sandbox projection")
+    except Exception:
+        _clear_projection_scope(scope_root, paths.custom, paths.legacy)
+        raise
 
 
 def rebuild_skill_projections(
@@ -325,17 +336,25 @@ def ensure_skill_projections(storage: SkillStorage) -> SkillProjectionPaths:
     """Repair stale projection scopes, otherwise leave their inodes untouched."""
     paths = get_skill_projection_paths(storage)
     with _projection_lock(paths.public.parent):
-        manifest = _read_manifest(paths.public.parent)
-        signature = _source_signature(storage, "public")
-        if not paths.public.is_dir() or manifest is None or manifest.get("version") != _MANIFEST_VERSION or manifest.get("source_signature") != signature:
-            _rebuild_public_locked(storage, paths)
+        try:
+            manifest = _read_manifest(paths.public.parent)
+            signature = _source_signature(storage, "public")
+            if not paths.public.is_dir() or manifest is None or manifest.get("version") != _MANIFEST_VERSION or manifest.get("source_signature") != signature:
+                _rebuild_public_locked(storage, paths)
+        except Exception:
+            _clear_projection_scope(paths.public.parent, paths.public)
+            raise
 
     if getattr(storage, "user_id", None) is not None:
         with _projection_lock(paths.custom.parent):
-            manifest = _read_manifest(paths.custom.parent)
-            signature = _source_signature(storage, "user")
-            if not paths.custom.is_dir() or not paths.legacy.is_dir() or manifest is None or manifest.get("version") != _MANIFEST_VERSION or manifest.get("source_signature") != signature:
-                _rebuild_user_locked(storage, paths)
+            try:
+                manifest = _read_manifest(paths.custom.parent)
+                signature = _source_signature(storage, "user")
+                if not paths.custom.is_dir() or not paths.legacy.is_dir() or manifest is None or manifest.get("version") != _MANIFEST_VERSION or manifest.get("source_signature") != signature:
+                    _rebuild_user_locked(storage, paths)
+            except Exception:
+                _clear_projection_scope(paths.custom.parent, paths.custom, paths.legacy)
+                raise
     return paths
 
 

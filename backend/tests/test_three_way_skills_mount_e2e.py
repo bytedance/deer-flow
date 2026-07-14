@@ -98,6 +98,30 @@ class TestThreeWayMountEndToEnd:
         assert idx["/mnt/skills/public"].read_only is True
         assert Path(idx["/mnt/skills/public"].local_path) == paths.public_skills_view_dir
 
+    def test_local_acquire_recovers_public_mount_after_initial_projection_failure(self, skills_fs):
+        cfg = _build_config(skills_fs["root"])
+        paths = Paths(base_dir=skills_fs["users_dir"].parent)
+        projection = SimpleNamespace(
+            public=paths.public_skills_view_dir,
+            custom=paths.user_custom_skills_view_dir("user-1"),
+            legacy=paths.user_legacy_skills_view_dir("user-1"),
+        )
+        for root in (projection.public, projection.custom, projection.legacy):
+            root.mkdir(parents=True, exist_ok=True)
+
+        with (
+            patch("deerflow.config.get_app_config", return_value=cfg),
+            patch("deerflow.config.paths.get_paths", return_value=paths),
+            patch.object(LocalSandboxProvider, "_ensure_skills_projection", side_effect=[OSError("transient"), projection]),
+        ):
+            provider = LocalSandboxProvider()
+            sandbox_id = provider.acquire("thread-1", user_id="user-1")
+            sandbox = provider.get(sandbox_id)
+
+        mappings = {mapping.container_path: mapping for mapping in sandbox.path_mappings}
+        assert Path(mappings["/mnt/skills/public"].local_path) == projection.public
+        assert mappings["/mnt/skills/public"].read_only is True
+
     def test_local_per_user_custom_skill_mounted(self, skills_fs):
         cfg = _build_config(skills_fs["root"])
         paths = Paths(base_dir=skills_fs["users_dir"].parent)

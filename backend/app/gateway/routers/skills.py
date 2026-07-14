@@ -11,7 +11,7 @@ from app.gateway.deps import get_config, require_admin_user
 from app.gateway.path_utils import resolve_thread_virtual_path
 from deerflow.agents.lead_agent.prompt import clear_skills_system_prompt_cache, refresh_user_skills_system_prompt_cache_async
 from deerflow.config.app_config import AppConfig
-from deerflow.config.extensions_config import ExtensionsConfig, SkillStateConfig, get_extensions_config, reload_extensions_config
+from deerflow.config.extensions_config import ExtensionsConfig, SkillStateConfig, reload_extensions_config
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.skills import Skill
 from deerflow.skills.installer import SkillAlreadyExistsError, SkillSecurityScanError
@@ -96,6 +96,34 @@ def _skill_to_response(skill: Skill) -> SkillResponse:
         enabled=skill.enabled,
         editable=skill.category == SkillCategory.CUSTOM,
     )
+
+
+def _persist_shared_skill_state(
+    storage: SkillStorage,
+    config_path: Path,
+    skill_name: str,
+    enabled: bool,
+    *,
+    rebuild_public_projection: bool,
+) -> None:
+    from contextlib import nullcontext
+
+    from deerflow.skills.projection import skill_projection_mutation
+    from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
+
+    projection_update = skill_projection_mutation(storage, "public") if rebuild_public_projection and isinstance(storage, LocalSkillStorage) else nullcontext()
+    with projection_update:
+        # The projection lock is cross-process, but the singleton cache is not.
+        # Reload the latest disk state inside the lock before this RMW.
+        extensions_config = ExtensionsConfig.from_file(config_path) if config_path.exists() else ExtensionsConfig()
+        extensions_config.skills[skill_name] = SkillStateConfig(enabled=enabled)
+        config_data = {
+            "mcpServers": {name: server.model_dump() for name, server in extensions_config.mcp_servers.items()},
+            "skills": {name: {"enabled": skill_config.enabled} for name, skill_config in extensions_config.skills.items()},
+        }
+        with config_path.open("w", encoding="utf-8") as stream:
+            json.dump(config_data, stream, indent=2)
+        reload_extensions_config()
 
 
 def _static_scan_http_detail(error: StaticScanBlockedError) -> dict:
@@ -236,8 +264,9 @@ async def update_custom_skill(skill_name: str, body: CustomSkillUpdateRequest, r
         if scan.decision == "block":
             raise HTTPException(status_code=400, detail=f"Security scan blocked the edit: {scan.reason}")
         prev_content = storage.read_custom_skill(skill_name)
-        storage.write_custom_skill(skill_name, SKILL_MD_FILE, body.content)
-        storage.append_history(
+        await asyncio.to_thread(storage.write_custom_skill, skill_name, SKILL_MD_FILE, body.content)
+        await asyncio.to_thread(
+            storage.append_history,
             skill_name,
             {
                 "action": "human_edit",
@@ -268,7 +297,8 @@ async def delete_custom_skill(skill_name: str, request: Request, config: AppConf
     try:
         skill_name = skill_name.replace("\r\n", "").replace("\n", "")
         storage = _get_user_skill_storage(config)
-        storage.delete_custom_skill(
+        await asyncio.to_thread(
+            storage.delete_custom_skill,
             skill_name,
             history_meta={
                 "action": "human_delete",
@@ -337,10 +367,10 @@ async def rollback_custom_skill(skill_name: str, body: SkillRollbackRequest, req
             "scanner": {"decision": scan.decision, "reason": scan.reason, "static_findings": static_findings},
         }
         if scan.decision == "block":
-            storage.append_history(skill_name, history_entry)
+            await asyncio.to_thread(storage.append_history, skill_name, history_entry)
             raise HTTPException(status_code=400, detail=f"Rollback blocked by security scanner: {scan.reason}")
-        storage.write_custom_skill(skill_name, SKILL_MD_FILE, target_content)
-        storage.append_history(skill_name, history_entry)
+        await asyncio.to_thread(storage.write_custom_skill, skill_name, SKILL_MD_FILE, target_content)
+        await asyncio.to_thread(storage.append_history, skill_name, history_entry)
         await refresh_user_skills_system_prompt_cache_async(get_effective_user_id())
         return await _read_custom_skill_response(skill_name, config)
     except HTTPException:
@@ -409,50 +439,34 @@ async def update_skill(skill_name: str, body: SkillUpdateRequest, request: Reque
                 config_path = Path.cwd().parent / "extensions_config.json"
                 logger.info(f"No existing extensions config found. Creating new config at: {config_path}")
 
-            from contextlib import nullcontext
-
-            from deerflow.skills.projection import skill_projection_mutation
-            from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
-
-            projection_update = skill_projection_mutation(storage, "public") if isinstance(storage, LocalSkillStorage) else nullcontext()
-            with projection_update:
-                # The projection lock is cross-process, but the singleton cache
-                # is not. Reload the latest on-disk state inside the lock so a
-                # worker with a stale cache cannot overwrite another worker's
-                # completed toggle.
-                extensions_config = ExtensionsConfig.from_file(config_path)
-                extensions_config.skills[skill_name] = SkillStateConfig(enabled=body.enabled)
-
-                config_data = {
-                    "mcpServers": {name: server.model_dump() for name, server in extensions_config.mcp_servers.items()},
-                    "skills": {name: {"enabled": skill_config.enabled} for name, skill_config in extensions_config.skills.items()},
-                }
-
-                with open(config_path, "w", encoding="utf-8") as f:
-                    json.dump(config_data, f, indent=2)
-
-                logger.info(f"Skills configuration updated and saved to: {config_path}")
-                reload_extensions_config()
+            await asyncio.to_thread(
+                _persist_shared_skill_state,
+                storage,
+                config_path,
+                skill_name,
+                body.enabled,
+                rebuild_public_projection=True,
+            )
+            logger.info(f"Skills configuration updated and saved to: {config_path}")
         else:
             # CUSTOM / LEGACY: write per-user state
             from deerflow.skills.storage.user_scoped_skill_storage import UserScopedSkillStorage
 
             if isinstance(storage, UserScopedSkillStorage):
-                storage.set_skill_enabled_state(skill_name, body.enabled)
+                await asyncio.to_thread(storage.set_skill_enabled_state, skill_name, body.enabled)
             else:
                 # Fallback for non-user-scoped storage (unlikely in practice)
                 config_path = ExtensionsConfig.resolve_config_path()
                 if config_path is None:
                     config_path = Path.cwd().parent / "extensions_config.json"
-                extensions_config = get_extensions_config()
-                extensions_config.skills[skill_name] = SkillStateConfig(enabled=body.enabled)
-                config_data = {
-                    "mcpServers": {name: server.model_dump() for name, server in extensions_config.mcp_servers.items()},
-                    "skills": {name: {"enabled": skill_config.enabled} for name, skill_config in extensions_config.skills.items()},
-                }
-                with open(config_path, "w", encoding="utf-8") as f:
-                    json.dump(config_data, f, indent=2)
-                reload_extensions_config()
+                await asyncio.to_thread(
+                    _persist_shared_skill_state,
+                    storage,
+                    config_path,
+                    skill_name,
+                    body.enabled,
+                    rebuild_public_projection=False,
+                )
 
         # PUBLIC skill enabled state lives in the global extensions_config.json
         # and affects every user, so the prompt cache for ALL users must be

@@ -628,7 +628,6 @@ def test_update_skill_refreshes_prompt_cache_before_return(monkeypatch, tmp_path
     mock_storage = _FakeUserScopedStorage()
     monkeypatch.setattr(skills_router, "_get_user_skill_storage", lambda cfg: mock_storage)
     monkeypatch.setattr(skills_router, "get_effective_user_id", lambda: "default")
-    monkeypatch.setattr("app.gateway.routers.skills.get_extensions_config", lambda: SimpleNamespace(mcp_servers={}, skills={}))
     monkeypatch.setattr("app.gateway.routers.skills.reload_extensions_config", lambda: None)
     monkeypatch.setattr(skills_router.ExtensionsConfig, "resolve_config_path", staticmethod(lambda config_path=None: config_path))
     monkeypatch.setattr("app.gateway.routers.skills.refresh_user_skills_system_prompt_cache_async", _refresh)
@@ -705,7 +704,6 @@ def test_public_skill_toggle_clears_all_users_cache(monkeypatch, tmp_path):
         return config_path
 
     monkeypatch.setattr(skills_router.ExtensionsConfig, "resolve_config_path", staticmethod(_resolve))
-    monkeypatch.setattr("app.gateway.routers.skills.get_extensions_config", lambda: __import__("deerflow.config.extensions_config", fromlist=["ExtensionsConfig"]).ExtensionsConfig.from_file(config_path))
     monkeypatch.setattr("app.gateway.routers.skills.reload_extensions_config", lambda: None)
     monkeypatch.setattr("app.gateway.routers.skills.clear_skills_system_prompt_cache", _clear)
     monkeypatch.setattr("app.gateway.routers.skills.refresh_user_skills_system_prompt_cache_async", _refresh)
@@ -723,6 +721,45 @@ def test_public_skill_toggle_clears_all_users_cache(monkeypatch, tmp_path):
     # The global state file must reflect the toggle.
     persisted = json.loads(config_path.read_text(encoding="utf-8"))
     assert persisted["skills"]["public-skill"]["enabled"] is False
+
+
+def test_public_skill_toggle_creates_missing_extensions_config(monkeypatch, tmp_path):
+    backend_dir = tmp_path / "backend"
+    backend_dir.mkdir()
+    monkeypatch.chdir(backend_dir)
+    config_path = tmp_path / "extensions_config.json"
+
+    def _load_skills(*, enabled_only: bool):
+        enabled = True
+        if config_path.exists():
+            enabled = json.loads(config_path.read_text(encoding="utf-8"))["skills"]["public-skill"]["enabled"]
+        skill = _make_skill("public-skill", enabled=enabled)
+        return [] if enabled_only and not enabled else [skill]
+
+    storage = SimpleNamespace(load_skills=_load_skills)
+    monkeypatch.setattr(skills_router, "_get_user_skill_storage", lambda _config: storage)
+
+    def _resolve_config_path(explicit_path=None):
+        if explicit_path is None:
+            return None
+        path = Path(explicit_path)
+        if not path.exists():
+            raise FileNotFoundError(path)
+        return path
+
+    monkeypatch.setattr(skills_router.ExtensionsConfig, "resolve_config_path", staticmethod(_resolve_config_path))
+    monkeypatch.setattr(skills_router, "reload_extensions_config", lambda: None)
+    monkeypatch.setattr(skills_router, "clear_skills_system_prompt_cache", lambda: None)
+
+    with TestClient(_make_test_app(SimpleNamespace())) as client:
+        response = client.put("/api/skills/public-skill", json={"enabled": False})
+
+    assert response.status_code == 200, response.text
+    assert response.json()["enabled"] is False
+    assert json.loads(config_path.read_text(encoding="utf-8")) == {
+        "mcpServers": {},
+        "skills": {"public-skill": {"enabled": False}},
+    }
 
 
 def test_public_skill_toggle_rebuilds_projection_before_response(monkeypatch, tmp_path):
@@ -1016,7 +1053,6 @@ class TestMultiUserSkillIsolation:
         )
         monkeypatch.setattr(skills_router, "_get_user_skill_storage", lambda cfg: alice_storage)
         monkeypatch.setattr(skills_router, "get_effective_user_id", lambda: "alice")
-        monkeypatch.setattr("app.gateway.routers.skills.get_extensions_config", lambda: SimpleNamespace(mcp_servers={}, skills={}))
         monkeypatch.setattr("app.gateway.routers.skills.reload_extensions_config", lambda: None)
 
         app = _make_test_app(config)
@@ -1070,7 +1106,6 @@ class TestMultiUserSkillIsolation:
 
         monkeypatch.setattr(skills_router, "_get_user_skill_storage", lambda cfg: alice_storage)
         monkeypatch.setattr(skills_router, "get_effective_user_id", lambda: "alice")
-        monkeypatch.setattr("app.gateway.routers.skills.get_extensions_config", lambda: SimpleNamespace(mcp_servers={}, skills={}))
         monkeypatch.setattr("app.gateway.routers.skills.reload_extensions_config", lambda: None)
         monkeypatch.setattr("app.gateway.routers.skills.refresh_user_skills_system_prompt_cache_async", _noop_async)
 

@@ -229,6 +229,22 @@ class LocalSandboxProvider(SandboxProvider):
         return ensure_skill_projections(storage)
 
     @staticmethod
+    def _append_public_skill_mapping(mappings: list[PathMapping], projection) -> None:
+        from deerflow.config import get_app_config
+
+        container_path = get_app_config().skills.container_path.rstrip("/")
+        public_container_path = f"{container_path}/public"
+        if any(mapping.container_path.rstrip("/") == public_container_path for mapping in mappings):
+            return
+        mappings.append(
+            PathMapping(
+                container_path=public_container_path,
+                local_path=str(projection.public),
+                read_only=True,
+            )
+        )
+
+    @staticmethod
     def _sandbox_id_for_thread(thread_id: str, user_id: str) -> str:
         return f"local:{user_id}:{thread_id}"
 
@@ -334,10 +350,12 @@ class LocalSandboxProvider(SandboxProvider):
         global _singleton
 
         if thread_id is None:
-            self._ensure_skills_projection()
+            skill_projection = self._ensure_skills_projection()
             with self._lock:
                 if self._generic_sandbox is None:
-                    self._generic_sandbox = LocalSandbox("local", path_mappings=list(self._path_mappings))
+                    mappings = list(self._path_mappings)
+                    self._append_public_skill_mapping(mappings, skill_projection)
+                    self._generic_sandbox = LocalSandbox("local", path_mappings=mappings)
                     _singleton = self._generic_sandbox
                 return self._generic_sandbox.id
 
@@ -357,7 +375,9 @@ class LocalSandboxProvider(SandboxProvider):
 
         # ``_build_thread_path_mappings`` touches the filesystem
         # (``ensure_thread_dirs``); release the lock during I/O.
-        new_mappings = list(self._path_mappings) + self._build_thread_path_mappings(
+        new_mappings = list(self._path_mappings)
+        self._append_public_skill_mapping(new_mappings, skill_projection)
+        new_mappings += self._build_thread_path_mappings(
             thread_id,
             user_id=effective_user_id,
             skill_projection=skill_projection,

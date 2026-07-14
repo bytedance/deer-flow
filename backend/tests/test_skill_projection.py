@@ -210,6 +210,26 @@ def test_rebuild_failure_clears_old_projection(projection_env, monkeypatch) -> N
     assert list(projected.public.iterdir()) == []
 
 
+def test_signature_failure_clears_old_projection_and_manifest(projection_env, monkeypatch) -> None:
+    env = projection_env
+    _write_skill(env.skills_root / "public", "demo-skill")
+    projected = rebuild_skill_projections(env.storage)
+    manifest = projected.public.parent / ".projection-manifest.json"
+    assert (projected.public / "demo-skill" / "SKILL.md").is_file()
+    assert manifest.is_file()
+
+    monkeypatch.setattr(
+        "deerflow.skills.projection._source_signature",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(PermissionError("source metadata unavailable")),
+    )
+
+    with pytest.raises(PermissionError, match="source metadata unavailable"):
+        ensure_skill_projections(env.storage)
+
+    assert list(projected.public.iterdir()) == []
+    assert not manifest.exists()
+
+
 def test_boot_rebuild_restores_public_and_known_user_views(projection_env) -> None:
     env = projection_env
     _write_skill(env.skills_root / "public", "public-skill")
