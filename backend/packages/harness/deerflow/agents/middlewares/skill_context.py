@@ -13,7 +13,6 @@ import yaml
 from langchain_core.messages import AIMessage, AnyMessage, ToolMessage
 
 from deerflow.agents.thread_state import (
-    _SKILL_DESCRIPTION_MAX_CHARS,
     SkillEntry,
     description_for_skill_entry,
 )
