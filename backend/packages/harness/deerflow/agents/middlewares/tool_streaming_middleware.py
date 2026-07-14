@@ -10,15 +10,17 @@ only meaningful for async paths where the event loop can interleave chunk
 emission with tool execution.
 
 Architecture:
-  ToolStreamingMiddleware (outer)
-    └── handler → next middleware → actual tool
+  ToolErrorHandlingMiddleware (outer)
+    └── ToolStreamingMiddleware (inner)
+          └── handler → actual tool
 
 Placement:
-  Must sit **outer** of ``ToolErrorHandlingMiddleware`` so that downstream
-  middlewares see complete ToolMessage results.  The wrapper emits lifecycle
-  chunks (start / final) around the handler call; any intermediate chunks
-  emitted by the tool itself via ``langgraph.config.get_stream_writer()`` flow
-  through the same custom channel and are forwarded to the frontend naturally.
+  Must sit **inner** of ``ToolErrorHandlingMiddleware`` so it sees raw
+  exceptions before ``ToolErrorHandlingMiddleware`` converts them to error
+  ToolMessages.  The wrapper emits lifecycle chunks (start / final) around
+  the handler call; any intermediate chunks emitted by the tool itself via
+  ``langgraph.config.get_stream_writer()`` flow through the same custom
+  channel and are forwarded to the frontend naturally.
 """
 
 from __future__ import annotations
@@ -30,6 +32,7 @@ from typing import override
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import ToolMessage
+from langgraph.errors import GraphBubbleUp
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
 
@@ -39,6 +42,12 @@ logger = logging.getLogger(__name__)
 
 # Event type string emitted as a LangGraph custom stream event.
 TOOL_OUTPUT_CHUNK_EVENT = "tool_output_chunk"
+
+# Preview length for the final chunk sent as a completion signal.
+# The full output still arrives via the canonical ToolMessage; sending a
+# truncated copy avoids a double payload while still letting the frontend
+# know that streaming has ended for this tool_call_id.
+_FINAL_PREVIEW_MAX_CHARS = 200
 
 
 def _build_start_chunk(tool_call_id: str, tool_name: str) -> dict:
@@ -54,12 +63,21 @@ def _build_start_chunk(tool_call_id: str, tool_name: str) -> dict:
 
 
 def _build_final_chunk(tool_call_id: str, tool_name: str, content: str) -> dict:
-    """Build the end-of-execution lifecycle chunk with the full output."""
+    """Build the end-of-execution lifecycle chunk with a short preview.
+
+    The complete output arrives as a canonical ToolMessage in the message
+    stream; re-sending it in full here doubles the payload and creates UI
+    flicker.  Emit only a short preview so the frontend receives a
+    completion signal without a redundant payload.
+    """
+    preview = content[: content.find("\n")] if "\n" in content else content
+    if len(preview) > _FINAL_PREVIEW_MAX_CHARS:
+        preview = preview[:_FINAL_PREVIEW_MAX_CHARS] + "…"
     return {
         "type": TOOL_OUTPUT_CHUNK_EVENT,
         "tool_call_id": tool_call_id,
         "tool_name": tool_name,
-        "chunk": content,
+        "chunk": preview,
         "is_partial": False,
         "is_final": True,
     }
@@ -120,10 +138,12 @@ class ToolStreamingMiddleware(AgentMiddleware[AgentState]):
         ``langgraph.config.get_stream_writer()`` during execution.  The
         middleware does not produce these — they flow through the custom channel
         natively.
-      - **final**: emitted after the handler returns, carrying the complete
-        tool output (``is_partial=False``, ``is_final=True``).
+      - **final**: emitted after the handler returns, carrying a short preview
+        of the tool output as a completion signal (``is_partial=False``,
+        ``is_final=True``).  The full output arrives via the canonical
+        ToolMessage; the preview prevents a double payload.
       - **error**: emitted when the handler raises an exception.  The exception
-        is re-raised so ``ToolErrorHandlingMiddleware`` (inner) can convert it
+        is re-raised so ``ToolErrorHandlingMiddleware`` (outer) can convert it
         to an error ToolMessage.
 
     Safe fallback: when the stream writer is unavailable (no ``custom`` mode in
@@ -135,8 +155,6 @@ class ToolStreamingMiddleware(AgentMiddleware[AgentState]):
     def __init__(self, *, config: ToolStreamingConfig | None = None) -> None:
         super().__init__()
         self._enabled = config.enabled if config is not None else False
-        self._min_chunk_size = config.min_chunk_size if config is not None else 64
-        self._max_buffer_seconds = config.max_buffer_seconds if config is not None else 0.1
 
     @classmethod
     def from_config(cls, config: ToolStreamingConfig) -> ToolStreamingMiddleware:
@@ -187,10 +205,13 @@ class ToolStreamingMiddleware(AgentMiddleware[AgentState]):
 
         try:
             result = await handler(request)
+        except GraphBubbleUp:
+            # Preserve LangGraph control-flow signals (interrupt/pause/resume).
+            raise
         except Exception as exc:
-            # Emit an error chunk before re-raising so the frontend can show
-            # what went wrong.  ToolErrorHandlingMiddleware (inner) will catch
-            # this and convert it to an error ToolMessage.
+            # Emit an error chunk before re-raising.  ToolErrorHandlingMiddleware
+            # (outer) will catch the re-raised exception and convert it to an
+            # error ToolMessage.
             error_text = str(exc).strip() or exc.__class__.__name__
             if len(error_text) > 500:
                 error_text = error_text[:497] + "..."
@@ -200,7 +221,9 @@ class ToolStreamingMiddleware(AgentMiddleware[AgentState]):
                 logger.debug("Failed to emit tool error chunk for %s/%s", tool_name, tool_call_id, exc_info=True)
             raise
 
-        # Emit final chunk with the complete tool output.
+        # Emit final chunk as a completion signal with a short preview.
+        # The full tool output arrives via the canonical ToolMessage in the
+        # message stream; re-sending it in full here doubles the payload.
         content = _extract_content(result)
         try:
             writer(_build_final_chunk(tool_call_id, tool_name, content))
