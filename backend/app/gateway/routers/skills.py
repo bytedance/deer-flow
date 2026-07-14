@@ -416,7 +416,11 @@ async def update_skill(skill_name: str, body: SkillUpdateRequest, request: Reque
 
             projection_update = skill_projection_mutation(storage, "public") if isinstance(storage, LocalSkillStorage) else nullcontext()
             with projection_update:
-                extensions_config = get_extensions_config()
+                # The projection lock is cross-process, but the singleton cache
+                # is not. Reload the latest on-disk state inside the lock so a
+                # worker with a stale cache cannot overwrite another worker's
+                # completed toggle.
+                extensions_config = ExtensionsConfig.from_file(config_path)
                 extensions_config.skills[skill_name] = SkillStateConfig(enabled=body.enabled)
 
                 config_data = {

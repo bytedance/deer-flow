@@ -726,7 +726,7 @@ def test_public_skill_toggle_clears_all_users_cache(monkeypatch, tmp_path):
 
 
 def test_public_skill_toggle_rebuilds_projection_before_response(monkeypatch, tmp_path):
-    from deerflow.config.extensions_config import reload_extensions_config, reset_extensions_config
+    from deerflow.config.extensions_config import ExtensionsConfig, SkillStateConfig, reset_extensions_config, set_extensions_config
     from deerflow.config.paths import Paths
     from deerflow.skills.projection import rebuild_skill_projections
 
@@ -736,7 +736,18 @@ def test_public_skill_toggle_rebuilds_projection_before_response(monkeypatch, tm
     skill_file.write_text(_skill_content("public-skill"), encoding="utf-8")
     (skills_root / "custom").mkdir()
     config_path = tmp_path / "extensions_config.json"
-    config_path.write_text(json.dumps({"mcpServers": {}, "skills": {"public-skill": {"enabled": True}}}), encoding="utf-8")
+    config_path.write_text(
+        json.dumps(
+            {
+                "mcpServers": {},
+                "skills": {
+                    "public-skill": {"enabled": True},
+                    "untouched-skill": {"enabled": False},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
     monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(config_path))
 
     paths = Paths(base_dir=tmp_path)
@@ -752,7 +763,10 @@ def test_public_skill_toggle_rebuilds_projection_before_response(monkeypatch, tm
     monkeypatch.setattr("deerflow.config.paths._paths", None)
     monkeypatch.setattr(skills_router, "get_effective_user_id", lambda: "default")
     monkeypatch.setattr(skills_router, "clear_skills_system_prompt_cache", lambda: None)
-    reload_extensions_config(str(config_path))
+    # Simulate another worker having updated the file after this worker cached
+    # an older snapshot. The public toggle must reload from disk under the
+    # cross-process projection lock before its read-modify-write.
+    set_extensions_config(ExtensionsConfig(skills={"public-skill": SkillStateConfig(enabled=True)}))
 
     storage = UserScopedSkillStorage("default", host_path=str(skills_root), app_config=config)
     monkeypatch.setattr(skills_router, "_get_user_skill_storage", lambda _config: storage)
@@ -766,6 +780,8 @@ def test_public_skill_toggle_rebuilds_projection_before_response(monkeypatch, tm
         assert response.status_code == 200, response.text
         assert response.json()["enabled"] is False
         assert not (projected.public / "public-skill").exists()
+        persisted = json.loads(config_path.read_text(encoding="utf-8"))
+        assert persisted["skills"]["untouched-skill"] == {"enabled": False}
     finally:
         reset_extensions_config()
 

@@ -155,6 +155,15 @@ class SkillStorage(ABC):
         Origin: ``deerflow.skills.manager.atomic_write``.
         """
 
+    def remove_custom_skill_file(self, name: str, relative_path: str) -> str:
+        """Remove a supporting file and return its previous text content."""
+        target = self.ensure_safe_support_path(name, relative_path)
+        if not target.exists():
+            raise FileNotFoundError(f"Supporting file '{relative_path}' not found for skill '{name}'.")
+        previous_content = target.read_text(encoding="utf-8")
+        target.unlink()
+        return previous_content
+
     @abstractmethod
     async def ainstall_skill_from_archive(self, archive_path: str | Path) -> dict:
         """Async install of a skill from a ``.skill`` ZIP archive.

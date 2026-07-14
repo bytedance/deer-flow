@@ -1186,7 +1186,9 @@ class DeerFlowClient:
             from deerflow.skills.projection import skill_projection_mutation
 
             with skill_projection_mutation(storage, "public"):
-                extensions_config = get_extensions_config()
+                # The projection lock is cross-process, but the singleton cache
+                # is not. Reload from disk under the lock before this RMW.
+                extensions_config = ExtensionsConfig.from_file(config_path)
                 extensions_config.skills[name] = SkillStateConfig(enabled=enabled)
 
                 config_data = {

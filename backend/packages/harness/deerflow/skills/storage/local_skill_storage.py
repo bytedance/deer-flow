@@ -110,6 +110,10 @@ class LocalSkillStorage(SkillStorage):
             tmp_path.unlink(missing_ok=True)
             raise
 
+    def remove_custom_skill_file(self, name: str, relative_path: str) -> str:
+        with self._skill_projection_mutation():
+            return super().remove_custom_skill_file(name, relative_path)
+
     async def ainstall_skill_from_archive(self, archive_path: str | Path) -> dict:
         from deerflow.skills.installer import _scan_skill_archive_contents_or_raise
 
