@@ -244,7 +244,8 @@ async def fanout_event(
         # and both still fire. ``ChannelManager._inbound_dedupe_key`` indexes
         # on (channel, workspace_id, chat_id, message_id); workspace_id and
         # chat_id are both the repo here, so match.user_id is the only thing
-        # that can separate two users in that key (willem-bd, PR #4104).
+        # that can separate two users in that key — see
+        # test_dedupe_identity_distinguishes_same_agent_name_across_users.
         # Left None when the header is absent, so the manager fails open (no
         # dedupe) exactly as before rather than collapsing distinct deliveries.
         dedupe_message_id = f"{delivery_id}:{match.user_id}:{agent.name}" if delivery_id else None
