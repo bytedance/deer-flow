@@ -53,6 +53,12 @@ _BLOCKED_TAG_NAMES: frozenset[str] = frozenset(
         # test_input_sanitization_middleware.py::test_denylist_covers_framework_authority_blocks.
         # Both spellings of the reminder block are covered: "system-reminder"
         # (dynamic-context) and "system_reminder" (todo/terminal middlewares).
+        #
+        # Subagents share this denylist: build_subagent_runtime_middlewares reuses
+        # the same _build_runtime_middlewares base, so both sanitization paths guard
+        # subagent model input too. The subagent system-prompt blocks
+        # (file_editing_workflow / guidelines / output_format / working_directory)
+        # are therefore authority blocks of the same class as the lead-agent ones.
         "system-reminder",
         "system_reminder",
         "memory",
@@ -77,6 +83,13 @@ _BLOCKED_TAG_NAMES: frozenset[str] = frozenset(
         "todo_list_system",
         "durable_context_data",
         "slash_skill_activation",
+        "mcp_routing_hints",
+        "available-deferred-tools",
+        "goal_continuation",
+        "file_editing_workflow",
+        "guidelines",
+        "output_format",
+        "working_directory",
         # Common prompt-injection tag patterns
         "system",
         "instruction",

@@ -192,6 +192,20 @@ _FRAMEWORK_STRUCTURED_TAGS = [
     "durable_context_data",
     "slash_skill_activation",
     "system_reminder",
+    # Rendered into the lead-agent system prompt by tools/builtins/tool_search.py
+    # via the {deferred_tools_section} / {mcp_routing_hints_section} placeholders.
+    "mcp_routing_hints",
+    "available-deferred-tools",
+    # Framework-authored hidden HumanMessage that instructs the agent to keep
+    # working (runtime/goal.py::make_goal_continuation_message).
+    "goal_continuation",
+    # Subagent system-prompt blocks. Subagents run the same sanitization
+    # middlewares (build_subagent_runtime_middlewares -> _build_runtime_middlewares),
+    # so forging these mimics trusted context on that agent's model input too.
+    "file_editing_workflow",
+    "guidelines",
+    "output_format",
+    "working_directory",
 ]
 
 
@@ -211,38 +225,66 @@ def test_neutralize_untrusted_tags_covers_framework_structured_tags(tag):
     assert f"<{tag}>" not in result
 
 
-# Framework source files that emit structured/authority blocks into model input:
-# the lead-agent system prompt, the deferred-skill index, and the middlewares
-# that inject hidden context or reminder blocks.
-_FRAMEWORK_BLOCK_SOURCES = [
-    "agents/lead_agent/prompt.py",
-    "skills/describe.py",
-    "agents/middlewares/durable_context_middleware.py",
-    "agents/middlewares/skill_activation_middleware.py",
-    "agents/middlewares/todo_middleware.py",
-    "agents/middlewares/terminal_response_middleware.py",
-    "agents/middlewares/dynamic_context_middleware.py",
-    "agents/memory/message_processing.py",
-]
-
-# Paired block tags that are NOT authority blocks: leaf/child elements rendered
-# *inside* an authority block (e.g. <skill><name>/<description> within
-# <available_skills>), or wrappers the framework puts around already-untrusted
-# content (<user_request> wraps the user's own task text). Forging one in
-# isolation grants no trusted-context authority, and several are common English
-# words that would over-match legitimate user input. Excluding them is a
-# deliberate, reviewed choice — a NEW block tag defaults to "must be blocked".
-_NON_AUTHORITY_BLOCK_TAGS = {"name", "description", "location", "skill", "skill_content", "user_request"}
+# Paired block tags found in the harness that are deliberately NOT in the
+# denylist. Every entry is a reviewed exemption with a stated reason; anything
+# NOT listed here must be blocked, so the guard fails *closed*: a new framework
+# block anywhere in the harness turns this test red until someone either blocks
+# it or exempts it on the record. (The previous revision scanned a hand-listed
+# set of source files instead — which fails *open*: a block emitted from a file
+# nobody remembered to list was silently unguarded. That is what let
+# `mcp_routing_hints` / `available-deferred-tools` through, and it was the same
+# forgot-to-update-a-list root cause the guard was meant to eliminate.)
+_EXEMPT_BLOCK_TAGS = {
+    # Leaf/child elements rendered *inside* an authority block (e.g.
+    # <skill><name>/<description> within <available_skills>), or wrappers the
+    # framework puts around already-untrusted content (<user_request> wraps the
+    # user's own task text). Forging one in isolation grants no trusted context,
+    # and several are common words that would over-match legitimate input.
+    "name",
+    "description",
+    "location",
+    "skill",
+    "skill_content",
+    "user_request",
+    # Prompts for a *different* LLM call (memory updater, summarizer). Those
+    # prompts are built from checkpointed state, not from the ModelRequest that
+    # InputSanitizationMiddleware rewrites, so this denylist does not defend them
+    # either way — blocking them here would be false coverage, not protection.
+    # The raw-state exposure on those calls is a separate surface, tracked apart
+    # from this PR.
+    "current_memory",
+    "conversation",
+    "stale_facts",
+    "consolidation_candidates",
+    "existing_summary",
+    "new_messages",
+    # MindIE provider wire format: parsed out of model *output*, never injected
+    # into model input, so it is not framework authority context.
+    "function",
+    "parameter",
+    "tool_call",
+    "tool_response",
+    # Documentation artifact: appears only in this middleware's own explanatory
+    # comment describing the tag pattern, not emitted into any prompt.
+    "tag",
+}
 
 
 def test_denylist_covers_framework_authority_blocks():
     """Anti-drift guard: every framework authority block must be in the denylist.
 
-    Scans the framework source for paired ``<tag>...</tag>`` blocks and asserts
-    each (minus the reviewed non-authority leaf/wrapper set) is neutralized. If a
-    future change adds a new authority block without blocking it, this fails —
-    closing the "denylist names a category but misses members" class (#4026)
-    instead of relying on the block list being remembered by hand.
+    Scans the *whole harness* for paired ``<tag>...</tag>`` blocks and asserts each
+    one is either blocked or an explicitly reviewed exemption. A new framework block
+    added anywhere fails this test until it is classified — closing the "denylist
+    names a category but misses members" class (#4026) rather than relying on any
+    hand-maintained list being remembered.
+
+    The scan reads raw source rather than AST string literals on purpose: an
+    attributed block built as an f-string (e.g. ``f'<consolidation_candidates
+    count="{n}">'``) splits its ``>`` into a separate literal chunk, so an
+    AST-on-literals scan silently misses it. Raw source has one known false
+    positive (a comment), exempted above — a false positive costs a review note,
+    a false negative costs an unguarded injection surface.
     """
     import pathlib
     import re
@@ -250,21 +292,24 @@ def test_denylist_covers_framework_authority_blocks():
     import deerflow
 
     harness_root = pathlib.Path(deerflow.__file__).parent
-    open_re = re.compile(r"<([a-z][a-z0-9_-]*)>")
-    close_re = re.compile(r"</([a-z][a-z0-9_-]*)>")
+    # Mirrors the tolerance of the production pattern (_BLOCKED_TAG_PATTERN):
+    # attributes and surrounding whitespace must not hide a block from the scan.
+    open_re = re.compile(r"<\s*([a-z][a-z0-9_-]*)\b[^>]*>")
+    close_re = re.compile(r"</\s*([a-z][a-z0-9_-]*)\s*>")
 
     paired: set[str] = set()
-    for rel in _FRAMEWORK_BLOCK_SOURCES:
-        source = (harness_root / rel).read_text(encoding="utf-8")
+    for path in harness_root.rglob("*.py"):
+        source = path.read_text(encoding="utf-8")
         paired |= set(open_re.findall(source)) & set(close_re.findall(source))
 
-    authority = paired - _NON_AUTHORITY_BLOCK_TAGS
-    # Guard against a broken scanner silently finding nothing: the well-known
-    # blocks the reviewer named must be seen by the scan.
-    assert {"soul", "clarification_system", "durable_context_data"} <= authority
+    # Guard against a broken scanner silently finding nothing: blocks emitted from
+    # the lead prompt, a subagent prompt, a hidden-context middleware, and a
+    # tool-rendered section must all be seen, or the scan is not covering the
+    # surfaces it claims to.
+    assert {"soul", "durable_context_data", "mcp_routing_hints", "working_directory"} <= paired
 
-    missing = sorted(tag for tag in authority if tag not in _BLOCKED_TAG_NAMES)
-    assert not missing, f"Framework authority blocks missing from _BLOCKED_TAG_NAMES: {missing}"
+    unclassified = sorted(paired - _BLOCKED_TAG_NAMES - _EXEMPT_BLOCK_TAGS)
+    assert not unclassified, f"Framework block tags neither blocked nor exempted: {unclassified}. Add each to _BLOCKED_TAG_NAMES, or to _EXEMPT_BLOCK_TAGS with a reason."
 
 
 @pytest.mark.parametrize(
