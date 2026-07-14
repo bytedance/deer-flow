@@ -41,20 +41,58 @@ _SUMMARY_MESSAGE_NAME = "summary"
 # Finite set of blocked tag names: system-reserved + common injection patterns.
 _BLOCKED_TAG_NAMES: frozenset[str] = frozenset(
     {
-        # System-reserved tags (used by the agent framework for structured context)
+        # Framework-injected structured/authority blocks. The lead-agent system
+        # prompt's "System-Context Confidentiality" section (agents/lead_agent/
+        # prompt.py) declares *every* such tag trusted internal data — it names a
+        # few then says "and all other structured tags". So the denylist must
+        # cover the framework's authority blocks as a class, not a hand-picked
+        # subset: any one of them, forged in untrusted input, mimics trusted
+        # framework context. Enumerated from the block tags the framework actually
+        # emits into model input (system prompt + hidden-context/reminder
+        # middlewares) and pinned against drift by
+        # test_input_sanitization_middleware.py::test_denylist_covers_framework_authority_blocks.
+        # Both spellings of the reminder block are covered: "system-reminder"
+        # (dynamic-context) and "system_reminder" (todo/terminal middlewares).
+        #
+        # Subagents share this denylist: build_subagent_runtime_middlewares reuses
+        # the same _build_runtime_middlewares base, so both sanitization paths guard
+        # subagent model input too. The subagent system-prompt blocks
+        # (file_editing_workflow / guidelines / output_format / working_directory)
+        # are therefore authority blocks of the same class as the lead-agent ones.
         "system-reminder",
+        "system_reminder",
         "memory",
         "current_date",
         "think",
         "analysis",
+        "role",
+        "soul",
+        "self_update",
+        "thinking_style",
+        "clarification_system",
+        "critical_reminders",
+        "response_style",
+        "citations",
         "subagent_system",
         "skill_system",
+        "skill_index",
+        "available_skills",
+        "disabled_skills",
+        "memory_tool_system",
         "uploaded_files",
         "todo_list_system",
+        "durable_context_data",
+        "slash_skill_activation",
+        "mcp_routing_hints",
+        "available-deferred-tools",
+        "goal_continuation",
+        "file_editing_workflow",
+        "guidelines",
+        "output_format",
+        "working_directory",
         # Common prompt-injection tag patterns
         "system",
         "instruction",
-        "role",
         "important",
         "override",
         "ignore",
