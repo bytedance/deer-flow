@@ -342,7 +342,7 @@ test.describe("Artifact preview stability", () => {
       ],
     });
     await page.route(
-      `**/mock/api/threads/${PDF_THREAD_ID}/artifacts${PDF_ARTIFACT_PATH}`,
+      `**/api/threads/${PDF_THREAD_ID}/artifacts${PDF_ARTIFACT_PATH}`,
       (route) =>
         route.fulfill({
           status: 200,
