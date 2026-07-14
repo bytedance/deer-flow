@@ -47,6 +47,7 @@ import {
   extractTextFromMessage,
   getAssistantTurnCopyData,
   getAssistantTurnUsageMessages,
+  getBranchableAssistantGroupIds,
   getMessageGroups,
   getStreamingMessageLookup,
   hasContent,
@@ -404,6 +405,10 @@ export function MessageList({
     }
     return null;
   }, [groupedMessages, thread.isLoading]);
+  const branchableAssistantGroupIds = useMemo(
+    () => getBranchableAssistantGroupIds(groupedMessages, thread.isLoading),
+    [groupedMessages, thread.isLoading],
+  );
 
   const clearSelectionToolbar = useCallback(() => {
     setSelectionToolbar(null);
@@ -544,6 +549,7 @@ export function MessageList({
     (
       messages: Message[],
       isStreaming: boolean,
+      enableBranchForTurn: boolean,
       enableRegenerateForTurn: boolean,
     ) => {
       const clipboardData = getAssistantTurnCopyData(messages, { isStreaming });
@@ -561,36 +567,41 @@ export function MessageList({
       return (
         <div className="mt-2 flex justify-start gap-1 opacity-0 transition-opacity delay-200 duration-300 group-hover/assistant-turn:opacity-100">
           {clipboardData && <CopyButton clipboardData={clipboardData} />}
-          {!isStreaming && actionTarget?.id && onBranchTurn && (
-            <Tooltip content={t.common.branch}>
-              <Button
-                aria-label={t.common.branch}
-                size="icon-sm"
-                type="button"
-                variant="ghost"
-                disabled={!canBranch || branchingMessageId === actionTarget.id}
-                onClick={() => {
-                  const targetId = actionTarget.id;
-                  if (!targetId) {
-                    return;
+          {enableBranchForTurn &&
+            !isStreaming &&
+            actionTarget?.id &&
+            onBranchTurn && (
+              <Tooltip content={t.common.branch}>
+                <Button
+                  aria-label={t.common.branch}
+                  size="icon-sm"
+                  type="button"
+                  variant="ghost"
+                  disabled={
+                    !canBranch || branchingMessageId === actionTarget.id
                   }
-                  setBranchingMessageId(targetId);
-                  void Promise.resolve(
-                    onBranchTurn(targetId, assistantMessageIds),
-                  ).finally(() => {
-                    setBranchingMessageId(null);
-                  });
-                }}
-              >
-                <GitBranchPlusIcon
-                  className={cn(
-                    "size-4",
-                    branchingMessageId === actionTarget.id && "animate-pulse",
-                  )}
-                />
-              </Button>
-            </Tooltip>
-          )}
+                  onClick={() => {
+                    const targetId = actionTarget.id;
+                    if (!targetId) {
+                      return;
+                    }
+                    setBranchingMessageId(targetId);
+                    void Promise.resolve(
+                      onBranchTurn(targetId, assistantMessageIds),
+                    ).finally(() => {
+                      setBranchingMessageId(null);
+                    });
+                  }}
+                >
+                  <GitBranchPlusIcon
+                    className={cn(
+                      "size-4",
+                      branchingMessageId === actionTarget.id && "animate-pulse",
+                    )}
+                  />
+                </Button>
+              </Tooltip>
+            )}
           {enableRegenerateForTurn &&
             actionTarget?.id &&
             onRegenerateMessage && (
@@ -782,6 +793,8 @@ export function MessageList({
                         group.messages,
                         streamingMessages,
                       ),
+                      group.id !== undefined &&
+                        branchableAssistantGroupIds.has(group.id),
                       group.id === latestAssistantGroupId,
                     )}
                 </div>
