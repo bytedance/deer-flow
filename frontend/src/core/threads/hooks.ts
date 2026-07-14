@@ -1231,7 +1231,7 @@ export function useThreadStream({
           is_final: boolean;
           error?: boolean;
         };
-        updateToolStream({
+        updateToolStream(e.tool_call_id, {
           toolName: e.tool_name,
           text: e.chunk,
           isPartial: e.is_partial,
