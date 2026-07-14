@@ -47,6 +47,9 @@ class LangfuseTracingConfig(BaseModel):
             raise ValueError(f"Langfuse tracing is enabled but required settings are missing: {', '.join(missing)}")
 
 
+# Manual mirror of monocle_apptrace's supported exporters, kept local so a typo
+# fails at startup with a clear message instead of an opaque upstream error.
+# Update this tuple when a monocle_apptrace bump adds or renames an exporter.
 _MONOCLE_EXPORTERS = ("file", "console", "okahu", "s3", "blob", "gcs")
 
 
@@ -63,10 +66,15 @@ class MonocleTracingConfig(BaseModel):
         # exporter-dependent and lives in validate(), run at Gateway startup.
         return self.enabled
 
+    @property
+    def exporter_list(self) -> list[str]:
+        """The configured exporters, parsed once so validation and setup agree."""
+        return [e.strip() for e in self.exporters.split(",") if e.strip()]
+
     def validate(self) -> None:
         if not self.enabled:
             return
-        selected = [e.strip() for e in self.exporters.split(",") if e.strip()]
+        selected = self.exporter_list
         unknown = [e for e in selected if e not in _MONOCLE_EXPORTERS]
         if unknown:
             raise ValueError(f"MONOCLE_EXPORTERS has unknown exporter(s): {', '.join(unknown)}. Allowed: {', '.join(_MONOCLE_EXPORTERS)}.")

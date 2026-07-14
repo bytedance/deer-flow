@@ -102,6 +102,26 @@ def test_warns_on_non_file_exporter(monkeypatch, caplog):
     warnings = [r.message for r in caplog.records if "beyond the local" in r.message]
     assert warnings, "expected an off-box exporter warning"
     assert "s3" in warnings[0]
+    assert "Langfuse" not in warnings[0]  # only mentioned when Langfuse is co-enabled
+
+
+def test_off_box_warning_mentions_langfuse_when_co_enabled(monkeypatch, caplog):
+    """With Langfuse sharing the global provider, its spans leave the box too — say so."""
+    monkeypatch.setenv("MONOCLE_TRACING", "true")
+    monkeypatch.setenv("MONOCLE_EXPORTERS", "okahu")
+    monkeypatch.setenv("OKAHU_API_KEY", "okh_test")
+    monkeypatch.setenv("LANGFUSE_TRACING", "true")
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-lf-test")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-lf-test")
+    reset_tracing_config()
+    monkeypatch.setattr("monocle_apptrace.setup_monocle_telemetry", lambda **kw: None)
+
+    with caplog.at_level(logging.WARNING):
+        assert setup_monocle_tracing_if_enabled() is True
+
+    warnings = [r.message for r in caplog.records if "beyond the local" in r.message]
+    assert warnings, "expected an off-box exporter warning"
+    assert "Langfuse" in warnings[0]
 
 
 def test_no_off_box_warning_for_file_exporter(monkeypatch, caplog):
@@ -332,3 +352,47 @@ def test_gateway_lifespan_initializes_monocle():
         asyncio.run(drive())
 
     setup_spy.assert_called_once_with()
+
+
+def test_gateway_lifespan_survives_monocle_setup_failure(caplog):
+    """A raising Monocle setup (e.g. bad MONOCLE_EXPORTERS) must not break startup.
+
+    Pins the lifespan's fail-open contract: the error is logged and the Gateway
+    keeps serving without tracing.
+    """
+    from fastapi import FastAPI
+
+    from app.gateway.app import lifespan
+
+    @asynccontextmanager
+    async def _noop_langgraph_runtime(_app, _startup_config):
+        yield
+
+    startup_config = SimpleNamespace(log_level="INFO", memory=SimpleNamespace(token_counting="char"))
+    fake_service = MagicMock()
+    fake_service.get_status = MagicMock(return_value={})
+
+    async def fake_start(_startup_config):
+        return fake_service
+
+    setup_spy = MagicMock(side_effect=ValueError("MONOCLE_EXPORTERS has unknown exporter(s): fle."))
+
+    with (
+        patch("app.gateway.app.get_app_config", return_value=startup_config),
+        patch("app.gateway.app.get_gateway_config", return_value=MagicMock(host="x", port=0)),
+        patch("app.gateway.app.langgraph_runtime", _noop_langgraph_runtime),
+        patch("app.gateway.app.setup_monocle_tracing_if_enabled", setup_spy),
+        patch("app.gateway.app.auth.close_oidc_service", AsyncMock()),
+        patch("app.channels.service.start_channel_service", side_effect=fake_start),
+        patch("app.channels.service.stop_channel_service", AsyncMock()),
+    ):
+
+        async def drive() -> None:
+            async with lifespan(FastAPI()):
+                pass
+
+        with caplog.at_level(logging.ERROR, logger="app.gateway.app"):
+            asyncio.run(drive())  # completes despite the raising setup
+
+    setup_spy.assert_called_once_with()
+    assert any("Monocle tracing setup failed" in r.message for r in caplog.records)

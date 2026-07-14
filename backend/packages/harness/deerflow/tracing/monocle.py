@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 
 from deerflow.config import (
+    get_enabled_tracing_providers,
     get_tracing_config,
     is_monocle_tracing_enabled,
 )
@@ -44,11 +45,15 @@ def setup_monocle_tracing_if_enabled() -> bool:
     exporters = monocle.exporters
 
     # `console` stays on local stdout, so only the remote exporters are flagged.
-    off_box = [e.strip() for e in exporters.split(",") if e.strip() and e.strip() not in ("file", "console")]
+    off_box = [e for e in monocle.exporter_list if e not in ("file", "console")]
     if off_box:
+        # Monocle's exporters see every span on the shared global provider, so a
+        # co-enabled OTel provider's spans leave the box too.
+        langfuse_note = " Langfuse is also enabled and shares the global provider, so its spans are exported there as well." if "langfuse" in get_enabled_tracing_providers() else ""
         logger.warning(
-            "Monocle is exporting trace data (prompts, tool inputs/outputs, completions) beyond the local .monocle/ file via: %s. Make sure that destination is trusted.",
+            "Monocle is exporting trace data (prompts, tool inputs/outputs, completions) beyond the local .monocle/ file via: %s. Make sure that destination is trusted.%s",
             ", ".join(off_box),
+            langfuse_note,
         )
 
     try:

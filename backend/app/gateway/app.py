@@ -197,7 +197,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # a bad Monocle config only logs: the Gateway keeps serving without tracing.
     try:
         setup_monocle_tracing_if_enabled()
-    except Exception:  # pragma: no cover - observability must never break startup
+    except Exception:  # observability must never break startup
         logger.exception("Monocle tracing setup failed; continuing without it")
 
     # Pre-warm tiktoken encoding cache so the first memory-injection request
