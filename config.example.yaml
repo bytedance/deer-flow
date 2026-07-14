@@ -112,6 +112,50 @@ models:
   #       thinking:
   #         type: disabled
 
+  # Example: Volcengine Coding Plan (one key, multi-vendor gateway)
+  # The Coding Plan endpoint (/api/coding/v3) lets you access models from
+  # Doubao, GLM, DeepSeek, Kimi, and MiniMax with a single API key.
+  # Each model may differ in thinking/vision support - configure per-model.
+  #
+  # - name: glm-5.2-cp
+  #   display_name: GLM-5.2 (Coding Plan)
+  #   use: deerflow.models.patched_deepseek:PatchedChatDeepSeek
+  #   model: glm-5.2
+  #   api_base: https://ark.cn-beijing.volces.com/api/coding/v3
+  #   api_key: $VOLCENGINE_API_KEY
+  #   timeout: 600.0
+  #   max_retries: 2
+  #   supports_thinking: true
+  #   supports_vision: false
+  #   supports_reasoning_effort: true
+  #   when_thinking_enabled:
+  #     extra_body:
+  #       thinking:
+  #         type: enabled
+  #   when_thinking_disabled:
+  #     extra_body:
+  #       thinking:
+  #         type: disabled
+  #
+  # - name: deepseek-v4-pro-cp
+  #   display_name: DeepSeek-V4-Pro (Coding Plan)
+  #   use: deerflow.models.patched_deepseek:PatchedChatDeepSeek
+  #   model: deepseek-v4-pro
+  #   api_base: https://ark.cn-beijing.volces.com/api/coding/v3
+  #   api_key: $VOLCENGINE_API_KEY
+  #   timeout: 600.0
+  #   max_retries: 2
+  #   supports_thinking: true
+  #   supports_vision: false
+  #   supports_reasoning_effort: true
+  #   when_thinking_enabled:
+  #     extra_body:
+  #       thinking:
+  #         type: enabled
+  #   when_thinking_disabled:
+  #     extra_body:
+  #       thinking:
+  #         type: disabled
   # Example: OpenAI model
   # - name: gpt-4
   #   display_name: GPT-4
