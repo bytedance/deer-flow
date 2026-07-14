@@ -43,6 +43,7 @@ from deerflow.agents.thread_state import ThreadState
 from deerflow.config.agents_config import load_agent_config, validate_agent_name
 from deerflow.config.app_config import AppConfig, get_app_config
 from deerflow.config.memory_config import should_use_memory_tools
+from deerflow.config.subagents_config import DEFAULT_MAX_TOTAL_SUBAGENTS_PER_RUN
 from deerflow.models import create_chat_model
 from deerflow.skills.tool_policy import ALWAYS_AVAILABLE_BUILTIN_TOOL_NAMES, filter_tools_by_skill_allowed_tools
 from deerflow.skills.types import Skill
@@ -60,6 +61,11 @@ _NON_INTERACTIVE_DISABLED_TOOL_NAMES = frozenset({"ask_clarification"})
 # itself is plumbed into ``run_context`` by
 # ``ChannelManager._resolve_run_params``.
 _WEBHOOK_CHANNELS: frozenset[str] = frozenset({"github"})
+
+
+def _default_max_total_subagents(app_config: object) -> int:
+    subagents_config = getattr(app_config, "subagents", None)
+    return getattr(subagents_config, "max_total_per_run", DEFAULT_MAX_TOTAL_SUBAGENTS_PER_RUN)
 
 
 def _append_memory_tools_without_name_conflicts(tools: list) -> None:
@@ -352,7 +358,8 @@ def build_middlewares(
     subagent_enabled = cfg.get("subagent_enabled", False)
     if subagent_enabled:
         max_concurrent_subagents = cfg.get("max_concurrent_subagents", 3)
-        middlewares.append(SubagentLimitMiddleware(max_concurrent=max_concurrent_subagents))
+        max_total_subagents = cfg.get("max_total_subagents", _default_max_total_subagents(resolved_app_config))
+        middlewares.append(SubagentLimitMiddleware(max_concurrent=max_concurrent_subagents, max_total=max_total_subagents))
 
     # LoopDetectionMiddleware — detect and break repetitive tool call loops
     loop_detection_config = resolved_app_config.loop_detection
@@ -441,6 +448,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
     is_plan_mode = cfg.get("is_plan_mode", False)
     subagent_enabled = cfg.get("subagent_enabled", False)
     max_concurrent_subagents = cfg.get("max_concurrent_subagents", 3)
+    max_total_subagents = cfg.get("max_total_subagents", _default_max_total_subagents(resolved_app_config))
     is_bootstrap = cfg.get("is_bootstrap", False)
     non_interactive = bool(cfg.get("non_interactive", False))
     agent_name = validate_agent_name(cfg.get("agent_name"))
@@ -462,7 +470,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
         thinking_enabled = False
 
     logger.info(
-        "Create Agent(%s) -> thinking_enabled: %s, reasoning_effort: %s, model_name: %s, is_plan_mode: %s, subagent_enabled: %s, max_concurrent_subagents: %s",
+        "Create Agent(%s) -> thinking_enabled: %s, reasoning_effort: %s, model_name: %s, is_plan_mode: %s, subagent_enabled: %s, max_concurrent_subagents: %s, max_total_subagents: %s",
         agent_name or "default",
         thinking_enabled,
         reasoning_effort,
@@ -470,6 +478,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
         is_plan_mode,
         subagent_enabled,
         max_concurrent_subagents,
+        max_total_subagents,
     )
 
     # Inject run metadata for LangSmith trace tagging
@@ -550,6 +559,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
             system_prompt=apply_prompt_template(
                 subagent_enabled=subagent_enabled,
                 max_concurrent_subagents=max_concurrent_subagents,
+                max_total_subagents=max_total_subagents,
                 available_skills=set(_BOOTSTRAP_SKILL_NAMES),
                 app_config=resolved_app_config,
                 deferred_names=setup.deferred_names,
@@ -616,6 +626,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
         system_prompt=apply_prompt_template(
             subagent_enabled=subagent_enabled,
             max_concurrent_subagents=max_concurrent_subagents,
+            max_total_subagents=max_total_subagents,
             agent_name=agent_name,
             available_skills=available_skills,
             app_config=resolved_app_config,

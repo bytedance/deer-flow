@@ -28,6 +28,7 @@ from langgraph.checkpoint.base import empty_checkpoint
 
 from deerflow.agents.goal_state import GoalEvaluation, GoalState
 from deerflow.config.app_config import AppConfig
+from deerflow.runtime.context_keys import CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY
 from deerflow.runtime.goal import (
     DEFAULT_MAX_GOAL_CONTINUATIONS,
     DEFAULT_MAX_NO_PROGRESS_CONTINUATIONS,
@@ -87,6 +88,8 @@ def _build_runtime_context(
     runtime_ctx: dict[str, Any] = {"thread_id": thread_id, "run_id": run_id}
     if isinstance(caller_context, dict):
         for key, value in caller_context.items():
+            if key == CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY:
+                continue
             runtime_ctx.setdefault(key, value)
     if app_config is not None:
         runtime_ctx["app_config"] = app_config
@@ -120,6 +123,8 @@ def _install_runtime_context(config: dict, runtime_context: dict[str, Any]) -> N
             existing_context.setdefault(DEERFLOW_TRACE_METADATA_KEY, runtime_context[DEERFLOW_TRACE_METADATA_KEY])
         if "app_config" in runtime_context:
             existing_context["app_config"] = runtime_context["app_config"]
+        if CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY in runtime_context:
+            existing_context[CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY] = runtime_context[CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY]
         return
 
     config["context"] = dict(runtime_context)
@@ -329,6 +334,7 @@ async def run_agent(
         # manually here because we drive the graph through ``agent.astream(config=...)``
         # without passing the official ``context=`` parameter.
         runtime_ctx = _build_runtime_context(thread_id, run_id, config.get("context"), ctx.app_config)
+        runtime_ctx[CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY] = frozenset(pre_existing_message_ids)
         incoming_metadata = config.get("metadata") if isinstance(config.get("metadata"), dict) else {}
         deerflow_trace_id = normalize_trace_id(incoming_metadata.get(DEERFLOW_TRACE_METADATA_KEY)) or get_current_trace_id()
         if deerflow_trace_id:

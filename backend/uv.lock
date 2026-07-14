@@ -799,6 +799,9 @@ dependencies = [
 discord = [
     { name = "discord-py" },
 ]
+monocle = [
+    { name = "deerflow-harness", extra = ["monocle"] },
+]
 postgres = [
     { name = "deerflow-harness", extra = ["postgres"] },
 ]
@@ -810,6 +813,7 @@ redis = [
 dev = [
     { name = "blockbuster" },
     { name = "jsonschema" },
+    { name = "monocle-apptrace" },
     { name = "prompt-toolkit" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
@@ -822,6 +826,7 @@ dev = [
 requires-dist = [
     { name = "bcrypt", specifier = ">=4.0.0" },
     { name = "deerflow-harness", editable = "packages/harness" },
+    { name = "deerflow-harness", extras = ["monocle"], marker = "extra == 'monocle'", editable = "packages/harness" },
     { name = "deerflow-harness", extras = ["postgres"], marker = "extra == 'postgres'", editable = "packages/harness" },
     { name = "deerflow-harness", extras = ["redis"], marker = "extra == 'redis'", editable = "packages/harness" },
     { name = "dingtalk-stream", specifier = ">=0.24.3" },
@@ -841,12 +846,13 @@ requires-dist = [
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.34.0" },
     { name = "wecom-aibot-python-sdk", specifier = ">=0.1.6" },
 ]
-provides-extras = ["postgres", "redis", "discord"]
+provides-extras = ["postgres", "redis", "discord", "monocle"]
 
 [package.metadata.requires-dev]
 dev = [
     { name = "blockbuster", specifier = ">=1.5.26,<1.6" },
     { name = "jsonschema", specifier = ">=4.26.0" },
+    { name = "monocle-apptrace", specifier = ">=0.8.8" },
     { name = "prompt-toolkit", specifier = ">=3.0.0" },
     { name = "pytest", specifier = ">=9.0.3" },
     { name = "pytest-asyncio", specifier = ">=1.3.0" },
@@ -900,6 +906,9 @@ dependencies = [
 [package.optional-dependencies]
 boxlite = [
     { name = "boxlite" },
+]
+monocle = [
+    { name = "monocle-apptrace" },
 ]
 ollama = [
     { name = "langchain-ollama" },
@@ -955,6 +964,7 @@ requires-dist = [
     { name = "langgraph-sdk", specifier = ">=0.1.51" },
     { name = "markdownify", specifier = ">=1.2.2" },
     { name = "markitdown", extras = ["all", "xlsx"], specifier = ">=0.0.1a2" },
+    { name = "monocle-apptrace", marker = "extra == 'monocle'", specifier = ">=0.8.8" },
     { name = "psycopg", extras = ["binary"], marker = "extra == 'postgres'", specifier = ">=3.3.3" },
     { name = "psycopg-pool", marker = "extra == 'postgres'", specifier = ">=3.3.0" },
     { name = "pydantic", specifier = ">=2.12.5" },
@@ -967,7 +977,7 @@ requires-dist = [
     { name = "textual", marker = "extra == 'tui'", specifier = ">=0.80" },
     { name = "tiktoken", specifier = ">=0.8.0" },
 ]
-provides-extras = ["tui", "groundroute", "ollama", "postgres", "redis", "pymupdf", "boxlite"]
+provides-extras = ["tui", "groundroute", "ollama", "postgres", "redis", "pymupdf", "boxlite", "monocle"]
 
 [[package]]
 name = "defusedxml"
@@ -2527,6 +2537,25 @@ wheels = [
 ]
 
 [[package]]
+name = "monocle-apptrace"
+version = "0.8.8"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "opentelemetry-api" },
+    { name = "opentelemetry-exporter-otlp-proto-http" },
+    { name = "opentelemetry-instrumentation" },
+    { name = "opentelemetry-sdk" },
+    { name = "pyyaml" },
+    { name = "requests" },
+    { name = "rfc3986" },
+    { name = "wrapt" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/76/61/ec2213cc56e2d5d6b67db691a408ca8ba9d8440ed48fc821a422b6a5560e/monocle_apptrace-0.8.8.tar.gz", hash = "sha256:ebebd8b8da8dbf48cdb708e14e1a61293c48e50ec02ba24cf29c01ea776ba02b", size = 241057, upload-time = "2026-07-08T18:01:51.923Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/3b/8f/3757b6ca53346a32bc271e4d5c0dd64ad920eb1b05e514b00c8ff2e02c02/monocle_apptrace-0.8.8-py3-none-any.whl", hash = "sha256:7e17f0f73e4f446f8e8722251201ffc30429fea0d93d545b023b41bfc4f83503", size = 354697, upload-time = "2026-07-08T18:01:47.407Z" },
+]
+
+[[package]]
 name = "mpmath"
 version = "1.3.0"
 source = { registry = "https://pypi.org/simple" }
@@ -2868,6 +2897,21 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/33/5b/9d3c7f70cca10136ba82a81e738dee626c8e7fc61c6887ea9a58bf34c606/opentelemetry_exporter_otlp_proto_http-1.41.1.tar.gz", hash = "sha256:4747a9604c8550ab38c6fd6180e2fcb80de3267060bef2c306bad3cb443302bc", size = 24139, upload-time = "2026-04-24T13:15:42.977Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/ba/4d/ef07ff2fc630849f2080ae0ae73a61f67257905b7ac79066640bfa0c5739/opentelemetry_exporter_otlp_proto_http-1.41.1-py3-none-any.whl", hash = "sha256:1a21e8f49c7a946d935551e90947d6c3eb39236723c6624401da0f33d68edcb4", size = 22673, upload-time = "2026-04-24T13:15:21.313Z" },
+]
+
+[[package]]
+name = "opentelemetry-instrumentation"
+version = "0.62b1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "opentelemetry-api" },
+    { name = "opentelemetry-semantic-conventions" },
+    { name = "packaging" },
+    { name = "wrapt" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/52/cb/0523b92c112a6cc70be43724343dc45225d3af134419844d7879a07755d4/opentelemetry_instrumentation-0.62b1.tar.gz", hash = "sha256:90e92a905ba4f84db06ac3aec96701df6c079b2d66e9379f8739f0a1bdcc7f45", size = 34043, upload-time = "2026-04-24T13:22:31.997Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/4d/0f/45adbaea1f81b847cffdcee4f4b5f89297e42facf7fac78c7aaac4c38e75/opentelemetry_instrumentation-0.62b1-py3-none-any.whl", hash = "sha256:976fc6e640f2006599e97429c949e622c108d0c17c2059347d1e6c93c707f257", size = 34163, upload-time = "2026-04-24T13:21:31.722Z" },
 ]
 
 [[package]]
@@ -4012,6 +4056,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/f3/61/d7545dafb7ac2230c70d38d31cbfe4cc64f7144dc41f6e4e4b78ecd9f5bb/requests-toolbelt-1.0.0.tar.gz", hash = "sha256:7681a0a3d047012b5bdc0ee37d7f8f07ebe76ab08caeccfc3921ce23c88d5bc6", size = 206888, upload-time = "2023-05-01T04:11:33.229Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/3f/51/d4db610ef29373b879047326cbf6fa98b6c1969d6f6dc423279de2b1be2c/requests_toolbelt-1.0.0-py2.py3-none-any.whl", hash = "sha256:cccfdd665f0a24fcf4726e690f65639d272bb0637b9b92dfd91a5568ccf6bd06", size = 54481, upload-time = "2023-05-01T04:11:28.427Z" },
+]
+
+[[package]]
+name = "rfc3986"
+version = "2.0.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/85/40/1520d68bfa07ab5a6f065a186815fb6610c86fe957bc065754e47f7b0840/rfc3986-2.0.0.tar.gz", hash = "sha256:97aacf9dbd4bfd829baad6e6309fa6573aaf1be3f6fa735c8ab05e46cecb261c", size = 49026, upload-time = "2022-01-10T00:52:30.832Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ff/9a/9afaade874b2fa6c752c36f1548f718b5b83af81ed9b76628329dab81c1b/rfc3986-2.0.0-py2.py3-none-any.whl", hash = "sha256:50b1502b60e289cb37883f3dfd34532b8873c7de9f49bb546641ce9cbd256ebd", size = 31326, upload-time = "2022-01-10T00:52:29.594Z" },
 ]
 
 [[package]]

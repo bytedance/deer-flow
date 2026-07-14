@@ -157,6 +157,28 @@ class RunStore(abc.ABC):
         pass
 
     @abc.abstractmethod
+    async def claim_for_takeover(
+        self,
+        run_id: str,
+        *,
+        grace_seconds: int,
+        error: str,
+    ) -> bool:
+        """Atomically mark an expired-lease active run as ``error``.
+
+        Only rows whose lease has expired past *grace_seconds* (or whose
+        lease is NULL — pre-ownership data) are updated.  The conditional
+        WHERE closes the race between the caller's stale read of the lease
+        and a concurrent heartbeat renewal by the owning worker.
+
+        Returns ``False`` when:
+          - the run is no longer ``pending`` / ``running``,
+          - the lease is still valid (owner heartbeat is alive), or
+          - the row doesn't exist.
+        """
+        pass
+
+    @abc.abstractmethod
     async def list_inflight_with_expired_lease(
         self,
         *,
