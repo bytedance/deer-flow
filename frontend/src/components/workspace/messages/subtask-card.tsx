@@ -37,9 +37,10 @@ import {
 } from "@/core/tasks/presentation";
 import { stepsForDisplay } from "@/core/tasks/steps";
 import { resolveRenderedSubtask } from "@/core/tasks/subtask-render";
+import { useToolStreaming } from "@/core/tasks/tool-streaming";
+import type { ToolStreamOutput } from "@/core/tasks/types";
 import { explainLastToolCall } from "@/core/tools/utils";
 import { cn } from "@/lib/utils";
-import { useToolStreaming } from "@/core/tasks/tool-streaming";
 
 import { CitationLink } from "../citations/citation-link";
 import { FlipDisplay } from "../flip-display";
@@ -66,7 +67,9 @@ export function SubtaskCard({
   const task = resolveRenderedSubtask(useSubtask(taskId), fallbackTask)!;
   const { models, tokenUsageEnabled } = useModels();
   const updateSubtask = useUpdateSubtask();
-  const { state: { output: streamingOutput } } = useToolStreaming();
+  const {
+    state: { outputs },
+  } = useToolStreaming();
   const modelLabel = resolveSubtaskModelLabel(task.modelName, models);
   const tokenLabel = tokenUsageEnabled
     ? formatSubtaskTokenUsage(task.usage)
@@ -107,6 +110,35 @@ export function SubtaskCard({
         backfilledRef.current = false;
       });
   }, [collapsed, stepsCount, threadId, runId, taskId, updateSubtask]);
+
+  // Collect the tool_call_ids the subagent is currently executing so we only
+  // render streaming output that belongs to *this* task (P1-2: two parallel
+  // in-progress subtasks must never render each other's tool output).
+  const activeToolCallIds = useMemo(() => {
+    const callIds: string[] = [];
+    // SSE AIMessage carries tool_calls with id/name/args.
+    void (
+      task.latestMessage?.tool_calls as
+        | { id?: string; name?: string }[]
+        | undefined
+    )?.forEach((tc) => {
+      if (tc.id) {
+        callIds.push(tc.id);
+      }
+    });
+    return callIds;
+  }, [task.latestMessage]);
+
+  // Streaming outputs that belong to this task's active tool calls.
+  const streamingEntries: Array<{
+    toolCallId: string;
+    output: ToolStreamOutput;
+  }> = useMemo(() => {
+    return activeToolCallIds
+      .filter((cid) => cid in outputs)
+      .map((cid) => ({ toolCallId: cid, output: outputs[cid]! }));
+  }, [activeToolCallIds, outputs]);
+
   const icon = useMemo(() => {
     if (task.status === "completed") {
       return <CheckCircleIcon className="size-3" />;
@@ -248,30 +280,32 @@ export function SubtaskCard({
               />
             );
           })}
-          {/* Streaming tool output: show real-time output from the currently executing tool */}
-          {task.status === "in_progress" && streamingOutput && (
-            <ChainOfThoughtStep
-              key="streaming-output"
-              label={
-                <div className="text-muted-foreground text-sm">
-                  <div className="mb-1 flex items-center gap-1 font-medium">
-                    <Loader2Icon className="size-3 animate-spin" />
-                    {streamingOutput.toolName}
+          {/* Streaming tool output: scoped to this task's active tool calls
+               (P1-2 fix: two parallel in-progress subtasks must not share output). */}
+          {task.status === "in_progress" &&
+            streamingEntries.map((entry) => (
+              <ChainOfThoughtStep
+                key={`streaming-output-${entry.toolCallId}`}
+                label={
+                  <div className="text-muted-foreground text-sm">
+                    <div className="mb-1 flex items-center gap-1 font-medium">
+                      <Loader2Icon className="size-3 animate-spin" />
+                      {entry.output.toolName}
+                    </div>
+                    {entry.output.text ? (
+                      <pre className="bg-muted/50 max-h-64 overflow-auto rounded p-2 font-mono text-xs whitespace-pre-wrap">
+                        {entry.output.text}
+                      </pre>
+                    ) : (
+                      <Shimmer duration={2} spread={2}>
+                        {t.subtasks[task.status]}
+                      </Shimmer>
+                    )}
                   </div>
-                  {streamingOutput.text ? (
-                    <pre className="bg-muted/50 max-h-64 overflow-auto rounded p-2 text-xs whitespace-pre-wrap font-mono">
-                      {streamingOutput.text}
-                    </pre>
-                  ) : (
-                    <Shimmer duration={2} spread={2}>
-                      {t.subtasks[task.status]}
-                    </Shimmer>
-                  )}
-                </div>
-              }
-              icon={<WrenchIcon className="size-4" />}
-            />
-          )}
+                }
+                icon={<WrenchIcon className="size-4" />}
+              />
+            ))}
           {task.status === "completed" && (
             <>
               <ChainOfThoughtStep

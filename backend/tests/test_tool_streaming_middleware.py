@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, call
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from langchain_core.messages import ToolMessage
@@ -229,8 +229,8 @@ class TestEnabledWithStreamWriter:
         # Verify start chunk
         assert writer.call_count == 2
         first_call = writer.call_args_list[0]
-        event_name, start_data = first_call[0][0]
-        assert event_name == TOOL_OUTPUT_CHUNK_EVENT
+        start_data = first_call[0][0]
+        assert start_data["type"] == TOOL_OUTPUT_CHUNK_EVENT
         assert start_data["is_partial"] is True
         assert start_data["is_final"] is False
         assert start_data["tool_call_id"] == "tc-bash"
@@ -238,8 +238,8 @@ class TestEnabledWithStreamWriter:
 
         # Verify final chunk
         second_call = writer.call_args_list[1]
-        event_name, final_data = second_call[0][0]
-        assert event_name == TOOL_OUTPUT_CHUNK_EVENT
+        final_data = second_call[0][0]
+        assert final_data["type"] == TOOL_OUTPUT_CHUNK_EVENT
         assert final_data["is_partial"] is False
         assert final_data["is_final"] is True
         assert final_data["chunk"] == "hello world"
@@ -262,11 +262,11 @@ class TestEnabledWithStreamWriter:
         # Start + error chunks
         assert writer.call_count == 2
         first_call = writer.call_args_list[0]
-        event_name, start_data = first_call[0][0]
+        start_data = first_call[0][0]
         assert start_data["is_partial"] is True
 
         second_call = writer.call_args_list[1]
-        event_name, error_data = second_call[0][0]
+        error_data = second_call[0][0]
         assert error_data["is_final"] is True
         assert error_data["error"] is True
         assert "command failed" in error_data["chunk"]
@@ -288,7 +288,7 @@ class TestEnabledWithStreamWriter:
             await mw.awrap_tool_call(request, handler)
 
         # First call: start chunk, second: error chunk
-        _, error_data = writer.call_args_list[1][0][0]
+        error_data = writer.call_args_list[1][0][0]
         assert len(error_data["chunk"]) == 500
         assert error_data["chunk"].endswith("...")
 
@@ -322,9 +322,7 @@ class TestEnabledWithStreamWriter:
 
         for tool_name in ["bash", "web_search", "read_file"]:
             writer.reset_mock()
-            request = _make_tool_request(
-                tool_name=tool_name, tool_call_id=f"tc-{tool_name}"
-            )
+            request = _make_tool_request(tool_name=tool_name, tool_call_id=f"tc-{tool_name}")
             msg = _make_tool_message(
                 content=f"output from {tool_name}",
                 tool_name=tool_name,
@@ -334,9 +332,71 @@ class TestEnabledWithStreamWriter:
 
             await mw.awrap_tool_call(request, handler)
 
-            _, final_data = writer.call_args_list[1][0][0]
+            final_data = writer.call_args_list[1][0][0]
             assert final_data["tool_name"] == tool_name
             assert final_data["chunk"] == f"output from {tool_name}"
+
+
+# ---------------------------------------------------------------------------
+# P1 regression: dict format (not tuple)
+# ---------------------------------------------------------------------------
+
+
+class TestWriterReceivesDictFormat:
+    """Regression for P1-1: the Run worker serialises writer args verbatim.
+
+    A tuple ``(event_name, data)`` becomes a JSON array ``["tool_output_chunk",
+    {…}]``, which the frontend's ``onCustomEvent`` cannot read via
+    ``event.type``.  The fix emits a plain dict so the JSON stays an object
+    with a top-level ``type`` field.
+    """
+
+    @pytest.mark.asyncio
+    async def test_start_chunk_is_dict_with_type_field(self):
+        """_build_start_chunk returns a dict with 'type' at top level."""
+        chunk = _build_start_chunk("tc-1", "bash")
+        assert isinstance(chunk, dict)
+        assert "type" in chunk
+        assert chunk["type"] == TOOL_OUTPUT_CHUNK_EVENT
+
+    @pytest.mark.asyncio
+    async def test_final_chunk_is_dict_with_type_field(self):
+        chunk = _build_final_chunk("tc-1", "bash", "output")
+        assert isinstance(chunk, dict)
+        assert "type" in chunk
+        assert chunk["type"] == TOOL_OUTPUT_CHUNK_EVENT
+
+    @pytest.mark.asyncio
+    async def test_error_chunk_is_dict_with_type_field(self):
+        chunk = _build_error_chunk("tc-1", "bash", "fail")
+        assert isinstance(chunk, dict)
+        assert "type" in chunk
+        assert chunk["type"] == TOOL_OUTPUT_CHUNK_EVENT
+
+    @pytest.mark.asyncio
+    async def test_writer_receives_dict_not_tuple(self, monkeypatch):
+        """Regression: the actual writer() invocation MUST pass a dict, not a
+        tuple, so the serialised JSON is an object with top-level ``type``."""
+        writer = _writer_mock()
+        monkeypatch.setattr(
+            "deerflow.agents.middlewares.tool_streaming_middleware._get_stream_writer",
+            lambda: writer,
+        )
+
+        mw = ToolStreamingMiddleware(config=_make_config(enabled=True))
+        request = _make_tool_request()
+        msg = _make_tool_message()
+        handler = AsyncMock(return_value=msg)
+
+        await mw.awrap_tool_call(request, handler)
+
+        # Every call to writer() must receive a single dict argument, NOT a
+        # tuple of (event_name, data).
+        for call_args in writer.call_args_list:
+            arg = call_args[0][0]
+            assert isinstance(arg, dict), f"writer() received {type(arg).__name__}, expected dict. Tuple-wrapping causes JSON-serialisation to a list that breaks frontend onCustomEvent."
+            assert "type" in arg, "Chunk dict is missing 'type' key — frontend read of event.type won't match TOOL_OUTPUT_CHUNK_EVENT."
+            assert arg["type"] == TOOL_OUTPUT_CHUNK_EVENT
 
 
 # ---------------------------------------------------------------------------
