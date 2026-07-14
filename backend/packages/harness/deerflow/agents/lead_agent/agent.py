@@ -613,16 +613,16 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
 
     enabled_skills = _load_enabled_available_skills(available_skills, app_config=resolved_app_config, user_id=resolved_user_id)
 
-    # Build skill search setup (deferred skill discovery).
-    # Controlled by skills.deferred_discovery — independent from tool_search.enabled.
-    from deerflow.skills.describe import build_skill_search_setup
-
     # Load config-declared extension middlewares (issue #3923).
     # Resolved at agent-build time so downstream integrators can register
     # custom middlewares without forking the assembly code.
     from deerflow.agents.factory import load_extension_middlewares
 
     extension_middlewares = load_extension_middlewares(resolved_app_config)
+
+    # Build skill search setup (deferred skill discovery).
+    # Controlled by skills.deferred_discovery — independent from tool_search.enabled.
+    from deerflow.skills.describe import build_skill_search_setup
 
     skill_search_enabled = resolved_app_config.skills.deferred_discovery
     container_base_path = resolved_app_config.skills.container_path

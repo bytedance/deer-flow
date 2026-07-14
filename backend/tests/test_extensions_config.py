@@ -10,7 +10,6 @@ from langchain.agents.middleware import AgentMiddleware
 from deerflow.config.app_config import AppConfig
 from deerflow.config.extensions_config import ExtensionsConfig
 
-
 # ---------------------------------------------------------------------------
 # Dummy middleware classes for testing
 # ---------------------------------------------------------------------------
@@ -32,18 +31,45 @@ class _NotAMiddleware:
     """A class that does not extend AgentMiddleware."""
 
 
-# Prevent LangChain's abstract-method enforcement from blocking instantiation
-# in tests.  _ValidMiddleware and _AnotherMiddleware are instantiated via
-# cls() without async_setup/on_tool_start/on_chat_model_start kwargs, so we
-# monkey-patch AgentMiddleware.__init_subclass__ only for this module.
-_original_init_subclass = getattr(AgentMiddleware, "__init_subclass__", None)
+class _BrokenMiddleware(AgentMiddleware):
+    """Middleware whose __init__ always raises — used to test instantiation-failure handling.
+
+    This is module-level so :func:`resolve_variable` can resolve it before
+    ``cls()`` is reached, exercising the ``except Exception`` branch in
+    :func:`load_extension_middlewares`.
+    """
+
+    def __init__(self, **kwargs):
+        raise RuntimeError("boom")
 
 
-def _noop_init_subclass(cls, **kwargs):
-    pass
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
 
 
-AgentMiddleware.__init_subclass__ = classmethod(_noop_init_subclass)  # type: ignore[assignment]
+@pytest.fixture(autouse=True)
+def _neutralize_agent_middleware_init_subclass():
+    """Prevent LangChain's abstract-method enforcement from blocking instantiation.
+
+    ``_ValidMiddleware``, ``_AnotherMiddleware``, and ``_BrokenMiddleware`` are
+    instantiated via ``cls()`` without ``async_setup``/``on_tool_start``/
+    ``on_chat_model_start`` kwargs.  This fixture monkey-patches
+    ``AgentMiddleware.__init_subclass__`` for the duration of this module's
+    tests and restores the original afterwards so other test modules are not
+    affected.
+    """
+    original = getattr(AgentMiddleware, "__init_subclass__", None)
+
+    def _noop(cls, **kwargs):
+        pass
+
+    AgentMiddleware.__init_subclass__ = classmethod(_noop)  # type: ignore[assignment]
+    yield
+    if original is not None:
+        AgentMiddleware.__init_subclass__ = original
+    else:
+        del AgentMiddleware.__init_subclass__
 
 
 # ---------------------------------------------------------------------------
@@ -188,12 +214,13 @@ class TestLoadExtensionMiddlewares:
         assert result == []
 
     def test_instantiation_failure_skipped(self):
-        """If cls() raises, log and skip."""
-        from deerflow.agents.factory import load_extension_middlewares
+        """If cls() raises, log and skip.
 
-        class _BrokenMiddleware(AgentMiddleware):
-            def __init__(self, **kwargs):
-                raise RuntimeError("boom")
+        Uses module-level ``_BrokenMiddleware`` so ``resolve_variable`` can
+        find it — the test then exercises the ``except Exception`` branch when
+        ``cls()`` raises at instantiation time.
+        """
+        from deerflow.agents.factory import load_extension_middlewares
 
         cfg = ExtensionsConfig(
             middlewares=["test_extensions_config:_BrokenMiddleware"],
@@ -305,14 +332,24 @@ class TestAppConfigExtensionsMerge:
     """Verify that YAML-declared extensions merge with JSON-loaded ones."""
 
     def test_yaml_extensions_override_json(self):
-        """YAML keys should take precedence over JSON-loaded keys."""
-        # Simulate: JSON loaded {"mcp_servers": {"srv": {...}}, "skills": {}}
-        # YAML had {"middlewares": ["pkg:MW"], "sse_wrapper": "pkg:Wrap"}
-        with patch.object(ExtensionsConfig, "from_file", return_value=ExtensionsConfig()):
-            with patch.object(AppConfig, "resolve_config_path", return_value=__file__):
-                # We can't fully test from_file without a real config.yaml,
-                # but we can test the merge logic directly.
-                pass
+        """YAML-declared extensions fields are merged with JSON-loaded config."""
+        json_cfg = ExtensionsConfig(
+            mcp_servers={},
+            skills={},
+            middlewares=["json_module:JsonMiddleware"],
+            sse_wrapper="json_module:JsonSSE",
+        )
+        with patch.object(ExtensionsConfig, "from_file", return_value=json_cfg):
+            yaml_ext = ExtensionsConfig(
+                middlewares=["yaml_module:YamlMiddleware"],
+                run_model_override="yaml_module:YamlRouter",
+            )
+            app_cfg = AppConfig.model_validate({"extensions": yaml_ext.model_dump(exclude_unset=True), "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"}})
+            # YAML middlewares take precedence
+            assert app_cfg.extensions.middlewares == ["yaml_module:YamlMiddleware"]
+            # YAML hooks take precedence
+            assert app_cfg.extensions.sse_wrapper is None  # not set in YAML ext
+            assert app_cfg.extensions.run_model_override == "yaml_module:YamlRouter"
 
     def test_app_config_extensions_field_defaults(self):
         """AppConfig should have extensions as optional with default factory."""
