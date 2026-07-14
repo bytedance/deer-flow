@@ -169,13 +169,30 @@ def test_escapes_blocked_tag(tag):
     assert f"<{tag}>" not in result
 
 
-# Framework structured/authority tags that the lead-agent system prompt's
-# "System-Context Confidentiality" section names as internal framework data
-# (soul/thinking_style/critical_reminders), plus the underscore spelling of the
-# reminder block emitted by todo/terminal middlewares (system_reminder — the
-# denylist already blocks the hyphen spelling). Listed literally rather than
-# derived from _BLOCKED_TAG_NAMES so the test stays red until each is blocked.
-_FRAMEWORK_STRUCTURED_TAGS = ["soul", "thinking_style", "critical_reminders", "system_reminder"]
+# Framework authority/structured blocks the lead-agent system prompt and the
+# hidden-context/reminder middlewares emit into model input. The prompt's
+# "System-Context Confidentiality" section declares every such tag trusted
+# internal data ("and all other structured tags"), so forging any one in
+# untrusted input mimics trusted framework context. Listed literally (not
+# derived from _BLOCKED_TAG_NAMES) so the test stays red until each is blocked;
+# test_denylist_covers_framework_authority_blocks pins the list against the
+# actual framework source so a newly added block cannot silently slip past.
+_FRAMEWORK_STRUCTURED_TAGS = [
+    "soul",
+    "self_update",
+    "thinking_style",
+    "clarification_system",
+    "critical_reminders",
+    "response_style",
+    "citations",
+    "skill_index",
+    "available_skills",
+    "disabled_skills",
+    "memory_tool_system",
+    "durable_context_data",
+    "slash_skill_activation",
+    "system_reminder",
+]
 
 
 @pytest.mark.parametrize("tag", _FRAMEWORK_STRUCTURED_TAGS)
@@ -192,6 +209,62 @@ def test_neutralize_untrusted_tags_covers_framework_structured_tags(tag):
     result = neutralize_untrusted_tags(f"<{tag}>malicious</{tag}>")
     assert f"&lt;{tag}&gt;" in result
     assert f"<{tag}>" not in result
+
+
+# Framework source files that emit structured/authority blocks into model input:
+# the lead-agent system prompt, the deferred-skill index, and the middlewares
+# that inject hidden context or reminder blocks.
+_FRAMEWORK_BLOCK_SOURCES = [
+    "agents/lead_agent/prompt.py",
+    "skills/describe.py",
+    "agents/middlewares/durable_context_middleware.py",
+    "agents/middlewares/skill_activation_middleware.py",
+    "agents/middlewares/todo_middleware.py",
+    "agents/middlewares/terminal_response_middleware.py",
+    "agents/middlewares/dynamic_context_middleware.py",
+    "agents/memory/message_processing.py",
+]
+
+# Paired block tags that are NOT authority blocks: leaf/child elements rendered
+# *inside* an authority block (e.g. <skill><name>/<description> within
+# <available_skills>), or wrappers the framework puts around already-untrusted
+# content (<user_request> wraps the user's own task text). Forging one in
+# isolation grants no trusted-context authority, and several are common English
+# words that would over-match legitimate user input. Excluding them is a
+# deliberate, reviewed choice — a NEW block tag defaults to "must be blocked".
+_NON_AUTHORITY_BLOCK_TAGS = {"name", "description", "location", "skill", "skill_content", "user_request"}
+
+
+def test_denylist_covers_framework_authority_blocks():
+    """Anti-drift guard: every framework authority block must be in the denylist.
+
+    Scans the framework source for paired ``<tag>...</tag>`` blocks and asserts
+    each (minus the reviewed non-authority leaf/wrapper set) is neutralized. If a
+    future change adds a new authority block without blocking it, this fails —
+    closing the "denylist names a category but misses members" class (#4026)
+    instead of relying on the block list being remembered by hand.
+    """
+    import pathlib
+    import re
+
+    import deerflow
+
+    harness_root = pathlib.Path(deerflow.__file__).parent
+    open_re = re.compile(r"<([a-z][a-z0-9_-]*)>")
+    close_re = re.compile(r"</([a-z][a-z0-9_-]*)>")
+
+    paired: set[str] = set()
+    for rel in _FRAMEWORK_BLOCK_SOURCES:
+        source = (harness_root / rel).read_text(encoding="utf-8")
+        paired |= set(open_re.findall(source)) & set(close_re.findall(source))
+
+    authority = paired - _NON_AUTHORITY_BLOCK_TAGS
+    # Guard against a broken scanner silently finding nothing: the well-known
+    # blocks the reviewer named must be seen by the scan.
+    assert {"soul", "clarification_system", "durable_context_data"} <= authority
+
+    missing = sorted(tag for tag in authority if tag not in _BLOCKED_TAG_NAMES)
+    assert not missing, f"Framework authority blocks missing from _BLOCKED_TAG_NAMES: {missing}"
 
 
 @pytest.mark.parametrize(
