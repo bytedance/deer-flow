@@ -20,7 +20,12 @@ import copy
 import inspect
 import logging
 import os
+import threading
+import weakref
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from datetime import datetime
 from functools import lru_cache
 from typing import Any, Literal, cast
 
@@ -62,6 +67,28 @@ from .naming import resolve_root_run_name
 from .schemas import RunStatus
 
 logger = logging.getLogger(__name__)
+
+_checkpoint_locks_guard = threading.Lock()
+_checkpoint_locks_by_loop: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, dict[str, asyncio.Lock]] = weakref.WeakKeyDictionary()
+
+
+@asynccontextmanager
+async def _checkpoint_thread_lock(thread_id: str) -> AsyncIterator[None]:
+    """Serialize checkpoint mutations for one thread without blocking goal commands."""
+    loop = asyncio.get_running_loop()
+    with _checkpoint_locks_guard:
+        locks = _checkpoint_locks_by_loop.get(loop)
+        if locks is None:
+            locks = {}
+            _checkpoint_locks_by_loop[loop] = locks
+        lock = locks.get(thread_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            locks[thread_id] = lock
+
+    async with lock:
+        yield
+
 
 # Valid stream_mode values for LangGraph's graph.astream()
 _VALID_LG_MODES = {"values", "updates", "checkpoints", "tasks", "debug", "messages", "custom"}
@@ -454,39 +481,40 @@ async def run_agent(
 
         async def _stream_once(input_payload: Any, stream_config: RunnableConfig) -> None:
             nonlocal llm_error_fallback_message
-            if len(lg_modes) == 1 and not stream_subgraphs:
-                # Single mode, no subgraphs: astream yields raw chunks
-                single_mode = lg_modes[0]
-                async for chunk in agent.astream(input_payload, config=stream_config, stream_mode=single_mode):
+            async with _checkpoint_thread_lock(thread_id):
+                if len(lg_modes) == 1 and not stream_subgraphs:
+                    # Single mode, no subgraphs: astream yields raw chunks
+                    single_mode = lg_modes[0]
+                    async for chunk in agent.astream(input_payload, config=stream_config, stream_mode=single_mode):
+                        if record.abort_event.is_set():
+                            logger.info("Run %s abort requested — stopping", run_id)
+                            break
+                        llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(chunk, pre_existing_message_ids)
+                        sse_event = _lg_mode_to_sse_event(single_mode)
+                        await bridge.publish(run_id, sse_event, serialize(chunk, mode=single_mode))
+                        if single_mode == "custom":
+                            await subagent_events.add(chunk)
+                    return
+                # Multiple modes or subgraphs: astream yields tuples
+                async for item in agent.astream(
+                    input_payload,
+                    config=stream_config,
+                    stream_mode=lg_modes,
+                    subgraphs=stream_subgraphs,
+                ):
                     if record.abort_event.is_set():
                         logger.info("Run %s abort requested — stopping", run_id)
                         break
+
+                    mode, chunk = _unpack_stream_item(item, lg_modes, stream_subgraphs)
+                    if mode is None:
+                        continue
+
                     llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(chunk, pre_existing_message_ids)
-                    sse_event = _lg_mode_to_sse_event(single_mode)
-                    await bridge.publish(run_id, sse_event, serialize(chunk, mode=single_mode))
-                    if single_mode == "custom":
+                    sse_event = _lg_mode_to_sse_event(mode)
+                    await bridge.publish(run_id, sse_event, serialize(chunk, mode=mode))
+                    if mode == "custom":
                         await subagent_events.add(chunk)
-                return
-            # Multiple modes or subgraphs: astream yields tuples
-            async for item in agent.astream(
-                input_payload,
-                config=stream_config,
-                stream_mode=lg_modes,
-                subgraphs=stream_subgraphs,
-            ):
-                if record.abort_event.is_set():
-                    logger.info("Run %s abort requested — stopping", run_id)
-                    break
-
-                mode, chunk = _unpack_stream_item(item, lg_modes, stream_subgraphs)
-                if mode is None:
-                    continue
-
-                llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(chunk, pre_existing_message_ids)
-                sse_event = _lg_mode_to_sse_event(mode)
-                await bridge.publish(run_id, sse_event, serialize(chunk, mode=mode))
-                if mode == "custom":
-                    await subagent_events.add(chunk)
 
         # 7. Stream the requested turn, then optionally continue hidden goal turns.
         await _stream_once(graph_input, initial_runnable_config)
@@ -620,6 +648,25 @@ async def run_agent(
                         await thread_store.update_display_name(thread_id, title)
             except Exception:
                 logger.debug("Failed to sync title for thread %s (non-fatal)", thread_id)
+
+        # Persist run duration to checkpoint metadata so history reads
+        # don't need to correlate runs and events.
+        if checkpointer is not None and record.status == RunStatus.success:
+            try:
+                created = datetime.fromisoformat(record.created_at.replace("Z", "+00:00"))
+                updated = datetime.fromisoformat(record.updated_at.replace("Z", "+00:00"))
+                # Match legacy history semantics: turn_duration is the whole
+                # RunRecord lifetime in integer seconds, including admission
+                # delay. Persist zero for sub-second successful turns.
+                duration = max(0, int((updated - created).total_seconds()))
+                await _persist_run_duration(
+                    checkpointer=checkpointer,
+                    thread_id=thread_id,
+                    run_id=run_id,
+                    duration_seconds=duration,
+                )
+            except Exception:
+                logger.debug("Failed to persist run duration for thread %s run %s (non-fatal)", thread_id, run_id)
 
         # Update threads_meta status based on run outcome
         if thread_store is not None:
@@ -1140,6 +1187,93 @@ def _title_generation_state(channel_values: dict[str, Any], graph_input: Any | N
         if fallback_messages:
             state["messages"] = fallback_messages
     return state
+
+
+def valid_duration_entry(run_id: Any, duration_seconds: Any) -> bool:
+    """Check that (run_id, duration_seconds) is a well-formed duration entry."""
+    return isinstance(run_id, str) and bool(run_id) and isinstance(duration_seconds, int) and not isinstance(duration_seconds, bool)
+
+
+async def persist_run_durations(
+    *,
+    checkpointer: Any,
+    thread_id: str,
+    durations: dict[str, int],
+) -> bool:
+    """Merge validated run durations into a metadata-only checkpoint.
+
+    Durations accumulate so the history fast path can serve every known turn
+    from the latest checkpoint.  Per-entry overhead is negligible (~50 bytes
+    per run_id) compared to the messages channel blob written on every graph
+    checkpoint, so no pruning is needed.
+    """
+    updates = {run_id: max(0, duration_seconds) for run_id, duration_seconds in durations.items() if valid_duration_entry(run_id, duration_seconds)}
+    if not updates:
+        return False
+
+    ckpt_config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+    async with _checkpoint_thread_lock(thread_id):
+        for _attempt in range(3):
+            ckpt_tuple = await _call_checkpointer_method(checkpointer, "aget_tuple", "get_tuple", ckpt_config)
+            if ckpt_tuple is None:
+                return False
+
+            checkpoint = dict(getattr(ckpt_tuple, "checkpoint", {}) or {})
+            metadata = dict(getattr(ckpt_tuple, "metadata", {}) or {})
+            raw_run_durations = metadata.get("run_durations")
+            run_durations = {key: value for key, value in raw_run_durations.items() if valid_duration_entry(key, value)} if isinstance(raw_run_durations, dict) else {}
+            changed_durations = {run_id: duration for run_id, duration in updates.items() if run_durations.get(run_id) != duration}
+            if not changed_durations:
+                return False
+
+            run_durations.update(changed_durations)
+            parent_checkpoint_id = _checkpoint_identity(ckpt_tuple, checkpoint)
+            latest_tuple = await _call_checkpointer_method(checkpointer, "aget_tuple", "get_tuple", ckpt_config)
+            latest_checkpoint = dict(getattr(latest_tuple, "checkpoint", {}) or {}) if latest_tuple is not None else {}
+            if _checkpoint_identity(latest_tuple, latest_checkpoint) != parent_checkpoint_id:
+                continue
+
+            checkpoint.update(_new_checkpoint_marker())
+            metadata["source"] = "update"
+            prev_step = metadata.get("step")
+            metadata["step"] = (prev_step + 1) if isinstance(prev_step, int) else 1
+            metadata["run_durations"] = run_durations
+            metadata["writes"] = {"runtime_run_duration": {"run_ids": sorted(changed_durations)}}
+
+            checkpoint_ns = _checkpoint_namespace(ckpt_tuple)
+            write_config = {
+                "configurable": {
+                    "thread_id": thread_id,
+                    "checkpoint_ns": checkpoint_ns,
+                    "checkpoint_id": parent_checkpoint_id,
+                }
+            }
+            await _call_checkpointer_method(
+                checkpointer,
+                "aput",
+                "put",
+                write_config,
+                checkpoint,
+                metadata,
+                {},
+            )
+            return True
+    return False
+
+
+async def _persist_run_duration(
+    *,
+    checkpointer: Any,
+    thread_id: str,
+    run_id: str,
+    duration_seconds: int,
+) -> None:
+    """Persist one completed run duration in the thread checkpoint metadata."""
+    await persist_run_durations(
+        checkpointer=checkpointer,
+        thread_id=thread_id,
+        durations={run_id: duration_seconds},
+    )
 
 
 async def _ensure_interrupted_title(*, checkpointer: Any, thread_id: str, app_config: AppConfig | None, graph_input: Any | None = None) -> str | None:
