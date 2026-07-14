@@ -501,7 +501,7 @@ class TestBoundDescription:
 
         result = _bound_description("short")
         assert result == "short"
-        assert _bound_description.__kwdefaults__ is not None  # cap has a default
+        assert _bound_description.__defaults__ is not None  # cap has a default
 
     def test_long_description_is_truncated_with_suffix(self):
         from deerflow.agents.middlewares.delegation_ledger import _bound_description
@@ -509,9 +509,7 @@ class TestBoundDescription:
         long = "x" * 201
         result = _bound_description(long)
         assert len(result) <= 201
-        assert result.endswith(" ... [truncated]"), (
-            f"Expected truncation suffix, got: {result[-50:]}"
-        )
+        assert result.endswith(" ... [truncated]"), f"Expected truncation suffix, got: {result[-50:]}"
         assert result != long
 
     def test_truncation_suffix_not_inserted_when_under_cap(self):
