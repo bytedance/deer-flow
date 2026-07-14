@@ -46,7 +46,7 @@ from deerflow.runtime.goal import DEFAULT_MAX_GOAL_CONTINUATIONS, build_goal_sta
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.skills.describe import build_skill_search_setup
 from deerflow.skills.storage import get_or_new_user_skill_storage
-from deerflow.tools.builtins.tool_search import assemble_deferred_tools, get_mcp_routing_hints_prompt_section
+from deerflow.tools.builtins.tool_search import assemble_deferred_tools, build_mcp_routing_middleware, get_mcp_routing_hints_prompt_section
 from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, generate_trace_id, get_current_trace_id, reset_current_trace_id, set_current_trace_id
 from deerflow.tracing import build_tracing_callbacks, inject_langfuse_metadata
 from deerflow.uploads.manager import (
@@ -243,6 +243,8 @@ class DeerFlowClient:
             cfg.get("thinking_enabled"),
             cfg.get("is_plan_mode"),
             cfg.get("subagent_enabled"),
+            cfg.get("max_concurrent_subagents"),
+            cfg.get("max_total_subagents"),
             self._agent_name,
             frozenset(self._available_skills) if self._available_skills is not None else None,
         )
@@ -254,9 +256,15 @@ class DeerFlowClient:
         model_name = cfg.get("model_name")
         subagent_enabled = cfg.get("subagent_enabled", False)
         max_concurrent_subagents = cfg.get("max_concurrent_subagents", 3)
+        max_total_subagents = cfg.get("max_total_subagents", self._app_config.subagents.max_total_per_run)
 
         tools = self._get_tools(model_name=model_name, subagent_enabled=subagent_enabled)
         final_tools, deferred_setup = assemble_deferred_tools(tools, enabled=self._app_config.tool_search.enabled)
+        mcp_routing_middleware = build_mcp_routing_middleware(
+            final_tools,
+            deferred_setup,
+            top_k=self._app_config.tool_search.auto_promote_top_k,
+        )
         mcp_routing_hints_section = get_mcp_routing_hints_prompt_section(tools, deferred_names=deferred_setup.deferred_names)
 
         # Wire deferred skill discovery — mirrors agent.py so config flag works on both paths.
@@ -286,11 +294,13 @@ class DeerFlowClient:
                 custom_middlewares=self._middlewares,
                 app_config=self._app_config,
                 deferred_setup=deferred_setup,
+                mcp_routing_middleware=mcp_routing_middleware,
                 user_id=get_effective_user_id(),
             ),
             "system_prompt": apply_prompt_template(
                 subagent_enabled=subagent_enabled,
                 max_concurrent_subagents=max_concurrent_subagents,
+                max_total_subagents=max_total_subagents,
                 agent_name=self._agent_name,
                 available_skills=self._available_skills,
                 app_config=self._app_config,
@@ -752,8 +762,9 @@ class DeerFlowClient:
 
         self._ensure_agent(config)
 
-        state: dict[str, Any] = {"messages": [HumanMessage(content=message)]}
-        context = {"thread_id": thread_id}
+        run_id = str(uuid.uuid4())
+        state: dict[str, Any] = {"messages": [HumanMessage(content=message, additional_kwargs={"run_id": run_id})]}
+        context = {"thread_id": thread_id, "run_id": run_id}
         if deerflow_trace_id:
             context[DEERFLOW_TRACE_METADATA_KEY] = deerflow_trace_id
         if self._agent_name:

@@ -19,12 +19,17 @@ import { Button } from "@/components/ui/button";
 import { ShineBorder } from "@/components/ui/shine-border";
 import { useI18n } from "@/core/i18n/hooks";
 import { hasToolCalls } from "@/core/messages/utils";
+import { useModels } from "@/core/models/hooks";
 import { useRehypeSplitWordsIntoSpans } from "@/core/rehype";
 import { streamdownPluginsWithWordAnimation } from "@/core/streamdown";
 import { SafeStreamdown } from "@/core/streamdown/components";
 import type { Subtask } from "@/core/tasks";
 import { fetchSubtaskSteps } from "@/core/tasks/api";
 import { useSubtask, useUpdateSubtask } from "@/core/tasks/context";
+import {
+  formatSubtaskTokenUsage,
+  resolveSubtaskModelLabel,
+} from "@/core/tasks/presentation";
 import { stepsForDisplay } from "@/core/tasks/steps";
 import { resolveRenderedSubtask } from "@/core/tasks/subtask-render";
 import { explainLastToolCall } from "@/core/tools/utils";
@@ -55,6 +60,7 @@ export function SubtaskCard({
   const rehypePlugins = useRehypeSplitWordsIntoSpans(isLoading);
   const liveTask = useSubtask(taskId);
   const task = resolveRenderedSubtask(liveTask, fallbackTask);
+  const { models, tokenUsageEnabled } = useModels();
   const updateSubtask = useUpdateSubtask();
 
   // The card shows the subagent's step timeline (#3779): its reasoning turns
@@ -99,6 +105,18 @@ export function SubtaskCard({
   if (!task) {
     return null;
   }
+
+  const modelLabel = resolveSubtaskModelLabel(task.modelName, models);
+  const tokenLabel = tokenUsageEnabled
+    ? formatSubtaskTokenUsage(task.usage)
+    : undefined;
+  const runtimeUsageLabel = tokenUsageEnabled
+    ? tokenLabel
+      ? `${tokenLabel} ${t.tokenUsage.label}`
+      : task.status === "in_progress"
+        ? t.tokenUsage.collecting
+        : t.tokenUsage.unavailableShort
+    : undefined;
 
   return (
     <ChainOfThought
@@ -148,6 +166,19 @@ export function SubtaskCard({
                       task.status === "failed" ? "text-red-500 opacity-67" : "",
                     )}
                   >
+                    {modelLabel && (
+                      <span className="max-w-32 truncate" title={modelLabel}>
+                        {modelLabel}
+                      </span>
+                    )}
+                    {runtimeUsageLabel && (
+                      <span
+                        className="max-w-28 truncate"
+                        title={runtimeUsageLabel}
+                      >
+                        {runtimeUsageLabel}
+                      </span>
+                    )}
                     {icon}
                     <FlipDisplay
                       className="max-w-[420px] truncate pb-1"

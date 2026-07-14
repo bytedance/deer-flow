@@ -21,6 +21,7 @@ from collections.abc import Iterable
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
+from deerflow.skills.package_paths import is_eval_fixture_skill_md
 from deerflow.skills.skillscan.models import (
     FindingSeverity,
     RuleSpec,
@@ -248,7 +249,7 @@ def _scan_archive_member_metadata(info: zipfile.ZipInfo, normalized: str) -> lis
     if _is_symlink_member(info):
         findings.append(_finding("package-symlink", file=normalized, evidence=info.filename))
     parts = PurePosixPath(normalized).parts
-    if parts and parts[-1] == "SKILL.md" and len(parts) > 2:
+    if parts and parts[-1] == "SKILL.md" and len(parts) > 2 and not is_eval_fixture_skill_md(PurePosixPath(normalized)):
         findings.append(_finding("package-nested-skill-md", file=normalized, evidence=normalized))
     return findings
 
@@ -256,7 +257,7 @@ def _scan_archive_member_metadata(info: zipfile.ZipInfo, normalized: str) -> lis
 def _scan_file_package_properties(rel_path: str, file_bytes: bytes, file_size: int) -> list[SecurityFinding]:
     findings: list[SecurityFinding] = []
     path = PurePosixPath(rel_path)
-    if path.name == "SKILL.md" and len(path.parts) > 1:
+    if path.name == "SKILL.md" and len(path.parts) > 1 and not is_eval_fixture_skill_md(path):
         findings.append(_finding("package-nested-skill-md", file=rel_path, evidence=rel_path))
     if file_size > MAX_FILE_BYTES:
         findings.append(_finding("package-oversized-file", file=rel_path, evidence=f"{file_size} bytes"))
@@ -359,7 +360,7 @@ def _scan_python(rel_path: str, text: str) -> list[SecurityFinding]:
                 has_network_sink = True
                 network_node = network_node or node
 
-        if isinstance(node, ast.Attribute) and _python_name(node, aliases) == "os.environ":
+        if isinstance(node, (ast.Attribute, ast.Name)) and _python_name(node, aliases) == "os.environ":
             has_env_dump = True
             env_node = env_node or node
 
@@ -386,7 +387,7 @@ def _scan_python(rel_path: str, text: str) -> list[SecurityFinding]:
         if call_name == "os.dup2":
             reverse_shell_parts.add("dup2")
             reverse_shell_node = reverse_shell_node or node
-        elif call_name == "socket.socket":
+        elif call_name in {"socket.socket", "socket.create_connection"}:
             reverse_shell_parts.add("socket")
         elif call_name.startswith("subprocess.") or call_name in {"os.system", "os.popen"}:
             reverse_shell_parts.add("subprocess")
@@ -654,7 +655,29 @@ def _call_has_shell_true(node: ast.Call) -> bool:
 
 
 def _call_is_network_sink(call_name: str) -> bool:
-    return call_name in {"requests.get", "requests.post", "requests.put", "requests.request", "urllib.request.urlopen", "httpx.get", "httpx.post", "socket.socket"}
+    return call_name in {
+        "requests.get",
+        "requests.post",
+        "requests.put",
+        "requests.patch",
+        "requests.delete",
+        "requests.head",
+        "requests.options",
+        "requests.request",
+        "httpx.get",
+        "httpx.post",
+        "httpx.put",
+        "httpx.patch",
+        "httpx.delete",
+        "httpx.head",
+        "httpx.options",
+        "httpx.request",
+        "httpx.stream",
+        "urllib.request.urlopen",
+        "urllib.request.urlretrieve",
+        "socket.socket",
+        "socket.create_connection",
+    }
 
 
 def _yaml_load_uses_safe_loader(node: ast.Call) -> bool:

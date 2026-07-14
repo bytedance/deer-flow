@@ -1,4 +1,5 @@
 import { describe, expect, it } from "@rstest/core";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
@@ -64,30 +65,37 @@ function renderCard({
   fallbackTask?: Subtask;
 }) {
   const tasks = contextTask ? { [contextTask.id]: contextTask } : {};
+  const queryClient = new QueryClient();
 
   return renderToStaticMarkup(
     createElement(
-      I18nContext.Provider,
+      QueryClientProvider,
       {
-        value: {
-          locale: "en-US",
-          setLocale: () => undefined,
-        },
+        client: queryClient,
       },
       createElement(
-        SubtaskContext.Provider,
+        I18nContext.Provider,
         {
           value: {
-            tasks,
-            tasksRef: { current: tasks },
-            setTasks: () => undefined,
+            locale: "en-US",
+            setLocale: () => undefined,
           },
         },
-        createElement(SubtaskCard, {
-          taskId: fallbackTask?.id ?? contextTask?.id ?? "task-1",
-          isLoading: false,
-          fallbackTask,
-        }),
+        createElement(
+          SubtaskContext.Provider,
+          {
+            value: {
+              tasks,
+              tasksRef: { current: tasks },
+              setTasks: () => undefined,
+            },
+          },
+          createElement(SubtaskCard, {
+            taskId: fallbackTask?.id ?? contextTask?.id ?? "task-1",
+            isLoading: false,
+            fallbackTask,
+          }),
+        ),
       ),
     ),
   );

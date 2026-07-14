@@ -107,6 +107,16 @@ class OAuthTokenManager:
         if not access_token:
             raise ValueError(f"OAuth token response missing '{oauth.token_field}'")
 
+        # Persist a rotated refresh_token so subsequent refreshes use the latest
+        # value. This is an in-process update only — it is intentionally NOT
+        # written back to extensions_config.json. Providers that rotate refresh
+        # tokens (Auth0, Okta, Google, etc.) return a new refresh_token on each
+        # refresh; discarding it makes the next refresh fail with invalid_grant.
+        if oauth.grant_type == "refresh_token":
+            rotated = payload.get("refresh_token")
+            if isinstance(rotated, str) and rotated:
+                oauth.refresh_token = rotated
+
         token_type = str(payload.get(oauth.token_type_field, oauth.default_token_type) or oauth.default_token_type)
 
         expires_in_raw = payload.get(oauth.expires_in_field, 3600)
@@ -145,6 +155,16 @@ async def get_initial_oauth_headers(extensions_config: ExtensionsConfig) -> dict
 
     headers: dict[str, str] = {}
     for server_name in token_manager.oauth_server_names():
-        headers[server_name] = await token_manager.get_authorization_header(server_name) or ""
+        try:
+            value = await token_manager.get_authorization_header(server_name)
+        except Exception:
+            logger.warning(
+                "Skipping initial OAuth header for MCP server '%s' after token fetch failed",
+                server_name,
+                exc_info=True,
+            )
+            continue
+        if value:
+            headers[server_name] = value
 
     return {name: value for name, value in headers.items() if value}

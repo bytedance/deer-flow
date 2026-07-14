@@ -41,20 +41,58 @@ _SUMMARY_MESSAGE_NAME = "summary"
 # Finite set of blocked tag names: system-reserved + common injection patterns.
 _BLOCKED_TAG_NAMES: frozenset[str] = frozenset(
     {
-        # System-reserved tags (used by the agent framework for structured context)
+        # Framework-injected structured/authority blocks. The lead-agent system
+        # prompt's "System-Context Confidentiality" section (agents/lead_agent/
+        # prompt.py) declares *every* such tag trusted internal data — it names a
+        # few then says "and all other structured tags". So the denylist must
+        # cover the framework's authority blocks as a class, not a hand-picked
+        # subset: any one of them, forged in untrusted input, mimics trusted
+        # framework context. Enumerated from the block tags the framework actually
+        # emits into model input (system prompt + hidden-context/reminder
+        # middlewares) and pinned against drift by
+        # test_input_sanitization_middleware.py::test_denylist_covers_framework_authority_blocks.
+        # Both spellings of the reminder block are covered: "system-reminder"
+        # (dynamic-context) and "system_reminder" (todo/terminal middlewares).
+        #
+        # Subagents share this denylist: build_subagent_runtime_middlewares reuses
+        # the same _build_runtime_middlewares base, so both sanitization paths guard
+        # subagent model input too. The subagent system-prompt blocks
+        # (file_editing_workflow / guidelines / output_format / working_directory)
+        # are therefore authority blocks of the same class as the lead-agent ones.
         "system-reminder",
+        "system_reminder",
         "memory",
         "current_date",
         "think",
         "analysis",
+        "role",
+        "soul",
+        "self_update",
+        "thinking_style",
+        "clarification_system",
+        "critical_reminders",
+        "response_style",
+        "citations",
         "subagent_system",
         "skill_system",
+        "skill_index",
+        "available_skills",
+        "disabled_skills",
+        "memory_tool_system",
         "uploaded_files",
         "todo_list_system",
+        "durable_context_data",
+        "slash_skill_activation",
+        "mcp_routing_hints",
+        "available-deferred-tools",
+        "goal_continuation",
+        "file_editing_workflow",
+        "guidelines",
+        "output_format",
+        "working_directory",
         # Common prompt-injection tag patterns
         "system",
         "instruction",
-        "role",
         "important",
         "override",
         "ignore",
@@ -268,10 +306,19 @@ class InputSanitizationMiddleware(AgentMiddleware[AgentState]):
 
             # Preserve the pre-sanitization user text so downstream consumers that
             # must see the genuine input (slash skill activation, regenerate) can
-            # recover it after the BEGIN/END wrapping. setdefault keeps an existing
-            # value (e.g. set by UploadsMiddleware or an IM channel) authoritative.
+            # recover it after the BEGIN/END wrapping. Keep a valid value set by
+            # UploadsMiddleware or an IM channel, but repair malformed metadata so
+            # persistence never falls back to the wrapped model-facing content.
             preserved_kwargs = dict(msg.additional_kwargs or {})
-            preserved_kwargs.setdefault(ORIGINAL_USER_CONTENT_KEY, message_content_to_text(content))
+            original_user_content = preserved_kwargs.get(ORIGINAL_USER_CONTENT_KEY)
+            if not isinstance(original_user_content, str):
+                if ORIGINAL_USER_CONTENT_KEY in preserved_kwargs:
+                    logger.warning(
+                        "InputSanitizationMiddleware replaced non-string %s metadata: type=%s",
+                        ORIGINAL_USER_CONTENT_KEY,
+                        type(original_user_content).__name__,
+                    )
+                preserved_kwargs[ORIGINAL_USER_CONTENT_KEY] = message_content_to_text(content)
             messages[i] = HumanMessage(
                 content=new_content,
                 id=msg.id,

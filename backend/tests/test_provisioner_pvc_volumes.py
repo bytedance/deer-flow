@@ -196,6 +196,22 @@ class TestBuildVolumeMounts:
         userdata_mount = mounts[-1]
         assert userdata_mount.sub_path is None
 
+    def test_skills_pvc_does_not_set_subpath_by_default(self, provisioner_module):
+        """PVC-backed skills keep legacy root mount unless explicitly configured."""
+        provisioner_module.SKILLS_PVC_NAME = "my-skills-pvc"
+        provisioner_module.SKILLS_PVC_SUBPATH_TEMPLATE = ""
+        mounts = provisioner_module._build_volume_mounts("thread-42", user_id="user-7")
+        skills_mount = mounts[0]
+        assert skills_mount.sub_path is None
+
+    def test_skills_pvc_can_use_user_scoped_subpath_template(self, provisioner_module):
+        """Operators can opt into per-user/thread skills subPath for shared PVCs."""
+        provisioner_module.SKILLS_PVC_NAME = "my-skills-pvc"
+        provisioner_module.SKILLS_PVC_SUBPATH_TEMPLATE = "deer-flow/users/{user_id}/threads/{thread_id}/skills"
+        mounts = provisioner_module._build_volume_mounts("thread-42", user_id="user-7")
+        skills_mount = mounts[0]
+        assert skills_mount.sub_path == "deer-flow/users/user-7/threads/thread-42/skills"
+
     def test_pvc_sets_user_scoped_subpath(self, provisioner_module):
         """PVC mode should include user_id in the user-data subPath."""
         provisioner_module.USERDATA_PVC_NAME = "my-pvc"
@@ -290,3 +306,12 @@ class TestBuildPodVolumes:
         assert mount_paths["skills-public"] == "/mnt/skills/public"
         assert mount_paths["skills-custom"] == "/mnt/skills/custom"
         assert mount_paths["skills-legacy"] == "/mnt/skills/legacy"
+
+    def test_pod_pvc_mode_can_use_user_scoped_skills_subpath(self, provisioner_module):
+        """Pod should use a configured user-scoped subPath for PVC skills."""
+        provisioner_module.SKILLS_PVC_NAME = "skills-pvc"
+        provisioner_module.SKILLS_PVC_SUBPATH_TEMPLATE = "deer-flow/users/{user_id}/threads/{thread_id}/skills"
+        provisioner_module.USERDATA_PVC_NAME = "userdata-pvc"
+        pod = provisioner_module._build_pod("sandbox-1", "thread-1", user_id="user-7")
+        skills_mount = pod.spec.containers[0].volume_mounts[0]
+        assert skills_mount.sub_path == "deer-flow/users/user-7/threads/thread-1/skills"

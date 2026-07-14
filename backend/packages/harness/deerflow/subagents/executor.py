@@ -2,6 +2,7 @@
 
 import asyncio
 import atexit
+import html
 import logging
 import os
 import threading
@@ -110,6 +111,12 @@ class SubagentResult:
         if self.ai_messages is None:
             self.ai_messages = []
 
+    def update_token_usage_records(self, records: list[dict[str, int | str | None]]) -> None:
+        """Publish the latest cumulative collector snapshot while still running."""
+        with self._state_lock:
+            if not self.status.is_terminal:
+                self.token_usage_records = list(records)
+
     def try_set_terminal(
         self,
         status: SubagentStatus,
@@ -190,6 +197,57 @@ def _extract_final_result(final_state: Any, *, trace_id: str, name: str) -> str:
 
     logger.warning(f"[trace={trace_id}] Subagent {name} no messages in final state")
     return "No response generated"
+
+
+def _extract_llm_error_fallback(final_state: Any) -> str | None:
+    """Return the user-facing error for a terminal LLM fallback message.
+
+    ``LLMErrorHandlingMiddleware`` converts provider exceptions into marked
+    ``AIMessage`` objects so the graph can terminate cleanly. Clean graph
+    termination is not task success, however: subagent callers need the
+    structured marker translated into the existing failed terminal state.
+
+    Only the last assistant message is authoritative, and scanning just the
+    tail (rather than all messages) is deliberate. Subagents share the
+    parent's ``thread_id`` (see ``_aexecute``'s ``run_config``), and LangGraph
+    replays the full parent message history through ``stream_mode="values"``,
+    so ``final_state`` can contain a *stale* fallback marker left by an earlier
+    parent-history turn. The lead-agent run path scans every message and must
+    mask those stale markers via ``pre_existing_message_ids``
+    (``runtime/runs/worker.py::_extract_llm_error_fallback_message``). Here no
+    masking is needed: a fallback ``AIMessage`` carries no ``tool_calls``, so it
+    always terminates the run, and a subagent always appends at least its own
+    terminal assistant message — the last ``AIMessage`` is therefore never a
+    stale parent-history marker. Do not "fix" this by scanning all messages;
+    that reintroduces the stale-marker false positive worker.py guards against.
+
+    Error-looking message text without the marker remains ordinary output.
+    """
+    if final_state is None:
+        return None
+
+    for message in reversed(final_state.get("messages", [])):
+        if not isinstance(message, AIMessage):
+            continue
+
+        metadata = message.additional_kwargs
+        if metadata.get("deerflow_error_fallback") is not True:
+            return None
+
+        content = message_content_to_text(message.content).strip()
+        if content:
+            return content
+
+        # Defensive: ``_build_error_fallback_message`` always sets a non-empty
+        # user-facing ``content`` (and ``error_detail`` via ``_extract_error_detail``,
+        # which falls back to the exception class name). These branches only
+        # guard against a future middleware that emits an empty fallback.
+        detail = metadata.get("error_detail")
+        if isinstance(detail, str) and detail.strip():
+            return detail.strip()
+        return "LLM request failed"
+
+    return None
 
 
 # Global storage for background task results
@@ -437,13 +495,25 @@ class SubagentExecutor:
 
         # Reuse shared middleware composition with lead agent. ``agent_name``
         # lets the builder resolve the per-agent token_budget override.
-        middlewares = build_subagent_runtime_middlewares(
-            app_config=app_config,
-            model_name=self.model_name,
-            lazy_init=True,
-            deferred_setup=deferred_setup,
-            agent_name=self.config.name,
-        )
+        mcp_routing_middleware = None
+        if deferred_setup is not None and deferred_setup.deferred_names:
+            from deerflow.tools.builtins.tool_search import build_mcp_routing_middleware
+
+            mcp_routing_middleware = build_mcp_routing_middleware(
+                tools if tools is not None else self.tools,
+                deferred_setup,
+                top_k=app_config.tool_search.auto_promote_top_k,
+            )
+        middleware_kwargs = {
+            "app_config": app_config,
+            "model_name": self.model_name,
+            "lazy_init": True,
+            "deferred_setup": deferred_setup,
+            "agent_name": self.config.name,
+        }
+        if mcp_routing_middleware is not None:
+            middleware_kwargs["mcp_routing_middleware"] = mcp_routing_middleware
+        middlewares = build_subagent_runtime_middlewares(**middleware_kwargs)
         # Collect every guard middleware that exposes ``consume_stop_reason``
         # (TokenBudgetMiddleware, LoopDetectionMiddleware) so _aexecute can read
         # each after the run and surface whichever cap fired. Duck-typed
@@ -536,7 +606,10 @@ class SubagentExecutor:
                 content = await asyncio.to_thread(skill.skill_file.read_text, encoding="utf-8")
                 content = content.strip()
                 if content:
-                    messages.append(SystemMessage(content=f'<skill name="{skill.name}">\n{content}\n</skill>'))
+                    # name/body are untrusted (installable ``.skill`` archive); escape
+                    # both so the body cannot forge a framework tag, matching the
+                    # slash-activation sibling (name quote=True attribute, body quote=False).
+                    messages.append(SystemMessage(content=f'<skill name="{html.escape(skill.name, quote=True)}">\n{html.escape(content, quote=False)}\n</skill>'))
                     logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} loaded skill: {skill.name}")
             except Exception:
                 logger.debug(f"[trace={self.trace_id}] Failed to read skill {skill.name}", exc_info=True)
@@ -744,6 +817,7 @@ class SubagentExecutor:
                     return result
 
                 final_state = chunk
+                result.update_token_usage_records(collector.snapshot_records())
 
                 # Capture every step message (assistant turns AND tool outputs)
                 # appended since the last chunk. A single super-step can append
@@ -758,19 +832,30 @@ class SubagentExecutor:
 
             logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} completed async execution")
             token_usage_records = collector.snapshot_records()
-            final_result = _extract_final_result(final_state, trace_id=self.trace_id, name=self.config.name)
-            # A guard hard-stop (token budget or loop detection) does not raise
-            # — it strips tool_calls so the run completes with a final answer.
-            # ``consume_stop_reason`` on each guard tells us whether that
-            # happened so we can mark the completed result with the cap reason
-            # (token_capped / loop_capped) for the lead (#3875 Phase 2).
-            stop_reason = self._consume_guard_stop_reason()
-            result.try_set_terminal(
-                SubagentStatus.COMPLETED,
-                result=final_result,
-                stop_reason=stop_reason,
-                token_usage_records=token_usage_records,
-            )
+            llm_error = _extract_llm_error_fallback(final_state)
+            if llm_error is not None:
+                result.try_set_terminal(
+                    SubagentStatus.FAILED,
+                    error=llm_error,
+                    token_usage_records=token_usage_records,
+                )
+            else:
+                final_result = _extract_final_result(final_state, trace_id=self.trace_id, name=self.config.name)
+                # A guard hard-stop (token budget or loop detection) does not raise
+                # — it strips tool_calls so the run completes with a final answer.
+                # ``consume_stop_reason`` on each guard tells us whether that
+                # happened so we can mark the completed result with the cap reason
+                # (token_capped / loop_capped) for the lead (#3875 Phase 2). It
+                # pops the reason, so keep it on the branch that consumes it — a
+                # fallback carries no tool_calls, so no guard hard-stop can have
+                # co-occurred on the FAILED branch anyway.
+                stop_reason = self._consume_guard_stop_reason()
+                result.try_set_terminal(
+                    SubagentStatus.COMPLETED,
+                    result=final_result,
+                    stop_reason=stop_reason,
+                    token_usage_records=token_usage_records,
+                )
 
         except GraphRecursionError:
             # ``recursion_limit`` on run_config == ``self.config.max_turns``
@@ -791,30 +876,46 @@ class SubagentExecutor:
             # consistent and pops the reason so it is not orphaned in the dict.
             max_turns = self.config.max_turns
             logger.warning(f"[trace={self.trace_id}] Subagent {self.config.name} reached max_turns={max_turns} (GraphRecursionError); recovering partial result")
-            messages = (final_state or {}).get("messages", [])
-            usable_partial: str | None = None
-            for m in reversed(messages):
-                if isinstance(m, AIMessage):
-                    text = message_content_to_text(m.content).strip()
-                    if text:
-                        usable_partial = text
-                    break
             records = collector.snapshot_records() if collector is not None else None
             stop_reason = self._consume_guard_stop_reason() or "turn_capped"
-            if usable_partial is not None:
+
+            # A handled LLM provider failure (#4042) carries non-empty
+            # user-facing text on its terminal ``AIMessage`` just like genuine
+            # partial output, so it must be checked here too or it is
+            # indistinguishable from the raw-text scan below and gets
+            # misclassified as a completed task. Consult the same marker the
+            # normal-completion path above uses, before falling back to that scan.
+            llm_error = _extract_llm_error_fallback(final_state)
+            if llm_error is not None:
                 result.try_set_terminal(
-                    SubagentStatus.COMPLETED,
-                    result=usable_partial,
+                    SubagentStatus.FAILED,
+                    error=llm_error,
                     stop_reason=stop_reason,
                     token_usage_records=records,
                 )
             else:
-                result.try_set_terminal(
-                    SubagentStatus.FAILED,
-                    error=f"Reached max_turns={max_turns}",
-                    stop_reason=stop_reason,
-                    token_usage_records=records,
-                )
+                messages = (final_state or {}).get("messages", [])
+                usable_partial: str | None = None
+                for m in reversed(messages):
+                    if isinstance(m, AIMessage):
+                        text = message_content_to_text(m.content).strip()
+                        if text:
+                            usable_partial = text
+                        break
+                if usable_partial is not None:
+                    result.try_set_terminal(
+                        SubagentStatus.COMPLETED,
+                        result=usable_partial,
+                        stop_reason=stop_reason,
+                        token_usage_records=records,
+                    )
+                else:
+                    result.try_set_terminal(
+                        SubagentStatus.FAILED,
+                        error=f"Reached max_turns={max_turns}",
+                        stop_reason=stop_reason,
+                        token_usage_records=records,
+                    )
 
         except Exception as e:
             logger.exception(f"[trace={self.trace_id}] Subagent {self.config.name} async execution failed")

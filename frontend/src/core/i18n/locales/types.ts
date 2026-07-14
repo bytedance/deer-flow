@@ -104,6 +104,18 @@ export interface Translations {
     inputPolishFailed: string;
     inputPolishUndo: string;
     inputPolishCancel: string;
+    voiceInputStartLabel: string;
+    voiceInputStopLabel: string;
+    voiceInputStart: string;
+    voiceInputStop: string;
+    voiceInputListening: string;
+    voiceInputUnsupported: string;
+    voiceInputPermissionDenied: string;
+    voiceInputMicrophoneUnavailable: string;
+    voiceInputUnsupportedLanguage: string;
+    voiceInputNetworkError: string;
+    voiceInputNoSpeech: string;
+    voiceInputFailed: string;
     mode: string;
     flashMode: string;
     flashModeDescription: string;
@@ -490,6 +502,7 @@ export interface Translations {
     view: string;
     unavailable: string;
     unavailableShort: string;
+    collecting: string;
     note: string;
     presets: {
       off: string;

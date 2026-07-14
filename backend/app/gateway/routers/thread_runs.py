@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from copy import deepcopy
+from datetime import UTC, datetime
 from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -24,13 +26,14 @@ from app.gateway.authz import require_permission
 from app.gateway.deps import get_checkpointer, get_current_user, get_feedback_repo, get_run_event_store, get_run_manager, get_run_store, get_stream_bridge
 from app.gateway.pagination import trim_run_message_page
 from app.gateway.services import sse_consumer, start_run, wait_for_run_completion
-from deerflow.runtime import RunRecord, RunStatus, serialize_channel_values_for_api
+from deerflow.runtime import CancelOutcome, RunRecord, RunStatus, serialize_channel_values_for_api
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, get_original_user_content_text, message_to_text
 from deerflow.workspace_changes import get_workspace_changes_response
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/threads", tags=["runs"])
 REGENERATE_HISTORY_SCAN_LIMIT = 200
+THREAD_MESSAGE_PAGE_SCAN_BATCH = 201
 
 
 def compute_run_durations(runs) -> dict[str, int]:
@@ -90,6 +93,12 @@ class RegeneratePrepareResponse(BaseModel):
     target_run_id: str
 
 
+class ThreadMessagesPageResponse(BaseModel):
+    data: list[dict[str, Any]]
+    has_more: bool
+    next_before_seq: int | None = None
+
+
 class RunResponse(BaseModel):
     run_id: str
     thread_id: str
@@ -143,6 +152,54 @@ def _cancel_conflict_detail(run_id: str, record: RunRecord) -> str:
     if record.status in (RunStatus.pending, RunStatus.running):
         return f"Run {run_id} is not active on this worker and cannot be cancelled"
     return f"Run {run_id} is not cancellable (status: {record.status.value})"
+
+
+def _compute_retry_after(lease_expires_at: str | None, grace_seconds: int) -> int | None:
+    """Return seconds until the lease expires + grace, for ``Retry-After``.
+
+    Returns ``None`` when the lease is NULL or unparseable so the caller
+    can decide whether to send a generic 409 without the header.
+
+    The ``max(1, ...)`` floor means a lease just about to expire yields
+    ``Retry-After: 1``.  This is a lower bound, not a recommended poll
+    interval — clients that honour this header should apply minimum
+    backoff / jitter rather than retrying every second.
+    """
+    if lease_expires_at is None:
+        return None
+    try:
+        dt = datetime.fromisoformat(lease_expires_at)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=UTC)
+    except (ValueError, TypeError):
+        return None
+    remaining = (dt - datetime.now(UTC)).total_seconds() + grace_seconds
+    return max(1, int(remaining))
+
+
+async def _raise_lease_valid_elsewhere(
+    run_id: str,
+    run_mgr,  # RunManager (avoid import for testability)
+    record: RunRecord,
+) -> None:
+    """Re-fetch the lease and raise HTTP 409 + Retry-After.
+
+    ``record.lease_expires_at`` may be stale (fetched at request start while
+    the owner renewed between our read and the conditional UPDATE). Re-read
+    from the store to get the fresh value so ``Retry-After`` is accurate.
+    """
+    fresh = await run_mgr.get(run_id)
+    if fresh is not None:
+        record = fresh
+    retry_after = _compute_retry_after(record.lease_expires_at, run_mgr.grace_seconds)
+    headers: dict[str, str] = {}
+    if retry_after is not None:
+        headers["Retry-After"] = str(retry_after)
+    raise HTTPException(
+        status_code=409,
+        detail=f"Run {run_id} is active on another worker; retry after lease expiry.",
+        headers=headers,
+    )
 
 
 def _record_to_response(record: RunRecord) -> RunResponse:
@@ -219,6 +276,10 @@ def _is_visible_human_message(message: Any) -> bool:
 
 def _is_visible_ai_message(message: Any) -> bool:
     return _message_type(message) == "ai" and not _is_hidden_or_control_message(message)
+
+
+def _is_middleware_message_row(row: dict[str, Any]) -> bool:
+    return str((row.get("metadata") or {}).get("caller", "")).startswith("middleware:")
 
 
 def _checkpoint_messages(checkpoint_tuple: Any) -> list[Any]:
@@ -512,24 +573,34 @@ async def cancel_run(
     - action=rollback: Stop execution, revert to pre-run checkpoint state
     - wait=true: Block until the run fully stops, return 204
     - wait=false: Return immediately with 202
+
+    In multi-worker deployments, a cancel landing on a non-owning worker
+    can take over the run when the owner's lease has expired.  When the
+    lease is still valid a 409 + ``Retry-After`` header is returned.
     """
     run_mgr = get_run_manager(request)
     record = await run_mgr.get(run_id)
     if record is None or record.thread_id != thread_id:
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
 
-    cancelled = await run_mgr.cancel(run_id, action=action)
-    if not cancelled:
-        raise HTTPException(status_code=409, detail=_cancel_conflict_detail(run_id, record))
+    outcome = await run_mgr.cancel(run_id, action=action)
 
-    if wait and record.task is not None:
-        try:
-            await record.task
-        except asyncio.CancelledError:
-            pass
-        return Response(status_code=204)
+    # Success paths — the run was either cancelled locally or taken over
+    # from a dead worker.
+    if outcome in (CancelOutcome.cancelled, CancelOutcome.taken_over):
+        if wait and record.task is not None:
+            try:
+                await record.task
+            except asyncio.CancelledError:
+                pass
+            return Response(status_code=204)
+        return Response(status_code=202)
 
-    return Response(status_code=202)
+    if outcome == CancelOutcome.lease_valid_elsewhere:
+        await _raise_lease_valid_elsewhere(run_id, run_mgr, record)
+
+    # not_cancellable, not_active_locally, unknown
+    raise HTTPException(status_code=409, detail=_cancel_conflict_detail(run_id, record))
 
 
 @router.get("/{thread_id}/runs/{run_id}/join")
@@ -586,8 +657,16 @@ async def stream_existing_run(
 
     # Cancel if an action was requested (stop-button / interrupt flow)
     if action is not None:
-        cancelled = await run_mgr.cancel(run_id, action=action)
-        if not cancelled:
+        outcome = await run_mgr.cancel(run_id, action=action)
+        if outcome == CancelOutcome.taken_over:
+            # The run was on another worker and is now marked ``error`` in the
+            # store.  There is no local stream to drain — return immediately so
+            # the client doesn't hang on an SSE subscription this worker can
+            # never serve.
+            return Response(status_code=202)
+        if outcome != CancelOutcome.cancelled:
+            if outcome == CancelOutcome.lease_valid_elsewhere:
+                await _raise_lease_valid_elsewhere(run_id, run_mgr, record)
             raise HTTPException(status_code=409, detail=_cancel_conflict_detail(run_id, record))
         if wait and record.task is not None:
             try:
@@ -677,6 +756,139 @@ async def list_thread_messages(
                     content["additional_kwargs"]["turn_duration"] = run_durations[rid]
 
     return messages
+
+
+async def _scan_thread_message_page(
+    thread_id: str,
+    *,
+    limit: int,
+    before_seq: int | None,
+    request: Request,
+    user_id: str | None,
+) -> tuple[list[dict[str, Any]], bool]:
+    """Select the newest ``limit + 1`` page-eligible rows before a cursor."""
+    event_store = get_run_event_store(request)
+    run_mgr = get_run_manager(request)
+    superseded_run_ids = await run_mgr.list_successful_regenerate_sources(thread_id, user_id=user_id)
+    visible_desc: list[dict[str, Any]] = []
+    scan_before = before_seq
+
+    while len(visible_desc) < limit + 1:
+        raw = await event_store.list_messages(
+            thread_id,
+            limit=THREAD_MESSAGE_PAGE_SCAN_BATCH,
+            before_seq=scan_before,
+            user_id=user_id,
+        )
+        if not raw:
+            break
+
+        invalid_seq_rows = [row for row in raw if not isinstance(row.get("seq"), int)]
+        if invalid_seq_rows:
+            logger.error(
+                "Thread message scan found rows without sequence values: thread_id=%s scan_before=%s row_count=%d invalid_count=%d",
+                thread_id,
+                scan_before,
+                len(raw),
+                len(invalid_seq_rows),
+            )
+            raise RuntimeError("Run event message rows are missing sequence values")
+
+        for row in reversed(raw):
+            if _is_middleware_message_row(row) or row.get("run_id") in superseded_run_ids:
+                continue
+            visible_desc.append(row)
+            if len(visible_desc) == limit + 1:
+                break
+
+        raw_seqs = [row["seq"] for row in raw]
+        next_scan_before = min(raw_seqs)
+        if scan_before is not None and next_scan_before >= scan_before:
+            logger.error(
+                "Thread message scan cursor did not advance: thread_id=%s scan_before=%s next_scan_before=%s row_count=%d",
+                thread_id,
+                scan_before,
+                next_scan_before,
+                len(raw),
+            )
+            raise RuntimeError("Run event message scan did not advance its cursor")
+        scan_before = next_scan_before
+        if len(raw) < THREAD_MESSAGE_PAGE_SCAN_BATCH:
+            break
+
+    has_more = len(visible_desc) > limit
+    return list(reversed(visible_desc[:limit])), has_more
+
+
+async def _enrich_thread_message_page(
+    thread_id: str,
+    rows: list[dict[str, Any]],
+    *,
+    request: Request,
+    user_id: str | None,
+) -> list[dict[str, Any]]:
+    """Attach run-scoped duration and feedback without mutating store rows."""
+    data = deepcopy(rows)
+    if not data:
+        return data
+
+    run_ids = {row["run_id"] for row in data if isinstance(row.get("run_id"), str)}
+    run_mgr = get_run_manager(request)
+    records = await run_mgr.get_many_by_thread(thread_id, run_ids, user_id=user_id)
+    run_durations = compute_run_durations(records.values())
+
+    event_store = get_run_event_store(request)
+    last_ai_seq_by_run = await event_store.get_last_visible_ai_seq_by_run(thread_id, run_ids, user_id=user_id)
+    feedback_map: dict[str, dict] = {}
+    feedback_run_ids = {run_id for row in data if isinstance((run_id := row.get("run_id")), str) and row.get("seq") == last_ai_seq_by_run.get(run_id)}
+    if feedback_run_ids:
+        feedback_repo = get_feedback_repo(request)
+        feedback_map = await feedback_repo.list_by_run_ids(thread_id, feedback_run_ids, user_id=user_id)
+
+    for row in data:
+        run_id = row.get("run_id")
+        row["feedback"] = None
+        if row.get("seq") == last_ai_seq_by_run.get(run_id):
+            feedback = feedback_map.get(run_id)
+            if feedback:
+                row["feedback"] = {
+                    "feedback_id": feedback["feedback_id"],
+                    "rating": feedback["rating"],
+                    "comment": feedback.get("comment"),
+                }
+
+        content = row.get("content")
+        if isinstance(content, dict) and content.get("type") == "ai" and run_id in run_durations:
+            content.setdefault("additional_kwargs", {})["turn_duration"] = run_durations[run_id]
+    return data
+
+
+@router.get("/{thread_id}/messages/page", response_model=ThreadMessagesPageResponse)
+@require_permission("runs", "read", owner_check=True)
+async def list_thread_messages_page(
+    thread_id: str,
+    request: Request,
+    limit: int = Query(default=50, ge=1, le=200),
+    before_seq: int | None = Query(default=None, ge=1),
+) -> ThreadMessagesPageResponse:
+    """Return a backward page ordered by the thread-global event sequence."""
+    if "after_seq" in request.query_params:
+        raise HTTPException(status_code=422, detail="after_seq is not supported by this backward-only endpoint")
+
+    user_id = await get_current_user(request)
+    rows, has_more = await _scan_thread_message_page(
+        thread_id,
+        limit=limit,
+        before_seq=before_seq,
+        request=request,
+        user_id=user_id,
+    )
+    data = await _enrich_thread_message_page(thread_id, rows, request=request, user_id=user_id)
+    return ThreadMessagesPageResponse(
+        data=data,
+        has_more=has_more,
+        next_before_seq=data[0]["seq"] if has_more else None,
+    )
 
 
 @router.get("/{thread_id}/runs/{run_id}/messages")

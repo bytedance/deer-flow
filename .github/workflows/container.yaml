@@ -51,6 +51,12 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          # Bake the `postgres` extra into the published image so multi-replica
+          # deployments (K8s/Helm) can use shared Postgres persistence instead of
+          # file-based SQLite. sqlite/redis-only single-replica setups still work;
+          # this only adds the Postgres driver. See backend/Dockerfile `UV_EXTRAS`.
+          build-args: |
+            UV_EXTRAS=postgres
 
       - name: Generate artifact attestation
         uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be #v2.4.0

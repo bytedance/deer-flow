@@ -37,6 +37,8 @@ export function resolveRenderedSubtask(
 
   return {
     ...fallbackTask,
+    modelName: fallbackTask.modelName ?? liveTask.modelName,
+    usage: fallbackTask.usage ?? liveTask.usage,
     steps: liveTask.steps ?? fallbackTask.steps,
     latestMessage: liveTask.latestMessage ?? fallbackTask.latestMessage,
   };

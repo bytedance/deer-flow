@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html
 import logging
 import math
 import re
@@ -116,7 +117,13 @@ Output Format (JSON):
     {{ "content": "...", "category": "preference|knowledge|context|behavior|goal|correction", "confidence": 0.0-1.0 }}
   ],
   "factsToRemove": ["fact_id_1", "fact_id_2"],
-  "staleFactsToRemove": [{{ "id": "fact_id", "reason": "brief explanation" }}]
+  "staleFactsToRemove": [{{ "id": "fact_id", "reason": "brief explanation" }}],
+  "factsToConsolidate": [
+    {{
+      "sourceIds": ["fact_id_1", "fact_id_2"],
+      "consolidated": {{ "content": "synthesized fact", "category": "knowledge", "confidence": 0.9 }}
+    }}
+  ]
 }}
 
 Important Rules:
@@ -137,6 +144,8 @@ Important Rules:
   Recording upload events causes confusion in subsequent conversations.
 
 {staleness_review_section}
+
+{consolidation_section}
 
 Return ONLY valid JSON, no explanation or markdown."""
 
@@ -168,6 +177,33 @@ supports the removal.
 
 Be conservative — when in doubt, KEEP. Removing a valid fact is worse than
 keeping a slightly stale one, because the next review cycle will re-evaluate it."""
+
+
+# Prompt section injected into MEMORY_UPDATE_PROMPT when consolidation triggers.
+# Surfaces fact groups that have accumulated many entries in the same category
+# so the LLM can synthesize them into fewer, richer facts.
+CONSOLIDATION_PROMPT = """## Memory Consolidation
+
+The following fact categories have accumulated many individual entries.
+Review each group and identify facts that can be synthesized into a single,
+richer consolidated fact that preserves all key information.
+
+{consolidation_groups}
+
+For each group, decide:
+- CONSOLIDATE: Multiple facts can be merged into one richer fact.
+  Specify the source fact IDs and the consolidated content.
+- SKIP: Facts are distinct enough to remain separate.
+
+Add consolidation decisions to "factsToConsolidate" in your output JSON.
+Each entry: {{"sourceIds": ["fact_id_1", "fact_id_2"], "consolidated": {{"content": "...", "category": "...", "confidence": 0.9}}}}
+
+Rules:
+- The consolidated fact must preserve ALL key details from source facts
+- Only consolidate facts that describe the same aspect of the user
+- Confidence of consolidated fact = max of source confidences
+- Be conservative — when in doubt, keep facts separate
+- Maximum {max_groups} consolidation groups per cycle"""
 
 
 # Prompt template for extracting facts from a single message
@@ -363,9 +399,34 @@ def _format_fact_line(fact: dict[str, Any]) -> str | None:
     category = str(fact.get("category", "context")).strip() or "context"
     confidence = _coerce_confidence(fact.get("confidence"), default=0.0)
     source_error = fact.get("sourceError")
+    # These fields are user-editable (POST/PATCH /api/memory, import) and are
+    # rendered into the <memory> block of the lead-agent system prompt. Escape
+    # them so a value like "</memory></system-reminder>" cannot close the block
+    # and relocate the text after it out of the user-managed trust zone the
+    # prompt declares. Mirrors the MEMORY_UPDATE_PROMPT escaping in #4028/#4060.
+    # quote=False: these land in element-text position (never attribute values),
+    # so only <, >, & can break out — leave ' and " in facts untouched.
+    content = html.escape(content, quote=False)
+    category = html.escape(category, quote=False)
     if category == "correction" and isinstance(source_error, str) and source_error.strip():
-        return f"- [{category} | {confidence:.2f}] {content} (avoid: {source_error.strip()})"
+        return f"- [{category} | {confidence:.2f}] {content} (avoid: {html.escape(source_error.strip(), quote=False)})"
     return f"- [{category} | {confidence:.2f}] {content}"
+
+
+def _escape_summary(value: Any) -> str:
+    """Escape a user-editable context summary for the ``<memory>`` block.
+
+    Context summaries (``workContext``/``personalContext``/``topOfMind`` and the
+    history sections) are user-editable via ``/api/memory`` import and render into
+    the same ``<memory>`` block as facts, so an unescaped ``</memory>`` value can
+    close the block and relocate the text after it out of the user-managed trust
+    zone the lead-agent prompt declares. Sibling of ``_format_fact_line``'s
+    escaping (#4097). ``str(...)`` preserves the prior f-string coercion for the
+    rare non-string summary an import can plant; ``quote=False`` because summaries
+    land in element-text position (never attribute values), so only ``<``, ``>``,
+    ``&`` can break out — leave ``'`` and ``"`` untouched.
+    """
+    return html.escape(str(value), quote=False)
 
 
 def _select_fact_lines(
@@ -502,15 +563,15 @@ def format_memory_for_injection(
 
         work_ctx = user_data.get("workContext", {})
         if work_ctx.get("summary"):
-            user_sections.append(f"Work: {work_ctx['summary']}")
+            user_sections.append(f"Work: {_escape_summary(work_ctx['summary'])}")
 
         personal_ctx = user_data.get("personalContext", {})
         if personal_ctx.get("summary"):
-            user_sections.append(f"Personal: {personal_ctx['summary']}")
+            user_sections.append(f"Personal: {_escape_summary(personal_ctx['summary'])}")
 
         top_of_mind = user_data.get("topOfMind", {})
         if top_of_mind.get("summary"):
-            user_sections.append(f"Current Focus: {top_of_mind['summary']}")
+            user_sections.append(f"Current Focus: {_escape_summary(top_of_mind['summary'])}")
 
         if user_sections:
             sections.append("User Context:\n" + "\n".join(f"- {s}" for s in user_sections))
@@ -522,15 +583,15 @@ def format_memory_for_injection(
 
         recent = history_data.get("recentMonths", {})
         if recent.get("summary"):
-            history_sections.append(f"Recent: {recent['summary']}")
+            history_sections.append(f"Recent: {_escape_summary(recent['summary'])}")
 
         earlier = history_data.get("earlierContext", {})
         if earlier.get("summary"):
-            history_sections.append(f"Earlier: {earlier['summary']}")
+            history_sections.append(f"Earlier: {_escape_summary(earlier['summary'])}")
 
         background = history_data.get("longTermBackground", {})
         if background.get("summary"):
-            history_sections.append(f"Background: {background['summary']}")
+            history_sections.append(f"Background: {_escape_summary(background['summary'])}")
 
         if history_sections:
             sections.append("History:\n" + "\n".join(f"- {s}" for s in history_sections))
@@ -554,6 +615,13 @@ def format_memory_for_injection(
     #   performs a single-pass confidence-only ranking.
     facts_data = memory_data.get("facts", [])
     guaranteed_line_tokens = 0  # used later for the effective truncation limit
+    # Initialise the facts-block markers at function scope (alongside
+    # ``guaranteed_line_tokens`` above) so the structure-aware truncation at the
+    # bottom can reference them even when there are no facts and the block below
+    # never runs. Otherwise the overflow path raises ``UnboundLocalError`` when a
+    # user has sizeable context/history but an empty ``facts`` list.
+    facts_header = "Facts:\n"
+    all_fact_lines: list[str] = []
     if isinstance(facts_data, list) and facts_data:
         # Token cost of sections built above (user context, history).
         base_text = "\n\n".join(sections)
@@ -563,13 +631,6 @@ def format_memory_for_injection(
         # path can pass the same list straight into the fallback without
         # redoing validation work on the hot prompt-injection path.
         valid_facts = [f for f in facts_data if isinstance(f, dict) and isinstance(f.get("content"), str) and f.get("content", "").strip()]
-
-        # Initialise the facts-block markers *before* the try so the
-        # structure-aware truncation at the bottom of the function can
-        # reason about them regardless of whether the primary path or
-        # the except/fallback path produced the final Facts section.
-        facts_header = "Facts:\n"
-        all_fact_lines: list[str] = []
 
         try:
             # Partition valid facts into guaranteed vs regular groups.

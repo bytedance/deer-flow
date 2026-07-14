@@ -91,13 +91,13 @@ class TestBashToolChannelIdentityPrefix:
         sandbox = _run_bash(monkeypatch, _aio_runtime({"channel_user_id": "ou_feishu_123"}))
 
         assert len(sandbox.calls) == 1
-        assert sandbox.calls[0]["command"] == f"export {CHANNEL_USER_ID_ENV}=ou_feishu_123; echo hi"
+        assert sandbox.calls[0]["command"] == f"export {CHANNEL_USER_ID_ENV}=ou_feishu_123; cd /mnt/user-data/workspace; echo hi"
         assert sandbox.calls[0]["env"] is None
 
-    def test_no_channel_user_id_leaves_command_unchanged(self, monkeypatch):
+    def test_no_channel_user_id_omits_identity_prefix(self, monkeypatch):
         sandbox = _run_bash(monkeypatch, _aio_runtime({"thread_id": "t1"}))
 
-        assert sandbox.calls[0]["command"] == "echo hi"
+        assert sandbox.calls[0]["command"] == "cd /mnt/user-data/workspace; echo hi"
         assert sandbox.calls[0]["env"] is None
 
     def test_per_call_identity_follows_current_context(self, monkeypatch):
@@ -114,10 +114,10 @@ class TestBashToolChannelIdentityPrefix:
         sandbox = _run_bash(monkeypatch, _aio_runtime({"channel_user_id": "x'; rm -rf /tmp/y; '"}))
 
         command = sandbox.calls[0]["command"]
-        assert command.endswith("; echo hi")
+        assert command.endswith("; cd /mnt/user-data/workspace; echo hi")
         # shlex.quote wraps the value; the raw injection payload must not appear
         # as executable syntax outside the quoted region.
-        assert "export " + CHANNEL_USER_ID_ENV + "='x'\"'\"'; rm -rf /tmp/y; '\"'\"''; echo hi" == command
+        assert "export " + CHANNEL_USER_ID_ENV + "='x'\"'\"'; rm -rf /tmp/y; '\"'\"''; cd /mnt/user-data/workspace; echo hi" == command
 
     def test_secrets_and_identity_compose(self, monkeypatch):
         """Active skill secrets keep the env= channel; the identity keeps the
@@ -132,7 +132,7 @@ class TestBashToolChannelIdentityPrefix:
 
         call = sandbox.calls[0]
         assert call["env"] == {"ERP_TOKEN": "secret-value"}
-        assert call["command"].startswith(f"export {CHANNEL_USER_ID_ENV}=ou_1; ")
+        assert call["command"] == f"export {CHANNEL_USER_ID_ENV}=ou_1; cd /mnt/user-data/workspace; echo hi"
         assert "secret-value" not in call["command"]
 
     def test_non_im_run_leaves_command_untouched(self):
@@ -159,8 +159,8 @@ class TestBashToolChannelIdentityPrefix:
         a = _run_bash(monkeypatch, _aio_runtime({"channel_user_id": "sender-a"}))
         b = _run_bash(monkeypatch, _aio_runtime({"channel_user_id": "b" * 5000}))
 
-        assert a.calls[0]["command"] == f"export {CHANNEL_USER_ID_ENV}=sender-a; echo hi"
-        assert b.calls[0]["command"] == f"unset {CHANNEL_USER_ID_ENV}; echo hi"
+        assert a.calls[0]["command"] == f"export {CHANNEL_USER_ID_ENV}=sender-a; cd /mnt/user-data/workspace; echo hi"
+        assert b.calls[0]["command"] == f"unset {CHANNEL_USER_ID_ENV}; cd /mnt/user-data/workspace; echo hi"
         assert b.calls[0]["env"] is None
 
     def test_windows_local_sandbox_skips_prefix(self, monkeypatch):

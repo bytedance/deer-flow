@@ -15,7 +15,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 20
+config_version: 24
 
 # ============================================================================
 # Logging
@@ -29,6 +29,14 @@ logging:
   enhance:
     enabled: false
     format: text
+
+# ============================================================================
+# Tracing / Observability (Monocle)
+# ============================================================================
+# Optional agent tracing via Monocle. Configured through environment variables
+# (MONOCLE_TRACING, MONOCLE_EXPORTERS, OKAHU_API_KEY — like LangSmith/Langfuse),
+# not config.yaml keys, and OFF by default. See README.md → "Monocle Tracing"
+# for setup, what each exporter captures, and where the trace data goes.
 
 # ============================================================================
 # Token Usage
@@ -872,6 +880,10 @@ tools:
 
 tool_search:
   enabled: false
+  # When tool_search is enabled, PR1 MCP routing metadata can auto-promote
+  # matching deferred MCP tool schemas before a model call. This is the maximum
+  # number of matched schemas promoted per model call. Valid range: 1..5.
+  auto_promote_top_k: 3
 
 # ============================================================================
 # Tool Output Budget Protection
@@ -1149,6 +1161,10 @@ sandbox:
 #   # Set to 0 to keep warm VMs until shutdown or replica eviction.
 #   # idle_timeout: 600
 #
+#   # Optional: Skip the reclaim health check for very recently released VMs.
+#   # Default 0.0 keeps reliability-first validation before warm reuse.
+#   # health_check_skip_seconds: 0.0
+#
 #   # Optional: Environment variables to inject into every command.
 #   # environment:
 #   #   PYTHONUNBUFFERED: "1"
@@ -1159,6 +1175,11 @@ sandbox:
 # sandbox:
 #   use: deerflow.community.aio_sandbox:AioSandboxProvider
 #   provisioner_url: http://provisioner:8002
+#   # API key for provisioner authentication. Must match PROVISIONER_API_KEY
+#   # set on the provisioner container. Both sides must have the same value set;
+#   # the provisioner rejects all /api/* requests when PROVISIONER_API_KEY is unset.
+#   # Generate a strong key: openssl rand -hex 32
+#   # provisioner_api_key: $PROVISIONER_API_KEY
 #   # Note: provisioner-created Pods use the provisioner's SANDBOX_IMAGE
 #   # environment variable, not sandbox.image from this config file.
 
@@ -1175,6 +1196,14 @@ sandbox:
 #   # Optional global max-turn override for all subagents.
 #   # Built-in defaults: general-purpose=150, bash=60. Leave unset to keep them.
 #   # max_turns: 120
+#
+#   # Total number of subagent delegations allowed in one lead-agent run.
+#   # This is a deterministic backstop against repeated planning checkpoints
+#   # launching legal-sized batches forever. The default 6 allows two full
+#   # batches at the default concurrency of 3. Valid config range: 1-50.
+#   # Per-request runtime context can temporarily override this with
+#   # `max_total_subagents`, clamped to the same 1-50 range.
+#   max_total_per_run: 6
 #
 #   # Per-run token ceiling for subagents (#3875 Phase 2). A backstop against a
 #   # subagent that burns tokens on trivial work. At the hard-stop threshold the
@@ -1379,7 +1408,14 @@ summarization:
 # Stores user context and conversation history for personalized responses
 memory:
   enabled: true
-  storage_path: memory.json # Path relative to backend directory
+  # Memory operation mode:
+  #   middleware (default) - passive background extraction after each turn.
+  #   tool - experimental opt-in; the model calls memory_search/memory_add/
+  #     memory_update/memory_delete directly. This gives the model agency over
+  #     memory writes, but effectiveness depends on model tool-use behavior.
+  # Only one mode runs at a time.
+  mode: middleware
+  storage_path: memory.json # Absolute path opts out of per-user isolation; a relative path resolves under the data base_dir, not the backend directory
   debounce_seconds: 30 # Wait time before processing queued updates
   model_name: null # Use default model
   max_facts: 100 # Maximum number of facts to store
@@ -1429,6 +1465,26 @@ memory:
   staleness_max_removals_per_cycle: 10
   staleness_protected_categories:
     - correction
+
+  # Memory consolidation: when a single category accumulates many fragmented
+  # facts, the LLM reviews them during the normal memory-update call (same
+  # invocation — no extra API call) and decides whether groups of related facts
+  # can be synthesized into a single richer fact.
+  # consolidation_enabled defaults to false because consolidation is lossy:
+  # source fact content is permanently replaced by the LLM-synthesized fact
+  # (only the source IDs are kept in consolidatedFrom). Enable explicitly once
+  # you are comfortable with that trade-off.
+  #   consolidation_enabled          - master switch (default: false)
+  #   consolidation_min_facts        - minimum facts in a category to trigger
+  #                                    consolidation review (default: 8)
+  #   consolidation_max_groups_per_cycle - safety cap on merges per cycle
+  #                                        (default: 3)
+  #   consolidation_max_sources      - max source facts per merge group;
+  #                                    prevents over-merging (default: 8)
+  consolidation_enabled: false
+  consolidation_min_facts: 8
+  consolidation_max_groups_per_cycle: 3
+  consolidation_max_sources: 8
 
 # ============================================================================
 # Custom Agent Management API
@@ -1560,6 +1616,30 @@ scheduler:
   lease_seconds: 120
   max_concurrent_runs: 3
   min_once_delay_seconds: 60
+
+# ============================================================================
+# Run Ownership Configuration
+# ============================================================================
+# Controls cross-process run ownership for multi-worker deployments.
+# When GATEWAY_WORKERS > 1, each worker claims runs with a lease; the heartbeat
+# renews leases, and reconciliation recovers orphaned runs from crashed workers.
+#
+# CLOCK-SYNC REQUIREMENT (multi-worker only): reconciliation compares another
+# worker's UTC lease timestamp against this worker's datetime.now(UTC). Worker
+# clocks MUST be synced (NTP / chrony / systemd-timesyncd — default on K8s and
+# cloud VMs) within a few seconds. grace_seconds is the skew budget; worst case
+# (owning worker's heartbeat just about to fire), a peer whose clock is more
+# than grace_seconds ahead can mis-reclaim a still-live run as an orphan. Raise
+# grace_seconds if your environment cannot keep clocks within a few seconds;
+# the trade-off is longer recovery latency for genuinely dead workers
+# (lease_seconds + grace_seconds from last heartbeat to reclaim).
+
+run_ownership:
+  lease_seconds: 30           # Seconds before a run lease expires if not renewed.
+                              # Heartbeat renews every lease_seconds / 3.
+  grace_seconds: 10           # Extra seconds past expiry before reclaiming an orphaned run.
+                              # Also the cross-worker clock-skew budget — see note above.
+  heartbeat_enabled: false    # Set to true for GATEWAY_WORKERS > 1
 
 # ============================================================================
 # Stream Bridge Configuration

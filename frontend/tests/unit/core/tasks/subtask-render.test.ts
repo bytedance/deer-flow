@@ -138,6 +138,12 @@ describe("resolveRenderedSubtask", () => {
     const resolved = resolveRenderedSubtask(
       baseTask({
         status: "in_progress",
+        modelName: "claude-3-7-sonnet",
+        usage: {
+          inputTokens: 800,
+          outputTokens: 200,
+          totalTokens: 1_000,
+        },
         latestMessage: { id: "live-1" } as Subtask["latestMessage"],
       }),
       baseTask({
@@ -149,6 +155,12 @@ describe("resolveRenderedSubtask", () => {
     expect(resolved).toMatchObject({
       status: "failed",
       error: "Subtask failed",
+      modelName: "claude-3-7-sonnet",
+      usage: {
+        inputTokens: 800,
+        outputTokens: 200,
+        totalTokens: 1_000,
+      },
       latestMessage: { id: "live-1" },
     });
   });

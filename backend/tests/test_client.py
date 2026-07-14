@@ -276,6 +276,32 @@ class TestStream:
         assert call_kwargs["context"]["thread_id"] == "t1"
         assert call_kwargs["context"]["agent_name"] == "test-agent-1"
 
+    def test_stream_assigns_unique_run_id_per_call(self, client):
+        """Each embedded client stream call has a run identity for per-run middleware."""
+        agent = MagicMock()
+        agent.stream.side_effect = [
+            iter([{"messages": [AIMessage(content="one", id="ai-1")]}]),
+            iter([{"messages": [AIMessage(content="two", id="ai-2")]}]),
+        ]
+
+        with (
+            patch.object(client, "_ensure_agent"),
+            patch.object(client, "_agent", agent),
+        ):
+            list(client.stream("first", thread_id="t1"))
+            list(client.stream("second", thread_id="t1"))
+
+        first_args, first_call = agent.stream.call_args_list[0].args, agent.stream.call_args_list[0].kwargs
+        second_args, second_call = agent.stream.call_args_list[1].args, agent.stream.call_args_list[1].kwargs
+        first_run_id = first_call["context"]["run_id"]
+        second_run_id = second_call["context"]["run_id"]
+
+        assert first_run_id
+        assert second_run_id
+        assert first_run_id != second_run_id
+        assert first_args[0]["messages"][0].additional_kwargs["run_id"] == first_run_id
+        assert second_args[0]["messages"][0].additional_kwargs["run_id"] == second_run_id
+
     def test_custom_mode_is_normalized_to_string(self, client):
         """stream() forwards custom events even when the mode is not a plain string."""
 
@@ -1003,13 +1029,46 @@ class TestEnsureAgent:
         """_ensure_agent does not recreate if config key unchanged."""
         mock_agent = MagicMock()
         client._agent = mock_agent
-        client._agent_config_key = (None, True, False, False, None, None)
+        client._agent_config_key = (None, True, False, False, None, None, None, None)
 
         config = client._get_runnable_config("t1")
         client._ensure_agent(config)
 
         # Should still be the same mock — no recreation
         assert client._agent is mock_agent
+
+    def test_recreates_agent_when_subagent_limits_change(self, client):
+        """Subagent limit changes alter prompt/middleware and must invalidate the cached agent."""
+        config1 = client._get_runnable_config("t1")
+        config1["configurable"].update(
+            {
+                "subagent_enabled": True,
+                "max_concurrent_subagents": 2,
+                "max_total_subagents": 5,
+            }
+        )
+        config2 = client._get_runnable_config("t1")
+        config2["configurable"].update(
+            {
+                "subagent_enabled": True,
+                "max_concurrent_subagents": 4,
+                "max_total_subagents": 5,
+            }
+        )
+
+        with (
+            patch("deerflow.client.create_chat_model"),
+            patch("deerflow.client.create_agent", side_effect=[MagicMock(), MagicMock()]) as mock_create_agent,
+            patch("deerflow.client.build_middlewares", return_value=[]),
+            patch("deerflow.client.apply_prompt_template", return_value="prompt"),
+            patch("deerflow.client.get_enabled_skills_for_config", return_value=[]),
+            patch.object(client, "_get_tools", return_value=[]),
+            patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=None),
+        ):
+            client._ensure_agent(config1)
+            client._ensure_agent(config2)
+
+        assert mock_create_agent.call_count == 2
 
     def test_deferred_skill_discovery_wired_when_enabled(self, client, mock_app_config):
         """When skills.deferred_discovery=True, skill_names reaches apply_prompt_template
@@ -1086,6 +1145,68 @@ class TestEnsureAgent:
 
         skill_names_arg = mock_apply_prompt.call_args.kwargs.get("skill_names")
         assert skill_names_arg is None, "skill_names must be None when deferred_discovery=False"
+
+    def test_mcp_routing_middleware_wired_when_tool_search_enabled(self, client, mock_app_config):
+        """Embedded client builds McpRoutingMiddleware from routed deferred MCP tools.
+
+        RFC §10.3/§12.5 requires verifying the actual embedded-client builder path
+        rather than assuming it inherits lead-agent behavior. Exercises the real
+        assemble_deferred_tools + build_mcp_routing_middleware wiring and asserts a
+        genuine McpRoutingMiddleware reaches build_middlewares.
+        """
+        from langchain_core.tools import tool as as_tool
+
+        from deerflow.agents.middlewares.mcp_routing_middleware import McpRoutingMiddleware
+        from deerflow.tools.mcp_metadata import tag_mcp_routing, tag_mcp_tool
+
+        @as_tool
+        def postgres_query(sql: str) -> str:
+            "Query Postgres."
+            return sql
+
+        tag_mcp_tool(postgres_query)
+        tag_mcp_routing(postgres_query, {"mode": "prefer", "priority": 100, "keywords": ["orders"]})
+
+        mock_app_config.tool_search.enabled = True
+        mock_app_config.tool_search.auto_promote_top_k = 3
+        mock_app_config.skills.deferred_discovery = False
+        client._app_config = mock_app_config
+        config = client._get_runnable_config("t1")
+
+        with (
+            patch("deerflow.client.create_chat_model"),
+            patch("deerflow.client.create_agent", return_value=MagicMock()),
+            patch("deerflow.client.build_middlewares", return_value=[]) as mock_build_middlewares,
+            patch("deerflow.client.apply_prompt_template", return_value="prompt"),
+            patch.object(client, "_get_tools", return_value=[postgres_query]),
+            patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=None),
+            patch("deerflow.client.get_enabled_skills_for_config", return_value=[]),
+        ):
+            client._ensure_agent(config)
+
+        routing_arg = mock_build_middlewares.call_args.kwargs.get("mcp_routing_middleware")
+        assert isinstance(routing_arg, McpRoutingMiddleware)
+        assert routing_arg._matched_names({"messages": [HumanMessage(content="show orders")]}) == ["postgres_query"]
+
+    def test_mcp_routing_middleware_absent_when_tool_search_disabled(self, client, mock_app_config):
+        """No routing middleware is built on the embedded path when tool_search is off."""
+        mock_app_config.tool_search.enabled = False
+        mock_app_config.skills.deferred_discovery = False
+        client._app_config = mock_app_config
+        config = client._get_runnable_config("t1")
+
+        with (
+            patch("deerflow.client.create_chat_model"),
+            patch("deerflow.client.create_agent", return_value=MagicMock()),
+            patch("deerflow.client.build_middlewares", return_value=[]) as mock_build_middlewares,
+            patch("deerflow.client.apply_prompt_template", return_value="prompt"),
+            patch.object(client, "_get_tools", return_value=[]),
+            patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=None),
+            patch("deerflow.client.get_enabled_skills_for_config", return_value=[]),
+        ):
+            client._ensure_agent(config)
+
+        assert mock_build_middlewares.call_args.kwargs.get("mcp_routing_middleware") is None
 
 
 # ---------------------------------------------------------------------------

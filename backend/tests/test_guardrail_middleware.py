@@ -114,6 +114,19 @@ class TestAllowlistProvider:
         decision = provider.evaluate(req)
         assert decision.allow is True
 
+    def test_empty_allowlist_blocks_all(self):
+        """An explicitly empty allowlist means "permit no tools" and must fail closed.
+
+        Regression test: a truthiness check would collapse ``[]`` into the
+        ``None`` sentinel ("no allowlist -> allow all"), silently letting every
+        tool through when the operator intended to permit none.
+        """
+        provider = AllowlistProvider(allowed_tools=[])
+        for tool in ("bash", "web_search", "read_file"):
+            decision = provider.evaluate(GuardrailRequest(tool_name=tool, tool_input={}))
+            assert decision.allow is False, f"empty allowlist should block {tool!r}"
+            assert decision.reasons[0].code == "oap.tool_not_allowed"
+
     def test_both_allowed_and_denied(self):
         provider = AllowlistProvider(allowed_tools=["bash", "web_search"], denied_tools=["bash"])
         # bash is in both: allowlist passes, denylist blocks

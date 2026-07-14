@@ -46,6 +46,7 @@ from deerflow.runtime.goal import goal_thread_lock
 from deerflow.runtime.runs.naming import resolve_root_run_name
 from deerflow.runtime.secret_context import redact_config_secrets
 from deerflow.runtime.user_context import reset_current_user, set_current_user
+from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
 
 logger = logging.getLogger(__name__)
 
@@ -117,7 +118,16 @@ def normalize_stream_modes(raw: list[str] | str | None) -> list[str]:
     return raw if raw else ["values"]
 
 
-def normalize_input(raw_input: dict[str, Any] | None) -> dict[str, Any]:
+def _strip_external_message_metadata(message: Any) -> Any:
+    """Remove server-owned metadata from an untrusted input message."""
+    if not isinstance(message, BaseMessage) or ORIGINAL_USER_CONTENT_KEY not in message.additional_kwargs:
+        return message
+    additional_kwargs = dict(message.additional_kwargs)
+    additional_kwargs.pop(ORIGINAL_USER_CONTENT_KEY, None)
+    return message.model_copy(update={"additional_kwargs": additional_kwargs})
+
+
+def normalize_input(raw_input: dict[str, Any] | None, *, trusted_internal: bool = False) -> dict[str, Any]:
     """Convert LangGraph Platform input format to LangChain state dict.
 
     Delegates dict→message coercion to ``langchain_core.messages.utils.convert_to_messages``
@@ -130,6 +140,11 @@ def normalize_input(raw_input: dict[str, Any] | None) -> dict[str, Any]:
     role, etc.) raise ``HTTPException(400)`` with the offending index, instead
     of bubbling up as a 500.  The gateway is a system boundary, so per-entry
     validation errors are the right shape for clients to retry against.
+
+    ``original_user_content`` is server-owned provenance used to undo model-only
+    sanitization at persistence time. External callers cannot supply it; trusted
+    internal channel calls may preserve the value they captured before adding
+    transport or file context.
     """
     if raw_input is None:
         return {}
@@ -149,6 +164,8 @@ def normalize_input(raw_input: dict[str, Any] | None) -> dict[str, Any]:
                     ) from exc
             else:
                 converted.append(msg)
+        if not trusted_internal:
+            converted = [_strip_external_message_metadata(message) for message in converted]
         return {**raw_input, "messages": converted}
     return raw_input
 
@@ -171,6 +188,7 @@ _CONTEXT_CONFIGURABLE_KEYS: frozenset[str] = frozenset(
         "is_plan_mode",
         "subagent_enabled",
         "max_concurrent_subagents",
+        "max_total_subagents",
         "agent_name",
         "is_bootstrap",
     }
@@ -656,11 +674,12 @@ async def start_run(
             logger.warning("Failed to upsert thread_meta for %s (non-fatal)", sanitize_log_param(thread_id))
 
         agent_factory = resolve_agent_factory(body.assistant_id)
+        is_internal_caller = getattr(getattr(request, "state", None), "auth_source", None) == AUTH_SOURCE_INTERNAL
         command = getattr(body, "command", None)
         if command and command.get("resume") is not None:
             graph_input = Command(resume=command["resume"])
         else:
-            graph_input = normalize_input(body.input)
+            graph_input = normalize_input(body.input, trusted_internal=is_internal_caller)
         config = build_run_config(thread_id, body.config, body.metadata, assistant_id=body.assistant_id)
         await apply_checkpoint_to_run_config(config, body=body, thread_id=thread_id, request=request)
 
@@ -668,7 +687,6 @@ async def start_run(
         # The ``context`` field is a custom extension for the langgraph-compat layer
         # that carries agent configuration (model_name, thinking_enabled, etc.).
         # Only agent-relevant keys are forwarded; unknown keys (e.g. thread_id) are ignored.
-        is_internal_caller = getattr(getattr(request, "state", None), "auth_source", None) == AUTH_SOURCE_INTERNAL
         merge_run_context_overrides(config, getattr(body, "context", None), internal=is_internal_caller)
         if not is_internal_caller:
             # ``body.config`` is free-form and copied verbatim by

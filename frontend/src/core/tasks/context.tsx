@@ -7,7 +7,7 @@ import {
   useState,
 } from "react";
 
-import { computeNextSubtask } from "./subtask-update";
+import { computeNextSubtask, subtaskNotification } from "./subtask-update";
 import type { Subtask } from "./types";
 
 export interface SubtaskContextValue {
@@ -74,18 +74,23 @@ export function useUpdateSubtask() {
       // fetchSubtaskSteps().then(updateSubtask) resolving late would write a stale
       // map, clobbering SSE steps/status and sibling subtasks added meanwhile (#3779).
       const current = tasksRef.current;
-      const { next, becameTerminal } = computeNextSubtask(
+      const { next, becameTerminal, changed } = computeNextSubtask(
         current[task.id],
         task,
       );
 
       current[task.id] = next;
 
-      if (task.latestMessage || task.steps) {
+      // Gate on an actual state change, not mere field presence. The terminal
+      // ToolMessage is re-parsed on every MessageList render and always carries
+      // modelName/usage, so a presence check would setTasks({...}) with a fresh
+      // reference each render — an infinite loop. `subtaskNotification` routes a
+      // terminal transition through the deferred (after-render) path and skips
+      // no-op re-parses entirely.
+      const notify = subtaskNotification(task, { becameTerminal, changed });
+      if (notify === "eager") {
         setTasks({ ...current });
-      } else if (becameTerminal) {
-        // Defer the render to the after-render effect so a terminal-only update
-        // does not loop with MessageList's same-render pending write.
+      } else if (notify === "deferred") {
         shouldNotifyAfterRenderRef.current = true;
       }
     },
