@@ -129,7 +129,13 @@ export function ArtifactFileDetail({
   }, [filepath]);
   const { isCodeFile, language } = useMemo(() => {
     if (isWriteFile) {
-      let language = checkCodeFile(filepath).language;
+      const codeResult = checkCodeFile(filepath);
+      // Non-code browser-previewable files (PDF, images, audio, video)
+      // should render in the sandboxed iframe, not the code editor.
+      if (!codeResult.isCodeFile && canBrowserPreviewFile(filepath)) {
+        return codeResult;
+      }
+      let language = codeResult.language;
       language ??= "text";
       return { isCodeFile: true, language };
     }
