@@ -124,6 +124,37 @@ def test_update_agent_rejects_unknown_agent(tmp_path, patched_paths):
     assert not _user_agent_dir(tmp_path, "ghost").exists()
 
 
+def test_update_agent_rejects_legacy_agent_when_user_dir_has_only_memory(tmp_path, patched_paths):
+    """Regression for #3390's update_agent guard.
+
+    A per-user agent directory can exist containing only memory.json —
+    written automatically the first time this user chats with a legacy
+    shared agent, before update_agent is ever called. The stale guard
+    checked bare directory existence, so it missed this case, fell
+    through to load_agent_config (which correctly resolves through to
+    the legacy shared config via resolve_agent_dir), and then silently
+    forked a brand-new config.yaml/SOUL.md into the memory-only
+    directory — splitting the agent for just this user with no warning.
+    """
+    legacy_dir = tmp_path / "agents" / "legacy-agent"
+    legacy_dir.mkdir(parents=True)
+    (legacy_dir / "config.yaml").write_text(yaml.safe_dump({"name": "legacy-agent", "description": "legacy"}), encoding="utf-8")
+    (legacy_dir / "SOUL.md").write_text("legacy soul", encoding="utf-8")
+
+    user_agent_dir = _user_agent_dir(tmp_path, "legacy-agent")
+    user_agent_dir.mkdir(parents=True)
+    (user_agent_dir / "memory.json").write_text("{}", encoding="utf-8")
+
+    result = update_agent.func(runtime=_runtime(agent_name="legacy-agent"), soul="should not write")
+
+    msg = result.update["messages"][0]
+    assert "only exists in the legacy shared layout" in msg.content
+    assert msg.status == "error"
+    assert not (user_agent_dir / "config.yaml").exists()
+    assert not (user_agent_dir / "SOUL.md").exists()
+    assert (user_agent_dir / "memory.json").exists(), "the user's existing memory must be left untouched"
+
+
 def test_update_agent_requires_at_least_one_field(tmp_path, patched_paths):
     _seed_agent(tmp_path)
 
