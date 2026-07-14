@@ -574,9 +574,7 @@ async def test_baseline_index_names_constant_matches_0001(tmp_path: Path) -> Non
         async with engine.connect() as conn:
             all_indexes: set[str] = set()
             for table_name in _BASELINE_TABLE_NAMES:
-                indexes = await conn.run_sync(
-                    lambda c, t=table_name: {ix["name"] for ix in sa.inspect(c).get_indexes(t)}
-                )
+                indexes = await conn.run_sync(lambda c, t=table_name: {ix["name"] for ix in sa.inspect(c).get_indexes(t)})
                 all_indexes.update(indexes)
 
         # alembic_version also gets an index from alembic's own table --
@@ -584,9 +582,7 @@ async def test_baseline_index_names_constant_matches_0001(tmp_path: Path) -> Non
         all_indexes.discard("ix_alembic_version")
 
         assert all_indexes == _BASELINE_INDEX_NAMES, (
-            f"_BASELINE_INDEX_NAMES drifted from 0001_baseline.upgrade()'s output:\n"
-            f"only-in-0001={sorted(all_indexes - _BASELINE_INDEX_NAMES)}\n"
-            f"only-in-constant={sorted(_BASELINE_INDEX_NAMES - all_indexes)}"
+            f"_BASELINE_INDEX_NAMES drifted from 0001_baseline.upgrade()'s output:\nonly-in-0001={sorted(all_indexes - _BASELINE_INDEX_NAMES)}\nonly-in-constant={sorted(_BASELINE_INDEX_NAMES - all_indexes)}"
         )
     finally:
         await engine.dispose()
@@ -712,23 +708,28 @@ async def test_legacy_backfill_rejects_post_baseline_indexes(tmp_path: Path) -> 
         await asyncio.to_thread(_upgrade, cfg, "0001_baseline")
 
         async with engine.begin() as conn:
-            # Insert a user (FK target for runs.user_id)
-            await conn.execute(
-                sa.text(
-                    "INSERT INTO users (id, name, email) "
-                    "VALUES ('u1', 'test', 'test@example.com')"
-                )
-            )
             # Insert two pending runs for the same thread -- violates the
             # partial UNIQUE constraint uq_runs_thread_active that 0004 adds.
-            await conn.execute(
-                sa.text(
-                    "INSERT INTO runs (run_id, thread_id, user_id, assistant_id, status, task, created_at) "
-                    "VALUES "
-                    "('run-1', 'thread-1', 'u1', 'asst-1', 'pending', '{}', '2026-01-01T00:00:00'),"
-                    "('run-2', 'thread-1', 'u1', 'asst-1', 'pending', '{}', '2026-01-01T00:00:01')"
+            for i in range(2):
+                await conn.execute(
+                    sa.text(
+                        "INSERT INTO runs "
+                        "(run_id, thread_id, user_id, assistant_id, status, "
+                        "multitask_strategy, metadata_json, kwargs_json, "
+                        "message_count, total_input_tokens, total_output_tokens, "
+                        "total_tokens, llm_call_count, lead_agent_tokens, "
+                        "subagent_tokens, middleware_tokens, token_usage_by_model, "
+                        "created_at, updated_at) "
+                        "VALUES (:run_id, 'thread-1', 'u1', 'asst-1', 'pending', "
+                        "'reject', '{}', '{}', 0, 0, 0, 0, 0, 0, 0, 0, '{}', "
+                        ":created_at, :updated_at)"
+                    ),
+                    {
+                        "run_id": f"run-{i}",
+                        "created_at": f"2026-01-01T00:00:0{i}",
+                        "updated_at": f"2026-01-01T00:00:0{i}",
+                    },
                 )
-            )
 
         # 2. Run the backfill helper -- must NOT crash on duplicate data.
         async with engine.begin() as conn:
@@ -736,32 +737,18 @@ async def test_legacy_backfill_rejects_post_baseline_indexes(tmp_path: Path) -> 
 
         # 3. Stamp baseline and upgrade to head -- 0004 should dedupe then
         #    create the index cleanly.
-        await asyncio.to_thread(
-            _upgrade, cfg, "0001_baseline"
-        )  # stamp-like: 0001 already ran
+        await asyncio.to_thread(_upgrade, cfg, "0001_baseline")  # stamp-like: 0001 already ran
         await asyncio.to_thread(_upgrade, cfg, "head")
 
         # 4. After upgrade, the index must exist and only one active run
         #    should remain (0004's dedup cancelled the other).
         async with engine.connect() as conn:
-            indexes = await conn.run_sync(
-                lambda c: {ix["name"] for ix in sa.inspect(c).get_indexes("runs")}
-            )
-            assert "uq_runs_thread_active" in indexes, (
-                "0004 should have created uq_runs_thread_active after dedup"
-            )
+            indexes = await conn.run_sync(lambda c: {ix["name"] for ix in sa.inspect(c).get_indexes("runs")})
+            assert "uq_runs_thread_active" in indexes, "0004 should have created uq_runs_thread_active after dedup"
 
             # 0004's dedup cancels all-but-one active run per thread.
-            remaining = (
-                await conn.execute(
-                    sa.text(
-                        "SELECT COUNT(*) FROM runs WHERE thread_id='thread-1' AND status='pending'"
-                    )
-                )
-            ).scalar()
-            assert remaining == 1, (
-                f"Expected 1 pending run after 0004 dedup, got {remaining}"
-            )
+            remaining = (await conn.execute(sa.text("SELECT COUNT(*) FROM runs WHERE thread_id='thread-1' AND status='pending'"))).scalar()
+            assert remaining == 1, f"Expected 1 pending run after 0004 dedup, got {remaining}"
     finally:
         await engine.dispose()
 
@@ -786,26 +773,28 @@ async def test_legacy_backfill_duplicate_channel_connections_does_not_crash(
 
         # Drop the index so the backfill has work to do.
         async with engine.begin() as conn:
-            await conn.execute(
-                sa.text("DROP INDEX IF EXISTS uq_channel_connection_active_identity")
-            )
+            await conn.execute(sa.text("DROP INDEX IF EXISTS uq_channel_connection_active_identity"))
 
         # Seed duplicate non-revoked connections with the same identity.
         async with engine.begin() as conn:
-            await conn.execute(
-                sa.text(
-                    "INSERT INTO users (id, name, email) "
-                    "VALUES ('u1', 'test', 'test@example.com')"
-                )
-            )
             for i in range(2):
                 await conn.execute(
                     sa.text(
                         "INSERT INTO channel_connections "
-                        "(id, name, provider, external_account_id, workspace_id, owner_user_id, status) "
-                        "VALUES (:cid, 'dup', 'slack', 'ext-1', 'ws-1', 'u1', 'active')"
+                        "(id, owner_user_id, provider, status, external_account_id, "
+                        "workspace_id, scopes_json, capabilities_json, metadata_json, "
+                        "created_at, updated_at) "
+                        "VALUES (:cid, :owner, 'slack', 'active', 'ext-1', 'ws-1', "
+                        "'[]', '{}', '{}', :created_at, :updated_at)"
                     ),
-                    {"cid": f"cc-{i}"},
+                    {
+                        "cid": f"cc-{i}",
+                        # The baseline owner+identity unique constraint requires
+                        # distinct owners; the partial active-identity index does not.
+                        "owner": f"u{i}",
+                        "created_at": "2026-01-01T00:00:00",
+                        "updated_at": "2026-01-01T00:00:00",
+                    },
                 )
 
         # Backfill must not crash even with duplicate data.
@@ -815,11 +804,7 @@ async def test_legacy_backfill_duplicate_channel_connections_does_not_crash(
         # The index won't exist (duplicate data prevents creation), but
         # bootstrap must have survived -- the operator can fix data and retry.
         async with engine.connect() as conn:
-            indexes = await conn.run_sync(
-                lambda c: {
-                    ix["name"] for ix in sa.inspect(c).get_indexes("channel_connections")
-                }
-            )
+            indexes = await conn.run_sync(lambda c: {ix["name"] for ix in sa.inspect(c).get_indexes("channel_connections")})
         # Index missing is expected when data violates the constraint.
         # The backfill logged a warning instead of crashing.
         assert "uq_channel_connection_active_identity" not in indexes

@@ -368,9 +368,7 @@ def _run_baseline_create_all_sync(sync_conn: Any) -> None:
                 idx.create(sync_conn, checkfirst=True)
             except Exception:
                 logger.warning(
-                    "bootstrap: failed to create baseline index %r on %r -- "
-                    "the DB may contain rows that violate the index constraint. "
-                    "Address the duplicate data, then re-run bootstrap.",
+                    "bootstrap: failed to create baseline index %r on %r -- the DB may contain rows that violate the index constraint. Address the duplicate data, then re-run bootstrap.",
                     idx.name,
                     table.name,
                 )
