@@ -166,6 +166,43 @@ class RunRepository(RunStore):
             result = await session.execute(stmt)
             return [self._row_to_dict(r) for r in result.scalars()]
 
+    async def list_successful_regenerate_sources(
+        self,
+        thread_id,
+        *,
+        user_id: str | None | _AutoSentinel = AUTO,
+    ):
+        resolved_user_id = resolve_user_id(user_id, method_name="RunRepository.list_successful_regenerate_sources")
+        source = RunRow.metadata_json["regenerate_from_run_id"].as_string()
+        stmt = select(source).where(
+            RunRow.thread_id == thread_id,
+            RunRow.status == "success",
+            source.is_not(None),
+            source != "",
+        )
+        if resolved_user_id is not None:
+            stmt = stmt.where(RunRow.user_id == resolved_user_id)
+        async with self._sf() as session:
+            result = await session.execute(stmt)
+            return {value for value in result.scalars() if isinstance(value, str) and value}
+
+    async def get_many_by_thread(
+        self,
+        thread_id,
+        run_ids,
+        *,
+        user_id: str | None | _AutoSentinel = AUTO,
+    ):
+        if not run_ids:
+            return {}
+        resolved_user_id = resolve_user_id(user_id, method_name="RunRepository.get_many_by_thread")
+        stmt = select(RunRow).where(RunRow.thread_id == thread_id, RunRow.run_id.in_(run_ids))
+        if resolved_user_id is not None:
+            stmt = stmt.where(RunRow.user_id == resolved_user_id)
+        async with self._sf() as session:
+            result = await session.execute(stmt)
+            return {row.run_id: self._row_to_dict(row) for row in result.scalars()}
+
     async def update_status(self, run_id, status, *, error=None) -> bool:
         values: dict[str, Any] = {"status": status, "updated_at": datetime.now(UTC)}
         if error is not None:

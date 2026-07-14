@@ -327,6 +327,24 @@ describe("invalidateStoppedThreadCaches", () => {
     expect(queryKeys()).toContainEqual(["thread-token-usage", "thread-1"]);
   });
 
+  test("preserves loaded history pages while invalidating", () => {
+    const client = new QueryClient();
+    const key = ["thread-messages", "thread-1"] as const;
+    const latest = { data: [], has_more: true, next_before_seq: 20 };
+    const older = { data: [], has_more: false, next_before_seq: null };
+    client.setQueryData(key, {
+      pages: [latest, older],
+      pageParams: [null, 20],
+    });
+
+    invalidateStoppedThreadCaches(client, "thread-1", false);
+
+    expect(client.getQueryData(key)).toEqual({
+      pages: [latest, older],
+      pageParams: [null, 20],
+    });
+  });
+
   test("does not refresh per-thread API caches for mock threads", () => {
     const client = new QueryClient();
     const { queryKeys } = invalidatedQueryKeys(client);

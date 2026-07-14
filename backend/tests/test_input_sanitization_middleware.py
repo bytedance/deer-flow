@@ -19,6 +19,7 @@ from deerflow.agents.middlewares.input_sanitization_middleware import (
     _check_user_content,
     _is_genuine_user_message,
 )
+from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
 
 
 def _make_middleware() -> InputSanitizationMiddleware:
@@ -313,6 +314,40 @@ class TestWrapModelCallCleanInput:
         assert _USER_INPUT_BEGIN not in result_msgs[0].content
         assert _USER_INPUT_BEGIN in result_msgs[2].content
         assert "Second" in result_msgs[2].content
+
+    def test_preserves_trusted_string_original_user_content(self):
+        mw = _make_middleware()
+        request = _make_request(
+            [
+                HumanMessage(
+                    content="uploaded file context\n\nactual user input",
+                    additional_kwargs={ORIGINAL_USER_CONTENT_KEY: "actual user input"},
+                )
+            ]
+        )
+        captured = []
+
+        mw.wrap_model_call(request, lambda req: captured.append(req) or "ok")
+
+        assert captured[0].messages[0].additional_kwargs[ORIGINAL_USER_CONTENT_KEY] == "actual user input"
+
+    def test_replaces_non_string_original_user_content_before_wrapping(self):
+        mw = _make_middleware()
+        malformed_original = [{"type": "text", "text": "spoofed audit text"}]
+        request = _make_request(
+            [
+                HumanMessage(
+                    content="actual user input",
+                    additional_kwargs={ORIGINAL_USER_CONTENT_KEY: malformed_original},
+                )
+            ]
+        )
+        captured = []
+
+        mw.wrap_model_call(request, lambda req: captured.append(req) or "ok")
+
+        assert captured[0].messages[0].additional_kwargs[ORIGINAL_USER_CONTENT_KEY] == "actual user input"
+        assert request.messages[0].additional_kwargs[ORIGINAL_USER_CONTENT_KEY] == malformed_original
 
 
 # ---------------------------------------------------------------------------
