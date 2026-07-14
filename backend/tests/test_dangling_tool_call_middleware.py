@@ -517,7 +517,10 @@ class TestBuildPatchedMessagesPatching:
         """A ToolMessage whose tool_call_id is None is always an orphan —
         no valid tool call uses ``None`` as its id — and must be dropped."""
         mw = DanglingToolCallMiddleware()
-        none_id_orphan = ToolMessage(content="ghost", tool_call_id=None)  # type: ignore[arg-type]
+        # Use model_construct to bypass pydantic validation (ToolMessage requires
+        # a string tool_call_id at construction, but a corrupt serialized payload
+        # or edge-case provider could still produce None at runtime).
+        none_id_orphan = ToolMessage.model_construct(content="ghost", tool_call_id=None)
         msgs = [
             _ai_with_tool_calls([_tc("bash", "call_1")]),
             none_id_orphan,
