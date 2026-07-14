@@ -231,3 +231,29 @@ class TestListUploadedFiles:
         f = result["files"][0]
         assert "outline" not in f
         assert "outline_preview" not in f
+
+    def test_cross_turn_state_clear_does_not_exclude_historical_file(self, tmp_path):
+        """Two-turn regression: file uploaded in turn 1 must appear in turn 2.
+
+        Turn 1: upload report.pdf → state.uploaded_files = [{filename: "report.pdf"}]
+                list_uploaded_files excludes it (it's the current run's file).
+        Turn 2: no upload → middleware clears state.uploaded_files = []
+                list_uploaded_files MUST now include report.pdf (it became historical).
+        """
+        uploads_dir = _uploads_dir(tmp_path)
+        (uploads_dir / "report.pdf").write_bytes(b"%PDF content")
+
+        # — Turn 1: file just uploaded, excluded from historical listing —
+        rt_turn1 = _runtime(state_uploaded=[{"filename": "report.pdf", "size": 12, "path": "/mnt/user-data/uploads/report.pdf"}])
+        result1 = _list_uploaded_files_impl(runtime=rt_turn1, _paths=_paths(tmp_path))
+        filenames1 = {f["filename"] for f in result1["files"]}
+        assert "report.pdf" not in filenames1, "Turn 1: current-run file must be excluded"
+        assert result1.get("total_count", 0) == 0
+
+        # — Turn 2: no new uploads, middleware cleared uploaded_files →
+        #           report.pdf is now historical and must appear —
+        rt_turn2 = _runtime(state_uploaded=[])
+        result2 = _list_uploaded_files_impl(runtime=rt_turn2, _paths=_paths(tmp_path))
+        filenames2 = {f["filename"] for f in result2["files"]}
+        assert "report.pdf" in filenames2, "Turn 2: file must appear after state is cleared"
+        assert result2["total_count"] == 1

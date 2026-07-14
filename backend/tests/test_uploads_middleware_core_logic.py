@@ -232,17 +232,19 @@ class TestBeforeAgent:
         state = self._state(HumanMessage(content="q"), AIMessage(content="a"))
         assert mw.before_agent(state, _runtime()) is None
 
-    def test_returns_none_when_no_files_in_kwargs(self, tmp_path):
+    def test_clears_uploaded_files_when_no_files_in_kwargs(self, tmp_path):
         mw = _middleware(tmp_path)
         state = self._state(_human("plain message"))
-        assert mw.before_agent(state, _runtime()) is None
+        result = mw.before_agent(state, _runtime())
+        assert result == {"uploaded_files": []}
 
-    def test_returns_none_when_all_files_missing_from_disk(self, tmp_path):
+    def test_clears_uploaded_files_when_all_files_missing_from_disk(self, tmp_path):
         mw = _middleware(tmp_path)
         _uploads_dir(tmp_path)  # directory exists but is empty
         msg = _human("hi", files=[{"filename": "ghost.txt", "size": 10, "path": "/mnt/user-data/uploads/ghost.txt"}])
         state = self._state(msg)
-        assert mw.before_agent(state, _runtime()) is None
+        result = mw.before_agent(state, _runtime())
+        assert result == {"uploaded_files": []}
 
     def test_injects_uploaded_files_tag_into_string_content(self, tmp_path):
         mw = _middleware(tmp_path)
@@ -459,7 +461,7 @@ class TestBeforeAgent:
         assert "old.txt" not in content
 
     def test_no_upload_context_when_no_new_files(self, tmp_path):
-        """When there are no new files, nothing is injected — even if historical files exist."""
+        """When there are no new files, no block is injected — but stale uploaded_files is cleared."""
         mw = _middleware(tmp_path)
         uploads_dir = _uploads_dir(tmp_path)
         (uploads_dir / "old.txt").write_bytes(b"old")
@@ -468,8 +470,8 @@ class TestBeforeAgent:
         msg = _human("go")
         result = mw.before_agent(self._state(msg), _runtime())
 
-        # No new files → no injection at all
-        assert result is None
+        # No new files → no block injected, but state is cleared
+        assert result == {"uploaded_files": []}
 
     def test_no_historical_section_for_large_uploads_dir(self, tmp_path):
         """Even with many files in uploads dir, only current-run files listed."""

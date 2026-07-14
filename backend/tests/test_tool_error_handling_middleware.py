@@ -906,7 +906,13 @@ def test_lead_runtime_chain_finds_historical_uploads_under_lazy_init_false(tmp_p
     # Historical files are NO LONGER injected — only new (current-run) uploads.
     # The prior-report.txt file exists in the uploads dir from a previous turn,
     # so UploadsMiddleware must NOT inject it into the prompt.
-    assert um_result is None, "UploadsMiddleware must NOT inject context for historical files — only new uploads trigger <current_uploads>"
+    # It MUST however clear uploaded_files so list_uploaded_files doesn't
+    # incorrectly exclude files that just became historical.
+    assert um_result == {"uploaded_files": []}, (
+        "UploadsMiddleware must NOT inject context for historical files, "
+        "but MUST clear uploaded_files to prevent cross-turn state leakage "
+        "into list_uploaded_files"
+    )
 
 
 def test_subagent_summarization_fires_mid_run_and_produces_usable_result(monkeypatch):

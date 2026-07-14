@@ -226,7 +226,9 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
         # Get newly uploaded files from the current message's additional_kwargs.files
         new_files = self._files_from_kwargs(last_message, uploads_dir) or []
         if not new_files:
-            return None
+            # Clear stale uploaded_files so list_uploaded_files doesn't
+            # exclude files that became historical after the previous turn.
+            return {"uploaded_files": []}
 
         context_files, omitted_files = self._select_files_for_context(new_files)
 
