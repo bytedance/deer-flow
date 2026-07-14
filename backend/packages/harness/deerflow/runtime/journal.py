@@ -30,7 +30,7 @@ from langchain_core.messages import AIMessage, AnyMessage, BaseMessage, HumanMes
 from langgraph.types import Command
 
 from deerflow.agents.human_input import read_human_input_response
-from deerflow.utils.messages import message_to_text
+from deerflow.utils.messages import message_to_text, restore_original_human_message
 
 if TYPE_CHECKING:
     from deerflow.runtime.events.store.base import RunEventStore
@@ -222,14 +222,15 @@ class RunJournal(BaseCallbackHandler):
             for batch in reversed(messages):
                 for m in reversed(batch):
                     if _should_persist_human_input_message(m):
-                        self.set_first_human_message(m.text)
+                        persisted_message = restore_original_human_message(m)
+                        self.set_first_human_message(self._message_text(persisted_message))
                         self._put(
                             event_type="llm.human.input",
                             category="message",
-                            content=m.model_dump(),
+                            content=persisted_message.model_dump(),
                             metadata={"caller": caller},
                         )
-                        self._record_message_summary(m, caller=caller)
+                        self._record_message_summary(persisted_message, caller=caller)
                         break
                 if self._first_human_msg:
                     break
