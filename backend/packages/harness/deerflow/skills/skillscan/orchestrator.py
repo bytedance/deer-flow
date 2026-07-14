@@ -387,7 +387,7 @@ def _scan_python(rel_path: str, text: str) -> list[SecurityFinding]:
         if call_name == "os.dup2":
             reverse_shell_parts.add("dup2")
             reverse_shell_node = reverse_shell_node or node
-        elif call_name == "socket.socket":
+        elif call_name in {"socket.socket", "socket.create_connection"}:
             reverse_shell_parts.add("socket")
         elif call_name.startswith("subprocess.") or call_name in {"os.system", "os.popen"}:
             reverse_shell_parts.add("subprocess")
@@ -661,16 +661,22 @@ def _call_is_network_sink(call_name: str) -> bool:
         "requests.put",
         "requests.patch",
         "requests.delete",
+        "requests.head",
+        "requests.options",
         "requests.request",
         "httpx.get",
         "httpx.post",
         "httpx.put",
         "httpx.patch",
         "httpx.delete",
+        "httpx.head",
+        "httpx.options",
         "httpx.request",
         "httpx.stream",
         "urllib.request.urlopen",
+        "urllib.request.urlretrieve",
         "socket.socket",
+        "socket.create_connection",
     }
 
 
