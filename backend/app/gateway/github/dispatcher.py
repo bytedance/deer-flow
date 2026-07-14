@@ -33,7 +33,7 @@ from app.gateway.github.identity import extract_target, resolve_thread_id
 from app.gateway.github.prompts import build_prompt
 from app.gateway.github.registry import build_github_agent_registry, lookup_agents
 from app.gateway.github.triggers import event_should_fire
-from deerflow.config.agents_config import GitHubAgentConfig
+from deerflow.config.agents_config import GitHubAgentConfig, GitHubTriggerConfig
 
 logger = logging.getLogger(__name__)
 
@@ -127,12 +127,40 @@ def _is_redundant_review_comment(payload: dict[str, Any]) -> bool:
     IMPORTANT: a ``True`` result is NOT by itself a "safe to drop" signal —
     see the per-binding gate in :func:`fanout_event`, which only suppresses
     a companion comment for a binding that *also* has its own
-    ``pull_request_review`` trigger on the same repo (and therefore an
-    independent path to the review). A binding that subscribes to
-    ``pull_request_review_comment`` alone never receives the parent review
-    event, so unconditionally dropping its companion comments would be a
-    silent, total loss of the review's inline content for it — not noise
-    reduction (PR #4131 review feedback from willem-bd / zhfeng).
+    ``pull_request_review`` trigger on the same repo AND whose *resolved*
+    trigger does not itself require a mention (see the ``require_mention``
+    gap note below) — i.e. an unconditional, independent path to the
+    review. A binding that subscribes to ``pull_request_review_comment``
+    alone never receives the parent review event, so unconditionally
+    dropping its companion comments would be a silent, total loss of the
+    review's inline content for it — not noise reduction (PR #4131 review
+    feedback from willem-bd / zhfeng).
+
+    ``require_mention`` gap (PR #4131 review, Medium finding, willem-bd —
+    second round, against the per-binding gate above): a dual-subscribed
+    binding's ``pull_request_review`` trigger is only a *guaranteed*
+    independent path when that trigger does not itself gate on
+    ``require_mention``. If it does, the paired review event can be
+    silently dropped by :func:`app.gateway.github.triggers.event_should_fire`'s
+    own mention check against ``review["body"]`` — the review's
+    *top-level* summary, which this ``pull_request_review_comment``
+    payload never carries (there is no way to see, from a comment
+    delivery, what the sibling review's own summary said). A human
+    ``@mention`` that lives only inside one inline comment — not the
+    review summary — would otherwise be lost twice over: the review event
+    is filtered out (``no_mention``) *and* the one inline comment that
+    actually carries the mention is dropped here as "redundant", via a
+    narrower path than the original bug. The per-binding gate therefore
+    additionally requires ``require_mention`` to be false on the paired
+    trigger before treating it as coverage. This trades a small amount of
+    residual redundancy (an extra companion delivery on occasions when the
+    review's own summary happened to carry the mention too, or
+    ``allow_authors``/self-event would have let the review through anyway)
+    for zero silent loss — the same trade the original fix already made at
+    a coarser grain. It deliberately does not attempt to replay
+    ``allow_authors`` or an ``actions`` whitelist that might also be
+    configured on the paired trigger; those are accepted as out of scope
+    for this narrower fix, same as ``self_event``.
 
     Residual caveat (PR #4131 review, Concern 3, zhfeng): GitHub documents
     ``pull_request_review_id`` on the review-comment schema as nullable
@@ -145,7 +173,11 @@ def _is_redundant_review_comment(payload: dict[str, Any]) -> bool:
     own ``pull_request_review`` trigger could still lose such a comment
     under the per-binding gate. Confirmed via a real/documented webhook
     payload capture before ruling this out; treat it as an open,
-    low-probability risk rather than a settled non-issue.
+    low-probability risk rather than a settled non-issue. (Distinct from
+    the ``require_mention`` gap above: this caveat questions whether the
+    paired event fires *at all* for a given delivery shape; the
+    ``require_mention`` gap is about a paired event that fires but is then
+    filtered by its own trigger config, which the gate now accounts for.)
     """
     comment = payload.get("comment")
     if not isinstance(comment, dict):
@@ -215,18 +247,25 @@ async def fanout_event(
     #    shape of review fan-out is a property of the event and computed
     #    once here, but whether that fan-out is safe to DROP is a property
     #    of the individual binding: only a binding that also has its own
-    #    ``pull_request_review`` trigger on this repo has an independent
-    #    path to the review's content, so the actual suppression decision
-    #    is made per-agent below (next to the self-event gate), not here.
-    #    ``covered_by_review_trigger`` reuses :func:`lookup_agents` against
+    #    ``pull_request_review`` trigger on this repo, WITHOUT that trigger
+    #    itself requiring a mention, has a *guaranteed* independent path to
+    #    the review's content — so the actual suppression decision is made
+    #    per-agent below (next to the self-event gate), not here.
+    #    ``review_trigger_by_binding`` reuses :func:`lookup_agents` against
     #    the registry we just built — a binding only appears in the
     #    ``(repo, "pull_request_review")`` slot if it explicitly lists that
     #    event under its own ``triggers:`` (opt-in per binding, see
     #    ``triggers.py``) — so this does not duplicate any trigger-matching
     #    logic, and it stays correctly scoped to this repo (an agent with a
-    #    second binding on a *different* repo does not count).
+    #    second binding on a *different* repo does not count). It maps to
+    #    the binding's *resolved* :class:`GitHubTriggerConfig` (not just
+    #    membership) so the per-agent gate below can also check
+    #    ``require_mention`` — see the ``require_mention`` gap note on
+    #    :func:`_is_redundant_review_comment` for why a mention-gated review
+    #    trigger cannot be trusted as coverage (PR #4131 review, Medium
+    #    finding, willem-bd).
     is_redundant_review_comment = event == "pull_request_review_comment" and _is_redundant_review_comment(payload)
-    covered_by_review_trigger: set[tuple[str, str]] = {(m.user_id, m.agent.name) for m in lookup_agents(registry, repo, "pull_request_review")} if is_redundant_review_comment else set()
+    review_trigger_by_binding: dict[tuple[str, str], GitHubTriggerConfig] = {(m.user_id, m.agent.name): m.trigger for m in lookup_agents(registry, repo, "pull_request_review")} if is_redundant_review_comment else {}
 
     for match in matches:
         agent = match.agent
@@ -251,29 +290,11 @@ async def fanout_event(
             skipped.append({"agent": agent.name, "reason": "self_event"})
             continue
 
-        # 5. Redundant review-comment gate, per binding (PR #4131 review —
-        #    willem-bd / zhfeng). Only suppress THIS binding's companion
-        #    comment when it is also registered for ``pull_request_review``
-        #    on this repo — i.e. it has its own path to the review content
-        #    that makes the companion comment genuinely redundant *for it*.
-        #    A binding registered for ``pull_request_review_comment`` alone
-        #    never receives the parent review event at all, so it still
-        #    fires here even though the payload has the fan-out shape.
-        if is_redundant_review_comment and (match.user_id, agent.name) in covered_by_review_trigger:
-            logger.info(
-                "github_fanout: agent=%s skipped (reason=redundant_review_comment, repo=%s#%s, delivery=%s)",
-                agent.name,
-                repo,
-                number,
-                delivery_id,
-            )
-            skipped.append({"agent": agent.name, "reason": "redundant_review_comment"})
-            continue
-
-        # 6. Trigger filter.
-        # ``default_mention_login`` mirrors the precedence used by
-        # ``_is_self_event`` above, then extended with the operator
-        # default from ``channels.github.default_mention_login``:
+        # 5. Trigger filter — computed once, up front, rather than right
+        #    before its own gate further below. ``default_mention_login``
+        #    mirrors the precedence used by ``_is_self_event`` above, then
+        #    extended with the operator default from
+        #    ``channels.github.default_mention_login``:
         #
         #   1. ``trigger.mention_login`` — per-event override (handled
         #      inside ``event_should_fire``; we only pass the fallback).
@@ -299,9 +320,61 @@ async def fanout_event(
         # string. ``operator_default_mention_login`` is a plain function
         # argument (not a validated model field), so it is normalized here
         # explicitly.
+        #
+        # Computing this here (rather than at its old location right before
+        # its own gate) lets the redundant-review-comment gate just below
+        # also consult the verdict for a more precise skip reason, instead
+        # of always reporting ``redundant_review_comment`` even when this
+        # binding's own trigger would have skipped the event anyway for an
+        # unrelated reason (PR #4131 review, Minor finding, willem-bd).
+        # ``event_should_fire`` is a pure function of its arguments, so
+        # computing it once here and reusing it below is not a behavior
+        # change from calling it at the old step 6 location.
         operator_default = (operator_default_mention_login or "").strip() or None
         default_mention_login = github.bot_login or operator_default or agent.name
         fire, reason = event_should_fire(event, payload, trigger, default_mention_login)
+
+        # 6. Redundant review-comment gate, per binding (PR #4131 review —
+        #    willem-bd / zhfeng). Only suppress THIS binding's companion
+        #    comment when it is also registered for ``pull_request_review``
+        #    on this repo AND that trigger's own ``require_mention`` is not
+        #    set — i.e. it has an unconditional, independent path to the
+        #    review content that makes the companion comment genuinely
+        #    redundant *for it*. A binding registered for
+        #    ``pull_request_review_comment`` alone never receives the
+        #    parent review event at all, so it still fires here even though
+        #    the payload has the fan-out shape. A binding whose review
+        #    trigger DOES require a mention is also not treated as covered:
+        #    this ``pull_request_review_comment`` payload never carries the
+        #    review's own top-level body, so there is no way to verify from
+        #    here whether that mention check would actually pass for the
+        #    paired review event — see the ``require_mention`` gap note on
+        #    :func:`_is_redundant_review_comment`.
+        #
+        #    When this binding IS suppressed as redundant, the skip reason
+        #    prefers this binding's own trigger verdict (``reason`` from
+        #    step 5 above) over the generic ``redundant_review_comment``
+        #    label whenever that verdict is ALSO a skip — e.g. this
+        #    companion's own ``pull_request_review_comment`` trigger
+        #    separately requires a mention it doesn't have. The event is
+        #    skipped either way; this only makes the logged reason more
+        #    useful for operator debugging (PR #4131 review, Minor finding,
+        #    willem-bd).
+        review_trigger = review_trigger_by_binding.get((match.user_id, agent.name))
+        if is_redundant_review_comment and review_trigger is not None and not review_trigger.require_mention:
+            skip_reason = reason if not fire else "redundant_review_comment"
+            logger.info(
+                "github_fanout: agent=%s skipped (reason=%s, repo=%s#%s, delivery=%s)",
+                agent.name,
+                skip_reason,
+                repo,
+                number,
+                delivery_id,
+            )
+            skipped.append({"agent": agent.name, "reason": skip_reason})
+            continue
+
+        # 7. Apply the trigger filter's verdict from step 5.
         if not fire:
             logger.info(
                 "github_fanout: agent=%s skipped (reason=%s)",
@@ -311,7 +384,7 @@ async def fanout_event(
             skipped.append({"agent": agent.name, "reason": reason})
             continue
 
-        # 7. Build prompt + publish inbound message onto the bus.
+        # 8. Build prompt + publish inbound message onto the bus.
         prompt = build_prompt(event, payload)
         thread_id = resolve_thread_id(repo, number, agent.name)
 

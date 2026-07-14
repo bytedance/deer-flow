@@ -1349,3 +1349,212 @@ async def test_issue_comment_unaffected_by_review_comment_filter(base_dir: Path)
     result = await fanout_event(bus, "issue_comment", "del-issue-1", payload)
     assert result["fired_agents"] == ["assistant"], result
     assert result["skipped"] == []
+
+
+# ---------------------------------------------------------------------------
+# require_mention conditional-delivery gap (PR #4131 review, Medium + Minor
+# findings, willem-bd -- second review round, against the per-binding gate
+# above which already shipped in response to the FIRST round)
+#
+# The per-binding gate's premise is that a binding also registered for
+# `pull_request_review` on this repo has an independent path to the review
+# content, so its companion comments are genuinely redundant for it. That
+# premise only holds if the review event is GUARANTEED to fire. If the
+# binding's `pull_request_review` trigger itself has `require_mention:
+# true`, the review event can be silently dropped by its own mention check
+# against `review["body"]` (the review's top-level summary) -- a field
+# this `pull_request_review_comment` payload never carries, so there is no
+# way to verify from here whether that check would pass. A human
+# `@mention` living only inside one inline comment (not the review
+# summary) would then be lost twice over: the review is filtered
+# (`no_mention`) *and* the one inline comment that actually carries the
+# mention is dropped here as "redundant" -- the same silent-loss shape as
+# the original bug, just via a narrower path. `dispatcher.py` now treats a
+# mention-gated review trigger as NOT covering its companion comments.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_review_comment_not_suppressed_when_review_trigger_requires_mention(base_dir: Path) -> None:
+    """Reproduces willem-bd's exact Medium-finding scenario: a dual-subscribed
+    binding whose `pull_request_review` trigger has `require_mention: true`,
+    and a review whose summary would carry no mention typed only inside one
+    inline comment.
+
+    Only the `pull_request_review_comment` half of the scenario can be
+    exercised at this layer -- the two events are separate webhook
+    deliveries -- but that is exactly where the bug lived: on the
+    as-reviewed code, this binding's mere registration for
+    `pull_request_review` was enough to mark it "covered" and suppress the
+    companion, regardless of that trigger's own `require_mention`. Since the
+    paired review event's delivery can't be verified from a comment
+    payload, that was a silent loss. The fix lets this companion fire on
+    its own terms instead.
+
+    The companion's own `pull_request_review_comment` trigger ALSO requires
+    a mention here (the strictest version of the scenario), and the mention
+    is present only in the comment body -- proving the fix actually
+    delivers the content, not just an incidental extra fire.
+    """
+    bus = MessageBus()
+    _write_agent(
+        base_dir,
+        "default",
+        "reviewer",
+        {
+            "name": "reviewer",
+            "github": {
+                "bindings": [
+                    {
+                        "repo": "a/b",
+                        "triggers": {
+                            # The gap: this trigger requiring a mention means
+                            # the paired `pull_request_review` event is not a
+                            # guaranteed delivery path for this binding.
+                            "pull_request_review": {"require_mention": True},
+                            "pull_request_review_comment": {"require_mention": True},
+                        },
+                    }
+                ],
+            },
+        },
+    )
+    payload = {
+        "action": "created",
+        "pull_request": {"number": 7},
+        "comment": {
+            # The mention lives ONLY here -- the (separate, not modeled in
+            # this payload) review summary has none.
+            "body": "@reviewer this needs another look before merging.",
+            "user": {"login": "alice"},
+            "pull_request_review_id": 999001,
+            "in_reply_to_id": None,
+        },
+        "repository": {"full_name": "a/b"},
+        "sender": {"login": "alice"},
+    }
+    result = await fanout_event(bus, "pull_request_review_comment", "del-req-mention-1", payload)
+    assert result["fired_agents"] == ["reviewer"], result
+    assert result["skipped"] == [], result
+    messages = await _drain(bus)
+    assert len(messages) == 1
+    assert messages[0].metadata["agent_name"] == "reviewer"
+    assert "@reviewer this needs another look" in messages[0].text
+
+
+@pytest.mark.asyncio
+async def test_review_comment_gate_is_independent_per_agent_in_same_call(base_dir: Path) -> None:
+    """Two bindings on the same repo/event, evaluated in the SAME
+    `fanout_event` call: one dual-subscribed (genuinely covered ->
+    suppressed) and one review-comment-only (not covered -> fires).
+    Willem-bd's review flagged this combined case as untested -- the
+    per-binding decision must be independent within a single call, not
+    accidentally global or order-dependent.
+    """
+    bus = MessageBus()
+    _write_agent(
+        base_dir,
+        "default",
+        "coder",
+        {
+            "name": "coder",
+            "github": {
+                "bindings": [
+                    {
+                        "repo": "a/b",
+                        "triggers": {
+                            "pull_request_review": {},
+                            "pull_request_review_comment": {"require_mention": False},
+                        },
+                    }
+                ],
+            },
+        },
+    )
+    _write_agent(
+        base_dir,
+        "default",
+        "notifier",
+        {
+            "name": "notifier",
+            "github": {
+                "bindings": [
+                    {
+                        "repo": "a/b",
+                        "triggers": {"pull_request_review_comment": {"require_mention": False}},
+                    }
+                ],
+            },
+        },
+    )
+    payload = {
+        "action": "created",
+        "pull_request": {"number": 7},
+        "comment": {
+            "body": "nit: consider renaming this variable.",
+            "user": {"login": "coderabbitai[bot]"},
+            "pull_request_review_id": 999001,
+            "in_reply_to_id": None,
+        },
+        "repository": {"full_name": "a/b"},
+        "sender": {"login": "coderabbitai[bot]"},
+    }
+    result = await fanout_event(bus, "pull_request_review_comment", "del-multi-agent-1", payload)
+    assert set(result["matched_agents"]) == {"coder", "notifier"}, result
+    assert result["fired_agents"] == ["notifier"], result
+    assert result["skipped"] == [{"agent": "coder", "reason": "redundant_review_comment"}], result
+    messages = await _drain(bus)
+    assert len(messages) == 1
+    assert messages[0].metadata["agent_name"] == "notifier"
+
+
+@pytest.mark.asyncio
+async def test_review_comment_redundant_skip_prefers_own_trigger_reason_when_it_also_fails(base_dir: Path) -> None:
+    """Minor finding (willem-bd): when a companion is suppressed as
+    redundant AND would independently have failed its own trigger filter
+    (e.g. its own `require_mention` isn't satisfied), the more specific
+    reason is reported instead of the generic `redundant_review_comment` --
+    useful for operator debugging even though the event is skipped either
+    way.
+    """
+    bus = MessageBus()
+    _write_agent(
+        base_dir,
+        "default",
+        "reviewer",
+        {
+            "name": "reviewer",
+            "github": {
+                "bindings": [
+                    {
+                        "repo": "a/b",
+                        "triggers": {
+                            # Not mention-gated -- genuinely covered.
+                            "pull_request_review": {},
+                            # But THIS trigger requires a mention the
+                            # comment body below doesn't have.
+                            "pull_request_review_comment": {"require_mention": True},
+                        },
+                    }
+                ],
+            },
+        },
+    )
+    payload = {
+        "action": "created",
+        "pull_request": {"number": 7},
+        "comment": {
+            "body": "nit: consider renaming this variable.",
+            "user": {"login": "coderabbitai[bot]"},
+            "pull_request_review_id": 999001,
+            "in_reply_to_id": None,
+        },
+        "repository": {"full_name": "a/b"},
+        "sender": {"login": "coderabbitai[bot]"},
+    }
+    result = await fanout_event(bus, "pull_request_review_comment", "del-precedence-1", payload)
+    assert result["fired_agents"] == [], result
+    assert len(result["skipped"]) == 1
+    reason = result["skipped"][0]["reason"]
+    assert reason != "redundant_review_comment", result
+    assert "mention" in reason, result
