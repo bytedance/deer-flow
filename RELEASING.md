@@ -23,6 +23,13 @@ Container images are tagged from the git tag (not from these files), and the
 Helm chart version is validated against the tag — so if any source lags the
 tag, the release is blocked (see [Version gate](#version-gate)).
 
+The frontend's in-app About page (Settings ▸ About) is a *derived* consumer, not
+a fifth source: it reads `frontend/package.json`'s version at build time, so it
+tracks the table above automatically with no bump needed. Nightly builds override
+it with the chart's nightly string (`<base>-nightly.<YYYYMMDD>-<short_sha>`) via
+the `APP_VERSION` build-arg in `nightly.yaml`, so a nightly image's About page
+distinguishes it from a release.
+
 ## Helper scripts
 
 - `scripts/bump_version.sh <version>` — set all four fields at once, then
@@ -73,6 +80,36 @@ tag, the release is blocked (see [Version gate](#version-gate)).
   ```bash
   helm install deer-flow oci://ghcr.io/<owner>/deer-flow --version 2.2.0
   ```
+
+## Nightly builds
+
+`.github/workflows/nightly.yaml` runs on a schedule (and `workflow_dispatch`)
+to publish the same three images plus the chart from unreleased `main`. It is
+**not** gated by the version check (there is no `v*` tag) and it does **not**
+touch the `latest` tag, which stays pinned to the last `v*` release. Every job
+is gated on `github.repository == 'bytedance/deer-flow'`, so it only runs on
+the upstream repo - a scheduled run or manual dispatch on a fork skips all jobs.
+
+Artifacts (under the running repo's owner, where `<date>` is `YYYYMMDD`):
+
+- Images: `ghcr.io/<owner>/deer-flow-{backend,frontend,provisioner}:nightly`
+  (rolling, overwritten each run) and `:nightly-<date>` (pinned to a day, but
+  mutable within it - a same-day re-dispatch overwrites it). For a truly
+  immutable pin, use `:sha-<short>`.
+- Chart: `oci://ghcr.io/<owner>/deer-flow`, version `<base>-nightly.<date>-<sha>`
+  (e.g. `2.2.0-nightly.20260710-77a3652`). The short SHA makes each dispatch's
+  chart version unique, so a same-day re-dispatch re-publishes cleanly (OCI
+  chart versions are immutable and otherwise can't be overwritten). The
+  packaged chart defaults `image.registry=ghcr.io/<owner>` and
+  `image.tag=nightly`, so installing it pulls the matching nightly images with
+  no values overrides:
+  ```bash
+  helm install deer-flow oci://ghcr.io/<owner>/deer-flow \
+    --version 2.2.0-nightly.20260710-77a3652
+  ```
+
+The chart version is patched in-workflow only - `Chart.yaml` and `values.yaml`
+in the repo are never modified.
 
 ## Version gate
 

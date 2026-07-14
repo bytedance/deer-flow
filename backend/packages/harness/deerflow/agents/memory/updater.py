@@ -4,6 +4,7 @@ import asyncio
 import atexit
 import concurrent.futures
 import copy
+import html
 import json
 import logging
 import math
@@ -113,15 +114,27 @@ def _coerce_source_confidence(fact: dict[str, Any]) -> float:
     return max(0.0, min(val, 1.0)) if math.isfinite(val) else 0.5
 
 
-def create_memory_fact(
+def _trim_facts_to_max(facts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep the highest-confidence facts within the configured max_facts cap."""
+    config = get_memory_config()
+    if len(facts) <= config.max_facts:
+        return facts
+    return sorted(
+        facts,
+        key=_coerce_source_confidence,
+        reverse=True,
+    )[: config.max_facts]
+
+
+def create_memory_fact_with_created_fact(
     content: str,
     category: str = "context",
     confidence: float = 0.5,
     agent_name: str | None = None,
     *,
     user_id: str | None = None,
-) -> dict[str, Any]:
-    """Create a new fact and persist the updated memory data."""
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Create a new fact, persist memory, and return both memory and fact."""
     normalized_content = content.strip()
     if not normalized_content:
         raise ValueError("content")
@@ -132,21 +145,39 @@ def create_memory_fact(
     memory_data = get_memory_data(agent_name, user_id=user_id)
     updated_memory = dict(memory_data)
     facts = list(memory_data.get("facts", []))
-    facts.append(
-        {
-            "id": f"fact_{uuid.uuid4().hex[:8]}",
-            "content": normalized_content,
-            "category": normalized_category,
-            "confidence": validated_confidence,
-            "createdAt": now,
-            "source": "manual",
-        }
-    )
-    updated_memory["facts"] = facts
+    created_fact = {
+        "id": f"fact_{uuid.uuid4().hex[:8]}",
+        "content": normalized_content,
+        "category": normalized_category,
+        "confidence": validated_confidence,
+        "createdAt": now,
+        "source": "manual",
+    }
+    facts.append(created_fact)
+    updated_memory["facts"] = _trim_facts_to_max(facts)
 
     if not _save_memory_to_file(updated_memory, agent_name, user_id=user_id):
         raise OSError("Failed to save memory data after creating fact")
 
+    return updated_memory, created_fact
+
+
+def create_memory_fact(
+    content: str,
+    category: str = "context",
+    confidence: float = 0.5,
+    agent_name: str | None = None,
+    *,
+    user_id: str | None = None,
+) -> dict[str, Any]:
+    """Create a new fact and persist the updated memory data."""
+    updated_memory, _created_fact = create_memory_fact_with_created_fact(
+        content,
+        category=category,
+        confidence=confidence,
+        agent_name=agent_name,
+        user_id=user_id,
+    )
     return updated_memory
 
 
@@ -165,6 +196,51 @@ def delete_memory_fact(fact_id: str, agent_name: str | None = None, *, user_id: 
         raise OSError(f"Failed to save memory data after deleting fact '{fact_id}'")
 
     return updated_memory
+
+
+def search_memory_facts(
+    query: str,
+    category: str | None = None,
+    limit: int = 10,
+    *,
+    agent_name: str | None = None,
+    user_id: str | None = None,
+) -> list[dict[str, Any]]:
+    """Search facts by case-insensitive substring match against content.
+
+    Args:
+        query: Substring to match (case-insensitive). Empty query returns [].
+        category: Optional category filter. If provided, only facts matching
+            this category are considered.
+        limit: Maximum results to return (default 10).
+        agent_name: Per-agent scope, or global memory if None.
+        user_id: Per-user scope within agent.
+
+    Returns:
+        List of matching fact dicts, sorted by confidence descending.
+    """
+    if not query or not query.strip():
+        return []
+    if limit <= 0:
+        return []
+
+    query_lower = query.strip().lower()
+    memory_data = get_memory_data(agent_name, user_id=user_id)
+    facts = memory_data.get("facts", [])
+
+    matched = []
+    for fact in facts:
+        content = fact.get("content", "")
+        if not isinstance(content, str):
+            continue
+        if query_lower not in content.lower():
+            continue
+        if category is not None and fact.get("category") != category:
+            continue
+        matched.append(fact)
+
+    matched.sort(key=_coerce_source_confidence, reverse=True)
+    return matched[:limit]
 
 
 def update_memory_fact(
@@ -247,7 +323,7 @@ def _extract_text(content: Any) -> str:
     return str(content)
 
 
-_REQUIRED_MEMORY_UPDATE_TOP_LEVEL_KEYS = frozenset({"user", "history", "newFacts", "factsToRemove"})
+_REQUIRED_MEMORY_UPDATE_TOP_LEVEL_KEYS = frozenset({"user", "history", "newFacts"})
 
 
 def _normalize_memory_update_fact(fact: Any) -> dict[str, Any] | None:
@@ -515,11 +591,11 @@ def _build_staleness_section(
     lines: list[str] = []
     for fact in stale_candidates:
         fid = fact.get("id", "?")
-        cat = str(fact.get("category", "context")).strip() or "context"
-        conf = fact.get("confidence", 0.0)
+        cat = html.escape(str(fact.get("category", "context")).strip() or "context")
+        conf = _coerce_source_confidence(fact)
         created_raw = fact.get("createdAt", "")
         created_short = created_raw[:10] if isinstance(created_raw, str) and len(created_raw) >= 10 else created_raw
-        content = str(fact.get("content", ""))
+        content = html.escape(str(fact.get("content", "")))
         lines.append(f'- [{fid} | {cat} | {conf:.2f} | {created_short}] "{content}"')
     return STALENESS_REVIEW_PROMPT.format(
         stale_facts="\n".join(lines),
@@ -575,11 +651,39 @@ def _build_consolidation_section(
         for fact in group[:max_sources]:
             fid = fact.get("id", "?")
             conf = _coerce_source_confidence(fact)
-            content = str(fact.get("content", ""))
+            content = html.escape(str(fact.get("content", "")))
             lines.append(f'- [{fid} | {conf:.2f}] "{content}"')
         shown = min(len(group), max_sources)
-        parts.append(f'<consolidation_candidates category="{cat}" count="{shown}">\n' + "\n".join(lines) + "\n</consolidation_candidates>")
+        parts.append(f'<consolidation_candidates category="{html.escape(cat)}" count="{shown}">\n' + "\n".join(lines) + "\n</consolidation_candidates>")
     return CONSOLIDATION_PROMPT.format(consolidation_groups="\n\n".join(parts), max_groups=max_groups)
+
+
+def _escape_memory_for_prompt(memory: Any) -> Any:
+    """Return a copy of ``memory`` with every string leaf HTML-escaped.
+
+    ``MEMORY_UPDATE_PROMPT`` embeds the full memory state as a ``json.dumps``
+    blob inside a ``<current_memory>...</current_memory>`` block. ``json.dumps``
+    escapes ``"`` and ``\\`` but leaves ``<``, ``>`` and ``&`` intact, so a
+    user-influenced field — e.g. a fact ``content`` of
+    ``</current_memory><evil>...`` — would otherwise reach the model verbatim
+    and break out of the block (prompt injection, #4044).
+
+    Escaping each string *value* before serialization (rather than the
+    serialized blob) cannot corrupt the JSON structure, because ``json.dumps``
+    re-quotes the already-safe values. Escaping every leaf — not just known
+    fields — guarantees no current or future user-influenced field can carry a
+    raw ``<``/``>``/``&``; controlled fields such as ids and timestamps contain
+    none of those characters, so escaping them is a harmless no-op. This mirrors
+    the ``html.escape`` treatment already applied to the staleness and
+    consolidation sections (#4028).
+    """
+    if isinstance(memory, str):
+        return html.escape(memory)
+    if isinstance(memory, dict):
+        return {key: _escape_memory_for_prompt(value) for key, value in memory.items()}
+    if isinstance(memory, list):
+        return [_escape_memory_for_prompt(item) for item in memory]
+    return memory
 
 
 class MemoryUpdater:
@@ -671,8 +775,14 @@ class MemoryUpdater:
                     max_sources=config.consolidation_max_sources,
                 )
 
+        # HTML-escape user-influenced string values before embedding the memory
+        # state as a JSON blob inside <current_memory>...</current_memory>, so a
+        # fact/summary containing </current_memory> cannot break out of the block
+        # (prompt injection, #4044). Escaping values — not the serialized blob —
+        # keeps the JSON well-formed because json.dumps re-quotes safe values.
+        # The unescaped current_memory is returned unchanged for the apply path.
         prompt = MEMORY_UPDATE_PROMPT.format(
-            current_memory=json.dumps(current_memory, indent=2, ensure_ascii=False),
+            current_memory=json.dumps(_escape_memory_for_prompt(current_memory), indent=2, ensure_ascii=False),
             conversation=conversation_text,
             correction_hint=correction_hint,
             staleness_review_section=staleness_section,
@@ -928,7 +1038,7 @@ class MemoryUpdater:
                 max_stale = config.staleness_max_removals_per_cycle
                 if len(stale_ids_to_remove) > max_stale:
                     stale_facts = [f for f in current_memory.get("facts", []) if f.get("id") in stale_ids_to_remove]
-                    stale_facts.sort(key=lambda f: f.get("confidence", 0))
+                    stale_facts.sort(key=_coerce_source_confidence)
                     stale_ids_to_remove = {f["id"] for f in stale_facts[:max_stale]}
 
                 current_memory["facts"] = [f for f in current_memory.get("facts", []) if f.get("id") not in stale_ids_to_remove]
@@ -978,14 +1088,7 @@ class MemoryUpdater:
                 if fact_key is not None:
                     existing_fact_keys.add(fact_key)
 
-        # Enforce max facts limit
-        if len(current_memory["facts"]) > config.max_facts:
-            # Sort by confidence and keep top ones
-            current_memory["facts"] = sorted(
-                current_memory["facts"],
-                key=lambda f: f.get("confidence", 0),
-                reverse=True,
-            )[: config.max_facts]
+        current_memory["facts"] = _trim_facts_to_max(current_memory["facts"])
 
         # ── Memory consolidation ──
         # Runs after the max_facts trim so source facts that were just evicted

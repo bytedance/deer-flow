@@ -597,6 +597,90 @@ async def test_run_agent_reuses_goal_evaluator_model_for_goal_loop(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_persist_goal_evaluation_does_not_regress_continuation_count_on_race():
+    """A racing continuation must not overwrite a higher count with a lower one.
+
+    Scenario: two goal continuations run concurrently.  Continuation A reads
+    continuation_count=1, computes next=2.  Continuation B reads the same
+    count=1, computes next=2, but acquires the lock first and writes count=2.
+    When A acquires the lock, the current_goal already has count=2.  Without
+    the defensive guard, A would write count=2 again (stale computation),
+    effectively losing one continuation event.  The guard must compute
+    ``max(stale_next, current_count + 1)`` so A writes count=3.
+    """
+    checkpointer = InMemorySaver()
+    thread_id = "race-count-thread"
+    await _seed_goal_thread(checkpointer, thread_id=thread_id, goal_text="Race test")
+    # Simulate a racing continuation: bump the persisted continuation_count to 2
+    # before calling _persist_goal_evaluation with a next_count computed from
+    # stale state (count=1 → next=2).
+    existing_goal = await read_thread_goal(checkpointer, thread_id)
+    assert existing_goal is not None
+    bumped_goal = attach_goal_evaluation(
+        existing_goal,
+        GoalEvaluation(satisfied=False, blocker="goal_not_met_yet", reason="racing", evidence_summary=""),
+        run_id="racing-run",
+        continuation_count=2,  # racing continuation already bumped to 2
+    )
+    await write_thread_goal(checkpointer, thread_id, bumped_goal)
+
+    # Now call _persist_goal_evaluation with continuation_count=2 computed from
+    # stale state (old count was 1).  The guard should detect current_count=2
+    # and write max(2, 2+1) = 3.
+    bridge = _CollectingBridge()
+    result = await worker._persist_goal_evaluation(
+        bridge=bridge,
+        checkpointer=checkpointer,
+        thread_id=thread_id,
+        run_id="run-late",
+        goal=existing_goal,  # stale goal with continuation_count=1
+        evaluation=GoalEvaluation(
+            satisfied=False,
+            blocker="goal_not_met_yet",
+            reason="More work remains.",
+            evidence_summary="Work remains.",
+        ),
+        no_progress_count=1,
+        continuation_count=2,  # computed from stale state: stale_count(1) + 1
+    )
+
+    assert result is not None
+    # Without the guard this would be 2 (stale computation wins).  With the
+    # guard it must be 3 (current_count + 1 taken inside the lock).
+    assert result["continuation_count"] == 3
+
+
+@pytest.mark.asyncio
+async def test_persist_goal_evaluation_no_race_uses_caller_count():
+    """When no racing continuation exists, the caller's continuation_count is used."""
+    checkpointer = InMemorySaver()
+    thread_id = "no-race-thread"
+    await _seed_goal_thread(checkpointer, thread_id=thread_id, goal_text="No race test")
+    existing_goal = await read_thread_goal(checkpointer, thread_id)
+    assert existing_goal is not None
+
+    bridge = _CollectingBridge()
+    result = await worker._persist_goal_evaluation(
+        bridge=bridge,
+        checkpointer=checkpointer,
+        thread_id=thread_id,
+        run_id="run-normal",
+        goal=existing_goal,
+        evaluation=GoalEvaluation(
+            satisfied=False,
+            blocker="goal_not_met_yet",
+            reason="More work.",
+            evidence_summary="Work.",
+        ),
+        no_progress_count=1,
+        continuation_count=1,  # 0 + 1 = 1
+    )
+
+    assert result is not None
+    assert result["continuation_count"] == 1
+
+
+@pytest.mark.asyncio
 async def test_run_agent_strips_branch_checkpoint_for_goal_continuation(monkeypatch):
     class FakeAgent:
         def __init__(self) -> None:

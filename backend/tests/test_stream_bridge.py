@@ -177,6 +177,23 @@ async def test_cleanup(bridge: MemoryStreamBridge):
 
 
 @pytest.mark.anyio
+async def test_stream_exists_reports_cleanup(bridge: MemoryStreamBridge):
+    """Callers can detect when the in-process event log has been cleaned up.
+
+    Before cleanup a completed run's retained history still exists; after
+    cleanup ``stream_exists`` reports False so a reconnecting subscriber does
+    not hang waiting on a stream whose data is already gone.
+    """
+    run_id = "run-post-cleanup"
+    await bridge.publish(run_id, "event-1", {"n": 1})
+    await bridge.publish_end(run_id)
+
+    assert await bridge.stream_exists(run_id) is True
+    await bridge.cleanup(run_id)
+    assert await bridge.stream_exists(run_id) is False
+
+
+@pytest.mark.anyio
 async def test_history_is_bounded():
     """Retained history should be bounded by queue_maxsize."""
     bridge = MemoryStreamBridge(queue_maxsize=1)

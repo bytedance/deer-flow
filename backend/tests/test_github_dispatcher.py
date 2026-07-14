@@ -798,6 +798,95 @@ async def test_operator_default_blank_string_treated_as_none(base_dir: Path) -> 
     assert result["fired_agents"] == ["assistant"], result
 
 
+@pytest.mark.asyncio
+async def test_bot_login_whitespace_only_treated_as_none(base_dir: Path) -> None:
+    """A whitespace-only ``github.bot_login`` must not silently become the
+    mention-gating handle.
+
+    AGENTS.md documents the whole ``require_mention`` precedence chain
+    (``trigger.mention_login`` -> ``github.bot_login`` ->
+    ``channels.github.default_mention_login`` -> ``agent.name``) as treating
+    whitespace-only defaults as unset. A misconfigured ``bot_login: "   "``
+    (e.g. a YAML templating slip) is truthy in Python, so an unstripped
+    ``github.bot_login or operator_default or agent.name`` never falls
+    through to the working ``agent.name`` fallback — every legitimate
+    ``@assistant`` mention is silently rejected and the trigger can never
+    fire again until an operator notices and fixes the typo.
+    """
+    bus = MessageBus()
+    _write_agent(
+        base_dir,
+        "default",
+        "assistant",
+        {
+            "name": "assistant",
+            "github": {
+                "bot_login": "   ",  # whitespace-only — must be treated as unset
+                "bindings": [
+                    {"repo": "a/b", "triggers": {"issue_comment": {"require_mention": True}}},
+                ],
+            },
+        },
+    )
+    payload = {
+        "action": "created",
+        "issue": {"number": 7, "pull_request": {"url": "..."}},
+        "comment": {"body": "hey @assistant please", "user": {"login": "alice"}},
+        "repository": {"full_name": "a/b"},
+        "sender": {"login": "alice"},
+    }
+    # Whitespace-only bot_login → falls through to the agent.name fallback.
+    result = await fanout_event(bus, "issue_comment", "del-blank-bot-login", payload)
+    assert result["fired_agents"] == ["assistant"], result
+
+
+@pytest.mark.asyncio
+async def test_trigger_mention_login_whitespace_only_treated_as_none(base_dir: Path) -> None:
+    """A whitespace-only per-trigger ``mention_login`` must not silently
+    become the mention-gating handle either.
+
+    Same contract as ``test_bot_login_whitespace_only_treated_as_none``, one
+    link higher in the precedence chain: ``event_should_fire`` reads
+    ``trigger.mention_login`` first. A misconfigured
+    ``mention_login: "   "`` is truthy, so an unstripped
+    ``trigger.mention_login or default_mention_login`` never falls through
+    to the agent's real ``github.bot_login`` handle.
+    """
+    bus = MessageBus()
+    _write_agent(
+        base_dir,
+        "default",
+        "coder",
+        {
+            "name": "coder",
+            "github": {
+                "bot_login": "deerflow-bot",  # the real, working fallback handle
+                "bindings": [
+                    {
+                        "repo": "a/b",
+                        "triggers": {
+                            "issue_comment": {
+                                "require_mention": True,
+                                "mention_login": "   ",  # whitespace-only — must be treated as unset
+                            }
+                        },
+                    },
+                ],
+            },
+        },
+    )
+    payload = {
+        "action": "created",
+        "issue": {"number": 7, "pull_request": {"url": "..."}},
+        "comment": {"body": "hey @deerflow-bot please look", "user": {"login": "alice"}},
+        "repository": {"full_name": "a/b"},
+        "sender": {"login": "alice"},
+    }
+    # Whitespace-only trigger.mention_login → falls through to github.bot_login.
+    result = await fanout_event(bus, "issue_comment", "del-blank-trigger-mention", payload)
+    assert result["fired_agents"] == ["coder"], result
+
+
 # ---------------------------------------------------------------------------
 # Multiple agents
 # ---------------------------------------------------------------------------

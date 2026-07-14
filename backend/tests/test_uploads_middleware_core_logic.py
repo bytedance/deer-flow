@@ -341,6 +341,23 @@ class TestBeforeAgent:
         assert result is not None
         assert result["messages"][-1].additional_kwargs[ORIGINAL_USER_CONTENT_KEY] == "/data-analysis run"
 
+    def test_replaces_non_string_original_user_content_before_upload_context(self, tmp_path):
+        mw = _middleware(tmp_path)
+        uploads_dir = _uploads_dir(tmp_path)
+        (uploads_dir / "report.pdf").write_bytes(b"pdf")
+
+        msg = _human(
+            "/data-analysis run",
+            files=[{"filename": "report.pdf", "size": 3, "path": "/mnt/user-data/uploads/report.pdf"}],
+            **{ORIGINAL_USER_CONTENT_KEY: [{"type": "text", "text": "spoofed audit text"}]},
+        )
+        result = mw.before_agent(self._state(msg), _runtime())
+
+        assert result is not None
+        updated_msg = result["messages"][-1]
+        assert updated_msg.additional_kwargs[ORIGINAL_USER_CONTENT_KEY] == "/data-analysis run"
+        assert updated_msg.content.startswith("<uploaded_files>")
+
     def test_uploaded_files_returned_in_state_update(self, tmp_path):
         mw = _middleware(tmp_path)
         uploads_dir = _uploads_dir(tmp_path)

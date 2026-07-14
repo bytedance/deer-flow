@@ -2,6 +2,7 @@
 
 import copy
 from collections import OrderedDict
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -304,8 +305,14 @@ class TestLoopDetection:
         mw.wrap_model_call(request_a, handler)
         assert any(isinstance(message, HumanMessage) and message.name == "loop_warning" for message in captured[1].messages)
 
-    def test_missing_run_id_uses_default_pending_scope(self):
-        """When runtime has no run_id, warning handling falls back to the default run scope."""
+    def test_missing_run_id_uses_per_runtime_pending_scope(self):
+        """When runtime.context has no ``run_id`` key at all, warning handling
+        falls back to a key scoped to the runtime object's identity —
+        mirroring ``TokenBudgetMiddleware._get_run_id``'s fallback — instead
+        of a shared literal like the old ``"default"``, which would collide
+        across concurrent runs that both lack a run_id (the ``_stop_reason``
+        dict this same key derivation feeds is keyed by run_id alone, with
+        no thread scoping)."""
         mw = LoopDetectionMiddleware(warn_threshold=3, hard_limit=10)
         runtime = MagicMock()
         runtime.context = {"thread_id": "test-thread"}
@@ -314,7 +321,8 @@ class TestLoopDetection:
         for _ in range(3):
             mw._apply(_make_state(tool_calls=call), runtime)
 
-        assert mw._pending_warnings.get(_pending_key(run_id="default"))
+        fallback_run_id = str(id(runtime))
+        assert mw._pending_warnings.get(_pending_key(run_id=fallback_run_id))
 
         request = _make_request([AIMessage(content="hi")], runtime)
         captured, handler = _capture_handler()
@@ -323,7 +331,7 @@ class TestLoopDetection:
         loop_warnings = [message for message in captured[0].messages if isinstance(message, HumanMessage) and message.name == "loop_warning"]
         assert len(loop_warnings) == 1
         assert "LOOP DETECTED" in loop_warnings[0].content
-        assert not mw._pending_warnings.get(_pending_key(run_id="default"))
+        assert not mw._pending_warnings.get(_pending_key(run_id=fallback_run_id))
 
     def test_before_agent_clears_stale_pending_warnings_for_thread(self):
         """Starting a new run drops stale warnings from prior runs in the same thread."""
@@ -447,6 +455,40 @@ class TestLoopDetection:
                 assert result is None, f"unexpected hard stop at call {i}"
 
         assert mw.consume_stop_reason("test-run") == "loop_capped"
+
+    def test_hard_stop_stamps_loop_capped_with_explicit_none_run_id(self):
+        """Regression: a subagent whose ``run_id`` is genuinely ``None`` must
+        still round-trip its ``loop_capped`` stop reason.
+
+        ``SubagentExecutor`` sets ``context["run_id"] = self.run_id``
+        unconditionally (no truthiness guard), so an embedded/TUI-dispatched
+        subagent — whose ``run_id`` is never assigned per ``AGENTS.md``'s
+        description of the embedded ``DeerFlowClient`` — runs with a context
+        that legitimately carries ``run_id=None`` (the key is *present*, not
+        absent). The executor later reads the reason back with the raw
+        attribute: ``consume_stop_reason(self.run_id)``, i.e.
+        ``consume_stop_reason(None)``. Before the fix, ``_get_run_id`` used a
+        truthiness check (``if run_id:``) that collapsed this present-but-None
+        state to the same literal ``"default"`` key used for a totally absent
+        run_id, so the write (``self._stop_reason["default"] = "loop_capped"``)
+        and this read (keyed by the raw ``None``) disagreed and the signal was
+        silently lost. Mirrors ``TokenBudgetMiddleware``'s key-presence-based
+        ``_get_run_id``, which does not have this bug."""
+        mw = LoopDetectionMiddleware(warn_threshold=2, hard_limit=4)
+        runtime = SimpleNamespace(context={"thread_id": "t", "run_id": None})
+        call = [_bash_call("ls")]
+
+        for _ in range(3):
+            mw._apply(_make_state(tool_calls=call), runtime)
+        hard_stop = mw._apply(_make_state(tool_calls=call), runtime)
+        assert hard_stop is not None
+
+        # Exactly what SubagentExecutor._consume_guard_stop_reason does:
+        # consume_stop_reason(self.run_id), where self.run_id is the raw,
+        # un-normalized (possibly-None) attribute value.
+        assert mw.consume_stop_reason(None) == "loop_capped"
+        # Popped on read — a second read is None (no double-report on reuse).
+        assert mw.consume_stop_reason(None) is None
 
     def test_different_calls_dont_trigger(self):
         mw = LoopDetectionMiddleware(warn_threshold=2)

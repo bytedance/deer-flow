@@ -274,11 +274,30 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
         return "default"
 
     def _get_run_id(self, runtime: Runtime) -> str:
-        """Extract run_id from runtime context for per-run warning scoping."""
-        run_id = runtime.context.get("run_id") if runtime.context else None
-        if run_id:
-            return str(run_id)
-        return "default"
+        """Extract run_id from runtime context for per-run warning scoping.
+
+        Keyed by presence, not truthiness: ``SubagentExecutor`` sets
+        ``context["run_id"] = self.run_id`` unconditionally (no truthiness
+        guard), so an embedded/TUI-dispatched subagent — whose ``run_id`` is
+        never assigned per ``AGENTS.md``'s description of the embedded
+        ``DeerFlowClient`` — runs with a context that legitimately carries
+        ``run_id=None`` (the key is *present*, not absent). The executor
+        later reads the stop reason back with the raw attribute,
+        ``consume_stop_reason(self.run_id)``, so this must return exactly
+        that value (``None`` included) when the key is present, rather than
+        collapsing it to a shared fallback indistinguishable from an absent
+        key. A truthiness check (``if run_id:``) previously conflated
+        "present but None/falsy" with "absent", both mapping to the same
+        literal ``"default"`` — so a genuine ``run_id=None`` hard-stop was
+        recorded under ``"default"`` here but looked up under ``None`` by
+        the executor, silently losing the ``loop_capped`` stop reason.
+        Mirrors ``TokenBudgetMiddleware._get_run_id``.
+        """
+        ctx = getattr(runtime, "context", None)
+        if isinstance(ctx, dict) and "run_id" in ctx:
+            return ctx["run_id"]
+        # Fallback to runtime object ID to prevent collisions across embedded client runs
+        return str(id(runtime))
 
     def consume_stop_reason(self, run_id: str | None) -> str | None:
         """Pop and return the stop reason the hard-stop set for this run.

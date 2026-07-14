@@ -67,5 +67,5 @@ config.yaml.bak
 .gstack/
 .worktrees
 
-# Monocle runtime trace output
+# Monocle agent-observability trace output (local file exporter)
 .monocle/

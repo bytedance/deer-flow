@@ -15,10 +15,12 @@ from deerflow.sandbox.security import LOCAL_BASH_SUBAGENT_DISABLED_MESSAGE
 from deerflow.subagents.config import SubagentConfig
 from deerflow.subagents.status_contract import (
     SUBAGENT_ERROR_KEY,
+    SUBAGENT_MODEL_NAME_KEY,
     SUBAGENT_RESULT_BRIEF_KEY,
     SUBAGENT_RESULT_SHA256_KEY,
     SUBAGENT_STATUS_KEY,
     SUBAGENT_STOP_REASON_KEY,
+    SUBAGENT_TOKEN_USAGE_KEY,
 )
 
 # Use module import so tests can patch the exact symbols referenced inside task_tool().
@@ -116,6 +118,18 @@ def test_task_result_command_derives_content_from_status_payload():
     assert completed.content == "Task Succeeded. Result: done"
     assert completed.additional_kwargs[SUBAGENT_STATUS_KEY] == "completed"
     assert completed.additional_kwargs[SUBAGENT_RESULT_BRIEF_KEY] == "done"
+
+    completed_with_runtime_metadata = _task_tool_message(
+        task_tool_module._task_result_command(
+            tool_call_id="tc-completed-metadata",
+            status="completed",
+            result="done",
+            model_name="claude-3-7-sonnet",
+            usage={"input_tokens": 100, "output_tokens": 20, "total_tokens": 120},
+        )
+    )
+    assert completed_with_runtime_metadata.additional_kwargs[SUBAGENT_MODEL_NAME_KEY] == "claude-3-7-sonnet"
+    assert completed_with_runtime_metadata.additional_kwargs[SUBAGENT_TOKEN_USAGE_KEY]["total_tokens"] == 120
 
     failed = _task_tool_message(
         task_tool_module._task_result_command(
@@ -431,7 +445,66 @@ def test_task_tool_emits_running_and_completed_events(monkeypatch):
 
     event_types = [e["type"] for e in events]
     assert event_types == ["task_started", "task_running", "task_running", "task_completed"]
+    assert events[0]["model_name"] == "ark-model"
     assert events[-1]["result"] == "all done"
+
+
+def test_task_tool_emits_cumulative_usage_on_running_event(monkeypatch):
+    config = _make_subagent_config()
+    runtime = _make_runtime()
+    events = []
+    usage_records = [
+        {
+            "source_run_id": "subagent-call-1",
+            "caller": "subagent:general-purpose",
+            "input_tokens": 100,
+            "output_tokens": 20,
+            "total_tokens": 120,
+        }
+    ]
+    responses = iter(
+        [
+            _make_result(
+                FakeSubagentStatus.RUNNING,
+                ai_messages=[{"id": "m1", "content": "researching"}],
+                token_usage_records=usage_records,
+            ),
+            _make_result(
+                FakeSubagentStatus.COMPLETED,
+                result="done",
+                token_usage_records=usage_records,
+            ),
+        ]
+    )
+
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(
+        task_tool_module,
+        "SubagentExecutor",
+        type("DummyExecutor", (), {"__init__": lambda self, **kwargs: None, "execute_async": lambda self, prompt, task_id=None: task_id}),
+    )
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: config)
+    monkeypatch.setattr(task_tool_module, "get_background_task_result", lambda _: next(responses))
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: events.append)
+    monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr(task_tool_module, "_report_subagent_usage", lambda *_: None)
+    monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [])
+
+    _run_task_tool(
+        runtime=runtime,
+        description="research",
+        prompt="find facts",
+        subagent_type="general-purpose",
+        tool_call_id="tc-live-usage",
+    )
+
+    running = next(event for event in events if event["type"] == "task_running")
+    assert running["usage"] == {
+        "input_tokens": 100,
+        "output_tokens": 20,
+        "total_tokens": 120,
+    }
+    assert running["model_name"] == "ark-model"
 
 
 def test_task_tool_propagates_tool_groups_to_subagent(monkeypatch):
