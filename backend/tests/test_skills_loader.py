@@ -102,6 +102,22 @@ def test_load_skills_skips_hidden_directories(tmp_path: Path):
     assert "secret-skill" not in names
 
 
+def test_load_skills_skips_evals_and_fixtures_directories(tmp_path: Path):
+    """Skills inside evals/ or fixtures/ directories must not be discovered (issue #4095)."""
+    skills_root = tmp_path / "skills"
+
+    _write_skill(skills_root / "public" / "real-skill", "real-skill", "A real skill")
+    _write_skill(skills_root / "public" / "skill-reviewer" / "evals" / "fixtures" / "prompt-injection", "injection-example", "Eval fixture")
+    _write_skill(skills_root / "public" / "another" / "fixtures" / "stale", "stale-fixture", "Another fixture")
+
+    skills = get_or_new_skill_storage(skills_path=skills_root).load_skills(enabled_only=False)
+    names = {skill.name for skill in skills}
+
+    assert "real-skill" in names
+    assert "injection-example" not in names
+    assert "stale-fixture" not in names
+
+
 def test_load_skills_prefers_custom_over_public_with_same_name(tmp_path: Path):
     skills_root = tmp_path / "skills"
     _write_skill(skills_root / "public" / "shared-skill", "shared-skill", "Public version")
