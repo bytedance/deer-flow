@@ -292,6 +292,36 @@ class DbRunEventStore(RunEventStore):
                 rows = list(result.scalars())
                 return [self._row_to_dict(r) for r in reversed(rows)]
 
+    async def get_last_visible_ai_seq_by_run(
+        self,
+        thread_id,
+        run_ids,
+        *,
+        user_id: str | None | _AutoSentinel = AUTO,
+    ):
+        if not run_ids:
+            return {}
+        resolved_user_id = resolve_user_id(user_id, method_name="DbRunEventStore.get_last_visible_ai_seq_by_run")
+        caller = RunEventRow.event_metadata["caller"].as_string()
+        # RunJournal canonically persists AI message rows as
+        # ``llm.ai.response``; ``ai_message`` remains for legacy compatibility.
+        stmt = (
+            select(RunEventRow.run_id, func.max(RunEventRow.seq))
+            .where(
+                RunEventRow.thread_id == thread_id,
+                RunEventRow.run_id.in_(run_ids),
+                RunEventRow.category == "message",
+                RunEventRow.event_type.in_(("llm.ai.response", "ai_message")),
+                ~func.coalesce(caller, "").like("middleware:%"),
+            )
+            .group_by(RunEventRow.run_id)
+        )
+        if resolved_user_id is not None:
+            stmt = stmt.where(RunEventRow.user_id == resolved_user_id)
+        async with self._sf() as session:
+            result = await session.execute(stmt)
+            return {run_id: seq for run_id, seq in result if isinstance(seq, int)}
+
     async def count_messages(
         self,
         thread_id,

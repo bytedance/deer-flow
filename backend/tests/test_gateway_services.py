@@ -132,6 +132,54 @@ def test_normalize_input_preserves_additional_kwargs_and_id():
     assert msg.additional_kwargs == {"files": files, "custom": "keep-me"}
 
 
+@pytest.mark.parametrize(
+    "forged_original",
+    ["spoofed audit text", [{"type": "text", "text": "spoofed audit text"}]],
+)
+def test_normalize_input_strips_external_original_user_content(forged_original):
+    from app.gateway.services import normalize_input
+    from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
+
+    result = normalize_input(
+        {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "actual user input",
+                    "additional_kwargs": {
+                        ORIGINAL_USER_CONTENT_KEY: forged_original,
+                        "custom": "keep-me",
+                    },
+                }
+            ]
+        }
+    )
+
+    assert result["messages"][0].additional_kwargs == {"custom": "keep-me"}
+
+
+def test_normalize_input_preserves_trusted_internal_original_user_content():
+    from app.gateway.services import normalize_input
+    from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
+
+    result = normalize_input(
+        {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "uploaded file context\n\nactual user input",
+                    "additional_kwargs": {
+                        ORIGINAL_USER_CONTENT_KEY: "actual user input",
+                    },
+                }
+            ]
+        },
+        trusted_internal=True,
+    )
+
+    assert result["messages"][0].additional_kwargs[ORIGINAL_USER_CONTENT_KEY] == "actual user input"
+
+
 def test_normalize_input_preserves_human_input_response_metadata():
     from langchain_core.messages import HumanMessage
 
@@ -835,7 +883,7 @@ def test_inject_authenticated_user_context_strips_internal_spoofed_attribution()
     assert "oauth_id" not in config["context"]
 
 
-async def _capture_start_run_graph_input(body):
+async def _capture_start_run_graph_input(body, *, auth_source=None):
     from types import SimpleNamespace
     from unittest.mock import patch
 
@@ -859,7 +907,7 @@ async def _capture_start_run_graph_input(body):
     )
     request = SimpleNamespace(
         headers={},
-        state=SimpleNamespace(),
+        state=SimpleNamespace(auth_source=auth_source),
         app=SimpleNamespace(state=state),
     )
     captured: dict[str, object] = {}
@@ -916,6 +964,60 @@ def test_start_run_uses_normalized_input_without_command(_stub_app_config):
     assert isinstance(graph_input, dict)
     assert isinstance(graph_input["messages"][0], HumanMessage)
     assert graph_input["messages"][0].content == "hi"
+
+
+def test_start_run_strips_external_original_user_content(_stub_app_config):
+    import asyncio
+
+    from app.gateway.routers.thread_runs import RunCreateRequest
+    from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
+
+    graph_input = asyncio.run(
+        _capture_start_run_graph_input(
+            RunCreateRequest(
+                input={
+                    "messages": [
+                        {
+                            "role": "human",
+                            "content": "actual user input",
+                            "additional_kwargs": {ORIGINAL_USER_CONTENT_KEY: "spoofed audit text"},
+                        }
+                    ]
+                },
+                command=None,
+            )
+        )
+    )
+
+    assert ORIGINAL_USER_CONTENT_KEY not in graph_input["messages"][0].additional_kwargs
+
+
+def test_start_run_preserves_internal_original_user_content(_stub_app_config):
+    import asyncio
+
+    from app.gateway.auth_disabled import AUTH_SOURCE_INTERNAL
+    from app.gateway.routers.thread_runs import RunCreateRequest
+    from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
+
+    graph_input = asyncio.run(
+        _capture_start_run_graph_input(
+            RunCreateRequest(
+                input={
+                    "messages": [
+                        {
+                            "role": "human",
+                            "content": "uploaded file context\n\nactual user input",
+                            "additional_kwargs": {ORIGINAL_USER_CONTENT_KEY: "actual user input"},
+                        }
+                    ]
+                },
+                command=None,
+            ),
+            auth_source=AUTH_SOURCE_INTERNAL,
+        )
+    )
+
+    assert graph_input["messages"][0].additional_kwargs[ORIGINAL_USER_CONTENT_KEY] == "actual user input"
 
 
 def test_start_run_uses_internal_owner_header_for_persistence(_stub_app_config):

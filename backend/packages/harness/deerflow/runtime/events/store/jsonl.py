@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Any
 
 from deerflow.runtime.events.store.base import RunEventStore
+from deerflow.runtime.user_context import AUTO, _AutoSentinel
 
 logger = logging.getLogger(__name__)
 
@@ -206,7 +207,7 @@ class JsonlRunEventStore(RunEventStore):
         with open(path, "a", encoding="utf-8") as f:
             f.write(lines)
 
-    async def list_messages(self, thread_id, *, limit=50, before_seq=None, after_seq=None):
+    async def list_messages(self, thread_id, *, limit=50, before_seq=None, after_seq=None, user_id: str | None | _AutoSentinel = AUTO):
         all_events = await asyncio.to_thread(self._read_thread_events, thread_id)
         messages = [e for e in all_events if e.get("category") == "message"]
 
@@ -240,6 +241,19 @@ class JsonlRunEventStore(RunEventStore):
             return filtered[:limit]
         else:
             return filtered[-limit:] if len(filtered) > limit else filtered
+
+    async def get_last_visible_ai_seq_by_run(self, thread_id, run_ids, *, user_id: str | None | _AutoSentinel = AUTO):
+        def _scan() -> dict[str, int]:
+            result: dict[str, int] = {}
+            for run_id in run_ids:
+                for event in reversed(self._read_run_events(thread_id, run_id)):
+                    caller = str((event.get("metadata") or {}).get("caller", ""))
+                    if event.get("category") == "message" and event.get("event_type") in {"llm.ai.response", "ai_message"} and not caller.startswith("middleware:"):
+                        result[run_id] = event["seq"]
+                        break
+            return result
+
+        return await asyncio.to_thread(_scan)
 
     async def count_messages(self, thread_id):
         all_events = await asyncio.to_thread(self._read_thread_events, thread_id)

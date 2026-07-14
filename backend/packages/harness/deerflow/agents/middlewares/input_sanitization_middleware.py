@@ -268,10 +268,19 @@ class InputSanitizationMiddleware(AgentMiddleware[AgentState]):
 
             # Preserve the pre-sanitization user text so downstream consumers that
             # must see the genuine input (slash skill activation, regenerate) can
-            # recover it after the BEGIN/END wrapping. setdefault keeps an existing
-            # value (e.g. set by UploadsMiddleware or an IM channel) authoritative.
+            # recover it after the BEGIN/END wrapping. Keep a valid value set by
+            # UploadsMiddleware or an IM channel, but repair malformed metadata so
+            # persistence never falls back to the wrapped model-facing content.
             preserved_kwargs = dict(msg.additional_kwargs or {})
-            preserved_kwargs.setdefault(ORIGINAL_USER_CONTENT_KEY, message_content_to_text(content))
+            original_user_content = preserved_kwargs.get(ORIGINAL_USER_CONTENT_KEY)
+            if not isinstance(original_user_content, str):
+                if ORIGINAL_USER_CONTENT_KEY in preserved_kwargs:
+                    logger.warning(
+                        "InputSanitizationMiddleware replaced non-string %s metadata: type=%s",
+                        ORIGINAL_USER_CONTENT_KEY,
+                        type(original_user_content).__name__,
+                    )
+                preserved_kwargs[ORIGINAL_USER_CONTENT_KEY] = message_content_to_text(content)
             messages[i] = HumanMessage(
                 content=new_content,
                 id=msg.id,
