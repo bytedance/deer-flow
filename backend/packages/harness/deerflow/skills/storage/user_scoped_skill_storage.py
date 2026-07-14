@@ -81,6 +81,7 @@ class UserScopedSkillStorage(LocalSkillStorage):
 
         self._user_id = _validate_user_id(user_id)
         paths = get_paths()
+        self._paths = paths
         self._user_custom_root: Path = paths.user_custom_skills_dir(self._user_id)
         self._user_skills_root: Path = paths.user_skills_dir(self._user_id)
         self._global_custom_root: Path = self._host_root / SkillCategory.CUSTOM.value
@@ -151,9 +152,10 @@ class UserScopedSkillStorage(LocalSkillStorage):
 
     def set_skill_enabled_state(self, skill_name: str, enabled: bool) -> None:
         """Set the enabled state for a custom/legacy skill and persist."""
-        states = self._read_skill_states()
-        states[skill_name] = {"enabled": enabled}
-        self._write_skill_states(states)
+        with self._skill_projection_mutation():
+            states = self._read_skill_states()
+            states[skill_name] = {"enabled": enabled}
+            self._write_skill_states(states)
 
     # ------------------------------------------------------------------
     # Path helpers — redirect custom skill paths to user directory
@@ -351,8 +353,13 @@ class UserScopedSkillStorage(LocalSkillStorage):
         ) as tmp_file:
             tmp_file.write(content)
             tmp_path = Path(tmp_file.name)
-        tmp_path.replace(target)
-        make_skill_written_path_sandbox_readable(self.get_custom_skill_dir(name), target)
+        try:
+            with self._skill_projection_mutation():
+                tmp_path.replace(target)
+                make_skill_written_path_sandbox_readable(self.get_custom_skill_dir(name), target)
+        except Exception:
+            tmp_path.unlink(missing_ok=True)
+            raise
 
     # ------------------------------------------------------------------
     # Public helpers

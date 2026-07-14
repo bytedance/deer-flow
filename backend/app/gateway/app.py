@@ -190,6 +190,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     config = get_gateway_config()
     logger.info(f"Starting API Gateway on {config.host}:{config.port}")
 
+    from deerflow.skills.projection import rebuild_all_skill_projections
+
+    rebuilt_skill_users = await asyncio.to_thread(rebuild_all_skill_projections, app_config=startup_config)
+    logger.info("Rebuilt enabled-only skill projections for public skills and %d known user(s)", rebuilt_skill_users)
+
     # Agent observability (Monocle). Off by default; enabled with
     # MONOCLE_TRACING. Initialized here at startup — not at import time — so a
     # plain `import deerflow.agents` never installs a process-global tracer.

@@ -167,7 +167,7 @@ async def test_sandbox_business_routes_run_k8s_client_off_event_loop_thread(
     [
         (
             False,
-            ["skills-public", "skills-custom", "user-data"],
+            ["skills-public", "skills-custom", "skills-legacy", "user-data"],
         ),
         (
             True,

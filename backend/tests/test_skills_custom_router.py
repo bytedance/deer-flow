@@ -725,6 +725,51 @@ def test_public_skill_toggle_clears_all_users_cache(monkeypatch, tmp_path):
     assert persisted["skills"]["public-skill"]["enabled"] is False
 
 
+def test_public_skill_toggle_rebuilds_projection_before_response(monkeypatch, tmp_path):
+    from deerflow.config.extensions_config import reload_extensions_config, reset_extensions_config
+    from deerflow.config.paths import Paths
+    from deerflow.skills.projection import rebuild_skill_projections
+
+    skills_root = tmp_path / "skills"
+    skill_file = skills_root / "public" / "public-skill" / "SKILL.md"
+    skill_file.parent.mkdir(parents=True)
+    skill_file.write_text(_skill_content("public-skill"), encoding="utf-8")
+    (skills_root / "custom").mkdir()
+    config_path = tmp_path / "extensions_config.json"
+    config_path.write_text(json.dumps({"mcpServers": {}, "skills": {"public-skill": {"enabled": True}}}), encoding="utf-8")
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(config_path))
+
+    paths = Paths(base_dir=tmp_path)
+    config = SimpleNamespace(
+        skills=SimpleNamespace(
+            get_skills_path=lambda: skills_root,
+            container_path="/mnt/skills",
+            use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage",
+        ),
+        skill_evolution=SimpleNamespace(enabled=True, moderation_model_name=None),
+    )
+    monkeypatch.setattr("deerflow.config.paths.get_paths", lambda: paths)
+    monkeypatch.setattr("deerflow.config.paths._paths", None)
+    monkeypatch.setattr(skills_router, "get_effective_user_id", lambda: "default")
+    monkeypatch.setattr(skills_router, "clear_skills_system_prompt_cache", lambda: None)
+    reload_extensions_config(str(config_path))
+
+    storage = UserScopedSkillStorage("default", host_path=str(skills_root), app_config=config)
+    monkeypatch.setattr(skills_router, "_get_user_skill_storage", lambda _config: storage)
+    projected = rebuild_skill_projections(storage)
+    assert (projected.public / "public-skill" / "SKILL.md").is_file()
+
+    try:
+        with TestClient(_make_test_app(config)) as client:
+            response = client.put("/api/skills/public-skill", json={"enabled": False})
+
+        assert response.status_code == 200, response.text
+        assert response.json()["enabled"] is False
+        assert not (projected.public / "public-skill").exists()
+    finally:
+        reset_extensions_config()
+
+
 class TestMultiUserSkillIsolation:
     """End-to-end integration tests verifying per-user skill isolation
     through the HTTP router → _get_user_skill_storage → filesystem chain.

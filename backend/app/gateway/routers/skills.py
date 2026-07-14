@@ -409,19 +409,26 @@ async def update_skill(skill_name: str, body: SkillUpdateRequest, request: Reque
                 config_path = Path.cwd().parent / "extensions_config.json"
                 logger.info(f"No existing extensions config found. Creating new config at: {config_path}")
 
-            extensions_config = get_extensions_config()
-            extensions_config.skills[skill_name] = SkillStateConfig(enabled=body.enabled)
+            from contextlib import nullcontext
 
-            config_data = {
-                "mcpServers": {name: server.model_dump() for name, server in extensions_config.mcp_servers.items()},
-                "skills": {name: {"enabled": skill_config.enabled} for name, skill_config in extensions_config.skills.items()},
-            }
+            from deerflow.skills.projection import skill_projection_mutation
+            from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
 
-            with open(config_path, "w", encoding="utf-8") as f:
-                json.dump(config_data, f, indent=2)
+            projection_update = skill_projection_mutation(storage, "public") if isinstance(storage, LocalSkillStorage) else nullcontext()
+            with projection_update:
+                extensions_config = get_extensions_config()
+                extensions_config.skills[skill_name] = SkillStateConfig(enabled=body.enabled)
 
-            logger.info(f"Skills configuration updated and saved to: {config_path}")
-            reload_extensions_config()
+                config_data = {
+                    "mcpServers": {name: server.model_dump() for name, server in extensions_config.mcp_servers.items()},
+                    "skills": {name: {"enabled": skill_config.enabled} for name, skill_config in extensions_config.skills.items()},
+                }
+
+                with open(config_path, "w", encoding="utf-8") as f:
+                    json.dump(config_data, f, indent=2)
+
+                logger.info(f"Skills configuration updated and saved to: {config_path}")
+                reload_extensions_config()
         else:
             # CUSTOM / LEGACY: write per-user state
             from deerflow.skills.storage.user_scoped_skill_storage import UserScopedSkillStorage

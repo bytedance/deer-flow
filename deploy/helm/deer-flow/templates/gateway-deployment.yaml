@@ -91,8 +91,6 @@ spec:
               value: http://gateway:8001
             - name: DEER_FLOW_HOST_BASE_DIR
               value: /app/backend/.deer-flow
-            - name: DEER_FLOW_HOST_SKILLS_PATH
-              value: /app/skills
             - name: GATEWAY_HOST
               value: 0.0.0.0
             - name: GATEWAY_PORT

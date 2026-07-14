@@ -25,7 +25,7 @@ The **Sandbox Provisioner** is a FastAPI service that dynamically manages sandbo
 2. **Pod Creation**: The provisioner creates a dedicated Pod in the `deer-flow` namespace with:
    - The sandbox container image (all-in-one-sandbox)
    - HostPath volumes mounted for:
-     - `/mnt/skills` → Read-only access to public skills
+     - `/mnt/skills/{public,custom,legacy}` → Read-only enabled-only skill projections
      - `/mnt/user-data` → Read-write access to thread-specific data
    - Resource limits (CPU, memory, ephemeral storage)
    - Readiness/liveness probes
@@ -145,8 +145,8 @@ The provisioner is configured via environment variables (set in [docker-compose-
 |----------|---------|-------------|
 | `K8S_NAMESPACE` | `deer-flow` | Kubernetes namespace for sandbox resources |
 | `SANDBOX_IMAGE` | `enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest` | AIO-compatible container image for sandbox Pods |
-| `SKILLS_HOST_PATH` | - | **Host machine** path to skills directory (must be absolute) |
 | `THREADS_HOST_PATH` | - | **Host machine** path to threads data directory (must be absolute) |
+| `DEER_FLOW_HOST_BASE_DIR` | `/.deer-flow` | **Host machine** DeerFlow data root containing global and per-user `skills_view` projections |
 | `SKILLS_PVC_NAME` | empty (use hostPath) | PVC name for skills volume; when set, sandbox Pods use PVC instead of hostPath |
 | `SKILLS_PVC_SUBPATH_TEMPLATE` | empty | Optional `subPath` template for `SKILLS_PVC_NAME`. Supports `{user_id}` and `{thread_id}`. When empty, the skills PVC root is mounted unchanged |
 | `USERDATA_PVC_NAME` | empty (use hostPath) | PVC name for user-data volume; when set, uses PVC with `subPath: deer-flow/users/{user_id}/threads/{thread_id}/user-data` |
@@ -177,7 +177,7 @@ PYTHONPATH=. python scripts/migrate_user_isolation.py --user-id <target-user-id>
 
 This moves legacy `threads/{thread_id}/user-data` data under `users/<target-user-id>/threads/{thread_id}/user-data`, which matches the new provisioner PVC subPath when the gateway base directory is mounted at `deer-flow/` on the PVC. Use `default` as the target user only when the legacy data should remain in the default no-auth user namespace. Run the migration while no gateway or sandbox Pods are writing to those paths.
 
-When skills are materialized per thread on the same PVC, set `SKILLS_PVC_NAME` to that PVC and configure `SKILLS_PVC_SUBPATH_TEMPLATE=deer-flow/users/{user_id}/threads/{thread_id}/skills`. Leaving the template empty preserves the legacy behavior of mounting the skills PVC root at `/mnt/skills`.
+In hostPath mode, the gateway materializes enabled-only views under `skills_view/public` and `users/{user_id}/skills_view/{custom,legacy}` beneath `DEER_FLOW_HOST_BASE_DIR`; the provisioner mounts those stable directories. When skills are materialized per thread on the same PVC, set `SKILLS_PVC_NAME` to that PVC and configure `SKILLS_PVC_SUBPATH_TEMPLATE=deer-flow/users/{user_id}/threads/{thread_id}/skills`. Leaving the template empty preserves the legacy behavior of mounting the skills PVC root at `/mnt/skills`. The gateway does not yet populate that PVC layout dynamically, so PVC-backed skills do not receive hostPath projection updates.
 
 ### Important: K8S_API_SERVER Override
 
@@ -217,7 +217,7 @@ kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}'
      - Read Namespaces (to create `deer-flow` if missing)
 
 4. **Host Paths**:
-   - The `SKILLS_HOST_PATH` and `THREADS_HOST_PATH` must be **absolute paths on the host machine**
+   - `DEER_FLOW_HOST_BASE_DIR` and `THREADS_HOST_PATH` must be **absolute paths on the host machine**
    - These paths are mounted into sandbox Pods via K8s HostPath volumes
    - The paths must exist and be readable by the K8s node
 
@@ -319,7 +319,7 @@ docker exec deer-flow-gateway curl -s $SANDBOX_URL/v1/sandbox
 **Cause**: HostPath volumes contain invalid paths (e.g., relative paths with `..`).
 
 **Solution**: 
-- Use absolute paths for `SKILLS_HOST_PATH` and `THREADS_HOST_PATH`
+- Use absolute paths for `DEER_FLOW_HOST_BASE_DIR` and `THREADS_HOST_PATH`
 - Verify the paths exist on your host machine:
   ```bash
   ls -la /path/to/skills

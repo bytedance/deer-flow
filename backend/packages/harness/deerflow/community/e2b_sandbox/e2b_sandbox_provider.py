@@ -503,7 +503,7 @@ class E2BSandboxProvider(SandboxProvider):
         # One-shot mount uploads.  e2b has no host bind-mount, so we copy
         # files from ``host_path`` into ``container_path`` at sandbox start.
         try:
-            self._apply_mounts(client)
+            self._apply_mounts(client, user_id=user_id)
         except Exception as e:
             logger.warning("Failed to apply some mounts to e2b sandbox %s: %s", sandbox_id, e)
 
@@ -670,11 +670,28 @@ class E2BSandboxProvider(SandboxProvider):
                 stderr.strip(),
             )
 
-    def _apply_mounts(self, client: E2BClientSandbox) -> None:
-        mounts = self._config.get("mounts") or []
-        if not mounts:
-            return
-        for mount in mounts:
+    def _skill_projection_mounts(self, user_id: str) -> list[tuple[Path, str, bool]]:
+        from deerflow.skills.projection import ensure_skill_projections
+        from deerflow.skills.storage import get_or_new_user_skill_storage
+
+        config = get_app_config()
+        storage = get_or_new_user_skill_storage(user_id, app_config=config)
+        projection = ensure_skill_projections(storage)
+        container_root = config.skills.container_path.rstrip("/")
+        return [
+            (projection.public, f"{container_root}/public", True),
+            (projection.custom, f"{container_root}/custom", True),
+            (projection.legacy, f"{container_root}/legacy", True),
+        ]
+
+    def _apply_mounts(self, client: E2BClientSandbox, *, user_id: str | None = None) -> None:
+        effective_user_id = user_id or get_effective_user_id()
+        projection_mounts = self._skill_projection_mounts(effective_user_id)
+        configured_mounts = self._config.get("mounts") or []
+        skills_root = get_app_config().skills.container_path.rstrip("/")
+
+        mounts: list[tuple[Path, str, bool]] = list(projection_mounts)
+        for mount in configured_mounts:
             try:
                 host_path = Path(getattr(mount, "host_path", "") or "")
                 container_path = (getattr(mount, "container_path", "") or "").rstrip("/")
@@ -684,6 +701,12 @@ class E2BSandboxProvider(SandboxProvider):
                 container_path = (mount.get("container_path", "") or "").rstrip("/")
                 read_only = bool(mount.get("read_only", False))
 
+            if container_path == skills_root or container_path.startswith(skills_root + "/"):
+                logger.warning("Skipping e2b mount that conflicts with managed skills projection: %s", container_path)
+                continue
+            mounts.append((host_path, container_path, read_only))
+
+        for host_path, container_path, read_only in mounts:
             if not host_path.exists():
                 logger.warning("Skipping e2b mount: host_path %s does not exist", host_path)
                 continue

@@ -351,7 +351,10 @@ async def test_acquire_internal_async_offloads_cached_reuse_health_check(tmp_pat
     sandbox_id = await provider._acquire_internal_async("thread-cached-async", user_id="default")
 
     assert sandbox_id == "sandbox-cached-async"
-    assert to_thread_calls == [(provider._reuse_in_process_sandbox, ("thread-cached-async",))]
+    assert to_thread_calls == [
+        (provider._ensure_skills_projection, ("default",)),
+        (provider._reuse_in_process_sandbox, ("thread-cached-async",)),
+    ]
 
 
 def test_remote_backend_create_forwards_effective_user_id(monkeypatch):
@@ -373,7 +376,6 @@ def test_remote_backend_create_forwards_effective_user_id(monkeypatch):
         return _Response()
 
     monkeypatch.setattr(remote_mod.requests, "post", _post)
-    monkeypatch.setattr(remote_mod, "user_should_see_legacy_skills", lambda user_id: True)
 
     try:
         backend.create("thread-42", "sandbox-42")
@@ -385,7 +387,6 @@ def test_remote_backend_create_forwards_effective_user_id(monkeypatch):
         "sandbox_id": "sandbox-42",
         "thread_id": "thread-42",
         "user_id": "user-7",
-        "include_legacy_skills": True,
     }
 
 
@@ -408,12 +409,11 @@ def test_remote_backend_create_prefers_explicit_user_id(monkeypatch):
 
     monkeypatch.setattr(remote_mod.requests, "post", _post)
     monkeypatch.setattr(remote_mod, "get_effective_user_id", lambda: "default")
-    monkeypatch.setattr(remote_mod, "user_should_see_legacy_skills", lambda user_id: False)
 
     backend.create("thread-42", "sandbox-42", user_id="ou-user")
 
     assert posted["json"]["user_id"] == "ou-user"
-    assert posted["json"]["include_legacy_skills"] is False
+    assert "include_legacy_skills" not in posted["json"]
 
 
 # ── Sandbox client teardown (#2872) ──────────────────────────────────────────

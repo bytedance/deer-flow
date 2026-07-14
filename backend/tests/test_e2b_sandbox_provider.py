@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib
 import threading
 from collections import OrderedDict
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
@@ -194,6 +195,43 @@ def _install_fake_sdk(monkeypatch, provider) -> FakeSandboxClass:
     fake_cls = FakeSandboxClass()
     monkeypatch.setattr(provider, "_get_sandbox_cls", lambda: fake_cls)
     return fake_cls
+
+
+def _write_skill(root: Path, name: str) -> None:
+    target = root / name / "SKILL.md"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(f"---\nname: {name}\ndescription: test\n---\n", encoding="utf-8")
+
+
+def test_apply_mounts_uploads_only_enabled_skill_projection(monkeypatch, tmp_path):
+    from deerflow.config.extensions_config import ExtensionsConfig, SkillStateConfig
+
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+    paths = Paths(base_dir=tmp_path)
+    skills_root = tmp_path / "skills"
+    _write_skill(skills_root / "public", "enabled-skill")
+    _write_skill(skills_root / "public", "disabled-skill")
+    (skills_root / "custom").mkdir()
+    extensions = ExtensionsConfig(skills={"disabled-skill": SkillStateConfig(enabled=False)})
+    config = SimpleNamespace(
+        skills=SimpleNamespace(
+            get_skills_path=lambda: skills_root,
+            container_path="/mnt/skills",
+            use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage",
+        )
+    )
+    monkeypatch.setattr(mod, "get_app_config", lambda: config)
+    monkeypatch.setattr("deerflow.config.paths.get_paths", lambda: paths)
+    monkeypatch.setattr("deerflow.config.extensions_config.ExtensionsConfig.from_file", lambda *_args, **_kwargs: extensions)
+    monkeypatch.setattr("deerflow.config.extensions_config.get_extensions_config", lambda: extensions)
+
+    provider = _make_provider()
+    client = FakeClient()
+    provider._apply_mounts(client, user_id="user-1")
+
+    uploaded_paths = {path for path, _content in client.files.write_calls}
+    assert "/mnt/skills/public/enabled-skill/SKILL.md" in uploaded_paths
+    assert "/mnt/skills/public/disabled-skill/SKILL.md" not in uploaded_paths
 
 
 def _make_sandbox(client: FakeClient, *, sandbox_id: str | None = None) -> Any:
