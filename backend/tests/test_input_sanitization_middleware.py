@@ -247,6 +247,10 @@ _EXEMPT_BLOCK_TAGS = {
     "skill",
     "skill_content",
     "user_request",
+    # UploadsMiddleware instruction block — wraps trusted server-generated file
+    # metadata, not user-controlled content. Renamed from uploaded_files in the
+    # lazy-loading PR (#4174).
+    "current_uploads",
     # Prompts for a *different* LLM call (memory updater, summarizer). Those
     # prompts are built from checkpointed state, not from the ModelRequest that
     # InputSanitizationMiddleware rewrites, so this denylist does not defend them
