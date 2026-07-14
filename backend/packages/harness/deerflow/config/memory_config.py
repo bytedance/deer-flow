@@ -177,6 +177,24 @@ def should_use_memory_tools(config: MemoryConfig) -> bool:
     return config.enabled and config.mode == "tool"
 
 
+def disabled_memory_config(config: MemoryConfig) -> MemoryConfig:
+    """Return a copy of ``config`` with the memory subsystem fully switched off.
+
+    Both the write side (``enabled`` — MemoryMiddleware capture, the ``memory_*``
+    tools, and the summarization memory-flush hook) and the read side
+    (``injection_enabled`` — the ``<memory>`` block injected by
+    ``DynamicContextMiddleware``) are turned off, so an agent resolved through
+    the returned config neither records nor recalls memory. Every other field is
+    preserved, so if the operator later flips memory back on the agent inherits
+    the same debounce/model/limits it always had.
+
+    Used to fold a custom agent's ``memory: {enabled: false}`` opt-out into the
+    effective app config in one place (issue #3626); see
+    ``deerflow.agents.lead_agent.agent.apply_agent_memory_override``.
+    """
+    return config.model_copy(update={"enabled": False, "injection_enabled": False})
+
+
 # Global configuration instance
 _memory_config: MemoryConfig = MemoryConfig()
 

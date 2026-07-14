@@ -40,9 +40,9 @@ from deerflow.agents.middlewares.token_usage_middleware import TokenUsageMiddlew
 from deerflow.agents.middlewares.tool_error_handling_middleware import build_lead_runtime_middlewares
 from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
 from deerflow.agents.thread_state import ThreadState
-from deerflow.config.agents_config import load_agent_config, validate_agent_name
+from deerflow.config.agents_config import AgentConfig, load_agent_config, validate_agent_name
 from deerflow.config.app_config import AppConfig, get_app_config
-from deerflow.config.memory_config import should_use_memory_tools
+from deerflow.config.memory_config import disabled_memory_config, should_use_memory_tools
 from deerflow.config.subagents_config import DEFAULT_MAX_TOTAL_SUBAGENTS_PER_RUN
 from deerflow.models import create_chat_model
 from deerflow.skills.tool_policy import ALWAYS_AVAILABLE_BUILTIN_TOOL_NAMES, filter_tools_by_skill_allowed_tools
@@ -79,6 +79,31 @@ def _append_memory_tools_without_name_conflicts(tools: list) -> None:
             continue
         tools.append(memory_tool)
         existing_names.add(memory_tool.name)
+
+
+def apply_agent_memory_override(app_config: AppConfig, agent_config: AgentConfig | None) -> AppConfig:
+    """Fold a custom agent's memory opt-out into the effective app config (issue #3626).
+
+    When a custom agent sets ``memory: {enabled: false}`` in its ``config.yaml``,
+    return a shallow copy of ``app_config`` whose ``memory`` section is switched
+    off (see :func:`deerflow.config.memory_config.disabled_memory_config`).
+    Otherwise return ``app_config`` unchanged — the *same* object, no copy — so
+    every existing agent (and any agent that leaves memory on) is unaffected.
+
+    Resolving the override once, here, means the four downstream memory gates all
+    read the already-resolved ``app_config.memory`` and need no per-gate flag:
+    MemoryMiddleware capture, the ``memory_*`` tools, the ``<memory>`` injection
+    in DynamicContextMiddleware, and the summarization memory-flush hook. The
+    override is narrow by design — an agent may only disable memory, never force
+    it on when the operator disabled it globally.
+    """
+    # A missing ``memory`` attribute is treated the same as ``memory=None``
+    # (inherit the global config): a real AgentConfig always declares the field,
+    # so this only softens the duck-typed agent configs used in some tests.
+    memory_override = getattr(agent_config, "memory", None) if agent_config is not None else None
+    if memory_override is not None and not memory_override.enabled:
+        return app_config.model_copy(update={"memory": disabled_memory_config(app_config.memory)})
+    return app_config
 
 
 def _get_runtime_config(config: RunnableConfig) -> dict:
@@ -455,6 +480,14 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
 
     agent_config = load_agent_config(agent_name) if not is_bootstrap else None
     available_skills = _available_skill_names(agent_config, is_bootstrap)
+
+    # Fold the custom agent's memory opt-out (issue #3626) into the effective app
+    # config before anything reads it, so a custom agent with
+    # ``memory: {enabled: false}`` gets no memory capture, tools, or injection.
+    # A no-op for every other agent (returns the same object), so behavior is
+    # unchanged unless an agent explicitly disables memory.
+    resolved_app_config = apply_agent_memory_override(resolved_app_config, agent_config)
+
     # Custom agent model from agent config (if any), or None to let _resolve_model_name pick the default
     agent_model_name = agent_config.model if agent_config and agent_config.model else None
 
