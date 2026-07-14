@@ -1,12 +1,16 @@
-"""Middleware to fix dangling tool calls in message history.
+"""Middleware to fix dangling tool calls and orphan tool results in message history.
 
 A dangling tool call occurs when an AIMessage contains tool_calls but there are
 no corresponding ToolMessages in the history (e.g., due to user interruption or
-request cancellation). This causes LLM errors due to incomplete message format.
+request cancellation). An orphan ToolMessage occurs when a tool result exists
+without a matching AIMessage tool_call (e.g., after summarization/branching
+dropped the upstream AIMessage). Both cause strict-provider rejections.
 
-This middleware intercepts the model call to detect and patch such gaps by
-inserting synthetic ToolMessages with an error indicator immediately after the
-AIMessage that made the tool calls, ensuring correct message ordering.
+This middleware intercepts the model call to:
+- Insert synthetic ToolMessages with an error indicator for each dangling AIMessage
+  tool_call, ensuring correct message ordering
+- Drop orphan ToolMessages whose originating tool_call is no longer present in the
+  request, preventing strict OpenAI-compatible backends from returning HTTP 400
 
 Note: Uses wrap_model_call instead of before_model to ensure patches are inserted
 at the correct positions (immediately after each dangling AIMessage), not appended
@@ -47,11 +51,14 @@ def _has_invalid_tool_name(name: object) -> bool:
 
 
 class DanglingToolCallMiddleware(AgentMiddleware[AgentState]):
-    """Inserts placeholder ToolMessages for dangling tool calls before model invocation.
+    """Inserts placeholder ToolMessages for dangling tool calls and drops orphan
+    ToolMessages (tool results whose originating AIMessage tool_call is gone).
 
-    Scans the message history for AIMessages whose tool_calls lack corresponding
-    ToolMessages, and injects synthetic error responses immediately after the
-    offending AIMessage so the LLM receives a well-formed conversation.
+    Scans the message history for:
+    - AIMessages whose tool_calls lack corresponding ToolMessages, and injects
+      synthetic error responses immediately after the offending AIMessage
+    - ToolMessages with no matching AIMessage tool_call (orphans), and drops
+      them so strict OpenAI-compatible backends do not reject the request
     """
 
     @staticmethod
@@ -238,8 +245,17 @@ class DanglingToolCallMiddleware(AgentMiddleware[AgentState]):
 
         patched: list = []
         patch_count = 0
+        drop_count = 0
         for msg in messages:
-            if isinstance(msg, ToolMessage) and msg.tool_call_id in tool_call_ids:
+            if isinstance(msg, ToolMessage):
+                if msg.tool_call_id in tool_call_ids:
+                    continue  # Will be re-emitted after its AIMessage
+                # Orphan: ToolMessage whose originating AIMessage tool_call is
+                # no longer in the request (e.g. removed by summarization).
+                # Drop it silently from the model request so strict providers
+                # do not reject it with HTTP 400. Persisted state is untouched;
+                # this only affects the single model call.
+                drop_count += 1
                 continue
 
             sanitized_msg = self._sanitize_ai_message_tool_names(msg)
@@ -271,11 +287,14 @@ class DanglingToolCallMiddleware(AgentMiddleware[AgentState]):
                     )
                     patch_count += 1
 
-        if patched == messages:
+        if patched == messages and not drop_count:
             return None
-
-        if patch_count:
-            logger.warning(f"Injecting {patch_count} placeholder ToolMessage(s) for dangling tool calls")
+        if drop_count or patch_count:
+            logger.warning(
+                "DanglingToolCallMiddleware: %d orphan(s) dropped, %d placeholder(s) injected",
+                drop_count,
+                patch_count,
+            )
         return patched
 
     @override

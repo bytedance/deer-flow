@@ -464,7 +464,14 @@ class TestBuildPatchedMessagesPatching:
         assert isinstance(patched[4], ToolMessage)
         assert patched[4].tool_call_id == "call_2"
 
-    def test_orphan_tool_message_is_preserved_during_grouping(self):
+    def test_orphan_tool_message_is_dropped_during_grouping(self):
+        """An orphan ToolMessage — one whose tool_call_id has no matching AIMessage
+        tool_call — is dropped from the patched output.
+
+        Behavior intentionally changed: strict OpenAI-compatible providers reject a
+        ToolMessage that does not follow an assistant tool_call, so an orphan left
+        over from interruption/compaction must not be forwarded.
+        """
         mw = DanglingToolCallMiddleware()
         orphan = _tool_msg("orphan_call", "orphan")
         msgs = [
@@ -477,12 +484,57 @@ class TestBuildPatchedMessagesPatching:
         patched = mw._build_patched_messages(msgs)
 
         assert patched is not None
+        # The orphan is dropped; call_1's result is regrouped right after its AIMessage.
         assert isinstance(patched[0], AIMessage)
         assert isinstance(patched[1], ToolMessage)
         assert patched[1].tool_call_id == "call_1"
-        assert patched[2] is orphan
-        assert isinstance(patched[3], HumanMessage)
-        assert patched.count(orphan) == 1
+        assert isinstance(patched[2], HumanMessage)
+        assert orphan not in patched
+        assert patched.count(orphan) == 0
+        assert len(patched) == 3
+
+    def test_leading_orphan_tool_message_is_dropped(self):
+        """A ToolMessage that leads the transcript with no preceding tool_call is an
+        orphan and must be dropped (leaving a valid grouped transcript)."""
+        mw = DanglingToolCallMiddleware()
+        leading_orphan = _tool_msg("stale_call", "stale")
+        msgs = [
+            leading_orphan,
+            _ai_with_tool_calls([_tc("bash", "call_1")]),
+            _tool_msg("call_1", "bash"),
+        ]
+
+        patched = mw._build_patched_messages(msgs)
+
+        assert patched is not None
+        assert leading_orphan not in patched
+        assert isinstance(patched[0], AIMessage)
+        assert isinstance(patched[1], ToolMessage)
+        assert patched[1].tool_call_id == "call_1"
+        assert len(patched) == 2
+
+    def test_tool_call_id_none_orphan_is_dropped(self):
+        """A ToolMessage whose tool_call_id is None is always an orphan —
+        no valid tool call uses ``None`` as its id — and must be dropped."""
+        mw = DanglingToolCallMiddleware()
+        # Use model_construct to bypass pydantic validation (ToolMessage requires
+        # a string tool_call_id at construction, but a corrupt serialized payload
+        # or edge-case provider could still produce None at runtime).
+        none_id_orphan = ToolMessage.model_construct(content="ghost", tool_call_id=None)
+        msgs = [
+            _ai_with_tool_calls([_tc("bash", "call_1")]),
+            none_id_orphan,
+            _tool_msg("call_1", "bash"),
+        ]
+
+        patched = mw._build_patched_messages(msgs)
+
+        assert patched is not None
+        assert none_id_orphan not in patched
+        assert len(patched) == 2
+        assert isinstance(patched[0], AIMessage)
+        assert isinstance(patched[1], ToolMessage)
+        assert patched[1].tool_call_id == "call_1"
 
     def test_invalid_tool_call_is_patched(self):
         mw = DanglingToolCallMiddleware()
