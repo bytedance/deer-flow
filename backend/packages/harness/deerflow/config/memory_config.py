@@ -4,7 +4,8 @@ DeerMem-private fields live in ``backends/deermem/config.py`` (``DeerMemConfig``
 reached via ``backend_config`` (a dict the factory passes to the backend's
 ``__init__``). This module holds ONLY the host-shared fields every backend /
 call site / factory reads: ``enabled`` / ``injection_enabled`` /
-``manager_class`` / ``backend_config``. Keeping the shared schema slim is what
+``shutdown_flush_timeout_seconds`` / ``manager_class`` / ``backend_config``.
+Keeping the shared schema slim is what
 makes backends swappable and portable (DeerMem's knobs do not leak onto the
 shared contract).
 """
@@ -17,7 +18,7 @@ from pydantic import BaseModel, Field
 logger = logging.getLogger(__name__)
 
 # Host-shared MemoryConfig fields (read by every backend / call site / factory).
-_SHARED_FIELDS = frozenset({"enabled", "mode", "injection_enabled", "manager_class", "backend_config"})
+_SHARED_FIELDS = frozenset({"enabled", "mode", "injection_enabled", "shutdown_flush_timeout_seconds", "manager_class", "backend_config"})
 
 # DeerMem-private fields that used to live at the top level of `memory:` in
 # config.yaml (pre-abstraction). On load they are auto-migrated into
@@ -65,6 +66,23 @@ class MemoryConfig(BaseModel):
     injection_enabled: bool = Field(
         default=True,
         description="Whether to inject memory into the system prompt (call-site gate).",
+    )
+    shutdown_flush_timeout_seconds: float = Field(
+        default=30.0,
+        ge=1.0,
+        le=300.0,
+        description=(
+            "Hard time budget (seconds) for draining the memory backend's "
+            "pending-update buffer during Gateway graceful shutdown. The drain "
+            "makes one LLM call per pending item, so large IM batches may need "
+            "a higher value. Must fit inside the pod's K8s "
+            "terminationGracePeriodSeconds (together with channel/scheduler "
+            "stop) or K8s SIGKILLs the drain mid-flight. The drain runs on a "
+            "daemon thread, so on timeout the process proceeds to exit and any "
+            "unfinished tail is dropped (same failure direction as no flush, "
+            "scoped to the tail). Host-shared (not backend-private): the host "
+            "owns the lifespan budget and the K8s grace relationship."
+        ),
     )
     manager_class: str = Field(
         default="deermem",

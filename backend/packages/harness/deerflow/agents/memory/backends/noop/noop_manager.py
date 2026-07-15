@@ -157,6 +157,11 @@ class NoopMemoryManager(MemoryManager):
     ) -> dict[str, Any]:
         return _empty_memory()
 
+    # ── Lifecycle ───────────────────────────────────────────────────────
+    def shutdown_flush(self, timeout: float) -> bool:
+        """Nothing is ever queued, so shutdown drain is a clean no-op success."""
+        return True
+
     # ── Optional DeerMem-internal capabilities (NOT on the ABC) ──────────
     # The host gateway discovers these via ``hasattr(manager, "<name>")`` and
     # returns 501 when absent. Implement the ones your backend supports so the

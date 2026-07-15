@@ -15,7 +15,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 25
+config_version: 26
 
 # ============================================================================
 # Logging
@@ -1453,6 +1453,7 @@ summarization:
 # Shared fields (host level, backend-agnostic):
 #   enabled             - Master switch for the memory mechanism (call-site gate)
 #   injection_enabled   - Whether to inject memory into the system prompt (call-site gate)
+#   shutdown_flush_timeout_seconds - Hard budget (s) to drain pending updates on Gateway graceful shutdown (default: 30)
 #   manager_class       - Backend selector: registered name (deermem/noop) or dotted path
 #   backend_config      - Backend-private config dict (passthrough; each backend self-interprets)
 #
@@ -1476,6 +1477,12 @@ summarization:
 memory:
   enabled: true
   injection_enabled: true # Whether to inject memory into system prompt
+  # Hard budget (seconds) to drain pending memory updates on Gateway graceful
+  # shutdown. Each pending item does one LLM call, so large IM batches may need
+  # more. Must fit inside the pod's K8s terminationGracePeriodSeconds (channel
+  # stop + this drain + buffer) or K8s SIGKILLs the drain -- set that on the
+  # gateway Helm deployment (see deploy/helm/deer-flow). Default 30s.
+  shutdown_flush_timeout_seconds: 30.0
   # Memory backend selector. Either a registered backend name (matching a
   # backends/<name>/ folder that exposes MANAGER_CLASS, e.g. deermem / noop)
   # or a dotted import path to a MemoryManager subclass.
