@@ -360,7 +360,7 @@ def _scan_python(rel_path: str, text: str) -> list[SecurityFinding]:
                 has_network_sink = True
                 network_node = network_node or node
 
-        if isinstance(node, ast.Attribute) and _python_name(node, aliases) == "os.environ":
+        if isinstance(node, (ast.Attribute, ast.Name)) and _python_name(node, aliases) == "os.environ":
             has_env_dump = True
             env_node = env_node or node
 
@@ -387,7 +387,7 @@ def _scan_python(rel_path: str, text: str) -> list[SecurityFinding]:
         if call_name == "os.dup2":
             reverse_shell_parts.add("dup2")
             reverse_shell_node = reverse_shell_node or node
-        elif call_name == "socket.socket":
+        elif call_name in {"socket.socket", "socket.create_connection"}:
             reverse_shell_parts.add("socket")
         elif call_name.startswith("subprocess.") or call_name in {"os.system", "os.popen"}:
             reverse_shell_parts.add("subprocess")
@@ -655,7 +655,29 @@ def _call_has_shell_true(node: ast.Call) -> bool:
 
 
 def _call_is_network_sink(call_name: str) -> bool:
-    return call_name in {"requests.get", "requests.post", "requests.put", "requests.request", "urllib.request.urlopen", "httpx.get", "httpx.post", "socket.socket"}
+    return call_name in {
+        "requests.get",
+        "requests.post",
+        "requests.put",
+        "requests.patch",
+        "requests.delete",
+        "requests.head",
+        "requests.options",
+        "requests.request",
+        "httpx.get",
+        "httpx.post",
+        "httpx.put",
+        "httpx.patch",
+        "httpx.delete",
+        "httpx.head",
+        "httpx.options",
+        "httpx.request",
+        "httpx.stream",
+        "urllib.request.urlopen",
+        "urllib.request.urlretrieve",
+        "socket.socket",
+        "socket.create_connection",
+    }
 
 
 def _yaml_load_uses_safe_loader(node: ast.Call) -> bool:

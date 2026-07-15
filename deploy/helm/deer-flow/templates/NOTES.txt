@@ -6,7 +6,7 @@ DeerFlow has been deployed.
 
   ⚠️  WARNING: `image.registry` is empty. The gateway/frontend/provisioner
   images won't resolve. Set `image.registry` in your values and build+push the
-  three images (see deploy/helm/deer-flow/scripts/build-and-push.sh).
+  three images (see the chart README's "Build & push images" section).
 {{- end }}
 
 Get the status:

@@ -705,6 +705,128 @@ class TestAsyncCheckpointer:
         mock_saver.setup.assert_awaited_once()
 
 
+class TestCheckpointerDatabaseConfig:
+    """The sync checkpointer must follow the unified ``database`` section when no
+    legacy ``checkpointer`` section is configured — matching the async
+    ``make_checkpointer`` factory and the sync Store provider.
+
+    Regression: ``get_checkpointer`` / ``checkpointer_context`` previously read
+    only the legacy ``checkpointer`` section and fell back to ``InMemorySaver``,
+    silently ignoring ``database``. Embedded callers (``DeerFlowClient``) and the
+    TUI then persisted Store rows to sqlite/postgres while checkpoints went to an
+    in-memory saver and were lost on exit.
+    """
+
+    def test_sync_checkpointer_context_uses_database_config(self):
+        """The one-shot sync checkpointer factory must follow unified database config."""
+        from deerflow.runtime.checkpointer.provider import checkpointer_context
+
+        app_config = SimpleNamespace(
+            checkpointer=None,
+            database=DatabaseConfig(backend="postgres", postgres_url="postgresql://localhost/db"),
+        )
+        expected = object()
+        factory = MagicMock(return_value=nullcontext(expected))
+
+        with (
+            patch("deerflow.runtime.checkpointer.provider.get_app_config", return_value=app_config),
+            patch("deerflow.runtime.checkpointer.provider._sync_checkpointer_cm", factory),
+            checkpointer_context() as cp,
+        ):
+            assert cp is expected
+
+        resolved = factory.call_args.args[0]
+        assert resolved.type == "postgres"
+        assert resolved.connection_string == "postgresql://localhost/db"
+
+    def test_sync_checkpointer_context_uses_sqlite_database_config(self, tmp_path):
+        """The one-shot sync checkpointer factory must resolve the sqlite branch too, not just postgres."""
+        from deerflow.runtime.checkpointer.provider import checkpointer_context
+
+        db_config = DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path))
+        app_config = SimpleNamespace(checkpointer=None, database=db_config)
+        expected = object()
+        factory = MagicMock(return_value=nullcontext(expected))
+
+        with (
+            patch("deerflow.runtime.checkpointer.provider.get_app_config", return_value=app_config),
+            patch("deerflow.runtime.checkpointer.provider._sync_checkpointer_cm", factory),
+            checkpointer_context() as cp,
+        ):
+            assert cp is expected
+
+        resolved = factory.call_args.args[0]
+        assert resolved.type == "sqlite"
+        assert resolved.connection_string == db_config.checkpointer_sqlite_path
+
+    def test_sync_checkpointer_singleton_uses_database_config(self):
+        """The cached sync checkpointer factory must resolve database config before locking."""
+        app_config = SimpleNamespace(
+            checkpointer=None,
+            database=DatabaseConfig(backend="postgres", postgres_url="postgresql://localhost/db"),
+        )
+        expected = object()
+        factory = MagicMock(return_value=nullcontext(expected))
+
+        with (
+            patch("deerflow.runtime.checkpointer.provider.ensure_config_loaded"),
+            patch("deerflow.runtime.checkpointer.provider.get_app_config", return_value=app_config),
+            patch("deerflow.runtime.checkpointer.provider._sync_checkpointer_cm", factory),
+        ):
+            assert get_checkpointer() is expected
+
+        resolved = factory.call_args.args[0]
+        assert resolved.type == "postgres"
+        assert resolved.connection_string == "postgresql://localhost/db"
+
+    def test_sync_checkpointer_falls_back_to_memory_when_config_file_is_missing(self):
+        """The sync checkpointer keeps its no-config fallback for embedded callers."""
+        from langgraph.checkpoint.memory import InMemorySaver
+
+        with (
+            patch("deerflow.runtime.checkpointer.provider.ensure_config_loaded"),
+            patch("deerflow.runtime.checkpointer.provider.get_checkpointer_config", return_value=None),
+            patch("deerflow.runtime.checkpointer.provider.get_app_config", side_effect=FileNotFoundError),
+        ):
+            assert isinstance(get_checkpointer(), InMemorySaver)
+
+    def test_legacy_checkpointer_config_takes_precedence(self):
+        """Backward-compatible checkpointer config must override database."""
+        from deerflow.runtime.checkpointer.provider import checkpointer_context
+
+        app_config = SimpleNamespace(
+            checkpointer=CheckpointerConfig(type="memory"),
+            database=DatabaseConfig(backend="postgres", postgres_url="postgresql://localhost/db"),
+        )
+        expected = object()
+        factory = MagicMock(return_value=nullcontext(expected))
+
+        with (
+            patch("deerflow.runtime.checkpointer.provider.get_app_config", return_value=app_config),
+            patch("deerflow.runtime.checkpointer.provider._sync_checkpointer_cm", factory),
+            checkpointer_context() as cp,
+        ):
+            assert cp is expected
+
+        resolved = factory.call_args.args[0]
+        assert resolved.type == "memory"
+        assert resolved.connection_string is None
+
+    def test_explicit_memory_database_uses_in_memory_saver(self):
+        """Explicit memory mode remains an intentional non-persistent checkpointer."""
+        from langgraph.checkpoint.memory import InMemorySaver
+
+        from deerflow.runtime.checkpointer.provider import checkpointer_context
+
+        app_config = SimpleNamespace(checkpointer=None, database=DatabaseConfig(backend="memory"))
+
+        with (
+            patch("deerflow.runtime.checkpointer.provider.get_app_config", return_value=app_config),
+            checkpointer_context() as cp,
+        ):
+            assert isinstance(cp, InMemorySaver)
+
+
 class TestStoreDatabaseConfig:
     def test_sync_store_falls_back_to_memory_when_config_file_is_missing(self):
         """The sync Store keeps its no-config fallback for embedded callers."""

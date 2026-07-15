@@ -10,10 +10,13 @@ import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy.exc import IntegrityError as SAIntegrityError
 
+from deerflow.runtime.user_context import AUTO, _AutoSentinel, resolve_user_id
+from deerflow.utils.time import is_lease_expired
 from deerflow.utils.time import now_iso as _now_iso
 
 from .schemas import DisconnectMode, RunStatus
@@ -340,6 +343,29 @@ class RunManager:
                 lambda: self._store.update_status(record.run_id, status.value, error=error),
             )
             if updated is False:
+                # ``update_status`` is now guarded by ``status IN ('pending','running')``.
+                # False can mean either:
+                #   (a) the row was never persisted (initial ``put()`` failed) → recreate.
+                #   (b) the row is terminal — either a peer takeover (``error``)
+                #       or a local cancel/completion race (``interrupted`` /
+                #       ``success``). The log severity branches on which.
+                existing = await self._store.get(record.run_id)
+                if existing is not None:
+                    existing_status = existing.get("status")
+                    if existing_status == "error":
+                        logger.warning(
+                            "Run %s status update to %s skipped: store row already at error (peer takeover)",
+                            record.run_id,
+                            status.value,
+                        )
+                    else:
+                        logger.info(
+                            "Run %s status update to %s skipped: store row already at %s (local cancel/completion race)",
+                            record.run_id,
+                            status.value,
+                            existing_status,
+                        )
+                    return False
                 return await self._persist_snapshot_to_store(record.run_id, row_recovery_payload)
             return True
         except Exception:
@@ -565,6 +591,71 @@ class RunManager:
                     logger.warning("Failed to map store row for run %s", run_id, exc_info=True)
         return sorted(records_by_id.values(), key=lambda record: record.created_at, reverse=True)[:limit]
 
+    async def list_successful_regenerate_sources(
+        self,
+        thread_id: str,
+        *,
+        user_id: str | None | _AutoSentinel = AUTO,
+    ) -> set[str]:
+        """Return all source runs superseded by successful regenerations.
+
+        Unlike :meth:`list_by_thread`, this query is intentionally unbounded.
+        Current-process records override matching persisted status: a latest
+        in-memory failure must not inherit an older successful store snapshot.
+        Store failures propagate because supersession filtering is required for
+        correct pagination.
+        """
+        resolved_user_id = resolve_user_id(user_id, method_name="RunManager.list_successful_regenerate_sources")
+        async with self._lock:
+            memory_records = [record for record in self._thread_records_locked(thread_id) if resolved_user_id is None or record.user_id == resolved_user_id]
+
+        sources = set(await self._store.list_successful_regenerate_sources(thread_id, user_id=resolved_user_id)) if self._store is not None else set()
+        # _thread_records_locked preserves the insertion order of the thread
+        # index. Applying records oldest-to-newest makes the latest in-memory
+        # regeneration attempt authoritative when several attempts reference
+        # the same source run (for example, a failed retry after a success).
+        for record in memory_records:
+            source = record.metadata.get("regenerate_from_run_id")
+            if not isinstance(source, str) or not source:
+                continue
+            sources.discard(source)
+            if record.status == RunStatus.success:
+                sources.add(source)
+        return sources
+
+    async def get_many_by_thread(
+        self,
+        thread_id: str,
+        run_ids: set[str],
+        *,
+        user_id: str | None | _AutoSentinel = AUTO,
+    ) -> dict[str, RunRecord]:
+        """Batch-load selected thread runs with in-memory records preferred."""
+        if not run_ids:
+            return {}
+        resolved_user_id = resolve_user_id(user_id, method_name="RunManager.get_many_by_thread")
+        async with self._lock:
+            records_by_id = {record.run_id: record for record in self._thread_records_locked(thread_id) if record.run_id in run_ids and (resolved_user_id is None or record.user_id == resolved_user_id)}
+        if self._store is None:
+            return records_by_id
+
+        remaining = run_ids - records_by_id.keys()
+        if not remaining:
+            return records_by_id
+        try:
+            rows = await self._store.get_many_by_thread(thread_id, set(remaining), user_id=resolved_user_id)
+        except Exception:
+            logger.warning("Failed to batch-hydrate runs for thread %s", thread_id, exc_info=True)
+            return records_by_id
+        for run_id, row in rows.items():
+            if run_id in records_by_id:
+                continue
+            try:
+                records_by_id[run_id] = self._record_from_store(row)
+            except Exception:
+                logger.warning("Failed to map store row for run %s", run_id, exc_info=True)
+        return records_by_id
+
     async def set_status(self, run_id: str, status: RunStatus, *, error: str | None = None) -> None:
         """Transition a run to a new status."""
         async with self._lock:
@@ -662,41 +753,151 @@ class RunManager:
         await self._persist_model_name(run_id, model_name)
         logger.info("Run %s model_name=%s", run_id, model_name)
 
-    async def cancel(self, run_id: str, *, action: str = "interrupt") -> bool:
+    async def cancel(self, run_id: str, *, action: str = "interrupt") -> CancelOutcome:
         """Request cancellation of a run.
+
+        When the call lands on the owning worker the run is cancelled
+        locally as before (in-memory abort + status persisted to store).
+
+        When the call lands on a non-owning worker in a multi-worker
+        deployment with heartbeat enabled:
+
+        - **Lease expired** — the run's lease has passed the grace
+          threshold, so this worker takes ownership and marks it as
+          ``error``.  The owning worker is assumed dead (its heartbeat
+          stopped renewing).
+
+        - **Lease still valid** — returns ``lease_valid_elsewhere`` so
+          the caller can return HTTP 409 + ``Retry-After`` to tell the
+          client when to retry.
+
+        In single-worker mode (``heartbeat_enabled=False``) store-only
+        hydrated runs that aren't in-memory return ``not_active_locally``,
+        preserving the original 409 behaviour.
 
         Args:
             run_id: The run ID to cancel.
-            action: "interrupt" keeps checkpoint, "rollback" reverts to pre-run state.
+            action: ``"interrupt"`` keeps checkpoint, ``"rollback"``
+                    reverts to pre-run state.
 
-        Sets the abort event with the action reason and cancels the asyncio task.
-        Returns ``True`` if cancellation was initiated **or** the run was already
-        interrupted (idempotent — a second cancel is a no-op success).
-        Returns ``False`` only when the run is unknown to this worker or has
-        reached a terminal state other than interrupted (completed, failed, etc.).
+        Returns:
+            A :class:`CancelOutcome` enum describing what happened.
         """
+        # ------------------------------------------------------------------
+        # Local path — this worker owns the run in-memory.
+        # ------------------------------------------------------------------
         async with self._lock:
             record = self._runs.get(run_id)
-            if record is None:
-                return False
-            if record.status == RunStatus.interrupted:
-                return True  # idempotent — already cancelled on this worker
-            if record.status not in (RunStatus.pending, RunStatus.running):
-                return False
-            record.abort_action = action
-            record.abort_event.set()
-            task_active = record.task is not None and not record.task.done()
-            record.finalizing = task_active
-            if task_active:
-                record.task.cancel()
-            record.status = RunStatus.interrupted
-            record.updated_at = _now_iso()
-        await self._persist_status(record, RunStatus.interrupted)
-        logger.info("Run %s cancelled (action=%s)", run_id, action)
-        return True
+            if record is not None:
+                if record.status == RunStatus.interrupted:
+                    return CancelOutcome.cancelled  # idempotent
+                if record.status not in (RunStatus.pending, RunStatus.running):
+                    return CancelOutcome.not_cancellable
+                record.abort_action = action
+                record.abort_event.set()
+                task_active = record.task is not None and not record.task.done()
+                record.finalizing = task_active
+                if task_active:
+                    record.task.cancel()
+                record.status = RunStatus.interrupted
+                record.updated_at = _now_iso()
+
+        # Persist outside the lock so store calls don't block other mutations.
+        if record is not None:
+            persisted = await self._persist_status(record, RunStatus.interrupted)
+            if not persisted and self._store is not None:
+                # ``_persist_status`` already fetched ``existing`` internally;
+                # re-check the store to see if a peer takeover flipped the
+                # row to ``error`` between our in-memory cancel and the
+                # guarded ``update_status``. If so, surface ``taken_over``
+                # so the client sees a status consistent with the store.
+                try:
+                    existing = await self._store.get(run_id)
+                except Exception:
+                    existing = None
+                if existing is not None and existing.get("status") == "error":
+                    # The in-memory ``record.status`` is still ``interrupted``
+                    # (set under the lock above) while the store row is now
+                    # ``error``.  This transient staleness is harmless: the
+                    # ``_persist_status`` guard prevents the late finalisation
+                    # write from overwriting the takeover, and the store is the
+                    # authoritative source for subsequent reads.
+                    logger.info("Run %s local cancel superseded by peer takeover", run_id)
+                    return CancelOutcome.taken_over
+            logger.info("Run %s cancelled (action=%s)", run_id, action)
+            return CancelOutcome.cancelled
+
+        # ------------------------------------------------------------------
+        # Non-local path — no in-memory record, must consult the store.
+        # ------------------------------------------------------------------
+
+        if not self.heartbeat_enabled:
+            return CancelOutcome.not_active_locally
+
+        if self._store is None:
+            return CancelOutcome.unknown
+
+        try:
+            row = await self._store.get(run_id)
+        except Exception:
+            logger.warning("Failed to fetch run %s from store during cancel", run_id, exc_info=True)
+            return CancelOutcome.unknown
+
+        if row is None:
+            return CancelOutcome.unknown
+
+        store_status = row.get("status")
+        if store_status not in ("pending", "running"):
+            return CancelOutcome.not_cancellable
+
+        grace_seconds = self.grace_seconds
+        lease_expires_at: str | None = row.get("lease_expires_at")
+
+        if not is_lease_expired(lease_expires_at, grace_seconds=grace_seconds):
+            return CancelOutcome.lease_valid_elsewhere
+
+        take_over_msg = f"Run reclaimed by worker {self._worker_id}: the owning worker ({row.get('owner_worker_id') or 'unknown'}) stopped renewing its lease and is presumed dead."
+        try:
+            taken = await self._call_store_with_retry(
+                "claim_for_takeover",
+                run_id,
+                lambda: self._store.claim_for_takeover(
+                    run_id,
+                    grace_seconds=grace_seconds,
+                    error=take_over_msg,
+                ),
+            )
+        except Exception:
+            logger.warning("Take-over claim for run %s failed with exception", run_id, exc_info=True)
+            return CancelOutcome.unknown
+
+        if taken:
+            logger.warning("Run %s taken over by worker %s (action=%s)", run_id, self._worker_id, action)
+            return CancelOutcome.taken_over
+
+        # The conditional UPDATE matched 0 rows. Two causes:
+        #   (a) the owner renewed the lease → lease_valid_elsewhere.
+        #   (b) the row went terminal between our read and the claim
+        #       (run finished, or another worker already took it over)
+        #       → not_cancellable or taken_over.
+        # Re-read to distinguish.
+        try:
+            fresh = await self._store.get(run_id)
+        except Exception:
+            fresh = None
+        if fresh is None:
+            return CancelOutcome.unknown
+        fresh_status = fresh.get("status")
+        if fresh_status not in ("pending", "running"):
+            if fresh_status == "error":
+                logger.info("Run %s takeover lost to another worker already at error", run_id)
+                return CancelOutcome.taken_over
+            return CancelOutcome.not_cancellable
+        # Row is still active — lease must have been renewed by the owner.
+        return CancelOutcome.lease_valid_elsewhere
 
     def _compute_lease_expires_at(self) -> str | None:
-        """Compute the lease expiration timestamp for a new run.
+        """Return the lease expiry ISO timestamp for a freshly created run.
 
         Returns ``None`` when heartbeat is disabled (single-worker mode) so
         reconciliation treats crashed runs as orphans (NULL lease) and
@@ -967,6 +1168,17 @@ class RunManager:
             return False
         return self._run_ownership_config.heartbeat_enabled
 
+    @property
+    def grace_seconds(self) -> int:
+        """Return the configured grace seconds.
+
+        All current callers are downstream of ``heartbeat_enabled``, which
+        is False whenever ``_run_ownership_config`` is None.  The fallback
+        matches the Pydantic model default and is defensive against future
+        callers that might reach this property without that guard.
+        """
+        return self._run_ownership_config.grace_seconds if self._run_ownership_config else 10
+
     async def start_heartbeat(self) -> None:
         """Start the background lease-renewal task.
 
@@ -1084,6 +1296,22 @@ class RunManager:
                     # fields). Re-acquiring ``self._lock`` here would
                     # serialise against unrelated run mutations for no gain.
                     record.lease_expires_at = new_expiry
+                else:
+                    # ``update_lease`` returned False — the row was claimed
+                    # by another worker (status is no longer pending/running,
+                    # or ``owner_worker_id`` changed). Stop the local task so
+                    # we don't waste CPU or overwrite the takeover status on
+                    # finalisation.
+                    logger.warning(
+                        "Run %s lease renewal failed (status=%s,owner=%s) – worker likely taken over; aborting local task",
+                        run_id,
+                        record.status.value,
+                        record.owner_worker_id,
+                    )
+                    record.abort_event.set()
+                    task_active = record.task is not None and not record.task.done()
+                    if task_active:
+                        record.task.cancel()
             except Exception:
                 logger.warning("Failed to renew lease for run %s", run_id, exc_info=True)
 
@@ -1196,6 +1424,17 @@ class RunManager:
         if pending:
             logger.warning("Run drain exceeded %.1fs on shutdown; %d run task(s) still active and may race checkpointer teardown", timeout, len(pending))
         logger.info("Drained %d in-flight run(s) on shutdown (%d settled within %.1fs)", len(inflight), len(inflight) - len(pending), timeout)
+
+
+class CancelOutcome(StrEnum):
+    """Result of a :meth:`RunManager.cancel` call."""
+
+    cancelled = "cancelled"
+    taken_over = "taken_over"
+    lease_valid_elsewhere = "lease_valid_elsewhere"
+    not_cancellable = "not_cancellable"
+    not_active_locally = "not_active_locally"
+    unknown = "unknown"
 
 
 class ConflictError(Exception):

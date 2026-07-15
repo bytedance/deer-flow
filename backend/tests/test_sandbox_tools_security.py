@@ -451,6 +451,53 @@ def test_replace_virtual_paths_in_command_replaces_user_data_only() -> None:
         assert "/tmp/deer-flow/threads/t1/user-data/workspace/out.txt" in result
 
 
+@pytest.mark.parametrize(
+    "sibling",
+    [
+        "/mnt/user-data-backup/secret.txt",
+        "/mnt/user-data2/report.txt",
+        "/mnt/user-data.bak",
+        "/mnt/user-data_old/x",
+    ],
+)
+def test_replace_virtual_paths_in_command_does_not_rewrite_prefix_siblings(sibling: str) -> None:
+    """A path that merely starts with the virtual root is not a virtual path.
+
+    The matcher's trailing group needs a ``/`` to consume anything, so when the
+    character after ``/mnt/user-data`` is ``-``, ``.``, ``_``, a digit or a
+    letter, the group matches empty and the bare root still matches. The
+    substitution then rewrites it to the thread's host directory, and the rest of
+    the sibling name rides along — handing the command a real host path outside
+    the mount contract (``.../user-data-backup``), which the agent then reads or
+    writes.
+
+    Same defect as #4035 (reverse patterns) and #4053 (masking patterns),
+    mirrored into the virtual→host command direction.
+    """
+    result = replace_virtual_paths_in_command(f"cat {sibling}", _THREAD_DATA)
+
+    assert result == f"cat {sibling}"
+    assert "/tmp/deer-flow/threads/t1" not in result
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        # The bare root, at end of string and before shell/text punctuation, must
+        # keep translating — these guard the boundary from being narrowed too far.
+        ("ls /mnt/user-data", "ls /tmp/deer-flow/threads/t1/user-data"),
+        ("ls /mnt/user-data && pwd", "ls /tmp/deer-flow/threads/t1/user-data && pwd"),
+        ("PYTHONPATH=/mnt/user-data:/opt x", "PYTHONPATH=/tmp/deer-flow/threads/t1/user-data:/opt x"),
+        ("echo '/mnt/user-data, done'", "echo '/tmp/deer-flow/threads/t1/user-data, done'"),
+        # Real children still translate.
+        ("cat /mnt/user-data/workspace/a.txt", "cat /tmp/deer-flow/threads/t1/user-data/workspace/a.txt"),
+    ],
+)
+def test_replace_virtual_paths_in_command_still_translates_genuine_paths(command: str, expected: str) -> None:
+    """The narrowing must not stop translating paths that translate today."""
+    assert replace_virtual_paths_in_command(command, _THREAD_DATA) == expected
+
+
 # ---------- validate_local_bash_command_paths ----------
 
 

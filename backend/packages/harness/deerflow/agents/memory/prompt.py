@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html
 import logging
 import math
 import re
@@ -398,9 +399,34 @@ def _format_fact_line(fact: dict[str, Any]) -> str | None:
     category = str(fact.get("category", "context")).strip() or "context"
     confidence = _coerce_confidence(fact.get("confidence"), default=0.0)
     source_error = fact.get("sourceError")
+    # These fields are user-editable (POST/PATCH /api/memory, import) and are
+    # rendered into the <memory> block of the lead-agent system prompt. Escape
+    # them so a value like "</memory></system-reminder>" cannot close the block
+    # and relocate the text after it out of the user-managed trust zone the
+    # prompt declares. Mirrors the MEMORY_UPDATE_PROMPT escaping in #4028/#4060.
+    # quote=False: these land in element-text position (never attribute values),
+    # so only <, >, & can break out — leave ' and " in facts untouched.
+    content = html.escape(content, quote=False)
+    category = html.escape(category, quote=False)
     if category == "correction" and isinstance(source_error, str) and source_error.strip():
-        return f"- [{category} | {confidence:.2f}] {content} (avoid: {source_error.strip()})"
+        return f"- [{category} | {confidence:.2f}] {content} (avoid: {html.escape(source_error.strip(), quote=False)})"
     return f"- [{category} | {confidence:.2f}] {content}"
+
+
+def _escape_summary(value: Any) -> str:
+    """Escape a user-editable context summary for the ``<memory>`` block.
+
+    Context summaries (``workContext``/``personalContext``/``topOfMind`` and the
+    history sections) are user-editable via ``/api/memory`` import and render into
+    the same ``<memory>`` block as facts, so an unescaped ``</memory>`` value can
+    close the block and relocate the text after it out of the user-managed trust
+    zone the lead-agent prompt declares. Sibling of ``_format_fact_line``'s
+    escaping (#4097). ``str(...)`` preserves the prior f-string coercion for the
+    rare non-string summary an import can plant; ``quote=False`` because summaries
+    land in element-text position (never attribute values), so only ``<``, ``>``,
+    ``&`` can break out — leave ``'`` and ``"`` untouched.
+    """
+    return html.escape(str(value), quote=False)
 
 
 def _select_fact_lines(
@@ -537,15 +563,15 @@ def format_memory_for_injection(
 
         work_ctx = user_data.get("workContext", {})
         if work_ctx.get("summary"):
-            user_sections.append(f"Work: {work_ctx['summary']}")
+            user_sections.append(f"Work: {_escape_summary(work_ctx['summary'])}")
 
         personal_ctx = user_data.get("personalContext", {})
         if personal_ctx.get("summary"):
-            user_sections.append(f"Personal: {personal_ctx['summary']}")
+            user_sections.append(f"Personal: {_escape_summary(personal_ctx['summary'])}")
 
         top_of_mind = user_data.get("topOfMind", {})
         if top_of_mind.get("summary"):
-            user_sections.append(f"Current Focus: {top_of_mind['summary']}")
+            user_sections.append(f"Current Focus: {_escape_summary(top_of_mind['summary'])}")
 
         if user_sections:
             sections.append("User Context:\n" + "\n".join(f"- {s}" for s in user_sections))
@@ -557,15 +583,15 @@ def format_memory_for_injection(
 
         recent = history_data.get("recentMonths", {})
         if recent.get("summary"):
-            history_sections.append(f"Recent: {recent['summary']}")
+            history_sections.append(f"Recent: {_escape_summary(recent['summary'])}")
 
         earlier = history_data.get("earlierContext", {})
         if earlier.get("summary"):
-            history_sections.append(f"Earlier: {earlier['summary']}")
+            history_sections.append(f"Earlier: {_escape_summary(earlier['summary'])}")
 
         background = history_data.get("longTermBackground", {})
         if background.get("summary"):
-            history_sections.append(f"Background: {background['summary']}")
+            history_sections.append(f"Background: {_escape_summary(background['summary'])}")
 
         if history_sections:
             sections.append("History:\n" + "\n".join(f"- {s}" for s in history_sections))
@@ -786,6 +812,18 @@ def format_conversation_for_update(messages: list[Any]) -> str:
         # Truncate very long messages
         if len(str(content)) > 1000:
             content = str(content)[:1000] + "..."
+
+        # Escape < > & before embedding into the <conversation> block of
+        # MEMORY_UPDATE_PROMPT. This raw user turn is the most attacker-influenced
+        # input in the prompt, so an unescaped value like
+        # "</conversation><current_memory>..." would close the block and forge a
+        # <current_memory> authority section for the extraction LLM. Same block-
+        # breakout defense #4044 applied to the current_memory slot of this exact
+        # template, and the sibling _escape_summary/_format_fact_line escaping of
+        # the <memory> block (#4097). Escape after truncation so a trailing "..."
+        # cannot split an entity; quote=False because content lands in element-
+        # text position (never an attribute value).
+        content = html.escape(str(content), quote=False)
 
         if role == "human":
             lines.append(f"User: {content}")

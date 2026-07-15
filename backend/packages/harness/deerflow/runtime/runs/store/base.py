@@ -54,6 +54,29 @@ class RunStore(abc.ABC):
     ) -> list[dict[str, Any]]:
         pass
 
+    async def list_successful_regenerate_sources(
+        self,
+        thread_id: str,
+        *,
+        user_id: str | None = None,
+    ) -> set[str]:
+        """Return source run IDs superseded by successful regenerations.
+
+        Implementations must inspect the complete thread and must not apply the
+        normal bounded run-list limit.
+        """
+        raise NotImplementedError
+
+    async def get_many_by_thread(
+        self,
+        thread_id: str,
+        run_ids: set[str],
+        *,
+        user_id: str | None = None,
+    ) -> dict[str, dict[str, Any]]:
+        """Batch-load selected runs belonging to one thread."""
+        raise NotImplementedError
+
     @abc.abstractmethod
     async def update_status(
         self,
@@ -154,6 +177,28 @@ class RunStore(abc.ABC):
         lease_expires_at: str,
     ) -> bool:
         """Renew the lease on an active run. Returns ``False`` when no row matched."""
+        pass
+
+    @abc.abstractmethod
+    async def claim_for_takeover(
+        self,
+        run_id: str,
+        *,
+        grace_seconds: int,
+        error: str,
+    ) -> bool:
+        """Atomically mark an expired-lease active run as ``error``.
+
+        Only rows whose lease has expired past *grace_seconds* (or whose
+        lease is NULL — pre-ownership data) are updated.  The conditional
+        WHERE closes the race between the caller's stale read of the lease
+        and a concurrent heartbeat renewal by the owning worker.
+
+        Returns ``False`` when:
+          - the run is no longer ``pending`` / ``running``,
+          - the lease is still valid (owner heartbeat is alive), or
+          - the row doesn't exist.
+        """
         pass
 
     @abc.abstractmethod

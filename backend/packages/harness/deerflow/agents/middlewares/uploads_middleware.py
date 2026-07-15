@@ -396,7 +396,15 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
         # Extract original content - handle both string and list formats
         original_content = last_message.content
         additional_kwargs = dict(last_message.additional_kwargs or {})
-        additional_kwargs.setdefault(ORIGINAL_USER_CONTENT_KEY, message_content_to_text(original_content))
+        original_user_content = additional_kwargs.get(ORIGINAL_USER_CONTENT_KEY)
+        if not isinstance(original_user_content, str):
+            if ORIGINAL_USER_CONTENT_KEY in additional_kwargs:
+                logger.warning(
+                    "UploadsMiddleware replaced non-string %s metadata: type=%s",
+                    ORIGINAL_USER_CONTENT_KEY,
+                    type(original_user_content).__name__,
+                )
+            additional_kwargs[ORIGINAL_USER_CONTENT_KEY] = message_content_to_text(original_content)
         if isinstance(original_content, str):
             # Simple case: string content, just prepend files message
             updated_content = f"{files_message}\n\n{original_content}"

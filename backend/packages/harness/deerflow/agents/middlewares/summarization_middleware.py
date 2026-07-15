@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html
 import logging
 from dataclasses import dataclass
 from typing import Any, Protocol, override, runtime_checkable
@@ -218,12 +219,22 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
                     strategy="first",
                 )
 
+        # Escape < > & before embedding into the <existing_summary>/<new_messages>
+        # blocks. new_messages is get_buffer_string over the raw state["messages"]
+        # tail (InputSanitizationMiddleware only overrides the ModelRequest, never
+        # state, so the summarizer sees genuine user text); existing_summary is the
+        # prior turn's summary_text. An unescaped value like "</new_messages>..."
+        # would close the block and forge an authority section for the extraction
+        # LLM. Same block-breakout defense #4162 applied to the <conversation> block
+        # and #4097 to the <memory> block. Escape after trimming so a trailing "..."
+        # cannot split an entity; quote=False because content lands in element-text
+        # position (never an attribute value).
         parts: list[str] = []
         if trimmed_previous_summary:
             parts.extend(
                 [
                     "<existing_summary>",
-                    trimmed_previous_summary,
+                    html.escape(trimmed_previous_summary, quote=False),
                     "</existing_summary>",
                     "",
                 ]
@@ -232,7 +243,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
             parts.extend(
                 [
                     "<new_messages>",
-                    trimmed_new_messages,
+                    html.escape(trimmed_new_messages, quote=False),
                     "</new_messages>",
                 ]
             )

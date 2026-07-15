@@ -239,7 +239,7 @@ def search_memory_facts(
             continue
         matched.append(fact)
 
-    matched.sort(key=lambda f: f.get("confidence", 0), reverse=True)
+    matched.sort(key=_coerce_source_confidence, reverse=True)
     return matched[:limit]
 
 
@@ -323,7 +323,7 @@ def _extract_text(content: Any) -> str:
     return str(content)
 
 
-_REQUIRED_MEMORY_UPDATE_TOP_LEVEL_KEYS = frozenset({"user", "history", "newFacts", "factsToRemove"})
+_REQUIRED_MEMORY_UPDATE_TOP_LEVEL_KEYS = frozenset({"user", "history", "newFacts"})
 
 
 def _normalize_memory_update_fact(fact: Any) -> dict[str, Any] | None:
@@ -592,7 +592,7 @@ def _build_staleness_section(
     for fact in stale_candidates:
         fid = fact.get("id", "?")
         cat = html.escape(str(fact.get("category", "context")).strip() or "context")
-        conf = fact.get("confidence", 0.0)
+        conf = _coerce_source_confidence(fact)
         created_raw = fact.get("createdAt", "")
         created_short = created_raw[:10] if isinstance(created_raw, str) and len(created_raw) >= 10 else created_raw
         content = html.escape(str(fact.get("content", "")))
@@ -1038,7 +1038,7 @@ class MemoryUpdater:
                 max_stale = config.staleness_max_removals_per_cycle
                 if len(stale_ids_to_remove) > max_stale:
                     stale_facts = [f for f in current_memory.get("facts", []) if f.get("id") in stale_ids_to_remove]
-                    stale_facts.sort(key=lambda f: f.get("confidence", 0))
+                    stale_facts.sort(key=_coerce_source_confidence)
                     stale_ids_to_remove = {f["id"] for f in stale_facts[:max_stale]}
 
                 current_memory["facts"] = [f for f in current_memory.get("facts", []) if f.get("id") not in stale_ids_to_remove]

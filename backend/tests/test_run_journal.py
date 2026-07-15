@@ -8,9 +8,11 @@ from unittest.mock import MagicMock
 from uuid import uuid4
 
 import pytest
+from langchain_core.messages import HumanMessage
 
 from deerflow.runtime.events.store.memory import MemoryRunEventStore
 from deerflow.runtime.journal import RunJournal
+from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
 
 
 @pytest.fixture
@@ -57,6 +59,28 @@ def _make_llm_response(content="Hello", usage=None, tool_calls=None, additional_
 
 
 class TestLlmCallbacks:
+    @pytest.mark.anyio
+    async def test_on_chat_model_start_persists_original_user_input_without_mutating_model_message(self, journal_setup):
+        j, store = journal_setup
+        wrapped_content = "--- BEGIN USER INPUT ---\nShow revenue\n--- END USER INPUT ---"
+        model_message = HumanMessage(
+            content=wrapped_content,
+            id="human-1",
+            additional_kwargs={ORIGINAL_USER_CONTENT_KEY: "Show revenue", "channel": "web"},
+        )
+
+        j.on_chat_model_start({}, [[model_message]], run_id=uuid4(), tags=["lead_agent"])
+        await j.flush()
+
+        assert j._first_human_msg == "Show revenue"
+        events = await store.list_events("t1", "r1")
+        human_event = next(event for event in events if event["event_type"] == "llm.human.input")
+        assert human_event["content"]["content"] == "Show revenue"
+        assert human_event["content"]["id"] == "human-1"
+        assert human_event["content"]["additional_kwargs"] == {"channel": "web"}
+        assert model_message.content == wrapped_content
+        assert model_message.additional_kwargs[ORIGINAL_USER_CONTENT_KEY] == "Show revenue"
+
     @pytest.mark.anyio
     async def test_on_llm_end_produces_trace_event(self, journal_setup):
         j, store = journal_setup

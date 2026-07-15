@@ -2,6 +2,8 @@ import { getBackendBaseURL } from "../config";
 import { isStaticWebsiteOnly } from "../static-mode";
 import type { AgentThreadState } from "../threads";
 
+const EMPTY_ARTIFACT_PATHS: readonly string[] = [];
+
 export function urlOfArtifact({
   filepath,
   threadId,
@@ -25,7 +27,7 @@ export function urlOfArtifact({
 export function extractArtifactsFromThread(thread: {
   values: Pick<AgentThreadState, "artifacts">;
 }) {
-  return thread.values.artifacts ?? [];
+  return thread.values.artifacts ?? EMPTY_ARTIFACT_PATHS;
 }
 
 export function resolveArtifactURL(absolutePath: string, threadId: string) {

@@ -28,6 +28,7 @@ dependencies = [
 postgres = ["deerflow-harness[postgres]"]
 redis = ["deerflow-harness[redis]"]
 discord = ["discord.py>=2.7.0"]
+monocle = ["deerflow-harness[monocle]"]
 
 [dependency-groups]
 dev = [
@@ -37,6 +38,9 @@ dev = [
     "pytest>=9.0.3",
     "pytest-asyncio>=1.3.0",
     "ruff>=0.14.11",
+    # Monocle tracer (also the deerflow-harness[monocle] extra); kept in the dev
+    # group so the tracing tests can import it without forcing it onto installs.
+    "monocle_apptrace>=0.8.8",
     # redis is an optional runtime extra (deerflow-harness[redis]); pin it in the
     # dev group so the stream-bridge tests can always import/exercise the redis
     # bridge without forcing it onto production installs.

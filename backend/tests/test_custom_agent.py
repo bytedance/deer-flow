@@ -322,6 +322,73 @@ class TestLoadAgentSoul:
 
         assert soul is None
 
+    def test_loads_soul_without_config_yaml(self, tmp_path):
+        """SOUL.md should load even when the agent dir has no config.yaml (#4135)."""
+        agent_dir = tmp_path / "agents" / "soul-only"
+        agent_dir.mkdir(parents=True)
+        # Deliberately no config.yaml – the agent is configured externally
+        (agent_dir / "SOUL.md").write_text("You are a brave agent.", encoding="utf-8")
+
+        with patch("deerflow.config.agents_config.get_paths", return_value=_make_paths(tmp_path)), patch("deerflow.config.agents_config.get_effective_user_id", return_value="default"):
+            from deerflow.config.agents_config import load_agent_soul
+
+            soul = load_agent_soul("soul-only")
+
+        assert soul == "You are a brave agent."
+
+    def test_loads_soul_from_user_dir_without_config_yaml(self, tmp_path):
+        """Fallback should find SOUL.md when resolver returns a default dir without it (#4135).
+
+        Setup: per-user agent 'foo' exists as a memory-only directory
+        (no config.yaml, no SOUL.md). Legacy agent 'foo' has SOUL.md but
+        no config.yaml. resolve_agent_dir returns the per-user path as
+        default (neither dir has config.yaml). The fallback then finds
+        SOUL.md in the legacy directory.
+        """
+        # Per-user dir: memory-only (no config.yaml, no SOUL.md)
+        user_dir = tmp_path / "users" / "test-user" / "agents" / "foo"
+        user_dir.mkdir(parents=True)
+        (user_dir / "memory.json").write_text("{}", encoding="utf-8")
+
+        # Legacy dir: has SOUL.md but no config.yaml
+        legacy_dir = tmp_path / "agents" / "foo"
+        legacy_dir.mkdir(parents=True)
+        (legacy_dir / "SOUL.md").write_text("You are a legacy agent.", encoding="utf-8")
+
+        with patch("deerflow.config.agents_config.get_paths", return_value=_make_paths(tmp_path)), patch("deerflow.config.agents_config.get_effective_user_id", return_value="test-user"):
+            from deerflow.config.agents_config import load_agent_soul
+
+            soul = load_agent_soul("foo")
+
+        assert soul == "You are a legacy agent."
+
+    def test_soul_not_leaked_from_legacy_when_per_user_has_config(self, tmp_path):
+        """Per-user agent with config.yaml but no SOUL.md should NOT fall back to legacy SOUL.md.
+
+        This verifies the gated condition: fallback only fires when the
+        resolved dir lacks config.yaml. A properly-resolved per-user agent
+        that simply has no SOUL.md returns None, preserving the
+        "per-user entries fully shadow legacy entries" invariant.
+        """
+        # Legacy dir: has SOUL.md
+        legacy_dir = tmp_path / "agents" / "foo"
+        legacy_dir.mkdir(parents=True)
+        (legacy_dir / "config.yaml").write_text("name: foo\n")
+        (legacy_dir / "SOUL.md").write_text("You are a legacy agent.", encoding="utf-8")
+
+        # Per-user dir: has config.yaml (resolver returns this) but no SOUL.md
+        user_dir = tmp_path / "users" / "test-user" / "agents" / "foo"
+        user_dir.mkdir(parents=True)
+        (user_dir / "config.yaml").write_text("name: foo\n")
+        # No SOUL.md in per-user dir
+
+        with patch("deerflow.config.agents_config.get_paths", return_value=_make_paths(tmp_path)), patch("deerflow.config.agents_config.get_effective_user_id", return_value="test-user"):
+            from deerflow.config.agents_config import load_agent_soul
+
+            soul = load_agent_soul("foo")
+
+        assert soul is None
+
 
 # ===========================================================================
 # 5. list_custom_agents
@@ -627,6 +694,32 @@ class TestAgentsAPI:
                 }
             ],
         }
+
+    def test_update_memory_only_user_dir_with_legacy_agent_returns_409(self, agent_client, tmp_path):
+        """Regression for #3390's PUT /api/agents/{name} guard.
+
+        A per-user agent directory can exist containing only memory.json
+        (written the first time this user chats with a legacy shared
+        agent). The stale guard checked bare directory existence and
+        missed this case, letting the route silently fork a brand-new
+        config.yaml/SOUL.md into the memory-only directory instead of
+        blocking with the migration-script guidance.
+        """
+        legacy_dir = tmp_path / "agents" / "legacy-agent"
+        legacy_dir.mkdir(parents=True)
+        (legacy_dir / "config.yaml").write_text("name: legacy-agent\ndescription: legacy\n", encoding="utf-8")
+        (legacy_dir / "SOUL.md").write_text("legacy soul", encoding="utf-8")
+
+        user_agent_dir = tmp_path / "users" / "test-user-autouse" / "agents" / "legacy-agent"
+        user_agent_dir.mkdir(parents=True)
+        (user_agent_dir / "memory.json").write_text("{}", encoding="utf-8")
+
+        response = agent_client.put("/api/agents/legacy-agent", json={"soul": "should not write"})
+
+        assert response.status_code == 409
+        assert not (user_agent_dir / "config.yaml").exists()
+        assert not (user_agent_dir / "SOUL.md").exists()
+        assert (user_agent_dir / "memory.json").exists(), "the user's existing memory must be left untouched"
 
     def test_update_missing_agent_404(self, agent_client):
         response = agent_client.put("/api/agents/ghost-agent", json={"soul": "new"})

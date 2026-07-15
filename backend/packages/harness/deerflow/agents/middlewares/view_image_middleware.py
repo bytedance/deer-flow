@@ -1,6 +1,9 @@
 """Middleware for injecting image details into conversation before LLM call."""
 
+import asyncio
+import base64
 import logging
+from pathlib import Path
 from typing import override
 
 from langchain.agents.middleware import AgentMiddleware
@@ -10,6 +13,11 @@ from langgraph.runtime import Runtime
 from deerflow.agents.thread_state import ThreadState
 
 logger = logging.getLogger(__name__)
+
+# Mirror the tool-side size cap as a defense-in-depth check. The tool
+# enforces this at write time; the middleware re-checks at read time in
+# case the file grew on disk between view and injection.
+_MAX_IMAGE_BYTES = 20 * 1024 * 1024
 
 
 class ViewImageMiddlewareState(ThreadState):
@@ -91,8 +99,42 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
         # Check if all tool calls have been completed
         return tool_call_ids.issubset(completed_tool_ids)
 
+    @staticmethod
+    def _read_image_as_data_url(actual_path: str, mime_type: str, expected_size: int) -> str | None:
+        """Read image file and return a `data:` URL, or None on failure.
+
+        Trust assumption: ``actual_path`` is set by ``view_image_tool``
+        (server-side, validated against the allowed virtual roots at write
+        time) and held in LangGraph-controlled state. Client input cannot
+        reach this field, so the read scope is trusted. We still re-check
+        size at read time to defend against TOCTOU growth and skip files
+        exceeding ``_MAX_IMAGE_BYTES``.
+        """
+        try:
+            file_path = Path(actual_path)
+            if not file_path.exists() or not file_path.is_file():
+                return None
+            current_size = file_path.stat().st_size
+            if current_size != expected_size:
+                # File changed between view and inject - skip.
+                return None
+            if current_size > _MAX_IMAGE_BYTES:
+                return None
+            with open(file_path, "rb") as f:
+                image_bytes = f.read()
+            base64_data = base64.b64encode(image_bytes).decode("utf-8")
+            return f"data:{mime_type};base64,{base64_data}"
+        except OSError:
+            return None
+
     def _create_image_details_message(self, state: ViewImageMiddlewareState) -> list[str | dict]:
         """Create a formatted message with all viewed image details.
+
+        Reads image files from disk on-demand and encodes them as base64
+        for the model. The base64 data is NOT persisted in state -- only
+        lightweight metadata (path, mime_type, size) is stored in
+        ``viewed_images``, avoiding large duplicate payloads across every
+        checkpoint (see #4138).
 
         Args:
             state: Current state containing viewed_images
@@ -110,19 +152,24 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
 
         for image_path, image_data in viewed_images.items():
             mime_type = image_data.get("mime_type", "unknown")
-            base64_data = image_data.get("base64", "")
+            actual_path = image_data.get("actual_path", "")
+            expected_size = image_data.get("size", 0)
 
             # Add text description
             content_blocks.append({"type": "text", "text": f"\n- **{image_path}** ({mime_type})"})
 
-            # Add the actual image data so LLM can "see" it
-            if base64_data:
-                content_blocks.append(
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": f"data:{mime_type};base64,{base64_data}"},
-                    }
-                )
+            # Read the image file on-demand and encode as base64 for the model
+            if actual_path:
+                data_url = self._read_image_as_data_url(actual_path, mime_type, expected_size)
+                if data_url:
+                    content_blocks.append(
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": data_url},
+                        }
+                    )
+                else:
+                    content_blocks.append({"type": "text", "text": f"  (file unavailable or changed on disk: {actual_path})"})
 
         return content_blocks
 
@@ -221,4 +268,11 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
         Returns:
             State update with additional human message, or None if no update needed
         """
-        return self._inject_image_message(state)
+        if not self._should_inject_image_message(state):
+            return None
+        # Image reads + base64 encoding can be slow (up to 20MB), so offload
+        # the blocking work to a thread rather than stalling the event loop.
+        image_content = await asyncio.to_thread(self._create_image_details_message, state)
+        human_msg = HumanMessage(content=image_content, additional_kwargs={"hide_from_ui": True})
+        logger.debug("Injecting image details message with images before LLM call")
+        return {"messages": [human_msg]}

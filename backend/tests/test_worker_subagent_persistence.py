@@ -155,6 +155,52 @@ async def test_store_errors_do_not_propagate():
 
 
 @pytest.mark.asyncio
+async def test_flush_rebuffers_batch_on_store_failure():
+    # A failed put_batch must re-buffer the events instead of dropping them, so a
+    # transient store error does not silently lose subagent step history.
+    buffer = _SubagentEventBuffer(_BoomStore(), "thread_1", "run_1")
+    await buffer.add(_running_step(message_index=1))
+    await buffer.add(_running_step(message_index=2))
+
+    await buffer.flush()  # BoomStore raises; batch must be retained, not dropped
+
+    assert [e["metadata"]["message_index"] for e in buffer._pending] == [1, 2]
+
+
+class _FailOnceStore:
+    """Raises on the first put_batch, then records subsequent batches."""
+
+    def __init__(self):
+        self.calls = 0
+        self.batches: list[list[dict]] = []
+
+    async def put_batch(self, events):
+        self.calls += 1
+        if self.calls == 1:
+            raise RuntimeError("transient db error")
+        self.batches.append([dict(e) for e in events])
+        return list(events)
+
+
+@pytest.mark.asyncio
+async def test_rebuffered_batch_is_prepended_ahead_of_new_events():
+    # After a failed flush the retained batch is prepended, so once the store
+    # recovers the events persist in original order ahead of later arrivals.
+    store = _FailOnceStore()
+    buffer = _SubagentEventBuffer(store, "thread_1", "run_1")
+
+    await buffer.add(_running_step(message_index=1))
+    await buffer.flush()  # fails -> re-buffers [1]
+
+    await buffer.add(_running_step(message_index=2))  # arrives after the failure
+    await buffer.flush()  # succeeds
+
+    assert len(store.batches) == 1
+    assert [e["metadata"]["message_index"] for e in store.batches[0]] == [1, 2]
+    assert buffer._pending == []
+
+
+@pytest.mark.asyncio
 async def test_roundtrip_step_is_listable_but_not_in_message_feed():
     # End-to-end against the real in-memory store: a persisted subagent step is
     # retrievable via list_events (fetch-on-expand) yet never leaks into the
