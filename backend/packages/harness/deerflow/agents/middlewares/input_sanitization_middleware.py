@@ -73,6 +73,7 @@ _BLOCKED_TAG_NAMES: frozenset[str] = frozenset(
         "critical_reminders",
         "response_style",
         "citations",
+        "uploaded_files",  # old uploads tag — still processed by deermem for backward-compat
         "current_uploads",
         "subagent_system",
         "skill_system",
@@ -303,11 +304,11 @@ class InputSanitizationMiddleware(AgentMiddleware[AgentState]):
             # Sanitize only the user's original input when available (set by
             # UploadsMiddleware before it prepends the <current_uploads> block),
             # so server-injected trusted blocks are never scanned for blocked
-            # tags.  Fall back to full-content scanning when the marker is absent
-            # — UploadsMiddleware only sets it on turns with uploads, so plain
-            # text messages won't have it.  Full-content scanning is safe for
-            # those: no server-injected <current_uploads> block exists to
-            # accidentally escape.
+            # tags.  Fall back to full-content scanning only when the marker is
+            # absent — UploadsMiddleware sets it on upload turns, so plain text
+            # messages without uploads won't have it.  Full-content scanning is
+            # safe for those: no server-injected <current_uploads> block exists
+            # to accidentally escape.
             preserved_kwargs = dict(msg.additional_kwargs or {})
             original_user_content = preserved_kwargs.get(ORIGINAL_USER_CONTENT_KEY)
             if isinstance(original_user_content, str) and original_user_content:
@@ -321,18 +322,25 @@ class InputSanitizationMiddleware(AgentMiddleware[AgentState]):
                     else:
                         # _extract_text_from_content and message_content_to_text
                         # disagreed on text extraction — rfind failed.
-                        # text_blocks is None for string content; if we get here
-                        # with string content, log the unexpected path and fall
-                        # back.  Server-injected blocks are safe to escape here
-                        # because string content means no <current_uploads> was
-                        # prepended (UploadsMiddleware converts to list content
-                        # when it injects the block).
+                        # For string content this branch is unreachable
+                        # (message_content_to_text(str) returns the string
+                        # verbatim, so original_user_content is always a suffix
+                        # of text_content).  For multimodal content, fall back
+                        # to full-content sanitization — the server-injected
+                        # block may be escaped, which is a UX degradation but
+                        # not a security regression (user forgeries are still
+                        # neutralized).
                         logger.warning(
                             "rfind failed with original_user_content set; falling back to full-content sanitization",
                         )
                         processed = _check_user_content(text_content)
                 else:
                     processed = text_content  # no change needed
+            elif isinstance(original_user_content, str):
+                # Key is present but empty string (e.g. file upload with no
+                # text input).  No user text to sanitize; server-injected
+                # blocks must survive untouched.
+                processed = text_content
             else:
                 processed = _check_user_content(text_content)  # fallback
 

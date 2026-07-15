@@ -114,17 +114,18 @@ def _list_uploaded_files_impl(
     # Skip .md files that are conversion artifacts (have a same-stem non-.md sibling).
     candidates: list[tuple[float, Path]] = []
     try:
-        # First pass: collect all non-staging filenames so we can detect conversion artifacts
-        all_names: set[str] = {entry.name for entry in os.scandir(uploads_dir) if entry.is_file() and not is_upload_staging_file(entry.name)}
+        # Collect file entries once to build the name set and iterate.
+        entries = [e for e in os.scandir(uploads_dir) if e.is_file() and not is_upload_staging_file(e.name)]
+        all_names: set[str] = {e.name for e in entries}
 
-        for entry in os.scandir(uploads_dir):
-            if not entry.is_file():
-                continue
-            if is_upload_staging_file(entry.name):
-                continue
+        for entry in entries:
             if entry.name in current_run_filenames:
                 continue
-            # Skip .md files that are conversion artifacts of another file
+            # Skip .md files that are conversion artifacts of another file.
+            # Known limitation: if a user manually uploads both report.pdf and
+            # report.md, the .md is hidden as a "conversion artifact".  This is
+            # acceptable for the MVP — triggering this requires uploading files
+            # whose stems collide with converted documents, which is rare.
             if entry.name.endswith(".md"):
                 stem = entry.name[:-3]  # remove ".md"
                 non_md_siblings = {n for n in all_names if n != entry.name and Path(n).stem == stem}
