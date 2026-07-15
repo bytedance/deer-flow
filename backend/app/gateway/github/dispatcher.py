@@ -398,6 +398,28 @@ async def fanout_event(
         # (The store accepts a pre-known thread id; manager will fall
         # through to _create_thread() the very first time.)
         topic_id = f"{number}:{agent.name}"
+        # Inbound dedupe identity for ChannelManager._is_duplicate_inbound,
+        # mirroring the stable per-message id the other channels stamp (Slack
+        # `ts`, Telegram `message_id`, WeChat/WeCom `message_id`, …) that the
+        # dedupe added in PR #3584 keys on. ``X-GitHub-Delivery`` is GitHub's
+        # globally-unique per-delivery GUID; it is reused verbatim when a
+        # delivery is retried after a timeout or replayed via the repo/App
+        # "Redeliver" button, so keying on it lets the manager absorb those
+        # replays instead of re-running the agent (and its real side effects,
+        # e.g. a duplicate PR comment). One delivery fans out to N agents
+        # across potentially N different owning users, so the per-message id
+        # is scoped to (delivery, user, agent): an identical redelivery
+        # reproduces the same triples (deduped) while two agents matching the
+        # same delivery — including two different users who each bind an
+        # agent of the same name to the same repo+event — keep distinct ids
+        # and both still fire. ``ChannelManager._inbound_dedupe_key`` indexes
+        # on (channel, workspace_id, chat_id, message_id); workspace_id and
+        # chat_id are both the repo here, so match.user_id is the only thing
+        # that can separate two users in that key — see
+        # test_dedupe_identity_distinguishes_same_agent_name_across_users.
+        # Left None when the header is absent, so the manager fails open (no
+        # dedupe) exactly as before rather than collapsing distinct deliveries.
+        dedupe_message_id = f"{delivery_id}:{match.user_id}:{agent.name}" if delivery_id else None
         msg = InboundMessage(
             channel_name="github",
             chat_id=repo,
@@ -408,7 +430,15 @@ async def fanout_event(
             # owner_user_id drives which user bucket the run executes in
             # (custom agent lookup, sandbox, memory).
             owner_user_id=match.user_id,
+            # Tenant key the manager's dedupe requires (it fails closed without
+            # one, to avoid collapsing two workspaces). The repo is globally
+            # unique and always present — mirrors Telegram/WeChat keying the
+            # workspace on the chat id.
+            workspace_id=repo,
             metadata={
+                # Stable inbound-dedupe id keyed by the manager — see
+                # ``dedupe_message_id`` above.
+                "message_id": dedupe_message_id,
                 # Routes to the right custom agent inside the manager:
                 # _resolve_run_params() pulls this and writes it into
                 # run_context["agent_name"].
