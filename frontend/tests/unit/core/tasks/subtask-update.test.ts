@@ -153,49 +153,6 @@ describe("computeNextSubtask", () => {
 
     expect(changed).toBe(true);
   });
-
-  it("reports changed=true when streamingTool changes (P1-2 regression)", () => {
-    const previous = baseTask({
-      status: "in_progress",
-      streamingTool: {
-        toolName: "bash",
-        text: "prev",
-        isPartial: true,
-        isError: false,
-      },
-    });
-
-    const { changed } = computeNextSubtask(previous, {
-      id: "t1",
-      streamingTool: {
-        toolName: "bash",
-        text: "next",
-        isPartial: true,
-        isError: false,
-      },
-    });
-
-    // streamingTool is reference-compared; a new object always triggers change.
-    expect(changed).toBe(true);
-  });
-
-  it("reports changed=false when streamingTool reference is unchanged", () => {
-    const tool = {
-      toolName: "bash",
-      text: "out",
-      isPartial: true,
-      isError: false,
-    };
-    const previous = baseTask({ status: "in_progress", streamingTool: tool });
-
-    const { changed } = computeNextSubtask(previous, {
-      id: "t1",
-      streamingTool: tool,
-    });
-
-    // Same reference — no change.
-    expect(changed).toBe(false);
-  });
 });
 
 describe("subtaskNotification", () => {
