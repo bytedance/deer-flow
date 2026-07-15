@@ -993,11 +993,18 @@ async def _prepare_goal_continuation_input(
     if not _goal_instance_matches(updated_goal, latest_goal) or latest_checkpoint_tuple is None:
         return None
     if visible_conversation_signature(_read_checkpoint_messages(latest_checkpoint_tuple)) != conversation_signature_before:
+        # Do not pass continuation_count here: the persist above already
+        # committed it (as next_count). Re-passing next_count would make
+        # _persist_goal_evaluation's race guard (#4088) see that same write as
+        # a "current_count" bump and add another +1 on top of it, silently
+        # double-counting this single continuation attempt against the
+        # continuation budget even though it is being stood down, not
+        # delivered. Omitting it leaves the already-committed count untouched,
+        # matching every other stand-down call site in this function.
         await _persist(
             latest_goal,
             evaluation,
             no_progress_count,
-            continuation_count=next_count,
             stand_down_reason="thread_changed_before_continuation",
         )
         return None

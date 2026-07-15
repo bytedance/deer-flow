@@ -48,6 +48,47 @@ class _ClearBeforeSecondGoalReadCheckpointer:
         return await self.inner.aput(*args, **kwargs)
 
 
+class _RaceAfterFirstContinuationCommitCheckpointer:
+    """Wrap a saver and inject a racing user message right after the first
+    goal-continuation commit lands.
+
+    ``_prepare_goal_continuation_input``'s real continuation commit (the
+    ``_persist(..., continuation_count=next_count)`` call that records the
+    evaluator's decision to continue) performs this scenario's first
+    ``aput``. Injecting a racing visible message immediately after that write
+    lands lets the worker's trailing visible-conversation-signature re-check
+    observe a thread change that happened *after* the continuation was
+    committed but *before* that re-check runs -- modelling the
+    ``thread_changed_before_continuation`` race.
+    """
+
+    def __init__(self, inner: InMemorySaver, thread_id: str) -> None:
+        self.inner = inner
+        self.thread_id = thread_id
+        self.put_count = 0
+
+    def get_next_version(self, current, channel):
+        return self.inner.get_next_version(current, channel)
+
+    async def aget_tuple(self, config):
+        return await self.inner.aget_tuple(config)
+
+    async def aput(self, *args, **kwargs):
+        result = await self.inner.aput(*args, **kwargs)
+        self.put_count += 1
+        if self.put_count == 1:
+            checkpoint_tuple = await self.inner.aget_tuple({"configurable": {"thread_id": self.thread_id, "checkpoint_ns": ""}})
+            checkpoint = getattr(checkpoint_tuple, "checkpoint", {}) or {}
+            channel_values = checkpoint.get("channel_values", {}) or {}
+            current_messages = channel_values.get("messages", []) or []
+            await _write_messages(
+                self.inner,
+                thread_id=self.thread_id,
+                messages=[*current_messages, HumanMessage(content="Actually, stop and wait.")],
+            )
+        return result
+
+
 async def _seed_goal_thread(
     checkpointer: InMemorySaver,
     *,
@@ -382,6 +423,60 @@ async def test_goal_worker_stands_down_when_thread_changes_after_evaluation(monk
     assert latest_goal is not None
     assert latest_goal["continuation_count"] == 0
     assert latest_goal["last_evaluation"]["stand_down_reason"] == "thread_changed_after_evaluation"
+
+
+@pytest.mark.asyncio
+async def test_goal_worker_stands_down_when_thread_changes_before_continuation(monkeypatch):
+    """A user message racing in right after the continuation commits must not
+    double-bump continuation_count.
+
+    Sibling scenario to ``..._after_evaluation`` above, but the race lands
+    later: after the evaluator runs and after _prepare_goal_continuation_input
+    commits the real continuation (``_persist(..., continuation_count=next_count)``),
+    a racing visible message arrives before the function's trailing re-check.
+    That re-check detects the changed thread and stands down via a second
+    ``_persist(..., continuation_count=next_count, stand_down_reason=...)``
+    call using the *same* next_count as the first, already-successful call.
+
+    Without the fix, that second call re-triggers PR #4088's
+    max(continuation_count, current_count + 1) guard against its own sibling
+    call's prior write (current_count is already next_count from the first
+    call), bumping continuation_count to next_count + 1 a second time --
+    consuming 2 units of the continuation budget for a cycle that delivered
+    zero actual continuations. The fix must leave it at next_count (1).
+    """
+    inner = InMemorySaver()
+    thread_id = "race-before-continuation-thread"
+    await _seed_goal_thread(inner, thread_id=thread_id, goal_text="Finish all tests")
+    checkpointer = _RaceAfterFirstContinuationCommitCheckpointer(inner, thread_id)
+    bridge = _CollectingBridge()
+
+    async def fake_evaluate_goal_completion(_goal, _messages, **_kwargs):
+        return GoalEvaluation(
+            satisfied=False,
+            blocker="goal_not_met_yet",
+            reason="More work remains.",
+            evidence_summary="Work remains.",
+        )
+
+    monkeypatch.setattr(worker, "evaluate_goal_completion", fake_evaluate_goal_completion)
+
+    continuation = await worker._prepare_goal_continuation_input(
+        bridge=bridge,
+        checkpointer=checkpointer,
+        thread_id=thread_id,
+        run_id="run-race-before-continuation",
+        model_name="test-model",
+        app_config=None,
+    )
+
+    assert continuation is None
+    latest_goal = await read_thread_goal(inner, thread_id)
+    assert latest_goal is not None
+    # Without the fix this is 2 (double-bumped). It must be 1: one real
+    # continuation attempt was committed and then stood down, not two.
+    assert latest_goal["continuation_count"] == 1
+    assert latest_goal["last_evaluation"]["stand_down_reason"] == "thread_changed_before_continuation"
 
 
 @pytest.mark.asyncio
