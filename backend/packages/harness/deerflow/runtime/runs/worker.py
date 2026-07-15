@@ -528,6 +528,8 @@ async def run_agent(
                 app_config=ctx.app_config,
                 evaluator_model_factory=_get_goal_evaluator_model,
                 abort_event=record.abort_event,
+                user_id=resolve_runtime_user_id(runtime),
+                deerflow_trace_id=deerflow_trace_id,
             )
             if continuation_input is None or record.abort_event.is_set():
                 break
@@ -842,6 +844,8 @@ async def _prepare_goal_continuation_input(
     app_config: AppConfig | None,
     evaluator_model_factory: Any | None = None,
     abort_event: asyncio.Event | None = None,
+    user_id: str | None = None,
+    deerflow_trace_id: str | None = None,
 ) -> dict[str, Any] | None:
     """Evaluate the active goal and return a hidden continuation input if needed.
 
@@ -919,6 +923,9 @@ async def _prepare_goal_continuation_input(
             model=evaluator_model,
             model_name=model_name,
             app_config=app_config,
+            thread_id=thread_id,
+            user_id=user_id,
+            deerflow_trace_id=deerflow_trace_id,
         )
         if abort_event is not None and abort_event.is_set():
             return None
