@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import logging
 from typing import Any
 
@@ -16,6 +17,26 @@ from app.channels.message_bus import InboundMessageType, MessageBus, OutboundMes
 logger = logging.getLogger(__name__)
 
 _slack_md_converter = SlackMarkdownConverter()
+
+
+def _escape_slack_text(text: str) -> str:
+    """Escape Slack's reserved characters (``&``, ``<``, ``>``) in raw message text.
+
+    Slack requires callers to replace these with their HTML entity equivalents
+    (``&amp;``, ``&lt;``, ``&gt;``) before sending message text -- an unescaped
+    ``<...>`` triggers Slack's own mention/link syntax (e.g. ``<@USERID>``,
+    ``<http://url|label>``). See:
+    https://api.slack.com/reference/surfaces/formatting#escaping
+
+    This MUST run before ``_slack_md_converter.convert()``, not after: the
+    converter emits its own mrkdwn link syntax (``<url|label>``) for real
+    markdown links, and that generated syntax must reach Slack unescaped.
+    Escaping the raw input first -- and leaving the converter's own output
+    alone -- satisfies both requirements. ``html.escape(..., quote=False)``
+    replaces ``&`` before ``<``/``>``, so the entities it introduces are never
+    re-escaped.
+    """
+    return html.escape(text, quote=False)
 
 
 def _normalize_allowed_users(allowed_users: Any) -> set[str]:
@@ -128,7 +149,7 @@ class SlackChannel(Channel):
 
         kwargs: dict[str, Any] = {
             "channel": msg.chat_id,
-            "text": _slack_md_converter.convert(msg.text),
+            "text": _slack_md_converter.convert(_escape_slack_text(msg.text)),
         }
         if msg.thread_ts:
             kwargs["thread_ts"] = msg.thread_ts
