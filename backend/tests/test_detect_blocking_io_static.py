@@ -105,6 +105,128 @@ def test_scan_file_detects_self_helper_reached_from_async_method(tmp_path: Path)
     assert findings[0]["event_loop_exposure"] == "ASYNC_REACHABLE_SAME_FILE"
 
 
+def test_scan_file_detects_self_attribute_chain_helper_reached_from_async_method(tmp_path: Path) -> None:
+    """self.store.flush() is one hop deeper than the self.flush() case above.
+
+    The receiver (`self.store`) is not the literal Name `self`, so it used to
+    fall through every branch in `_record_call_ref` and be silently dropped
+    from the call graph -- a false negative for a real blocking call reachable
+    from async code.
+    """
+    source_file = _write_python(
+        tmp_path / "sample.py",
+        """
+        class Store:
+            def flush(self):
+                with open("out.txt", "w") as handle:
+                    handle.write("x")
+
+        class Router:
+            def __init__(self, store):
+                self.store = store
+
+            async def get(self):
+                return self.store.flush()
+        """,
+    )
+
+    findings = _payload(source_file, tmp_path)
+
+    assert len(findings) == 1
+    assert findings[0]["location"]["function"] == "Store.flush"
+    assert findings[0]["event_loop_exposure"] == "ASYNC_REACHABLE_SAME_FILE"
+    assert findings[0]["blocking_call"]["symbol"] == "open"
+
+
+def test_scan_file_detects_local_variable_alias_of_self_attribute(tmp_path: Path) -> None:
+    """store = self.store; store.flush() must resolve the same as self.store.flush().
+
+    The local variable is traced back, within the same function, to a
+    self.-rooted attribute -- the same one-hop-back scope as the constructor
+    parameter case below, just through an intermediate local name.
+    """
+    source_file = _write_python(
+        tmp_path / "sample.py",
+        """
+        class Store:
+            def flush(self):
+                with open("out.txt", "w") as handle:
+                    handle.write("x")
+
+        class Router:
+            def __init__(self, store):
+                self.store = store
+
+            async def get(self):
+                store = self.store
+                return store.flush()
+        """,
+    )
+
+    findings = _payload(source_file, tmp_path)
+
+    assert len(findings) == 1
+    assert findings[0]["location"]["function"] == "Store.flush"
+    assert findings[0]["event_loop_exposure"] == "ASYNC_REACHABLE_SAME_FILE"
+    assert findings[0]["blocking_call"]["symbol"] == "open"
+
+
+def test_scan_file_detects_constructor_parameter_used_directly_as_receiver(tmp_path: Path) -> None:
+    """A function parameter (e.g. a constructor-injected dependency) used
+    directly as a call receiver, with no self./cls. attribute in between,
+    is the other local-alias origin the fix traces (same function only).
+    """
+    source_file = _write_python(
+        tmp_path / "sample.py",
+        """
+        class Store:
+            def flush(self):
+                with open("out.txt", "w") as handle:
+                    handle.write("x")
+
+        class Router:
+            def _flush_via(self, store):
+                store.flush()
+
+            async def get(self, store):
+                return self._flush_via(store)
+        """,
+    )
+
+    findings = _payload(source_file, tmp_path)
+
+    assert len(findings) == 1
+    assert findings[0]["location"]["function"] == "Store.flush"
+    assert findings[0]["event_loop_exposure"] == "ASYNC_REACHABLE_SAME_FILE"
+    assert findings[0]["blocking_call"]["symbol"] == "open"
+
+
+def test_scan_file_does_not_trace_unrelated_local_variables_as_receivers(tmp_path: Path) -> None:
+    """Scope guardrail: a local variable with no traceable origin (not a
+    parameter, not assigned from a self./cls. attribute or another traced
+    name) must NOT be resolved through the bare-method-name fallback, or the
+    fix would reintroduce broad false positives the tool already avoids.
+    """
+    source_file = _write_python(
+        tmp_path / "sample.py",
+        """
+        class Unrelated:
+            def flush(self):
+                with open("out.txt", "w") as handle:
+                    handle.write("x")
+
+        def helper():
+            data = compute()
+            data.flush()
+
+        async def route():
+            return helper()
+        """,
+    )
+
+    assert detector.scan_file(source_file, repo_root=tmp_path) == []
+
+
 def test_json_output_uses_concise_review_record_schema(tmp_path: Path, capsys) -> None:
     source_file = _write_python(
         tmp_path / "sample.py",

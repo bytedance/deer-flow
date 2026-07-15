@@ -325,6 +325,7 @@ class BlockingIOStaticVisitor(ast.NodeVisitor):
         self.functions_by_name: dict[str, list[str]] = defaultdict(list)
         self.call_refs: dict[str, list[_CallRef]] = defaultdict(list)
         self.path_like_name_stack: list[set[str]] = []
+        self.local_receiver_alias_stack: list[set[str]] = []
         self.potential_findings: list[_PotentialFinding] = []
 
     @property
@@ -367,12 +368,14 @@ class BlockingIOStaticVisitor(ast.NodeVisitor):
 
     def visit_Assign(self, node: ast.Assign) -> None:
         self._record_sync_http_client_targets(node.value, node.targets)
+        self._record_local_receiver_alias_targets(node.value, node.targets)
         self.generic_visit(node)
 
     def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
         self._record_path_like_annotation(node.annotation, [node.target])
         if node.value is not None:
             self._record_sync_http_client_targets(node.value, [node.target])
+            self._record_local_receiver_alias_targets(node.value, [node.target])
         self.generic_visit(node)
 
     def visit_With(self, node: ast.With) -> None:
@@ -416,7 +419,9 @@ class BlockingIOStaticVisitor(ast.NodeVisitor):
         self.function_stack.append(context)
         self.sync_http_client_stack.append({})
         self.path_like_name_stack.append(set(_path_like_argument_names(node.args, self._canonical_name)))
+        self.local_receiver_alias_stack.append(set(_all_argument_names(node.args)))
         self.generic_visit(node)
+        self.local_receiver_alias_stack.pop()
         self.path_like_name_stack.pop()
         self.sync_http_client_stack.pop()
         self.function_stack.pop()
@@ -441,10 +446,31 @@ class BlockingIOStaticVisitor(ast.NodeVisitor):
         if receiver in {"self", "cls"}:
             self.call_refs[current.qualname].append(_CallRef(node.func.attr, current.class_name, self_method=True))
             return
+        if self._is_traceable_same_function_receiver(receiver):
+            # Multi-hop self./cls. attribute chains (self.store.flush()) and local
+            # variables/parameters traced back -- within this same function only --
+            # to a self./cls. attribute or a parameter (store = self.store;
+            # store.flush()) cannot be resolved to a specific class without full
+            # type inference. Fall back to the same conservative same-file,
+            # bare-method-name resolution already used below for receivers that
+            # cannot be resolved to a name at all, rather than dropping the edge.
+            self.call_refs[current.qualname].append(_CallRef(node.func.attr, current.class_name, self_method=False))
+            return
         # Keep same-module direct calls through canonical aliases out of the call graph.
         # External calls are handled as blocking candidates instead.
         if "." not in call_name:
             self.call_refs[current.qualname].append(_CallRef(call_name, current.class_name, self_method=False))
+
+    def _is_traceable_same_function_receiver(self, receiver: str | None) -> bool:
+        # True when `receiver` is a self./cls.-rooted attribute chain, or a name
+        # traced -- within the current function only -- back to one of those or
+        # to a parameter. Deliberately no cross-function/cross-module alias or
+        # type inference; see `local_receiver_alias_stack` and
+        # `_record_local_receiver_alias_targets`.
+        if receiver is None:
+            return False
+        root = receiver.split(".", 1)[0]
+        return root in {"self", "cls"} or root in self.current_local_receiver_aliases
 
     def _record_blocking_candidate(self, node: ast.Call, call_name: str, current: _FunctionContext) -> None:
         rule = self._blocking_rule(node, call_name)
@@ -512,6 +538,10 @@ class BlockingIOStaticVisitor(ast.NodeVisitor):
     def current_path_like_names(self) -> set[str]:
         return self.path_like_name_stack[-1] if self.path_like_name_stack else set()
 
+    @property
+    def current_local_receiver_aliases(self) -> set[str]:
+        return self.local_receiver_alias_stack[-1] if self.local_receiver_alias_stack else set()
+
     def _record_path_like_annotation(self, annotation: ast.AST, targets: Iterable[ast.AST]) -> None:
         if not self.path_like_name_stack or not _is_path_annotation(annotation, self._canonical_name):
             return
@@ -525,6 +555,19 @@ class BlockingIOStaticVisitor(ast.NodeVisitor):
         for target in targets:
             for name in _iter_assigned_names(target):
                 current_clients[name] = client_base
+
+    def _record_local_receiver_alias_targets(self, value: ast.AST, targets: Iterable[ast.AST]) -> None:
+        if not self.local_receiver_alias_stack:
+            return
+        dotted = dotted_name(value)
+        if dotted is None:
+            return
+        current_aliases = self.current_local_receiver_aliases
+        root = dotted.split(".", 1)[0]
+        if root not in {"self", "cls"} and root not in current_aliases:
+            return
+        for target in targets:
+            current_aliases.update(_iter_assigned_names(target))
 
     def _sync_http_client_factory_base(self, node: ast.AST) -> str | None:
         if not isinstance(node, ast.Call):
@@ -573,15 +616,28 @@ def _is_path_annotation(annotation: ast.AST | None, canonical_name: Callable[[st
     return False
 
 
-def _path_like_argument_names(arguments: ast.arguments, canonical_name: Callable[[str | None], str | None]) -> Iterable[str]:
+def _iter_arguments(arguments: ast.arguments) -> Iterable[ast.arg]:
     candidates = [*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs]
     if arguments.vararg is not None:
         candidates.append(arguments.vararg)
     if arguments.kwarg is not None:
         candidates.append(arguments.kwarg)
-    for argument in candidates:
+    yield from candidates
+
+
+def _path_like_argument_names(arguments: ast.arguments, canonical_name: Callable[[str | None], str | None]) -> Iterable[str]:
+    for argument in _iter_arguments(arguments):
         if _is_path_annotation(argument.annotation, canonical_name):
             yield argument.arg
+
+
+def _all_argument_names(arguments: ast.arguments) -> Iterable[str]:
+    # Every parameter name of a function, unfiltered by annotation -- used to
+    # seed same-function receiver-alias tracing (see
+    # `local_receiver_alias_stack`) so a parameter used directly as a call
+    # receiver (e.g. a constructor-injected dependency) is traceable too.
+    for argument in _iter_arguments(arguments):
+        yield argument.arg
 
 
 def _iter_assigned_names(target: ast.AST) -> Iterable[str]:

@@ -111,8 +111,15 @@ detect-blocking-io` resolve to the same repo-root path). JSON findings include
 `code` for model-assisted or manual review. `priority` is a deterministic
 review ordering from operation type, not proof of a bug. Bare-name same-file
 calls are resolved by function name, so duplicate helper names in one file can
-conservatively over-report async reachability. It is intentionally
-informational and is not run from CI in this round.
+conservatively over-report async reachability. The call graph also resolves
+multi-hop `self.`/`cls.` attribute chains (`self.store.flush()`) and local
+variables or parameters traced back — within the same function only — to a
+`self.`/`cls.` attribute (`store = self.store; store.flush()`); both fall back
+to the same bare-method-name resolution as an unresolvable receiver, so they
+share its over-report risk rather than adding a new kind. Deeper cross-function
+or cross-module aliasing is out of scope and stays an unreported false
+negative. It is intentionally informational and is not run from CI in this
+round.
 
 For a diff-scoped view of the same findings, `scripts/scan_changed_blocking_io.py`
 (repo root) reports findings on the added lines of `git diff <base>...HEAD`
