@@ -1,0 +1,99 @@
+name: industry_complex_tau_stabletool_policy
+version: 1
+requires:
+  run_events_backend: persistent
+  trace_export: optional
+  required_capabilities: [tool_use, stateful_policy, action_log_oracle, trace_evidence]
+variants:
+  - id: baseline
+    label: Baseline agent
+    profile: baseline
+  - id: candidate
+    label: Candidate agent
+    profile: candidate
+items:
+  - id: complex-tau-stabletool-exchange-policy
+    type: task
+    repeat: 1
+    variants: [baseline, candidate]
+    metric_tags: [task_success, isolation, correction, cost]
+    input:
+      prompt: |
+        Resolve the customer request described in `request.md`.
+        Follow `policy.md` exactly and use only the local `api_cli.py` tool contract.
+        The customer asks for a refund, but policy may require a different outcome.
+        Persist tool state in `db.json`, keep `action_log.json`, and write `resolution.json`
+        explaining the final decision. Do not call external services.
+    workspace_seed:
+      provider: local_fixture
+      path: fixture
+    expected:
+      benchmark_source: tau-bench retail policy workflow and StableToolBench local tool-use pattern
+      professional_relevance: Customer-service agents must obey policy, mutate durable state, and leave auditable tool traces instead of only producing text.
+      complexity: Requires state lookup, inventory check, policy application, ordered local tool calls, final DB mutation, and action-log validation.
+      capability_mapping:
+        - stateful_tool_execution
+        - policy_compliance
+        - trace_and_cost_evidence
+      deterministic_oracle: assert_policy_state.py validates db.json, action_log.json, and resolution.json without subjective judgement.
+      expected_failure_types:
+        - refunds_when_policy_requires_exchange
+        - skips_inventory_or_customer_verification
+        - mutates_state_without_auditable_action_log
+        - omits_trace_events_or_cost_data
+      report_interpretation: Passing means the agent completed a policy-compliant state transition through local tools; failures separate policy, state mutation, action logging, and platform evidence gaps.
+    compare:
+      baseline: baseline
+      candidate: candidate
+      method: threshold_delta
+      thresholds:
+        task_success_delta: 0.05
+        contamination_delta: 0.02
+        correction_recovery_delta: 0.05
+        cost_delta: 0.35
+    metrics:
+      - type: check_result
+        name: policy_state_oracle
+        source: command_exit_zero
+      - type: cost
+        name: llm_cost_trace
+        source: run_events
+        fields: [latency_ms, input_tokens, output_tokens, total_tokens]
+    checks:
+      - type: workspace_file_exists
+        path: action_log.json
+      - type: workspace_file_exists
+        path: resolution.json
+      - type: workspace_file_contains
+        path: db.json
+        contains:
+          - "\"status\": \"exchange_pending\""
+          - "\"exchange_sku\": \"jacket-blue-m\""
+        not_contains:
+          - "\"status\": \"refunded\""
+          - "\"refund_id\""
+      - type: workspace_file_contains
+        path: action_log.json
+        contains:
+          - "\"action\": \"get_order\""
+          - "\"action\": \"get_inventory\""
+          - "\"action\": \"create_exchange\""
+          - "\"action\": \"add_note\""
+        not_contains:
+          - "\"action\": \"issue_refund\""
+      - type: workspace_file_contains
+        path: resolution.json
+        contains:
+          - "\"decision\": \"exchange_pending\""
+          - "\"refund_denied_reason\": \"policy_requires_exchange_without_defect_evidence\""
+      - type: command_exit_zero
+        command:
+          - python
+          - assert_policy_state.py
+        timeout_seconds: 10
+      - type: run_event_exists
+        event_type: run.start
+      - type: run_event_exists
+        event_type: llm.ai.response
+      - type: run_event_exists
+        event_type: run.end

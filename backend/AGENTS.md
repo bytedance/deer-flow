@@ -15,6 +15,19 @@ DeerFlow is a LangGraph-based AI super agent system with a full-stack architectu
 **Runtime**:
 - `make dev`, Docker dev, and production all run the agent runtime in Gateway via `RunManager` + `run_agent()` + `StreamBridge` (`packages/harness/deerflow/runtime/`). Nginx exposes that runtime at `/api/langgraph/*` and rewrites it to Gateway's native `/api/*` routers.
 - Scheduled-task executions must reuse that same Gateway run lifecycle. The scheduler may decide *when* work runs, but it must dispatch through the existing run path rather than introducing a parallel execution stack.
+- Evaluation executions also reuse the Gateway internal run-launch path. `EvaluationService`
+  materializes each `workspace_seed` into an isolated per-run workspace and passes that
+  path into the trusted internal run context as `eval_workspace_path`, so
+  `/mnt/user-data/workspace` and deterministic checks observe the same files. Eval
+  internal runs use a larger default recursion budget (`300`) for multi-step tool
+  workflows unless `config.recursion_limit` overrides it. Eval launchers that need
+  Trace Gate evidence must either return `run_events` directly or wait for completion
+  and read them back from the configured persistent `RunEventStore`. Empty local
+  evidence for required `run_event_exists` checks is classified as
+  `platform_evidence_missing`; non-empty traces that miss required events remain
+  `trace_gate_failed`. Generated JSON and Markdown reports include per-item Trace
+  references by default: `thread_id`, `run_id`, event counts/types, the Gateway
+  events API path, and the local JSONL path when available.
 
 **Project Structure**:
 ```
@@ -408,7 +421,13 @@ Proxied through nginx: `/api/langgraph/*` → Gateway LangGraph-compatible runti
    - `task` - Delegate to subagent (description, prompt, subagent_type)
 
 Scheduled-task runtime note:
-- Scheduled background runs set `context.non_interactive=true` and therefore exclude `ask_clarification` from the lead-agent tool list. This keeps scheduler-triggered runs from stalling on human confirmation mid-execution. `non_interactive` is an internal-only context key: it is merged from `body.context` only when the request authenticated as the process-internal user (the scheduler path), never from arbitrary HTTP/IM clients.
+- Scheduled and eval background runs set `context.non_interactive=true` and
+  `context.disable_clarification=true`, excluding `ask_clarification` from the
+  lead-agent tool list and suppressing any clarification calls that a model still
+  tries to make. This keeps non-interactive runs from stalling on human confirmation
+  mid-execution. `non_interactive` is an internal-only context key: it is merged from
+  `body.context` only when the request authenticated as the process-internal user,
+  never from arbitrary HTTP/IM clients.
 
 **Community tools** (`packages/harness/deerflow/community/`): optional integrations, each in its own subpackage and wired through `config.yaml`. Documented examples:
 - `tavily/` - Web search (5 results default) and web fetch (4KB limit)

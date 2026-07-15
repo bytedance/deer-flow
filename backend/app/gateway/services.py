@@ -21,7 +21,7 @@ from langchain_core.messages.utils import convert_to_messages
 from langgraph.types import Command
 
 from app.gateway.auth_disabled import AUTH_SOURCE_INTERNAL
-from app.gateway.deps import get_checkpointer, get_local_provider, get_run_context, get_run_manager, get_stream_bridge
+from app.gateway.deps import get_checkpointer, get_local_provider, get_run_context, get_run_event_store, get_run_manager, get_stream_bridge
 from app.gateway.internal_auth import (
     INTERNAL_OWNER_USER_ID_HEADER_NAME,
     INTERNAL_SYSTEM_ROLE,
@@ -81,6 +81,21 @@ def format_sse(event: str, data: Any, *, event_id: str | None = None) -> str:
 
 def _run_is_terminal(record: RunRecord) -> bool:
     return record.status in _TERMINAL_RUN_STATUSES
+
+
+async def _run_has_terminal_status(run_mgr: RunManager, record: RunRecord) -> bool:
+    """Return true when the latest in-memory/store status is terminal."""
+
+    try:
+        latest = await run_mgr.get(record.run_id, user_id=record.user_id)
+    except Exception:
+        logger.debug(
+            "Failed to refresh run status for %s",
+            sanitize_log_param(record.run_id),
+            exc_info=True,
+        )
+        latest = None
+    return _run_is_terminal(latest or record)
 
 
 async def _terminal_record_stream_missing(bridge: StreamBridge, record: RunRecord) -> bool:
@@ -216,6 +231,12 @@ _CONTEXT_INTERNAL_CALLER_KEYS: frozenset[str] = frozenset({"non_interactive"})
 #                              instead of dead-ending the run.
 _CONTEXT_RUNTIME_ONLY_KEYS: frozenset[str] = frozenset({"github_token", "disable_clarification"})
 
+# Runtime-only keys accepted only from internally authenticated launchers.
+# ``eval_workspace_path`` lets the eval service mount a materialized suite
+# workspace as the agent-visible `/mnt/user-data/workspace` without exposing a
+# host-path override to external clients.
+_CONTEXT_INTERNAL_RUNTIME_ONLY_KEYS: frozenset[str] = frozenset({"eval_workspace_path"})
+
 
 def strip_internal_context_keys(config: dict[str, Any]) -> None:
     """Drop internal-only keys a non-internal caller smuggled into the run config.
@@ -228,7 +249,7 @@ def strip_internal_context_keys(config: dict[str, Any]) -> None:
     for section in ("context", "configurable"):
         value = config.get(section)
         if isinstance(value, dict):
-            for key in _CONTEXT_INTERNAL_CALLER_KEYS:
+            for key in _CONTEXT_INTERNAL_CALLER_KEYS | _CONTEXT_INTERNAL_RUNTIME_ONLY_KEYS:
                 value.pop(key, None)
 
 
@@ -269,6 +290,10 @@ def merge_run_context_overrides(config: dict[str, Any], context: Mapping[str, An
     for key in _CONTEXT_RUNTIME_ONLY_KEYS:
         if key in context and isinstance(runtime_context, dict):
             runtime_context.setdefault(key, context[key])
+    if internal:
+        for key in _CONTEXT_INTERNAL_RUNTIME_ONLY_KEYS:
+            if key in context and isinstance(runtime_context, dict):
+                runtime_context.setdefault(key, context[key])
     if "user_id" in context and isinstance(runtime_context, dict):
         runtime_context.setdefault("user_id", context["user_id"])
     # The raw platform user id from IM channels (Feishu open_id, Slack Uxxx, ...)
@@ -734,9 +759,39 @@ async def launch_scheduled_thread_run(
     owner_user_id: str | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    return await launch_internal_thread_run(
+        thread_id=thread_id,
+        assistant_id=assistant_id,
+        prompt=prompt,
+        request=request,
+        app=app,
+        owner_user_id=owner_user_id,
+        metadata=metadata,
+    )
+
+
+async def launch_internal_thread_run(
+    *,
+    thread_id: str,
+    assistant_id: str | None,
+    prompt: str,
+    request: Request | None = None,
+    app: Any | None = None,
+    owner_user_id: str | None = None,
+    metadata: dict[str, Any] | None = None,
+    context: dict[str, Any] | None = None,
+    eval_workspace_path: str | None = None,
+    run_config: dict[str, Any] | None = None,
+    wait_for_completion: bool = False,
+    include_run_events: bool = False,
+) -> dict[str, Any]:
     if request is None:
         if app is None:
-            raise ValueError("launch_scheduled_thread_run requires request or app")
+            raise ValueError("launch_internal_thread_run requires request or app")
+
+        async def _is_disconnected() -> bool:
+            return False
+
         request = SimpleNamespace(
             app=app,
             headers=({INTERNAL_OWNER_USER_ID_HEADER_NAME: owner_user_id} if owner_user_id else {}),
@@ -745,21 +800,29 @@ async def launch_scheduled_thread_run(
                 auth_source=AUTH_SOURCE_INTERNAL,
             ),
             cookies={},
+            is_disconnected=_is_disconnected,
         )
     # SimpleNamespace stands in for the Pydantic run-request body that the
     # HTTP path parses. If start_run gains a new body.* attribute that it reads
-    # directly, add the matching field here so the scheduler path stays in sync.
+    # directly, add the matching field here so all internal launchers stay in sync.
+    runtime_context = {"non_interactive": True, **(context or {})}
+    if runtime_context.get("non_interactive"):
+        runtime_context.setdefault("disable_clarification", True)
+    if owner_user_id:
+        runtime_context["user_id"] = owner_user_id
+    if eval_workspace_path:
+        runtime_context["eval_workspace_path"] = eval_workspace_path
     body = SimpleNamespace(
         assistant_id=assistant_id,
         input={"messages": [{"role": "user", "content": prompt}]},
         command=None,
         metadata=metadata or {},
-        config=None,
+        config=run_config,
         # ``user_id`` mirrors what IM channels put in ``body.context`` so
         # runtime-context consumers without a ContextVar fallback (e.g.
         # user-scoped GuardrailMiddleware providers) see the owning user;
         # ``inject_authenticated_user_context`` skips the internal user.
-        context=({"non_interactive": True, "user_id": owner_user_id} if owner_user_id else {"non_interactive": True}),
+        context=runtime_context,
         webhook=None,
         checkpoint_id=None,
         checkpoint=None,
@@ -776,7 +839,13 @@ async def launch_scheduled_thread_run(
         feedback_keys=None,
     )
     record = await start_run(body, thread_id, request)
-    return {"run_id": record.run_id, "thread_id": record.thread_id}
+    result = {"run_id": record.run_id, "thread_id": record.thread_id}
+    if wait_for_completion:
+        await wait_for_run_completion(get_stream_bridge(request), record, request, get_run_manager(request))
+    if include_run_events:
+        event_store = get_run_event_store(request)
+        result["run_events"] = await event_store.list_events(record.thread_id, record.run_id, limit=2000)
+    return result
 
 
 async def sse_consumer(
@@ -854,7 +923,7 @@ async def wait_for_run_completion(
         response.
     """
     completed = False
-    if await _terminal_record_stream_missing(bridge, record):
+    if await _terminal_record_stream_missing(bridge, record) or await _run_has_terminal_status(run_mgr, record):
         return True
 
     try:
@@ -865,14 +934,25 @@ async def wait_for_run_completion(
             if entry is END_SENTINEL:
                 completed = True
                 return True
-            if entry is HEARTBEAT_SENTINEL and await _terminal_record_stream_missing(bridge, record):
-                completed = True
-                return True
+            if entry is HEARTBEAT_SENTINEL:
+                if await _terminal_record_stream_missing(bridge, record) or await _run_has_terminal_status(run_mgr, record):
+                    completed = True
+                    return True
             if await request.is_disconnected():
                 break
             # Heartbeats and regular events: keep waiting for END_SENTINEL.
+        if await _run_has_terminal_status(run_mgr, record):
+            completed = True
+            return True
         return completed
     finally:
-        if not completed and record.status in (RunStatus.pending, RunStatus.running):
+        should_cancel = record.status in (RunStatus.pending, RunStatus.running)
+        try:
+            latest = await run_mgr.get(record.run_id, user_id=record.user_id)
+        except Exception:
+            latest = None
+        if latest is not None:
+            should_cancel = latest.status in (RunStatus.pending, RunStatus.running)
+        if not completed and should_cancel:
             if record.on_disconnect == DisconnectMode.cancel:
                 await run_mgr.cancel(record.run_id)

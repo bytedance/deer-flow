@@ -518,6 +518,22 @@ def test_non_interactive_context_override_honored_for_internal_caller():
     assert config["configurable"]["model_name"] == "gpt"
 
 
+def test_eval_workspace_path_context_override_is_internal_runtime_only():
+    from app.gateway.services import build_run_config, merge_run_context_overrides
+
+    client_config = build_run_config("thread-1", None, None)
+    merge_run_context_overrides(client_config, {"eval_workspace_path": "/tmp/eval/workspace"})
+
+    assert "eval_workspace_path" not in client_config["configurable"]
+    assert "eval_workspace_path" not in client_config["context"]
+
+    internal_config = build_run_config("thread-1", None, None)
+    merge_run_context_overrides(internal_config, {"eval_workspace_path": "/tmp/eval/workspace"}, internal=True)
+
+    assert "eval_workspace_path" not in internal_config["configurable"]
+    assert internal_config["context"]["eval_workspace_path"] == "/tmp/eval/workspace"
+
+
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
@@ -1211,9 +1227,175 @@ def test_launch_scheduled_thread_run_marks_context_non_interactive(_stub_app_con
     captured, result = asyncio.run(_scenario())
 
     assert captured["thread_id"] == "thread-scheduled"
-    assert captured["context"] == {"non_interactive": True, "user_id": "user-1"}
+    assert captured["context"] == {"non_interactive": True, "disable_clarification": True, "user_id": "user-1"}
     assert captured["metadata"] == {"scheduled_task_id": "task-1"}
     assert result == {"run_id": "run-1", "thread_id": "thread-scheduled"}
+
+
+def test_launch_internal_thread_run_can_wait_and_return_run_events(_stub_app_config):
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from app.gateway.services import launch_internal_thread_run
+    from deerflow.runtime import END_SENTINEL, RunStatus
+
+    class FakeBridge:
+        subscribed_run_id: str | None = None
+
+        async def subscribe(self, run_id, last_event_id=None):
+            self.subscribed_run_id = run_id
+            yield END_SENTINEL
+
+    class FakeEventStore:
+        call: tuple[str, str, int] | None = None
+
+        async def list_events(self, thread_id, run_id, *, limit=500, **kwargs):
+            self.call = (thread_id, run_id, limit)
+            return [{"thread_id": thread_id, "run_id": run_id, "event_type": "run.end"}]
+
+    async def _scenario():
+        bridge = FakeBridge()
+        event_store = FakeEventStore()
+        app = SimpleNamespace(state=SimpleNamespace(stream_bridge=bridge, run_manager=object(), run_event_store=event_store))
+
+        async def fake_start_run(body, thread_id, request):
+            assert body.context["non_interactive"] is True
+            assert body.context["disable_clarification"] is True
+            assert body.config == {"recursion_limit": 300}
+            return SimpleNamespace(run_id="run-1", thread_id=thread_id, status=RunStatus.running)
+
+        with patch("app.gateway.services.start_run", side_effect=fake_start_run):
+            result = await launch_internal_thread_run(
+                thread_id="thread-eval",
+                assistant_id="lead_agent",
+                prompt="Run eval",
+                app=app,
+                run_config={"recursion_limit": 300},
+                wait_for_completion=True,
+                include_run_events=True,
+            )
+        return bridge, event_store, result
+
+    bridge, event_store, result = asyncio.run(_scenario())
+
+    assert bridge.subscribed_run_id == "run-1"
+    assert event_store.call == ("thread-eval", "run-1", 2000)
+    assert result == {
+        "run_id": "run-1",
+        "thread_id": "thread-eval",
+        "run_events": [{"thread_id": "thread-eval", "run_id": "run-1", "event_type": "run.end"}],
+    }
+
+
+def test_wait_for_run_completion_returns_when_heartbeat_sees_terminal_status():
+    import asyncio
+    from types import SimpleNamespace
+
+    from app.gateway.services import wait_for_run_completion
+    from deerflow.runtime import HEARTBEAT_SENTINEL, DisconnectMode, RunRecord, RunStatus
+
+    class FakeBridge:
+        async def subscribe(self, _run_id, last_event_id=None):
+            _ = last_event_id
+            yield HEARTBEAT_SENTINEL
+
+    class FakeRunManager:
+        cancelled = False
+
+        async def get(self, run_id, *, user_id=None):
+            _ = user_id
+            return RunRecord(
+                run_id=run_id,
+                thread_id="thread-eval",
+                assistant_id="lead_agent",
+                status=RunStatus.interrupted,
+                on_disconnect=DisconnectMode.continue_,
+            )
+
+        async def cancel(self, _run_id):
+            self.cancelled = True
+
+    async def _scenario():
+        run_mgr = FakeRunManager()
+        record = RunRecord(
+            run_id="run-terminal-without-end",
+            thread_id="thread-eval",
+            assistant_id="lead_agent",
+            status=RunStatus.running,
+            on_disconnect=DisconnectMode.cancel,
+        )
+
+        async def _is_disconnected():
+            return False
+
+        request = SimpleNamespace(is_disconnected=_is_disconnected)
+        completed = await wait_for_run_completion(FakeBridge(), record, request, run_mgr)
+        return completed, run_mgr
+
+    completed, run_mgr = asyncio.run(_scenario())
+
+    assert completed is True
+    assert run_mgr.cancelled is False
+
+
+def test_wait_for_run_completion_returns_when_stream_closes_after_terminal_status():
+    import asyncio
+    from types import SimpleNamespace
+
+    from app.gateway.services import wait_for_run_completion
+    from deerflow.runtime import DisconnectMode, RunRecord, RunStatus
+
+    class FakeBridge:
+        async def subscribe(self, _run_id, last_event_id=None):
+            _ = last_event_id
+            for entry in ():
+                yield entry
+
+    class FakeRunManager:
+        def __init__(self, terminal_status):
+            self.terminal_status = terminal_status
+            self.cancelled = False
+
+        async def get(self, run_id, *, user_id=None):
+            _ = user_id
+            return RunRecord(
+                run_id=run_id,
+                thread_id="thread-eval",
+                assistant_id="lead_agent",
+                status=self.terminal_status,
+                on_disconnect=DisconnectMode.continue_,
+            )
+
+        async def cancel(self, _run_id):
+            self.cancelled = True
+
+    async def _scenario(terminal_status):
+        run_mgr = FakeRunManager(terminal_status)
+        record = RunRecord(
+            run_id=f"run-terminal-{terminal_status.value}",
+            thread_id="thread-eval",
+            assistant_id="lead_agent",
+            status=RunStatus.running,
+            on_disconnect=DisconnectMode.cancel,
+        )
+
+        async def _is_disconnected():
+            return False
+
+        request = SimpleNamespace(is_disconnected=_is_disconnected)
+        completed = await wait_for_run_completion(FakeBridge(), record, request, run_mgr)
+        return completed, run_mgr
+
+    for terminal_status in (
+        RunStatus.success,
+        RunStatus.error,
+        RunStatus.timeout,
+        RunStatus.interrupted,
+    ):
+        completed, run_mgr = asyncio.run(_scenario(terminal_status))
+        assert completed is True
+        assert run_mgr.cancelled is False
 
 
 # ---------------------------------------------------------------------------

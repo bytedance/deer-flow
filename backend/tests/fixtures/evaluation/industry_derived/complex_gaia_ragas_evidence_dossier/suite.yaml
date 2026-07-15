@@ -1,0 +1,86 @@
+name: industry_complex_gaia_ragas_evidence_dossier
+version: 1
+requires:
+  run_events_backend: persistent
+  trace_export: optional
+  required_capabilities: [retrieval, grounded_answer, citation_control, trace_evidence]
+variants:
+  - id: baseline
+    label: Baseline agent
+    profile: baseline
+  - id: candidate
+    label: Candidate agent
+    profile: candidate
+items:
+  - id: complex-gaia-ragas-atlas-evidence
+    type: task
+    repeat: 1
+    variants: [baseline, candidate]
+    metric_tags: [task_success, correction, cost]
+    input:
+      prompt: |
+        Answer `question.md` using only the local files under `knowledge_base/`.
+        Write `answer.md` with these sections: `Answer`, `Evidence`, and `Sources`.
+        Every factual claim in `Answer` must cite one of the accepted source ids.
+        Prefer current incident and runbook records over archived or rumor documents.
+        Do not call external services.
+    workspace_seed:
+      provider: local_fixture
+      path: fixture
+    expected:
+      benchmark_source: GAIA and RAGAS grounded-answer evaluation pattern
+      professional_relevance: Enterprise agents must synthesize evidence from multiple internal documents while rejecting stale or untrusted distractors.
+      complexity: Requires multi-document retrieval, contradiction handling, source attribution, and deterministic answer validation.
+      capability_mapping:
+        - knowledge_retrieval_with_distractors
+        - grounded_answer_source_oracle
+        - trace_and_cost_evidence
+      deterministic_oracle: validate_answer.py checks the required facts, source ids, evidence section, and forbidden distractor facts.
+      expected_failure_types:
+        - cites_archive_or_rumor_instead_of_current_source
+        - answers_correct_fact_without_required_evidence
+        - omits_trace_events_or_cost_data
+      report_interpretation: Passing means the agent produced a source-grounded answer constrained to current local evidence; failures distinguish retrieval, grounding, and trace-evidence gaps.
+    compare:
+      baseline: baseline
+      candidate: candidate
+      method: threshold_delta
+      thresholds:
+        task_success_delta: 0.05
+        correction_recovery_delta: 0.05
+        cost_delta: 0.35
+    metrics:
+      - type: check_result
+        name: grounded_answer_oracle
+        source: command_exit_zero
+      - type: cost
+        name: llm_cost_trace
+        source: run_events
+        fields: [latency_ms, input_tokens, output_tokens, total_tokens]
+    checks:
+      - type: workspace_file_exists
+        path: answer.md
+      - type: workspace_file_contains
+        path: answer.md
+        contains:
+          - "SRE Aurora"
+          - "2026-07-18 15:00 UTC"
+          - "P1 data freshness degradation"
+          - "KB-IR-2026-0711"
+          - "KB-RUNBOOK-ATLAS-FAILOVER"
+        not_contains:
+          - "2025-12-01"
+          - "KB-ARCHIVE-2025-ATLAS"
+          - "KB-RUMOR-UNVERIFIED"
+      - type: command_exit_zero
+        command:
+          - python
+          - validate_answer.py
+          - answer.md
+        timeout_seconds: 10
+      - type: run_event_exists
+        event_type: run.start
+      - type: run_event_exists
+        event_type: llm.ai.response
+      - type: run_event_exists
+        event_type: run.end

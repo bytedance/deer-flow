@@ -32,10 +32,12 @@ from sqlalchemy.orm import Session
 
 import deerflow.persistence.models  # noqa: F401  -- registers ORM models
 from deerflow.persistence.base import Base
+from deerflow.persistence.bootstrap import _get_head_revision
 from deerflow.persistence.engine import close_engine, init_engine
 from deerflow.persistence.run.model import RunRow
 
 pytestmark = pytest.mark.asyncio
+HEAD = _get_head_revision()
 
 
 def _seed_pre_0004_with_duplicates(db_path: Path) -> None:
@@ -156,7 +158,7 @@ async def test_migration_dedupes_duplicate_active_rows_before_unique_index(tmp_p
 
         with sqlite3.connect(db_path) as raw:
             version_row = raw.execute("SELECT version_num FROM alembic_version").fetchone()
-        assert version_row[0] == "0004_run_ownership"
+        assert version_row[0] == HEAD
 
         # Sanity: the invariant the index enforces is now true — at most one
         # active row per thread.

@@ -1,0 +1,16 @@
+{
+  "users": {
+    "user-007": {
+      "verified": true,
+      "email": "user007@example.test"
+    }
+  },
+  "orders": {
+    "ord-1001": {
+      "user_id": "user-007",
+      "status": "delivered",
+      "total_cents": 2599,
+      "refund_id": null
+    }
+  }
+}

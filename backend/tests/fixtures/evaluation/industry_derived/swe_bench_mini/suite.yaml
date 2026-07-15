@@ -1,0 +1,52 @@
+name: industry_swe_bench_mini
+version: 1
+requires:
+  run_events_backend: persistent
+  trace_export: optional
+  required_capabilities: [code_edit, local_pytest]
+variants:
+  - id: baseline
+    label: Baseline agent
+    profile: baseline
+  - id: candidate
+    label: Candidate agent
+    profile: candidate
+items:
+  - id: swe-bench-mini-merge-intervals
+    type: task
+    variants: [baseline, candidate]
+    metric_tags: [task_success, correction]
+    input:
+      prompt: |
+        Resolve issue SWEB-MINI-001 in the local Python repo.
+        `tinycalc.merge_intervals()` must merge overlapping and adjacent integer intervals.
+        Use the existing failing pytest suite as the oracle and keep the change scoped to the target implementation.
+    workspace_seed:
+      provider: local_fixture
+      path: fixture
+    expected:
+      source: SWE-bench Lite/Verified local slice
+      relevance: Code-edit task with failing tests and target implementation oracle.
+      capability: Local repo repair through deterministic pytest evidence.
+    compare:
+      baseline: baseline
+      candidate: candidate
+      method: threshold_delta
+      thresholds:
+        task_success_delta: 0.05
+        correction_recovery_delta: 0.05
+    checks:
+      - type: workspace_file_contains
+        path: tinycalc/intervals.py
+        contains:
+          - "current_start <= last_end + 1"
+          - "merged[-1] = (last_start, max(last_end, current_end))"
+        not_contains:
+          - "return sorted(intervals)"
+      - type: command_exit_zero
+        command:
+          - python
+          - -m
+          - pytest
+          - -q
+        timeout_seconds: 30

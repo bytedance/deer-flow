@@ -19,6 +19,7 @@ from app.gateway.routers import (
     channel_connections,
     channels,
     console,
+    evals,
     features,
     feedback,
     github_webhooks,
@@ -272,6 +273,30 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         except Exception:
             logger.exception("Failed to initialize scheduled task service")
 
+        try:
+            from app.evaluation import EvalDispatcher, EvaluationService
+            from app.gateway.services import launch_internal_thread_run
+
+            if getattr(app.state, "evaluation_repo", None) is not None:
+                evaluation_service = EvaluationService(
+                    repository=app.state.evaluation_repo,
+                    launch_run=lambda **kwargs: launch_internal_thread_run(
+                        app=app,
+                        wait_for_completion=True,
+                        include_run_events=True,
+                        **kwargs,
+                    ),
+                )
+                evaluation_dispatcher = EvalDispatcher(
+                    repository=app.state.evaluation_repo,
+                    service=evaluation_service,
+                )
+                app.state.evaluation_service = evaluation_service
+                app.state.evaluation_dispatcher = evaluation_dispatcher
+                await evaluation_dispatcher.start()
+        except Exception:
+            logger.exception("Failed to initialize evaluation service")
+
         yield
 
         try:
@@ -300,6 +325,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 await app.state.scheduled_task_service.stop()
             except Exception:
                 logger.exception("Failed to stop scheduled task service")
+
+        if getattr(app.state, "evaluation_dispatcher", None) is not None:
+            try:
+                await app.state.evaluation_dispatcher.stop()
+            except Exception:
+                logger.exception("Failed to stop evaluation dispatcher")
 
     logger.info("Shutting down API Gateway")
 
@@ -437,6 +468,9 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
 
     # Console API (cross-thread observability) is mounted at /api/console
     app.include_router(console.router)
+
+    # Evaluation API is mounted at /api/evals
+    app.include_router(evals.router)
 
     # MCP API is mounted at /api/mcp
     app.include_router(mcp.router)

@@ -6,6 +6,7 @@ Importing this module ensures all ORM models are registered with
 The actual ORM classes have moved to entity-specific subpackages:
 - ``deerflow.persistence.thread_meta``
 - ``deerflow.persistence.run``
+- ``deerflow.persistence.evaluations``
 - ``deerflow.persistence.feedback``
 - ``deerflow.persistence.user``
 
@@ -20,6 +21,7 @@ from deerflow.persistence.channel_connections.model import (
     ChannelCredentialRow,
     ChannelOAuthStateRow,
 )
+from deerflow.persistence.evaluations.model import EvalItemAttemptRow, EvalRunItemRow, EvalRunRow
 from deerflow.persistence.feedback.model import FeedbackRow
 from deerflow.persistence.models.run_event import RunEventRow
 from deerflow.persistence.run.model import RunRow
@@ -33,6 +35,9 @@ __all__ = [
     "ChannelConversationRow",
     "ChannelCredentialRow",
     "ChannelOAuthStateRow",
+    "EvalItemAttemptRow",
+    "EvalRunItemRow",
+    "EvalRunRow",
     "FeedbackRow",
     "RunEventRow",
     "RunRow",

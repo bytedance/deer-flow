@@ -43,6 +43,7 @@ dependencies = [
 
 [project.scripts]
 deerflow = "deerflow.tui.cli:main"
+deerflow-eval = "deerflow.evaluation.cli:main"
 
 [project.optional-dependencies]
 # Terminal workbench (TUI). Kept optional so the core harness install stays lean;

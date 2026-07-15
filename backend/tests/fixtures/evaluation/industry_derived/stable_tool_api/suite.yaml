@@ -1,0 +1,52 @@
+name: industry_stable_tool_api
+version: 1
+requires:
+  run_events_backend: persistent
+  trace_export: optional
+  required_capabilities: [tool_use, structured_output]
+variants:
+  - id: baseline
+    label: Baseline agent
+    profile: baseline
+  - id: candidate
+    label: Candidate agent
+    profile: candidate
+items:
+  - id: stable-toolbench-local-reservation
+    type: task
+    variants: [baseline, candidate]
+    metric_tags: [task_success]
+    input:
+      prompt: |
+        Use the local `tool_catalog.json` and `mock_api.py` to reserve 2 units of sku `widget-a`.
+        Write `result.json` with the exact tool name, sku, reserved quantity, and reservation id returned by the local API.
+        Do not call external services.
+    workspace_seed:
+      provider: local_fixture
+      path: fixture
+    expected:
+      source: StableToolBench-style local tool API slice
+      relevance: Tool selection and API result validation without external service drift.
+      capability: Deterministic local tool execution and structured result persistence.
+    compare:
+      baseline: baseline
+      candidate: candidate
+      method: threshold_delta
+      thresholds:
+        task_success_delta: 0.05
+    checks:
+      - type: workspace_file_exists
+        path: result.json
+      - type: workspace_file_contains
+        path: result.json
+        contains:
+          - "\"tool_name\": \"reserve_inventory\""
+          - "\"sku\": \"widget-a\""
+          - "\"reserved_quantity\": 2"
+          - "\"reservation_id\": \"resv-widget-a-2\""
+      - type: command_exit_zero
+        command:
+          - python
+          - validate.py
+          - result.json
+        timeout_seconds: 10

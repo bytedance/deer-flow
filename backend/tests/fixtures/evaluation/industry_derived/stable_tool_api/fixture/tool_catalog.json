@@ -1,0 +1,22 @@
+{
+  "tools": [
+    {
+      "name": "lookup_inventory",
+      "description": "Return current stock for a sku.",
+      "arguments": {
+        "sku": "string"
+      }
+    },
+    {
+      "name": "reserve_inventory",
+      "description": "Reserve a quantity of stock for a sku and return a reservation id.",
+      "arguments": {
+        "sku": "string",
+        "quantity": "integer"
+      }
+    }
+  ],
+  "expected_tool": "reserve_inventory",
+  "expected_sku": "widget-a",
+  "expected_quantity": 2
+}

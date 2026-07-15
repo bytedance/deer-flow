@@ -1,0 +1,20 @@
+name: coding_smoke
+version: 1
+items:
+  - id: command-check-smoke
+    type: task
+    metric_tags: [task_success]
+    input:
+      prompt: Verify the seeded artifact.
+    workspace_seed:
+      provider: local_fixture
+      path: fixture
+    checks:
+      - type: workspace_file_contains
+        path: artifact.txt
+        contains: ok
+      - type: command_exit_zero
+        command:
+          - python
+          - -c
+          - "from pathlib import Path; assert Path('artifact.txt').read_text().strip() == 'ok'"

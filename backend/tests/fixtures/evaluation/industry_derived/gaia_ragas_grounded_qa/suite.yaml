@@ -1,0 +1,55 @@
+name: industry_gaia_ragas_grounded_qa
+version: 1
+requires:
+  run_events_backend: persistent
+  trace_export: optional
+  required_capabilities: [retrieval, grounded_answer]
+variants:
+  - id: baseline
+    label: Baseline agent
+    profile: baseline
+  - id: candidate
+    label: Candidate agent
+    profile: candidate
+items:
+  - id: gaia-ragas-nebula-window
+    type: task
+    variants: [baseline, candidate]
+    metric_tags: [task_success, correction]
+    input:
+      prompt: |
+        Answer the question in `question.md` using only files under `knowledge_base/`.
+        Write `answer.md` with a `Short answer:` line and a `Source:` line containing the source id.
+        Prefer current facts over archived distractors.
+    workspace_seed:
+      provider: local_fixture
+      path: fixture
+    expected:
+      source: GAIA + RAGAS grounded QA local slice
+      relevance: Grounded QA with a local knowledge base and a stale-fact distractor.
+      capability: Source-grounded answer generation with contradiction avoidance.
+    compare:
+      baseline: baseline
+      candidate: candidate
+      method: threshold_delta
+      thresholds:
+        task_success_delta: 0.05
+        correction_recovery_delta: 0.05
+    checks:
+      - type: workspace_file_exists
+        path: answer.md
+      - type: workspace_file_contains
+        path: answer.md
+        contains:
+          - "Short answer:"
+          - "2026-08-17 09:00 UTC"
+          - "Source: KB-2026-NEBULA"
+        not_contains:
+          - "2024-09-30"
+          - "KB-2024-ARCHIVE"
+      - type: command_exit_zero
+        command:
+          - python
+          - validate_answer.py
+          - answer.md
+        timeout_seconds: 10

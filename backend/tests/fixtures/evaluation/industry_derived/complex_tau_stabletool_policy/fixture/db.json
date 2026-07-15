@@ -1,0 +1,24 @@
+{
+  "customers": {
+    "cust-42": {
+      "verified": true,
+      "tier": "gold"
+    }
+  },
+  "inventory": {
+    "jacket-blue-m": {
+      "available": 3
+    }
+  },
+  "orders": {
+    "ret-9001": {
+      "customer_id": "cust-42",
+      "category": "apparel",
+      "delivered_days_ago": 12,
+      "status": "delivered",
+      "defect_evidence": false,
+      "exchange_sku": null,
+      "notes": []
+    }
+  }
+}

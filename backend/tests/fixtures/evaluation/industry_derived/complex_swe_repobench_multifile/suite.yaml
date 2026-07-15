@@ -1,0 +1,72 @@
+name: industry_complex_swe_repobench_multifile
+version: 1
+requires:
+  run_events_backend: persistent
+  trace_export: optional
+  required_capabilities: [code_edit, cross_file_reasoning, local_pytest, trace_evidence]
+variants:
+  - id: baseline
+    label: Baseline agent
+    profile: baseline
+  - id: candidate
+    label: Candidate agent
+    profile: candidate
+items:
+  - id: complex-swe-repobench-invoice-pipeline
+    type: task
+    repeat: 1
+    variants: [baseline, candidate]
+    metric_tags: [task_success, correction, cost]
+    input:
+      prompt: |
+        Resolve issue SWEB-COMPLEX-001 in the local `billing` package.
+        The invoice pipeline currently disagrees across models, tax calculation, invoice aggregation,
+        and reporting. Repair the implementation so the existing pytest oracle passes.
+        Keep the public API stable and do not replace the tests or call external services.
+    workspace_seed:
+      provider: local_fixture
+      path: fixture
+    expected:
+      benchmark_source: SWE-bench Verified and RepoBench cross-file code repair pattern
+      professional_relevance: Real maintenance bugs often require understanding package APIs across several files instead of patching one function.
+      complexity: Requires coordinated edits in models.py, tax.py, invoice.py, and reporting.py plus local pytest evidence.
+      capability_mapping:
+        - multi_file_code_repair
+        - local_command_execution
+        - trace_and_cost_evidence
+      deterministic_oracle: pytest tests/test_invoice_pipeline.py validates the repaired cross-file invoice behavior.
+      expected_failure_types:
+        - one_file_patch_leaves_tax_or_refund_bug
+        - hardcoded_output_without_preserving_api
+        - missing_trace_or_cost_evidence
+      report_interpretation: Passing means the agent repaired the cross-file invoice behavior under deterministic pytest; failures identify whether code repair or platform trace evidence is missing.
+    compare:
+      baseline: baseline
+      candidate: candidate
+      method: threshold_delta
+      thresholds:
+        task_success_delta: 0.05
+        correction_recovery_delta: 0.05
+        cost_delta: 0.35
+    metrics:
+      - type: check_result
+        name: pytest_invoice_oracle
+        source: command_exit_zero
+      - type: cost
+        name: llm_cost_trace
+        source: run_events
+        fields: [latency_ms, input_tokens, output_tokens, total_tokens]
+    checks:
+      - type: command_exit_zero
+        command:
+          - python
+          - -m
+          - pytest
+          - -q
+        timeout_seconds: 30
+      - type: run_event_exists
+        event_type: run.start
+      - type: run_event_exists
+        event_type: llm.ai.response
+      - type: run_event_exists
+        event_type: run.end

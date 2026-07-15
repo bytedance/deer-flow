@@ -15,8 +15,17 @@ from unittest.mock import MagicMock
 import pytest
 
 # Make 'app' and 'deerflow' importable from any working directory
+TESTS_ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(TESTS_ROOT))
 sys.path.insert(0, str(Path(__file__).parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
+
+from support.evaluation_collection import is_industry_derived_fixture_oracle_path  # noqa: E402
+
+
+def pytest_ignore_collect(collection_path: Path, config: pytest.Config) -> bool:
+    return is_industry_derived_fixture_oracle_path(collection_path, tests_root=TESTS_ROOT)
+
 
 # Break the circular import chain that exists in production code:
 #   deerflow.subagents.__init__

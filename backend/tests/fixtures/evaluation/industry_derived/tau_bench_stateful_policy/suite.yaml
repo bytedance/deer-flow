@@ -1,0 +1,58 @@
+name: industry_tau_bench_stateful_policy
+version: 1
+requires:
+  run_events_backend: persistent
+  trace_export: optional
+  required_capabilities: [tool_use, stateful_policy]
+variants:
+  - id: baseline
+    label: Baseline agent
+    profile: baseline
+  - id: candidate
+    label: Candidate agent
+    profile: candidate
+items:
+  - id: tau-bench-refund-policy
+    type: task
+    variants: [baseline, candidate]
+    metric_tags: [task_success, isolation, correction]
+    input:
+      prompt: |
+        Follow `policy.md` and use the local `api_cli.py` contract to process the fixed user request:
+        verified user `user-007` asks for a refund on delivered order `ord-1001`.
+        Persist the final state in `db.json` and record policy actions in `action_log.json`.
+    workspace_seed:
+      provider: local_fixture
+      path: fixture
+    expected:
+      source: tau-bench fixed-user stateful policy slice
+      relevance: Stateful customer-service policy task with local DB and action-log oracle.
+      capability: Multi-step policy compliance and durable state mutation.
+    compare:
+      baseline: baseline
+      candidate: candidate
+      method: threshold_delta
+      thresholds:
+        task_success_delta: 0.05
+        contamination_delta: 0.02
+        correction_recovery_delta: 0.05
+    checks:
+      - type: workspace_file_exists
+        path: action_log.json
+      - type: workspace_file_contains
+        path: db.json
+        contains:
+          - "\"status\": \"refunded\""
+          - "\"refund_id\": \"rfnd-ord-1001\""
+        not_contains:
+          - "\"status\": \"cancelled\""
+      - type: workspace_file_contains
+        path: action_log.json
+        contains:
+          - "\"action\": \"verify_user\""
+          - "\"action\": \"issue_refund\""
+      - type: command_exit_zero
+        command:
+          - python
+          - assert_db_state.py
+        timeout_seconds: 10

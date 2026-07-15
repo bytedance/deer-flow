@@ -1,5 +1,6 @@
 import logging
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import NotRequired, override
 
 from langchain.agents import AgentState
@@ -78,6 +79,22 @@ class ThreadDataMiddleware(AgentMiddleware[ThreadDataMiddlewareState]):
         self._paths.ensure_thread_dirs(thread_id, user_id=user_id)
         return self._get_thread_paths(thread_id, user_id=user_id)
 
+    @staticmethod
+    def _get_eval_workspace_paths(eval_workspace_path: str) -> dict[str, str]:
+        """Map an internal eval workspace into the standard user-data shape."""
+
+        workspace_path = Path(eval_workspace_path).expanduser().resolve()
+        user_data_root = workspace_path.parent
+        uploads_path = user_data_root / "uploads"
+        outputs_path = user_data_root / "outputs"
+        for path in (workspace_path, uploads_path, outputs_path):
+            path.mkdir(parents=True, exist_ok=True)
+        return {
+            "workspace_path": str(workspace_path),
+            "uploads_path": str(uploads_path),
+            "outputs_path": str(outputs_path),
+        }
+
     @override
     def before_agent(self, state: ThreadDataMiddlewareState, runtime: Runtime) -> dict | None:
         context = runtime.context or {}
@@ -91,7 +108,11 @@ class ThreadDataMiddleware(AgentMiddleware[ThreadDataMiddlewareState]):
 
         user_id = get_effective_user_id()
 
-        if self._lazy_init:
+        eval_workspace_path = context.get("eval_workspace_path")
+        if isinstance(eval_workspace_path, str) and eval_workspace_path:
+            paths = self._get_eval_workspace_paths(eval_workspace_path)
+            logger.debug("Using eval workspace for thread %s", thread_id)
+        elif self._lazy_init:
             # Lazy initialization: only compute paths, don't create directories
             paths = self._get_thread_paths(thread_id, user_id=user_id)
         else:

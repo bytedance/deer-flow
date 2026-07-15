@@ -285,6 +285,7 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
 
         app.state.thread_store = make_thread_store(sf, app.state.store)
         if sf is not None:
+            from deerflow.persistence.evaluations import EvaluationRepository
             from deerflow.persistence.scheduled_task_runs import (
                 ScheduledTaskRunRepository,
             )
@@ -292,9 +293,11 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
 
             app.state.scheduled_task_repo = ScheduledTaskRepository(sf)
             app.state.scheduled_task_run_repo = ScheduledTaskRunRepository(sf)
+            app.state.evaluation_repo = EvaluationRepository(sf)
         else:
             app.state.scheduled_task_repo = None
             app.state.scheduled_task_run_repo = None
+            app.state.evaluation_repo = None
 
         # Run event store. The store and the matching ``run_events_config`` are
         # both frozen at startup so ``get_run_context`` does not combine a
@@ -400,6 +403,13 @@ def get_scheduled_task_service(request: Request):
     val = getattr(request.app.state, "scheduled_task_service", None)
     if val is None:
         raise HTTPException(status_code=503, detail="Scheduled task service not available")
+    return val
+
+
+def get_evaluation_repo(request: Request):
+    val = getattr(request.app.state, "evaluation_repo", None)
+    if val is None:
+        raise HTTPException(status_code=503, detail="Evaluation repository not available")
     return val
 
 

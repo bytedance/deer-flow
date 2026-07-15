@@ -1,0 +1,32 @@
+name: memory_multi_session
+version: 1
+variants:
+  - id: baseline
+  - id: candidate
+items:
+  - id: preference-carryover
+    type: multi_session
+    metric_tags: [task_success, preference, cross_thread]
+    sessions:
+      - id: setup
+        steps:
+          - user: This project prefers pytest over unittest.
+      - id: verify
+        steps:
+          - user: Add tests for the target function using the project preference.
+    checks:
+      - type: run_event_exists
+        event_type: run.end
+  - id: correction-recovery
+    type: multi_session
+    metric_tags: [correction, isolation]
+    sessions:
+      - id: correction
+        steps:
+          - user: Replace the old deployment region with us-east-1.
+      - id: verify
+        steps:
+          - user: Summarize the current deployment region without using old facts.
+    checks:
+      - type: run_event_exists
+        event_type: run.end
