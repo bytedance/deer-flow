@@ -1,12 +1,13 @@
 """Tests for DanglingToolCallMiddleware."""
 
+import json
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 # Intentional private import: these tests lock the OpenAI serialization boundary
-# that strict providers reject when assistant tool-call names are empty.
+# that strict providers reject when assistant tool-call names or arguments are malformed.
 from langchain_openai.chat_models.base import _convert_message_to_dict
 
 from deerflow.agents.middlewares.dangling_tool_call_middleware import (
@@ -319,6 +320,132 @@ class TestBuildPatchedMessagesPatching:
         assert "name was missing or empty" in patched[1].content
         assert "arguments were invalid" not in patched[1].content
 
+    def test_issue_4172_mixed_tool_calls_serialize_with_valid_names_and_arguments(self):
+        mw = DanglingToolCallMiddleware()
+        invalid_args = '{"description": "读取CSV数据文件前部内容", "path": "/mnt/user-data/uploads/test2.csv"}}'
+        ai_message = AIMessage(
+            content="",
+            tool_calls=[
+                _tc("read_file", "valid_call"),
+                _tc("", "empty_name_call"),
+            ],
+            invalid_tool_calls=[
+                {
+                    "type": "invalid_tool_call",
+                    "id": "invalid_args_call",
+                    "name": "read_file",
+                    "args": invalid_args,
+                    "error": None,
+                }
+            ],
+        )
+        msgs = [
+            ai_message,
+            _tool_msg("valid_call", "read_file"),
+            ToolMessage(
+                content="Error: invalid tool",
+                tool_call_id="empty_name_call",
+                name="",
+                status="error",
+            ),
+        ]
+
+        patched = mw._build_patched_messages(msgs)
+
+        assert patched is not None
+        payload = _convert_message_to_dict(patched[0])
+        assert all(call["function"]["name"] for call in payload["tool_calls"])
+        assert [json.loads(call["function"]["arguments"]) for call in payload["tool_calls"]] == [
+            {},
+            {},
+            {},
+        ]
+        assert ai_message.invalid_tool_calls[0]["args"] == invalid_args
+        tool_messages = [message for message in patched if isinstance(message, ToolMessage)]
+        assert [message.tool_call_id for message in tool_messages] == [
+            "valid_call",
+            "empty_name_call",
+            "invalid_args_call",
+        ]
+        assert tool_messages[1].name == "unknown_tool"
+        assert tool_messages[2].status == "error"
+
+    def test_empty_name_and_malformed_arguments_in_invalid_tool_call_are_sanitized(self):
+        mw = DanglingToolCallMiddleware()
+        msgs = [
+            _ai_with_invalid_tool_calls(
+                [
+                    _invalid_tc(
+                        name="",
+                        tc_id="empty_invalid_call",
+                        error="Failed to parse tool arguments: malformed JSON",
+                    )
+                ]
+            )
+        ]
+
+        patched = mw._build_patched_messages(msgs)
+
+        assert patched is not None
+        payload_call = _convert_message_to_dict(patched[0])["tool_calls"][0]
+        assert payload_call["function"]["name"] == "unknown_tool"
+        assert json.loads(payload_call["function"]["arguments"]) == {}
+
+    @pytest.mark.parametrize(
+        "arguments",
+        [
+            '{"path":"/tmp/data.csv"}}',
+            None,
+            '["not", "an", "object"]',
+            {"path": "/tmp/data.csv"},
+        ],
+    )
+    def test_raw_provider_tool_call_arguments_are_sanitized(self, arguments):
+        mw = DanglingToolCallMiddleware()
+        msgs = [
+            AIMessage.model_construct(
+                content="",
+                type="ai",
+                tool_calls=[],
+                invalid_tool_calls=[],
+                additional_kwargs={
+                    "tool_calls": [
+                        {
+                            "id": "raw_invalid_args_call",
+                            "type": "function",
+                            "function": {"name": "read_file", "arguments": arguments},
+                        }
+                    ]
+                },
+                response_metadata={},
+            )
+        ]
+
+        patched = mw._build_patched_messages(msgs)
+
+        assert patched is not None
+        raw_arguments = patched[0].additional_kwargs["tool_calls"][0]["function"]["arguments"]
+        assert json.loads(raw_arguments) == (arguments if isinstance(arguments, dict) else {})
+
+    def test_valid_invalid_tool_call_arguments_are_sanitization_noop(self):
+        mw = DanglingToolCallMiddleware()
+        msgs = [
+            _ai_with_invalid_tool_calls(
+                [
+                    {
+                        "type": "invalid_tool_call",
+                        "id": "valid_args_call",
+                        "name": "read_file",
+                        "args": '{"path": "/tmp/data.csv"}',
+                        "error": "schema validation failed",
+                    }
+                ]
+            ),
+            _tool_msg("valid_args_call", "read_file"),
+        ]
+
+        assert mw._build_patched_messages(msgs) is None
+
     def test_non_adjacent_tool_result_is_moved_next_to_tool_call(self):
         middleware = DanglingToolCallMiddleware()
         msgs = [
@@ -583,13 +710,21 @@ class TestBuildPatchedMessagesPatching:
         assert len(tool_msgs) == 2
         assert {tm.tool_call_id for tm in tool_msgs} == {"call_1", "write_file:36"}
 
-    def test_invalid_tool_call_already_responded_is_not_patched(self):
+    def test_invalid_tool_call_already_responded_is_sanitized_without_placeholder(self):
         mw = DanglingToolCallMiddleware()
+        ai_message = _ai_with_invalid_tool_calls([_invalid_tc()])
+        tool_message = _tool_msg("write_file:36", "write_file")
         msgs = [
-            _ai_with_invalid_tool_calls([_invalid_tc()]),
-            _tool_msg("write_file:36", "write_file"),
+            ai_message,
+            tool_message,
         ]
-        assert mw._build_patched_messages(msgs) is None
+
+        patched = mw._build_patched_messages(msgs)
+
+        assert patched is not None
+        assert patched[1] is tool_message
+        assert json.loads(_convert_message_to_dict(patched[0])["tool_calls"][0]["function"]["arguments"]) == {}
+        assert ai_message.invalid_tool_calls[0]["args"] == _invalid_tc()["args"]
 
 
 class TestWrapModelCall:
