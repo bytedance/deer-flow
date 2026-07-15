@@ -20,6 +20,12 @@ from pathlib import Path
 
 from deerflow.config.app_config import get_app_config
 
+# Backward-compat re-exports — outline extraction moved to file_outline.py.
+from deerflow.utils.file_outline import (  # noqa: F401
+    MAX_OUTLINE_ENTRIES,
+    extract_outline,
+)
+
 logger = logging.getLogger(__name__)
 
 # File extensions that should be converted to markdown
@@ -176,14 +182,6 @@ async def convert_file_to_markdown(file_path: Path) -> Path | None:
 #   2. Starts with a recognised structural keyword:
 #      - ITEM / PART / SECTION (with optional number/letter after)
 #      - SCHEDULE, EXHIBIT, APPENDIX, ANNEX, CHAPTER
-# Backward-compat re-exports — outline extraction moved to file_outline.py.
-# Keep these names available under the original module so existing callers
-# (tests/test_uploads_middleware_core_logic.py, tests/test_file_conversion.py)
-# don't have to update their imports.
-from deerflow.utils.file_outline import (  # noqa: E402, F401
-    MAX_OUTLINE_ENTRIES,
-    extract_outline,
-)
 
 _ALLOWED_PDF_CONVERTERS = {"auto", "pymupdf4llm", "markitdown"}
 

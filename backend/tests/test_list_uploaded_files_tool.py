@@ -4,6 +4,8 @@ import os
 from pathlib import Path
 from unittest.mock import MagicMock
 
+from langchain_core.messages import HumanMessage
+
 from deerflow.config.paths import Paths
 from deerflow.tools.builtins.list_uploaded_files_tool import _format_omitted_summary, _list_uploaded_files_impl, _resolve_thread_id
 
@@ -253,3 +255,82 @@ class TestListUploadedFiles:
         filenames2 = {f["filename"] for f in result2["files"]}
         assert "report.pdf" in filenames2, "Turn 2: file must appear after state is cleared"
         assert result2["total_count"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Bridge test: UploadsMiddleware.before_agent() state write → tool state read
+# Verifies format compatibility between the middleware's {"uploaded_files": [...]}
+# return value and the tool's runtime.state["uploaded_files"] reading.
+# This is the integration smoke test for the runtime.state visibility contract.
+# ---------------------------------------------------------------------------
+
+
+class TestMiddlewareToolStateBridge:
+    def test_middleware_state_write_excludes_file_in_tool(self, tmp_path):
+        """Middleware writes uploaded_files → tool reads and excludes them."""
+        from deerflow.agents.middlewares.uploads_middleware import UploadsMiddleware
+        from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
+
+        # Setup: create uploads dir + file using the same thread_id the
+        # middleware and tool will resolve.
+        bridge_thread_id = "thread-bridge"
+        uploads_dir = _uploads_dir(tmp_path, thread_id=bridge_thread_id)
+        (uploads_dir / "bridged.pdf").write_bytes(b"%PDF content")
+
+        # Simulate what the frontend sends: a HumanMessage with files in kwargs
+        msg = HumanMessage(
+            content=[{"type": "text", "text": "analyse this"}],
+            additional_kwargs={
+                "files": [{"filename": "bridged.pdf", "size": 12, "path": "/mnt/user-data/uploads/bridged.pdf"}],
+                ORIGINAL_USER_CONTENT_KEY: "analyse this",
+            },
+        )
+        state = {"messages": [msg]}
+        rt = MagicMock()
+        rt.context = {"thread_id": "thread-bridge"}
+        # runtime.state must reflect what before_agent returns — simulate LangGraph
+        # having applied the middleware's state update before tool execution.
+
+        # Run middleware to get the state update
+        mw = UploadsMiddleware(base_dir=str(tmp_path))
+        mw_result = mw.before_agent(state, rt)
+
+        assert mw_result is not None, "Middleware must return a state update"
+        assert "uploaded_files" in mw_result, "Middleware must write uploaded_files"
+        assert len(mw_result["uploaded_files"]) == 1
+        assert mw_result["uploaded_files"][0]["filename"] == "bridged.pdf"
+
+        # Now simulate what LangGraph does: apply the state update, then
+        # the tool reads runtime.state.  We set the runtime's state to
+        # reflect the post-before_agent state.
+        rt.state = {"uploaded_files": mw_result["uploaded_files"]}
+
+        # Call the tool — the bridged file must be excluded
+        result = _list_uploaded_files_impl(runtime=rt, _paths=_paths(tmp_path))
+        filenames = {f["filename"] for f in result["files"]}
+        assert "bridged.pdf" not in filenames, "Middleware wrote bridged.pdf to state, but tool did not exclude it — format mismatch between middleware write and tool read"
+        assert result.get("total_count", 0) == 0
+
+    def test_empty_state_update_excludes_nothing(self, tmp_path):
+        """When middleware clears state (no uploads), tool sees all files as historical."""
+        from deerflow.agents.middlewares.uploads_middleware import UploadsMiddleware
+
+        empty_thread_id = "thread-bridge-empty"
+        uploads_dir = _uploads_dir(tmp_path, thread_id=empty_thread_id)
+        (uploads_dir / "old.pdf").write_bytes(b"old")
+
+        # No files in the message → middleware returns {"uploaded_files": []}
+        msg = HumanMessage(content="plain question")
+        state = {"messages": [msg]}
+        rt = MagicMock()
+        rt.context = {"thread_id": empty_thread_id}
+
+        mw = UploadsMiddleware(base_dir=str(tmp_path))
+        mw_result = mw.before_agent(state, rt)
+
+        assert mw_result == {"uploaded_files": []}, "No upload → must clear state"
+        rt.state = {"uploaded_files": mw_result["uploaded_files"]}
+
+        result = _list_uploaded_files_impl(runtime=rt, _paths=_paths(tmp_path))
+        filenames = {f["filename"] for f in result["files"]}
+        assert "old.pdf" in filenames, "Cleared state must make historical files visible"

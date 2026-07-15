@@ -235,7 +235,10 @@ class InputSanitizationMiddleware(AgentMiddleware[AgentState]):
         text_blocks: list[dict] = []
         for block in content:
             if isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str):
-                text_parts.append(block["text"])
+                text = block["text"]
+                if not text:  # skip empty blocks — matches message_content_to_text behaviour
+                    continue
+                text_parts.append(text)
                 text_blocks.append(block)
         return "\n".join(text_parts), text_blocks
 
@@ -316,7 +319,18 @@ class InputSanitizationMiddleware(AgentMiddleware[AgentState]):
                     if idx >= 0:
                         processed = text_content[:idx] + processed_user
                     else:
-                        processed = _check_user_content(text_content)  # fallback
+                        # _extract_text_from_content and message_content_to_text
+                        # disagreed on text extraction — rfind failed.
+                        # text_blocks is None for string content; if we get here
+                        # with string content, log the unexpected path and fall
+                        # back.  Server-injected blocks are safe to escape here
+                        # because string content means no <current_uploads> was
+                        # prepended (UploadsMiddleware converts to list content
+                        # when it injects the block).
+                        logger.warning(
+                            "rfind failed with original_user_content set; falling back to full-content sanitization",
+                        )
+                        processed = _check_user_content(text_content)
                 else:
                     processed = text_content  # no change needed
             else:

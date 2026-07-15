@@ -8,7 +8,6 @@ from copy import copy
 from typing import Any
 
 _UPLOAD_BLOCK_RE = re.compile(r"<(?P<tag>uploaded_files|current_uploads)>[\s\S]*?</(?P=tag)>\n*", re.IGNORECASE)
->>>>>>> 6da25d88 (fix: review feedback — memory pipeline, stale tags, state clearing, nits):backend/packages/harness/deerflow/agents/memory/message_processing.py
 _CORRECTION_PATTERNS = (
     re.compile(r"\bthat(?:'s| is) (?:wrong|incorrect)\b", re.IGNORECASE),
     re.compile(r"\byou misunderstood\b", re.IGNORECASE),

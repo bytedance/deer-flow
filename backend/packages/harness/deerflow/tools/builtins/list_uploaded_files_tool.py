@@ -6,6 +6,7 @@ this tool lets the agent discover files uploaded in previous turns on demand.
 
 from __future__ import annotations
 
+import logging
 import os
 from collections import Counter
 from pathlib import Path
@@ -19,6 +20,8 @@ from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.tools.types import Runtime
 from deerflow.uploads.manager import is_upload_staging_file
 from deerflow.utils.file_outline import extract_outline_for_file
+
+logger = logging.getLogger(__name__)
 
 _DEFAULT_MAX_RESULTS = 20
 _MAX_MAX_RESULTS = 100
@@ -91,7 +94,10 @@ def _list_uploaded_files_impl(
                 if isinstance(entry, dict) and entry.get("filename"):
                     current_run_filenames.add(entry["filename"])
     except Exception:
-        pass  # Non-critical — worst case we list a file that is also in <current_uploads>.
+        logger.warning(
+            "Failed to read uploaded_files from runtime.state; current-run files may appear in list_uploaded_files results",
+            exc_info=True,
+        )
 
     # Normalize max_results
     max_results = max(1, min(max_results, _MAX_MAX_RESULTS))
