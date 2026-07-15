@@ -124,7 +124,7 @@ they resolve from the `secrets` map):
 
 ```yaml
 config: |
-  config_version: 24
+  config_version: 25
   models:
     - name: gpt-4
       use: langchain_openai:ChatOpenAI

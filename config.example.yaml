@@ -15,7 +15,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 24
+config_version: 25
 
 # ============================================================================
 # Logging
@@ -1912,6 +1912,16 @@ run_ownership:
 #     use: my_package:MyGuardrailProvider
 #     config:
 #       key: value
+
+# ============================================================================
+# Authorization Configuration
+# ============================================================================
+# Fine-grained resource authorization (RBAC and beyond). Disabled by default;
+# every authenticated user has access to all resources. Schema is present but
+# inert; the built-in RBAC provider and runtime wiring arrive in subsequent phases.
+# See RFC: https://github.com/bytedance/deer-flow/issues/4063
+authorization:
+  enabled: false
 
 # ============================================================================
 # Circuit Breaker Configuration
