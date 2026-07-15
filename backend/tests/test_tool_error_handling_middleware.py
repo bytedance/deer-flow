@@ -908,11 +908,7 @@ def test_lead_runtime_chain_finds_historical_uploads_under_lazy_init_false(tmp_p
     # so UploadsMiddleware must NOT inject it into the prompt.
     # It MUST however clear uploaded_files so list_uploaded_files doesn't
     # incorrectly exclude files that just became historical.
-    assert um_result == {"uploaded_files": []}, (
-        "UploadsMiddleware must NOT inject context for historical files, "
-        "but MUST clear uploaded_files to prevent cross-turn state leakage "
-        "into list_uploaded_files"
-    )
+    assert um_result == {"uploaded_files": []}, "UploadsMiddleware must NOT inject context for historical files, but MUST clear uploaded_files to prevent cross-turn state leakage into list_uploaded_files"
 
 
 def test_subagent_summarization_fires_mid_run_and_produces_usable_result(monkeypatch):

@@ -176,7 +176,7 @@ async def convert_file_to_markdown(file_path: Path) -> Path | None:
 #   2. Starts with a recognised structural keyword:
 #      - ITEM / PART / SECTION (with optional number/letter after)
 #      - SCHEDULE, EXHIBIT, APPENDIX, ANNEX, CHAPTER
-# ponytail: backward-compat re-exports — outline extraction moved to file_outline.py.
+# Backward-compat re-exports — outline extraction moved to file_outline.py.
 # Keep these names available under the original module so existing callers
 # (tests/test_uploads_middleware_core_logic.py, tests/test_file_conversion.py)
 # don't have to update their imports.

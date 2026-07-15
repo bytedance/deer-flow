@@ -59,17 +59,13 @@ class TestResolveThreadId:
 
 class TestFormatOmittedSummary:
     def test_single_type(self):
-        summary = _format_omitted_summary(["a.txt", "b.txt"], 2)
+        summary = _format_omitted_summary(["a.txt", "b.txt"])
         assert "2 .txt" in summary
 
     def test_mixed_types(self):
-        summary = _format_omitted_summary(["a.txt", "b.pdf", "c.txt"], 3)
+        summary = _format_omitted_summary(["a.txt", "b.pdf", "c.txt"])
         assert ".pdf" in summary
         assert ".txt" in summary
-
-    def test_with_total(self):
-        summary = _format_omitted_summary(["a.txt"], 10)
-        assert "... (10 total)" in summary
 
 
 # ---------------------------------------------------------------------------

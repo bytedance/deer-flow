@@ -222,14 +222,14 @@ class TestBeforeAgent:
     def _state(self, *messages):
         return {"messages": list(messages)}
 
-    def test_returns_none_when_messages_empty(self, tmp_path):
+    def test_clears_uploaded_files_when_messages_empty(self, tmp_path):
         mw = _middleware(tmp_path)
-        assert mw.before_agent({"messages": []}, _runtime()) is None
+        assert mw.before_agent({"messages": []}, _runtime()) == {"uploaded_files": []}
 
-    def test_returns_none_when_last_message_is_not_human(self, tmp_path):
+    def test_clears_uploaded_files_when_last_message_is_not_human(self, tmp_path):
         mw = _middleware(tmp_path)
         state = self._state(HumanMessage(content="q"), AIMessage(content="a"))
-        assert mw.before_agent(state, _runtime()) is None
+        assert mw.before_agent(state, _runtime()) == {"uploaded_files": []}
 
     def test_clears_uploaded_files_when_no_files_in_kwargs(self, tmp_path):
         mw = _middleware(tmp_path)

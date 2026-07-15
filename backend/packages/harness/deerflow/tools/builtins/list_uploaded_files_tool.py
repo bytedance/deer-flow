@@ -29,11 +29,9 @@ def _extension_label(file_path: Path) -> str:
     return suffix or "(no extension)"
 
 
-def _format_omitted_summary(omitted: list[str], total_omitted: int) -> str:
+def _format_omitted_summary(omitted: list[str]) -> str:
     counts = Counter(_extension_label(Path(f)) for f in omitted)
     parts = [f"{count} {ext}" for ext, count in sorted(counts.items())]
-    if total_omitted > len(omitted):
-        parts.append(f"... ({total_omitted} total)")
     return ", ".join(parts)
 
 
@@ -170,7 +168,7 @@ def _list_uploaded_files_impl(
 
     if truncated:
         result["truncated"] = True
-        result["omitted_summary"] = _format_omitted_summary(omitted_paths, total_count - max_results)
+        result["omitted_summary"] = _format_omitted_summary(omitted_paths)
 
     if files:
         result["message"] = f"Found {total_count} historical file(s)."

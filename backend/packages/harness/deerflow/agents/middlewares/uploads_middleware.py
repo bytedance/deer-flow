@@ -37,8 +37,6 @@ def _format_omitted_file_types(files: list[dict]) -> str:
     return ", ".join(parts)
 
 
-
-
 class UploadsMiddlewareState(AgentState):
     """State schema for uploads middleware."""
 
@@ -204,13 +202,13 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
         """
         messages = list(state.get("messages", []))
         if not messages:
-            return None
+            return {"uploaded_files": []}
 
         last_message_index = len(messages) - 1
         last_message = messages[last_message_index]
 
         if not isinstance(last_message, HumanMessage):
-            return None
+            return {"uploaded_files": []}
 
         # Resolve uploads directory for existence checks
         thread_id = (runtime.context or {}).get("thread_id")
