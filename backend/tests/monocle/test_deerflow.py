@@ -15,8 +15,8 @@ Two layers:
 The whole module is skipped when ``monocle_test_tools`` is not installed (see the
 ``importorskip`` below), so a plain backend venv collects it without error.
 
-    pytest tests/monocle/                 # offline example (no keys)
-    pytest tests/monocle/ -k live         # add the live behavioural tests
+    pytest backend/tests/monocle/            # offline example (no keys)
+    pytest backend/tests/monocle/ -k live    # add the live behavioural tests
 
 See ``README.md`` for how to add your own.
 """

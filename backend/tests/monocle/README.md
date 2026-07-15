@@ -44,7 +44,14 @@ sentence-transformers), so it is a standalone `requirements.txt` install rather
 than a backend dependency. When it is absent (e.g. a plain backend venv) the
 whole suite skips cleanly via `pytest.importorskip`.
 
+Because that dependency is deliberately absent from the backend deps, **none of
+these tests run in CI** — `make test` collects and skips the whole module,
+including the offline example. This is an on-demand suite: install the
+requirements and run it locally (or wire a dedicated CI job with the
+requirements installed) when changing agent behaviour, tools, or routing.
+
 ```bash
+# from the repo root
 pip install -r backend/tests/monocle/requirements.txt
 
 # offline example — no network, no keys
@@ -52,6 +59,14 @@ pytest backend/tests/monocle/
 
 # add the live behavioural tests (needs OPENAI_API_KEY + the DeerFlow app)
 pytest backend/tests/monocle/ -k live
+```
+
+Or, following the backend convention (from `backend/`, with uv):
+
+```bash
+uv pip install -r tests/monocle/requirements.txt
+uv run pytest tests/monocle/            # offline
+uv run pytest tests/monocle/ -k live    # + live
 ```
 
 The live tests skip automatically when `OPENAI_API_KEY` is unset, when the
