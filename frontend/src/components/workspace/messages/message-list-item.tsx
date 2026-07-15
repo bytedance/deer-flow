@@ -293,22 +293,19 @@ function MessageContent_({
   );
   const turnDuration = rawTurnDuration ?? cachedDuration;
 
+  // `cachedDuration` mirrors only backend-confirmed `turn_duration` values
+  // (never a client-measured one). A run can produce several standalone
+  // content messages (e.g. a subagent handoff) that each briefly become the
+  // newest message and each mount their own `Reasoning` timer; letting that
+  // per-message timer feed a duration back here made every one of them cache
+  // and keep showing a "Worked for X seconds" badge — with a different,
+  // premature number — the moment a later message superseded it (#4152).
   useEffect(() => {
     if (rawTurnDuration !== undefined && message.id) {
       clientTurnDurations.set(`${threadId}:${message.id}`, rawTurnDuration);
       setCachedDuration(rawTurnDuration);
     }
   }, [rawTurnDuration, message.id, threadId]);
-
-  const handleDurationChange = useCallback(
-    (d: number | undefined) => {
-      if (d !== undefined && message.id) {
-        clientTurnDurations.set(`${threadId}:${message.id}`, d);
-        setCachedDuration(d);
-      }
-    },
-    [message.id, threadId],
-  );
 
   useEffect(() => {
     return () => {
@@ -404,7 +401,6 @@ function MessageContent_({
           isStreaming={isLoading}
           startTimeProp={turnStartTime}
           duration={turnDuration}
-          onTurnDurationChange={handleDurationChange}
         >
           <ReasoningTrigger />
           <SafeReasoningContent>{reasoningContent}</SafeReasoningContent>
@@ -451,7 +447,6 @@ function MessageContent_({
             isStreaming={isLoading}
             startTimeProp={turnStartTime}
             duration={turnDuration}
-            onTurnDurationChange={handleDurationChange}
           >
             <ReasoningTrigger hasContent={!!reasoningContent} />
             {reasoningContent && (
