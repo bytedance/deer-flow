@@ -32,7 +32,7 @@ from deerflow.agents.middlewares.clarification_middleware import ClarificationMi
 from deerflow.agents.middlewares.loop_detection_middleware import LoopDetectionMiddleware
 from deerflow.agents.middlewares.memory_middleware import MemoryMiddleware
 from deerflow.agents.middlewares.safety_finish_reason_middleware import SafetyFinishReasonMiddleware
-from deerflow.agents.middlewares.subagent_limit_middleware import SubagentLimitMiddleware, _clamp_subagent_limit
+from deerflow.agents.middlewares.subagent_limit_middleware import SubagentLimitMiddleware
 from deerflow.agents.middlewares.summarization_middleware import DeerFlowSummarizationMiddleware, create_summarization_middleware
 from deerflow.agents.middlewares.terminal_response_middleware import TerminalResponseMiddleware
 from deerflow.agents.middlewares.title_middleware import TitleMiddleware
@@ -378,7 +378,7 @@ def build_middlewares(
     # Add SubagentLimitMiddleware to truncate excess parallel task calls
     subagent_enabled = cfg.get("subagent_enabled", False)
     if subagent_enabled:
-        max_concurrent_subagents = _clamp_subagent_limit(cfg.get("max_concurrent_subagents", 3))
+        max_concurrent_subagents = cfg.get("max_concurrent_subagents", 3)
         max_total_subagents = cfg.get("max_total_subagents", _default_max_total_subagents(resolved_app_config))
         middlewares.append(SubagentLimitMiddleware(max_concurrent=max_concurrent_subagents, max_total=max_total_subagents))
 
@@ -468,7 +468,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
     requested_model_name: str | None = cfg.get("model_name") or cfg.get("model")
     is_plan_mode = cfg.get("is_plan_mode", False)
     subagent_enabled = cfg.get("subagent_enabled", False)
-    max_concurrent_subagents = _clamp_subagent_limit(cfg.get("max_concurrent_subagents", 3))
+    max_concurrent_subagents = cfg.get("max_concurrent_subagents", 3)
     max_total_subagents = cfg.get("max_total_subagents", _default_max_total_subagents(resolved_app_config))
     is_bootstrap = cfg.get("is_bootstrap", False)
     non_interactive = bool(cfg.get("non_interactive", False))

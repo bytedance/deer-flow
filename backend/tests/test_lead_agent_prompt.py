@@ -262,12 +262,13 @@ def test_apply_prompt_template_clamps_subagent_limits_to_enforced_bounds(monkeyp
 
 
 def test_apply_prompt_template_single_subagent_limit_matches_middleware(monkeypatch):
-    """Regression test for the prompt/middleware divergence on max_concurrent_subagents=1.
+    """Regression test for single-subagent mode (MIN_CONCURRENT_SUBAGENT_CALLS = 1).
 
-    Before MIN_CONCURRENT_SUBAGENT_CALLS was lowered to 1, the prompt path clamped
-    1 up to 2 ("HARD LIMITS: max 2 `task` calls per response") while the middleware
-    enforced 1, so the model emitted a second parallel task call that was silently
-    dropped. The prompt-advertised limit must equal the middleware-enforced limit.
+    Before the floor was lowered to 1, a user-configured limit of 1 was silently
+    bumped to 2 by both the prompt path and the middleware. This renders the real
+    system prompt with max_concurrent_subagents=1 and asserts the advertised
+    HARD LIMITS value equals the middleware-enforced max_concurrent, so the two
+    paths cannot drift apart on the newly-allowed value.
     """
     from deerflow.agents.middlewares.subagent_limit_middleware import SubagentLimitMiddleware
 

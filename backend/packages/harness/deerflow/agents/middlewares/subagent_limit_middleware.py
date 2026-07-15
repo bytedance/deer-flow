@@ -14,13 +14,14 @@ from deerflow.config.subagents_config import (
     MAX_TOTAL_SUBAGENTS_PER_RUN,
     MIN_CONCURRENT_SUBAGENT_CALLS,
     MIN_TOTAL_SUBAGENTS_PER_RUN,
+    clamp_subagent_concurrency,
     clamp_total_subagents_per_run,
 )
 from deerflow.subagents.executor import MAX_CONCURRENT_SUBAGENTS
 
 logger = logging.getLogger(__name__)
 
-# Valid range for max_concurrent_subagents — kept in sync with subagents_config
+# Valid range for max_concurrent_subagents
 MIN_SUBAGENT_LIMIT = MIN_CONCURRENT_SUBAGENT_CALLS
 MAX_SUBAGENT_LIMIT = MAX_CONCURRENT_SUBAGENT_CALLS
 DEFAULT_MAX_TOTAL_SUBAGENTS = DEFAULT_MAX_TOTAL_SUBAGENTS_PER_RUN
@@ -36,7 +37,7 @@ _TOTAL_LIMIT_STOP_MSG = (
 
 def _clamp_subagent_limit(value: int) -> int:
     """Clamp subagent limit to valid range [1, 4]."""
-    return max(MIN_SUBAGENT_LIMIT, min(MAX_SUBAGENT_LIMIT, value))
+    return clamp_subagent_concurrency(value)
 
 
 def _clamp_total_subagent_limit(value: int) -> int:
