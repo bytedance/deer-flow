@@ -1,3 +1,5 @@
+import { INTERNAL_MARKER_TAGS } from "@/core/messages/utils";
+
 import { normalizeMermaidMarkdown } from "./mermaid";
 
 const MERMAID_BLOCK_HINT_RE = /mermaid/i;
@@ -315,6 +317,45 @@ export function compactDisplayMathBlocks(markdown: string): string {
 
 export function normalizeStreamdownMathMarkdown(markdown: string): string {
   return compactDisplayMathBlocks(normalizeLatexMathDelimiters(markdown));
+}
+
+// Regex matching any opening, closing, or self-closing internal marker tag.
+// e.g. <memory>, </memory>, <memory attr="x">, <memory/>
+const _INTERNAL_TAG_RE = new RegExp(
+  `</?(?:${INTERNAL_MARKER_TAGS.join("|")})(?:\\s[^>]*)?/?>`,
+  "g",
+);
+
+/**
+ * Strip leaked system-internal HTML tags from markdown content.
+ *
+ * Backend-injected markers like ``<memory>…</memory>`` can occasionally
+ * reach the UI renderer (e.g. when a ``hide_from_ui`` reminder leaks through
+ * the filter).  React's DOM renderer logs "unrecognized tag" console errors
+ * for unknown HTML elements.  This function strips the tag markers while
+ * preserving the inner content — unlike {@link stripInternalMarkers} in
+ * ``utils.ts``, which removes the entire block.
+ *
+ * Code-aware: tags inside fenced code blocks (````` `````) and indented code
+ * blocks (4-space indent) are left untouched, so user-written meta-discussions
+ * about the memory system are not silently stripped.
+ */
+export function stripLeakedSystemTags(markdown: string): string {
+  const lines = markdown.split("\n");
+  let insideFence = false;
+
+  return lines
+    .map((line) => {
+      if (CODE_FENCE_RE.test(line)) {
+        insideFence = !insideFence;
+        return line;
+      }
+      if (insideFence || INDENTED_CODE_RE.test(line)) {
+        return line;
+      }
+      return line.replace(_INTERNAL_TAG_RE, "");
+    })
+    .join("\n");
 }
 
 export function preprocessStreamdownMarkdown(markdown: string): string {
