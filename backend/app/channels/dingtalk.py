@@ -110,8 +110,22 @@ def _adapt_markdown_for_dingtalk(text: str) -> str:
         quoted_lines = "\n".join(f"> {line}" for line in code.split("\n"))
         return f"{prefix}{quoted_lines}\n"
 
-    text = _FENCED_CODE_BLOCK_RE.sub(_code_block_to_quote, text)
+    # Stash fenced blocks behind placeholders before the inline-code pass runs,
+    # so backticks meant to render verbatim inside a fenced block (e.g. a shell
+    # command substitution like `` `echo hello` `` in a ```bash block) are never
+    # re-scanned and turned into bold markers. Without this, the inline-code
+    # regex below would run over the ENTIRE text, including the blockquoted
+    # output this step produces, and corrupt any backticks it finds there.
+    fenced_blocks: list[str] = []
+
+    def _stash_fenced_block(match: re.Match) -> str:
+        fenced_blocks.append(_code_block_to_quote(match))
+        return f"\x00DINGTALK_FENCED_BLOCK_{len(fenced_blocks) - 1}\x00"
+
+    text = _FENCED_CODE_BLOCK_RE.sub(_stash_fenced_block, text)
     text = _INLINE_CODE_RE.sub(r"**\1**", text)
+    for index, block in enumerate(fenced_blocks):
+        text = text.replace(f"\x00DINGTALK_FENCED_BLOCK_{index}\x00", block)
     text = _convert_markdown_table(text)
     text = _HORIZONTAL_RULE_RE.sub("───────────", text)
     return text

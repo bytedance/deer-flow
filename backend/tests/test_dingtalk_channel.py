@@ -1025,6 +1025,46 @@ class TestAdaptMarkdownForDingtalk:
         assert "───────────" in result
         assert "Done." in result
 
+    def test_fenced_code_block_with_inline_backticks_not_corrupted(self):
+        """Backticks meant to render verbatim inside a fenced block must survive
+        the later inline-code pass instead of being re-scanned and bolded."""
+        text = "```markdown\nUse `code` for inline code.\n```"
+        result = _adapt_markdown_for_dingtalk(text)
+        assert "```" not in result
+        assert "> **markdown**" in result
+        assert "> Use `code` for inline code." in result
+        assert "**code**" not in result
+
+    def test_fenced_code_block_with_shell_command_substitution_not_corrupted(self):
+        """A shell command-substitution backtick pair inside a fenced block is a
+        very common case (coding assistants routinely show this) and must not
+        be turned into bold markers."""
+        text = "```bash\nresult=`echo hello`\necho $result\n```"
+        result = _adapt_markdown_for_dingtalk(text)
+        assert "```" not in result
+        assert "> result=`echo hello`" in result
+        assert "> echo $result" in result
+        assert "**echo hello**" not in result
+
+    def test_standalone_inline_code_still_converted_outside_fenced_block(self):
+        """Regression guard: the legitimate case (no fenced block at all) must
+        keep working after the fix."""
+        text = "Run `ls -la` to list files."
+        result = _adapt_markdown_for_dingtalk(text)
+        assert result == "Run **ls -la** to list files."
+
+    def test_mixed_fenced_block_and_standalone_inline_code(self):
+        """A message with both a fenced block (containing backticks that must
+        stay literal) and separate standalone inline-code spans (which must
+        still be bolded) needs to handle both correctly at once."""
+        text = "Use `git status` to check your repo.\n\n```markdown\nWrap code in `backticks` like this.\n```\n\nThen run `git diff` to see changes."
+        result = _adapt_markdown_for_dingtalk(text)
+        assert "```" not in result
+        assert "**git status**" in result
+        assert "**git diff**" in result
+        assert "> Wrap code in `backticks` like this." in result
+        assert "**backticks**" not in result
+
 
 class TestConvertMarkdownTable:
     def test_simple_table(self):
