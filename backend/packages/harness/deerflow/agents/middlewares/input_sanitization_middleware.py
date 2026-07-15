@@ -73,6 +73,7 @@ _BLOCKED_TAG_NAMES: frozenset[str] = frozenset(
         "critical_reminders",
         "response_style",
         "citations",
+        "current_uploads",
         "subagent_system",
         "skill_system",
         "skill_index",
@@ -296,10 +297,30 @@ class InputSanitizationMiddleware(AgentMiddleware[AgentState]):
                 logger.debug("_process_request: no text content in message — passing through")
                 return request
 
-            processed = _check_user_content(text_content)
+            # Sanitize only the user's original input when available (set by
+            # UploadsMiddleware before it prepends the <current_uploads> block),
+            # so server-injected trusted blocks are never scanned for blocked
+            # tags.  Fall back to full-content scanning when the marker is absent
+            # (legacy checkpoints, non-upload paths).
+            preserved_kwargs = dict(msg.additional_kwargs or {})
+            original_user_content = preserved_kwargs.get(ORIGINAL_USER_CONTENT_KEY)
+            if isinstance(original_user_content, str) and original_user_content:
+                processed_user = _check_user_content(original_user_content)
+                if processed_user != original_user_content:
+                    # Replace only the user's text suffix within the full
+                    # content — server-prepended blocks stay untouched.
+                    idx = text_content.rfind(original_user_content)
+                    if idx >= 0:
+                        processed = text_content[:idx] + processed_user
+                    else:
+                        processed = _check_user_content(text_content)  # fallback
+                else:
+                    processed = text_content  # no change needed
+            else:
+                processed = _check_user_content(text_content)  # fallback
 
             if processed == text_content:
-                # Already wrapped — no override needed
+                # Already clean / already wrapped — no override needed
                 return request
 
             if text_blocks:
@@ -312,8 +333,6 @@ class InputSanitizationMiddleware(AgentMiddleware[AgentState]):
             # recover it after the BEGIN/END wrapping. Keep a valid value set by
             # UploadsMiddleware or an IM channel, but repair malformed metadata so
             # persistence never falls back to the wrapped model-facing content.
-            preserved_kwargs = dict(msg.additional_kwargs or {})
-            original_user_content = preserved_kwargs.get(ORIGINAL_USER_CONTENT_KEY)
             if not isinstance(original_user_content, str):
                 if ORIGINAL_USER_CONTENT_KEY in preserved_kwargs:
                     logger.warning(
