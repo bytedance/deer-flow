@@ -162,6 +162,44 @@ def test_allow_authors_does_not_help_other_users() -> None:
     assert fire is False
 
 
+def test_allow_authors_match_is_case_insensitive() -> None:
+    """GitHub logins are case-insensitive; allow_authors must match that.
+
+    Sibling gates already ignore case: ``_mentions`` documents
+    ``Match is case-insensitive; GitHub itself is.``, and the self-event
+    check lowercases both sides. A bare ``in`` membership test rejects an
+    owner whose YAML casing differs from the payload login, so
+    ``require_mention`` still applies and the webhook is silently dropped.
+    """
+    trigger = _resolve(
+        "issue_comment",
+        GitHubTriggerConfig(require_mention=True, allow_authors=["Alice"]),
+    )
+    fire, reason = event_should_fire(
+        "issue_comment",
+        _comment_payload("no handle here", author="alice"),
+        trigger,
+        BOT,
+    )
+    assert fire is True
+    assert "allow_authors" in reason
+
+
+def test_allow_authors_case_insensitive_still_rejects_other_users() -> None:
+    """Case-folding the allowlist must not open the gate for non-members."""
+    trigger = _resolve(
+        "issue_comment",
+        GitHubTriggerConfig(require_mention=True, allow_authors=["Alice"]),
+    )
+    fire, _ = event_should_fire(
+        "issue_comment",
+        _comment_payload("no handle", author="bob"),
+        trigger,
+        BOT,
+    )
+    assert fire is False
+
+
 # ---------------------------------------------------------------------------
 # Override: mention_login replaces default login
 # ---------------------------------------------------------------------------
