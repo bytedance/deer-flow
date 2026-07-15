@@ -321,19 +321,53 @@ class InputSanitizationMiddleware(AgentMiddleware[AgentState]):
                         processed = text_content[:idx] + processed_user
                     else:
                         # _extract_text_from_content and message_content_to_text
-                        # disagreed on text extraction — rfind failed.
-                        # For string content this branch is unreachable
-                        # (message_content_to_text(str) returns the string
-                        # verbatim, so original_user_content is always a suffix
-                        # of text_content).  For multimodal content, fall back
-                        # to full-content sanitization — the server-injected
-                        # block may be escaped, which is a UX degradation but
-                        # not a security regression (user forgeries are still
-                        # neutralized).
-                        logger.warning(
-                            "rfind failed with original_user_content set; falling back to full-content sanitization",
-                        )
-                        processed = _check_user_content(text_content)
+                        # disagreed on text extraction — rfind failed (only
+                        # reachable for multimodal list content; see Decision 18).
+                        if text_blocks and len(text_blocks) >= 2 and isinstance(content, list):
+                            # content[0] is the server-injected
+                            # <current_uploads> block (UploadsMiddleware
+                            # prepends it as the first element for list
+                            # content).  Sanitize only user blocks (content[1:])
+                            # and rebuild directly — _rebuild_content only
+                            # handles type:"text" blocks and would miss raw
+                            # strings or non-standard dict blocks that
+                            # message_content_to_text sees.
+                            logger.warning(
+                                "rfind failed on multimodal content; sanitizing user content blocks individually",
+                            )
+                            new_content: list = [content[0]]
+                            for block in content[1:]:
+                                if isinstance(block, str):
+                                    new_content.append(neutralize_untrusted_tags(block))
+                                elif isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str):
+                                    sanitized = neutralize_untrusted_tags(block["text"])
+                                    if sanitized != block["text"]:
+                                        new_content.append({**block, "text": sanitized})
+                                    else:
+                                        new_content.append(block)
+                                else:
+                                    new_content.append(block)
+                            # Guard ORIGINAL_USER_CONTENT_KEY (shared tail)
+                            if not isinstance(original_user_content, str) and ORIGINAL_USER_CONTENT_KEY in preserved_kwargs:
+                                preserved_kwargs[ORIGINAL_USER_CONTENT_KEY] = message_content_to_text(content)
+                            messages[i] = HumanMessage(
+                                content=new_content,
+                                id=msg.id,
+                                name=msg.name,
+                                additional_kwargs=preserved_kwargs,
+                            )
+                            return request.override(messages=messages)
+                        else:
+                            # Cannot distinguish server block from user blocks
+                            # (< 2 text_blocks, not a list, or none).
+                            # Degrade to full-content sanitization — server
+                            # block may be escaped (UX degradation) but user
+                            # forgeries are still neutralized (no security
+                            # regression).
+                            logger.warning(
+                                "rfind failed with original_user_content set; cannot distinguish blocks, falling back to full-content sanitization",
+                            )
+                            processed = _check_user_content(text_content)
                 else:
                     processed = text_content  # no change needed
             elif isinstance(original_user_content, str):
