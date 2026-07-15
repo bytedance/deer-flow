@@ -237,6 +237,19 @@ class DeerMem(MemoryManager):
         """Not implemented this phase (no distinct export yet; /export routes via get_memory)."""
         raise NotImplementedError("DeerMem.export_memory is not implemented yet")
 
+    # ── Lifecycle ───────────────────────────────────────────────────────
+    def shutdown_flush(self, timeout: float) -> bool:
+        """Drain the debounce queue within ``timeout`` on graceful shutdown.
+
+        Delegates to the queue's bounded synchronous flush, which joins an
+        in-flight worker first (so contexts a debounce Timer already pulled out
+        of the queue are not lost on exit) and otherwise drains the queue on a
+        daemon thread with a real hard timeout (the memory-update LLM call is
+        synchronous and cannot be interrupted). Returns ``True`` only when the
+        drain genuinely finished within ``timeout``.
+        """
+        return self._queue.flush_sync(timeout)
+
     # ── DeerMem-internal (NOT on the ABC; reached via hasattr probing) ───
     def warm(self) -> bool:
         """Pre-warm DeerMem-specific resources (the tiktoken encoding cache).

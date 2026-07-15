@@ -596,6 +596,7 @@ Focused regression coverage for the updater lives in `backend/tests/test_memory_
 - `mode` - Operation mode: `middleware` (default passive background extraction) or `tool` (experimental model-driven memory tools). Modes are mutually exclusive.
 - `storage_path` - Path to memory.json (absolute path opts out of per-user isolation)
 - `debounce_seconds` - Wait time before processing (default: 30)
+- `shutdown_flush_timeout_seconds` - Host-shared hard budget (seconds) to drain the memory backend's pending-update buffer on Gateway graceful shutdown (default: 30; 1–300). Each pending item does one LLM call, so large IM batches may need more. The Gateway lifespan calls `MemoryManager.shutdown_flush(timeout)` after channels/scheduler stop; the backend short-circuits on an idle buffer, so the host calls it unconditionally (no pending/processing gate). Must fit inside the pod's K8s `terminationGracePeriodSeconds` (gateway Helm chart sets this; default 45s) or K8s SIGKILLs the drain mid-flight.
 - `model_name` - LLM for updates (null = default model)
 - `max_facts` / `fact_confidence_threshold` - Fact storage limits (100 / 0.7)
 - `max_injection_tokens` - Token limit for prompt injection (2000)
@@ -732,7 +733,7 @@ Config is env-driven like the others — `MonocleTracingConfig`, built in `get_t
 - `title` - Auto-title generation (enabled, max_words, max_chars, model_name; null model_name uses fast local fallback, explicit model_name uses the prompt_template LLM path)
 - `summarization` - Context summarization (enabled, trigger conditions, keep policy)
 - `subagents.enabled` - Master switch for subagent delegation
-- `memory` - Memory system (enabled, storage_path, debounce_seconds, model_name, max_facts, fact_confidence_threshold, injection_enabled, max_injection_tokens, staleness_review_enabled, staleness_age_days, staleness_min_candidates, staleness_max_removals_per_cycle, staleness_protected_categories)
+- `memory` - Memory system (enabled, storage_path, debounce_seconds, shutdown_flush_timeout_seconds, model_name, max_facts, fact_confidence_threshold, injection_enabled, max_injection_tokens, staleness_review_enabled, staleness_age_days, staleness_min_candidates, staleness_max_removals_per_cycle, staleness_protected_categories)
 
 **`extensions_config.json`**:
 - `mcpServers` - Map of server name → config (enabled, type, command, args, env, url, headers, oauth, description, `routing`, `tools`, `tool_call_timeout`). `routing.mode="prefer"` emits `<mcp_routing_hints>` prompt guidance; if `tool_search` defers the hinted tool, `McpRoutingMiddleware` can also auto-promote matching deferred schemas before the model call. It does not hard-disable other tools.
