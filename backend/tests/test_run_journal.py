@@ -613,6 +613,27 @@ class TestMiddlewareEvents:
         assert "middleware:guardrail" in event_types
 
 
+class TestContextEvents:
+    @pytest.mark.anyio
+    async def test_record_memory_context_is_readable_from_public_store_contract(self, journal_setup):
+        j, store = journal_setup
+
+        j.record_memory_context(
+            content_sha256="a" * 64,
+        )
+        # Goal continuations may enter the graph more than once under the same
+        # run-scoped journal; the effective frozen memory event stays singular.
+        j.record_memory_context(
+            content_sha256="a" * 64,
+        )
+        await j.flush()
+
+        events = await store.list_events("t1", "r1", event_types=["context:memory"])
+        assert len(events) == 1
+        assert events[0]["category"] == "context"
+        assert events[0]["content"] == {"content_sha256": "a" * 64}
+
+
 class TestCallerBucketing:
     """Tests for caller-bucketed token accumulation (lead_agent / subagent / middleware)."""
 

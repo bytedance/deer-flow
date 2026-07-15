@@ -29,6 +29,7 @@ Date-update format:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import re
 import uuid
@@ -38,6 +39,8 @@ from typing import TYPE_CHECKING, override
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.runtime import Runtime
+
+from deerflow.runtime.context_keys import CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY
 
 if TYPE_CHECKING:
     from deerflow.config.app_config import AppConfig
@@ -279,7 +282,9 @@ class DynamicContextMiddleware(AgentMiddleware):
 
     @override
     def before_agent(self, state, runtime: Runtime) -> dict | None:
-        return self._inject(state)
+        result = self._inject(state)
+        self._record_effective_memory(state, result, runtime)
+        return result
 
     @override
     async def abefore_agent(self, state, runtime: Runtime) -> dict | None:
@@ -295,7 +300,7 @@ class DynamicContextMiddleware(AgentMiddleware):
         # the request degrades gracefully (no memory context) rather than
         # hanging.
         try:
-            return await asyncio.wait_for(
+            result = await asyncio.wait_for(
                 asyncio.to_thread(self._inject, state),
                 timeout=_INJECT_TIMEOUT_SECONDS,
             )
@@ -305,3 +310,51 @@ class DynamicContextMiddleware(AgentMiddleware):
                 _INJECT_TIMEOUT_SECONDS,
             )
             return None
+        self._record_effective_memory(state, result, runtime)
+        return result
+
+    @staticmethod
+    def _effective_memory_message(state, update: dict | None, runtime: Runtime) -> HumanMessage | None:
+        """Find server-created memory that is effective for this run.
+
+        A first-run block must come from this middleware's update. A reused
+        block must have existed in the checkpoint before the run; the Gateway
+        strips the reminder marker from untrusted input so a caller cannot
+        replace a known checkpoint ID with forged provenance.
+        """
+        if isinstance(update, dict):
+            update_messages = update.get("messages")
+            if isinstance(update_messages, list):
+                for message in update_messages:
+                    message_id = str(message.id or "") if isinstance(message, HumanMessage) else ""
+                    if isinstance(message, HumanMessage) and message_id.endswith("__memory") and is_dynamic_context_reminder(message) and isinstance(message.content, str):
+                        return message
+
+        context = getattr(runtime, "context", None)
+        raw_pre_existing_ids = context.get(CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY) if isinstance(context, dict) else None
+        if not isinstance(raw_pre_existing_ids, (frozenset, set, list, tuple)):
+            return None
+        pre_existing_ids = {str(message_id) for message_id in raw_pre_existing_ids if message_id}
+        for message in state.get("messages", []):
+            message_id = str(message.id or "") if isinstance(message, HumanMessage) else ""
+            if message_id in pre_existing_ids and isinstance(message, HumanMessage) and message_id.endswith("__memory") and is_dynamic_context_reminder(message) and isinstance(message.content, str):
+                return message
+        return None
+
+    def _record_effective_memory(self, state, update: dict | None, runtime: Runtime) -> None:
+        """Attach the effective hidden memory block to the current run ledger."""
+        context = getattr(runtime, "context", None)
+        journal = context.get("__run_journal") if isinstance(context, dict) else None
+        if journal is None:
+            return
+
+        message = self._effective_memory_message(state, update, runtime)
+        if message is None:
+            return
+
+        try:
+            journal.record_memory_context(
+                content_sha256=hashlib.sha256(message.content.encode("utf-8")).hexdigest(),
+            )
+        except Exception:
+            logger.debug("Failed to record effective memory context", exc_info=True)
