@@ -139,8 +139,11 @@ def test_enable_toggle_allowed_for_admin(monkeypatch, tmp_path):
         ]
 
     app = _make_app(system_role="admin")
+    # Not a real LocalSkillStorage instance, so _persist_shared_skill_state's
+    # projection-mutation branch is skipped (nullcontext) and it reads the
+    # (nonexistent) config_path fresh via ExtensionsConfig.from_file, falling
+    # back to ExtensionsConfig() — no monkeypatch of the config read needed.
     monkeypatch.setattr(skills_router, "_get_user_skill_storage", lambda cfg: SimpleNamespace(load_skills=_load_skills))
-    monkeypatch.setattr(skills_router, "get_extensions_config", lambda: SimpleNamespace(mcp_servers={}, skills={}))
     monkeypatch.setattr(skills_router, "reload_extensions_config", lambda: None)
     monkeypatch.setattr(skills_router.ExtensionsConfig, "resolve_config_path", staticmethod(lambda: config_path))
 
