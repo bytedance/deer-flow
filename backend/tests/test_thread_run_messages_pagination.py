@@ -392,3 +392,49 @@ def test_list_thread_messages_injects_turn_duration_once_per_run():
     assert data[2]["content"]["additional_kwargs"]["turn_duration"] == 5
     assert "turn_duration" not in data[3].get("content", {}).get("additional_kwargs", {})
     assert data[4]["content"]["additional_kwargs"]["turn_duration"] == 9
+
+
+def test_list_thread_messages_turn_duration_skips_middleware_tail():
+    """The thread feed gained the middleware skip through the same
+    ``stamp_turn_duration_on_last_ai`` helper as the per-run endpoint — before
+    that it stamped every AI message, middleware included. Lock the contract
+    on this path too, not just ``list_run_messages``."""
+    from unittest.mock import AsyncMock
+
+    from deerflow.runtime import RunRecord
+
+    mock_run = RunRecord(
+        run_id="run-1",
+        thread_id="thread-1",
+        assistant_id=None,
+        status="success",
+        on_disconnect="cancel",
+        created_at="2026-06-20T10:00:00Z",
+        updated_at="2026-06-20T10:00:05Z",
+    )
+
+    rows = [
+        {"seq": 1, "run_id": "run-1", "content": {"type": "ai", "text": "Response"}},
+        {"seq": 2, "run_id": "run-1", "content": {"type": "ai", "text": "Title"}, "metadata": {"caller": "middleware:title"}},
+    ]
+
+    event_store = MagicMock()
+    event_store.list_messages = AsyncMock(return_value=rows)
+
+    run_manager = AsyncMock()
+    run_manager.list_by_thread = AsyncMock(return_value=[mock_run])
+
+    feedback_repo = MagicMock()
+    feedback_repo.list_by_thread_grouped = AsyncMock(return_value={})
+
+    app = _make_app(event_store=event_store, run_manager=run_manager)
+    app.state.feedback_repo = feedback_repo
+
+    with TestClient(app) as client:
+        response = client.get("/api/threads/thread-1/messages")
+
+    assert response.status_code == 200
+    data = response.json()
+
+    assert data[0]["content"]["additional_kwargs"]["turn_duration"] == 5
+    assert "turn_duration" not in data[1]["content"].get("additional_kwargs", {})

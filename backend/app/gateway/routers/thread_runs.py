@@ -76,6 +76,13 @@ def stamp_turn_duration_on_last_ai(messages, run_durations: dict[str, int]) -> N
     Accepts both message shapes that carry ``run_id``: event-store rows, which
     wrap the message payload in a ``content`` dict, and flat serialized
     checkpoint messages (``/history``), where the payload is the row itself.
+
+    The middleware skip is only effective on the event-store shape: checkpoint
+    messages replayed on ``/history`` never carry ``metadata.caller`` (they are
+    plain serialized LangChain messages), so this skip is inert there. That is
+    not a gap in practice — middleware writes (e.g. title generation) go to
+    thread metadata, not the ``messages`` channel, so no middleware message
+    reaches a checkpoint's ``messages`` list to begin with.
     """
     stamped: set[str] = set()
     for msg in reversed(messages):
