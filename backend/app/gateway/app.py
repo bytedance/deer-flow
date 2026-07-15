@@ -22,6 +22,7 @@ from app.gateway.routers import (
     features,
     feedback,
     github_webhooks,
+    input_polish,
     mcp,
     memory,
     models,
@@ -36,6 +37,7 @@ from app.gateway.routers import (
 from app.gateway.trace_middleware import TraceMiddleware, resolve_trace_enabled
 from deerflow.config import app_config as deerflow_app_config
 from deerflow.logging_config import DEFAULT_LOG_DATE_FORMAT, DEFAULT_LOG_FORMAT, configure_logging
+from deerflow.tracing.monocle import setup_monocle_tracing_if_enabled
 from deerflow.uploads.manager import cleanup_stale_upload_staging_files
 
 AppConfig = deerflow_app_config.AppConfig
@@ -188,30 +190,44 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     config = get_gateway_config()
     logger.info(f"Starting API Gateway on {config.host}:{config.port}")
 
+    # Agent observability (Monocle). Off by default; enabled with
+    # MONOCLE_TRACING. Initialized here at startup — not at import time — so a
+    # plain `import deerflow.agents` never installs a process-global tracer.
+    # Unlike LangSmith/Langfuse, whose validation failures abort the agent run,
+    # a bad Monocle config only logs: the Gateway keeps serving without tracing.
+    try:
+        setup_monocle_tracing_if_enabled()
+    except Exception:  # observability must never break startup
+        logger.exception("Monocle tracing setup failed; continuing without it")
+
     # Pre-warm tiktoken encoding cache so the first memory-injection request
     # never blocks on the BPE data download (which hits an OpenAI/Azure URL
     # that may be unreachable in restricted networks — see issue #3402).
-    # When memory.token_counting is "char", token counting never touches
-    # tiktoken, so skip the warm-up entirely (avoids even the 5s probe in
+    # Warm-up runs via the manager's `warm` capability (getattr-probed, so
+    # non-DeerMem backends skip it). DeerMem.warm re-checks token_counting==
+    # "char" and returns early, so char-mode backends never touch tiktoken
+    # (avoids even the 5s probe in
     # network-restricted deployments — see issue #3429).
-    if startup_config.memory.token_counting == "char":
-        logger.info("memory.token_counting='char'; skipping tiktoken warm-up (network-free token estimation)")
-    else:
-        try:
-            from deerflow.agents.memory.prompt import warm_tiktoken_cache
+    try:
+        from deerflow.agents.memory import get_memory_manager
 
+        manager = get_memory_manager()
+        warm = getattr(manager, "warm", None)
+        if not callable(warm):
+            logger.info("Memory backend %s has no warm-up hook; skipping tiktoken warm-up", type(manager).__name__)
+        else:
             warmed = await asyncio.wait_for(
-                asyncio.to_thread(warm_tiktoken_cache),
+                asyncio.to_thread(warm),
                 timeout=5,
             )
             if warmed:
                 logger.info("tiktoken encoding cache warmed successfully")
             else:
                 logger.warning("tiktoken encoding cache warm-up failed; token counting will use character-based fallback until tiktoken loads successfully")
-        except TimeoutError:
-            logger.warning("tiktoken encoding cache warm-up timed out; token counting will use character-based fallback until tiktoken loads successfully")
-        except Exception:
-            logger.warning("tiktoken warm-up skipped", exc_info=True)
+    except TimeoutError:
+        logger.warning("tiktoken encoding cache warm-up timed out; token counting will use character-based fallback until tiktoken loads successfully")
+    except Exception:
+        logger.warning("tiktoken warm-up skipped", exc_info=True)
 
     try:
         removed_upload_staging_files = await asyncio.to_thread(cleanup_stale_upload_staging_files)
@@ -363,6 +379,10 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
                 "description": "Generate follow-up question suggestions for conversations",
             },
             {
+                "name": "input-polish",
+                "description": "Polish composer draft input before sending",
+            },
+            {
                 "name": "channels",
                 "description": "Manage IM channel integrations (Feishu, Slack, Telegram)",
             },
@@ -444,6 +464,9 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
 
     # Suggestions API is mounted at /api/threads/{thread_id}/suggestions
     app.include_router(suggestions.router)
+
+    # Input polishing API is mounted at /api/input-polish
+    app.include_router(input_polish.router)
 
     # User-facing IM channel connection API is mounted at /api/channels
     app.include_router(channel_connections.router)

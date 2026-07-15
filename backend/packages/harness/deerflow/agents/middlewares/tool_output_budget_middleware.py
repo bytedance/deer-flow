@@ -77,11 +77,31 @@ def _snap_to_line_boundary(text: str, pos: int) -> int:
     Used so that previews and truncations end on a complete line when
     possible.  If no newline exists in the second half of ``text[:pos]``
     the original *pos* is returned unchanged.
+
+    Only valid for an *end* offset: moving backwards shortens the slice that
+    ends here.  Use :func:`_snap_start_to_line_boundary` for a start offset.
     """
     if pos <= 0 or pos >= len(text):
         return pos
     half = pos // 2
     nl = text.rfind("\n", half, pos)
+    if nl >= 0:
+        return nl + 1
+    return pos
+
+
+def _snap_start_to_line_boundary(text: str, pos: int) -> int:
+    """Return *pos* or the nearest following newline+1, whichever is closer.
+
+    The start-offset mirror of :func:`_snap_to_line_boundary`. Snapping a start
+    backwards would *lengthen* the slice beginning there, so the tail of a
+    budgeted preview must snap forward instead. If no newline exists in the
+    first half of ``text[pos:]`` the original *pos* is returned unchanged.
+    """
+    if pos <= 0 or pos >= len(text):
+        return pos
+    half = pos + (len(text) - pos) // 2
+    nl = text.find("\n", pos, half)
     if nl >= 0:
         return nl + 1
     return pos
@@ -258,10 +278,7 @@ def _build_fallback(
     effective_tail = min(tail_chars, max(0, budget - effective_head))
 
     head_end = _snap_to_line_boundary(content, min(effective_head, total))
-    tail_start = max(head_end, total - effective_tail)
-    tail_start_snapped = _snap_to_line_boundary(content, tail_start)
-    if tail_start_snapped > head_end:
-        tail_start = tail_start_snapped
+    tail_start = _snap_start_to_line_boundary(content, max(head_end, total - effective_tail))
 
     head = content[:head_end]
     tail = content[tail_start:] if tail_start < total else ""

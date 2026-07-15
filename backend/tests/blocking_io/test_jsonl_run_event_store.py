@@ -10,7 +10,8 @@ so any blocking IO here stalls the event loop on the hot path.
 ``tests/test_jsonl_event_store_async_io.py`` that covers ``put`` only. This
 anchor complements it by driving the **full** async surface (``put``,
 ``put_batch``, ``list_messages``, ``list_events``, ``list_messages_by_run``,
-``count_messages``, ``delete_by_run``, ``delete_by_thread``) under the strict
+``get_last_visible_ai_seq_by_run``, ``count_messages``, ``delete_by_run``,
+``delete_by_thread``) under the strict
 Blockbuster runtime gate, so any blocking IO reintroduced on the event loop in
 any of these methods — not just removal of a specific ``to_thread`` call —
 fails CI.
@@ -55,6 +56,7 @@ async def test_jsonl_run_event_store_async_api_does_not_block_event_loop(tmp_pat
     assert isinstance(await store.list_events("t1", "r1"), list)
     assert isinstance(await store.list_events("t1", "r1", event_types=["message"]), list)
     assert isinstance(await store.list_messages_by_run("t1", "r2"), list)
+    assert isinstance(await store.get_last_visible_ai_seq_by_run("t1", {"r1", "r2"}, user_id="user-1"), dict)
     assert await store.count_messages("t1") >= 1
 
     # deletes: delete_by_run (single file) then delete_by_thread (remaining)

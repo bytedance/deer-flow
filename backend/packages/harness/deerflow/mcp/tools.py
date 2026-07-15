@@ -14,17 +14,29 @@ from urllib.parse import unquote, urlparse
 from langchain_core.tools import BaseTool, StructuredTool
 from langgraph.config import get_config
 
-from deerflow.config.extensions_config import ExtensionsConfig
+from deerflow.config.extensions_config import ExtensionsConfig, resolve_effective_mcp_routing
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX, Paths, get_paths
 from deerflow.mcp.client import build_servers_config
 from deerflow.mcp.oauth import build_oauth_tool_interceptor, get_initial_oauth_headers
 from deerflow.mcp.session_pool import get_session_pool
 from deerflow.reflection import resolve_variable
 from deerflow.runtime.user_context import resolve_runtime_user_id
+from deerflow.tools.mcp_metadata import tag_mcp_routing, tag_mcp_tool
 from deerflow.tools.sync import make_sync_tool_wrapper
 from deerflow.tools.types import Runtime
 
 logger = logging.getLogger(__name__)
+
+# MCP tool names arrive verbatim from external (potentially hostile/compromised)
+# servers. A tool name is only ever a function identifier: the provider's
+# function-calling API validates it against this same charset at bind time. But
+# deferred (tool_search) MCP tools are withheld from binding, so that provider
+# check never runs on their names — they only ever live in the system-prompt
+# string, where a crafted name (newlines, markdown, angle brackets) could forge
+# framework prompt structure. Canonicalizing at the load boundary constrains
+# both bound and deferred names to the same safe identifier charset, mirroring
+# the load-time validation skill names get (skills/storage/skill_storage.py).
+_VALID_MCP_TOOL_NAME = re.compile(r"^[A-Za-z0-9_-]+$")
 
 # Subdirectory under the thread's workspace used as the temp dir for stdio MCP
 # subprocesses. Pinning the process temp dir here (alongside its cwd) makes
@@ -663,6 +675,20 @@ async def get_mcp_tools() -> list[BaseTool]:
             transport = servers_config[source_name].get("transport", "stdio")
             server_cfg = extensions_config.mcp_servers.get(source_name)
             for tool in server_tools:
+                if not _VALID_MCP_TOOL_NAME.fullmatch(tool.name or ""):
+                    logger.warning(
+                        "Dropping MCP tool from server '%s' with invalid name %r: tool names must match %s. A name outside this charset cannot be bound as a function tool and could forge prompt structure when listed as a deferred tool.",
+                        source_name,
+                        tool.name,
+                        _VALID_MCP_TOOL_NAME.pattern,
+                    )
+                    continue
+                tag_mcp_tool(tool)
+                prefix = f"{source_name}_"
+                original_name = tool.name[len(prefix) :] if tool.name.startswith(prefix) else tool.name
+                routing = resolve_effective_mcp_routing(server_cfg, original_name)
+                if routing.get("mode") != "off":
+                    tag_mcp_routing(tool, routing)
                 if tool.name.startswith(f"{source_name}_") and transport == "stdio":
                     _timeout = server_cfg.tool_call_timeout if server_cfg else None
                     wrapped_tools.append(_make_session_pool_tool(tool, source_name, servers_config[source_name], tool_interceptors, tool_call_timeout=_timeout))

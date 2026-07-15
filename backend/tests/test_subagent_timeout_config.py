@@ -12,8 +12,10 @@ Covers:
 import pytest
 
 from deerflow.config.subagents_config import (
+    DEFAULT_MAX_TOTAL_SUBAGENTS_PER_RUN,
     SubagentOverrideConfig,
     SubagentsAppConfig,
+    default_subagent_token_budget,
     get_subagents_app_config,
     load_subagents_config_from_dict,
 )
@@ -103,26 +105,90 @@ class TestSubagentsAppConfigDefaults:
         config = SubagentsAppConfig()
         assert config.max_turns is None
 
+    def test_default_max_total_per_run(self):
+        config = SubagentsAppConfig()
+        assert config.max_total_per_run == DEFAULT_MAX_TOTAL_SUBAGENTS_PER_RUN
+
     def test_default_agents_empty(self):
         config = SubagentsAppConfig()
         assert config.agents == {}
 
     def test_custom_global_runtime_overrides(self):
-        config = SubagentsAppConfig(timeout_seconds=1800, max_turns=120)
+        config = SubagentsAppConfig(timeout_seconds=1800, max_turns=120, max_total_per_run=8)
         assert config.timeout_seconds == 1800
         assert config.max_turns == 120
+        assert config.max_total_per_run == 8
 
     def test_rejects_zero_timeout(self):
         with pytest.raises(ValueError):
             SubagentsAppConfig(timeout_seconds=0)
         with pytest.raises(ValueError):
             SubagentsAppConfig(max_turns=0)
+        with pytest.raises(ValueError):
+            SubagentsAppConfig(max_total_per_run=0)
 
     def test_rejects_negative_timeout(self):
         with pytest.raises(ValueError):
             SubagentsAppConfig(timeout_seconds=-60)
         with pytest.raises(ValueError):
             SubagentsAppConfig(max_turns=-60)
+        with pytest.raises(ValueError):
+            SubagentsAppConfig(max_total_per_run=-1)
+
+    def test_rejects_above_max_total_per_run(self):
+        with pytest.raises(ValueError):
+            SubagentsAppConfig(max_total_per_run=51)
+
+    def test_default_token_budget_coupled_to_summarization_switch(self):
+        """The token-budget backstop engages by default (#3857 point 4). Its
+        ``max_tokens`` ceiling is coupled to whether subagent summarization is
+        on (#3875 Phase 3 review): 1M when compaction runs, 2M otherwise —
+        because Phase 2 acknowledged legitimate deep-research runs can exceed
+        1M without compaction, so tightening to 1M unconditionally would
+        prematurely cap summarization-off deployments."""
+        # Default (no summarization): 2M — preserves Phase 2 headroom.
+        budget_off = default_subagent_token_budget(summarization_enabled=False)
+        assert budget_off.enabled is True
+        assert budget_off.max_tokens == 2_000_000
+        assert budget_off.warn_threshold == 0.7
+        # Summarization on: 1M — compaction justifies the tighter ceiling.
+        budget_on = default_subagent_token_budget(summarization_enabled=True)
+        assert budget_on.max_tokens == 1_000_000
+        # The AppConfig model-level default cannot read summarization.enabled,
+        # so it falls back to the no-compaction 2M; the builder recomputes via
+        # get_token_budget_for(summarization_enabled=...).
+        config = SubagentsAppConfig()
+        assert config.token_budget.max_tokens == 2_000_000
+        assert config.token_budget.enabled is True
+
+    def test_get_token_budget_for_couples_default_to_summarization(self):
+        """``get_token_budget_for`` must re-couple the DEFAULT ceiling to the
+        summarization switch, but a user-set budget (global or per-agent) must
+        always win regardless of the switch (#3875 Phase 3 review)."""
+        # Default global budget → re-coupled.
+        config = SubagentsAppConfig()
+        assert config.get_token_budget_for("general-purpose", summarization_enabled=True).max_tokens == 1_000_000
+        assert config.get_token_budget_for("general-purpose", summarization_enabled=False).max_tokens == 2_000_000
+
+    def test_get_token_budget_for_respects_explicit_global(self):
+        """A user-set global ``token_budget`` is respected as-is — the
+        summarization coupling only affects the default."""
+        from deerflow.config.token_budget_config import TokenBudgetConfig
+
+        config = SubagentsAppConfig(token_budget=TokenBudgetConfig(enabled=True, max_tokens=500_000))
+        # Explicit global wins for an agent with no per-agent override.
+        assert config.get_token_budget_for("general-purpose", summarization_enabled=True).max_tokens == 500_000
+        assert config.get_token_budget_for("general-purpose", summarization_enabled=False).max_tokens == 500_000
+
+    def test_get_token_budget_for_respects_per_agent_override(self):
+        """A per-agent ``token_budget`` override wins over both the default and
+        the summarization coupling."""
+        from deerflow.config.token_budget_config import TokenBudgetConfig
+
+        config = SubagentsAppConfig(
+            agents={"bash": SubagentOverrideConfig(token_budget=TokenBudgetConfig(enabled=True, max_tokens=300_000))},
+        )
+        assert config.get_token_budget_for("bash", summarization_enabled=True).max_tokens == 300_000
 
 
 # ---------------------------------------------------------------------------

@@ -222,11 +222,13 @@ def _apply_assistant_delta(state: ViewState, action: AssistantDelta) -> ViewStat
         # match here anyway — the guard is belt-and-suspenders to keep an error
         # row from being merged into if a future change ever gives it an id.
         if isinstance(row, AssistantRow) and row.id == action.id and not row.error:
-            merged = _merge_stream_text(row.text, action.text)
-            if merged == row.text:
-                # No-op re-send (e.g. a values snapshot re-emitting history) —
-                # don't mark this as the actively-streaming message.
+            # Exact re-send of the same full text (e.g. a values snapshot
+            # re-emitting history after reconnection): no-op.  Only multi-char
+            # matches are treated as re-sends so single-char deltas that happen
+            # to equal the buffer (CJK reduplication) are NOT mistaken for no-ops.
+            if row.text == action.text and len(action.text) > 1:
                 return state
+            merged = _merge_stream_text(row.text, action.text)
             rows[i] = replace(row, text=merged)
             return _mark_streaming(replace(state, rows=tuple(rows)), action.id)
     return _mark_streaming(_append(state, AssistantRow(text=action.text, id=action.id)), action.id)
@@ -242,10 +244,14 @@ def _mark_streaming(state: ViewState, message_id: str) -> ViewState:
 def _merge_stream_text(existing: str, incoming: str) -> str:
     if not existing:
         return incoming
-    if incoming.startswith(existing):
-        return incoming  # cumulative snapshot or exact full re-send
-    if existing.startswith(incoming):
-        return existing  # shorter/stale re-send
+    # Cumulative re-delivery: incoming strictly extends existing.
+    if len(incoming) > len(existing) and incoming.startswith(existing):
+        return incoming
+    # Stale/shorter re-send: existing already contains incoming as a prefix
+    # (e.g. a values snapshot re-emitting history that has already been
+    # accumulated from deltas). Only treat as stale when strictly shorter.
+    if len(existing) > len(incoming) and existing.startswith(incoming):
+        return existing
     return existing + incoming  # genuine incremental delta
 
 

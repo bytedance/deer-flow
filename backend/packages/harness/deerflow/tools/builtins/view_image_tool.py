@@ -1,4 +1,3 @@
-import base64
 import mimetypes
 from pathlib import Path
 from typing import Annotated
@@ -132,13 +131,19 @@ def view_image_tool(
             update={"messages": [ToolMessage(f"Error: Image file is too large: {image_size} bytes. Maximum supported size is {_MAX_IMAGE_BYTES} bytes", tool_call_id=tool_call_id)]},
         )
 
-    # Read image file and convert to base64
+    # Read image file to validate contents (magic bytes + size)
     try:
         with open(actual_path, "rb") as f:
             image_data = f.read()
     except Exception as e:
         return Command(
             update={"messages": [ToolMessage(f"Error reading image file: {_sanitize_image_error(e, thread_data)}", tool_call_id=tool_call_id)]},
+        )
+
+    if len(image_data) != image_size:
+        # File changed between stat() and read() - reject for safety.
+        return Command(
+            update={"messages": [ToolMessage("Error: Image file changed during read", tool_call_id=tool_call_id)]},
         )
 
     detected_mime_type = _detect_image_mime(image_data)
@@ -151,11 +156,17 @@ def view_image_tool(
             update={"messages": [ToolMessage(f"Error: Image contents are {detected_mime_type}, but file extension indicates {expected_mime_type}", tool_call_id=tool_call_id)]},
         )
     mime_type = detected_mime_type
-    image_base64 = base64.b64encode(image_data).decode("utf-8")
 
-    # Update viewed_images in state
-    # The merge_viewed_images reducer will handle merging with existing images
-    new_viewed_images = {image_path: {"base64": image_base64, "mime_type": mime_type}}
+    # Store only lightweight metadata in state (not base64) to avoid
+    # duplicating large payloads across every checkpoint (see #4138).
+    # The middleware reads the file on-demand when the model needs it.
+    new_viewed_images = {
+        image_path: {
+            "mime_type": mime_type,
+            "size": image_size,
+            "actual_path": str(actual_path),
+        }
+    }
 
     return Command(
         update={"viewed_images": new_viewed_images, "messages": [ToolMessage("Successfully read image", tool_call_id=tool_call_id)]},

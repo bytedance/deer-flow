@@ -162,7 +162,11 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
         config = self._get_title_config()
         fallback_chars = min(config.max_chars, 50)
         if len(user_msg) > fallback_chars:
-            return user_msg[:fallback_chars].rstrip() + "..."
+            # Reserve room for the ellipsis so this path honours ``max_chars``
+            # exactly as ``_parse_title`` does on the model path.
+            ellipsis = "..."
+            body = min(fallback_chars, config.max_chars - len(ellipsis))
+            return user_msg[:body].rstrip() + ellipsis
         return user_msg if user_msg else "New Conversation"
 
     def _get_runnable_config(self) -> dict[str, Any]:

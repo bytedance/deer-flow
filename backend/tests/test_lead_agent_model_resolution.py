@@ -9,13 +9,16 @@ import pytest
 from langchain.agents.middleware import AgentMiddleware
 
 from deerflow.agents.lead_agent import agent as lead_agent_module
+from deerflow.agents.middlewares import summarization_middleware as summarization_middleware_module
 from deerflow.agents.middlewares.loop_detection_middleware import LoopDetectionMiddleware
+from deerflow.agents.middlewares.subagent_limit_middleware import SubagentLimitMiddleware
 from deerflow.config.app_config import AppConfig
 from deerflow.config.extensions_config import ExtensionsConfig
 from deerflow.config.loop_detection_config import LoopDetectionConfig
 from deerflow.config.memory_config import MemoryConfig
 from deerflow.config.model_config import ModelConfig
 from deerflow.config.sandbox_config import SandboxConfig
+from deerflow.config.subagents_config import SubagentsAppConfig
 from deerflow.config.summarization_config import SummarizationConfig
 
 
@@ -381,10 +384,18 @@ def test_build_middlewares_uses_resolved_model_name_for_vision(monkeypatch):
 
     assert any(isinstance(m, lead_agent_module.ViewImageMiddleware) for m in middlewares)
     # verify the custom middleware is injected correctly.
-    # Chain tail order after the custom middleware is:
-    #   ..., custom, SafetyFinishReasonMiddleware, ClarificationMiddleware
-    # so the custom mock sits at index [-3].
-    assert len(middlewares) > 0 and isinstance(middlewares[-3], MagicMock)
+    # With this test's default safety config enabled, the tail order is:
+    #   ..., custom, TerminalResponseMiddleware, SafetyFinishReasonMiddleware,
+    #   ClarificationMiddleware, so the custom mock sits at index [-4].
+    assert len(middlewares) > 0 and isinstance(middlewares[-4], MagicMock)
+
+    from deerflow.agents.middlewares.clarification_middleware import ClarificationMiddleware
+    from deerflow.agents.middlewares.safety_finish_reason_middleware import SafetyFinishReasonMiddleware
+    from deerflow.agents.middlewares.terminal_response_middleware import TerminalResponseMiddleware
+
+    assert isinstance(middlewares[-3], TerminalResponseMiddleware)
+    assert isinstance(middlewares[-2], SafetyFinishReasonMiddleware)
+    assert isinstance(middlewares[-1], ClarificationMiddleware)
 
 
 def test_build_middlewares_passes_explicit_app_config_to_shared_factory(monkeypatch):
@@ -431,6 +442,33 @@ def test_build_middlewares_passes_explicit_app_config_to_shared_factory(monkeypa
         "memory_config": app_config.memory,
     }
     assert middlewares[0] == "base-middleware"
+
+
+def test_build_middlewares_places_mcp_routing_before_deferred_filter(monkeypatch):
+    from deerflow.agents.middlewares.deferred_tool_filter_middleware import DeferredToolFilterMiddleware
+    from deerflow.agents.middlewares.mcp_routing_middleware import McpRoutingMiddleware
+    from deerflow.tools.builtins.tool_search import DeferredToolSetup
+
+    app_config = _make_app_config([_make_model("safe-model", supports_thinking=False)], loop_detection=LoopDetectionConfig(enabled=False))
+    routing = McpRoutingMiddleware({"mcp_thing": {"priority": 100, "keywords": ["orders"]}}, "hash123", 3)
+    setup = DeferredToolSetup(object(), frozenset({"mcp_thing"}), "hash123")
+
+    monkeypatch.setattr(lead_agent_module, "get_app_config", lambda: app_config)
+    monkeypatch.setattr(lead_agent_module, "build_lead_runtime_middlewares", lambda *, app_config, lazy_init=True: [])
+    monkeypatch.setattr(lead_agent_module, "_create_summarization_middleware", lambda *, app_config=None: None)
+    monkeypatch.setattr(lead_agent_module, "_create_todo_list_middleware", lambda is_plan_mode: None)
+
+    middlewares = lead_agent_module.build_middlewares(
+        {"configurable": {"is_plan_mode": False, "subagent_enabled": False}},
+        model_name="safe-model",
+        app_config=app_config,
+        deferred_setup=setup,
+        mcp_routing_middleware=routing,
+    )
+
+    routing_idx = next(i for i, middleware in enumerate(middlewares) if isinstance(middleware, McpRoutingMiddleware))
+    filter_idx = next(i for i, middleware in enumerate(middlewares) if isinstance(middleware, DeferredToolFilterMiddleware))
+    assert routing_idx < filter_idx
 
 
 def test_build_middlewares_uses_loop_detection_config(monkeypatch):
@@ -512,13 +550,66 @@ def test_build_middlewares_injects_configured_extension_middlewares(monkeypatch)
     )
 
     middleware_types = [type(m).__name__ for m in middlewares]
-    assert middleware_types[-4:] == [
+    assert middleware_types[-5:] == [
         "ConfiguredGuardMiddleware",
         "ConfiguredAuditMiddleware",
+        "TerminalResponseMiddleware",
         "SafetyFinishReasonMiddleware",
         "ClarificationMiddleware",
     ]
     assert middlewares[middleware_types.index("ConfiguredGuardMiddleware") - 1] is manual_middleware
+
+
+def test_build_middlewares_passes_subagent_total_limit_from_app_config(monkeypatch):
+    app_config = _make_app_config(
+        [_make_model("safe-model", supports_thinking=False)],
+        loop_detection=LoopDetectionConfig(enabled=False),
+    )
+    app_config.subagents = SubagentsAppConfig(max_total_per_run=7)
+
+    monkeypatch.setattr(lead_agent_module, "get_app_config", lambda: app_config)
+    monkeypatch.setattr(lead_agent_module, "build_lead_runtime_middlewares", lambda *, app_config, lazy_init=True: [])
+    monkeypatch.setattr(lead_agent_module, "_create_summarization_middleware", lambda *, app_config=None: None)
+    monkeypatch.setattr(lead_agent_module, "_create_todo_list_middleware", lambda is_plan_mode: None)
+
+    middlewares = lead_agent_module.build_middlewares(
+        {"configurable": {"is_plan_mode": False, "subagent_enabled": True, "max_concurrent_subagents": 3}},
+        model_name="safe-model",
+        app_config=app_config,
+    )
+
+    limit = next(m for m in middlewares if isinstance(m, SubagentLimitMiddleware))
+    assert limit.max_concurrent == 3
+    assert limit.max_total == 7
+
+
+def test_build_middlewares_allows_runtime_subagent_total_limit_override(monkeypatch):
+    app_config = _make_app_config(
+        [_make_model("safe-model", supports_thinking=False)],
+        loop_detection=LoopDetectionConfig(enabled=False),
+    )
+    app_config.subagents = SubagentsAppConfig(max_total_per_run=7)
+
+    monkeypatch.setattr(lead_agent_module, "get_app_config", lambda: app_config)
+    monkeypatch.setattr(lead_agent_module, "build_lead_runtime_middlewares", lambda *, app_config, lazy_init=True: [])
+    monkeypatch.setattr(lead_agent_module, "_create_summarization_middleware", lambda *, app_config=None: None)
+    monkeypatch.setattr(lead_agent_module, "_create_todo_list_middleware", lambda is_plan_mode: None)
+
+    middlewares = lead_agent_module.build_middlewares(
+        {
+            "configurable": {
+                "is_plan_mode": False,
+                "subagent_enabled": True,
+                "max_concurrent_subagents": 3,
+                "max_total_subagents": 5,
+            }
+        },
+        model_name="safe-model",
+        app_config=app_config,
+    )
+
+    limit = next(m for m in middlewares if isinstance(m, SubagentLimitMiddleware))
+    assert limit.max_total == 5
 
 
 def test_build_middlewares_rejects_invalid_configured_extension_middleware(monkeypatch):
@@ -582,9 +673,9 @@ def test_create_summarization_middleware_uses_configured_model_alias(monkeypatch
     def _raise_get_app_config():
         raise AssertionError("ambient get_app_config() must not be used when app_config is explicit")
 
-    monkeypatch.setattr(lead_agent_module, "get_app_config", _raise_get_app_config)
-    monkeypatch.setattr(lead_agent_module, "create_chat_model", _fake_create_chat_model)
-    monkeypatch.setattr(lead_agent_module, "DeerFlowSummarizationMiddleware", lambda **kwargs: kwargs)
+    monkeypatch.setattr(summarization_middleware_module, "get_app_config", _raise_get_app_config)
+    monkeypatch.setattr(summarization_middleware_module, "create_chat_model", _fake_create_chat_model)
+    monkeypatch.setattr(summarization_middleware_module, "DeerFlowSummarizationMiddleware", lambda **kwargs: kwargs)
 
     middleware = lead_agent_module._create_summarization_middleware(app_config=app_config)
 
@@ -593,6 +684,30 @@ def test_create_summarization_middleware_uses_configured_model_alias(monkeypatch
     assert captured["app_config"] is app_config
     assert middleware["model"] is fake_model
     fake_model.with_config.assert_called_once_with(tags=["middleware:summarize"])
+
+
+def test_create_summarization_middleware_omits_model_name_when_unconfigured(monkeypatch):
+    app_config = _make_app_config([_make_model("default-model", supports_thinking=False)])
+    app_config.summarization = SummarizationConfig(enabled=True, model_name=None)
+    app_config.memory = MemoryConfig(enabled=False)
+
+    captured: dict[str, object] = {}
+    fake_model = MagicMock()
+    fake_model.with_config.return_value = fake_model
+
+    def _fake_create_chat_model(**kwargs):
+        captured.update(kwargs)
+        return fake_model
+
+    monkeypatch.setattr(summarization_middleware_module, "create_chat_model", _fake_create_chat_model)
+    monkeypatch.setattr(summarization_middleware_module, "DeerFlowSummarizationMiddleware", lambda **kwargs: kwargs)
+
+    middleware = lead_agent_module._create_summarization_middleware(app_config=app_config)
+
+    assert "name" not in captured
+    assert captured["thinking_enabled"] is False
+    assert captured["app_config"] is app_config
+    assert middleware["model"] is fake_model
 
 
 def test_create_summarization_middleware_uses_frontend_supported_update_key(monkeypatch):
@@ -604,7 +719,7 @@ def test_create_summarization_middleware_uses_frontend_supported_update_key(monk
 
     fake_model = MagicMock()
     fake_model.with_config.return_value = fake_model
-    monkeypatch.setattr(lead_agent_module, "create_chat_model", lambda **kwargs: fake_model)
+    monkeypatch.setattr(summarization_middleware_module, "create_chat_model", lambda **kwargs: fake_model)
 
     middleware = lead_agent_module._create_summarization_middleware(app_config=app_config)
 
@@ -628,9 +743,9 @@ def test_create_summarization_middleware_threads_resolved_app_config_to_model(mo
         captured["app_config"] = app_config
         return fake_model
 
-    monkeypatch.setattr(lead_agent_module, "get_app_config", lambda: fallback_app_config)
-    monkeypatch.setattr(lead_agent_module, "create_chat_model", _fake_create_chat_model)
-    monkeypatch.setattr(lead_agent_module, "DeerFlowSummarizationMiddleware", lambda **kwargs: kwargs)
+    monkeypatch.setattr(summarization_middleware_module, "get_app_config", lambda: fallback_app_config)
+    monkeypatch.setattr(summarization_middleware_module, "create_chat_model", _fake_create_chat_model)
+    monkeypatch.setattr(summarization_middleware_module, "DeerFlowSummarizationMiddleware", lambda **kwargs: kwargs)
 
     lead_agent_module._create_summarization_middleware()
 

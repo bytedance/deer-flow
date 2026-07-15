@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage, SystemMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
@@ -165,6 +167,21 @@ class TestSummaryWritesChannel:
 
         assert out is not None
         assert out["summary_text"] == "UPDATED_SUMMARY"
+
+    def test_compact_state_force_ignores_trigger_threshold(self):
+        middleware = DeerFlowSummarizationMiddleware(
+            model=_StaticChatModel(text="FORCED_SUMMARY"),
+            trigger=("messages", 100),
+            keep=("messages", 2),
+            token_counter=len,
+        )
+
+        result = middleware.compact_state({"messages": _big_history(3)}, SimpleNamespace(context={}), force=True)
+
+        assert result is not None
+        assert result.summary_text == "FORCED_SUMMARY"
+        assert len(result.preserved_messages) == 2
+        assert len(result.messages_to_summarize) > 0
 
     def test_previous_summary_is_trimmed_with_summary_prompt_input(self):
         middleware = DeerFlowSummarizationMiddleware(

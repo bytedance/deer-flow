@@ -5,6 +5,63 @@ All notable changes to DeerFlow are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### ⚠ Breaking changes
+
+- **memory:** The memory system is now pluggable (`memory.manager_class` selects
+  a backend; default `deermem` is self-contained). DeerMem-private settings moved
+  from the top level of `memory:` into `memory.backend_config`, and the
+  `/memory/config` response (and `client.get_memory_config()`) changed shape.
+- **memory:** `/memory/config` and `client.get_memory_config()` no longer return
+  flat DeerMem fields (`storage_path`, `max_facts`, `debounce_seconds`,
+  `token_counting`, `guaranteed_*`, `staleness_*`, ...). They return
+  `{enabled, mode, injection_enabled, manager_class, backend_config}` where
+  `backend_config` is an opaque dict the active backend self-interprets. Memory
+  *data* responses (`/memory`, `/memory/status` data) are unchanged. External
+  API/SDK clients reading the old flat fields must read `backend_config` instead.
+- **memory:** Custom `memory.storage_class` moved: the old default path
+  `deerflow.agents.memory.storage.FileMemoryStorage` no longer exists (now
+  `deerflow.agents.memory.backends.deermem.deermem.core.storage.FileMemoryStorage`).
+  Custom `MemoryStorage` subclasses must accept `config` in `__init__` (was
+  no-arg). A broken/old `storage_class` logs an error and falls back to
+  `FileMemoryStorage` (won't crash) -- update the path + signature to restore it.
+- **memory:** `storage_path` semantics changed from a FILE path to a root
+  DIRECTORY. Pre-abstraction, an absolute `storage_path` was the shared memory
+  file (opting out of per-user isolation) and a relative value was the global
+  file under the data base_dir. Now `storage_path` (absolute or relative) is the
+  root directory; per-user memory lives at `{storage_path}/users/{uid}/memory.json`.
+  An upgrade keeping the old default `storage_path: memory.json` (a relative file
+  name) would orphan per-user memory or hit `NotADirectoryError` on save, so the
+  legacy migration **drops file-style `storage_path` values (ending in `.json`)
+  with a warning** and the factory **raises** if `storage_path` resolves to an
+  existing file. Set `memory.backend_config.storage_path` to a directory for a
+  custom root.
+
+### Changed
+
+- **memory:** Pre-abstraction top-level `memory.*` DeerMem fields
+  (`storage_path`, `max_facts`, `debounce_seconds`, `model_name`,
+  `token_counting`, `staleness_*`, `consolidation_*`, ...) are **auto-migrated
+  into `backend_config`** on load with a warning, so an upgrade does NOT silently
+  revert customized settings to defaults (`model_name` ->
+  `backend_config.model.model`). Move them under `memory.backend_config` in
+  `config.yaml` to silence the warning.
+- **memory:** Added `memory.mode` (`middleware` | `tool`); `tool` mode registers
+  memory tools (`memory_search`/`add`/`update`/`delete`) the model calls directly
+  instead of passive per-turn summarization. `manager_class` resolution is now
+  fail-fast (raises `ValueError` on an unknown backend instead of silently
+  falling back).
+
+### Fixed
+
+- **models:** Honor `api_base` on every `BaseChatOpenAI` subclass (`VllmChatModel`,
+  `MindIEChatModel`, `PatchedChatMiMo`, `PatchedChatStepFun`, `PatchedChatMiniMax`),
+  not just `ChatOpenAI` / `PatchedChatOpenAI`. Those five previously dropped the
+  configured endpoint silently and then failed every request with an opaque
+  `unexpected keyword argument 'api_base'`; the unknown-config-key warning was
+  disabled for them as well. Both now gate on `issubclass(BaseChatOpenAI)`. ([#4146])
+
 ## [2.0.0] — 2026-06-15
 
 DeerFlow 2.0 is a ground-up rewrite around a "super agent" harness with
@@ -518,3 +575,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#3654]: https://github.com/bytedance/deer-flow/pull/3654
 [#3657]: https://github.com/bytedance/deer-flow/pull/3657
 [#3658]: https://github.com/bytedance/deer-flow/pull/3658
+[#4146]: https://github.com/bytedance/deer-flow/pull/4146

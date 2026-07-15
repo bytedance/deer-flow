@@ -68,8 +68,9 @@ def test_view_image_reads_virtual_uploads_path(tmp_path: Path) -> None:
 
     assert _message_content(result) == "Successfully read image"
     viewed_image = result.update["viewed_images"]["/mnt/user-data/uploads/sample.png"]
-    assert viewed_image["base64"] == base64.b64encode(PNG_BYTES).decode("utf-8")
     assert viewed_image["mime_type"] == "image/png"
+    assert viewed_image["size"] == len(PNG_BYTES)
+    assert viewed_image["actual_path"] == str(image_path)
 
 
 def test_view_image_rejects_spoofed_extension(tmp_path: Path) -> None:

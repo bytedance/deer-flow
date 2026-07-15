@@ -35,7 +35,6 @@ async def _run_lifespan_with_hanging_stop() -> float:
     app = FastAPI()
     startup_config = MagicMock()
     startup_config.log_level = "INFO"
-    startup_config.memory.token_counting = "char"
     fake_service = MagicMock()
     fake_service.get_status = MagicMock(return_value={})
 
@@ -51,6 +50,7 @@ async def _run_lifespan_with_hanging_stop() -> float:
         patch("app.gateway.app.auth.close_oidc_service", close_oidc_service),
         patch("app.channels.service.start_channel_service", side_effect=fake_start),
         patch("app.channels.service.stop_channel_service", side_effect=hang_forever),
+        patch("deerflow.agents.memory.get_memory_manager", return_value=MagicMock()),
     ):
         loop = asyncio.get_event_loop()
         start = loop.time()
