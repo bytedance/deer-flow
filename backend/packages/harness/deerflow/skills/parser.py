@@ -98,6 +98,42 @@ def parse_required_secrets(raw: object, skill_file: Path) -> tuple[SecretRequire
     return tuple(secrets)
 
 
+_OUTPUT_BASENAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+def parse_required_outputs(raw: object, skill_file: Path) -> tuple[str, ...]:
+    """Parse the optional ``required-outputs`` frontmatter field.
+
+    Each entry is a basename under the thread ``outputs/`` directory (no path
+    separators). Omitted or empty → no deliverable gate. Raises ValueError only
+    when the field is present but is not a list; malformed entries are dropped
+    with a warning so one bad name does not invalidate the whole skill.
+    """
+    if raw is None:
+        return ()
+    if not isinstance(raw, list):
+        raise ValueError(f"required-outputs in {skill_file} must be a list")
+
+    outputs: list[str] = []
+    seen: set[str] = set()
+    for item in raw:
+        if not isinstance(item, str):
+            logger.warning("Ignoring malformed required-outputs entry in %s: %r", skill_file, item)
+            continue
+        name = item.strip()
+        if not name or "/" in name or "\\" in name or name in {".", ".."} or Path(name).name != name:
+            logger.warning("Ignoring unsafe required-outputs basename in %s: %r", skill_file, item)
+            continue
+        if not _OUTPUT_BASENAME_RE.match(name):
+            logger.warning("Ignoring invalid required-outputs basename in %s: %r", skill_file, item)
+            continue
+        if name in seen:
+            continue
+        seen.add(name)
+        outputs.append(name)
+    return tuple(outputs)
+
+
 def parse_secrets_autonomous(raw: object, skill_file: Path) -> bool:
     """Parse the optional ``secrets-autonomous`` frontmatter field (issue #3914).
 
@@ -179,6 +215,12 @@ def parse_skill_file(skill_file: Path, category: SkillCategory, relative_path: P
             logger.error("Invalid required-secrets in %s: %s", skill_file, exc)
             return None
 
+        try:
+            required_outputs = parse_required_outputs(metadata.get("required-outputs"), skill_file)
+        except ValueError as exc:
+            logger.error("Invalid required-outputs in %s: %s", skill_file, exc)
+            return None
+
         secrets_autonomous = parse_secrets_autonomous(metadata.get("secrets-autonomous"), skill_file)
 
         return Skill(
@@ -193,6 +235,7 @@ def parse_skill_file(skill_file: Path, category: SkillCategory, relative_path: P
             enabled=True,  # Actual state comes from the extensions config file.
             required_secrets=required_secrets,
             secrets_autonomous=secrets_autonomous,
+            required_outputs=required_outputs,
         )
 
     except Exception:

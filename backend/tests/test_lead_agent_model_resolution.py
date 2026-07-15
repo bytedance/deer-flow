@@ -375,14 +375,17 @@ def test_build_middlewares_uses_resolved_model_name_for_vision(monkeypatch):
     assert any(isinstance(m, lead_agent_module.ViewImageMiddleware) for m in middlewares)
     # verify the custom middleware is injected correctly.
     # With this test's default safety config enabled, the tail order is:
-    #   ..., custom, TerminalResponseMiddleware, SafetyFinishReasonMiddleware,
-    #   ClarificationMiddleware, so the custom mock sits at index [-4].
-    assert len(middlewares) > 0 and isinstance(middlewares[-4], MagicMock)
+    #   ..., custom, SlashSkillDeliverableMiddleware, TerminalResponseMiddleware,
+    #   SafetyFinishReasonMiddleware, ClarificationMiddleware, so the custom mock
+    #   sits at index [-5].
+    assert len(middlewares) > 0 and isinstance(middlewares[-5], MagicMock)
 
     from deerflow.agents.middlewares.clarification_middleware import ClarificationMiddleware
     from deerflow.agents.middlewares.safety_finish_reason_middleware import SafetyFinishReasonMiddleware
+    from deerflow.agents.middlewares.slash_skill_deliverable_middleware import SlashSkillDeliverableMiddleware
     from deerflow.agents.middlewares.terminal_response_middleware import TerminalResponseMiddleware
 
+    assert isinstance(middlewares[-4], SlashSkillDeliverableMiddleware)
     assert isinstance(middlewares[-3], TerminalResponseMiddleware)
     assert isinstance(middlewares[-2], SafetyFinishReasonMiddleware)
     assert isinstance(middlewares[-1], ClarificationMiddleware)

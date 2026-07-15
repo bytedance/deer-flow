@@ -69,6 +69,17 @@ _SECRETS_BINDING_AUDIT_KEY = "__skill_secrets_binding_audit"
 # digest, never a secret value; listed below to keep the redaction guard complete.
 _SLASH_SKILL_ACTIVATION_RUN_KEY = "__slash_skill_activation_run"
 
+# Canonical name of the slash skill activated for this run (never a secret value).
+# Written by SkillActivationMiddleware so later tool-loop model calls — and
+# deliverable gates — can still identify the skill after the one-shot activation
+# reminder leaves the request.messages projection.
+_SLASH_SKILL_NAME_KEY = "__slash_skill_name"
+
+# Basenames from the activated skill's ``required-outputs`` frontmatter. Empty
+# list means "no deliverable gate for this activation". Written with the skill
+# name so SlashSkillDeliverableMiddleware does not need a hardcoded skill list.
+_SLASH_SKILL_REQUIRED_OUTPUTS_KEY = "__slash_skill_required_outputs"
+
 # Run-context keys whose values are request-scoped secrets and must be stripped
 # before a context mapping is serialized anywhere observable (traces, logs).
 REDACTED_CONTEXT_KEYS = frozenset(
@@ -78,6 +89,8 @@ REDACTED_CONTEXT_KEYS = frozenset(
         _SLASH_SECRET_SOURCE_KEY,
         _SECRETS_BINDING_AUDIT_KEY,
         _SLASH_SKILL_ACTIVATION_RUN_KEY,
+        _SLASH_SKILL_NAME_KEY,
+        _SLASH_SKILL_REQUIRED_OUTPUTS_KEY,
     }
 )
 

@@ -9,7 +9,7 @@ from typing import Any
 
 from deerflow.skills.frontmatter import ALLOWED_FRONTMATTER_PROPERTIES, split_skill_markdown
 from deerflow.skills.package_paths import is_eval_fixture_path, is_eval_fixture_skill_md
-from deerflow.skills.parser import parse_allowed_tools, parse_required_secrets
+from deerflow.skills.parser import parse_allowed_tools, parse_required_outputs, parse_required_secrets
 from deerflow.skills.review.digest import compute_package_digest
 from deerflow.skills.review.eval_schema import analyze_eval_manifests
 from deerflow.skills.review.models import (
@@ -254,6 +254,19 @@ def _analyze_skill_md(content: str, *, profile: ProfileName, findings: list[dict
                 path="SKILL.md",
                 message=str(exc),
                 remediation="Declare required-secrets as a YAML list.",
+            )
+        )
+
+    try:
+        parse_required_outputs(metadata.get("required-outputs"), Path("SKILL.md"))
+    except ValueError as exc:
+        findings.append(
+            make_finding(
+                "structure.invalid-required-outputs",
+                severity="error",
+                path="SKILL.md",
+                message=str(exc),
+                remediation="Declare required-outputs as a YAML list of output basenames.",
             )
         )
 

@@ -21,6 +21,8 @@ from deerflow.runtime.secret_context import (
     _SECRETS_BINDING_AUDIT_KEY,
     _SLASH_SECRET_SOURCE_KEY,
     _SLASH_SKILL_ACTIVATION_RUN_KEY,
+    _SLASH_SKILL_NAME_KEY,
+    _SLASH_SKILL_REQUIRED_OUTPUTS_KEY,
     ACTIVE_SECRETS_CONTEXT_KEY,
     extract_request_secrets,
 )
@@ -52,8 +54,11 @@ _SLASH_SKILL_ACTIVATION_TARGET_ID_KEY = "slash_skill_activation_target_id"
 # added via request.override(messages=...) for a single model call and never
 # persisted to graph state, so the 2nd..Nth model call of a turn rebuilds
 # request.messages from state without it — the run context is the only signal that
-# survives the tool loop. All three live in secret_context so they are covered by
-# REDACTED_CONTEXT_KEYS in one place.
+# survives the tool loop.
+# _SLASH_SKILL_NAME_KEY / _SLASH_SKILL_REQUIRED_OUTPUTS_KEY: activated skill
+# identity and its ``required-outputs`` basenames for the same lifetime (used by
+# SlashSkillDeliverableMiddleware). All five live in secret_context so they are
+# covered by REDACTED_CONTEXT_KEYS in one place.
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,6 +71,7 @@ class _Activation:
     remaining_text: str
     editable: bool
     required_secrets: tuple[SecretRequirement, ...] = ()
+    required_outputs: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,6 +176,7 @@ class SkillActivationMiddleware(AgentMiddleware):
                 remaining_text=resolved.remaining_text,
                 editable=editable,
                 required_secrets=tuple(resolved.skill.required_secrets or ()),
+                required_outputs=tuple(resolved.skill.required_outputs or ()),
             )
         )
 
@@ -336,6 +343,8 @@ Follow this skill before choosing a general workflow. Load supporting resources 
         # (computed once there, threaded through here) rather than recomputed.
         if run_context is not None:
             run_context[_SLASH_SKILL_ACTIVATION_RUN_KEY] = run_key
+            run_context[_SLASH_SKILL_NAME_KEY] = activation.skill_name
+            run_context[_SLASH_SKILL_REQUIRED_OUTPUTS_KEY] = list(activation.required_outputs)
         activation_msg = self._make_activation_message(target, self._build_activation_reminder(activation))
         messages = list(request.messages)
         messages.insert(target_index, activation_msg)
