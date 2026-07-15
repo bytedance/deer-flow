@@ -11,7 +11,7 @@ Kubernetes resources. No existing repo files are modified.
 ## Prerequisites
 
 - A Kubernetes cluster (Docker Desktop K8s, OrbStack, kind, k3d, or a real cluster).
-- `kubectl` + `helm` 3 installed.
+- `kubectl` + `helm` 3.8+ installed (OCI registry support stabilized in 3.8; earlier 3.x needs `HELM_EXPERIMENTAL_OCI=1`).
 - The three DeerFlow images — either the published ones (see "Install the
   published chart" below) or built locally (see step 1).
 - An Ingress controller (e.g. ingress-nginx) if you enable `ingress`.
@@ -23,7 +23,7 @@ The chart and all three images are published to GHCR on every `v*` release tag
 and install directly:
 
 ```bash
-helm install deer-flow oci://ghcr.io/<owner>/deer-flow \
+helm install deer-flow oci://ghcr.io/<owner>/charts/deer-flow \
   --version <version> \
   -n deer-flow --create-namespace \
   -f my-values.yaml
@@ -31,7 +31,14 @@ helm install deer-flow oci://ghcr.io/<owner>/deer-flow \
 
 where `<owner>` is the GitHub owner the chart is published from and `<version>`
 matches the release tag without the leading `v` (tag `v0.1.0` → `--version
-0.1.0`). Point the chart at the published images:
+0.1.0`).
+
+> **Note:** the helm chart is new in 2.1.0 - no chart was published before it.
+> It publishes to `oci://ghcr.io/<owner>/charts/deer-flow` (the `charts/` prefix
+> keeps it distinct from the `deer-flow-{backend,frontend,provisioner}` image
+> packages).
+
+Point the chart at the published images:
 
 ```yaml
 image:
@@ -58,11 +65,25 @@ Skip this section if you're using the published chart above. To build the
 images yourself from the existing Dockerfiles:
 
 ```bash
-REGISTRY=ghcr.io/yourorg TAG=latest ./deploy/helm/deer-flow/scripts/build-and-push.sh
+REGISTRY=ghcr.io/yourorg
+TAG=latest
+
+# backend - build with the `postgres` extra so multi-replica deploys can use
+# shared Postgres (matches the published image)
+docker build -t $REGISTRY/deer-flow-backend:$TAG --build-arg UV_EXTRAS=postgres -f backend/Dockerfile .
+# frontend
+docker build -t $REGISTRY/deer-flow-frontend:$TAG -f frontend/Dockerfile .
+# provisioner
+docker build -t $REGISTRY/deer-flow-provisioner:$TAG -f docker/provisioner/Dockerfile docker/provisioner
+
+docker push $REGISTRY/deer-flow-backend:$TAG
+docker push $REGISTRY/deer-flow-frontend:$TAG
+docker push $REGISTRY/deer-flow-provisioner:$TAG
 ```
 
-This produces `$REGISTRY/deer-flow-backend`, `$REGISTRY/deer-flow-frontend`,
-`$REGISTRY/deer-flow-provisioner`. The chart's image-name defaults match these.
+These names match the chart's `gatewayImage` / `frontendImage` /
+`provisionerImage` defaults, so only `image.registry` and `image.tag` need to
+point at them.
 
 If your registry needs auth, create a pull secret:
 

@@ -12,7 +12,7 @@ name: Nightly Build
 # Artifacts (under the running repo's owner):
 #   ghcr.io/<owner>/deer-flow-{backend,frontend,provisioner}:nightly
 #   ghcr.io/<owner>/deer-flow-{backend,frontend,provisioner}:nightly-YYYYMMDD
-#   oci://ghcr.io/<owner>/deer-flow   chart version <base>-nightly.YYYYMMDD-<sha>
+#   oci://ghcr.io/<owner>/charts/deer-flow   chart version <base>-nightly.YYYYMMDD-<sha>
 #
 # The nightly chart defaults image.tag=nightly and image.registry=ghcr.io/<owner>
 # (patched in-workflow, never committed), so installing it pulls the matching
@@ -230,5 +230,5 @@ jobs:
           helm package deploy/helm/deer-flow --destination ./packages
           for pkg in ./packages/*.tgz; do
             echo "--- pushing $pkg"
-            helm push "$pkg" oci://ghcr.io/${{ github.repository_owner }}
+            helm push "$pkg" oci://ghcr.io/${{ github.repository_owner }}/charts
           done

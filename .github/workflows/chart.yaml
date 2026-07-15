@@ -9,7 +9,7 @@ name: Publish Helm Chart
 # stale chart fails the PR, not the release.
 #
 # Users then install with:
-#   helm install deer-flow oci://ghcr.io/${{ owner }}/deer-flow --version <ver>
+#   helm install deer-flow oci://ghcr.io/${{ owner }}/charts/deer-flow --version <ver>
 
 on:
   push:
@@ -83,5 +83,5 @@ jobs:
         run: |
           for pkg in ./packages/*.tgz; do
             echo "--- pushing $pkg"
-            helm push "$pkg" oci://ghcr.io/${{ github.repository_owner }}
+            helm push "$pkg" oci://ghcr.io/${{ github.repository_owner }}/charts
           done
