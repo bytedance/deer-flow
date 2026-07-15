@@ -10,6 +10,7 @@ export interface WorkspaceChangeSummary {
   created: number;
   modified: number;
   deleted: number;
+  symlink_created: number;
   additions: number;
   deletions: number;
   truncated: boolean;

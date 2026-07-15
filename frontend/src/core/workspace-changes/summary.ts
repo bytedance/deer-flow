@@ -8,7 +8,12 @@ export type WorkspaceChangeLineClass =
   | "meta";
 
 export function getChangedFileCount(summary: WorkspaceChangeSummary) {
-  return summary.created + summary.modified + summary.deleted;
+  return (
+    summary.created +
+    summary.modified +
+    summary.deleted +
+    summary.symlink_created
+  );
 }
 
 export function getWorkspaceChangeBadgeLabel(summary: WorkspaceChangeSummary) {
