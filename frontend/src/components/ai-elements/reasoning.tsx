@@ -167,12 +167,15 @@ const defaultGetThinkingMessage = (
   if (isStreaming || duration === 0) {
     return <Shimmer duration={1}>Thinking...</Shimmer>;
   }
+  // `duration` is the run's wall-clock elapsed time (backend `turn_duration`,
+  // stamped on the run's final AI message only). "Thought for" would
+  // mislabel it as model thinking latency, since it includes tool execution
+  // (#4152); the no-duration case uses the same "Worked for" framing for
+  // consistency, since it reflects the same completed-run state, just
+  // without a persisted number yet (e.g. before the backend value lands).
   if (duration === undefined) {
-    return <span>Thought for a few seconds</span>;
+    return <span>Worked for a few seconds</span>;
   }
-  // `duration` is the run's wall-clock elapsed time (backend `turn_duration`),
-  // which includes tool execution — "Thought for" would mislabel it as model
-  // thinking latency (#4152).
   return <span>Worked for {duration} seconds</span>;
 };
 
