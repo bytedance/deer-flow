@@ -323,7 +323,7 @@ class InputSanitizationMiddleware(AgentMiddleware[AgentState]):
                         # _extract_text_from_content and message_content_to_text
                         # disagreed on text extraction — rfind failed (only
                         # reachable for multimodal list content; see Decision 18).
-                        if text_blocks and len(text_blocks) >= 2 and isinstance(content, list):
+                        if isinstance(content, list) and len(content) >= 2:
                             # content[0] is the server-injected
                             # <current_uploads> block (UploadsMiddleware
                             # prepends it as the first element for list
@@ -359,7 +359,7 @@ class InputSanitizationMiddleware(AgentMiddleware[AgentState]):
                             return request.override(messages=messages)
                         else:
                             # Cannot distinguish server block from user blocks
-                            # (< 2 text_blocks, not a list, or none).
+                            # (non-list content or len(content) < 2).
                             # Degrade to full-content sanitization — server
                             # block may be escaped (UX degradation) but user
                             # forgeries are still neutralized (no security
