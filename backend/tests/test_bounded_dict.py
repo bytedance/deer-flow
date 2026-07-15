@@ -22,7 +22,7 @@ class TestBoundedDict:
         bd["a"] = 1
         bd["b"] = 2
         bd["a"] = 10  # refresh recency — a is now youngest
-        bd["c"] = 3   # triggers eviction — b (oldest) is dropped
+        bd["c"] = 3  # triggers eviction — b (oldest) is dropped
         assert "a" in bd, "updated key 'a' should survive eviction (LRU)"
         assert "b" not in bd, "never-updated key 'b' should be evicted (LRU)"
         assert "c" in bd
