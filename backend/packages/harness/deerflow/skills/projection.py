@@ -400,14 +400,26 @@ def skill_projection_mutation(storage: SkillStorage, scope: str) -> Iterator[Non
 
 
 def rebuild_all_skill_projections(*, app_config=None) -> int:
-    """Rebuild public and every known user's views during gateway boot."""
+    """Rebuild public and every known user's views during gateway boot.
+
+    Each scope's rebuild is isolated: a single broken user directory (bad
+    permissions, corrupted state file, unreadable content) fails closed for
+    that scope only (``_rebuild_*_locked`` already clears the view on error)
+    and must not abort the whole gateway boot — the same failure mode that
+    isolates a scope at acquire/mutation time applies here too, since this is
+    just another rebuild trigger. Sandbox acquire self-heals a scope left
+    empty by a boot failure on next actual use.
+    """
     from deerflow.config import get_app_config
     from deerflow.config.paths import _validate_user_id, get_paths
     from deerflow.skills.storage import get_or_new_skill_storage, get_or_new_user_skill_storage
 
     config = app_config or get_app_config()
     public_storage = get_or_new_skill_storage(app_config=config)
-    rebuild_skill_projections(public_storage, include_user=False)
+    try:
+        rebuild_skill_projections(public_storage, include_user=False)
+    except Exception:
+        logger.warning("Failed to rebuild the public skill projection during boot; it stays empty until a sandbox acquire self-heals it", exc_info=True)
 
     users_dir = get_paths().base_dir / "users"
     if not users_dir.is_dir():
@@ -423,6 +435,10 @@ def rebuild_all_skill_projections(*, app_config=None) -> int:
             logger.warning("Skipping invalid user directory while rebuilding skill projections")
             continue
         storage = get_or_new_user_skill_storage(user_id, app_config=config)
-        rebuild_skill_projections(storage, include_public=False)
+        try:
+            rebuild_skill_projections(storage, include_public=False)
+        except Exception:
+            logger.warning("Failed to rebuild the skill projection for user %s during boot; it stays empty until a sandbox acquire self-heals it", user_id, exc_info=True)
+            continue
         rebuilt += 1
     return rebuilt

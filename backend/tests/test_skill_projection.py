@@ -242,6 +242,34 @@ def test_boot_rebuild_restores_public_and_known_user_views(projection_env) -> No
     assert (env.paths.user_custom_skills_view_dir("bob") / "custom-skill" / "SKILL.md").is_file()
 
 
+def test_boot_rebuild_isolates_one_users_failure_from_the_rest(projection_env, monkeypatch) -> None:
+    """A broken user directory (bad permissions, corrupted state file, ...)
+    must fail closed for that user's scope only — not abort gateway boot for
+    public skills or for other users' projections."""
+    env = projection_env
+    _write_skill(env.skills_root / "public", "public-skill")
+    _write_skill(env.paths.user_custom_skills_dir("alice-broken"), "alice-skill")
+    _write_skill(env.paths.user_custom_skills_dir("bob-ok"), "bob-skill")
+
+    from deerflow.skills import projection as projection_module
+
+    real_rebuild = projection_module.rebuild_skill_projections
+
+    def _flaky_rebuild(storage, **kwargs):
+        if getattr(storage, "user_id", None) == "alice-broken":
+            raise OSError("simulated disk failure for alice-broken")
+        return real_rebuild(storage, **kwargs)
+
+    monkeypatch.setattr(projection_module, "rebuild_skill_projections", _flaky_rebuild)
+
+    rebuilt_users = rebuild_all_skill_projections(app_config=env.config)
+
+    assert rebuilt_users == 1
+    assert (env.paths.public_skills_view_dir / "public-skill" / "SKILL.md").is_file()
+    assert (env.paths.user_custom_skills_view_dir("bob-ok") / "bob-skill" / "SKILL.md").is_file()
+    assert not env.paths.user_custom_skills_view_dir("alice-broken").exists() or list(env.paths.user_custom_skills_view_dir("alice-broken").iterdir()) == []
+
+
 @pytest.mark.anyio
 async def test_archive_install_is_projected_before_return(projection_env, monkeypatch, tmp_path) -> None:
     from deerflow.skills.security_scanner import ScanResult
