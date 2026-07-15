@@ -19,11 +19,13 @@ import importlib
 import sys
 import threading
 from datetime import datetime
+from importlib.metadata import version as package_version
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+from packaging.version import Version
 
 from deerflow.skills.types import Skill
 
@@ -39,6 +41,8 @@ _MOCKED_MODULE_NAMES = [
     "deerflow.models",
     "deerflow.skills.storage",
 ]
+
+_LANGGRAPH_HAS_ROOT_LINEAGE_STREAM_REGRESSION = Version(package_version("langgraph")) >= Version("1.2.6")
 
 
 def _default_app_config():
@@ -2596,6 +2600,10 @@ class TestSubagentCheckpointLineage:
         assert fake_agent.captured_context["thread_id"] == "parent-thread-1"
 
     @pytest.mark.anyio
+    @pytest.mark.skipif(
+        not _LANGGRAPH_HAS_ROOT_LINEAGE_STREAM_REGRESSION,
+        reason="root-lineage message leak only manifests on LangGraph >=1.2.6",
+    )
     async def test_parent_message_stream_excludes_delegated_graph_messages(
         self,
         classes,
@@ -2603,6 +2611,7 @@ class TestSubagentCheckpointLineage:
     ):
         """Child AI/tool frames stay outside the parent's messages stream."""
         from langchain_core.messages import AIMessage, ToolMessage
+        from langgraph.checkpoint.memory import MemorySaver
         from langgraph.graph import END, START, MessagesState, StateGraph
 
         executor_module = importlib.import_module("deerflow.subagents.executor")
@@ -2679,8 +2688,19 @@ class TestSubagentCheckpointLineage:
         monkeypatch.setattr(executor, "_create_agent", lambda *args, **kwargs: child_graph)
 
         async def delegate(_state):
-            result = executor.execute("run the child graph")
-            assert result.status.value == "completed"
+            task_id = executor.execute_async("run the child graph")
+            try:
+                deadline = asyncio.get_running_loop().time() + 5
+                while True:
+                    result = executor_module.get_background_task_result(task_id)
+                    if result is not None and result.status.is_terminal:
+                        break
+                    if asyncio.get_running_loop().time() >= deadline:
+                        pytest.fail("background subagent did not complete")
+                    await asyncio.sleep(0.001)
+                assert result.status.value == "completed"
+            finally:
+                executor_module.cleanup_background_task(task_id)
             return {
                 "messages": [
                     AIMessage(
@@ -2694,7 +2714,7 @@ class TestSubagentCheckpointLineage:
         parent_builder.add_node("delegate", delegate)
         parent_builder.add_edge(START, "delegate")
         parent_builder.add_edge("delegate", END)
-        parent_graph = parent_builder.compile()
+        parent_graph = parent_builder.compile(checkpointer=MemorySaver())
 
         streamed_messages = [
             message
