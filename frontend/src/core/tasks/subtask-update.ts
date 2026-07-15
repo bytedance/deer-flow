@@ -80,7 +80,6 @@ function subtaskChanged(prev: Subtask | undefined, next: Subtask): boolean {
     prev.prompt !== next.prompt ||
     prev.latestMessage !== next.latestMessage ||
     prev.steps !== next.steps ||
-    prev.streamingTool !== next.streamingTool ||
     !usageEquals(prev.usage, next.usage)
   );
 }

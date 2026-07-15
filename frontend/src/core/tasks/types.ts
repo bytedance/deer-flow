@@ -41,6 +41,4 @@ export interface Subtask {
    * badge can show "capped" without parsing result text (#3875 Phase 2).
    */
   stopReason?: string;
-  /** Live streaming tool output from ``tool_output_chunk`` custom events. */
-  streamingTool?: ToolStreamOutput;
 }
