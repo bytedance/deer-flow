@@ -47,6 +47,11 @@ class MemoryUpdateQueue:
         self._lock = threading.Lock()
         self._timer: threading.Timer | None = None
         self._processing = False
+        # Thread currently running ``_process_queue`` (None when idle). ``flush_sync``
+        # joins an in-flight worker instead of reporting a false-positive "completed"
+        # while contexts it already pulled out of the queue are still being processed
+        # (and would be lost on exit). See ``flush_sync`` step (1).
+        self._processing_thread: threading.Thread | None = None
         self._reprocess_pending = False
 
     @staticmethod
@@ -172,8 +177,15 @@ class MemoryUpdateQueue:
         self._timer.daemon = True
         self._timer.start()
 
-    def _process_queue(self) -> None:
-        """Process all queued conversation contexts."""
+    def _process_queue(self, *, skip_inter_item_delay: bool = False) -> None:
+        """Process all queued conversation contexts.
+
+        Args:
+            skip_inter_item_delay: When set, skip the inter-item rate-limit
+                ``time.sleep``. Intended for the shutdown-drain path
+                (:meth:`flush_sync`), which races a bounded timeout and should
+                not waste budget sleeping between items.
+        """
         with self._lock:
             if self._processing:
                 # Another worker is already draining the queue. Instead of
@@ -188,12 +200,15 @@ class MemoryUpdateQueue:
                 return
 
             self._processing = True
+            self._processing_thread = threading.current_thread()
             contexts_to_process = self._queue.copy()
             self._queue.clear()
             self._timer = None
 
         logger.info("Processing %d queued memory updates", len(contexts_to_process))
 
+        succeeded = 0
+        failed = 0
         try:
             for context in contexts_to_process:
                 try:
@@ -208,35 +223,122 @@ class MemoryUpdateQueue:
                         trace_id=context.trace_id,
                     )
                     if success:
+                        succeeded += 1
                         logger.info("Memory updated successfully for thread %s (trace_id=%s)", context.thread_id, context.trace_id)
                     else:
+                        failed += 1
                         logger.warning("Memory update skipped/failed for thread %s (trace_id=%s)", context.thread_id, context.trace_id)
                 except Exception as e:
+                    failed += 1
                     logger.error("Error updating memory for thread %s (trace_id=%s): %s", context.thread_id, context.trace_id, e)
 
-                # Small delay between updates to avoid rate limiting
-                if len(contexts_to_process) > 1:
+                # Small delay between updates to avoid rate limiting.
+                # Skipped on the shutdown-drain path, which races a bounded
+                # timeout and should spend that budget on LLM calls, not on
+                # sleeping between items.
+                if not skip_inter_item_delay and len(contexts_to_process) > 1:
                     time.sleep(0.5)
-
         finally:
+            # Summary count disambiguates "drained" (queue emptied) from "saved"
+            # (every extraction persisted): per-item ``update_memory`` failures are
+            # swallowed above, so without this an operator debugging missing
+            # memories would see only the happy-path "Processing N" line.
+            if succeeded or failed:
+                logger.info("Memory update batch done: %d succeeded, %d failed", succeeded, failed)
             with self._lock:
                 self._processing = False
+                self._processing_thread = None
                 if self._reprocess_pending:
                     self._reprocess_pending = False
                     if self._queue:
                         self._schedule_timer(0)
 
-    def flush(self) -> None:
+    def flush(self, *, skip_inter_item_delay: bool = False) -> None:
         """Force immediate processing of the queue.
 
         This is useful for testing or graceful shutdown.
+
+        Args:
+            skip_inter_item_delay: Forwarded to :meth:`_process_queue`; skip the
+                inter-item rate-limit sleep. Intended for the shutdown-drain
+                path (:meth:`flush_sync`).
         """
         with self._lock:
             if self._timer is not None:
                 self._timer.cancel()
                 self._timer = None
 
-        self._process_queue()
+        self._process_queue(skip_inter_item_delay=skip_inter_item_delay)
+
+    def flush_sync(self, timeout: float) -> bool:
+        """Best-effort synchronous flush bounded by ``timeout`` seconds.
+
+        Unlike :meth:`flush_nowait` (which only schedules a daemon timer that
+        is killed on process exit), this runs :meth:`flush` on a daemon thread
+        and waits up to ``timeout`` seconds for it to finish. Intended for
+        graceful shutdown: without it, any updates enqueued since the last
+        timer fire are lost on restart / rolling deploy / SIGTERM, because the
+        queue is pure in-memory and the debounce Timer is a daemon thread.
+
+        The drain accounts for two races a naive ``flush()`` would miss:
+
+        - **In-flight worker.** If the debounce Timer already fired, an
+          ``_process_queue`` worker is mid-LLM-call holding contexts it already
+          pulled out of the queue (``_processing=True``, queue empty). ``flush``
+          alone would see ``_processing=True``, no-op, and report success while
+          that worker is still running and likely killed on exit. So we join
+          the in-flight worker first (bounded by the remaining budget).
+        - **Failed flush.** ``flush`` makes a synchronous LLM call that can
+          raise; success is tracked on the happy path only, so the return value
+          matches the docstring's "completed".
+
+        Note: steps (1) and (3) share the same ``deadline`` budget. A slow
+        in-flight worker can consume most/all of it, leaving step (3) to no-op;
+        ``timeout`` must therefore cover both a slow in-flight worker *and* the
+        remaining queue (best-effort: any tail not drained in budget is dropped,
+        same failure direction as no flush, scoped to the tail).
+
+        Returns ``True`` only if the drain genuinely finished (queue empty, no
+        worker still running, flush did not raise) within ``timeout``.
+        """
+        deadline = time.monotonic() + timeout
+
+        # (1) Wait for an in-flight _process_queue first (bounded). Otherwise
+        # flush() would see _processing=True, no-op, and we would report
+        # success while that worker is still mid-LLM-call on a daemon thread
+        # that exit will kill — losing the contexts it already pulled out.
+        with self._lock:
+            in_flight = self._processing_thread
+        if in_flight is not None:
+            in_flight.join(timeout=max(0.0, deadline - time.monotonic()))
+
+        # (2) Genuine idle: nothing pending and no worker still running.
+        if self.pending_count == 0 and not self.is_processing:
+            return True
+
+        # (3) Drain the queue on a daemon thread so the timeout is a real hard
+        # stop: flush() makes a synchronous LLM call that cannot be
+        # interrupted, so we wait on Event.wait, not on Thread.join.
+        success = False
+        done = threading.Event()
+
+        def _run() -> None:
+            nonlocal success
+            try:
+                self.flush(skip_inter_item_delay=True)
+                success = True
+            except Exception:
+                logger.exception("Memory queue flush failed during shutdown drain")
+            finally:
+                done.set()
+
+        worker = threading.Thread(target=_run, name="memory-shutdown-flush", daemon=True)
+        worker.start()
+        finished = done.wait(timeout=max(0.0, deadline - time.monotonic()))
+        if not finished:
+            return False
+        # flush() returned; only report success if no worker raced back in.
+        return bool(success) and not self.is_processing
 
     def flush_nowait(self) -> None:
         """Start queue processing immediately in a background thread."""
@@ -256,6 +358,7 @@ class MemoryUpdateQueue:
                 self._timer = None
             self._queue.clear()
             self._processing = False
+            self._processing_thread = None
             self._reprocess_pending = False
 
     @property

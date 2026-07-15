@@ -15,6 +15,7 @@ are independent of order.
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -146,3 +147,47 @@ def test_empty_storage_path_factory_injects_runtime_home(tmp_path, monkeypatch) 
     # per-user dir created under the injected runtime_home root
     user_dirs = [p.name for p in (tmp_path / "users").iterdir() if p.is_dir()]
     assert len(user_dirs) == 1
+
+
+def test_shutdown_flush_is_on_abc_and_noop_is_noop_success() -> None:
+    """``shutdown_flush`` is part of the MemoryManager ABC (every backend must
+    implement a bounded graceful-shutdown drain); noop has no buffer, so it
+    returns True immediately."""
+    assert "shutdown_flush" in MemoryManager.__abstractmethods__
+    reset_memory_manager()
+    set_memory_config(MemoryConfig(manager_class="noop"))
+    noop = get_memory_manager()
+    assert noop.shutdown_flush(1.0) is True
+    reset_memory_manager()
+
+
+def test_deermem_shutdown_flush_delegates_to_queue_flush_sync() -> None:
+    """DeerMem.shutdown_flush delegates to its queue's bounded flush_sync,
+    forwarding the host-owned timeout budget unchanged."""
+    reset_memory_manager()
+    set_memory_config(MemoryConfig(manager_class="deermem"))
+    deermem = get_memory_manager()
+    with patch.object(deermem._queue, "flush_sync", return_value=True) as spy:
+        assert deermem.shutdown_flush(7.0) is True
+        spy.assert_called_once_with(7.0)
+    reset_memory_manager()
+
+
+def test_deermem_shutdown_flush_drains_a_pending_update() -> None:
+    """End-to-end: a pending update sitting in DeerMem's queue is drained
+    within the timeout on shutdown_flush (the loss-on-exit bug the ABC method
+    fixes). The drain skips inter-item sleep so the budget goes to LLM calls."""
+    from deerflow.agents.memory.backends.deermem.deermem.core.queue import ConversationContext
+
+    reset_memory_manager()
+    set_memory_config(MemoryConfig(manager_class="deermem"))
+    deermem = get_memory_manager()
+    # Inject a mock updater so no real LLM call is made; both items "succeed".
+    mock_updater = MagicMock()
+    mock_updater.update_memory.return_value = True
+    deermem._queue._updater = mock_updater
+    deermem._queue._queue = [ConversationContext(thread_id=f"t{i}", messages=["m"], agent_name="lead_agent") for i in range(3)]
+    assert deermem.shutdown_flush(5.0) is True
+    assert deermem._queue.pending_count == 0
+    assert mock_updater.update_memory.call_count == 3
+    reset_memory_manager()

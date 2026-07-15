@@ -28,6 +28,18 @@ gateway:
   replicas: 1               # Safe default. Postgres + the Redis stream bridge are
                             # wired, but multi-replica needs issue #3948's run-control
                             # work (cancel/dedup/reconcile) — see README "Gateway replicas".
+  # Pod termination grace period (seconds). MUST exceed the Gateway's graceful
+  # shutdown work: channel stop (~5s) + memory queue drain
+  # (memory.shutdown_flush_timeout_seconds, default 30s) + buffer. K8s defaults
+  # to 30s, which SIGKILLs the memory drain mid-flight and silently re-introduces
+  # the memory loss that shutdown_flush is fixing. Raise this when you raise the
+  # memory timeout. See gateway-deployment.yaml + README "Graceful shutdown".
+  terminationGracePeriodSeconds: 45
+  # preStop hook sleep (seconds) before SIGTERM, so the Service/ingress
+  # deregisters the pod and in-flight HTTP requests drain before graceful
+  # shutdown begins (which runs the memory queue drain). 0 disables the hook.
+  # Counts against terminationGracePeriodSeconds.
+  preStopSleepSeconds: 5
   resources:
     requests:
       cpu: 200m
@@ -221,7 +233,7 @@ ingress:
 # -- DeerFlow config.yaml content. Secrets MUST stay as $VAR references — never
 #    inline literal secret values here. The default enables provisioner sandbox.
 config: |
-  config_version: 25
+  config_version: 26
   log_level: info
 
   models: []

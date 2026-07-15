@@ -11,7 +11,7 @@ class NamedTool:
         self.name = name
 
 
-def _make_skill(name: str, allowed_tools: list[str] | None = None) -> Skill:
+def _make_skill(name: str, allowed_tools: list[str] | None = None, *, enabled: bool = True) -> Skill:
     return Skill(
         name=name,
         description=f"Description for {name}",
@@ -21,7 +21,7 @@ def _make_skill(name: str, allowed_tools: list[str] | None = None) -> Skill:
         relative_path=Path(name),
         category="public",
         allowed_tools=tuple(allowed_tools) if allowed_tools is not None else None,
-        enabled=True,
+        enabled=enabled,
     )
 
 
@@ -78,6 +78,36 @@ def test_get_skills_prompt_section_returns_all_when_available_skills_is_none(mon
     result = get_skills_prompt_section(available_skills=None)
     assert "skill1" in result
     assert "skill2" in result
+
+
+def test_get_skills_prompt_section_no_arg_cold_cache_loads_enabled_skills(monkeypatch):
+    """#4144: a fresh process calling the no-arg helper must not render an empty
+    enabled-skills list while the synchronously-loaded disabled section is populated."""
+    import threading
+
+    from deerflow.agents.lead_agent import prompt as prompt_mod
+
+    skills = [_make_skill("skill1"), _make_skill("skill2", enabled=False)]
+    mock_storage = SimpleNamespace(load_skills=lambda *, enabled_only: [s for s in skills if s.enabled or not enabled_only])
+    monkeypatch.setattr("deerflow.agents.lead_agent.prompt.get_or_new_skill_storage", lambda **kwargs: mock_storage)
+    monkeypatch.setattr("deerflow.agents.lead_agent.prompt.get_or_new_user_skill_storage", lambda user_id, **kwargs: mock_storage)
+    monkeypatch.setattr(
+        "deerflow.config.get_app_config",
+        lambda: SimpleNamespace(
+            skills=SimpleNamespace(container_path="/mnt/skills", use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage", get_skills_path=lambda: Path("/tmp/skills")),
+            skill_evolution=SimpleNamespace(enabled=False),
+        ),
+    )
+    # Cold cache: no warmed enabled-skills list, and the background refresh must
+    # not fill it mid-test — the reporter's cold start loses exactly this race.
+    monkeypatch.setattr(prompt_mod, "_enabled_skills_cache", None)
+    monkeypatch.setattr(prompt_mod, "_ensure_enabled_skills_cache", lambda: threading.Event())
+
+    result = get_skills_prompt_section(available_skills=None)
+
+    assert "<available_skills>" in result
+    assert "skill1" in result
+    assert "<disabled_skills>" in result
 
 
 def test_get_skills_prompt_section_includes_slash_activation_guidance(monkeypatch):

@@ -7,6 +7,7 @@ without a matching AIMessage tool_call (e.g., after summarization/branching
 dropped the upstream AIMessage). Both cause strict-provider rejections.
 
 This middleware intercepts the model call to:
+- Sanitize malformed tool-call names and arguments before provider serialization
 - Insert synthetic ToolMessages with an error indicator for each dangling AIMessage
   tool_call, ensuring correct message ordering
 - Drop orphan ToolMessages whose originating tool_call is no longer present in the
@@ -48,6 +49,27 @@ def _normalize_tool_name(name: object) -> str:
 
 def _has_invalid_tool_name(name: object) -> bool:
     return not _valid_tool_name(name)
+
+
+def _parse_json_object(value: object) -> dict | None:
+    """Parse a JSON-object string, returning None for other inputs."""
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = json.loads(value)
+    except ValueError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _normalize_tool_arguments(arguments: object) -> str:
+    """Return a JSON-object string safe for OpenAI-compatible replay."""
+    if isinstance(arguments, dict):
+        try:
+            return json.dumps(arguments, ensure_ascii=False, allow_nan=False)
+        except (TypeError, ValueError):
+            return "{}"
+    return arguments if _parse_json_object(arguments) is not None else "{}"
 
 
 class DanglingToolCallMiddleware(AgentMiddleware[AgentState]):
@@ -99,13 +121,8 @@ class DanglingToolCallMiddleware(AgentMiddleware[AgentState]):
 
                 args = raw_tc.get("args", {})
                 if not args and isinstance(function, dict):
-                    raw_args = function.get("arguments")
-                    if isinstance(raw_args, str):
-                        try:
-                            parsed_args = json.loads(raw_args)
-                        except (TypeError, ValueError, json.JSONDecodeError):
-                            parsed_args = {}
-                        args = parsed_args if isinstance(parsed_args, dict) else {}
+                    parsed_args = _parse_json_object(function.get("arguments"))
+                    args = parsed_args if parsed_args is not None else {}
 
                 normalized_call = {
                     "id": raw_tc.get("id"),
@@ -161,8 +178,8 @@ class DanglingToolCallMiddleware(AgentMiddleware[AgentState]):
         return "[Tool call was interrupted and did not return a result.]"
 
     @staticmethod
-    def _sanitize_ai_message_tool_names(msg):
-        """Return an AIMessage with model-bound tool-call names made non-empty."""
+    def _sanitize_ai_message_tool_calls(msg):
+        """Return an AIMessage with model-bound tool calls safe to serialize."""
         if getattr(msg, "type", None) != "ai":
             return msg
 
@@ -188,6 +205,28 @@ class DanglingToolCallMiddleware(AgentMiddleware[AgentState]):
                 update["tool_calls"] = sanitized_tool_calls
                 changed = True
 
+        invalid_tool_calls = getattr(msg, "invalid_tool_calls", None)
+        if invalid_tool_calls:
+            invalid_changed = False
+            sanitized_invalid_tool_calls = []
+            for invalid_tool_call in invalid_tool_calls:
+                if not isinstance(invalid_tool_call, dict):
+                    sanitized_invalid_tool_calls.append(invalid_tool_call)
+                    continue
+                sanitized = dict(invalid_tool_call)
+                normalized_name = _normalize_tool_name(sanitized.get("name"))
+                normalized_arguments = _normalize_tool_arguments(sanitized.get("args"))
+                if sanitized.get("name") != normalized_name:
+                    sanitized["name"] = normalized_name
+                    invalid_changed = True
+                if sanitized.get("args") != normalized_arguments:
+                    sanitized["args"] = normalized_arguments
+                    invalid_changed = True
+                sanitized_invalid_tool_calls.append(sanitized)
+            if invalid_changed:
+                update["invalid_tool_calls"] = sanitized_invalid_tool_calls
+                changed = True
+
         additional_kwargs = dict(getattr(msg, "additional_kwargs", {}) or {})
         raw_tool_calls = additional_kwargs.get("tool_calls")
         if isinstance(raw_tool_calls, list):
@@ -203,10 +242,15 @@ class DanglingToolCallMiddleware(AgentMiddleware[AgentState]):
                 if isinstance(function, dict):
                     sanitized_function = dict(function)
                     normalized_name = _normalize_tool_name(sanitized_function.get("name"))
+                    normalized_arguments = _normalize_tool_arguments(sanitized_function.get("arguments"))
                     if sanitized_function.get("name") != normalized_name:
                         sanitized_function["name"] = normalized_name
-                        sanitized_raw["function"] = sanitized_function
                         raw_changed = True
+                    if sanitized_function.get("arguments") != normalized_arguments:
+                        sanitized_function["arguments"] = normalized_arguments
+                        raw_changed = True
+                    if sanitized_function != function:
+                        sanitized_raw["function"] = sanitized_function
                 else:
                     normalized_name = _normalize_tool_name(sanitized_raw.get("name"))
                     if sanitized_raw.get("name") != normalized_name:
@@ -258,7 +302,7 @@ class DanglingToolCallMiddleware(AgentMiddleware[AgentState]):
                 drop_count += 1
                 continue
 
-            sanitized_msg = self._sanitize_ai_message_tool_names(msg)
+            sanitized_msg = self._sanitize_ai_message_tool_calls(msg)
             patched.append(sanitized_msg)
             if getattr(msg, "type", None) != "ai":
                 continue

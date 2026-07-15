@@ -247,3 +247,159 @@ def test_process_queue_forwards_trace_id_to_updater() -> None:
         user_id=None,
         trace_id="trace-memory-1",
     )
+
+
+# ---------------------------------------------------------------------------
+# shutdown_flush / flush_sync (graceful-shutdown drain) — review carry-overs.
+# The queue is a daemon-timer + in-memory buffer, so anything pending at
+# process exit is lost. flush_sync drains it within a hard timeout, joining an
+# in-flight worker first so contexts a debounce Timer already pulled out of the
+# queue are not lost either.
+# ---------------------------------------------------------------------------
+
+_QUEUE_MODULE = "deerflow.agents.memory.backends.deermem.deermem.core.queue"
+
+
+def test_flush_sync_noop_on_empty_queue() -> None:
+    """flush_sync short-circuits and returns True when there is nothing to drain."""
+    queue = _queue()
+    assert queue.pending_count == 0
+    assert queue.flush_sync(timeout=5.0) is True
+
+
+def test_flush_sync_drains_pending_queue_and_returns_true() -> None:
+    """flush_sync runs the synchronous flush() and waits for it to finish."""
+    mock_updater = MagicMock()
+    mock_updater.update_memory.return_value = True
+    queue = _queue(mock_updater)
+    queue._queue = [ConversationContext(thread_id="thread-1", messages=["conversation"], agent_name="lead_agent")]
+
+    with (
+        patch(_QUEUE_MODULE + ".MemoryUpdater", create=True),
+        patch(_QUEUE_MODULE + ".time.sleep"),
+    ):
+        completed = queue.flush_sync(timeout=5.0)
+
+    assert completed is True
+    assert queue.pending_count == 0
+    mock_updater.update_memory.assert_called_once_with(
+        messages=["conversation"],
+        thread_id="thread-1",
+        agent_name="lead_agent",
+        correction_detected=False,
+        reinforcement_detected=False,
+        user_id=None,
+        trace_id=None,
+    )
+
+
+def test_flush_sync_returns_false_when_flush_exceeds_timeout() -> None:
+    """flush_sync does not block past ``timeout``; a slow flush returns False."""
+    queue = _queue()
+    queue._queue = [ConversationContext(thread_id="thread-1", messages=["conversation"], agent_name="lead_agent")]
+    release = threading.Event()
+
+    def _slow_flush() -> None:
+        # Block until the test releases us (well past the flush_sync timeout).
+        release.wait(timeout=5.0)
+
+    with patch.object(queue, "flush", side_effect=_slow_flush):
+        completed = queue.flush_sync(timeout=0.1)
+
+    assert completed is False
+    # The queue was not drained because flush() never returned.
+    assert queue.pending_count == 1
+    # Release the daemon thread so it does not linger past the test.
+    release.set()
+
+
+def _run_inflight_worker(queue: MemoryUpdateQueue, release: threading.Event) -> threading.Thread:
+    """Start a thread that mimics _process_queue's "pulled contexts, mid-LLM" state.
+
+    It claims ``_processing`` / ``_processing_thread`` (so the queue looks idle
+    by ``pending_count`` but a worker is in flight), blocks on ``release``,
+    then clears the flags on the way out.
+    """
+
+    def _inflight() -> None:
+        with queue._lock:
+            queue._processing = True
+            queue._processing_thread = threading.current_thread()
+        release.wait(timeout=5.0)
+        with queue._lock:
+            queue._processing = False
+            queue._processing_thread = None
+
+    thread = threading.Thread(target=_inflight, name="fake-inflight-worker", daemon=True)
+    thread.start()
+    # Wait until the fake worker has claimed _processing.
+    while not queue.is_processing:
+        time.sleep(0.005)
+    return thread
+
+
+def test_flush_sync_waits_for_inflight_worker_and_returns_false_if_unfinished() -> None:
+    """flush_sync must not report success while an in-flight _process_queue is
+    still mid-LLM-call — the contexts it already pulled out would be lost on
+    exit. It joins the in-flight worker (bounded) and returns False when the
+    worker does not finish within the budget (review comment #1)."""
+    queue = _queue()
+    release = threading.Event()
+    inflight = _run_inflight_worker(queue, release)
+
+    try:
+        completed = queue.flush_sync(timeout=0.2)
+    finally:
+        release.set()
+        inflight.join(timeout=5.0)
+
+    assert completed is False
+
+
+def test_flush_sync_returns_true_when_inflight_worker_finishes_in_budget() -> None:
+    """When the in-flight worker finishes within the budget, flush_sync joins it
+    and reports success (review comment #1, positive case)."""
+    queue = _queue()
+    release = threading.Event()
+    inflight = _run_inflight_worker(queue, release)
+
+    # Let the in-flight worker finish well within the budget.
+    release.set()
+
+    completed = queue.flush_sync(timeout=5.0)
+    inflight.join(timeout=5.0)
+
+    assert completed is True
+    assert queue.is_processing is False
+    assert queue._processing_thread is None
+
+
+def test_flush_sync_returns_false_when_flush_raises() -> None:
+    """flush_sync reports failure (not success) when flush() raises, so the
+    caller never logs a contradictory 'completed' next to the exception
+    (review comment #2)."""
+    queue = _queue()
+    queue._queue = [ConversationContext(thread_id="thread-1", messages=["conversation"], agent_name="lead_agent")]
+
+    with patch.object(queue, "flush", side_effect=RuntimeError("boom")):
+        completed = queue.flush_sync(timeout=5.0)
+
+    assert completed is False
+
+
+def test_flush_sync_skips_inter_item_delay_on_drain_path() -> None:
+    """On the shutdown-drain path the per-item rate-limit sleep is skipped so
+    the bounded timeout covers as many items as possible (review comment #5)."""
+    mock_updater = MagicMock()
+    mock_updater.update_memory.return_value = True
+    queue = _queue(mock_updater)
+    queue._queue = [ConversationContext(thread_id=f"thread-{i}", messages=["conversation"], agent_name="lead_agent") for i in range(3)]
+
+    with patch(_QUEUE_MODULE + ".time.sleep") as mock_sleep:
+        completed = queue.flush_sync(timeout=5.0)
+
+    assert completed is True
+    assert queue.pending_count == 0
+    # No inter-item rate-limit sleep on the drain path.
+    mock_sleep.assert_not_called()
+    assert mock_updater.update_memory.call_count == 3

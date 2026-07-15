@@ -188,6 +188,34 @@ class MemoryManager(ABC):
     ) -> dict[str, Any]:
         """Export the memory document for the bucket. *stub* this phase (no caller yet)."""
 
+    # ── Lifecycle ───────────────────────────────────────────────────────
+    @abstractmethod
+    def shutdown_flush(self, timeout: float) -> bool:
+        """Best-effort bounded drain of pending updates on graceful shutdown.
+
+        Runs on the Gateway shutdown path (after IM channels and the scheduler
+        stop, so no new IM/scheduler updates arrive during the drain) to flush
+        updates still sitting in the backend's debounce buffer. Without it, any
+        update enqueued since the last timer fire is lost on restart / rolling
+        deploy / SIGTERM, because the buffer is pure in-memory and the debounce
+        worker is a daemon thread killed on process exit.
+
+        Implementations must honour a *hard* ``timeout``: the drain makes a
+        synchronous LLM call that cannot be interrupted, so the caller (the
+        Gateway lifespan) needs a real upper bound that lines up with the K8s
+        ``terminationGracePeriodSeconds`` (the drain must finish inside the pod
+        grace window, or K8s SIGKILLs it mid-drain and the loss the drain is
+        fixing is silently re-introduced).
+
+        Returns ``True`` if the drain genuinely finished within ``timeout``
+        (buffer empty, no worker still running, no exception); ``False`` on
+        timeout or failure (the caller logs a warning and proceeds to exit --
+        any unfinished tail is dropped, strictly better than no flush). A
+        backend with no pending work (or no buffer at all) returns ``True``
+        immediately, so the host may call this unconditionally when memory is
+        enabled without gating on backend-private queue state.
+        """
+
 
 # ── Backend discovery (drop-in) ───────────────────────────────────────────
 def _scan_backends() -> dict[str, type[MemoryManager]]:

@@ -143,3 +143,36 @@ def test_stream_actions_surfaces_exception_as_error_then_ends():
     actions = list(stream_actions(_BoomClient(), "go"))
     assert any(isinstance(a, AssistantError) and "model down" in a.text for a in actions)
     assert isinstance(actions[-1], RunEnded)
+
+
+def test_stream_actions_two_turns_with_none_ids_produce_separate_rows():
+    """Some providers/paths never stamp per-chunk ids: the raw chunk carries
+    an explicit ``id: None``, which ``_as_str`` coerces to ``""``. Two
+    separate turns from such a provider must not fold into one row -- see
+    ``_apply_assistant_delta_anonymous`` in view_state.py. Drives the real
+    translate()/stream_actions() bridge, not just the reducer directly."""
+    first_turn = _FakeClient(
+        [
+            StreamEvent(type="messages-tuple", data={"type": "ai", "content": "First turn answer.", "id": None}),
+            StreamEvent(type="end", data={"usage": None}),
+        ]
+    )
+    second_turn = _FakeClient(
+        [
+            StreamEvent(type="messages-tuple", data={"type": "ai", "content": "Second turn answer.", "id": None}),
+            StreamEvent(type="end", data={"usage": None}),
+        ]
+    )
+
+    state = initial_state()
+    for action in stream_actions(first_turn, "first question"):
+        state = reduce(state, action)
+    for action in stream_actions(second_turn, "second question"):
+        state = reduce(state, action)
+
+    assistants = [r for r in state.rows if r.kind == "assistant"]
+    # Pre-fix: both turns' AssistantDelta carry id="" and the second turn's
+    # text is folded into the first turn's row instead of starting a new one.
+    assert len(assistants) == 2
+    assert assistants[0].text == "First turn answer."
+    assert assistants[1].text == "Second turn answer."
