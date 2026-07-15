@@ -9,9 +9,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from deerflow.config.agents_config import AGENT_NAME_PATTERN
-from deerflow.config.memory_config import get_memory_config
-from deerflow.config.paths import get_paths
+from ..config import DeerMemConfig
+from .paths import memory_file_path
 
 logger = logging.getLogger(__name__)
 
@@ -62,44 +61,18 @@ class MemoryStorage(abc.ABC):
 class FileMemoryStorage(MemoryStorage):
     """File-based memory storage provider."""
 
-    def __init__(self):
-        """Initialize the file memory storage."""
+    def __init__(self, config: DeerMemConfig):
+        """Initialize the file memory storage with an injected DeerMemConfig."""
+        self._config = config
         # Per-user/agent memory cache: keyed by (user_id, agent_name) tuple (None = global)
         # Value: (memory_data, file_mtime)
         self._memory_cache: dict[tuple[str | None, str | None], tuple[dict[str, Any], float | None]] = {}
         # Guards all reads and writes to _memory_cache across concurrent callers.
         self._cache_lock = threading.Lock()
 
-    def _validate_agent_name(self, agent_name: str) -> None:
-        """Validate that the agent name is safe to use in filesystem paths.
-
-        Uses the repository's established AGENT_NAME_PATTERN to ensure consistency
-        across the codebase and prevent path traversal or other problematic characters.
-        """
-        if not agent_name:
-            raise ValueError("Agent name must be a non-empty string.")
-        if not AGENT_NAME_PATTERN.match(agent_name):
-            raise ValueError(f"Invalid agent name {agent_name!r}: names must match {AGENT_NAME_PATTERN.pattern}")
-
     def _get_memory_file_path(self, agent_name: str | None = None, *, user_id: str | None = None) -> Path:
-        """Get the path to the memory file."""
-        if user_id is not None:
-            if agent_name is not None:
-                self._validate_agent_name(agent_name)
-                return get_paths().user_agent_memory_file(user_id, agent_name)
-            config = get_memory_config()
-            if config.storage_path and Path(config.storage_path).is_absolute():
-                return Path(config.storage_path)
-            return get_paths().user_memory_file(user_id)
-        # Legacy: no user_id
-        if agent_name is not None:
-            self._validate_agent_name(agent_name)
-            return get_paths().agent_memory_file(agent_name)
-        config = get_memory_config()
-        if config.storage_path:
-            p = Path(config.storage_path)
-            return p if p.is_absolute() else get_paths().base_dir / p
-        return get_paths().memory_file
+        """Get the path to the memory file (DeerMem's own path resolution)."""
+        return memory_file_path(self._config, agent_name, user_id=user_id)
 
     def _load_memory_from_file(self, agent_name: str | None = None, *, user_id: str | None = None) -> dict[str, Any]:
         """Load memory data from file."""
@@ -189,43 +162,40 @@ class FileMemoryStorage(MemoryStorage):
             return False
 
 
-_storage_instance: MemoryStorage | None = None
-_storage_lock = threading.Lock()
+def create_storage(config: DeerMemConfig) -> MemoryStorage:
+    """Build the configured memory storage instance for ``config``.
 
+    Replaces the old ``get_memory_storage()`` global singleton: the caller
+    (``DeerMem.__init__``) owns the returned instance. Empty ``storage_class``
+    (default) -> ``FileMemoryStorage`` directly (no importlib, portable); a
+    dotted path is resolved and raises ``ValueError`` on failure (fail-fast:
+    memory is persistent state, so an unresolved ``storage_class`` is not
+    silently substituted with ``FileMemoryStorage`` -- mirrors the
+    ``manager_class`` resolution policy).
+    """
+    storage_class_path = config.storage_class
+    if not storage_class_path:
+        return FileMemoryStorage(config)
 
-def get_memory_storage() -> MemoryStorage:
-    """Get the configured memory storage instance."""
-    global _storage_instance
-    if _storage_instance is not None:
-        return _storage_instance
+    try:
+        module_path, class_name = storage_class_path.rsplit(".", 1)
+        import importlib
 
-    with _storage_lock:
-        if _storage_instance is not None:
-            return _storage_instance
+        module = importlib.import_module(module_path)
+        storage_class = getattr(module, class_name)
 
-        config = get_memory_config()
-        storage_class_path = config.storage_class
+        # Validate that the configured storage is a MemoryStorage implementation
+        if not isinstance(storage_class, type):
+            raise TypeError(f"Configured memory storage '{storage_class_path}' is not a class: {storage_class!r}")
+        if not issubclass(storage_class, MemoryStorage):
+            raise TypeError(f"Configured memory storage '{storage_class_path}' is not a subclass of MemoryStorage")
 
-        try:
-            module_path, class_name = storage_class_path.rsplit(".", 1)
-            import importlib
-
-            module = importlib.import_module(module_path)
-            storage_class = getattr(module, class_name)
-
-            # Validate that the configured storage is a MemoryStorage implementation
-            if not isinstance(storage_class, type):
-                raise TypeError(f"Configured memory storage '{storage_class_path}' is not a class: {storage_class!r}")
-            if not issubclass(storage_class, MemoryStorage):
-                raise TypeError(f"Configured memory storage '{storage_class_path}' is not a subclass of MemoryStorage")
-
-            _storage_instance = storage_class()
-        except Exception as e:
-            logger.error(
-                "Failed to load memory storage %s, falling back to FileMemoryStorage: %s",
-                storage_class_path,
-                e,
-            )
-            _storage_instance = FileMemoryStorage()
-
-    return _storage_instance
+        return storage_class(config)
+    except Exception as e:
+        raise ValueError(
+            f"backend_config.storage_class={storage_class_path!r} failed to load: {e}. "
+            "Refusing to silently fall back to FileMemoryStorage - memory is persistent "
+            "state, so a wrong store is a silent data-integrity footgun (a misspelled "
+            "class path would otherwise write every fact to local JSON instead of the "
+            "intended backend)."
+        ) from e

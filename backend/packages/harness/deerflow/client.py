@@ -1043,21 +1043,21 @@ class DeerFlowClient:
         Returns:
             Memory data dict (see src/agents/memory/updater.py for structure).
         """
-        from deerflow.agents.memory.updater import get_memory_data
+        from deerflow.agents.memory import get_memory_manager
 
-        return get_memory_data(user_id=get_effective_user_id())
+        return get_memory_manager().get_memory(user_id=get_effective_user_id())
 
     def export_memory(self) -> dict:
         """Export current memory data for backup or transfer."""
-        from deerflow.agents.memory.updater import get_memory_data
+        from deerflow.agents.memory import get_memory_manager
 
-        return get_memory_data(user_id=get_effective_user_id())
+        return get_memory_manager().get_memory(user_id=get_effective_user_id())
 
     def import_memory(self, memory_data: dict) -> dict:
         """Import and persist full memory data."""
-        from deerflow.agents.memory.updater import import_memory_data
+        from deerflow.agents.memory import get_memory_manager
 
-        return import_memory_data(memory_data, user_id=get_effective_user_id())
+        return get_memory_manager().import_memory(memory_data, user_id=get_effective_user_id())
 
     def get_model(self, name: str) -> dict | None:
         """Get a specific model's configuration by name.
@@ -1273,27 +1273,40 @@ class DeerFlowClient:
         Returns:
             The reloaded memory data dict.
         """
-        from deerflow.agents.memory.updater import reload_memory_data
+        from deerflow.agents.memory import get_memory_manager
 
-        return reload_memory_data(user_id=get_effective_user_id())
+        manager = get_memory_manager()
+        if hasattr(manager, "reload_memory"):
+            return manager.reload_memory(user_id=get_effective_user_id())
+        # Non-DeerMem backends have no reload concept; return current memory.
+        return manager.get_memory(user_id=get_effective_user_id())
 
     def clear_memory(self) -> dict:
         """Clear all persisted memory data."""
-        from deerflow.agents.memory.updater import clear_memory_data
+        from deerflow.agents.memory import get_memory_manager
 
-        return clear_memory_data(user_id=get_effective_user_id())
+        return get_memory_manager().clear_memory(user_id=get_effective_user_id())
 
     def create_memory_fact(self, content: str, category: str = "context", confidence: float = 0.5) -> dict:
         """Create a single fact manually."""
-        from deerflow.agents.memory.updater import create_memory_fact
+        from deerflow.agents.memory import get_memory_manager
 
-        return create_memory_fact(content=content, category=category, confidence=confidence)
+        manager = get_memory_manager()
+        if not hasattr(manager, "create_fact"):
+            raise NotImplementedError(f"create_fact not supported by memory backend '{type(manager).__name__}'")
+        memory_data, fact_id = manager.create_fact(content=content, category=category, confidence=confidence, user_id=get_effective_user_id())
+        if fact_id is None:
+            raise ValueError("Fact was not stored because memory.max_facts kept higher-confidence facts")
+        return memory_data
 
     def delete_memory_fact(self, fact_id: str) -> dict:
         """Delete a single fact from memory by fact id."""
-        from deerflow.agents.memory.updater import delete_memory_fact
+        from deerflow.agents.memory import get_memory_manager
 
-        return delete_memory_fact(fact_id)
+        manager = get_memory_manager()
+        if not hasattr(manager, "delete_fact"):
+            raise NotImplementedError(f"delete_fact not supported by memory backend '{type(manager).__name__}'")
+        return manager.delete_fact(fact_id, user_id=get_effective_user_id())
 
     def update_memory_fact(
         self,
@@ -1303,13 +1316,17 @@ class DeerFlowClient:
         confidence: float | None = None,
     ) -> dict:
         """Update a single fact manually, preserving omitted fields."""
-        from deerflow.agents.memory.updater import update_memory_fact
+        from deerflow.agents.memory import get_memory_manager
 
-        return update_memory_fact(
+        manager = get_memory_manager()
+        if not hasattr(manager, "update_fact"):
+            raise NotImplementedError(f"update_fact not supported by memory backend '{type(manager).__name__}'")
+        return manager.update_fact(
             fact_id=fact_id,
             content=content,
             category=category,
             confidence=confidence,
+            user_id=get_effective_user_id(),
         )
 
     def get_memory_config(self) -> dict:
@@ -1323,20 +1340,10 @@ class DeerFlowClient:
         config = get_memory_config()
         return {
             "enabled": config.enabled,
-            "storage_path": config.storage_path,
-            "debounce_seconds": config.debounce_seconds,
-            "max_facts": config.max_facts,
-            "fact_confidence_threshold": config.fact_confidence_threshold,
+            "mode": config.mode,
             "injection_enabled": config.injection_enabled,
-            "max_injection_tokens": config.max_injection_tokens,
-            "token_counting": config.token_counting,
-            "guaranteed_categories": config.guaranteed_categories,
-            "guaranteed_token_budget": config.guaranteed_token_budget,
-            "staleness_review_enabled": config.staleness_review_enabled,
-            "staleness_age_days": config.staleness_age_days,
-            "staleness_min_candidates": config.staleness_min_candidates,
-            "staleness_max_removals_per_cycle": config.staleness_max_removals_per_cycle,
-            "staleness_protected_categories": config.staleness_protected_categories,
+            "manager_class": config.manager_class,
+            "backend_config": config.backend_config,
         }
 
     def get_memory_status(self) -> dict:

@@ -1,34 +1,63 @@
 """Tests for the memory consolidation feature in the memory updater.
 
-Covers:
-- Candidate selection (category fragmentation threshold)
-- Trigger conditions (min facts, enabled flag)
-- Prompt section formatting
-- Consolidation apply in _apply_updates (guardrails, observability)
-- Normalization of factsToConsolidate from LLM responses
-- Integration with _prepare_update_prompt
+Ported from upstream commit 90976426 (feat(memory): add memory consolidation)
+and adapted to the self-contained DeerMem DI structure:
+
+- Config lives on ``DeerMemConfig`` (not the shared ``MemoryConfig``); the
+  ``_memory_config`` helper builds a ``DeerMemConfig`` and sets overrides via
+  ``setattr`` (so test-only values outside the production bounds, e.g.
+  ``max_facts=3`` to exercise trim ordering, are accepted without validation
+  rejection).
+- ``MemoryUpdater`` is constructed with injected ``(config, storage, llm)`` --
+  no ``get_memory_config`` / ``get_memory_data`` module globals exist in the
+  DI layout, so the old ``patch(...get_memory_config...)`` is replaced by a
+  direct ``_make_updater(...)`` call and, for the prompt path,
+  ``patch.object(updater, "get_memory_data", ...)``.
+
+Also includes the staleness ``KeyError`` regression (upstream commit c0b917cc:
+``f["id"]`` direct subscript on id-less legacy facts), which lives here because
+``test_memory_staleness_review.py`` is module-skipped pending DI migration.
 """
 
+from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from deerflow.agents.memory.updater import (
+from deerflow.agents.memory.backends.deermem.deermem.config import DeerMemConfig
+from deerflow.agents.memory.backends.deermem.deermem.core.updater import (
     MemoryUpdater,
     _build_consolidation_section,
     _normalize_memory_update_data,
     _select_consolidation_candidates,
 )
-from deerflow.config.memory_config import MemoryConfig
 
 # ── Helpers ────────────────────────────────────────────────────────────────
 
 
-def _memory_config(**overrides: object) -> MemoryConfig:
-    config = MemoryConfig()
+def _memory_config(**overrides: object) -> DeerMemConfig:
+    """Build a DeerMemConfig with test overrides (validation bypassed via setattr).
+
+    ``enabled`` is a host-shared MemoryConfig field (not on DeerMemConfig) and is
+    not read by ``_prepare_update_prompt`` in the DI layout, so it is dropped.
+    """
+    config = DeerMemConfig()
     for key, value in overrides.items():
+        if key == "enabled":
+            continue
         setattr(config, key, value)
     return config
+
+
+def _make_updater(**config_overrides: object) -> MemoryUpdater:
+    """DI-constructed MemoryUpdater with a fake storage + no LLM.
+
+    ``_apply_updates`` only reads ``self._config``; ``_prepare_update_prompt``
+    additionally calls ``self.get_memory_data`` (patched per-test). Storage is a
+    MagicMock so no filesystem is touched; LLM is ``None`` since these tests
+    never invoke the model.
+    """
+    return MemoryUpdater(_memory_config(**config_overrides), MagicMock(), None)
 
 
 def _make_fact(
@@ -297,7 +326,13 @@ class TestNormalizeFactsToConsolidate:
 
 class TestApplyUpdatesConsolidation:
     def test_consolidation_removes_sources_adds_merged(self):
-        updater = MemoryUpdater()
+        updater = _make_updater(
+            max_facts=100,
+            consolidation_enabled=True,
+            consolidation_min_facts=3,
+            consolidation_max_groups_per_cycle=3,
+            consolidation_max_sources=8,
+        )
         current_memory = _make_memory(
             [
                 _make_fact("fact_a", "User uses React", "knowledge", 0.9),
@@ -324,17 +359,7 @@ class TestApplyUpdatesConsolidation:
             ],
         }
 
-        with patch(
-            "deerflow.agents.memory.updater.get_memory_config",
-            return_value=_memory_config(
-                max_facts=100,
-                consolidation_enabled=True,
-                consolidation_min_facts=3,
-                consolidation_max_groups_per_cycle=3,
-                consolidation_max_sources=8,
-            ),
-        ):
-            result = updater._apply_updates(current_memory, update_data)
+        result = updater._apply_updates(current_memory, update_data)
 
         # 3 sources removed, 1 consolidated added, fact_keep preserved
         assert len(result["facts"]) == 2
@@ -350,7 +375,12 @@ class TestApplyUpdatesConsolidation:
 
     def test_max_groups_cap(self):
         """Only consolidation_max_groups_per_cycle groups are processed."""
-        updater = MemoryUpdater()
+        updater = _make_updater(
+            max_facts=100,
+            consolidation_enabled=True,
+            consolidation_max_groups_per_cycle=2,  # cap at 2
+            consolidation_max_sources=8,
+        )
         facts = [_make_fact(f"f_{i}", f"Fact {i}", "knowledge", 0.8) for i in range(10)]
         current_memory = _make_memory(facts)
         update_data = {
@@ -366,16 +396,7 @@ class TestApplyUpdatesConsolidation:
             ],
         }
 
-        with patch(
-            "deerflow.agents.memory.updater.get_memory_config",
-            return_value=_memory_config(
-                max_facts=100,
-                consolidation_enabled=True,
-                consolidation_max_groups_per_cycle=2,  # cap at 2
-                consolidation_max_sources=8,
-            ),
-        ):
-            result = updater._apply_updates(current_memory, update_data)
+        result = updater._apply_updates(current_memory, update_data)
 
         # Only first 2 groups processed: 4 sources removed, 2 consolidated added
         consolidated = [f for f in result["facts"] if f.get("source") == "consolidation"]
@@ -383,7 +404,12 @@ class TestApplyUpdatesConsolidation:
 
     def test_nonexistent_source_id_refused(self):
         """LLM hallucinating a non-existent fact ID is silently rejected."""
-        updater = MemoryUpdater()
+        updater = _make_updater(
+            max_facts=100,
+            consolidation_enabled=True,
+            consolidation_min_facts=2,
+            consolidation_max_sources=8,
+        )
         current_memory = _make_memory(
             [
                 _make_fact("fact_a", "Fact A", "knowledge", 0.9),
@@ -404,18 +430,18 @@ class TestApplyUpdatesConsolidation:
             ],
         }
 
-        with patch(
-            "deerflow.agents.memory.updater.get_memory_config",
-            return_value=_memory_config(max_facts=100, consolidation_enabled=True, consolidation_min_facts=2, consolidation_max_sources=8),
-        ):
-            result = updater._apply_updates(current_memory, update_data)
+        result = updater._apply_updates(current_memory, update_data)
 
         # Nothing consolidated, original facts preserved
         assert len(result["facts"]) == 2
 
     def test_over_max_sources_refused(self):
         """Groups exceeding consolidation_max_sources are rejected."""
-        updater = MemoryUpdater()
+        updater = _make_updater(
+            max_facts=100,
+            consolidation_enabled=True,
+            consolidation_max_sources=5,
+        )
         facts = [_make_fact(f"f_{i}", f"Fact {i}", "knowledge", 0.8) for i in range(10)]
         current_memory = _make_memory(facts)
         update_data = {
@@ -432,18 +458,20 @@ class TestApplyUpdatesConsolidation:
             ],
         }
 
-        with patch(
-            "deerflow.agents.memory.updater.get_memory_config",
-            return_value=_memory_config(max_facts=100, consolidation_enabled=True, consolidation_max_sources=5),
-        ):
-            result = updater._apply_updates(current_memory, update_data)
+        result = updater._apply_updates(current_memory, update_data)
 
         # Nothing consolidated
         assert len(result["facts"]) == 10
 
     def test_double_consume_prevented(self):
         """A fact ID used in one group cannot be reused in another."""
-        updater = MemoryUpdater()
+        updater = _make_updater(
+            max_facts=100,
+            consolidation_enabled=True,
+            consolidation_min_facts=3,
+            consolidation_max_groups_per_cycle=3,
+            consolidation_max_sources=8,
+        )
         current_memory = _make_memory(
             [
                 _make_fact("fact_a", "A", "knowledge", 0.9),
@@ -463,11 +491,7 @@ class TestApplyUpdatesConsolidation:
             ],
         }
 
-        with patch(
-            "deerflow.agents.memory.updater.get_memory_config",
-            return_value=_memory_config(max_facts=100, consolidation_enabled=True, consolidation_min_facts=3, consolidation_max_groups_per_cycle=3, consolidation_max_sources=8),
-        ):
-            result = updater._apply_updates(current_memory, update_data)
+        result = updater._apply_updates(current_memory, update_data)
 
         # First group succeeds (fact_a, fact_b consumed), second skipped (fact_b already consumed)
         consolidated = [f for f in result["facts"] if f.get("source") == "consolidation"]
@@ -476,9 +500,14 @@ class TestApplyUpdatesConsolidation:
 
     def test_consolidation_with_staleness_and_contradiction(self):
         """All three removal paths (contradiction, staleness, consolidation) work together."""
-        updater = MemoryUpdater()
-        from datetime import UTC, datetime, timedelta
-
+        updater = _make_updater(
+            max_facts=100,
+            consolidation_enabled=True,
+            consolidation_min_facts=2,
+            staleness_max_removals_per_cycle=10,
+            consolidation_max_groups_per_cycle=3,
+            consolidation_max_sources=8,
+        )
         old_date = (datetime.now(UTC) - timedelta(days=200)).isoformat().replace("+00:00", "Z")
         current_memory = _make_memory(
             [
@@ -499,18 +528,7 @@ class TestApplyUpdatesConsolidation:
             ],
         }
 
-        with patch(
-            "deerflow.agents.memory.updater.get_memory_config",
-            return_value=_memory_config(
-                max_facts=100,
-                consolidation_enabled=True,
-                consolidation_min_facts=2,
-                staleness_max_removals_per_cycle=10,
-                consolidation_max_groups_per_cycle=3,
-                consolidation_max_sources=8,
-            ),
-        ):
-            result = updater._apply_updates(current_memory, update_data)
+        result = updater._apply_updates(current_memory, update_data)
 
         # contradiction removed fact_contradicted, staleness removed fact_stale,
         # consolidation merged fact_a + fact_b into 1
@@ -523,7 +541,7 @@ class TestApplyUpdatesConsolidation:
 
 class TestReviewerFindings:
     def test_duplicate_source_ids_rejected(self):
-        """#1: ["f1","f1"] must not bypass the ≥2-distinct-sources check."""
+        """#1: ["f1","f1"] must not bypass the >=2-distinct-sources check."""
         data = {
             "user": {},
             "history": {},
@@ -584,7 +602,14 @@ class TestReviewerFindings:
 
     def test_consolidation_runs_after_trim(self):
         """#2: sources trimmed away before consolidation must be rejected, not deleted."""
-        updater = MemoryUpdater()
+        updater = _make_updater(
+            max_facts=3,
+            consolidation_enabled=True,
+            consolidation_min_facts=2,
+            fact_confidence_threshold=0.7,
+            consolidation_max_groups_per_cycle=3,
+            consolidation_max_sources=8,
+        )
         # 3 low-confidence facts that consolidation wants to merge
         facts = [
             _make_fact("low_a", "Low conf A", "knowledge", 0.71),
@@ -611,22 +636,11 @@ class TestReviewerFindings:
                 },
             ],
         }
-        with patch(
-            "deerflow.agents.memory.updater.get_memory_config",
-            return_value=_memory_config(
-                max_facts=3,
-                consolidation_enabled=True,
-                consolidation_min_facts=2,
-                fact_confidence_threshold=0.7,
-                consolidation_max_groups_per_cycle=3,
-                consolidation_max_sources=8,
-            ),
-        ):
-            result = updater._apply_updates(current_memory, update_data)
+        result = updater._apply_updates(current_memory, update_data)
 
         # After trim: high_keep(0.99) + new_high_1(0.98) + new_high_2(0.97) = 3 facts.
         # low_a and low_b were evicted by the trim, so consolidation is rejected
-        # (source IDs no longer exist) — neither low_a/low_b nor "Merged low" appear.
+        # (source IDs no longer exist) - neither low_a/low_b nor "Merged low" appear.
         ids = {f["id"] for f in result["facts"]}
         contents = {f["content"] for f in result["facts"]}
         assert "Merged low" not in contents, "consolidated fact must not appear when sources were trimmed"
@@ -637,7 +651,13 @@ class TestReviewerFindings:
 
     def test_source_error_propagated(self):
         """#6: sourceError from source facts must be carried into the consolidated fact."""
-        updater = MemoryUpdater()
+        updater = _make_updater(
+            max_facts=100,
+            consolidation_enabled=True,
+            consolidation_min_facts=2,
+            consolidation_max_groups_per_cycle=3,
+            consolidation_max_sources=8,
+        )
         facts = [
             {**_make_fact("fact_a", "Fact A", "knowledge", 0.9), "sourceError": "Agent used wrong approach"},
             _make_fact("fact_b", "Fact B", "knowledge", 0.85),
@@ -656,11 +676,7 @@ class TestReviewerFindings:
                 },
             ],
         }
-        with patch(
-            "deerflow.agents.memory.updater.get_memory_config",
-            return_value=_memory_config(max_facts=100, consolidation_enabled=True, consolidation_min_facts=2, consolidation_max_groups_per_cycle=3, consolidation_max_sources=8),
-        ):
-            result = updater._apply_updates(current_memory, update_data)
+        result = updater._apply_updates(current_memory, update_data)
 
         merged = [f for f in result["facts"] if f.get("source") == "consolidation"]
         assert len(merged) == 1
@@ -668,11 +684,17 @@ class TestReviewerFindings:
 
     def test_protected_category_rejected_at_apply_time(self):
         """P1: correction facts proposed by LLM slip must be rejected at apply time."""
-        updater = MemoryUpdater()
+        updater = _make_updater(
+            max_facts=100,
+            consolidation_enabled=True,
+            consolidation_min_facts=8,
+            consolidation_max_groups_per_cycle=3,
+            consolidation_max_sources=8,
+        )
         # correction category has consolidation_min_facts-1 facts (below threshold),
         # but we give the LLM a chance to propose them anyway (simulating a slip).
-        # We need ≥ consolidation_min_facts correction facts to even appear in
-        # allowed_source_ids — so we put them BELOW threshold to confirm they're blocked.
+        # We need >= consolidation_min_facts correction facts to even appear in
+        # allowed_source_ids - so we put them BELOW threshold to confirm they're blocked.
         correction_facts = [{**_make_fact(f"corr_{i}", f"Correction {i}", "correction", 0.95), "sourceError": "wrong approach"} for i in range(3)]
         current_memory = _make_memory(correction_facts)
         update_data = {
@@ -688,17 +710,7 @@ class TestReviewerFindings:
                 },
             ],
         }
-        with patch(
-            "deerflow.agents.memory.updater.get_memory_config",
-            return_value=_memory_config(
-                max_facts=100,
-                consolidation_enabled=True,
-                consolidation_min_facts=8,
-                consolidation_max_groups_per_cycle=3,
-                consolidation_max_sources=8,
-            ),
-        ):
-            result = updater._apply_updates(current_memory, update_data)
+        result = updater._apply_updates(current_memory, update_data)
 
         # All 3 correction facts must survive untouched
         assert len(result["facts"]) == 3
@@ -708,14 +720,21 @@ class TestReviewerFindings:
 
     def test_confidence_cap_and_threshold_gate(self):
         """P2a: LLM-returned confidence is capped at max source confidence; result below threshold is rejected."""
-        updater = MemoryUpdater()
+        updater = _make_updater(
+            max_facts=100,
+            consolidation_enabled=True,
+            fact_confidence_threshold=0.7,
+            consolidation_min_facts=2,
+            consolidation_max_groups_per_cycle=3,
+            consolidation_max_sources=8,
+        )
         facts = [
             _make_fact("fact_a", "Fact A", "knowledge", 0.75),
             _make_fact("fact_b", "Fact B", "knowledge", 0.75),
         ]
         current_memory = _make_memory(facts)
 
-        # Case 1: LLM returns conf=1.0, sources max at 0.75 → capped to 0.75
+        # Case 1: LLM returns conf=1.0, sources max at 0.75 -> capped to 0.75
         update_data = {
             "user": {},
             "history": {},
@@ -729,24 +748,13 @@ class TestReviewerFindings:
                 },
             ],
         }
-        with patch(
-            "deerflow.agents.memory.updater.get_memory_config",
-            return_value=_memory_config(
-                max_facts=100,
-                consolidation_enabled=True,
-                fact_confidence_threshold=0.7,
-                consolidation_min_facts=2,
-                consolidation_max_groups_per_cycle=3,
-                consolidation_max_sources=8,
-            ),
-        ):
-            result = updater._apply_updates(current_memory, update_data)
+        result = updater._apply_updates(current_memory, update_data)
 
         merged = [f for f in result["facts"] if f.get("source") == "consolidation"]
         assert len(merged) == 1, "merge should succeed"
         assert merged[0]["confidence"] == 0.75, "confidence must be capped at max source confidence"
 
-        # Case 2: sources max at 0.65, below fact_confidence_threshold=0.7 → rejected
+        # Case 2: sources max at 0.65, below fact_confidence_threshold=0.7 -> rejected
         facts2 = [
             _make_fact("fact_c", "Fact C", "knowledge", 0.65),
             _make_fact("fact_d", "Fact D", "knowledge", 0.60),
@@ -765,26 +773,20 @@ class TestReviewerFindings:
                 },
             ],
         }
-        with patch(
-            "deerflow.agents.memory.updater.get_memory_config",
-            return_value=_memory_config(
-                max_facts=100,
-                consolidation_enabled=True,
-                fact_confidence_threshold=0.7,
-                consolidation_min_facts=2,
-                consolidation_max_groups_per_cycle=3,
-                consolidation_max_sources=8,
-            ),
-        ):
-            result2 = updater._apply_updates(current_memory2, update_data2)
+        result2 = updater._apply_updates(current_memory2, update_data2)
 
-        # Both source facts must survive untouched — consolidation was rejected
+        # Both source facts must survive untouched - consolidation was rejected
         assert len(result2["facts"]) == 2
         assert all(f.get("source") != "consolidation" for f in result2["facts"])
 
     def test_apply_gate_consolidation_disabled(self):
-        """P2b: factsToConsolidate present but consolidation_enabled=False → nothing merged at apply time."""
-        updater = MemoryUpdater()
+        """P2b: factsToConsolidate present but consolidation_enabled=False -> nothing merged at apply time."""
+        updater = _make_updater(
+            max_facts=100,
+            consolidation_enabled=False,
+            consolidation_max_groups_per_cycle=3,
+            consolidation_max_sources=8,
+        )
         facts = [
             _make_fact("fact_a", "Fact A", "knowledge", 0.9),
             _make_fact("fact_b", "Fact B", "knowledge", 0.85),
@@ -803,25 +805,14 @@ class TestReviewerFindings:
                 },
             ],
         }
-        with patch(
-            "deerflow.agents.memory.updater.get_memory_config",
-            return_value=_memory_config(
-                max_facts=100,
-                consolidation_enabled=False,
-                consolidation_max_groups_per_cycle=3,
-                consolidation_max_sources=8,
-            ),
-        ):
-            result = updater._apply_updates(current_memory, update_data)
+        result = updater._apply_updates(current_memory, update_data)
 
         assert len(result["facts"]) == 2, "both source facts must survive when consolidation is disabled"
         assert all(f.get("source") != "consolidation" for f in result["facts"])
 
     def test_consolidation_enabled_defaults_to_false(self):
-        """Finding 1: consolidation is opt-in — default must be False to avoid lossy mutations on first deploy."""
-        from deerflow.config.memory_config import MemoryConfig
-
-        assert MemoryConfig().consolidation_enabled is False
+        """Finding 1: consolidation is opt-in - default must be False to avoid lossy mutations on first deploy."""
+        assert DeerMemConfig().consolidation_enabled is False
 
     def test_null_confidence_renders_consistently_with_cap(self):
         """Finding 2: a fact with confidence=None must show the same value in the prompt as in the confidence cap."""
@@ -834,7 +825,14 @@ class TestReviewerFindings:
         assert "0.00" not in section
 
         # Apply-time cap must also use 0.5 for the null-confidence source
-        updater = MemoryUpdater()
+        updater = _make_updater(
+            max_facts=100,
+            fact_confidence_threshold=0.5,
+            consolidation_enabled=True,
+            consolidation_min_facts=2,
+            consolidation_max_groups_per_cycle=3,
+            consolidation_max_sources=8,
+        )
         current_memory = _make_memory([null_fact, other_fact])
         update_data = {
             "user": {},
@@ -850,27 +848,22 @@ class TestReviewerFindings:
                 },
             ],
         }
-        with patch(
-            "deerflow.agents.memory.updater.get_memory_config",
-            return_value=_memory_config(
-                max_facts=100,
-                fact_confidence_threshold=0.5,
-                consolidation_enabled=True,
-                consolidation_min_facts=2,
-                consolidation_max_groups_per_cycle=3,
-                consolidation_max_sources=8,
-            ),
-        ):
-            result = updater._apply_updates(current_memory, update_data)
+        result = updater._apply_updates(current_memory, update_data)
 
         merged = [f for f in result["facts"] if f.get("source") == "consolidation"]
         assert len(merged) == 1, "merge should succeed"
-        # cap = max(coerce(null)=0.5, coerce(0.9)=0.9) = 0.9; LLM conf 1.0 capped → 0.9
+        # cap = max(coerce(null)=0.5, coerce(0.9)=0.9) = 0.9; LLM conf 1.0 capped -> 0.9
         assert merged[0]["confidence"] == pytest.approx(0.9)
 
     def test_consolidated_created_at_tracks_newest_source(self):
         """Finding 3: createdAt must equal the newest source's createdAt (not now) to preserve staleness eligibility."""
-        updater = MemoryUpdater()
+        updater = _make_updater(
+            max_facts=100,
+            consolidation_enabled=True,
+            consolidation_min_facts=2,
+            consolidation_max_groups_per_cycle=3,
+            consolidation_max_sources=8,
+        )
         older_date = "2025-01-01T00:00:00Z"
         newer_date = "2026-03-15T12:00:00Z"
         facts = [
@@ -891,21 +884,11 @@ class TestReviewerFindings:
                 },
             ],
         }
-        with patch(
-            "deerflow.agents.memory.updater.get_memory_config",
-            return_value=_memory_config(
-                max_facts=100,
-                consolidation_enabled=True,
-                consolidation_min_facts=2,
-                consolidation_max_groups_per_cycle=3,
-                consolidation_max_sources=8,
-            ),
-        ):
-            result = updater._apply_updates(current_memory, update_data)
+        result = updater._apply_updates(current_memory, update_data)
 
         merged = [f for f in result["facts"] if f.get("source") == "consolidation"]
         assert len(merged) == 1
-        # createdAt must be the newest source's date — staleness clock not reset
+        # createdAt must be the newest source's date - staleness clock not reset
         assert merged[0]["createdAt"] == newer_date, "createdAt must equal newest source's date"
         # consolidatedAt must be present as an audit field
         assert "consolidatedAt" in merged[0], "consolidatedAt must be set for auditability"
@@ -914,7 +897,13 @@ class TestReviewerFindings:
 
     def test_confidence_fallback_to_max_source_when_llm_omits_field(self):
         """Finding 5: when LLM omits confidence field entirely, merged fact uses max_source_conf."""
-        updater = MemoryUpdater()
+        updater = _make_updater(
+            max_facts=100,
+            consolidation_enabled=True,
+            consolidation_min_facts=2,
+            consolidation_max_groups_per_cycle=3,
+            consolidation_max_sources=8,
+        )
         facts = [
             _make_fact("fact_a", "Fact A", "knowledge", 0.85),
             _make_fact("fact_b", "Fact B", "knowledge", 0.75),
@@ -934,17 +923,7 @@ class TestReviewerFindings:
                 },
             ],
         }
-        with patch(
-            "deerflow.agents.memory.updater.get_memory_config",
-            return_value=_memory_config(
-                max_facts=100,
-                consolidation_enabled=True,
-                consolidation_min_facts=2,
-                consolidation_max_groups_per_cycle=3,
-                consolidation_max_sources=8,
-            ),
-        ):
-            result = updater._apply_updates(current_memory, update_data)
+        result = updater._apply_updates(current_memory, update_data)
 
         merged = [f for f in result["facts"] if f.get("source") == "consolidation"]
         assert len(merged) == 1, "merge should succeed"
@@ -957,7 +936,10 @@ class TestReviewerFindings:
 
 class TestPrepareUpdatePromptConsolidation:
     def test_consolidation_section_included_when_triggered(self):
-        updater = MemoryUpdater()
+        updater = _make_updater(
+            consolidation_enabled=True,
+            consolidation_min_facts=8,
+        )
         facts = [_make_fact(f"fact_{i}", f"Knowledge {i}", "knowledge", 0.8) for i in range(10)]
         memory = _make_memory(facts)
 
@@ -965,16 +947,7 @@ class TestPrepareUpdatePromptConsolidation:
         msg.type = "human"
         msg.content = "Hello"
 
-        config = _memory_config(
-            enabled=True,
-            consolidation_enabled=True,
-            consolidation_min_facts=8,
-        )
-
-        with (
-            patch("deerflow.agents.memory.updater.get_memory_config", return_value=config),
-            patch("deerflow.agents.memory.updater.get_memory_data", return_value=memory),
-        ):
+        with patch.object(updater, "get_memory_data", return_value=memory):
             result = updater._prepare_update_prompt(
                 messages=[msg],
                 agent_name=None,
@@ -988,23 +961,17 @@ class TestPrepareUpdatePromptConsolidation:
         assert "consolidation_candidates" in prompt
 
     def test_consolidation_section_omitted_when_not_triggered(self):
-        updater = MemoryUpdater()
+        updater = _make_updater(
+            consolidation_enabled=True,
+            consolidation_min_facts=8,
+        )
         memory = _make_memory([_make_fact("fact_only", category="knowledge")])
 
         msg = MagicMock()
         msg.type = "human"
         msg.content = "Hello"
 
-        config = _memory_config(
-            enabled=True,
-            consolidation_enabled=True,
-            consolidation_min_facts=8,
-        )
-
-        with (
-            patch("deerflow.agents.memory.updater.get_memory_config", return_value=config),
-            patch("deerflow.agents.memory.updater.get_memory_data", return_value=memory),
-        ):
+        with patch.object(updater, "get_memory_data", return_value=memory):
             result = updater._prepare_update_prompt(
                 messages=[msg],
                 agent_name=None,
@@ -1017,7 +984,9 @@ class TestPrepareUpdatePromptConsolidation:
         assert "Memory Consolidation" not in prompt
 
     def test_consolidation_section_omitted_when_disabled(self):
-        updater = MemoryUpdater()
+        updater = _make_updater(
+            consolidation_enabled=False,
+        )
         facts = [_make_fact(f"fact_{i}", category="knowledge") for i in range(20)]
         memory = _make_memory(facts)
 
@@ -1025,15 +994,7 @@ class TestPrepareUpdatePromptConsolidation:
         msg.type = "human"
         msg.content = "Hello"
 
-        config = _memory_config(
-            enabled=True,
-            consolidation_enabled=False,
-        )
-
-        with (
-            patch("deerflow.agents.memory.updater.get_memory_config", return_value=config),
-            patch("deerflow.agents.memory.updater.get_memory_data", return_value=memory),
-        ):
+        with patch.object(updater, "get_memory_data", return_value=memory):
             result = updater._prepare_update_prompt(
                 messages=[msg],
                 agent_name=None,
@@ -1044,3 +1005,46 @@ class TestPrepareUpdatePromptConsolidation:
         assert result is not None
         _, prompt = result
         assert "Memory Consolidation" not in prompt
+
+
+# ── Staleness KeyError regression (upstream c0b917cc) ──────────────────────
+
+
+class TestStalenessKeyErrorRegression:
+    """Regression: an aged, non-protected fact missing the ``id`` key must not
+    crash the staleness apply path.
+
+    ``candidate_ids`` was built with a direct ``f["id"]`` access over
+    ``_select_stale_candidates`` output, but every other fact access in the
+    module uses ``f.get("id")``. An aged, non-protected fact with no ``id`` key
+    (common in legacy / migrated ``memory.json``) is a valid staleness
+    candidate, so it reached ``f["id"]`` and raised ``KeyError: 'id'``,
+    aborting the whole memory-update cycle. Lives here because
+    ``test_memory_staleness_review.py`` is module-skipped pending DI migration.
+    """
+
+    def test_stale_candidate_without_id_does_not_raise(self):
+        updater = _make_updater(max_facts=100, staleness_max_removals_per_cycle=10)
+        aged = (datetime.now(UTC) - timedelta(days=120)).isoformat().replace("+00:00", "Z")
+        # An aged, non-protected fact deliberately missing the "id" key.
+        idless_fact = {"content": "User uses Vue.js", "category": "knowledge", "confidence": 0.8, "createdAt": aged}
+        keep_fact = {"id": "fact_keep", "content": "User knows Python", "category": "knowledge", "confidence": 0.9, "createdAt": aged, "source": "test"}
+        current_memory = _make_memory([keep_fact, idless_fact])
+        update_data = {
+            "user": {},
+            "history": {},
+            "newFacts": [],
+            "factsToRemove": [],
+            "staleFactsToRemove": [
+                {"id": "fact_keep", "reason": "outdated"},
+            ],
+        }
+
+        # Must not raise KeyError: 'id'.
+        result = updater._apply_updates(current_memory, update_data)
+
+        # The id-less fact survives (it can never be targeted by the id-based
+        # removal set), and the id-based removal of fact_keep still applies.
+        contents = {f.get("content") for f in result["facts"]}
+        assert "User uses Vue.js" in contents
+        assert "User knows Python" not in contents

@@ -794,12 +794,10 @@ class TestMemoryAccess:
         c = DeerFlowClient(checkpointer=None, thinking_enabled=False)
         result = c.get_memory_config()
         assert "enabled" in result
-        assert "storage_path" in result
-        assert "debounce_seconds" in result
-        assert "max_facts" in result
-        assert "fact_confidence_threshold" in result
         assert "injection_enabled" in result
-        assert "max_injection_tokens" in result
+        assert "manager_class" in result
+        assert "backend_config" in result
+        assert "mode" in result
 
     def test_get_memory_status_combines_config_and_data(self, e2e_env):
         """get_memory_status() returns both 'config' and 'data' keys."""
@@ -808,4 +806,5 @@ class TestMemoryAccess:
         assert "config" in result
         assert "data" in result
         assert "enabled" in result["config"]
+        assert "mode" in result["config"]
         assert isinstance(result["data"], dict)

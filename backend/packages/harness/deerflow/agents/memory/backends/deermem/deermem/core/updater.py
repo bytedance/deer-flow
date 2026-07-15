@@ -8,28 +8,23 @@ import html
 import json
 import logging
 import math
-import os
 import re
 import uuid
-from contextlib import nullcontext
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from deerflow.agents.memory.prompt import (
+from ..config import DeerMemConfig
+from .prompt import (
     CONSOLIDATION_PROMPT,
     MEMORY_UPDATE_PROMPT,
     STALENESS_REVIEW_PROMPT,
     format_conversation_for_update,
 )
-from deerflow.agents.memory.storage import (
+from .storage import (
+    MemoryStorage,
     create_empty_memory,
-    get_memory_storage,
     utc_now_iso_z,
 )
-from deerflow.config.memory_config import get_memory_config
-from deerflow.models import create_chat_model
-from deerflow.trace_context import request_trace_context
-from deerflow.tracing import inject_langfuse_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -46,49 +41,10 @@ _SYNC_MEMORY_UPDATER_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
 atexit.register(lambda: _SYNC_MEMORY_UPDATER_EXECUTOR.shutdown(wait=False))
 
 
-def _save_memory_to_file(memory_data: dict[str, Any], agent_name: str | None = None, *, user_id: str | None = None) -> bool:
-    """Backward-compatible wrapper around the configured memory storage save path."""
-    return get_memory_storage().save(memory_data, agent_name, user_id=user_id)
-
-
-def get_memory_data(agent_name: str | None = None, *, user_id: str | None = None) -> dict[str, Any]:
-    """Get the current memory data via storage provider."""
-    return get_memory_storage().load(agent_name, user_id=user_id)
-
-
-def reload_memory_data(agent_name: str | None = None, *, user_id: str | None = None) -> dict[str, Any]:
-    """Reload memory data via storage provider."""
-    return get_memory_storage().reload(agent_name, user_id=user_id)
-
-
-def import_memory_data(memory_data: dict[str, Any], agent_name: str | None = None, *, user_id: str | None = None) -> dict[str, Any]:
-    """Persist imported memory data via storage provider.
-
-    Args:
-        memory_data: Full memory payload to persist.
-        agent_name: If provided, imports into per-agent memory.
-        user_id: If provided, scopes memory to a specific user.
-
-    Returns:
-        The saved memory data after storage normalization.
-
-    Raises:
-        OSError: If persisting the imported memory fails.
-    """
-    storage = get_memory_storage()
-    if not storage.save(memory_data, agent_name, user_id=user_id):
-        raise OSError("Failed to save imported memory data")
-    return storage.load(agent_name, user_id=user_id)
-
-
-def clear_memory_data(agent_name: str | None = None, *, user_id: str | None = None) -> dict[str, Any]:
-    """Clear all stored memory data and persist an empty structure."""
-    cleared_memory = create_empty_memory()
-    if not _save_memory_to_file(cleared_memory, agent_name, user_id=user_id):
-        raise OSError("Failed to save cleared memory data")
-    return cleared_memory
-
-
+# Data-access + fact-CRUD functions (_save_memory_to_file / get_memory_data /
+# reload_memory_data / import_memory_data / clear_memory_data / create_memory_fact /
+# delete_memory_fact / update_memory_fact) moved into MemoryUpdater as instance
+# methods (use self._storage). See the class below.
 def _validate_confidence(confidence: float) -> float:
     """Validate persisted fact confidence so stored JSON stays standards-compliant."""
     if not math.isfinite(confidence) or confidence < 0 or confidence > 1:
@@ -114,176 +70,20 @@ def _coerce_source_confidence(fact: dict[str, Any]) -> float:
     return max(0.0, min(val, 1.0)) if math.isfinite(val) else 0.5
 
 
-def _trim_facts_to_max(facts: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Keep the highest-confidence facts within the configured max_facts cap."""
-    config = get_memory_config()
-    if len(facts) <= config.max_facts:
-        return facts
-    return sorted(
-        facts,
-        key=_coerce_source_confidence,
-        reverse=True,
-    )[: config.max_facts]
+def _trim_facts_to_max(facts: list[dict[str, Any]], max_facts: int) -> list[dict[str, Any]]:
+    """Keep the highest-confidence facts within ``max_facts`` (confidence coerced).
 
-
-def create_memory_fact_with_created_fact(
-    content: str,
-    category: str = "context",
-    confidence: float = 0.5,
-    agent_name: str | None = None,
-    *,
-    user_id: str | None = None,
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Create a new fact, persist memory, and return both memory and fact."""
-    normalized_content = content.strip()
-    if not normalized_content:
-        raise ValueError("content")
-
-    normalized_category = category.strip() or "context"
-    validated_confidence = _validate_confidence(confidence)
-    now = utc_now_iso_z()
-    memory_data = get_memory_data(agent_name, user_id=user_id)
-    updated_memory = dict(memory_data)
-    facts = list(memory_data.get("facts", []))
-    created_fact = {
-        "id": f"fact_{uuid.uuid4().hex[:8]}",
-        "content": normalized_content,
-        "category": normalized_category,
-        "confidence": validated_confidence,
-        "createdAt": now,
-        "source": "manual",
-    }
-    facts.append(created_fact)
-    updated_memory["facts"] = _trim_facts_to_max(facts)
-
-    if not _save_memory_to_file(updated_memory, agent_name, user_id=user_id):
-        raise OSError("Failed to save memory data after creating fact")
-
-    return updated_memory, created_fact
-
-
-def create_memory_fact(
-    content: str,
-    category: str = "context",
-    confidence: float = 0.5,
-    agent_name: str | None = None,
-    *,
-    user_id: str | None = None,
-) -> dict[str, Any]:
-    """Create a new fact and persist the updated memory data."""
-    updated_memory, _created_fact = create_memory_fact_with_created_fact(
-        content,
-        category=category,
-        confidence=confidence,
-        agent_name=agent_name,
-        user_id=user_id,
-    )
-    return updated_memory
-
-
-def delete_memory_fact(fact_id: str, agent_name: str | None = None, *, user_id: str | None = None) -> dict[str, Any]:
-    """Delete a fact by its id and persist the updated memory data."""
-    memory_data = get_memory_data(agent_name, user_id=user_id)
-    facts = memory_data.get("facts", [])
-    updated_facts = [fact for fact in facts if fact.get("id") != fact_id]
-    if len(updated_facts) == len(facts):
-        raise KeyError(fact_id)
-
-    updated_memory = dict(memory_data)
-    updated_memory["facts"] = updated_facts
-
-    if not _save_memory_to_file(updated_memory, agent_name, user_id=user_id):
-        raise OSError(f"Failed to save memory data after deleting fact '{fact_id}'")
-
-    return updated_memory
-
-
-def search_memory_facts(
-    query: str,
-    category: str | None = None,
-    limit: int = 10,
-    *,
-    agent_name: str | None = None,
-    user_id: str | None = None,
-) -> list[dict[str, Any]]:
-    """Search facts by case-insensitive substring match against content.
-
-    Args:
-        query: Substring to match (case-insensitive). Empty query returns [].
-        category: Optional category filter. If provided, only facts matching
-            this category are considered.
-        limit: Maximum results to return (default 10).
-        agent_name: Per-agent scope, or global memory if None.
-        user_id: Per-user scope within agent.
-
-    Returns:
-        List of matching fact dicts, sorted by confidence descending.
+    Confidence is read via :func:`_coerce_source_confidence` so legacy / imported
+    facts with ``null`` or non-numeric confidence never crash the sort -- the
+    pre-#4023 ``key=lambda f: f.get("confidence", 0)`` form compared ``None`` /
+    ``str`` against ``float`` and raised ``TypeError`` once ``len(facts) >
+    max_facts``. Mirrors upstream's ``_trim_facts_to_max`` (introduced in #4023)
+    so the vendored copy no longer lags the coercion fix the
+    monolithic->vendored rename silently dropped.
     """
-    if not query or not query.strip():
-        return []
-    if limit <= 0:
-        return []
-
-    query_lower = query.strip().lower()
-    memory_data = get_memory_data(agent_name, user_id=user_id)
-    facts = memory_data.get("facts", [])
-
-    matched = []
-    for fact in facts:
-        content = fact.get("content", "")
-        if not isinstance(content, str):
-            continue
-        if query_lower not in content.lower():
-            continue
-        if category is not None and fact.get("category") != category:
-            continue
-        matched.append(fact)
-
-    matched.sort(key=_coerce_source_confidence, reverse=True)
-    return matched[:limit]
-
-
-def update_memory_fact(
-    fact_id: str,
-    content: str | None = None,
-    category: str | None = None,
-    confidence: float | None = None,
-    agent_name: str | None = None,
-    *,
-    user_id: str | None = None,
-) -> dict[str, Any]:
-    """Update an existing fact and persist the updated memory data."""
-    memory_data = get_memory_data(agent_name, user_id=user_id)
-    updated_memory = dict(memory_data)
-    updated_facts: list[dict[str, Any]] = []
-    found = False
-
-    for fact in memory_data.get("facts", []):
-        if fact.get("id") == fact_id:
-            found = True
-            updated_fact = dict(fact)
-            if content is not None:
-                normalized_content = content.strip()
-                if not normalized_content:
-                    raise ValueError("content")
-                updated_fact["content"] = normalized_content
-            if category is not None:
-                updated_fact["category"] = category.strip() or "context"
-            if confidence is not None:
-                updated_fact["confidence"] = _validate_confidence(confidence)
-            updated_facts.append(updated_fact)
-        else:
-            updated_facts.append(fact)
-
-    if not found:
-        raise KeyError(fact_id)
-
-    updated_memory["facts"] = updated_facts
-
-    if not _save_memory_to_file(updated_memory, agent_name, user_id=user_id):
-        raise OSError(f"Failed to save memory data after updating fact '{fact_id}'")
-
-    return updated_memory
+    if len(facts) <= max_facts:
+        return facts
+    return sorted(facts, key=_coerce_source_confidence, reverse=True)[:max_facts]
 
 
 def _extract_text(content: Any) -> str:
@@ -439,7 +239,7 @@ def _normalize_memory_update_data(update_data: dict[str, Any]) -> dict[str, Any]
                 continue
             # Normalize confidence: reject booleans (bool subclasses int, so the
             # isinstance check alone would silently accept True/False), coerce to float,
-            # and reject non-finite values — matching _normalize_memory_update_fact.
+            # and reject non-finite values - matching _normalize_memory_update_fact.
             _raw_conf = consolidated.get("confidence", 0.9)
             if isinstance(_raw_conf, bool) or not isinstance(_raw_conf, (int, float)):
                 _norm_conf = 0.9
@@ -613,7 +413,9 @@ def _select_consolidation_candidates(
     """Return fact categories that exceed the fragmentation threshold.
 
     Groups facts by category; only categories with at least
-    ``consolidation_min_facts`` entries are returned.
+    ``consolidation_min_facts`` entries are returned.  Categories in
+    ``staleness_protected_categories`` are exempt, mirroring the staleness
+    contract so explicit user feedback is never surfaced for merging.
     """
     facts = current_memory.get("facts", [])
     if not facts:
@@ -664,14 +466,14 @@ def _escape_memory_for_prompt(memory: Any) -> Any:
     ``MEMORY_UPDATE_PROMPT`` embeds the full memory state as a ``json.dumps``
     blob inside a ``<current_memory>...</current_memory>`` block. ``json.dumps``
     escapes ``"`` and ``\\`` but leaves ``<``, ``>`` and ``&`` intact, so a
-    user-influenced field — e.g. a fact ``content`` of
-    ``</current_memory><evil>...`` — would otherwise reach the model verbatim
+    user-influenced field - e.g. a fact ``content`` of
+    ``</current_memory><evil>...`` - would otherwise reach the model verbatim
     and break out of the block (prompt injection, #4044).
 
     Escaping each string *value* before serialization (rather than the
     serialized blob) cannot corrupt the JSON structure, because ``json.dumps``
-    re-quotes the already-safe values. Escaping every leaf — not just known
-    fields — guarantees no current or future user-influenced field can carry a
+    re-quotes the already-safe values. Escaping every leaf - not just known
+    fields - guarantees no current or future user-influenced field can carry a
     raw ``<``/``>``/``&``; controlled fields such as ids and timestamps contain
     none of those characters, so escaping them is a harmless no-op. This mirrors
     the ``html.escape`` treatment already applied to the staleness and
@@ -689,22 +491,131 @@ def _escape_memory_for_prompt(memory: Any) -> Any:
 class MemoryUpdater:
     """Updates memory using LLM based on conversation context."""
 
-    def __init__(self, model_name: str | None = None):
-        """Initialize the memory updater.
+    def __init__(self, config: DeerMemConfig, storage: MemoryStorage, llm: Any = None):
+        """Initialize the memory updater with injected config + storage + llm (DI).
 
         Args:
-            model_name: Optional model name to use. If None, uses config or default.
+            config: DeerMem private configuration.
+            storage: Memory storage instance (owned by DeerMem, injected here).
+            llm: The chat model for memory extraction (owned by DeerMem, injected
+                here). None when no LLM is configured; an update raises in that case.
         """
-        self._model_name = model_name
+        self._config = config
+        self._storage = storage
+        self._llm = llm
 
-    def _get_model(self):
-        """Get the model for memory updates."""
-        return create_chat_model(name=self._resolve_model_name(), thinking_enabled=False)
+    # ── Data access + fact CRUD (formerly module-level functions; use self._storage) ──
 
-    def _resolve_model_name(self) -> str | None:
-        """Return the configured model name for memory updates."""
-        config = get_memory_config()
-        return self._model_name or config.model_name
+    def _save_memory_to_file(self, memory_data: dict[str, Any], agent_name: str | None = None, *, user_id: str | None = None) -> bool:
+        """Persist memory data via the injected storage."""
+        return self._storage.save(memory_data, agent_name, user_id=user_id)
+
+    def get_memory_data(self, agent_name: str | None = None, *, user_id: str | None = None) -> dict[str, Any]:
+        """Get the current memory data via the injected storage."""
+        return self._storage.load(agent_name, user_id=user_id)
+
+    def reload_memory_data(self, agent_name: str | None = None, *, user_id: str | None = None) -> dict[str, Any]:
+        """Reload memory data via the injected storage."""
+        return self._storage.reload(agent_name, user_id=user_id)
+
+    def import_memory_data(self, memory_data: dict[str, Any], agent_name: str | None = None, *, user_id: str | None = None) -> dict[str, Any]:
+        """Persist imported memory data via the injected storage."""
+        if not self._storage.save(memory_data, agent_name, user_id=user_id):
+            raise OSError("Failed to save imported memory data")
+        return self._storage.load(agent_name, user_id=user_id)
+
+    def clear_memory_data(self, agent_name: str | None = None, *, user_id: str | None = None) -> dict[str, Any]:
+        """Clear all stored memory data and persist an empty structure."""
+        cleared_memory = create_empty_memory()
+        if not self._save_memory_to_file(cleared_memory, agent_name, user_id=user_id):
+            raise OSError("Failed to save cleared memory data")
+        return cleared_memory
+
+    def create_memory_fact(self, content: str, category: str = "context", confidence: float = 0.5, agent_name: str | None = None, *, user_id: str | None = None) -> tuple[dict[str, Any], str | None]:
+        """Create a new fact, persist it, and return ``(updated_memory, fact_id)``.
+
+        The fact_id is returned directly so callers (e.g. the memory_add tool)
+        don't have to re-derive it from the memory data by content matching --
+        which would couple them to the backend's content normalization and could
+        misreport a storage cap on backends that normalize differently.
+
+        The new fact is then trimmed by :func:`_trim_facts_to_max` (highest-
+        confidence wins, confidence coerced). If the cap evicts the just-added
+        (lower-confidence) fact, ``fact_id`` is ``None`` so callers report
+        "not stored - cap reached" instead of a dangling id with a false
+        "added" status. This restores both the max_facts cap and the post-trim
+        existence check (upstream's ``create_memory_fact_with_created_fact``),
+        which the vendored copy had dropped together to avoid the dangling id.
+        """
+        normalized_content = content.strip()
+        if not normalized_content:
+            raise ValueError("content")
+        normalized_category = category.strip() or "context"
+        validated_confidence = _validate_confidence(confidence)
+        now = utc_now_iso_z()
+        memory_data = self.get_memory_data(agent_name, user_id=user_id)
+        updated_memory = dict(memory_data)
+        facts = list(memory_data.get("facts", []))
+        fact_id = f"fact_{uuid.uuid4().hex[:8]}"
+        facts.append(
+            {
+                "id": fact_id,
+                "content": normalized_content,
+                "category": normalized_category,
+                "confidence": validated_confidence,
+                "createdAt": now,
+                "source": "manual",
+            }
+        )
+        updated_memory["facts"] = _trim_facts_to_max(facts, self._config.max_facts)
+        if not self._save_memory_to_file(updated_memory, agent_name, user_id=user_id):
+            raise OSError("Failed to save memory data after creating fact")
+        # If the cap evicted the just-added (lower-confidence) fact, signal via
+        # None so callers don't report a dangling id as "added".
+        stored = any(f.get("id") == fact_id for f in updated_memory["facts"])
+        return updated_memory, (fact_id if stored else None)
+
+    def delete_memory_fact(self, fact_id: str, agent_name: str | None = None, *, user_id: str | None = None) -> dict[str, Any]:
+        """Delete a fact by its id and persist the updated memory data."""
+        memory_data = self.get_memory_data(agent_name, user_id=user_id)
+        facts = memory_data.get("facts", [])
+        updated_facts = [fact for fact in facts if fact.get("id") != fact_id]
+        if len(updated_facts) == len(facts):
+            raise KeyError(fact_id)
+        updated_memory = dict(memory_data)
+        updated_memory["facts"] = updated_facts
+        if not self._save_memory_to_file(updated_memory, agent_name, user_id=user_id):
+            raise OSError(f"Failed to save memory data after deleting fact '{fact_id}'")
+        return updated_memory
+
+    def update_memory_fact(self, fact_id: str, content: str | None = None, category: str | None = None, confidence: float | None = None, agent_name: str | None = None, *, user_id: str | None = None) -> dict[str, Any]:
+        """Update an existing fact and persist the updated memory data."""
+        memory_data = self.get_memory_data(agent_name, user_id=user_id)
+        updated_memory = dict(memory_data)
+        updated_facts: list[dict[str, Any]] = []
+        found = False
+        for fact in memory_data.get("facts", []):
+            if fact.get("id") == fact_id:
+                found = True
+                updated_fact = dict(fact)
+                if content is not None:
+                    normalized_content = content.strip()
+                    if not normalized_content:
+                        raise ValueError("content")
+                    updated_fact["content"] = normalized_content
+                if category is not None:
+                    updated_fact["category"] = category.strip() or "context"
+                if confidence is not None:
+                    updated_fact["confidence"] = _validate_confidence(confidence)
+                updated_facts.append(updated_fact)
+            else:
+                updated_facts.append(fact)
+        if not found:
+            raise KeyError(fact_id)
+        updated_memory["facts"] = updated_facts
+        if not self._save_memory_to_file(updated_memory, agent_name, user_id=user_id):
+            raise OSError(f"Failed to save memory data after updating fact '{fact_id}'")
+        return updated_memory
 
     def _build_correction_hint(
         self,
@@ -740,11 +651,11 @@ class MemoryUpdater:
         user_id: str | None = None,
     ) -> tuple[dict[str, Any], str] | None:
         """Load memory and build the update prompt for a conversation."""
-        config = get_memory_config()
-        if not config.enabled or not messages:
+        config = self._config
+        if not messages:
             return None
 
-        current_memory = get_memory_data(agent_name, user_id=user_id)
+        current_memory = self.get_memory_data(agent_name, user_id=user_id)
         conversation_text = format_conversation_for_update(messages)
         if not conversation_text.strip():
             return None
@@ -775,12 +686,6 @@ class MemoryUpdater:
                     max_sources=config.consolidation_max_sources,
                 )
 
-        # HTML-escape user-influenced string values before embedding the memory
-        # state as a JSON blob inside <current_memory>...</current_memory>, so a
-        # fact/summary containing </current_memory> cannot break out of the block
-        # (prompt injection, #4044). Escaping values — not the serialized blob —
-        # keeps the JSON well-formed because json.dumps re-quotes safe values.
-        # The unescaped current_memory is returned unchanged for the apply path.
         prompt = MEMORY_UPDATE_PROMPT.format(
             current_memory=json.dumps(_escape_memory_for_prompt(current_memory), indent=2, ensure_ascii=False),
             conversation=conversation_text,
@@ -804,7 +709,7 @@ class MemoryUpdater:
         # cannot corrupt the still-cached original object reference.
         updated_memory = self._apply_updates(copy.deepcopy(current_memory), update_data, thread_id)
         updated_memory = _strip_upload_mentions_from_memory(updated_memory)
-        return get_memory_storage().save(updated_memory, agent_name, user_id=user_id)
+        return self._storage.save(updated_memory, agent_name, user_id=user_id)
 
     async def aupdate_memory(
         self,
@@ -814,7 +719,7 @@ class MemoryUpdater:
         correction_detected: bool = False,
         reinforcement_detected: bool = False,
         user_id: str | None = None,
-        deerflow_trace_id: str | None = None,
+        trace_id: str | None = None,
     ) -> bool:
         """Update memory asynchronously by delegating to the sync path.
 
@@ -832,7 +737,7 @@ class MemoryUpdater:
             correction_detected=correction_detected,
             reinforcement_detected=reinforcement_detected,
             user_id=user_id,
-            deerflow_trace_id=deerflow_trace_id,
+            trace_id=trace_id,
         )
 
     def _do_update_memory_sync(
@@ -843,7 +748,50 @@ class MemoryUpdater:
         correction_detected: bool = False,
         reinforcement_detected: bool = False,
         user_id: str | None = None,
-        deerflow_trace_id: str | None = None,
+        trace_id: str | None = None,
+    ) -> bool:
+        """Pure-sync memory update; bind ``trace_id`` into the request-trace
+        ContextVar for the worker thread, then delegate to the impl.
+
+        The update runs on a Timer / executor thread with no request ContextVar
+        inheritance, so log records emitted here would otherwise lose the
+        request trace id (it only reached ``tracing_callback`` before). The
+        host-injected ``trace_context_manager`` hook (``None`` when DeerMem runs
+        standalone, outside the deer-flow factory) binds ``trace_id`` for the
+        duration of the call and restores the prior binding on exit. A ``None``
+        trace_id leaves the ContextVar untouched (no fabricated id).
+        """
+        cm = self._config.trace_context_manager
+        if cm is not None and trace_id is not None:
+            with cm(trace_id):
+                return self._do_update_memory_sync_impl(
+                    messages=messages,
+                    thread_id=thread_id,
+                    agent_name=agent_name,
+                    correction_detected=correction_detected,
+                    reinforcement_detected=reinforcement_detected,
+                    user_id=user_id,
+                    trace_id=trace_id,
+                )
+        return self._do_update_memory_sync_impl(
+            messages=messages,
+            thread_id=thread_id,
+            agent_name=agent_name,
+            correction_detected=correction_detected,
+            reinforcement_detected=reinforcement_detected,
+            user_id=user_id,
+            trace_id=trace_id,
+        )
+
+    def _do_update_memory_sync_impl(
+        self,
+        messages: list[Any],
+        thread_id: str | None = None,
+        agent_name: str | None = None,
+        correction_detected: bool = False,
+        reinforcement_detected: bool = False,
+        user_id: str | None = None,
+        trace_id: str | None = None,
     ) -> bool:
         """Pure-sync memory update using ``model.invoke()``.
 
@@ -853,53 +801,49 @@ class MemoryUpdater:
         lead agent) is never touched — no cross-loop connection reuse is
         possible.
         """
-        # Callers may run us in a ``threading.Timer`` thread or an
-        # ``_SYNC_MEMORY_UPDATER_EXECUTOR`` worker — neither propagates the
-        # request-trace ContextVar. Rebind it here from the explicitly plumbed
-        # ``deerflow_trace_id`` so ``TraceContextFilter`` attaches the correct
-        # trace id to every log record emitted below (including model-invoke
-        # tracing-callback logs). ``nullcontext`` when unknown avoids
-        # fabricating a bogus id via ``request_trace_context(None)``.
-        trace_ctx = request_trace_context(deerflow_trace_id) if deerflow_trace_id else nullcontext()
-        with trace_ctx:
-            try:
-                prepared = self._prepare_update_prompt(
-                    messages=messages,
-                    agent_name=agent_name,
-                    correction_detected=correction_detected,
-                    reinforcement_detected=reinforcement_detected,
-                    user_id=user_id,
-                )
-                if prepared is None:
-                    return False
+        try:
+            prepared = self._prepare_update_prompt(
+                messages=messages,
+                agent_name=agent_name,
+                correction_detected=correction_detected,
+                reinforcement_detected=reinforcement_detected,
+                user_id=user_id,
+            )
+            if prepared is None:
+                return False
 
-                current_memory, prompt = prepared
-                model_name = self._resolve_model_name()
-                model = self._get_model()
-                invoke_config: dict[str, Any] = {"run_name": "memory_agent"}
-                inject_langfuse_metadata(
+            current_memory, prompt = prepared
+            model_name = self._config.model.model
+            model = self._llm
+            if model is None:
+                raise RuntimeError("DeerMem memory update requested but no LLM is configured (set memory.backend_config.model in config).")
+            invoke_config: dict[str, Any] = {"run_name": "memory_agent"}
+            # Optional observability callback (e.g. langfuse), injected via
+            # backend_config.tracing_callback. None = no tracing (langfuse is not
+            # hard-required); the host may pass a wrapper around its own tracer.
+            if self._config.tracing_callback is not None:
+                self._config.tracing_callback(
                     invoke_config,
                     thread_id=thread_id,
                     user_id=user_id,
-                    assistant_id="memory_agent",
+                    trace_id=trace_id,
                     model_name=model_name,
-                    environment=os.environ.get("DEER_FLOW_ENV") or os.environ.get("ENVIRONMENT"),
-                    deerflow_trace_id=deerflow_trace_id,
                 )
-                response = model.invoke(prompt, config=invoke_config)
-                return self._finalize_update(
-                    current_memory=current_memory,
-                    response_content=response.content,
-                    thread_id=thread_id,
-                    agent_name=agent_name,
-                    user_id=user_id,
-                )
-            except json.JSONDecodeError as e:
-                logger.warning("Failed to parse LLM response for memory update: %s", e)
-                return False
-            except Exception as e:
-                logger.exception("Memory update failed: %s", e)
-                return False
+            logger.info("Invoking memory-update LLM (thread=%s trace_id=%s)", thread_id, trace_id)
+            response = model.invoke(prompt, config=invoke_config)
+            return self._finalize_update(
+                current_memory=current_memory,
+                response_content=response.content,
+                thread_id=thread_id,
+                agent_name=agent_name,
+                user_id=user_id,
+            )
+        except json.JSONDecodeError as e:
+            logger.warning("Failed to parse LLM response for memory update: %s", e)
+            return False
+        except Exception as e:
+            logger.exception("Memory update failed: %s", e)
+            return False
 
     def update_memory(
         self,
@@ -909,7 +853,7 @@ class MemoryUpdater:
         correction_detected: bool = False,
         reinforcement_detected: bool = False,
         user_id: str | None = None,
-        deerflow_trace_id: str | None = None,
+        trace_id: str | None = None,
     ) -> bool:
         """Synchronously update memory using the sync LLM path.
 
@@ -948,7 +892,7 @@ class MemoryUpdater:
                     correction_detected=correction_detected,
                     reinforcement_detected=reinforcement_detected,
                     user_id=user_id,
-                    deerflow_trace_id=deerflow_trace_id,
+                    trace_id=trace_id,
                 )
                 return future.result()
             except Exception:
@@ -962,7 +906,7 @@ class MemoryUpdater:
             correction_detected=correction_detected,
             reinforcement_detected=reinforcement_detected,
             user_id=user_id,
-            deerflow_trace_id=deerflow_trace_id,
+            trace_id=trace_id,
         )
 
     def _apply_updates(
@@ -981,7 +925,7 @@ class MemoryUpdater:
         Returns:
             Updated memory data.
         """
-        config = get_memory_config()
+        config = self._config
         now = utc_now_iso_z()
 
         # Update user sections
@@ -1088,12 +1032,13 @@ class MemoryUpdater:
                 if fact_key is not None:
                     existing_fact_keys.add(fact_key)
 
-        current_memory["facts"] = _trim_facts_to_max(current_memory["facts"])
+        # Enforce max facts limit (coerced confidence -- see _trim_facts_to_max).
+        current_memory["facts"] = _trim_facts_to_max(current_memory["facts"], config.max_facts)
 
         # ── Memory consolidation ──
         # Runs after the max_facts trim so source facts that were just evicted
         # (low confidence, pushed out by high-confidence newFacts) are absent
-        # from fact_index and rejected by the existence guardrail — preventing
+        # from fact_index and rejected by the existence guardrail - preventing
         # the only real data-loss scenario where sources are deleted but the
         # merged replacement is itself trimmed away.  Because consolidation
         # always removes ≥2 facts and adds 1, running it after trim cannot push
@@ -1116,8 +1061,9 @@ class MemoryUpdater:
                 # categories and categories below the threshold).  Any LLM slip that
                 # proposes a protected or ineligible fact ID is rejected here regardless
                 # of model behaviour, matching how staleness intersects with
-                # _select_stale_candidates before applying removals.
-                allowed_source_ids = {f["id"] for group in _select_consolidation_candidates(current_memory, config).values() for f in group}
+                # _select_stale_candidates before applying removals.  Skip id-less
+                # legacy facts (they can never be targeted by the id-based source set).
+                allowed_source_ids = {f["id"] for group in _select_consolidation_candidates(current_memory, config).values() for f in group if f.get("id") is not None}
 
                 # Iterate all decisions and count successes rather than pre-slicing,
                 # so guard failures on early decisions cannot silently starve valid
@@ -1131,7 +1077,7 @@ class MemoryUpdater:
 
                     # Guardrail: all source IDs must exist in the post-trim index,
                     # must not already be consumed by an earlier merge this cycle,
-                    # and must be in allowed_source_ids — the set built from
+                    # and must be in allowed_source_ids - the set built from
                     # _select_consolidation_candidates, which excludes categories in
                     # staleness_protected_categories (default: "correction").  This
                     # mirrors the staleness apply-time check and ensures explicit user
@@ -1161,7 +1107,7 @@ class MemoryUpdater:
                     else:
                         fact_confidence = max_source_conf
 
-                    # Skip merges whose result would fall below the storage threshold —
+                    # Skip merges whose result would fall below the storage threshold -
                     # same gate applied to newFacts, so consolidation never admits
                     # facts that the normal ingestion path would reject.
                     if fact_confidence < config.fact_confidence_threshold:
@@ -1208,29 +1154,3 @@ class MemoryUpdater:
                     current_memory["facts"].extend(new_consolidated)
 
         return current_memory
-
-
-def update_memory_from_conversation(
-    messages: list[Any],
-    thread_id: str | None = None,
-    agent_name: str | None = None,
-    correction_detected: bool = False,
-    reinforcement_detected: bool = False,
-    user_id: str | None = None,
-    deerflow_trace_id: str | None = None,
-) -> bool:
-    """Convenience function to update memory from a conversation.
-
-    Args:
-        messages: List of conversation messages.
-        thread_id: Optional thread ID.
-        agent_name: If provided, updates per-agent memory. If None, updates global memory.
-        correction_detected: Whether recent turns include an explicit correction signal.
-        reinforcement_detected: Whether recent turns include a positive reinforcement signal.
-        user_id: If provided, scopes memory to a specific user.
-
-    Returns:
-        True if successful, False otherwise.
-    """
-    updater = MemoryUpdater()
-    return updater.update_memory(messages, thread_id, agent_name, correction_detected, reinforcement_detected, user_id=user_id, deerflow_trace_id=deerflow_trace_id)

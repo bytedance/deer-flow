@@ -284,28 +284,15 @@ def test_get_memory_context_uses_explicit_app_config_without_global_config(monke
     def fail_get_memory_config():
         raise AssertionError("ambient get_memory_config() must not be used when app_config is explicit")
 
-    def fake_get_memory_data(agent_name=None, *, user_id=None):
+    def fake_get_context(user_id, *, agent_name=None, thread_id=None):
         captured["agent_name"] = agent_name
         captured["user_id"] = user_id
-        return {"facts": []}
-
-    def fake_format_memory_for_injection(
-        memory_data,
-        *,
-        max_tokens,
-        use_tiktoken=True,
-        guaranteed_categories=None,
-        guaranteed_token_budget=500,
-    ):
-        captured["memory_data"] = memory_data
-        captured["max_tokens"] = max_tokens
-        captured["use_tiktoken"] = use_tiktoken
         return "remember this"
 
+    manager = SimpleNamespace(get_context=fake_get_context)
     monkeypatch.setattr("deerflow.config.memory_config.get_memory_config", fail_get_memory_config)
     monkeypatch.setattr("deerflow.runtime.user_context.get_effective_user_id", lambda: "user-1")
-    monkeypatch.setattr("deerflow.agents.memory.get_memory_data", fake_get_memory_data)
-    monkeypatch.setattr("deerflow.agents.memory.format_memory_for_injection", fake_format_memory_for_injection)
+    monkeypatch.setattr("deerflow.agents.memory.get_memory_manager", lambda: manager)
 
     context = prompt_module._get_memory_context("agent-a", app_config=explicit_config)
 
@@ -314,9 +301,6 @@ def test_get_memory_context_uses_explicit_app_config_without_global_config(monke
     assert captured == {
         "agent_name": "agent-a",
         "user_id": "user-1",
-        "memory_data": {"facts": []},
-        "max_tokens": 1234,
-        "use_tiktoken": True,
     }
 
 

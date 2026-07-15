@@ -7,7 +7,7 @@ import tempfile
 import zipfile
 from enum import Enum
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 import pytest
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, SystemMessage, ToolMessage  # noqa: F401
@@ -167,16 +167,20 @@ class TestConfigQueries:
 
     def test_get_memory(self, client):
         memory = {"version": "1.0", "facts": []}
-        with patch("deerflow.agents.memory.updater.get_memory_data", return_value=memory) as mock_mem:
+        mock_mgr = MagicMock()
+        mock_mgr.get_memory.return_value = memory
+        with patch("deerflow.agents.memory.get_memory_manager", return_value=mock_mgr):
             result = client.get_memory()
-            mock_mem.assert_called_once()
+            mock_mgr.get_memory.assert_called_once()
         assert result == memory
 
     def test_export_memory(self, client):
         memory = {"version": "1.0", "facts": []}
-        with patch("deerflow.agents.memory.updater.get_memory_data", return_value=memory) as mock_mem:
+        mock_mgr = MagicMock()
+        mock_mgr.get_memory.return_value = memory
+        with patch("deerflow.agents.memory.get_memory_manager", return_value=mock_mgr):
             result = client.export_memory()
-            mock_mem.assert_called_once()
+            mock_mgr.get_memory.assert_called_once()
         assert result == memory
 
 
@@ -1578,112 +1582,126 @@ class TestSkillsManagement:
 class TestMemoryManagement:
     def test_import_memory(self, client):
         imported = {"version": "1.0", "facts": []}
-        with patch("deerflow.agents.memory.updater.import_memory_data", return_value=imported) as mock_import:
+        mock_mgr = MagicMock()
+        mock_mgr.import_memory.return_value = imported
+        with patch("deerflow.agents.memory.get_memory_manager", return_value=mock_mgr):
             result = client.import_memory(imported)
-
-        assert mock_import.call_count == 1
-        call_args = mock_import.call_args
+        assert mock_mgr.import_memory.call_count == 1
+        call_args = mock_mgr.import_memory.call_args
         assert call_args.args == (imported,)
         assert "user_id" in call_args.kwargs
         assert result == imported
 
     def test_reload_memory(self, client):
         data = {"version": "1.0", "facts": []}
-        with patch("deerflow.agents.memory.updater.reload_memory_data", return_value=data):
+        mock_mgr = MagicMock()
+        mock_mgr.reload_memory.return_value = data
+        with patch("deerflow.agents.memory.get_memory_manager", return_value=mock_mgr):
             result = client.reload_memory()
         assert result == data
 
     def test_clear_memory(self, client):
         data = {"version": "1.0", "facts": []}
-        with patch("deerflow.agents.memory.updater.clear_memory_data", return_value=data):
+        mock_mgr = MagicMock()
+        mock_mgr.clear_memory.return_value = data
+        with patch("deerflow.agents.memory.get_memory_manager", return_value=mock_mgr):
             result = client.clear_memory()
         assert result == data
 
     def test_create_memory_fact(self, client):
         data = {"version": "1.0", "facts": []}
-        with patch("deerflow.agents.memory.updater.create_memory_fact", return_value=data) as create_fact:
+        mock_mgr = MagicMock()
+        mock_mgr.create_fact.return_value = (data, "fact_new")
+        with patch("deerflow.agents.memory.get_memory_manager", return_value=mock_mgr):
             result = client.create_memory_fact(
                 "User prefers concise code reviews.",
                 category="preference",
                 confidence=0.88,
             )
-            create_fact.assert_called_once_with(
+            mock_mgr.create_fact.assert_called_once_with(
                 content="User prefers concise code reviews.",
                 category="preference",
                 confidence=0.88,
+                user_id=ANY,
             )
         assert result == data
 
     def test_delete_memory_fact(self, client):
         data = {"version": "1.0", "facts": []}
-        with patch("deerflow.agents.memory.updater.delete_memory_fact", return_value=data) as delete_fact:
+        mock_mgr = MagicMock()
+        mock_mgr.delete_fact.return_value = data
+        with patch("deerflow.agents.memory.get_memory_manager", return_value=mock_mgr):
             result = client.delete_memory_fact("fact_123")
-            delete_fact.assert_called_once_with("fact_123")
+            mock_mgr.delete_fact.assert_called_once_with("fact_123", user_id=ANY)
         assert result == data
 
     def test_update_memory_fact(self, client):
         data = {"version": "1.0", "facts": []}
-        with patch("deerflow.agents.memory.updater.update_memory_fact", return_value=data) as update_fact:
+        mock_mgr = MagicMock()
+        mock_mgr.update_fact.return_value = data
+        with patch("deerflow.agents.memory.get_memory_manager", return_value=mock_mgr):
             result = client.update_memory_fact(
                 "fact_123",
                 "User prefers spaces",
                 category="workflow",
                 confidence=0.91,
             )
-            update_fact.assert_called_once_with(
+            mock_mgr.update_fact.assert_called_once_with(
                 fact_id="fact_123",
                 content="User prefers spaces",
                 category="workflow",
                 confidence=0.91,
+                user_id=ANY,
             )
         assert result == data
 
     def test_update_memory_fact_preserves_omitted_fields(self, client):
         data = {"version": "1.0", "facts": []}
-        with patch("deerflow.agents.memory.updater.update_memory_fact", return_value=data) as update_fact:
+        mock_mgr = MagicMock()
+        mock_mgr.update_fact.return_value = data
+        with patch("deerflow.agents.memory.get_memory_manager", return_value=mock_mgr):
             result = client.update_memory_fact(
                 "fact_123",
                 "User prefers spaces",
             )
-            update_fact.assert_called_once_with(
+            mock_mgr.update_fact.assert_called_once_with(
                 fact_id="fact_123",
                 content="User prefers spaces",
                 category=None,
                 confidence=None,
+                user_id=ANY,
             )
         assert result == data
 
     def test_get_memory_config(self, client):
         config = MagicMock()
         config.enabled = True
-        config.storage_path = ".deer-flow/memory.json"
-        config.debounce_seconds = 30
-        config.max_facts = 100
-        config.fact_confidence_threshold = 0.7
+        config.mode = "middleware"
         config.injection_enabled = True
-        config.max_injection_tokens = 2000
+        config.manager_class = "deermem"
+        config.backend_config = {}
 
         with patch("deerflow.config.memory_config.get_memory_config", return_value=config):
             result = client.get_memory_config()
 
         assert result["enabled"] is True
-        assert result["max_facts"] == 100
+        assert result["manager_class"] == "deermem"
 
     def test_get_memory_status(self, client):
         config = MagicMock()
         config.enabled = True
-        config.storage_path = ".deer-flow/memory.json"
-        config.debounce_seconds = 30
-        config.max_facts = 100
-        config.fact_confidence_threshold = 0.7
+        config.mode = "middleware"
         config.injection_enabled = True
-        config.max_injection_tokens = 2000
+        config.manager_class = "deermem"
+        config.backend_config = {}
 
         data = {"version": "1.0", "facts": []}
+        mock_mgr = MagicMock()
+        mock_mgr.get_memory.return_value = data
 
         with (
             patch("deerflow.config.memory_config.get_memory_config", return_value=config),
-            patch("deerflow.agents.memory.updater.get_memory_data", return_value=data),
+            patch("deerflow.agents.memory.get_memory_manager", return_value=mock_mgr),
         ):
             result = client.get_memory_status()
 
@@ -2350,24 +2368,26 @@ class TestScenarioMemoryWorkflow:
 
         config = MagicMock()
         config.enabled = True
-        config.storage_path = ".deer-flow/memory.json"
-        config.debounce_seconds = 30
-        config.max_facts = 100
-        config.fact_confidence_threshold = 0.7
+        config.mode = "middleware"
         config.injection_enabled = True
-        config.max_injection_tokens = 2000
+        config.manager_class = "deermem"
+        config.backend_config = {}
 
-        with patch("deerflow.agents.memory.updater.get_memory_data", return_value=initial_data):
+        mock_mgr = MagicMock()
+        mock_mgr.get_memory.side_effect = [initial_data, updated_data]
+        mock_mgr.reload_memory.return_value = updated_data
+
+        with patch("deerflow.agents.memory.get_memory_manager", return_value=mock_mgr):
             mem = client.get_memory()
         assert len(mem["facts"]) == 1
 
-        with patch("deerflow.agents.memory.updater.reload_memory_data", return_value=updated_data):
+        with patch("deerflow.agents.memory.get_memory_manager", return_value=mock_mgr):
             refreshed = client.reload_memory()
         assert len(refreshed["facts"]) == 2
 
         with (
             patch("deerflow.config.memory_config.get_memory_config", return_value=config),
-            patch("deerflow.agents.memory.updater.get_memory_data", return_value=updated_data),
+            patch("deerflow.agents.memory.get_memory_manager", return_value=mock_mgr),
         ):
             status = client.get_memory_status()
         assert status["config"]["enabled"] is True
@@ -2731,42 +2751,25 @@ class TestGatewayConformance:
     def test_get_memory_config(self, client):
         mem_cfg = MagicMock()
         mem_cfg.enabled = True
-        mem_cfg.storage_path = ".deer-flow/memory.json"
-        mem_cfg.debounce_seconds = 30
-        mem_cfg.max_facts = 100
-        mem_cfg.fact_confidence_threshold = 0.7
+        mem_cfg.mode = "middleware"
         mem_cfg.injection_enabled = True
-        mem_cfg.max_injection_tokens = 2000
-        mem_cfg.token_counting = "tiktoken"
-        mem_cfg.staleness_review_enabled = True
-        mem_cfg.staleness_age_days = 90
-        mem_cfg.staleness_min_candidates = 3
-        mem_cfg.staleness_max_removals_per_cycle = 10
-        mem_cfg.staleness_protected_categories = ["correction"]
+        mem_cfg.manager_class = "deermem"
+        mem_cfg.backend_config = {}
 
         with patch("deerflow.config.memory_config.get_memory_config", return_value=mem_cfg):
             result = client.get_memory_config()
 
         parsed = MemoryConfigResponse(**result)
         assert parsed.enabled is True
-        assert parsed.max_facts == 100
-        assert parsed.token_counting == "tiktoken"
+        assert parsed.manager_class == "deermem"
 
     def test_get_memory_status(self, client):
         mem_cfg = MagicMock()
         mem_cfg.enabled = True
-        mem_cfg.storage_path = ".deer-flow/memory.json"
-        mem_cfg.debounce_seconds = 30
-        mem_cfg.max_facts = 100
-        mem_cfg.fact_confidence_threshold = 0.7
+        mem_cfg.mode = "middleware"
         mem_cfg.injection_enabled = True
-        mem_cfg.max_injection_tokens = 2000
-        mem_cfg.token_counting = "tiktoken"
-        mem_cfg.staleness_review_enabled = True
-        mem_cfg.staleness_age_days = 90
-        mem_cfg.staleness_min_candidates = 3
-        mem_cfg.staleness_max_removals_per_cycle = 10
-        mem_cfg.staleness_protected_categories = ["correction"]
+        mem_cfg.manager_class = "deermem"
+        mem_cfg.backend_config = {}
 
         memory_data = {
             "version": "1.0",
@@ -2783,16 +2786,18 @@ class TestGatewayConformance:
             },
             "facts": [],
         }
+        mock_mgr = MagicMock()
+        mock_mgr.get_memory.return_value = memory_data
 
         with (
             patch("deerflow.config.memory_config.get_memory_config", return_value=mem_cfg),
-            patch("deerflow.agents.memory.updater.get_memory_data", return_value=memory_data),
+            patch("deerflow.agents.memory.get_memory_manager", return_value=mock_mgr),
         ):
             result = client.get_memory_status()
 
         parsed = MemoryStatusResponse(**result)
         assert parsed.config.enabled is True
-        assert parsed.config.token_counting == "tiktoken"
+        assert parsed.config.manager_class == "deermem"
         assert parsed.data.version == "1.0"
 
 

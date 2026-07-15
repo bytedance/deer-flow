@@ -1448,87 +1448,94 @@ summarization:
 # ============================================================================
 # Memory Configuration
 # ============================================================================
-# Global memory mechanism
-# Stores user context and conversation history for personalized responses
+# Global memory mechanism (pluggable + self-contained).
+#
+# Shared fields (host level, backend-agnostic):
+#   enabled             - Master switch for the memory mechanism (call-site gate)
+#   injection_enabled   - Whether to inject memory into the system prompt (call-site gate)
+#   manager_class       - Backend selector: registered name (deermem/noop) or dotted path
+#   backend_config      - Backend-private config dict (passthrough; each backend self-interprets)
+#
+# DeerMem-private fields live under ``backend_config`` (NOT at the memory: top level):
+#   storage_path        - Data root. Empty = deer-flow base_dir (factory injects absolute
+#                         runtime_home). Absolute path = that root. Relative = CWD-relative.
+#   model               - LLM config for memory extraction: {provider, model, api_key, base_url,
+#                         temperature}. Omit all fields = no extraction (non-LLM ops still work).
+#   debounce_seconds    - Debounce wait before processing queued updates (default: 30)
+#   max_facts           - Maximum facts to store (default: 100)
+#   fact_confidence_threshold - Minimum confidence for storing facts (default: 0.7)
+#   max_injection_tokens     - Token budget for memory injection (default: 2000)
+#   token_counting          - tiktoken (accurate, network on first use) or char (network-free)
+#   guaranteed_categories   - Fact categories always injected (default: ["correction"])
+#   guaranteed_token_budget - Token ceiling for guaranteed categories (default: 500)
+#   staleness_review_enabled       - Enable staleness pruning (default: true)
+#   staleness_age_days             - Age threshold for staleness candidates (default: 90)
+#   staleness_min_candidates       - Minimum stale facts to trigger review (default: 3)
+#   staleness_max_removals_per_cycle - Safety cap on removals per cycle (default: 10)
+#   staleness_protected_categories - Categories exempt from staleness review (default: ["correction"])
 memory:
   enabled: true
+  injection_enabled: true # Whether to inject memory into system prompt
+  # Memory backend selector. Either a registered backend name (matching a
+  # backends/<name>/ folder that exposes MANAGER_CLASS, e.g. deermem / noop)
+  # or a dotted import path to a MemoryManager subclass.
+  manager_class: deermem
   # Memory operation mode:
   #   middleware (default) - passive background extraction after each turn.
   #   tool - experimental opt-in; the model calls memory_search/memory_add/
   #     memory_update/memory_delete directly. This gives the model agency over
   #     memory writes, but effectiveness depends on model tool-use behavior.
-  # Only one mode runs at a time.
+  # Only one mode runs at a time. (tool mode calls the MemoryManager ABC --
+  # memory_search/add/update/delete go through the active backend; backends
+  # without fact-CRUD return a JSON error instead of crashing.)
   mode: middleware
-  storage_path: memory.json # Absolute path opts out of per-user isolation; a relative path resolves under the data base_dir, not the backend directory
-  debounce_seconds: 30 # Wait time before processing queued updates
-  model_name: null # Use default model
-  max_facts: 100 # Maximum number of facts to store
-  fact_confidence_threshold: 0.7 # Minimum confidence for storing facts
-  injection_enabled: true # Whether to inject memory into system prompt
-  max_injection_tokens: 2000 # Maximum tokens for memory injection
-  # Token counting strategy for memory-injection budgeting:
-  #   tiktoken (default) - accurate, but the encoding's BPE data may be
-  #     downloaded from a public network endpoint on first use. In
-  #     network-restricted environments this download can block for a long
-  #     time (see issues #3402 / #3429). Pre-cache the encoding or set this
-  #     to "char" to avoid it.
-  #   char - network-free CJK-aware character-based estimate; never touches
-  #     tiktoken. Slightly less precise budgeting, zero network I/O.
-  token_counting: tiktoken
-  # Guaranteed injection: fact categories that bypass the regular token budget
-  # and draw from a reserved allowance, so high-signal corrections (e.g.
-  # "don't use `pip`, use `uv`") survive even when the budget is tight.
-  #   guaranteed_categories - list of fact categories to guarantee. Pass [] to
-  #     disable; defaults to ["correction"].
-  #   guaranteed_token_budget - token ceiling for guaranteed facts. In the
-  #     common case the total injection stays within ``max_injection_tokens``
-  #     (guaranteed lines displace regular ones); the allowance becomes
-  #     additive only when guaranteed lines alone would overflow
-  #     ``max_injection_tokens``, in which case the safety-truncation ceiling
-  #     is raised accordingly.
-  guaranteed_categories:
-    - correction
-  guaranteed_token_budget: 500
-  # Staleness review: periodically prune aged facts that may no longer reflect
-  # the user's current situation.  When triggered, the LLM reviews facts older
-  # than ``staleness_age_days`` during the normal memory-update call (same LLM
-  # invocation — no extra API call) and decides KEEP or REMOVE for each.
-  #   staleness_review_enabled - master switch (default: true)
-  #   staleness_age_days       - facts older than this are candidates (default: 90)
-  #   staleness_min_candidates - minimum stale facts required to trigger a review
-  #                              cycle; avoids wasteful LLM calls when there are
-  #                              very few candidates (default: 3)
-  #   staleness_max_removals_per_cycle - safety cap on removals per cycle; when
-  #                                      exceeded, the lowest-confidence entries
-  #                                      are kept (default: 10)
-  #   staleness_protected_categories - fact categories exempt from review
-  #                                    (default: ["correction"])
-  staleness_review_enabled: true
-  staleness_age_days: 90
-  staleness_min_candidates: 3
-  staleness_max_removals_per_cycle: 10
-  staleness_protected_categories:
-    - correction
-
-  # Memory consolidation: when a single category accumulates many fragmented
-  # facts, the LLM reviews them during the normal memory-update call (same
-  # invocation — no extra API call) and decides whether groups of related facts
-  # can be synthesized into a single richer fact.
-  # consolidation_enabled defaults to false because consolidation is lossy:
-  # source fact content is permanently replaced by the LLM-synthesized fact
-  # (only the source IDs are kept in consolidatedFrom). Enable explicitly once
-  # you are comfortable with that trade-off.
-  #   consolidation_enabled          - master switch (default: false)
-  #   consolidation_min_facts        - minimum facts in a category to trigger
-  #                                    consolidation review (default: 8)
-  #   consolidation_max_groups_per_cycle - safety cap on merges per cycle
-  #                                        (default: 3)
-  #   consolidation_max_sources      - max source facts per merge group;
-  #                                    prevents over-merging (default: 8)
-  consolidation_enabled: false
-  consolidation_min_facts: 8
-  consolidation_max_groups_per_cycle: 3
-  consolidation_max_sources: 8
+  # Backend-private config (a dict), passed verbatim to the backend __init__.
+  # Each backend self-interprets it (DeerMem parses it into DeerMemConfig).
+  backend_config:
+    storage_path: ""            # empty = deer-flow base_dir (factory injects absolute runtime_home); a non-empty path is the root DIRECTORY (per-user memory under {storage_path}/users/{uid}/memory.json)
+    debounce_seconds: 30 # Wait time before processing queued updates
+    model:                      # LLM for memory extraction; omit all fields = no extraction (non-LLM ops still work; an update raises)
+      # provider: openai
+      # model: gpt-4o-mini
+      # api_key: $OPENAI_API_KEY
+      # base_url:               # optional, for OpenAI-compatible gateways (e.g. DeepSeek)
+      # temperature:            # optional
+    max_facts: 100 # Maximum number of facts to store
+    fact_confidence_threshold: 0.7 # Minimum confidence for storing facts
+    max_injection_tokens: 2000 # Maximum tokens for memory injection
+    # Token counting strategy for memory-injection budgeting:
+    #   tiktoken (default) - accurate, but the encoding BPE data may be
+    #     downloaded from a public network endpoint on first use. In
+    #     network-restricted environments this download can block for a long
+    #     time (see issues #3402 / #3429). Pre-cache the encoding or set this
+    #     to "char" to avoid it.
+    #   char - network-free CJK-aware character-based estimate; never touches
+    #     tiktoken. Slightly less precise budgeting, zero network I/O.
+    token_counting: tiktoken
+    # Guaranteed injection: fact categories that bypass the regular token budget
+    # and draw from a reserved allowance, so high-signal corrections (e.g.
+    # "don use pip, use uv") survive even when the budget is tight.
+    guaranteed_categories:
+      - correction
+    guaranteed_token_budget: 500
+    # Staleness review: periodically prune aged facts that may no longer reflect
+    # the user current situation. When triggered, the LLM reviews facts older
+    # than staleness_age_days during the normal memory-update call (same LLM
+    # invocation - no extra API call) and decides KEEP or REMOVE for each.
+    staleness_review_enabled: true
+    staleness_age_days: 90
+    staleness_min_candidates: 3
+    staleness_max_removals_per_cycle: 10
+    staleness_protected_categories:
+      - correction
+    # Memory consolidation (opt-in, lossy: source facts are replaced by a
+    # synthesized one; only consolidatedFrom IDs are kept). Runs in the same
+    # memory-update LLM call as extraction/staleness - no extra API cost.
+    # consolidation_enabled defaults to false because consolidation is lossy.
+    consolidation_enabled: false       # set true to opt into fact consolidation
+    consolidation_min_facts: 8         # min facts in one category to trigger review (3-30)
+    consolidation_max_groups_per_cycle: 3  # max groups merged per update cycle (1-10)
+    consolidation_max_sources: 8       # max source facts per consolidation group (2-20)
 
 # ============================================================================
 # Custom Agent Management API
