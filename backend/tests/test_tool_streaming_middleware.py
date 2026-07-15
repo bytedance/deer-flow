@@ -426,8 +426,6 @@ class TestConfigToggles:
         """Default config has enabled=False."""
         default = ToolStreamingConfig()
         assert default.enabled is False
-        assert default.min_chunk_size == 64
-        assert default.max_buffer_seconds == 0.1
 
     @pytest.mark.asyncio
     async def test_from_config_enabled_false(self, monkeypatch):
@@ -460,26 +458,3 @@ class TestConfigToggles:
 
         await mw.awrap_tool_call(request, handler)
         assert writer.call_count == 2  # start + final
-
-
-# ---------------------------------------------------------------------------
-# ToolStreamingConfig field validation
-# ---------------------------------------------------------------------------
-
-
-class TestStreamingConfigValidation:
-    def test_min_chunk_size_default(self):
-        config = ToolStreamingConfig()
-        assert config.min_chunk_size == 64
-
-    def test_max_buffer_seconds_default(self):
-        config = ToolStreamingConfig()
-        assert config.max_buffer_seconds == 0.1
-
-    def test_min_chunk_size_custom(self):
-        config = ToolStreamingConfig(min_chunk_size=128)
-        assert config.min_chunk_size == 128
-
-    def test_max_buffer_seconds_custom(self):
-        config = ToolStreamingConfig(max_buffer_seconds=0.5)
-        assert config.max_buffer_seconds == 0.5

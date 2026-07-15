@@ -17,13 +17,3 @@ class ToolStreamingConfig(BaseModel):
         default=False,
         description="Enable real-time tool output streaming via custom stream events.",
     )
-    min_chunk_size: int = Field(
-        default=64,
-        ge=1,
-        description="Minimum chunk size in characters. Smaller buffered output is coalesced to prevent UI jank from tiny, frequent updates.",
-    )
-    max_buffer_seconds: float = Field(
-        default=0.1,
-        ge=0.0,
-        description="Maximum time in seconds to buffer streaming output before emitting a chunk.",
-    )
