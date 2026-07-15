@@ -403,11 +403,22 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
 
     @staticmethod
     def _ensure_skills_projection(user_id: str):
+        """Best-effort: a projection failure must not fail sandbox acquire.
+
+        Called directly (for its side effect) from ``_acquire_internal`` /
+        ``_acquire_internal_async`` outside any try/except, as well as from
+        within ``_get_skills_mounts``'s own guarded block — swallowing here
+        keeps both call sites safe without duplicating the guard.
+        """
         from deerflow.skills.projection import ensure_skill_projections
         from deerflow.skills.storage import get_or_new_user_skill_storage
 
-        storage = get_or_new_user_skill_storage(user_id, app_config=get_app_config())
-        return ensure_skill_projections(storage)
+        try:
+            storage = get_or_new_user_skill_storage(user_id, app_config=get_app_config())
+            return ensure_skill_projections(storage)
+        except Exception as exc:
+            logger.warning("Could not ensure skills projection for user %s: %s", user_id, exc, exc_info=True)
+            return None
 
     # ── Idle timeout management ──────────────────────────────────────────
 

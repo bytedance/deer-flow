@@ -217,32 +217,49 @@ class LocalSandboxProvider(SandboxProvider):
 
     @staticmethod
     def _ensure_skills_projection(user_id: str | None = None):
+        """Best-effort: a projection failure must not fail sandbox acquire.
+
+        Mirrors the surrounding skill-mount setup, which has always logged
+        and continued rather than failing the whole acquire (e.g. missing
+        config.yaml in a test double). Callers see ``None`` and skip the
+        skill mounts for this acquire; the projection self-heals on a later
+        acquire once the underlying condition clears.
+        """
         from deerflow.config import get_app_config
         from deerflow.skills.projection import ensure_skill_projections
         from deerflow.skills.storage import get_or_new_skill_storage, get_or_new_user_skill_storage
 
-        config = get_app_config()
-        if user_id is None:
-            storage = get_or_new_skill_storage(app_config=config)
-        else:
-            storage = get_or_new_user_skill_storage(user_id, app_config=config)
-        return ensure_skill_projections(storage)
+        try:
+            config = get_app_config()
+            if user_id is None:
+                storage = get_or_new_skill_storage(app_config=config)
+            else:
+                storage = get_or_new_user_skill_storage(user_id, app_config=config)
+            return ensure_skill_projections(storage)
+        except Exception as exc:
+            logger.warning("Could not ensure skills projection for user %s: %s", user_id, exc, exc_info=True)
+            return None
 
     @staticmethod
     def _append_public_skill_mapping(mappings: list[PathMapping], projection) -> None:
-        from deerflow.config import get_app_config
-
-        container_path = get_app_config().skills.container_path.rstrip("/")
-        public_container_path = f"{container_path}/public"
-        if any(mapping.container_path.rstrip("/") == public_container_path for mapping in mappings):
+        if projection is None:
             return
-        mappings.append(
-            PathMapping(
-                container_path=public_container_path,
-                local_path=str(projection.public),
-                read_only=True,
+        try:
+            from deerflow.config import get_app_config
+
+            container_path = get_app_config().skills.container_path.rstrip("/")
+            public_container_path = f"{container_path}/public"
+            if any(mapping.container_path.rstrip("/") == public_container_path for mapping in mappings):
+                return
+            mappings.append(
+                PathMapping(
+                    container_path=public_container_path,
+                    local_path=str(projection.public),
+                    read_only=True,
+                )
             )
-        )
+        except Exception as exc:
+            logger.warning("Could not append public skill mapping: %s", exc, exc_info=True)
 
     @staticmethod
     def _sandbox_id_for_thread(thread_id: str, user_id: str) -> str:
@@ -313,22 +330,23 @@ class LocalSandboxProvider(SandboxProvider):
         try:
             config = get_app_config()
             skills_container_path = config.skills.container_path
-            projection = skill_projection or LocalSandboxProvider._ensure_skills_projection(effective_user_id)
+            projection = skill_projection if skill_projection is not None else LocalSandboxProvider._ensure_skills_projection(effective_user_id)
 
-            mappings.extend(
-                [
-                    PathMapping(
-                        container_path=f"{skills_container_path}/custom",
-                        local_path=str(projection.custom),
-                        read_only=True,
-                    ),
-                    PathMapping(
-                        container_path=f"{skills_container_path}/legacy",
-                        local_path=str(projection.legacy),
-                        read_only=True,
-                    ),
-                ]
-            )
+            if projection is not None:
+                mappings.extend(
+                    [
+                        PathMapping(
+                            container_path=f"{skills_container_path}/custom",
+                            local_path=str(projection.custom),
+                            read_only=True,
+                        ),
+                        PathMapping(
+                            container_path=f"{skills_container_path}/legacy",
+                            local_path=str(projection.legacy),
+                            read_only=True,
+                        ),
+                    ]
+                )
         except Exception as exc:
             logger.warning("Could not setup per-thread skills projection mounts: %s", exc, exc_info=True)
 
