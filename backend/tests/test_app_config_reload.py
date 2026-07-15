@@ -530,3 +530,34 @@ def test_get_app_config_does_not_mutate_singletons_when_reload_validation_fails(
         assert get_store() is initial_store
     finally:
         _reset_config_singletons()
+
+
+def test_get_memory_config_follows_config_file_reload(tmp_path, monkeypatch):
+    """get_memory_config() picks up a config.yaml memory.mode edit on its own (#4204).
+
+    ``_memory_config`` used to refresh only as a side effect of ``get_app_config()``,
+    so a reader reaching memory config directly (e.g. the agent factory deciding
+    whether to bind the memory tools) saw a stale mode after a config edit even
+    though ``memory.*`` is documented as hot-reloadable.
+    """
+    config_path = tmp_path / "config.yaml"
+    extensions_path = tmp_path / "extensions_config.json"
+    _write_extensions_config(extensions_path)
+    _write_config_with_sections(config_path, {"memory": {"enabled": True, "mode": "middleware"}})
+
+    monkeypatch.setenv("DEER_FLOW_CONFIG_PATH", str(config_path))
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(extensions_path))
+    _reset_config_singletons()
+
+    try:
+        assert get_memory_config().mode == "middleware"
+
+        _write_config_with_sections(config_path, {"memory": {"enabled": True, "mode": "tool"}})
+        next_mtime = config_path.stat().st_mtime + 5
+        os.utime(config_path, (next_mtime, next_mtime))
+
+        # No explicit get_app_config() call: get_memory_config() must reflect the
+        # new mode on its own.
+        assert get_memory_config().mode == "tool"
+    finally:
+        _reset_config_singletons()
