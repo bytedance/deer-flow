@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+import json
+from unittest.mock import MagicMock
 
 import pytest
+import yaml
 from langchain.agents.middleware import AgentMiddleware
 
 from deerflow.config.app_config import AppConfig
@@ -82,29 +84,16 @@ class TestExtensionsConfigDeserialization:
 
     def test_defaults(self):
         cfg = ExtensionsConfig()
+        assert cfg.enabled is True
         assert cfg.middlewares == []
-        assert cfg.sse_wrapper is None
-        assert cfg.run_model_override is None
 
     def test_from_dict_with_middlewares(self):
         cfg = ExtensionsConfig.model_validate({"middlewares": ["pkg.mod:MW1", "pkg.mod:MW2"]})
         assert cfg.middlewares == ["pkg.mod:MW1", "pkg.mod:MW2"]
 
-    def test_from_dict_with_hooks(self):
-        cfg = ExtensionsConfig.model_validate(
-            {
-                "sse_wrapper": "pkg.stream:Wrapper",
-                "run_model_override": "pkg.router:Router",
-            }
-        )
-        assert cfg.sse_wrapper == "pkg.stream:Wrapper"
-        assert cfg.run_model_override == "pkg.router:Router"
-
     def test_from_empty_dict(self):
         cfg = ExtensionsConfig.model_validate({})
         assert cfg.middlewares == []
-        assert cfg.sse_wrapper is None
-        assert cfg.run_model_override is None
 
     def test_preserves_mcp_servers_and_skills(self):
         """New fields must not break existing mcpServers/skills parsing."""
@@ -135,6 +124,18 @@ class TestLoadExtensionMiddlewares:
         from deerflow.agents.factory import load_extension_middlewares
 
         cfg = ExtensionsConfig()
+        app_cfg = MagicMock(extensions=cfg)
+        result = load_extension_middlewares(app_cfg)
+        assert result == []
+
+    def test_disabled_returns_empty(self):
+        """When extensions.enabled is False, middlewares are not loaded."""
+        from deerflow.agents.factory import load_extension_middlewares
+
+        cfg = ExtensionsConfig(
+            enabled=False,
+            middlewares=["test_extensions_config:_ValidMiddleware"],
+        )
         app_cfg = MagicMock(extensions=cfg)
         result = load_extension_middlewares(app_cfg)
         assert result == []
@@ -259,105 +260,65 @@ class TestLoadExtensionMiddlewares:
 
 
 # ---------------------------------------------------------------------------
-# resolve_extension_hooks
-# ---------------------------------------------------------------------------
-
-
-class TestResolveExtensionHooks:
-    """Unit tests for :func:`deerflow.agents.factory.resolve_extension_hooks`."""
-
-    def test_none_extensions_returns_none_tuple(self):
-        from deerflow.agents.factory import resolve_extension_hooks
-
-        app_cfg = MagicMock(extensions=None)
-        sse, model = resolve_extension_hooks(app_cfg)
-        assert sse is None
-        assert model is None
-
-    def test_no_hooks_configured(self):
-        from deerflow.agents.factory import resolve_extension_hooks
-
-        cfg = ExtensionsConfig()
-        app_cfg = MagicMock(extensions=cfg)
-        sse, model = resolve_extension_hooks(app_cfg)
-        assert sse is None
-        assert model is None
-
-    def test_sse_wrapper_resolved(self):
-        from deerflow.agents.factory import resolve_extension_hooks
-
-        cfg = ExtensionsConfig(sse_wrapper="test_extensions_config:_ValidMiddleware")
-        app_cfg = MagicMock(extensions=cfg)
-        sse, model = resolve_extension_hooks(app_cfg)
-        assert sse is _ValidMiddleware
-        assert model is None
-
-    def test_run_model_override_resolved(self):
-        from deerflow.agents.factory import resolve_extension_hooks
-
-        cfg = ExtensionsConfig(run_model_override="test_extensions_config:_AnotherMiddleware")
-        app_cfg = MagicMock(extensions=cfg)
-        sse, model = resolve_extension_hooks(app_cfg)
-        assert sse is None
-        assert model is _AnotherMiddleware
-
-    def test_both_hooks_resolved(self):
-        from deerflow.agents.factory import resolve_extension_hooks
-
-        cfg = ExtensionsConfig(
-            sse_wrapper="test_extensions_config:_ValidMiddleware",
-            run_model_override="test_extensions_config:_AnotherMiddleware",
-        )
-        app_cfg = MagicMock(extensions=cfg)
-        sse, model = resolve_extension_hooks(app_cfg)
-        assert sse is _ValidMiddleware
-        assert model is _AnotherMiddleware
-
-    def test_sse_wrapper_not_found_returns_none(self):
-        from deerflow.agents.factory import resolve_extension_hooks
-
-        cfg = ExtensionsConfig(sse_wrapper="nonexistent.module:Klass")
-        app_cfg = MagicMock(extensions=cfg)
-        sse, model = resolve_extension_hooks(app_cfg)
-        assert sse is None  # gracefully handled
-        assert model is None
-
-
-# ---------------------------------------------------------------------------
 # AppConfig integration
 # ---------------------------------------------------------------------------
 
 
-class TestAppConfigExtensionsMerge:
-    """Verify that YAML-declared extensions merge with JSON-loaded ones."""
+class TestExtensionsJsonIntegration:
+    """Extensions (incl. middlewares) come from ``extensions_config.json`` in production.
 
-    def test_yaml_extensions_override_json(self):
-        """YAML-declared extensions fields are merged with JSON-loaded config."""
-        json_cfg = ExtensionsConfig(
-            mcp_servers={},
-            skills={},
-            middlewares=["json_module:JsonMiddleware"],
-            sse_wrapper="json_module:JsonSSE",
+    ``AppConfig.from_file`` populates the ``extensions`` section from
+    ``ExtensionsConfig.from_file()`` and ignores any ``extensions`` key in
+    ``config.yaml`` — these tests pin that documented behaviour.
+    """
+
+    def test_middlewares_parse_from_extensions_json_file(self, tmp_path):
+        extensions_path = tmp_path / "extensions_config.json"
+        extensions_path.write_text(
+            json.dumps(
+                {
+                    "mcpServers": {"srv": {"enabled": False, "type": "stdio", "command": "echo"}},
+                    "skills": {},
+                    "middlewares": ["my_package.middleware:MyCustomMiddleware"],
+                }
+            ),
+            encoding="utf-8",
         )
-        with patch.object(ExtensionsConfig, "from_file", return_value=json_cfg):
-            yaml_ext = ExtensionsConfig(
-                middlewares=["yaml_module:YamlMiddleware"],
-                run_model_override="yaml_module:YamlRouter",
-            )
-            app_cfg = AppConfig.model_validate({"extensions": yaml_ext.model_dump(exclude_unset=True), "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"}})
-            # YAML middlewares take precedence
-            assert app_cfg.extensions.middlewares == ["yaml_module:YamlMiddleware"]
-            # YAML hooks take precedence
-            assert app_cfg.extensions.sse_wrapper is None  # not set in YAML ext
-            assert app_cfg.extensions.run_model_override == "yaml_module:YamlRouter"
+
+        cfg = ExtensionsConfig.from_file(str(extensions_path))
+
+        assert cfg.enabled is True
+        assert cfg.middlewares == ["my_package.middleware:MyCustomMiddleware"]
+        assert cfg.mcp_servers["srv"].command == "echo"
+
+    def test_app_config_loads_extensions_from_json_not_yaml(self, tmp_path, monkeypatch):
+        """An ``extensions`` section in config.yaml is ignored; extensions_config.json wins."""
+        extensions_path = tmp_path / "extensions_config.json"
+        extensions_path.write_text(
+            json.dumps({"mcpServers": {}, "skills": {}, "middlewares": ["json_module:JsonMiddleware"]}),
+            encoding="utf-8",
+        )
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            yaml.safe_dump(
+                {
+                    "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"},
+                    "extensions": {"middlewares": ["yaml_module:YamlMiddleware"]},
+                }
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(extensions_path))
+
+        app_cfg = AppConfig.from_file(str(config_path))
+
+        assert app_cfg.extensions.middlewares == ["json_module:JsonMiddleware"]
 
     def test_app_config_extensions_field_defaults(self):
-        """AppConfig should have extensions as optional with default factory."""
-        # Minimal config data with only required fields
+        """AppConfig.extensions defaults to an empty ExtensionsConfig."""
         cfg_data = {"sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"}}
-        # Extensions should default to an empty ExtensionsConfig
-        with patch.object(ExtensionsConfig, "from_file", return_value=ExtensionsConfig()):
-            app_cfg = AppConfig.model_validate(cfg_data)
-            assert app_cfg.extensions.middlewares == []
-            assert app_cfg.extensions.sse_wrapper is None
-            assert app_cfg.extensions.run_model_override is None
+
+        app_cfg = AppConfig.model_validate(cfg_data)
+
+        assert app_cfg.extensions.enabled is True
+        assert app_cfg.extensions.middlewares == []

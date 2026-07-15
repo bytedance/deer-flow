@@ -132,12 +132,24 @@ class SkillStateConfig(BaseModel):
 class ExtensionsConfig(BaseModel):
     """Unified configuration for MCP servers, skills, and user-registered middleware hooks.
 
-    The ``middlewares``, ``sse_wrapper``, and ``run_model_override`` fields let
-    downstream integrators inject custom behaviour via ``config.yaml`` without
-    forking the agent-assembly code.  Each value is a dotted path that is
-    resolved at agent-build time via :func:`deerflow.reflection.resolvers.resolve_variable`.
+    The ``middlewares`` field lets downstream integrators inject custom
+    behaviour via ``extensions_config.json`` without forking the
+    agent-assembly code (``AppConfig.from_file`` populates ``extensions``
+    from that JSON file; the ``extensions`` key of ``config.yaml`` is not
+    read).  Each value is a ``module:Attribute`` colon-path that is resolved
+    at agent-build time via :func:`deerflow.reflection.resolvers.resolve_variable`.
+    Set ``enabled: false`` to disable extension middleware loading entirely.
+
+    Security: middleware entries are imported and instantiated in-process,
+    so they are operator-declared code by design (same trust model as
+    ``mcpServers`` commands and ``mcpInterceptors``).  Keep
+    ``extensions_config.json`` writable only by trusted operators.
     """
 
+    enabled: bool = Field(
+        default=True,
+        description="Whether extension middleware loading is enabled. When false, ``middlewares`` entries are ignored.",
+    )
     middlewares: list[str] = Field(
         default_factory=list,
         description="AgentMiddleware class paths loaded into the lead-agent middleware chain. Each entry uses 'module.path:ClassName'.",
@@ -153,15 +165,7 @@ class ExtensionsConfig(BaseModel):
     )
     middlewares: list[str] = Field(
         default_factory=list,
-        description="List of dotted paths to AgentMiddleware subclasses to insert into the agent middleware chain.",
-    )
-    sse_wrapper: str | None = Field(
-        default=None,
-        description="Dotted path to an SSE event-stream wrapper callable or class.",
-    )
-    run_model_override: str | None = Field(
-        default=None,
-        description="Dotted path to a callable/class for overriding model resolution at the run level.",
+        description="List of ``module:Attribute`` colon-paths to AgentMiddleware subclasses to insert into the agent middleware chain.",
     )
     model_config = ConfigDict(extra="allow", populate_by_name=True)
 

@@ -355,12 +355,29 @@ def _assemble_from_features(
 
 
 def load_extension_middlewares(app_config) -> list[AgentMiddleware]:
-    """Resolve and instantiate middleware classes declared in ``config.yaml``.
+    """Resolve and instantiate middleware classes declared in extensions config.
 
-    Reads ``app_config.extensions.middlewares`` — a list of dotted paths such as
-    ``"my_package.middleware:MyCustomMiddleware"`` — resolves each via
-    :func:`deerflow.reflection.resolvers.resolve_variable`, validates it is an
-    :class:`AgentMiddleware` subclass, instantiates it, and returns the list.
+    Reads ``app_config.extensions.middlewares`` — a list of ``module:Attribute``
+    colon-paths such as ``"my_package.middleware:MyCustomMiddleware"`` — resolves
+    each via :func:`deerflow.reflection.resolvers.resolve_variable`, validates it
+    is an :class:`AgentMiddleware` subclass, instantiates it, and returns the
+    list.
+
+    In production the ``extensions`` section of :class:`AppConfig` is populated
+    from ``extensions_config.json`` (see ``AppConfig.from_file``), so this is
+    where operators declare middlewares — the ``extensions`` key of
+    ``config.yaml`` is not read.
+
+    Respects ``app_config.extensions.enabled`` — returns an empty list when
+    ``enabled`` is ``False``.
+
+    Security: each entry is imported and instantiated inside the agent
+    process, so a middleware path is operator-declared code execution by
+    design — the same trust model as ``mcpServers`` commands and
+    ``mcpInterceptors`` in the same file. ``extensions_config.json`` must
+    only be writable by trusted operators; the Gateway config API
+    (``PUT /api/mcp/config``) is admin-gated and only rewrites
+    ``mcpServers``/``skills``, preserving ``middlewares`` verbatim.
 
     Error handling:
     * ``ModuleNotFoundError`` / ``ImportError`` with missing module → logged at
@@ -370,8 +387,9 @@ def load_extension_middlewares(app_config) -> list[AgentMiddleware]:
     * Resolved class not a subclass of ``AgentMiddleware`` → logged at ERROR
       and skipped (the entry is misconfigured).
 
-    Returns an empty list when ``app_config.extensions.middlewares`` is empty or
-    ``app_config.extensions`` is absent.
+    Returns an empty list when ``app_config.extensions.middlewares`` is empty,
+    ``app_config.extensions.enabled`` is ``False``, or ``app_config.extensions``
+    is absent.
     """
     try:
         extensions = getattr(app_config, "extensions", None)
@@ -379,6 +397,10 @@ def load_extension_middlewares(app_config) -> list[AgentMiddleware]:
         return []
 
     if extensions is None:
+        return []
+
+    enabled: bool = getattr(extensions, "enabled", True)
+    if not enabled:
         return []
 
     paths: list[str] = getattr(extensions, "middlewares", None) or []
@@ -427,45 +449,6 @@ def load_extension_middlewares(app_config) -> list[AgentMiddleware]:
         logger.info("Loaded %d extension middleware(s) from config: %s", len(instances), [type(m).__name__ for m in instances])
 
     return instances
-
-
-def resolve_extension_hooks(app_config) -> tuple[object | None, object | None]:
-    """Resolve ``sse_wrapper`` and ``run_model_override`` from config.
-
-    Returns a ``(sse_wrapper, run_model_override)`` tuple where each element is
-    the resolved object, or ``None`` if the corresponding config key is absent
-    or resolution fails.
-    """
-    try:
-        extensions = getattr(app_config, "extensions", None)
-    except Exception:
-        return None, None
-
-    if extensions is None:
-        return None, None
-
-    from deerflow.reflection.resolvers import resolve_variable
-
-    sse_wrapper = None
-    run_model_override = None
-
-    sse_path: str | None = getattr(extensions, "sse_wrapper", None)
-    if sse_path:
-        try:
-            sse_wrapper = resolve_variable(sse_path.strip())
-            logger.info("Resolved extensions.sse_wrapper: %s", sse_path)
-        except Exception:
-            logger.error("Failed to resolve extensions.sse_wrapper %r", sse_path, exc_info=True)
-
-    model_path: str | None = getattr(extensions, "run_model_override", None)
-    if model_path:
-        try:
-            run_model_override = resolve_variable(model_path.strip())
-            logger.info("Resolved extensions.run_model_override: %s", model_path)
-        except Exception:
-            logger.error("Failed to resolve extensions.run_model_override %r", model_path, exc_info=True)
-
-    return sse_wrapper, run_model_override
 
 
 # ---------------------------------------------------------------------------
