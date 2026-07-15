@@ -301,7 +301,10 @@ class InputSanitizationMiddleware(AgentMiddleware[AgentState]):
             # UploadsMiddleware before it prepends the <current_uploads> block),
             # so server-injected trusted blocks are never scanned for blocked
             # tags.  Fall back to full-content scanning when the marker is absent
-            # (legacy checkpoints, non-upload paths).
+            # — UploadsMiddleware only sets it on turns with uploads, so plain
+            # text messages won't have it.  Full-content scanning is safe for
+            # those: no server-injected <current_uploads> block exists to
+            # accidentally escape.
             preserved_kwargs = dict(msg.additional_kwargs or {})
             original_user_content = preserved_kwargs.get(ORIGINAL_USER_CONTENT_KEY)
             if isinstance(original_user_content, str) and original_user_content:
