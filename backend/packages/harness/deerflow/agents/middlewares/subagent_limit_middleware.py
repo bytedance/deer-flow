@@ -18,9 +18,9 @@ from deerflow.subagents.executor import MAX_CONCURRENT_SUBAGENTS
 
 logger = logging.getLogger(__name__)
 
-# Valid range for max_concurrent_subagents
-MIN_SUBAGENT_LIMIT = 1
-MAX_SUBAGENT_LIMIT = 4
+# Valid range for max_concurrent_subagents — kept in sync with subagents_config
+MIN_SUBAGENT_LIMIT = MIN_CONCURRENT_SUBAGENT_CALLS
+MAX_SUBAGENT_LIMIT = MAX_CONCURRENT_SUBAGENT_CALLS
 DEFAULT_MAX_TOTAL_SUBAGENTS = DEFAULT_MAX_TOTAL_SUBAGENTS_PER_RUN
 MIN_SUBAGENT_TOTAL_LIMIT = MIN_TOTAL_SUBAGENTS_PER_RUN
 MAX_SUBAGENT_TOTAL_LIMIT = MAX_TOTAL_SUBAGENTS_PER_RUN
@@ -101,7 +101,7 @@ class SubagentLimitMiddleware(AgentMiddleware[AgentState]):
 
     Args:
         max_concurrent: Maximum number of concurrent subagent calls allowed.
-            Defaults to MAX_CONCURRENT_SUBAGENTS (3). Clamped to [2, 4].
+            Defaults to MAX_CONCURRENT_SUBAGENTS (3). Clamped to [1, 4].
         max_total: Maximum number of subagent calls allowed across the run.
             Defaults to 6. Clamped to [1, 50].
     """

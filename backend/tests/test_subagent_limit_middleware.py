@@ -77,6 +77,20 @@ class TestClampSubagentLimit:
         assert _clamp_subagent_limit(4) == 4
 
 
+class TestConfigParity:
+    """The clamp used by the middleware must agree with the clamp used by the
+    prompt-generation path (prompt.py: ``clamp_subagent_concurrency``), so the
+    HARD LIMITS line the model sees matches what the middleware enforces.
+    """
+
+    def test_prompt_path_and_middleware_clamp_agree(self):
+        from deerflow.agents.middlewares.subagent_limit_middleware import _clamp_subagent_limit
+        from deerflow.config.subagents_config import clamp_subagent_concurrency
+
+        for value in (-5, 0, 1, 2, 3, 4, 5, 10, 100):
+            assert _clamp_subagent_limit(value) == clamp_subagent_concurrency(value), f"Mismatch at value={value}: middleware={_clamp_subagent_limit(value)} vs prompt={clamp_subagent_concurrency(value)}"
+
+
 class TestSubagentLimitMiddlewareInit:
     def test_default_max_concurrent(self):
         mw = SubagentLimitMiddleware()
