@@ -357,12 +357,12 @@ export function stripLeakedSystemTags(markdown: string): string {
     .map((line) => {
       const fenceMatch = FENCE_MARKER_RE.exec(line);
       if (fenceMatch) {
-        const marker = fenceMatch[1];
+        const marker = fenceMatch[1]!;
         if (fenceMarker === null) {
           // Opening a fenced code block
           fenceMarker = marker;
         } else if (
-          marker[0] === fenceMarker[0] &&
+          marker.startsWith(fenceMarker.charAt(0)) &&
           marker.length >= fenceMarker.length
         ) {
           // Closing fence: same character and at least as long as opener
