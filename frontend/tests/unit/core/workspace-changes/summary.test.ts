@@ -4,8 +4,36 @@ import {
   getChangedFileCount,
   getWorkspaceChangeBadgeLabel,
   getWorkspaceChangeLineClass,
+  sortWorkspaceChanges,
 } from "@/core/workspace-changes/summary";
-import type { WorkspaceChangesResponse } from "@/core/workspace-changes/types";
+import type {
+  WorkspaceChangesResponse,
+  WorkspaceFileChange,
+} from "@/core/workspace-changes/types";
+
+function makeFileChange(
+  overrides: Partial<WorkspaceFileChange> &
+    Pick<WorkspaceFileChange, "path" | "status">,
+): WorkspaceFileChange {
+  return {
+    root: "workspace",
+    binary: false,
+    sensitive: false,
+    size_before: null,
+    size_after: null,
+    sha256_before: null,
+    sha256_after: null,
+    diff: "",
+    diff_truncated: false,
+    diff_unavailable_reason: null,
+    additions: 0,
+    deletions: 0,
+    symlink: false,
+    symlink_target_before: null,
+    symlink_target_after: null,
+    ...overrides,
+  };
+}
 
 const changes: WorkspaceChangesResponse = {
   available: true,
@@ -65,5 +93,36 @@ describe("workspace change summary helpers", () => {
   test("treats content lines beginning with +++/--- as add/remove, not meta", () => {
     expect(getWorkspaceChangeLineClass("+++foo")).toBe("addition");
     expect(getWorkspaceChangeLineClass("---bar")).toBe("deletion");
+  });
+
+  test("ranks a symlink-created entry with modified files, not before created or after deleted", () => {
+    // Regression: statusRank previously had no "symlink_created" entry, so
+    // `statusRank[left.status] - statusRank[right.status]` was NaN for any
+    // comparison involving a symlink-created file -- violating Array#sort's
+    // consistency contract instead of producing a deterministic order.
+    const files = [
+      makeFileChange({ path: "z-deleted.txt", status: "deleted" }),
+      makeFileChange({ path: "m-symlink.txt", status: "symlink_created" }),
+      makeFileChange({ path: "a-created.txt", status: "created" }),
+    ];
+
+    const sorted = sortWorkspaceChanges(files);
+
+    expect(sorted.map((file) => file.path)).toEqual([
+      "a-created.txt",
+      "m-symlink.txt",
+      "z-deleted.txt",
+    ]);
+  });
+
+  test("breaks ties between modified and symlink-created entries by path", () => {
+    const files = [
+      makeFileChange({ path: "z.txt", status: "modified" }),
+      makeFileChange({ path: "a.txt", status: "symlink_created" }),
+    ];
+
+    const sorted = sortWorkspaceChanges(files);
+
+    expect(sorted.map((file) => file.path)).toEqual(["a.txt", "z.txt"]);
   });
 });

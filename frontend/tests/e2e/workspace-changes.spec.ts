@@ -49,6 +49,7 @@ test.describe("Workspace changes", () => {
               created: 1,
               modified: 1,
               deleted: 0,
+              symlink_created: 0,
               additions: 8,
               deletions: 2,
               truncated: false,

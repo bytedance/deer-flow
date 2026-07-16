@@ -106,6 +106,7 @@ export const zhCN: Translations = {
     largeUnavailable: "文件过大，已省略 diff。",
     sensitiveUnavailable: "敏感路径，已隐藏内容。",
     truncatedUnavailable: "变更集过大，已省略 diff。",
+    symlinkUnavailable: "符号链接变更，无法展示 diff。",
     truncatedSummary: "部分变更已被截断。",
   },
 
