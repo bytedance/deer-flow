@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from app.gateway.github.triggers import (
     DEFAULT_TRIGGERS,
     _resolved_trigger,
@@ -153,6 +155,57 @@ def test_allow_authors_bypasses_mention_requirement() -> None:
 
 def test_allow_authors_does_not_help_other_users() -> None:
     trigger = _resolve("issue_comment", GitHubTriggerConfig(require_mention=True, allow_authors=["alice"]))
+    fire, _ = event_should_fire(
+        "issue_comment",
+        _comment_payload("no handle", author="bob"),
+        trigger,
+        BOT,
+    )
+    assert fire is False
+
+
+@pytest.mark.parametrize(
+    ("allow_authors", "author"),
+    [
+        (["Alice"], "alice"),  # config upper / payload lower
+        (["alice"], "Alice"),  # reverse: config lower / payload upper
+        (["ALICE"], "alice"),  # all-caps config
+        (["Alice"], "Alice"),  # exact case still fires after folding
+    ],
+)
+def test_allow_authors_match_is_case_insensitive(allow_authors: list[str], author: str) -> None:
+    """GitHub logins are case-insensitive; allow_authors must match that.
+
+    Sibling gates already ignore case: ``_mentions`` documents
+    ``Match is case-insensitive; GitHub itself is.``, and the self-event
+    check lowercases both sides. A bare ``in`` membership test rejects an
+    owner whose YAML casing differs from the payload login, so
+    ``require_mention`` still applies and the webhook is silently dropped.
+
+    ``.lower()`` is symmetric, so both fold directions and an all-caps
+    config must fire; the exact-case pair pins that folding stays a
+    superset of the old exact match.
+    """
+    trigger = _resolve(
+        "issue_comment",
+        GitHubTriggerConfig(require_mention=True, allow_authors=allow_authors),
+    )
+    fire, reason = event_should_fire(
+        "issue_comment",
+        _comment_payload("no handle here", author=author),
+        trigger,
+        BOT,
+    )
+    assert fire is True
+    assert "allow_authors" in reason
+
+
+def test_allow_authors_case_insensitive_still_rejects_other_users() -> None:
+    """Case-folding the allowlist must not open the gate for non-members."""
+    trigger = _resolve(
+        "issue_comment",
+        GitHubTriggerConfig(require_mention=True, allow_authors=["Alice"]),
+    )
     fire, _ = event_should_fire(
         "issue_comment",
         _comment_payload("no handle", author="bob"),

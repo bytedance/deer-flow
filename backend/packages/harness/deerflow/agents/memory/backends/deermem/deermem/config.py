@@ -203,10 +203,16 @@ class DeerMemConfig(BaseModel):
         typo (e.g. ``storage_pat`` missing the ``h``) does not silently fall
         back to the default and write memory to an unintended location --
         mirrors the host layer's ``load_memory_config_from_dict`` warning.
+
+        ``None`` values are dropped so they fall back to the field default:
+        YAML renders an empty key (``model:`` with only commented children, as
+        shipped in ``config.example.yaml``) as ``None``, which non-Optional
+        fields like ``model`` would otherwise reject even though omitting the
+        key entirely is valid.
         """
         if not backend_config:
             return cls()
-        known = {k: v for k, v in backend_config.items() if k in cls.model_fields}
+        known = {k: v for k, v in backend_config.items() if k in cls.model_fields and v is not None}
         unknown = sorted(k for k in backend_config if k not in cls.model_fields)
         if unknown:
             logger.warning(

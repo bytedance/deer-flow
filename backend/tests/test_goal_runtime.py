@@ -116,9 +116,73 @@ def test_evaluate_goal_completion_uses_non_thinking_model(monkeypatch):
     assert result["satisfied"] is True
     assert result["blocker"] == "none"
     assert captured["thinking_enabled"] is False
-    assert captured["attach_tracing"] is False
+    # The goal evaluator runs from runtime/runs/worker.py after the main graph
+    # run has already finished, so there is no graph root for it to inherit
+    # tracing callbacks from (unlike make_lead_agent/DeerFlowClient.stream,
+    # which attach build_tracing_callbacks() at the graph root and correctly
+    # pass attach_tracing=False to avoid double-attaching). It must attach its
+    # own model-level tracing callbacks, same as the other standalone,
+    # non-graph callers (oneshot_llm.run_oneshot_llm, MemoryUpdater).
+    assert captured["attach_tracing"] is True
     fake_model.ainvoke.assert_awaited_once()
+    # No thread_id/user_id supplied here, and Langfuse is not enabled in the
+    # ambient test env, so inject_langfuse_metadata() is a no-op and the
+    # config is unchanged from the plain run_name — see
+    # test_evaluate_goal_completion_injects_langfuse_metadata below for the
+    # Langfuse-enabled case.
     assert fake_model.ainvoke.await_args.kwargs["config"] == {"run_name": "goal_evaluator"}
+
+
+def test_evaluate_goal_completion_injects_langfuse_metadata(monkeypatch):
+    """Regression test for the goal evaluator's Langfuse tracing gap.
+
+    Mirrors PR #2944 (main graph) and PR #3902 (memory_agent/suggest_agent):
+    a standalone, non-graph model call must inject Langfuse trace-attribute
+    metadata itself since there is no graph root to lift it from.
+    """
+    from deerflow.config.tracing_config import reset_tracing_config
+
+    for name in ("LANGFUSE_TRACING", "LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY", "LANGFUSE_BASE_URL"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("LANGFUSE_TRACING", "true")
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-lf-test")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-lf-test")
+    reset_tracing_config()
+
+    fake_model = MagicMock()
+    fake_model.ainvoke = AsyncMock(return_value=SimpleNamespace(content='{"satisfied": true, "reason": "Done", "evidence_summary": "Done"}'))
+    state = goal.build_goal_state("Finish")
+
+    try:
+        result = asyncio.run(
+            goal.evaluate_goal_completion(
+                state,
+                [
+                    HumanMessage(content="Please finish this."),
+                    AIMessage(content="Done."),
+                ],
+                model=fake_model,
+                model_name="gpt-4o",
+                app_config=object(),
+                thread_id="thread-xyz",
+                user_id="alice",
+                deerflow_trace_id="gateway-trace-1",
+            )
+        )
+    finally:
+        reset_tracing_config()
+
+    assert result["satisfied"] is True
+    fake_model.ainvoke.assert_awaited_once()
+    config = fake_model.ainvoke.await_args.kwargs["config"]
+    assert config["run_name"] == "goal_evaluator"
+    metadata = config.get("metadata") or {}
+    assert metadata.get("langfuse_session_id") == "thread-xyz", "goal evaluator trace must group under the thread's session"
+    assert metadata.get("langfuse_user_id") == "alice"
+    assert metadata.get("langfuse_trace_name") == "goal_evaluator"
+    assert metadata.get("deerflow_trace_id") == "gateway-trace-1"
+    tags = metadata.get("langfuse_tags") or []
+    assert "model:gpt-4o" in tags
 
 
 def test_evaluate_goal_completion_uses_injected_model(monkeypatch):

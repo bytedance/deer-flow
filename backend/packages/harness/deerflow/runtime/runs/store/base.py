@@ -29,6 +29,7 @@ class RunStore(abc.ABC):
         metadata: dict[str, Any] | None = None,
         kwargs: dict[str, Any] | None = None,
         error: str | None = None,
+        stop_reason: str | None = None,
         created_at: str | None = None,
         owner_worker_id: str | None = None,
         lease_expires_at: str | None = None,
@@ -84,6 +85,7 @@ class RunStore(abc.ABC):
         status: str,
         *,
         error: str | None = None,
+        stop_reason: str | None = None,
     ) -> bool | None:
         """Update a run status.
 
