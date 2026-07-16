@@ -189,3 +189,47 @@ def test_override_cannot_force_memory_on_when_global_off() -> None:
     effective = apply_agent_memory_override(app_config, agent_config)
     assert effective is app_config
     assert effective.memory.enabled is False
+
+
+# --------------------------------------------------------------------------- #
+# build_middlewares — the opt-out folds through to the real chain
+# --------------------------------------------------------------------------- #
+def test_build_middlewares_folds_memory_opt_out_into_the_chain(monkeypatch) -> None:
+    """End-to-end: the opt-out reaches the actual middleware chain.
+
+    ``apply_agent_memory_override`` resolves the effective config once; then
+    ``build_middlewares`` reads ``app_config.memory`` and hands it to
+    ``MemoryMiddleware``, which self-gates on ``enabled`` (its hooks return early
+    when disabled). So an opted-out agent's ``MemoryMiddleware`` is inert (present
+    but short-circuits) with read-side injection off, while a normal agent's is
+    active. This locks the ``risk:high`` wiring end-to-end rather than only the
+    pure helpers.
+    """
+    from deerflow.agents.lead_agent import agent as lead_agent_module
+    from deerflow.agents.middlewares.memory_middleware import MemoryMiddleware
+
+    # Stub the heavy shared/summarization/todo parts so this exercises only the
+    # lead-only assembly that decides on MemoryMiddleware.
+    monkeypatch.setattr(lead_agent_module, "build_lead_runtime_middlewares", lambda *, app_config, lazy_init=True: [])
+    monkeypatch.setattr(lead_agent_module, "_create_summarization_middleware", lambda *, app_config=None: None)
+    monkeypatch.setattr(lead_agent_module, "_create_todo_list_middleware", lambda is_plan_mode: None)
+
+    runnable = {"configurable": {"is_plan_mode": False, "subagent_enabled": False}}
+
+    def _memory_mw(mws):
+        return next((m for m in mws if isinstance(m, MemoryMiddleware)), None)
+
+    app_config = _app_config(enabled=True, injection=True)
+
+    # Normal agent: MemoryMiddleware is present and active.
+    normal = _memory_mw(lead_agent_module.build_middlewares(runnable, model_name="safe-model", app_config=app_config))
+    assert normal is not None
+    assert normal._memory_config.enabled is True
+
+    # Opted-out agent: fold the override, rebuild -> MemoryMiddleware is inert.
+    effective = apply_agent_memory_override(app_config, AgentConfig(name="worker", memory={"enabled": False}))
+    assert effective.memory.enabled is False
+    assert effective.memory.injection_enabled is False  # read side off too
+    opted = _memory_mw(lead_agent_module.build_middlewares(runnable, model_name="safe-model", app_config=effective))
+    assert opted is not None
+    assert opted._memory_config.enabled is False

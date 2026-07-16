@@ -96,6 +96,12 @@ def apply_agent_memory_override(app_config: AppConfig, agent_config: AgentConfig
     in DynamicContextMiddleware, and the summarization memory-flush hook. The
     override is narrow by design — an agent may only disable memory, never force
     it on when the operator disabled it globally.
+
+    Invariant: this "fold once" only holds while every gate reads the *passed*
+    ``app_config.memory``. A future memory gate that reaches for the global
+    ``get_memory_config()`` / ``get_app_config()`` directly would bypass the
+    opt-out and must instead take its memory config from the resolved config
+    threaded through here.
     """
     # A missing ``memory`` attribute is treated the same as ``memory=None``
     # (inherit the global config): a real AgentConfig always declares the field,
