@@ -19,6 +19,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from deerflow.community.aio_sandbox.aio_sandbox_provider import SandboxBeingDestroyedError
+from deerflow.community.aio_sandbox.ownership import compute_lease_ttl
 from deerflow.community.aio_sandbox.sandbox_info import SandboxInfo
 
 # ── SandboxBackend.list_running() default ────────────────────────────────────
@@ -413,6 +414,7 @@ def _make_provider_for_reconciliation(tmp_path=None, *, worker_id: str = "worker
     provider._thread_locks = {}
     provider._last_activity = {}
     provider._warm_pool = {}
+    provider._unowned_since = {}
     provider._shutdown_called = False
     provider._idle_checker_stop = threading.Event()
     provider._idle_checker_thread = None
@@ -641,8 +643,10 @@ def test_expired_lease_lets_peer_adopt_crashed_owner_container():
     """The crash path still works: once a dead owner's lease lapses, adopt it.
 
     The counterpart to the tests above — ownership must not become a permanent
-    leak when the owning instance dies without releasing.
+    leak when the owning instance dies without releasing. Adoption is delayed by
+    the recovery grace, but a dead owner never republishes, so it still happens.
     """
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
     shared = _make_shared_ownership_store(ttl_seconds=0.05)
     dead = _make_provider_for_reconciliation(worker_id="worker-dead", store=shared)
     worker_b = _make_provider_for_reconciliation(worker_id="worker-b", store=shared)
@@ -655,9 +659,17 @@ def test_expired_lease_lets_peer_adopt_crashed_owner_container():
     dead._publish_ownership("crashed1")
     worker_b._backend.list_running.return_value = [info]
 
-    # Owner "crashes": stops renewing. Its lease lapses.
+    # Owner "crashes": stops renewing. Its lease lapses in the store.
     time.sleep(0.1)
-    worker_b._reconcile_orphans()
+
+    now = time.time()
+    with patch.object(aio_mod.time, "time", return_value=now):
+        worker_b._reconcile_orphans()
+    assert "crashed1" not in worker_b._warm_pool, "adopted a lapsed lease without waiting out the recovery grace"
+
+    # The dead owner never republishes, so the grace runs out and B adopts.
+    with patch.object(aio_mod.time, "time", return_value=now + compute_lease_ttl(worker_b._ownership_config) + 1):
+        worker_b._reconcile_orphans()
 
     assert "crashed1" in worker_b._warm_pool
     assert shared.owner("crashed1") == "worker-b"
@@ -964,6 +976,120 @@ def test_store_losing_all_state_does_not_evict_live_sandboxes():
     sandbox.close.assert_not_called()
     worker._backend.destroy.assert_not_called()
     # And it is ours again, so peers still cannot reap it.
+    assert shared.owner("live01") == "worker-a"
+
+
+def test_peer_reconcile_after_state_loss_does_not_steal_a_live_container():
+    """The other half of the store-restart case: a peer must not adopt first.
+
+    ``_refresh_ownership`` already refuses to read an absent lease as
+    abandonment. Reconciliation must not contradict it on the other path: after
+    the store loses every key, each live owner is still serving its containers
+    and simply has not reached its next renewal tick. An instance reconciling in
+    that window sees no lease and would adopt every one of them; the real owner's
+    next renewal then reports LOST and it drops a sandbox mid-turn, which the
+    adopter later idle-destroys — #4206 through the back door.
+    """
+    shared = _make_shared_ownership_store()
+    worker_a = _make_provider_for_reconciliation(worker_id="worker-a", store=shared)
+    info = SandboxInfo(
+        sandbox_id="live01",
+        sandbox_url="http://localhost:8080",
+        container_name="deer-flow-sandbox-live01",
+        created_at=time.time(),
+    )
+    sandbox = MagicMock()
+    worker_a._sandboxes["live01"] = sandbox
+    worker_a._sandbox_infos["live01"] = info
+    worker_a._thread_sandboxes[("u1", "t1")] = "live01"
+    worker_a._publish_ownership("live01")
+
+    # The store loses everything, as a Redis restart without persistence does.
+    # Worker A is alive and still serving live01.
+    shared._leases.clear()
+
+    # A peer starts up and reconciles before A's renewal tick fires.
+    worker_b = _make_provider_for_reconciliation(worker_id="worker-b", store=shared)
+    worker_b._backend.list_running.return_value = [info]
+    worker_b._reconcile_orphans()
+
+    assert "live01" not in worker_b._warm_pool, "a peer adopted a container whose owner is still alive and serving it"
+
+    # A's renewal tick finally fires: it must still own and keep the sandbox.
+    worker_a._renew_owned_leases()
+
+    assert "live01" in worker_a._sandboxes, "a peer's reconcile evicted a live sandbox after the store lost its state"
+    assert ("u1", "t1") in worker_a._thread_sandboxes
+    sandbox.close.assert_not_called()
+    worker_b._backend.destroy.assert_not_called()
+    assert shared.owner("live01") == "worker-a"
+
+
+def test_adoption_grace_expires_so_a_truly_orphaned_container_is_still_adopted():
+    """The grace must delay adoption, not disable it.
+
+    A container that stays unowned across a full lease TTL has no live owner —
+    a surviving owner republishes within one renewal interval, which is shorter
+    than the TTL by construction. Reconciliation must adopt it then, or a crashed
+    instance's containers would leak forever.
+    """
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    shared = _make_shared_ownership_store()
+    worker_b = _make_provider_for_reconciliation(worker_id="worker-b", store=shared)
+    ttl = compute_lease_ttl(worker_b._ownership_config)
+    info = SandboxInfo(
+        sandbox_id="crashed1",
+        sandbox_url="http://localhost:8080",
+        container_name="deer-flow-sandbox-crashed1",
+        created_at=time.time() - 50,
+    )
+    worker_b._backend.list_running.return_value = [info]
+
+    now = time.time()
+    with patch.object(aio_mod.time, "time", return_value=now):
+        worker_b._reconcile_orphans()
+    assert "crashed1" not in worker_b._warm_pool, "adopted a keyless container without waiting out the recovery grace"
+
+    # Nobody republished the lease across a full TTL: the owner is really gone.
+    with patch.object(aio_mod.time, "time", return_value=now + ttl + 1):
+        worker_b._reconcile_orphans()
+
+    assert "crashed1" in worker_b._warm_pool, "the grace never expired, so a crashed owner's container would leak forever"
+    assert shared.owner("crashed1") == "worker-b"
+
+
+def test_adoption_grace_restarts_when_a_live_owner_republishes():
+    """A republished lease must reset the grace, not just pause it.
+
+    Otherwise an owner that republishes late still loses its container: the
+    adopter's grace, started before the republish, would expire regardless and
+    hand it a container that now has a live owner.
+    """
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    shared = _make_shared_ownership_store()
+    worker_a = _make_provider_for_reconciliation(worker_id="worker-a", store=shared)
+    worker_b = _make_provider_for_reconciliation(worker_id="worker-b", store=shared)
+    ttl = compute_lease_ttl(worker_b._ownership_config)
+    info = SandboxInfo(
+        sandbox_id="live01",
+        sandbox_url="http://localhost:8080",
+        container_name="deer-flow-sandbox-live01",
+        created_at=time.time(),
+    )
+    worker_b._backend.list_running.return_value = [info]
+
+    now = time.time()
+    # B starts its grace on a container that currently looks unowned.
+    with patch.object(aio_mod.time, "time", return_value=now):
+        worker_b._reconcile_orphans()
+
+    # A republishes mid-grace (its renewal tick re-establishing a lapsed lease).
+    worker_a._publish_ownership("live01")
+
+    with patch.object(aio_mod.time, "time", return_value=now + ttl + 1):
+        worker_b._reconcile_orphans()
+
+    assert "live01" not in worker_b._warm_pool, "a stale grace expired over a lease a live owner had already republished"
     assert shared.owner("live01") == "worker-a"
 
 

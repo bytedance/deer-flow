@@ -49,6 +49,7 @@ from .ownership import (
     OwnershipBackendError,
     RenewOutcome,
     SandboxOwnershipStore,
+    compute_lease_ttl,
     generate_owner_id,
     make_sandbox_ownership_store,
     resolve_ownership_config,
@@ -170,6 +171,9 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         # Containers here can be reclaimed quickly (no cold-start) or destroyed
         # when replicas capacity is exhausted.
         self._warm_pool: dict[str, tuple[SandboxInfo, float]] = {}
+        # sandbox_id -> when reconciliation first saw it running with no lease.
+        # Gates adoption behind a recovery grace (see _adoptable_after_grace).
+        self._unowned_since: dict[str, float] = {}
         self._shutdown_called = False
         self._idle_checker_stop = threading.Event()
         self._idle_checker_thread: threading.Thread | None = None
@@ -364,6 +368,50 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
 
     # ── Startup reconciliation ────────────────────────────────────────────
 
+    def _adoptable_after_grace(self, sandbox_id: str, now: float) -> bool:
+        """Whether *sandbox_id* has looked unowned long enough to be a real orphan.
+
+        An absent lease normally proves the owner died and its TTL ran out. But
+        the store can lose every key while every owner is alive and serving — a
+        Redis restart without persistence, or eviction under ``maxmemory``
+        pressure. ``_refresh_ownership`` already refuses to read that as
+        abandonment (``LAPSED`` is re-established, not surrendered). Reading the
+        same signal as "orphan, adopt" here would contradict it on the other
+        path: whoever reconciles first would adopt every live container in the
+        window before its owner's next renewal tick, that owner's renewal would
+        then report ``LOST``, and it would drop a sandbox it is actively serving
+        for the adopter to idle-destroy — #4206 through the back door.
+
+        Waiting one full lease TTL rebuilds the delay the state loss erased. A
+        live owner republishes within one renewal interval, which is shorter than
+        the TTL by construction (``ttl_multiplier >= 2``), so only a container
+        whose owner is really gone stays unowned across the whole grace.
+        """
+        if not self._ownership.supports_cross_process:
+            # No peer can hold a lease this store would show us, so an unowned
+            # container cannot be a live peer's — it is from a dead lifecycle of
+            # this process. Single-instance deployments keep instant cleanup, and
+            # a grace could not help a multi-worker one on this store anyway:
+            # peers are invisible to each other's leases with or without it.
+            return True
+
+        try:
+            current_owner = self._ownership.owner(sandbox_id)
+        except OwnershipBackendError as e:
+            # Unknown, not free: fail closed, same as _claim_ownership.
+            logger.warning("Could not read sandbox ownership for %s during reconciliation (deferring adoption): %s", sandbox_id, e)
+            return False
+
+        if current_owner is not None:
+            # Owned — by a peer, or already by us. Either way not an orphan, and
+            # a live owner republishing must restart the grace rather than let a
+            # stale one expire over its lease.
+            self._unowned_since.pop(sandbox_id, None)
+            return False
+
+        first_seen = self._unowned_since.setdefault(sandbox_id, now)
+        return now - first_seen >= compute_lease_ttl(self._ownership_config)
+
     def _reconcile_orphans(self) -> None:
         """Reconcile orphaned containers left by previous process lifecycles.
 
@@ -376,6 +424,10 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         Adopted orphans get a fresh warm-pool timestamp; the idle checker then
         destroys them if nobody re-acquires within ``idle_timeout``.  That still
         cleans containers left by a crashed process once its lease expires.
+
+        An unowned container is not adopted on sight — it must stay unowned for a
+        recovery grace first, so a store that lost its state cannot be mistaken
+        for a fleet of dead owners (see ``_adoptable_after_grace``).
         """
         try:
             running = self._backend.list_running()
@@ -383,18 +435,31 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             logger.warning(f"Failed to enumerate running containers during startup reconciliation: {e}")
             return
 
+        # Forget grace timers for containers that no longer exist, so a
+        # long-lived instance does not accumulate an entry per destroyed
+        # container. Runs before the empty-list return so it also drains.
+        running_ids = {info.sandbox_id for info in running}
+        self._unowned_since = {sid: seen for sid, seen in self._unowned_since.items() if sid in running_ids}
+
         if not running:
             return
 
         current_time = time.time()
         adopted = 0
         skipped_live = 0
+        deferred = 0
 
         for info in running:
             age = current_time - info.created_at if info.created_at > 0 else float("inf")
-            # Claim first: a successful claim both proves the container is not a
+            if not self._adoptable_after_grace(info.sandbox_id, current_time):
+                deferred += 1
+                logger.debug("Deferring container %s during reconciliation: owned, or not yet past the recovery grace", info.sandbox_id)
+                continue
+
+            # Claim second: a successful claim both proves the container is not a
             # peer's and locks peers out, so no separate guard is needed around
-            # the decision and the warm-pool insert.
+            # the decision and the warm-pool insert. The grace above is a
+            # precondition, not a substitute — only the claim is atomic.
             if not self._claim_ownership(info.sandbox_id):
                 skipped_live += 1
                 logger.debug("Skipping container %s during reconciliation: owned by another instance", info.sandbox_id)
@@ -407,13 +472,15 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 if info.sandbox_id in self._sandboxes or info.sandbox_id in self._warm_pool:
                     continue
                 self._warm_pool[info.sandbox_id] = (info, current_time)
+            self._unowned_since.pop(info.sandbox_id, None)
             adopted += 1
             logger.info(f"Adopted container {info.sandbox_id} into warm pool (age: {age:.0f}s)")
 
         logger.info(
-            "Startup reconciliation complete: %s adopted into warm pool, %s skipped (live peer ownership), %s total found",
+            "Startup reconciliation complete: %s adopted into warm pool, %s skipped (live peer ownership), %s deferred (owned or within recovery grace), %s total found",
             adopted,
             skipped_live,
+            deferred,
             len(running),
         )
 
