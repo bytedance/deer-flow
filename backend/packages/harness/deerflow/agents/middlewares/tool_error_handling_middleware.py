@@ -511,16 +511,17 @@ def _build_runtime_middlewares(
 
         tail.append(ToolProgressMiddleware.from_config(tool_progress_config))
 
-    # ToolStreamingMiddleware sits between ToolProgress and ToolErrorHandling so
-    # it can emit lifecycle/error chunks around tool execution before
-    # ToolErrorHandlingMiddleware catches and wraps exceptions.  When the stream
-    # writer is unavailable (no "custom" stream_mode) it silently degrades to a
-    # pass-through with zero overhead.
-    if app_config.tool_streaming.enabled:
-        from deerflow.agents.middlewares.tool_streaming_middleware import ToolStreamingMiddleware
-
-        tail.append(ToolStreamingMiddleware.from_config(app_config.tool_streaming))
-
+    # ToolErrorHandlingMiddleware sits between ToolProgress and ToolStreaming so
+    # exceptions flow outward: the actual tool raises -> ToolStreaming (inner)
+    # sees the raw exception, emits an error chunk, and re-raises ->
+    # ToolErrorHandling (outer) catches it and converts to an error ToolMessage.
+    #
+    # All middleware sitting outer of ToolErrorHandling (ToolProgress,
+    # GuardrailMiddleware, ...) then see a well-formed error ToolMessage stamped
+    # with deerflow_tool_meta, never a raw exception.
+    #
+    # When the stream writer is unavailable (no "custom" stream_mode)
+    # ToolStreaming silently degrades to a pass-through with zero overhead.
     tail.append(ToolErrorHandlingMiddleware(app_config=app_config, skill_authorization=skill_authorization, user_id=user_id))
     # Artifact capture is a `before_model` hook that reads state messages, so
     # its position in the tool-execution wrap chain is functionally irrelevant:
@@ -534,6 +535,11 @@ def _build_runtime_middlewares(
         from deerflow.agents.middlewares.artifact_capture_middleware import ArtifactCaptureMiddleware
 
         tail.append(ArtifactCaptureMiddleware(config=app_config.tool_artifacts))
+
+    if app_config.tool_streaming.enabled:
+        from deerflow.agents.middlewares.tool_streaming_middleware import ToolStreamingMiddleware
+
+        tail.append(ToolStreamingMiddleware.from_config(app_config.tool_streaming))
 
     middlewares = [*outer_wrappers, *thread_hooks, *tail]
 

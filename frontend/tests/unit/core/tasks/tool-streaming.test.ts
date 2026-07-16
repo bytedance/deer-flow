@@ -117,7 +117,11 @@ describe("ToolStreamingProvider scoping logic (P1-2 regression)", () => {
     expect(Object.keys(state.outputs)).toHaveLength(1);
   });
 
-  it("stale final chunk does not overwrite a newer partial chunk", () => {
+  it("late partial chunk does not overwrite a completed final chunk", () => {
+    // Regression: the provider must drop a late-arriving partial chunk when a
+    // final output has already been written for the same tool_call_id.
+    // (The old guard was inverted — it rejected the *final* instead of the
+    // *partial*, so the complete output was never visible.)
     type State = {
       outputs: Record<string, { text: string; isPartial: boolean }>;
     };
@@ -134,7 +138,8 @@ describe("ToolStreamingProvider scoping logic (P1-2 regression)", () => {
         return { outputs: next };
       }
       const existing = prev.outputs[toolCallId];
-      if (existing && !output.isPartial && existing.isPartial) {
+      // Reject a late partial when final already exists.
+      if (existing && output.isPartial && !existing.isPartial) {
         return prev;
       }
       return { outputs: { ...prev.outputs, [toolCallId]: output } };
@@ -142,12 +147,21 @@ describe("ToolStreamingProvider scoping logic (P1-2 regression)", () => {
 
     let state: State = { outputs: {} };
 
-    // New partial chunk arrives
-    state = update(state, "tc-1", { text: "new partial", isPartial: true });
-    expect(state.outputs["tc-1"]?.text).toBe("new partial");
+    // Normal flow: start chunk arrives first.
+    state = update(state, "tc-1", { text: "", isPartial: true });
+    expect(state.outputs["tc-1"]?.text).toBe("");
 
-    // Stale final chunk arrives — must be rejected
-    state = update(state, "tc-1", { text: "old final", isPartial: false });
-    expect(state.outputs["tc-1"]?.text).toBe("new partial");
+    // Final chunk arrives — should be stored.
+    state = update(state, "tc-1", {
+      text: "complete output",
+      isPartial: false,
+    });
+    expect(state.outputs["tc-1"]?.text).toBe("complete output");
+    expect(state.outputs["tc-1"]?.isPartial).toBe(false);
+
+    // Late partial chunk arrives (network reorder) — must be dropped.
+    state = update(state, "tc-1", { text: "stale partial", isPartial: true });
+    expect(state.outputs["tc-1"]?.text).toBe("complete output");
+    expect(state.outputs["tc-1"]?.isPartial).toBe(false);
   });
 });
