@@ -14,6 +14,7 @@ this test fails.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import threading
 from types import SimpleNamespace
 from unittest import mock
@@ -27,6 +28,7 @@ from deerflow.agents.middlewares.dynamic_context_middleware import (
     _DYNAMIC_CONTEXT_REMINDER_KEY,
     DynamicContextMiddleware,
 )
+from deerflow.runtime.context_keys import CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY
 
 pytestmark = pytest.mark.asyncio
 
@@ -146,3 +148,64 @@ async def test_abefore_agent_returns_none_on_timeout() -> None:
     release.set()
     assert await asyncio.to_thread(finished.wait, 1)
     journal.record_memory_context.assert_not_called()
+
+
+async def test_abefore_agent_records_checkpointed_memory_on_timeout() -> None:
+    """A timeout does not hide frozen memory that remains effective for the run."""
+    mw = DynamicContextMiddleware()
+    started = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+    journal = mock.MagicMock()
+    memory_content = "<memory>checkpoint context</memory>"
+
+    def blocking_inject(state):
+        started.set()
+        release.wait(timeout=2)
+        try:
+            return {
+                "messages": [
+                    HumanMessage(
+                        content="<memory>late replacement</memory>",
+                        id="msg-2__memory",
+                        additional_kwargs={_DYNAMIC_CONTEXT_REMINDER_KEY: True},
+                    )
+                ]
+            }
+        finally:
+            finished.set()
+
+    state = {
+        "messages": [
+            HumanMessage(
+                content=memory_content,
+                id="msg-1__memory",
+                additional_kwargs={_DYNAMIC_CONTEXT_REMINDER_KEY: True},
+            )
+        ]
+    }
+    runtime = SimpleNamespace(
+        context={
+            "__run_journal": journal,
+            CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY: frozenset({"msg-1__memory"}),
+        }
+    )
+
+    with (
+        mock.patch.object(mw, "_inject", blocking_inject),
+        mock.patch(
+            "deerflow.agents.middlewares.dynamic_context_middleware._INJECT_TIMEOUT_SECONDS",
+            0.01,
+        ),
+    ):
+        result = await mw.abefore_agent(state, runtime)
+
+    recorded_call = journal.record_memory_context.call_args
+    release.set()
+    assert await asyncio.to_thread(finished.wait, 1)
+    assert started.is_set()
+    assert result is None
+    assert recorded_call == mock.call(
+        content_sha256=hashlib.sha256(memory_content.encode("utf-8")).hexdigest(),
+    )
+    journal.record_memory_context.assert_called_once()

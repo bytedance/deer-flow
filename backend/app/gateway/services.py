@@ -29,6 +29,7 @@ from app.gateway.internal_auth import (
     get_trusted_internal_owner_user_id,
 )
 from app.gateway.utils import sanitize_log_param
+from deerflow.agents.middlewares.dynamic_context_middleware import _DYNAMIC_CONTEXT_REMINDER_KEY, _REMINDER_DATE_KEY
 from deerflow.config.app_config import get_app_config
 from deerflow.runtime import (
     END_SENTINEL,
@@ -59,8 +60,8 @@ _TERMINAL_RUN_STATUSES = {
 
 _SERVER_OWNED_DYNAMIC_CONTEXT_KEYS = frozenset(
     {
-        "dynamic_context_reminder",
-        "reminder_date",
+        _DYNAMIC_CONTEXT_REMINDER_KEY,
+        _REMINDER_DATE_KEY,
     }
 )
 

@@ -297,8 +297,8 @@ class DynamicContextMiddleware(AgentMiddleware):
         # Bounded timeout: if startup warm-up failed silently (e.g. network
         # blip during deploy), the first request's cold tiktoken download can
         # block for tens of minutes (OS TCP timeout).  Time-box injection so
-        # the request degrades gracefully (no memory context) rather than
-        # hanging.
+        # the request degrades gracefully (no new dynamic-context update)
+        # rather than hanging. Frozen context already in state remains active.
         try:
             result = await asyncio.wait_for(
                 asyncio.to_thread(self._inject, state),
@@ -306,9 +306,10 @@ class DynamicContextMiddleware(AgentMiddleware):
             )
         except TimeoutError:
             logger.warning(
-                "DynamicContextMiddleware: injection timed out (%.1fs); skipping memory/date injection for this turn",
+                "DynamicContextMiddleware: injection timed out (%.1fs); skipping new memory/date injection for this turn",
                 _INJECT_TIMEOUT_SECONDS,
             )
+            self._record_effective_memory(state, None, runtime)
             return None
         self._record_effective_memory(state, result, runtime)
         return result
@@ -326,8 +327,10 @@ class DynamicContextMiddleware(AgentMiddleware):
             update_messages = update.get("messages")
             if isinstance(update_messages, list):
                 for message in update_messages:
-                    message_id = str(message.id or "") if isinstance(message, HumanMessage) else ""
-                    if isinstance(message, HumanMessage) and message_id.endswith("__memory") and is_dynamic_context_reminder(message) and isinstance(message.content, str):
+                    if not isinstance(message, HumanMessage):
+                        continue
+                    message_id = str(message.id or "")
+                    if message_id.endswith("__memory") and is_dynamic_context_reminder(message) and isinstance(message.content, str):
                         return message
 
         context = getattr(runtime, "context", None)
@@ -336,8 +339,10 @@ class DynamicContextMiddleware(AgentMiddleware):
             return None
         pre_existing_ids = {str(message_id) for message_id in raw_pre_existing_ids if message_id}
         for message in state.get("messages", []):
-            message_id = str(message.id or "") if isinstance(message, HumanMessage) else ""
-            if message_id in pre_existing_ids and isinstance(message, HumanMessage) and message_id.endswith("__memory") and is_dynamic_context_reminder(message) and isinstance(message.content, str):
+            if not isinstance(message, HumanMessage):
+                continue
+            message_id = str(message.id or "")
+            if message_id in pre_existing_ids and message_id.endswith("__memory") and is_dynamic_context_reminder(message) and isinstance(message.content, str):
                 return message
         return None
 

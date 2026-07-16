@@ -641,12 +641,12 @@ class RunJournal(BaseCallbackHandler):
         """
         if self._memory_context_recorded:
             return
-        self._memory_context_recorded = True
         self._put(
             event_type="context:memory",
             category="context",
             content={"content_sha256": content_sha256},
         )
+        self._memory_context_recorded = True
 
     async def flush(self) -> None:
         """Force flush remaining buffer. Called in worker's finally block."""
