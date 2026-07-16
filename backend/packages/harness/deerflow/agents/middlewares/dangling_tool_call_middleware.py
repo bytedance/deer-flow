@@ -37,10 +37,39 @@ logger = logging.getLogger(__name__)
 _MAX_RECOVERY_ERROR_DETAIL_LEN = 500
 _UNKNOWN_TOOL_NAME = "unknown_tool"
 _EMPTY_TOOL_NAME_ERROR = "Tool call could not be executed because its name was missing or empty."
+_SYNTHETIC_TOOL_CALL_ID_PREFIX = "deerflow_synthetic_tool_call_"
 
 
 def _valid_tool_name(name: object) -> bool:
     return isinstance(name, str) and bool(name.strip())
+
+
+def _valid_tool_call_id(tool_call_id: object) -> bool:
+    return isinstance(tool_call_id, str) and bool(tool_call_id.strip())
+
+
+def _relabel_tool_call_ids(tool_calls: list, msg_index: int, source: str) -> tuple[list, list[tuple[object, str]], bool]:
+    """Replace malformed ids in one tool-call list with stable synthetic ids.
+
+    The id is derived from the call's position so both the pairing pass and the
+    model-bound message agree on it without threading state between them.
+
+    Returns the rewritten list, the ``(original_id, synthetic_id)`` pairs whose
+    existing ToolMessages must follow their call, and whether anything changed.
+    """
+    relabeled: list = []
+    assigned: list[tuple[object, str]] = []
+    changed = False
+    for position, tool_call in enumerate(tool_calls):
+        if not isinstance(tool_call, dict) or _valid_tool_call_id(tool_call.get("id")):
+            relabeled.append(tool_call)
+            continue
+        original = tool_call.get("id")
+        synthetic = f"{_SYNTHETIC_TOOL_CALL_ID_PREFIX}{msg_index}_{source}_{position}"
+        relabeled.append({**tool_call, "id": synthetic})
+        changed = True
+        assigned.append((original, synthetic))
+    return relabeled, assigned, changed
 
 
 def _normalize_tool_name(name: object) -> str:
@@ -267,19 +296,78 @@ class DanglingToolCallMiddleware(AgentMiddleware[AgentState]):
             return msg
         return msg.model_copy(update=update)
 
+    @staticmethod
+    def _normalize_tool_call_ids(messages: list) -> list:
+        """Return messages with malformed tool-call ids replaced by synthetic ids.
+
+        A provider that omits a tool-call id parses into a well-formed ``tool_calls``
+        entry with an empty/``None`` id. Such an id can never enter the pairing set
+        below, so the call's own result is dropped as an orphan and no placeholder
+        replaces it — the request then reaches the provider with an empty id and the
+        tool result gone. Normalizing ids up front lets the pairing and placeholder
+        logic treat the call like any other, mirroring the empty-name recovery.
+        """
+        rewritten: dict[int, object] = {}
+        synthetic_by_original: dict[object, deque[str]] = defaultdict(deque)
+
+        for index, msg in enumerate(messages):
+            if getattr(msg, "type", None) != "ai":
+                continue
+
+            update: dict = {}
+            structured = getattr(msg, "tool_calls", None) or []
+            additional_kwargs = getattr(msg, "additional_kwargs", None) or {}
+            raw_tool_calls = additional_kwargs.get("tool_calls")
+
+            sources: list[tuple[str, list, str]] = [
+                ("call", structured, "tool_calls"),
+                ("invalid", getattr(msg, "invalid_tool_calls", None) or [], "invalid_tool_calls"),
+            ]
+            # Mirror _message_tool_calls: the raw payload is a fallback view of the same
+            # calls, so relabel it only when it is the view actually read and serialized.
+            if not structured and isinstance(raw_tool_calls, list):
+                sources.append(("raw", raw_tool_calls, "additional_kwargs"))
+
+            for source, tool_calls, field in sources:
+                relabeled, assigned, changed = _relabel_tool_call_ids(tool_calls, index, source)
+                for original, synthetic in assigned:
+                    synthetic_by_original[original].append(synthetic)
+                if not changed:
+                    continue
+                update[field] = {**additional_kwargs, "tool_calls": relabeled} if field == "additional_kwargs" else relabeled
+
+            if update:
+                rewritten[index] = msg.model_copy(update=update)
+
+        if not rewritten:
+            return messages
+
+        # Re-point each already-paired result at its call's new id, in document order,
+        # so the pairing below keeps it instead of dropping it as an orphan.
+        for index, msg in enumerate(messages):
+            if not isinstance(msg, ToolMessage) or _valid_tool_call_id(msg.tool_call_id):
+                continue
+            queue = synthetic_by_original.get(msg.tool_call_id)
+            if queue:
+                rewritten[index] = msg.model_copy(update={"tool_call_id": queue.popleft()})
+
+        return [rewritten.get(index, msg) for index, msg in enumerate(messages)]
+
     def _build_patched_messages(self, messages: list) -> list | None:
         """Return messages with tool results grouped after their tool-call AIMessage.
 
         This normalizes model-bound causal order before provider serialization while
         preserving already-valid transcripts unchanged.
         """
+        normalized = self._normalize_tool_call_ids(messages)
+
         tool_messages_by_id: dict[str, deque[ToolMessage]] = defaultdict(deque)
-        for msg in messages:
+        for msg in normalized:
             if isinstance(msg, ToolMessage):
                 tool_messages_by_id[msg.tool_call_id].append(msg)
 
         tool_call_ids: set[str] = set()
-        for msg in messages:
+        for msg in normalized:
             if getattr(msg, "type", None) != "ai":
                 continue
             for tc in self._message_tool_calls(msg):
@@ -290,7 +378,7 @@ class DanglingToolCallMiddleware(AgentMiddleware[AgentState]):
         patched: list = []
         patch_count = 0
         drop_count = 0
-        for msg in messages:
+        for msg in normalized:
             if isinstance(msg, ToolMessage):
                 if msg.tool_call_id in tool_call_ids:
                     continue  # Will be re-emitted after its AIMessage

@@ -727,6 +727,174 @@ class TestBuildPatchedMessagesPatching:
         assert ai_message.invalid_tool_calls[0]["args"] == _invalid_tc()["args"]
 
 
+class TestMalformedToolCallIdRecovery:
+    """Empty/missing tool-call ids get the same recovery as empty names (#4008).
+
+    A provider that omits the id parses into a well-formed ``tool_calls`` entry with
+    ``id=""``/``None``, so these reach the middleware through the normal path.
+    """
+
+    @pytest.mark.parametrize("tc_id", ["", "   ", None])
+    def test_malformed_structured_tool_call_id_is_normalized(self, tc_id):
+        mw = DanglingToolCallMiddleware()
+        msgs = [_ai_with_tool_calls([_tc("bash", tc_id)])]
+
+        patched = mw._build_patched_messages(msgs)
+
+        assert patched is not None
+        normalized_id = patched[0].tool_calls[0]["id"]
+        assert normalized_id
+        assert normalized_id.strip()
+        payload = _convert_message_to_dict(patched[0])
+        assert payload["tool_calls"][0]["id"] == normalized_id
+        assert isinstance(patched[1], ToolMessage)
+        assert patched[1].tool_call_id == normalized_id
+        assert patched[1].status == "error"
+
+    def test_empty_tool_call_id_keeps_its_paired_tool_result(self):
+        """The destructive case: the result exists, so it must survive and stay paired.
+
+        Without id normalization the empty id never enters the pairing set, so the
+        real result is dropped as an orphan while the AIMessage keeps ``id=""``.
+        """
+        mw = DanglingToolCallMiddleware()
+        msgs = [
+            _ai_with_tool_calls([_tc("bash", "")]),
+            ToolMessage(content="REAL RESULT", tool_call_id="", name="bash"),
+        ]
+
+        patched = mw._build_patched_messages(msgs)
+
+        assert patched is not None
+        assert len(patched) == 2
+        assert isinstance(patched[1], ToolMessage)
+        assert patched[1].content == "REAL RESULT"
+        assert patched[1].tool_call_id == patched[0].tool_calls[0]["id"]
+        assert patched[1].status != "error"
+
+    def test_multiple_empty_ids_get_distinct_ids_and_pair_in_order(self):
+        mw = DanglingToolCallMiddleware()
+        msgs = [
+            _ai_with_tool_calls([_tc("bash", ""), _tc("ls", "")]),
+            ToolMessage(content="first", tool_call_id="", name="bash"),
+            ToolMessage(content="second", tool_call_id="", name="ls"),
+        ]
+
+        patched = mw._build_patched_messages(msgs)
+
+        assert patched is not None
+        first_id, second_id = (tc["id"] for tc in patched[0].tool_calls)
+        assert first_id != second_id
+        assert [m.content for m in patched[1:]] == ["first", "second"]
+        assert [m.tool_call_id for m in patched[1:]] == [first_id, second_id]
+
+    def test_empty_id_invalid_tool_call_is_normalized(self):
+        mw = DanglingToolCallMiddleware()
+        msgs = [_ai_with_invalid_tool_calls([_invalid_tc(tc_id="")])]
+
+        patched = mw._build_patched_messages(msgs)
+
+        assert patched is not None
+        normalized_id = patched[0].invalid_tool_calls[0]["id"]
+        assert normalized_id
+        payload = _convert_message_to_dict(patched[0])
+        assert payload["tool_calls"][0]["id"] == normalized_id
+        assert patched[1].tool_call_id == normalized_id
+
+    def test_empty_id_raw_provider_tool_call_is_normalized(self):
+        mw = DanglingToolCallMiddleware()
+        msgs = [
+            AIMessage.model_construct(
+                content="",
+                type="ai",
+                tool_calls=[],
+                invalid_tool_calls=[],
+                additional_kwargs={"tool_calls": [{"id": "", "type": "function", "function": {"name": "bash", "arguments": "{}"}}]},
+                response_metadata={},
+            )
+        ]
+
+        patched = mw._build_patched_messages(msgs)
+
+        assert patched is not None
+        normalized_id = patched[0].additional_kwargs["tool_calls"][0]["id"]
+        assert normalized_id
+        payload = _convert_message_to_dict(patched[0])
+        assert payload["tool_calls"][0]["id"] == normalized_id
+        assert patched[1].tool_call_id == normalized_id
+
+    def test_only_the_serialized_view_of_a_call_gets_a_recovered_id(self):
+        """When both views of one call are present, only the read one is relabelled.
+
+        ``_message_tool_calls`` and the OpenAI serializer both prefer structured
+        tool_calls and ignore the raw payload while they coexist. Relabelling raw here
+        would invent a *second* id for a call that already got one, so the two views of
+        the same call would disagree; the raw ids cannot simply be copied from
+        structured either, since a partially-parsed turn splits calls across
+        ``invalid_tool_calls`` and breaks positional alignment.
+        """
+        mw = DanglingToolCallMiddleware()
+        msgs = [
+            AIMessage.model_construct(
+                content="",
+                type="ai",
+                tool_calls=[_tc("bash", "")],
+                invalid_tool_calls=[],
+                additional_kwargs={"tool_calls": [{"id": "", "type": "function", "function": {"name": "bash", "arguments": "{}"}}]},
+                response_metadata={},
+            )
+        ]
+
+        patched = mw._build_patched_messages(msgs)
+
+        assert patched is not None
+        recovered_id = patched[0].tool_calls[0]["id"]
+        assert recovered_id
+        assert _convert_message_to_dict(patched[0])["tool_calls"][0]["id"] == recovered_id
+        assert patched[1].tool_call_id == recovered_id
+        # The unread view keeps the provider's value rather than a second invented id.
+        assert patched[0].additional_kwargs["tool_calls"][0]["id"] == ""
+
+    def test_none_id_call_reclaims_its_own_none_id_result(self):
+        """A ``None``-id result is an orphan only when no call used ``None`` as its id.
+
+        Sibling of ``test_tool_call_id_none_orphan_is_dropped``: there the call's id is
+        valid, so the result stays an orphan. Here the call itself carries the ``None``
+        id, so the result is its own and must follow the call to its recovered id
+        instead of being dropped. Both are reachable only from a corrupt serialized
+        payload, which is why the ToolMessage is built with ``model_construct``.
+        """
+        mw = DanglingToolCallMiddleware()
+        msgs = [
+            _ai_with_tool_calls([_tc("bash", None)]),
+            ToolMessage.model_construct(content="REAL RESULT", tool_call_id=None),
+        ]
+
+        patched = mw._build_patched_messages(msgs)
+
+        assert patched is not None
+        assert len(patched) == 2
+        assert isinstance(patched[1], ToolMessage)
+        assert patched[1].content == "REAL RESULT"
+        assert patched[1].tool_call_id == patched[0].tool_calls[0]["id"]
+
+    def test_valid_ids_are_left_byte_for_byte_unchanged(self):
+        """Delta-set guard: normalization must only fire on malformed ids.
+
+        A valid id is matched against ``ToolMessage.tool_call_id`` verbatim, so
+        rewriting (e.g. stripping) one would break pairing that works today.
+        """
+        mw = DanglingToolCallMiddleware()
+        msgs = [
+            _ai_with_tool_calls([_tc("bash", " call_1 ")]),
+            ToolMessage(content="result", tool_call_id=" call_1 ", name="bash"),
+        ]
+
+        patched = mw._build_patched_messages(msgs)
+
+        assert patched is None or patched[0].tool_calls[0]["id"] == " call_1 "
+
+
 class TestWrapModelCall:
     def test_no_patch_passthrough(self):
         mw = DanglingToolCallMiddleware()
