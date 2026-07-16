@@ -16,10 +16,12 @@ export function ArtifactLink(props: AnchorHTMLAttributes<HTMLAnchorElement>) {
   // artifact preview cannot execute in the main document, matching the guard in
   // createMarkdownLinkComponent (markdown-link.tsx).
   if (props.href !== undefined && !isSafeHref(props.href)) {
-    const { className, children, target, rel, ...rest } = props;
+    // Intentionally no {...props} spread: anchor-only attributes (href,
+    // target, rel) are not valid on a <span> and would leak the unsafe URL
+    // into the DOM / trigger React DOM warnings.
+    const { className, children } = props;
     return (
       <span
-        {...rest}
         className={cn(
           "text-muted-foreground cursor-not-allowed underline decoration-dotted underline-offset-2",
           className,

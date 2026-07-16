@@ -11,10 +11,10 @@ import { CitationLink } from "../citations/citation-link";
  * Anything else (``javascript:``, ``data:text/html``, ``vbscript:``,
  * ``file:``, …) is blocked because once it lands in a real anchor the
  * browser happily executes the payload in the chat surface where
- * sessionStorage / CSRF cookies are reachable. We accept only ``http`` /
- * ``https`` plus same-origin paths (which are governed by the artifact
- * branch below and ``resolveArtifactURL``) — relative ``/…`` URLs are
- * inherently safe and pass through ``URL.protocol === ""``.
+ * sessionStorage / CSRF cookies are reachable. We accept ``http(s)``
+ * plus the non-executing ``mailto:`` / ``tel:`` schemes; same-origin
+ * relative paths (``/…``) and in-document anchors (``#…``) are allowed
+ * by the explicit prefix checks in ``isSafeHref`` before URL parsing.
  */
 const SAFE_HREF_PROTOCOLS = ["http:", "https:", "mailto:", "tel:"] as const;
 
@@ -64,10 +64,12 @@ export function createMarkdownLinkComponent(threadId?: string) {
     // blocked. Keep the visible label so the user can still see what the
     // link claimed to point at.
     if (href !== undefined && !isSafeHref(href)) {
-      const { className, children, target, rel, ...rest } = props;
+      // Intentionally no {...props} spread: react-markdown props like `node`
+      // (and anchor-only attributes such as target/rel) are not valid on a
+      // <span> and would trigger React DOM warnings.
+      const { className, children } = props;
       return (
         <span
-          {...rest}
           className={cn(
             "text-muted-foreground cursor-not-allowed underline decoration-dotted underline-offset-2",
             className,
