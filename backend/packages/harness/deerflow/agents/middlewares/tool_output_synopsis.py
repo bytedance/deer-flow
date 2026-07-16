@@ -32,6 +32,12 @@ _JSON_SHAPE_MAX_DEPTH = 2
 _JSON_STRUCTURE_LIMIT = 24
 _JSON_STRUCTURE_DEPTH = 4
 
+# Hard cap on the synopsis input size. Beyond this threshold the full parse
+# is skipped and only a raw head/tail sample is emitted. This bounds the
+# worst-case memory/CPU when externalized tool output is pathologically large
+# (e.g. 50+ MB log dumps) and prevents DoS via XML/YAML entity-expansion.
+_MAX_SYNOPSIS_INPUT_BYTES = 5_000_000
+
 _CODE_HINTS = (
     re.compile(r"^\s*(?:from\s+\S+\s+import|import\s+\S+)", re.MULTILINE),
     re.compile(r"^\s*(?:class|def|async\s+def|function|export\s+function)\s+[A-Za-z_]\w*", re.MULTILINE),
@@ -63,6 +69,23 @@ def build_tool_output_synopsis(content: str, *, tool_name: str = "") -> ToolOutp
             summary=["The tool returned an empty string."],
             structure=[],
             notable_items=[],
+        )
+
+    # Size guard: parsing the full content above the threshold is a DoS risk
+    # (XML entity expansion, YAML alias bombs, memory/CPU from raw text).
+    # Fall back to a raw head/tail sample to bound the worst case.
+    if len(content.encode("utf-8")) > _MAX_SYNOPSIS_INPUT_BYTES:
+        return ToolOutputSynopsis(
+            kind="unknown",
+            title="Oversized output",
+            summary=[
+                f"The output has {len(content)} characters "
+                f"({len(content.encode('utf-8')) / 1024 / 1024:.1f} MB). "
+                "Parsing skipped due to size limit.",
+            ],
+            structure=[],
+            notable_items=[],
+            sample=_head_tail_sample(content, _TEXT_EXCERPT_CHARS * 2),
         )
 
     if _looks_binary(content):
@@ -349,6 +372,11 @@ def _try_json(content: str) -> ToolOutputSynopsis | None:
     structure: list[str] = [f"shape: {_json_shape(value)}"]
     structure.extend(_json_container_paths(value))
     notable = _scalar_examples(value)
+    # NOTE: scalar examples may surface values from anywhere in the parsed
+    # structure (not just head/tail bytes). This is expected behaviour — the
+    # synopsis is a structural summary, not a confidentiality filter. Operators
+    # who relied on the old preview to only expose head/tail snippets should
+    # review their tool outputs for sensitive mid-document values.
     if isinstance(value, dict):
         keys = [str(key) for key in value.keys()]
         summary.append(f"JSON object with {len(keys)} top-level keys.")
@@ -374,6 +402,8 @@ def _try_json(content: str) -> ToolOutputSynopsis | None:
 
 def _try_xml(stripped: str) -> ToolOutputSynopsis | None:
     if not stripped.startswith("<"):
+        return None
+    if SafeET is None:  # defusedxml not available; skip XML parsing to avoid entity-expansion DoS
         return None
     try:
         root = (SafeET or ET).fromstring(stripped)
@@ -484,6 +514,12 @@ def _looks_yaml(content: str) -> bool:
 
 def _try_yaml(content: str) -> ToolOutputSynopsis | None:
     if not _looks_yaml(content):
+        return None
+    # Bound the parse size to prevent alias-bomb DoS (yaml.safe_load resolves
+    # YAML aliases which can expand exponentially). The heuristic detector
+    # already rejects most non-YAML content, but a crafted alias bomb can
+    # trivially pass the heuristic.
+    if len(content) > 500_000:
         return None
     try:
         value = yaml.safe_load(content)
