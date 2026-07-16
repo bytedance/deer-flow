@@ -112,7 +112,7 @@ def _list_uploaded_files_impl(
 
     # Collect historical files (sorted by mtime descending).
     # Skip .md files that are conversion artifacts (have a same-stem non-.md sibling).
-    candidates: list[tuple[float, Path]] = []
+    candidates: list[tuple[float, Path, int]] = []
     try:
         # Collect file entries once to build the name set and iterate.
         entries = [e for e in os.scandir(uploads_dir) if e.is_file() and not is_upload_staging_file(e.name)]
@@ -132,7 +132,7 @@ def _list_uploaded_files_impl(
                 if non_md_siblings:
                     continue
             stat = entry.stat()
-            candidates.append((stat.st_mtime, Path(entry.path)))
+            candidates.append((stat.st_mtime, Path(entry.path), stat.st_size))
     except OSError:
         return {"files": [], "message": f"Failed to read uploads directory: {uploads_dir}"}
 
@@ -145,15 +145,14 @@ def _list_uploaded_files_impl(
     total_count = len(candidates)
     truncated = total_count > max_results
     visible = candidates[:max_results]
-    omitted_paths = [p.name for _, p in candidates[max_results:]]
+    omitted_paths = [p.name for _, p, _ in candidates[max_results:]]
 
     files: list[dict] = []
-    for _, file_path in visible:
+    for _, file_path, st_size in visible:
         filename = file_path.name
-        stat = file_path.stat()
         file_info: dict = {
             "filename": filename,
-            "size": stat.st_size,
+            "size": st_size,
             "path": f"/mnt/user-data/uploads/{filename}",
             "extension": file_path.suffix,
         }

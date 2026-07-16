@@ -347,9 +347,6 @@ class InputSanitizationMiddleware(AgentMiddleware[AgentState]):
                                         new_content.append(block)
                                 else:
                                     new_content.append(block)
-                            # Guard ORIGINAL_USER_CONTENT_KEY (shared tail)
-                            if not isinstance(original_user_content, str) and ORIGINAL_USER_CONTENT_KEY in preserved_kwargs:
-                                preserved_kwargs[ORIGINAL_USER_CONTENT_KEY] = message_content_to_text(content)
                             messages[i] = HumanMessage(
                                 content=new_content,
                                 id=msg.id,

@@ -16,7 +16,6 @@ BUILTIN_TOOLS = [
     present_file_tool,
     ask_clarification_tool,
     review_skill_package,
-    list_uploaded_files,
 ]
 
 SUBAGENT_TOOLS = [
@@ -49,6 +48,7 @@ def get_available_tools(
     model_name: str | None = None,
     subagent_enabled: bool = False,
     *,
+    include_upload_tool: bool = True,
     app_config: AppConfig | None = None,
 ) -> list[BaseTool]:
     """Get all available tools from config.
@@ -61,6 +61,9 @@ def get_available_tools(
         include_mcp: Whether to include tools from MCP servers (default: True).
         model_name: Optional model name to determine if vision tools should be included.
         subagent_enabled: Whether to include subagent tools (task, task_status).
+        include_upload_tool: Whether to include ``list_uploaded_files`` (default: True).
+            Set to False for subagent tool assembly — subagents have independent
+            ThreadState and cannot exclude current-run files.
 
     Returns:
         List of available tools.
@@ -91,6 +94,8 @@ def get_available_tools(
 
     # Conditionally add tools based on config
     builtin_tools = BUILTIN_TOOLS.copy()
+    if include_upload_tool:
+        builtin_tools.append(list_uploaded_files)
     skill_evolution_config = getattr(config, "skill_evolution", None)
     if getattr(skill_evolution_config, "enabled", False):
         from deerflow.tools.skill_manage_tool import skill_manage_tool

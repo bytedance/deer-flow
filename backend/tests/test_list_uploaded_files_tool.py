@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 from unittest.mock import MagicMock
 
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, ToolMessage
 
 from deerflow.config.paths import Paths
 from deerflow.tools.builtins.list_uploaded_files_tool import _format_omitted_summary, _list_uploaded_files_impl, _resolve_thread_id
@@ -334,3 +334,97 @@ class TestMiddlewareToolStateBridge:
         result = _list_uploaded_files_impl(runtime=rt, _paths=_paths(tmp_path))
         filenames = {f["filename"] for f in result["files"]}
         assert "old.pdf" in filenames, "Cleared state must make historical files visible"
+
+
+# ---------------------------------------------------------------------------
+# Integration test: real LangGraph state propagation
+# Exercises the full create_agent graph (not mocked runtime.state) to verify
+# that UploadsMiddleware.before_agent()'s uploaded_files write is visible to
+# list_uploaded_files inside ToolRuntime.state during the same turn.
+# ---------------------------------------------------------------------------
+
+
+def test_real_graph_state_propagation_to_list_uploaded_files(tmp_path):
+    """LangGraph must propagate before_agent state write into tool's runtime.state.
+
+    This is the integration-level smoke test confirming that
+    ``UploadsMiddleware.before_agent()``'s ``{"uploaded_files": [...]}`` state
+    update is visible when ``list_uploaded_files`` reads ``runtime.state``
+    inside the same turn — the load-bearing assumption behind the per-run file
+    exclusion.
+
+    Uses a real ``create_agent`` graph with a fake model that triggers
+    ``list_uploaded_files``.  Does NOT mock ``runtime.state``.
+    """
+    import asyncio
+
+    from langchain.agents import create_agent
+    from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
+    from langchain_core.messages import AIMessage, HumanMessage
+
+    from deerflow.agents.middlewares.uploads_middleware import UploadsMiddleware
+    from deerflow.agents.thread_state import ThreadState
+    from deerflow.tools.builtins.list_uploaded_files_tool import list_uploaded_files
+    from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
+
+    thread_id = "test-graph-propagation"
+    uploads_dir = _uploads_dir(tmp_path, thread_id=thread_id)
+    (uploads_dir / "fresh.pdf").write_bytes(b"%PDF content")
+
+    # Fake model: turn 1 calls list_uploaded_files, turn 2 finishes.
+    class _RecordingFakeModel(GenericFakeChatModel):
+        def bind_tools(self, tools, **kwargs):
+            return self
+
+    model = _RecordingFakeModel(
+        messages=iter(
+            [
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "list_uploaded_files",
+                            "args": {"include_outline": False},
+                            "id": "call_integration_1",
+                            "type": "tool_call",
+                        }
+                    ],
+                ),
+                AIMessage(content="done"),
+            ]
+        )
+    )
+
+    msg = HumanMessage(
+        content="what files?",
+        additional_kwargs={
+            "files": [
+                {
+                    "filename": "fresh.pdf",
+                    "size": 12,
+                    "path": "/mnt/user-data/uploads/fresh.pdf",
+                }
+            ],
+            ORIGINAL_USER_CONTENT_KEY: "what files?",
+        },
+    )
+
+    graph = create_agent(
+        model=model,
+        tools=[list_uploaded_files],
+        middleware=[UploadsMiddleware(base_dir=str(tmp_path))],
+        state_schema=ThreadState,
+    )
+
+    result = asyncio.run(
+        graph.ainvoke(
+            {"messages": [msg]},
+            {"configurable": {"thread_id": thread_id}},
+        )
+    )
+
+    # The list_uploaded_files tool result must exclude the current-run file.
+    tool_messages = [m for m in result["messages"] if isinstance(m, ToolMessage)]
+    assert tool_messages, "Expected at least one ToolMessage from list_uploaded_files"
+    tool_output = tool_messages[0].content
+    assert "fresh.pdf" not in tool_output, f"Current-run file must be excluded from list_uploaded_files via state propagation. Tool output:\n{tool_output}"
