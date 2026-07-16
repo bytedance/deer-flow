@@ -15,6 +15,7 @@ from langchain_core.messages import HumanMessage
 from langchain_core.runnables import run_in_executor
 from langgraph.runtime import Runtime
 
+from deerflow.agents.middlewares.input_sanitization_middleware import neutralize_untrusted_tags
 from deerflow.config.paths import Paths, get_paths
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.uploads.manager import is_upload_staging_file
@@ -76,11 +77,17 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
         self._max_files_per_context_section = max_files_per_context_section
 
     def _format_file_entry(self, file: dict, lines: list[str]) -> None:
-        """Append a single file entry (name, size, path, optional outline) to lines."""
+        """Append a single file entry (name, size, path, optional outline) to lines.
+
+        User-derived values (filename, path, outline titles, preview text) are
+        neutralized via ``neutralize_untrusted_tags`` so a crafted filename or
+        document cannot embed blocked authority tags inside the trusted
+        ``<current_uploads>`` wrapper.
+        """
         size_kb = file["size"] / 1024
         size_str = f"{size_kb:.1f} KB" if size_kb < 1024 else f"{size_kb / 1024:.1f} MB"
-        lines.append(f"- {file['filename']} ({size_str})")
-        lines.append(f"  Path: {file['path']}")
+        lines.append(f"- {neutralize_untrusted_tags(file['filename'])} ({size_str})")
+        lines.append(f"  Path: {neutralize_untrusted_tags(file['path'])}")
         if file.get("selection_reason") == "query_match":
             lines.append("  Selected because: matched the current query.")
         outline = file.get("outline") or []
@@ -89,7 +96,7 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
             visible = [e for e in outline if not e.get("truncated")]
             lines.append("  Document outline (use `read_file` with line ranges to read sections):")
             for entry in visible:
-                lines.append(f"    L{entry['line']}: {entry['title']}")
+                lines.append(f"    L{entry['line']}: {neutralize_untrusted_tags(entry['title'])}")
             if truncated:
                 lines.append(f"    ... (showing first {len(visible)} headings; use `read_file` to explore further)")
         else:
@@ -97,7 +104,7 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
             if preview:
                 lines.append("  No structural headings detected. Document begins with:")
                 for text in preview:
-                    lines.append(f"    > {text}")
+                    lines.append(f"    > {neutralize_untrusted_tags(text)}")
             lines.append("  Use `grep` to search for keywords (e.g. `grep(pattern='keyword', path='/mnt/user-data/uploads/')`).")
         lines.append("")
 
