@@ -613,6 +613,51 @@ class TestMiddlewareEvents:
         assert "middleware:guardrail" in event_types
 
 
+class TestContextEvents:
+    @pytest.mark.anyio
+    async def test_record_memory_context_is_readable_from_public_store_contract(self, journal_setup):
+        j, store = journal_setup
+
+        j.record_memory_context(
+            content_sha256="a" * 64,
+        )
+        # Goal continuations may enter the graph more than once under the same
+        # run-scoped journal; the effective frozen memory event stays singular.
+        j.record_memory_context(
+            content_sha256="a" * 64,
+        )
+        await j.flush()
+
+        events = await store.list_events("t1", "r1", event_types=["context:memory"])
+        assert len(events) == 1
+        assert events[0]["category"] == "context"
+        assert events[0]["content"] == {"content_sha256": "a" * 64}
+
+    @pytest.mark.anyio
+    async def test_record_memory_context_can_retry_after_buffer_failure(self, journal_setup, monkeypatch):
+        j, store = journal_setup
+        original_put = j._put
+        attempts = 0
+
+        def fail_once(**kwargs):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise RuntimeError("buffer unavailable")
+            return original_put(**kwargs)
+
+        monkeypatch.setattr(j, "_put", fail_once)
+
+        with pytest.raises(RuntimeError, match="buffer unavailable"):
+            j.record_memory_context(content_sha256="a" * 64)
+        j.record_memory_context(content_sha256="a" * 64)
+        await j.flush()
+
+        events = await store.list_events("t1", "r1", event_types=["context:memory"])
+        assert len(events) == 1
+        assert events[0]["content"] == {"content_sha256": "a" * 64}
+
+
 class TestCallerBucketing:
     """Tests for caller-bucketed token accumulation (lead_agent / subagent / middleware)."""
 
