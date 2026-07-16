@@ -481,6 +481,14 @@ class DeerFlowTUI(App):
         if self._conv_thread_id is None:
             self._conv_thread_id = str(uuid.uuid4())
             self._refresh_header()
+            # /goal can be the very first action in a brand-new session, before any
+            # chat message ever reaches _stream_worker (the only other place that
+            # registers a thread). Without this, the thread would stay invisible in
+            # the Web UI sidebar until — if ever — a later chat message was sent in
+            # the same thread. Mirrors _stream_worker's call exactly.
+            writer = getattr(self.session, "writer", None)
+            if writer is not None:
+                writer.ensure_created(self._conv_thread_id, assistant_id="lead-agent", metadata={"source": "tui"})
         try:
             goal = self.session.client.set_goal(self._conv_thread_id, command.objective).get("goal")
         except Exception:  # noqa: BLE001

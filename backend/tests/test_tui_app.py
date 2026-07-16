@@ -180,6 +180,27 @@ class _GoalSession(_FakeSession):
         self.client = _GoalClient()
 
 
+class _RecordingWriter:
+    """Fake ThreadMetaWriter that records ensure_created calls (Web UI visibility)."""
+
+    def __init__(self):
+        self.ensure_created_calls: list[tuple] = []
+
+    def ensure_created(self, thread_id, *, assistant_id=None, metadata=None):
+        self.ensure_created_calls.append((thread_id, assistant_id, metadata))
+
+    def set_title(self, thread_id, title):
+        pass
+
+
+class _GoalSessionWithWriter(_GoalSession):
+    """A _GoalSession wired with a writer, like the real session's `.writer`."""
+
+    def __init__(self):
+        super().__init__()
+        self.writer = _RecordingWriter()
+
+
 def _system_rows(app):
     return [r for r in app.state.rows if r.kind == "system"]
 
@@ -255,3 +276,46 @@ async def test_goal_set_failure_shows_error_tone():
         await pilot.pause()
     errors = [r for r in _system_rows(app) if r.tone == "error"]
     assert any("Could not set goal." in r.text for r in errors)
+
+
+@pytest.mark.asyncio
+async def test_goal_as_first_action_registers_thread_for_web_ui():
+    """/goal as the very first action must make the new thread Web-UI-visible.
+
+    Regression test: minting a thread id inside _handle_goal used to skip the
+    threads_meta registration that _stream_worker performs for chat turns, so a
+    TUI session that only ever used /goal stayed invisible in the Web UI sidebar
+    (see AGENTS.md's "Web UI visibility" note).
+    """
+    session = _GoalSessionWithWriter()
+    app = DeerFlowTUI(session, LaunchPlan(mode="tui"))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert app._conv_thread_id is None
+        app._handle_goal("finish the work")
+        await pilot.pause()
+    assert app._conv_thread_id is not None
+    # Same call shape _stream_worker uses, so the thread is immediately Web-UI-visible.
+    assert session.writer.ensure_created_calls == [(app._conv_thread_id, "lead-agent", {"source": "tui"})]
+
+
+@pytest.mark.asyncio
+async def test_goal_after_chat_message_does_not_duplicate_thread_registration():
+    """Normal order (chat first, /goal after) must be unaffected: no extra/duplicate
+    ensure_created call once the thread is already registered."""
+    session = _GoalSessionWithWriter()
+    app = DeerFlowTUI(session, LaunchPlan(mode="tui"))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        for ch in "hi":
+            await pilot.press(ch)
+        await pilot.press("enter")
+        await _wait_until(lambda: not app._streaming and app._conv_thread_id is not None, pilot)
+        thread_id_after_chat = app._conv_thread_id
+        assert len(session.writer.ensure_created_calls) == 1
+
+        app._handle_goal("finish the work")
+        await pilot.pause()
+    assert app._conv_thread_id == thread_id_after_chat
+    # No new/duplicate ensure_created call from the /goal path once a thread already exists.
+    assert len(session.writer.ensure_created_calls) == 1
