@@ -6,6 +6,7 @@ import errno
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Event
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -13,7 +14,7 @@ import pytest
 
 from deerflow.config.extensions_config import ExtensionsConfig, SkillStateConfig
 from deerflow.config.paths import Paths
-from deerflow.skills.projection import ensure_skill_projections, rebuild_all_skill_projections, rebuild_skill_projections
+from deerflow.skills.projection import ensure_public_skill_projection, ensure_skill_projections, rebuild_skill_projections
 from deerflow.skills.storage.user_scoped_skill_storage import UserScopedSkillStorage
 
 
@@ -230,44 +231,93 @@ def test_signature_failure_clears_old_projection_and_manifest(projection_env, mo
     assert not manifest.exists()
 
 
-def test_boot_rebuild_restores_public_and_known_user_views(projection_env) -> None:
+def test_boot_ensures_public_projection_without_scanning_known_users(projection_env, monkeypatch) -> None:
     env = projection_env
     _write_skill(env.skills_root / "public", "public-skill")
     _write_skill(env.paths.user_custom_skills_dir("bob"), "custom-skill")
 
-    rebuilt_users = rebuild_all_skill_projections(app_config=env.config)
+    def _unexpected_user_storage(*_args, **_kwargs):
+        raise AssertionError("gateway boot must not enumerate user skill storage")
 
-    assert rebuilt_users == 1
+    monkeypatch.setattr("deerflow.skills.storage.get_or_new_user_skill_storage", _unexpected_user_storage)
+
+    assert ensure_public_skill_projection(app_config=env.config) is True
+
     assert (env.paths.public_skills_view_dir / "public-skill" / "SKILL.md").is_file()
+    assert not env.paths.user_custom_skills_view_dir("bob").exists()
+
+    bob_storage = UserScopedSkillStorage("bob", host_path=str(env.skills_root), app_config=env.config)
+    ensure_skill_projections(bob_storage)
     assert (env.paths.user_custom_skills_view_dir("bob") / "custom-skill" / "SKILL.md").is_file()
 
 
-def test_boot_rebuild_isolates_one_users_failure_from_the_rest(projection_env, monkeypatch) -> None:
-    """A broken user directory (bad permissions, corrupted state file, ...)
-    must fail closed for that user's scope only — not abort gateway boot for
-    public skills or for other users' projections."""
+def test_boot_public_projection_failure_is_fail_closed_without_aborting(projection_env, monkeypatch) -> None:
+    env = projection_env
+    _write_skill(env.skills_root / "public", "public-skill", "before")
+    rebuild_skill_projections(env.storage, include_user=False)
+    monkeypatch.setattr(
+        "deerflow.skills.projection._source_signature",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(PermissionError("source unavailable")),
+    )
+
+    assert ensure_public_skill_projection(app_config=env.config) is False
+
+    assert list(env.paths.public_skills_view_dir.iterdir()) == []
+
+
+def test_boot_public_storage_factory_failure_is_fail_closed_without_aborting(projection_env, monkeypatch) -> None:
     env = projection_env
     _write_skill(env.skills_root / "public", "public-skill")
-    _write_skill(env.paths.user_custom_skills_dir("alice-broken"), "alice-skill")
-    _write_skill(env.paths.user_custom_skills_dir("bob-ok"), "bob-skill")
+    rebuild_skill_projections(env.storage, include_user=False)
+    monkeypatch.setattr(
+        "deerflow.skills.storage.get_or_new_skill_storage",
+        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("storage init failed")),
+    )
 
+    assert ensure_public_skill_projection(app_config=env.config) is False
+    assert list(env.paths.public_skills_view_dir.iterdir()) == []
+
+
+def test_boot_factory_failure_cleanup_waits_for_concurrent_public_rebuild(projection_env, monkeypatch) -> None:
+    env = projection_env
+    _write_skill(env.skills_root / "public", "public-skill")
     from deerflow.skills import projection as projection_module
 
-    real_rebuild = projection_module.rebuild_skill_projections
+    before_manifest = Event()
+    release_rebuild = Event()
+    cleanup_finished = Event()
+    real_write_manifest = projection_module._write_manifest
 
-    def _flaky_rebuild(storage, **kwargs):
-        if getattr(storage, "user_id", None) == "alice-broken":
-            raise OSError("simulated disk failure for alice-broken")
-        return real_rebuild(storage, **kwargs)
+    def _delayed_write_manifest(scope_root, signature):
+        before_manifest.set()
+        assert release_rebuild.wait(timeout=5)
+        real_write_manifest(scope_root, signature)
 
-    monkeypatch.setattr(projection_module, "rebuild_skill_projections", _flaky_rebuild)
+    monkeypatch.setattr(projection_module, "_write_manifest", _delayed_write_manifest)
+    monkeypatch.setattr(
+        "deerflow.skills.storage.get_or_new_skill_storage",
+        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("storage init failed")),
+    )
 
-    rebuilt_users = rebuild_all_skill_projections(app_config=env.config)
+    def _rebuild() -> None:
+        rebuild_skill_projections(env.storage, include_user=False)
 
-    assert rebuilt_users == 1
-    assert (env.paths.public_skills_view_dir / "public-skill" / "SKILL.md").is_file()
-    assert (env.paths.user_custom_skills_view_dir("bob-ok") / "bob-skill" / "SKILL.md").is_file()
-    assert not env.paths.user_custom_skills_view_dir("alice-broken").exists() or list(env.paths.user_custom_skills_view_dir("alice-broken").iterdir()) == []
+    def _fail_boot_ensure() -> None:
+        assert ensure_public_skill_projection(app_config=env.config) is False
+        cleanup_finished.set()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        rebuild_future = executor.submit(_rebuild)
+        assert before_manifest.wait(timeout=5)
+        cleanup_future = executor.submit(_fail_boot_ensure)
+        cleanup_waited_for_rebuild = not cleanup_finished.wait(timeout=0.2)
+        release_rebuild.set()
+        rebuild_future.result(timeout=5)
+        cleanup_future.result(timeout=5)
+
+    assert cleanup_waited_for_rebuild
+    assert list(env.paths.public_skills_view_dir.iterdir()) == []
+    assert not (env.paths.public_skills_view_dir.parent / ".projection-manifest.json").exists()
 
 
 @pytest.mark.anyio

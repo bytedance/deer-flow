@@ -22,6 +22,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   
 ### ⚠ Breaking changes
 
+- **skills:** Sandboxes now reserve `/mnt/skills` for managed enabled-only
+  projections. `DEER_FLOW_HOST_SKILLS_PATH` and `SKILLS_HOST_PATH` are no longer
+  used; Docker/AIO and hostPath deployments derive projection paths from
+  `DEER_FLOW_HOST_BASE_DIR`. E2B operator mounts targeting `/mnt/skills` or any
+  child path are skipped with a warning so they cannot shadow the managed
+  projection; move extra E2B content to a different container path. ([#4178])
 - **skills:** A directory containing `SKILL.md` is now a runtime package
   boundary. Nested `SKILL.md` files inside that package are supporting data and
   are no longer registered as independent skills; unusual custom layouts must
@@ -603,4 +609,5 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#4095]: https://github.com/bytedance/deer-flow/issues/4095
 [#4098]: https://github.com/bytedance/deer-flow/pull/4098
 [#4146]: https://github.com/bytedance/deer-flow/pull/4146
+[#4178]: https://github.com/bytedance/deer-flow/pull/4178
 [#4190]: https://github.com/bytedance/deer-flow/pull/4190

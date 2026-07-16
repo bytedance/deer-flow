@@ -92,6 +92,8 @@ def _projection_lock(root: Path) -> Iterator[None]:
 
 
 def _link_or_copy(source: str, target: str, *, follow_symlinks: bool = True) -> str:
+    # Hardlinks share the source inode and provide no write isolation. Any
+    # read-only guarantee must come from the consuming sandbox or mount.
     try:
         os.link(source, target, follow_symlinks=follow_symlinks)
     except OSError as exc:
@@ -406,46 +408,28 @@ def skill_projection_mutation(storage: SkillStorage, scope: str) -> Iterator[Non
         rebuild()
 
 
-def rebuild_all_skill_projections(*, app_config=None) -> int:
-    """Rebuild public and every known user's views during gateway boot.
+def ensure_public_skill_projection(*, app_config=None) -> bool:
+    """Ensure the global public view during boot without scanning user data.
 
-    Each scope's rebuild is isolated: a single broken user directory (bad
-    permissions, corrupted state file, unreadable content) fails closed for
-    that scope only (``_rebuild_*_locked`` already clears the view on error)
-    and must not abort the whole gateway boot — the same failure mode that
-    isolates a scope at acquire/mutation time applies here too, since this is
-    just another rebuild trigger. Sandbox acquire self-heals a scope left
-    empty by a boot failure on next actual use.
+    User projections are repaired lazily by sandbox acquire. Eagerly rebuilding
+    every historical user would make gateway readiness scale with tenant count,
+    while providing no additional safety before that user's next acquire.
     """
     from deerflow.config import get_app_config
-    from deerflow.config.paths import _validate_user_id, get_paths
-    from deerflow.skills.storage import get_or_new_skill_storage, get_or_new_user_skill_storage
+    from deerflow.config.paths import get_paths
+    from deerflow.skills.storage import get_or_new_skill_storage
 
-    config = app_config or get_app_config()
-    public_storage = get_or_new_skill_storage(app_config=config)
     try:
-        rebuild_skill_projections(public_storage, include_user=False)
+        config = app_config or get_app_config()
+        public_storage = get_or_new_skill_storage(app_config=config)
+        ensure_skill_projections(public_storage)
     except Exception:
-        logger.warning("Failed to rebuild the public skill projection during boot; it stays empty until a sandbox acquire self-heals it", exc_info=True)
-
-    users_dir = get_paths().base_dir / "users"
-    if not users_dir.is_dir():
-        return 0
-
-    rebuilt = 0
-    for user_dir in sorted(users_dir.iterdir(), key=lambda path: path.name):
-        if not user_dir.is_dir() or user_dir.name.startswith("."):
-            continue
+        logger.warning("Failed to ensure the public skill projection during boot; clearing it until a sandbox acquire self-heals it", exc_info=True)
         try:
-            user_id = _validate_user_id(user_dir.name)
-        except ValueError:
-            logger.warning("Skipping invalid user directory while rebuilding skill projections")
-            continue
-        storage = get_or_new_user_skill_storage(user_id, app_config=config)
-        try:
-            rebuild_skill_projections(storage, include_public=False)
+            paths = get_paths()
+            with _projection_lock(paths.public_skills_view_dir.parent):
+                _clear_projection_scope(paths.public_skills_view_dir.parent, paths.public_skills_view_dir)
         except Exception:
-            logger.warning("Failed to rebuild the skill projection for user %s during boot; it stays empty until a sandbox acquire self-heals it", user_id, exc_info=True)
-            continue
-        rebuilt += 1
-    return rebuilt
+            logger.error("Failed to clear the public skill projection after a boot-time error", exc_info=True)
+        return False
+    return True
