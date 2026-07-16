@@ -79,9 +79,7 @@ def build_tool_output_synopsis(content: str, *, tool_name: str = "") -> ToolOutp
             kind="unknown",
             title="Oversized output",
             summary=[
-                f"The output has {len(content)} characters "
-                f"({len(content.encode('utf-8')) / 1024 / 1024:.1f} MB). "
-                "Parsing skipped due to size limit.",
+                f"The output has {len(content)} characters ({len(content.encode('utf-8')) / 1024 / 1024:.1f} MB). Parsing skipped due to size limit.",
             ],
             structure=[],
             notable_items=[],
