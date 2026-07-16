@@ -315,14 +315,15 @@ export function MessageList({
     () =>
       collectRenderedSubtasks(
         groupedMessages,
-        (groupMessages) =>
-          isAssistantMessageGroupStreaming(groupMessages, streamingMessages),
+        (_groupMessages, groupIndex) =>
+          thread.isLoading && groupIndex === lastGroupIndex,
         t.subtasks.failed,
       ),
-    [groupedMessages, streamingMessages, t.subtasks.failed],
+    [groupedMessages, lastGroupIndex, t.subtasks.failed, thread.isLoading],
   );
 
   useEffect(() => {
+    // The task context ignores identical snapshots, keeping stream updates idempotent.
     for (const task of renderedSubtasks.updates) {
       updateSubtask(task);
     }

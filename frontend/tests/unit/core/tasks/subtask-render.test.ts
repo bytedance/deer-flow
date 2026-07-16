@@ -29,6 +29,11 @@ function subagentGroup(messages: Message[]) {
 describe("collectRenderedSubtasks", () => {
   it("derives an in-progress task while the subagent turn is still streaming", () => {
     const groups = [
+      {
+        id: "group-0",
+        type: "human",
+        messages: [],
+      },
       subagentGroup([
         {
           type: "ai",
@@ -48,7 +53,13 @@ describe("collectRenderedSubtasks", () => {
       ]),
     ];
 
-    const rendered = collectRenderedSubtasks(groups, () => true, "failed");
+    const threadIsLoading = true;
+    const rendered = collectRenderedSubtasks(
+      groups,
+      (_messages, groupIndex) =>
+        threadIsLoading && groupIndex === groups.length - 1,
+      "failed",
+    );
 
     expect(rendered.tasks.get("task-1")).toMatchObject({
       id: "task-1",
@@ -134,6 +145,15 @@ describe("collectRenderedSubtasks", () => {
 });
 
 describe("resolveRenderedSubtask", () => {
+  it("uses an in-progress fallback before the live task is available", () => {
+    const fallbackTask = baseTask({
+      status: "in_progress",
+      description: "fallback",
+    });
+
+    expect(resolveRenderedSubtask(undefined, fallbackTask)).toBe(fallbackTask);
+  });
+
   it("prefers a terminal fallback snapshot over a stale live task", () => {
     const resolved = resolveRenderedSubtask(
       baseTask({

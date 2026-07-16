@@ -46,18 +46,18 @@ export function resolveRenderedSubtask(
 
 export function collectRenderedSubtasks(
   groups: MessageGroupLike[],
-  isGroupStreaming: (messages: Message[]) => boolean,
+  isGroupLoading: (messages: Message[], groupIndex: number) => boolean,
   failedLabel: string,
 ): RenderedSubtasks {
   const tasks = new Map<string, Subtask>();
   const updates: Array<Partial<Subtask> & { id: string }> = [];
 
-  for (const group of groups) {
+  for (const [groupIndex, group] of groups.entries()) {
     if (group.type !== "assistant:subagent") {
       continue;
     }
 
-    const groupIsLoading = isGroupStreaming(group.messages);
+    const groupIsLoading = isGroupLoading(group.messages, groupIndex);
 
     for (const message of group.messages) {
       if (message.type === "ai") {
