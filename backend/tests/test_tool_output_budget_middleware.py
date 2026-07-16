@@ -8,6 +8,7 @@ sync/async code paths.
 
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 from types import SimpleNamespace
@@ -31,6 +32,7 @@ from deerflow.agents.middlewares.tool_output_budget_middleware import (
     _snap_to_line_boundary,
     _tool_message_over_budget,
 )
+from deerflow.agents.middlewares.tool_output_synopsis import build_tool_output_synopsis
 from deerflow.config.app_config import AppConfig
 from deerflow.config.sandbox_config import SandboxConfig
 from deerflow.config.tool_output_config import ToolOutputConfig
@@ -263,7 +265,7 @@ class TestNeedsBudget:
 
 
 class TestBuildPreview:
-    def test_contains_head_and_tail_and_reference(self):
+    def test_contains_typed_summary_and_reference(self):
         content = "HEAD_" + "x" * 5000 + "_TAIL"
         preview = _build_preview(
             content,
@@ -272,8 +274,9 @@ class TestBuildPreview:
             head_chars=100,
             tail_chars=50,
         )
-        assert preview.startswith("HEAD_")
-        assert "_TAIL" in preview
+        assert preview.startswith("[Full bash output saved to /mnt/test/bash-abc.log")
+        assert "Preview kind: text" in preview
+        assert "Text output" in preview
         assert "/mnt/test/bash-abc.log" in preview
         assert "read_file" in preview
         assert "start_line and end_line" in preview
@@ -288,6 +291,233 @@ class TestBuildPreview:
             tail_chars=100,
         )
         assert "10000 chars" in preview
+
+    def test_json_preview_includes_structure_and_raw_sample(self):
+        content = '{"meta":{"source":"unit"},"items":[{"id":1,"name":"alpha"},{"id":2,"name":"beta"}],"payload":"' + "x" * 5000 + '","tail_marker":"SHOULD_NOT_NEED_TAIL"}'
+        preview = _build_preview(
+            content,
+            tool_name="mcp_json",
+            virtual_path="/mnt/test/result.json",
+            head_chars=80,
+            tail_chars=40,
+        )
+        assert "Preview kind: json" in preview
+        assert "JSON object with 4 top-level keys" in preview
+        assert "Top-level keys: meta, items, payload, tail_marker" in preview
+        assert "items: array length 2" in preview
+        assert '$.meta.source: "unit"' in preview
+        assert not preview.startswith('{"meta"')
+        # The synopsis no longer hides the raw head/tail bytes; the model
+        # gets the typed synopsis AND inline raw samples so it can read
+        # the file with a tighter start_line range.
+        assert "Raw sample (head + tail" in preview
+        # payload segment dominates the document, so even with head_chars=80
+        # the raw head sample is almost entirely 'x' characters.
+        assert preview.count("x") >= 50
+
+    def test_json_preview_reports_nested_paths_and_line_hints(self):
+        content = json.dumps(
+            {
+                "data": {
+                    "items": [{"id": idx, "name": f"item-{idx}"} for idx in range(47)],
+                    "next_cursor": "cursor-2",
+                },
+                "meta": {"source": "unit"},
+            },
+            indent=2,
+        )
+        preview = _build_preview(
+            content,
+            tool_name="api_tool",
+            virtual_path="/mnt/test/api.json",
+            head_chars=80,
+            tail_chars=40,
+        )
+        assert "$.data: object keys 2; keys items, next_cursor" in preview
+        assert "$.data.items: array length 47; first item object" in preview
+        # Location hints were removed: they are wrong when a key string also
+        # appears as a value earlier in the document, or when the same key
+        # recurs at multiple depths.
+        assert "line " not in preview.split("Access:")[0]
+        assert "byte offset " not in preview
+
+    def test_json_paths_are_emitted_without_line_hints(self):
+        content = "\n\n" + json.dumps({"data": {"items": [1, 2, 3]}}, indent=2)
+        preview = _build_preview(
+            content,
+            tool_name="api_tool",
+            virtual_path="/mnt/test/api.json",
+            head_chars=80,
+            tail_chars=40,
+        )
+        assert "$.data: object keys 1; keys items" in preview
+        assert "line " not in preview.split("Access:")[0]
+        assert "byte offset " not in preview
+
+    def test_table_preview_extracts_columns(self):
+        content = "name,score\n" + "\n".join(f"Ada{i},{90 + i}" for i in range(10)) + "\n"
+        preview = _build_preview(
+            content,
+            tool_name="csv_tool",
+            virtual_path="/mnt/test/table.csv",
+            head_chars=80,
+            tail_chars=40,
+        )
+        assert "Preview kind: csv" in preview
+        assert "CSV table with 10 data rows and 2 columns" in preview
+        assert "columns: name, score" in preview
+        assert "first data row: name=Ada0 | score=90" in preview
+
+
+class TestToolOutputSynopsis:
+    def test_code_synopsis_extracts_imports_and_symbols(self):
+        content = "import os\nfrom pathlib import Path\n\nclass Runner:\n    pass\n\ndef main():\n    return Path(os.getcwd())\n"
+        synopsis = build_tool_output_synopsis(content, tool_name="python")
+        assert synopsis.kind == "code"
+        assert "line count" in synopsis.structure[0]
+        assert any("imports: os, pathlib" in item for item in synopsis.structure)
+        assert "class Runner" in synopsis.notable_items
+        assert "def main" in synopsis.notable_items
+
+    def test_yaml_synopsis_extracts_top_level_keys(self):
+        content = "name: deer\nsettings:\n  enabled: true\n  retries: 3\nitems:\n  - alpha\n"
+        synopsis = build_tool_output_synopsis(content, tool_name="config")
+        assert synopsis.kind == "yaml"
+        assert "Top-level keys: name, settings, items" in synopsis.summary
+        assert "settings: object" in synopsis.structure
+        assert "items: array" in synopsis.structure
+
+    def test_xml_synopsis_extracts_root_and_children(self):
+        content = '<feed><entry id="1"/><entry id="2"/><meta/></feed>'
+        synopsis = build_tool_output_synopsis(content, tool_name="xml")
+        assert synopsis.kind == "xml"
+        assert "XML document with root tag feed." in synopsis.summary
+        assert "root tag: feed" in synopsis.structure
+        assert "entry: 2" in synopsis.structure
+
+    # ------------------------------------------------------------------
+    # Regression tests for the @willem-bd review of PR #3377.
+    # Each test pins one of the eight findings so a future change cannot
+    # silently regress the fix.
+    # ------------------------------------------------------------------
+
+    def test_review_5_log_lines_are_not_misclassified_as_yaml(self):
+        # 200 lines of log output shaped like "LEVEL: message". The previous
+        # _looks_yaml counted 2 'key:' lines and accepted it; _try_yaml then
+        # produced a "YAML object with 3 top-level keys: INFO, ERROR, WARN"
+        # summary that hid every line, count, and middle-of-log signal.
+        content = "INFO: starting service\nERROR: failed to connect\nWARN: retrying\nINFO: connected\n" * 200
+        synopsis = build_tool_output_synopsis(content, tool_name="bash")
+        assert synopsis.kind == "text", f"expected text, got {synopsis.kind!r}: {synopsis.summary}"
+
+    def test_review_6_json_paths_are_emitted_without_byte_offset(self):
+        # The previous _json_path_location anchored at the first textual
+        # occurrence of the key string, which is wrong when the key also
+        # appears as a value earlier in the document.
+        content = '{"label": "items", "items": {"id": 1, "name": "foo"}}'
+        preview = _build_preview(
+            content,
+            tool_name="api_tool",
+            virtual_path="/mnt/test/api.json",
+            head_chars=200,
+            tail_chars=200,
+        )
+        assert "byte offset" not in preview
+        # The path itself is still useful navigation.
+        assert "$.items" in preview
+
+    def test_review_7_scalar_examples_respects_depth_cap(self):
+        # build_tool_output_synopsis used to recurse without a depth cap
+        # in _scalar_examples, which could trigger RecursionError on
+        # deeply nested JSON. The cap is now mirrored from
+        # _JSON_STRUCTURE_DEPTH.
+        deep = {"k": 1}
+        for _ in range(500):
+            deep = {"k": deep}
+        # Should not raise.
+        synopsis = build_tool_output_synopsis(json.dumps(deep))
+        assert synopsis.kind == "json"
+
+    def test_review_8_csv_first_row_quoted_cells_round_trip(self):
+        # delimiter.join(rows[1]) silently re-split cells containing the
+        # delimiter inside a quoted cell, misleading the model about
+        # column count.
+        header = "name,description,score"
+        rows = [
+            'Ada,"a fine, brilliant logician",98',
+            'Grace,"a creator, of compilers",99',
+            'Alan,"a pioneer, of computing",95',
+            'Kurt,"a poet, of logic",91',
+            'Ada2,"another, fine mind",97',
+            'Grace2,"yet another, creator",93',
+        ]
+        content = header + "\n" + "\n".join(rows) + "\n"
+        synopsis = build_tool_output_synopsis(content, tool_name="csv_tool")
+        assert synopsis.kind == "csv"
+        first_row = next((line for line in synopsis.structure if line.startswith("first data row:")), "")
+        # All three columns must be present, and the quoted cell must
+        # round-trip without losing the embedded comma.
+        assert "name=Ada" in first_row
+        assert "score=98" in first_row
+        assert "a fine, brilliant logician" in first_row
+        # The re-joined comma-broken row is the failure mode we are guarding.
+        assert "Ada,a fine, brilliant" not in first_row
+
+    def test_review_9_tsv_detector_rejects_tab_indented_bash(self):
+        # Tab-indented output (ls -l, tree, indented logs) used to be
+        # accepted as TSV because _try_table only checked that the
+        # delimiter is present and rows agree on width.
+        row = "drwxr-xr-x  2 user  group   64 Jun 24 17:00 dir"
+        bash_out = "ls -l output:\n\ttotal 0\n" + "\n".join(f"\t{row}{i}" for i in range(1, 6)) + "\n"
+        synopsis = build_tool_output_synopsis(bash_out, tool_name="bash")
+        assert synopsis.kind == "text", f"expected text, got {synopsis.kind!r}: {synopsis.summary}"
+
+    def test_review_10_preview_includes_raw_head_and_tail_sample(self):
+        # Default behavior change in the PR removed the inline raw bytes
+        # for non-binary previews. The fix restores them so the model
+        # can see the actual first/last KB without a follow-up read_file.
+        content = "log line 1\n" * 200
+        preview = _build_preview(
+            content,
+            tool_name="bash",
+            virtual_path="/mnt/test/run.log",
+            head_chars=400,
+            tail_chars=400,
+        )
+        assert "Raw sample (head + tail" in preview
+        # head_chars=400 should capture the first 80 'log line 1' lines
+        # verbatim; tail_chars=400 should capture the last 80.
+        assert preview.count("log line 1") >= 70  # line snapping may lose a few
+
+    def test_review_11_short_text_does_not_duplicate_excerpts(self):
+        # For inputs shorter than 2 * _TEXT_EXCERPT_CHARS, the previous
+        # opener/closer slices overlapped and the model saw the same
+        # body twice. build_tool_output_synopsis is reachable directly
+        # from tests and other callers that pass small inputs.
+        short = "hello world " * 30  # ~360 chars
+        synopsis = build_tool_output_synopsis(short)
+        opener_line = next((ln for ln in synopsis.summary if ln.startswith("Opening excerpt: ")), "")
+        # Closer is now suppressed entirely for short inputs.
+        assert all(not ln.startswith("Closing excerpt: ") for ln in synopsis.summary), f"unexpected closer for short input: {synopsis.summary}"
+        assert opener_line, "opening excerpt should still be present"
+
+    def test_review_12_preview_head_tail_chars_are_operational(self):
+        # preview_head_chars / preview_tail_chars were silently no-op
+        # for every non-binary kind. The fix plumbs them through
+        # render_tool_output_preview as an explicit 'Raw sample' section.
+        content = "alpha " * 1000  # 6000 chars
+        preview = _build_preview(
+            content,
+            tool_name="bash",
+            virtual_path="/mnt/test/run.log",
+            head_chars=300,
+            tail_chars=300,
+        )
+        # The head sample should contain 'alpha' more times than the
+        # tail (or split-count), proving head_chars=300 took effect.
+        # The full document has 1000 'alpha' tokens; without head_chars
+        # we'd see fewer than 50 in the head sample.
+        assert preview.count("alpha") >= 50
 
 
 class TestBuildFallback:
@@ -394,7 +624,7 @@ class TestWrapToolCallExternalize:
             with open(os.path.join(storage_dir, files[0]), encoding="utf-8") as f:
                 assert f.read() == content
 
-    def test_preview_contains_head_and_tail(self):
+    def test_preview_contains_typed_summary(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             config = ToolOutputConfig(externalize_min_chars=50, preview_head_chars=20, preview_tail_chars=10)
             mw = ToolOutputBudgetMiddleware(config=config)
@@ -404,8 +634,10 @@ class TestWrapToolCallExternalize:
 
             result = mw.wrap_tool_call(req, lambda _: msg)
 
-            assert result.content.startswith("HEADPART_")
-            assert "_TAILPART" in result.content
+            assert result.content.startswith("[Full web_search output saved to")
+            assert "Preview kind: text" in result.content
+            assert "Text output" in result.content
+            assert "HEADPART_" in result.content
 
 
 class TestWrapToolCallFallback:

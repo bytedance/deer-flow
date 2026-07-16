@@ -934,8 +934,8 @@ tool_search:
 # ============================================================================
 # Prevents oversized tool results from blowing the model context window.
 # Outputs exceeding `externalize_min_chars` are persisted to disk and replaced
-# with a compact preview + file reference. The model can read the full output
-# via read_file.  When disk persistence is unavailable, outputs exceeding
+# with a compact typed synopsis + file reference. The model can read the full output
+# via read_file. When disk persistence is unavailable, outputs exceeding
 # `fallback_max_chars` are head+tail truncated instead.
 #
 # `exempt_tools` prevents persist→read→persist infinite loops for read tools.
@@ -944,6 +944,8 @@ tool_search:
 tool_output:
   enabled: true
   externalize_min_chars: 12000
+  # Sampling budget for the inline raw head/tail sample appended to every
+  # typed synopsis; ignored for binary-like output, which carries its own sample.
   preview_head_chars: 2000
   preview_tail_chars: 1000
   fallback_max_chars: 30000
