@@ -16,10 +16,27 @@ import logging
 
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 
+# Recycle pooled Postgres connections before stale idle sockets can hang
+# pool_pre_ping, and bound asyncpg commands when they do (#3882).
+POSTGRES_POOL_RECYCLE_SECONDS = 300
+POSTGRES_COMMAND_TIMEOUT_SECONDS = 60
+
 
 def _json_serializer(obj: object) -> str:
     """JSON serializer with ensure_ascii=False for Chinese character support."""
     return json.dumps(obj, ensure_ascii=False)
+
+
+def _postgres_engine_kwargs(*, echo: bool, pool_size: int) -> dict[str, object]:
+    """Build the shared SQLAlchemy engine options for PostgreSQL."""
+    return {
+        "echo": echo,
+        "pool_size": pool_size,
+        "pool_pre_ping": True,
+        "pool_recycle": POSTGRES_POOL_RECYCLE_SECONDS,
+        "connect_args": {"command_timeout": POSTGRES_COMMAND_TIMEOUT_SECONDS},
+        "json_serializer": _json_serializer,
+    }
 
 
 logger = logging.getLogger(__name__)
@@ -131,13 +148,7 @@ async def init_engine(
             finally:
                 cursor.close()
     elif backend == "postgres":
-        _engine = create_async_engine(
-            url,
-            echo=echo,
-            pool_size=pool_size,
-            pool_pre_ping=True,
-            json_serializer=_json_serializer,
-        )
+        _engine = create_async_engine(url, **_postgres_engine_kwargs(echo=echo, pool_size=pool_size))
     else:
         raise ValueError(f"Unknown persistence backend: {backend!r}")
 
@@ -162,7 +173,7 @@ async def init_engine(
             await _auto_create_postgres_db(url)
             # Rebuild engine against the now-existing database
             await _engine.dispose()
-            _engine = create_async_engine(url, echo=echo, pool_size=pool_size, pool_pre_ping=True, json_serializer=_json_serializer)
+            _engine = create_async_engine(url, **_postgres_engine_kwargs(echo=echo, pool_size=pool_size))
             _session_factory = async_sessionmaker(_engine, expire_on_commit=False)
             await bootstrap_schema(_engine, backend=backend)
         else:
