@@ -1148,6 +1148,51 @@ class TestReviewerFindings:
         next_cycle_candidates = _select_stale_candidates(result, updater._config)
         assert any(f.get("source") == "consolidation" for f in next_cycle_candidates), "volatile-source merge must re-enter staleness review"
 
+    @pytest.mark.parametrize("bad_evd", [float("nan"), float("inf"), float("-inf")], ids=["nan", "inf", "-inf"])
+    def test_consolidation_with_non_finite_source_evd_does_not_raise(self, bad_evd):
+        """A malformed non-finite expected_valid_days (NaN / +/-inf) in a
+        hand-edited memory.json must not abort consolidation. The source's
+        effective lifetime falls back to the global staleness_age_days, so its
+        deadline still participates in the earliest-deadline computation instead
+        of raising ValueError/OverflowError during int() coercion."""
+        updater = _make_updater(
+            max_facts=100,
+            consolidation_enabled=True,
+            consolidation_min_facts=2,
+            consolidation_max_groups_per_cycle=3,
+            consolidation_max_sources=8,
+            staleness_age_days=90,
+            staleness_max_lifetime_multiplier=20.0,
+        )
+        created = _days_ago(100)
+        facts = [
+            {**_make_fact("fact_bad", "Bad evd", "knowledge", 0.9), "createdAt": created, "expected_valid_days": bad_evd},
+            {**_make_fact("fact_stable", "Stable", "knowledge", 0.85), "createdAt": created, "expected_valid_days": 3650},
+        ]
+        current_memory = _make_memory(facts)
+        update_data = {
+            "user": {},
+            "history": {},
+            "newFacts": [],
+            "factsToRemove": [],
+            "staleFactsToRemove": [],
+            "factsToConsolidate": [
+                {
+                    "sourceIds": ["fact_bad", "fact_stable"],
+                    "consolidated": {"content": "merged", "category": "knowledge", "confidence": 0.9},
+                },
+            ],
+        }
+        # Must not raise. The bad source's non-finite evd falls back to the global
+        # 90, whose deadline (createdAt + 90) governs over the stable 3650.
+        result = updater._apply_updates(current_memory, update_data)
+
+        merged = [f for f in result["facts"] if f.get("source") == "consolidation"]
+        assert len(merged) == 1
+        # earliest deadline = createdAt + 90 (non-finite source fallback), relative
+        # to merged createdAt (same) = 90.
+        assert merged[0]["expected_valid_days"] == 90
+
     def test_consolidated_evd_overdue_source_clamps_to_minimal_window(self):
         """When a source's review deadline (createdAt + evd) is earlier than the
         merged fact's createdAt (the newest source's) - e.g. a very old source

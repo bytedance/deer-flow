@@ -159,6 +159,17 @@ class TestReadExpectedValidDays:
     def test_ignores_non_numeric(self):
         assert _read_expected_valid_days({"expected_valid_days": "365"}) is None
 
+    def test_rejects_non_finite_values(self):
+        # int(nan) raises ValueError and int(inf) raises OverflowError; the helper
+        # must reject non-finite floats (NaN, +/-inf) before coercion so a single
+        # malformed field in a hand-edited memory.json cannot abort staleness
+        # selection or consolidation. Python's JSON decoder accepts these as floats.
+
+        for bad in (float("nan"), float("inf"), float("-inf")):
+            assert _read_expected_valid_days({"expected_valid_days": bad}) is None
+        # sanity: the helper no longer raises on these
+        assert _read_expected_valid_days({"expected_valid_days": float("nan")}) is None
+
 
 # ── _effective_fact_staleness_age ─────────────────────────────────────────
 
@@ -207,6 +218,16 @@ class TestEffectiveFactStalenessAge:
         # where int() ran after the > 0 check.
         config = _memory_config(staleness_age_days=90)
         for bad in (0.5, 0.9):
+            fact = _make_fact("f1", days_ago=100)
+            fact["expected_valid_days"] = bad
+            assert _effective_fact_staleness_age(fact, config) == 90
+
+    def test_falls_back_for_non_finite_values(self):
+        # NaN / +/-inf in a hand-edited memory.json must fall back to the global
+        # age instead of raising (int(nan) -> ValueError, int(inf) -> OverflowError).
+        # Drives the persisted-fact read path the reviewer flagged.
+        config = _memory_config(staleness_age_days=90)
+        for bad in (float("nan"), float("inf"), float("-inf")):
             fact = _make_fact("f1", days_ago=100)
             fact["expected_valid_days"] = bad
             assert _effective_fact_staleness_age(fact, config) == 90

@@ -172,8 +172,8 @@ def _normalize_memory_update_fact(fact: Any) -> dict[str, Any] | None:
             normalized_fact["sourceError"] = normalized_source_error
 
     # Fact lifetime (expected_valid_days): optional LLM-assigned review window.
-    # Validated via the shared _read_expected_valid_days rule (int/float, reject
-    # bool, >0, coerce to int); the creation-time cap is applied in _apply_updates.
+    # Validated via the shared _read_expected_valid_days rule (reject bool, require
+    # finite, coerce to int, keep only positive); cap applied in _apply_updates.
     evd = _read_expected_valid_days(fact)
     if evd is not None:
         normalized_fact["expected_valid_days"] = evd
@@ -399,14 +399,18 @@ def _read_expected_valid_days(fact: dict[str, Any]) -> int | None:
     ``_normalize_memory_update_fact`` rule.  Coercing first matters for values
     in (0, 1): ``0.5`` passes a raw ``> 0`` check but truncates to ``0``, which
     would otherwise be returned as a (non-positive) lifetime instead of
-    ``None`` - and ``_effective_fact_staleness_age`` would treat that zero as
-    an explicit lifetime, making the fact immediately stale.  Hand-edited
-    ``memory.json`` files and pre-feature facts may carry floats or lack the
-    field entirely; returning ``None`` lets callers fall back to the global
-    age or omit the field rather than silently writing a zero/negative lifetime.
+    ``None``.  Non-finite values (``NaN``, ``+/-inf``) are rejected before the
+    coercion - ``int(nan)`` raises ``ValueError`` and ``int(inf)`` raises
+    ``OverflowError`` - because Python's JSON decoder accepts them as floats by
+    default and they can appear in a hand-edited ``memory.json``; rejecting them
+    keeps a single malformed field from aborting staleness selection or
+    consolidation.  Hand-edited files and pre-feature facts may also carry
+    floats or lack the field entirely; returning ``None`` lets callers fall back
+    to the global age or omit the field rather than silently writing a
+    zero/negative/non-finite lifetime.
     """
     raw = fact.get("expected_valid_days")
-    if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+    if isinstance(raw, (int, float)) and not isinstance(raw, bool) and math.isfinite(float(raw)):
         evd = int(raw)  # coerce before the positivity guard
         if evd > 0:
             return evd
