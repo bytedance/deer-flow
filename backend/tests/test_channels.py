@@ -6809,6 +6809,28 @@ class TestSlackTextEscaping:
         sent = self._sent_text("[Search](https://example.com?a=1&b=2)")
         assert "<https://example.com?a=1&amp;b=2|Search>" in sent
 
+    def test_blockquote_marker_at_line_start_is_preserved(self):
+        # A ">" at the very start of a line is Slack's own blockquote marker
+        # (the mrkdwn converter passes it through unchanged), not part of the
+        # <...> mention/link syntax that & and < neutralize. Escaping it would
+        # turn a quoted line into visible "&gt;" text instead of a rendered
+        # blockquote.
+        sent = self._sent_text("> quoted text")
+        assert sent == "> quoted text"
+
+    def test_blockquote_marker_exemption_is_line_start_only(self):
+        # The line-start exemption must not widen into "never escape '>'":
+        # a "<"/"&" anywhere, and a ">" that is NOT at the start of a line,
+        # still escape -- only the leading marker is restored.
+        sent = self._sent_text("> a < b & c > d")
+        assert sent == "> a &lt; b &amp; c &gt; d"
+
+    def test_blockquote_marker_restored_on_every_line(self):
+        # The restoration must apply per-line (re.MULTILINE), not just once
+        # at the start of the whole string.
+        sent = self._sent_text("intro\n> first quote\nmiddle\n> second quote")
+        assert sent == "intro\n> first quote\nmiddle\n> second quote"
+
 
 # ---------------------------------------------------------------------------
 # Telegram streaming tests

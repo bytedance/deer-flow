@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import html
 import logging
+import re
 from typing import Any
 
 from markdown_to_mrkdwn import SlackMarkdownConverter
@@ -20,7 +21,8 @@ _slack_md_converter = SlackMarkdownConverter()
 
 
 def _escape_slack_text(text: str) -> str:
-    """Escape Slack's reserved characters (``&``, ``<``, ``>``) in raw message text.
+    """Escape Slack's reserved characters (``&``, ``<``, ``>``) in raw message text,
+    except a ``>`` at the very start of a line -- Slack's own blockquote marker.
 
     Slack requires callers to replace these with their HTML entity equivalents
     (``&amp;``, ``&lt;``, ``&gt;``) before sending message text -- an unescaped
@@ -35,8 +37,16 @@ def _escape_slack_text(text: str) -> str:
     alone -- satisfies both requirements. ``html.escape(..., quote=False)``
     replaces ``&`` before ``<``/``>``, so the entities it introduces are never
     re-escaped.
+
+    Only ``&`` and ``<`` neutralize Slack's ``<...>`` mention/link syntax; a
+    ``>`` is special to Slack only at the start of a line, where the mrkdwn
+    converter passes it through unchanged as a blockquote marker. Escaping
+    every ``>`` would turn a quoted line into visible ``&gt;`` text instead of
+    a rendered blockquote, so a line-leading ``>`` is restored to a literal
+    ``>`` after escaping; a ``>`` anywhere else in the text still escapes.
     """
-    return html.escape(text, quote=False)
+    escaped = html.escape(text, quote=False)
+    return re.sub(r"(?m)^&gt;", ">", escaped)
 
 
 def _normalize_allowed_users(allowed_users: Any) -> set[str]:
