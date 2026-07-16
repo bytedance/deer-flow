@@ -376,17 +376,28 @@ an opt-in root `volumePermissions` initContainer that chowns on every start (the
 Bitnami pattern) — is not yet wired into this chart; it would introduce a root
 container, so it's left as an operator decision for now.
 
-## Sandbox NodePort reachability
+## Sandbox Service type
 
-The provisioner returns `http://{NODE_HOST}:{NodePort}` to the gateway so the
-agent can reach its sandbox. In Docker Compose `NODE_HOST=host.docker.internal`;
-in Kubernetes `NODE_HOST` **defaults to the provisioner pod's node IP** via the
-[downward API](https://kubernetes.io/docs/concepts/workloads/pods/downward-api/)
-(`status.hostIP`). Because a NodePort is exposed on every node, the gateway can
-reach `<node-IP>:<NodePort>` on most clusters without any configuration.
+The provisioner exposes each sandbox Pod behind a per-sandbox Service whose type
+is controlled by `provisioner.sandboxServiceType` (default `ClusterIP`).
 
-Override `provisioner.nodeHost` only if your CNI or network policy blocks
-pod->node-IP traffic:
+**`ClusterIP` (default, recommended).** The provisioner returns a cluster-DNS
+URL - `http://sandbox-<id>-svc.<namespace>.svc.cluster.local:8080` - so the
+gateway reaches its sandbox entirely inside the cluster network. No node IP, no
+high port, and the code-execution surface is **not** bound on every node's
+interfaces. This is correct for the chart, where the gateway always runs
+in-cluster.
+
+**`NodePort` (Docker-Compose/hybrid escape hatch).** Set
+`provisioner.sandboxServiceType: NodePort` only when the gateway is *not* in K8s
+(e.g. the compose dev path, where the gateway is a container reaching sandbox
+Pods on the host's Docker Desktop K8s). The provisioner then returns
+`http://{NODE_HOST}:{NodePort}`. `NODE_HOST` defaults to the provisioner pod's
+node IP via the [downward API](https://kubernetes.io/docs/concepts/workloads/pods/downward-api/)
+(`status.hostIP`); because a NodePort is exposed on every node, the gateway can
+reach `<node-IP>:<NodePort>` on most clusters without configuration. Override
+`provisioner.nodeHost` only if your CNI or network policy blocks pod->node-IP
+traffic:
 
 ```bash
 kubectl get nodes -o wide    # use INTERNAL-IP or EXTERNAL-IP
@@ -394,11 +405,13 @@ kubectl get nodes -o wide    # use INTERNAL-IP or EXTERNAL-IP
 
 ```yaml
 provisioner:
+  sandboxServiceType: NodePort
   nodeHost: 192.168.x.x
 ```
 
 On multi-node clusters, also switch `persistence.home.accessMode` to
-`ReadWriteMany`.
+`ReadWriteMany` (this is orthogonal to the Service type - it governs whether a
+sandbox Pod can be scheduled on a node other than the gateway's).
 
 ## Lint / dry-run
 

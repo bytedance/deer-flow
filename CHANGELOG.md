@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **sandbox:** The Helm chart now defaults per-sandbox Services to `ClusterIP`
+  instead of `NodePort`, so the code-execution sandbox is reachable only inside
+  the cluster via Service DNS (`http://sandbox-<id>-svc.<ns>.svc.cluster.local`)
+  and is no longer bound on every node's interfaces - including the
+  externally-reachable ones on GKE/EKS/AKS. Existing chart installs flip
+  NodePort -> ClusterIP on upgrade. To preserve the old reachability (an
+  external probe hitting the 30xxx port, or the Docker-Compose/hybrid path
+  where the gateway is not in K8s), set `provisioner.sandboxServiceType: NodePort`
+  (with `provisioner.nodeHost` if needed). The provisioner itself is unchanged
+  (mode-aware since #4016). ([#4190])
+  
 ### ⚠ Breaking changes
 
 - **skills:** A directory containing `SKILL.md` is now a runtime package
@@ -590,3 +603,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#4095]: https://github.com/bytedance/deer-flow/issues/4095
 [#4098]: https://github.com/bytedance/deer-flow/pull/4098
 [#4146]: https://github.com/bytedance/deer-flow/pull/4146
+[#4190]: https://github.com/bytedance/deer-flow/pull/4190
