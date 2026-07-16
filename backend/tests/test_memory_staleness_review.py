@@ -26,6 +26,7 @@ from deerflow.agents.memory.backends.deermem.deermem.core.updater import (
     _effective_fact_staleness_age,
     _normalize_memory_update_data,
     _parse_fact_datetime,
+    _read_expected_valid_days,
     _select_stale_candidates,
 )
 
@@ -124,6 +125,41 @@ class TestParseFactDatetime:
         assert result.tzinfo is not None
 
 
+# ── _read_expected_valid_days ─────────────────────────────────────────────
+
+
+class TestReadExpectedValidDays:
+    """Shared validator used by the newFact creation cap, the staleness read
+    path, and consolidation inheritance - so its type rule is tested once here
+    rather than reimplemented per call site."""
+
+    def test_returns_int_when_present(self):
+        assert _read_expected_valid_days({"expected_valid_days": 365}) == 365
+
+    def test_coerces_float_to_int(self):
+        assert _read_expected_valid_days({"expected_valid_days": 180.7}) == 180
+
+    def test_returns_none_when_absent(self):
+        assert _read_expected_valid_days({}) is None
+
+    def test_ignores_bool(self):
+        assert _read_expected_valid_days({"expected_valid_days": True}) is None
+
+    def test_ignores_zero_and_negative(self):
+        assert _read_expected_valid_days({"expected_valid_days": 0}) is None
+        assert _read_expected_valid_days({"expected_valid_days": -5}) is None
+
+    def test_fractional_below_one_returns_none(self):
+        # 0.5 passes a raw > 0 check but truncates to 0 - the int coercion must
+        # happen BEFORE the positivity guard, else 0 leaks out as a (non-positive)
+        # lifetime instead of None. Regression for the helper-extraction order bug.
+        assert _read_expected_valid_days({"expected_valid_days": 0.5}) is None
+        assert _read_expected_valid_days({"expected_valid_days": 0.9}) is None
+
+    def test_ignores_non_numeric(self):
+        assert _read_expected_valid_days({"expected_valid_days": "365"}) is None
+
+
 # ── _effective_fact_staleness_age ─────────────────────────────────────────
 
 
@@ -160,6 +196,17 @@ class TestEffectiveFactStalenessAge:
     def test_ignores_zero_and_negative(self):
         config = _memory_config(staleness_age_days=90)
         for bad in (0, -5):
+            fact = _make_fact("f1", days_ago=100)
+            fact["expected_valid_days"] = bad
+            assert _effective_fact_staleness_age(fact, config) == 90
+
+    def test_falls_back_for_fractional_below_one(self):
+        # A hand-edited 0.5 must NOT be treated as an explicit (zero) lifetime
+        # that makes the fact immediately stale - it falls back to the global
+        # age like any other invalid value. Guards the coercion-order regression
+        # where int() ran after the > 0 check.
+        config = _memory_config(staleness_age_days=90)
+        for bad in (0.5, 0.9):
             fact = _make_fact("f1", days_ago=100)
             fact["expected_valid_days"] = bad
             assert _effective_fact_staleness_age(fact, config) == 90
