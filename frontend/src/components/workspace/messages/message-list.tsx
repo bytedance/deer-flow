@@ -315,8 +315,7 @@ export function MessageList({
     () =>
       collectRenderedSubtasks(
         groupedMessages,
-        (_groupMessages, groupIndex) =>
-          thread.isLoading && groupIndex === lastGroupIndex,
+        (groupIndex) => thread.isLoading && groupIndex === lastGroupIndex,
         t.subtasks.failed,
       ),
     [groupedMessages, lastGroupIndex, t.subtasks.failed, thread.isLoading],

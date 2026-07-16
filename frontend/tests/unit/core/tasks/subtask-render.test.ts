@@ -1,6 +1,7 @@
 import type { Message } from "@langchain/langgraph-sdk";
 import { describe, expect, it } from "@rstest/core";
 
+import type { MessageGroup } from "@/core/messages/utils";
 import {
   collectRenderedSubtasks,
   resolveRenderedSubtask,
@@ -28,7 +29,7 @@ function subagentGroup(messages: Message[]) {
 
 describe("collectRenderedSubtasks", () => {
   it("derives an in-progress task while the subagent turn is still streaming", () => {
-    const groups = [
+    const groups: MessageGroup[] = [
       {
         id: "group-0",
         type: "human",
@@ -56,8 +57,7 @@ describe("collectRenderedSubtasks", () => {
     const threadIsLoading = true;
     const rendered = collectRenderedSubtasks(
       groups,
-      (_messages, groupIndex) =>
-        threadIsLoading && groupIndex === groups.length - 1,
+      (groupIndex) => threadIsLoading && groupIndex === groups.length - 1,
       "failed",
     );
 
@@ -194,6 +194,39 @@ describe("resolveRenderedSubtask", () => {
     expect(resolved).toMatchObject({
       status: "in_progress",
       description: "live",
+    });
+  });
+
+  it("fills a metadata-only live task from an in-progress fallback", () => {
+    const resolved = resolveRenderedSubtask(
+      {
+        id: "task-1",
+        modelName: "claude-3-7-sonnet",
+      } as Subtask,
+      baseTask({ status: "in_progress", description: "fallback" }),
+    );
+
+    expect(resolved).toMatchObject({
+      id: "task-1",
+      status: "in_progress",
+      description: "fallback",
+      modelName: "claude-3-7-sonnet",
+    });
+  });
+
+  it("preserves fields available only on a live task after completion", () => {
+    const resolved = resolveRenderedSubtask(
+      {
+        ...baseTask({ status: "in_progress" }),
+        futureLiveMetadata: "preserved",
+      } as Subtask & { futureLiveMetadata: string },
+      baseTask({ status: "completed", result: "done" }),
+    ) as Subtask & { futureLiveMetadata?: string };
+
+    expect(resolved).toMatchObject({
+      status: "completed",
+      result: "done",
+      futureLiveMetadata: "preserved",
     });
   });
 });

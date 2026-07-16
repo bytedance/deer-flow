@@ -72,9 +72,10 @@ export function SubtaskCard({
   // already have steps from SSE, so the `steps.length` guard skips the fetch.
   const stepsCount = task?.steps?.length ?? 0;
   const taskStatus = task?.status;
+  const hasTask = task !== undefined;
   const backfilledRef = useRef(false);
   useEffect(() => {
-    if (!task || collapsed || backfilledRef.current || stepsCount > 0) {
+    if (!hasTask || collapsed || backfilledRef.current || stepsCount > 0) {
       return;
     }
     if (!threadId || !runId) {
@@ -91,7 +92,7 @@ export function SubtaskCard({
         // Allow a retry on the next expand if the fetch failed.
         backfilledRef.current = false;
       });
-  }, [collapsed, stepsCount, task, threadId, runId, taskId, updateSubtask]);
+  }, [collapsed, hasTask, stepsCount, threadId, runId, taskId, updateSubtask]);
 
   const icon =
     taskStatus === "completed" ? (

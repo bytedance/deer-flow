@@ -1,6 +1,4 @@
-import type { Message } from "@langchain/langgraph-sdk";
-
-import { extractTextFromMessage } from "../messages/utils";
+import { extractTextFromMessage, type MessageGroup } from "../messages/utils";
 
 import {
   derivePendingSubtaskStatus,
@@ -8,11 +6,6 @@ import {
 } from "./subtask-result";
 import { isTerminalSubtaskStatus } from "./subtask-update";
 import type { Subtask } from "./types";
-
-interface MessageGroupLike {
-  type: string;
-  messages: Message[];
-}
 
 export interface RenderedSubtasks {
   tasks: Map<string, Subtask>;
@@ -32,21 +25,20 @@ export function resolveRenderedSubtask(
   }
 
   if (!isTerminalSubtaskStatus(fallbackTask.status)) {
-    return liveTask;
+    return liveTask.status ? liveTask : { ...fallbackTask, ...liveTask };
   }
 
   return {
+    ...liveTask,
     ...fallbackTask,
-    modelName: fallbackTask.modelName ?? liveTask.modelName,
-    usage: fallbackTask.usage ?? liveTask.usage,
     steps: liveTask.steps ?? fallbackTask.steps,
     latestMessage: liveTask.latestMessage ?? fallbackTask.latestMessage,
   };
 }
 
 export function collectRenderedSubtasks(
-  groups: MessageGroupLike[],
-  isGroupLoading: (messages: Message[], groupIndex: number) => boolean,
+  groups: MessageGroup[],
+  isGroupLoading: (groupIndex: number) => boolean,
   failedLabel: string,
 ): RenderedSubtasks {
   const tasks = new Map<string, Subtask>();
@@ -57,7 +49,7 @@ export function collectRenderedSubtasks(
       continue;
     }
 
-    const groupIsLoading = isGroupLoading(group.messages, groupIndex);
+    const groupIsLoading = isGroupLoading(groupIndex);
 
     for (const message of group.messages) {
       if (message.type === "ai") {
