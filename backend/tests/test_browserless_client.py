@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from deerflow.community.browserless import tools
-from deerflow.community.browserless.browserless_client import BrowserlessClient, BrowserlessScreenshotResult
+from deerflow.community.browserless.browserless_client import BrowserlessClient, BrowserlessFetchResult, BrowserlessScreenshotResult
 
 
 class AsyncMock(MagicMock):
@@ -22,7 +22,7 @@ class TestBrowserlessClient:
     """Tests for the BrowserlessClient class."""
 
     async def test_fetch_html_success(self):
-        """fetch_html returns HTML content on success."""
+        """fetch_html returns a BrowserlessFetchResult with the rendered HTML on success."""
         with patch("deerflow.community.browserless.browserless_client.httpx.AsyncClient") as mock_cls:
             mock_ctx = MagicMock()
             mock_cls.return_value.__aenter__.return_value = mock_ctx
@@ -36,12 +36,41 @@ class TestBrowserlessClient:
             client = BrowserlessClient(base_url="http://browserless:3000")
             result = await client.fetch_html("https://example.com")
 
-            assert result == "<html><body>Page content</body></html>"
+            assert isinstance(result, BrowserlessFetchResult)
+            assert result.html == "<html><body>Page content</body></html>"
             call_kwargs = mock_ctx.post.call_args.kwargs
             assert call_kwargs["json"]["url"] == "https://example.com"
             assert "waitUntil" not in call_kwargs["json"]
             assert "gotoTimeout" not in call_kwargs["json"]
             assert "bestAttempt" not in call_kwargs["json"]
+
+    async def test_fetch_html_surfaces_target_status_headers(self):
+        """fetch_html carries the target page's real status headers on the result.
+
+        Browserless returns HTTP 200 for the render request itself even when the
+        target page responded with a 404 (or an anti-bot block page), so callers
+        need the X-Response-Code/X-Response-Status headers to tell the two apart.
+        """
+        with patch("deerflow.community.browserless.browserless_client.httpx.AsyncClient") as mock_cls:
+            mock_ctx = MagicMock()
+            mock_cls.return_value.__aenter__.return_value = mock_ctx
+
+            mock_resp = MagicMock()
+            mock_resp.status_code = 200
+            mock_resp.text = "<html><body>Access Denied</body></html>"
+            mock_resp.headers = {
+                "X-Response-Code": "404",
+                "X-Response-Status": "Not Found",
+            }
+            mock_ctx.post = AsyncMock(return_value=mock_resp)
+
+            client = BrowserlessClient(base_url="http://browserless:3000")
+            result = await client.fetch_html("https://example.com/blocked")
+
+            assert isinstance(result, BrowserlessFetchResult)
+            assert result.html == "<html><body>Access Denied</body></html>"
+            assert result.target_status_code == "404"
+            assert result.target_status == "Not Found"
 
     async def test_fetch_html_empty_response(self):
         """fetch_html returns error for empty response."""
@@ -253,13 +282,20 @@ class TestBrowserlessTools:
     async def test_web_fetch_tool_success(self, mock_get_client):
         """web_fetch_tool successfully fetches and extracts content."""
         mock_client = MagicMock()
-        mock_client.fetch_html = AsyncMock(return_value="<html><body><article><h1>Title</h1><p>Content</p></article></body></html>")
+        mock_client.fetch_html = AsyncMock(
+            return_value=BrowserlessFetchResult(
+                html="<html><body><article><h1>Title</h1><p>Content</p></article></body></html>",
+                target_status_code="200",
+                target_status="OK",
+            )
+        )
         mock_get_client.return_value = mock_client
 
         with patch("deerflow.community.browserless.tools._get_tool_config", return_value=None):
             result = await tools.web_fetch_tool.ainvoke("https://example.com/article")
 
         assert "Error:" not in result
+        assert "warning:" not in result
 
     @patch("deerflow.community.browserless.tools._get_browserless_client")
     async def test_web_fetch_tool_error(self, mock_get_client):
@@ -311,7 +347,13 @@ class TestBrowserlessTools:
     async def test_web_fetch_tool_allows_private_when_opted_in(self, mock_get_client):
         """web_fetch_tool allows internal targets only when explicitly configured."""
         mock_client = MagicMock()
-        mock_client.fetch_html = AsyncMock(return_value="<html><body><article><p>internal</p></article></body></html>")
+        mock_client.fetch_html = AsyncMock(
+            return_value=BrowserlessFetchResult(
+                html="<html><body><article><p>internal</p></article></body></html>",
+                target_status_code="200",
+                target_status="OK",
+            )
+        )
         mock_get_client.return_value = mock_client
 
         with patch("deerflow.community.browserless.tools._get_tool_config", return_value={"allow_private_addresses": True}):
@@ -319,6 +361,110 @@ class TestBrowserlessTools:
 
         assert "Error:" not in result
         mock_client.fetch_html.assert_called_once()
+
+    @patch("deerflow.community.browserless.tools._get_browserless_client")
+    async def test_web_fetch_tool_warns_on_target_error_status(self, mock_get_client):
+        """web_fetch_tool surfaces a warning when the fetched page itself errored.
+
+        Mirrors test_web_capture_tool_warns_on_target_error_status below:
+        Browserless returns HTTP 200 for the render request even when the target
+        page is a 404 or an anti-bot block page, so fetch_html's target-status
+        headers must produce the same visible warning web_capture_tool already
+        gives via _target_status_warning.
+        """
+        mock_client = MagicMock()
+        mock_client.fetch_html = AsyncMock(
+            return_value=BrowserlessFetchResult(
+                html="<html><body><article><h1>Not Found</h1><p>The page does not exist.</p></article></body></html>",
+                target_status_code="404",
+                target_status="Not Found",
+            )
+        )
+        mock_get_client.return_value = mock_client
+
+        with patch("deerflow.community.browserless.tools._get_tool_config", return_value=None):
+            result = await tools.web_fetch_tool.ainvoke("https://example.com/missing")
+
+        assert "Error:" not in result
+        assert "warning: target page responded 404 Not Found" in result
+
+    @patch("deerflow.community.browserless.tools._get_browserless_client")
+    async def test_web_fetch_tool_no_warning_for_normal_target_status(self, mock_get_client):
+        """web_fetch_tool does not warn when the target page responded normally.
+
+        Regression guard: a legitimate 200-target-page fetch must be unaffected
+        by the target-status warning added for error/blocked pages.
+        """
+        mock_client = MagicMock()
+        mock_client.fetch_html = AsyncMock(
+            return_value=BrowserlessFetchResult(
+                html="<html><body><article><h1>Title</h1><p>Content</p></article></body></html>",
+                target_status_code="200",
+                target_status="OK",
+            )
+        )
+        mock_get_client.return_value = mock_client
+
+        with patch("deerflow.community.browserless.tools._get_tool_config", return_value=None):
+            result = await tools.web_fetch_tool.ainvoke("https://example.com/article")
+
+        assert "Error:" not in result
+        assert "warning:" not in result
+
+    async def test_web_fetch_and_web_capture_tools_agree_on_target_error_warning(self, tmp_path):
+        """web_fetch_tool and web_capture_tool surface the identical warning for identical target-error headers.
+
+        Both tools sit on top of the same Browserless target-status headers
+        (X-Response-Code / X-Response-Status). Before this fix, only
+        web_capture_tool (via capture_screenshot + _target_status_warning)
+        surfaced them; web_fetch_tool (via fetch_html) silently returned the
+        blocked page's raw content with no indication anything was wrong. This
+        drives both real tool functions with the same headers and asserts they
+        now agree.
+        """
+        outputs_dir = tmp_path / "outputs"
+        outputs_dir.mkdir()
+        runtime = SimpleNamespace(state={"thread_data": {"outputs_path": str(outputs_dir)}})
+
+        fetch_client = MagicMock()
+        fetch_client.fetch_html = AsyncMock(
+            return_value=BrowserlessFetchResult(
+                html="<html><body><article><h1>Blocked</h1><p>Access denied.</p></article></body></html>",
+                target_status_code="404",
+                target_status="Not Found",
+            )
+        )
+
+        capture_client = MagicMock()
+        capture_client.capture_screenshot = AsyncMock(
+            return_value=BrowserlessScreenshotResult(
+                content=b"\x89PNG\r\n\x1a\nimage",
+                content_type="image/png",
+                target_status_code="404",
+                target_status="Not Found",
+                final_url="https://example.com/missing",
+            )
+        )
+
+        with patch("deerflow.community.browserless.tools._get_tool_config", return_value=None):
+            with patch("deerflow.community.browserless.tools._get_browserless_client", return_value=fetch_client):
+                fetch_result = await tools.web_fetch_tool.ainvoke("https://example.com/missing")
+
+            with patch(
+                "deerflow.community.browserless.tools._resolve_host_addresses",
+                return_value=[ipaddress.ip_address("93.184.216.34")],
+            ):
+                with patch("deerflow.community.browserless.tools._get_browserless_client", return_value=capture_client):
+                    capture_command = await tools.web_capture_tool.coroutine(
+                        runtime=runtime,
+                        url="https://example.com/missing",
+                        tool_call_id="tool-1",
+                    )
+
+        capture_message = capture_command.update["messages"][0].content
+
+        assert "warning: target page responded 404 Not Found" in fetch_result
+        assert "warning: target page responded 404 Not Found" in capture_message
 
     @patch("deerflow.community.browserless.tools._get_browserless_client")
     async def test_web_capture_tool_writes_artifact(self, mock_get_client, tmp_path):

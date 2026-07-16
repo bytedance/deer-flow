@@ -8,6 +8,13 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
+class BrowserlessFetchResult:
+    html: str
+    target_status_code: str
+    target_status: str
+
+
+@dataclass(frozen=True)
 class BrowserlessScreenshotResult:
     content: bytes
     content_type: str
@@ -40,7 +47,7 @@ class BrowserlessClient:
         wait_for_selector_timeout_ms: int = 5000,
         reject_resource_types: list[str] | None = None,
         reject_request_pattern: list[str] | None = None,
-    ) -> str:
+    ) -> BrowserlessFetchResult | str:
         """Fetch the rendered HTML of a page using Browserless.
 
         Only sends accepted parameters for the current Browserless API version.
@@ -56,7 +63,8 @@ class BrowserlessClient:
             reject_request_pattern: URL patterns to block.
 
         Returns:
-            Rendered HTML content.
+            Fetch result with the rendered HTML and target-page status headers,
+            or an error string.
         """
         payload: dict[str, Any] = {
             "url": url,
@@ -103,7 +111,11 @@ class BrowserlessClient:
                 if not html or not html.strip():
                     return "Error: Browserless returned empty response"
 
-                return html
+                return BrowserlessFetchResult(
+                    html=html,
+                    target_status_code=_get_header(resp.headers, "X-Response-Code"),
+                    target_status=_get_header(resp.headers, "X-Response-Status"),
+                )
 
         except httpx.TimeoutException:
             return f"Error: Browserless request timed out after {self.timeout_s}s"
