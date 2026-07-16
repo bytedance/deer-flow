@@ -251,6 +251,11 @@ class TokenBudgetMiddleware(AgentMiddleware[AgentState]):
                 # returns (the hard stop itself does not raise). See
                 # ``consume_stop_reason``.
                 self._stop_reason[run_id] = "token_capped"
+                # Also write to runtime.context so the lead worker can read it
+                # without needing a reference to this middleware instance (#4176).
+                ctx = getattr(runtime, "context", None)
+                if isinstance(ctx, dict):
+                    ctx["stop_reason"] = "token_capped"
                 stop_text = _BUDGET_EXCEEDED_MSG.format(reason=trigger_reason, used=trigger_used, budget=trigger_budget)
                 return self._build_hard_stop_update(last_msg, stop_text)
 
