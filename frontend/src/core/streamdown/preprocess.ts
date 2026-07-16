@@ -326,6 +326,10 @@ const _INTERNAL_TAG_RE = new RegExp(
   "g",
 );
 
+// Regex matching the start/end of a fenced code block (3+ backticks or tildes).
+// Captures the marker string so we can compare character and length.
+const FENCE_MARKER_RE = /^ {0,3}(`{3,}|~{3,})/;
+
 /**
  * Strip leaked system-internal HTML tags from markdown content.
  *
@@ -339,18 +343,36 @@ const _INTERNAL_TAG_RE = new RegExp(
  * Code-aware: tags inside fenced code blocks (````` `````) and indented code
  * blocks (4-space indent) are left untouched, so user-written meta-discussions
  * about the memory system are not silently stripped.
+ *
+ * Fence tracking is marker-aware (tracking the opening character and run
+ * length) so that a tilde-fenced block containing a shorter backtick run, or a
+ * 4-backtick block containing a 3-backtick run, does not prematurely close the
+ * fence.
  */
 export function stripLeakedSystemTags(markdown: string): string {
   const lines = markdown.split("\n");
-  let insideFence = false;
+  let fenceMarker: string | null = null;
 
   return lines
     .map((line) => {
-      if (CODE_FENCE_RE.test(line)) {
-        insideFence = !insideFence;
+      const fenceMatch = FENCE_MARKER_RE.exec(line);
+      if (fenceMatch) {
+        const marker = fenceMatch[1];
+        if (fenceMarker === null) {
+          // Opening a fenced code block
+          fenceMarker = marker;
+        } else if (
+          marker[0] === fenceMarker[0] &&
+          marker.length >= fenceMarker.length
+        ) {
+          // Closing fence: same character and at least as long as opener
+          fenceMarker = null;
+        }
+        // Otherwise: different fence type or shorter run inside a fence
+        // (e.g. ``` inside ~~~~, or `` inside `````) — stay inside.
         return line;
       }
-      if (insideFence || INDENTED_CODE_RE.test(line)) {
+      if (fenceMarker !== null || INDENTED_CODE_RE.test(line)) {
         return line;
       }
       return line.replace(_INTERNAL_TAG_RE, "");

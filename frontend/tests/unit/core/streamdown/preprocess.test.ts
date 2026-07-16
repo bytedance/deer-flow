@@ -366,3 +366,82 @@ test("stripLeakedSystemTags handles multiple fences correctly", () => {
   ].join("\n");
   expect(stripLeakedSystemTags(input)).toBe(expected);
 });
+
+test("stripLeakedSystemTags preserves tags inside tilde fence with inner backtick fence", () => {
+  const input = [
+    "<memory>outside</memory>",
+    "~~~~",
+    "```",
+    "<memory>inside tilde</memory>",
+    "```",
+    "~~~~",
+    "<memory>after</memory>",
+  ].join("\n");
+  const expected = [
+    "outside",
+    "~~~~",
+    "```",
+    "<memory>inside tilde</memory>",
+    "```",
+    "~~~~",
+    "after",
+  ].join("\n");
+  expect(stripLeakedSystemTags(input)).toBe(expected);
+});
+
+test("stripLeakedSystemTags preserves tags inside 4-backtick fence with inner 3-backtick fence", () => {
+  const input = [
+    "<memory>outside</memory>",
+    "````",
+    "```",
+    "<memory>inside 4-backtick</memory>",
+    "```",
+    "````",
+    "<memory>after</memory>",
+  ].join("\n");
+  const expected = [
+    "outside",
+    "````",
+    "```",
+    "<memory>inside 4-backtick</memory>",
+    "```",
+    "````",
+    "after",
+  ].join("\n");
+  expect(stripLeakedSystemTags(input)).toBe(expected);
+});
+
+test("stripLeakedSystemTags handles backtick fence inside tilde fence with shorter tilde closing", () => {
+  // A 4-tilde fence containing a 3-backtick sub-fence; the closing tilde run
+  // is shorter (3 vs 4) so it should NOT close the fence.
+  const input = [
+    "<memory>outside</memory>",
+    "~~~~",
+    "```",
+    "<memory>inside</memory>",
+    "```",
+    "~~~",
+  ].join("\n");
+  const expected = [
+    "outside",
+    "~~~~",
+    "```",
+    "<memory>inside</memory>",
+    "```",
+    "~~~",
+  ].join("\n");
+  expect(stripLeakedSystemTags(input)).toBe(expected);
+});
+
+test("stripLeakedSystemTags strips tags after real closing fence", () => {
+  const input = [
+    "~~~~",
+    "<memory>inside</memory>",
+    "~~~~",
+    "<memory>after</memory>",
+  ].join("\n");
+  const expected = ["~~~~", "<memory>inside</memory>", "~~~~", "after"].join(
+    "\n",
+  );
+  expect(stripLeakedSystemTags(input)).toBe(expected);
+});
