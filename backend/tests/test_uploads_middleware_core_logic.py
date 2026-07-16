@@ -51,7 +51,7 @@ def _human(content, files=None, **extra_kwargs):
     return HumanMessage(content=content, additional_kwargs=additional_kwargs)
 
 
-def _uploaded_files_block(content) -> str:
+def _current_uploads_block(content) -> str:
     text = message_content_to_text(content)
     match = re.search(r"<current_uploads>[\s\S]*?</current_uploads>", text)
     assert match is not None
@@ -245,7 +245,7 @@ class TestBeforeAgent:
         result = mw.before_agent(state, _runtime())
         assert result == {"uploaded_files": []}
 
-    def test_injects_uploaded_files_tag_into_string_content(self, tmp_path):
+    def test_injects_current_uploads_tag_into_string_content(self, tmp_path):
         mw = _middleware(tmp_path)
         uploads_dir = _uploads_dir(tmp_path)
         (uploads_dir / "report.pdf").write_bytes(b"pdf")
@@ -261,7 +261,7 @@ class TestBeforeAgent:
         assert "report.pdf" in updated_msg.content
         assert "please analyse" in updated_msg.content
 
-    def test_injects_uploaded_files_tag_into_list_content(self, tmp_path):
+    def test_injects_current_uploads_tag_into_list_content(self, tmp_path):
         mw = _middleware(tmp_path)
         uploads_dir = _uploads_dir(tmp_path)
         (uploads_dir / "data.csv").write_bytes(b"a,b")
@@ -414,7 +414,7 @@ class TestBeforeAgent:
         result = mw.before_agent(self._state(_human("please inspect current_11.txt", files=files)), _runtime())
 
         assert result is not None
-        content = _uploaded_files_block(result["messages"][-1].content)
+        content = _current_uploads_block(result["messages"][-1].content)
         assert "current_00.txt" in content
         assert "current_10.txt" not in content
         assert "2 more file(s) from this message omitted from this context" in content
@@ -439,7 +439,7 @@ class TestBeforeAgent:
         result = mw.before_agent(self._state(msg), _runtime())
 
         assert result is not None
-        content = _uploaded_files_block(result["messages"][-1].content)
+        content = _current_uploads_block(result["messages"][-1].content)
         assert "current_00.txt" in content
         assert "current_10.txt" not in content
 
@@ -505,7 +505,7 @@ class TestBeforeAgent:
         result = mw.before_agent(self._state(_human("analyze recent_09.txt", files=files)), _runtime())
 
         assert result is not None
-        content = _uploaded_files_block(result["messages"][-1].content)
+        content = _current_uploads_block(result["messages"][-1].content)
         assert "recent_00.txt" in content
         assert "selected because" not in content.lower()
 

@@ -338,7 +338,7 @@ class TestFileUploadIntegration:
         tid = str(uuid.uuid4())
 
         c.upload_files(tid, [test_file])
-        # Chat — the middleware should inject <uploaded_files> context
+        # Chat — the middleware should inject <current_uploads> context
         response = c.chat("What files are available?", thread_id=tid)
         assert isinstance(response, str) and len(response) > 0
 

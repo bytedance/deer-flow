@@ -773,33 +773,6 @@ async def _ingest_inbound_files(thread_id: str, msg: InboundMessage, *, user_id:
     return created
 
 
-def _format_uploaded_files_block(files: list[dict[str, Any]]) -> str:
-    lines = [
-        "<uploaded_files>",
-        "The following files were uploaded in this message:",
-        "",
-    ]
-    if not files:
-        lines.append("(empty)")
-    else:
-        for f in files:
-            filename = f.get("filename", "")
-            size = int(f.get("size") or 0)
-            size_kb = size / 1024 if size else 0
-            size_str = f"{size_kb:.1f} KB" if size_kb < 1024 else f"{size_kb / 1024:.1f} MB"
-            path = f.get("path", "")
-            is_image = bool(f.get("is_image"))
-            file_kind = "image" if is_image else "file"
-            lines.append(f"- {filename} ({size_str})")
-            lines.append(f"  Type: {file_kind}")
-            lines.append(f"  Path: {path}")
-            lines.append("")
-    lines.append("Use `read_file` for text-based files and documents.")
-    lines.append("Use `view_image` for image files (jpg, jpeg, png, webp) so the model can inspect the image content.")
-    lines.append("</uploaded_files>")
-    return "\n".join(lines)
-
-
 class ChannelManager:
     """Core dispatcher that bridges IM channels to the DeerFlow agent.
 
@@ -1589,8 +1562,6 @@ class ChannelManager:
 
         original_text = msg.text
         uploaded = await _ingest_inbound_files(thread_id, msg, user_id=storage_user_id)
-        if uploaded:
-            msg.text = f"{_format_uploaded_files_block(uploaded)}\n\n{msg.text}".strip()
         human_message = _human_input_message(msg.text, original_content=original_text, files=uploaded or None)
 
         if self._channel_supports_streaming(msg.channel_name):

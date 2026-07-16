@@ -476,3 +476,62 @@ def test_files_in_additional_kwargs_reaches_middleware(tmp_path):
     assert "uploaded_files" in mw_result
     assert len(mw_result["uploaded_files"]) == 1
     assert mw_result["uploaded_files"][0]["filename"] == "im_file.pdf", "Middleware must read file metadata from additional_kwargs.files"
+
+
+def test_channel_message_single_upload_block_via_middleware(tmp_path):
+    """IM channel attachments must produce exactly one upload block.
+
+    Regression guard (fancyboi999 review): after passing files= through
+    ``_human_input_message()``, the channel path must NOT also prepend a
+    legacy ``<uploaded_files>`` block.  ``UploadsMiddleware`` is the sole
+    upload-context producer, so one attachment → one ``<current_uploads>``
+    block → the filename appears exactly once in the model-facing content.
+    """
+    from deerflow.agents.middlewares.uploads_middleware import UploadsMiddleware
+
+    thread_id = "test-channel-single-block"
+    uploads_dir = _uploads_dir(tmp_path, thread_id=thread_id)
+    (uploads_dir / "report.pdf").write_bytes(b"%PDF-fake")
+
+    # Simulate what _human_input_message() now produces:
+    # content == original_text (no manual prepend), files= in additional_kwargs,
+    # and no ORIGINAL_USER_CONTENT_KEY (because content was not modified).
+    msg = HumanMessage(
+        content="帮我分析这个PDF",
+        additional_kwargs={
+            "files": [
+                {
+                    "filename": "report.pdf",
+                    "size": 10,
+                    "path": "/mnt/user-data/uploads/report.pdf",
+                }
+            ],
+            # Deliberately omit ORIGINAL_USER_CONTENT_KEY —
+            # UploadsMiddleware must backfill it when missing.
+        },
+    )
+    state = {"messages": [msg]}
+    rt = MagicMock()
+    rt.context = {"thread_id": thread_id}
+
+    mw = UploadsMiddleware(base_dir=str(tmp_path))
+    mw_result = mw.before_agent(state, rt)
+
+    assert mw_result is not None, "Middleware must return a state update"
+    assert "uploaded_files" in mw_result
+    assert len(mw_result["uploaded_files"]) == 1
+    assert mw_result["uploaded_files"][0]["filename"] == "report.pdf"
+
+    # The content must contain exactly one upload block and one filename occurrence.
+    updated = mw_result["messages"][-1]
+    content = updated.content if isinstance(updated.content, str) else str(updated.content)
+
+    assert "<current_uploads>" in content, "Middleware must inject <current_uploads>"
+    assert "<uploaded_files>" not in content, "Legacy <uploaded_files> block must NOT appear — UploadsMiddleware is the sole upload-context producer"
+    # The filename naturally appears in the list item AND the path line
+    # within <current_uploads> — that's one block, not double injection.
+    assert content.count("<current_uploads>") == 1, f"Exactly one <current_uploads> block expected, found {content.count('<current_uploads>')}"
+
+    # Verify ORIGINAL_USER_CONTENT_KEY was backfilled by the middleware.
+    updated_additional = updated.additional_kwargs or {}
+    assert updated_additional.get("original_user_content") == "帮我分析这个PDF", "UploadsMiddleware must backfill ORIGINAL_USER_CONTENT_KEY when absent"
