@@ -378,6 +378,12 @@ class LocalSandboxProvider(SandboxProvider):
                 return self._generic_sandbox.id
 
         effective_user_id = self._effective_acquire_user_id(user_id)
+        # Runs on every acquire, including cache hits, to self-heal drift —
+        # cheap (~3-4 ms metadata walk) when the manifest is fresh. If another
+        # worker mutated this user's skills since the last check, this
+        # triggers a full rebuild (~400 ms measured locally) under the
+        # cross-process projection lock, serializing concurrent acquires and
+        # mutations for that user. Acceptable for an editing-frequency event.
         skill_projection = self._ensure_skills_projection(effective_user_id)
         key = self._thread_key(thread_id, effective_user_id)
 

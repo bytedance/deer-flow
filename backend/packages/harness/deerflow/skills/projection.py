@@ -152,6 +152,15 @@ def _clear_projection_scope(scope_root: Path, *category_roots: Path) -> None:
 
 
 def _update_tree_digest(digest, root: Path, label: str) -> None:
+    """Hash directory metadata (inode/mode/size/mtime), not file contents.
+
+    Trade-off: fast enough to run on every sandbox acquire (O(files), no
+    reads), but an external edit that preserves inode+size+mtime — unlikely,
+    not zero-probability — is invisible to this signature and leaves the
+    projection stale until the next explicit rebuild. Runtime writes through
+    this codebase are covered regardless: the mutation path rebuilds under
+    lock, and atomic-rename always changes the inode.
+    """
     digest.update(f"root:{label}\0".encode())
     if not root.exists():
         digest.update(b"absent\0")
@@ -389,14 +398,12 @@ def skill_projection_mutation(storage: SkillStorage, scope: str) -> Iterator[Non
         for category_root in category_roots:
             _clear_category(category_root)
         _manifest_path(scope_root).unlink(missing_ok=True)
-        try:
-            yield
-        except Exception:
-            # Keep the view empty. A later acquire compares the missing manifest
-            # with the actual source state and repairs it under the same lock.
-            raise
-        else:
-            rebuild()
+        yield
+        # Only reached on success — a raise from the mutation propagates past
+        # this point, leaving the view empty (already cleared above). A later
+        # acquire compares the missing manifest with the actual source state
+        # and repairs it under the same lock.
+        rebuild()
 
 
 def rebuild_all_skill_projections(*, app_config=None) -> int:
