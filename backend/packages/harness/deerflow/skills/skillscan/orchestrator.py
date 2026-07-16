@@ -43,6 +43,12 @@ _MAX_ARCHIVE_MEMBERS = 4096
 _SPECS = [
     RuleSpec("package-path-traversal", "CRITICAL", "Archive member path traverses outside the skill root.", "Remove parent-directory traversal from the package path."),
     RuleSpec("package-absolute-path", "CRITICAL", "Archive member path is absolute.", "Use relative paths inside the skill archive."),
+    RuleSpec(
+        "package-ads-stream-name",
+        "CRITICAL",
+        "Archive member path contains a colon, which on Windows/NTFS addresses an alternate data stream hidden from directory listing.",
+        "Remove colons from archive member paths.",
+    ),
     RuleSpec("package-symlink", "HIGH", "Package contains a symlink entry.", "Remove symlinks from the skill package."),
     RuleSpec("package-nested-skill-md", "CRITICAL", "Package contains a nested SKILL.md file.", "Keep exactly one SKILL.md at the skill root."),
     RuleSpec("package-oversized-total", "CRITICAL", "Package total uncompressed size exceeds the limit.", "Remove large files or split assets out of the skill package."),
@@ -246,6 +252,8 @@ def _scan_archive_member_metadata(info: zipfile.ZipInfo, normalized: str) -> lis
         findings.append(_finding("package-absolute-path", file=normalized, evidence=info.filename))
     elif _archive_member_traverses(info.filename):
         findings.append(_finding("package-path-traversal", file=normalized, evidence=info.filename))
+    elif _archive_member_has_colon(info.filename):
+        findings.append(_finding("package-ads-stream-name", file=normalized, evidence=info.filename))
     if _is_symlink_member(info):
         findings.append(_finding("package-symlink", file=normalized, evidence=info.filename))
     parts = PurePosixPath(normalized).parts
@@ -543,6 +551,18 @@ def _archive_member_is_absolute(name: str) -> bool:
 
 def _archive_member_traverses(name: str) -> bool:
     return ".." in PurePosixPath(name.replace("\\", "/")).parts
+
+
+def _archive_member_has_colon(name: str) -> bool:
+    # A colon has no legitimate use in a relative archive member path (zip
+    # entries use ``/`` separators; a real Windows drive prefix is already
+    # caught by ``_archive_member_is_absolute``). On Windows/NTFS a colon
+    # elsewhere in the path addresses an Alternate Data Stream on the
+    # preceding path component (e.g. ``scripts/run.sh:hidden.txt`` attaches
+    # hidden content to ``run.sh`` instead of creating a sibling file), and
+    # that stream is invisible to directory-listing-based scanning. Reject
+    # outright rather than trying to allow-list "safe" colon positions.
+    return ":" in name
 
 
 def _is_symlink_member(info: zipfile.ZipInfo) -> bool:
