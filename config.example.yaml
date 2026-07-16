@@ -37,12 +37,12 @@ logging:
 # middleware chains after built-in runtime middlewares, but before the
 # safety/clarification tail. Missing packages, invalid classes, and broken
 # modules fail loudly at agent creation with an actionable import error.
-extensions:
-  middlewares: []
-  # Example:
-  # middlewares:
-  #   - my_company.deerflow_middlewares:DomainGuardMiddleware
-  #   - my_company.deerflow_middlewares:LatencyStampingMiddleware
+# Uncomment this block to define middlewares in config.yaml. Leaving it commented
+# lets extensions_config.json remain the source of truth for extension packages.
+# extensions:
+#   middlewares:
+#     - my_company.deerflow_middlewares:DomainGuardMiddleware
+#     - my_company.deerflow_middlewares:LatencyStampingMiddleware
 
 # ============================================================================
 # Tracing / Observability (Monocle)

@@ -104,6 +104,14 @@ def _write_extensions_config(path: Path) -> None:
     path.write_text(json.dumps({"mcpServers": {}, "skills": {}}), encoding="utf-8")
 
 
+def test_config_example_does_not_enable_empty_extensions_block_by_default():
+    config_example_path = Path(__file__).resolve().parents[2] / "config.example.yaml"
+
+    config_data = yaml.safe_load(config_example_path.read_text(encoding="utf-8"))
+
+    assert "extensions" not in config_data
+
+
 def test_app_config_defaults_missing_database_to_sqlite(tmp_path, monkeypatch):
     config_path = tmp_path / "config.yaml"
     extensions_path = tmp_path / "extensions_config.json"

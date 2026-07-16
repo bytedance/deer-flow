@@ -1,7 +1,7 @@
 """Config-declared agent middleware loading."""
 
 import logging
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 from langchain.agents.middleware import AgentMiddleware
 
@@ -30,7 +30,5 @@ def load_configured_extension_middlewares(app_config: "AppConfig") -> list[Agent
         except Exception:
             logger.exception("Failed to instantiate configured extension middleware %s", middleware_path)
             raise
-        if not isinstance(middleware, AgentMiddleware):
-            raise TypeError(f"Configured extension middleware '{middleware_path}' must be an AgentMiddleware instance")
-        middlewares.append(cast(AgentMiddleware, middleware))
+        middlewares.append(middleware)
     return middlewares

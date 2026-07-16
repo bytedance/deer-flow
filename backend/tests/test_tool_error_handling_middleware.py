@@ -577,6 +577,10 @@ def test_subagent_runtime_middlewares_inject_configured_extension_middlewares(mo
 
     extension_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, ConfiguredSubagentMiddleware))
     safety_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, SafetyFinishReasonMiddleware))
+    for guard_name in ("LoopDetectionMiddleware", "TokenBudgetMiddleware"):
+        guard_idx = next((i for i, m in enumerate(middlewares) if type(m).__name__ == guard_name), None)
+        if guard_idx is not None:
+            assert guard_idx < extension_idx
     assert extension_idx < safety_idx
 
 

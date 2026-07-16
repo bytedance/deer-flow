@@ -143,7 +143,16 @@ def test_enable_toggle_allowed_for_admin(monkeypatch, tmp_path):
     monkeypatch.setattr(skills_router, "_get_user_skill_storage", lambda cfg: SimpleNamespace(load_skills=_load_skills))
     from deerflow.config.extensions_config import ExtensionsConfig
 
-    monkeypatch.setattr(skills_router, "get_extensions_config", lambda: ExtensionsConfig(mcp_servers={}, skills={}, middlewares=["pkg:Middleware"]))
+    monkeypatch.setattr(
+        skills_router,
+        "get_extensions_config",
+        lambda: ExtensionsConfig(
+            mcp_servers={},
+            skills={},
+            middlewares=["pkg:Middleware"],
+            mcpInterceptors=["pkg.interceptor:build"],
+        ),
+    )
     monkeypatch.setattr(skills_router, "reload_extensions_config", lambda: None)
     monkeypatch.setattr(skills_router.ExtensionsConfig, "resolve_config_path", staticmethod(lambda: config_path))
 
@@ -156,3 +165,4 @@ def test_enable_toggle_allowed_for_admin(monkeypatch, tmp_path):
         assert resp.status_code == 200, f"admin toggle should succeed, got {resp.status_code}"
     written = json.loads(config_path.read_text(encoding="utf-8"))
     assert written["middlewares"] == ["pkg:Middleware"]
+    assert written["mcpInterceptors"] == ["pkg.interceptor:build"]

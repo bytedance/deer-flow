@@ -389,9 +389,9 @@ def build_middlewares(
 
     # SafetyFinishReasonMiddleware — suppress tool execution when the provider
     # safety-terminated the response. Registered after the terminal-response
-    # and custom middlewares so LangChain's reverse-order after_model dispatch
-    # runs Safety first; cleared tool_calls then flow through the remaining
-    # accounting/terminal guards without firing extra alarms.
+    # and custom/configured middlewares so LangChain's reverse-order after_model
+    # dispatch runs Safety first; cleared tool_calls then flow through the
+    # remaining accounting/terminal guards without firing extra alarms.
     safety_config = resolved_app_config.safety_finish_reason
     if safety_config.enabled:
         middlewares.append(SafetyFinishReasonMiddleware.from_config(safety_config))
