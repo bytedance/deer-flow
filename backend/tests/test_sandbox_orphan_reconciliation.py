@@ -1120,6 +1120,100 @@ def test_acquire_refuses_a_container_a_peer_is_destroying():
     assert "dying01" not in worker_a._sandboxes
 
 
+def test_teardown_marker_is_held_for_a_stop_that_outlives_the_lease_ttl():
+    """The `del:` state must not expire out from under an in-flight stop.
+
+    `test_acquire_refuses_a_container_a_peer_is_destroying` above proves the
+    marker refuses a takeover — but never lets it expire. `claim(for_destroy)`
+    writes it with the ordinary lease TTL and nothing refreshes it: `renew()`
+    only extends `own:` and reports a teardown as LOST, and the destroy paths
+    drop the sandbox from the maps the renewal loop iterates. So a container
+    stop that outlives the TTL let the marker lapse, a peer's `take()` then
+    succeeded against the still-running container, and the stop landed on the
+    turn that had just been handed it — the very window `del:` exists to close,
+    reopened by its own expiry. The `flock` this replaced could not expire; a
+    lease can, so it has to be held on purpose.
+    """
+    from deerflow.config.sandbox_config import SandboxOwnershipConfig
+
+    lease_ttl = 0.15
+    shared = _make_shared_ownership_store(ttl_seconds=lease_ttl)
+    worker_a = _make_provider_for_reconciliation(worker_id="worker-a", store=shared)
+    worker_b = _make_provider_for_reconciliation(worker_id="worker-b", store=shared)
+    # A legal config: the schema bounds only renewal > 0 and multiplier >= 2.
+    worker_a._ownership_config = SandboxOwnershipConfig(renewal_interval_seconds=0.05, ttl_multiplier=3.0)
+    info = SandboxInfo(
+        sandbox_id="doomed1",
+        sandbox_url="http://localhost:8080",
+        container_name="deer-flow-sandbox-doomed1",
+        created_at=time.time(),
+    )
+
+    stop_entered = threading.Event()
+    release_stop = threading.Event()
+
+    def slow_destroy(entry):
+        stop_entered.set()
+        release_stop.wait(timeout=5)
+
+    worker_a._backend.destroy = MagicMock(side_effect=slow_destroy)
+    worker_a._warm_pool["doomed1"] = (info, time.time())
+
+    reaper = threading.Thread(
+        target=lambda: worker_a._destroy_warm_entry("doomed1", info, reason="idle_timeout"),
+        daemon=True,
+    )
+    reaper.start()
+    try:
+        assert stop_entered.wait(timeout=5), "the reaper never reached the backend stop"
+
+        # Across a span several times the lease TTL, a turn for this thread must
+        # keep being refused — the container is still being stopped.
+        deadline = time.time() + lease_ttl * 4
+        while time.time() < deadline:
+            assert not worker_b._ownership.take("doomed1"), "a peer took a container whose stop was still in flight"
+            time.sleep(0.02)
+    finally:
+        release_stop.set()
+        reaper.join(timeout=5)
+
+    # Once the stop returns the marker is dropped, so the thread can cold-start.
+    assert shared.owner("doomed1") is None, "the teardown marker outlived the stop that justified it"
+    assert worker_b._ownership.take("doomed1") is True
+
+
+def test_teardown_heartbeat_stops_when_the_stop_returns():
+    """A finite TTL must survive the fix, or a crashed destroyer leaks forever.
+
+    The heartbeat is what holds the exclusion, so it has to die with the stop:
+    if it outlived the destroy the marker would be refreshed indefinitely and no
+    peer could ever adopt or recreate the container.
+    """
+    from deerflow.config.sandbox_config import SandboxOwnershipConfig
+
+    shared = _make_shared_ownership_store(ttl_seconds=0.15)
+    worker_a = _make_provider_for_reconciliation(worker_id="worker-a", store=shared)
+    worker_a._ownership_config = SandboxOwnershipConfig(renewal_interval_seconds=0.05, ttl_multiplier=3.0)
+    info = SandboxInfo(
+        sandbox_id="doomed2",
+        sandbox_url="http://localhost:8080",
+        container_name="deer-flow-sandbox-doomed2",
+        created_at=time.time(),
+    )
+    worker_a._warm_pool["doomed2"] = (info, time.time())
+
+    assert worker_a._destroy_warm_entry("doomed2", info, reason="idle_timeout") is True
+
+    # Named rather than counted: threading.active_count() is global and other
+    # tests' idle-checker/renewal threads make it noise, so a count comparison
+    # here passes straight through a leak.
+    assert [t for t in threading.enumerate() if t.name == "sandbox-teardown-lease"] == [], "a teardown heartbeat thread outlived its stop"
+
+    # And nothing keeps refreshing the marker past its TTL.
+    time.sleep(0.3)
+    assert shared.owner("doomed2") is None
+
+
 def test_cached_sandbox_being_destroyed_is_dropped_not_reused():
     """The same window on the warm/in-process reuse path falls through cleanly."""
     shared = _make_shared_ownership_store()

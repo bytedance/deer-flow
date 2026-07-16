@@ -12,6 +12,7 @@ The provider itself handles:
 
 import asyncio
 import atexit
+import contextlib
 import hashlib
 import logging
 import os
@@ -365,6 +366,61 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             logger.warning("Lapsed ownership lease for %s was taken by a peer", sandbox_id)
             return False
         return False
+
+    @contextlib.contextmanager
+    def _held_teardown_lease(self, sandbox_id: str):
+        """Keep *sandbox_id*'s teardown marker alive for as long as its stop runs.
+
+        ``claim(..., for_destroy=True)`` writes the ``del:`` marker with the
+        ordinary lease TTL, and nothing else refreshes it: ``renew()`` extends
+        only ``own:`` and deliberately reports a teardown as ``LOST``, and the
+        destroy paths drop the sandbox from the maps ``_renew_owned_leases``
+        iterates. A container stop that outlives the TTL therefore let the marker
+        lapse, a peer's ``take()`` succeeded against the still-running container,
+        and the stop landed on the turn that had just been handed it — the very
+        window the ``del:`` state exists to close, reopened by its own expiry.
+
+        This is what the per-sandbox ``flock`` used to cover for free: a held lock
+        cannot expire. A lease can, so the exclusion has to be held deliberately
+        rather than assumed to outlast the work it guards. Reachable without an
+        abnormal backend — the config schema bounds only ``renewal_interval_seconds``
+        (> 0) and ``ttl_multiplier`` (>= 2), so a legal setting puts the TTL below a
+        normal container stop, and ``LocalContainerBackend._stop_container`` passes
+        no ``timeout`` to ``subprocess.run``, so a wedged daemon blocks unbounded
+        even at the default 120s.
+
+        The TTL stays finite on purpose: the heartbeat dies with the process, so a
+        destroyer that crashes mid-stop still releases the container one TTL later
+        instead of marking it undestroyable forever.
+        """
+        stop = threading.Event()
+
+        def beat() -> None:
+            interval = self._ownership_config.renewal_interval_seconds
+            while not stop.wait(interval):
+                try:
+                    if not self._ownership.claim(sandbox_id, for_destroy=True):
+                        # Only reachable if the store lost our marker *and* a peer
+                        # took it (e.g. a flush mid-stop). The stop is already in
+                        # flight and cannot be recalled, so say so loudly rather
+                        # than let a peer's container die without a trace.
+                        logger.error(
+                            "Lost the teardown exclusion for %s while its container stop was still in flight; a peer may have taken it",
+                            sandbox_id,
+                        )
+                        return
+                except OwnershipBackendError as e:
+                    # Unknown, not lost: the marker may well still be live, and
+                    # the TTL bounds how long a stale one survives. Retry.
+                    logger.warning("Could not refresh the teardown lease for %s, will retry: %s", sandbox_id, e)
+
+        beater = threading.Thread(target=beat, name="sandbox-teardown-lease", daemon=True)
+        beater.start()
+        try:
+            yield
+        finally:
+            stop.set()
+            beater.join(timeout=5)
 
     # ── Startup reconciliation ────────────────────────────────────────────
 
@@ -1106,7 +1162,9 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             return False
 
         try:
-            self._backend.destroy(entry)
+            # The marker must outlast the stop, not the TTL it was written with.
+            with self._held_teardown_lease(sandbox_id):
+                self._backend.destroy(entry)
         except Exception as e:
             if reason == "idle_timeout":
                 logger.error(f"Failed to destroy idle warm-pool sandbox {sandbox_id}: {e}")
@@ -1446,7 +1504,9 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 logger.warning(f"Error closing sandbox {sandbox_id} during destroy: {e}")
 
         if info:
-            self._backend.destroy(info)
+            # The marker must outlast the stop, not the TTL it was written with.
+            with self._held_teardown_lease(sandbox_id):
+                self._backend.destroy(info)
             logger.info(f"Destroyed sandbox {sandbox_id}")
 
         # Clears the teardown marker whether or not there was a container to
