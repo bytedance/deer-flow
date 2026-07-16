@@ -153,6 +153,25 @@ class TestSafeExtract:
         assert (dest / "normal.txt").exists()
         assert not (dest / "link.txt").exists()
 
+    def test_rejects_too_many_entries(self, tmp_path):
+        """Entry-count cap is independent of total size: 4 tiny files still trips a low max_entries."""
+        zip_path = self._make_zip(tmp_path, {f"file-{i}.txt": "x" for i in range(4)})
+        dest = tmp_path / "out"
+        dest.mkdir()
+        with zipfile.ZipFile(zip_path) as zf:
+            with pytest.raises(ValueError, match="too many entries"):
+                safe_extract_skill_archive(zf, dest, max_entries=3)
+        assert not any(dest.iterdir())
+
+    def test_allows_entries_at_the_cap(self, tmp_path):
+        """The cap is inclusive: exactly max_entries members is not rejected."""
+        zip_path = self._make_zip(tmp_path, {f"file-{i}.txt": "x" for i in range(5)})
+        dest = tmp_path / "out"
+        dest.mkdir()
+        with zipfile.ZipFile(zip_path) as zf:
+            safe_extract_skill_archive(zf, dest, max_entries=5)
+        assert len(list(dest.iterdir())) == 5
+
     def test_normal_archive(self, tmp_path):
         zip_path = self._make_zip(
             tmp_path,
@@ -225,6 +244,86 @@ class TestSafeExtract:
         with zipfile.ZipFile(zip_path) as zf:
             safe_extract_skill_archive(zf, dest)
         assert (dest / "my-skill" / "assets" / "blob.bin").exists()
+
+
+# ---------------------------------------------------------------------------
+# Entry-count cap must apply unconditionally, independent of skill_scan.enabled.
+#
+# scan_archive_preflight() (skillscan/orchestrator.py) already caps member
+# count at 4096, but only runs as part of the optional native scanner
+# (skill_scan.enabled, default true). When that scanner is disabled,
+# safe_extract_skill_archive was the only remaining guard on the extraction
+# path, and it only capped total bytes — not entry count. These tests pin
+# the fix: the cap now lives in extraction itself, so it holds regardless of
+# skill_scan.enabled.
+# ---------------------------------------------------------------------------
+
+
+class TestEntryCountCapAppliesRegardlessOfSkillScan:
+    @pytest.fixture(autouse=True)
+    def _allow_security_scan(self, monkeypatch):
+        async def _scan(*args, **kwargs):
+            return ScanResult(decision="allow", reason="ok")
+
+        monkeypatch.setattr("deerflow.skills.installer.scan_skill_content", _scan)
+
+    def _make_storage(self, skills_root: Path, *, skill_scan_enabled: bool):
+        from types import SimpleNamespace
+
+        from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
+
+        return LocalSkillStorage(
+            host_path=str(skills_root),
+            app_config=SimpleNamespace(skill_scan=SimpleNamespace(enabled=skill_scan_enabled)),
+        )
+
+    def _make_many_entry_zip(self, tmp_path: Path, *, entry_count: int, skill_name: str = "test-skill") -> Path:
+        """A real archive with ``entry_count`` tiny members and a small total size —
+        matches the reported shape (50,000 entries, ~5MB total)."""
+        zip_path = tmp_path / f"{skill_name}.skill"
+        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr(f"{skill_name}/SKILL.md", f"---\nname: {skill_name}\ndescription: A test skill\n---\n\n# {skill_name}\n")
+            for i in range(entry_count):
+                zf.writestr(f"{skill_name}/pad-{i:06d}.txt", "")
+        return zip_path
+
+    def test_rejects_high_entry_count_archive_even_with_skill_scan_disabled(self, tmp_path):
+        """The previously-vulnerable configuration: skill_scan disabled, so
+        scan_archive_preflight's member cap never runs. safe_extract_skill_archive
+        must still reject the archive unconditionally, on its own."""
+        zip_path = self._make_many_entry_zip(tmp_path, entry_count=50_000)
+        skills_root = tmp_path / "skills"
+        skills_root.mkdir()
+        storage = self._make_storage(skills_root, skill_scan_enabled=False)
+
+        with pytest.raises(ValueError, match="too many entries"):
+            storage.install_skill_from_archive(zip_path)
+
+        assert not (skills_root / "custom" / "test-skill").exists()
+
+    def test_scan_archive_preflight_independently_flags_the_same_archive(self, tmp_path):
+        """Cross-check tying the two protections together: the pre-existing optional
+        scanner also flags this exact archive by member count when it does run."""
+        from deerflow.skills.skillscan.orchestrator import scan_archive_preflight
+
+        zip_path = self._make_many_entry_zip(tmp_path, entry_count=50_000)
+
+        result = scan_archive_preflight(zip_path)
+
+        assert result["blocked"] is True
+        assert any(finding["rule_id"] == "package-too-many-members" for finding in result["findings"])
+
+    def test_normal_skill_archive_still_installs_with_skill_scan_disabled(self, tmp_path):
+        """Same disabled-scan configuration, but a small, legitimate skill: must still install."""
+        zip_path = self._make_many_entry_zip(tmp_path, entry_count=5, skill_name="small-skill")
+        skills_root = tmp_path / "skills"
+        skills_root.mkdir()
+        storage = self._make_storage(skills_root, skill_scan_enabled=False)
+
+        result = storage.install_skill_from_archive(zip_path)
+
+        assert result["success"] is True
+        assert (skills_root / "custom" / "small-skill" / "SKILL.md").exists()
 
 
 # ---------------------------------------------------------------------------
