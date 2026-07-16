@@ -111,8 +111,16 @@ class SandboxOwnershipStore(abc.ABC):
     def claim(self, sandbox_id: str, *, for_destroy: bool = False) -> bool:
         """Take ownership of *sandbox_id* only if it is unowned or already ours.
 
-        Atomic: concurrent claims from different instances cannot both succeed.
-        Gates every adopt/reap path.
+        Exclusive: succeeds only when the container is unowned or already ours,
+        which is what gates every adopt/reap path.
+
+        The read-modify-write must not interleave. On redis that is Lua (one
+        script, server-side); the memory store serializes on a process-local lock
+        and is single-instance anyway, so "different instances" cannot arise
+        there. Note what is *not* verified: the contract suite drives sequential
+        calls, so it pins the exclusion predicate, not the atomicity — and CI
+        runs the memory tier only, so the Lua that carries it never executes on
+        the merge gate.
 
         Args:
             for_destroy: mark the lease as a teardown in progress, so a

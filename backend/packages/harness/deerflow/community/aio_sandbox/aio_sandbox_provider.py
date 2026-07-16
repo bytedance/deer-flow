@@ -1130,7 +1130,11 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             # in which case stopping it is the cross-instance kill again.
             if self._claim_ownership(sandbox_id, for_destroy=True):
                 try:
-                    self._backend.destroy(info)
+                    # Held like the other two stop paths: this one untracks before
+                    # claiming, so `_renew_owned_leases` cannot see the id either
+                    # and nothing else would refresh the marker.
+                    with self._held_teardown_lease(sandbox_id):
+                        self._backend.destroy(info)
                 except Exception as e:
                     logger.warning(f"Error destroying unhealthy sandbox {sandbox_id}: {e}")
                 self._release_ownership(sandbox_id)
