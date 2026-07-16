@@ -329,7 +329,7 @@ def test_extract_host_port_handles_missing_fields():
 # ── AioSandboxProvider._reconcile_orphans() ──────────────────────────────────
 
 
-def _make_provider_for_reconciliation():
+def _make_provider_for_reconciliation(tmp_path=None, *, worker_id: str = "worker-test"):
     """Build a minimal AioSandboxProvider without triggering __init__ side effects.
 
     WARNING: This helper intentionally bypasses ``__init__`` via ``__new__`` so
@@ -340,6 +340,9 @@ def _make_provider_for_reconciliation():
     this helper must be updated in lockstep — otherwise tests will fail with a
     confusing ``AttributeError`` instead of a meaningful assertion failure.
     """
+    import tempfile
+    from pathlib import Path
+
     aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
     provider = aio_mod.AioSandboxProvider.__new__(aio_mod.AioSandboxProvider)
     provider._lock = threading.Lock()
@@ -357,12 +360,17 @@ def _make_provider_for_reconciliation():
         "replicas": 3,
     }
     provider._backend = MagicMock()
+    provider._worker_id = worker_id
+    if tmp_path is None:
+        provider._lease_base_dir = Path(tempfile.mkdtemp(prefix="aio-sandbox-lease-"))
+    else:
+        provider._lease_base_dir = Path(tmp_path)
     return provider
 
 
-def test_reconcile_adopts_old_containers_into_warm_pool():
-    """All containers are adopted into warm pool regardless of age — idle checker handles cleanup."""
-    provider = _make_provider_for_reconciliation()
+def test_reconcile_adopts_old_containers_into_warm_pool(tmp_path):
+    """Lease-free containers are adopted into warm pool — idle checker handles cleanup."""
+    provider = _make_provider_for_reconciliation(tmp_path)
     now = time.time()
 
     old_info = SandboxInfo(
@@ -380,9 +388,9 @@ def test_reconcile_adopts_old_containers_into_warm_pool():
     assert "old12345" in provider._warm_pool
 
 
-def test_reconcile_adopts_young_containers():
-    """Young containers are adopted into warm pool for potential reuse."""
-    provider = _make_provider_for_reconciliation()
+def test_reconcile_adopts_young_containers(tmp_path):
+    """Young lease-free containers are adopted into warm pool for potential reuse."""
+    provider = _make_provider_for_reconciliation(tmp_path)
     now = time.time()
 
     young_info = SandboxInfo(
@@ -401,9 +409,9 @@ def test_reconcile_adopts_young_containers():
     assert adopted_info.sandbox_id == "young123"
 
 
-def test_reconcile_mixed_containers_all_adopted():
-    """All containers (old and young) are adopted into warm pool."""
-    provider = _make_provider_for_reconciliation()
+def test_reconcile_mixed_containers_all_adopted(tmp_path):
+    """All lease-free containers (old and young) are adopted into warm pool."""
+    provider = _make_provider_for_reconciliation(tmp_path)
     now = time.time()
 
     old_info = SandboxInfo(
@@ -427,9 +435,9 @@ def test_reconcile_mixed_containers_all_adopted():
     assert "young_one" in provider._warm_pool
 
 
-def test_reconcile_skips_already_tracked_containers():
+def test_reconcile_skips_already_tracked_containers(tmp_path):
     """Containers already in _sandboxes or _warm_pool should be skipped."""
-    provider = _make_provider_for_reconciliation()
+    provider = _make_provider_for_reconciliation(tmp_path)
     now = time.time()
 
     existing_info = SandboxInfo(
@@ -449,9 +457,9 @@ def test_reconcile_skips_already_tracked_containers():
     assert "existing1" not in provider._warm_pool
 
 
-def test_reconcile_handles_backend_failure():
+def test_reconcile_handles_backend_failure(tmp_path):
     """Reconciliation should not crash if backend.list_running() fails."""
-    provider = _make_provider_for_reconciliation()
+    provider = _make_provider_for_reconciliation(tmp_path)
     provider._backend.list_running.side_effect = RuntimeError("docker not available")
 
     # Should not raise
@@ -460,9 +468,9 @@ def test_reconcile_handles_backend_failure():
     assert provider._warm_pool == {}
 
 
-def test_reconcile_no_running_containers():
+def test_reconcile_no_running_containers(tmp_path):
     """Reconciliation with no running containers is a no-op."""
-    provider = _make_provider_for_reconciliation()
+    provider = _make_provider_for_reconciliation(tmp_path)
     provider._backend.list_running.return_value = []
 
     provider._reconcile_orphans()
@@ -471,9 +479,103 @@ def test_reconcile_no_running_containers():
     assert provider._warm_pool == {}
 
 
-def test_reconcile_multiple_containers_all_adopted():
-    """Multiple containers should all be adopted into warm pool."""
-    provider = _make_provider_for_reconciliation()
+def test_reconcile_skips_container_with_live_peer_lease(tmp_path):
+    """#4206: do not adopt a container another worker still owns."""
+    from deerflow.community.aio_sandbox.sandbox_lease import touch_lease
+
+    worker_a = _make_provider_for_reconciliation(tmp_path, worker_id="worker-a")
+    worker_b = _make_provider_for_reconciliation(tmp_path, worker_id="worker-b")
+    now = time.time()
+    info = SandboxInfo(
+        sandbox_id="shared01",
+        sandbox_url="http://localhost:8080",
+        container_name="deer-flow-sandbox-shared01",
+        created_at=now - 50,
+    )
+    touch_lease(tmp_path, "shared01", "worker-a", idle_timeout=600)
+    worker_b._backend.list_running.return_value = [info]
+
+    worker_b._reconcile_orphans()
+
+    assert "shared01" not in worker_b._warm_pool
+    worker_b._backend.destroy.assert_not_called()
+    # worker_a is unused beyond the lease identity; silence linters
+    assert worker_a._worker_id == "worker-a"
+
+
+def test_idle_reap_does_not_destroy_peer_owned_warm_entry(tmp_path):
+    """#4206: idle reaper must not stop a container under another worker's lease."""
+    from deerflow.community.aio_sandbox.sandbox_lease import touch_lease
+
+    worker_b = _make_provider_for_reconciliation(tmp_path, worker_id="worker-b")
+    worker_b._config["idle_timeout"] = 60
+    now = time.time()
+    info = SandboxInfo(
+        sandbox_id="a99c8444",
+        sandbox_url="http://localhost:8080",
+        container_name="deer-flow-sandbox-a99c8444",
+        created_at=now - 50,
+    )
+    # Simulate the bad old path: B already has it in warm (or adopted wrongly).
+    worker_b._warm_pool["a99c8444"] = (info, now - 61)
+    touch_lease(tmp_path, "a99c8444", "worker-a", idle_timeout=600)
+
+    worker_b._reap_expired_warm(idle_timeout=60)
+
+    worker_b._backend.destroy.assert_not_called()
+
+
+def test_multi_worker_release_then_peer_reconcile_cannot_kill(tmp_path):
+    """#4206 issue-log path: A release→warm; B reconcile+reap must not destroy."""
+    from deerflow.community.aio_sandbox.sandbox_lease import touch_lease
+
+    destroyed: list[str] = []
+    running: dict[str, SandboxInfo] = {}
+
+    def list_running():
+        return list(running.values())
+
+    def destroy(info: SandboxInfo):
+        destroyed.append(info.sandbox_id)
+        running.pop(info.sandbox_id, None)
+
+    backend = MagicMock()
+    backend.list_running.side_effect = list_running
+    backend.destroy.side_effect = destroy
+
+    sid = "a99c8444"
+    info = SandboxInfo(
+        sandbox_id=sid,
+        sandbox_url="http://localhost:8080",
+        container_name=f"deer-flow-sandbox-{sid}",
+        created_at=time.time() - 50,
+    )
+    running[sid] = info
+
+    worker_a = _make_provider_for_reconciliation(tmp_path, worker_id="worker-a")
+    worker_a._backend = backend
+    worker_a._config["idle_timeout"] = 60
+    # A released to warm and holds the lease (release always touches lease).
+    worker_a._warm_pool[sid] = (info, time.time())
+    touch_lease(tmp_path, sid, "worker-a", idle_timeout=60)
+
+    worker_b = _make_provider_for_reconciliation(tmp_path, worker_id="worker-b")
+    worker_b._backend = backend
+    worker_b._config["idle_timeout"] = 60
+    worker_b._reconcile_orphans()
+    assert sid not in worker_b._warm_pool
+
+    # Even if B somehow had it warm, reap must refuse.
+    worker_b._warm_pool[sid] = (info, time.time() - 61)
+    worker_b._reap_expired_warm(idle_timeout=60)
+    assert sid not in destroyed
+    assert sid in running
+    assert sid in worker_a._warm_pool
+
+
+def test_reconcile_multiple_containers_all_adopted(tmp_path):
+    """Multiple lease-free containers should all be adopted into warm pool."""
+    provider = _make_provider_for_reconciliation(tmp_path)
     now = time.time()
 
     info1 = SandboxInfo(sandbox_id="cont_one", sandbox_url="http://localhost:8081", created_at=now - 1200)

@@ -47,6 +47,13 @@ from .backend import SandboxBackend, wait_for_sandbox_ready, wait_for_sandbox_re
 from .local_backend import LocalContainerBackend
 from .remote_backend import RemoteSandboxBackend
 from .sandbox_info import SandboxInfo
+from .sandbox_lease import (
+    DEFAULT_LEASE_GRACE_SECONDS,
+    clear_lease,
+    foreign_lease_blocks,
+    generate_sandbox_worker_id,
+    touch_lease,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -151,6 +158,9 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         self._shutdown_called = False
         self._idle_checker_stop = threading.Event()
         self._idle_checker_thread: threading.Thread | None = None
+        # Per-process id used for cross-worker sandbox ownership leases (#4206).
+        self._worker_id = generate_sandbox_worker_id()
+        self._lease_base_dir = get_paths().base_dir
 
         self._config = self._load_config()
         self._backend: SandboxBackend = self._create_backend()
@@ -237,24 +247,63 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 resolved[key] = str(value)
         return resolved
 
+    # ── Cross-worker ownership leases ─────────────────────────────────────
+
+    def _idle_timeout_seconds(self) -> float:
+        return float(self._config.get("idle_timeout", DEFAULT_IDLE_TIMEOUT))
+
+    def _touch_sandbox_lease(self, sandbox_id: str) -> None:
+        """Renew the shared lease so peer workers do not adopt/destroy this container."""
+        try:
+            touch_lease(
+                self._lease_base_dir,
+                sandbox_id,
+                self._worker_id,
+                idle_timeout=self._idle_timeout_seconds(),
+                grace_seconds=DEFAULT_LEASE_GRACE_SECONDS,
+            )
+        except OSError as e:
+            logger.warning("Failed to touch sandbox lease for %s: %s", sandbox_id, e)
+
+    def _clear_sandbox_lease(self, sandbox_id: str) -> None:
+        try:
+            clear_lease(self._lease_base_dir, sandbox_id, worker_id=self._worker_id)
+        except OSError as e:
+            logger.warning("Failed to clear sandbox lease for %s: %s", sandbox_id, e)
+
+    def _foreign_lease_blocks(self, sandbox_id: str) -> bool:
+        """True when another live worker still owns *sandbox_id*."""
+        try:
+            return foreign_lease_blocks(
+                self._lease_base_dir,
+                sandbox_id,
+                self._worker_id,
+                grace_seconds=0,
+            )
+        except OSError as e:
+            logger.warning("Failed to read sandbox lease for %s: %s", sandbox_id, e)
+            # Fail closed for destroy paths: do not kill a container we cannot
+            # prove is orphaned. Reconcile will skip it until the next pass.
+            return True
+
+    def _can_destroy_shared_container(self, sandbox_id: str) -> bool:
+        """Whether this worker may stop the Docker container for *sandbox_id*."""
+        return not self._foreign_lease_blocks(sandbox_id)
+
     # ── Startup reconciliation ────────────────────────────────────────────
 
     def _reconcile_orphans(self) -> None:
         """Reconcile orphaned containers left by previous process lifecycles.
 
-        On startup, enumerate all running containers matching our prefix
-        and adopt them all into the warm pool.  The idle checker will reclaim
-        containers that nobody re-acquires within ``idle_timeout``.
+        On startup (and periodically from the idle checker), enumerate running
+        containers matching our prefix and adopt **true orphans** into the warm
+        pool.  A container is only adopted when no other worker holds an
+        unexpired ownership lease — so multi-worker gateways cannot adopt and
+        later idle-destroy a peer's live sandbox (#4206).
 
-        All containers are adopted unconditionally because we cannot
-        distinguish "orphaned" from "actively used by another process"
-        based on age alone — ``idle_timeout`` represents inactivity, not
-        uptime.  Adopting into the warm pool and letting the idle checker
-        decide avoids destroying containers that a concurrent process may
-        still be using.
-
-        This closes the fundamental gap where in-memory state loss (process
-        restart, crash, SIGKILL) leaves Docker containers running forever.
+        Adopted orphans get a fresh warm-pool timestamp; the idle checker then
+        destroys them if nobody re-acquires within ``idle_timeout``.  That still
+        cleans containers left by a crashed process once its lease expires.
         """
         try:
             running = self._backend.list_running()
@@ -267,9 +316,17 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
 
         current_time = time.time()
         adopted = 0
+        skipped_live = 0
 
         for info in running:
             age = current_time - info.created_at if info.created_at > 0 else float("inf")
+            if self._foreign_lease_blocks(info.sandbox_id):
+                skipped_live += 1
+                logger.debug(
+                    "Skipping container %s during reconciliation: owned by another worker",
+                    info.sandbox_id,
+                )
+                continue
             # Single lock acquisition per container: atomic check-and-insert.
             # Avoids a TOCTOU window between the "already tracked?" check and
             # the warm-pool insert.
@@ -277,11 +334,18 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 if info.sandbox_id in self._sandboxes or info.sandbox_id in self._warm_pool:
                     continue
                 self._warm_pool[info.sandbox_id] = (info, current_time)
+            # Claim ownership so a peer starting at the same moment does not
+            # also adopt and race us on idle destroy.
+            self._touch_sandbox_lease(info.sandbox_id)
             adopted += 1
             logger.info(f"Adopted container {info.sandbox_id} into warm pool (age: {age:.0f}s)")
 
-        logger.info(f"Startup reconciliation complete: {adopted} adopted into warm pool, {len(running)} total found")
-
+        logger.info(
+            "Startup reconciliation complete: %s adopted into warm pool, %s skipped (live peer lease), %s total found",
+            adopted,
+            skipped_live,
+            len(running),
+        )
     # ── Deterministic ID ─────────────────────────────────────────────────
 
     @staticmethod
@@ -415,6 +479,8 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
 
     def _cleanup_idle_resources(self, idle_timeout: float) -> None:
         """Clean AIO resources idle longer than ``idle_timeout`` seconds."""
+        # Pick up containers whose peer leases expired since startup (crash path).
+        self._reconcile_orphans()
         self._cleanup_idle_sandboxes(idle_timeout)
 
     def _cleanup_idle_sandboxes(self, idle_timeout: float) -> None:
@@ -451,6 +517,51 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 logger.error(f"Failed to destroy idle sandbox {sandbox_id}: {e}")
 
         self._reap_expired_warm(idle_timeout)
+
+    def _reap_expired_warm(self, idle_timeout: float | None = None) -> None:
+        """Destroy warm entries older than ``idle_timeout``, never a peer's live container."""
+        timeout = float(self._config.get("idle_timeout", DEFAULT_IDLE_TIMEOUT) if idle_timeout is None else idle_timeout)
+        if timeout <= 0:
+            return
+
+        now = time.time()
+        expired: list[tuple[str, SandboxInfo]] = []
+        with self._lock:
+            for sandbox_id, (entry, timestamp) in self._warm_pool.items():
+                if now - timestamp > timeout:
+                    expired.append((sandbox_id, entry))
+            for sandbox_id, _ in expired:
+                self._warm_pool.pop(sandbox_id, None)
+
+        for sandbox_id, entry in expired:
+            if not self._can_destroy_shared_container(sandbox_id):
+                logger.info(
+                    "Skipping idle destroy of warm-pool sandbox %s: owned by another worker",
+                    sandbox_id,
+                )
+                continue
+            self._destroy_warm_entry(sandbox_id, entry, reason="idle_timeout")
+
+    def _evict_oldest_warm(self) -> str | None:
+        """Evict the oldest warm entry this worker is allowed to destroy."""
+        while True:
+            with self._lock:
+                if not self._warm_pool:
+                    return None
+                # Prefer oldest owned entry; skip peer-owned ones still under lease.
+                candidates = sorted(self._warm_pool.items(), key=lambda item: item[1][1])
+                chosen: tuple[str, SandboxInfo] | None = None
+                for sandbox_id, (entry, _) in candidates:
+                    if self._can_destroy_shared_container(sandbox_id):
+                        self._warm_pool.pop(sandbox_id, None)
+                        chosen = (sandbox_id, entry)
+                        break
+                if chosen is None:
+                    return None
+
+            sandbox_id, entry = chosen
+            self._destroy_warm_entry(sandbox_id, entry, reason="replica_enforcement")
+            return sandbox_id
 
     # ── Signal handling ──────────────────────────────────────────────────
 
@@ -537,7 +648,8 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             suffix = " (post-lock check)" if post_lock else ""
             logger.info(f"Reusing in-process sandbox {existing_id} for user/thread {effective_user_id}/{thread_id}{suffix}")
             self._last_activity[existing_id] = time.time()
-            return existing_id
+        self._touch_sandbox_lease(existing_id)
+        return existing_id
 
     def _reclaim_warm_pool_sandbox(
         self,
@@ -579,6 +691,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             self._last_activity[sandbox_id] = time.time()
             self._thread_sandboxes[key] = sandbox_id
 
+        self._touch_sandbox_lease(sandbox_id)
         suffix = " (post-lock check)" if post_lock else f" at {info.sandbox_url}"
         logger.info(f"Reclaimed warm-pool sandbox {sandbox_id} for user/thread {effective_user_id}/{thread_id}{suffix}")
         return sandbox_id
@@ -602,6 +715,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             self._last_activity[info.sandbox_id] = time.time()
             self._thread_sandboxes[key] = info.sandbox_id
 
+        self._touch_sandbox_lease(info.sandbox_id)
         logger.info(f"Discovered existing sandbox {info.sandbox_id} for user/thread {user_id}/{thread_id} at {info.sandbox_url}")
         return info.sandbox_id
 
@@ -615,6 +729,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             if thread_id:
                 self._thread_sandboxes[self._thread_key(thread_id, self._effective_acquire_user_id(user_id))] = sandbox_id
 
+        self._touch_sandbox_lease(sandbox_id)
         logger.info(f"Created sandbox {sandbox_id} for thread {thread_id} at {info.sandbox_url}")
         return sandbox_id
 
@@ -679,6 +794,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 self._backend.destroy(info)
             except Exception as e:
                 logger.warning(f"Error destroying unhealthy sandbox {sandbox_id}: {e}")
+            self._clear_sandbox_lease(sandbox_id)
 
         logger.warning(f"Dropped unhealthy sandbox {sandbox_id}: {reason}")
 
@@ -688,6 +804,13 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
 
     def _destroy_warm_entry(self, sandbox_id: str, entry: SandboxInfo, *, reason: str) -> None:
         """Destroy a warm-pool sandbox using AIO-specific backend logging."""
+        if not self._can_destroy_shared_container(sandbox_id):
+            logger.info(
+                "Refusing to destroy warm-pool sandbox %s for %s: owned by another worker",
+                sandbox_id,
+                reason,
+            )
+            return
         try:
             self._backend.destroy(entry)
         except Exception as e:
@@ -699,13 +822,14 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 logger.error(f"Failed to destroy warm-pool sandbox {sandbox_id} for {reason}: {e}")
             return
 
+        self._clear_sandbox_lease(sandbox_id)
+
         if reason == "idle_timeout":
             logger.info(f"Destroyed idle warm-pool sandbox {sandbox_id}")
         elif reason == "replica_enforcement":
             logger.info(f"Destroyed warm-pool sandbox {sandbox_id}")
         else:
             logger.info(f"Destroyed warm-pool sandbox {sandbox_id} for {reason}")
-
     # ── Core: acquire / get / release / shutdown ─────────────────────────
 
     def acquire(self, thread_id: str | None = None, *, user_id: str | None = None) -> str:
@@ -926,7 +1050,9 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             sandbox = self._sandboxes.get(sandbox_id)
             if sandbox is not None:
                 self._last_activity[sandbox_id] = time.time()
-            return sandbox
+        if sandbox is not None:
+            self._touch_sandbox_lease(sandbox_id)
+        return sandbox
 
     def release(self, sandbox_id: str) -> None:
         """Release a sandbox from active use into the warm pool.
@@ -967,6 +1093,11 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             except Exception as e:
                 logger.warning(f"Error closing sandbox {sandbox_id} during release: {e}")
 
+        # Keep the lease while warm so a peer cannot adopt+destroy before we
+        # reclaim or our own idle reaper finishes.
+        if info is not None:
+            self._touch_sandbox_lease(sandbox_id)
+
         logger.info(f"Released sandbox {sandbox_id} to warm pool (container still running)")
 
     def destroy(self, sandbox_id: str) -> None:
@@ -994,7 +1125,14 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 logger.warning(f"Error closing sandbox {sandbox_id} during destroy: {e}")
 
         if info:
+            if not self._can_destroy_shared_container(sandbox_id):
+                logger.warning(
+                    "Refusing to destroy sandbox %s: owned by another worker",
+                    sandbox_id,
+                )
+                return
             self._backend.destroy(info)
+            self._clear_sandbox_lease(sandbox_id)
             logger.info(f"Destroyed sandbox {sandbox_id}")
 
     def shutdown(self) -> None:
@@ -1018,8 +1156,15 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 logger.error(f"Failed to destroy sandbox {sandbox_id} during shutdown: {e}")
 
         for sandbox_id, (info, _) in warm_items:
+            if not self._can_destroy_shared_container(sandbox_id):
+                logger.info(
+                    "Leaving warm-pool sandbox %s running on shutdown: owned by another worker",
+                    sandbox_id,
+                )
+                continue
             try:
                 self._backend.destroy(info)
+                self._clear_sandbox_lease(sandbox_id)
                 logger.info(f"Destroyed warm-pool sandbox {sandbox_id} during shutdown")
             except Exception as e:
                 logger.error(f"Failed to destroy warm-pool sandbox {sandbox_id} during shutdown: {e}")

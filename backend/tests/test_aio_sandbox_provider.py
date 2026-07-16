@@ -46,13 +46,21 @@ def test_host_thread_dir_rejects_invalid_thread_id(tmp_path):
 
 def _make_provider(tmp_path):
     """Build a minimal AioSandboxProvider instance without starting the idle checker."""
+    import tempfile
+    from pathlib import Path
+
     aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
     with patch.object(aio_mod.AioSandboxProvider, "_start_idle_checker"):
         provider = aio_mod.AioSandboxProvider.__new__(aio_mod.AioSandboxProvider)
-        provider._config = {}
+        provider._config = {"idle_timeout": 600, "replicas": 3}
         provider._sandboxes = {}
         provider._lock = MagicMock()
         provider._idle_checker_stop = MagicMock()
+        provider._worker_id = "test-worker"
+        if tmp_path is None:
+            provider._lease_base_dir = Path(tempfile.mkdtemp(prefix="aio-lease-"))
+        else:
+            provider._lease_base_dir = Path(tmp_path)
     return provider
 
 
