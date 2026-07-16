@@ -1,0 +1,21 @@
+﻿## Context
+
+PR #4174 replaced per-turn injection of all historical upload metadata with on-demand discovery via `list_uploaded_files`. The agent-facing tag changed from `<uploaded_files>` to `<current_uploads>`.
+
+## What was fixed
+
+1. **Files metadata gap** (commit `8d86dbf6`): `_human_input_message()` was not passing `additional_kwargs.files` to the downstream message. `UploadsMiddleware` read nothing, wrote `uploaded_files=[]`, and `list_uploaded_files` reported same-run IM attachments as historical files. Fixed by adding a `files` parameter.
+
+2. **Double-injection regression** (fancyboi999 review): The fix above left the manual `<uploaded_files>` prepend in place (`_format_uploaded_files_block()`), so every IM attachment reached the model twice — once via the legacy block and once via `<current_uploads>`. Fixed by removing the manual prepend and the now-dead `_format_uploaded_files_block()` function. IM and web both go through `UploadsMiddleware` as the sole upload-context producer.
+
+## What remains (low priority)
+
+The injection side is unified — IM channels no longer emit `<uploaded_files>`. But backward-compat handling for the old tag still exists in several layers. These can be cleaned up separately:
+
+| Location | What |
+|----------|------|
+| `deerflow/agents/memory/.../message_processing.py` | Regex matches both `uploaded_files` and `current_uploads` |
+| `deerflow/agents/memory/.../prompt.py` | Same |
+| `deerflow/agents/memory/.../updater.py` | Same |
+| `deerflow/agents/middlewares/input_sanitization_middleware.py` | Denylist includes `"uploaded_files"` |
+| `frontend/src/core/messages/utils.ts` | `stripUploadedFilesTag` regex and `INTERNAL_MARKER_TAGS` include `uploaded_files` |
