@@ -33,7 +33,7 @@ function isBrowser(): boolean {
  * settings panel. This wrapper traps every storage exception so callers can
  * always fall back to a sane default.
  */
-const safeLocalStorage = {
+export const safeLocalStorage = {
   getItem(key: string): string | null {
     if (!isBrowser()) return null;
     try {
