@@ -21,14 +21,42 @@ KNOWN_CHANNEL_COMMANDS: frozenset[str] = frozenset(
 )
 
 
+def _is_leading_mention_token(token: str) -> bool:
+    """Return whether *token* looks like a platform bot/user mention.
+
+    Group chats often require ``@bot`` before the message is delivered. Slack
+    and Discord strip those tokens before connect parsing; Feishu / DingTalk
+    leave them in the text (``@_user_1``, ``@bot``, ``<@id>``). Treat them as
+    transport noise only when they lead the message so
+    ``@bot /connect <code>`` still binds.
+    """
+    if not token:
+        return False
+    # Slack / Discord style: <@U123> or <@!U123> or <@U123|name>
+    if token.startswith("<@") and token.endswith(">"):
+        return True
+    # Feishu / DingTalk / generic: @_user_1, @bot, @nickname
+    if token.startswith("@") and len(token) > 1:
+        return True
+    return False
+
+
 def extract_connect_code(text: str) -> str | None:
-    """Extract the one-time channel binding code from a connect command."""
+    """Extract the one-time channel binding code from a connect command.
+
+    Accepts a leading platform mention so group ``@bot /connect <code>``
+    messages bind the same way as bare ``/connect <code>`` (Slack/Discord
+    already strip mentions before calling this helper).
+    """
     parts = text.strip().split()
-    if len(parts) < 2:
+    index = 0
+    while index < len(parts) and _is_leading_mention_token(parts[index]):
+        index += 1
+    if index + 1 >= len(parts):
         return None
-    command = parts[0].lower()
+    command = parts[index].lower()
     if command in {"/connect", "connect"}:
-        return parts[1]
+        return parts[index + 1]
     return None
 
 

@@ -4,9 +4,9 @@ name: Publish Helm Chart
 # container images (see container.yaml). Triggers on the same `v*` tags.
 #
 # On pull requests touching the chart or config.example.yaml, `validate-chart`
-# runs lint + template render + a config_version drift check (the chart's
-# embedded config_version must not lag config.example.yaml) so a broken or
-# stale chart fails the PR, not the release.
+# runs lint + template render + a sandbox Service-type gating check + a
+# config_version drift check (the chart's embedded config_version must not lag
+# config.example.yaml) so a broken or stale chart fails the PR, not the release.
 #
 # Users then install with:
 #   helm install deer-flow oci://ghcr.io/${{ owner }}/charts/deer-flow --version <ver>
@@ -21,6 +21,7 @@ on:
       - "config.example.yaml"
       - ".github/workflows/chart.yaml"
       - "scripts/check_config_version.sh"
+      - "scripts/check_chart_sandbox_service.sh"
 
 jobs:
   validate-chart:
@@ -41,6 +42,12 @@ jobs:
         run: helm lint deploy/helm/deer-flow
       - name: Validate templates render
         run: helm template deer-flow deploy/helm/deer-flow --include-crds >/dev/null
+
+      # Assert the sandbox Service-type gating: default emits
+      # SANDBOX_SERVICE_TYPE=ClusterIP and no NODE_HOST; the NodePort opt-in
+      # emits both. Guards the #3929 default flip against regressions.
+      - name: Validate sandbox Service-type gating
+        run: bash scripts/check_chart_sandbox_service.sh
 
       # The chart's `config:` block embeds a config_version that must not fall
       # behind config.example.yaml. A stale version is silent in-cluster (the

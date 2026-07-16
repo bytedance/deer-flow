@@ -1349,7 +1349,7 @@ async def test_cancel_returns_taken_over_when_peer_claims_during_local_cancel():
     # the race: in-memory cancel succeeds, but store write is blocked.
     original = store.update_status
 
-    async def race_update(run_id, status, *, error=None):
+    async def race_update(run_id, status, *, error=None, stop_reason=None):
         # Simulate peer takeover: flip to error before our write lands
         run = store._runs.get(run_id)
         if run and run["status"] == "running" and status == "interrupted":
@@ -1357,7 +1357,7 @@ async def test_cancel_returns_taken_over_when_peer_claims_during_local_cancel():
             run["error"] = "peer takeover"
             run["updated_at"] = datetime.now(UTC).isoformat()
             return False  # our write was blocked
-        return await original(run_id, status, error=error)
+        return await original(run_id, status, error=error, stop_reason=stop_reason)
 
     store.update_status = race_update
 

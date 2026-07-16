@@ -1,3 +1,5 @@
+import { INTERNAL_MARKER_TAGS } from "@/core/messages/utils";
+
 import { normalizeMermaidMarkdown } from "./mermaid";
 
 const MERMAID_BLOCK_HINT_RE = /mermaid/i;
@@ -315,6 +317,67 @@ export function compactDisplayMathBlocks(markdown: string): string {
 
 export function normalizeStreamdownMathMarkdown(markdown: string): string {
   return compactDisplayMathBlocks(normalizeLatexMathDelimiters(markdown));
+}
+
+// Regex matching any opening, closing, or self-closing internal marker tag.
+// e.g. <memory>, </memory>, <memory attr="x">, <memory/>
+const _INTERNAL_TAG_RE = new RegExp(
+  `</?(?:${INTERNAL_MARKER_TAGS.join("|")})(?:\\s[^>]*)?/?>`,
+  "g",
+);
+
+// Regex matching the start/end of a fenced code block (3+ backticks or tildes).
+// Captures the marker string so we can compare character and length.
+const FENCE_MARKER_RE = /^ {0,3}(`{3,}|~{3,})/;
+
+/**
+ * Strip leaked system-internal HTML tags from markdown content.
+ *
+ * Backend-injected markers like ``<memory>…</memory>`` can occasionally
+ * reach the UI renderer (e.g. when a ``hide_from_ui`` reminder leaks through
+ * the filter).  React's DOM renderer logs "unrecognized tag" console errors
+ * for unknown HTML elements.  This function strips the tag markers while
+ * preserving the inner content — unlike {@link stripInternalMarkers} in
+ * ``utils.ts``, which removes the entire block.
+ *
+ * Code-aware: tags inside fenced code blocks (````` `````) and indented code
+ * blocks (4-space indent) are left untouched, so user-written meta-discussions
+ * about the memory system are not silently stripped.
+ *
+ * Fence tracking is marker-aware (tracking the opening character and run
+ * length) so that a tilde-fenced block containing a shorter backtick run, or a
+ * 4-backtick block containing a 3-backtick run, does not prematurely close the
+ * fence.
+ */
+export function stripLeakedSystemTags(markdown: string): string {
+  const lines = markdown.split("\n");
+  let fenceMarker: string | null = null;
+
+  return lines
+    .map((line) => {
+      const fenceMatch = FENCE_MARKER_RE.exec(line);
+      if (fenceMatch) {
+        const marker = fenceMatch[1]!;
+        if (fenceMarker === null) {
+          // Opening a fenced code block
+          fenceMarker = marker;
+        } else if (
+          marker.startsWith(fenceMarker.charAt(0)) &&
+          marker.length >= fenceMarker.length
+        ) {
+          // Closing fence: same character and at least as long as opener
+          fenceMarker = null;
+        }
+        // Otherwise: different fence type or shorter run inside a fence
+        // (e.g. ``` inside ~~~~, or `` inside `````) — stay inside.
+        return line;
+      }
+      if (fenceMarker !== null || INDENTED_CODE_RE.test(line)) {
+        return line;
+      }
+      return line.replace(_INTERNAL_TAG_RE, "");
+    })
+    .join("\n");
 }
 
 export function preprocessStreamdownMarkdown(markdown: string): string {
