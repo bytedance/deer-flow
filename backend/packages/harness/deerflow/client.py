@@ -46,7 +46,7 @@ from deerflow.runtime.goal import DEFAULT_MAX_GOAL_CONTINUATIONS, build_goal_sta
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.skills.describe import build_skill_search_setup
 from deerflow.skills.storage import get_or_new_user_skill_storage
-from deerflow.tools.builtins.tool_search import assemble_deferred_tools
+from deerflow.tools.builtins.tool_search import assemble_deferred_tools, build_mcp_routing_middleware, get_mcp_routing_hints_prompt_section
 from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, generate_trace_id, get_current_trace_id, reset_current_trace_id, set_current_trace_id
 from deerflow.tracing import build_tracing_callbacks, inject_langfuse_metadata
 from deerflow.uploads.manager import (
@@ -243,6 +243,8 @@ class DeerFlowClient:
             cfg.get("thinking_enabled"),
             cfg.get("is_plan_mode"),
             cfg.get("subagent_enabled"),
+            cfg.get("max_concurrent_subagents"),
+            cfg.get("max_total_subagents"),
             self._agent_name,
             frozenset(self._available_skills) if self._available_skills is not None else None,
         )
@@ -254,9 +256,16 @@ class DeerFlowClient:
         model_name = cfg.get("model_name")
         subagent_enabled = cfg.get("subagent_enabled", False)
         max_concurrent_subagents = cfg.get("max_concurrent_subagents", 3)
+        max_total_subagents = cfg.get("max_total_subagents", self._app_config.subagents.max_total_per_run)
 
         tools = self._get_tools(model_name=model_name, subagent_enabled=subagent_enabled)
         final_tools, deferred_setup = assemble_deferred_tools(tools, enabled=self._app_config.tool_search.enabled)
+        mcp_routing_middleware = build_mcp_routing_middleware(
+            final_tools,
+            deferred_setup,
+            top_k=self._app_config.tool_search.auto_promote_top_k,
+        )
+        mcp_routing_hints_section = get_mcp_routing_hints_prompt_section(tools, deferred_names=deferred_setup.deferred_names)
 
         # Wire deferred skill discovery — mirrors agent.py so config flag works on both paths.
         skills_list = get_enabled_skills_for_config(self._app_config)
@@ -285,15 +294,18 @@ class DeerFlowClient:
                 custom_middlewares=self._middlewares,
                 app_config=self._app_config,
                 deferred_setup=deferred_setup,
+                mcp_routing_middleware=mcp_routing_middleware,
                 user_id=get_effective_user_id(),
             ),
             "system_prompt": apply_prompt_template(
                 subagent_enabled=subagent_enabled,
                 max_concurrent_subagents=max_concurrent_subagents,
+                max_total_subagents=max_total_subagents,
                 agent_name=self._agent_name,
                 available_skills=self._available_skills,
                 app_config=self._app_config,
                 deferred_names=deferred_setup.deferred_names,
+                mcp_routing_hints_section=mcp_routing_hints_section,
                 user_id=get_effective_user_id(),
                 skill_names=skill_setup.skill_names or None,
             ),
@@ -750,8 +762,9 @@ class DeerFlowClient:
 
         self._ensure_agent(config)
 
-        state: dict[str, Any] = {"messages": [HumanMessage(content=message)]}
-        context = {"thread_id": thread_id}
+        run_id = str(uuid.uuid4())
+        state: dict[str, Any] = {"messages": [HumanMessage(content=message, additional_kwargs={"run_id": run_id})]}
+        context = {"thread_id": thread_id, "run_id": run_id}
         if deerflow_trace_id:
             context[DEERFLOW_TRACE_METADATA_KEY] = deerflow_trace_id
         if self._agent_name:
@@ -1030,21 +1043,21 @@ class DeerFlowClient:
         Returns:
             Memory data dict (see src/agents/memory/updater.py for structure).
         """
-        from deerflow.agents.memory.updater import get_memory_data
+        from deerflow.agents.memory import get_memory_manager
 
-        return get_memory_data(user_id=get_effective_user_id())
+        return get_memory_manager().get_memory(user_id=get_effective_user_id())
 
     def export_memory(self) -> dict:
         """Export current memory data for backup or transfer."""
-        from deerflow.agents.memory.updater import get_memory_data
+        from deerflow.agents.memory import get_memory_manager
 
-        return get_memory_data(user_id=get_effective_user_id())
+        return get_memory_manager().get_memory(user_id=get_effective_user_id())
 
     def import_memory(self, memory_data: dict) -> dict:
         """Import and persist full memory data."""
-        from deerflow.agents.memory.updater import import_memory_data
+        from deerflow.agents.memory import get_memory_manager
 
-        return import_memory_data(memory_data, user_id=get_effective_user_id())
+        return get_memory_manager().import_memory(memory_data, user_id=get_effective_user_id())
 
     def get_model(self, name: str) -> dict | None:
         """Get a specific model's configuration by name.
@@ -1260,27 +1273,40 @@ class DeerFlowClient:
         Returns:
             The reloaded memory data dict.
         """
-        from deerflow.agents.memory.updater import reload_memory_data
+        from deerflow.agents.memory import get_memory_manager
 
-        return reload_memory_data(user_id=get_effective_user_id())
+        manager = get_memory_manager()
+        if hasattr(manager, "reload_memory"):
+            return manager.reload_memory(user_id=get_effective_user_id())
+        # Non-DeerMem backends have no reload concept; return current memory.
+        return manager.get_memory(user_id=get_effective_user_id())
 
     def clear_memory(self) -> dict:
         """Clear all persisted memory data."""
-        from deerflow.agents.memory.updater import clear_memory_data
+        from deerflow.agents.memory import get_memory_manager
 
-        return clear_memory_data(user_id=get_effective_user_id())
+        return get_memory_manager().clear_memory(user_id=get_effective_user_id())
 
     def create_memory_fact(self, content: str, category: str = "context", confidence: float = 0.5) -> dict:
         """Create a single fact manually."""
-        from deerflow.agents.memory.updater import create_memory_fact
+        from deerflow.agents.memory import get_memory_manager
 
-        return create_memory_fact(content=content, category=category, confidence=confidence)
+        manager = get_memory_manager()
+        if not hasattr(manager, "create_fact"):
+            raise NotImplementedError(f"create_fact not supported by memory backend '{type(manager).__name__}'")
+        memory_data, fact_id = manager.create_fact(content=content, category=category, confidence=confidence, user_id=get_effective_user_id())
+        if fact_id is None:
+            raise ValueError("Fact was not stored because memory.max_facts kept higher-confidence facts")
+        return memory_data
 
     def delete_memory_fact(self, fact_id: str) -> dict:
         """Delete a single fact from memory by fact id."""
-        from deerflow.agents.memory.updater import delete_memory_fact
+        from deerflow.agents.memory import get_memory_manager
 
-        return delete_memory_fact(fact_id)
+        manager = get_memory_manager()
+        if not hasattr(manager, "delete_fact"):
+            raise NotImplementedError(f"delete_fact not supported by memory backend '{type(manager).__name__}'")
+        return manager.delete_fact(fact_id, user_id=get_effective_user_id())
 
     def update_memory_fact(
         self,
@@ -1290,13 +1316,17 @@ class DeerFlowClient:
         confidence: float | None = None,
     ) -> dict:
         """Update a single fact manually, preserving omitted fields."""
-        from deerflow.agents.memory.updater import update_memory_fact
+        from deerflow.agents.memory import get_memory_manager
 
-        return update_memory_fact(
+        manager = get_memory_manager()
+        if not hasattr(manager, "update_fact"):
+            raise NotImplementedError(f"update_fact not supported by memory backend '{type(manager).__name__}'")
+        return manager.update_fact(
             fact_id=fact_id,
             content=content,
             category=category,
             confidence=confidence,
+            user_id=get_effective_user_id(),
         )
 
     def get_memory_config(self) -> dict:
@@ -1310,20 +1340,11 @@ class DeerFlowClient:
         config = get_memory_config()
         return {
             "enabled": config.enabled,
-            "storage_path": config.storage_path,
-            "debounce_seconds": config.debounce_seconds,
-            "max_facts": config.max_facts,
-            "fact_confidence_threshold": config.fact_confidence_threshold,
+            "mode": config.mode,
             "injection_enabled": config.injection_enabled,
-            "max_injection_tokens": config.max_injection_tokens,
-            "token_counting": config.token_counting,
-            "guaranteed_categories": config.guaranteed_categories,
-            "guaranteed_token_budget": config.guaranteed_token_budget,
-            "staleness_review_enabled": config.staleness_review_enabled,
-            "staleness_age_days": config.staleness_age_days,
-            "staleness_min_candidates": config.staleness_min_candidates,
-            "staleness_max_removals_per_cycle": config.staleness_max_removals_per_cycle,
-            "staleness_protected_categories": config.staleness_protected_categories,
+            "shutdown_flush_timeout_seconds": config.shutdown_flush_timeout_seconds,
+            "manager_class": config.manager_class,
+            "backend_config": config.backend_config,
         }
 
     def get_memory_status(self) -> dict:

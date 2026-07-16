@@ -15,7 +15,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 20
+config_version: 26
 
 # ============================================================================
 # Logging
@@ -29,6 +29,14 @@ logging:
   enhance:
     enabled: false
     format: text
+
+# ============================================================================
+# Tracing / Observability (Monocle)
+# ============================================================================
+# Optional agent tracing via Monocle. Configured through environment variables
+# (MONOCLE_TRACING, MONOCLE_EXPORTERS, OKAHU_API_KEY — like LangSmith/Langfuse),
+# not config.yaml keys, and OFF by default. See README.md → "Monocle Tracing"
+# for setup, what each exporter captures, and where the trace data goes.
 
 # ============================================================================
 # Token Usage
@@ -120,6 +128,50 @@ models:
   #       thinking:
   #         type: disabled
 
+  # Example: Volcengine Coding Plan (one key, multi-vendor gateway)
+  # The Coding Plan endpoint (/api/coding/v3) lets you access models from
+  # Doubao, GLM, DeepSeek, Kimi, and MiniMax with a single API key.
+  # Each model may differ in thinking/vision support - configure per-model.
+  #
+  # - name: glm-5.2-cp
+  #   display_name: GLM-5.2 (Coding Plan)
+  #   use: deerflow.models.patched_deepseek:PatchedChatDeepSeek
+  #   model: glm-5.2
+  #   api_base: https://ark.cn-beijing.volces.com/api/coding/v3
+  #   api_key: $VOLCENGINE_API_KEY
+  #   timeout: 600.0
+  #   max_retries: 2
+  #   supports_thinking: true
+  #   supports_vision: false
+  #   supports_reasoning_effort: true
+  #   when_thinking_enabled:
+  #     extra_body:
+  #       thinking:
+  #         type: enabled
+  #   when_thinking_disabled:
+  #     extra_body:
+  #       thinking:
+  #         type: disabled
+  #
+  # - name: deepseek-v4-pro-cp
+  #   display_name: DeepSeek-V4-Pro (Coding Plan)
+  #   use: deerflow.models.patched_deepseek:PatchedChatDeepSeek
+  #   model: deepseek-v4-pro
+  #   api_base: https://ark.cn-beijing.volces.com/api/coding/v3
+  #   api_key: $VOLCENGINE_API_KEY
+  #   timeout: 600.0
+  #   max_retries: 2
+  #   supports_thinking: true
+  #   supports_vision: false
+  #   supports_reasoning_effort: true
+  #   when_thinking_enabled:
+  #     extra_body:
+  #       thinking:
+  #         type: enabled
+  #   when_thinking_disabled:
+  #     extra_body:
+  #       thinking:
+  #         type: disabled
   # Example: OpenAI model
   # - name: gpt-4
   #   display_name: GPT-4
@@ -895,6 +947,10 @@ tools:
 
 tool_search:
   enabled: false
+  # When tool_search is enabled, PR1 MCP routing metadata can auto-promote
+  # matching deferred MCP tool schemas before a model call. This is the maximum
+  # number of matched schemas promoted per model call. Valid range: 1..5.
+  auto_promote_top_k: 3
 
 # ============================================================================
 # Tool Output Budget Protection
@@ -932,6 +988,20 @@ tool_output:
 
 suggestions:
   enabled: true
+
+
+# ============================================================================
+# Input Polish Configuration
+# ============================================================================
+# Configure whether the composer can rewrite draft input before sending.
+
+input_polish:
+  enabled: true
+  # Maximum draft length accepted by /api/input-polish.
+  max_chars: 4000
+  # Optional fast model for draft polishing. Leave null to use the default chat model.
+  # For best UX, set this to your lowest-latency inexpensive model.
+  model_name: null
 
 
 # ============================================================================
@@ -1158,6 +1228,10 @@ sandbox:
 #   # Set to 0 to keep warm VMs until shutdown or replica eviction.
 #   # idle_timeout: 600
 #
+#   # Optional: Skip the reclaim health check for very recently released VMs.
+#   # Default 0.0 keeps reliability-first validation before warm reuse.
+#   # health_check_skip_seconds: 0.0
+#
 #   # Optional: Environment variables to inject into every command.
 #   # environment:
 #   #   PYTHONUNBUFFERED: "1"
@@ -1168,6 +1242,11 @@ sandbox:
 # sandbox:
 #   use: deerflow.community.aio_sandbox:AioSandboxProvider
 #   provisioner_url: http://provisioner:8002
+#   # API key for provisioner authentication. Must match PROVISIONER_API_KEY
+#   # set on the provisioner container. Both sides must have the same value set;
+#   # the provisioner rejects all /api/* requests when PROVISIONER_API_KEY is unset.
+#   # Generate a strong key: openssl rand -hex 32
+#   # provisioner_api_key: $PROVISIONER_API_KEY
 #   # Note: provisioner-created Pods use the provisioner's SANDBOX_IMAGE
 #   # environment variable, not sandbox.image from this config file.
 
@@ -1185,11 +1264,34 @@ sandbox:
 #   # Built-in defaults: general-purpose=150, bash=60. Leave unset to keep them.
 #   # max_turns: 120
 #
+#   # Total number of subagent delegations allowed in one lead-agent run.
+#   # This is a deterministic backstop against repeated planning checkpoints
+#   # launching legal-sized batches forever. The default 6 allows two full
+#   # batches at the default concurrency of 3. Valid config range: 1-50.
+#   # Per-request runtime context can temporarily override this with
+#   # `max_total_subagents`, clamped to the same 1-50 range.
+#   max_total_per_run: 6
+#
+#   # Per-run token ceiling for subagents (#3875 Phase 2). A backstop against a
+#   # subagent that burns tokens on trivial work. At the hard-stop threshold the
+#   # in-flight turn is capped (tool calls stripped, finish_reason forced to
+#   # "stop") so the run completes naturally with a final answer; the result is
+#   # stamped `completed` + `subagent_stop_reason=token_capped` so the lead and
+#   # UI can tell a budget-capped completion from a clean one. The 2,000,000
+#   # default is a generous ceiling — lower it to tighten cost controls. A
+#   # per-agent `token_budget` override (see `agents:` below) wins over this.
+#   # token_budget:
+#   #   enabled: true
+#   #   max_tokens: 2000000
+#   #   warn_threshold: 0.7     # log a warning once this fraction of the budget is spent
+#
 #   # Optional per-agent overrides (applies to both built-in and custom agents)
 #   agents:
 #     general-purpose:
 #       timeout_seconds: 2700  # 45 minutes for very long deep-research tasks
 #       max_turns: 250         # raise above the 150 default for very deep tasks
+#       # token_budget:        # per-agent override of the global token_budget above
+#       #   max_tokens: 3000000  # raise the ceiling for deep-research tasks
 #       # model: qwen3:32b     # Use a specific model (default: inherit from lead agent)
 #       # skills:               # Skill whitelist (default: inherit all enabled skills)
 #       #   - web-search
@@ -1369,60 +1471,115 @@ summarization:
 # ============================================================================
 # Memory Configuration
 # ============================================================================
-# Global memory mechanism
-# Stores user context and conversation history for personalized responses
+# Global memory mechanism (pluggable + self-contained).
+#
+# Shared fields (host level, backend-agnostic):
+#   enabled             - Master switch for the memory mechanism (call-site gate)
+#   injection_enabled   - Whether to inject memory into the system prompt (call-site gate)
+#   shutdown_flush_timeout_seconds - Hard budget (s) to drain pending updates on Gateway graceful shutdown (default: 30)
+#   manager_class       - Backend selector: registered name (deermem/noop) or dotted path
+#   backend_config      - Backend-private config dict (passthrough; each backend self-interprets)
+#
+# DeerMem-private fields live under ``backend_config`` (NOT at the memory: top level):
+#   storage_path        - Data root. Empty = deer-flow base_dir (factory injects absolute
+#                         runtime_home). Absolute path = that root. Relative = CWD-relative.
+#   model               - LLM config for memory extraction: {provider, model, api_key, base_url,
+#                         temperature}. Omit all fields = no extraction (non-LLM ops still work).
+#   debounce_seconds    - Debounce wait before processing queued updates (default: 30)
+#   max_facts           - Maximum facts to store (default: 100)
+#   fact_confidence_threshold - Minimum confidence for storing facts (default: 0.7)
+#   max_injection_tokens     - Token budget for memory injection (default: 2000)
+#   token_counting          - tiktoken (accurate, network on first use) or char (network-free)
+#   guaranteed_categories   - Fact categories always injected (default: ["correction"])
+#   guaranteed_token_budget - Token ceiling for guaranteed categories (default: 500)
+#   staleness_review_enabled       - Enable staleness pruning (default: true)
+#   staleness_age_days             - Age threshold for staleness candidates (default: 90)
+#   staleness_min_candidates       - Minimum stale facts to trigger review (default: 3)
+#   staleness_max_removals_per_cycle - Safety cap on removals per cycle (default: 10)
+#   staleness_protected_categories - Categories exempt from staleness review (default: ["correction"])
+#   staleness_max_lifetime_multiplier - Creation-time cap multiplier for a fact LLM-assigned
+#                                       expected_valid_days; new facts clamped to
+#                                       staleness_age_days x multiplier. Default 20.0
+#                                       (90 x 20 = 1800d ~ 5 years) supports the very-stable
+#                                       prompt tier. (default: 20.0, range: 1.0-100.0)
+#   staleness_max_extension_days   - Absolute ceiling (in days) on expected_valid_days after a
+#                                    lifetime extension (staleFactsToExtend). Prevents timedelta
+#                                    overflow and LLM misfire from permanently deferring a fact.
+#                                    (default: 3650, range: 90-36500)
 memory:
   enabled: true
-  storage_path: memory.json # Path relative to backend directory
-  debounce_seconds: 30 # Wait time before processing queued updates
-  model_name: null # Use default model
-  max_facts: 100 # Maximum number of facts to store
-  fact_confidence_threshold: 0.7 # Minimum confidence for storing facts
   injection_enabled: true # Whether to inject memory into system prompt
-  max_injection_tokens: 2000 # Maximum tokens for memory injection
-  # Token counting strategy for memory-injection budgeting:
-  #   tiktoken (default) - accurate, but the encoding's BPE data may be
-  #     downloaded from a public network endpoint on first use. In
-  #     network-restricted environments this download can block for a long
-  #     time (see issues #3402 / #3429). Pre-cache the encoding or set this
-  #     to "char" to avoid it.
-  #   char - network-free CJK-aware character-based estimate; never touches
-  #     tiktoken. Slightly less precise budgeting, zero network I/O.
-  token_counting: tiktoken
-  # Guaranteed injection: fact categories that bypass the regular token budget
-  # and draw from a reserved allowance, so high-signal corrections (e.g.
-  # "don't use `pip`, use `uv`") survive even when the budget is tight.
-  #   guaranteed_categories - list of fact categories to guarantee. Pass [] to
-  #     disable; defaults to ["correction"].
-  #   guaranteed_token_budget - token ceiling for guaranteed facts. In the
-  #     common case the total injection stays within ``max_injection_tokens``
-  #     (guaranteed lines displace regular ones); the allowance becomes
-  #     additive only when guaranteed lines alone would overflow
-  #     ``max_injection_tokens``, in which case the safety-truncation ceiling
-  #     is raised accordingly.
-  guaranteed_categories:
-    - correction
-  guaranteed_token_budget: 500
-  # Staleness review: periodically prune aged facts that may no longer reflect
-  # the user's current situation.  When triggered, the LLM reviews facts older
-  # than ``staleness_age_days`` during the normal memory-update call (same LLM
-  # invocation — no extra API call) and decides KEEP or REMOVE for each.
-  #   staleness_review_enabled - master switch (default: true)
-  #   staleness_age_days       - facts older than this are candidates (default: 90)
-  #   staleness_min_candidates - minimum stale facts required to trigger a review
-  #                              cycle; avoids wasteful LLM calls when there are
-  #                              very few candidates (default: 3)
-  #   staleness_max_removals_per_cycle - safety cap on removals per cycle; when
-  #                                      exceeded, the lowest-confidence entries
-  #                                      are kept (default: 10)
-  #   staleness_protected_categories - fact categories exempt from review
-  #                                    (default: ["correction"])
-  staleness_review_enabled: true
-  staleness_age_days: 90
-  staleness_min_candidates: 3
-  staleness_max_removals_per_cycle: 10
-  staleness_protected_categories:
-    - correction
+  # Hard budget (seconds) to drain pending memory updates on Gateway graceful
+  # shutdown. Each pending item does one LLM call, so large IM batches may need
+  # more. Must fit inside the pod's K8s terminationGracePeriodSeconds (channel
+  # stop + this drain + buffer) or K8s SIGKILLs the drain -- set that on the
+  # gateway Helm deployment (see deploy/helm/deer-flow). Default 30s.
+  shutdown_flush_timeout_seconds: 30.0
+  # Memory backend selector. Either a registered backend name (matching a
+  # backends/<name>/ folder that exposes MANAGER_CLASS, e.g. deermem / noop)
+  # or a dotted import path to a MemoryManager subclass.
+  manager_class: deermem
+  # Memory operation mode:
+  #   middleware (default) - passive background extraction after each turn.
+  #   tool - experimental opt-in; the model calls memory_search/memory_add/
+  #     memory_update/memory_delete directly. This gives the model agency over
+  #     memory writes, but effectiveness depends on model tool-use behavior.
+  # Only one mode runs at a time. (tool mode calls the MemoryManager ABC --
+  # memory_search/add/update/delete go through the active backend; backends
+  # without fact-CRUD return a JSON error instead of crashing.)
+  mode: middleware
+  # Backend-private config (a dict), passed verbatim to the backend __init__.
+  # Each backend self-interprets it (DeerMem parses it into DeerMemConfig).
+  backend_config:
+    storage_path: ""            # empty = deer-flow base_dir (factory injects absolute runtime_home); a non-empty path is the root DIRECTORY (per-user memory under {storage_path}/users/{uid}/memory.json)
+    debounce_seconds: 30 # Wait time before processing queued updates
+    model:                      # LLM for memory extraction; omit all fields = no extraction (non-LLM ops still work; an update raises)
+      # provider: openai
+      # model: gpt-4o-mini
+      # api_key: $OPENAI_API_KEY
+      # base_url:               # optional, for OpenAI-compatible gateways (e.g. DeepSeek)
+      # temperature:            # optional
+    max_facts: 100 # Maximum number of facts to store
+    fact_confidence_threshold: 0.7 # Minimum confidence for storing facts
+    max_injection_tokens: 2000 # Maximum tokens for memory injection
+    # Token counting strategy for memory-injection budgeting:
+    #   tiktoken (default) - accurate, but the encoding BPE data may be
+    #     downloaded from a public network endpoint on first use. In
+    #     network-restricted environments this download can block for a long
+    #     time (see issues #3402 / #3429). Pre-cache the encoding or set this
+    #     to "char" to avoid it.
+    #   char - network-free CJK-aware character-based estimate; never touches
+    #     tiktoken. Slightly less precise budgeting, zero network I/O.
+    token_counting: tiktoken
+    # Guaranteed injection: fact categories that bypass the regular token budget
+    # and draw from a reserved allowance, so high-signal corrections (e.g.
+    # "don use pip, use uv") survive even when the budget is tight.
+    guaranteed_categories:
+      - correction
+    guaranteed_token_budget: 500
+    # Staleness review: periodically prune aged facts that may no longer reflect
+    # the user current situation. When triggered, the LLM reviews facts older
+    # than their individual review window (expected_valid_days, or
+    # staleness_age_days as fallback) during the normal memory-update call (same
+    # LLM invocation - no extra API call) and decides KEEP, REMOVE, or EXTEND
+    # for each. The LLM assigns expected_valid_days when creating a fact; EXTEND
+    # (staleFactsToExtend) recalibrates that window at review time.
+    staleness_review_enabled: true
+    staleness_age_days: 90
+    staleness_min_candidates: 3
+    staleness_max_removals_per_cycle: 10
+    staleness_protected_categories:
+      - correction
+    staleness_max_lifetime_multiplier: 20.0   # creation cap = staleness_age_days x multiplier (90 x 20 = 1800d)
+    staleness_max_extension_days: 3650        # absolute ceiling on extended expected_valid_days (~10 years)
+    # Memory consolidation (opt-in, lossy: source facts are replaced by a
+    # synthesized one; only consolidatedFrom IDs are kept). Runs in the same
+    # memory-update LLM call as extraction/staleness - no extra API cost.
+    # consolidation_enabled defaults to false because consolidation is lossy.
+    consolidation_enabled: false       # set true to opt into fact consolidation
+    consolidation_min_facts: 8         # min facts in one category to trigger review (3-30)
+    consolidation_max_groups_per_cycle: 3  # max groups merged per update cycle (1-10)
+    consolidation_max_sources: 8       # max source facts per consolidation group (2-20)
 
 # ============================================================================
 # Custom Agent Management API
@@ -1554,6 +1711,30 @@ scheduler:
   lease_seconds: 120
   max_concurrent_runs: 3
   min_once_delay_seconds: 60
+
+# ============================================================================
+# Run Ownership Configuration
+# ============================================================================
+# Controls cross-process run ownership for multi-worker deployments.
+# When GATEWAY_WORKERS > 1, each worker claims runs with a lease; the heartbeat
+# renews leases, and reconciliation recovers orphaned runs from crashed workers.
+#
+# CLOCK-SYNC REQUIREMENT (multi-worker only): reconciliation compares another
+# worker's UTC lease timestamp against this worker's datetime.now(UTC). Worker
+# clocks MUST be synced (NTP / chrony / systemd-timesyncd — default on K8s and
+# cloud VMs) within a few seconds. grace_seconds is the skew budget; worst case
+# (owning worker's heartbeat just about to fire), a peer whose clock is more
+# than grace_seconds ahead can mis-reclaim a still-live run as an orphan. Raise
+# grace_seconds if your environment cannot keep clocks within a few seconds;
+# the trade-off is longer recovery latency for genuinely dead workers
+# (lease_seconds + grace_seconds from last heartbeat to reclaim).
+
+run_ownership:
+  lease_seconds: 30           # Seconds before a run lease expires if not renewed.
+                              # Heartbeat renews every lease_seconds / 3.
+  grace_seconds: 10           # Extra seconds past expiry before reclaiming an orphaned run.
+                              # Also the cross-worker clock-skew budget — see note above.
+  heartbeat_enabled: false    # Set to true for GATEWAY_WORKERS > 1
 
 # ============================================================================
 # Stream Bridge Configuration
@@ -1782,6 +1963,16 @@ scheduler:
 #     use: my_package:MyGuardrailProvider
 #     config:
 #       key: value
+
+# ============================================================================
+# Authorization Configuration
+# ============================================================================
+# Fine-grained resource authorization (RBAC and beyond). Disabled by default;
+# every authenticated user has access to all resources. Schema is present but
+# inert; the built-in RBAC provider and runtime wiring arrive in subsequent phases.
+# See RFC: https://github.com/bytedance/deer-flow/issues/4063
+authorization:
+  enabled: false
 
 # ============================================================================
 # Circuit Breaker Configuration

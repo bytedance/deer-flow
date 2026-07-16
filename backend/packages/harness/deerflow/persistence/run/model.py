@@ -25,6 +25,7 @@ class RunRow(Base):
     metadata_json: Mapped[dict] = mapped_column(JSON, default=dict)
     kwargs_json: Mapped[dict] = mapped_column(JSON, default=dict)
     error: Mapped[str | None] = mapped_column(Text)
+    stop_reason: Mapped[str | None] = mapped_column(String(50))
 
     # Convenience fields (for listing pages without querying RunEventStore)
     message_count: Mapped[int] = mapped_column(default=0)
@@ -44,7 +45,25 @@ class RunRow(Base):
     # Follow-up association
     follow_up_to_run_id: Mapped[str | None] = mapped_column(String(64))
 
+    # Multi-worker run ownership
+    owner_worker_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC))
 
-    __table_args__ = (Index("ix_runs_thread_status", "thread_id", "status"),)
+    __table_args__ = (
+        Index("ix_runs_thread_status", "thread_id", "status"),
+        Index("ix_runs_lease", "lease_expires_at"),
+        # Cross-process atomicity guarantee: at most one pending/running run per
+        # thread. Must live in ORM ``__table_args__`` (not just the migration)
+        # because the empty-DB bootstrap path runs ``create_all`` + ``stamp head``
+        # and never executes the migration that also defines this index.
+        Index(
+            "uq_runs_thread_active",
+            "thread_id",
+            unique=True,
+            sqlite_where=text("status IN ('pending', 'running')"),
+            postgresql_where=text("status IN ('pending', 'running')"),
+        ),
+    )

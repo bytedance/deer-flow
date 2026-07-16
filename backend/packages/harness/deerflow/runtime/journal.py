@@ -30,7 +30,7 @@ from langchain_core.messages import AIMessage, AnyMessage, BaseMessage, HumanMes
 from langgraph.types import Command
 
 from deerflow.agents.human_input import read_human_input_response
-from deerflow.utils.messages import message_to_text
+from deerflow.utils.messages import message_to_text, restore_original_human_message
 
 if TYPE_CHECKING:
     from deerflow.runtime.events.store.base import RunEventStore
@@ -102,6 +102,7 @@ class RunJournal(BaseCallbackHandler):
         self._counted_llm_run_ids: set[str] = set()
         self._counted_external_source_ids: set[str] = set()
         self._counted_message_llm_run_ids: set[str] = set()
+        self._memory_context_recorded = False
 
         # Convenience fields
         self._last_ai_msg: str | None = None
@@ -222,14 +223,15 @@ class RunJournal(BaseCallbackHandler):
             for batch in reversed(messages):
                 for m in reversed(batch):
                     if _should_persist_human_input_message(m):
-                        self.set_first_human_message(m.text)
+                        persisted_message = restore_original_human_message(m)
+                        self.set_first_human_message(self._message_text(persisted_message))
                         self._put(
                             event_type="llm.human.input",
                             category="message",
-                            content=m.model_dump(),
+                            content=persisted_message.model_dump(),
                             metadata={"caller": caller},
                         )
-                        self._record_message_summary(m, caller=caller)
+                        self._record_message_summary(persisted_message, caller=caller)
                         break
                 if self._first_human_msg:
                     break
@@ -628,6 +630,23 @@ class RunJournal(BaseCallbackHandler):
             category="middleware",
             content={"name": name, "hook": hook, "action": action, "changes": changes},
         )
+
+    def record_memory_context(self, *, content_sha256: str) -> None:
+        """Record the effective hidden memory block for this run.
+
+        The full block already lives in checkpoint state and may contain user
+        data, so the event stores only its exact SHA-256 identity. Operators
+        consume it through the existing run-events debug API to compare the
+        effective memory used by different runs without copying that content.
+        """
+        if self._memory_context_recorded:
+            return
+        self._put(
+            event_type="context:memory",
+            category="context",
+            content={"content_sha256": content_sha256},
+        )
+        self._memory_context_recorded = True
 
     async def flush(self) -> None:
         """Force flush remaining buffer. Called in worker's finally block."""

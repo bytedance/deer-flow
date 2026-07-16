@@ -180,12 +180,21 @@ def event_should_fire(
 
     # allow_authors bypasses require_mention entirely. Useful so a repo
     # owner can talk to the bot without typing the handle every time.
+    # Match is case-insensitive — GitHub logins are, and the sibling gates
+    # in this module already are (``_mentions`` uses re.IGNORECASE; the
+    # self-event check lowercases both sides). A bare ``in`` membership
+    # test would drop an owner whose YAML casing differs from the payload.
     if trigger.allow_authors:
         author = _author_login(event, payload)
-        if author and author in trigger.allow_authors:
+        if author and author.lower() in {a.lower() for a in trigger.allow_authors}:
             return True, f"allow_authors:{author}"
 
     if trigger.require_mention:
+        # ``trigger.mention_login`` is normalized (whitespace-only -> None)
+        # by ``GitHubTriggerConfig``'s field validator, so this ``or`` falls
+        # through a misconfigured ``mention_login: "   "`` to
+        # ``default_mention_login`` instead of gating on a literal
+        # whitespace string that no real ``@mention`` could ever match.
         login = trigger.mention_login or default_mention_login
         body = _comment_body(event, payload)
         # Boundary-aware @-mention match: ``@deerflow`` must NOT match

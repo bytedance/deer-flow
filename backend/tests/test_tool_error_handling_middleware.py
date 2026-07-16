@@ -1,3 +1,4 @@
+import posixpath
 import sys
 from types import ModuleType, SimpleNamespace
 
@@ -143,18 +144,34 @@ def test_build_subagent_runtime_middlewares_threads_app_config_to_llm_middleware
     middlewares = build_subagent_runtime_middlewares(app_config=app_config, lazy_init=False)
 
     assert captured["app_config"] is app_config
-    # 8 baseline (InputSanitization, ToolOutputBudget, ThreadData, Sandbox,
-    # DanglingToolCall, LLMErrorHandling, SandboxAudit, ToolErrorHandling)
+    # 9 baseline (InputSanitization, ToolOutputBudget, ToolResultSanitization,
+    # ThreadData, Sandbox, DanglingToolCall, LLMErrorHandling, SandboxAudit,
+    # ToolErrorHandling)
     # + 1 ReadBeforeWriteMiddleware + 1 LoopDetectionMiddleware
-    # + 1 SafetyFinishReasonMiddleware (all enabled by default).
+    # + 1 TokenBudgetMiddleware (subagents.token_budget enabled by default, #3875 Phase 2)
+    # + 1 SafetyFinishReasonMiddleware + 1 DurableContextMiddleware
+    # + 1 SystemMessageCoalescingMiddleware (all enabled by default).
+    from deerflow.agents.middlewares.durable_context_middleware import DurableContextMiddleware
     from deerflow.agents.middlewares.safety_finish_reason_middleware import SafetyFinishReasonMiddleware
+    from deerflow.agents.middlewares.system_message_coalescing_middleware import SystemMessageCoalescingMiddleware
+    from deerflow.agents.middlewares.token_budget_middleware import TokenBudgetMiddleware
     from deerflow.agents.middlewares.tool_output_budget_middleware import ToolOutputBudgetMiddleware
 
-    assert len(middlewares) == 11
+    assert len(middlewares) == 15
     assert isinstance(middlewares[0], FakeMiddleware)  # InputSanitizationMiddleware stub
     assert isinstance(middlewares[1], ToolOutputBudgetMiddleware)
     assert any(isinstance(m, ToolErrorHandlingMiddleware) for m in middlewares)
-    assert isinstance(middlewares[-1], SafetyFinishReasonMiddleware)
+    # The token-budget backstop is attached by default so the cap engages (#3875).
+    assert any(isinstance(m, TokenBudgetMiddleware) for m in middlewares)
+    assert any(isinstance(m, SafetyFinishReasonMiddleware) for m in middlewares)
+    # DurableContextMiddleware is present but not last: the coalescer (#4040) is
+    # appended innermost so it can merge the SystemMessage DurableContext injects.
+    # The coalescer is appended unconditionally (after the optional summarization
+    # middleware), so it is the last element regardless of summarization.enabled —
+    # unlike DurableContextMiddleware, which is only last when summarization is off.
+    durable_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, DurableContextMiddleware))
+    assert isinstance(middlewares[-1], SystemMessageCoalescingMiddleware)
+    assert durable_idx < len(middlewares) - 1
 
 
 def test_tool_progress_middleware_is_outer_relative_to_error_handling(monkeypatch: pytest.MonkeyPatch):
@@ -543,6 +560,23 @@ def test_subagent_runtime_middlewares_attach_deferred_filter_when_setup_has_name
     assert filter_idx < safety_idx
 
 
+def test_subagent_runtime_middlewares_place_mcp_routing_before_deferred_filter(monkeypatch):
+    from deerflow.agents.middlewares.deferred_tool_filter_middleware import DeferredToolFilterMiddleware
+    from deerflow.agents.middlewares.mcp_routing_middleware import McpRoutingMiddleware
+    from deerflow.tools.builtins.tool_search import DeferredToolSetup
+
+    app_config = _make_app_config()
+    _stub_runtime_middleware_imports(monkeypatch)
+    routing = McpRoutingMiddleware({"mcp_thing": {"priority": 100, "keywords": ["orders"]}}, "hash123", 3)
+    setup = DeferredToolSetup(object(), frozenset({"mcp_thing"}), "hash123")
+
+    middlewares = build_subagent_runtime_middlewares(app_config=app_config, deferred_setup=setup, mcp_routing_middleware=routing)
+
+    routing_idx = next(i for i, middleware in enumerate(middlewares) if isinstance(middleware, McpRoutingMiddleware))
+    filter_idx = next(i for i, middleware in enumerate(middlewares) if isinstance(middleware, DeferredToolFilterMiddleware))
+    assert routing_idx < filter_idx
+
+
 def test_subagent_runtime_middlewares_skip_deferred_filter_without_names(monkeypatch):
     """No deferred setup (disabled / no MCP tool) -> no DeferredToolFilterMiddleware."""
     from deerflow.agents.middlewares.deferred_tool_filter_middleware import DeferredToolFilterMiddleware
@@ -606,6 +640,223 @@ def test_subagent_runtime_middlewares_place_loop_detection_before_safety_finish(
     assert loop_idx < safety_idx
 
 
+def test_subagent_runtime_middlewares_attach_durable_context_before_summarization(monkeypatch):
+    """Subagents must project ``summary_text`` back into model requests after
+    compaction, just like the lead agent does.
+
+    Without ``DurableContextMiddleware``, a message-count keep policy can
+    retain only an assistant tool-call plus its tool results. The summary is
+    stored in ``ThreadState.summary_text`` but never reaches the next request,
+    so strict providers reject the assistant-first history. The durable
+    context layer must use the same skill settings as the lead chain and run
+    before summarization.
+    """
+    from deerflow.agents.middlewares import summarization_middleware as sm
+    from deerflow.agents.middlewares.durable_context_middleware import DurableContextMiddleware
+
+    sentinel = object()
+    captured: dict[str, object] = {}
+
+    def fake_create_summarization_middleware(*, app_config=None, keep=None, skip_memory_flush=False):
+        captured["app_config"] = app_config
+        captured["keep"] = keep
+        captured["skip_memory_flush"] = skip_memory_flush
+        return sentinel
+
+    # summarization is enabled by default False; flip it on so the factory path
+    # is taken (the factory early-returns None when disabled).
+    from deerflow.config.summarization_config import SummarizationConfig
+
+    app_config = _make_app_config().model_copy(update={"summarization": SummarizationConfig(enabled=True)})
+    monkeypatch.setattr(sm, "create_summarization_middleware", fake_create_summarization_middleware)
+    _stub_runtime_middleware_imports(monkeypatch)
+
+    middlewares = build_subagent_runtime_middlewares(app_config=app_config, model_name="test-model")
+
+    # The shared factory received the same app_config the builder did (no lead
+    # wrapper, no config drift between the two chains).
+    assert captured["app_config"] is app_config
+    # skip_memory_flush=True so subagent-internal turns are not flushed into the
+    # PARENT thread's durable memory (#3875 Phase 3 review).
+    assert captured["skip_memory_flush"] is True
+    durable = [middleware for middleware in middlewares if isinstance(middleware, DurableContextMiddleware)]
+    assert len(durable) == 1
+    # ``_skills_root`` is ``posixpath.normpath(container_path)``, so compare against
+    # the normalized form — a trailing slash / ``.`` / ``..`` in config would fail
+    # a raw equality even though the wiring is correct.
+    assert durable[0]._skills_root == posixpath.normpath(app_config.skills.container_path)
+    assert durable[0]._skill_read_tool_names == frozenset(app_config.summarization.skill_file_read_tool_names)
+    assert middlewares.index(durable[0]) < middlewares.index(sentinel)
+
+
+def test_subagent_compaction_injects_summary_before_assistant_tool_tail(monkeypatch):
+    """A three-tool turn with ``keep=4`` must remain provider-valid.
+
+    This reproduces the production failure shape: compaction preserves an
+    assistant tool-call plus three tool results while removing the original
+    system/user messages. The subagent chain must inject the generated summary
+    as durable human context before that tail reaches the model.
+    """
+    from langchain.agents import create_agent
+    from langchain_core.language_models import BaseChatModel
+    from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+    from langchain_core.outputs import ChatGeneration, ChatResult
+
+    from deerflow.agents.middlewares.durable_context_middleware import DurableContextMiddleware
+    from deerflow.agents.middlewares.summarization_middleware import DeerFlowSummarizationMiddleware
+    from deerflow.agents.middlewares.system_message_coalescing_middleware import SystemMessageCoalescingMiddleware
+    from deerflow.agents.thread_state import ThreadState
+    from deerflow.config.summarization_config import ContextSize, SummarizationConfig
+
+    class _StaticModel(BaseChatModel):
+        text: str
+        require_durable_summary: bool = False
+
+        @property
+        def _llm_type(self) -> str:
+            return "static"
+
+        def bind_tools(self, tools, **kwargs):
+            return self
+
+        def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+            if self.require_durable_summary:
+                first_ai = next(i for i, message in enumerate(messages) if isinstance(message, AIMessage))
+                durable = [(i, message) for i, message in enumerate(messages) if isinstance(message, HumanMessage) and message.additional_kwargs.get("durable_context_data")]
+                assert durable, "compacted summary must be injected into the subagent request"
+                assert durable[0][0] < first_ai, "durable summary must precede the assistant/tool tail"
+                assert "COMPRESSED_SUBAGENT_HISTORY" in durable[0][1].content
+                # DurableContext injects a SystemMessage(authority); without the
+                # coalescer the request would carry it as a second/non-leading
+                # system message, which strict providers reject (#4040). Assert the
+                # outgoing request is provider-valid: a single leading SystemMessage.
+                system_indices = [i for i, message in enumerate(messages) if isinstance(message, SystemMessage)]
+                assert system_indices == [0], f"request must have exactly one leading SystemMessage, got {system_indices}"
+            return ChatResult(generations=[ChatGeneration(message=AIMessage(content=self.text))])
+
+    summary_model = _StaticModel(text="COMPRESSED_SUBAGENT_HISTORY")
+    strict_model = _StaticModel(text="final answer", require_durable_summary=True)
+    monkeypatch.setattr(
+        "deerflow.agents.middlewares.summarization_middleware.create_chat_model",
+        lambda **kwargs: summary_model,
+    )
+
+    app_config = _make_app_config().model_copy(
+        update={
+            "summarization": SummarizationConfig(
+                enabled=True,
+                trigger=ContextSize(type="messages", value=5),
+                keep=ContextSize(type="messages", value=4),
+            )
+        }
+    )
+    runtime_middlewares = build_subagent_runtime_middlewares(
+        app_config=app_config,
+        model_name="test-model",
+        agent_name="general-purpose",
+    )
+    compaction_middlewares = [middleware for middleware in runtime_middlewares if isinstance(middleware, (DurableContextMiddleware, DeerFlowSummarizationMiddleware, SystemMessageCoalescingMiddleware))]
+    agent = create_agent(
+        model=strict_model,
+        tools=[],
+        middleware=compaction_middlewares,
+        state_schema=ThreadState,
+    )
+
+    tool_calls = [{"name": "web_search", "args": {"query": f"q{i}"}, "id": f"call_{i}", "type": "tool_call"} for i in range(3)]
+    seed = [
+        SystemMessage(content="subagent instructions", id="system"),
+        HumanMessage(content="research three regions", id="human"),
+        AIMessage(content="searching", tool_calls=tool_calls, id="assistant"),
+        *[ToolMessage(content=f"result {i}", tool_call_id=f"call_{i}", id=f"tool_{i}") for i in range(3)],
+    ]
+
+    result = agent.invoke({"messages": seed})
+
+    assert result["summary_text"] == "COMPRESSED_SUBAGENT_HISTORY"
+    assert result["messages"][-1].content == "final answer"
+
+
+def test_subagent_chain_coalesces_durable_authority_system_message(monkeypatch):
+    """The durable-context authority SystemMessage must not survive as a second one.
+
+    Subagents carry their system prompt as a leading ``SystemMessage`` in
+    ``messages`` (``create_agent(system_prompt=None)``), and
+    ``DurableContextMiddleware`` inserts ``SystemMessage(authority_contract)``
+    directly after it whenever durable data (summary / delegations / skills) is
+    present. That leaves two adjacent system messages — the exact non-leading /
+    duplicate-system shape strict OpenAI-compatible providers reject and the
+    same #4039 failure class the durable fix set out to avoid.
+
+    ``build_subagent_runtime_middlewares`` must therefore pair durable context
+    with ``SystemMessageCoalescingMiddleware`` (#4040). This drives the real
+    builder output through a strict model and asserts the outgoing request keeps
+    exactly one leading ``SystemMessage``. Remove the coalescer from the builder
+    and the model sees ``[System(base), System(authority), ...]`` and this fails.
+    """
+    from langchain.agents import create_agent
+    from langchain_core.language_models import BaseChatModel
+    from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
+    from langchain_core.outputs import ChatGeneration, ChatResult
+
+    from deerflow.agents.middlewares.durable_context_middleware import DurableContextMiddleware
+    from deerflow.agents.middlewares.system_message_coalescing_middleware import SystemMessageCoalescingMiddleware
+    from deerflow.agents.thread_state import ThreadState
+
+    seen: dict[str, list[int]] = {}
+
+    class _StrictModel(BaseChatModel):
+        @property
+        def _llm_type(self) -> str:
+            return "strict"
+
+        def bind_tools(self, tools, **kwargs):
+            return self
+
+        def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+            seen["system_indices"] = [i for i, message in enumerate(messages) if isinstance(message, SystemMessage)]
+            return ChatResult(generations=[ChatGeneration(message=AIMessage(content="ok"))])
+
+    app_config = _make_app_config()
+    runtime_middlewares = build_subagent_runtime_middlewares(
+        app_config=app_config,
+        model_name="test-model",
+        agent_name="general-purpose",
+    )
+    # Isolate the two middlewares under test, preserving builder order. The
+    # coalescer must come after (inner of) durable context to observe the
+    # injected system message.
+    chain = [m for m in runtime_middlewares if isinstance(m, (DurableContextMiddleware, SystemMessageCoalescingMiddleware))]
+    assert [type(m).__name__ for m in chain] == ["DurableContextMiddleware", "SystemMessageCoalescingMiddleware"]
+
+    agent = create_agent(model=_StrictModel(), tools=[], middleware=chain, state_schema=ThreadState)
+
+    # A leading system prompt plus an assistant tool-call tail, with a summary
+    # already in state so durable context injects its authority SystemMessage.
+    seed = [
+        SystemMessage(content="subagent instructions", id="system"),
+        AIMessage(content="searching", tool_calls=[{"name": "web_search", "args": {"query": "x"}, "id": "call_0", "type": "tool_call"}], id="assistant"),
+        ToolMessage(content="result", tool_call_id="call_0", id="tool_0"),
+    ]
+    agent.invoke({"messages": seed, "summary_text": "COMPRESSED_SUBAGENT_HISTORY"})
+
+    assert seen["system_indices"] == [0], f"request must have a single leading SystemMessage, got {seen['system_indices']}"
+
+
+def test_subagent_runtime_middlewares_omit_summarization_when_factory_returns_none(monkeypatch):
+    """When ``summarization.enabled`` is False the shared factory returns None and
+    the subagent chain must NOT carry a summarization middleware — the default
+    state, since SummarizationConfig.enabled defaults to False."""
+    from deerflow.agents.middlewares.summarization_middleware import DeerFlowSummarizationMiddleware
+
+    app_config = _make_app_config()  # summarization.enabled defaults to False
+    _stub_runtime_middleware_imports(monkeypatch)
+
+    middlewares = build_subagent_runtime_middlewares(app_config=app_config, model_name="test-model")
+
+    assert not any(isinstance(m, DeerFlowSummarizationMiddleware) for m in middlewares)
+
+
 def test_lead_runtime_chain_finds_historical_uploads_under_lazy_init_false(tmp_path, monkeypatch):
     """Integration anchor for the ThreadData → Uploads ordering.
 
@@ -658,3 +909,108 @@ def test_lead_runtime_chain_finds_historical_uploads_under_lazy_init_false(tmp_p
     assert "<uploaded_files>" in injected_content
     assert "prior-report.txt" in injected_content
     assert "previous messages" in injected_content  # historical section header
+
+
+def test_subagent_summarization_fires_mid_run_and_produces_usable_result(monkeypatch):
+    """Integration coverage for #3875 Phase 3 review gap: drive the REAL
+    ``DeerFlowSummarizationMiddleware`` (the exact instance the subagent chain
+    gets via ``create_summarization_middleware(skip_memory_flush=True)``) through
+    a ``create_agent`` run, and assert that (a) compaction actually fires mid-run
+    (messages channel contracts via ``RemoveMessage``) and (b) the run still
+    completes with a usable final answer — not just wiring.
+
+    The builder-wiring test above proves the middleware lands on the chain; this
+    proves the live middleware triggers and the run survives it. We bypass the
+    full ``build_subagent_runtime_middlewares`` chain (whose sandbox/thread-data
+    stubs aren't AgentMiddleware-compatible for a live run) and use the factory
+    directly — the same instance the builder appends."""
+    from langchain.agents import create_agent
+    from langchain_core.language_models import BaseChatModel
+    from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage
+    from langchain_core.outputs import ChatGeneration, ChatResult
+
+    from deerflow.agents.middlewares.summarization_middleware import (
+        DeerFlowSummarizationMiddleware,
+        create_summarization_middleware,
+    )
+    from deerflow.agents.thread_state import ThreadState
+    from deerflow.config.memory_config import MemoryConfig
+    from deerflow.config.summarization_config import ContextSize, SummarizationConfig
+
+    # A model that always emits a plain AIMessage — no tools, so the run is a
+    # single turn but the input already exceeds the trigger threshold, forcing
+    # before_model compaction on the first (and only) model call.
+    class _StaticModel(BaseChatModel):
+        text: str = "final answer after compaction"
+
+        @property
+        def _llm_type(self) -> str:
+            return "static"
+
+        def bind_tools(self, tools, **kwargs):
+            return self
+
+        def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+            return ChatResult(generations=[ChatGeneration(message=AIMessage(content=self.text))])
+
+    static_model = _StaticModel()
+    # The factory resolves its summary model via create_chat_model; point it at
+    # the same static model so no real provider is contacted.
+    monkeypatch.setattr(
+        "deerflow.agents.middlewares.summarization_middleware.create_chat_model",
+        lambda **kwargs: static_model,
+    )
+
+    app_config = SimpleNamespace(
+        summarization=SummarizationConfig(
+            enabled=True,
+            trigger=ContextSize(type="messages", value=4),
+            keep=ContextSize(type="messages", value=2),
+        ),
+        # memory disabled + skip_memory_flush=True mirrors the subagent path:
+        # no memory_flush_hook is attached.
+        memory=MemoryConfig(enabled=False),
+    )
+    middleware = create_summarization_middleware(
+        app_config=app_config,
+        skip_memory_flush=True,
+    )
+    assert isinstance(middleware, DeerFlowSummarizationMiddleware), "the real middleware must be built"
+    # Subagent invariant: skip_memory_flush means no durable-memory hook.
+    assert not middleware._before_summarization_hooks
+
+    agent = create_agent(
+        model=static_model,
+        tools=[],
+        middleware=[middleware],
+        state_schema=ThreadState,
+    )
+
+    # 6 messages > trigger(4) → compaction must fire in before_model.
+    seed = [
+        HumanMessage(content="q1", id="h1"),
+        AIMessage(content="a1", id="a1"),
+        HumanMessage(content="q2", id="h2"),
+        AIMessage(content="a2", id="a2"),
+        HumanMessage(content="q3", id="h3"),
+        AIMessage(content="a3", id="a3"),
+    ]
+    chunks = list(agent.stream({"messages": seed}, stream_mode="updates"))
+
+    # (a) Compaction fired: the middleware's before_model emitted a summary + RemoveMessage.
+    before_model_chunks = [c for c in chunks if "DeerFlowSummarizationMiddleware.before_model" in c]
+    assert before_model_chunks, "summarization before_model must fire when messages exceed the trigger"
+    summary_update = before_model_chunks[0]["DeerFlowSummarizationMiddleware.before_model"]
+    assert summary_update.get("summary_text"), "a summary must be produced"
+    emitted = summary_update["messages"]
+    assert isinstance(emitted[0], RemoveMessage), "compaction must lead with RemoveMessage"
+
+    # (b) The run completed with a usable final AIMessage despite compaction.
+    # The model's output surfaces under the "model" node key in updates mode.
+    final_messages: list = []
+    for chunk in chunks:
+        node_msg = chunk.get("model") or chunk.get("agent") or {}
+        final_messages = node_msg.get("messages", final_messages)
+    ai_finals = [m for m in final_messages if isinstance(m, AIMessage)]
+    assert ai_finals, "the run must produce a final AIMessage after compaction"
+    assert ai_finals[-1].content == "final answer after compaction"

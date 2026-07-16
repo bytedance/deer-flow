@@ -1,0 +1,204 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "deer-flow.fullname" . }}-gateway
+  namespace: {{ include "deer-flow.namespace" . }}
+  labels:
+    {{- include "deer-flow.labels" . | nindent 4 }}
+    app.kubernetes.io/component: gateway
+spec:
+  replicas: {{ .Values.gateway.replicas }}
+  selector:
+    matchLabels:
+      {{- include "deer-flow.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: gateway
+  template:
+    metadata:
+      labels:
+        {{- include "deer-flow.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: gateway
+      annotations:
+        # Roll pods when the mounted ConfigMaps change (subPath mounts don't
+        # get live updates, so without this a config-only upgrade is ignored).
+        checksum/config: {{ include "deer-flow.configChecksum" . }}
+        checksum/extensions: {{ include "deer-flow.extensionsChecksum" . }}
+    spec:
+      {{- include "deer-flow.imagePullSecrets" . | nindent 6 }}
+      # MUST exceed channel stop (~5s) + memory shutdown_flush_timeout_seconds
+      # (default 30s) + buffer, or K8s SIGKILLs the memory drain mid-flight
+      # (values.yaml gateway.terminationGracePeriodSeconds). K8s defaults to 30s.
+      terminationGracePeriodSeconds: {{ .Values.gateway.terminationGracePeriodSeconds | default 45 }}
+      securityContext:
+        # Non-root: the gateway image has no USER directive and would otherwise
+        # run as root. uid/gid 1000; fsGroup 1000 so the .deer-flow PVC is
+        # group-writable for memory/sqlite/custom-agent state.
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      # initContainer ensures the subPath `deer-flow/` exists on the PV so the
+      # volumeMount succeeds on first boot, and the PVC layout matches what the
+      # provisioner's PVC user-data mode expects (deer-flow/users/.../user-data).
+      {{- if .Values.persistence.home.enabled }}
+      initContainers:
+        - name: init-home
+          image: busybox:1.36
+          command: ["sh", "-c", "mkdir -p /home-pvc/deer-flow/data"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: home
+              mountPath: /home-pvc
+      {{- end }}
+      containers:
+        - name: gateway
+          image: {{ include "deer-flow.gatewayImage" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          workingDir: /app
+          command: ["sh", "-c"]
+          args:
+            - cd backend && PYTHONPATH=. uv run --no-sync uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 --workers 1
+          env:
+            - name: CI
+              value: "true"
+            # Running as non-root uid 1000: suppress .pyc writes under the
+            # root-owned /app (avoids PermissionError noise; harmless fallback).
+            - name: PYTHONDONTWRITEBYTECODE
+              value: "1"
+            # uv would cache to ~/.cache (no home dir as 1000); point it at /tmp
+            # (1777). --no-sync means no install/cache writes in practice.
+            - name: UV_CACHE_DIR
+              value: /tmp
+            - name: DEER_FLOW_PROJECT_ROOT
+              value: /app
+            - name: DEER_FLOW_HOME
+              value: /app/backend/.deer-flow
+            - name: DEER_FLOW_CONFIG_PATH
+              value: /app/backend/config.yaml
+            - name: DEER_FLOW_EXTENSIONS_CONFIG_PATH
+              value: /app/backend/extensions_config.json
+            - name: DEER_FLOW_CHANNELS_LANGGRAPH_URL
+              value: http://gateway:8001/api
+            - name: DEER_FLOW_CHANNELS_GATEWAY_URL
+              value: http://gateway:8001
+            - name: DEER_FLOW_HOST_BASE_DIR
+              value: /app/backend/.deer-flow
+            - name: DEER_FLOW_HOST_SKILLS_PATH
+              value: /app/skills
+            - name: GATEWAY_HOST
+              value: 0.0.0.0
+            - name: GATEWAY_PORT
+              value: "8001"
+            - name: DEER_FLOW_INTERNAL_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "deer-flow.appSecret" . }}
+                  key: DEER_FLOW_INTERNAL_AUTH_TOKEN
+            {{- /* PostgreSQL DSN — only mounted when postgres is configured
+                  (bundled StatefulSet, external databaseUrl, or an existing
+                  Secret). In sqlite/memory mode the env is omitted and
+                  config.yaml's database.postgres_url is never read. */ -}}
+            {{- $pgConfigured := or .Values.postgresql.enabled .Values.postgresql.external.databaseUrl .Values.postgresql.external.existingSecret .Values.postgresql.existingSecret -}}
+            {{- if $pgConfigured }}
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "deer-flow.databaseUrlSecret" . }}
+                  key: database-url
+            {{- end }}
+            {{- /* Redis stream-bridge URL — only mounted when redis is configured
+                  (bundled StatefulSet, external URL, or an existing Secret).
+                  Drives cross-pod SSE delivery (PR #3191). redis-py connects via
+                  raw TCP so HTTP_PROXY/NO_PROXY do not apply. */ -}}
+            {{- if (include "deer-flow.redisConfigured" .) }}
+            - name: DEER_FLOW_STREAM_BRIDGE_REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "deer-flow.redisUrlSecret" . }}
+                  key: redis-url
+            {{- end }}
+            - name: NO_PROXY
+              value: localhost,127.0.0.1,::1,gateway,frontend,nginx,provisioner
+            - name: no_proxy
+              value: localhost,127.0.0.1,::1,gateway,frontend,nginx,provisioner
+          {{- if or .Values.secrets .Values.existingSecret }}
+          envFrom:
+            - secretRef:
+                name: {{ include "deer-flow.providerSecret" . }}
+          {{- end }}
+          ports:
+            - containerPort: 8001
+              name: http
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 20
+          {{- /* preStop sleep so the Service/ingress deregisters the pod and
+                  in-flight requests drain before SIGTERM begins graceful shutdown
+                  (which runs the memory queue drain). 0 / unset disables it.
+                  Counts against terminationGracePeriodSeconds. */ -}}
+          {{- if and .Values.gateway.preStopSleepSeconds (gt (.Values.gateway.preStopSleepSeconds | int) 0) }}
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sleep", "{{ .Values.gateway.preStopSleepSeconds | int }}"]
+          {{- end }}
+          {{- with .Values.gateway.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: config
+              mountPath: /app/backend/config.yaml
+              subPath: config.yaml
+              readOnly: true
+            - name: extensions
+              mountPath: /app/backend/extensions_config.json
+              subPath: extensions_config.json
+              readOnly: true
+            - name: skills
+              mountPath: /app/skills
+              readOnly: true
+            {{- if .Values.persistence.home.enabled }}
+            - name: home
+              mountPath: /app/backend/.deer-flow
+              subPath: deer-flow
+            {{- end }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "deer-flow.fullname" . }}-config
+        - name: extensions
+          configMap:
+            name: {{ include "deer-flow.fullname" . }}-extensions
+        - name: skills
+          {{- if .Values.skills.existingClaim }}
+          persistentVolumeClaim:
+            claimName: {{ .Values.skills.existingClaim }}
+          {{- else if .Values.skills.configMap }}
+          configMap:
+            name: {{ .Values.skills.configMap }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        {{- if .Values.persistence.home.enabled }}
+        - name: home
+          persistentVolumeClaim:
+            claimName: {{ include "deer-flow.homePVC" . }}
+        {{- end }}

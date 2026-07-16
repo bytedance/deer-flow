@@ -48,6 +48,47 @@ class _ClearBeforeSecondGoalReadCheckpointer:
         return await self.inner.aput(*args, **kwargs)
 
 
+class _RaceAfterFirstContinuationCommitCheckpointer:
+    """Wrap a saver and inject a racing user message right after the first
+    goal-continuation commit lands.
+
+    ``_prepare_goal_continuation_input``'s real continuation commit (the
+    ``_persist(..., continuation_count=next_count)`` call that records the
+    evaluator's decision to continue) performs this scenario's first
+    ``aput``. Injecting a racing visible message immediately after that write
+    lands lets the worker's trailing visible-conversation-signature re-check
+    observe a thread change that happened *after* the continuation was
+    committed but *before* that re-check runs -- modelling the
+    ``thread_changed_before_continuation`` race.
+    """
+
+    def __init__(self, inner: InMemorySaver, thread_id: str) -> None:
+        self.inner = inner
+        self.thread_id = thread_id
+        self.put_count = 0
+
+    def get_next_version(self, current, channel):
+        return self.inner.get_next_version(current, channel)
+
+    async def aget_tuple(self, config):
+        return await self.inner.aget_tuple(config)
+
+    async def aput(self, *args, **kwargs):
+        result = await self.inner.aput(*args, **kwargs)
+        self.put_count += 1
+        if self.put_count == 1:
+            checkpoint_tuple = await self.inner.aget_tuple({"configurable": {"thread_id": self.thread_id, "checkpoint_ns": ""}})
+            checkpoint = getattr(checkpoint_tuple, "checkpoint", {}) or {}
+            channel_values = checkpoint.get("channel_values", {}) or {}
+            current_messages = channel_values.get("messages", []) or []
+            await _write_messages(
+                self.inner,
+                thread_id=self.thread_id,
+                messages=[*current_messages, HumanMessage(content="Actually, stop and wait.")],
+            )
+        return result
+
+
 async def _seed_goal_thread(
     checkpointer: InMemorySaver,
     *,
@@ -385,6 +426,60 @@ async def test_goal_worker_stands_down_when_thread_changes_after_evaluation(monk
 
 
 @pytest.mark.asyncio
+async def test_goal_worker_stands_down_when_thread_changes_before_continuation(monkeypatch):
+    """A user message racing in right after the continuation commits must not
+    double-bump continuation_count.
+
+    Sibling scenario to ``..._after_evaluation`` above, but the race lands
+    later: after the evaluator runs and after _prepare_goal_continuation_input
+    commits the real continuation (``_persist(..., continuation_count=next_count)``),
+    a racing visible message arrives before the function's trailing re-check.
+    That re-check detects the changed thread and stands down via a second
+    ``_persist(..., continuation_count=next_count, stand_down_reason=...)``
+    call using the *same* next_count as the first, already-successful call.
+
+    Without the fix, that second call re-triggers PR #4088's
+    max(continuation_count, current_count + 1) guard against its own sibling
+    call's prior write (current_count is already next_count from the first
+    call), bumping continuation_count to next_count + 1 a second time --
+    consuming 2 units of the continuation budget for a cycle that delivered
+    zero actual continuations. The fix must leave it at next_count (1).
+    """
+    inner = InMemorySaver()
+    thread_id = "race-before-continuation-thread"
+    await _seed_goal_thread(inner, thread_id=thread_id, goal_text="Finish all tests")
+    checkpointer = _RaceAfterFirstContinuationCommitCheckpointer(inner, thread_id)
+    bridge = _CollectingBridge()
+
+    async def fake_evaluate_goal_completion(_goal, _messages, **_kwargs):
+        return GoalEvaluation(
+            satisfied=False,
+            blocker="goal_not_met_yet",
+            reason="More work remains.",
+            evidence_summary="Work remains.",
+        )
+
+    monkeypatch.setattr(worker, "evaluate_goal_completion", fake_evaluate_goal_completion)
+
+    continuation = await worker._prepare_goal_continuation_input(
+        bridge=bridge,
+        checkpointer=checkpointer,
+        thread_id=thread_id,
+        run_id="run-race-before-continuation",
+        model_name="test-model",
+        app_config=None,
+    )
+
+    assert continuation is None
+    latest_goal = await read_thread_goal(inner, thread_id)
+    assert latest_goal is not None
+    # Without the fix this is 2 (double-bumped). It must be 1: one real
+    # continuation attempt was committed and then stood down, not two.
+    assert latest_goal["continuation_count"] == 1
+    assert latest_goal["last_evaluation"]["stand_down_reason"] == "thread_changed_before_continuation"
+
+
+@pytest.mark.asyncio
 async def test_goal_worker_stands_down_without_durable_assistant_receipt():
     checkpointer = InMemorySaver()
     thread_id = "no-receipt-thread"
@@ -594,6 +689,90 @@ async def test_run_agent_reuses_goal_evaluator_model_for_goal_loop(monkeypatch):
     assert len(create_calls) == 1
     assert create_calls[0]["model_name"] == "test-model"
     assert record.status == RunStatus.success
+
+
+@pytest.mark.asyncio
+async def test_persist_goal_evaluation_does_not_regress_continuation_count_on_race():
+    """A racing continuation must not overwrite a higher count with a lower one.
+
+    Scenario: two goal continuations run concurrently.  Continuation A reads
+    continuation_count=1, computes next=2.  Continuation B reads the same
+    count=1, computes next=2, but acquires the lock first and writes count=2.
+    When A acquires the lock, the current_goal already has count=2.  Without
+    the defensive guard, A would write count=2 again (stale computation),
+    effectively losing one continuation event.  The guard must compute
+    ``max(stale_next, current_count + 1)`` so A writes count=3.
+    """
+    checkpointer = InMemorySaver()
+    thread_id = "race-count-thread"
+    await _seed_goal_thread(checkpointer, thread_id=thread_id, goal_text="Race test")
+    # Simulate a racing continuation: bump the persisted continuation_count to 2
+    # before calling _persist_goal_evaluation with a next_count computed from
+    # stale state (count=1 → next=2).
+    existing_goal = await read_thread_goal(checkpointer, thread_id)
+    assert existing_goal is not None
+    bumped_goal = attach_goal_evaluation(
+        existing_goal,
+        GoalEvaluation(satisfied=False, blocker="goal_not_met_yet", reason="racing", evidence_summary=""),
+        run_id="racing-run",
+        continuation_count=2,  # racing continuation already bumped to 2
+    )
+    await write_thread_goal(checkpointer, thread_id, bumped_goal)
+
+    # Now call _persist_goal_evaluation with continuation_count=2 computed from
+    # stale state (old count was 1).  The guard should detect current_count=2
+    # and write max(2, 2+1) = 3.
+    bridge = _CollectingBridge()
+    result = await worker._persist_goal_evaluation(
+        bridge=bridge,
+        checkpointer=checkpointer,
+        thread_id=thread_id,
+        run_id="run-late",
+        goal=existing_goal,  # stale goal with continuation_count=1
+        evaluation=GoalEvaluation(
+            satisfied=False,
+            blocker="goal_not_met_yet",
+            reason="More work remains.",
+            evidence_summary="Work remains.",
+        ),
+        no_progress_count=1,
+        continuation_count=2,  # computed from stale state: stale_count(1) + 1
+    )
+
+    assert result is not None
+    # Without the guard this would be 2 (stale computation wins).  With the
+    # guard it must be 3 (current_count + 1 taken inside the lock).
+    assert result["continuation_count"] == 3
+
+
+@pytest.mark.asyncio
+async def test_persist_goal_evaluation_no_race_uses_caller_count():
+    """When no racing continuation exists, the caller's continuation_count is used."""
+    checkpointer = InMemorySaver()
+    thread_id = "no-race-thread"
+    await _seed_goal_thread(checkpointer, thread_id=thread_id, goal_text="No race test")
+    existing_goal = await read_thread_goal(checkpointer, thread_id)
+    assert existing_goal is not None
+
+    bridge = _CollectingBridge()
+    result = await worker._persist_goal_evaluation(
+        bridge=bridge,
+        checkpointer=checkpointer,
+        thread_id=thread_id,
+        run_id="run-normal",
+        goal=existing_goal,
+        evaluation=GoalEvaluation(
+            satisfied=False,
+            blocker="goal_not_met_yet",
+            reason="More work.",
+            evidence_summary="Work.",
+        ),
+        no_progress_count=1,
+        continuation_count=1,  # 0 + 1 = 1
+    )
+
+    assert result is not None
+    assert result["continuation_count"] == 1
 
 
 @pytest.mark.asyncio

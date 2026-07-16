@@ -55,6 +55,33 @@ def test_tool_search_returns_command_with_hash_scoped_promotion():
     assert "mcp_calc" in msg.content
 
 
+def test_tool_search_promotes_every_selected_tool():
+    """``select:`` promotes all named tools -- the tool closure must not re-cap.
+
+    ``DeferredToolCatalog.search`` already caps the ranked modes internally, so
+    a second ``[:MAX_RESULTS]`` in the closure only truncates ``select:``. Its
+    sibling closure, ``skills/describe.py::describe_skill``, calls
+    ``catalog.search(name)`` with no slice. Without this test, dropping the cap
+    inside ``search`` alone would still leave ``select:`` capped here.
+    """
+
+    def _t(name: str):
+        @as_tool(name)
+        def _f(query: str) -> str:
+            "A deferred tool."
+            return query
+
+        return _f
+
+    names = [f"mcp_t{i}" for i in range(6)]  # 6 > MAX_RESULTS
+    catalog = DeferredToolCatalog(tuple(_t(n) for n in names))
+    ts = build_tool_search_tool(catalog)
+
+    out = ts.invoke({"type": "tool_call", "name": "tool_search", "args": {"query": "select:" + ",".join(names)}, "id": "tc3"})
+
+    assert out.update["promoted"]["names"] == names
+
+
 def test_tool_search_no_match_empty_names():
     catalog = DeferredToolCatalog((mcp_calc,))
     ts = build_tool_search_tool(catalog)

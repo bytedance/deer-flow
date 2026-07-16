@@ -201,6 +201,13 @@ def _get_repository(request: Request, config: ChannelConnectionsConfig) -> Chann
 
 
 def _provider_config(config: ChannelConnectionsConfig, provider: str):
+    # Resolve provider configs only for known providers. An unrestricted
+    # getattr would let a request-supplied name that happens to match another
+    # config attribute (e.g. the "enabled" / "require_bound_identity" bool
+    # fields) slip past the 404 and return a non-provider value, which callers
+    # then dereference as a provider config (AttributeError -> HTTP 500).
+    if provider not in _PROVIDER_META:
+        raise HTTPException(status_code=404, detail="Unknown channel provider")
     provider_config = getattr(config, provider, None)
     if provider_config is None:
         raise HTTPException(status_code=404, detail="Unknown channel provider")

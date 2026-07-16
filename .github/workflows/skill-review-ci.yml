@@ -1,0 +1,70 @@
+name: Skill Review CI
+
+on:
+  push:
+    branches: ["main", "2.0.x-dev"]
+    paths:
+      - "skills/public/**"
+      - "backend/packages/harness/deerflow/skills/review/**"
+      - "contracts/skill_review/**"
+      - "scripts/review_changed_public_skills.py"
+      - "backend/pyproject.toml"
+      - "backend/uv.lock"
+      - ".github/workflows/skill-review-ci.yml"
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - "skills/public/**"
+      - "backend/packages/harness/deerflow/skills/review/**"
+      - "contracts/skill_review/**"
+      - "scripts/review_changed_public_skills.py"
+      - "backend/pyproject.toml"
+      - "backend/uv.lock"
+      - ".github/workflows/skill-review-ci.yml"
+
+concurrency:
+  group: skill-review-ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  skill-review:
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Install backend dependencies
+        working-directory: backend
+        run: uv sync --group dev
+
+      - name: Review changed public skills (pull request)
+        if: github.event_name == 'pull_request'
+        working-directory: backend
+        run: |
+          uv run python ../scripts/review_changed_public_skills.py \
+            --base-ref "${{ github.event.pull_request.base.sha }}" \
+            --head-ref "${{ github.event.pull_request.head.sha }}"
+
+      - name: Review changed public skills (push)
+        if: github.event_name == 'push'
+        working-directory: backend
+        run: |
+          uv run python ../scripts/review_changed_public_skills.py \
+            --before "${{ github.event.before }}" \
+            --after "${{ github.event.after }}"
