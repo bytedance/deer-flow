@@ -123,8 +123,14 @@ def get_memory_config() -> MemoryConfig:
     if _app_config is not None:
         try:
             get_app_config()
-        except FileNotFoundError:
-            pass
+        except Exception:
+            # If the config file is transiently broken (invalid YAML, schema
+            # violation, missing env var, etc.), keep the last-good singleton
+            # so an in-flight turn completes normally instead of crashing.
+            logger.warning(
+                "Failed to reload app config from get_memory_config(); falling back to cached memory config.",
+                exc_info=True,
+            )
     return _memory_config
 
 
