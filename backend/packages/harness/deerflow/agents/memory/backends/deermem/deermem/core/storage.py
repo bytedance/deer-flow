@@ -425,6 +425,7 @@ class FileMemoryStorage(MemoryStorage):
         with self._cache_lock:
             return self._scope_locks.setdefault(key, threading.RLock())
 
+<<<<<<< HEAD
     def _get_memory_file_path(self, agent_name: str | None = None, *, user_id: str | None = None) -> Path:
         return memory_file_path(self._config, agent_name, user_id=user_id)
 
@@ -981,15 +982,25 @@ class FileMemoryStorage(MemoryStorage):
                 migration_notifications = self._run_read_migrations_locked(path, agent_name, user_id=user_id)
         for notification_agent, notifications in migration_notifications:
             self._dispatch_retrieval_notifications(notifications, user_id=user_id, agent_name=notification_agent)
-        signature = self._scope_signature(path, agent_name)
+        # Serialise the signature computation + cache lookup + (cold path)
+        # document read under a single critical section. Without this, two
+        # callers racing on a cold cache can both miss, both compute the same
+        # signature, and both schedule a disk read — the second write to
+        # ``_memory_cache`` then clobbers the first read, so the cached value
+        # can disagree with the file's actual contents (the file may have been
+        # touched between the two reads). Trade-off: the disk read + parse now
+        # happen while holding ``_cache_lock``, serialising concurrent cold
+        # loads; memory documents are small so this is acceptable.
+        # ``_scope_signature``/``_read_document`` must never re-acquire
+        # ``_cache_lock`` (it is a non-reentrant ``threading.Lock``).
         with self._cache_lock:
+            signature = self._scope_signature(path, agent_name)
             cached = self._memory_cache.get(key)
             if cached is not None and cached[1] == signature:
                 return copy.deepcopy(cached[0])
-        document = self._read_document(path, agent_name, user_id=user_id)
-        with self._cache_lock:
+            document = self._read_document(path, agent_name, user_id=user_id)
             self._memory_cache[key] = (copy.deepcopy(document), signature)
-        return copy.deepcopy(document)
+            return copy.deepcopy(document)
 
     def reload(self, agent_name: str | None = None, *, user_id: str | None = None) -> dict[str, Any]:
         path = self._get_memory_file_path(agent_name, user_id=user_id)

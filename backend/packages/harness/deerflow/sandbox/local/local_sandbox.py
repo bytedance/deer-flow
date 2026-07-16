@@ -178,16 +178,17 @@ class LocalSandbox(Sandbox):
         except OSError:
             return False
 
-    def __init__(self, id: str, path_mappings: list[PathMapping] | None = None):
+    def __init__(self, sandbox_id: str, path_mappings: list[PathMapping] | None = None):
         """
         Initialize local sandbox with optional path mappings.
 
         Args:
-            id: Sandbox identifier
+            sandbox_id: Sandbox identifier. Renamed from ``id`` to avoid
+                shadowing the built-in :func:`id` function inside this scope.
             path_mappings: List of path mappings with optional read-only flag.
                           Skills directory is read-only by default.
         """
-        super().__init__(id)
+        super().__init__(sandbox_id)
         self.path_mappings = path_mappings or []
         # Track files written through write_file so read_file only
         # reverse-resolves paths in agent-authored content.

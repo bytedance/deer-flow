@@ -115,6 +115,14 @@ class LocalSkillStorage(SkillStorage):
 
         logger.info("Installing skill from %s", archive_path)
         path = Path(archive_path)
+        # Fail fast on missing/non-file inputs so the caller sees the same error
+        # shape regardless of where the bad path was discovered, instead of an
+        # obscure zipfile.BadZipFile from _prepare_skill_archive.
+        # ``Path.is_file`` calls ``os.stat`` under the hood — route through a
+        # worker thread so the blocking-IO checker stays green.
+        is_file = await asyncio.to_thread(path.is_file)
+        if not is_file:
+            raise FileNotFoundError(f"Skill archive not found or not a regular file: {path}")
         custom_dir = self._host_root / "custom"
 
         # The per-file security scan is an async LLM call and must stay on the

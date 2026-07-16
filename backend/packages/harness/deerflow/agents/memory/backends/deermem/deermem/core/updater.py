@@ -199,6 +199,15 @@ def _normalize_memory_update_data(update_data: dict[str, Any]) -> dict[str, Any]
                 dropped_new_fact = True
 
     if normalized_facts_to_remove and dropped_new_fact:
+        # The LLM asked to remove facts and produced malformed newFacts. Applying
+        # only the removals would let the model quietly drop knowledge it never
+        # intended to replace, so the whole update is rejected.
+        logger.warning(
+            "Rejecting memory update with %d removal(s) but malformed newFacts (%s); %d keys in update_data",
+            len(normalized_facts_to_remove),
+            type(new_facts).__name__,
+            len(update_data),
+        )
         raise json.JSONDecodeError(
             "Unsafe partial memory update: factsToRemove with malformed newFacts",
             json.dumps(update_data, ensure_ascii=False),
