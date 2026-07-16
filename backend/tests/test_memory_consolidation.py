@@ -930,6 +930,106 @@ class TestReviewerFindings:
         # fallback: max(coerce(0.85), coerce(0.75)) = 0.85
         assert merged[0]["confidence"] == pytest.approx(0.85)
 
+    def test_cross_category_source_ids_rejected(self):
+        """allowed_source_ids must not flatten categories together.
+
+        `_select_consolidation_candidates` returns candidates grouped by
+        category, and the prompt surfaces one <consolidation_candidates
+        category="..."> block per category, so a single decision is only ever
+        meant to merge sources from the group it was shown. Previously,
+        `allowed_source_ids` flattened every eligible category's fact IDs into
+        one combined set, so a decision mixing a "knowledge" fact and a
+        "preference" fact (each individually a member of the flattened set)
+        passed the membership guard and produced one merged fact tagged with
+        only one category - silently losing the other's categorical
+        distinction. Both categories are given >= consolidation_min_facts
+        facts so each is independently eligible, isolating the cross-category
+        mixing as the only guard that should reject this decision.
+        """
+        updater = _make_updater(
+            max_facts=100,
+            consolidation_enabled=True,
+            consolidation_min_facts=2,
+            consolidation_max_groups_per_cycle=3,
+            consolidation_max_sources=8,
+        )
+        current_memory = _make_memory(
+            [
+                _make_fact("fact_k1", "User works with Kubernetes", "knowledge", 0.9),
+                _make_fact("fact_k2", "User works with Docker", "knowledge", 0.85),
+                _make_fact("fact_p1", "User prefers dark mode", "preference", 0.9),
+                _make_fact("fact_p2", "User prefers vim keybindings", "preference", 0.85),
+            ]
+        )
+        update_data = {
+            "user": {},
+            "history": {},
+            "newFacts": [],
+            "factsToRemove": [],
+            "staleFactsToRemove": [],
+            "factsToConsolidate": [
+                {
+                    "sourceIds": ["fact_k1", "fact_p1"],
+                    "consolidated": {"content": "Mixed knowledge and preference", "category": "knowledge", "confidence": 0.9},
+                },
+            ],
+        }
+
+        result = updater._apply_updates(current_memory, update_data)
+
+        # Cross-category merge must be rejected: all 4 original facts survive untouched.
+        assert len(result["facts"]) == 4
+        ids = {f["id"] for f in result["facts"]}
+        assert {"fact_k1", "fact_k2", "fact_p1", "fact_p2"} == ids
+        assert all(f.get("source") != "consolidation" for f in result["facts"])
+
+    def test_same_category_sources_still_merge(self):
+        """Control for the cross-category guard: a same-category group must
+        still merge even while a second category is simultaneously eligible.
+
+        Guards against a too-strict fix that rejects every decision once more
+        than one category qualifies for consolidation, instead of only
+        rejecting decisions whose own source IDs span categories.
+        """
+        updater = _make_updater(
+            max_facts=100,
+            consolidation_enabled=True,
+            consolidation_min_facts=2,
+            consolidation_max_groups_per_cycle=3,
+            consolidation_max_sources=8,
+        )
+        current_memory = _make_memory(
+            [
+                _make_fact("fact_k1", "User works with Kubernetes", "knowledge", 0.9),
+                _make_fact("fact_k2", "User works with Docker", "knowledge", 0.85),
+                _make_fact("fact_p1", "User prefers dark mode", "preference", 0.9),
+                _make_fact("fact_p2", "User prefers vim keybindings", "preference", 0.85),
+            ]
+        )
+        update_data = {
+            "user": {},
+            "history": {},
+            "newFacts": [],
+            "factsToRemove": [],
+            "staleFactsToRemove": [],
+            "factsToConsolidate": [
+                {
+                    "sourceIds": ["fact_k1", "fact_k2"],
+                    "consolidated": {"content": "Uses Kubernetes and Docker", "category": "knowledge", "confidence": 0.9},
+                },
+            ],
+        }
+
+        result = updater._apply_updates(current_memory, update_data)
+
+        # Same-category merge still succeeds; unrelated preference facts untouched.
+        assert len(result["facts"]) == 3
+        consolidated = [f for f in result["facts"] if f.get("source") == "consolidation"]
+        assert len(consolidated) == 1
+        assert consolidated[0]["consolidatedFrom"] == ["fact_k1", "fact_k2"]
+        ids = {f["id"] for f in result["facts"]}
+        assert {"fact_p1", "fact_p2"} <= ids
+
 
 # ── Integration: _prepare_update_prompt ────────────────────────────────────
 

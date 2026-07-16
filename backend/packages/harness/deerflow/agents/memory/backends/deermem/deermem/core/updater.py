@@ -1183,14 +1183,23 @@ class MemoryUpdater:
                 new_consolidated: list[dict[str, Any]] = []
                 merge_count = 0
 
-                # Mirror the staleness-pass guardrail: build the set of IDs the LLM
+                # Mirror the staleness-pass guardrail: build a map of IDs the LLM
                 # was legitimately allowed to see as candidates (excludes protected
-                # categories and categories below the threshold).  Any LLM slip that
-                # proposes a protected or ineligible fact ID is rejected here regardless
-                # of model behaviour, matching how staleness intersects with
+                # categories and categories below the threshold) to the category
+                # they were surfaced under.  Any LLM slip that proposes a protected
+                # or ineligible fact ID is rejected here regardless of model
+                # behaviour, matching how staleness intersects with
                 # _select_stale_candidates before applying removals.  Skip id-less
-                # legacy facts (they can never be targeted by the id-based source set).
-                allowed_source_ids = {f["id"] for group in _select_consolidation_candidates(current_memory, config).values() for f in group if f.get("id") is not None}
+                # legacy facts (they can never be targeted by the id-based source
+                # set).  Kept as a per-category map (not flattened into one set) so
+                # the per-decision guard below can also enforce that every source ID
+                # in a single decision came from the SAME category - the prompt
+                # surfaces one <consolidation_candidates category="..."> block per
+                # category, so a decision mixing categories (e.g. one "knowledge" id
+                # and one "preference" id, each individually eligible) would
+                # otherwise merge them into one fact tagged with only one category,
+                # silently losing the other's categorical distinction.
+                allowed_source_categories = {f["id"]: cat for cat, group in _select_consolidation_candidates(current_memory, config).items() for f in group if f.get("id") is not None}
 
                 # Iterate all decisions and count successes rather than pre-slicing,
                 # so guard failures on early decisions cannot silently starve valid
@@ -1204,12 +1213,23 @@ class MemoryUpdater:
 
                     # Guardrail: all source IDs must exist in the post-trim index,
                     # must not already be consumed by an earlier merge this cycle,
-                    # and must be in allowed_source_ids - the set built from
+                    # and must be in allowed_source_categories - the map built from
                     # _select_consolidation_candidates, which excludes categories in
                     # staleness_protected_categories (default: "correction").  This
                     # mirrors the staleness apply-time check and ensures explicit user
                     # feedback is never silently merged away regardless of model behaviour.
-                    if any(sid in ids_consumed or sid not in fact_index or sid not in allowed_source_ids for sid in source_ids):
+                    if any(sid in ids_consumed or sid not in fact_index or sid not in allowed_source_categories for sid in source_ids):
+                        continue
+                    # Guardrail: every source ID in this decision must belong to the
+                    # SAME candidate category.  allowed_source_categories spans every
+                    # eligible category at once, so the membership check above alone
+                    # cannot tell "fact_k1 and fact_p1 are each individually eligible"
+                    # apart from "fact_k1 and fact_p1 were shown in the same group" -
+                    # only the latter is a valid consolidation decision.  A decision
+                    # mixing categories is skipped rather than merged with a single
+                    # (arbitrary) category label, which would silently discard the
+                    # other source's categorical distinction.
+                    if len({allowed_source_categories[sid] for sid in source_ids}) != 1:
                         continue
                     # Guardrail: 2..max_sources per group
                     if not (2 <= len(source_ids) <= max_sources):
