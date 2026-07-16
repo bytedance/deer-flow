@@ -22,6 +22,7 @@ import logging
 import requests
 
 from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.skills.storage import user_should_see_legacy_skills
 
 from .backend import SandboxBackend
 from .sandbox_info import SandboxInfo
@@ -40,20 +41,27 @@ class RemoteSandboxBackend(SandboxBackend):
         sandbox:
           use: deerflow.community.aio_sandbox:AioSandboxProvider
           provisioner_url: http://provisioner:8002
+          provisioner_api_key: $PROVISIONER_API_KEY
     """
 
-    def __init__(self, provisioner_url: str):
-        """Initialize with the provisioner service URL.
+    def __init__(self, provisioner_url: str, api_key: str = ""):
+        """Initialize with the provisioner service URL and optional API key.
 
         Args:
             provisioner_url: URL of the provisioner service
                              (e.g., ``http://provisioner:8002``).
+            api_key: Value sent as ``X-API-Key`` header on every request.
+                     Leave empty to send no authentication header.
         """
         self._provisioner_url = provisioner_url.rstrip("/")
+        self._api_key = api_key
 
     @property
     def provisioner_url(self) -> str:
         return self._provisioner_url
+
+    def _auth_headers(self) -> dict[str, str]:
+        return {"X-API-Key": self._api_key} if self._api_key else {}
 
     # ── SandboxBackend interface ──────────────────────────────────────────
 
@@ -62,13 +70,15 @@ class RemoteSandboxBackend(SandboxBackend):
         thread_id: str | None,
         sandbox_id: str,
         extra_mounts: list[tuple[str, str, bool]] | None = None,
+        *,
+        user_id: str | None = None,
     ) -> SandboxInfo:
         """Create a sandbox Pod + Service via the provisioner.
 
         Calls ``POST /api/sandboxes`` which creates a dedicated Pod +
         NodePort Service in k3s.
         """
-        return self._provisioner_create(thread_id, sandbox_id, extra_mounts)
+        return self._provisioner_create(thread_id, sandbox_id, extra_mounts, user_id=user_id)
 
     def destroy(self, info: SandboxInfo) -> None:
         """Destroy a sandbox Pod + Service via the provisioner."""
@@ -103,7 +113,7 @@ class RemoteSandboxBackend(SandboxBackend):
     def _provisioner_list(self) -> list[SandboxInfo]:
         """GET /api/sandboxes → list all running sandboxes."""
         try:
-            resp = requests.get(f"{self._provisioner_url}/api/sandboxes", timeout=10)
+            resp = requests.get(f"{self._provisioner_url}/api/sandboxes", headers=self._auth_headers(), timeout=10)
             resp.raise_for_status()
             data = resp.json()
             if not isinstance(data, dict):
@@ -132,16 +142,28 @@ class RemoteSandboxBackend(SandboxBackend):
             logger.warning("Provisioner list_running failed: %s", exc)
             return []
 
-    def _provisioner_create(self, thread_id: str | None, sandbox_id: str, extra_mounts: list[tuple[str, str, bool]] | None = None) -> SandboxInfo:
+    def _provisioner_create(
+        self,
+        thread_id: str | None,
+        sandbox_id: str,
+        extra_mounts: list[tuple[str, str, bool]] | None = None,
+        *,
+        user_id: str | None = None,
+    ) -> SandboxInfo:
         """POST /api/sandboxes → create Pod + Service."""
+        del extra_mounts
+        effective_user_id = user_id or get_effective_user_id()
+        include_legacy_skills = user_should_see_legacy_skills(effective_user_id)
         try:
             resp = requests.post(
                 f"{self._provisioner_url}/api/sandboxes",
                 json={
                     "sandbox_id": sandbox_id,
                     "thread_id": thread_id,
-                    "user_id": get_effective_user_id(),
+                    "user_id": effective_user_id,
+                    "include_legacy_skills": include_legacy_skills,
                 },
+                headers=self._auth_headers(),
                 timeout=30,
             )
             resp.raise_for_status()
@@ -160,6 +182,7 @@ class RemoteSandboxBackend(SandboxBackend):
         try:
             resp = requests.delete(
                 f"{self._provisioner_url}/api/sandboxes/{sandbox_id}",
+                headers=self._auth_headers(),
                 timeout=15,
             )
             if resp.ok:
@@ -174,20 +197,26 @@ class RemoteSandboxBackend(SandboxBackend):
         try:
             resp = requests.get(
                 f"{self._provisioner_url}/api/sandboxes/{sandbox_id}",
+                headers=self._auth_headers(),
                 timeout=10,
             )
-            if resp.ok:
-                data = resp.json()
-                return data.get("status") == "Running"
+        except requests.RequestException as exc:
+            raise RuntimeError(f"Provisioner health check failed for {sandbox_id}: {exc}") from exc
+
+        if resp.status_code == 404:
             return False
-        except requests.RequestException:
-            return False
+        if not resp.ok:
+            raise RuntimeError(f"Provisioner health check failed for {sandbox_id}: HTTP {resp.status_code} {resp.text}")
+
+        data = resp.json()
+        return data.get("status") == "Running"
 
     def _provisioner_discover(self, sandbox_id: str) -> SandboxInfo | None:
         """GET /api/sandboxes/{sandbox_id} → discover existing sandbox."""
         try:
             resp = requests.get(
                 f"{self._provisioner_url}/api/sandboxes/{sandbox_id}",
+                headers=self._auth_headers(),
                 timeout=10,
             )
             if resp.status_code == 404:

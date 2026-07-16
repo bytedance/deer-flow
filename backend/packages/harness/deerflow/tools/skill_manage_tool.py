@@ -3,15 +3,26 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
-from typing import Any
+import shutil
+import tempfile
+from pathlib import Path
+from typing import Any, NoReturn
 from weakref import WeakValueDictionary
 
 from langchain.tools import tool
 
-from deerflow.agents.lead_agent.prompt import refresh_skills_system_prompt_cache_async
+from deerflow.agents.lead_agent.prompt import refresh_user_skills_system_prompt_cache_async
+from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.skills.security_scanner import scan_skill_content
-from deerflow.skills.storage import get_or_new_skill_storage
+from deerflow.skills.security_static_scanner import (
+    StaticFinding,
+    StaticScanBlockedError,
+    StaticScannerError,
+    enforce_static_scan,
+)
+from deerflow.skills.storage import get_or_new_user_skill_storage
 from deerflow.skills.storage.skill_storage import SkillStorage
 from deerflow.skills.types import SKILL_MD_FILE
 from deerflow.tools.sync import make_sync_tool_wrapper
@@ -19,14 +30,16 @@ from deerflow.tools.types import Runtime
 
 logger = logging.getLogger(__name__)
 
-_skill_locks: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
+# Lock granularity: (user_id, skill_name) to avoid cross-user blocking.
+_skill_locks: WeakValueDictionary[tuple[str, str], asyncio.Lock] = WeakValueDictionary()
 
 
-def _get_lock(name: str) -> asyncio.Lock:
-    lock = _skill_locks.get(name)
+def _get_lock(user_id: str, name: str) -> asyncio.Lock:
+    key = (user_id, name)
+    lock = _skill_locks.get(key)
     if lock is None:
         lock = asyncio.Lock()
-        _skill_locks[name] = lock
+        _skill_locks[key] = lock
     return lock
 
 
@@ -50,13 +63,47 @@ def _history_record(*, action: str, file_path: str, prev_content: str | None, ne
     }
 
 
-async def _scan_or_raise(content: str, *, executable: bool, location: str) -> dict[str, str]:
-    result = await scan_skill_content(content, executable=executable, location=location)
+async def _scan_or_raise(content: str, *, executable: bool, location: str, static_findings: list[StaticFinding] | None = None) -> dict[str, Any]:
+    result = await scan_skill_content(content, executable=executable, location=location, static_findings=static_findings or [])
     if result.decision == "block":
         raise ValueError(f"Security scan blocked the write: {result.reason}")
     if executable and result.decision != "allow":
         raise ValueError(f"Security scan rejected executable content: {result.reason}")
     return {"decision": result.decision, "reason": result.reason}
+
+
+def _raise_static_block(error: StaticScanBlockedError) -> NoReturn:
+    payload = {
+        "skill_name": error.skill_name,
+        "findings": error.findings,
+    }
+    raise ValueError(f"{error} Findings: {json.dumps(payload, ensure_ascii=False)}") from error
+
+
+def _raise_static_scan_failure(name: str, error: StaticScannerError) -> NoReturn:
+    raise ValueError(f"Static security scan failed for skill '{name}': {error}") from error
+
+
+async def _scan_static_candidate_or_raise(name: str, updates: dict[str, str], skill_storage: SkillStorage | None = None) -> list[StaticFinding]:
+    def _scan_candidate() -> list[StaticFinding]:
+        with tempfile.TemporaryDirectory() as tmp:
+            skill_dir = Path(tmp) / name
+            if skill_storage is None:
+                skill_dir.mkdir(parents=True)
+            else:
+                shutil.copytree(skill_storage.get_custom_skill_dir(name), skill_dir)
+            for relative_path, content in updates.items():
+                target = skill_dir / relative_path
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(content, encoding="utf-8")
+            return enforce_static_scan(skill_dir, skill_name=name)
+
+    try:
+        return await _to_thread(_scan_candidate)
+    except StaticScanBlockedError as e:
+        _raise_static_block(e)
+    except StaticScannerError as e:
+        _raise_static_scan_failure(name, e)
 
 
 async def _to_thread(func, /, *args, **kwargs):
@@ -85,9 +132,10 @@ async def _skill_manage_impl(
         expected_count: Optional expected number of replacements for patch.
     """
     name = SkillStorage.validate_skill_name(name)
-    lock = _get_lock(name)
+    user_id = resolve_runtime_user_id(runtime)
+    lock = _get_lock(user_id, name)
     thread_id = _get_thread_id(runtime)
-    skill_storage = get_or_new_skill_storage()
+    skill_storage = get_or_new_user_skill_storage(user_id)
 
     async with lock:
         if action == "create":
@@ -96,22 +144,25 @@ async def _skill_manage_impl(
             if content is None:
                 raise ValueError("content is required for create.")
             await _to_thread(skill_storage.validate_skill_markdown_content, name, content)
-            scan = await _scan_or_raise(content, executable=False, location=f"{name}/{SKILL_MD_FILE}")
+            static_findings = await _scan_static_candidate_or_raise(name, {SKILL_MD_FILE: content})
+            scan = await _scan_or_raise(content, executable=False, location=f"{name}/{SKILL_MD_FILE}", static_findings=static_findings)
+            scan["static_findings"] = static_findings
             await _to_thread(skill_storage.write_custom_skill, name, SKILL_MD_FILE, content)
             await _to_thread(
                 skill_storage.append_history,
                 name,
                 _history_record(action="create", file_path=SKILL_MD_FILE, prev_content=None, new_content=content, thread_id=thread_id, scanner=scan),
             )
-            await refresh_skills_system_prompt_cache_async()
+            await refresh_user_skills_system_prompt_cache_async(user_id)
             return f"Created custom skill '{name}'."
-
         if action == "edit":
             await _to_thread(skill_storage.ensure_custom_skill_is_editable, name)
             if content is None:
                 raise ValueError("content is required for edit.")
             await _to_thread(skill_storage.validate_skill_markdown_content, name, content)
-            scan = await _scan_or_raise(content, executable=False, location=f"{name}/{SKILL_MD_FILE}")
+            static_findings = await _scan_static_candidate_or_raise(name, {SKILL_MD_FILE: content})
+            scan = await _scan_or_raise(content, executable=False, location=f"{name}/{SKILL_MD_FILE}", static_findings=static_findings)
+            scan["static_findings"] = static_findings
             skill_file = skill_storage.get_custom_skill_file(name)
             prev_content = await _to_thread(skill_file.read_text, encoding="utf-8")
             await _to_thread(skill_storage.write_custom_skill, name, SKILL_MD_FILE, content)
@@ -120,7 +171,7 @@ async def _skill_manage_impl(
                 name,
                 _history_record(action="edit", file_path=SKILL_MD_FILE, prev_content=prev_content, new_content=content, thread_id=thread_id, scanner=scan),
             )
-            await refresh_skills_system_prompt_cache_async()
+            await refresh_user_skills_system_prompt_cache_async(user_id)
             return f"Updated custom skill '{name}'."
 
         if action == "patch":
@@ -137,14 +188,16 @@ async def _skill_manage_impl(
             replacement_count = expected_count if expected_count is not None else 1
             new_content = prev_content.replace(find, replace, replacement_count)
             await _to_thread(skill_storage.validate_skill_markdown_content, name, new_content)
-            scan = await _scan_or_raise(new_content, executable=False, location=f"{name}/{SKILL_MD_FILE}")
+            static_findings = await _scan_static_candidate_or_raise(name, {SKILL_MD_FILE: new_content})
+            scan = await _scan_or_raise(new_content, executable=False, location=f"{name}/{SKILL_MD_FILE}", static_findings=static_findings)
+            scan["static_findings"] = static_findings
             await _to_thread(skill_storage.write_custom_skill, name, SKILL_MD_FILE, new_content)
             await _to_thread(
                 skill_storage.append_history,
                 name,
                 _history_record(action="patch", file_path=SKILL_MD_FILE, prev_content=prev_content, new_content=new_content, thread_id=thread_id, scanner=scan),
             )
-            await refresh_skills_system_prompt_cache_async()
+            await refresh_user_skills_system_prompt_cache_async(user_id)
             return f"Patched custom skill '{name}' ({replacement_count} replacement(s) applied, {occurrences} match(es) found)."
 
         if action == "delete":
@@ -160,7 +213,7 @@ async def _skill_manage_impl(
                     scanner={"decision": "allow", "reason": "Deletion requested."},
                 ),
             )
-            await refresh_skills_system_prompt_cache_async()
+            await refresh_user_skills_system_prompt_cache_async(user_id)
             return f"Deleted custom skill '{name}'."
 
         if action == "write_file":
@@ -171,13 +224,16 @@ async def _skill_manage_impl(
             exists = await _to_thread(target.exists)
             prev_content = await _to_thread(target.read_text, encoding="utf-8") if exists else None
             executable = "scripts/" in path or path.startswith("scripts/")
-            scan = await _scan_or_raise(content, executable=executable, location=f"{name}/{path}")
+            static_findings = await _scan_static_candidate_or_raise(name, {path: content}, skill_storage)
+            scan = await _scan_or_raise(content, executable=executable, location=f"{name}/{path}", static_findings=static_findings)
+            scan["static_findings"] = static_findings
             await _to_thread(skill_storage.write_custom_skill, name, path, content)
             await _to_thread(
                 skill_storage.append_history,
                 name,
                 _history_record(action="write_file", file_path=path, prev_content=prev_content, new_content=content, thread_id=thread_id, scanner=scan),
             )
+            await refresh_user_skills_system_prompt_cache_async(user_id)
             return f"Wrote '{path}' for custom skill '{name}'."
 
         if action == "remove_file":
@@ -194,10 +250,14 @@ async def _skill_manage_impl(
                 name,
                 _history_record(action="remove_file", file_path=path, prev_content=prev_content, new_content=None, thread_id=thread_id, scanner={"decision": "allow", "reason": "Deletion requested."}),
             )
+            await refresh_user_skills_system_prompt_cache_async(user_id)
             return f"Removed '{path}' from custom skill '{name}'."
 
         if await _to_thread(skill_storage.public_skill_exists, name):
-            raise ValueError(f"'{name}' is a built-in skill. To customise it, create a new skill with the same name under skills/custom/.")
+            # public_skill_exists covers both built-in (PUBLIC) and legacy (LEGACY)
+            # skills; the UserScopedSkillStorage override distinguishes them in
+            # ensure_custom_skill_is_editable with category-specific messages.
+            raise ValueError(f"'{name}' is a read-only skill (built-in or legacy shared). To customise it, create your own version with the same name.")
         raise ValueError(f"Unsupported action '{action}'.")
 
 

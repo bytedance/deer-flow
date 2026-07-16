@@ -13,19 +13,54 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from copy import deepcopy
+from datetime import UTC, datetime
 from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import Response, StreamingResponse
+from langchain_core.messages import BaseMessage
 from pydantic import BaseModel, Field
 
 from app.gateway.authz import require_permission
 from app.gateway.deps import get_checkpointer, get_current_user, get_feedback_repo, get_run_event_store, get_run_manager, get_run_store, get_stream_bridge
-from app.gateway.services import sse_consumer, start_run
-from deerflow.runtime import RunRecord, RunStatus, serialize_channel_values
+from app.gateway.pagination import trim_run_message_page
+from app.gateway.services import sse_consumer, start_run, wait_for_run_completion
+from deerflow.runtime import CancelOutcome, RunRecord, RunStatus, serialize_channel_values_for_api
+from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, get_original_user_content_text, message_to_text
+from deerflow.workspace_changes import get_workspace_changes_response
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/threads", tags=["runs"])
+REGENERATE_HISTORY_SCAN_LIMIT = 200
+# Doubled to keep ~200 effective checkpoints when duration-only checkpoints
+# (one per successful run in steady state) consume roughly half of history.
+REGENERATE_HISTORY_RAW_SCAN_LIMIT = REGENERATE_HISTORY_SCAN_LIMIT * 2
+THREAD_MESSAGE_PAGE_SCAN_BATCH = 201
+
+
+def _is_duration_only_checkpoint(checkpoint_tuple: Any) -> bool:
+    metadata = getattr(checkpoint_tuple, "metadata", None)
+    writes = metadata.get("writes") if isinstance(metadata, dict) else None
+    return isinstance(writes, dict) and "runtime_run_duration" in writes
+
+
+def compute_run_durations(runs) -> dict[str, int]:
+    """Map run_id -> duration in seconds from run timestamps."""
+    from datetime import datetime
+
+    durations: dict[str, int] = {}
+    for r in runs:
+        if r.created_at and r.updated_at:
+            try:
+                created = datetime.fromisoformat(r.created_at.replace("Z", "+00:00"))
+                updated = datetime.fromisoformat(r.updated_at.replace("Z", "+00:00"))
+                # Note: updated_at - created_at represents the row's total lifetime,
+                # which can slightly overshoot the actual AI turn end if the row is mutated later.
+                durations[r.run_id] = int((updated - created).total_seconds())
+            except Exception:
+                logger.warning("Failed to parse timestamps for run %s", r.run_id, exc_info=True)
+    return durations
 
 
 # ---------------------------------------------------------------------------
@@ -56,6 +91,23 @@ class RunCreateRequest(BaseModel):
     feedback_keys: list[str] | None = Field(default=None, description="LangSmith feedback keys")
 
 
+class RegeneratePrepareRequest(BaseModel):
+    message_id: str = Field(..., min_length=1, description="Assistant message id to regenerate")
+
+
+class RegeneratePrepareResponse(BaseModel):
+    input: dict[str, Any]
+    checkpoint: dict[str, Any]
+    metadata: dict[str, Any]
+    target_run_id: str
+
+
+class ThreadMessagesPageResponse(BaseModel):
+    data: list[dict[str, Any]]
+    has_more: bool
+    next_before_seq: int | None = None
+
+
 class RunResponse(BaseModel):
     run_id: str
     thread_id: str
@@ -74,11 +126,15 @@ class RunResponse(BaseModel):
     subagent_tokens: int = 0
     middleware_tokens: int = 0
     message_count: int = 0
+    stop_reason: str | None = None
 
 
 class ThreadTokenUsageModelBreakdown(BaseModel):
     tokens: int = 0
-    runs: int = 0
+    runs: int = Field(
+        default=0,
+        description="Number of runs in which this model appeared; counts are non-exclusive for runs that used multiple models.",
+    )
 
 
 class ThreadTokenUsageCallerBreakdown(BaseModel):
@@ -108,6 +164,54 @@ def _cancel_conflict_detail(run_id: str, record: RunRecord) -> str:
     return f"Run {run_id} is not cancellable (status: {record.status.value})"
 
 
+def _compute_retry_after(lease_expires_at: str | None, grace_seconds: int) -> int | None:
+    """Return seconds until the lease expires + grace, for ``Retry-After``.
+
+    Returns ``None`` when the lease is NULL or unparseable so the caller
+    can decide whether to send a generic 409 without the header.
+
+    The ``max(1, ...)`` floor means a lease just about to expire yields
+    ``Retry-After: 1``.  This is a lower bound, not a recommended poll
+    interval — clients that honour this header should apply minimum
+    backoff / jitter rather than retrying every second.
+    """
+    if lease_expires_at is None:
+        return None
+    try:
+        dt = datetime.fromisoformat(lease_expires_at)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=UTC)
+    except (ValueError, TypeError):
+        return None
+    remaining = (dt - datetime.now(UTC)).total_seconds() + grace_seconds
+    return max(1, int(remaining))
+
+
+async def _raise_lease_valid_elsewhere(
+    run_id: str,
+    run_mgr,  # RunManager (avoid import for testability)
+    record: RunRecord,
+) -> None:
+    """Re-fetch the lease and raise HTTP 409 + Retry-After.
+
+    ``record.lease_expires_at`` may be stale (fetched at request start while
+    the owner renewed between our read and the conditional UPDATE). Re-read
+    from the store to get the fresh value so ``Retry-After`` is accurate.
+    """
+    fresh = await run_mgr.get(run_id)
+    if fresh is not None:
+        record = fresh
+    retry_after = _compute_retry_after(record.lease_expires_at, run_mgr.grace_seconds)
+    headers: dict[str, str] = {}
+    if retry_after is not None:
+        headers["Retry-After"] = str(retry_after)
+    raise HTTPException(
+        status_code=409,
+        detail=f"Run {run_id} is active on another worker; retry after lease expiry.",
+        headers=headers,
+    )
+
+
 def _record_to_response(record: RunRecord) -> RunResponse:
     return RunResponse(
         run_id=record.run_id,
@@ -127,12 +231,258 @@ def _record_to_response(record: RunRecord) -> RunResponse:
         subagent_tokens=record.subagent_tokens,
         middleware_tokens=record.middleware_tokens,
         message_count=record.message_count,
+        stop_reason=record.stop_reason,
+    )
+
+
+def _message_id(message: Any) -> str | None:
+    value = getattr(message, "id", None)
+    if value is None and isinstance(message, dict):
+        value = message.get("id")
+    return str(value) if value else None
+
+
+def _message_type(message: Any) -> str | None:
+    value = getattr(message, "type", None)
+    if value is None and isinstance(message, dict):
+        value = message.get("type") or message.get("role")
+    if value == "assistant":
+        return "ai"
+    return str(value) if value else None
+
+
+def _message_name(message: Any) -> str | None:
+    value = getattr(message, "name", None)
+    if value is None and isinstance(message, dict):
+        value = message.get("name")
+    return str(value) if value else None
+
+
+def _message_content(message: Any) -> Any:
+    if isinstance(message, dict):
+        return message.get("content")
+    return getattr(message, "content", None)
+
+
+def _message_text(message: Any) -> str:
+    return message_to_text(message)
+
+
+def _message_additional_kwargs(message: Any) -> dict[str, Any]:
+    value = getattr(message, "additional_kwargs", None)
+    if value is None and isinstance(message, dict):
+        value = message.get("additional_kwargs")
+    return dict(value or {}) if isinstance(value, dict) else {}
+
+
+def _is_hidden_or_control_message(message: Any) -> bool:
+    message_type = _message_type(message)
+    additional_kwargs = _message_additional_kwargs(message)
+    return message_type == "remove" or _message_name(message) == "summary" or additional_kwargs.get("hide_from_ui") is True
+
+
+def _is_visible_human_message(message: Any) -> bool:
+    return _message_type(message) == "human" and not _is_hidden_or_control_message(message)
+
+
+def _is_visible_ai_message(message: Any) -> bool:
+    return _message_type(message) == "ai" and not _is_hidden_or_control_message(message)
+
+
+def _is_middleware_message_row(row: dict[str, Any]) -> bool:
+    return str((row.get("metadata") or {}).get("caller", "")).startswith("middleware:")
+
+
+def _checkpoint_messages(checkpoint_tuple: Any) -> list[Any]:
+    checkpoint = getattr(checkpoint_tuple, "checkpoint", None) or {}
+    channel_values = checkpoint.get("channel_values", {}) if isinstance(checkpoint, dict) else {}
+    messages = channel_values.get("messages", []) if isinstance(channel_values, dict) else []
+    return messages if isinstance(messages, list) else []
+
+
+def _checkpoint_configurable(checkpoint_tuple: Any) -> dict[str, Any]:
+    config = getattr(checkpoint_tuple, "config", None) or {}
+    configurable = config.get("configurable", {}) if isinstance(config, dict) else {}
+    return dict(configurable) if isinstance(configurable, dict) else {}
+
+
+def _checkpoint_response(checkpoint_tuple: Any) -> dict[str, Any]:
+    configurable = _checkpoint_configurable(checkpoint_tuple)
+    checkpoint_id = configurable.get("checkpoint_id")
+    if not checkpoint_id:
+        raise HTTPException(status_code=409, detail="Checkpoint is missing checkpoint_id")
+    return {
+        "checkpoint_ns": str(configurable.get("checkpoint_ns") or ""),
+        "checkpoint_id": str(checkpoint_id),
+        "checkpoint_map": configurable.get("checkpoint_map"),
+    }
+
+
+def _clean_human_message_for_regenerate(message: Any) -> dict[str, Any]:
+    additional_kwargs = _message_additional_kwargs(message)
+    content = get_original_user_content_text(_message_content(message), additional_kwargs)
+    additional_kwargs.pop(ORIGINAL_USER_CONTENT_KEY, None)
+    additional_kwargs.pop("hide_from_ui", None)
+
+    clean_message: dict[str, Any] = {
+        "type": "human",
+        "content": [{"type": "text", "text": content}],
+        "additional_kwargs": additional_kwargs,
+    }
+    message_id = _message_id(message)
+    if message_id:
+        clean_message["id"] = message_id
+    name = _message_name(message)
+    if name:
+        clean_message["name"] = name
+    return clean_message
+
+
+def _event_message_id(row: dict[str, Any]) -> str | None:
+    content = row.get("content")
+    if isinstance(content, BaseMessage):
+        return _message_id(content)
+    if isinstance(content, dict):
+        return _message_id(content)
+    return None
+
+
+def _run_last_ai_matches_message(record: RunRecord, message: Any) -> bool:
+    last_ai_message = (record.last_ai_message or "").strip()
+    if not last_ai_message:
+        return False
+    target_text = _message_text(message).strip()
+    if not target_text:
+        return False
+    return last_ai_message == target_text[: len(last_ai_message)]
+
+
+async def _find_target_run_id(thread_id: str, message_id: str, target_message: Any, request: Request) -> str:
+    event_store = get_run_event_store(request)
+    rows = await event_store.list_messages(thread_id, limit=REGENERATE_HISTORY_SCAN_LIMIT)
+    for row in reversed(rows):
+        if row.get("event_type") not in {"ai_message", "llm.ai.response"}:
+            continue
+        if _event_message_id(row) == message_id:
+            run_id = row.get("run_id")
+            if isinstance(run_id, str) and run_id:
+                return run_id
+    run_mgr = get_run_manager(request)
+    user_id = await get_current_user(request)
+    records = await run_mgr.list_by_thread(thread_id, user_id=user_id, limit=10)
+    fallback_record = next(
+        (record for record in records if record.status == RunStatus.success and _run_last_ai_matches_message(record, target_message)),
+        None,
+    )
+    if fallback_record is not None:
+        return fallback_record.run_id
+    if len(rows) >= REGENERATE_HISTORY_SCAN_LIMIT:
+        logger.warning(
+            "Could not find source run for regenerate message %s in recent run events for thread %s (limit=%s)",
+            message_id,
+            thread_id,
+            REGENERATE_HISTORY_SCAN_LIMIT,
+        )
+    raise HTTPException(status_code=409, detail="Could not find source run for assistant message")
+
+
+async def _find_base_checkpoint_before_human(thread_id: str, human_message_id: str, request: Request) -> Any:
+    checkpointer = get_checkpointer(request)
+    base_config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+    try:
+        raw_checkpoints = [item async for item in checkpointer.alist(base_config, limit=REGENERATE_HISTORY_RAW_SCAN_LIMIT)]
+        checkpoints = [item for item in raw_checkpoints if not _is_duration_only_checkpoint(item)]
+    except Exception as exc:
+        logger.exception("Failed to list checkpoints for regenerate thread %s", thread_id)
+        raise HTTPException(status_code=500, detail="Failed to inspect checkpoint history") from exc
+
+    previous_checkpoint = None
+    for checkpoint_tuple in reversed(checkpoints):
+        messages = _checkpoint_messages(checkpoint_tuple)
+        message_ids = {_message_id(message) for message in messages}
+        if human_message_id in message_ids:
+            if previous_checkpoint is None:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Could not find an addressable checkpoint before the target user message",
+                )
+            return previous_checkpoint
+        if _checkpoint_configurable(checkpoint_tuple).get("checkpoint_id"):
+            previous_checkpoint = checkpoint_tuple
+
+    if len(checkpoints) >= REGENERATE_HISTORY_SCAN_LIMIT:
+        logger.warning(
+            "Could not locate target user message %s in recent checkpoint history for thread %s (limit=%s)",
+            human_message_id,
+            thread_id,
+            REGENERATE_HISTORY_SCAN_LIMIT,
+        )
+    raise HTTPException(
+        status_code=409,
+        detail=(f"Could not locate target user message in recent checkpoint history (limit={REGENERATE_HISTORY_SCAN_LIMIT})"),
+    )
+
+
+async def _prepare_regenerate_payload(thread_id: str, message_id: str, request: Request) -> RegeneratePrepareResponse:
+    checkpointer = get_checkpointer(request)
+    latest_config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+    try:
+        latest_checkpoint = await checkpointer.aget_tuple(latest_config)
+    except Exception as exc:
+        logger.exception("Failed to read latest checkpoint for regenerate thread %s", thread_id)
+        raise HTTPException(status_code=500, detail="Failed to read latest checkpoint") from exc
+    if latest_checkpoint is None:
+        raise HTTPException(status_code=404, detail=f"Thread {thread_id} has no checkpoint")
+
+    messages = _checkpoint_messages(latest_checkpoint)
+    target_index = next((i for i, message in enumerate(messages) if _message_id(message) == message_id), None)
+    if target_index is None:
+        raise HTTPException(status_code=404, detail=f"Message {message_id} not found")
+    target_message = messages[target_index]
+    if not _is_visible_ai_message(target_message):
+        raise HTTPException(status_code=409, detail="Only visible assistant messages can be regenerated")
+
+    latest_visible_ai = next((message for message in reversed(messages) if _is_visible_ai_message(message)), None)
+    if _message_id(latest_visible_ai) != message_id:
+        raise HTTPException(status_code=409, detail="Only the latest assistant message can be regenerated")
+
+    previous_human = next((message for message in reversed(messages[:target_index]) if _is_visible_human_message(message)), None)
+    if previous_human is None:
+        raise HTTPException(status_code=409, detail="Could not find the user message for this assistant response")
+    previous_human_id = _message_id(previous_human)
+    if not previous_human_id:
+        raise HTTPException(status_code=409, detail="The source user message is missing an id")
+
+    base_checkpoint_tuple = await _find_base_checkpoint_before_human(thread_id, previous_human_id, request)
+    target_run_id = await _find_target_run_id(thread_id, message_id, target_message, request)
+    checkpoint = _checkpoint_response(base_checkpoint_tuple)
+    metadata = {
+        "regenerate_from_message_id": message_id,
+        "regenerate_from_run_id": target_run_id,
+        "regenerate_checkpoint_id": checkpoint["checkpoint_id"],
+    }
+    return RegeneratePrepareResponse(
+        input={"messages": [_clean_human_message_for_regenerate(previous_human)]},
+        checkpoint=checkpoint,
+        metadata=metadata,
+        target_run_id=target_run_id,
     )
 
 
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
+
+
+@router.post("/{thread_id}/runs/regenerate/prepare", response_model=RegeneratePrepareResponse)
+@require_permission("runs", "create", owner_check=True, require_existing=True)
+async def prepare_regenerate_run(
+    thread_id: str,
+    body: RegeneratePrepareRequest,
+    request: Request,
+) -> RegeneratePrepareResponse:
+    """Prepare input and checkpoint for regenerating the latest assistant turn."""
+    return await _prepare_regenerate_payload(thread_id, body.message_id, request)
 
 
 @router.post("/{thread_id}/runs", response_model=RunResponse)
@@ -175,24 +525,25 @@ async def stream_run(thread_id: str, body: RunCreateRequest, request: Request) -
 @require_permission("runs", "create", owner_check=True, require_existing=True)
 async def wait_run(thread_id: str, body: RunCreateRequest, request: Request) -> dict:
     """Create a run and block until it completes, returning the final state."""
+    bridge = get_stream_bridge(request)
+    run_mgr = get_run_manager(request)
     record = await start_run(body, thread_id, request)
 
+    completed = True
     if record.task is not None:
-        try:
-            await record.task
-        except asyncio.CancelledError:
-            pass
+        completed = await wait_for_run_completion(bridge, record, request, run_mgr)
 
-    checkpointer = get_checkpointer(request)
-    config = {"configurable": {"thread_id": thread_id}}
-    try:
-        checkpoint_tuple = await checkpointer.aget_tuple(config)
-        if checkpoint_tuple is not None:
-            checkpoint = getattr(checkpoint_tuple, "checkpoint", {}) or {}
-            channel_values = checkpoint.get("channel_values", {})
-            return serialize_channel_values(channel_values)
-    except Exception:
-        logger.exception("Failed to fetch final state for run %s", record.run_id)
+    if completed:
+        checkpointer = get_checkpointer(request)
+        config = {"configurable": {"thread_id": thread_id}}
+        try:
+            checkpoint_tuple = await checkpointer.aget_tuple(config)
+            if checkpoint_tuple is not None:
+                checkpoint = getattr(checkpoint_tuple, "checkpoint", {}) or {}
+                channel_values = checkpoint.get("channel_values", {})
+                return serialize_channel_values_for_api(channel_values)
+        except Exception:
+            logger.exception("Failed to fetch final state for run %s", record.run_id)
 
     return {"status": record.status.value, "error": record.error}
 
@@ -234,24 +585,34 @@ async def cancel_run(
     - action=rollback: Stop execution, revert to pre-run checkpoint state
     - wait=true: Block until the run fully stops, return 204
     - wait=false: Return immediately with 202
+
+    In multi-worker deployments, a cancel landing on a non-owning worker
+    can take over the run when the owner's lease has expired.  When the
+    lease is still valid a 409 + ``Retry-After`` header is returned.
     """
     run_mgr = get_run_manager(request)
     record = await run_mgr.get(run_id)
     if record is None or record.thread_id != thread_id:
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
 
-    cancelled = await run_mgr.cancel(run_id, action=action)
-    if not cancelled:
-        raise HTTPException(status_code=409, detail=_cancel_conflict_detail(run_id, record))
+    outcome = await run_mgr.cancel(run_id, action=action)
 
-    if wait and record.task is not None:
-        try:
-            await record.task
-        except asyncio.CancelledError:
-            pass
-        return Response(status_code=204)
+    # Success paths — the run was either cancelled locally or taken over
+    # from a dead worker.
+    if outcome in (CancelOutcome.cancelled, CancelOutcome.taken_over):
+        if wait and record.task is not None:
+            try:
+                await record.task
+            except asyncio.CancelledError:
+                pass
+            return Response(status_code=204)
+        return Response(status_code=202)
 
-    return Response(status_code=202)
+    if outcome == CancelOutcome.lease_valid_elsewhere:
+        await _raise_lease_valid_elsewhere(run_id, run_mgr, record)
+
+    # not_cancellable, not_active_locally, unknown
+    raise HTTPException(status_code=409, detail=_cancel_conflict_detail(run_id, record))
 
 
 @router.get("/{thread_id}/runs/{run_id}/join")
@@ -262,10 +623,10 @@ async def join_run(thread_id: str, run_id: str, request: Request) -> StreamingRe
     record = await run_mgr.get(run_id)
     if record is None or record.thread_id != thread_id:
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
-    if record.store_only:
+    bridge = get_stream_bridge(request)
+    if record.store_only and not bridge.supports_cross_process:
         raise HTTPException(status_code=409, detail=f"Run {run_id} is not active on this worker and cannot be streamed")
 
-    bridge = get_stream_bridge(request)
     return StreamingResponse(
         sse_consumer(bridge, record, request, run_mgr),
         media_type="text/event-stream",
@@ -277,7 +638,12 @@ async def join_run(thread_id: str, run_id: str, request: Request) -> StreamingRe
     )
 
 
-@router.api_route("/{thread_id}/runs/{run_id}/stream", methods=["GET", "POST"], response_model=None)
+# Register GET and POST as separate routes so each method gets a unique OpenAPI
+# operationId. ``api_route(methods=["GET", "POST"])`` shares one route registration
+# across both methods, which makes FastAPI emit the same ``operationId`` twice and
+# warn about a duplicate operation id during OpenAPI generation.
+@router.get("/{thread_id}/runs/{run_id}/stream", response_model=None)
+@router.post("/{thread_id}/runs/{run_id}/stream", response_model=None)
 @require_permission("runs", "read", owner_check=True)
 async def stream_existing_run(
     thread_id: str,
@@ -297,13 +663,22 @@ async def stream_existing_run(
     record = await run_mgr.get(run_id)
     if record is None or record.thread_id != thread_id:
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
-    if record.store_only and action is None:
+    bridge = get_stream_bridge(request)
+    if record.store_only and action is None and not bridge.supports_cross_process:
         raise HTTPException(status_code=409, detail=f"Run {run_id} is not active on this worker and cannot be streamed")
 
     # Cancel if an action was requested (stop-button / interrupt flow)
     if action is not None:
-        cancelled = await run_mgr.cancel(run_id, action=action)
-        if not cancelled:
+        outcome = await run_mgr.cancel(run_id, action=action)
+        if outcome == CancelOutcome.taken_over:
+            # The run was on another worker and is now marked ``error`` in the
+            # store.  There is no local stream to drain — return immediately so
+            # the client doesn't hang on an SSE subscription this worker can
+            # never serve.
+            return Response(status_code=202)
+        if outcome != CancelOutcome.cancelled:
+            if outcome == CancelOutcome.lease_valid_elsewhere:
+                await _raise_lease_valid_elsewhere(run_id, run_mgr, record)
             raise HTTPException(status_code=409, detail=_cancel_conflict_detail(run_id, record))
         if wait and record.task is not None:
             try:
@@ -312,7 +687,6 @@ async def stream_existing_run(
                 pass
             return Response(status_code=204)
 
-    bridge = get_stream_bridge(request)
     return StreamingResponse(
         sse_consumer(bridge, record, request, run_mgr),
         media_type="text/event-stream",
@@ -342,18 +716,26 @@ async def list_thread_messages(
     event_store = get_run_event_store(request)
     messages = await event_store.list_messages(thread_id, limit=limit, before_seq=before_seq, after_seq=after_seq)
 
-    # Attach feedback to the last AI message of each run
-    feedback_repo = get_feedback_repo(request)
+    # Resolve the caller once; it is needed both to scope the feedback query
+    # below and to list the thread's runs for turn-duration injection.
     user_id = await get_current_user(request)
-    feedback_map = await feedback_repo.list_by_thread_grouped(thread_id, user_id=user_id)
 
-    # Find the last ai_message per run_id
+    # Find the last AI message per run_id. AI messages are persisted by
+    # RunJournal with event_type "llm.ai.response" (see runtime/journal.py);
+    # the event store returns that value verbatim, so match on it here.
     last_ai_per_run: dict[str, int] = {}  # run_id -> index in messages list
     for i, msg in enumerate(messages):
-        if msg.get("event_type") == "ai_message":
+        if msg.get("event_type") == "llm.ai.response":
             last_ai_per_run[msg["run_id"]] = i
 
-    # Attach feedback field
+    # Attach feedback to the last AI message of each run. Only query when there
+    # is an AI message to attach it to — threads with no completed AI turn yet
+    # would otherwise pay for a grouped feedback lookup whose result is unused.
+    feedback_map: dict[str, dict] = {}
+    if last_ai_per_run:
+        feedback_repo = get_feedback_repo(request)
+        feedback_map = await feedback_repo.list_by_thread_grouped(thread_id, user_id=user_id)
+
     last_ai_indices = set(last_ai_per_run.values())
     for i, msg in enumerate(messages):
         if i in last_ai_indices:
@@ -371,7 +753,154 @@ async def list_thread_messages(
         else:
             msg["feedback"] = None
 
+    run_mgr = get_run_manager(request)
+    runs = await run_mgr.list_by_thread(thread_id, user_id=user_id)
+    run_durations = compute_run_durations(runs)
+
+    if run_durations:
+        for msg in messages:
+            content = msg.get("content", {})
+            if isinstance(content, dict) and content.get("type") == "ai":
+                rid = msg.get("run_id")
+                if rid and rid in run_durations:
+                    if "additional_kwargs" not in content:
+                        content["additional_kwargs"] = {}
+                    content["additional_kwargs"]["turn_duration"] = run_durations[rid]
+
     return messages
+
+
+async def _scan_thread_message_page(
+    thread_id: str,
+    *,
+    limit: int,
+    before_seq: int | None,
+    request: Request,
+    user_id: str | None,
+) -> tuple[list[dict[str, Any]], bool]:
+    """Select the newest ``limit + 1`` page-eligible rows before a cursor."""
+    event_store = get_run_event_store(request)
+    run_mgr = get_run_manager(request)
+    superseded_run_ids = await run_mgr.list_successful_regenerate_sources(thread_id, user_id=user_id)
+    visible_desc: list[dict[str, Any]] = []
+    scan_before = before_seq
+
+    while len(visible_desc) < limit + 1:
+        raw = await event_store.list_messages(
+            thread_id,
+            limit=THREAD_MESSAGE_PAGE_SCAN_BATCH,
+            before_seq=scan_before,
+            user_id=user_id,
+        )
+        if not raw:
+            break
+
+        invalid_seq_rows = [row for row in raw if not isinstance(row.get("seq"), int)]
+        if invalid_seq_rows:
+            logger.error(
+                "Thread message scan found rows without sequence values: thread_id=%s scan_before=%s row_count=%d invalid_count=%d",
+                thread_id,
+                scan_before,
+                len(raw),
+                len(invalid_seq_rows),
+            )
+            raise RuntimeError("Run event message rows are missing sequence values")
+
+        for row in reversed(raw):
+            if _is_middleware_message_row(row) or row.get("run_id") in superseded_run_ids:
+                continue
+            visible_desc.append(row)
+            if len(visible_desc) == limit + 1:
+                break
+
+        raw_seqs = [row["seq"] for row in raw]
+        next_scan_before = min(raw_seqs)
+        if scan_before is not None and next_scan_before >= scan_before:
+            logger.error(
+                "Thread message scan cursor did not advance: thread_id=%s scan_before=%s next_scan_before=%s row_count=%d",
+                thread_id,
+                scan_before,
+                next_scan_before,
+                len(raw),
+            )
+            raise RuntimeError("Run event message scan did not advance its cursor")
+        scan_before = next_scan_before
+        if len(raw) < THREAD_MESSAGE_PAGE_SCAN_BATCH:
+            break
+
+    has_more = len(visible_desc) > limit
+    return list(reversed(visible_desc[:limit])), has_more
+
+
+async def _enrich_thread_message_page(
+    thread_id: str,
+    rows: list[dict[str, Any]],
+    *,
+    request: Request,
+    user_id: str | None,
+) -> list[dict[str, Any]]:
+    """Attach run-scoped duration and feedback without mutating store rows."""
+    data = deepcopy(rows)
+    if not data:
+        return data
+
+    run_ids = {row["run_id"] for row in data if isinstance(row.get("run_id"), str)}
+    run_mgr = get_run_manager(request)
+    records = await run_mgr.get_many_by_thread(thread_id, run_ids, user_id=user_id)
+    run_durations = compute_run_durations(records.values())
+
+    event_store = get_run_event_store(request)
+    last_ai_seq_by_run = await event_store.get_last_visible_ai_seq_by_run(thread_id, run_ids, user_id=user_id)
+    feedback_map: dict[str, dict] = {}
+    feedback_run_ids = {run_id for row in data if isinstance((run_id := row.get("run_id")), str) and row.get("seq") == last_ai_seq_by_run.get(run_id)}
+    if feedback_run_ids:
+        feedback_repo = get_feedback_repo(request)
+        feedback_map = await feedback_repo.list_by_run_ids(thread_id, feedback_run_ids, user_id=user_id)
+
+    for row in data:
+        run_id = row.get("run_id")
+        row["feedback"] = None
+        if row.get("seq") == last_ai_seq_by_run.get(run_id):
+            feedback = feedback_map.get(run_id)
+            if feedback:
+                row["feedback"] = {
+                    "feedback_id": feedback["feedback_id"],
+                    "rating": feedback["rating"],
+                    "comment": feedback.get("comment"),
+                }
+
+        content = row.get("content")
+        if isinstance(content, dict) and content.get("type") == "ai" and run_id in run_durations:
+            content.setdefault("additional_kwargs", {})["turn_duration"] = run_durations[run_id]
+    return data
+
+
+@router.get("/{thread_id}/messages/page", response_model=ThreadMessagesPageResponse)
+@require_permission("runs", "read", owner_check=True)
+async def list_thread_messages_page(
+    thread_id: str,
+    request: Request,
+    limit: int = Query(default=50, ge=1, le=200),
+    before_seq: int | None = Query(default=None, ge=1),
+) -> ThreadMessagesPageResponse:
+    """Return a backward page ordered by the thread-global event sequence."""
+    if "after_seq" in request.query_params:
+        raise HTTPException(status_code=422, detail="after_seq is not supported by this backward-only endpoint")
+
+    user_id = await get_current_user(request)
+    rows, has_more = await _scan_thread_message_page(
+        thread_id,
+        limit=limit,
+        before_seq=before_seq,
+        request=request,
+        user_id=user_id,
+    )
+    data = await _enrich_thread_message_page(thread_id, rows, request=request, user_id=user_id)
+    return ThreadMessagesPageResponse(
+        data=data,
+        has_more=has_more,
+        next_before_seq=data[0]["seq"] if has_more else None,
+    )
 
 
 @router.get("/{thread_id}/runs/{run_id}/messages")
@@ -396,8 +925,24 @@ async def list_run_messages(
         before_seq=before_seq,
         after_seq=after_seq,
     )
-    has_more = len(rows) > limit
-    data = rows[:limit] if has_more else rows
+    data, has_more = trim_run_message_page(rows, limit=limit, after_seq=after_seq)
+
+    if data:
+        run_mgr = get_run_manager(request)
+        record = await run_mgr.get(run_id)
+        if record:
+            durations = compute_run_durations([record])
+            duration = durations.get(run_id)
+            if duration is not None:
+                for msg in reversed(data):
+                    content = msg.get("content")
+                    metadata = msg.get("metadata", {})
+                    is_middleware = str(metadata.get("caller", "")).startswith("middleware:")
+                    if isinstance(content, dict) and content.get("type") == "ai" and not is_middleware:
+                        if "additional_kwargs" not in content:
+                            content["additional_kwargs"] = {}
+                        content["additional_kwargs"]["turn_duration"] = duration
+
     return {"data": data, "has_more": has_more}
 
 
@@ -408,12 +953,38 @@ async def list_run_events(
     run_id: str,
     request: Request,
     event_types: str | None = Query(default=None),
+    task_id: str | None = Query(default=None),
     limit: int = Query(default=500, le=2000),
+    after_seq: int | None = Query(default=None),
 ) -> list[dict]:
-    """Return the full event stream for a run (debug/audit)."""
+    """Return the full event stream for a run (debug/audit).
+
+    ``task_id`` + ``after_seq`` let the subtask card page through one subagent
+    task's persisted steps without the run-wide ``limit`` truncating the tail (#3779).
+    """
     event_store = get_run_event_store(request)
     types = event_types.split(",") if event_types else None
-    return await event_store.list_events(thread_id, run_id, event_types=types, limit=limit)
+    return await event_store.list_events(thread_id, run_id, event_types=types, task_id=task_id, limit=limit, after_seq=after_seq)
+
+
+@router.get("/{thread_id}/runs/{run_id}/workspace-changes")
+@require_permission("runs", "read", owner_check=True)
+async def get_run_workspace_changes(
+    thread_id: str,
+    run_id: str,
+    request: Request,
+    include_files: bool = Query(default=True),
+    include_diff: bool = Query(default=True),
+) -> dict:
+    """Return workspace/output file changes recorded for one run."""
+    event_store = get_run_event_store(request)
+    return await get_workspace_changes_response(
+        event_store,
+        thread_id,
+        run_id,
+        include_files=include_files,
+        include_diff=include_diff,
+    )
 
 
 @router.get("/{thread_id}/token-usage", response_model=ThreadTokenUsageResponse)

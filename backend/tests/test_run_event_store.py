@@ -122,6 +122,26 @@ class TestListMessages:
         messages = await store.list_messages("t1", limit=3)
         assert [m["seq"] for m in messages] == [8, 9, 10]
 
+    @pytest.mark.anyio
+    async def test_pagination_with_interleaved_trace_events(self, store):
+        # Messages and non-message events interleave, so message seqs are
+        # non-contiguous (1, 3, 5, 7, 9). Seq-window pagination must still be
+        # correct over the messages-only projection, including when the cursor
+        # lands in a gap or exactly on a message seq (exclusive bound).
+        for i in range(10):
+            category = "message" if i % 2 == 0 else "trace"
+            await store.put(thread_id="t1", run_id="r1", event_type="e", category=category, content=str(i))
+
+        assert [m["seq"] for m in await store.list_messages("t1")] == [1, 3, 5, 7, 9]
+        # before_seq in a gap: seq < 6 -> [1, 3, 5], last 2
+        assert [m["seq"] for m in await store.list_messages("t1", before_seq=6, limit=2)] == [3, 5]
+        # before_seq on a message seq is exclusive: seq < 5 -> [1, 3]
+        assert [m["seq"] for m in await store.list_messages("t1", before_seq=5, limit=5)] == [1, 3]
+        # after_seq in a gap: seq > 4 -> [5, 7, 9], first 2
+        assert [m["seq"] for m in await store.list_messages("t1", after_seq=4, limit=2)] == [5, 7]
+        # after_seq on a message seq is exclusive: seq > 5 -> [7, 9]
+        assert [m["seq"] for m in await store.list_messages("t1", after_seq=5, limit=5)] == [7, 9]
+
 
 # -- list_events --
 
@@ -474,6 +494,109 @@ class TestDbRunEventStore:
         assert record["content"] == content
         assert record["metadata"]["content_is_json"] is True
         assert record["metadata"]["content_is_dict"] is True
+
+        await close_engine()
+
+
+class TestDbRunEventStoreWriteLock:
+    """Per-thread seq-assignment lock (fixes SQLite UNIQUE(thread_id, seq) races).
+
+    Two in-process coroutines writing to the same thread can interleave between
+    the ``max(seq)`` read and the INSERT, both computing the same next seq and
+    colliding. A per-thread ``asyncio.Lock`` serializes seq assignment.
+    """
+
+    def test_get_write_lock_same_thread_returns_same_lock(self):
+        import asyncio
+        from unittest.mock import MagicMock
+
+        from deerflow.runtime.events.store.db import DbRunEventStore
+
+        # The lock accessor does not touch the session factory, so a stub is fine.
+        store = DbRunEventStore(MagicMock())
+
+        lock = store._get_write_lock("thread-1")
+        assert isinstance(lock, asyncio.Lock)
+        assert store._get_write_lock("thread-1") is lock
+
+    def test_get_write_lock_distinct_threads_get_distinct_locks(self):
+        from unittest.mock import MagicMock
+
+        from deerflow.runtime.events.store.db import DbRunEventStore
+
+        store = DbRunEventStore(MagicMock())
+
+        assert store._get_write_lock("thread-1") is not store._get_write_lock("thread-2")
+
+    @pytest.mark.anyio
+    async def test_concurrent_put_batch_same_thread_has_no_seq_collision(self, tmp_path):
+        import asyncio
+
+        from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
+        from deerflow.runtime.events.store.db import DbRunEventStore
+
+        url = f"sqlite+aiosqlite:///{tmp_path / 'test.db'}"
+        await init_engine("sqlite", url=url, sqlite_dir=str(tmp_path))
+        s = DbRunEventStore(get_session_factory())
+
+        def _batch(run_id: str):
+            return [{"thread_id": "t1", "run_id": run_id, "event_type": "trace", "category": "trace"} for _ in range(20)]
+
+        # Fire two concurrent batches at the same thread; without the per-thread
+        # lock this races on seq and raises IntegrityError / duplicates seq.
+        results = await asyncio.gather(s.put_batch(_batch("r1")), s.put_batch(_batch("r2")))
+
+        all_seqs = [r["seq"] for batch in results for r in batch]
+        assert len(all_seqs) == 40
+        # Seq values are unique and contiguous 1..40 across both writers.
+        assert sorted(all_seqs) == list(range(1, 41))
+
+        await close_engine()
+
+    @pytest.mark.anyio
+    async def test_delete_by_thread_evicts_orphaned_write_lock(self, tmp_path):
+        from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
+        from deerflow.runtime.events.store.db import DbRunEventStore
+
+        url = f"sqlite+aiosqlite:///{tmp_path / 'test.db'}"
+        await init_engine("sqlite", url=url, sqlite_dir=str(tmp_path))
+        s = DbRunEventStore(get_session_factory())
+
+        # A write materializes the per-thread lock in the registry.
+        await s.put_batch([{"thread_id": "t1", "run_id": "r1", "event_type": "trace", "category": "trace"}])
+        assert "t1" in s._write_locks
+
+        # Deleting the thread must evict the now-orphaned lock so the registry
+        # does not grow unbounded across the singleton store's lifetime.
+        await s.delete_by_thread("t1")
+        assert "t1" not in s._write_locks
+
+        # A subsequent write recreates a fresh lock and seq restarts from 1.
+        result = await s.put_batch([{"thread_id": "t1", "run_id": "r2", "event_type": "trace", "category": "trace"}])
+        assert "t1" in s._write_locks
+        assert result[0]["seq"] == 1
+
+        await close_engine()
+
+    @pytest.mark.anyio
+    async def test_delete_by_thread_keeps_lock_held_by_inflight_writer(self, tmp_path):
+        from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
+        from deerflow.runtime.events.store.db import DbRunEventStore
+
+        url = f"sqlite+aiosqlite:///{tmp_path / 'test.db'}"
+        await init_engine("sqlite", url=url, sqlite_dir=str(tmp_path))
+        s = DbRunEventStore(get_session_factory())
+
+        # Simulate a writer mid-flight by holding the lock; the eviction must
+        # not drop a lock another coroutine is actively using.
+        lock = s._get_write_lock("t1")
+        await lock.acquire()
+        try:
+            await s.delete_by_thread("t1")
+            assert "t1" in s._write_locks
+            assert s._write_locks["t1"] is lock
+        finally:
+            lock.release()
 
         await close_engine()
 

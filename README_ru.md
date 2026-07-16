@@ -19,13 +19,9 @@ https://github.com/user-attachments/assets/a8bcadc4-e040-4cf2-8fda-dd768b999c18
 
 ## Официальный сайт
 
-[<img width="2880" height="1600" alt="image" src="https://github.com/user-attachments/assets/a598c49f-3b2f-41ea-a052-05e21349188a" />](https://deerflow.tech)
-
 Больше информации и живые демо на [**официальном сайте**](https://deerflow.tech).
 
 ## Coding Plan от ByteDance Volcengine
-
-<img width="4808" height="2400" alt="英文方舟" src="https://github.com/user-attachments/assets/2ecc7b9d-50be-4185-b1f7-5542d222fb2d" />
 
 - Рекомендуем Doubao-Seed-2.0-Code, DeepSeek v3.2 и Kimi 2.5 для запуска DeerFlow
 - [Подробнее](https://www.byteplus.com/en/activity/codingplan?utm_campaign=deer_flow&utm_content=deer_flow&utm_medium=devrel&utm_source=OWO&utm_term=deer_flow)
@@ -48,6 +44,7 @@ DeerFlow интегрирован с инструментарием для ум�
 
 - [🦌 DeerFlow - 2.0](#-deerflow---20)
   - [Официальный сайт](#официальный-сайт)
+  - [Coding Plan от ByteDance Volcengine](#coding-plan-от-bytedance-volcengine)
   - [InfoQuest](#infoquest)
   - [Содержание](#содержание)
   - [Установка одной фразой для coding agent](#установка-одной-фразой-для-coding-agent)
@@ -61,16 +58,21 @@ DeerFlow интегрирован с инструментарием для ум�
       - [MCP-сервер](#mcp-сервер)
       - [Мессенджеры](#мессенджеры)
       - [Трассировка LangSmith](#трассировка-langsmith)
+      - [Трассировка Langfuse](#трассировка-langfuse)
+      - [Использование обоих провайдеров](#использование-обоих-провайдеров)
   - [От Deep Research к Super Agent Harness](#от-deep-research-к-super-agent-harness)
   - [Core Features](#core-features)
     - [Skills & Tools](#skills--tools)
       - [Интеграция с Claude Code](#интеграция-с-claude-code)
+    - [Цели сессии (Session Goals)](#цели-сессии-session-goals)
     - [Sub-Agents](#sub-agents)
     - [Sandbox & файловая система](#sandbox--файловая-система)
     - [Context Engineering](#context-engineering)
     - [Long-Term Memory](#long-term-memory)
   - [Рекомендуемые модели](#рекомендуемые-модели)
   - [Встроенный Python-клиент](#встроенный-python-клиент)
+  - [Запланированные задачи (Scheduled Tasks)](#запланированные-задачи-scheduled-tasks)
+  - [Терминальная панель (TUI)](#терминальная-панель-tui)
   - [Документация](#документация)
   - [⚠️ Безопасность](#️-безопасность)
   - [Участие в разработке](#участие-в-разработке)
@@ -100,35 +102,47 @@ DeerFlow интегрирован с инструментарием для ум�
    cd deer-flow
    ```
 
-2. **Сгенерировать локальные конфиги**
+2. **Запустить мастер настройки (рекомендуется)**
 
    Из корня проекта (`deer-flow/`) запустите:
 
    ```bash
-   make config
+   make setup
    ```
 
-   Команда создаёт локальные конфиги на основе шаблонов.
+   Запустится интерактивный мастер, который поможет выбрать LLM-провайдера, опциональный веб-поиск и настройки выполнения/безопасности (режим sandbox, доступ к bash, инструменты записи файлов). Он сгенерирует минимальный `config.yaml` и запишет ключи в `.env`. Это занимает около 2 минут.
 
-3. **Настроить модель**
+   В любой момент запускайте `make doctor`, чтобы проверить конфигурацию и получить конкретные подсказки по исправлению.
+   Если вы открываете GitHub issue о проблеме с локальной установкой или работой системы, выполните
+   `make support-bundle`. Команда выводит дальнейшие шаги для автора отчёта, создаёт файл
+   `*-issue-summary.md`, который нужно вставить в issue, файл `*-issue-draft.md`
+   для оформления issue с помощью AI и, опционально, zip-архив с диагностикой в
+   `.deer-flow/support-bundles/`. Если issue оформляет AI-ассистент, он должен начать
+   с черновика и заменить каждый плейсхолдер REQUIRED, а не выдумывать недостающие
+   факты. Прикладывайте zip-архив только если его запросит мейнтейнер или если одной
+   сводки недостаточно. Мейнтейнеры и AI-инструменты триажа могут начинать с
+   `triage.json`; архив содержит только очищенную от чувствительных данных диагностику
+   и манифесты файлов и не включает `.env`, исходные сообщения диалогов или содержимое
+   пользовательских файлов.
 
-   Отредактируйте `config.yaml` и задайте хотя бы одну модель:
+   > **Продвинутая / ручная настройка**: если вы предпочитаете редактировать `config.yaml` напрямую, выполните вместо этого `make config`, чтобы скопировать полный шаблон. Полный справочник — `config.example.yaml`, включая CLI-провайдеров (Codex CLI, Claude Code OAuth), OpenRouter, Responses API и многое другое.
+
+   <details>
+   <summary>Примеры ручной настройки моделей</summary>
 
    ```yaml
    models:
-     - name: gpt-4                       # Внутренний идентификатор
-       display_name: GPT-4               # Отображаемое имя
-       use: langchain_openai:ChatOpenAI  # Путь к классу LangChain
-       model: gpt-4                      # Идентификатор модели для API
-       api_key: $OPENAI_API_KEY          # API-ключ (рекомендуется: переменная окружения)
-       max_tokens: 4096                  # Максимальное количество токенов на запрос
-       temperature: 0.7                  # Температура сэмплирования
+     - name: gpt-4o
+       display_name: GPT-4o
+       use: langchain_openai:ChatOpenAI
+       model: gpt-4o
+       api_key: $OPENAI_API_KEY
 
      - name: openrouter-gemini-2.5-flash
        display_name: Gemini 2.5 Flash (OpenRouter)
        use: langchain_openai:ChatOpenAI
        model: google/gemini-2.5-flash-preview
-       api_key: $OPENAI_API_KEY
+       api_key: $OPENROUTER_API_KEY
        base_url: https://openrouter.ai/api/v1
 
      - name: gpt-5-responses
@@ -138,9 +152,27 @@ DeerFlow интегрирован с инструментарием для ум�
        api_key: $OPENAI_API_KEY
        use_responses_api: true
        output_version: responses/v1
+
+     - name: qwen3-32b-vllm
+       display_name: Qwen3 32B (vLLM)
+       use: deerflow.models.vllm_provider:VllmChatModel
+       model: Qwen/Qwen3-32B
+       api_key: $VLLM_API_KEY
+       base_url: http://localhost:8000/v1
+       supports_thinking: true
+       when_thinking_enabled:
+         extra_body:
+           chat_template_kwargs:
+             enable_thinking: true
    ```
 
-   OpenRouter и аналогичные OpenAI-совместимые шлюзы настраиваются через `langchain_openai:ChatOpenAI` с параметром `base_url`. Для CLI-провайдеров:
+   OpenRouter и аналогичные OpenAI-совместимые шлюзы настраиваются через `langchain_openai:ChatOpenAI` с параметром `base_url`. Если вы предпочитаете имя переменной окружения, специфичное для провайдера, укажите его в `api_key` явно (например, `api_key: $OPENROUTER_API_KEY`).
+
+   Чтобы направить модели OpenAI через `/v1/responses`, продолжайте использовать `langchain_openai:ChatOpenAI` и задайте `use_responses_api: true` вместе с `output_version: responses/v1`.
+
+   Для vLLM 0.19.0 используйте `deerflow.models.vllm_provider:VllmChatModel`. Для reasoning-моделей в стиле Qwen DeerFlow переключает режим рассуждений через `extra_body.chat_template_kwargs.enable_thinking` и сохраняет нестандартное поле `reasoning` vLLM в многоходовых диалогах с вызовами инструментов. Устаревшие конфигурации `thinking` автоматически нормализуются для обратной совместимости. Reasoning-моделям также может потребоваться запуск сервера с флагом `--reasoning-parser ...`. Если ваш локальный vLLM принимает любой непустой API-ключ, всё равно задайте `VLLM_API_KEY` со значением-заглушкой.
+
+   Примеры CLI-провайдеров:
 
    ```yaml
    models:
@@ -160,30 +192,22 @@ DeerFlow интегрирован с инструментарием для ум�
    ```
 
    - Codex CLI читает `~/.codex/auth.json`
-   - Claude Code принимает `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_AUTH_TOKEN` или `~/.claude/.credentials.json`
+   - Claude Code принимает `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_CREDENTIALS_PATH` или `~/.claude/.credentials.json`
+   - Записи ACP-агентов настраиваются отдельно от провайдеров моделей — если вы настраиваете `acp_agents.codex`, укажите в нём Codex ACP-адаптер, например `npx -y @zed-industries/codex-acp`
    - На macOS при необходимости экспортируйте аутентификацию Claude Code явно:
 
    ```bash
    eval "$(python3 scripts/export_claude_code_oauth.py --print-export)"
    ```
 
-4. **Указать API-ключи**
-
-   - **Вариант А**: файл `.env` в корне проекта (рекомендуется)
+   API-ключи также можно задать вручную в `.env` (рекомендуется) или экспортировать в оболочке:
 
    ```bash
-   TAVILY_API_KEY=your-tavily-api-key
    OPENAI_API_KEY=your-openai-api-key
-   INFOQUEST_API_KEY=your-infoquest-api-key
+   TAVILY_API_KEY=your-tavily-api-key
    ```
 
-   - **Вариант Б**: переменные окружения в терминале
-
-   ```bash
-   export OPENAI_API_KEY=your-openai-api-key
-   ```
-
-   - **Вариант В**: напрямую в `config.yaml` (не рекомендуется для продакшена)
+   </details>
 
 ### Запуск
 
@@ -209,6 +233,9 @@ make down   # Остановить и удалить контейнеры
 Адрес: http://localhost:2026
 
 #### Вариант 2: Локальная разработка
+
+Предварительное условие: сначала выполните шаги раздела «Конфигурация» выше (`make setup`). Для `make dev` нужен корректный `config.yaml` в корне проекта. Задайте `DEER_FLOW_PROJECT_ROOT`, чтобы явно указать корень проекта, или `DEER_FLOW_CONFIG_PATH`, чтобы указать конкретный файл конфигурации. Состояние времени выполнения по умолчанию записывается в `.deer-flow` в корне проекта и может быть перенесено через `DEER_FLOW_HOME`; skills по умолчанию читаются из `skills/` в корне проекта, путь можно переопределить через `DEER_FLOW_SKILLS_PATH`. Перед запуском выполните `make doctor`, чтобы проверить настройку.
+В Windows запускайте локальный процесс разработки из Git Bash. Нативные оболочки `cmd.exe` и PowerShell не поддерживаются для сервисных скриптов на bash, а работа в WSL не гарантируется, поскольку некоторые скрипты зависят от утилит Git for Windows, таких как `cygpath`.
 
 1. **Проверить зависимости**:
    ```bash
@@ -251,11 +278,15 @@ DeerFlow поддерживает настраиваемые MCP-серверы 
 
 DeerFlow принимает задачи прямо из мессенджеров. Каналы запускаются автоматически при настройке, публичный IP не нужен.
 
+DeerFlow может также предоставлять в workspace UI пользовательские подключения IM-каналов. Когда включён `channel_connections`, вошедшие в систему пользователи могут привязать Telegram, Slack, Discord, Feishu/Lark, DingTalk, WeChat или WeCom из боковой панели / Settings > Channels. Это переиспользует существующие исходящие транспорты `channels.*`, поэтому публичный IP или URL обратного вызова провайдера не требуются. Входящие IM-сообщения выполняются от имени подключённого пользователя DeerFlow. Настройки и вопросы безопасности описаны в [IM Channel Connections](backend/docs/IM_CHANNEL_CONNECTIONS.md).
+
 | Канал | Транспорт | Сложность |
 |-------|-----------|-----------|
 | Telegram | Bot API (long-polling) | Просто |
 | Slack | Socket Mode | Средне |
 | Feishu / Lark | WebSocket | Средне |
+| WeChat | Tencent iLink (long-polling) | Средне |
+| WeCom | WebSocket | Средне |
 | DingTalk | Stream Push (WebSocket) | Средне |
 
 **Конфигурация в `config.yaml`:**
@@ -269,6 +300,11 @@ channels:
     # domain: https://open.feishu.cn       # China (default)
     # domain: https://open.larksuite.com   # International
 
+  wecom:
+    enabled: true
+    bot_id: $WECOM_BOT_ID
+    bot_secret: $WECOM_BOT_SECRET
+
   slack:
     enabled: true
     bot_token: $SLACK_BOT_TOKEN
@@ -280,6 +316,19 @@ channels:
     bot_token: $TELEGRAM_BOT_TOKEN
     allowed_users: []
 
+  wechat:
+    enabled: false
+    bot_token: $WECHAT_BOT_TOKEN
+    ilink_bot_id: $WECHAT_ILINK_BOT_ID
+    qrcode_login_enabled: true      # опционально: разрешить первичную загрузку через QR-код при отсутствии bot_token
+    allowed_users: []               # пусто = разрешить всем
+    polling_timeout: 35
+    state_dir: ./.deer-flow/wechat/state
+    max_inbound_image_bytes: 20971520
+    max_outbound_image_bytes: 20971520
+    max_inbound_file_bytes: 52428800
+    max_outbound_file_bytes: 52428800
+
   dingtalk:
     enabled: true
     client_id: $DINGTALK_CLIENT_ID             # ClientId с DingTalk Open Platform
@@ -288,10 +337,53 @@ channels:
     card_template_id: ""                       # Опционально: ID шаблона AI Card для потокового эффекта печатной машинки
 ```
 
+**Ключи API в `.env`:**
+
+```bash
+# Telegram
+TELEGRAM_BOT_TOKEN=123456789:ABCdefGHIjklMNOpqrSTUvwxYZ
+
+# Slack
+SLACK_BOT_TOKEN=xoxb-...
+SLACK_APP_TOKEN=xapp-...
+
+# Feishu / Lark
+FEISHU_APP_ID=cli_xxxx
+FEISHU_APP_SECRET=your_app_secret
+
+# WeChat iLink
+WECHAT_BOT_TOKEN=your_ilink_bot_token
+WECHAT_ILINK_BOT_ID=your_ilink_bot_id
+
+# WeCom
+WECOM_BOT_ID=your_bot_id
+WECOM_BOT_SECRET=your_bot_secret
+
+# DingTalk
+DINGTALK_CLIENT_ID=your_client_id
+DINGTALK_CLIENT_SECRET=your_client_secret
+```
+
 **Настройка Telegram**
 
 1. Напишите [@BotFather](https://t.me/BotFather), отправьте `/newbot` и скопируйте HTTP API-токен.
 2. Укажите `TELEGRAM_BOT_TOKEN` в `.env` и включите канал в `config.yaml`.
+
+**Настройка WeChat**
+
+1. Включите канал `wechat` в `config.yaml`.
+2. Либо задайте `WECHAT_BOT_TOKEN` в `.env`, либо установите `qrcode_login_enabled: true` для первичной загрузки через QR-код.
+3. Когда `bot_token` отсутствует и загрузка через QR включена, следите за логами бэкенда — там появится QR-контент, возвращённый iLink, — и завершите процесс привязки.
+4. После успешного прохождения QR-процесса DeerFlow сохраняет полученный токен в `state_dir` для последующих перезапусков.
+5. Для развёртываний Docker Compose держите `state_dir` на постоянном томе, чтобы курсор `get_updates_buf` и сохранённое состояние аутентификации переживали перезапуски.
+
+**Настройка WeCom**
+
+1. Создайте бота на платформе WeCom AI Bot и получите `bot_id` и `bot_secret`.
+2. Включите `channels.wecom` в `config.yaml` и заполните `bot_id` / `bot_secret`.
+3. Задайте `WECOM_BOT_ID` и `WECOM_BOT_SECRET` в `.env`.
+4. Убедитесь, что зависимости бэкенда включают `wecom-aibot-python-sdk`. Канал использует долговременное WebSocket-соединение и не требует публичного URL обратного вызова.
+5. Текущая интеграция поддерживает входящие текстовые сообщения, изображения и файлы. Итоговые изображения/файлы, сгенерированные агентом, также отправляются обратно в диалог WeCom.
 
 **Настройка DingTalk**
 
@@ -325,6 +417,37 @@ LANGSMITH_PROJECT=deer-flow
 ```
 
 `LANGSMITH_ENDPOINT` по умолчанию `https://api.smith.langchain.com` и может быть переопределён при необходимости. Устаревшие переменные `LANGCHAIN_*` (`LANGCHAIN_TRACING_V2`, `LANGCHAIN_API_KEY` и т.д.) также поддерживаются для обратной совместимости; `LANGSMITH_*` имеет приоритет, когда заданы обе.
+
+#### Трассировка Langfuse
+
+DeerFlow также поддерживает наблюдаемость через [Langfuse](https://langfuse.com) для запусков, совместимых с LangChain.
+
+Добавьте в файл `.env`:
+
+```bash
+LANGFUSE_TRACING=true
+LANGFUSE_PUBLIC_KEY=pk-lf-xxxxxxxxxxxxxxxx
+LANGFUSE_SECRET_KEY=sk-lf-xxxxxxxxxxxxxxxx
+LANGFUSE_BASE_URL=https://cloud.langfuse.com
+```
+
+Если вы используете собственный экземпляр Langfuse, укажите `LANGFUSE_BASE_URL` в качестве URL вашего развёртывания.
+
+**Поля корреляции трасс.** Каждый запуск агента аннотируется зарезервированными атрибутами трассировки Langfuse, поэтому страницы Sessions и Users заполняются автоматически:
+
+- `session_id` = `thread_id` LangGraph — группирует все трассы одного диалога
+- `user_id` = эффективный пользователь из `get_effective_user_id()` (возвращается к `default` в режиме без аутентификации)
+- `trace_name` = assistant id (по умолчанию `lead-agent`)
+- `tags` = `[env:<DEER_FLOW_ENV>, model:<model_name>]` (опускается, если не заданы)
+- `metadata.deerflow_trace_id` = идентификатор корреляции запросов DeerFlow, совпадающий с `X-Trace-Id`, когда корреляция трассировки запросов включена
+
+Эти поля внедряются в `RunnableConfig.metadata` в корне вызова графа как для gateway-пути (`runtime/runs/worker.py::run_agent`), так и для встроенного пути (`client.py::DeerFlowClient.stream`), поэтому любой LangChain-совместимый callback может их прочитать. Установите `DEER_FLOW_ENV` (или `ENVIRONMENT`) для тегирования трасс по среде развёртывания.
+
+#### Использование обоих провайдеров
+
+Если и LangSmith, и Langfuse включены, DeerFlow подключает оба callback'а трассировки и отправляет одну и ту же активность модели в обе системы.
+
+Если провайдер явно включён, но отсутствуют необходимые учётные данные, или если его callback не может инициализироваться, DeerFlow завершает работу с ошибкой (fail fast) при инициализации трассировки во время создания модели, а сообщение об ошибке указывает провайдера, вызвавшего сбой.
 
 В Docker-развёртываниях трассировка отключена по умолчанию. Установите `LANGSMITH_TRACING=true` и `LANGSMITH_API_KEY` в `.env` для включения.
 
@@ -382,6 +505,22 @@ npx skills add https://github.com/bytedance/deer-flow --skill claude-to-deerflow
 
 Полный справочник API в [`skills/public/claude-to-deerflow/SKILL.md`](skills/public/claude-to-deerflow/SKILL.md).
 
+### Цели сессии (Session Goals)
+
+Используйте `/goal <условие завершения>`, чтобы привязать к текущему треду одно активное условие завершения. Цель — это состояние уровня треда, а не активация навыка, поэтому она остаётся активной между ходами, пока DeerFlow не сочтёт её выполненной или пока вы её не очистите.
+
+Поддерживаемые команды:
+
+```text
+/goal finish the implementation and make all tests pass
+/goal              # показать активную цель
+/goal clear        # очистить её
+```
+
+После каждого запуска, выполненного через Gateway, DeerFlow оценивает видимый диалог относительно активной цели с помощью non-thinking модели-оценщика. Оценщик должен вернуть типизированный блокер (`missing_evidence`, `needs_user_input`, `run_failed`, `external_wait` или `goal_not_met_yet`) с видимыми доказательствами. DeerFlow добавляет hidden continuation только тогда, когда последний ход assistant сохранён в чекпоинте, блокер имеет тип `goal_not_met_yet`, тред не изменился во время оценки и счётчик отсутствия прогресса не сработал. Предел безопасности по умолчанию — 8 hidden continuation, а повторяющиеся одинаковые оценки без прогресса останавливаются после 2 попыток. `/goal clear` и любой новый ввод от пользователя имеют приоритет над continuation в очереди. Когда цель выполнена, DeerFlow очищает её автоматически и публикует обновлённое состояние треда.
+
+Веб-интерфейс показывает активную цель над полем ввода. Та же команда доступна из TUI и поддерживаемых IM-каналов. В веб-интерфейсе и поддерживаемых IM-каналах установка `/goal <условие завершения>` также запускает выполнение с условием в качестве задачи; команды статуса и очистки только управляют состоянием цели.
+
 ### Sub-Agents
 
 Сложные задачи редко решаются за один проход. DeerFlow их декомпозирует.
@@ -429,7 +568,7 @@ DeerFlow работает с любым LLM через OpenAI-совместим
 
 ## Встроенный Python-клиент
 
-DeerFlow можно использовать как Python-библиотеку прямо в коде — без запуска HTTP-сервисов. `DeerFlowClient` даёт доступ ко всем возможностям агента и Gateway, возвращает те же схемы ответов, что и HTTP Gateway API:
+DeerFlow можно использовать как Python-библиотеку прямо в коде — без запуска HTTP-сервисов. `DeerFlowClient` даёт доступ ко всем возможностям агента и Gateway, возвращает те же схемы ответов, что и HTTP Gateway API. HTTP Gateway также предоставляет `DELETE /api/threads/{thread_id}` для удаления локальных данных треда, управляемых DeerFlow, после того как сам LangGraph thread был удалён:
 
 ```python
 from deerflow.client import DeerFlowClient
@@ -449,7 +588,53 @@ models = client.list_models()        # {"models": [...]}
 skills = client.list_skills()        # {"skills": [...]}
 client.update_skill("web-search", enabled=True)
 client.upload_files("thread-1", ["./report.pdf"])  # {"success": True, "files": [...]}
+client.set_goal("thread-1", "finish the implementation and make all tests pass")
+client.get_goal("thread-1")       # {"goal": {...}} or {"goal": None}
+client.clear_goal("thread-1")
 ```
+
+## Запланированные задачи (Scheduled Tasks)
+
+Теперь в DeerFlow есть первоклассный MVP запланированных задач (scheduled-task) в workspace.
+
+Текущие возможности MVP:
+
+- Управление задачами на `/workspace/scheduled-tasks`
+- Выбор: каждая запланированная задача переиспользует тред или создаёт новый тред для каждого запуска
+- Поддержка расписаний `once` и `cron`
+- Фоновые запланированные запуски выполняются как неинтерактивные запуски DeerFlow (`ask_clarification` там не предоставляется)
+- При совпадении наступившего cron-запуска с активным запуском на том же переиспользуемом треде применяется поведение перекрытия `skip`
+- Приостановка, возобновление, ручной запуск, просмотр истории и удаление задач
+- Запланированные задачи выполняются через стандартный жизненный цикл запуска DeerFlow
+
+Текущие ограничения MVP:
+
+- Пока нет инструмента `schedule_task`, создающего задачи в диалоге
+- Нет заданий с текстовыми уведомлениями
+- Нет каналов или целей отправки GitHub
+- В этой первой версии нет типа расписания `interval`
+
+Включите фоновый опрос через `config.yaml -> scheduler.enabled`. Ручной запуск использует тот же ресурс и путь выполнения scheduled-task.
+
+## Терминальная панель (TUI)
+
+`deerflow` — это нативная терминальная панель для тех, кто живёт в шелле. Она работает **встроенной** поверх `DeerFlowClient` — без Gateway, фронтенда, nginx или Docker — и при этом учитывает те же настройки `config.yaml`, checkpointer, skills, memory, MCP и sandbox, что и остальной DeerFlow.
+
+![DeerFlow TUI](docs/tui/tui-preview.svg)
+
+```bash
+uv pip install 'deerflow-harness[tui]'        # опциональная зависимость 'textual'
+
+deerflow                                      # запустить терминальный UI (требуется TTY)
+deerflow --continue                           # возобновить последний тред
+deerflow --resume THREAD                      # возобновить тред по id
+deerflow --print "summarize this repo"        # автономный разовый ответ в stdout
+deerflow --json  "hello"                       # автономный режим, StreamEvents с разделением новой строкой
+```
+
+Интерфейс чата с управлением с клавиатуры: потоковый транскрипт (ответы рендерятся в Markdown), компактные карточки активности инструментов, палитра слэш-команд `/`, управление целями `/goal`, селекторы `/model` и `/threads`, история ввода, а также прерывание через `Esc` / `Ctrl+C`. Сессии, открытые в TUI, также появляются в боковой панели веб-интерфейса — TUI пишет в общее хранилище тредов под локальным пользователем по умолчанию, поэтому терминал и веб остаются синхронизированными **без запуска Gateway**.
+
+Полное руководство — в [backend/docs/TUI.md](backend/docs/TUI.md).
 
 ## Документация
 

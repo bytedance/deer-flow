@@ -17,7 +17,9 @@ Initialization is handled directly in ``app.py`` via :class:`AsyncExitStack`.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import os
 from collections.abc import AsyncGenerator, Callable
 from contextlib import AsyncExitStack, asynccontextmanager
 from typing import TYPE_CHECKING, TypeVar, cast
@@ -32,6 +34,120 @@ from deerflow.runtime.events.store.base import RunEventStore
 from deerflow.runtime.runs.store.base import RunStore
 
 logger = logging.getLogger(__name__)
+
+# Upper bound (seconds) for draining in-flight runs during shutdown, before the
+# AsyncExitStack tears down the checkpointer (and its connection pool). Kept
+# local to avoid an app -> deps -> app import cycle. This is a *separate* budget
+# from ``app.gateway.app._SHUTDOWN_HOOK_TIMEOUT_SECONDS`` (currently also 5.0s,
+# which bounds channel-service stop): the two govern independent teardown steps
+# and may diverge, but both count toward the lifespan shutdown window — revisit
+# them together if their sum must stay within the server's graceful-shutdown
+# timeout.
+_RUN_DRAIN_TIMEOUT_SECONDS = 5.0
+
+
+def _enforce_postgres_for_multi_worker(config: AppConfig) -> None:
+    """Refuse to start when GATEWAY_WORKERS > 1 and safety preconditions are not met.
+
+    Two checks (both must pass for multi-worker):
+
+    1. The DB backend must be Postgres — SQLite write-locks cannot support
+       concurrent multi-process access.
+    2. ``run_ownership.heartbeat_enabled`` must be True — without heartbeat,
+       every run has a NULL lease, so reconciliation treats all inflight
+       runs as orphans and Worker B would kill Worker A's live runs on
+       every rolling update or scale-up.
+
+    This gate runs once at startup before any persistence engine is
+    initialised so the error message is clear and the process exits
+    immediately.
+    """
+    try:
+        workers = int(os.environ.get("GATEWAY_WORKERS", "1"))
+    except (TypeError, ValueError):
+        workers = 1
+
+    if workers <= 1:
+        return
+
+    backend = getattr(config.database, "backend", None)
+    if backend != "postgres":
+        raise SystemExit(f"GATEWAY_WORKERS={workers} requires database.backend='postgres', but database.backend is '{backend}'. SQLite cannot support concurrent multi-process access. Set GATEWAY_WORKERS=1 or switch to Postgres.")
+
+    run_ownership = getattr(config, "run_ownership", None)
+    if run_ownership is None or not run_ownership.heartbeat_enabled:
+        raise SystemExit(
+            f"GATEWAY_WORKERS={workers} requires run_ownership.heartbeat_enabled=true. "
+            "Without heartbeat, every run has a NULL lease, so reconciliation "
+            "treats all inflight runs as orphans — Worker B would kill Worker A's "
+            "live runs on every rolling update or scale-up. "
+            "Set run_ownership.heartbeat_enabled=true in config.yaml."
+        )
+
+
+async def _drain_inflight_runs(run_manager: RunManager) -> None:
+    """Drain in-flight runs before the checkpointer is torn down (issue #3373).
+
+    Shields the (internally-bounded) drain so that even if the lifespan
+    coroutine is itself cancelled mid-shutdown — a second SIGINT or the server's
+    graceful-shutdown timeout, i.e. the same signal storm behind #3373 — the
+    checkpointer pool is not closed while run tasks are still writing
+    checkpoints. On such a cancellation we let the already-running drain finish
+    (it is bounded by ``RunManager.shutdown``'s own timeout) and then propagate
+    the cancellation.
+    """
+    drain = asyncio.create_task(run_manager.shutdown(timeout=_RUN_DRAIN_TIMEOUT_SECONDS))
+    try:
+        await asyncio.shield(drain)
+    except asyncio.CancelledError:
+        # Re-shield so this second wait does not abandon the in-flight drain;
+        # it is bounded, so this cannot hang. Then re-raise to honour shutdown.
+        try:
+            await asyncio.shield(drain)
+        except Exception:
+            logger.exception("In-flight run drain failed after shutdown cancellation")
+        raise
+    except Exception:
+        logger.exception("Failed to drain in-flight runs during shutdown")
+
+
+async def _publish_recovered_run_stream_end(
+    bridge: StreamBridge,
+    recovered_runs: list[RunRecord],
+    *,
+    cleanup_delay: float = 60.0,
+) -> None:
+    """Terminate retained streams for runs recovered as orphaned at startup."""
+    for record in recovered_runs:
+        stream_exists = getattr(bridge, "stream_exists", None)
+        if stream_exists is not None:
+            try:
+                if not await stream_exists(record.run_id):
+                    logger.debug("Skipping recovered stream end for %s: stream already expired", record.run_id)
+                    continue
+            except Exception:
+                logger.debug("Failed to check recovered stream existence for %s", record.run_id, exc_info=True)
+        try:
+            await bridge.publish_end(record.run_id)
+        except Exception:
+            logger.warning(
+                "Failed to publish recovered run stream end for %s",
+                record.run_id,
+                exc_info=True,
+            )
+            continue
+        task = asyncio.create_task(bridge.cleanup(record.run_id, delay=cleanup_delay))
+        task.add_done_callback(lambda task, run_id=record.run_id: _log_recovered_stream_cleanup_result(task, run_id))
+
+
+def _log_recovered_stream_cleanup_result(task: asyncio.Task[None], run_id: str) -> None:
+    if task.cancelled():
+        return
+    try:
+        task.result()
+    except Exception:
+        logger.warning("Failed to clean up recovered run stream for %s", run_id, exc_info=True)
+
 
 if TYPE_CHECKING:
     from app.gateway.auth.local_provider import LocalAuthProvider
@@ -81,6 +197,16 @@ def get_config() -> AppConfig:
     split-brain where the worker / lead-agent thread saw a stale startup
     snapshot.
 
+    Hot-reload boundary: fields backed by startup-time singletons
+    (engines, sandbox provider, IM channels, logging handler) require a
+    process restart to change at runtime. The authoritative list lives in
+    :mod:`deerflow.config.reload_boundary` and is mirrored by the
+    standardised ``"startup-only:"`` prefix on the matching
+    ``Field(description=...)`` in :class:`AppConfig` — IDE hover on those
+    fields will surface the boundary inline. See
+    ``backend/CLAUDE.md`` "Config Hot-Reload Boundary" for the operator
+    summary.
+
     Any failure to materialise the config (missing file, permission denied,
     YAML parse error, validation error) is reported as 503 — semantically
     "the gateway cannot serve requests without a usable configuration" — and
@@ -123,6 +249,12 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
     from deerflow.runtime.checkpointer.async_provider import make_checkpointer
     from deerflow.runtime.events.store import make_run_event_store
 
+    # ------------------------------------------------------------------
+    # Multi-worker safety gate: reject SQLite when GATEWAY_WORKERS > 1.
+    # SQLite write-locks cannot support concurrent multi-process access.
+    # ------------------------------------------------------------------
+    _enforce_postgres_for_multi_worker(startup_config)
+
     async with AsyncExitStack() as stack:
         config = startup_config
 
@@ -152,6 +284,17 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         from deerflow.persistence.thread_meta import make_thread_store
 
         app.state.thread_store = make_thread_store(sf, app.state.store)
+        if sf is not None:
+            from deerflow.persistence.scheduled_task_runs import (
+                ScheduledTaskRunRepository,
+            )
+            from deerflow.persistence.scheduled_tasks import ScheduledTaskRepository
+
+            app.state.scheduled_task_repo = ScheduledTaskRepository(sf)
+            app.state.scheduled_task_run_repo = ScheduledTaskRunRepository(sf)
+        else:
+            app.state.scheduled_task_repo = None
+            app.state.scheduled_task_run_repo = None
 
         # Run event store. The store and the matching ``run_events_config`` are
         # both frozen at startup so ``get_run_context`` does not combine a
@@ -162,21 +305,41 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         app.state.run_event_store = make_run_event_store(run_events_config)
 
         # RunManager with store backing for persistence
-        app.state.run_manager = RunManager(store=app.state.run_store)
-        if getattr(config.database, "backend", None) == "sqlite":
-            from deerflow.utils.time import now_iso
+        run_ownership_config = getattr(config, "run_ownership", None)
+        app.state.run_manager = RunManager(
+            store=app.state.run_store,
+            run_ownership_config=run_ownership_config,
+        )
+        # Startup recovery: mark inflight runs whose lease has expired as error.
+        # In single-worker mode (SQLite / backend=memory), no run has a lease, so
+        # all inflight rows are reclaimed (unchanged behaviour). In multi-worker
+        # mode (Postgres), only runs with an expired lease are reclaimed; runs
+        # owned by another live worker are skipped.
+        from deerflow.utils.time import now_iso
 
-            # Startup-only recovery: clean shutdowns return no active rows and
-            # the thread-status update below becomes a no-op.
-            recovered_runs = await app.state.run_manager.reconcile_orphaned_inflight_runs(
-                error="Gateway restarted before this run reached a durable final state.",
-                before=now_iso(),
-            )
-            await _mark_latest_recovered_threads_error(app.state.run_manager, app.state.thread_store, recovered_runs)
+        recovered_runs = await app.state.run_manager.reconcile_orphaned_inflight_runs(
+            error="Gateway restarted before this run reached a durable final state.",
+            before=now_iso(),
+        )
+        sb_config = getattr(config, "stream_bridge", None)
+        cleanup_delay = getattr(sb_config, "recovered_stream_cleanup_delay_seconds", 60.0) if sb_config else 60.0
+        await _publish_recovered_run_stream_end(app.state.stream_bridge, recovered_runs, cleanup_delay=cleanup_delay)
+        await _mark_latest_recovered_threads_error(app.state.run_manager, app.state.thread_store, recovered_runs)
+
+        # Start the lease heartbeat if enabled (multi-worker deployments).
+        await app.state.run_manager.start_heartbeat()
 
         try:
             yield
         finally:
+            # Drain in-flight run tasks BEFORE the AsyncExitStack tears down the
+            # checkpointer (and its connection pool). A run still mid-graph would
+            # otherwise leak into asyncio.run() shutdown, where langgraph's
+            # _checkpointer_put_after_previous aput races the closed pool and
+            # raises PoolClosed (issue #3373).
+            run_manager = getattr(app.state, "run_manager", None)
+            if run_manager is not None:
+                await _drain_inflight_runs(run_manager)
             await close_engine()
 
 
@@ -219,6 +382,27 @@ def get_thread_store(request: Request) -> ThreadMetaStore:
     return val
 
 
+def get_scheduled_task_repo(request: Request):
+    val = getattr(request.app.state, "scheduled_task_repo", None)
+    if val is None:
+        raise HTTPException(status_code=503, detail="Scheduled task repo not available")
+    return val
+
+
+def get_scheduled_task_run_repo(request: Request):
+    val = getattr(request.app.state, "scheduled_task_run_repo", None)
+    if val is None:
+        raise HTTPException(status_code=503, detail="Scheduled task run repo not available")
+    return val
+
+
+def get_scheduled_task_service(request: Request):
+    val = getattr(request.app.state, "scheduled_task_service", None)
+    if val is None:
+        raise HTTPException(status_code=503, detail="Scheduled task service not available")
+    return val
+
+
 def get_run_context(request: Request) -> RunContext:
     """Build a :class:`RunContext` from ``app.state`` singletons.
 
@@ -236,6 +420,7 @@ def get_run_context(request: Request) -> RunContext:
         run_events_config=getattr(request.app.state, "run_events_config", None),
         thread_store=get_thread_store(request),
         app_config=get_config(),
+        on_run_completed=getattr(request.app.state, "scheduled_task_service", None).handle_run_completion if getattr(request.app.state, "scheduled_task_service", None) is not None else None,
     )
 
 
@@ -275,6 +460,17 @@ async def get_current_user_from_request(request: Request):
 
     Raises HTTPException 401 if not authenticated.
     """
+    state = getattr(request, "state", None)
+    state_user = getattr(state, "user", None)
+    from app.gateway.auth_disabled import AUTH_SOURCE_AUTH_DISABLED, AUTH_SOURCE_INTERNAL, AUTH_SOURCE_SESSION
+
+    if state_user is not None and getattr(state, "auth_source", None) in {
+        AUTH_SOURCE_SESSION,
+        AUTH_SOURCE_AUTH_DISABLED,
+        AUTH_SOURCE_INTERNAL,
+    }:
+        return state_user
+
     from app.gateway.auth import decode_token
     from app.gateway.auth.errors import AuthErrorCode, AuthErrorResponse, TokenError, token_error_to_code
 
@@ -308,6 +504,28 @@ async def get_current_user_from_request(request: Request):
         )
 
     return user
+
+
+async def require_admin_user(request: Request, *, detail: str) -> None:
+    """Require the authenticated caller to be an admin user.
+
+    ``AuthMiddleware`` normally stamps ``request.state.user`` before the request
+    reaches a router. Falling back to the strict dependency keeps the route safe
+    in tests or alternative ASGI compositions that mount a router without the
+    global middleware. ``detail`` is the route-specific 403 message.
+
+    Centralising this here means a future change to the admin definition (e.g.
+    allowing an internal system role, adding audit logging, or switching to a
+    permission-based check) lands in one place instead of drifting across the
+    per-router copies that previously existed in ``mcp``, ``channel_connections``
+    and ``channels``.
+    """
+    user = getattr(request.state, "user", None)
+    if user is None:
+        user = await get_current_user_from_request(request)
+
+    if getattr(user, "system_role", None) != "admin":
+        raise HTTPException(status_code=403, detail=detail)
 
 
 async def get_optional_user_from_request(request: Request):

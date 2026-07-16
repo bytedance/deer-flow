@@ -55,3 +55,17 @@ def test_general_purpose_subagent_prompt_mentions_workspace_relative_paths() -> 
 
     assert "Treat `/mnt/user-data/workspace` as the default working directory for coding and file IO" in GENERAL_PURPOSE_CONFIG.system_prompt
     assert "`hello.txt`, `../uploads/input.csv`, and `../outputs/result.md`" in GENERAL_PURPOSE_CONFIG.system_prompt
+
+
+def test_general_purpose_subagent_prompt_prohibits_task_tool() -> None:
+    """The system prompt must explicitly tell the LLM that `task` is unavailable.
+
+    Without this, subagents may attempt to call `task` after seeing the parent
+    agent use it, triggering a LangGraph tool validation error (#4159).
+    """
+    from deerflow.subagents.builtins.general_purpose import GENERAL_PURPOSE_CONFIG
+
+    prompt = GENERAL_PURPOSE_CONFIG.system_prompt
+    assert "task" in prompt.lower()
+    assert "NOT available" in prompt or "must NEVER" in prompt
+    assert "disallowed_tools" not in prompt  # don't leak internal implementation details

@@ -1,6 +1,6 @@
 """Tests for memory schema normalization."""
 
-from deerflow.agents.memory.storage import create_empty_memory, normalize_memory_data
+from deerflow.agents.memory.backends.deermem.deermem.core.storage import create_empty_memory, normalize_memory_data
 
 
 def test_normalize_memory_data_adds_cognitive_style() -> None:

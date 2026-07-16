@@ -1,5 +1,6 @@
 """Tests for RunManager."""
 
+import asyncio
 import logging
 import re
 import sqlite3
@@ -9,7 +10,7 @@ import pytest
 from sqlalchemy.exc import DatabaseError as SQLAlchemyDatabaseError
 
 from deerflow.runtime import DisconnectMode, RunManager, RunStatus
-from deerflow.runtime.runs.manager import PersistenceRetryPolicy
+from deerflow.runtime.runs.manager import CancelOutcome, ConflictError, PersistenceRetryPolicy
 from deerflow.runtime.runs.store.memory import MemoryRunStore
 
 ISO_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}")
@@ -28,19 +29,19 @@ class FlakyStatusRunStore(MemoryRunStore):
         self.status_failures = status_failures
         self.status_update_attempts = 0
 
-    async def update_status(self, run_id, status, *, error=None):
+    async def update_status(self, run_id, status, *, error=None, stop_reason=None):
         self.status_update_attempts += 1
         if self.status_failures > 0:
             self.status_failures -= 1
             raise sqlite3.OperationalError("database is locked")
-        return await super().update_status(run_id, status, error=error)
+        return await super().update_status(run_id, status, error=error, stop_reason=stop_reason)
 
 
 class MissingRowStatusRunStore(MemoryRunStore):
     """Memory run store that reports a missing row for status updates."""
 
-    async def update_status(self, run_id, status, *, error=None):
-        await super().update_status(run_id, status, error=error)
+    async def update_status(self, run_id, status, *, error=None, stop_reason=None):
+        await super().update_status(run_id, status, error=error, stop_reason=stop_reason)
         return False
 
 
@@ -51,7 +52,7 @@ class PermanentStatusRunStore(MemoryRunStore):
         super().__init__()
         self.status_update_attempts = 0
 
-    async def update_status(self, run_id, status, *, error=None):
+    async def update_status(self, run_id, status, *, error=None, stop_reason=None):
         self.status_update_attempts += 1
         raise SQLAlchemyDatabaseError(
             "UPDATE runs SET status = :status WHERE run_id = :run_id",
@@ -67,7 +68,7 @@ class FailingStatusRunStore(MemoryRunStore):
         super().__init__()
         self.status_update_attempts = 0
 
-    async def update_status(self, run_id, status, *, error=None):
+    async def update_status(self, run_id, status, *, error=None, stop_reason=None):
         self.status_update_attempts += 1
         raise sqlite3.OperationalError("database is locked")
 
@@ -150,7 +151,7 @@ async def test_cancel(manager: RunManager):
     await manager.set_status(record.run_id, RunStatus.running)
 
     cancelled = await manager.cancel(record.run_id)
-    assert cancelled is True
+    assert cancelled == CancelOutcome.cancelled
     assert record.abort_event.is_set()
     assert record.status == RunStatus.interrupted
 
@@ -166,7 +167,7 @@ async def test_cancel_persists_interrupted_status_to_store():
     cancelled = await manager.cancel(record.run_id)
 
     stored = await store.get(record.run_id)
-    assert cancelled is True
+    assert cancelled == CancelOutcome.cancelled
     assert stored is not None
     assert stored["status"] == "interrupted"
 
@@ -322,12 +323,12 @@ async def test_reconcile_orphaned_inflight_runs_skips_rows_when_error_status_is_
 
 @pytest.mark.anyio
 async def test_cancel_not_inflight(manager: RunManager):
-    """Cancelling a completed run should return False."""
+    """Cancelling a completed run should return not_cancellable."""
     record = await manager.create("thread-1")
     await manager.set_status(record.run_id, RunStatus.success)
 
     cancelled = await manager.cancel(record.run_id)
-    assert cancelled is False
+    assert cancelled == CancelOutcome.not_cancellable
 
 
 @pytest.mark.anyio
@@ -472,6 +473,81 @@ async def test_create_record_is_not_store_only(manager: RunManager):
 
 
 @pytest.mark.anyio
+async def test_create_rolls_back_in_memory_record_on_store_failure():
+    """create() must fail and hide the run when the initial store write fails."""
+    from unittest.mock import AsyncMock
+
+    store = MemoryRunStore()
+    store.put = AsyncMock(side_effect=RuntimeError("db down"))
+    manager = RunManager(store=store)
+
+    with pytest.raises(RuntimeError, match="db down"):
+        await manager.create("thread-1")
+
+    assert manager._runs == {}
+    assert await manager.list_by_thread("thread-1") == []
+
+
+@pytest.mark.anyio
+async def test_create_rolls_back_in_memory_record_on_store_cancellation():
+    """create() must also roll back when cancelled during the initial store write."""
+    store = MemoryRunStore()
+
+    async def cancelled_put(run_id, **kwargs):
+        raise asyncio.CancelledError
+
+    store.put = cancelled_put
+    manager = RunManager(store=store)
+
+    with pytest.raises(asyncio.CancelledError):
+        await manager.create("thread-1")
+
+    assert manager._runs == {}
+    assert await manager.list_by_thread("thread-1") == []
+
+
+@pytest.mark.anyio
+async def test_create_does_not_expose_run_until_store_persist_completes():
+    """Concurrent readers must wait until the new run has been persisted."""
+    store = MemoryRunStore()
+    manager = RunManager(store=store)
+    original_put = store.put
+    put_started = asyncio.Event()
+    allow_put = asyncio.Event()
+
+    async def blocking_put(run_id, **kwargs):
+        put_started.set()
+        await allow_put.wait()
+        return await original_put(run_id, **kwargs)
+
+    store.put = blocking_put
+    create_task = asyncio.create_task(manager.create("thread-1"))
+    list_task = None
+
+    try:
+        await put_started.wait()
+        list_task = asyncio.create_task(manager.list_by_thread("thread-1"))
+        await asyncio.sleep(0)
+        assert not list_task.done()
+
+        allow_put.set()
+        record = await create_task
+        runs = await list_task
+
+        assert [run.run_id for run in runs] == [record.run_id]
+    finally:
+        allow_put.set()
+        cleanup_tasks = []
+        for task in (list_task, create_task):
+            if task is None:
+                continue
+            if not task.done():
+                task.cancel()
+            cleanup_tasks.append(task)
+        await asyncio.gather(*cleanup_tasks, return_exceptions=True)
+
+
+@pytest.mark.anyio
 async def test_get_prefers_in_memory_record_over_store():
     """In-memory records retain task/control state when store has same run."""
     store = MemoryRunStore()
@@ -556,6 +632,52 @@ async def test_create_or_reject_interrupt_persists_interrupted_status_to_store()
     assert old.status == RunStatus.interrupted
     assert stored_old is not None
     assert stored_old["status"] == "interrupted"
+
+
+@pytest.mark.anyio
+async def test_create_or_reject_does_not_interrupt_old_run_when_new_run_store_write_fails():
+    """A failed new-run persist must not cancel the existing inflight run."""
+    from unittest.mock import AsyncMock
+
+    store = MemoryRunStore()
+    manager = RunManager(store=store)
+    old = await manager.create("thread-1")
+    await manager.set_status(old.run_id, RunStatus.running)
+    store.create_run_atomic = AsyncMock(side_effect=RuntimeError("db down"))
+
+    with pytest.raises(RuntimeError, match="db down"):
+        await manager.create_or_reject("thread-1", multitask_strategy="interrupt")
+
+    stored_old = await store.get(old.run_id)
+    assert list(manager._runs) == [old.run_id]
+    assert old.status == RunStatus.running
+    assert old.abort_event.is_set() is False
+    assert stored_old is not None
+    assert stored_old["status"] == "running"
+
+
+@pytest.mark.anyio
+async def test_create_or_reject_does_not_interrupt_old_run_when_new_run_store_write_is_cancelled():
+    """Cancellation during new-run persist must not cancel the existing run."""
+    store = MemoryRunStore()
+    manager = RunManager(store=store)
+    old = await manager.create("thread-1")
+    await manager.set_status(old.run_id, RunStatus.running)
+
+    async def cancelled_create(run_id, **kwargs):
+        raise asyncio.CancelledError
+
+    store.create_run_atomic = cancelled_create
+
+    with pytest.raises(asyncio.CancelledError):
+        await manager.create_or_reject("thread-1", multitask_strategy="interrupt")
+
+    stored_old = await store.get(old.run_id)
+    assert list(manager._runs) == [old.run_id]
+    assert old.status == RunStatus.running
+    assert old.abort_event.is_set() is False
+    assert stored_old is not None
+    assert stored_old["status"] == "running"
 
 
 @pytest.mark.anyio
@@ -749,3 +871,103 @@ async def test_list_by_thread_falls_back_to_store_with_user_filter():
 
     runs = await mgr.list_by_thread("thread-1", user_id="user-1")
     assert [r.run_id for r in runs] == ["run-1"]
+
+
+# ---------------------------------------------------------------------------
+# Per-thread index (thread_id -> run_ids): keeps per-thread queries
+# O(runs-in-thread) instead of scanning every in-memory run, and stays
+# consistent with ``_runs`` across create / cleanup / rollback.
+# ---------------------------------------------------------------------------
+
+
+class _FailingPutRunStore(MemoryRunStore):
+    """Memory run store whose every ``put`` and ``create_run_atomic`` fails (non-retryably)."""
+
+    async def put(self, run_id, **kwargs):
+        raise ValueError("simulated persist failure")
+
+    async def create_run_atomic(self, run_id, **kwargs):
+        raise ValueError("simulated persist failure")
+
+
+@pytest.mark.anyio
+async def test_thread_index_scopes_runs_per_thread(manager: RunManager):
+    a1 = await manager.create("thread-a")
+    a2 = await manager.create("thread-a")
+    b1 = await manager.create("thread-b")
+
+    # The index mirrors _runs membership, bucketed by thread.
+    assert set(manager._runs_by_thread["thread-a"]) == {a1.run_id, a2.run_id}
+    assert set(manager._runs_by_thread["thread-b"]) == {b1.run_id}
+
+    # Per-thread queries return only that thread's runs (no cross-thread leak).
+    assert {r.run_id for r in await manager.list_by_thread("thread-a")} == {a1.run_id, a2.run_id}
+    assert {r.run_id for r in await manager.list_by_thread("thread-b")} == {b1.run_id}
+    assert await manager.list_by_thread("thread-missing") == []
+
+
+@pytest.mark.anyio
+async def test_thread_index_preserves_insertion_order(manager: RunManager):
+    # The index is insertion-ordered (dict-as-ordered-set) so list_by_thread
+    # keeps the stable tie-breaking the full-scan implementation guaranteed.
+    first = await manager.create("thread-a")
+    second = await manager.create("thread-a")
+    assert list(manager._runs_by_thread["thread-a"]) == [first.run_id, second.run_id]
+
+
+@pytest.mark.anyio
+async def test_thread_index_cleanup_prunes_run_and_empty_bucket(manager: RunManager):
+    a1 = await manager.create("thread-a")
+    a2 = await manager.create("thread-a")
+
+    await manager.cleanup(a1.run_id, delay=0)
+    assert a1.run_id not in manager._runs
+    assert set(manager._runs_by_thread["thread-a"]) == {a2.run_id}
+
+    await manager.cleanup(a2.run_id, delay=0)
+    # Empty buckets are pruned so the index cannot grow without bound.
+    assert "thread-a" not in manager._runs_by_thread
+    assert await manager.list_by_thread("thread-a") == []
+
+
+@pytest.mark.anyio
+async def test_has_inflight_reflects_index(manager: RunManager):
+    record = await manager.create("thread-a")
+    assert await manager.has_inflight("thread-a") is True
+    assert await manager.has_inflight("thread-b") is False
+
+    await manager.set_status(record.run_id, RunStatus.success)
+    assert await manager.has_inflight("thread-a") is False
+
+
+@pytest.mark.anyio
+async def test_create_or_reject_inflight_is_thread_scoped(manager: RunManager):
+    await manager.create_or_reject("thread-a", multitask_strategy="reject")
+    # A different thread is unaffected by thread-a's active run.
+    await manager.create_or_reject("thread-b", multitask_strategy="reject")
+    # A second active run on the same thread is rejected.
+    with pytest.raises(ConflictError):
+        await manager.create_or_reject("thread-a", multitask_strategy="reject")
+
+
+@pytest.mark.anyio
+async def test_failed_create_unindexes_run():
+    manager = RunManager(store=_FailingPutRunStore())
+    with pytest.raises(ValueError):
+        await manager.create("thread-a")
+    # A rolled-back run must leave no trace in either _runs or the index.
+    assert manager._runs == {}
+    assert "thread-a" not in manager._runs_by_thread
+
+
+@pytest.mark.anyio
+async def test_failed_create_or_reject_unindexes_run():
+    # Symmetric to test_failed_create_unindexes_run: create_or_reject has its own
+    # insert + rollback-unindex site, so a persist failure there must also leave
+    # neither _runs nor the index holding the rolled-back run. This closes the last
+    # mutation path not exercised by an index-consistency test.
+    manager = RunManager(store=_FailingPutRunStore())
+    with pytest.raises(ValueError):
+        await manager.create_or_reject("thread-a", multitask_strategy="reject")
+    assert manager._runs == {}
+    assert "thread-a" not in manager._runs_by_thread

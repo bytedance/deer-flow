@@ -38,6 +38,13 @@ import {
   getAgent,
 } from "@/core/agents/api";
 import { useI18n } from "@/core/i18n/hooks";
+import {
+  buildHumanInputResponseText,
+  hasOpenHumanInputRequest,
+  type HumanInputRequest,
+  type HumanInputResponse,
+} from "@/core/messages/human-input";
+import { isHiddenFromUIMessage } from "@/core/messages/utils";
 import { useThreadStream } from "@/core/threads/hooks";
 import { uuid } from "@/core/utils/uuid";
 import { isIMEComposing } from "@/lib/ime";
@@ -110,6 +117,14 @@ export default function NewAgentPage() {
       });
     },
   });
+  const hasOpenHumanInputCard = useMemo(
+    () =>
+      hasOpenHumanInputRequest(
+        thread.messages,
+        (message) => !isHiddenFromUIMessage(message),
+      ),
+    [thread.messages],
+  );
 
   useEffect(() => {
     if (typeof window === "undefined" || step !== "chat") {
@@ -146,6 +161,27 @@ export default function NewAgentPage() {
         err.reason === "backend_unreachable"
       ) {
         setNameError(t.agents.nameStepNetworkError);
+      } else if (
+        err instanceof AgentNameCheckError &&
+        err.reason === "request_failed"
+      ) {
+        // Surface the backend-provided detail (e.g. validation error) when
+        // one is present, wrapped in a localised prefix so zh-CN users
+        // don't see a bare English string next to the surrounding Chinese
+        // UI. Falls back to the generic localised fallback when the backend
+        // sent no detail — `err.message` is unreliable for this branch
+        // because `checkAgentName` substitutes a generated fallback string
+        // ("Failed to check agent name: ${statusText}") when `detail` is
+        // missing, so testing `err.message` would always be truthy and the
+        // generated fallback would leak through.
+        setNameError(
+          err.detail
+            ? t.agents.nameStepCheckErrorWithDetail.replace(
+                "{detail}",
+                err.detail,
+              )
+            : t.agents.nameStepCheckError,
+        );
       } else {
         setNameError(t.agents.nameStepCheckError);
       }
@@ -172,6 +208,7 @@ export default function NewAgentPage() {
     t.agents.nameStepNetworkError,
     t.agents.nameStepBootstrapMessage,
     t.agents.nameStepCheckError,
+    t.agents.nameStepCheckErrorWithDetail,
     t.agents.nameStepInvalidError,
     threadId,
   ]);
@@ -186,14 +223,43 @@ export default function NewAgentPage() {
   const handleChatSubmit = useCallback(
     async (text: string) => {
       const trimmed = text.trim();
-      if (!trimmed || thread.isLoading) return;
+      if (!trimmed || thread.isLoading || hasOpenHumanInputCard) return;
       await sendMessage(
         threadId,
         { text: trimmed, files: [] },
         { agent_name: agentName },
       );
     },
-    [agentName, sendMessage, thread.isLoading, threadId],
+    [agentName, hasOpenHumanInputCard, sendMessage, thread.isLoading, threadId],
+  );
+
+  const handleSubmitHumanInput = useCallback(
+    async (request: HumanInputRequest, response: HumanInputResponse) => {
+      if (!agentName) {
+        return false;
+      }
+
+      let sent = false;
+      await sendMessage(
+        threadId,
+        {
+          text: buildHumanInputResponseText(request, response),
+          files: [],
+        },
+        { agent_name: agentName },
+        {
+          additionalKwargs: {
+            hide_from_ui: true,
+            human_input_response: response,
+          },
+          onSent: () => {
+            sent = true;
+          },
+        },
+      );
+      return sent;
+    },
+    [agentName, sendMessage, threadId],
   );
 
   const handleSaveAgent = useCallback(async () => {
@@ -343,6 +409,9 @@ export default function NewAgentPage() {
                 className={cn("size-full", showSaveHint ? "pt-4" : "pt-10")}
                 threadId={threadId}
                 thread={thread}
+                onSubmitHumanInput={
+                  agentName ? handleSubmitHumanInput : undefined
+                }
               />
             </div>
 
@@ -372,15 +441,18 @@ export default function NewAgentPage() {
                   </div>
                 ) : (
                   <PromptInput
+                    disabled={thread.isLoading || hasOpenHumanInputCard}
                     onSubmit={({ text }) => void handleChatSubmit(text)}
                   >
                     <PromptInputTextarea
                       autoFocus
                       placeholder={t.agents.createPageSubtitle}
-                      disabled={thread.isLoading}
+                      disabled={thread.isLoading || hasOpenHumanInputCard}
                     />
                     <PromptInputFooter className="justify-end">
-                      <PromptInputSubmit disabled={thread.isLoading} />
+                      <PromptInputSubmit
+                        disabled={thread.isLoading || hasOpenHumanInputCard}
+                      />
                     </PromptInputFooter>
                   </PromptInput>
                 )}

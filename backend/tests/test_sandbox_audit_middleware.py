@@ -183,6 +183,14 @@ class TestClassifyCommand:
     def test_safe_classified_as_pass(self, cmd):
         assert _classify_command(cmd) == "pass", f"Expected 'pass' for: {cmd!r}"
 
+    def test_unparseable_heredoc_classified_as_pass(self):
+        cmd = "python3 << 'EOF'\necho it's fine\nEOF"
+        assert _classify_command(cmd) == "pass"
+
+    def test_unparseable_heredoc_with_high_risk_pattern_still_blocks(self):
+        cmd = "python3 << 'EOF'\necho it's fine\ncat /etc/shadow\nEOF"
+        assert _classify_command(cmd) == "block"
+
     # --- Compound commands: sub-command splitting ---
 
     @pytest.mark.parametrize(
