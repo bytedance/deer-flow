@@ -29,11 +29,35 @@ def test_pending_connect_code_extracts_code_when_connections_configured():
     assert channel._pending_connect_code("hello world") is None
 
 
+def test_pending_connect_code_accepts_leading_platform_mentions():
+    """Group chats prefix @bot; Feishu/DingTalk leave that noise in the text.
+
+    Slack/Discord strip mentions before this helper; the shared parser must
+    still accept the unstripped form so @bot /connect <code> binds.
+    """
+    from app.channels.commands import extract_connect_code
+
+    assert extract_connect_code("@_user_1 /connect abc123") == "abc123"
+    assert extract_connect_code("@bot  /connect code-xyz") == "code-xyz"
+    assert extract_connect_code("<@U123ABC> /connect slackish") == "slackish"
+    assert extract_connect_code("@bot @_user_2 /connect multi") == "multi"
+    # Mentions without a connect command stay non-binding.
+    assert extract_connect_code("@_user_1 hello") is None
+    # Connect not at the command position after mentions does not bind.
+    assert extract_connect_code("please @bot /connect leaked") is None
+    # Mid-sentence /connect must not bind (unchanged).
+    assert extract_connect_code("hi /connect abc123") is None
+
+    channel = _StubChannel(name="stub", bus=MessageBus(), config={"connection_repo": object()})
+    assert channel._pending_connect_code("@_user_1 /connect via-base") == "via-base"
+
+
 def test_pending_connect_code_is_none_when_connections_disabled():
     # With no connection repo, binding is not configured and connect codes are
     # ignored so the message falls through to normal handling.
     channel = _StubChannel(name="stub", bus=MessageBus(), config={})
     assert channel._pending_connect_code("/connect abc123") is None
+    assert channel._pending_connect_code("@bot /connect abc123") is None
 
 
 async def _make_repo(tmp_path, name: str):
