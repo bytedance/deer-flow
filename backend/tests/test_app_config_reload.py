@@ -561,3 +561,44 @@ def test_get_memory_config_follows_config_file_reload(tmp_path, monkeypatch):
         assert get_memory_config().mode == "tool"
     finally:
         _reset_config_singletons()
+
+
+def test_get_memory_config_surfaces_malformed_config_edit(tmp_path, monkeypatch):
+    """A malformed config edit surfaces through get_memory_config() rather than
+    being swallowed.
+
+    The ``except FileNotFoundError`` guard is deliberately narrow: it covers only
+    the genuinely-absent file (tests, or a defaults-only deployment) where there
+    is nothing to reload from. A file that exists but fails validation is a real
+    error and propagates -- consistent with every other unguarded
+    ``get_app_config()`` caller -- and the last-good singleton is left intact
+    rather than cleared or half-applied.
+    """
+    import deerflow.config.memory_config as memory_config_module
+
+    config_path = tmp_path / "config.yaml"
+    extensions_path = tmp_path / "extensions_config.json"
+    _write_extensions_config(extensions_path)
+    _write_config_with_sections(config_path, {"memory": {"enabled": True, "mode": "middleware"}})
+
+    monkeypatch.setenv("DEER_FLOW_CONFIG_PATH", str(config_path))
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(extensions_path))
+    _reset_config_singletons()
+
+    try:
+        assert get_memory_config().mode == "middleware"
+
+        # Same file, now invalid: `title: false` fails AppConfig validation while
+        # the edit also flips memory.mode -- so a half-applied reload would leak
+        # "tool" into the singleton.
+        _write_config_with_sections(config_path, {"memory": {"enabled": True, "mode": "tool"}, "title": False})
+        next_mtime = config_path.stat().st_mtime + 5
+        os.utime(config_path, (next_mtime, next_mtime))
+
+        with pytest.raises(ValidationError):
+            get_memory_config()
+
+        # Failed reload: the last-good singleton stays "middleware", not "tool".
+        assert memory_config_module._memory_config.mode == "middleware"
+    finally:
+        _reset_config_singletons()

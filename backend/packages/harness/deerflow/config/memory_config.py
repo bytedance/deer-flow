@@ -132,7 +132,10 @@ def get_memory_config() -> MemoryConfig:
     If no config file is on disk (tests, or a minimal deployment running purely
     on defaults / ``set_memory_config``), there is nothing to reload from, so we
     keep the pre-existing behavior of returning the in-memory singleton instead of
-    becoming more fragile than before.
+    becoming more fragile than before. The catch is deliberately narrow: a config
+    file that exists but fails to load (malformed YAML, failed validation) is a
+    real error and is surfaced here just as it is at every other unguarded
+    ``get_app_config()`` call site, leaving the last-good singleton untouched.
     """
     # Lazy import: app_config imports this module, so a top-level import cycles.
     from .app_config import get_app_config
