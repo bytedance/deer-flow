@@ -275,6 +275,9 @@ def test_update_agent_rejects_empty_soul_and_does_not_overwrite(tmp_path, patche
 
     msg = result.update["messages"][0]
     assert "soul content is empty" in msg.content
+    # Message must guide the retry (omit the field) so the model self-corrects
+    # in one step instead of retrying with another empty-ish value.
+    assert "Omit the soul field" in msg.content
     assert msg.status == "error"
     assert (agent_dir / "SOUL.md").read_text() == "original soul"
     cfg = yaml.safe_load((agent_dir / "config.yaml").read_text())
@@ -288,6 +291,7 @@ def test_update_agent_rejects_whitespace_only_soul_and_does_not_overwrite(tmp_pa
 
     msg = result.update["messages"][0]
     assert "soul content is empty" in msg.content
+    assert "Omit the soul field" in msg.content
     assert msg.status == "error"
     assert (agent_dir / "SOUL.md").read_text() == "original soul"
 

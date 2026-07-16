@@ -150,7 +150,7 @@ def update_agent(
     # otherwise a custom agent can report success while wiping a working
     # SOUL.md and leaving the next turn with an empty personality.
     if soul is not None and not soul.strip():
-        return _err("soul content is empty; refusing to update agent with an empty SOUL.md")
+        return _err("soul content is empty; refusing to update agent with an empty SOUL.md. Omit the soul field if you do not want to change it.")
 
     try:
         agent_name = validate_agent_name(agent_name_raw)
