@@ -231,10 +231,14 @@ class DurableContextMiddleware(AgentMiddleware[AgentState]):
             _with_run_id(extract_delegations(messages), run_id, existing),
             existing,
         )
+        updates: dict = {}
         if delegations:
-            updates: dict = {"delegations": delegations}
-            return updates
-        return None
+            updates["delegations"] = delegations
+        truncated_count = self._compute_truncated_count(state)
+        if truncated_count is not None:
+            existing_count = state.get("delegations_truncated_count") or 0
+            updates["delegations_truncated_count"] = max(existing_count, truncated_count)
+        return updates or None
 
     def _compute_truncated_count(self, state: AgentState) -> int | None:
         """Compute the number of delegation entries silently dropped from the ledger.
@@ -244,24 +248,29 @@ class DurableContextMiddleware(AgentMiddleware[AgentState]):
         the parallel ``delegations_truncated_count`` channel stable across
         checkpoint round-trips: it does not regress when the ledger shrinks back
         below the cap on a fresh thread. (D2 in the agent-core hunt.)
+
+        Known gap: a single turn that emits more than the cap of delegations
+        while the ledger is still below the cap returns ``None`` for that turn
+        (the guard sees a below-cap ledger); the channel's ``max``-reducer picks
+        the count up on a later capture, once the merged ledger sits at the cap.
+        The below-cap guard also runs before ``extract_delegations`` on purpose:
+        the common under-cap case skips the O(messages) scan on the hot
+        before/after-model path.
         """
-        observed = extract_delegations(state["messages"])
         existing = state.get("delegations") or []
-        if len(observed) > _DELEGATION_LEDGER_MAX_ENTRIES and len(existing) >= _DELEGATION_LEDGER_MAX_ENTRIES:
+        if len(existing) < _DELEGATION_LEDGER_MAX_ENTRIES:
+            return None
+        observed = extract_delegations(state["messages"])
+        if len(observed) > _DELEGATION_LEDGER_MAX_ENTRIES:
             return len(observed) - _DELEGATION_LEDGER_MAX_ENTRIES
         return None
 
     def _capture(self, state: AgentState, runtime: Runtime | None) -> dict | None:
-        messages = state["messages"]
         updates: dict = {}
         delegation_update = self._capture_delegations(state, runtime)
         if delegation_update:
             updates.update(delegation_update)
-        truncated_count = self._compute_truncated_count(state)
-        if truncated_count is not None:
-            existing_count = state.get("delegations_truncated_count") or 0
-            updates["delegations_truncated_count"] = max(existing_count, truncated_count)
-        skills = extract_skills(messages, skills_root=self._skills_root, read_tool_names=self._skill_read_tool_names)
+        skills = extract_skills(state["messages"], skills_root=self._skills_root, read_tool_names=self._skill_read_tool_names)
         if skills:
             updates["skill_context"] = skills
         return updates or None

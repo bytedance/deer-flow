@@ -460,13 +460,14 @@ class TestRenderDelegationLedger:
         assert "omitted from this model view" in out
 
     def test_truncated_count_zero_no_marker(self):
-        """When truncated_count is 0 (the default), the 'dropped from this
-        ledger' marker must not appear."""
+        """When truncated_count is 0 (the default), the durable-cap
+        'delegations dropped permanently' marker must not appear."""
         out = render_delegation_ledger(
             [_entry("a", "completed", description="research")],
             truncated_count=0,
         )
-        assert "dropped from this ledger" not in out
+        assert "delegations dropped" not in out
+        assert "permanently" not in out
 
     def test_truncated_count_single(self):
         """truncated_count=1 must render a marker so the lead observes that
@@ -504,11 +505,11 @@ class TestBoundDescription:
         assert _bound_description.__defaults__ is not None  # cap has a default
 
     def test_long_description_is_truncated_with_suffix(self):
-        from deerflow.agents.middlewares.delegation_ledger import _bound_description
+        from deerflow.agents.middlewares.delegation_ledger import _DESCRIPTION_CAP, _bound_description
 
         long = "x" * 201
         result = _bound_description(long)
-        assert len(result) <= 201
+        assert len(result) == _DESCRIPTION_CAP  # pinned: catches suffix-math drift
         assert result.endswith(" ... [truncated]"), f"Expected truncation suffix, got: {result[-50:]}"
         assert result != long
 
