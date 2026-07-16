@@ -671,18 +671,31 @@ class E2BSandboxProvider(SandboxProvider):
             )
 
     def _skill_projection_mounts(self, user_id: str) -> list[tuple[Path, str, bool]]:
+        """Best-effort: a projection failure must not drop configured mounts too.
+
+        Unlike Local/AIO's ``_ensure_skills_projection``, this used to raise
+        straight out of ``_apply_mounts`` before the configured-mounts loop
+        ran, so a projection hiccup dropped the operator's own mounts as
+        collateral damage (only caught by ``create()``'s outer warning, with
+        no mounts applied at all). Swallowing here keeps the two mount
+        sources independent, matching the other two providers.
+        """
         from deerflow.skills.projection import ensure_skill_projections
         from deerflow.skills.storage import get_or_new_user_skill_storage
 
-        config = get_app_config()
-        storage = get_or_new_user_skill_storage(user_id, app_config=config)
-        projection = ensure_skill_projections(storage)
-        container_root = config.skills.container_path.rstrip("/")
-        return [
-            (projection.public, f"{container_root}/public", True),
-            (projection.custom, f"{container_root}/custom", True),
-            (projection.legacy, f"{container_root}/legacy", True),
-        ]
+        try:
+            config = get_app_config()
+            storage = get_or_new_user_skill_storage(user_id, app_config=config)
+            projection = ensure_skill_projections(storage)
+            container_root = config.skills.container_path.rstrip("/")
+            return [
+                (projection.public, f"{container_root}/public", True),
+                (projection.custom, f"{container_root}/custom", True),
+                (projection.legacy, f"{container_root}/legacy", True),
+            ]
+        except Exception as exc:
+            logger.warning("Could not ensure skills projection for user %s: %s", user_id, exc, exc_info=True)
+            return []
 
     def _apply_mounts(self, client: E2BClientSandbox, *, user_id: str | None = None) -> None:
         effective_user_id = user_id or get_effective_user_id()
