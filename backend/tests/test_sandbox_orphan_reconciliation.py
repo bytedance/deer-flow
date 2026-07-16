@@ -1422,6 +1422,40 @@ def test_destroy_holds_the_teardown_marker_for_its_stop():
     assert shared.owner("doomed3") is None, "the teardown marker outlived the stop that justified it"
 
 
+def test_destroy_releases_the_teardown_marker_when_the_stop_fails():
+    """A failed stop must not strand the id under a `del:` marker.
+
+    `_destroy_warm_entry` releases on both outcomes and says why: the container is
+    still up, so leaving it marked would block its thread from ever re-acquiring
+    it. `destroy()` had no such guard — a raising backend propagated straight past
+    the release, and `take()` stays refused against `del:`, so the thread could not
+    acquire until the TTL lapsed. Fails safe rather than fatal (nobody stops a live
+    container), but the three stop paths must agree on this.
+
+    The error still propagates: `shutdown()` logs per sandbox off it, so releasing
+    must not turn into swallowing.
+    """
+    shared = _make_shared_ownership_store()
+    worker = _make_provider_for_reconciliation(worker_id="worker-a", store=shared)
+    info = SandboxInfo(
+        sandbox_id="boom01",
+        sandbox_url="http://localhost:8080",
+        container_name="deer-flow-sandbox-boom01",
+        created_at=time.time(),
+    )
+    worker._sandboxes["boom01"] = MagicMock()
+    worker._sandbox_infos["boom01"] = info
+    worker._backend.destroy = MagicMock(side_effect=RuntimeError("docker daemon is unreachable"))
+
+    with pytest.raises(RuntimeError, match="docker daemon is unreachable"):
+        worker.destroy("boom01")
+
+    assert shared.owner("boom01") is None, "a failed stop left the id stranded under a teardown marker"
+    # The container may well still be running, so its thread must be able to take
+    # it back rather than wait out the TTL.
+    assert worker._ownership.take("boom01") is True
+
+
 def test_evict_keeps_the_warm_entry_when_the_claim_is_refused():
     """Replica eviction must not pop before it knows the container is going away.
 

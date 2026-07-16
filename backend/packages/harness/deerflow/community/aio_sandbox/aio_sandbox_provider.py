@@ -1508,10 +1508,19 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 logger.warning(f"Error closing sandbox {sandbox_id} during destroy: {e}")
 
         if info:
-            # The marker must outlast the stop, not the TTL it was written with.
-            with self._held_teardown_lease(sandbox_id):
-                self._backend.destroy(info)
-            logger.info(f"Destroyed sandbox {sandbox_id}")
+            try:
+                # The marker must outlast the stop, not the TTL it was written with.
+                with self._held_teardown_lease(sandbox_id):
+                    self._backend.destroy(info)
+                logger.info(f"Destroyed sandbox {sandbox_id}")
+            except Exception:
+                # Release before propagating, like `_destroy_warm_entry` does: the
+                # stop failed, so the container is probably still up, and a marker
+                # left behind refuses its own thread's `take()` until the TTL
+                # lapses. Still raised — `shutdown()` logs per sandbox off it, so
+                # swallowing here would silently change what callers can see.
+                self._release_ownership(sandbox_id)
+                raise
 
         # Clears the teardown marker whether or not there was a container to
         # stop, so an untracked id cannot leave a lease stuck in `del:`.
