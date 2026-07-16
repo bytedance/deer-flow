@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### ⚠ Breaking changes
 
+- **skills:** A directory containing `SKILL.md` is now a runtime package
+  boundary. Nested `SKILL.md` files inside that package are supporting data and
+  are no longer registered as independent skills; unusual custom layouts must
+  move independently loadable skills under a namespace directory without its
+  own `SKILL.md`. ([#4098])
 - **memory:** The memory system is now pluggable (`memory.manager_class` selects
   a backend; default `deermem` is self-contained). DeerMem-private settings moved
   from the top level of `memory:` into `memory.backend_config`, and the
@@ -40,6 +45,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **skills:** An active restrictive skill must explicitly list `task` in
+  `allowed-tools` to delegate to a subagent. Read-only discovery infrastructure
+  (`tool_search` and `describe_skill`) remains available, but cannot grant schema
+  visibility or execution for a denied business tool. ([#4098])
 - **memory:** Pre-abstraction top-level `memory.*` DeerMem fields
   (`storage_path`, `max_facts`, `debounce_seconds`, `model_name`,
   `token_counting`, `staleness_*`, `consolidation_*`, ...) are **auto-migrated
@@ -55,6 +64,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **skills:** Apply `allowed-tools` only to slash-activated or actually loaded
+  lead-agent skills, preventing passive enabled skills and evaluation fixtures
+  from removing `task`, web, and file tools from every run. ([#4095], [#4098])
 - **models:** Honor `api_base` on every `BaseChatOpenAI` subclass (`VllmChatModel`,
   `MindIEChatModel`, `PatchedChatMiMo`, `PatchedChatStepFun`, `PatchedChatMiniMax`),
   not just `ChatOpenAI` / `PatchedChatOpenAI`. Those five previously dropped the
@@ -575,4 +587,6 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#3654]: https://github.com/bytedance/deer-flow/pull/3654
 [#3657]: https://github.com/bytedance/deer-flow/pull/3657
 [#3658]: https://github.com/bytedance/deer-flow/pull/3658
+[#4095]: https://github.com/bytedance/deer-flow/issues/4095
+[#4098]: https://github.com/bytedance/deer-flow/pull/4098
 [#4146]: https://github.com/bytedance/deer-flow/pull/4146
