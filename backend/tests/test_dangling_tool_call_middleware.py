@@ -878,6 +878,95 @@ class TestMalformedToolCallIdRecovery:
         assert patched[1].content == "REAL RESULT"
         assert patched[1].tool_call_id == patched[0].tool_calls[0]["id"]
 
+    def test_dangling_call_does_not_consume_a_later_turns_result(self):
+        """A result answers the turn that issued it, never an earlier dangling call.
+
+        Malformed originals are all equally empty, so pairing on the original id alone
+        lets the first empty-id call claim a later turn's result: the real result is
+        served to the wrong call while the call that actually ran gets the placeholder.
+        The retried tool shares the interrupted one's name — the realistic shape, and
+        the one where nothing but document order can tell the two turns apart.
+        """
+        mw = DanglingToolCallMiddleware()
+        msgs = [
+            _ai_with_tool_calls([_tc("bash", "")]),  # interrupted: never produced a result
+            _ai_with_tool_calls([_tc("bash", "")]),  # retried, and this one ran
+            ToolMessage(content="REAL RESULT", tool_call_id="", name="bash"),
+        ]
+
+        patched = mw._build_patched_messages(msgs)
+
+        assert patched is not None
+        interrupted_call, interrupted_result, retried_call, retried_result = patched
+        assert interrupted_result.tool_call_id == interrupted_call.tool_calls[0]["id"]
+        assert interrupted_result.status == "error"
+        assert retried_result.tool_call_id == retried_call.tool_calls[0]["id"]
+        assert retried_result.content == "REAL RESULT"
+
+    def test_orphan_result_is_not_adopted_by_a_later_malformed_call(self):
+        """An orphan malformed result stays an orphan and is dropped.
+
+        A result whose originating AIMessage is gone (e.g. dropped by summarization)
+        has no call to return to. Pairing on the original id alone lets a *later*
+        malformed call adopt it, resurrecting a stale result as the answer to a call
+        that never produced it — and swallowing the placeholder that call is owed.
+        """
+        mw = DanglingToolCallMiddleware()
+        msgs = [
+            ToolMessage(content="STALE ORPHAN", tool_call_id="", name="search"),
+            HumanMessage(content="continue"),
+            _ai_with_tool_calls([_tc("write_file", "")]),
+        ]
+
+        patched = mw._build_patched_messages(msgs)
+
+        assert patched is not None
+        assert all(getattr(m, "content", None) != "STALE ORPHAN" for m in patched)
+        human, write_call, write_result = patched
+        assert isinstance(human, HumanMessage)
+        assert write_result.tool_call_id == write_call.tool_calls[0]["id"]
+        assert write_result.status == "error"
+
+    def test_sibling_call_does_not_consume_its_neighbours_result(self):
+        """Parallel calls in one turn: the result goes to the sibling that ran.
+
+        Interrupting one of several parallel calls is this middleware's own trigger,
+        and within a turn the empty originals cannot tell the siblings apart either.
+        The result's name can, so it must not be handed to whichever sibling is first.
+        """
+        mw = DanglingToolCallMiddleware()
+        msgs = [
+            _ai_with_tool_calls([_tc("search", ""), _tc("write_file", "")]),
+            ToolMessage(content="REAL RESULT", tool_call_id="", name="write_file"),
+        ]
+
+        patched = mw._build_patched_messages(msgs)
+
+        assert patched is not None
+        search_id, write_id = (tc["id"] for tc in patched[0].tool_calls)
+        results = {m.tool_call_id: m for m in patched[1:]}
+        assert results[write_id].content == "REAL RESULT"
+        assert results[search_id].status == "error"
+
+    def test_result_naming_no_call_is_dropped_rather_than_misattributed(self):
+        """An unattributable result is dropped, not repurposed.
+
+        When the name matches no open call there is no evidence tying the result to
+        any of them. Dropping it is what it already gets today; handing it to an
+        arbitrary call would invent a pairing and corrupt the transcript instead.
+        """
+        mw = DanglingToolCallMiddleware()
+        msgs = [
+            _ai_with_tool_calls([_tc("search", ""), _tc("write_file", "")]),
+            ToolMessage(content="RESULT OF NEITHER", tool_call_id="", name="grep"),
+        ]
+
+        patched = mw._build_patched_messages(msgs)
+
+        assert patched is not None
+        assert all(getattr(m, "content", None) != "RESULT OF NEITHER" for m in patched)
+        assert [m.status for m in patched[1:]] == ["error", "error"]
+
     def test_valid_ids_are_left_byte_for_byte_unchanged(self):
         """Delta-set guard: normalization must only fire on malformed ids.
 

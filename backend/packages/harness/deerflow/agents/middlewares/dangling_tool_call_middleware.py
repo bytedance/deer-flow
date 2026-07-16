@@ -48,28 +48,65 @@ def _valid_tool_call_id(tool_call_id: object) -> bool:
     return isinstance(tool_call_id, str) and bool(tool_call_id.strip())
 
 
-def _relabel_tool_call_ids(tool_calls: list, msg_index: int, source: str) -> tuple[list, list[tuple[object, str]], bool]:
+def _tool_call_name(tool_call: dict) -> object:
+    """Return a call's declared name, mirroring _message_tool_calls' raw-payload fallback."""
+    name = tool_call.get("name")
+    if _valid_tool_name(name):
+        return name
+    function = tool_call.get("function")
+    return function.get("name") if isinstance(function, dict) else name
+
+
+def _names_can_pair(call_name: object, result_name: object) -> bool:
+    """Whether a result's name contradicts a call's name.
+
+    Either side may legitimately be missing (the empty-name sibling recovery exists
+    for exactly that), and a missing name cannot contradict anything — only two
+    usable names that differ rule the pairing out.
+    """
+    if not _valid_tool_name(call_name) or not _valid_tool_name(result_name):
+        return True
+    return call_name.strip() == result_name.strip()
+
+
+def _relabel_tool_call_ids(tool_calls: list, msg_index: int, source: str) -> tuple[list, list[dict], bool]:
     """Replace malformed ids in one tool-call list with stable synthetic ids.
 
     The id is derived from the call's position so both the pairing pass and the
     model-bound message agree on it without threading state between them.
 
-    Returns the rewritten list, the ``(original_id, synthetic_id)`` pairs whose
-    existing ToolMessages must follow their call, and whether anything changed.
+    Returns the rewritten list, one ``{original, synthetic, name}`` claim entry per
+    relabelled call, and whether anything changed.
     """
     relabeled: list = []
-    assigned: list[tuple[object, str]] = []
+    assigned: list[dict] = []
     changed = False
     for position, tool_call in enumerate(tool_calls):
         if not isinstance(tool_call, dict) or _valid_tool_call_id(tool_call.get("id")):
             relabeled.append(tool_call)
             continue
-        original = tool_call.get("id")
         synthetic = f"{_SYNTHETIC_TOOL_CALL_ID_PREFIX}{msg_index}_{source}_{position}"
         relabeled.append({**tool_call, "id": synthetic})
         changed = True
-        assigned.append((original, synthetic))
+        assigned.append({"original": tool_call.get("id"), "synthetic": synthetic, "name": _tool_call_name(tool_call)})
     return relabeled, assigned, changed
+
+
+def _claim_synthetic_id(open_calls: list[dict], result: ToolMessage) -> str | None:
+    """Consume the open malformed call that ``result`` answers, returning its new id.
+
+    Malformed originals are all equally empty, so they cannot identify their own
+    result; ``open_calls`` is already scoped to the issuing turn, and the name rules
+    out the wrong sibling within it. Returning ``None`` leaves the result malformed
+    for the orphan pass to drop, which is what an unattributable result gets today —
+    better than repurposing it as some other call's answer.
+    """
+    for entry in open_calls:
+        if entry["original"] != result.tool_call_id or not _names_can_pair(entry["name"], result.name):
+            continue
+        open_calls.remove(entry)
+        return entry["synthetic"]
+    return None
 
 
 def _normalize_tool_name(name: object) -> str:
@@ -308,49 +345,51 @@ class DanglingToolCallMiddleware(AgentMiddleware[AgentState]):
         logic treat the call like any other, mirroring the empty-name recovery.
         """
         rewritten: dict[int, object] = {}
-        synthetic_by_original: dict[object, deque[str]] = defaultdict(deque)
+        # Malformed calls from the most recent AIMessage that are still unanswered.
+        # Walking in document order and resetting here is what scopes a result to the
+        # turn that issued it: a result never answers a call from an earlier turn, so
+        # an earlier dangling call must not consume a later turn's result.
+        open_calls: list[dict] = []
 
         for index, msg in enumerate(messages):
-            if getattr(msg, "type", None) != "ai":
+            if getattr(msg, "type", None) == "ai":
+                update: dict = {}
+                assigned: list[dict] = []
+                structured = getattr(msg, "tool_calls", None) or []
+                additional_kwargs = getattr(msg, "additional_kwargs", None) or {}
+                raw_tool_calls = additional_kwargs.get("tool_calls")
+
+                sources: list[tuple[str, list, str]] = [
+                    ("call", structured, "tool_calls"),
+                    ("invalid", getattr(msg, "invalid_tool_calls", None) or [], "invalid_tool_calls"),
+                ]
+                # Mirror _message_tool_calls: the raw payload is a fallback view of the same
+                # calls, so relabel it only when it is the view actually read and serialized.
+                if not structured and isinstance(raw_tool_calls, list):
+                    sources.append(("raw", raw_tool_calls, "additional_kwargs"))
+
+                for source, tool_calls, field in sources:
+                    relabeled, source_assigned, changed = _relabel_tool_call_ids(tool_calls, index, source)
+                    assigned.extend(source_assigned)
+                    if not changed:
+                        continue
+                    update[field] = {**additional_kwargs, "tool_calls": relabeled} if field == "additional_kwargs" else relabeled
+
+                open_calls = assigned
+                if update:
+                    rewritten[index] = msg.model_copy(update=update)
                 continue
 
-            update: dict = {}
-            structured = getattr(msg, "tool_calls", None) or []
-            additional_kwargs = getattr(msg, "additional_kwargs", None) or {}
-            raw_tool_calls = additional_kwargs.get("tool_calls")
-
-            sources: list[tuple[str, list, str]] = [
-                ("call", structured, "tool_calls"),
-                ("invalid", getattr(msg, "invalid_tool_calls", None) or [], "invalid_tool_calls"),
-            ]
-            # Mirror _message_tool_calls: the raw payload is a fallback view of the same
-            # calls, so relabel it only when it is the view actually read and serialized.
-            if not structured and isinstance(raw_tool_calls, list):
-                sources.append(("raw", raw_tool_calls, "additional_kwargs"))
-
-            for source, tool_calls, field in sources:
-                relabeled, assigned, changed = _relabel_tool_call_ids(tool_calls, index, source)
-                for original, synthetic in assigned:
-                    synthetic_by_original[original].append(synthetic)
-                if not changed:
-                    continue
-                update[field] = {**additional_kwargs, "tool_calls": relabeled} if field == "additional_kwargs" else relabeled
-
-            if update:
-                rewritten[index] = msg.model_copy(update=update)
+            # Re-point an already-paired result at its call's new id so the pairing
+            # below keeps it instead of dropping it as an orphan.
+            if not isinstance(msg, ToolMessage) or _valid_tool_call_id(msg.tool_call_id):
+                continue
+            synthetic = _claim_synthetic_id(open_calls, msg)
+            if synthetic is not None:
+                rewritten[index] = msg.model_copy(update={"tool_call_id": synthetic})
 
         if not rewritten:
             return messages
-
-        # Re-point each already-paired result at its call's new id, in document order,
-        # so the pairing below keeps it instead of dropping it as an orphan.
-        for index, msg in enumerate(messages):
-            if not isinstance(msg, ToolMessage) or _valid_tool_call_id(msg.tool_call_id):
-                continue
-            queue = synthetic_by_original.get(msg.tool_call_id)
-            if queue:
-                rewritten[index] = msg.model_copy(update={"tool_call_id": queue.popleft()})
-
         return [rewritten.get(index, msg) for index, msg in enumerate(messages)]
 
     def _build_patched_messages(self, messages: list) -> list | None:
