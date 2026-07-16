@@ -118,8 +118,34 @@ variables or parameters traced back — within the same function only — to a
 to the same bare-method-name resolution as an unresolvable receiver, so they
 share its over-report risk rather than adding a new kind. Deeper cross-function
 or cross-module aliasing is out of scope and stays an unreported false
-negative. It is intentionally informational and is not run from CI in this
-round.
+negative.
+
+That same-function alias tracing is deliberately narrower than the symbolic
+names `dotted_name()` builds for blocking-call pattern matching elsewhere in
+this module: receiver/alias extraction uses a restricted extractor that only
+recognizes `Name`/`Attribute` chains, so a `Call` or `Subscript` result (e.g.
+`factory().flush()`, or `client = factory(); client.flush()` /
+`client = clients[0]; client.flush()`) is never treated as inheriting its
+base's alias-worthiness. Reassigning a traced name to a non-traceable value
+(anything other than a `self.`/`cls.` attribute or an already-traced name)
+kills its alias instead of leaving it traceable, so a stale alias from an
+earlier assignment cannot keep exposing an unrelated same-named method after
+the variable is reassigned to something else. `if`/`else` branches get
+isolated alias state — an alias added in one branch cannot leak into the
+other — and the state after the whole `if` is the union of what each branch
+produced (a conservative may-alias join), so the result no longer depends on
+which branch is textually `body` vs. `orelse`. This branch isolation is
+deliberately scoped to `ast.If` only; `ast.Try`/`ast.Match` have different,
+more complex control-flow semantics and keep the older unisolated traversal.
+Finally, a function's decorators, parameter defaults/annotations, return
+annotation, and any PEP 695 type-parameter bounds are all analyzed in the
+*enclosing* scope rather than the new function's own — those expressions run
+at definition time, before the function has ever been called, so a call
+there is never attributed to the function being defined (it moves to
+whatever scope actually contains the `def`, e.g. the enclosing function, or
+disappears if that scope is module/class level and therefore never
+async-reachable). It is intentionally informational and is not run from CI in
+this round.
 
 For a diff-scoped view of the same findings, `scripts/scan_changed_blocking_io.py`
 (repo root) reports findings on the added lines of `git diff <base>...HEAD`

@@ -541,3 +541,328 @@ def test_parse_errors_are_reported_as_findings(tmp_path: Path) -> None:
     assert findings[0]["blocking_call"]["category"] == "PARSE_ERROR"
     assert findings[0]["priority"] == "MEDIUM"
     assert f"{source_file.name}:1:18" in detector.format_text(detector.scan_file(source_file, repo_root=tmp_path))
+
+
+def test_scan_file_does_not_treat_call_result_as_receiver_alias(tmp_path: Path) -> None:
+    """factory().flush() must not resolve like a traced self./cls./parameter alias.
+
+    `dotted_name()` intentionally unwraps `ast.Call` to build a symbolic name for
+    blocking-call pattern matching elsewhere in this module, but reusing that
+    unwrap for alias/receiver extraction would treat a call's result as if it
+    inherited the callee's own alias-worthiness. `factory` is traceable here (a
+    parameter of `get`), so `dotted_name(factory())` unwraps to "factory" and
+    used to incorrectly link this call to `Store.flush` below.
+    """
+    source_file = _write_python(
+        tmp_path / "sample.py",
+        """
+        class Store:
+            def flush(self):
+                with open("out.txt", "w") as handle:
+                    handle.write("x")
+
+        class Router:
+            async def get(self, factory):
+                return factory().flush()
+        """,
+    )
+
+    assert detector.scan_file(source_file, repo_root=tmp_path) == []
+
+
+def test_scan_file_does_not_treat_call_result_assigned_to_local_as_receiver_alias(tmp_path: Path) -> None:
+    """client = factory(); client.flush() must not alias client to a traced receiver.
+
+    Same unwrap problem as the direct-call case above, one assignment removed:
+    `dotted_name(factory())` returns "factory" (a traced parameter), so `client`
+    was incorrectly added to the same-function alias set.
+    """
+    source_file = _write_python(
+        tmp_path / "sample.py",
+        """
+        class Store:
+            def flush(self):
+                with open("out.txt", "w") as handle:
+                    handle.write("x")
+
+        class Router:
+            async def get(self, factory):
+                client = factory()
+                return client.flush()
+        """,
+    )
+
+    assert detector.scan_file(source_file, repo_root=tmp_path) == []
+
+
+def test_scan_file_does_not_treat_subscript_result_as_receiver_alias(tmp_path: Path) -> None:
+    """client = clients[0]; client.flush() must not alias client either.
+
+    `dotted_name()` also unwraps `ast.Subscript`, so `dotted_name(clients[0])`
+    returned "clients" (a traced parameter), incorrectly aliasing `client`.
+    """
+    source_file = _write_python(
+        tmp_path / "sample.py",
+        """
+        class Store:
+            def flush(self):
+                with open("out.txt", "w") as handle:
+                    handle.write("x")
+
+        class Router:
+            async def get(self, clients):
+                client = clients[0]
+                return client.flush()
+        """,
+    )
+
+    assert detector.scan_file(source_file, repo_root=tmp_path) == []
+
+
+def test_scan_file_kills_alias_after_non_traceable_reassignment(tmp_path: Path) -> None:
+    """A non-traceable reassignment must clear a name's existing alias, not just fail to add one.
+
+    `client` starts aliased to `self.store` (traceable), then is reassigned to
+    `NonBlockingClient()` (not traceable). The old code only ever added names to
+    the alias set and never removed them, so `client` stayed aliased forever and
+    `client.flush()` after the reassignment still resolved to `Store.flush`.
+    """
+    source_file = _write_python(
+        tmp_path / "sample.py",
+        """
+        class Store:
+            def flush(self):
+                with open("out.txt", "w") as handle:
+                    handle.write("x")
+
+        class NonBlockingClient:
+            def close(self):
+                pass
+
+        class Router:
+            def __init__(self, store):
+                self.store = store
+
+            async def get(self):
+                client = self.store
+                client = NonBlockingClient()
+                return client.flush()
+        """,
+    )
+
+    assert detector.scan_file(source_file, repo_root=tmp_path) == []
+
+
+def test_if_else_alias_tracking_is_order_independent_across_branches(tmp_path: Path) -> None:
+    """Reversing which branch aliases client vs. uses it must not change the result.
+
+    Without a `visit_If` override, `body` and `orelse` shared one mutable alias
+    set with no isolation or restore between them, so an alias assigned in
+    whichever branch is visited first (always `body`, then `orelse`) leaked into
+    the other -- making the finding depend on branch position instead of
+    program semantics. Both variants below (same statements, swapped between
+    the `if` and `else`) must produce identical output; in this pair neither
+    reference is preceded by its assignment on the same execution path, so the
+    correct output for both is empty.
+    """
+    body_first_root = tmp_path / "body_first"
+    orelse_first_root = tmp_path / "orelse_first"
+    body_first_root.mkdir()
+    orelse_first_root.mkdir()
+
+    variant_assign_in_body = _write_python(
+        body_first_root / "sample.py",
+        """
+        class Store:
+            def flush(self):
+                with open("out.txt", "w") as handle:
+                    handle.write("x")
+
+        class Router:
+            def __init__(self, store):
+                self.store = store
+
+            async def get(self, flag):
+                if flag:
+                    client = self.store
+                else:
+                    client.flush()
+                return None
+        """,
+    )
+    variant_assign_in_orelse = _write_python(
+        orelse_first_root / "sample.py",
+        """
+        class Store:
+            def flush(self):
+                with open("out.txt", "w") as handle:
+                    handle.write("x")
+
+        class Router:
+            def __init__(self, store):
+                self.store = store
+
+            async def get(self, flag):
+                if flag:
+                    client.flush()
+                else:
+                    client = self.store
+                return None
+        """,
+    )
+
+    findings_body_first = _payload(variant_assign_in_body, body_first_root)
+    findings_orelse_first = _payload(variant_assign_in_orelse, orelse_first_root)
+
+    assert findings_body_first == findings_orelse_first == []
+
+
+def test_if_else_alias_union_carries_forward_after_the_if_statement(tmp_path: Path) -> None:
+    """A name aliased in only one branch is still (conservatively) aliased after the if.
+
+    This is the other half of the may-alias join: `client` is only assigned
+    inside the `if` body, but since either branch might have run, code after
+    the whole `if` statement must still treat `client` as possibly aliased.
+    """
+    source_file = _write_python(
+        tmp_path / "sample.py",
+        """
+        class Store:
+            def flush(self):
+                with open("out.txt", "w") as handle:
+                    handle.write("x")
+
+        class Router:
+            def __init__(self, store):
+                self.store = store
+
+            async def get(self, flag):
+                if flag:
+                    client = self.store
+                else:
+                    pass
+                return client.flush()
+        """,
+    )
+
+    findings = _payload(source_file, tmp_path)
+
+    assert len(findings) == 1
+    assert findings[0]["location"]["function"] == "Store.flush"
+    assert findings[0]["event_loop_exposure"] == "ASYNC_REACHABLE_SAME_FILE"
+
+
+def test_scan_file_does_not_treat_default_value_expression_as_inside_new_function(tmp_path: Path) -> None:
+    """A default value referencing an outer variable must not be misattributed to the function being defined.
+
+    `receiver` here is a module-level object, unrelated to `route`'s own
+    parameter that happens to share its name. `_visit_function` used to push
+    the new function's context -- and its parameter-seeded alias set, which
+    includes the literal name "receiver" -- before visiting defaults, so
+    `receiver.flush()` incorrectly looked like route's own traced parameter
+    calling its own method.
+    """
+    source_file = _write_python(
+        tmp_path / "sample.py",
+        """
+        class Store:
+            def flush(self):
+                with open("out.txt", "w") as handle:
+                    handle.write("x")
+
+        receiver = Store()
+
+        async def route(receiver=receiver.flush()):
+            return None
+        """,
+    )
+
+    assert detector.scan_file(source_file, repo_root=tmp_path) == []
+
+
+def test_definition_time_expressions_are_still_attributed_to_the_enclosing_function(tmp_path: Path) -> None:
+    """Decorators/defaults/annotations must move to the enclosing scope, not disappear.
+
+    `helper` is a nested, never-called, sync function -- if its default value's
+    blocking call were (incorrectly) attributed to `helper` itself, the finding
+    would be silently dropped (helper is neither async nor reachable from
+    anything async). Fixing the scope must move the finding to the actual
+    enclosing scope that runs it (`outer_async`, which is async), not just make
+    it disappear.
+    """
+    source_file = _write_python(
+        tmp_path / "sample.py",
+        """
+        import time
+
+        async def outer_async():
+            def helper(x=time.sleep(1)):
+                return x
+            return None
+        """,
+    )
+
+    findings = _payload(source_file, tmp_path)
+
+    assert len(findings) == 1
+    assert findings[0]["location"]["function"] == "outer_async"
+    assert findings[0]["event_loop_exposure"] == "DIRECT_ASYNC"
+    assert findings[0]["blocking_call"]["symbol"] == "time.sleep"
+
+
+def test_decorator_default_annotation_and_return_annotation_all_use_enclosing_scope(tmp_path: Path) -> None:
+    """All four definition-time expression positions must resolve in the enclosing scope.
+
+    Covers the decorator list, a parameter default, a parameter annotation, and
+    the return annotation in one signature -- each pinned to a distinct,
+    unconditionally-recognized blocking symbol so a regression in any one
+    position produces a non-empty result.
+    """
+    source_file = _write_python(
+        tmp_path / "sample.py",
+        """
+        import os
+        import shutil
+        import time
+
+        def _mark(value):
+            def _wrap(fn):
+                return fn
+            return _wrap
+
+        @_mark(time.sleep(1))
+        async def route(x=os.listdir("."), y: shutil.rmtree("z") = None) -> time.sleep(2):
+            return x
+        """,
+    )
+
+    assert detector.scan_file(source_file, repo_root=tmp_path) == []
+
+
+def test_pep695_type_parameter_bound_uses_enclosing_scope(tmp_path: Path) -> None:
+    """PEP 695 type-parameter bounds are definition-time expressions too.
+
+    `ast.FunctionDef`/`ast.AsyncFunctionDef` gained a `type_params` field in
+    Python 3.12 (this repo's minimum version) that `generic_visit` already
+    walked; the enclosing-scope fix above must not silently drop it. Same
+    enclosing-attribution shape as the nested-default case above: the
+    never-called `helper` would otherwise swallow the finding entirely.
+    """
+    source_file = _write_python(
+        tmp_path / "sample.py",
+        """
+        import time
+
+        async def outer_async():
+            def helper[T: time.sleep(1)](x: T) -> T:
+                return x
+            return None
+        """,
+    )
+
+    findings = _payload(source_file, tmp_path)
+
+    assert len(findings) == 1
+    assert findings[0]["location"]["function"] == "outer_async"
+    assert findings[0]["event_loop_exposure"] == "DIRECT_ASYNC"
+    assert findings[0]["blocking_call"]["symbol"] == "time.sleep"

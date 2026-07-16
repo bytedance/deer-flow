@@ -293,6 +293,27 @@ def dotted_name(node: ast.AST | None) -> str | None:
     return None
 
 
+def _simple_receiver_name(node: ast.AST | None) -> str | None:
+    """Like `dotted_name`, but only for Name/Attribute chains.
+
+    `dotted_name` intentionally unwraps `ast.Call` and `ast.Subscript` to build a
+    symbolic name for blocking-call pattern matching (`visit_Call` /
+    `_blocking_rule` / `_sync_http_client_factory_base`). Reusing that for
+    receiver/alias tracking is wrong: it would make a Call or Subscript result
+    inherit its base's alias-worthiness (e.g. treating `factory()` as if it
+    were the traced name `factory`), which this restricted extractor refuses
+    to do by simply not recognizing those node shapes at all.
+    """
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        parent = _simple_receiver_name(node.value)
+        if parent:
+            return f"{parent}.{node.attr}"
+        return node.attr
+    return None
+
+
 def relative_to_repo(path: Path, repo_root: Path = REPO_ROOT) -> str:
     try:
         return path.resolve().relative_to(repo_root.resolve()).as_posix()
@@ -400,6 +421,33 @@ class BlockingIOStaticVisitor(ast.NodeVisitor):
                 else:
                     current_clients[name] = previous
 
+    def visit_If(self, node: ast.If) -> None:
+        # `ast.If` is the only branching construct given isolated, merged alias
+        # state: `body` and `orelse` are mutually exclusive at runtime, so an
+        # alias added in one must not leak into the other, but a name aliased in
+        # either branch might still be aliased after the `if` (a conservative
+        # may-alias join) -- and the result must not depend on which branch is
+        # textually `body` vs `orelse`. `ast.Try`/`ast.Match` have different,
+        # more complex control-flow semantics (exception edges, multiple
+        # mutually exclusive case bodies) and are deliberately out of scope
+        # here; they keep the prior unisolated `generic_visit` behavior.
+        self.visit(node.test)
+        if not self.local_receiver_alias_stack:
+            for statement in node.body:
+                self.visit(statement)
+            for statement in node.orelse:
+                self.visit(statement)
+            return
+        before = set(self.current_local_receiver_aliases)
+        for statement in node.body:
+            self.visit(statement)
+        after_body = set(self.current_local_receiver_aliases)
+        self.local_receiver_alias_stack[-1] = set(before)
+        for statement in node.orelse:
+            self.visit(statement)
+        after_orelse = self.current_local_receiver_aliases
+        self.local_receiver_alias_stack[-1] = after_body | after_orelse
+
     def visit_Call(self, node: ast.Call) -> None:
         current = self.current_context
         call_name = self._canonical_name(dotted_name(node.func))
@@ -416,15 +464,44 @@ class BlockingIOStaticVisitor(ast.NodeVisitor):
         self.functions_by_name[node.name].append(qualname)
         if class_name is not None:
             self.class_methods[class_name].add(node.name)
+
+        # Decorators, parameter defaults/annotations, the return annotation, and
+        # any PEP 695 type-parameter bounds all run at definition time in the
+        # ENCLOSING scope, not inside the function body -- visit them before
+        # pushing this function's own context. Otherwise a call/receiver there
+        # (e.g. a default value referencing an outer variable that happens to
+        # share a parameter's name) gets misattributed to the function being
+        # defined instead of to whatever actually executes it.
+        for decorator in node.decorator_list:
+            self.visit(decorator)
+        self._visit_definition_time_arguments(node.args)
+        if node.returns is not None:
+            self.visit(node.returns)
+        for type_param in node.type_params:
+            bound = getattr(type_param, "bound", None)
+            if bound is not None:
+                self.visit(bound)
+
         self.function_stack.append(context)
         self.sync_http_client_stack.append({})
         self.path_like_name_stack.append(set(_path_like_argument_names(node.args, self._canonical_name)))
         self.local_receiver_alias_stack.append(set(_all_argument_names(node.args)))
-        self.generic_visit(node)
+        for statement in node.body:
+            self.visit(statement)
         self.local_receiver_alias_stack.pop()
         self.path_like_name_stack.pop()
         self.sync_http_client_stack.pop()
         self.function_stack.pop()
+
+    def _visit_definition_time_arguments(self, arguments: ast.arguments) -> None:
+        for default in arguments.defaults:
+            self.visit(default)
+        for default in arguments.kw_defaults:
+            if default is not None:
+                self.visit(default)
+        for argument in _iter_arguments(arguments):
+            if argument.annotation is not None:
+                self.visit(argument.annotation)
 
     def _canonical_name(self, name: str | None) -> str | None:
         if name is None:
@@ -442,7 +519,7 @@ class BlockingIOStaticVisitor(ast.NodeVisitor):
             return
         if not isinstance(node.func, ast.Attribute):
             return
-        receiver = dotted_name(node.func.value)
+        receiver = _simple_receiver_name(node.func.value)
         if receiver in {"self", "cls"}:
             self.call_refs[current.qualname].append(_CallRef(node.func.attr, current.class_name, self_method=True))
             return
@@ -557,17 +634,27 @@ class BlockingIOStaticVisitor(ast.NodeVisitor):
                 current_clients[name] = client_base
 
     def _record_local_receiver_alias_targets(self, value: ast.AST, targets: Iterable[ast.AST]) -> None:
+        # Every assignment to a name previously in `current_local_receiver_aliases`
+        # must resolve that name's traceability from scratch -- not only add new
+        # traceable names -- or a stale alias from an earlier, unrelated value
+        # would keep exposing same-named blocking methods (dead code below this
+        # point) forever. A non-traceable value (an unrecognized shape, or a
+        # Call/Subscript result -- see `_simple_receiver_name`) therefore kills
+        # the name instead of leaving it untouched.
         if not self.local_receiver_alias_stack:
             return
-        dotted = dotted_name(value)
-        if dotted is None:
-            return
         current_aliases = self.current_local_receiver_aliases
-        root = dotted.split(".", 1)[0]
-        if root not in {"self", "cls"} and root not in current_aliases:
+        assigned_names = [name for target in targets for name in _iter_assigned_names(target)]
+        if not assigned_names:
             return
-        for target in targets:
-            current_aliases.update(_iter_assigned_names(target))
+        dotted = _simple_receiver_name(value)
+        root = dotted.split(".", 1)[0] if dotted is not None else None
+        is_traceable = root is not None and (root in {"self", "cls"} or root in current_aliases)
+        for name in assigned_names:
+            if is_traceable:
+                current_aliases.add(name)
+            else:
+                current_aliases.discard(name)
 
     def _sync_http_client_factory_base(self, node: ast.AST) -> str | None:
         if not isinstance(node, ast.Call):
