@@ -11,8 +11,10 @@ Order of resolution:
    - database.backend == postgres        -> postgres
    - checkpointer.type == postgres       -> postgres
    - stream_bridge.type == redis         -> redis
+   - sandbox.ownership.type == redis     -> redis
 3. Runtime environment toggles that enable optional backends:
    - DEER_FLOW_STREAM_BRIDGE_REDIS_URL   -> redis
+   - DEER_FLOW_SANDBOX_OWNERSHIP_REDIS_URL -> redis
 
 Each extra name is validated against ``^[A-Za-z][A-Za-z0-9_-]*$`` (the same
 shape uv enforces for `[project.optional-dependencies]` keys). Anything else
@@ -233,6 +235,8 @@ def detect_from_config(path: Path) -> list[str]:
         extras.add("postgres")
     if (section_value(lines, "stream_bridge", "type") or "").lower() == "redis":
         extras.add("redis")
+    if (nested_section_value(lines, "sandbox.ownership", "type") or "").lower() == "redis":
+        extras.add("redis")
     if (nested_section_value(lines, "channels.discord", "enabled") or "").lower() == "true":
         extras.add("discord")
     return sorted(extras)
@@ -241,6 +245,8 @@ def detect_from_config(path: Path) -> list[str]:
 def detect_from_runtime_env() -> list[str]:
     extras: set[str] = set()
     if os.environ.get("DEER_FLOW_STREAM_BRIDGE_REDIS_URL", "").strip():
+        extras.add("redis")
+    if os.environ.get("DEER_FLOW_SANDBOX_OWNERSHIP_REDIS_URL", "").strip():
         extras.add("redis")
     return sorted(extras)
 

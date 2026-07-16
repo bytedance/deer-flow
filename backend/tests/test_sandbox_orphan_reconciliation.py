@@ -14,10 +14,11 @@ import signal
 import threading
 import time
 from datetime import UTC, datetime
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
+from deerflow.community.aio_sandbox.aio_sandbox_provider import SandboxBeingDestroyedError
 from deerflow.community.aio_sandbox.sandbox_info import SandboxInfo
 
 # ── SandboxBackend.list_running() default ────────────────────────────────────
@@ -329,19 +330,79 @@ def test_extract_host_port_handles_missing_fields():
 # ── AioSandboxProvider._reconcile_orphans() ──────────────────────────────────
 
 
-def _make_provider_for_reconciliation(tmp_path=None, *, worker_id: str = "worker-test"):
+def _make_shared_ownership_store(**kwargs):
+    """A store two provider instances can share.
+
+    Sharing one store object between two providers is how these tests model two
+    gateway instances pointed at one Redis: the provider only ever sees the
+    ``SandboxOwnershipStore`` ABC, so the ownership behaviour exercised here is
+    backend-agnostic. The redis backend's own semantics are pinned separately in
+    ``test_sandbox_ownership_store.py``.
+    """
+    from deerflow.community.aio_sandbox.ownership.memory import MemoryOwnershipStore
+
+    kwargs.setdefault("ttl_seconds", 600)
+    return MemoryOwnershipStore(owner_id="__shared__", **kwargs)
+
+
+class _ScopedOwnershipStore:
+    """View of a shared store as seen by one instance (rebinds ``owner_id``)."""
+
+    def __init__(self, shared, owner_id: str):
+        self._shared = shared
+        self._owner_id = owner_id
+
+    @property
+    def owner_id(self) -> str:
+        return self._owner_id
+
+    @property
+    def supports_cross_process(self) -> bool:
+        return True
+
+    def _as_me(self, fn, *args):
+        previous = self._shared._owner_id
+        self._shared._owner_id = self._owner_id
+        try:
+            return fn(*args)
+        finally:
+            self._shared._owner_id = previous
+
+    def take(self, sandbox_id):
+        return self._as_me(self._shared.take, sandbox_id)
+
+    def claim(self, sandbox_id, *, for_destroy: bool = False):
+        return self._as_me(lambda sid: self._shared.claim(sid, for_destroy=for_destroy), sandbox_id)
+
+    def renew(self, sandbox_id):
+        return self._as_me(self._shared.renew, sandbox_id)
+
+    def release(self, sandbox_id):
+        return self._as_me(self._shared.release, sandbox_id)
+
+    def owner(self, sandbox_id):
+        return self._shared.owner(sandbox_id)
+
+    def close(self):
+        pass
+
+
+def _make_provider_for_reconciliation(tmp_path=None, *, worker_id: str = "worker-test", store=None):
     """Build a minimal AioSandboxProvider without triggering __init__ side effects.
 
     WARNING: This helper intentionally bypasses ``__init__`` via ``__new__`` so
-    tests don't depend on Docker or touch the real idle-checker thread.  The
-    downside is that this helper is tightly coupled to the set of attributes
+    tests don't depend on Docker or touch the real idle-checker/renewal threads.
+    The downside is that this helper is tightly coupled to the set of attributes
     set up in ``AioSandboxProvider.__init__``.  If ``__init__`` gains a new
     attribute that ``_reconcile_orphans`` (or other methods under test) reads,
     this helper must be updated in lockstep — otherwise tests will fail with a
     confusing ``AttributeError`` instead of a meaningful assertion failure.
+
+    Pass a shared *store* (see ``_make_shared_ownership_store``) to two providers
+    to model two gateway instances coordinating through one ownership backend.
+    ``tmp_path`` is accepted and ignored: ownership no longer lives on disk.
     """
-    import tempfile
-    from pathlib import Path
+    from deerflow.config.sandbox_config import SandboxOwnershipConfig
 
     aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
     provider = aio_mod.AioSandboxProvider.__new__(aio_mod.AioSandboxProvider)
@@ -355,16 +416,21 @@ def _make_provider_for_reconciliation(tmp_path=None, *, worker_id: str = "worker
     provider._shutdown_called = False
     provider._idle_checker_stop = threading.Event()
     provider._idle_checker_thread = None
+    provider._renewal_stop = threading.Event()
+    provider._renewal_thread = None
     provider._config = {
         "idle_timeout": 600,
         "replicas": 3,
     }
     provider._backend = MagicMock()
-    provider._worker_id = worker_id
-    if tmp_path is None:
-        provider._lease_base_dir = Path(tempfile.mkdtemp(prefix="aio-sandbox-lease-"))
+    provider._owner_id = worker_id
+    provider._ownership_config = SandboxOwnershipConfig()
+    if store is None:
+        from deerflow.community.aio_sandbox.ownership.memory import MemoryOwnershipStore
+
+        provider._ownership = MemoryOwnershipStore(owner_id=worker_id, ttl_seconds=600)
     else:
-        provider._lease_base_dir = Path(tmp_path)
+        provider._ownership = _ScopedOwnershipStore(store, worker_id)
     return provider
 
 
@@ -479,12 +545,11 @@ def test_reconcile_no_running_containers(tmp_path):
     assert provider._warm_pool == {}
 
 
-def test_reconcile_skips_container_with_live_peer_lease(tmp_path):
-    """#4206: do not adopt a container another worker still owns."""
-    from deerflow.community.aio_sandbox.sandbox_lease import touch_lease
-
-    worker_a = _make_provider_for_reconciliation(tmp_path, worker_id="worker-a")
-    worker_b = _make_provider_for_reconciliation(tmp_path, worker_id="worker-b")
+def test_reconcile_skips_container_owned_by_peer():
+    """#4206: do not adopt a container another instance still owns."""
+    shared = _make_shared_ownership_store()
+    worker_a = _make_provider_for_reconciliation(worker_id="worker-a", store=shared)
+    worker_b = _make_provider_for_reconciliation(worker_id="worker-b", store=shared)
     now = time.time()
     info = SandboxInfo(
         sandbox_id="shared01",
@@ -492,22 +557,22 @@ def test_reconcile_skips_container_with_live_peer_lease(tmp_path):
         container_name="deer-flow-sandbox-shared01",
         created_at=now - 50,
     )
-    touch_lease(tmp_path, "shared01", "worker-a", idle_timeout=600)
+    worker_a._publish_ownership("shared01")
     worker_b._backend.list_running.return_value = [info]
 
     worker_b._reconcile_orphans()
 
     assert "shared01" not in worker_b._warm_pool
     worker_b._backend.destroy.assert_not_called()
-    # worker_a is unused beyond the lease identity; silence linters
-    assert worker_a._worker_id == "worker-a"
+    # The lease is still A's — B's failed claim must not have stolen it.
+    assert shared.owner("shared01") == "worker-a"
 
 
-def test_idle_reap_does_not_destroy_peer_owned_warm_entry(tmp_path):
-    """#4206: idle reaper must not stop a container under another worker's lease."""
-    from deerflow.community.aio_sandbox.sandbox_lease import touch_lease
-
-    worker_b = _make_provider_for_reconciliation(tmp_path, worker_id="worker-b")
+def test_idle_reap_does_not_destroy_peer_owned_warm_entry():
+    """#4206: idle reaper must not stop a container another instance owns."""
+    shared = _make_shared_ownership_store()
+    worker_a = _make_provider_for_reconciliation(worker_id="worker-a", store=shared)
+    worker_b = _make_provider_for_reconciliation(worker_id="worker-b", store=shared)
     worker_b._config["idle_timeout"] = 60
     now = time.time()
     info = SandboxInfo(
@@ -518,17 +583,16 @@ def test_idle_reap_does_not_destroy_peer_owned_warm_entry(tmp_path):
     )
     # Simulate the bad old path: B already has it in warm (or adopted wrongly).
     worker_b._warm_pool["a99c8444"] = (info, now - 61)
-    touch_lease(tmp_path, "a99c8444", "worker-a", idle_timeout=600)
+    worker_a._publish_ownership("a99c8444")
 
     worker_b._reap_expired_warm(idle_timeout=60)
 
     worker_b._backend.destroy.assert_not_called()
 
 
-def test_multi_worker_release_then_peer_reconcile_cannot_kill(tmp_path):
+def test_multi_worker_release_then_peer_reconcile_cannot_kill():
     """#4206 issue-log path: A release→warm; B reconcile+reap must not destroy."""
-    from deerflow.community.aio_sandbox.sandbox_lease import touch_lease
-
+    shared = _make_shared_ownership_store()
     destroyed: list[str] = []
     running: dict[str, SandboxInfo] = {}
 
@@ -552,14 +616,14 @@ def test_multi_worker_release_then_peer_reconcile_cannot_kill(tmp_path):
     )
     running[sid] = info
 
-    worker_a = _make_provider_for_reconciliation(tmp_path, worker_id="worker-a")
+    worker_a = _make_provider_for_reconciliation(worker_id="worker-a", store=shared)
     worker_a._backend = backend
     worker_a._config["idle_timeout"] = 60
-    # A released to warm and holds the lease (release always touches lease).
+    # A released to warm and holds the lease.
     worker_a._warm_pool[sid] = (info, time.time())
-    touch_lease(tmp_path, sid, "worker-a", idle_timeout=60)
+    worker_a._publish_ownership(sid)
 
-    worker_b = _make_provider_for_reconciliation(tmp_path, worker_id="worker-b")
+    worker_b = _make_provider_for_reconciliation(worker_id="worker-b", store=shared)
     worker_b._backend = backend
     worker_b._config["idle_timeout"] = 60
     worker_b._reconcile_orphans()
@@ -573,164 +637,477 @@ def test_multi_worker_release_then_peer_reconcile_cannot_kill(tmp_path):
     assert sid in worker_a._warm_pool
 
 
-# ── Review round 2 (fancyboi999): fail-open, hot-path IO, check→destroy race ──
+def test_expired_lease_lets_peer_adopt_crashed_owner_container():
+    """The crash path still works: once a dead owner's lease lapses, adopt it.
 
-
-def test_corrupt_lease_fails_closed_not_read_as_free(tmp_path):
-    """P2a: a corrupt lease must not be read as 'no owner'.
-
-    ``read_lease`` used to swallow read/parse errors and return None, so a
-    corrupt or unreadable peer lease looked free and the destroy path killed the
-    container. It must now raise so the provider fails closed.
+    The counterpart to the tests above — ownership must not become a permanent
+    leak when the owning instance dies without releasing.
     """
-    from deerflow.community.aio_sandbox.sandbox_lease import (
-        CorruptLeaseError,
-        foreign_lease_blocks,
-        lease_dir,
-        lease_path,
-        read_lease,
-    )
-
-    lease_dir(tmp_path).mkdir(parents=True, exist_ok=True)
-    lease_path(tmp_path, "corrupt01").write_text("{ not json", encoding="utf-8")
-
-    with pytest.raises(CorruptLeaseError):
-        read_lease(lease_path(tmp_path, "corrupt01"))
-    # foreign_lease_blocks propagates; the provider wrapper fails closed to True.
-    with pytest.raises(OSError):
-        foreign_lease_blocks(tmp_path, "corrupt01", "worker-b")
-
-    worker_b = _make_provider_for_reconciliation(tmp_path, worker_id="worker-b")
-    assert worker_b._foreign_lease_blocks("corrupt01") is True
-    assert worker_b._can_destroy_shared_container("corrupt01") is False
-
-
-def test_unreadable_lease_fails_closed(tmp_path, monkeypatch):
-    """P2a: a lease that raises PermissionError on read must fail closed too."""
-    from deerflow.community.aio_sandbox import sandbox_lease as lease_mod
-    from deerflow.community.aio_sandbox.sandbox_lease import lease_dir, lease_path
-
-    lease_dir(tmp_path).mkdir(parents=True, exist_ok=True)
-    lease_path(tmp_path, "locked01").write_text("{}", encoding="utf-8")
-
-    real_read_text = lease_mod.Path.read_text
-
-    def deny(self, *args, **kwargs):
-        if self.name.endswith("locked01.lease"):
-            raise PermissionError("EACCES")
-        return real_read_text(self, *args, **kwargs)
-
-    monkeypatch.setattr(lease_mod.Path, "read_text", deny)
-
-    worker_b = _make_provider_for_reconciliation(tmp_path, worker_id="worker-b")
-    assert worker_b._foreign_lease_blocks("locked01") is True
-
-
-def test_corrupt_lease_blocks_idle_destroy(tmp_path):
-    """P2a end-to-end: idle reaper must not stop a container whose lease is corrupt."""
-    from deerflow.community.aio_sandbox.sandbox_lease import lease_dir, lease_path
-
-    worker_b = _make_provider_for_reconciliation(tmp_path, worker_id="worker-b")
-    worker_b._config["idle_timeout"] = 60
-    now = time.time()
+    shared = _make_shared_ownership_store(ttl_seconds=0.05)
+    dead = _make_provider_for_reconciliation(worker_id="worker-dead", store=shared)
+    worker_b = _make_provider_for_reconciliation(worker_id="worker-b", store=shared)
     info = SandboxInfo(
-        sandbox_id="corrupt02",
+        sandbox_id="crashed1",
         sandbox_url="http://localhost:8080",
-        container_name="deer-flow-sandbox-corrupt02",
-        created_at=now - 50,
+        container_name="deer-flow-sandbox-crashed1",
+        created_at=time.time() - 50,
     )
-    lease_dir(tmp_path).mkdir(parents=True, exist_ok=True)
-    lease_path(tmp_path, "corrupt02").write_text("garbage", encoding="utf-8")
-    worker_b._warm_pool["corrupt02"] = (info, now - 61)
+    dead._publish_ownership("crashed1")
+    worker_b._backend.list_running.return_value = [info]
 
-    worker_b._reap_expired_warm(idle_timeout=60)
+    # Owner "crashes": stops renewing. Its lease lapses.
+    time.sleep(0.1)
+    worker_b._reconcile_orphans()
 
-    worker_b._backend.destroy.assert_not_called()
+    assert "crashed1" in worker_b._warm_pool
+    assert shared.owner("crashed1") == "worker-b"
 
 
-def test_get_does_not_renew_lease(tmp_path, monkeypatch):
-    """P2b: get() is a pure in-memory lookup — it must not write the lease.
+# ── Ownership store rework (#4206): fail-closed publish, renewal independence ──
 
-    ``ensure_sandbox_initialized_async`` calls ``provider.get()`` directly on the
-    event loop, so a lease write here (mkdir + fsync + os.replace) would be
-    blocking IO on the hot path. Renewal now happens off the event loop.
+
+def test_acquire_fails_closed_when_ownership_cannot_be_published():
+    """Establishment is fail-closed: never hand out a sandbox we could not own.
+
+    The provider used to swallow the lease-write error and return the sandbox id
+    on the next line, so a store outage silently disabled the only cross-instance
+    exclusion while the sandbox was handed out as usable — peers then saw an
+    unowned live container and reaped it.
     """
-    worker = _make_provider_for_reconciliation(tmp_path)
-    sandbox = MagicMock()
-    worker._sandboxes["sb1"] = sandbox
+    from deerflow.community.aio_sandbox.ownership import OwnershipBackendError
 
-    touched: list[str] = []
-    monkeypatch.setattr(worker, "_touch_sandbox_lease", lambda sid: touched.append(sid))
+    worker = _make_provider_for_reconciliation(worker_id="worker-a")
+    worker._ownership = MagicMock()
+    worker._ownership.take.side_effect = OwnershipBackendError("store down")
 
-    assert worker.get("sb1") is sandbox
-    assert touched == [], "get() must not renew the lease on the event-loop hot path"
+    info = SandboxInfo(
+        sandbox_id="new001",
+        sandbox_url="http://localhost:8080",
+        container_name="deer-flow-sandbox-new001",
+        created_at=time.time(),
+    )
+
+    with pytest.raises(OwnershipBackendError):
+        worker._register_created_sandbox("t1", "new001", info, user_id="u1")
+
+    # The just-created container must not be leaked as an unowned orphan.
+    worker._backend.destroy.assert_called_once_with(info)
+    assert "new001" not in worker._sandboxes
 
 
-def test_idle_cycle_renews_active_leases(tmp_path):
-    """P2b: the background idle path renews active-sandbox leases off the event loop."""
-    from deerflow.community.aio_sandbox.sandbox_lease import lease_path, read_lease
+def test_reuse_fails_closed_when_ownership_cannot_be_published():
+    """Same fail-closed rule on the in-process reuse path."""
+    from deerflow.community.aio_sandbox.ownership import OwnershipBackendError
 
-    worker = _make_provider_for_reconciliation(tmp_path, worker_id="worker-a")
+    worker = _make_provider_for_reconciliation(worker_id="worker-a")
+    info = SandboxInfo(
+        sandbox_id="sb1",
+        sandbox_url="http://localhost:8080",
+        container_name="deer-flow-sandbox-sb1",
+        created_at=time.time(),
+    )
     worker._sandboxes["sb1"] = MagicMock()
+    worker._sandbox_infos["sb1"] = info
+    worker._thread_sandboxes[("u1", "t1")] = "sb1"
+    worker._check_tracked_sandbox_alive = MagicMock(return_value=True)
+    worker._ownership = MagicMock()
+    worker._ownership.take.side_effect = OwnershipBackendError("store down")
 
-    worker._renew_active_leases()
-
-    lease = read_lease(lease_path(tmp_path, "sb1"))
-    assert lease is not None and lease.worker_id == "worker-a"
+    with pytest.raises(OwnershipBackendError):
+        worker._reuse_in_process_sandbox("t1", user_id="u1")
 
 
-def test_peer_touch_cannot_interleave_with_destroy(tmp_path):
-    """P1: the ownership check → container stop is one cross-process atomic op.
+def test_destroy_fails_closed_when_ownership_unknown():
+    """A store that cannot answer must not be read as 'container is free'."""
+    from deerflow.community.aio_sandbox.ownership import OwnershipBackendError
 
-    A peer's ``touch_lease`` shares the same per-sandbox guard, so it cannot land
-    between a destroy's ownership check and the container stop (the interleaving
-    that revived the cross-worker kill). Here worker-a holds the guard mid-stop;
-    worker-b's touch must block until worker-a releases it.
-    """
-    worker_a = _make_provider_for_reconciliation(tmp_path, worker_id="worker-a")
-    worker_b = _make_provider_for_reconciliation(tmp_path, worker_id="worker-b")
-    sid = "race01"
+    worker = _make_provider_for_reconciliation(worker_id="worker-a")
+    worker._ownership = MagicMock()
+    worker._ownership.claim.side_effect = OwnershipBackendError("store down")
+
     info = SandboxInfo(
-        sandbox_id=sid,
+        sandbox_id="unknown1",
         sandbox_url="http://localhost:8080",
-        container_name=f"deer-flow-sandbox-{sid}",
+        container_name="deer-flow-sandbox-unknown1",
         created_at=time.time() - 50,
     )
 
-    in_destroy = threading.Event()
-    release_destroy = threading.Event()
-    touch_done = threading.Event()
+    worker._destroy_warm_entry("unknown1", info, reason="idle_timeout")
 
-    def slow_destroy(_info):
-        in_destroy.set()
-        assert release_destroy.wait(3), "test did not release the destroy in time"
+    worker._backend.destroy.assert_not_called()
 
-    worker_a._backend.destroy.side_effect = slow_destroy
 
-    def do_destroy():
-        worker_a._destroy_warm_entry(sid, info, reason="idle_timeout")
+def test_reconcile_fails_closed_when_ownership_unknown():
+    """A store outage must not turn every peer container into an adoptable orphan."""
+    from deerflow.community.aio_sandbox.ownership import OwnershipBackendError
 
-    def do_touch():
-        assert in_destroy.wait(3)
-        worker_b._touch_sandbox_lease(sid)
-        touch_done.set()
+    worker = _make_provider_for_reconciliation(worker_id="worker-b")
+    worker._ownership = MagicMock()
+    worker._ownership.claim.side_effect = OwnershipBackendError("store down")
+    info = SandboxInfo(
+        sandbox_id="unknown2",
+        sandbox_url="http://localhost:8080",
+        container_name="deer-flow-sandbox-unknown2",
+        created_at=time.time() - 50,
+    )
+    worker._backend.list_running.return_value = [info]
 
-    t_destroy = threading.Thread(target=do_destroy)
-    t_touch = threading.Thread(target=do_touch)
-    t_destroy.start()
-    t_touch.start()
+    worker._reconcile_orphans()
+
+    assert "unknown2" not in worker._warm_pool
+    worker._backend.destroy.assert_not_called()
+
+
+@pytest.mark.parametrize("idle_timeout", [0, 600])
+def test_init_always_starts_lease_renewal(monkeypatch, idle_timeout):
+    """Renewal liveness must not ride on the idle checker's switch.
+
+    ``_renew_active_leases`` used to have exactly one caller — ``_cleanup_idle_resources``
+    — and ``__init__`` only starts the idle checker when ``idle_timeout > 0``.
+    ``idle_timeout: 0`` is a supported config (``config.example.yaml`` documents it
+    as "keep warm VMs until shutdown"), so on that config nothing ever refreshed a
+    lease and #4206 returned one TTL later.
+
+    This drives ``__init__`` on purpose: the defect is in *who starts renewal*, so
+    a test that calls ``_start_lease_renewal()`` directly passes on the broken code
+    and guards nothing.
+    """
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+
+    started: list[str] = []
+    monkeypatch.setattr(aio_mod.AioSandboxProvider, "_load_config", lambda self: {"idle_timeout": idle_timeout, "replicas": 3, "ownership": None})
+    monkeypatch.setattr(aio_mod.AioSandboxProvider, "_create_backend", lambda self: MagicMock())
+    monkeypatch.setattr(aio_mod.AioSandboxProvider, "_reconcile_orphans", lambda self: None)
+    monkeypatch.setattr(aio_mod.AioSandboxProvider, "_register_signal_handlers", lambda self: None)
+    monkeypatch.setattr(aio_mod.AioSandboxProvider, "_start_lease_renewal", lambda self: started.append("renewal"))
+    monkeypatch.setattr(aio_mod.AioSandboxProvider, "_start_idle_checker", lambda self: started.append("idle"))
+    monkeypatch.setattr(aio_mod.atexit, "register", lambda *a, **k: None)
+
+    aio_mod.AioSandboxProvider()
+
+    assert "renewal" in started, f"renewal must start at idle_timeout={idle_timeout}; ownership liveness cannot depend on the idle reaper"
+    assert ("idle" in started) is (idle_timeout > 0)
+
+
+def test_renewal_loop_refreshes_owned_leases():
+    """The renewal thread actually renews (the loop body, not just its wiring)."""
+    from deerflow.config.sandbox_config import SandboxOwnershipConfig
+
+    worker = _make_provider_for_reconciliation(worker_id="worker-a")
+    worker._ownership_config = SandboxOwnershipConfig(renewal_interval_seconds=0.05)
+    worker._sandboxes["sb1"] = MagicMock()
+    worker._publish_ownership("sb1")
+
+    renewed: list[str] = []
+    real_renew = worker._ownership.renew
+
+    def counting_renew(sandbox_id):
+        renewed.append(sandbox_id)
+        return real_renew(sandbox_id)
+
+    worker._ownership.renew = counting_renew
+
+    worker._start_lease_renewal()
     try:
-        assert in_destroy.wait(3)
-        # worker-a holds the per-sandbox guard across backend.destroy; worker-b's
-        # touch must not complete until the guard is released.
-        assert not touch_done.wait(0.4), "peer touch interleaved with destroy — guard not exclusive"
+        deadline = time.time() + 3
+        while not renewed and time.time() < deadline:
+            time.sleep(0.02)
     finally:
-        release_destroy.set()
-        t_destroy.join(3)
-        t_touch.join(3)
+        worker._stop_lease_renewal()
 
-    assert touch_done.is_set()
-    worker_a._backend.destroy.assert_called_once()
+    assert renewed == ["sb1"] or renewed[0] == "sb1"
+
+
+def test_renewal_covers_warm_entries_not_just_active():
+    """A warm container is still ours; letting its lease lapse invites adoption."""
+    worker = _make_provider_for_reconciliation(worker_id="worker-a")
+    info = SandboxInfo(
+        sandbox_id="warm01",
+        sandbox_url="http://localhost:8080",
+        container_name="deer-flow-sandbox-warm01",
+        created_at=time.time(),
+    )
+    worker._sandboxes["active01"] = MagicMock()
+    worker._warm_pool["warm01"] = (info, time.time())
+    worker._publish_ownership("active01")
+    worker._publish_ownership("warm01")
+
+    renewed: list[str] = []
+    worker._ownership = MagicMock()
+    worker._ownership.renew.side_effect = lambda sid: renewed.append(sid) or True
+
+    worker._renew_owned_leases()
+
+    assert set(renewed) == {"active01", "warm01"}
+
+
+def test_lost_lease_drops_sandbox_without_destroying_container():
+    """Losing the lease means the container is someone else's — drop it, don't kill it.
+
+    Destroying here would be the exact cross-instance kill the store exists to
+    prevent, just triggered from the renewal path instead of the reaper. Only our
+    host-side handle goes away, and it must be closed rather than leaked (#2872).
+    """
+    shared = _make_shared_ownership_store()
+    worker_a = _make_provider_for_reconciliation(worker_id="worker-a", store=shared)
+    worker_b = _make_provider_for_reconciliation(worker_id="worker-b", store=shared)
+    info = SandboxInfo(
+        sandbox_id="moved01",
+        sandbox_url="http://localhost:8080",
+        container_name="deer-flow-sandbox-moved01",
+        created_at=time.time(),
+    )
+    sandbox = MagicMock()
+    worker_a._sandboxes["moved01"] = sandbox
+    worker_a._sandbox_infos["moved01"] = info
+    worker_a._thread_sandboxes[("u1", "t1")] = "moved01"
+    worker_a._last_activity["moved01"] = time.time()
+    worker_a._publish_ownership("moved01")
+
+    # The thread's next turn routes to B, which takes over ownership.
+    worker_b._publish_ownership("moved01")
+
+    worker_a._renew_owned_leases()
+
+    assert "moved01" not in worker_a._sandboxes
+    assert "moved01" not in worker_a._sandbox_infos
+    assert ("u1", "t1") not in worker_a._thread_sandboxes
+    worker_a._backend.destroy.assert_not_called()
+    sandbox.close.assert_called_once()
+    assert shared.owner("moved01") == "worker-b"
+
+
+def test_ownership_rollback_on_create_closes_the_client_it_drops():
+    """The rollback destroys the container; its host-side client must not leak (#2872)."""
+    from deerflow.community.aio_sandbox.ownership import OwnershipBackendError
+
+    worker = _make_provider_for_reconciliation(worker_id="worker-a")
+    worker._ownership = MagicMock()
+    worker._ownership.take.side_effect = OwnershipBackendError("store down")
+    info = SandboxInfo(
+        sandbox_id="new002",
+        sandbox_url="http://localhost:8080",
+        container_name="deer-flow-sandbox-new002",
+        created_at=time.time(),
+    )
+
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    created: list[MagicMock] = []
+
+    def fake_aio_sandbox(**kwargs):
+        sandbox = MagicMock()
+        created.append(sandbox)
+        return sandbox
+
+    with patch.object(aio_mod, "AioSandbox", side_effect=fake_aio_sandbox):
+        with pytest.raises(OwnershipBackendError):
+            worker._register_created_sandbox("t1", "new002", info, user_id="u1")
+
+    worker._backend.destroy.assert_called_once_with(info)
+    assert created and created[0].close.call_count == 1
+
+
+def test_acquire_takes_over_ownership_so_a_thread_can_move_instances():
+    """A thread's next turn can land on another instance; it must not be stranded.
+
+    Ownership answers "who reaps this", not "who may use it". A conditional claim
+    here would refuse while the previous instance's lease was still live and break
+    every load-balanced follow-up turn.
+    """
+    shared = _make_shared_ownership_store()
+    worker_a = _make_provider_for_reconciliation(worker_id="worker-a", store=shared)
+    worker_b = _make_provider_for_reconciliation(worker_id="worker-b", store=shared)
+    info = SandboxInfo(
+        sandbox_id="thread01",
+        sandbox_url="http://localhost:8080",
+        container_name="deer-flow-sandbox-thread01",
+        created_at=time.time(),
+    )
+    worker_a._publish_ownership("thread01")
+    assert shared.owner("thread01") == "worker-a"
+
+    # B serves the thread's next turn and discovers the existing container.
+    assert worker_b._register_discovered_sandbox("t1", info, user_id="u1") == "thread01"
+    assert shared.owner("thread01") == "worker-b"
+
+
+def test_store_losing_all_state_does_not_evict_live_sandboxes():
+    """A Redis restart must not drop every in-flight sandbox fleet-wide.
+
+    `renew()` returns falsy for two very different situations: a peer took the
+    lease, and the lease is simply absent. Treating them the same meant that when
+    Redis restarted without persistence — every key gone, nobody holding
+    anything — each instance evicted every sandbox it was actively serving.
+    A lapsed lease must be re-established instead.
+    """
+    shared = _make_shared_ownership_store()
+    worker = _make_provider_for_reconciliation(worker_id="worker-a", store=shared)
+    info = SandboxInfo(
+        sandbox_id="live01",
+        sandbox_url="http://localhost:8080",
+        container_name="deer-flow-sandbox-live01",
+        created_at=time.time(),
+    )
+    sandbox = MagicMock()
+    worker._sandboxes["live01"] = sandbox
+    worker._sandbox_infos["live01"] = info
+    worker._thread_sandboxes[("u1", "t1")] = "live01"
+    worker._publish_ownership("live01")
+
+    # The store loses everything, as a Redis restart without persistence does.
+    shared._leases.clear()
+
+    worker._renew_owned_leases()
+
+    assert "live01" in worker._sandboxes, "a store restart evicted a live sandbox nobody had taken"
+    assert ("u1", "t1") in worker._thread_sandboxes
+    sandbox.close.assert_not_called()
+    worker._backend.destroy.assert_not_called()
+    # And it is ours again, so peers still cannot reap it.
+    assert shared.owner("live01") == "worker-a"
+
+
+def test_acquire_refuses_a_container_a_peer_is_destroying():
+    """#4206's last window: `take()` must not overrun a destroyer's claim.
+
+    Sequence: B's reaper claims X for destroy and starts the (slow) container
+    stop; a turn for X's thread routes to A. An unconditional takeover would hand
+    A a sandbox that B's stop is about to kill mid-turn.
+    """
+    shared = _make_shared_ownership_store()
+    worker_a = _make_provider_for_reconciliation(worker_id="worker-a", store=shared)
+    worker_b = _make_provider_for_reconciliation(worker_id="worker-b", store=shared)
+    info = SandboxInfo(
+        sandbox_id="dying01",
+        sandbox_url="http://localhost:8080",
+        container_name="deer-flow-sandbox-dying01",
+        created_at=time.time(),
+    )
+
+    # B decides to reap it and marks the teardown, then its stop is in flight.
+    assert worker_b._claim_ownership("dying01", for_destroy=True) is True
+
+    # A's acquire must refuse rather than hand out a doomed container.
+    with pytest.raises(SandboxBeingDestroyedError):
+        worker_a._register_discovered_sandbox("t1", info, user_id="u1")
+
+    assert "dying01" not in worker_a._sandboxes
+
+
+def test_cached_sandbox_being_destroyed_is_dropped_not_reused():
+    """The same window on the warm/in-process reuse path falls through cleanly."""
+    shared = _make_shared_ownership_store()
+    worker_a = _make_provider_for_reconciliation(worker_id="worker-a", store=shared)
+    worker_b = _make_provider_for_reconciliation(worker_id="worker-b", store=shared)
+    info = SandboxInfo(
+        sandbox_id="dying02",
+        sandbox_url="http://localhost:8080",
+        container_name="deer-flow-sandbox-dying02",
+        created_at=time.time(),
+    )
+    sandbox = MagicMock()
+    worker_a._sandboxes["dying02"] = sandbox
+    worker_a._sandbox_infos["dying02"] = info
+    worker_a._thread_sandboxes[("u1", "t1")] = "dying02"
+    worker_a._check_tracked_sandbox_alive = MagicMock(return_value=True)
+
+    worker_b._claim_ownership("dying02", for_destroy=True)
+
+    # Returns None (not the id, and not an exception) so acquire cold-starts.
+    assert worker_a._reuse_in_process_sandbox("t1", user_id="u1") is None
+    assert "dying02" not in worker_a._sandboxes
+    worker_a._backend.destroy.assert_not_called()
+
+
+def test_destroy_claims_before_untracking():
+    """A refused claim must not lose the container from every map.
+
+    Untracking first meant a peer-owned container was dropped from `_sandboxes`
+    and `_warm_pool` and then not destroyed — still running, and now invisible to
+    the instance that had been tracking it.
+    """
+    shared = _make_shared_ownership_store()
+    worker_a = _make_provider_for_reconciliation(worker_id="worker-a", store=shared)
+    worker_b = _make_provider_for_reconciliation(worker_id="worker-b", store=shared)
+    info = SandboxInfo(
+        sandbox_id="peer01",
+        sandbox_url="http://localhost:8080",
+        container_name="deer-flow-sandbox-peer01",
+        created_at=time.time(),
+    )
+    sandbox = MagicMock()
+    worker_a._sandboxes["peer01"] = sandbox
+    worker_a._sandbox_infos["peer01"] = info
+    worker_b._publish_ownership("peer01")
+
+    worker_a.destroy("peer01")
+
+    worker_a._backend.destroy.assert_not_called()
+    assert "peer01" in worker_a._sandboxes, "untracked a container it was refused permission to destroy"
+    sandbox.close.assert_not_called()
+
+
+def test_refused_idle_destroy_keeps_the_warm_entry():
+    """Popping before deciding loses the container: running, tracked by nobody."""
+    shared = _make_shared_ownership_store()
+    worker_a = _make_provider_for_reconciliation(worker_id="worker-a", store=shared)
+    worker_b = _make_provider_for_reconciliation(worker_id="worker-b", store=shared)
+    worker_a._config["idle_timeout"] = 60
+    info = SandboxInfo(
+        sandbox_id="warmpeer",
+        sandbox_url="http://localhost:8080",
+        container_name="deer-flow-sandbox-warmpeer",
+        created_at=time.time(),
+    )
+    worker_a._warm_pool["warmpeer"] = (info, time.time() - 999)
+    worker_b._publish_ownership("warmpeer")
+
+    worker_a._reap_expired_warm(idle_timeout=60)
+
+    worker_a._backend.destroy.assert_not_called()
+    assert "warmpeer" in worker_a._warm_pool, "dropped a warm entry it did not actually destroy"
+
+
+def test_unhealthy_sandbox_owned_by_peer_is_not_destroyed():
+    """The one reap path that used to skip the ownership gate entirely."""
+    shared = _make_shared_ownership_store()
+    worker_a = _make_provider_for_reconciliation(worker_id="worker-a", store=shared)
+    worker_b = _make_provider_for_reconciliation(worker_id="worker-b", store=shared)
+    info = SandboxInfo(
+        sandbox_id="sick01",
+        sandbox_url="http://localhost:8080",
+        container_name="deer-flow-sandbox-sick01",
+        created_at=time.time(),
+    )
+    worker_a._sandboxes["sick01"] = MagicMock()
+    worker_a._sandbox_infos["sick01"] = info
+    worker_b._publish_ownership("sick01")
+
+    worker_a._drop_unhealthy_sandbox("sick01", "failed health check")
+
+    worker_a._backend.destroy.assert_not_called()
+    assert shared.owner("sick01") == "worker-b"
+
+
+def test_get_does_not_touch_ownership_store():
+    """get() is a pure in-memory lookup — it must not do store IO.
+
+    ``ensure_sandbox_initialized_async`` calls ``provider.get()`` directly on the
+    event loop, so store IO here would be blocking filesystem or network IO on
+    the hot path. Ownership is published on acquire and refreshed by the renewal
+    thread instead.
+    """
+    worker = _make_provider_for_reconciliation(worker_id="worker-a")
+    sandbox = MagicMock()
+    worker._sandboxes["sb1"] = sandbox
+    worker._ownership = MagicMock()
+
+    assert worker.get("sb1") is sandbox
+
+    worker._ownership.take.assert_not_called()
+    worker._ownership.claim.assert_not_called()
+    worker._ownership.renew.assert_not_called()
+    worker._ownership.owner.assert_not_called()
 
 
 def test_reconcile_multiple_containers_all_adopted(tmp_path):

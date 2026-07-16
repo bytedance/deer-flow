@@ -45,9 +45,16 @@ def test_host_thread_dir_rejects_invalid_thread_id(tmp_path):
 
 
 def _make_provider(tmp_path):
-    """Build a minimal AioSandboxProvider instance without starting the idle checker."""
-    import tempfile
-    from pathlib import Path
+    """Build a minimal AioSandboxProvider instance without starting the idle checker.
+
+    ``tmp_path`` is accepted and ignored: ownership no longer lives on disk. Each
+    provider gets its own in-process ownership store, so it owns every sandbox it
+    tracks — cross-instance behaviour is covered in
+    ``test_sandbox_orphan_reconciliation.py`` (shared store) and
+    ``test_sandbox_ownership_store.py`` (store contract).
+    """
+    from deerflow.community.aio_sandbox.ownership.memory import MemoryOwnershipStore
+    from deerflow.config.sandbox_config import SandboxOwnershipConfig
 
     aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
     with patch.object(aio_mod.AioSandboxProvider, "_start_idle_checker"):
@@ -56,11 +63,11 @@ def _make_provider(tmp_path):
         provider._sandboxes = {}
         provider._lock = MagicMock()
         provider._idle_checker_stop = MagicMock()
-        provider._worker_id = "test-worker"
-        if tmp_path is None:
-            provider._lease_base_dir = Path(tempfile.mkdtemp(prefix="aio-lease-"))
-        else:
-            provider._lease_base_dir = Path(tmp_path)
+        provider._renewal_stop = MagicMock()
+        provider._renewal_thread = None
+        provider._owner_id = "test-worker"
+        provider._ownership_config = SandboxOwnershipConfig()
+        provider._ownership = MemoryOwnershipStore(owner_id="test-worker", ttl_seconds=600)
     return provider
 
 
