@@ -53,6 +53,9 @@ class Skill:
     # autonomous model load (skill_context), or only on explicit /slash
     # activation. Frontmatter: ``secrets-autonomous`` (default true).
     secrets_autonomous: bool = True
+    # Basenames under thread outputs that slash activation must leave behind
+    # before the lead run can END (frontmatter: ``required-outputs``).
+    required_outputs: tuple[str, ...] = field(default_factory=tuple)
 
     @property
     def skill_path(self) -> str:

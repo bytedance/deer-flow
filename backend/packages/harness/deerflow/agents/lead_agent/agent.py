@@ -377,6 +377,13 @@ def build_middlewares(
     if custom_middlewares:
         middlewares.extend(custom_middlewares)
 
+    # Content-* slash skills must leave a packaged JSON under thread outputs
+    # (MineAdmin pipeline contract). Retry a few times with a packaging reminder,
+    # then mark the run as an error instead of silent success without the file.
+    from deerflow.agents.middlewares.slash_skill_deliverable_middleware import SlashSkillDeliverableMiddleware
+
+    middlewares.append(SlashSkillDeliverableMiddleware())
+
     # A provider may return an empty AIMessage after tool execution. Retry the
     # final response once, then persist a visible error fallback rather than
     # allowing LangChain's no-tool-call router to end a silent successful run.

@@ -19,6 +19,9 @@ ALLOWED_FRONTMATTER_PROPERTIES = {
     "allowed-tools",
     "required-secrets",
     "secrets-autonomous",
+    # Filenames under thread ``outputs/`` that slash activation must produce
+    # before the lead run may END successfully (see SlashSkillDeliverableMiddleware).
+    "required-outputs",
     "metadata",
     "compatibility",
     "version",

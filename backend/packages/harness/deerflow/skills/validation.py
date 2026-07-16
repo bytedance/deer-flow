@@ -7,7 +7,7 @@ import re
 from pathlib import Path
 
 from deerflow.skills.frontmatter import ALLOWED_FRONTMATTER_PROPERTIES, split_skill_markdown
-from deerflow.skills.parser import parse_allowed_tools
+from deerflow.skills.parser import parse_allowed_tools, parse_required_outputs
 from deerflow.skills.types import SKILL_MD_FILE
 
 
@@ -78,6 +78,11 @@ def _validate_skill_frontmatter(skill_dir: Path) -> tuple[bool, str, str | None]
     required_secrets = frontmatter.get("required-secrets")
     if required_secrets is not None and not isinstance(required_secrets, list):
         return False, f"required-secrets in {SKILL_MD_FILE} must be a list", None
+
+    try:
+        parse_required_outputs(frontmatter.get("required-outputs"), skill_md)
+    except ValueError as e:
+        return False, str(e).replace(str(skill_md), SKILL_MD_FILE), None
 
     secrets_autonomous = frontmatter.get("secrets-autonomous")
     if secrets_autonomous is not None and not isinstance(secrets_autonomous, bool):

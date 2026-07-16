@@ -6,7 +6,7 @@ Use this checklist to keep reviews concrete and repeatable.
 
 - Root `SKILL.md` exists, is UTF-8 text, and has valid YAML frontmatter.
 - `name` and `description` are non-empty and valid for the selected profile.
-- `allowed-tools`, `required-secrets`, and `secrets-autonomous` are structurally valid.
+- `allowed-tools`, `required-secrets`, `required-outputs`, and `secrets-autonomous` are structurally valid.
 - Package digest is present.
 - `SkillScan` findings are visible and severity is preserved.
 - Reader errors, truncation, and analyzer errors are reported as limitations.
