@@ -1,8 +1,10 @@
 """Memory storage providers."""
 
 import abc
+import copy
 import json
 import logging
+import math
 import threading
 import uuid
 from datetime import UTC, datetime
@@ -24,40 +26,83 @@ def utc_now_iso_z() -> str:
 _EMPTY_CONTEXT_SECTION: dict[str, str] = {"summary": "", "updatedAt": ""}
 
 
+def _normalize_context_section(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return dict(_EMPTY_CONTEXT_SECTION)
+    section = dict(value)
+    section["summary"] = value.get("summary") if isinstance(value.get("summary"), str) else ""
+    section["updatedAt"] = value.get("updatedAt") if isinstance(value.get("updatedAt"), str) else ""
+    return section
+
+
+def _normalize_memory_fact(value: Any) -> dict[str, Any] | None:
+    """Normalize a recoverable legacy fact, dropping entries without content."""
+    if not isinstance(value, dict):
+        return None
+
+    content = value.get("content")
+    if not isinstance(content, str) or not content.strip():
+        return None
+
+    fact = dict(value)
+
+    fact_id = fact.get("id")
+    if not isinstance(fact_id, str) or not fact_id.strip():
+        fact["id"] = f"fact_{uuid.uuid4().hex[:8]}"
+    else:
+        fact["id"] = fact_id.strip()
+
+    category = fact.get("category")
+    fact["category"] = category.strip() if isinstance(category, str) and category.strip() else "context"
+
+    confidence = fact.get("confidence")
+    if isinstance(confidence, bool) or not isinstance(confidence, (int, float)) or not math.isfinite(confidence):
+        fact["confidence"] = 0.0
+    else:
+        fact["confidence"] = min(1.0, max(0.0, float(confidence)))
+
+    created_at = fact.get("createdAt")
+    fact["createdAt"] = created_at.strip() if isinstance(created_at, str) else ""
+
+    source = fact.get("source")
+    fact["source"] = source.strip() if isinstance(source, str) else ""
+    if "sourceError" in fact and fact["sourceError"] is not None and not isinstance(fact["sourceError"], str):
+        fact.pop("sourceError")
+
+    return fact
+
+
 def normalize_memory_data(data: dict[str, Any]) -> dict[str, Any]:
-    """Ensure memory dict includes all schema fields (backward compatible with older files)."""
-    user = data.get("user")
+    """Return a canonical memory copy compatible with legacy persisted files."""
+    normalized = copy.deepcopy(data) if isinstance(data, dict) else {}
+
+    user = normalized.get("user")
     if not isinstance(user, dict):
         user = {}
-        data["user"] = user
+    normalized["user"] = user
 
     for section in ("workContext", "personalContext", "topOfMind", "cognitiveStyle"):
-        section_data = user.get(section)
-        if not isinstance(section_data, dict):
-            user[section] = dict(_EMPTY_CONTEXT_SECTION)
-            continue
-        section_data.setdefault("summary", "")
-        section_data.setdefault("updatedAt", "")
+        user[section] = _normalize_context_section(user.get(section))
 
-    history = data.get("history")
+    history = normalized.get("history")
     if not isinstance(history, dict):
         history = {}
-        data["history"] = history
+    normalized["history"] = history
 
     for section in ("recentMonths", "earlierContext", "longTermBackground"):
-        section_data = history.get(section)
-        if not isinstance(section_data, dict):
-            history[section] = dict(_EMPTY_CONTEXT_SECTION)
-            continue
-        section_data.setdefault("summary", "")
-        section_data.setdefault("updatedAt", "")
+        history[section] = _normalize_context_section(history.get(section))
 
-    if not isinstance(data.get("facts"), list):
-        data["facts"] = []
+    facts = normalized.get("facts")
+    if not isinstance(facts, list):
+        normalized["facts"] = []
+    else:
+        normalized["facts"] = [fact for value in facts if (fact := _normalize_memory_fact(value)) is not None]
 
-    data.setdefault("version", "1.0")
-    data.setdefault("lastUpdated", "")
-    return data
+    if not isinstance(normalized.get("version"), str):
+        normalized["version"] = "1.0"
+    if not isinstance(normalized.get("lastUpdated"), str):
+        normalized["lastUpdated"] = ""
+    return normalized
 
 
 def create_empty_memory() -> dict[str, Any]:
@@ -173,7 +218,7 @@ class FileMemoryStorage(MemoryStorage):
         with self._cache_lock:
             cached = self._memory_cache.get(cache_key)
             if cached is not None and cached[1] == current_mtime:
-                return normalize_memory_data(cached[0])
+                return cached[0]
 
         memory_data = self._load_memory_from_file(agent_name, user_id=user_id)
 
@@ -204,10 +249,11 @@ class FileMemoryStorage(MemoryStorage):
 
         try:
             file_path.parent.mkdir(parents=True, exist_ok=True)
-            # Shallow-copy before adding lastUpdated so the caller's dict is not
-            # mutated as a side-effect, and the cache reference is not silently
-            # updated before the file write succeeds.
-            memory_data = {**memory_data, "lastUpdated": utc_now_iso_z()}
+            # Canonicalize at the persistence boundary so files and cache entries
+            # never retain legacy or malformed schema variants. Normalization
+            # returns a copy and therefore does not mutate the caller's dict.
+            memory_data = normalize_memory_data(memory_data)
+            memory_data["lastUpdated"] = utc_now_iso_z()
 
             temp_path = file_path.with_suffix(f".{uuid.uuid4().hex}.tmp")
             with open(temp_path, "w", encoding="utf-8") as f:

@@ -90,10 +90,10 @@ Async task delegation with concurrent execution:
 LLM-powered persistent context retention across conversations:
 
 - **Automatic extraction**: Analyzes conversations for user context, facts, and preferences
-- **Structured storage**: User context (work, personal, top-of-mind), history, and confidence-scored facts
+- **Structured storage**: User context (work, personal, top-of-mind, cognitive style), history, and confidence-scored facts
 - **Debounced updates**: Batches updates to minimize LLM calls (configurable wait time)
 - **System prompt injection**: Top facts + context injected into agent prompts
-- **Storage**: JSON file with mtime-based cache invalidation
+- **Storage**: JSON file with mtime-based cache invalidation and canonical normalization for legacy sections/fact metadata
 
 ### Tool Ecosystem
 

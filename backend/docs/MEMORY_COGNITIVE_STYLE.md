@@ -23,7 +23,7 @@ Extend the existing memory pipeline:
 |-------|------|
 | `user.cognitiveStyle.summary` | 2–4 sentence paragraph: reasoning & collaboration habits |
 | `facts[]` with `category: cognitive` | Atomic, confidence-ranked supplements |
-| `normalize_memory_data()` | Backward-compatible fill for older `memory.json` files |
+| `normalize_memory_data()` | Backward-compatible fill for older sections and fact metadata |
 | `MEMORY_UPDATE_PROMPT` | LLM sets `cognitiveStyle.shouldUpdate` only when new signals are clear |
 | `format_memory_for_injection()` | Injects as `Thinking Style:` under User Context |
 
@@ -60,21 +60,21 @@ When extending `memory.json` (new `user.*` or `history.*` section, or fact categ
 
 | Step | Location |
 |------|----------|
-| 1. Backend normalize | `deerflow/agents/memory/storage.py` — add key to the `user` / `history` loops in `normalize_memory_data()`; update `create_empty_memory()` |
-| 2. Frontend normalize | `frontend/src/core/memory/import-memory.ts` — add key to `USER_SECTION_KEYS` or `HISTORY_SECTION_KEYS` |
+| 1. Backend normalize | `deerflow/agents/memory/storage.py` — add keys to `normalize_memory_data()` / fact normalization; update `create_empty_memory()` |
+| 2. Frontend normalize | `frontend/src/core/memory/import-memory.ts` — add section keys and normalize recoverable legacy fact metadata before narrowing to `UserMemory` |
 | 3. Types & API models | `frontend/src/core/memory/types.ts`, `backend/app/gateway/routers/memory.py` (`UserContext` / `HistoryContext`) |
 | 4. Updater prompt | `deerflow/agents/memory/prompt.py` — `MEMORY_UPDATE_PROMPT` section + injection in `format_memory_for_injection()`; if adding a **fact category**, also sync `FACT_EXTRACTION_PROMPT` JSON union and `Categories:` list |
 | 5. Settings UI & i18n | `memory-settings-page.tsx`, `en-US.ts` / `zh-CN.ts` |
-| 6. Tests | Backend: `tests/test_memory_normalize.py` (legacy fixture missing the new field). Frontend: `tests/unit/core/memory/import-memory.test.ts` |
+| 6. Tests | Backend: legacy sections and facts in `tests/test_memory_storage.py` / `tests/test_memory_normalize.py`. Frontend: import and API-read behavior in `tests/unit/core/memory/` |
 | 7. Import path | Settings import must use `normalizeMemoryPayload()` — **do not** require the new field in a strict-only type guard |
 
-**Avoid:** backend `normalize_memory_data()` accepting legacy files while frontend import rejects them (strict `isImportedMemory`-style checks without normalize first).
+**Avoid:** normalizing only sections while leaving legacy fact metadata unchecked, or making one unrecoverable fact fail the entire background API read. User-initiated imports remain strict for facts without usable content; API reads drop only those unrecoverable entries.
 
 ## Verification
 
 ```bash
 cd backend
-PYTHONPATH=. uv run pytest tests/test_memory_normalize.py tests/test_memory_updater.py -v -k cognitive
+PYTHONPATH=. uv run pytest -q tests/test_memory_storage.py tests/test_memory_updater.py tests/test_memory_prompt_injection.py tests/test_memory_normalize.py
 PYTHONPATH=. uv run pytest tests/test_memory_router.py -v
 
 cd ../frontend
@@ -116,7 +116,7 @@ Manual:
 
 ### 实现范围
 
-- 扩展 `memory.json` schema，`normalize_memory_data()` 兼容旧文件
+- 扩展 `memory.json` schema，`normalize_memory_data()` 兼容旧 section 和缺少元数据的旧 facts
 - `MEMORY_UPDATE_PROMPT` 输出 `cognitiveStyle.shouldUpdate`；可选 `category: cognitive` 的 facts
 - 复用现有 Middleware → 防抖队列 → Updater → 注入链路，不新增子系统
 
@@ -137,4 +137,4 @@ Manual:
 
 ### 以后新增 memory 字段时
 
-按上文 **Adding a new memory field** 清单同步改后端 `normalize_memory_data()` 与前端 `normalizeMemoryPayload()`；导入走 normalize，不要只对完整新 schema 做严校验。
+按上文 **Adding a new memory field** 清单同步改后端 `normalize_memory_data()` 与前端 `normalizeMemoryPayload()`；导入走 normalize，不要只对完整新 schema 做严校验。后台 API 读取应丢弃无法恢复的单条 fact，而不是让整个 Memory 页面失败。

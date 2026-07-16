@@ -62,6 +62,30 @@ def test_apply_updates_cognitive_style_section() -> None:
     assert result["user"]["cognitiveStyle"]["updatedAt"]
 
 
+def test_apply_updates_preserves_cognitive_fact_category() -> None:
+    updater = MemoryUpdater()
+    current_memory = _make_memory()
+    update_data = {
+        "newFacts": [
+            {
+                "content": "User prefers conclusions before implementation details.",
+                "category": "cognitive",
+                "confidence": 0.92,
+            }
+        ]
+    }
+
+    with patch(
+        "deerflow.agents.memory.updater.get_memory_config",
+        return_value=_memory_config(max_facts=100, fact_confidence_threshold=0.7),
+    ):
+        result = updater._apply_updates(current_memory, update_data, thread_id="thread-cognitive")
+
+    assert len(result["facts"]) == 1
+    assert result["facts"][0]["category"] == "cognitive"
+    assert result["facts"][0]["source"] == "thread-cognitive"
+
+
 def test_apply_updates_skips_existing_duplicate_and_preserves_removals() -> None:
     updater = MemoryUpdater()
     current_memory = _make_memory(
@@ -366,7 +390,7 @@ def test_import_memory_data_saves_and_returns_imported_memory() -> None:
 
 
 def test_import_memory_data_returns_normalized_legacy_without_cognitive_style() -> None:
-    """Backend import reloads via storage.load(), which normalizes legacy payloads."""
+    """Backend import persists the normalized schema instead of raw legacy JSON."""
     legacy = {
         "version": "1.0",
         "lastUpdated": "2026-01-01T00:00:00Z",
@@ -380,19 +404,45 @@ def test_import_memory_data_returns_normalized_legacy_without_cognitive_style() 
             "earlierContext": {"summary": "", "updatedAt": ""},
             "longTermBackground": {"summary": "", "updatedAt": ""},
         },
-        "facts": [],
+        "facts": [
+            {
+                "content": "User prefers conclusions first.",
+                "category": "cognitive",
+            }
+        ],
     }
-    from deerflow.agents.memory.storage import normalize_memory_data
-
-    normalized = normalize_memory_data(legacy)
     mock_storage = MagicMock()
     mock_storage.save.return_value = True
-    mock_storage.load.return_value = normalized
+    mock_storage.load.return_value = {
+        **legacy,
+        "user": {
+            **legacy["user"],
+            "cognitiveStyle": {"summary": "", "updatedAt": ""},
+        },
+        "facts": [
+            {
+                "id": "fact_normalized",
+                "content": "User prefers conclusions first.",
+                "category": "cognitive",
+                "confidence": 0.0,
+                "createdAt": "",
+                "source": "",
+            }
+        ],
+    }
 
     with patch("deerflow.agents.memory.updater.get_memory_storage", return_value=mock_storage):
         result = import_memory_data(legacy)
 
-    mock_storage.save.assert_called_once_with(legacy, None, user_id=None)
+    saved_memory = mock_storage.save.call_args.args[0]
+    assert saved_memory is not legacy
+    assert saved_memory["user"]["cognitiveStyle"] == {"summary": "", "updatedAt": ""}
+    assert saved_memory["facts"][0]["id"].startswith("fact_")
+    assert saved_memory["facts"][0]["category"] == "cognitive"
+    assert saved_memory["facts"][0]["confidence"] == 0.0
+    assert saved_memory["facts"][0]["createdAt"] == ""
+    assert saved_memory["facts"][0]["source"] == ""
+    mock_storage.save.assert_called_once_with(saved_memory, None, user_id=None)
     assert result["user"]["cognitiveStyle"] == {"summary": "", "updatedAt": ""}
 
 

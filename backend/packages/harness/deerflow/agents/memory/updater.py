@@ -18,6 +18,7 @@ from deerflow.agents.memory.prompt import (
 from deerflow.agents.memory.storage import (
     create_empty_memory,
     get_memory_storage,
+    normalize_memory_data,
     utc_now_iso_z,
 )
 from deerflow.config.memory_config import get_memory_config
@@ -73,7 +74,8 @@ def import_memory_data(memory_data: dict[str, Any], agent_name: str | None = Non
         OSError: If persisting the imported memory fails.
     """
     storage = get_memory_storage()
-    if not storage.save(memory_data, agent_name, user_id=user_id):
+    normalized_memory = normalize_memory_data(memory_data)
+    if not storage.save(normalized_memory, agent_name, user_id=user_id):
         raise OSError("Failed to save imported memory data")
     return storage.load(agent_name, user_id=user_id)
 

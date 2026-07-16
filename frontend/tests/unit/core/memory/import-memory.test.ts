@@ -2,7 +2,10 @@ import { describe, expect, it } from "vitest";
 
 import { normalizeMemoryPayload } from "@/core/memory/import-memory";
 
-import { legacyMemoryWithoutCognitiveStyle } from "./fixtures";
+import {
+  legacyMemoryWithIncompleteFacts,
+  legacyMemoryWithoutCognitiveStyle,
+} from "./fixtures";
 
 /** Legacy strict guard (pre–normalizeMemoryPayload): required every section to exist. */
 function isImportedMemoryStrict(value: unknown): boolean {
@@ -117,5 +120,29 @@ describe("legacy memory import compatibility (TDD)", () => {
       summary: "",
       updatedAt: "",
     });
+  });
+
+  it("normalizes legacy facts that are missing generated metadata", () => {
+    const result = normalizeMemoryPayload(legacyMemoryWithIncompleteFacts());
+
+    expect(result).not.toBeNull();
+    expect(result!.facts).toHaveLength(1);
+    expect(result!.facts[0]!.id).toMatch(/^fact_/);
+    expect(result!.facts[0]).toMatchObject({
+      content: "User prefers conclusions first.",
+      category: "cognitive",
+      confidence: 0,
+      createdAt: "",
+      source: "",
+    });
+  });
+
+  it("rejects imports containing facts without usable content", () => {
+    const invalid = {
+      ...legacyMemoryWithoutCognitiveStyle(),
+      facts: [{ category: "context" }],
+    };
+
+    expect(normalizeMemoryPayload(invalid)).toBeNull();
   });
 });

@@ -434,6 +434,7 @@ export const enUS: Translations = {
           },
           content: "Content",
           source: "Source",
+          unknown: "Unknown",
           createdAt: "CreatedAt",
           view: "View",
         },

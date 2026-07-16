@@ -416,6 +416,7 @@ export const zhCN: Translations = {
           },
           content: "内容",
           source: "来源",
+          unknown: "未知",
           createdAt: "创建时间",
           view: "查看",
         },

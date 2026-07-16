@@ -10,6 +10,7 @@ from deerflow.agents.memory.storage import (
     MemoryStorage,
     create_empty_memory,
     get_memory_storage,
+    normalize_memory_data,
 )
 from deerflow.config.memory_config import MemoryConfig
 
@@ -26,6 +27,45 @@ class TestCreateEmptyMemory:
         assert isinstance(memory["user"], dict)
         assert isinstance(memory["history"], dict)
         assert isinstance(memory["facts"], list)
+
+
+class TestNormalizeMemoryData:
+    """Test backward-compatible memory schema normalization."""
+
+    def test_normalizes_legacy_facts_without_mutating_input(self):
+        legacy = {
+            "version": "1.0",
+            "lastUpdated": "",
+            "user": {},
+            "history": {},
+            "facts": [
+                {"content": "User prefers conclusions first", "category": "cognitive"},
+                None,
+                {"category": "context"},
+            ],
+        }
+
+        normalized = normalize_memory_data(legacy)
+
+        assert legacy == {
+            "version": "1.0",
+            "lastUpdated": "",
+            "user": {},
+            "history": {},
+            "facts": [
+                {"content": "User prefers conclusions first", "category": "cognitive"},
+                None,
+                {"category": "context"},
+            ],
+        }
+        assert len(normalized["facts"]) == 1
+        fact = normalized["facts"][0]
+        assert fact["id"].startswith("fact_")
+        assert fact["content"] == "User prefers conclusions first"
+        assert fact["category"] == "cognitive"
+        assert fact["confidence"] == 0.0
+        assert fact["createdAt"] == ""
+        assert fact["source"] == ""
 
 
 class TestMemoryStorageInterface:
@@ -127,6 +167,41 @@ class TestFileMemoryStorage:
 
         assert loaded["user"]["cognitiveStyle"] == {"summary": "", "updatedAt": ""}
         assert loaded["user"]["workContext"]["summary"] == "work"
+
+    def test_cache_hit_returns_already_normalized_memory(self, tmp_path):
+        """A cache hit should not normalize and mutate the cached object again."""
+        import json
+
+        memory_file = tmp_path / "memory.json"
+        memory_file.write_text(
+            json.dumps(
+                {
+                    "version": "1.0",
+                    "lastUpdated": "",
+                    "user": {},
+                    "history": {},
+                    "facts": [{"content": "Legacy cached fact"}],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        def mock_get_paths():
+            mock_paths = MagicMock()
+            mock_paths.memory_file = memory_file
+            return mock_paths
+
+        with patch("deerflow.agents.memory.storage.get_paths", side_effect=mock_get_paths):
+            with patch("deerflow.agents.memory.storage.get_memory_config", return_value=MemoryConfig(storage_path="")):
+                with patch("deerflow.agents.memory.storage.normalize_memory_data", wraps=normalize_memory_data) as normalize:
+                    storage = FileMemoryStorage()
+                    first = storage.load()
+                    calls_after_first_load = normalize.call_count
+                    second = storage.load()
+
+        assert normalize.call_count == calls_after_first_load
+        assert second is first
+        assert second["facts"][0]["id"] == first["facts"][0]["id"]
 
     def test_save_writes_to_file(self, tmp_path):
         """Should save memory data to file."""

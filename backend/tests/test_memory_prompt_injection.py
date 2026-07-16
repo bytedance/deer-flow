@@ -2,7 +2,12 @@
 
 import math
 
-from deerflow.agents.memory.prompt import _coerce_confidence, format_memory_for_injection
+from deerflow.agents.memory.prompt import (
+    FACT_EXTRACTION_PROMPT,
+    MEMORY_UPDATE_PROMPT,
+    _coerce_confidence,
+    format_memory_for_injection,
+)
 
 
 def test_format_memory_includes_facts_section() -> None:
@@ -172,6 +177,29 @@ def test_format_memory_includes_cognitive_style() -> None:
 
     assert "Thinking Style:" in result
     assert "Prefers conclusions first, then details." in result
+
+
+def test_cognitive_fact_category_is_documented_and_rendered() -> None:
+    assert "cognitive|goal|correction" in MEMORY_UPDATE_PROMPT
+    assert "cognitive|goal|correction" in FACT_EXTRACTION_PROMPT
+    assert "- cognitive:" in FACT_EXTRACTION_PROMPT
+
+    result = format_memory_for_injection(
+        {
+            "user": {},
+            "history": {},
+            "facts": [
+                {
+                    "content": "User prefers conclusions first.",
+                    "category": "cognitive",
+                    "confidence": 0.9,
+                }
+            ],
+        },
+        max_tokens=2000,
+    )
+
+    assert "[cognitive | 0.90] User prefers conclusions first." in result
 
 
 def test_format_memory_includes_long_term_background() -> None:

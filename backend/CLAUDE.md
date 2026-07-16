@@ -383,18 +383,19 @@ Bridges external messaging platforms (Feishu, Slack, Telegram, DingTalk) to the 
 - **Migration**: Run `PYTHONPATH=. python scripts/migrate_user_isolation.py` to move legacy `memory.json`, `threads/`, and `agents/` into per-user layout. Supports `--dry-run` (preview changes) and `--user-id USER_ID` (assign unowned legacy data to a user, defaults to `default`).
 
 **Data Structure** (stored in `{base_dir}/users/{user_id}/memory.json`):
-- **User Context**: `workContext`, `personalContext`, `topOfMind` (1-3 sentence summaries)
+- **User Context**: `workContext`, `personalContext`, `topOfMind`, `cognitiveStyle` (1-3 sentence summaries)
 - **History**: `recentMonths`, `earlierContext`, `longTermBackground`
-- **Facts**: Discrete facts with `id`, `content`, `category` (preference/knowledge/context/behavior/goal), `confidence` (0-1), `createdAt`, `source`
+- **Facts**: Discrete facts with `id`, `content`, `category` (preference/knowledge/context/behavior/cognitive/goal/correction), `confidence` (0-1), `createdAt`, `source`
+- **Schema normalization**: Reads/imports canonicalize legacy sections and recoverable fact metadata; facts without usable content are dropped on API reads and rejected on user-initiated frontend imports
 
 **Workflow**:
 1. `MemoryMiddleware` filters messages (user inputs + final AI responses), captures `user_id` via `get_effective_user_id()`, and queues conversation with the captured `user_id`
 2. Queue debounces (30s default), batches updates, deduplicates per-thread
 3. Background thread invokes LLM to extract context updates and facts, using the stored `user_id` (not the contextvar, which is unavailable on timer threads)
-4. Applies updates atomically (temp file + rename) with cache invalidation, skipping duplicate fact content before append
+4. Canonicalizes the memory schema, applies updates atomically (temp file + rename) with cache invalidation, and skips duplicate fact content before append
 5. Next interaction injects top 15 facts + context into `<memory>` tags in system prompt
 
-Focused regression coverage for the updater lives in `backend/tests/test_memory_updater.py`.
+Focused regression coverage lives in `backend/tests/test_memory_storage.py`, `backend/tests/test_memory_updater.py`, and `backend/tests/test_memory_prompt_injection.py`.
 
 **Configuration** (`config.yaml` → `memory`):
 - `enabled` / `injection_enabled` - Master switches

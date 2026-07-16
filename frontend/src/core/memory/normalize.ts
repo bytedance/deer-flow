@@ -3,7 +3,9 @@ import type { UserMemory } from "./types";
 
 /** Normalize API/import payloads (unknown → UserMemory). Throws if invalid. */
 export function normalizeUserMemory(value: unknown): UserMemory {
-  const normalized = normalizeMemoryPayload(value);
+  const normalized = normalizeMemoryPayload(value, {
+    invalidFactStrategy: "drop",
+  });
   if (!normalized) {
     throw new Error("Invalid memory payload");
   }

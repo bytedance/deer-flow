@@ -30,3 +30,16 @@ export function legacyMemoryWithoutCognitiveStyle(): Omit<
     facts: [],
   };
 }
+
+/** Legacy payload whose facts predate generated ids and source/timestamp metadata. */
+export function legacyMemoryWithIncompleteFacts() {
+  return {
+    ...legacyMemoryWithoutCognitiveStyle(),
+    facts: [
+      {
+        content: "User prefers conclusions first.",
+        category: "cognitive",
+      },
+    ],
+  };
+}

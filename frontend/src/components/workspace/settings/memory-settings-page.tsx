@@ -226,6 +226,13 @@ function upperFirst(str: string) {
   return str.charAt(0).toUpperCase() + str.slice(1);
 }
 
+function formatFactCreatedAt(createdAt: string, unknownLabel: string) {
+  if (!createdAt || Number.isNaN(Date.parse(createdAt))) {
+    return unknownLabel;
+  }
+  return formatTimeAgo(createdAt);
+}
+
 export function MemorySettingsPage() {
   const { t } = useI18n();
   const { memory, isLoading, error } = useMemory();
@@ -633,7 +640,10 @@ export function MemorySettingsPage() {
                                 <span className="text-muted-foreground">
                                   {t.settings.memory.markdown.table.createdAt}:
                                 </span>{" "}
-                                {formatTimeAgo(fact.createdAt)}
+                                {formatFactCreatedAt(
+                                  fact.createdAt,
+                                  t.settings.memory.markdown.table.unknown,
+                                )}
                               </span>
                               <span>
                                 <span className="text-muted-foreground">
@@ -641,13 +651,15 @@ export function MemorySettingsPage() {
                                 </span>{" "}
                                 {fact.source === "manual" ? (
                                   t.settings.memory.manualFactSource
-                                ) : (
+                                ) : fact.source && fact.source !== "unknown" ? (
                                   <Link
                                     href={pathOfThread(fact.source)}
                                     className="text-primary underline-offset-4 hover:underline"
                                   >
                                     {t.settings.memory.markdown.table.view}
                                   </Link>
+                                ) : (
+                                  t.settings.memory.markdown.table.unknown
                                 )}
                               </span>
                             </div>

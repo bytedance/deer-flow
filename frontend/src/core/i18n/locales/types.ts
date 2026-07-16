@@ -355,6 +355,7 @@ export interface Translations {
           };
           content: string;
           source: string;
+          unknown: string;
           createdAt: string;
           view: string;
         };
