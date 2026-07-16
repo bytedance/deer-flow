@@ -396,3 +396,37 @@ def test_from_backend_config_silent_on_known_keys(caplog):
     with caplog.at_level("WARNING", logger=cfg_logger):
         DeerMemConfig.from_backend_config({"storage_path": "/tmp/x", "max_facts": 20})
     assert not any("Unknown backend_config keys" in r.message for r in caplog.records)
+
+
+def test_from_backend_config_null_values_fall_back_to_defaults():
+    """Explicit YAML ``null`` values must behave like omitted keys, not crash.
+
+    ``config.example.yaml`` ships ``backend_config.model:`` as a bare key with
+    commented children, which YAML parses to ``None`` (and ``make
+    config-upgrade`` writes it out as an explicit ``model: null``). Non-Optional
+    fields like ``model: DeerMemModelConfig`` reject an explicit ``None`` even
+    though the omitted key would use the field default — so the shipped example
+    config crashed every run with a DeerMemConfig ValidationError."""
+    from deerflow.agents.memory.backends.deermem.deermem.config import (
+        DeerMemConfig,
+        DeerMemModelConfig,
+    )
+
+    cfg = DeerMemConfig.from_backend_config({"model": None, "debounce_seconds": None, "storage_path": "/tmp/x"})
+
+    # None entries fall back to field defaults; real values still parse
+    assert isinstance(cfg.model, DeerMemModelConfig)
+    assert cfg.model.model is None  # default = no extraction LLM configured
+    assert cfg.debounce_seconds == DeerMemConfig().debounce_seconds
+    assert cfg.storage_path == "/tmp/x"
+
+
+def test_from_backend_config_null_values_do_not_warn_as_unknown(caplog):
+    """Dropped ``None`` entries are known keys — they must not trip the
+    unknown-key typo warning."""
+    from deerflow.agents.memory.backends.deermem.deermem.config import DeerMemConfig
+
+    cfg_logger = "deerflow.agents.memory.backends.deermem.deermem.config"
+    with caplog.at_level("WARNING", logger=cfg_logger):
+        DeerMemConfig.from_backend_config({"model": None})
+    assert not any("Unknown backend_config keys" in r.message for r in caplog.records)

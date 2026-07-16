@@ -115,6 +115,39 @@ class DeerMemConfig(BaseModel):
         default_factory=lambda: ["correction"],
         description="Fact categories exempt from staleness review.",
     )
+    staleness_max_lifetime_multiplier: float = Field(
+        default=20.0,
+        ge=1.0,
+        le=100.0,
+        description=(
+            "Creation-time cap multiplier for a fact's LLM-assigned "
+            "expected_valid_days. When a new fact is stored, its "
+            "expected_valid_days is clamped to "
+            "staleness_age_days * staleness_max_lifetime_multiplier so the "
+            "model cannot set an initial lifetime so long that the fact is "
+            "never re-evaluated. Default 20.0 (90 x 20 = 1800 d ~= 5 years) "
+            "is generous enough to support the 'very stable' prompt tier "
+            "(core skills, native language) without needing multiple review "
+            "cycles to escape the cap. Lifetime extensions (staleFactsToExtend) "
+            "are subject to staleness_max_extension_days instead."
+        ),
+    )
+    staleness_max_extension_days: int = Field(
+        default=3650,
+        ge=90,
+        le=36500,
+        description=(
+            "Absolute upper bound (in days) on expected_valid_days after a "
+            "lifetime extension (staleFactsToExtend). Applied at write time "
+            "during staleness review: new_evd = min(days_since + extend_by, "
+            "staleness_max_extension_days). Separate from the creation-time "
+            "multiplier cap because extensions are deliberate recalibration "
+            "decisions and are not subject to the staleness_age_days scale. "
+            "The ceiling prevents a single LLM misfire from permanently "
+            "deferring a fact or causing timedelta overflow on the next "
+            "candidate-selection pass. Default 3650 (10 years)."
+        ),
+    )
     # ── Memory consolidation ────────────────────────────────────────────
     consolidation_enabled: bool = Field(
         default=False,
@@ -203,10 +236,16 @@ class DeerMemConfig(BaseModel):
         typo (e.g. ``storage_pat`` missing the ``h``) does not silently fall
         back to the default and write memory to an unintended location --
         mirrors the host layer's ``load_memory_config_from_dict`` warning.
+
+        ``None`` values are dropped so they fall back to the field default:
+        YAML renders an empty key (``model:`` with only commented children, as
+        shipped in ``config.example.yaml``) as ``None``, which non-Optional
+        fields like ``model`` would otherwise reject even though omitting the
+        key entirely is valid.
         """
         if not backend_config:
             return cls()
-        known = {k: v for k, v in backend_config.items() if k in cls.model_fields}
+        known = {k: v for k, v in backend_config.items() if k in cls.model_fields and v is not None}
         unknown = sorted(k for k in backend_config if k not in cls.model_fields)
         if unknown:
             logger.warning(
