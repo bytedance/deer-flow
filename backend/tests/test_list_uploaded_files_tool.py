@@ -428,3 +428,51 @@ def test_real_graph_state_propagation_to_list_uploaded_files(tmp_path):
     assert tool_messages, "Expected at least one ToolMessage from list_uploaded_files"
     tool_output = tool_messages[0].content
     assert "fresh.pdf" not in tool_output, f"Current-run file must be excluded from list_uploaded_files via state propagation. Tool output:\n{tool_output}"
+
+
+# ---------------------------------------------------------------------------
+# Regression: IM channel _human_input_message() files propagation
+# Fancyboi999 reported that _human_input_message() did not pass
+# additional_kwargs.files, so UploadsMiddleware wrote uploaded_files=[]
+# and list_uploaded_files reported same-run IM attachments as historical.
+# This test locks the fix: files in additional_kwargs must reach the middleware.
+# ---------------------------------------------------------------------------
+
+
+def test_files_in_additional_kwargs_reaches_middleware(tmp_path):
+    """UploadsMiddleware must read files from additional_kwargs.files.
+
+    This is the contract that IM channels rely on when passing files via
+    ``_human_input_message(..., files=uploaded)``.
+    """
+    from deerflow.agents.middlewares.uploads_middleware import UploadsMiddleware
+    from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
+
+    thread_id = "test-im-files"
+    uploads_dir = _uploads_dir(tmp_path, thread_id=thread_id)
+    (uploads_dir / "im_file.pdf").write_bytes(b"%PDF")
+
+    msg = HumanMessage(
+        content="check this file",
+        additional_kwargs={
+            "files": [
+                {
+                    "filename": "im_file.pdf",
+                    "size": 5,
+                    "path": "/mnt/user-data/uploads/im_file.pdf",
+                }
+            ],
+            ORIGINAL_USER_CONTENT_KEY: "check this file",
+        },
+    )
+    state = {"messages": [msg]}
+    rt = MagicMock()
+    rt.context = {"thread_id": thread_id}
+
+    mw = UploadsMiddleware(base_dir=str(tmp_path))
+    mw_result = mw.before_agent(state, rt)
+
+    assert mw_result is not None, "Middleware must return a state update"
+    assert "uploaded_files" in mw_result
+    assert len(mw_result["uploaded_files"]) == 1
+    assert mw_result["uploaded_files"][0]["filename"] == "im_file.pdf", "Middleware must read file metadata from additional_kwargs.files"

@@ -504,10 +504,15 @@ def _unknown_command_reply(command: str | None = None) -> str:
     return f"Unknown command. Available commands: {available}"
 
 
-def _human_input_message(content: str, *, original_content: str | None = None) -> dict[str, Any]:
+def _human_input_message(content: str, *, original_content: str | None = None, files: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     message: dict[str, Any] = {"role": "human", "content": content}
-    if original_content is not None and original_content != content:
-        message["additional_kwargs"] = {ORIGINAL_USER_CONTENT_KEY: original_content}
+    if original_content is not None and original_content != content or files:
+        additional_kwargs: dict[str, Any] = {}
+        if original_content is not None and original_content != content:
+            additional_kwargs[ORIGINAL_USER_CONTENT_KEY] = original_content
+        if files:
+            additional_kwargs["files"] = files
+        message["additional_kwargs"] = additional_kwargs
     return message
 
 
@@ -1586,7 +1591,7 @@ class ChannelManager:
         uploaded = await _ingest_inbound_files(thread_id, msg, user_id=storage_user_id)
         if uploaded:
             msg.text = f"{_format_uploaded_files_block(uploaded)}\n\n{msg.text}".strip()
-        human_message = _human_input_message(msg.text, original_content=original_text)
+        human_message = _human_input_message(msg.text, original_content=original_text, files=uploaded or None)
 
         if self._channel_supports_streaming(msg.channel_name):
             await self._handle_streaming_chat(
