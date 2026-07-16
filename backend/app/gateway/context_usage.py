@@ -1,7 +1,7 @@
 """Compute a per-category breakdown of the context window usage for a thread.
 
 The breakdown mirrors the layout shown by Claude Code's context indicator:
-messages, system prompt, skills, system / MCP tools (active + deferred),
+messages, system prompt, skills, system tools, MCP tools (active + deferred),
 custom agents (subagents), memory injection, the summarization headroom we
 treat as an autocompact buffer, and finally the free space left over.
 
@@ -14,8 +14,13 @@ endpoint. The numbers are approximate (``count_tokens_approximately`` /
 from __future__ import annotations
 
 import asyncio
+import contextvars
+import functools
+import hashlib
 import json
 import logging
+from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from fastapi import HTTPException, Request
@@ -25,6 +30,20 @@ from app.gateway.deps import get_checkpointer, get_config, get_thread_store
 logger = logging.getLogger(__name__)
 
 _CONTEXT_COUNT_TIMEOUT_SECONDS = 5.0
+_CONTEXT_COUNT_CACHE_SIZE = 64
+_CONTEXT_COUNT_EXECUTOR: ThreadPoolExecutor | None = None
+
+type _ContextCountCacheKey = tuple[str, str, str, str, str, str, str, str]
+
+_CONTEXT_COUNT_CACHE: OrderedDict[_ContextCountCacheKey, dict[str, Any]] = OrderedDict()
+_CONTEXT_COUNT_INFLIGHT: dict[_ContextCountCacheKey, asyncio.Task[dict[str, Any]]] = {}
+
+
+def _get_context_count_executor() -> ThreadPoolExecutor:
+    global _CONTEXT_COUNT_EXECUTOR
+    if _CONTEXT_COUNT_EXECUTOR is None:
+        _CONTEXT_COUNT_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="context-usage")
+    return _CONTEXT_COUNT_EXECUTOR
 
 
 # Order in which breakdown rows are listed in the UI. Items missing from the
@@ -38,7 +57,6 @@ _BREAKDOWN_ORDER: tuple[str, ...] = (
     "custom_agents",
     "memory_files",
     "mcp_tools_deferred",
-    "system_tools_deferred",
     "autocompact_buffer",
     "free_space",
 )
@@ -91,7 +109,7 @@ def _count_text(text: str | None, app_config: Any) -> int:
     if not _is_exact_counting(app_config):
         return _approx_text_tokens(text)
     try:
-        from deerflow.agents.memory.prompt import _count_tokens  # noqa: SLF001
+        from deerflow.agents.memory.backends.deermem.deermem.core.prompt import _count_tokens  # noqa: SLF001
 
         return int(_count_tokens(text, use_tiktoken=True))
     except Exception:
@@ -118,7 +136,7 @@ def _count_messages(messages: list[Any], app_config: Any) -> int:
 
     from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
-    from deerflow.agents.memory.prompt import _count_tokens  # noqa: SLF001
+    from deerflow.agents.memory.backends.deermem.deermem.core.prompt import _count_tokens  # noqa: SLF001
 
     total = 0
     for msg in messages:
@@ -186,22 +204,45 @@ async def _resolve_thread_runtime(run_store: Any, thread_id: str, app_config: An
     return (models[0].name if models else None), runtime
 
 
-async def _load_checkpoint_messages(checkpointer: Any, thread_id: str) -> tuple[list[Any], dict[str, Any] | None]:
+def _checkpoint_cache_token(checkpoint: dict[str, Any], messages: list[Any], promoted: dict[str, Any] | None) -> str:
+    checkpoint_id = checkpoint.get("id")
+    if isinstance(checkpoint_id, str) and checkpoint_id:
+        return checkpoint_id
+
+    snapshot = {
+        "messages": [
+            {
+                "type": type(message).__name__,
+                "id": getattr(message, "id", None),
+                "content": getattr(message, "content", None),
+                "additional_kwargs": getattr(message, "additional_kwargs", None),
+            }
+            for message in messages
+        ],
+        "promoted": promoted,
+    }
+    serialized = json.dumps(snapshot, ensure_ascii=False, sort_keys=True, default=repr)
+    return f"snapshot:{hashlib.sha256(serialized.encode()).hexdigest()}"
+
+
+async def _load_checkpoint_messages(checkpointer: Any, thread_id: str) -> tuple[list[Any], dict[str, Any] | None, str]:
     """Load messages and the raw promoted-tool entry from the thread checkpoint.
 
-    Returns ``(messages, promoted)``. ``promoted`` is the raw
+    Returns ``(messages, promoted, checkpoint_token)``. ``promoted`` is the raw
     ``{"catalog_hash", "names"}`` dict persisted by ``tool_search`` (or ``None``);
     it is scoped by catalog hash later in :func:`_split_tools` so a stale
-    promotion from MCP-config drift cannot inflate the active count.
+    promotion from MCP-config drift cannot inflate the active count. The stable
+    checkpoint token keys the bounded per-turn render cache.
     """
     checkpoint_tuple = await checkpointer.aget_tuple({"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}})
     if checkpoint_tuple is None:
-        return [], None
+        return [], None, _checkpoint_cache_token({}, [], None)
     checkpoint = getattr(checkpoint_tuple, "checkpoint", {}) or {}
     channel_values = checkpoint.get("channel_values", {}) if isinstance(checkpoint, dict) else {}
     messages = list(channel_values.get("messages") or [])
     promoted = channel_values.get("promoted")
-    return messages, promoted if isinstance(promoted, dict) else None
+    promoted = promoted if isinstance(promoted, dict) else None
+    return messages, promoted, _checkpoint_cache_token(checkpoint, messages, promoted)
 
 
 def _is_injected_memory_message(message: Any) -> bool:
@@ -301,6 +342,8 @@ def _count_system_prompt(
     user_id: str | None = None,
     subagent_enabled: bool | None = None,
     max_concurrent_subagents: int | None = None,
+    skills_tokens: int | None = None,
+    subagent_tokens: int | None = None,
 ) -> int:
     """System prompt tokens *excluding* skills/subagent sections.
 
@@ -336,21 +379,25 @@ def _count_system_prompt(
         full_tokens = _count_text(full, app_config)
 
         # Pieces accounted for under their own breakdown rows.
-        skills_tokens = _count_text(
-            get_skills_prompt_section(
-                available_skills=available_skills,
-                app_config=app_config,
-                user_id=user_id,
-            ),
-            app_config,
-        )
-        subagent_section_tokens = _count_subagent_section(
-            app_config,
-            enabled=resolved_subagent_enabled,
-            max_concurrent=resolved_max_concurrent,
-        )
+        resolved_skills_tokens = skills_tokens
+        if resolved_skills_tokens is None:
+            resolved_skills_tokens = _count_text(
+                get_skills_prompt_section(
+                    available_skills=available_skills,
+                    app_config=app_config,
+                    user_id=user_id,
+                ),
+                app_config,
+            )
+        resolved_subagent_tokens = subagent_tokens
+        if resolved_subagent_tokens is None:
+            resolved_subagent_tokens = _count_subagent_section(
+                app_config,
+                enabled=resolved_subagent_enabled,
+                max_concurrent=resolved_max_concurrent,
+            )
 
-        return max(0, full_tokens - skills_tokens - subagent_section_tokens)
+        return max(0, full_tokens - resolved_skills_tokens - resolved_subagent_tokens)
     except Exception:
         logger.warning("Failed to render system prompt for token breakdown", exc_info=True)
         return 0
@@ -392,12 +439,10 @@ def _split_tools(
     model_name: str | None,
     *,
     tool_groups: list[str] | None = None,
-    available_skills: set[str] | None = None,
-    user_id: str | None = None,
     subagent_enabled: bool | None = None,
     promoted: dict[str, Any] | None = None,
-) -> tuple[int, int, int, int]:
-    """Return (system_tools_active, mcp_tools_active, system_tools_deferred, mcp_tools_deferred).
+) -> tuple[int, int, int]:
+    """Return (system_tools_active, mcp_tools_active, mcp_tools_deferred).
 
     A tool is "deferred" exactly when ``tool_search.enabled`` is on, it is
     MCP-sourced, AND it has not been promoted in this thread — mirroring
@@ -411,6 +456,12 @@ def _split_tools(
     :func:`deerflow.tools.get_available_tools` via
     :func:`deerflow.tools.mcp_metadata.tag_mcp_tool`, so ``is_mcp_tool(tool)``
     classifies the returned list directly — no registry lookup is needed.
+
+    Skill ``allowed-tools`` filtering is intentionally not replayed here. On
+    current main it is model-call-local and applies only to slash-activated or
+    in-context skills; globally filtering by every enabled skill would
+    under-count ordinary passive turns. The checkpoint endpoint does not retain
+    enough run-local slash context to reconstruct that middleware decision.
     """
     try:
         from deerflow.tools.mcp_metadata import is_mcp_tool
@@ -425,23 +476,6 @@ def _split_tools(
             app_config=app_config,
         )
 
-        from deerflow.agents.lead_agent.agent import _load_enabled_skills_for_tool_policy  # noqa: SLF001
-        from deerflow.skills.tool_policy import SKILL_LOADING_TOOL_NAMES, filter_tools_by_skill_allowed_tools
-
-        try:
-            skills = _load_enabled_skills_for_tool_policy(
-                available_skills,
-                app_config=app_config,
-                user_id=user_id,
-            )
-            all_tools = filter_tools_by_skill_allowed_tools(
-                all_tools,
-                skills,
-                always_allowed_tool_names=SKILL_LOADING_TOOL_NAMES,
-            )
-        except Exception:
-            logger.warning("Failed to apply skill tool policy to context usage", exc_info=True)
-
         # deferred ⟺ (tool_search enabled AND MCP-sourced AND not promoted in this thread).
         ts_cfg = getattr(app_config, "tool_search", None)
         tool_search_enabled = bool(getattr(ts_cfg, "enabled", False))
@@ -454,7 +488,6 @@ def _split_tools(
 
         system_active = 0
         mcp_active = 0
-        system_deferred = 0
         mcp_deferred = 0
         for tool in all_tools:
             tokens = _approx_tool_schema_tokens(tool, app_config)
@@ -465,18 +498,15 @@ def _split_tools(
             # catalog drift simply match no tool here, so they cannot misclassify.
             is_deferred = tool_search_enabled and is_mcp and name not in promoted_names
             if is_deferred:
-                if is_mcp:
-                    mcp_deferred += tokens
-                else:
-                    system_deferred += tokens
+                mcp_deferred += tokens
             elif is_mcp:
                 mcp_active += tokens
             else:
                 system_active += tokens
-        return system_active, mcp_active, system_deferred, mcp_deferred
+        return system_active, mcp_active, mcp_deferred
     except Exception:
         logger.warning("Failed to enumerate tools for context-usage breakdown", exc_info=True)
-        return 0, 0, 0, 0
+        return 0, 0, 0
 
 
 def _compute_context_counts(
@@ -524,13 +554,13 @@ def _compute_context_counts(
         user_id=user_id,
         subagent_enabled=subagent_enabled,
         max_concurrent_subagents=max_concurrent,
+        skills_tokens=skills_tokens,
+        subagent_tokens=custom_agents_tokens,
     )
-    system_tools_active, mcp_tools_active, system_tools_deferred, mcp_tools_deferred = _split_tools(
+    system_tools_active, mcp_tools_active, mcp_tools_deferred = _split_tools(
         app_config,
         model_name,
         tool_groups=tool_groups,
-        available_skills=available_skills,
-        user_id=user_id,
         subagent_enabled=subagent_enabled,
         promoted=promoted,
     )
@@ -545,7 +575,6 @@ def _compute_context_counts(
         "memory_tokens": memory_tokens,
         "system_tools_active": system_tools_active,
         "mcp_tools_active": mcp_tools_active,
-        "system_tools_deferred": system_tools_deferred,
         "mcp_tools_deferred": mcp_tools_deferred,
         "summarization_trigger": _summarization_trigger_tokens(app_config),
     }
@@ -553,19 +582,23 @@ def _compute_context_counts(
 
 def _summarization_trigger_tokens(app_config: Any) -> int | None:
     """Return the token-based summarization trigger, or ``None`` if not set."""
-    summarization = getattr(app_config, "summarization", None)
-    if summarization is None or not getattr(summarization, "enabled", False):
-        return None
-    triggers = getattr(summarization, "trigger", None) or []
-    for trig in triggers:
-        if isinstance(trig, dict):
-            ttype = trig.get("type")
-            tvalue = trig.get("value")
-        else:
-            ttype = getattr(trig, "type", None)
-            tvalue = getattr(trig, "value", None)
-        if ttype == "tokens" and isinstance(tvalue, int) and tvalue > 0:
-            return int(tvalue)
+    try:
+        summarization = getattr(app_config, "summarization", None)
+        if summarization is None or not getattr(summarization, "enabled", False):
+            return None
+        configured = getattr(summarization, "trigger", None)
+        triggers = configured if isinstance(configured, (list, tuple)) else [configured] if configured is not None else []
+        for trig in triggers:
+            if isinstance(trig, dict):
+                ttype = trig.get("type")
+                tvalue = trig.get("value")
+            else:
+                ttype = getattr(trig, "type", None)
+                tvalue = getattr(trig, "value", None)
+            if ttype == "tokens" and isinstance(tvalue, int) and tvalue > 0:
+                return int(tvalue)
+    except Exception:
+        logger.warning("Failed to read summarization trigger for context usage", exc_info=True)
     return None
 
 
@@ -579,7 +612,6 @@ def build_context_usage_payload(
     memory_tokens: int,
     system_tools_active: int,
     mcp_tools_active: int,
-    system_tools_deferred: int,
     mcp_tools_deferred: int,
     summarization_trigger: int | None,
 ) -> dict[str, Any]:
@@ -597,7 +629,6 @@ def build_context_usage_payload(
         "system_tools": system_tools_active,
         "mcp_tools": mcp_tools_active,
         "mcp_tools_deferred": mcp_tools_deferred,
-        "system_tools_deferred": system_tools_deferred,
     }
 
     used_tokens = sum(v for k, v in raw_counts.items() if k in _ACTIVE_KEYS)
@@ -631,6 +662,113 @@ def build_context_usage_payload(
     }
 
 
+def _cache_json(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, default=repr)
+
+
+def _context_count_cache_key(
+    *,
+    thread_id: str,
+    checkpoint_token: str,
+    app_config: Any,
+    model_name: str | None,
+    runtime: dict[str, Any],
+    agent_name: str | None,
+    user_id: str,
+    promoted: dict[str, Any] | None,
+) -> _ContextCountCacheKey:
+    return (
+        thread_id,
+        checkpoint_token,
+        str(id(app_config)),
+        model_name or "",
+        agent_name or "",
+        user_id,
+        _cache_json(runtime),
+        _cache_json(promoted),
+    )
+
+
+async def _run_context_count(
+    messages: list[Any],
+    app_config: Any,
+    model_name: str | None,
+    runtime: dict[str, Any],
+    agent_name: str | None,
+    promoted: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Run one render on a small dedicated executor with ContextVars preserved."""
+    loop = asyncio.get_running_loop()
+    context = contextvars.copy_context()
+    call = functools.partial(
+        context.run,
+        _compute_context_counts,
+        messages,
+        app_config,
+        model_name,
+        runtime,
+        agent_name,
+        promoted,
+    )
+    return await loop.run_in_executor(_get_context_count_executor(), call)
+
+
+def _finish_context_count(cache_key: _ContextCountCacheKey, task: asyncio.Task[dict[str, Any]]) -> None:
+    if _CONTEXT_COUNT_INFLIGHT.get(cache_key) is task:
+        _CONTEXT_COUNT_INFLIGHT.pop(cache_key, None)
+    if task.cancelled():
+        return
+    try:
+        counts = task.result()
+    except Exception:
+        # Retrieving the exception prevents an unobserved-task warning when the
+        # only request awaiting this task already timed out. The request path
+        # logs failures that complete before its timeout.
+        return
+    _CONTEXT_COUNT_CACHE[cache_key] = counts
+    _CONTEXT_COUNT_CACHE.move_to_end(cache_key)
+    while len(_CONTEXT_COUNT_CACHE) > _CONTEXT_COUNT_CACHE_SIZE:
+        _CONTEXT_COUNT_CACHE.popitem(last=False)
+
+
+async def _get_context_counts(
+    cache_key: _ContextCountCacheKey,
+    messages: list[Any],
+    app_config: Any,
+    model_name: str | None,
+    runtime: dict[str, Any],
+    agent_name: str | None,
+    promoted: dict[str, Any] | None,
+    *,
+    timeout_seconds: float = _CONTEXT_COUNT_TIMEOUT_SECONDS,
+) -> dict[str, Any]:
+    """Return per-turn counts, reusing one tracked worker after waiter timeouts."""
+    cached = _CONTEXT_COUNT_CACHE.get(cache_key)
+    if cached is not None:
+        _CONTEXT_COUNT_CACHE.move_to_end(cache_key)
+        return cached
+
+    task = _CONTEXT_COUNT_INFLIGHT.get(cache_key)
+    if task is None:
+        task = asyncio.create_task(
+            _run_context_count(
+                messages,
+                app_config,
+                model_name,
+                runtime,
+                agent_name,
+                promoted,
+            )
+        )
+        _CONTEXT_COUNT_INFLIGHT[cache_key] = task
+        task.add_done_callback(functools.partial(_finish_context_count, cache_key))
+
+    # Shielding keeps the tracked worker alive after this request times out.
+    # A subsequent invalidation/refetch for the same checkpoint reuses it
+    # instead of leaking another default-executor thread.
+    return await asyncio.wait_for(asyncio.shield(task), timeout=timeout_seconds)
+
+
 async def build_context_usage(request: Request, thread_id: str, run_store: Any) -> dict[str, Any] | None:
     """Compute the full context-usage breakdown for ``thread_id``.
 
@@ -649,7 +787,7 @@ async def build_context_usage(request: Request, thread_id: str, run_store: Any) 
         app_config = None
 
     try:
-        messages, promoted = await _load_checkpoint_messages(checkpointer, thread_id)
+        messages, promoted, checkpoint_token = await _load_checkpoint_messages(checkpointer, thread_id)
     except Exception:
         logger.warning("Failed to load checkpoint for thread %s", thread_id, exc_info=True)
         return None
@@ -664,7 +802,6 @@ async def build_context_usage(request: Request, thread_id: str, run_store: Any) 
             memory_tokens=memory_tokens,
             system_tools_active=0,
             mcp_tools_active=0,
-            system_tools_deferred=0,
             mcp_tools_deferred=0,
             summarization_trigger=None,
         )
@@ -675,18 +812,28 @@ async def build_context_usage(request: Request, thread_id: str, run_store: Any) 
         runtime_agent_name = runtime.get("agent_name")
         agent_name = runtime_agent_name if isinstance(runtime_agent_name, str) else None
 
+    from deerflow.runtime.user_context import get_effective_user_id
+
+    cache_key = _context_count_cache_key(
+        thread_id=thread_id,
+        checkpoint_token=checkpoint_token,
+        app_config=app_config,
+        model_name=model_name,
+        runtime=runtime,
+        agent_name=agent_name,
+        user_id=get_effective_user_id(),
+        promoted=promoted,
+    )
+
     try:
-        counts = await asyncio.wait_for(
-            asyncio.to_thread(
-                _compute_context_counts,
-                messages,
-                app_config,
-                model_name,
-                runtime,
-                agent_name,
-                promoted,
-            ),
-            timeout=_CONTEXT_COUNT_TIMEOUT_SECONDS,
+        counts = await _get_context_counts(
+            cache_key,
+            messages,
+            app_config,
+            model_name,
+            runtime,
+            agent_name,
+            promoted,
         )
     except TimeoutError:
         logger.warning("Context-usage calculation timed out for thread %s", thread_id)

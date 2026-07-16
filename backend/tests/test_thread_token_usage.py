@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import ANY, AsyncMock, MagicMock
 
@@ -155,7 +156,6 @@ def _kwargs(**overrides) -> dict:
         memory_tokens=0,
         system_tools_active=0,
         mcp_tools_active=0,
-        system_tools_deferred=0,
         mcp_tools_deferred=0,
         summarization_trigger=None,
     )
@@ -203,7 +203,6 @@ def test_payload_orders_rows_canonically():
             custom_agents_tokens=100,
             memory_tokens=50,
             mcp_tools_deferred=80,
-            system_tools_deferred=40,
             summarization_trigger=8000,
         )
     )
@@ -217,7 +216,6 @@ def test_payload_orders_rows_canonically():
         "custom_agents",
         "memory_files",
         "mcp_tools_deferred",
-        "system_tools_deferred",
         "autocompact_buffer",
         "free_space",
     ]
@@ -281,12 +279,10 @@ def test_payload_marks_deferred_rows_inactive():
             max_context_tokens=10000,
             messages_tokens=100,
             mcp_tools_deferred=500,
-            system_tools_deferred=300,
         )
     )
     rows = {row["key"]: row for row in payload["breakdown"]}
     assert rows["mcp_tools_deferred"]["active"] is False
-    assert rows["system_tools_deferred"]["active"] is False
     # Deferred items must not feed the percentage.
     assert payload["used_tokens"] == 100
     assert payload["percentage"] == 1.0
@@ -308,6 +304,19 @@ def test_summarization_trigger_picks_tokens_type():
         ),
     )
     assert context_usage._summarization_trigger_tokens(config) == 12345
+
+
+def test_summarization_trigger_accepts_single_context_size():
+    from deerflow.config.summarization_config import ContextSize
+
+    config = SimpleNamespace(
+        summarization=SimpleNamespace(
+            enabled=True,
+            trigger=ContextSize(type="tokens", value=4000),
+        ),
+    )
+
+    assert context_usage._summarization_trigger_tokens(config) == 4000
 
 
 def test_summarization_trigger_returns_none_when_disabled():
@@ -336,6 +345,15 @@ def _make_tool(name: str, *, mcp: bool = False) -> SimpleNamespace:
     # A short, deterministic schema-ish body so _approx_tool_schema_tokens
     # falls into its except branch and counts name + description.
     return tool
+
+
+def test_context_usage_import_targets_follow_current_harness_layout():
+    """Regression: harness refactors must fail CI instead of zeroing rows silently."""
+    from deerflow.agents.memory.backends.deermem.deermem.core.prompt import _count_tokens
+    from deerflow.skills.tool_policy import ALWAYS_AVAILABLE_BUILTIN_TOOL_NAMES
+
+    assert callable(_count_tokens)
+    assert "read_file" in ALWAYS_AVAILABLE_BUILTIN_TOOL_NAMES
 
 
 def test_compute_deferred_tool_names_empty_when_disabled(monkeypatch):
@@ -369,10 +387,9 @@ def test_split_tools_classifies_deferred_mcp_when_enabled(monkeypatch):
         subagents=SimpleNamespace(enabled=False),
         tool_search=SimpleNamespace(enabled=True),
     )
-    system_active, mcp_active, system_deferred, mcp_deferred = context_usage._split_tools(config, None)
+    system_active, mcp_active, mcp_deferred = context_usage._split_tools(config, None)
     assert system_active > 0  # bash counted as active system tool
     assert mcp_active == 0  # no MCP tool is active — all are deferred
-    assert system_deferred == 0  # only MCP tools can be deferred
     assert mcp_deferred > 0  # mcp_a counted as deferred MCP tool
 
 
@@ -386,7 +403,7 @@ def test_split_tools_classifies_mcp_active_when_disabled(monkeypatch):
         subagents=SimpleNamespace(enabled=False),
         tool_search=SimpleNamespace(enabled=False),
     )
-    system_active, mcp_active, system_deferred, mcp_deferred = context_usage._split_tools(config, None)
+    system_active, mcp_active, mcp_deferred = context_usage._split_tools(config, None)
     assert mcp_active > 0
     assert mcp_deferred == 0
 
@@ -408,11 +425,14 @@ def test_split_tools_counts_promoted_mcp_as_active(monkeypatch):
         tool_search=SimpleNamespace(enabled=True),
     )
     # mcp_a was promoted in this thread; mcp_b is still deferred.
-    system_active, mcp_active, system_deferred, mcp_deferred = context_usage._split_tools(config, None, promoted={"catalog_hash": "x", "names": ["mcp_a"]})
+    system_active, mcp_active, mcp_deferred = context_usage._split_tools(
+        config,
+        None,
+        promoted={"catalog_hash": "x", "names": ["mcp_a"]},
+    )
     assert mcp_active > 0  # mcp_a now active
     assert mcp_deferred > 0  # mcp_b still deferred
     assert system_active == 0
-    assert system_deferred == 0
 
 
 def test_effective_promoted_names_scoped_by_catalog_hash(monkeypatch):
@@ -482,9 +502,10 @@ async def test_load_checkpoint_messages_returns_raw_promoted_entry():
         async def aget_tuple(self, _config):
             return _Tuple()
 
-    messages, result = await context_usage._load_checkpoint_messages(_Chk(), "t1")
+    messages, result, checkpoint_id = await context_usage._load_checkpoint_messages(_Chk(), "t1")
     assert messages == [msg]
     assert result == promoted  # raw, untouched; dedup happens in _effective_promoted_names
+    assert checkpoint_id.startswith("snapshot:")
 
 
 @pytest.mark.asyncio
@@ -498,8 +519,23 @@ async def test_load_checkpoint_messages_returns_none_when_missing():
         async def aget_tuple(self, _config):
             return _Tuple()
 
-    _messages, promoted = await context_usage._load_checkpoint_messages(_Chk(), "t1")
+    _messages, promoted, checkpoint_id = await context_usage._load_checkpoint_messages(_Chk(), "t1")
     assert promoted is None
+    assert checkpoint_id.startswith("snapshot:")
+
+
+@pytest.mark.asyncio
+async def test_load_checkpoint_messages_uses_checkpoint_id():
+    class _Tuple:
+        checkpoint = {"id": "checkpoint-7", "channel_values": {"messages": []}}
+
+    class _Chk:
+        async def aget_tuple(self, _config):
+            return _Tuple()
+
+    _messages, _promoted, checkpoint_id = await context_usage._load_checkpoint_messages(_Chk(), "t1")
+
+    assert checkpoint_id == "checkpoint-7"
 
 
 def test_count_system_prompt_returns_nonzero(monkeypatch):
@@ -529,6 +565,34 @@ def test_count_system_prompt_returns_nonzero(monkeypatch):
     )
     tokens = context_usage._count_system_prompt(config)
     assert tokens == 100  # would be 0 if the TypeError were still swallowed
+
+
+def test_count_system_prompt_reuses_precomputed_section_counts(monkeypatch):
+    monkeypatch.setattr(
+        "deerflow.agents.lead_agent.prompt.apply_prompt_template",
+        lambda **_: "x" * 400,
+    )
+    monkeypatch.setattr(
+        "deerflow.agents.lead_agent.prompt.get_skills_prompt_section",
+        MagicMock(side_effect=AssertionError("skills rendered twice")),
+    )
+    monkeypatch.setattr(
+        context_usage,
+        "_count_subagent_section",
+        MagicMock(side_effect=AssertionError("subagents rendered twice")),
+    )
+    config = SimpleNamespace(
+        subagents=None,
+        tool_search=SimpleNamespace(enabled=False),
+    )
+
+    tokens = context_usage._count_system_prompt(
+        config,
+        skills_tokens=10,
+        subagent_tokens=20,
+    )
+
+    assert tokens == 70
 
 
 # ---------------------------------------------------------------------------
@@ -567,7 +631,10 @@ def test_count_text_exact_delegates_to_model_tokenizer(monkeypatch):
         calls.append(text)
         return 42  # deterministic sentinel
 
-    monkeypatch.setattr("deerflow.agents.memory.prompt._count_tokens", _fake_count)
+    monkeypatch.setattr(
+        "deerflow.agents.memory.backends.deermem.deermem.core.prompt._count_tokens",
+        _fake_count,
+    )
     config = _config_with_counting("exact")
 
     assert context_usage._count_text("你好世界", config) == 42
@@ -580,7 +647,10 @@ def test_count_text_exact_falls_back_when_tokenizer_unavailable(monkeypatch):
     def _boom(*args, **kwargs):
         raise RuntimeError("tiktoken exploded")
 
-    monkeypatch.setattr("deerflow.agents.memory.prompt._count_tokens", _boom)
+    monkeypatch.setattr(
+        "deerflow.agents.memory.backends.deermem.deermem.core.prompt._count_tokens",
+        _boom,
+    )
     config = _config_with_counting("exact")
     # 8 chars -> 2 tokens (heuristic fallback), NOT 0.
     assert context_usage._count_text("abcdefgh", config) == 2
@@ -601,7 +671,10 @@ def test_count_messages_approximate_uses_langchain_heuristic(monkeypatch):
 
 
 def test_count_messages_exact_tokenizes_text(monkeypatch):
-    monkeypatch.setattr("deerflow.agents.memory.prompt._count_tokens", lambda text, **_: len(text))
+    monkeypatch.setattr(
+        "deerflow.agents.memory.backends.deermem.deermem.core.prompt._count_tokens",
+        lambda text, **_: len(text),
+    )
     config = _config_with_counting("exact")
     # Each message contributes its text length + 4 framing tokens.
     from langchain_core.messages import HumanMessage, SystemMessage
@@ -678,7 +751,7 @@ def test_custom_agent_settings_flow_into_prompt_and_tools(monkeypatch):
     monkeypatch.setattr(context_usage, "_count_checkpoint_tokens", lambda _messages, _config: (11, 3))
     skills_counter = MagicMock(return_value=5)
     prompt_counter = MagicMock(return_value=13)
-    tools_counter = MagicMock(return_value=(17, 19, 23, 29))
+    tools_counter = MagicMock(return_value=(17, 19, 29))
     monkeypatch.setattr(context_usage, "_count_skills_section", skills_counter)
     monkeypatch.setattr(context_usage, "_count_subagent_section", MagicMock(return_value=7))
     monkeypatch.setattr(context_usage, "_count_system_prompt", prompt_counter)
@@ -708,11 +781,11 @@ def test_custom_agent_settings_flow_into_prompt_and_tools(monkeypatch):
         "user_id": scoped_user_id,
         "subagent_enabled": True,
         "max_concurrent_subagents": 6,
+        "skills_tokens": 5,
+        "subagent_tokens": 7,
     }
     assert tools_counter.call_args.kwargs == {
         "tool_groups": ["web"],
-        "available_skills": {"code-review"},
-        "user_id": scoped_user_id,
         "subagent_enabled": True,
         "promoted": None,
     }
@@ -725,22 +798,26 @@ async def test_context_rendering_is_offloaded_from_event_loop(monkeypatch):
     counts = _kwargs(max_context_tokens=10_000, messages_tokens=4)
     monkeypatch.setattr(context_usage, "get_checkpointer", lambda _request: checkpointer)
     monkeypatch.setattr(context_usage, "get_config", lambda: SimpleNamespace())
-    monkeypatch.setattr(context_usage, "_load_checkpoint_messages", AsyncMock(return_value=(messages, None)))
+    monkeypatch.setattr(
+        context_usage,
+        "_load_checkpoint_messages",
+        AsyncMock(return_value=(messages, None, "checkpoint-1")),
+    )
     monkeypatch.setattr(
         context_usage,
         "_resolve_thread_runtime",
         AsyncMock(return_value=("model", {"subagent_enabled": False})),
     )
     monkeypatch.setattr(context_usage, "_resolve_thread_agent_name", AsyncMock(return_value=None))
-    to_thread = AsyncMock(return_value=counts)
-    monkeypatch.setattr(context_usage.asyncio, "to_thread", to_thread)
+    get_counts = AsyncMock(return_value=counts)
+    monkeypatch.setattr(context_usage, "_get_context_counts", get_counts)
 
     payload = await context_usage.build_context_usage(MagicMock(), "thread-1", MagicMock())
 
     assert payload is not None
     assert payload["used_tokens"] == 4
-    to_thread.assert_awaited_once_with(
-        context_usage._compute_context_counts,
+    get_counts.assert_awaited_once_with(
+        ANY,
         messages,
         ANY,
         "model",
@@ -748,3 +825,37 @@ async def test_context_rendering_is_offloaded_from_event_loop(monkeypatch):
         None,
         None,
     )
+
+
+@pytest.mark.asyncio
+async def test_context_count_timeout_reuses_inflight_task(monkeypatch):
+    context_usage._CONTEXT_COUNT_CACHE.clear()
+    context_usage._CONTEXT_COUNT_INFLIGHT.clear()
+    started = 0
+    release = asyncio.Event()
+    counts = _kwargs(max_context_tokens=10_000, messages_tokens=4)
+
+    async def _slow_count(*_args):
+        nonlocal started
+        started += 1
+        await release.wait()
+        return counts
+
+    monkeypatch.setattr(context_usage, "_run_context_count", _slow_count)
+    key = ("thread-1", "checkpoint-1", "config", "model", "agent", "user", "{}", "null")
+    args = ([], SimpleNamespace(), "model", {}, None, None)
+
+    with pytest.raises(TimeoutError):
+        await context_usage._get_context_counts(key, *args, timeout_seconds=0.001)
+    with pytest.raises(TimeoutError):
+        await context_usage._get_context_counts(key, *args, timeout_seconds=0.001)
+    assert started == 1
+
+    release.set()
+    result = await context_usage._get_context_counts(key, *args, timeout_seconds=1)
+    assert result == counts
+    await asyncio.sleep(0)
+    assert await context_usage._get_context_counts(key, *args, timeout_seconds=1) == counts
+    assert started == 1
+    context_usage._CONTEXT_COUNT_CACHE.clear()
+    context_usage._CONTEXT_COUNT_INFLIGHT.clear()

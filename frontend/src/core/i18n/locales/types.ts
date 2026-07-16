@@ -543,7 +543,6 @@ export interface Translations {
       custom_agents: string;
       memory_files: string;
       mcp_tools_deferred: string;
-      system_tools_deferred: string;
       autocompact_buffer: string;
       free_space: string;
     };

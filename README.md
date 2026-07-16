@@ -735,6 +735,8 @@ The Web UI shows the active goal above the composer. The same command is availab
 
 Use `/compact` in the Web UI composer to summarize older context for the current thread. DeerFlow keeps the full chat visible, but future model calls use the compacted summary plus recent messages. The command is ignored when there is not enough history to compact, and it is blocked while the thread has a run in flight.
 
+The chat header also shows a context-window gauge with the current percentage and a per-category breakdown when the selected model has `context_window` configured. The gauge stays visible as a lightweight placeholder while checkpoint usage is temporarily unavailable, so the control does not jump in and out during refetches or timeouts.
+
 ### Sub-Agents
 
 Complex tasks rarely fit in a single pass. DeerFlow decomposes them.

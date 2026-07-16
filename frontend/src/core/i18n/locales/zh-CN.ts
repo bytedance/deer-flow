@@ -633,7 +633,6 @@ export const zhCN: Translations = {
       custom_agents: "自定义子代理",
       memory_files: "记忆注入",
       mcp_tools_deferred: "MCP 工具（延迟加载）",
-      system_tools_deferred: "系统工具（延迟加载）",
       autocompact_buffer: "自动压缩预留",
       free_space: "剩余空间",
     },

@@ -76,7 +76,6 @@ export type ContextUsageBreakdownKey =
   | "custom_agents"
   | "memory_files"
   | "mcp_tools_deferred"
-  | "system_tools_deferred"
   | "autocompact_buffer"
   | "free_space";
 

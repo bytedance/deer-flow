@@ -36,7 +36,23 @@ export function ContextUsageBadge({
   const { t } = useI18n();
 
   if (!contextUsage || contextUsage.breakdown.length === 0) {
-    return null;
+    return (
+      <Button
+        type="button"
+        variant="ghost"
+        size="icon-sm"
+        disabled
+        data-context-usage-placeholder="true"
+        aria-label={t.contextUsage.title}
+        title={t.contextUsage.title}
+        className={cn(
+          "text-muted-foreground bg-background/70 rounded-full border",
+          className,
+        )}
+      >
+        <GaugeIcon size={14} />
+      </Button>
+    );
   }
 
   const formatted = formatContextUsagePercentage(contextUsage.percentage);

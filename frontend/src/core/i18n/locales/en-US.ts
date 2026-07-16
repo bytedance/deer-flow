@@ -658,7 +658,6 @@ export const enUS: Translations = {
       custom_agents: "Custom agents",
       memory_files: "Memory files",
       mcp_tools_deferred: "MCP tools (deferred)",
-      system_tools_deferred: "System tools (deferred)",
       autocompact_buffer: "Autocompact buffer",
       free_space: "Free space",
     },
