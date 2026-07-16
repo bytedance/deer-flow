@@ -1445,6 +1445,7 @@ sandbox:
 #     description: Claude Code for implementation, refactoring, and debugging
 #     model: null
 #     # auto_approve_permissions: false  # Set to true to auto-approve ACP permission requests
+#     # timeout_seconds: 1800            # Abort + kill the subprocess if it doesn't respond in time (default: 1800 = 30 min)
 #     # env:                             # Optional: inject environment variables into the agent subprocess
 #     #   ANTHROPIC_API_KEY: $ANTHROPIC_API_KEY  # $VAR resolves from host environment
 #
