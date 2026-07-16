@@ -1474,6 +1474,15 @@ summarization:
 #   staleness_min_candidates       - Minimum stale facts to trigger review (default: 3)
 #   staleness_max_removals_per_cycle - Safety cap on removals per cycle (default: 10)
 #   staleness_protected_categories - Categories exempt from staleness review (default: ["correction"])
+#   staleness_max_lifetime_multiplier - Creation-time cap multiplier for a fact LLM-assigned
+#                                       expected_valid_days; new facts clamped to
+#                                       staleness_age_days x multiplier. Default 20.0
+#                                       (90 x 20 = 1800d ~ 5 years) supports the very-stable
+#                                       prompt tier. (default: 20.0, range: 1.0-100.0)
+#   staleness_max_extension_days   - Absolute ceiling (in days) on expected_valid_days after a
+#                                    lifetime extension (staleFactsToExtend). Prevents timedelta
+#                                    overflow and LLM misfire from permanently deferring a fact.
+#                                    (default: 3650, range: 90-36500)
 memory:
   enabled: true
   injection_enabled: true # Whether to inject memory into system prompt
@@ -1527,14 +1536,19 @@ memory:
     guaranteed_token_budget: 500
     # Staleness review: periodically prune aged facts that may no longer reflect
     # the user current situation. When triggered, the LLM reviews facts older
-    # than staleness_age_days during the normal memory-update call (same LLM
-    # invocation - no extra API call) and decides KEEP or REMOVE for each.
+    # than their individual review window (expected_valid_days, or
+    # staleness_age_days as fallback) during the normal memory-update call (same
+    # LLM invocation - no extra API call) and decides KEEP, REMOVE, or EXTEND
+    # for each. The LLM assigns expected_valid_days when creating a fact; EXTEND
+    # (staleFactsToExtend) recalibrates that window at review time.
     staleness_review_enabled: true
     staleness_age_days: 90
     staleness_min_candidates: 3
     staleness_max_removals_per_cycle: 10
     staleness_protected_categories:
       - correction
+    staleness_max_lifetime_multiplier: 20.0   # creation cap = staleness_age_days x multiplier (90 x 20 = 1800d)
+    staleness_max_extension_days: 3650        # absolute ceiling on extended expected_valid_days (~10 years)
     # Memory consolidation (opt-in, lossy: source facts are replaced by a
     # synthesized one; only consolidatedFrom IDs are kept). Runs in the same
     # memory-update LLM call as extraction/staleness - no extra API cost.
