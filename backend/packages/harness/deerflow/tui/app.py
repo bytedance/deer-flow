@@ -144,7 +144,12 @@ class DeerFlowTUI(App):
     BINDINGS = [
         Binding("ctrl+c", "interrupt", "Interrupt / Quit", priority=True, show=True),
         Binding("ctrl+l", "redraw", "Redraw", show=False),
-        Binding("ctrl+u", "clear_composer", "Clear input", show=False),
+        # priority=True: Input's own BINDINGS already map ctrl+u to delete_left_all,
+        # which otherwise wins outright while the composer has focus (a focused
+        # widget's own bindings are checked before the App's non-priority ones).
+        # check_action gates this the same way as the other priority bindings below
+        # so it doesn't reach into the composer while a modal overlay is open.
+        Binding("ctrl+u", "clear_composer", "Clear input", show=False, priority=True),
         # Up/Down drive the palette when it's open, otherwise input history.
         # Tab/Enter/Esc only act when the palette is open. check_action gates all
         # of these so they never steal keys from a modal overlay or the composer.
@@ -241,16 +246,21 @@ class DeerFlowTUI(App):
     # ----- slash command palette ----------------------------------------- #
 
     def check_action(self, action: str, parameters):  # noqa: D401 - Textual hook
-        custom = {"nav_up", "nav_down", "palette_complete", "palette_accept", "escape"}
+        custom = {"nav_up", "nav_down", "palette_complete", "palette_accept", "escape", "clear_composer"}
         if action in custom:
             # A modal overlay (e.g. the model/thread picker) is on top — never
-            # intercept its keys; let the overlay handle them natively.
+            # intercept its keys; let the overlay handle them natively. This
+            # matters even for priority bindings: Textual's own modal-safety
+            # truncation (Screen._modal_binding_chain) only applies to the
+            # non-priority key pass, so a priority binding on the App (e.g.
+            # ctrl+u) would otherwise still fire while a modal is on top.
             if len(self.screen_stack) > 1:
                 return None
-            # nav (history), Tab and Esc are always consumed (Tab can't move focus
-            # off the composer; Esc closes the palette or interrupts a run). Enter
+            # nav (history), Tab, Esc and clear_composer are always consumed (Tab
+            # can't move focus off the composer; Esc closes the palette or
+            # interrupts a run; clear_composer isn't palette-dependent). Enter
             # falls through to the Input when the palette is closed so it submits.
-            if action in {"nav_up", "nav_down", "palette_complete", "escape"}:
+            if action in {"nav_up", "nav_down", "palette_complete", "escape", "clear_composer"}:
                 return True
             return True if self._palette_open else None
         return True

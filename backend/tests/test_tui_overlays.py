@@ -113,6 +113,28 @@ async def test_threads_command_opens_switcher_and_resumes():
 
 
 @pytest.mark.asyncio
+async def test_ctrl_u_does_not_leak_into_composer_while_modal_open():
+    # ctrl+u -> clear_composer is a priority binding so it can win over Input's
+    # own ctrl+u binding while the composer has focus (see app.py BINDINGS). But
+    # App-level priority bindings are still visible to check_action even while a
+    # modal is on top (Screen._modal_binding_chain only truncates the *non*
+    # priority pass), so check_action must keep gating it out like the other
+    # priority bindings — otherwise it would reach past the overlay and silently
+    # wipe the composer while the user is interacting with the picker.
+    app = DeerFlowTUI(_FakeSession(), LaunchPlan(mode="tui"))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        composer = app.query_one("#composer")
+        composer.value = "keep me"
+        app._open_model_picker()
+        await _settle(pilot, lambda: isinstance(app.screen, SelectScreen))
+        await pilot.press("ctrl+u")
+        await pilot.pause()
+        assert isinstance(app.screen, SelectScreen)
+    assert composer.value == "keep me"
+
+
+@pytest.mark.asyncio
 async def test_picker_escape_cancels_without_change():
     app = DeerFlowTUI(_FakeSession(), LaunchPlan(mode="tui"))
     async with app.run_test() as pilot:

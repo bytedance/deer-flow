@@ -108,6 +108,27 @@ async def test_up_arrow_recalls_previous_input_from_history():
 
 
 @pytest.mark.asyncio
+async def test_ctrl_u_clears_full_composer_not_just_left_of_cursor():
+    app = DeerFlowTUI(_FakeSession(), LaunchPlan(mode="tui"))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        composer = app.query_one("#composer")
+        for ch in "hello world":
+            await pilot.press("space" if ch == " " else ch)
+        assert composer.value == "hello world"
+        # Move the cursor left of the end so a left-of-cursor-only clear (Input's
+        # own ctrl+u -> delete_left_all binding) is observably different from a
+        # full composer clear (the app's intended clear_composer action).
+        await pilot.press("left", "left", "left")
+        await pilot.pause()
+        assert composer.cursor_position == len("hello world") - 3
+        await pilot.press("ctrl+u")
+        await pilot.pause()
+    # Input's shadowing binding would only remove "hello wo", leaving "rld".
+    assert composer.value == ""
+
+
+@pytest.mark.asyncio
 async def test_escape_interrupts_an_active_run():
     app = DeerFlowTUI(_FakeSession(), LaunchPlan(mode="tui"))
     async with app.run_test() as pilot:
