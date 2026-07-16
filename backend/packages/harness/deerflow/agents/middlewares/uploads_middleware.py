@@ -29,7 +29,7 @@ _MAX_FILES_PER_CONTEXT_SECTION = 10
 
 def _extension_label(file: dict) -> str:
     extension = str(file.get("extension") or Path(str(file.get("filename") or "")).suffix).lower()
-    return extension or "(no extension)"
+    return neutralize_untrusted_tags(extension) or "(no extension)"
 
 
 def _format_omitted_file_types(files: list[dict]) -> str:
