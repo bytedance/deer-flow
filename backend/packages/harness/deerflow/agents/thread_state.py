@@ -79,17 +79,6 @@ def merge_artifacts(existing: list[str] | None, new: list[str] | None) -> list[s
     return list(dict.fromkeys(existing + new))
 
 
-# Sentinel callers must pass to opt into clearing viewed_images. The default
-# "no-op writes are a no-op" invariant (matching merge_todos / merge_goal /
-# merge_promoted / merge_delegations / merge_skill_context) is restored so a
-# reducer-write of ``{}`` does NOT silently wipe the agent's vision context.
-# The legacy "empty dict clears" behavior was a footgun: any node returning
-# ``viewed_images={}`` accidentally wiped the entire image history with no log
-# line and no compensating re-fetch (D1 in the agent-core hunt).
-CLEAR_VIEWED_IMAGES: dict[str, ViewedImageData] = {"__deerflow_clear__": {"base64": "", "mime_type": ""}}
-_CLEAR_VIEWED_IMAGES_SENTINEL_KEY = next(iter(CLEAR_VIEWED_IMAGES))
-
-
 def merge_viewed_images(existing: dict[str, ViewedImageData] | None, new: dict[str, ViewedImageData] | None) -> dict[str, ViewedImageData]:
     """Reducer for viewed_images dict - merges image dictionaries.
 
@@ -98,16 +87,18 @@ def merge_viewed_images(existing: dict[str, ViewedImageData] | None, new: dict[s
       merge_delegations / merge_skill_context).
     - new is an empty dict -> preserve existing (no-op; accidental
       ``Command(update={"viewed_images": {}})`` no longer wipes vision context).
-    - new contains the :data:`CLEAR_VIEWED_IMAGES` sentinel key -> caller is
-      explicitly opting into clearing the channel; returns ``{}``.
+      The legacy "empty dict clears" behavior was a footgun: any node returning
+      ``viewed_images={}`` accidentally wiped the entire image history with no
+      log line and no compensating re-fetch (D1 in the agent-core hunt). No
+      caller needs explicit clearing today, so there is deliberately no clear
+      sentinel; if one becomes necessary, add an explicit opt-in rather than
+      resurrecting the empty-dict wipe.
     - otherwise -> merge dicts, new values override existing for same keys.
     """
     if existing is None:
         existing = {}
     if new is None or len(new) == 0:
         return existing
-    if _CLEAR_VIEWED_IMAGES_SENTINEL_KEY in new:
-        return {}
     return {**existing, **new}
 
 
@@ -187,11 +178,11 @@ def merge_delegations(existing: list[DelegationEntry] | None, new: list[Delegati
     - capped at ``_DELEGATION_LEDGER_MAX_ENTRIES``; the truncation is exposed
       to the renderer via the parallel
       :func:`merge_delegations_truncated_count` channel so the model-visible
-      rendering can append a "... (+N earlier delegations dropped from this
-      ledger)" marker. Without that marker the lead has no signal that
-      history was silently dropped and may re-delegate a task whose prior
-      completion is no longer in the visible ledger (D2 in the agent-core
-      hunt).
+      rendering can append a "... (+N earlier delegations dropped permanently
+      at the durable ledger cap)" marker. Without that marker the lead has no
+      signal that history was silently dropped and may re-delegate a task
+      whose prior completion is no longer in the visible ledger (D2 in the
+      agent-core hunt).
     """
     if not new:
         return existing or []
@@ -333,8 +324,9 @@ class ThreadState(AgentState):
     # Parallel channel that surfaces how many entries have been silently dropped
     # from :attr:`delegations` because the ledger exceeded its cap. The renderer
     # reads this to append a model-visible "... (+N earlier delegations dropped
-    # from this ledger)" marker so the lead does not re-delegate work whose
-    # completion is no longer in the visible ledger (D2 in the agent-core hunt).
+    # permanently at the durable ledger cap)" marker so the lead does not
+    # re-delegate work whose completion is no longer in the visible ledger (D2
+    # in the agent-core hunt).
     delegations_truncated_count: Annotated[int, merge_delegations_truncated_count]
     skill_context: Annotated[list[SkillEntry], merge_skill_context]
     summary_text: NotRequired[str | None]

@@ -9,7 +9,7 @@ from typing import Any
 
 from langchain_core.messages import AIMessage, AnyMessage, ToolMessage
 
-from deerflow.agents.thread_state import DelegationEntry
+from deerflow.agents.thread_state import _DELEGATION_LEDGER_MAX_ENTRIES, DelegationEntry
 from deerflow.subagents.status_contract import (
     read_subagent_result_metadata,
 )
@@ -186,14 +186,18 @@ def _render_entry_line(entry: DelegationEntry) -> str:
 def render_delegation_ledger(entries: list[DelegationEntry], *, max_chars: int = _LEDGER_RENDER_CHAR_BUDGET, truncated_count: int = 0) -> str:
     """Render the delegation ledger as model-visible system context.
 
-    ``truncated_count`` is the number of entries that have been silently
+    ``truncated_count`` is the number of entries that have been permanently
     dropped from the durable ledger because the channel exceeded its cap.
     Without surfacing this on the rendered output, the lead has no signal
     that history was clipped and may re-delegate a task whose prior
     completion is no longer in the visible ledger (D2 in the agent-core
     hunt). When ``truncated_count > 0``, the renderer appends a single
-    model-visible "... (+N earlier delegations dropped from this ledger)"
-    marker so the loss is observable.
+    model-visible "... (+N earlier delegations dropped permanently at the
+    ``_DELEGATION_LEDGER_MAX_ENTRIES``-entry durable ledger cap)" marker so
+    the loss is observable. The wording is deliberately distinct from the
+    render-budget "omitted from this model view" line above it: budget
+    omission hides entries from one request only, while cap truncation means
+    the entries are gone from the durable ledger for good.
     """
     if not entries and not truncated_count:
         return ""
@@ -221,12 +225,12 @@ def render_delegation_ledger(entries: list[DelegationEntry], *, max_chars: int =
             lines.append(omitted_line)
 
     if truncated_count > 0:
-        marker_line = f"- ... (+{truncated_count} earlier delegations dropped from this ledger because of cap)"
+        marker_line = f"- ... (+{truncated_count} earlier delegations dropped permanently at the {_DELEGATION_LEDGER_MAX_ENTRIES}-entry durable ledger cap)"
         if _fits_budget(lines, marker_line, max_chars):
             lines.append(marker_line)
         else:
             # Budget exhausted: at least emit a short marker so the loss is visible.
-            short_marker = f"- ... (+{truncated_count} earlier dropped)"
+            short_marker = f"- ... (+{truncated_count} earlier permanently dropped)"
             if _fits_budget(lines, short_marker, max_chars):
                 lines.append(short_marker)
 
