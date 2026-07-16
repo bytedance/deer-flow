@@ -118,6 +118,34 @@ def test_load_skills_skips_evals_and_fixtures_directories(tmp_path: Path):
     assert "stale-fixture" not in names
 
 
+def test_eval_fixture_skills_cannot_clamp_tool_policy(tmp_path: Path):
+    """End-to-end regression for issue #4095, exercising the real loader and the
+    real tool-policy functions (no mocks): a restrictive eval-fixture SKILL.md
+    must never reach ``allowed-tools`` filtering, so the ``task`` delegation
+    tool survives for the lead agent."""
+    from deerflow.skills.tool_policy import allowed_tool_names_for_skills, filter_tools_by_skill_allowed_tools
+
+    skills_root = tmp_path / "skills"
+    _write_skill(skills_root / "public" / "real-skill", "real-skill", "A real skill")
+    # An orphaned fixture directory with no parent SKILL.md package boundary:
+    # only the evals/fixtures directory-name exclusion keeps it undiscovered.
+    fixture_dir = skills_root / "public" / "evals" / "fixtures" / "restrictive"
+    fixture_dir.mkdir(parents=True)
+    (fixture_dir / "SKILL.md").write_text(
+        "---\nname: restrictive-fixture\ndescription: Eval fixture\nallowed-tools: [bash]\n---\n\n# restrictive-fixture\n",
+        encoding="utf-8",
+    )
+
+    skills = get_or_new_skill_storage(skills_path=skills_root).load_skills(enabled_only=False)
+
+    assert "restrictive-fixture" not in {skill.name for skill in skills}
+    # No discovered skill declares allowed-tools, so the policy stays allow-all.
+    assert allowed_tool_names_for_skills(skills) is None
+    tools = [SimpleNamespace(name="task"), SimpleNamespace(name="bash"), SimpleNamespace(name="web_search")]
+    filtered = filter_tools_by_skill_allowed_tools(tools, skills)
+    assert [tool.name for tool in filtered] == ["task", "bash", "web_search"]
+
+
 def test_load_skills_prefers_custom_over_public_with_same_name(tmp_path: Path):
     skills_root = tmp_path / "skills"
     _write_skill(skills_root / "public" / "shared-skill", "shared-skill", "Public version")

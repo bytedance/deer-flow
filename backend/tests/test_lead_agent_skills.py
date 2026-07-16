@@ -535,3 +535,24 @@ def test_make_lead_agent_keeps_update_agent_on_non_webhook_channels(monkeypatch)
     # Explicit non-webhook channel — telegram is interactive/trusted-by-operator.
     kwargs_tg = lead_agent_module.make_lead_agent({"configurable": {"agent_name": "test"}, "context": {"channel_name": "telegram"}})
     assert "update_agent" in [t.name for t in kwargs_tg["tools"]]
+
+
+def test_load_enabled_available_skills_real_path_none_returns_full_catalog(monkeypatch):
+    """Exercise the real ``_load_enabled_available_skills`` (the make_lead_agent
+    tests above monkeypatch it away): ``available_skills=None`` — the default
+    agent with no skill whitelist — must return the full enabled catalog so
+    skill discovery keeps working, and a whitelist must filter by name.
+
+    Guards against reintroducing the pre-#4098 tool-policy variant of this
+    helper that returned ``[]`` for ``None``, which would silently empty the
+    default agent's skill-search catalog."""
+    from deerflow.agents.lead_agent import agent as lead_agent_module
+
+    enabled = [_make_skill("alpha", ["bash"]), _make_skill("beta", None)]
+    monkeypatch.setattr("deerflow.agents.lead_agent.prompt.get_enabled_skills_for_config", lambda app_config, user_id=None: enabled)
+
+    full_catalog = lead_agent_module._load_enabled_available_skills(None, app_config=SimpleNamespace())
+    assert [skill.name for skill in full_catalog] == ["alpha", "beta"]
+
+    whitelisted = lead_agent_module._load_enabled_available_skills({"beta"}, app_config=SimpleNamespace())
+    assert [skill.name for skill in whitelisted] == ["beta"]

@@ -123,6 +123,35 @@ def test_passive_enabled_skill_does_not_filter_lead_tools():
     assert _tool_names(filtered) == ["task", "web_search", "review_skill_package"]
 
 
+def test_passive_eval_fixture_like_skill_cannot_strip_task_from_lead_tools():
+    """Regression for issue #4095: a merely-enabled skill with a restrictive
+    ``allowed-tools`` declaration (the shape of the eval fixtures under
+    skills/public/skill-reviewer/evals/fixtures/) must not strip ``task`` or
+    any other lead tool while it is passive."""
+    middleware = _middleware([_skill("prompt-injection-fixture", ["bash"]), _skill("empty-fixture", [])])
+    request = ModelRequestStub([NamedTool("task"), NamedTool("bash"), NamedTool("web_search")])
+
+    filtered = middleware._filter_model_request(request)
+
+    assert _tool_names(filtered) == ["task", "bash", "web_search"]
+
+
+def test_always_available_builtin_tool_names_membership_and_filter_behavior():
+    """Direct pin on ALWAYS_AVAILABLE_BUILTIN_TOOL_NAMES: framework discovery
+    tools survive a restrictive ``allowed-tools`` filter, while ``task`` is
+    deliberately not framework-exempt (#4098) — a restricted skill must
+    explicitly declare ``task`` to delegate around its policy."""
+    from deerflow.skills.tool_policy import ALWAYS_AVAILABLE_BUILTIN_TOOL_NAMES, filter_tools_by_skill_allowed_tools
+
+    assert ALWAYS_AVAILABLE_BUILTIN_TOOL_NAMES == frozenset({"describe_skill", "read_file", "review_skill_package", "tool_search"})
+    assert "task" not in ALWAYS_AVAILABLE_BUILTIN_TOOL_NAMES
+
+    tools = [NamedTool(name) for name in ("task", "bash", "read_file", "describe_skill", "review_skill_package", "tool_search", "web_search")]
+    filtered = filter_tools_by_skill_allowed_tools(tools, [_skill("restrictive", ["bash"])], always_allowed_tool_names=ALWAYS_AVAILABLE_BUILTIN_TOOL_NAMES)
+
+    assert [tool.name for tool in filtered] == ["bash", "read_file", "describe_skill", "review_skill_package", "tool_search"]
+
+
 def test_sync_passive_model_call_skips_storage():
     middleware = _middleware([])
 

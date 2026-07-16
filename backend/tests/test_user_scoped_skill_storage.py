@@ -155,6 +155,45 @@ class TestSkillLoading:
         assert len(custom_skills) == 1
         assert custom_skills[0].name == "my-skill"
 
+    def test_public_orphan_eval_fixture_dirs_are_not_registered(self, user_storage: UserScopedSkillStorage, skills_root: Path):
+        """Regression for issue #4095: evals/ and fixtures/ directories in the
+        public walk are excluded even without a parent SKILL.md package boundary."""
+        public_dir = skills_root / "public" / "deep-research"
+        public_dir.mkdir(parents=True)
+        (public_dir / "SKILL.md").write_text(_skill_content("deep-research"), encoding="utf-8")
+        orphan_fixture_dir = skills_root / "public" / "evals" / "fixtures" / "orphan"
+        orphan_fixture_dir.mkdir(parents=True)
+        (orphan_fixture_dir / "SKILL.md").write_text(_skill_content("orphan-fixture"), encoding="utf-8")
+
+        names = {skill.name for skill in user_storage.load_skills(enabled_only=False)}
+
+        assert names == {"deep-research"}
+
+    def test_user_custom_eval_fixture_dirs_are_not_registered(self, user_storage: UserScopedSkillStorage, base_dir: Path):
+        """Regression for issue #4095: the user-custom walk excludes evals/ and fixtures/ directories."""
+        user_storage.write_custom_skill("my-skill", "SKILL.md", _skill_content("my-skill"))
+        user_custom_root = base_dir / "users" / "test-user" / "skills" / "custom"
+        stale_fixture_dir = user_custom_root / "fixtures" / "stale"
+        stale_fixture_dir.mkdir(parents=True)
+        (stale_fixture_dir / "SKILL.md").write_text(_skill_content("stale-fixture"), encoding="utf-8")
+
+        names = {skill.name for skill in user_storage.load_skills(enabled_only=False)}
+
+        assert names == {"my-skill"}
+
+    def test_legacy_global_custom_eval_fixture_dirs_are_not_registered(self, user_storage: UserScopedSkillStorage, skills_root: Path):
+        """Regression for issue #4095: the legacy global-custom fallback walk excludes evals/ and fixtures/ directories."""
+        global_dir = skills_root / "custom" / "global-skill"
+        global_dir.mkdir(parents=True)
+        (global_dir / "SKILL.md").write_text(_skill_content("global-skill"), encoding="utf-8")
+        eval_fixture_dir = skills_root / "custom" / "evals" / "legacy-fixture"
+        eval_fixture_dir.mkdir(parents=True)
+        (eval_fixture_dir / "SKILL.md").write_text(_skill_content("legacy-fixture"), encoding="utf-8")
+
+        names = {skill.name for skill in user_storage.load_skills(enabled_only=False)}
+
+        assert names == {"global-skill"}
+
     def test_fallback_to_global_custom_when_user_dir_empty(self, user_storage: UserScopedSkillStorage, skills_root: Path, base_dir: Path):
         # Put skill in global custom (NOT in user dir)
         global_dir = skills_root / "custom" / "global-skill"
