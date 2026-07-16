@@ -17,9 +17,10 @@ import logging
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 
 # Recycle pooled Postgres connections before stale idle sockets can hang
-# pool_pre_ping, and bound asyncpg commands when they do (#3882).
+# pool_pre_ping, and keep the default asyncpg command deadline inside nginx's
+# 60-second proxy timeout (#3882).
 POSTGRES_POOL_RECYCLE_SECONDS = 300
-POSTGRES_COMMAND_TIMEOUT_SECONDS = 60
+POSTGRES_COMMAND_TIMEOUT_SECONDS = 30
 
 
 def _json_serializer(obj: object) -> str:
@@ -27,14 +28,17 @@ def _json_serializer(obj: object) -> str:
     return json.dumps(obj, ensure_ascii=False)
 
 
-def _postgres_engine_kwargs(*, echo: bool, pool_size: int) -> dict[str, object]:
+def _postgres_engine_kwargs(*, echo: bool, pool_size: int, command_timeout: float | None = POSTGRES_COMMAND_TIMEOUT_SECONDS) -> dict[str, object]:
     """Build the shared SQLAlchemy engine options for PostgreSQL."""
+    connect_args = {}
+    if command_timeout is not None:
+        connect_args["command_timeout"] = command_timeout
     return {
         "echo": echo,
         "pool_size": pool_size,
         "pool_pre_ping": True,
         "pool_recycle": POSTGRES_POOL_RECYCLE_SECONDS,
-        "connect_args": {"command_timeout": POSTGRES_COMMAND_TIMEOUT_SECONDS},
+        "connect_args": connect_args,
         "json_serializer": _json_serializer,
     }
 
@@ -78,6 +82,7 @@ async def init_engine(
     url: str = "",
     echo: bool = False,
     pool_size: int = 5,
+    command_timeout: float | None = POSTGRES_COMMAND_TIMEOUT_SECONDS,
     sqlite_dir: str = "",
 ) -> None:
     """Create the async engine and session factory, then auto-create tables.
@@ -87,6 +92,7 @@ async def init_engine(
         url: SQLAlchemy async URL (for sqlite/postgres).
         echo: Echo SQL to log.
         pool_size: Postgres connection pool size.
+        command_timeout: Timeout in seconds for app ORM Postgres commands, or None to disable.
         sqlite_dir: Directory to create for SQLite (ensured to exist).
     """
     global _engine, _session_factory
@@ -148,7 +154,7 @@ async def init_engine(
             finally:
                 cursor.close()
     elif backend == "postgres":
-        _engine = create_async_engine(url, **_postgres_engine_kwargs(echo=echo, pool_size=pool_size))
+        _engine = create_async_engine(url, **_postgres_engine_kwargs(echo=echo, pool_size=pool_size, command_timeout=command_timeout))
     else:
         raise ValueError(f"Unknown persistence backend: {backend!r}")
 
@@ -173,7 +179,7 @@ async def init_engine(
             await _auto_create_postgres_db(url)
             # Rebuild engine against the now-existing database
             await _engine.dispose()
-            _engine = create_async_engine(url, **_postgres_engine_kwargs(echo=echo, pool_size=pool_size))
+            _engine = create_async_engine(url, **_postgres_engine_kwargs(echo=echo, pool_size=pool_size, command_timeout=command_timeout))
             _session_factory = async_sessionmaker(_engine, expire_on_commit=False)
             await bootstrap_schema(_engine, backend=backend)
         else:
@@ -192,6 +198,7 @@ async def init_engine_from_config(config) -> None:
         url=config.app_sqlalchemy_url,
         echo=config.echo_sql,
         pool_size=config.pool_size,
+        command_timeout=config.command_timeout,
         sqlite_dir=config.sqlite_dir if config.backend == "sqlite" else "",
     )
 

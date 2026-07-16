@@ -124,7 +124,7 @@ they resolve from the `secrets` map):
 
 ```yaml
 config: |
-  config_version: 26
+  config_version: 27
   models:
     - name: gpt-4
       use: langchain_openai:ChatOpenAI
@@ -137,6 +137,7 @@ config: |
   database:
     backend: postgres
     postgres_url: $DATABASE_URL
+    command_timeout: 30
   checkpointer:
     type: postgres
     connection_string: $DATABASE_URL

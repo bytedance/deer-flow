@@ -63,6 +63,11 @@ class DatabaseConfig(BaseModel):
         default=5,
         description="Connection pool size for the app ORM engine (postgres only).",
     )
+    command_timeout: float | None = Field(
+        default=30,
+        gt=0,
+        description="Timeout in seconds for app ORM PostgreSQL commands. Set to null to disable the command timeout.",
+    )
 
     # -- Derived helpers (not user-configured) --
 
