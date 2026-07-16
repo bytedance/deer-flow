@@ -52,6 +52,7 @@ from .sandbox_lease import (
     clear_lease,
     foreign_lease_blocks,
     generate_sandbox_worker_id,
+    lease_ownership_guard,
     touch_lease,
 )
 
@@ -252,8 +253,17 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
     def _idle_timeout_seconds(self) -> float:
         return float(self._config.get("idle_timeout", DEFAULT_IDLE_TIMEOUT))
 
-    def _touch_sandbox_lease(self, sandbox_id: str) -> None:
-        """Renew the shared lease so peer workers do not adopt/destroy this container."""
+    def _lease_guard(self, sandbox_id: str):
+        """Per-sandbox cross-process mutex covering ownership check → destroy."""
+        return lease_ownership_guard(self._lease_base_dir, sandbox_id)
+
+    def _touch_sandbox_lease_locked(self, sandbox_id: str) -> None:
+        """Write the lease. Caller must already hold ``_lease_guard(sandbox_id)``.
+
+        Used from sections (e.g. reconcile adopt) that hold the guard, since
+        re-entering ``_lease_guard`` on the same sandbox in one thread would
+        deadlock on ``flock`` (a second fd cannot take the exclusive lock).
+        """
         try:
             touch_lease(
                 self._lease_base_dir,
@@ -264,6 +274,20 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             )
         except OSError as e:
             logger.warning("Failed to touch sandbox lease for %s: %s", sandbox_id, e)
+
+    def _touch_sandbox_lease(self, sandbox_id: str) -> None:
+        """Renew the shared lease so peer workers do not adopt/destroy this container.
+
+        Takes ``_lease_guard`` so the write participates in the same
+        cross-process protocol as the destroy paths: a peer's ownership check
+        cannot straddle this write. Must not be called while already holding the
+        guard for *sandbox_id* — use ``_touch_sandbox_lease_locked`` there.
+        """
+        try:
+            with self._lease_guard(sandbox_id):
+                self._touch_sandbox_lease_locked(sandbox_id)
+        except OSError as e:
+            logger.warning("Failed to lock sandbox lease for %s: %s", sandbox_id, e)
 
     def _clear_sandbox_lease(self, sandbox_id: str) -> None:
         try:
@@ -320,23 +344,33 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
 
         for info in running:
             age = current_time - info.created_at if info.created_at > 0 else float("inf")
-            if self._foreign_lease_blocks(info.sandbox_id):
-                skipped_live += 1
-                logger.debug(
-                    "Skipping container %s during reconciliation: owned by another worker",
-                    info.sandbox_id,
-                )
+            # Hold the per-sandbox guard across the ownership check and the
+            # claiming touch so a peer's destroy cannot re-check between our
+            # "not foreign" decision and our lease write and kill the container
+            # we are adopting (mirror of the destroy-side atomicity).
+            try:
+                with self._lease_guard(info.sandbox_id):
+                    if self._foreign_lease_blocks(info.sandbox_id):
+                        skipped_live += 1
+                        logger.debug(
+                            "Skipping container %s during reconciliation: owned by another worker",
+                            info.sandbox_id,
+                        )
+                        continue
+                    # Single lock acquisition per container: atomic check-and-insert.
+                    # Avoids a TOCTOU window between the "already tracked?" check
+                    # and the warm-pool insert.
+                    with self._lock:
+                        if info.sandbox_id in self._sandboxes or info.sandbox_id in self._warm_pool:
+                            continue
+                        self._warm_pool[info.sandbox_id] = (info, current_time)
+                    # Claim ownership so a peer starting at the same moment does
+                    # not also adopt and race us on idle destroy. Locked variant:
+                    # we already hold the guard for this sandbox.
+                    self._touch_sandbox_lease_locked(info.sandbox_id)
+            except OSError as e:
+                logger.warning("Skipping container %s during reconciliation: lease lock failed: %s", info.sandbox_id, e)
                 continue
-            # Single lock acquisition per container: atomic check-and-insert.
-            # Avoids a TOCTOU window between the "already tracked?" check and
-            # the warm-pool insert.
-            with self._lock:
-                if info.sandbox_id in self._sandboxes or info.sandbox_id in self._warm_pool:
-                    continue
-                self._warm_pool[info.sandbox_id] = (info, current_time)
-            # Claim ownership so a peer starting at the same moment does not
-            # also adopt and race us on idle destroy.
-            self._touch_sandbox_lease(info.sandbox_id)
             adopted += 1
             logger.info(f"Adopted container {info.sandbox_id} into warm pool (age: {age:.0f}s)")
 
@@ -346,6 +380,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             skipped_live,
             len(running),
         )
+
     # ── Deterministic ID ─────────────────────────────────────────────────
 
     @staticmethod
@@ -479,9 +514,21 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
 
     def _cleanup_idle_resources(self, idle_timeout: float) -> None:
         """Clean AIO resources idle longer than ``idle_timeout`` seconds."""
+        # Keep active owners' leases fresh from this background thread so a long
+        # single turn (many tool calls, no re-acquire) does not let the lease
+        # expire and a peer adopt/destroy a live container. Renewal used to live
+        # in get(), but get() runs on the event loop and must stay non-blocking.
+        self._renew_active_leases()
         # Pick up containers whose peer leases expired since startup (crash path).
         self._reconcile_orphans()
         self._cleanup_idle_sandboxes(idle_timeout)
+
+    def _renew_active_leases(self) -> None:
+        """Renew the lease for every active sandbox (background thread only)."""
+        with self._lock:
+            active_ids = list(self._sandboxes.keys())
+        for sandbox_id in active_ids:
+            self._touch_sandbox_lease(sandbox_id)
 
     def _cleanup_idle_sandboxes(self, idle_timeout: float) -> None:
         current_time = time.time()
@@ -803,26 +850,37 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         return len(self._sandboxes)
 
     def _destroy_warm_entry(self, sandbox_id: str, entry: SandboxInfo, *, reason: str) -> None:
-        """Destroy a warm-pool sandbox using AIO-specific backend logging."""
-        if not self._can_destroy_shared_container(sandbox_id):
-            logger.info(
-                "Refusing to destroy warm-pool sandbox %s for %s: owned by another worker",
-                sandbox_id,
-                reason,
-            )
-            return
-        try:
-            self._backend.destroy(entry)
-        except Exception as e:
-            if reason == "idle_timeout":
-                logger.error(f"Failed to destroy idle warm-pool sandbox {sandbox_id}: {e}")
-            elif reason == "replica_enforcement":
-                logger.error(f"Failed to destroy warm-pool sandbox {sandbox_id}: {e}")
-            else:
-                logger.error(f"Failed to destroy warm-pool sandbox {sandbox_id} for {reason}: {e}")
-            return
+        """Destroy a warm-pool sandbox using AIO-specific backend logging.
 
-        self._clear_sandbox_lease(sandbox_id)
+        The ownership re-check and the container stop run under the per-sandbox
+        guard so a peer's ``touch_lease`` cannot land between them and lose its
+        container (#4206 follow-up). A guard/lease-lock failure fails closed:
+        we do not destroy a container whose ownership we cannot pin down.
+        """
+        try:
+            with self._lease_guard(sandbox_id):
+                if not self._can_destroy_shared_container(sandbox_id):
+                    logger.info(
+                        "Refusing to destroy warm-pool sandbox %s for %s: owned by another worker",
+                        sandbox_id,
+                        reason,
+                    )
+                    return
+                try:
+                    self._backend.destroy(entry)
+                except Exception as e:
+                    if reason == "idle_timeout":
+                        logger.error(f"Failed to destroy idle warm-pool sandbox {sandbox_id}: {e}")
+                    elif reason == "replica_enforcement":
+                        logger.error(f"Failed to destroy warm-pool sandbox {sandbox_id}: {e}")
+                    else:
+                        logger.error(f"Failed to destroy warm-pool sandbox {sandbox_id} for {reason}: {e}")
+                    return
+
+                self._clear_sandbox_lease(sandbox_id)
+        except OSError as e:
+            logger.warning("Refusing to destroy warm-pool sandbox %s for %s: lease lock failed: %s", sandbox_id, reason, e)
+            return
 
         if reason == "idle_timeout":
             logger.info(f"Destroyed idle warm-pool sandbox {sandbox_id}")
@@ -830,6 +888,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             logger.info(f"Destroyed warm-pool sandbox {sandbox_id}")
         else:
             logger.info(f"Destroyed warm-pool sandbox {sandbox_id} for {reason}")
+
     # ── Core: acquire / get / release / shutdown ─────────────────────────
 
     def acquire(self, thread_id: str | None = None, *, user_id: str | None = None) -> str:
@@ -1040,6 +1099,12 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
     def get(self, sandbox_id: str) -> Sandbox | None:
         """Get a sandbox by ID. Updates last activity timestamp.
 
+        Stays a pure in-memory lookup: async tool paths call this directly on the
+        event loop (``ensure_sandbox_initialized_async``), so it must not do
+        blocking filesystem IO. The shared lease is renewed off the event loop —
+        on acquire/reclaim and from the background idle checker (see
+        ``_renew_active_leases``) — not here.
+
         Args:
             sandbox_id: The ID of the sandbox.
 
@@ -1050,8 +1115,6 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             sandbox = self._sandboxes.get(sandbox_id)
             if sandbox is not None:
                 self._last_activity[sandbox_id] = time.time()
-        if sandbox is not None:
-            self._touch_sandbox_lease(sandbox_id)
         return sandbox
 
     def release(self, sandbox_id: str) -> None:
@@ -1125,14 +1188,22 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 logger.warning(f"Error closing sandbox {sandbox_id} during destroy: {e}")
 
         if info:
-            if not self._can_destroy_shared_container(sandbox_id):
-                logger.warning(
-                    "Refusing to destroy sandbox %s: owned by another worker",
-                    sandbox_id,
-                )
+            # Ownership re-check + container stop under the per-sandbox guard so a
+            # peer's touch cannot straddle them (#4206 follow-up); a lease-lock
+            # failure fails closed.
+            try:
+                with self._lease_guard(sandbox_id):
+                    if not self._can_destroy_shared_container(sandbox_id):
+                        logger.warning(
+                            "Refusing to destroy sandbox %s: owned by another worker",
+                            sandbox_id,
+                        )
+                        return
+                    self._backend.destroy(info)
+                    self._clear_sandbox_lease(sandbox_id)
+            except OSError as e:
+                logger.warning("Refusing to destroy sandbox %s: lease lock failed: %s", sandbox_id, e)
                 return
-            self._backend.destroy(info)
-            self._clear_sandbox_lease(sandbox_id)
             logger.info(f"Destroyed sandbox {sandbox_id}")
 
     def shutdown(self) -> None:
@@ -1156,15 +1227,6 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 logger.error(f"Failed to destroy sandbox {sandbox_id} during shutdown: {e}")
 
         for sandbox_id, (info, _) in warm_items:
-            if not self._can_destroy_shared_container(sandbox_id):
-                logger.info(
-                    "Leaving warm-pool sandbox %s running on shutdown: owned by another worker",
-                    sandbox_id,
-                )
-                continue
-            try:
-                self._backend.destroy(info)
-                self._clear_sandbox_lease(sandbox_id)
-                logger.info(f"Destroyed warm-pool sandbox {sandbox_id} during shutdown")
-            except Exception as e:
-                logger.error(f"Failed to destroy warm-pool sandbox {sandbox_id} during shutdown: {e}")
+            # Route through _destroy_warm_entry so the ownership re-check and the
+            # container stop share the same per-sandbox guard as the idle path.
+            self._destroy_warm_entry(sandbox_id, info, reason="shutdown")

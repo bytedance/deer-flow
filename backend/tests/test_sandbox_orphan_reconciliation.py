@@ -573,6 +573,166 @@ def test_multi_worker_release_then_peer_reconcile_cannot_kill(tmp_path):
     assert sid in worker_a._warm_pool
 
 
+# ── Review round 2 (fancyboi999): fail-open, hot-path IO, check→destroy race ──
+
+
+def test_corrupt_lease_fails_closed_not_read_as_free(tmp_path):
+    """P2a: a corrupt lease must not be read as 'no owner'.
+
+    ``read_lease`` used to swallow read/parse errors and return None, so a
+    corrupt or unreadable peer lease looked free and the destroy path killed the
+    container. It must now raise so the provider fails closed.
+    """
+    from deerflow.community.aio_sandbox.sandbox_lease import (
+        CorruptLeaseError,
+        foreign_lease_blocks,
+        lease_dir,
+        lease_path,
+        read_lease,
+    )
+
+    lease_dir(tmp_path).mkdir(parents=True, exist_ok=True)
+    lease_path(tmp_path, "corrupt01").write_text("{ not json", encoding="utf-8")
+
+    with pytest.raises(CorruptLeaseError):
+        read_lease(lease_path(tmp_path, "corrupt01"))
+    # foreign_lease_blocks propagates; the provider wrapper fails closed to True.
+    with pytest.raises(OSError):
+        foreign_lease_blocks(tmp_path, "corrupt01", "worker-b")
+
+    worker_b = _make_provider_for_reconciliation(tmp_path, worker_id="worker-b")
+    assert worker_b._foreign_lease_blocks("corrupt01") is True
+    assert worker_b._can_destroy_shared_container("corrupt01") is False
+
+
+def test_unreadable_lease_fails_closed(tmp_path, monkeypatch):
+    """P2a: a lease that raises PermissionError on read must fail closed too."""
+    from deerflow.community.aio_sandbox import sandbox_lease as lease_mod
+    from deerflow.community.aio_sandbox.sandbox_lease import lease_dir, lease_path
+
+    lease_dir(tmp_path).mkdir(parents=True, exist_ok=True)
+    lease_path(tmp_path, "locked01").write_text("{}", encoding="utf-8")
+
+    real_read_text = lease_mod.Path.read_text
+
+    def deny(self, *args, **kwargs):
+        if self.name.endswith("locked01.lease"):
+            raise PermissionError("EACCES")
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(lease_mod.Path, "read_text", deny)
+
+    worker_b = _make_provider_for_reconciliation(tmp_path, worker_id="worker-b")
+    assert worker_b._foreign_lease_blocks("locked01") is True
+
+
+def test_corrupt_lease_blocks_idle_destroy(tmp_path):
+    """P2a end-to-end: idle reaper must not stop a container whose lease is corrupt."""
+    from deerflow.community.aio_sandbox.sandbox_lease import lease_dir, lease_path
+
+    worker_b = _make_provider_for_reconciliation(tmp_path, worker_id="worker-b")
+    worker_b._config["idle_timeout"] = 60
+    now = time.time()
+    info = SandboxInfo(
+        sandbox_id="corrupt02",
+        sandbox_url="http://localhost:8080",
+        container_name="deer-flow-sandbox-corrupt02",
+        created_at=now - 50,
+    )
+    lease_dir(tmp_path).mkdir(parents=True, exist_ok=True)
+    lease_path(tmp_path, "corrupt02").write_text("garbage", encoding="utf-8")
+    worker_b._warm_pool["corrupt02"] = (info, now - 61)
+
+    worker_b._reap_expired_warm(idle_timeout=60)
+
+    worker_b._backend.destroy.assert_not_called()
+
+
+def test_get_does_not_renew_lease(tmp_path, monkeypatch):
+    """P2b: get() is a pure in-memory lookup — it must not write the lease.
+
+    ``ensure_sandbox_initialized_async`` calls ``provider.get()`` directly on the
+    event loop, so a lease write here (mkdir + fsync + os.replace) would be
+    blocking IO on the hot path. Renewal now happens off the event loop.
+    """
+    worker = _make_provider_for_reconciliation(tmp_path)
+    sandbox = MagicMock()
+    worker._sandboxes["sb1"] = sandbox
+
+    touched: list[str] = []
+    monkeypatch.setattr(worker, "_touch_sandbox_lease", lambda sid: touched.append(sid))
+
+    assert worker.get("sb1") is sandbox
+    assert touched == [], "get() must not renew the lease on the event-loop hot path"
+
+
+def test_idle_cycle_renews_active_leases(tmp_path):
+    """P2b: the background idle path renews active-sandbox leases off the event loop."""
+    from deerflow.community.aio_sandbox.sandbox_lease import lease_path, read_lease
+
+    worker = _make_provider_for_reconciliation(tmp_path, worker_id="worker-a")
+    worker._sandboxes["sb1"] = MagicMock()
+
+    worker._renew_active_leases()
+
+    lease = read_lease(lease_path(tmp_path, "sb1"))
+    assert lease is not None and lease.worker_id == "worker-a"
+
+
+def test_peer_touch_cannot_interleave_with_destroy(tmp_path):
+    """P1: the ownership check → container stop is one cross-process atomic op.
+
+    A peer's ``touch_lease`` shares the same per-sandbox guard, so it cannot land
+    between a destroy's ownership check and the container stop (the interleaving
+    that revived the cross-worker kill). Here worker-a holds the guard mid-stop;
+    worker-b's touch must block until worker-a releases it.
+    """
+    worker_a = _make_provider_for_reconciliation(tmp_path, worker_id="worker-a")
+    worker_b = _make_provider_for_reconciliation(tmp_path, worker_id="worker-b")
+    sid = "race01"
+    info = SandboxInfo(
+        sandbox_id=sid,
+        sandbox_url="http://localhost:8080",
+        container_name=f"deer-flow-sandbox-{sid}",
+        created_at=time.time() - 50,
+    )
+
+    in_destroy = threading.Event()
+    release_destroy = threading.Event()
+    touch_done = threading.Event()
+
+    def slow_destroy(_info):
+        in_destroy.set()
+        assert release_destroy.wait(3), "test did not release the destroy in time"
+
+    worker_a._backend.destroy.side_effect = slow_destroy
+
+    def do_destroy():
+        worker_a._destroy_warm_entry(sid, info, reason="idle_timeout")
+
+    def do_touch():
+        assert in_destroy.wait(3)
+        worker_b._touch_sandbox_lease(sid)
+        touch_done.set()
+
+    t_destroy = threading.Thread(target=do_destroy)
+    t_touch = threading.Thread(target=do_touch)
+    t_destroy.start()
+    t_touch.start()
+    try:
+        assert in_destroy.wait(3)
+        # worker-a holds the per-sandbox guard across backend.destroy; worker-b's
+        # touch must not complete until the guard is released.
+        assert not touch_done.wait(0.4), "peer touch interleaved with destroy — guard not exclusive"
+    finally:
+        release_destroy.set()
+        t_destroy.join(3)
+        t_touch.join(3)
+
+    assert touch_done.is_set()
+    worker_a._backend.destroy.assert_called_once()
+
+
 def test_reconcile_multiple_containers_all_adopted(tmp_path):
     """Multiple lease-free containers should all be adopted into warm pool."""
     provider = _make_provider_for_reconciliation(tmp_path)
