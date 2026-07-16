@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -28,7 +29,17 @@ class OAuthTokenManager:
     def __init__(self, oauth_by_server: dict[str, McpOAuthConfig]):
         self._oauth_by_server = oauth_by_server
         self._tokens: dict[str, _OAuthToken] = {}
-        self._locks: dict[str, asyncio.Lock] = {name: asyncio.Lock() for name in oauth_by_server}
+        # A plain threading.Lock, not asyncio.Lock: the embedded/TUI sync tool-call
+        # path (DeerFlowClient.stream() -> LangGraph ToolNode._func -> a
+        # ThreadPoolExecutor -> deerflow.tools.sync.make_sync_tool_wrapper's
+        # per-call asyncio.run()) invokes get_authorization_header from a fresh
+        # event loop on a fresh OS thread for every concurrent tool call. An
+        # asyncio.Lock binds to whichever loop first contends on it; a second
+        # caller's release/wake-up crossing loops without call_soon_threadsafe
+        # either deadlocks silently or raises "bound to a different event loop".
+        # threading.Lock has no loop affinity, so it is safe to share across
+        # however many event loops/threads call into the same server's lock.
+        self._locks: dict[str, threading.Lock] = {name: threading.Lock() for name in oauth_by_server}
 
     @classmethod
     def from_extensions_config(cls, extensions_config: ExtensionsConfig) -> OAuthTokenManager:
@@ -54,7 +65,13 @@ class OAuthTokenManager:
             return f"{token.token_type} {token.access_token}"
 
         lock = self._locks[server_name]
-        async with lock:
+        # Acquire the OS-level lock off-thread so a blocking wait never blocks this
+        # event loop, then release it synchronously (release() never blocks). This
+        # keeps the de-duplication behavior of the old `async with lock:` (only one
+        # concurrent caller per server actually fetches a token) while remaining
+        # safe when callers are on different event loops/threads.
+        await asyncio.to_thread(lock.acquire)
+        try:
             token = self._tokens.get(server_name)
             if token and not self._is_expiring(token, oauth):
                 return f"{token.token_type} {token.access_token}"
@@ -63,6 +80,8 @@ class OAuthTokenManager:
             self._tokens[server_name] = fresh
             logger.info(f"Refreshed OAuth access token for MCP server: {server_name}")
             return f"{fresh.token_type} {fresh.access_token}"
+        finally:
+            lock.release()
 
     @staticmethod
     def _is_expiring(token: _OAuthToken, oauth: McpOAuthConfig) -> bool:

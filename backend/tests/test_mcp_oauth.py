@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from typing import Any
 
 from deerflow.config.extensions_config import ExtensionsConfig
@@ -332,3 +333,117 @@ def test_oauth_refresh_token_rotation_persists_rotated_value(monkeypatch):
     assert second == "Bearer at-1"
     assert len(post_calls) == 2
     assert post_calls[1]["data"]["refresh_token"] == "rt-rotated-1"
+
+
+def test_get_authorization_header_concurrent_threads_no_deadlock(monkeypatch):
+    """Concurrent callers on different event loops/threads must not deadlock.
+
+    The embedded/TUI sync tool-call path (``DeerFlowClient.stream()`` ->
+    LangGraph's ``ToolNode._func`` -> a ``ThreadPoolExecutor`` ->
+    ``deerflow.tools.sync.make_sync_tool_wrapper``'s per-call ``asyncio.run()``)
+    invokes ``get_authorization_header`` from a fresh event loop on a fresh OS
+    thread for every concurrent tool call. A per-server ``asyncio.Lock`` binds
+    to whichever loop first contends on it; when a caller on a *different*
+    loop later releases/wakes a waiter, it does so without
+    ``call_soon_threadsafe``, so the waiting loop's selector is never woken
+    and that caller hangs forever with no exception (a silent hang). A third
+    concurrent caller instead hits a synchronous ``RuntimeError: ... is bound
+    to a different event loop``. Both failure modes are reproducible with the
+    old ``asyncio.Lock``-per-server implementation.
+
+    This test uses a bounded thread-join timeout so that a regression back to
+    the old behavior fails this test quickly instead of hanging the whole
+    suite.
+    """
+    post_calls: list[dict[str, Any]] = []
+    post_calls_guard = threading.Lock()
+    holder_in_critical_section = threading.Event()
+
+    class _SlowMockAsyncClient:
+        def __init__(self, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url: str, data: dict[str, Any]):
+            with post_calls_guard:
+                post_calls.append({"url": url, "data": data})
+            # Signal that this call is inside the critical section (the lock
+            # is held) and stay there briefly so the other threads have time
+            # to reach their own acquire() and genuinely contend, rather than
+            # racing to also take an uncontended fast path.
+            holder_in_critical_section.set()
+            await asyncio.sleep(0.3)
+            return _MockResponse(
+                {
+                    "access_token": "concurrent-token",
+                    "token_type": "Bearer",
+                    "expires_in": 3600,
+                }
+            )
+
+    monkeypatch.setattr("httpx.AsyncClient", _SlowMockAsyncClient)
+
+    config = ExtensionsConfig.model_validate(
+        {
+            "mcpServers": {
+                "secure-http": {
+                    "enabled": True,
+                    "type": "http",
+                    "url": "https://api.example.com/mcp",
+                    "oauth": {
+                        "enabled": True,
+                        "token_url": "https://auth.example.com/oauth/token",
+                        "grant_type": "client_credentials",
+                        "client_id": "client-id",
+                        "client_secret": "client-secret",
+                    },
+                }
+            }
+        }
+    )
+
+    manager = OAuthTokenManager.from_extensions_config(config)
+    results: dict[str, Any] = {}
+
+    def run_in_own_loop(name: str, wait_for_holder: bool) -> None:
+        if wait_for_holder:
+            # Only start once another thread is confirmed to be holding the
+            # lock, guaranteeing this call contends instead of racing for
+            # the uncontended fast path itself.
+            assert holder_in_critical_section.wait(timeout=5), "holder thread never entered critical section"
+        try:
+            results[name] = asyncio.run(manager.get_authorization_header("secure-http"))
+        except BaseException as exc:  # noqa: BLE001 - captured to assert absence below
+            results[name] = exc
+
+    threads = [
+        threading.Thread(target=run_in_own_loop, args=("holder", False), name="holder", daemon=True),
+        threading.Thread(target=run_in_own_loop, args=("waiter-1", True), name="waiter-1", daemon=True),
+        threading.Thread(target=run_in_own_loop, args=("waiter-2", True), name="waiter-2", daemon=True),
+    ]
+
+    for t in threads:
+        t.start()
+
+    # Bounded timeout: under the old per-server asyncio.Lock, at least one of
+    # these threads would never return. Joining with a timeout keeps a
+    # regression from hanging the test suite forever; it fails fast instead.
+    for t in threads:
+        t.join(timeout=5)
+
+    still_alive = [t.name for t in threads if t.is_alive()]
+    assert not still_alive, f"deadlock: thread(s) still blocked after bounded timeout: {still_alive}"
+
+    for name, result in results.items():
+        assert not isinstance(result, BaseException), f"{name} raised instead of completing: {result!r}"
+        assert result == "Bearer concurrent-token"
+
+    # De-duplication must be preserved: three concurrent callers racing for
+    # the same (initially uncached) server must still only perform ONE real
+    # token fetch, not one per caller.
+    assert len(post_calls) == 1
