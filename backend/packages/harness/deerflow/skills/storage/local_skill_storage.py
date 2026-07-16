@@ -83,6 +83,12 @@ class LocalSkillStorage(SkillStorage):
                 dir_names[:] = sorted(name for name in dir_names if not name.startswith("."))
                 if SKILL_MD_FILE not in file_names:
                     continue
+                # A directory containing SKILL.md is a package boundary. Any
+                # nested SKILL.md files belong to that package's supporting
+                # resources (for example eval fixtures), not to the runtime
+                # skill registry. Namespace directories without SKILL.md still
+                # recurse, preserving layouts such as public/team/helper.
+                dir_names.clear()
                 yield category, category_path, Path(current_root) / SKILL_MD_FILE
 
     def read_custom_skill(self, name: str) -> str:

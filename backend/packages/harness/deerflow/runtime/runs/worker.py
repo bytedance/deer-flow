@@ -517,6 +517,12 @@ async def run_agent(
                         await subagent_events.add(chunk)
 
         # 7. Stream the requested turn, then optionally continue hidden goal turns.
+        # Clear any stale stop_reason before the first (user-visible) turn only.
+        # Continuation turns preserve a cap reason from the user turn: a run that
+        # hits a cap during the user turn IS capped even if hidden goal-evaluator
+        # turns complete cleanly afterward (#4176 review).
+        if isinstance(runtime.context, dict):
+            runtime.context.pop("stop_reason", None)
         await _stream_once(graph_input, initial_runnable_config)
         while not record.abort_event.is_set() and not llm_error_fallback_message and (journal is None or not journal.had_llm_error_fallback):
             continuation_input = await _prepare_goal_continuation_input(
@@ -528,6 +534,8 @@ async def run_agent(
                 app_config=ctx.app_config,
                 evaluator_model_factory=_get_goal_evaluator_model,
                 abort_event=record.abort_event,
+                user_id=resolve_runtime_user_id(runtime),
+                deerflow_trace_id=deerflow_trace_id,
             )
             if continuation_input is None or record.abort_event.is_set():
                 break
@@ -560,7 +568,22 @@ async def run_agent(
             error_msg = error_msg or "LLM provider failed after retries"
             await run_manager.set_status(run_id, RunStatus.error, error=error_msg)
         else:
-            await run_manager.set_status(run_id, RunStatus.success)
+            runtime_context = runtime.context if isinstance(runtime.context, dict) else None
+            # Guard middlewares that hard-stop a run by stripping tool_calls
+            # stamp stop_reason into runtime.context so the worker can surface
+            # it on the run record:
+            #   loop_detection      -> "loop_capped"
+            #   token_budget        -> "token_capped"
+            #   safety_finish_reason -> "safety_capped"
+            #   subagent_limit       -> "subagent_limit_capped"
+            #
+            # If more guards grow stop_reason semantics, consider a publish/
+            # collect pattern (e.g. each guard middleware publishes its cap
+            # reason to a dedicated runtime.context channel, and the worker
+            # collects the most severe / first / all reasons) instead of each
+            # guard writing directly to the same key.
+            stop_reason = runtime_context.get("stop_reason") if runtime_context is not None else None
+            await run_manager.set_status(run_id, RunStatus.success, stop_reason=stop_reason)
 
     except asyncio.CancelledError:
         await run_manager.set_finalizing(run_id, True)
@@ -842,6 +865,8 @@ async def _prepare_goal_continuation_input(
     app_config: AppConfig | None,
     evaluator_model_factory: Any | None = None,
     abort_event: asyncio.Event | None = None,
+    user_id: str | None = None,
+    deerflow_trace_id: str | None = None,
 ) -> dict[str, Any] | None:
     """Evaluate the active goal and return a hidden continuation input if needed.
 
@@ -919,6 +944,9 @@ async def _prepare_goal_continuation_input(
             model=evaluator_model,
             model_name=model_name,
             app_config=app_config,
+            thread_id=thread_id,
+            user_id=user_id,
+            deerflow_trace_id=deerflow_trace_id,
         )
         if abort_event is not None and abort_event.is_set():
             return None
@@ -993,11 +1021,18 @@ async def _prepare_goal_continuation_input(
     if not _goal_instance_matches(updated_goal, latest_goal) or latest_checkpoint_tuple is None:
         return None
     if visible_conversation_signature(_read_checkpoint_messages(latest_checkpoint_tuple)) != conversation_signature_before:
+        # Do not pass continuation_count here: the persist above already
+        # committed it (as next_count). Re-passing next_count would make
+        # _persist_goal_evaluation's race guard (#4088) see that same write as
+        # a "current_count" bump and add another +1 on top of it, silently
+        # double-counting this single continuation attempt against the
+        # continuation budget even though it is being stood down, not
+        # delivered. Omitting it leaves the already-committed count untouched,
+        # matching every other stand-down call site in this function.
         await _persist(
             latest_goal,
             evaluation,
             no_progress_count,
-            continuation_count=next_count,
             stand_down_reason="thread_changed_before_continuation",
         )
         return None

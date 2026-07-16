@@ -60,6 +60,18 @@ def test_native_scan_reports_structured_secret_finding(tmp_path: Path) -> None:
     assert result["blocked"] is True
 
 
+def test_native_scan_allows_eval_fixture_but_flags_other_nested_skill_markdown(tmp_path: Path) -> None:
+    skill_dir = tmp_path / "demo-skill"
+    _write_skill(skill_dir)
+    _write_skill(skill_dir / "evals" / "fixtures" / "calibration")
+    _write_skill(skill_dir / "examples" / "helper")
+
+    findings = scan_skill_dir(skill_dir)["findings"]
+    nested = [finding for finding in findings if finding["rule_id"] == "package-nested-skill-md"]
+
+    assert [finding["file"] for finding in nested] == ["examples/helper/SKILL.md"]
+
+
 def test_secret_evidence_is_redacted_everywhere(tmp_path: Path) -> None:
     token = "ghp_" + "a1B2c3D4e5F6g7H8i9J0k1L2m3N4"
     skill_dir = tmp_path / "demo-skill"

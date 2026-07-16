@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import os
@@ -15,6 +16,12 @@ from deerflow.mcp.cache import reset_mcp_tools_cache
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["mcp"])
 
+# Serializes the read-modify-write of extensions_config.json within this worker
+# process. Offloading the RMW to a thread removed the implicit serialization the
+# single-threaded event loop used to provide, so two concurrent
+# PUT /api/mcp/config calls could otherwise interleave and clobber each other.
+# (Cross-process writers remain a separate, pre-existing concern.)
+_mcp_config_write_lock = asyncio.Lock()
 _ADMIN_REQUIRED_DETAIL = "Admin privileges required to manage MCP configuration."
 
 
@@ -330,6 +337,70 @@ async def get_mcp_configuration(request: Request) -> McpConfigResponse:
     return McpConfigResponse(mcp_servers=servers)
 
 
+def _apply_mcp_config_update(body: McpConfigUpdateRequest) -> dict:
+    """Worker-thread body for :func:`update_mcp_configuration`.
+
+    Resolving the config path, the existence probe, reading the raw JSON,
+    writing the merged config, and reloading it are all blocking filesystem IO
+    that must stay off the event loop. The merge is pure in-memory work but
+    lives here too so the whole read-modify-write is a single worker hop.
+    Returns the reloaded MCP server configs for the response.
+    """
+    # Get the current config path (or determine where to save it)
+    config_path = ExtensionsConfig.resolve_config_path()
+
+    # If no config file exists, create one in the parent directory (project root)
+    if config_path is None:
+        config_path = Path.cwd().parent / "extensions_config.json"
+        logger.info(f"No existing extensions config found. Creating new config at: {config_path}")
+
+    # Load current config to preserve skills
+    current_config = get_extensions_config()
+
+    # Load raw (un-resolved) JSON from disk to use as the merge source.
+    # This preserves $VAR placeholders in env values and top-level keys
+    # like mcpInterceptors that would otherwise be lost.
+    raw_servers: dict[str, dict] = {}
+    raw_other_keys: dict = {}
+    if config_path is not None and config_path.exists():
+        with open(config_path, encoding="utf-8") as f:
+            raw_data = json.load(f)
+        raw_servers = raw_data.get("mcpServers", {})
+        # Preserve any top-level keys beyond mcpServers/skills
+        for key, value in raw_data.items():
+            if key not in ("mcpServers", "skills"):
+                raw_other_keys[key] = value
+
+    # Merge incoming server configs with raw on-disk secrets
+    merged_servers: dict[str, McpServerConfigResponse] = {}
+    for name, incoming in body.mcp_servers.items():
+        raw_server = raw_servers.get(name)
+        if raw_server is not None:
+            merged_servers[name] = _merge_preserving_secrets(
+                incoming,
+                McpServerConfigResponse(**raw_server),
+            )
+        else:
+            merged_servers[name] = incoming
+
+    # Build config data preserving all top-level keys from the original file
+    config_data = dict(raw_other_keys)
+    config_data["mcpServers"] = {name: server.model_dump() for name, server in merged_servers.items()}
+    config_data["skills"] = {name: {"enabled": skill.enabled} for name, skill in current_config.skills.items()}
+
+    # Write the configuration to file
+    with open(config_path, "w", encoding="utf-8") as f:
+        json.dump(config_data, f, indent=2)
+
+    logger.info(f"MCP configuration updated and saved to: {config_path}")
+
+    # Reload the Gateway configuration and update the global cache. The
+    # agent runtime lives in Gateway, so this keeps API reads and tool
+    # execution aligned after extensions_config.json changes.
+    reloaded_config = reload_extensions_config()
+    return reloaded_config.mcp_servers
+
+
 @router.post(
     "/mcp/cache/reset",
     response_model=McpCacheResetResponse,
@@ -393,60 +464,15 @@ async def update_mcp_configuration(request: Request, body: McpConfigUpdateReques
         await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
         _validate_mcp_update_request(body)
 
-        # Get the current config path (or determine where to save it)
-        config_path = ExtensionsConfig.resolve_config_path()
+        # Offload the blocking read-modify-write of extensions_config.json
+        # (path resolve, existence probe, raw read, merged write, reload). The
+        # lock serializes concurrent updates within this process so the RMW stays
+        # atomic now that it no longer runs inline on the event loop.
+        async with _mcp_config_write_lock:
+            reloaded_servers = await asyncio.to_thread(_apply_mcp_config_update, body)
 
-        # If no config file exists, create one in the parent directory (project root)
-        if config_path is None:
-            config_path = Path.cwd().parent / "extensions_config.json"
-            logger.info(f"No existing extensions config found. Creating new config at: {config_path}")
-
-        # Load current config to preserve skills
-        current_config = get_extensions_config()
-
-        # Load raw (un-resolved) JSON from disk to use as the merge source.
-        # This preserves $VAR placeholders in env values and top-level keys
-        # like mcpInterceptors that would otherwise be lost.
-        raw_servers: dict[str, dict] = {}
-        raw_other_keys: dict = {}
-        if config_path is not None and config_path.exists():
-            with open(config_path, encoding="utf-8") as f:
-                raw_data = json.load(f)
-            raw_servers = raw_data.get("mcpServers", {})
-            # Preserve any top-level keys beyond mcpServers/skills
-            for key, value in raw_data.items():
-                if key not in ("mcpServers", "skills"):
-                    raw_other_keys[key] = value
-
-        # Merge incoming server configs with raw on-disk secrets
-        merged_servers: dict[str, McpServerConfigResponse] = {}
-        for name, incoming in body.mcp_servers.items():
-            raw_server = raw_servers.get(name)
-            if raw_server is not None:
-                merged_servers[name] = _merge_preserving_secrets(
-                    incoming,
-                    McpServerConfigResponse(**raw_server),
-                )
-            else:
-                merged_servers[name] = incoming
-
-        # Build config data preserving all top-level keys from the original file
-        config_data = dict(raw_other_keys)
-        config_data["mcpServers"] = {name: server.model_dump() for name, server in merged_servers.items()}
-        config_data["skills"] = {name: {"enabled": skill.enabled} for name, skill in current_config.skills.items()}
-
-        # Write the configuration to file
-        with open(config_path, "w", encoding="utf-8") as f:
-            json.dump(config_data, f, indent=2)
-
-        logger.info(f"MCP configuration updated and saved to: {config_path}")
-
-        # Reload the Gateway configuration and update the global cache. The
-        # agent runtime lives in Gateway, so this keeps API reads and tool
-        # execution aligned after extensions_config.json changes.
-        reloaded_config = reload_extensions_config()
+        servers = {name: _mask_server_config(McpServerConfigResponse(**server.model_dump())) for name, server in reloaded_servers.items()}
         reset_mcp_tools_cache()
-        servers = {name: _mask_server_config(McpServerConfigResponse(**server.model_dump())) for name, server in reloaded_config.mcp_servers.items()}
         return McpConfigResponse(mcp_servers=servers)
 
     except HTTPException:

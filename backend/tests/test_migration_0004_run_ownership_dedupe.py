@@ -156,7 +156,7 @@ async def test_migration_dedupes_duplicate_active_rows_before_unique_index(tmp_p
 
         with sqlite3.connect(db_path) as raw:
             version_row = raw.execute("SELECT version_num FROM alembic_version").fetchone()
-        assert version_row[0] == "0004_run_ownership"
+        assert version_row[0] == "0005_run_stop_reason"
 
         # Sanity: the invariant the index enforces is now true — at most one
         # active row per thread.

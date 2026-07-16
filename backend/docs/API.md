@@ -646,6 +646,19 @@ All APIs return errors in a consistent format:
 
 ## Authentication
 
+DeerFlow supports four HTTP identity sources. They share the same thread/run isolation rules but differ in whether a row is created in `users` and how external identities are mapped. See [AUTH_DESIGN.md](AUTH_DESIGN.md) for the full design.
+
+| Model | Entry | `users` table | Isolation key |
+|---|---|---|---|
+| Browser session | `access_token` cookie after login/register | Yes | `users.id` |
+| OIDC / SSO | OAuth callback → cookie | Yes | `users.id` (see [SSO.md](SSO.md)) |
+| IM channel binding | Connect code + `channel_connections` | Bound to registered user | `channel_connections.owner_user_id` |
+| **Internal Auth** | `X-DeerFlow-Internal-Token` + `X-DeerFlow-Owner-User-Id` | **No** | Owner string on `threads_meta.user_id` |
+
+**IM channel binding** and **Internal Auth** are both *platform-trust* integrations: DeerFlow trusts the channel/platform to authenticate end users. IM bindings persist the mapping in `channel_connections` / `channel_conversations` and require a DeerFlow `users` row. Internal Auth lets a platform call the Gateway API directly with a deployment-shared token and a per-request owner header—no `users` row, but thread/run/checkpoint isolation works the same way.
+
+### Browser session (default)
+
 DeerFlow enforces authentication for all non-public HTTP routes. Public routes are limited to health/docs metadata and these public auth endpoints:
 
 - `POST /api/v1/auth/initialize` creates the first admin account when no admin exists.
@@ -668,6 +681,23 @@ User isolation is enforced from the authenticated user context:
 - Memory and custom agents are stored under `{base_dir}/users/{user_id}/...`.
 
 Note: MCP outbound connections can still use OAuth for configured HTTP/SSE MCP servers; that is separate from DeerFlow API authentication.
+
+### Internal Auth (platform HTTP integration)
+
+For server-to-server integrations (e.g. a Feishu or WeCom/Enterprise WeChat bot backend), configure:
+
+```bash
+export DEER_FLOW_INTERNAL_AUTH_TOKEN="<long-random-secret>"
+```
+
+| Header | Required | Description |
+|---|---|---|
+| `X-DeerFlow-Internal-Token` | Yes | Must match `DEER_FLOW_INTERNAL_AUTH_TOKEN`; missing/invalid → `401` |
+| `X-DeerFlow-Owner-User-Id` | Yes for per-user isolation | Platform user id (e.g. `feishu_ou_alice`, `wecom_user_bob`); omit → `default` bucket |
+
+Does **not** use browser cookies or CSRF tokens. Does **not** insert into `users`; sets `threads_meta.user_id` / `runs.user_id` from the owner header. DeerFlow validates only the platform token—not whether the owner id represents a real end user; user validity is entirely the platform's responsibility. See [AUTH_DESIGN.md — Internal Auth](AUTH_DESIGN.md#internal-auth-direct-http) for trust boundaries, persistence, and security notes.
+
+Use the standard Gateway thread/run endpoints (`POST /api/threads`, `POST /api/threads/{thread_id}/runs/stream`, etc.) with the headers above on every request.
 
 ---
 
