@@ -7,8 +7,9 @@ treat as an autocompact buffer, and finally the free space left over.
 
 Every category is computed in isolation in its own ``try`` block — if any
 single component fails to render we still return the rest, never the whole
-endpoint. The numbers are approximate (``count_tokens_approximately`` /
-``chars // 4``); they intentionally do not call the model's real tokenizer.
+endpoint. Counting is configurable: ``approximate`` uses LangChain's
+network-free heuristic, while ``exact`` tokenizes text and serialized tool or
+structured payloads, retaining a bounded estimate for images.
 """
 
 from __future__ import annotations
@@ -32,6 +33,21 @@ logger = logging.getLogger(__name__)
 _CONTEXT_COUNT_TIMEOUT_SECONDS = 5.0
 _CONTEXT_COUNT_CACHE_SIZE = 64
 _CONTEXT_COUNT_EXECUTOR: ThreadPoolExecutor | None = None
+_MESSAGE_FRAME_TOKENS = 4
+_TOKENS_PER_IMAGE = 85
+_IMAGE_CONTENT_BLOCK_TYPES: frozenset[str] = frozenset({"image", "image_url", "input_image"})
+_TOOL_CALL_CONTENT_BLOCK_TYPES: frozenset[str] = frozenset({"custom_tool_call", "function_call", "tool_call", "tool_use"})
+_REASONING_CONTENT_BLOCK_TYPES: frozenset[str] = frozenset({"reasoning", "reasoning_content", "thinking"})
+_RESPONSES_TEXT_METADATA_FIELDS: tuple[str, ...] = ("annotations", "id", "phase")
+_RESPONSES_FUNCTION_CALL_IDS_KEY = "__openai_function_call_ids__"
+_REASONING_REPLAY_MODEL_CLASSES: frozenset[str] = frozenset(
+    {
+        "PatchedChatDeepSeek",
+        "PatchedChatMiMo",
+        "PatchedChatStepFun",
+        "VllmChatModel",
+    }
+)
 
 type _ContextCountCacheKey = tuple[str, str, str, str, str, str, str, str]
 
@@ -119,13 +135,292 @@ def _count_text(text: str | None, app_config: Any) -> int:
         return _approx_text_tokens(text)
 
 
-def _count_messages(messages: list[Any], app_config: Any) -> int:
+def _serialize_message_value(value: Any) -> str:
+    """Serialize a model-bound value without pulling in local message metadata."""
+    try:
+        return json.dumps(
+            value,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            default=repr,
+        )
+    except Exception:
+        return repr(value)
+
+
+def _count_message_content_exact(content: Any, app_config: Any) -> int:
+    """Count one message's provider-facing content in tokenizer mode.
+
+    Text is tokenized directly. Non-text structured blocks are serialized so
+    their payload contributes to the count, while image data receives the same
+    bounded low-resolution penalty as LangChain's approximate counter instead
+    of tokenizing a URL or base64 body.
+    """
+    if isinstance(content, str):
+        return _count_text(content, app_config)
+    if not isinstance(content, list):
+        return _count_text(repr(content), app_config) if content is not None else 0
+
+    total = 0
+    for block in content:
+        if isinstance(block, str):
+            total += _count_text(block, app_config)
+            continue
+        if not isinstance(block, dict):
+            total += _count_text(repr(block), app_config)
+            continue
+
+        block_type = block.get("type", "")
+        if block_type in _IMAGE_CONTENT_BLOCK_TYPES:
+            total += _TOKENS_PER_IMAGE
+        elif block_type == "image_generation_call":
+            # The Responses adapter replays generated images by reference and
+            # drops the base64 ``result``. Count the provider-bound reference
+            # plus one bounded image estimate when a result is present.
+            reference = {"type": block_type}
+            if isinstance(block.get("id"), str):
+                reference["id"] = block["id"]
+            total += _count_text(_serialize_message_value(reference), app_config)
+            if block.get("result"):
+                total += _TOKENS_PER_IMAGE
+        elif block_type == "text" and isinstance(block.get("text"), str):
+            total += _count_text(block["text"], app_config)
+            metadata = {field: block[field] for field in _RESPONSES_TEXT_METADATA_FIELDS if field in block}
+            if metadata:
+                total += _count_text(_serialize_message_value(metadata), app_config)
+        else:
+            total += _count_text(_serialize_message_value(block), app_config)
+    return total
+
+
+def _content_tool_call_ids(content: Any) -> frozenset[str]:
+    """Return tool-call ids already serialized in list-form content."""
+    if not isinstance(content, list):
+        return frozenset()
+    ids: set[str] = set()
+    for block in content:
+        if not isinstance(block, dict) or block.get("type") not in _TOOL_CALL_CONTENT_BLOCK_TYPES:
+            continue
+        call_id = block.get("call_id") or block.get("id")
+        if isinstance(call_id, str) and call_id:
+            ids.add(call_id)
+    return frozenset(ids)
+
+
+def _message_tool_call_payload(
+    message: Any,
+    represented_ids: frozenset[str],
+    *,
+    include_provider_extensions: bool = True,
+) -> Any | None:
+    """Return the tool payload LangChain will send for an AIMessage.
+
+    Mirrors the adapter preference order: normalized valid/invalid calls win;
+    raw provider calls are a fallback, followed by the legacy function-call
+    field. Local response metadata and artifacts are intentionally excluded.
+    """
+
+    def _unrepresented(calls: list[Any]) -> list[Any]:
+        remaining = []
+        for call in calls:
+            call_id = call.get("id") if isinstance(call, dict) else None
+            if not isinstance(call_id, str) or call_id not in represented_ids:
+                remaining.append(call)
+        return remaining
+
+    def _provider_call(call: Any) -> Any:
+        if not isinstance(call, dict):
+            return call
+        arguments = call.get("args")
+        if not isinstance(arguments, str):
+            arguments = _serialize_message_value(arguments)
+        return {
+            "type": "function",
+            "id": call.get("id"),
+            "function": {
+                "name": call.get("name"),
+                "arguments": arguments,
+            },
+        }
+
+    def _raw_provider_call(call: Any) -> Any:
+        if not isinstance(call, dict):
+            return call
+        return {key: call[key] for key in ("id", "type", "function") if key in call}
+
+    additional_kwargs = getattr(message, "additional_kwargs", None)
+    if not isinstance(additional_kwargs, dict):
+        additional_kwargs = {}
+    raw_tool_calls = additional_kwargs.get("tool_calls")
+
+    def _provider_extensions(raw_calls: Any, sent_calls: list[Any]) -> list[dict[str, Any]]:
+        if isinstance(raw_calls, dict):
+            raw_calls = [raw_calls]
+        if not isinstance(raw_calls, list):
+            return []
+        raw_by_id = {call["id"]: call for call in raw_calls if isinstance(call, dict) and isinstance(call.get("id"), str) and call["id"]}
+        extensions = []
+        for index, sent_call in enumerate(sent_calls):
+            sent_id = sent_call.get("id") if isinstance(sent_call, dict) else None
+            raw_call = raw_by_id.get(sent_id) if isinstance(sent_id, str) else None
+            if raw_call is None and index < len(raw_calls) and isinstance(raw_calls[index], dict):
+                raw_call = raw_calls[index]
+            if raw_call is None:
+                continue
+            # PatchedChatOpenAI restores either spelling as the canonical
+            # ``thought_signature`` field on the provider-bound tool call.
+            signature = raw_call.get("thought_signature") or raw_call.get("thoughtSignature")
+            if signature:
+                extensions.append({"thought_signature": signature})
+        return extensions
+
+    tool_calls = getattr(message, "tool_calls", None) or []
+    invalid_tool_calls = getattr(message, "invalid_tool_calls", None) or []
+    if tool_calls or invalid_tool_calls:
+        normalized_calls = [*tool_calls, *invalid_tool_calls]
+        remaining = _unrepresented([_provider_call(call) for call in normalized_calls])
+        if include_provider_extensions:
+            remaining.extend(_provider_extensions(raw_tool_calls, normalized_calls))
+        return remaining or None
+
+    if raw_tool_calls:
+        if isinstance(raw_tool_calls, list):
+            remaining = []
+            for call in raw_tool_calls:
+                call_id = call.get("id") if isinstance(call, dict) else None
+                if isinstance(call_id, str) and call_id in represented_ids:
+                    if include_provider_extensions:
+                        remaining.extend(_provider_extensions(call, [call]))
+                else:
+                    remaining.append(_raw_provider_call(call))
+                    if include_provider_extensions:
+                        remaining.extend(_provider_extensions(call, [call]))
+            return remaining or None
+        return raw_tool_calls
+    function_call = additional_kwargs.get("function_call")
+    return function_call if function_call else None
+
+
+def _message_reasoning_payload(message: Any, content: Any) -> dict[str, Any] | None:
+    """Return an explicitly replayed provider reasoning field, if any."""
+    if isinstance(content, list) and any(isinstance(block, dict) and block.get("type") in _REASONING_CONTENT_BLOCK_TYPES for block in content):
+        return None
+
+    additional_kwargs = getattr(message, "additional_kwargs", None)
+    if not isinstance(additional_kwargs, dict):
+        return None
+    if additional_kwargs.get("reasoning") is not None:
+        return {"reasoning": additional_kwargs["reasoning"]}
+    if additional_kwargs.get("reasoning_content") is not None:
+        return {"reasoning_content": additional_kwargs["reasoning_content"]}
+    return None
+
+
+def _model_replays_reasoning(app_config: Any, model_name: str | None) -> bool:
+    """Whether the selected adapter sends saved reasoning back to the model."""
+    if model_name is None:
+        # Helper-level callers do not have runtime model context. Preserve the
+        # conservative standalone behavior; production always supplies a name.
+        return True
+    get_model_config = getattr(app_config, "get_model_config", None)
+    if not callable(get_model_config):
+        return False
+    model_config = get_model_config(model_name)
+    if model_config is None:
+        return False
+    if bool(getattr(model_config, "use_responses_api", False)) or getattr(model_config, "output_version", None) == "responses/v1":
+        return True
+    provider_path = getattr(model_config, "use", "")
+    provider_class = provider_path.replace(":", ".").rsplit(".", 1)[-1] if isinstance(provider_path, str) else ""
+    return provider_class in _REASONING_REPLAY_MODEL_CLASSES
+
+
+def _model_replays_tool_call_signatures(app_config: Any, model_name: str | None) -> bool:
+    """Whether the selected adapter restores raw Gemini thought signatures."""
+    if model_name is None:
+        return True
+    get_model_config = getattr(app_config, "get_model_config", None)
+    if not callable(get_model_config):
+        return False
+    model_config = get_model_config(model_name)
+    provider_path = getattr(model_config, "use", "") if model_config is not None else ""
+    provider_class = provider_path.replace(":", ".").rsplit(".", 1)[-1] if isinstance(provider_path, str) else ""
+    return provider_class == "PatchedChatOpenAI"
+
+
+def _content_item_key(block: Any) -> tuple[str, str] | None:
+    if not isinstance(block, dict) or not isinstance(block.get("type"), str):
+        return None
+    item_id = block.get("id") or block.get("call_id")
+    if not isinstance(item_id, str) or not item_id:
+        return None
+    return block["type"], item_id
+
+
+def _count_ai_replayed_fields_exact(message: Any, content: Any, app_config: Any) -> int:
+    """Count explicit Responses/Chat fields stored outside message content."""
+    additional_kwargs = getattr(message, "additional_kwargs", None)
+    if not isinstance(additional_kwargs, dict):
+        additional_kwargs = {}
+
+    content_blocks = content if isinstance(content, list) else []
+    content_types = {block.get("type") for block in content_blocks if isinstance(block, dict) and isinstance(block.get("type"), str)}
+    content_keys = {key for block in content_blocks if (key := _content_item_key(block)) is not None}
+    content_ids = {key[1] for key in content_keys}
+    total = 0
+
+    message_id = getattr(message, "id", None)
+    response_metadata = getattr(message, "response_metadata", None)
+    response_id = response_metadata.get("id") if isinstance(response_metadata, dict) else None
+    is_responses_v03 = (
+        isinstance(content, list)
+        and all(isinstance(block, dict) for block in content)
+        and (
+            any(key in additional_kwargs for key in ("reasoning", "tool_outputs", "refusal", _RESPONSES_FUNCTION_CALL_IDS_KEY))
+            or (isinstance(message_id, str) and message_id.startswith("msg_") and isinstance(response_id, str) and response_id.startswith("resp_"))
+        )
+    )
+    if is_responses_v03:
+        refusal = additional_kwargs.get("refusal")
+        if refusal and "refusal" not in content_types:
+            total += _count_text(_serialize_message_value({"type": "refusal", "refusal": refusal}), app_config)
+
+        tool_outputs = additional_kwargs.get("tool_outputs")
+        if isinstance(tool_outputs, list):
+            unrepresented_outputs = [block for block in tool_outputs if (key := _content_item_key(block)) is None or key not in content_keys]
+            total += _count_message_content_exact(unrepresented_outputs, app_config)
+
+        function_call_ids = additional_kwargs.get(_RESPONSES_FUNCTION_CALL_IDS_KEY)
+        if isinstance(function_call_ids, dict):
+            item_ids = []
+            for tool_call in getattr(message, "tool_calls", None) or []:
+                call_id = tool_call.get("id") if isinstance(tool_call, dict) else None
+                item_id = function_call_ids.get(call_id) if isinstance(call_id, str) else None
+                if isinstance(item_id, str) and item_id and item_id not in content_ids:
+                    item_ids.append({"id": item_id})
+            if item_ids:
+                total += _count_text(_serialize_message_value(item_ids), app_config)
+
+        if isinstance(message_id, str) and message_id.startswith("msg_"):
+            missing_text_ids = sum(1 for block in content_blocks if isinstance(block, dict) and block.get("type") == "text" and "id" not in block)
+            for _ in range(missing_text_ids):
+                total += _count_text(_serialize_message_value({"id": message_id}), app_config)
+
+    audio = additional_kwargs.get("audio")
+    if audio and "audio" not in content_types:
+        audio_reference = {"id": audio["id"]} if isinstance(audio, dict) and "id" in audio else audio
+        total += _count_text(_serialize_message_value({"audio": audio_reference}), app_config)
+
+    return total
+
+
+def _count_messages(messages: list[Any], app_config: Any, *, model_name: str | None = None) -> int:
     """Count tokens across checkpoint messages using the configured strategy.
 
-    ``approximate`` reuses langchain's ``count_tokens_approximately`` (chars//4).
-    ``exact`` tokenizes each message's textual content with the model tokenizer
-    and sums per-message overhead (role tags etc.) via the same approximation,
-    so structured/image parts degrade gracefully instead of raising.
+    ``approximate`` reuses LangChain's ``count_tokens_approximately``.
+    ``exact`` explicitly counts text, structured content, AI tool-call payloads,
+    ToolMessage call ids, and message names. Image blocks use a bounded estimate
+    and framing remains a small fixed overhead because it is provider-specific.
     """
     if not messages:
         return 0
@@ -134,29 +429,48 @@ def _count_messages(messages: list[Any], app_config: Any) -> int:
 
         return int(count_tokens_approximately(messages))
 
-    from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
-
-    from deerflow.agents.memory.backends.deermem.deermem.core.prompt import _count_tokens  # noqa: SLF001
+    from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
 
     total = 0
+    count_replayed_reasoning = _model_replays_reasoning(app_config, model_name)
+    count_tool_call_signatures = _model_replays_tool_call_signatures(app_config, model_name)
     for msg in messages:
-        # Pull the primary textual content; non-string content (image parts,
-        # structured tool payloads) is skipped from the exact count rather
-        # than coerced — its contribution stays in the approximate overhead.
         content = getattr(msg, "content", None)
-        parts = content if isinstance(content, list) else [content]
-        for part in parts:
-            text = None
-            if isinstance(part, str):
-                text = part
-            elif isinstance(part, dict):
-                text = part.get("text") if isinstance(part.get("text"), str) else None
-            if text:
-                total += int(_count_tokens(text, use_tiktoken=True))
-        # Per-message framing overhead (role tag, delimiters). Bounded 4-token
-        # bump keeps the total commensurate with the approximate baseline.
-        if isinstance(msg, (AIMessage, HumanMessage, SystemMessage, ToolMessage)):
-            total += 4
+        total += _count_message_content_exact(content, app_config)
+
+        # Anthropic and OpenAI Responses may normalize calls into both content
+        # blocks and ``tool_calls``. Deduplicate by id so any call missing from
+        # the content list still contributes its provider-bound payload.
+        if isinstance(msg, AIMessage):
+            tool_payload = _message_tool_call_payload(
+                msg,
+                _content_tool_call_ids(content),
+                include_provider_extensions=count_tool_call_signatures,
+            )
+            if tool_payload is not None:
+                total += _count_text(_serialize_message_value(tool_payload), app_config)
+            if count_replayed_reasoning:
+                reasoning_payload = _message_reasoning_payload(msg, content)
+                if reasoning_payload is not None:
+                    total += _count_text(_serialize_message_value(reasoning_payload), app_config)
+            total += _count_ai_replayed_fields_exact(msg, content, app_config)
+
+        if isinstance(msg, ToolMessage):
+            tool_call_id = getattr(msg, "tool_call_id", None)
+            if isinstance(tool_call_id, str):
+                total += _count_text(tool_call_id, app_config)
+
+        name = getattr(msg, "name", None)
+        additional_kwargs = getattr(msg, "additional_kwargs", None)
+        if not name and isinstance(additional_kwargs, dict):
+            name = additional_kwargs.get("name")
+        if isinstance(name, str) and name:
+            total += _count_text(name, app_config)
+
+        # Role tags and provider-specific delimiters are not exposed on the
+        # LangChain message, so retain the existing bounded framing estimate.
+        if isinstance(msg, BaseMessage):
+            total += _MESSAGE_FRAME_TOKENS
     return total
 
 
@@ -214,8 +528,13 @@ def _checkpoint_cache_token(checkpoint: dict[str, Any], messages: list[Any], pro
             {
                 "type": type(message).__name__,
                 "id": getattr(message, "id", None),
+                "name": getattr(message, "name", None),
                 "content": getattr(message, "content", None),
                 "additional_kwargs": getattr(message, "additional_kwargs", None),
+                "response_metadata": getattr(message, "response_metadata", None),
+                "tool_calls": getattr(message, "tool_calls", None),
+                "invalid_tool_calls": getattr(message, "invalid_tool_calls", None),
+                "tool_call_id": getattr(message, "tool_call_id", None),
             }
             for message in messages
         ],
@@ -252,11 +571,15 @@ def _is_injected_memory_message(message: Any) -> bool:
     return bool(additional_kwargs.get("dynamic_context_reminder") and isinstance(message_id, str) and message_id.endswith("__memory"))
 
 
-def _count_checkpoint_tokens(messages: list[Any], app_config: Any) -> tuple[int, int]:
+def _count_checkpoint_tokens(messages: list[Any], app_config: Any, *, model_name: str | None = None) -> tuple[int, int]:
     """Return (conversation, injected-memory) tokens without double counting."""
     memory_messages = [message for message in messages if _is_injected_memory_message(message)]
     conversation_messages = [message for message in messages if not _is_injected_memory_message(message)]
-    return _count_messages(conversation_messages, app_config), _count_messages(memory_messages, app_config)
+    return _count_messages(conversation_messages, app_config, model_name=model_name), _count_messages(
+        memory_messages,
+        app_config,
+        model_name=model_name,
+    )
 
 
 async def _resolve_thread_agent_name(request: Request, thread_id: str) -> str | None:
@@ -540,7 +863,7 @@ def _compute_context_counts(
         )
     )
 
-    messages_tokens, memory_tokens = _count_checkpoint_tokens(messages, app_config)
+    messages_tokens, memory_tokens = _count_checkpoint_tokens(messages, app_config, model_name=model_name)
     skills_tokens = _count_skills_section(app_config, available_skills, user_id)
     custom_agents_tokens = _count_subagent_section(
         app_config,

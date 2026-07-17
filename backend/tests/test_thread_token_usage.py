@@ -684,6 +684,581 @@ def test_count_messages_exact_tokenizes_text(monkeypatch):
     assert context_usage._count_messages(msgs, config) == 16
 
 
+def test_count_messages_exact_counts_tool_payloads_and_tool_call_ids(monkeypatch):
+    tokenized: list[str] = []
+
+    def _count(text: str, **_):
+        tokenized.append(text)
+        return len(text)
+
+    monkeypatch.setattr(
+        "deerflow.agents.memory.backends.deermem.deermem.core.prompt._count_tokens",
+        _count,
+    )
+    config = _config_with_counting("exact")
+    from langchain_core.messages import AIMessage, ToolMessage
+
+    def _tool_exchange(command: str, tool_call_id: str):
+        return [
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "bash",
+                        "args": {"command": command},
+                        "id": tool_call_id,
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            ToolMessage(content="ok", tool_call_id=tool_call_id),
+        ]
+
+    small = context_usage._count_messages(_tool_exchange("pwd", "call-1"), config)
+    large = context_usage._count_messages(
+        _tool_exchange("x" * 2000, "call-" + "y" * 100),
+        config,
+    )
+
+    # Both the serialized tool arguments and the matching ToolMessage id must
+    # contribute to the exact count; the old text-only loop returned the same
+    # value for both exchanges.
+    assert large > small + 2000
+    assert any('"name":"bash"' in text and "command" in text and "pwd" in text for text in tokenized)
+
+    short_id = context_usage._count_messages([ToolMessage(content="ok", tool_call_id="a")], config)
+    long_id = context_usage._count_messages([ToolMessage(content="ok", tool_call_id="a" * 100)], config)
+    assert long_id - short_id == 99
+
+
+def test_count_messages_exact_counts_tool_calls_beside_non_tool_list_content(monkeypatch):
+    monkeypatch.setattr(
+        "deerflow.agents.memory.backends.deermem.deermem.core.prompt._count_tokens",
+        lambda text, **_: len(text),
+    )
+    config = _config_with_counting("exact")
+    from langchain_core.messages import AIMessage
+
+    content = [{"type": "text", "text": "thinking"}]
+    without_tool_call = AIMessage(content=content)
+    with_tool_call = AIMessage(
+        content=content,
+        tool_calls=[
+            {
+                "name": "bash",
+                "args": {"command": "x" * 1000},
+                "id": "call-1",
+                "type": "tool_call",
+            }
+        ],
+    )
+
+    base = context_usage._count_messages([without_tool_call], config)
+    counted = context_usage._count_messages([with_tool_call], config)
+    assert counted > base + 1000
+
+
+def test_count_messages_exact_counts_responses_text_block_metadata(monkeypatch):
+    monkeypatch.setattr(
+        "deerflow.agents.memory.backends.deermem.deermem.core.prompt._count_tokens",
+        lambda text, **_: len(text),
+    )
+    config = _config_with_counting("exact")
+    from langchain_core.messages import AIMessage
+
+    plain = AIMessage(content=[{"type": "text", "text": "answer"}])
+    annotated = AIMessage(
+        content=[
+            {
+                "type": "text",
+                "text": "answer",
+                "id": "msg-1",
+                "phase": "final_answer",
+                "annotations": [
+                    {
+                        "type": "url_citation",
+                        "url": "https://example.com/" + "u" * 1000,
+                        "title": "source",
+                    }
+                ],
+            }
+        ]
+    )
+
+    assert context_usage._count_messages([annotated], config) > context_usage._count_messages([plain], config) + 1000
+
+
+def test_count_messages_exact_counts_replayed_reasoning_without_duplicates(monkeypatch):
+    monkeypatch.setattr(
+        "deerflow.agents.memory.backends.deermem.deermem.core.prompt._count_tokens",
+        lambda text, **_: len(text),
+    )
+    config = _config_with_counting("exact")
+    from langchain_core.messages import AIMessage
+
+    plain = AIMessage(content="answer")
+    replayed = AIMessage(
+        content="answer",
+        additional_kwargs={
+            "reasoning": "r" * 1000,
+            # vLLM stores a readable duplicate alongside the raw field.
+            "reasoning_content": "r" * 1000,
+        },
+    )
+    content_block = AIMessage(content=[{"type": "reasoning", "summary": [{"type": "summary_text", "text": "r" * 1000}]}])
+    content_block_with_duplicate = AIMessage(
+        content=content_block.content,
+        additional_kwargs={"reasoning_content": "r" * 1000},
+    )
+
+    assert context_usage._count_messages([replayed], config) > context_usage._count_messages([plain], config) + 1000
+    assert context_usage._count_messages([content_block_with_duplicate], config) == context_usage._count_messages([content_block], config)
+
+
+def test_count_messages_exact_only_counts_reasoning_for_replaying_models(monkeypatch):
+    monkeypatch.setattr(
+        "deerflow.agents.memory.backends.deermem.deermem.core.prompt._count_tokens",
+        lambda text, **_: len(text),
+    )
+    from langchain_core.messages import AIMessage
+
+    model_configs = {
+        "minimax": SimpleNamespace(
+            use="deerflow.models.patched_minimax:PatchedChatMiniMax",
+            use_responses_api=False,
+        ),
+        "deepseek": SimpleNamespace(
+            use="deerflow.models.patched_deepseek:PatchedChatDeepSeek",
+            use_responses_api=False,
+        ),
+        "responses": SimpleNamespace(
+            use="langchain_openai.ChatOpenAI",
+            use_responses_api=True,
+        ),
+    }
+    config = _config_with_counting("exact")
+    config.get_model_config = model_configs.get
+    plain = AIMessage(content="answer")
+    with_reasoning = AIMessage(
+        content="answer",
+        additional_kwargs={"reasoning_content": "r" * 1000},
+    )
+
+    plain_count = context_usage._count_messages([plain], config, model_name="minimax")
+    assert context_usage._count_messages([with_reasoning], config, model_name="minimax") == plain_count
+    assert context_usage._count_messages([with_reasoning], config, model_name="deepseek") > plain_count + 1000
+    assert context_usage._count_messages([with_reasoning], config, model_name="responses") > plain_count + 1000
+
+
+def test_count_messages_exact_counts_provider_fields_on_normalized_tool_calls(monkeypatch):
+    monkeypatch.setattr(
+        "deerflow.agents.memory.backends.deermem.deermem.core.prompt._count_tokens",
+        lambda text, **_: len(text),
+    )
+    config = _config_with_counting("exact")
+    from langchain_core.messages import AIMessage
+
+    normalized = {
+        "name": "bash",
+        "args": {"command": "pwd"},
+        "id": "call-1",
+        "type": "tool_call",
+    }
+    raw = {
+        "id": "call-1",
+        "type": "function",
+        "function": {"name": "bash", "arguments": '{"command":"pwd"}'},
+    }
+    unsigned = AIMessage(
+        content="",
+        tool_calls=[normalized],
+        additional_kwargs={"tool_calls": [raw]},
+    )
+    signed = AIMessage(
+        content="",
+        tool_calls=[normalized],
+        additional_kwargs={
+            "tool_calls": [{**raw, "thought_signature": "s" * 1000}],
+        },
+    )
+
+    assert context_usage._count_messages([signed], config) > context_usage._count_messages([unsigned], config) + 1000
+
+
+def test_count_messages_exact_only_counts_signatures_for_replaying_models(monkeypatch):
+    monkeypatch.setattr(
+        "deerflow.agents.memory.backends.deermem.deermem.core.prompt._count_tokens",
+        lambda text, **_: len(text),
+    )
+    from langchain_core.messages import AIMessage
+
+    model_configs = {
+        "standard": SimpleNamespace(use="langchain_openai.ChatOpenAI"),
+        "patched": SimpleNamespace(use="deerflow.models.patched_openai:PatchedChatOpenAI"),
+    }
+    config = _config_with_counting("exact")
+    config.get_model_config = model_configs.get
+    normalized = {
+        "name": "bash",
+        "args": {"command": "pwd"},
+        "id": "call-1",
+        "type": "tool_call",
+    }
+    raw = {
+        "id": "call-1",
+        "type": "function",
+        "function": {"name": "bash", "arguments": '{"command":"pwd"}'},
+    }
+    unsigned = AIMessage(content="", tool_calls=[normalized], additional_kwargs={"tool_calls": [raw]})
+    signed = AIMessage(
+        content="",
+        tool_calls=[normalized],
+        additional_kwargs={"tool_calls": [{**raw, "thought_signature": "s" * 1000}]},
+    )
+
+    standard_count = context_usage._count_messages([unsigned], config, model_name="standard")
+    assert context_usage._count_messages([signed], config, model_name="standard") == standard_count
+    assert context_usage._count_messages([signed], config, model_name="patched") > standard_count + 1000
+
+
+def test_count_messages_exact_ignores_unmatched_raw_tool_call_extensions(monkeypatch):
+    monkeypatch.setattr(
+        "deerflow.agents.memory.backends.deermem.deermem.core.prompt._count_tokens",
+        lambda text, **_: len(text),
+    )
+    config = _config_with_counting("exact")
+    from langchain_core.messages import AIMessage
+
+    normalized = {
+        "name": "bash",
+        "args": {"command": "pwd"},
+        "id": "call-1",
+        "type": "tool_call",
+    }
+    raw = {
+        "id": "call-1",
+        "type": "function",
+        "function": {"name": "bash", "arguments": '{"command":"pwd"}'},
+    }
+    matched_only = AIMessage(
+        content="",
+        tool_calls=[normalized],
+        additional_kwargs={"tool_calls": [raw]},
+    )
+    with_unmatched_signature = AIMessage(
+        content="",
+        tool_calls=[normalized],
+        additional_kwargs={
+            "tool_calls": [raw, {**raw, "id": "not-sent", "thought_signature": "s" * 1000}],
+        },
+    )
+
+    assert context_usage._count_messages([with_unmatched_signature], config) == context_usage._count_messages([matched_only], config)
+
+
+def test_count_messages_exact_counts_responses_v03_replayed_fields(monkeypatch):
+    monkeypatch.setattr(
+        "deerflow.agents.memory.backends.deermem.deermem.core.prompt._count_tokens",
+        lambda text, **_: len(text),
+    )
+    config = _config_with_counting("exact")
+    from langchain_core.messages import AIMessage
+
+    tool_call = {
+        "name": "bash",
+        "args": {"command": "pwd"},
+        "id": "call-1",
+        "type": "tool_call",
+    }
+    base = AIMessage(content=[{"type": "text", "text": "answer"}], tool_calls=[tool_call])
+    replayed = AIMessage(
+        content=base.content,
+        tool_calls=[tool_call],
+        additional_kwargs={
+            "refusal": "cannot comply " + "r" * 1000,
+            "tool_outputs": [
+                {
+                    "type": "mcp_call",
+                    "id": "mcp-1",
+                    "status": "completed",
+                    "output": "o" * 1000,
+                }
+            ],
+            "__openai_function_call_ids__": {"call-1": "fc_" + "i" * 1000},
+        },
+    )
+
+    assert context_usage._count_messages([replayed], config) > context_usage._count_messages([base], config) + 3000
+
+
+def test_count_messages_exact_ignores_v03_fields_when_adapter_will_not_replay_them(monkeypatch):
+    monkeypatch.setattr(
+        "deerflow.agents.memory.backends.deermem.deermem.core.prompt._count_tokens",
+        lambda text, **_: len(text),
+    )
+    config = _config_with_counting("exact")
+    from langchain_core.messages import AIMessage
+
+    tool_call = {
+        "name": "bash",
+        "args": {"command": "pwd"},
+        "id": "call-1",
+        "type": "tool_call",
+    }
+    base = AIMessage(content="answer", tool_calls=[tool_call])
+    not_replayed = AIMessage(
+        content="answer",
+        tool_calls=[tool_call],
+        additional_kwargs={
+            "refusal": "r" * 1000,
+            "tool_outputs": [{"type": "mcp_call", "id": "mcp-1", "output": "o" * 1000}],
+            "__openai_function_call_ids__": {"call-1": "fc_" + "i" * 1000},
+        },
+    )
+
+    assert context_usage._count_messages([not_replayed], config) == context_usage._count_messages([base], config)
+
+
+def test_count_messages_exact_frames_legacy_function_messages(monkeypatch):
+    monkeypatch.setattr(
+        "deerflow.agents.memory.backends.deermem.deermem.core.prompt._count_tokens",
+        lambda text, **_: len(text),
+    )
+    config = _config_with_counting("exact")
+    from langchain_core.messages import FunctionMessage
+
+    message = FunctionMessage(content="result", name="legacy_tool")
+
+    assert context_usage._count_messages([message], config) == len("result") + len("legacy_tool") + 4
+
+
+def test_count_messages_exact_counts_invalid_and_raw_tool_calls(monkeypatch):
+    monkeypatch.setattr(
+        "deerflow.agents.memory.backends.deermem.deermem.core.prompt._count_tokens",
+        lambda text, **_: len(text),
+    )
+    config = _config_with_counting("exact")
+    from langchain_core.messages import AIMessage
+
+    base = context_usage._count_messages([AIMessage(content="")], config)
+    invalid = AIMessage(
+        content="",
+        invalid_tool_calls=[
+            {
+                "name": "bash",
+                "args": "x" * 1000,
+                "id": "bad-1",
+                "error": "parse error",
+                "type": "invalid_tool_call",
+            }
+        ],
+    )
+    raw = AIMessage(
+        content="",
+        additional_kwargs={
+            "tool_calls": [
+                {
+                    "id": "raw-1",
+                    "type": "function",
+                    "function": {
+                        "name": "bash",
+                        "arguments": "x" * 1000,
+                    },
+                }
+            ]
+        },
+    )
+
+    assert context_usage._count_messages([invalid], config) > base + 1000
+    assert context_usage._count_messages([raw], config) > base + 1000
+
+    short_error = invalid.model_copy(
+        update={
+            "invalid_tool_calls": [
+                {
+                    **invalid.invalid_tool_calls[0],
+                    "error": "short",
+                }
+            ]
+        }
+    )
+    long_error = invalid.model_copy(
+        update={
+            "invalid_tool_calls": [
+                {
+                    **invalid.invalid_tool_calls[0],
+                    "error": "e" * 5000,
+                }
+            ]
+        }
+    )
+    assert context_usage._count_messages([long_error], config) == context_usage._count_messages([short_error], config)
+
+
+def test_count_messages_exact_counts_structured_blocks_and_bounds_images(monkeypatch):
+    monkeypatch.setattr(
+        "deerflow.agents.memory.backends.deermem.deermem.core.prompt._count_tokens",
+        lambda text, **_: len(text),
+    )
+    config = _config_with_counting("exact")
+    from langchain_core.messages import AIMessage, HumanMessage
+
+    structured = HumanMessage(
+        content=[
+            {"type": "text", "text": "hello"},
+            {"type": "input_audio", "data": "abc"},
+        ]
+    )
+    assert context_usage._count_messages([structured], config) > len("hello") + 4
+
+    short_image = HumanMessage(
+        content=[
+            {
+                "type": "image_url",
+                "image_url": {"url": "data:image/png;base64,a"},
+            }
+        ]
+    )
+    large_image = HumanMessage(
+        content=[
+            {
+                "type": "image_url",
+                "image_url": {"url": "data:image/png;base64," + "a" * 20_000},
+            }
+        ]
+    )
+    short_count = context_usage._count_messages([short_image], config)
+    large_count = context_usage._count_messages([large_image], config)
+
+    assert short_count >= 85
+    assert large_count == short_count
+
+    short_input_image = HumanMessage(
+        content=[
+            {
+                "type": "input_image",
+                "image_url": "data:image/png;base64,a",
+            }
+        ]
+    )
+    large_input_image = HumanMessage(
+        content=[
+            {
+                "type": "input_image",
+                "image_url": "data:image/png;base64," + "a" * 20_000,
+            }
+        ]
+    )
+    short_input_count = context_usage._count_messages([short_input_image], config)
+    large_input_count = context_usage._count_messages([large_input_image], config)
+
+    assert short_input_count >= 85
+    assert large_input_count == short_input_count
+
+    short_generated_image = AIMessage(
+        content=[
+            {
+                "type": "image_generation_call",
+                "id": "image-1",
+                "status": "completed",
+                "result": "a",
+            }
+        ]
+    )
+    large_generated_image = AIMessage(
+        content=[
+            {
+                "type": "image_generation_call",
+                "id": "image-1",
+                "status": "completed",
+                "result": "a" * 20_000,
+            }
+        ]
+    )
+    short_generated_count = context_usage._count_messages([short_generated_image], config)
+    large_generated_count = context_usage._count_messages([large_generated_image], config)
+
+    assert short_generated_count >= 85
+    assert large_generated_count == short_generated_count
+
+
+def test_count_messages_exact_does_not_double_count_tool_use_blocks(monkeypatch):
+    monkeypatch.setattr(
+        "deerflow.agents.memory.backends.deermem.deermem.core.prompt._count_tokens",
+        lambda text, **_: len(text),
+    )
+    config = _config_with_counting("exact")
+    from langchain_core.messages import AIMessage
+
+    block = {
+        "type": "tool_use",
+        "name": "bash",
+        "input": {"command": "pwd"},
+        "id": "call-1",
+    }
+    with_normalized_tool_calls = AIMessage(
+        content=[block],
+        tool_calls=[
+            {
+                "name": "bash",
+                "args": {"command": "pwd"},
+                "id": "call-1",
+                "type": "tool_call",
+            }
+        ],
+    )
+    content_only = AIMessage(content=[block])
+
+    counted = context_usage._count_messages([with_normalized_tool_calls], config)
+    assert counted > 4
+    assert counted == context_usage._count_messages([content_only], config)
+
+    with_an_additional_call = AIMessage(
+        content=[block],
+        tool_calls=[
+            {
+                "name": "bash",
+                "args": {"command": "pwd"},
+                "id": "call-1",
+                "type": "tool_call",
+            },
+            {
+                "name": "write_file",
+                "args": {"path": "result.txt", "content": "x" * 1000},
+                "id": "call-2",
+                "type": "tool_call",
+            },
+        ],
+    )
+    assert context_usage._count_messages([with_an_additional_call], config) > counted + 1000
+
+
+def test_count_messages_exact_tool_payload_falls_back_when_tokenizer_fails(monkeypatch):
+    def _boom(*args, **kwargs):
+        raise RuntimeError("tiktoken exploded")
+
+    monkeypatch.setattr(
+        "deerflow.agents.memory.backends.deermem.deermem.core.prompt._count_tokens",
+        _boom,
+    )
+    config = _config_with_counting("exact")
+    from langchain_core.messages import AIMessage
+
+    message = AIMessage(
+        content="",
+        tool_calls=[
+            {
+                "name": "bash",
+                "args": {"command": "x" * 400},
+                "id": "call-1",
+                "type": "tool_call",
+            }
+        ],
+    )
+
+    assert context_usage._count_messages([message], config) > 4
+
+
 def test_checkpoint_memory_is_reported_separately_from_messages():
     messages = [
         SystemMessage(content="Today is Tuesday", id="turn-1__date", additional_kwargs={"dynamic_context_reminder": True}),
@@ -698,6 +1273,35 @@ def test_checkpoint_memory_is_reported_separately_from_messages():
     assert memory_tokens > 0
     without_memory, _ = context_usage._count_checkpoint_tokens([messages[0], messages[2]], config)
     assert conversation_tokens == without_memory
+
+
+def test_checkpoint_cache_token_covers_all_counted_message_fields():
+    from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+
+    def _token(message):
+        return context_usage._checkpoint_cache_token({}, [message], None)
+
+    tool_call_a = {
+        "name": "bash",
+        "args": {"command": "pwd"},
+        "id": "call-1",
+        "type": "tool_call",
+    }
+    tool_call_b = {**tool_call_a, "args": {"command": "ls"}}
+    assert _token(AIMessage(content="", tool_calls=[tool_call_a])) != _token(AIMessage(content="", tool_calls=[tool_call_b]))
+
+    invalid_a = {
+        "name": "bash",
+        "args": "bad-a",
+        "id": "bad-1",
+        "error": "parse error",
+        "type": "invalid_tool_call",
+    }
+    invalid_b = {**invalid_a, "args": "bad-b"}
+    assert _token(AIMessage(content="", invalid_tool_calls=[invalid_a])) != _token(AIMessage(content="", invalid_tool_calls=[invalid_b]))
+
+    assert _token(ToolMessage(content="ok", tool_call_id="call-1")) != _token(ToolMessage(content="ok", tool_call_id="call-2"))
+    assert _token(HumanMessage(content="hello", name="alice")) != _token(HumanMessage(content="hello", name="bob"))
 
 
 @pytest.mark.asyncio
@@ -748,7 +1352,8 @@ def test_custom_agent_settings_flow_into_prompt_and_tools(monkeypatch):
         "load_agent_config",
         lambda name, user_id=None: SimpleNamespace(skills=["code-review"], tool_groups=["web"]),
     )
-    monkeypatch.setattr(context_usage, "_count_checkpoint_tokens", lambda _messages, _config: (11, 3))
+    checkpoint_counter = MagicMock(return_value=(11, 3))
+    monkeypatch.setattr(context_usage, "_count_checkpoint_tokens", checkpoint_counter)
     skills_counter = MagicMock(return_value=5)
     prompt_counter = MagicMock(return_value=13)
     tools_counter = MagicMock(return_value=(17, 19, 29))
@@ -772,6 +1377,7 @@ def test_custom_agent_settings_flow_into_prompt_and_tools(monkeypatch):
 
     assert counts["memory_tokens"] == 3
     assert counts["max_context_tokens"] == 100_000
+    checkpoint_counter.assert_called_once_with([], app_config, model_name="large-model")
     scoped_user_id = skills_counter.call_args.args[2]
     assert skills_counter.call_args.args[:2] == (app_config, {"code-review"})
     assert isinstance(scoped_user_id, str)
