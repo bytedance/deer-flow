@@ -60,24 +60,16 @@ class _FakeSandbox:
         *,
         exec_error: Exception | None = None,
         close_error: Exception | None = None,
-        exec_error_sequence: list[Exception | None] | None = None,
     ) -> None:
         self.id = "remote-session-id"
         self.files: dict[str, bytes] = {}
         self.exec_calls: list[tuple] = []
         self.exec_error = exec_error
-        # Per-call errors popped in order; None means "succeed normally". Lets a
-        # test make the first exec fail transiently and the retry succeed.
-        self.exec_error_sequence = exec_error_sequence
         self.close_error = close_error
         self.closed = False
 
     def exec(self, *argv: str, cwd=None, env=None, timeout=None):
         self.exec_calls.append({"argv": argv, "cwd": cwd, "env": env, "timeout": timeout})
-        if self.exec_error_sequence:
-            err = self.exec_error_sequence.pop(0)
-            if err is not None:
-                raise err
         if self.exec_error is not None:
             raise self.exec_error
         if argv[:2] == ("cat", "--"):
@@ -306,21 +298,17 @@ def test_regular_error_does_not_trigger_terminal_callback() -> None:
     assert invalidated == []
 
 
-def test_transient_transport_error_retries_once_and_succeeds() -> None:
-    fake = _FakeSandbox(exec_error_sequence=[RuntimeError("UNAVAILABLE: Socket closed"), None])
-    box = TenkiSandbox("sb", fake)
-    out = box.execute_command("echo ok")
-    assert out == "ok\n"
-    assert len(fake.exec_calls) == 2  # failed once, retried once
-
-
-def test_transient_error_that_persists_is_surfaced() -> None:
+def test_transient_transport_error_is_not_retried_and_not_evicted() -> None:
+    # exec is not idempotent, so a transient transport error must NOT be retried
+    # (re-running could double a command's side effects or duplicate a base64
+    # write chunk). It surfaces as text, and — not being a terminal session
+    # error — does not evict the sandbox.
     invalidated: list[tuple[str, str]] = []
     fake = _FakeSandbox(exec_error=RuntimeError("UNAVAILABLE: Socket closed"))
     box = TenkiSandbox("sb", fake, on_terminal_failure=lambda sid, reason: invalidated.append((sid, reason)))
     out = box.execute_command("echo ok")
     assert out.startswith("Error:")
-    assert len(fake.exec_calls) == 2  # one retry, then given up
+    assert len(fake.exec_calls) == 1  # executed exactly once — no retry
     assert invalidated == []  # transient, not terminal → sandbox not evicted
 
 

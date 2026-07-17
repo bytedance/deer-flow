@@ -40,7 +40,9 @@ SDK directly with no event-loop bridge. Sandboxes are named deterministically
 from `user_id:thread_id`, released into an in-process warm pool after each agent
 turn, and reclaimed (after a liveness health check) by the same thread on the
 next acquire. A terminal session error evicts the sandbox and the next acquire
-rebuilds it; a transient transport blip is retried once in-place.
+rebuilds it; other transport errors surface to the caller (`exec` is never
+auto-retried — it is not idempotent, so re-running could double a command's side
+effects or duplicate a file-write chunk).
 
 | File | Role |
 | --- | --- |

@@ -61,19 +61,6 @@ _TERMINAL_ERROR_NAMES = frozenset(
     }
 )
 
-# Substrings (matched case-insensitively on the error message) that mark a
-# transient data-plane transport blip — the gRPC channel to a still-alive
-# session dropped. Observed in live testing as a one-off on ~1/9 runs. These get
-# a single bounded retry; a genuinely dead session raises a *terminal* error
-# (above) instead, so this never masks a real failure.
-_RETRYABLE_ERROR_MARKERS = (
-    "socket closed",
-    "unavailable",
-    "failed to connect",
-    "connection reset",
-    "transport is closing",
-)
-
 
 class TenkiSandbox(Sandbox):
     """DeerFlow Sandbox adapter that delegates to a live Tenki cloud sandbox.
@@ -121,11 +108,6 @@ class TenkiSandbox(Sandbox):
             return True
         return type(error).__name__ in _TERMINAL_ERROR_NAMES
 
-    @staticmethod
-    def _is_retryable_failure(error: Exception) -> bool:
-        msg = str(error).lower()
-        return any(marker in msg for marker in _RETRYABLE_ERROR_MARKERS)
-
     def close(self) -> None:
         """Terminate the underlying Tenki session (idempotent)."""
         with self._lock:
@@ -144,27 +126,26 @@ class TenkiSandbox(Sandbox):
         # No forced cwd: commands run in the sandbox default working directory
         # (like community/e2b_sandbox and community/boxlite); file ops address
         # absolute, home-remapped paths, so cwd is irrelevant to them.
+        #
+        # No auto-retry: exec is not idempotent (a command or a base64 write
+        # chunk may have run server-side before a transport ack dropped), so
+        # re-running it risks double side effects / mid-file corruption. Like
+        # boxlite, a transient error is surfaced to the caller (returned as text
+        # by execute_command / raised by the file ops); a terminal session error
+        # additionally evicts the sandbox so the next acquire rebuilds it.
         with self._lock:
             if self._closed:
                 raise RuntimeError("sandbox has been closed")
             sandbox = self._sandbox
-
-        # ponytail: one retry, no backoff — enough for the observed transient
-        # gRPC data-plane drop; more attempts belong to the provider's
-        # recreate-on-terminal path, not here.
-        for attempt in range(2):
-            try:
-                return sandbox.exec(*argv, env=env, timeout=timeout)
-            except Exception as e:
-                if attempt == 0 and self._is_retryable_failure(e):
-                    logger.warning("Transient Tenki transport error on %s (retrying once): %s", self.id, e)
-                    continue
-                if self._on_terminal_failure is not None and self._is_terminal_failure(e):
-                    try:
-                        self._on_terminal_failure(self.id, str(e))
-                    except Exception:
-                        logger.exception("Terminal Tenki failure callback errored for %s", self.id)
-                raise
+        try:
+            return sandbox.exec(*argv, env=env, timeout=timeout)
+        except Exception as e:
+            if self._on_terminal_failure is not None and self._is_terminal_failure(e):
+                try:
+                    self._on_terminal_failure(self.id, str(e))
+                except Exception:
+                    logger.exception("Terminal Tenki failure callback errored for %s", self.id)
+            raise
 
     def _sh(self, script: str, env: dict[str, str] | None = None, timeout: float | None = None) -> Any:
         return self._exec("sh", "-lc", script, env=env, timeout=timeout)
