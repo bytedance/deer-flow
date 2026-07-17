@@ -129,6 +129,27 @@ class SkillStateConfig(BaseModel):
     enabled: bool = Field(default=True, description="Whether this skill is enabled")
 
 
+class IdentityHookCall(BaseModel):
+    """A single MCP tool invocation for an identity hook."""
+
+    tool: str = Field(description="MCP tool name as returned by list_tools (unprefixed)")
+    args: dict[str, Any] = Field(default_factory=dict, description="Arguments passed to the MCP tool")
+    model_config = ConfigDict(extra="forbid")
+
+
+class IdentityHooksConfig(BaseModel):
+    """Optional identity-provider hooks fired at session start."""
+
+    enabled: bool = Field(default=False, description="Whether identity hooks are active")
+    mcp_server_ref: str = Field(description="Name of an enabled mcpServers entry", alias="mcpServerRef")
+    session_start: list[IdentityHookCall] = Field(
+        default_factory=list,
+        description="Ordered MCP tool calls at thread/session start",
+        alias="sessionStart",
+    )
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+
 class ExtensionsConfig(BaseModel):
     """Unified configuration for MCP servers and skills."""
 
@@ -140,6 +161,11 @@ class ExtensionsConfig(BaseModel):
     skills: dict[str, SkillStateConfig] = Field(
         default_factory=dict,
         description="Map of skill name to state configuration",
+    )
+    identity_hooks: IdentityHooksConfig | None = Field(
+        default=None,
+        description="Optional identity-provider MCP hooks at session start",
+        alias="identityHooks",
     )
     model_config = ConfigDict(extra="allow", populate_by_name=True)
 

@@ -91,6 +91,11 @@ def _stub_runtime_middleware_imports(monkeypatch: pytest.MonkeyPatch) -> None:
         "deerflow.agents.middlewares.sandbox_audit_middleware",
         _module("deerflow.agents.middlewares.sandbox_audit_middleware", SandboxAuditMiddleware=FakeMiddleware),
     )
+    monkeypatch.setitem(
+        sys.modules,
+        "deerflow.agents.middlewares.identity_hooks_middleware",
+        _module("deerflow.agents.middlewares.identity_hooks_middleware", IdentityHooksMiddleware=FakeMiddleware),
+    )
 
 
 def test_build_subagent_runtime_middlewares_threads_app_config_to_llm_middleware(monkeypatch: pytest.MonkeyPatch):
@@ -137,6 +142,11 @@ def test_build_subagent_runtime_middlewares_threads_app_config_to_llm_middleware
     )
     monkeypatch.setitem(
         sys.modules,
+        "deerflow.agents.middlewares.identity_hooks_middleware",
+        _module("deerflow.agents.middlewares.identity_hooks_middleware", IdentityHooksMiddleware=FakeMiddleware),
+    )
+    monkeypatch.setitem(
+        sys.modules,
         "deerflow.agents.middlewares.input_sanitization_middleware",
         _module("deerflow.agents.middlewares.input_sanitization_middleware", InputSanitizationMiddleware=FakeMiddleware),
     )
@@ -145,7 +155,7 @@ def test_build_subagent_runtime_middlewares_threads_app_config_to_llm_middleware
 
     assert captured["app_config"] is app_config
     # 9 baseline (InputSanitization, ToolOutputBudget, ToolResultSanitization,
-    # ThreadData, Sandbox, DanglingToolCall, LLMErrorHandling, SandboxAudit,
+    # ThreadData, IdentityHooks, Sandbox, DanglingToolCall, LLMErrorHandling, SandboxAudit,
     # ToolErrorHandling)
     # + 1 ReadBeforeWriteMiddleware + 1 LoopDetectionMiddleware
     # + 1 TokenBudgetMiddleware (subagents.token_budget enabled by default, #3875 Phase 2)
@@ -157,7 +167,7 @@ def test_build_subagent_runtime_middlewares_threads_app_config_to_llm_middleware
     from deerflow.agents.middlewares.token_budget_middleware import TokenBudgetMiddleware
     from deerflow.agents.middlewares.tool_output_budget_middleware import ToolOutputBudgetMiddleware
 
-    assert len(middlewares) == 15
+    assert len(middlewares) == 16
     assert isinstance(middlewares[0], FakeMiddleware)  # InputSanitizationMiddleware stub
     assert isinstance(middlewares[1], ToolOutputBudgetMiddleware)
     assert any(isinstance(m, ToolErrorHandlingMiddleware) for m in middlewares)

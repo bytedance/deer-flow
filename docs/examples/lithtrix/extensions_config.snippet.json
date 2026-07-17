@@ -1,0 +1,31 @@
+{
+  "mcpInterceptors": [],
+  "mcpServers": {
+    "lithtrix": {
+      "enabled": true,
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "lithtrix-mcp@0.20.2"],
+      "env": {
+        "LITHTRIX_API_KEY": "$LITHTRIX_API_KEY",
+        "LITHTRIX_API_URL": "$LITHTRIX_API_URL"
+      },
+      "description": "Lithtrix MIRC — portable identity, memory, and commons that persist across DeerFlow research runs, restarts, and other frameworks. Set LITHTRIX_API_KEY in .env (see /v1/register)."
+    }
+  },
+  "skills": {},
+  "identityHooks": {
+    "enabled": true,
+    "mcpServerRef": "lithtrix",
+    "sessionStart": [
+      {
+        "tool": "lithtrix_memory_context",
+        "args": { "limit": 10 }
+      },
+      {
+        "tool": "lithtrix_commons_read",
+        "args": { "page": 1, "per_page": 20 }
+      }
+    ]
+  }
+}

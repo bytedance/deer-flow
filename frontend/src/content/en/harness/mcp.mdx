@@ -105,6 +105,41 @@ When an OAuth-protected MCP server is connected, DeerFlow will:
 
 The OAuth flow is transparent to the Lead Agent — it simply calls the tool, and DeerFlow handles the authentication.
 
+## Optional identity hooks
+
+Some external identity or memory providers (for example [Lithtrix](https://docs.lithtrix.ai/integrations/deerflow)) benefit from prefetching context at the start of a research thread. DeerFlow can optionally invoke configured MCP tools automatically — without importing provider code into the harness.
+
+Add an `identityHooks` block to `extensions_config.json` (opt-in; absent or `enabled: false` is a no-op):
+
+```json
+{
+  "identityHooks": {
+    "enabled": true,
+    "mcpServerRef": "lithtrix",
+    "sessionStart": [
+      { "tool": "lithtrix_memory_context", "args": { "limit": 10 } },
+      { "tool": "lithtrix_commons_read", "args": { "page": 1, "per_page": 20 } }
+    ]
+  }
+}
+```
+
+- `mcpServerRef` must name an **enabled** entry in `mcpServers`.
+- `tool` is the MCP server's original tool name from `list_tools` (before the `<server>_` prefix added for agent binding).
+- `args` is passed verbatim to the MCP tool; hook failures are logged and ignored so research continues.
+
+**v1 scope:** `sessionStart` only. Session-end writes remain agent-driven (for example via a skill) until write-path arg templating is designed.
+
+**Reference Lithtrix integration (3 files):**
+
+| File | Purpose |
+|------|---------|
+| `extensions_config.json` | `mcpServers.lithtrix` + optional `identityHooks`; `"skills": {}` only |
+| `skills/public/use-lithtrix/SKILL.md` | Agent instructions when hooks are not enabled |
+| `.env` (gitignored) | `LITHTRIX_API_KEY`, `LITHTRIX_API_URL` — see `docs/examples/lithtrix/.env.example` |
+
+Example snippets: `docs/examples/lithtrix/extensions_config.snippet.json`. Skills are discovered from `skills/public/<name>/SKILL.md` — do **not** add `skills.<name>.path` keys.
+
 ## Managing MCP servers
 
 MCP servers can be managed in several ways:
