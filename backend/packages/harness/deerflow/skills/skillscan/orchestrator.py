@@ -692,6 +692,15 @@ def _call_is_network_sink(call_name: str) -> bool:
 # and scope-local -- `.get(`/`.post(` collide with dict.get and friends, so a name is a
 # sink receiver only where it was bound to a known constructor. Anything broader is the
 # taint engine RFC #2634 rules out of Phase 5.
+#
+# Which scope sees which handle follows Python's own name resolution, not "every live
+# binding": a class namespace is not a closure scope for its methods, a function-local
+# binding shadows an enclosing name across the whole body, and comprehensions bind their
+# targets in a scope of their own. Approximating that with a flat copy reports benign
+# code that provably cannot reach the tracked client. Where a handle's identity is not
+# decidable one level deep (a comprehension target, a rebind from a call we do not model)
+# the name simply stops being a sink receiver -- under-reporting is the safe direction
+# for a blocking rule.
 _PYTHON_CLIENT_CONSTRUCTORS = {
     "http.client.HTTPConnection",
     "http.client.HTTPSConnection",
@@ -701,30 +710,40 @@ _PYTHON_CLIENT_CONSTRUCTORS = {
 }
 _PYTHON_CLIENT_SINK_METHODS = {"request", "connect", "get", "post", "put", "patch", "delete", "head", "options", "urlopen", "getresponse"}
 _PYTHON_SCOPE_NODES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)
+_PYTHON_COMPREHENSION_NODES = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
 
 
 def _find_client_handle_sink(tree: ast.AST, aliases: dict[str, str]) -> ast.AST | None:
     found: list[ast.AST] = []
-    _walk_client_scope(tree, {}, aliases, found)
+    module: dict[str, str] = {}
+    _walk_client_scope(tree, module, module, aliases, found)
     return found[0] if found else None
 
 
-def _walk_client_scope(node: ast.AST, handles: dict[str, str], aliases: dict[str, str], found: list[ast.AST]) -> None:
-    """Walk one lexical scope in source order, tracking which names currently hold a client handle."""
+def _walk_client_scope(node: ast.AST, handles: dict[str, str], inherited: dict[str, str], aliases: dict[str, str], found: list[ast.AST]) -> None:
+    """Walk one lexical scope in source order, tracking which names currently hold a client handle.
+
+    ``handles`` resolves names read by the scope being walked; ``inherited`` is what a nested
+    function scope closes over. They are the same mapping everywhere except a class body, whose
+    namespace is not a closure scope for the methods defined inside it.
+    """
     if isinstance(node, _PYTHON_SCOPE_NODES):
-        _walk_client_nested_scope(node, handles, aliases, found)
+        _walk_client_nested_scope(node, handles, inherited, aliases, found)
+        return
+    if isinstance(node, _PYTHON_COMPREHENSION_NODES):
+        _walk_client_comprehension(node, handles, inherited, aliases, found)
         return
     if isinstance(node, ast.Call) and _call_is_client_handle_sink(node, handles):
         found.append(node)
     if isinstance(node, (ast.Assign, ast.AnnAssign)):
         # The value is evaluated before the target is bound, so `s = s.get(x)` still sees the old handle.
         if node.value is not None:
-            _walk_client_scope(node.value, handles, aliases, found)
+            _walk_client_scope(node.value, handles, inherited, aliases, found)
         targets = node.targets if isinstance(node, ast.Assign) else [node.target]
         _rebind_client_handle(targets, node.value, handles, aliases)
         return
     if isinstance(node, ast.withitem):
-        _walk_client_scope(node.context_expr, handles, aliases, found)
+        _walk_client_scope(node.context_expr, handles, inherited, aliases, found)
         if node.optional_vars is not None:
             _rebind_client_handle([node.optional_vars], node.context_expr, handles, aliases)
         return
@@ -736,18 +755,37 @@ def _walk_client_scope(node: ast.AST, handles: dict[str, str], aliases: dict[str
         for alias in node.names:
             handles.pop(alias.asname or alias.name.split(".")[0], None)
     for child in ast.iter_child_nodes(node):
-        _walk_client_scope(child, handles, aliases, found)
+        _walk_client_scope(child, handles, inherited, aliases, found)
 
 
-def _walk_client_nested_scope(node: ast.AST, handles: dict[str, str], aliases: dict[str, str], found: list[ast.AST]) -> None:
+def _walk_client_nested_scope(node: ast.AST, handles: dict[str, str], inherited: dict[str, str], aliases: dict[str, str], found: list[ast.AST]) -> None:
     for expr in _client_scope_prelude(node):
-        _walk_client_scope(expr, handles, aliases, found)
-    inner = {name: constructor for name, constructor in handles.items() if name not in _client_scope_params(node)}
+        _walk_client_scope(expr, handles, inherited, aliases, found)
+    if isinstance(node, ast.ClassDef):
+        # A class body reads the enclosing scope, but the names it binds are not visible to the
+        # methods defined in it, so what those methods close over stays the class's own `inherited`.
+        inner, nested = dict(inherited), inherited
+    else:
+        inner = {name: constructor for name, constructor in inherited.items() if name not in _client_scope_bindings(node)}
+        nested = inner
     body = node.body if isinstance(node.body, list) else [node.body]
     for statement in body:
-        _walk_client_scope(statement, inner, aliases, found)
+        _walk_client_scope(statement, inner, nested, aliases, found)
     if not isinstance(node, ast.Lambda):
         handles.pop(node.name, None)
+
+
+def _walk_client_comprehension(node: ast.AST, handles: dict[str, str], inherited: dict[str, str], aliases: dict[str, str], found: list[ast.AST]) -> None:
+    """A comprehension is its own scope: only the outermost iterable is evaluated outside it, and
+    every `for` target shadows an enclosing name of the same id before the element runs."""
+    generators = node.generators
+    _walk_client_scope(generators[0].iter, handles, inherited, aliases, found)
+    targets = {name.id for generator in generators for name in ast.walk(generator.target) if isinstance(name, ast.Name)}
+    inner = {name: constructor for name, constructor in inherited.items() if name not in targets}
+    elements = [node.key, node.value] if isinstance(node, ast.DictComp) else [node.elt]
+    conditions = [condition for generator in generators for condition in generator.ifs]
+    for expr in [*(generator.iter for generator in generators[1:]), *conditions, *elements]:
+        _walk_client_scope(expr, inner, inner, aliases, found)
 
 
 def _client_scope_prelude(node: ast.AST) -> list[ast.AST]:
@@ -760,15 +798,48 @@ def _client_scope_prelude(node: ast.AST) -> list[ast.AST]:
     return [*node.decorator_list, *defaults]
 
 
-def _client_scope_params(node: ast.AST) -> set[str]:
-    if isinstance(node, ast.ClassDef):
-        return set()
+def _client_scope_bindings(node: ast.AST) -> set[str]:
+    """Names local to a function scope: parameters plus everything its body binds anywhere.
+
+    A function-local binding shadows an enclosing name across the whole body rather than from the
+    assignment onward, so an inherited handle must not survive into a scope that rebinds the name
+    at all. `global`/`nonlocal` opt a name back out of that shadowing.
+    """
     args = node.args
     names = {arg.arg for arg in [*args.posonlyargs, *args.args, *args.kwonlyargs]}
     for extra in (args.vararg, args.kwarg):
         if extra is not None:
             names.add(extra.arg)
-    return names
+    declared: set[str] = set()
+    for statement in node.body if isinstance(node.body, list) else [node.body]:
+        _collect_client_scope_bindings(statement, names, declared)
+    return names - declared
+
+
+def _collect_client_scope_bindings(node: ast.AST, names: set[str], declared: set[str]) -> None:
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        names.add(node.name)  # The statement binds its own name here; its body is a separate scope.
+        return
+    if isinstance(node, ast.Lambda):
+        return
+    if isinstance(node, (ast.Global, ast.Nonlocal)):
+        declared.update(node.names)
+        return
+    if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+        names.add(node.id)
+    elif isinstance(node, ast.ExceptHandler) and node.name:
+        names.add(node.name)
+    elif isinstance(node, (ast.Import, ast.ImportFrom)):
+        for alias in node.names:
+            names.add(alias.asname or alias.name.split(".")[0])
+    if isinstance(node, _PYTHON_COMPREHENSION_NODES):
+        # Comprehension targets bind in the comprehension's own scope; a walrus inside it binds here.
+        for child in ast.walk(node):
+            if isinstance(child, ast.NamedExpr):
+                _collect_client_scope_bindings(child.target, names, declared)
+        return
+    for child in ast.iter_child_nodes(node):
+        _collect_client_scope_bindings(child, names, declared)
 
 
 def _rebind_client_handle(targets: list[ast.AST], value: ast.AST | None, handles: dict[str, str], aliases: dict[str, str]) -> None:
