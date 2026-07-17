@@ -8,12 +8,32 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from langgraph.config import get_config
+
 from deerflow.config import get_app_config
 from deerflow.config.app_config import AppConfig
 from deerflow.models import create_chat_model
 from deerflow.skills.types import SKILL_MD_FILE
 
 logger = logging.getLogger(__name__)
+
+
+def _inherits_graph_tracing() -> bool:
+    """Whether this call runs inside a graph that already attached tracing.
+
+    ``scan_skill_content`` is reachable both in-graph (the ``skill_manage`` tool)
+    and standalone (Gateway skill routes, ``skills/installer.py``), and the two
+    need opposite wiring: in-graph must not attach at the model — the graph root
+    already did, and double-attaching emits duplicate spans *and* blocks the
+    Langfuse handler's ``propagate_attributes`` path (see the tracing INVARIANT in
+    ``agents/lead_agent/agent.py``) — while a standalone caller has no root to
+    inherit from and keeps model-level attachment.
+    """
+    try:
+        get_config()
+    except RuntimeError:
+        return False
+    return True
 
 
 @dataclass(slots=True)
@@ -103,7 +123,8 @@ async def scan_skill_content(
     try:
         config = app_config or get_app_config()
         model_name = config.skill_evolution.moderation_model_name
-        model = create_chat_model(name=model_name, thinking_enabled=False, app_config=config) if model_name else create_chat_model(thinking_enabled=False, app_config=config)
+        attach_tracing = not _inherits_graph_tracing()
+        model = create_chat_model(name=model_name, thinking_enabled=False, app_config=config, attach_tracing=attach_tracing) if model_name else create_chat_model(thinking_enabled=False, app_config=config, attach_tracing=attach_tracing)
         response = await model.ainvoke(
             [
                 {"role": "system", "content": rubric},

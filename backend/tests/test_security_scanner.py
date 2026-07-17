@@ -1,6 +1,8 @@
+from contextlib import contextmanager
 from types import SimpleNamespace
 
 import pytest
+from langchain_core.runnables.config import var_child_runnable_config
 
 from deerflow.skills.security_scanner import _extract_json_object, scan_skill_content
 
@@ -16,8 +18,13 @@ def _make_env(monkeypatch, response_content):
             return fake_response
 
     model = FakeModel()
+
+    def _fake_create_chat_model(**kwargs):
+        model.create_kwargs = kwargs
+        return model
+
     monkeypatch.setattr("deerflow.skills.security_scanner.get_app_config", lambda: config)
-    monkeypatch.setattr("deerflow.skills.security_scanner.create_chat_model", lambda **kwargs: model)
+    monkeypatch.setattr("deerflow.skills.security_scanner.create_chat_model", _fake_create_chat_model)
     return model
 
 
@@ -139,3 +146,43 @@ async def test_scan_distinguishes_unparseable_executable(monkeypatch):
     # Even for executable content, unparseable uses the unparseable message
     assert result.decision == "block"
     assert "unparseable" in result.reason
+
+
+# --- tracing wiring: in-graph vs standalone (see the INVARIANT in
+# packages/harness/deerflow/agents/lead_agent/agent.py and the Tracing System
+# section of backend/AGENTS.md) ---
+
+
+@contextmanager
+def _in_graph():
+    """Simulate execution inside a LangGraph run (e.g. the skill_manage tool)."""
+    token = var_child_runnable_config.set({"metadata": {"langfuse_session_id": "parent-thread"}, "callbacks": ["graph-root-handler"], "tags": []})
+    try:
+        yield
+    finally:
+        var_child_runnable_config.reset(token)
+
+
+@pytest.mark.anyio
+async def test_scan_skill_content_does_not_attach_model_tracing_in_graph(monkeypatch):
+    """In-graph callers inherit tracing from the graph root and MUST NOT double-attach.
+
+    Reached in-graph via the ``skill_manage`` tool. Per the tracing INVARIANT,
+    attaching at the model as well emits duplicate spans and blocks the Langfuse
+    handler's ``propagate_attributes`` path, so session_id/user_id never land.
+    """
+    model = _make_env(monkeypatch, '{"decision":"allow","reason":"ok"}')
+    with _in_graph():
+        result = await scan_skill_content(SKILL_CONTENT, executable=False)
+    assert result.decision == "allow"
+    assert model.create_kwargs["attach_tracing"] is False
+
+
+@pytest.mark.anyio
+async def test_scan_skill_content_attaches_model_tracing_when_standalone(monkeypatch):
+    """Standalone callers (Gateway skill routes, installer) have no graph root to
+    inherit from, so they keep model-level attachment."""
+    model = _make_env(monkeypatch, '{"decision":"allow","reason":"ok"}')
+    result = await scan_skill_content(SKILL_CONTENT, executable=False)
+    assert result.decision == "allow"
+    assert model.create_kwargs.get("attach_tracing", True) is True
