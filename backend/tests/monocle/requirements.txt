@@ -10,4 +10,4 @@
 # (with_trace_source("file", trace_path=...)) does not exist in 0.7.x.
 monocle_test_tools==0.8.8
 # Auto-loads the repo .env for the live tests (optional).
-python-dotenv
+python-dotenv>=1.0

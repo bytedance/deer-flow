@@ -54,6 +54,9 @@ def test_assertion_api_example(monocle_trace_asserter: TraceAssertion):
     monocle_trace_asserter.called_agent("LangGraph").contains_input("solid-state EV batteries")
     monocle_trace_asserter.contains_any_output("solid-state", "battery", "batteries", "EV")
     monocle_trace_asserter.called_tool("web_search", "LangGraph")
+    # The recorded run made 5 web_fetch calls, but the intent is "researched by
+    # fetching at least a couple of sources". Fetch counts genuinely vary run to
+    # run, so keep this a floor rather than tightening it to the exact count.
     monocle_trace_asserter.called_tool("web_fetch", "LangGraph", min_count=2)
     monocle_trace_asserter.does_not_call_tool("image_search", "LangGraph")
     monocle_trace_asserter.under_token_limit(100_000)

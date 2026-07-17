@@ -37,6 +37,20 @@ The suite has two:
 - `traces/` — the recorded trace the offline example loads
 - `requirements.txt` — standalone dependencies
 
+## The committed trace
+
+`traces/web_research_ev_battery.json` is a full, unmodified recording of a real
+run, committed whole so the offline example parses a genuine trace. That means
+it embeds the DeerFlow system prompt as of the recording date and the content
+the run fetched from the web, alongside the span structure the assertions read.
+It contains no credentials.
+
+The offline assertions are pinned to this exact trace and to the
+`monocle_apptrace` 0.8.8 span shapes: the `LangGraph` agent span name, the tool
+names, and the input phrasing. A rename of any of those breaks the offline test
+even when behaviour is unchanged; re-record the trace when the prompt, tools, or
+model change.
+
 ## Run
 
 `monocle_test_tools` hard-depends on the ML eval stack (torch, transformers,
@@ -72,6 +86,10 @@ uv run pytest tests/monocle/ -k live    # + live
 The live tests skip automatically when `OPENAI_API_KEY` is unset, when the
 DeerFlow app is not importable, or when `config.yaml` is missing. DeerFlow's
 `web_search` is DuckDuckGo, so a live run needs only `OPENAI_API_KEY`.
+
+The `monocle_trace_asserter` fixture is provided by `monocle_test_tools`' own
+pytest plugin, which registers automatically on install (a `pytest11` entry
+point); no `pytest_plugins` configuration is needed.
 
 ## Add your own test
 
