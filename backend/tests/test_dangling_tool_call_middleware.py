@@ -995,6 +995,72 @@ class TestMalformedToolCallIdRecovery:
         assert results[write_id].content == "REAL RESULT"
         assert results[search_id].status == "error"
 
+    def test_nameless_result_is_dropped_when_several_siblings_are_eligible(self):
+        """With nothing to tell two malformed siblings apart, the result names neither.
+
+        ``ToolMessage.name`` is optional, and a missing name cannot contradict any call,
+        so every open call in the turn stays eligible. Handing the result to whichever
+        sibling comes first is a guess: the interrupted call may be the first one, which
+        would serve a real result to the wrong call and give the one that actually ran a
+        placeholder — the same corruption as the cross-turn case, inside one turn.
+        Position cannot break the tie here either: one call has no result at all, so the
+        two no longer line up.
+        """
+        mw = DanglingToolCallMiddleware()
+        msgs = [
+            _ai_with_tool_calls([_tc("search", ""), _tc("write_file", "")]),
+            ToolMessage.model_construct(content="REAL RESULT", tool_call_id="", name=None),
+        ]
+
+        patched = mw._build_patched_messages(msgs)
+
+        assert patched is not None
+        assert all(getattr(m, "content", None) != "REAL RESULT" for m in patched)
+        assert [m.status for m in patched[1:]] == ["error", "error"]
+
+    def test_identical_parallel_calls_pair_with_their_results_in_order(self):
+        """Indistinguishable siblings that all answered are paired by position.
+
+        Two ``bash`` calls cannot be told apart by name, so a per-result "claim only a
+        unique candidate" rule would drop *both* real results and report two interrupted
+        calls. Position is real evidence precisely because nothing is missing: every open
+        call has a result, so the provider's call order lines them up. Contrast the test
+        above, where one call is unanswered and that alignment is gone.
+        """
+        mw = DanglingToolCallMiddleware()
+        msgs = [
+            _ai_with_tool_calls([_tc("bash", ""), _tc("bash", "")]),
+            ToolMessage(content="RESULT A", tool_call_id="", name="bash"),
+            ToolMessage(content="RESULT B", tool_call_id="", name="bash"),
+        ]
+
+        patched = mw._build_patched_messages(msgs)
+
+        assert patched is not None
+        first_id, second_id = (tc["id"] for tc in patched[0].tool_calls)
+        assert [m.tool_call_id for m in patched[1:]] == [first_id, second_id]
+        assert [m.content for m in patched[1:]] == ["RESULT A", "RESULT B"]
+
+    def test_identical_parallel_calls_drop_a_lone_ambiguous_result(self):
+        """Position is only evidence while the turn is fully answered.
+
+        Same two indistinguishable ``bash`` calls, but one result: the alignment that
+        justifies pairing by position no longer holds, and the name cannot narrow the
+        pair either, so there is no evidence tying the result to a call. Guards against
+        the positional tie-break widening into a first-sibling default.
+        """
+        mw = DanglingToolCallMiddleware()
+        msgs = [
+            _ai_with_tool_calls([_tc("bash", ""), _tc("bash", "")]),
+            ToolMessage(content="LONE RESULT", tool_call_id="", name="bash"),
+        ]
+
+        patched = mw._build_patched_messages(msgs)
+
+        assert patched is not None
+        assert all(getattr(m, "content", None) != "LONE RESULT" for m in patched)
+        assert [m.status for m in patched[1:]] == ["error", "error"]
+
     def test_result_naming_no_call_is_dropped_rather_than_misattributed(self):
         """An unattributable result is dropped, not repurposed.
 

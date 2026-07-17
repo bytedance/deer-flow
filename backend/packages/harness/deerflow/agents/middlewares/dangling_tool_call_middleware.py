@@ -92,21 +92,38 @@ def _relabel_tool_call_ids(tool_calls: list, msg_index: int, source: str) -> tup
     return relabeled, assigned, changed
 
 
-def _claim_synthetic_id(open_calls: list[dict], result: ToolMessage) -> str | None:
+def _turn_malformed_result_count(messages: list, start: int) -> int:
+    """Count the malformed results issued by the turn opened at ``start``."""
+    count = 0
+    for msg in messages[start + 1 :]:
+        if getattr(msg, "type", None) == "ai":
+            break
+        if isinstance(msg, ToolMessage) and not _valid_tool_call_id(msg.tool_call_id):
+            count += 1
+    return count
+
+
+def _claim_synthetic_id(open_calls: list[dict], result: ToolMessage, positional: bool) -> str | None:
     """Consume the open malformed call that ``result`` answers, returning its new id.
 
     Malformed originals are all equally empty, so they cannot identify their own
-    result; ``open_calls`` is already scoped to the issuing turn, and the name rules
-    out the wrong sibling within it. Returning ``None`` leaves the result malformed
-    for the orphan pass to drop, which is what an unattributable result gets today —
-    better than repurposing it as some other call's answer.
+    result; ``open_calls`` is already scoped to the issuing turn. Within that turn the
+    result's name narrows the candidates, and only a *forced* choice is taken:
+
+    * one compatible call — its name, or being the turn's only call, identifies it;
+    * several compatible calls — position identifies them, but only while ``positional``
+      holds, i.e. every open call in the turn has a result. Identical parallel calls
+      (two ``bash``) are distinguishable by nothing else, and a provider returns their
+      results in call order. A *missing* result means a call was interrupted — this
+      middleware's own trigger — and the survivors can no longer be trusted to line up.
+
+    Returning ``None`` leaves the result malformed for the orphan pass to drop, which is
+    what an unattributable result gets today — better than inventing a pairing.
     """
-    for position, entry in enumerate(open_calls):
-        if entry["original"] != result.tool_call_id or not _names_can_pair(entry["name"], result.name):
-            continue
-        del open_calls[position]
-        return entry["synthetic"]
-    return None
+    candidates = [position for position, entry in enumerate(open_calls) if entry["original"] == result.tool_call_id and _names_can_pair(entry["name"], result.name)]
+    if not candidates or (len(candidates) > 1 and not positional):
+        return None
+    return open_calls.pop(candidates[0])["synthetic"]
 
 
 def _normalize_tool_name(name: object) -> str:
@@ -350,6 +367,9 @@ class DanglingToolCallMiddleware(AgentMiddleware[AgentState]):
         # turn that issued it: a result never answers a call from an earlier turn, so
         # an earlier dangling call must not consume a later turn's result.
         open_calls: list[dict] = []
+        # Whether this turn's results line up 1:1 with its malformed calls, which is what
+        # lets position break a tie between otherwise indistinguishable siblings.
+        positional = False
 
         for index, msg in enumerate(messages):
             if getattr(msg, "type", None) == "ai":
@@ -380,6 +400,7 @@ class DanglingToolCallMiddleware(AgentMiddleware[AgentState]):
                     update[field] = {**additional_kwargs, "tool_calls": relabeled} if field == "additional_kwargs" else relabeled
 
                 open_calls = assigned
+                positional = _turn_malformed_result_count(messages, index) == len(assigned)
                 if update:
                     rewritten[index] = msg.model_copy(update=update)
                 continue
@@ -388,7 +409,7 @@ class DanglingToolCallMiddleware(AgentMiddleware[AgentState]):
             # below keeps it instead of dropping it as an orphan.
             if not isinstance(msg, ToolMessage) or _valid_tool_call_id(msg.tool_call_id):
                 continue
-            synthetic = _claim_synthetic_id(open_calls, msg)
+            synthetic = _claim_synthetic_id(open_calls, msg, positional)
             if synthetic is not None:
                 rewritten[index] = msg.model_copy(update={"tool_call_id": synthetic})
 
