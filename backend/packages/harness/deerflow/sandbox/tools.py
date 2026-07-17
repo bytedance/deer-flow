@@ -1280,6 +1280,18 @@ def _apply_cwd_prefix(command: str, thread_data: ThreadDataState | None) -> str:
     return command
 
 
+def _apply_user_env_prefix(command: str, user_id: str) -> str:
+    """Prepend `export DEERFLOW_USER_ID=...` so skill scripts and subprocesses
+    launched from bash can read the authenticated user's id.
+
+    Injected as plain shell text rather than via a separate env= parameter
+    because Sandbox.execute_command() only accepts a single command string —
+    this works uniformly for LocalSandbox (host subprocess) and AioSandbox
+    (docker exec) without changing the Sandbox interface.
+    """
+    return f"export DEERFLOW_USER_ID={shlex.quote(user_id)}; {command}"
+
+
 def get_thread_data(runtime: Runtime | None) -> ThreadDataState | None:
     """Extract thread_data from runtime state."""
     if runtime is None:
@@ -1716,6 +1728,7 @@ def bash_tool(runtime: Runtime, description: str, command: str) -> str:
     """
     try:
         sandbox = ensure_sandbox_initialized(runtime)
+        user_id = resolve_runtime_user_id(runtime)
         # Request-scoped secrets resolved for the active skill (#3861), plus a
         # short-lived GitHub App installation token threaded through by the
         # GitHub channel. Both are injected as per-call env into the subprocess,
@@ -1735,8 +1748,11 @@ def bash_tool(runtime: Runtime, description: str, command: str) -> str:
             command = _apply_cwd_prefix(command, thread_data)
             # POSIX-only: the Windows local sandbox may execute via
             # PowerShell/cmd.exe where `export` is not valid syntax.
-            if identity_prefix and not _is_windows():
-                command = identity_prefix + command
+            if not _is_windows():
+                if identity_prefix:
+                    command = identity_prefix + command
+                if user_id:
+                    command = _apply_user_env_prefix(command, user_id)
             try:
                 from deerflow.config.app_config import get_app_config
 
