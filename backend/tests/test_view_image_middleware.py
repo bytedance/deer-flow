@@ -16,6 +16,8 @@ Covered behavior:
 - `_inject_image_message` returns a state update with a HumanMessage, or None
   when injection is not warranted.
 - `before_model` and `abefore_model` expose the same behavior sync/async.
+- `after_model` and `aafter_model` remove only the transient image message so
+  later checkpoints do not retain its base64 payload.
 """
 
 from pathlib import Path
@@ -23,7 +25,11 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain.agents import create_agent
+from langchain_core.callbacks import BaseCallbackHandler
+from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage, SystemMessage, ToolMessage
+from langgraph.graph.message import add_messages
 
 from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
 
@@ -40,6 +46,14 @@ def _runtime() -> MagicMock:
     """Minimal Runtime stub. The middleware doesn't use it today, but the
     interface requires it."""
     return MagicMock()
+
+
+class _CaptureChatMessages(BaseCallbackHandler):
+    def __init__(self):
+        self.messages = []
+
+    def on_chat_model_start(self, serialized, messages, **kwargs):
+        self.messages = messages[0]
 
 
 def _make_viewed_image(tmp_path, filename="img.png", mime_type="image/png", data=b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"):
@@ -420,6 +434,8 @@ class TestInjectImageMessage:
         # Internal injection: must be hidden from the chat UI (and IM channels),
         # like the other middleware-injected context messages.
         assert injected.additional_kwargs.get("hide_from_ui") is True
+        assert injected.id is not None
+        assert injected.id.startswith("view-image-context:")
 
 
 class TestBeforeModel:
@@ -458,3 +474,92 @@ class TestBeforeModel:
         mw = ViewImageMiddleware()
         state = {"messages": []}
         assert await mw.abefore_model(state, _runtime()) is None
+
+
+class TestAfterModel:
+    def test_graph_exposes_image_context_only_during_model_call(self, tmp_path):
+        capture = _CaptureChatMessages()
+        model = FakeMessagesListChatModel(
+            responses=[AIMessage(content="I can see the image.")],
+            callbacks=[capture],
+        )
+        graph = create_agent(model=model, tools=[], middleware=[ViewImageMiddleware()])
+        assistant = AIMessage(content="", tool_calls=[_view_image_call("c1")])
+        img_meta = _make_viewed_image(tmp_path)
+
+        result = graph.invoke(
+            {
+                "messages": [assistant, ToolMessage(content="ok", tool_call_id="c1")],
+                "viewed_images": {"/img.png": img_meta},
+            }
+        )
+
+        model_image_messages = [message for message in capture.messages if isinstance(message, HumanMessage) and message.id and message.id.startswith("view-image-context:")]
+        assert len(model_image_messages) == 1
+        assert any(block.get("type") == "image_url" for block in model_image_messages[0].content)
+        assert all(not (isinstance(message, HumanMessage) and message.id and message.id.startswith("view-image-context:")) for message in result["messages"])
+
+    def test_removes_transient_image_message_from_later_state(self, tmp_path):
+        mw = ViewImageMiddleware()
+        assistant = AIMessage(content="", tool_calls=[_view_image_call("c1")])
+        tool_result = ToolMessage(content="ok", tool_call_id="c1")
+        img_meta = _make_viewed_image(tmp_path)
+        before_state = {
+            "messages": [assistant, tool_result],
+            "viewed_images": {"/img.png": img_meta},
+        }
+        injected = mw.before_model(before_state, _runtime())["messages"][0]
+        model_response = AIMessage(content="I can see the image.")
+        model_state = {
+            **before_state,
+            "messages": [assistant, tool_result, injected, model_response],
+        }
+
+        result = mw.after_model(model_state, _runtime())
+
+        assert result is not None
+        assert len(result["messages"]) == 1
+        removal = result["messages"][0]
+        assert isinstance(removal, RemoveMessage)
+        assert removal.id == injected.id
+
+        checkpoint_messages = add_messages(model_state["messages"], result["messages"])
+        assert injected.id not in {message.id for message in checkpoint_messages}
+        assert model_response in checkpoint_messages
+
+    def test_does_not_remove_unmarked_human_messages(self):
+        mw = ViewImageMiddleware()
+        state = {
+            "messages": [
+                HumanMessage(
+                    id="ordinary-hidden-message",
+                    content="Here are the images you've viewed: user-authored text",
+                    additional_kwargs={"hide_from_ui": True},
+                ),
+                AIMessage(content="response"),
+            ]
+        }
+
+        assert mw.after_model(state, _runtime()) is None
+
+    @pytest.mark.anyio
+    async def test_aafter_model_matches_sync_cleanup(self, tmp_path):
+        mw = ViewImageMiddleware()
+        assistant = AIMessage(content="", tool_calls=[_view_image_call("c1")])
+        tool_result = ToolMessage(content="ok", tool_call_id="c1")
+        img_meta = _make_viewed_image(tmp_path)
+        before_state = {
+            "messages": [assistant, tool_result],
+            "viewed_images": {"/img.png": img_meta},
+        }
+        injected = (await mw.abefore_model(before_state, _runtime()))["messages"][0]
+        model_state = {
+            **before_state,
+            "messages": [assistant, tool_result, injected, AIMessage(content="response")],
+        }
+
+        result = await mw.aafter_model(model_state, _runtime())
+
+        assert result is not None
+        assert isinstance(result["messages"][0], RemoveMessage)
+        assert result["messages"][0].id == injected.id
