@@ -400,6 +400,84 @@ class TestWriterReceivesDictFormat:
 
 
 # ---------------------------------------------------------------------------
+# Graph-to-stream regression: real LangGraph custom channel (no writer mock)
+# ---------------------------------------------------------------------------
+
+
+class TestGraphToCustomStream:
+    """Drive the middleware inside a real compiled LangGraph and consume
+    ``astream(stream_mode="custom")`` — the same channel the run worker
+    serializes to SSE verbatim (``worker.py`` publishes custom chunks
+    unmodified).  Unlike the writer-mock tests above, this exercises the real
+    ``langgraph.config.get_stream_writer()`` end-to-end: if the middleware
+    wrapped events in a ``(name, data)`` tuple again, the tuple would arrive
+    here instead of a dict.
+    """
+
+    @staticmethod
+    def _compile_single_node_graph(node):
+        from typing import TypedDict
+
+        from langgraph.graph import END, START, StateGraph
+
+        class _State(TypedDict):
+            done: bool
+
+        graph = StateGraph(_State)
+        graph.add_node("run_tool", node)
+        graph.add_edge(START, "run_tool")
+        graph.add_edge("run_tool", END)
+        return graph.compile()
+
+    @pytest.mark.asyncio
+    async def test_lifecycle_chunks_arrive_as_dicts_on_custom_channel(self):
+        mw = ToolStreamingMiddleware(config=_make_config(enabled=True))
+        request = _make_tool_request(tool_name="bash", tool_call_id="tc-graph")
+        msg = _make_tool_message(content="streamed output", tool_call_id="tc-graph")
+
+        async def _node(state):
+            await mw.awrap_tool_call(request, AsyncMock(return_value=msg))
+            return {"done": True}
+
+        compiled = self._compile_single_node_graph(_node)
+        chunks = [c async for c in compiled.astream({"done": False}, stream_mode="custom")]
+
+        assert len(chunks) == 2, f"expected start + final lifecycle chunks, got: {chunks!r}"
+        for chunk in chunks:
+            assert isinstance(chunk, dict), f"custom channel delivered {type(chunk).__name__}, expected dict — tuple-wrapping serialises to a JSON array the frontend onCustomEvent cannot read"
+            assert chunk["type"] == TOOL_OUTPUT_CHUNK_EVENT
+            assert chunk["tool_call_id"] == "tc-graph"
+        assert chunks[0]["is_partial"] is True
+        assert chunks[0]["is_final"] is False
+        assert chunks[1]["is_partial"] is False
+        assert chunks[1]["is_final"] is True
+        assert chunks[1]["chunk"] == "streamed output"
+
+    @pytest.mark.asyncio
+    async def test_error_chunk_arrives_on_custom_channel(self):
+        mw = ToolStreamingMiddleware(config=_make_config(enabled=True))
+        request = _make_tool_request(tool_name="bash", tool_call_id="tc-graph-err")
+
+        async def _node(state):
+            # Swallow the re-raised exception inside the node so the graph run
+            # completes and the emitted chunks can be collected.
+            with pytest.raises(RuntimeError, match="command failed"):
+                await mw.awrap_tool_call(request, AsyncMock(side_effect=RuntimeError("command failed")))
+            return {"done": True}
+
+        compiled = self._compile_single_node_graph(_node)
+        chunks = [c async for c in compiled.astream({"done": False}, stream_mode="custom")]
+
+        assert len(chunks) == 2, f"expected start + error chunks, got: {chunks!r}"
+        error_chunk = chunks[1]
+        assert isinstance(error_chunk, dict)
+        assert error_chunk["type"] == TOOL_OUTPUT_CHUNK_EVENT
+        assert error_chunk["is_final"] is True
+        assert error_chunk["error"] is True
+        assert "command failed" in error_chunk["chunk"]
+
+
+# ---------------------------------------------------------------------------
 # Sync path
 # ---------------------------------------------------------------------------
 
