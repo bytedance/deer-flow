@@ -118,6 +118,25 @@ def test_load_skills_skips_evals_and_fixtures_directories(tmp_path: Path):
     assert "stale-fixture" not in names
 
 
+def test_skill_packages_named_evals_or_fixtures_are_discovered(tmp_path: Path):
+    """``evals`` and ``fixtures`` are not reserved skill names (PR #4164 review):
+    a package whose own directory carries SKILL.md is discovered in both the
+    public and custom walks, while nested support data below that package
+    boundary stays excluded."""
+    skills_root = tmp_path / "skills"
+
+    _write_skill(skills_root / "public" / "evals", "evals", "Legit skill named evals")
+    _write_skill(skills_root / "custom" / "fixtures", "fixtures", "Legit skill named fixtures")
+    # Support data nested below the evals package boundary must stay out.
+    _write_skill(skills_root / "public" / "evals" / "fixtures" / "nested", "nested-fixture", "Support data")
+
+    names = {skill.name for skill in get_or_new_skill_storage(skills_path=skills_root).load_skills(enabled_only=False)}
+
+    assert "evals" in names
+    assert "fixtures" in names
+    assert "nested-fixture" not in names
+
+
 def test_eval_fixture_skills_cannot_clamp_tool_policy(tmp_path: Path):
     """End-to-end regression for issue #4095, exercising the real loader and the
     real tool-policy functions (no mocks): a restrictive eval-fixture SKILL.md

@@ -16,6 +16,19 @@ logger = logging.getLogger(__name__)
 
 _SKILL_NAME_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 
+# Directory names conventionally used for skill support data (eval suites and
+# their fixtures, e.g. skills/public/skill-reviewer/evals/fixtures/). They are
+# NOT reserved skill names: discovery prunes such a directory only when it is
+# not itself a skill package (no SKILL.md directly inside), so orphaned fixture
+# trees never reach the runtime registry (issue #4095) while a package
+# legitimately named `evals` or `fixtures` remains discoverable.
+SUPPORT_DATA_DIR_NAMES = frozenset({"evals", "fixtures"})
+
+
+def is_skill_support_data_dir(parent: Path, name: str) -> bool:
+    """Return True when *name* under *parent* is an evals/fixtures support-data directory rather than a skill package of that name."""
+    return name in SUPPORT_DATA_DIR_NAMES and not (parent / name / SKILL_MD_FILE).is_file()
+
 
 class SkillStorage(ABC):
     """Abstract base for skill storage backends.

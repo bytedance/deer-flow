@@ -194,6 +194,31 @@ class TestSkillLoading:
 
         assert names == {"global-skill"}
 
+    def test_skill_packages_named_evals_or_fixtures_are_discovered(self, user_storage: UserScopedSkillStorage, skills_root: Path):
+        """``evals`` and ``fixtures`` are not reserved skill names (PR #4164
+        review): packages whose own directory carries SKILL.md are discovered
+        in the public and user-custom walks; only support-data directories
+        without their own SKILL.md are pruned."""
+        public_pkg = skills_root / "public" / "evals"
+        public_pkg.mkdir(parents=True)
+        (public_pkg / "SKILL.md").write_text(_skill_content("evals"), encoding="utf-8")
+        user_storage.write_custom_skill("fixtures", "SKILL.md", _skill_content("fixtures"))
+
+        names = {skill.name for skill in user_storage.load_skills(enabled_only=False)}
+
+        assert names == {"evals", "fixtures"}
+
+    def test_legacy_skill_package_named_evals_is_discovered(self, user_storage: UserScopedSkillStorage, skills_root: Path):
+        """The legacy global-custom fallback walk also discovers a package
+        legitimately named ``evals`` when the directory itself is a package."""
+        global_pkg = skills_root / "custom" / "evals"
+        global_pkg.mkdir(parents=True)
+        (global_pkg / "SKILL.md").write_text(_skill_content("evals"), encoding="utf-8")
+
+        names = {skill.name for skill in user_storage.load_skills(enabled_only=False)}
+
+        assert names == {"evals"}
+
     def test_fallback_to_global_custom_when_user_dir_empty(self, user_storage: UserScopedSkillStorage, skills_root: Path, base_dir: Path):
         # Put skill in global custom (NOT in user dir)
         global_dir = skills_root / "custom" / "global-skill"
