@@ -205,10 +205,12 @@ class UserScopedSkillStorage(LocalSkillStorage):
         # being silently re-enabled by an absent per-user entry, while still
         # letting the per-user state override the global default when both
         # are present. PUBLIC skill state remains governed solely by
-        # extensions_config (handled by ``super().load_skills`` above).
-        from deerflow.config.extensions_config import get_extensions_config
+        # extensions_config (handled by ``super().load_skills`` above). Re-read
+        # from disk here too so another worker's update cannot be masked by
+        # this process's singleton cache while rebuilding a user projection.
+        from deerflow.config.extensions_config import ExtensionsConfig
 
-        extensions_config = get_extensions_config()
+        extensions_config = ExtensionsConfig.from_file()
         skills = [
             dataclasses.replace(s, enabled=self.get_skill_enabled_state(s.name) and extensions_config.is_skill_enabled(s.name, s.category.value if hasattr(s.category, "value") else s.category))
             if dataclasses.is_dataclass(s) and not isinstance(s, type) and (s.category.value if hasattr(s.category, "value") else s.category) != SkillCategory.PUBLIC.value

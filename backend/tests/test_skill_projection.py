@@ -277,6 +277,32 @@ def test_user_custom_skill_replaces_legacy_projection(projection_env) -> None:
     assert list(projected.legacy.iterdir()) == []
 
 
+@pytest.mark.parametrize("category", ["custom", "legacy"])
+def test_ensure_user_projection_uses_fresh_global_state_across_workers(projection_env, category: str) -> None:
+    env = projection_env
+    skill_name = f"{category}-skill"
+    source_root = env.storage.get_user_custom_root() if category == "custom" else env.skills_root / "custom"
+    _write_skill(source_root, skill_name)
+    projected = rebuild_skill_projections(env.storage)
+    target = getattr(projected, category) / skill_name / "SKILL.md"
+    manifest = projected.custom.parent / ".projection-manifest.json"
+    assert target.is_file()
+    assert manifest.is_file()
+
+    fresh_extensions = ExtensionsConfig()
+    fresh_extensions.skills[skill_name] = SkillStateConfig(enabled=False)
+    with patch("deerflow.config.extensions_config.ExtensionsConfig.from_file", return_value=fresh_extensions):
+        ensure_skill_projections(env.storage)
+        assert not target.exists()
+        assert manifest.is_file()
+        rebuilt_manifest = manifest.read_text(encoding="utf-8")
+
+        # The rebuilt manifest must not mark the stale visible view as fresh.
+        ensure_skill_projections(env.storage)
+        assert not target.exists()
+        assert manifest.read_text(encoding="utf-8") == rebuilt_manifest
+
+
 def test_ensure_repairs_direct_atomic_source_replacement(projection_env) -> None:
     env = projection_env
     source = _write_skill(env.skills_root / "public", "demo-skill", "before")
