@@ -30,6 +30,7 @@ from deerflow.agents.memory.backends.deermem.deermem.core.updater import (
     _build_consolidation_section,
     _normalize_memory_update_data,
     _select_consolidation_candidates,
+    _select_stale_candidates,
 )
 
 # ── Helpers ────────────────────────────────────────────────────────────────
@@ -991,8 +992,6 @@ class TestReviewerFindings:
         fallback). The merged fact's deadline is derived from that fallback, not
         omitted - so a merge of aged legacy facts still re-enters review rather
         than silently inheriting nothing."""
-        from deerflow.agents.memory.backends.deermem.deermem.core.updater import _select_stale_candidates
-
         updater = _make_updater(
             max_facts=100,
             consolidation_enabled=True,
@@ -1102,8 +1101,6 @@ class TestReviewerFindings:
         volatile source's much sooner deadline, so the volatile sub-detail cannot
         escape staleness review for years (staleness KEEP/REMOVE is the only path
         that re-validates a merged fact)."""
-        from deerflow.agents.memory.backends.deermem.deermem.core.updater import _select_stale_candidates
-
         updater = _make_updater(
             max_facts=100,
             consolidation_enabled=True,
@@ -1253,10 +1250,9 @@ class TestReviewerFindings:
             staleness_age_days=90,
             staleness_max_lifetime_multiplier=20.0,
         )
-        # Both sources 3 days old. Volatile source (evd=7): deadline in 4 days
-        # (3 + 7 = 10 days from createdAt, minus 3 already elapsed = 7? No: the
-        # window is relative to merged createdAt, which is 3 days ago, so
-        # days_until = (createdAt + 7) - createdAt = 7).
+        # The window is relative to the merged createdAt, not elapsed-since-
+        # creation: days_until = (createdAt + 7) - createdAt = 7, regardless of
+        # the source's current age.
         created = _days_ago(3)
         facts = [
             {**_make_fact("fact_stable", "Stable", "knowledge", 0.9), "createdAt": created, "expected_valid_days": 3650},
@@ -1330,8 +1326,6 @@ class TestReviewerFindings:
         fact immediately stale next cycle. Before this fix the merged fact had no
         expected_valid_days, fell back to staleness_age_days=90, and (with an old
         createdAt) re-entered the staleness candidate set right away."""
-        from deerflow.agents.memory.backends.deermem.deermem.core.updater import _select_stale_candidates
-
         updater = _make_updater(
             max_facts=100,
             consolidation_enabled=True,
