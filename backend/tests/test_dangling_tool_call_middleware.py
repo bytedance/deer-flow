@@ -1023,9 +1023,11 @@ class TestMalformedToolCallIdRecovery:
 
         Two ``bash`` calls cannot be told apart by name, so a per-result "claim only a
         unique candidate" rule would drop *both* real results and report two interrupted
-        calls. Position is real evidence precisely because nothing is missing: every open
-        call has a result, so the provider's call order lines them up. Contrast the test
-        above, where one call is unanswered and that alignment is gone.
+        calls. Position is real evidence precisely because nothing is missing: LangGraph's
+        ``ToolNode`` builds these results with ``asyncio.gather`` / ``executor.map`` over
+        ``tool_calls``, which yield in input order regardless of completion order, so a
+        fully answered turn lines up by construction. Contrast the test above, where one
+        call is unanswered and that alignment is gone.
         """
         mw = DanglingToolCallMiddleware()
         msgs = [

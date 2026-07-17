@@ -113,9 +113,12 @@ def _claim_synthetic_id(open_calls: list[dict], result: ToolMessage, positional:
     * one compatible call — its name, or being the turn's only call, identifies it;
     * several compatible calls — position identifies them, but only while ``positional``
       holds, i.e. every open call in the turn has a result. Identical parallel calls
-      (two ``bash``) are distinguishable by nothing else, and a provider returns their
-      results in call order. A *missing* result means a call was interrupted — this
-      middleware's own trigger — and the survivors can no longer be trusted to line up.
+      (two ``bash``) are distinguishable by nothing else, and order here is a
+      construction guarantee rather than an assumption about the provider: LangGraph's
+      ``ToolNode`` builds the results with ``asyncio.gather`` / ``executor.map`` over
+      ``tool_calls``, both of which yield in input order however the tools interleave.
+      A *missing* result means a call was interrupted — this middleware's own trigger —
+      so the surviving results can no longer be trusted to line up with the calls.
 
     Returning ``None`` leaves the result malformed for the orphan pass to drop, which is
     what an unattributable result gets today — better than inventing a pairing.
