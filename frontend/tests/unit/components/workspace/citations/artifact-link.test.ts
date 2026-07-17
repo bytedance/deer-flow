@@ -27,4 +27,15 @@ describe("ArtifactLink rendering", () => {
     expect(html).toContain('target="_blank"');
     expect(html).toContain('rel="noopener noreferrer"');
   });
+
+  it("renders scheme-less relative hrefs as navigable anchors", () => {
+    const tests = ["report.md", "./report.md", "../assets/chart.png"];
+    for (const href of tests) {
+      const html = renderToStaticMarkup(
+        createElement(ArtifactLink, { href }, "doc"),
+      );
+      expect(html).toContain("<a");
+      expect(html).toContain(`href="${href}"`);
+    }
+  });
 });
