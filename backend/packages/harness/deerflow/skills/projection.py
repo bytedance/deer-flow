@@ -118,24 +118,80 @@ def _stage_skill(source: Path, target: Path, nested_skill_roots: set[Path]) -> N
     )
 
 
+def _path_kind(path: Path) -> str:
+    if path.is_symlink():
+        return "symlink"
+    if path.is_dir():
+        return "directory"
+    return "file"
+
+
+def _tree_entries(root: Path) -> dict[Path, str]:
+    entries: dict[Path, str] = {}
+    for current_root, dir_names, file_names in os.walk(root, followlinks=False):
+        current = Path(current_root)
+        for name in dir_names:
+            path = current / name
+            entries[path.relative_to(root)] = _path_kind(path)
+        dir_names[:] = [name for name in dir_names if not (current / name).is_symlink()]
+        for name in file_names:
+            path = current / name
+            entries[path.relative_to(root)] = _path_kind(path)
+    return entries
+
+
+def _remove_projection_entry(path: Path) -> None:
+    if path.is_dir() and not path.is_symlink():
+        shutil.rmtree(path)
+    else:
+        path.unlink(missing_ok=True)
+
+
+def _validate_projection_relative_path(relative_path: Path) -> None:
+    if relative_path.is_absolute() or not relative_path.parts or any(part in {"", ".", ".."} for part in relative_path.parts):
+        raise ValueError("Projection removal path must identify a package within its category root")
+
+
+def _remove_projection_relative(root: Path, relative_path: Path) -> None:
+    """Remove a projected package without following a drifted namespace symlink."""
+    current = root
+    for part in relative_path.parts:
+        current /= part
+        if current.is_symlink():
+            current.unlink()
+            return
+    _remove_projection_entry(current)
+
+
+def _sync_staged_category(root: Path, staging: Path) -> None:
+    desired = _tree_entries(staging)
+    live = _tree_entries(root)
+
+    for relative_path, live_kind in sorted(live.items(), key=lambda item: len(item[0].parts), reverse=True):
+        if desired.get(relative_path) != live_kind:
+            _remove_projection_entry(root / relative_path)
+
+    for relative_path, kind in sorted(desired.items(), key=lambda item: len(item[0].parts)):
+        if kind == "directory":
+            (root / relative_path).mkdir(parents=True, exist_ok=True)
+
+    for relative_path, kind in desired.items():
+        if kind == "directory":
+            continue
+        target = root / relative_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        (staging / relative_path).replace(target)
+
+
 def _replace_category(root: Path, desired: dict[Path, Skill], skill_boundaries: set[Path]) -> None:
-    """Replace entries beneath a stable category root, removing first."""
+    """Reconcile entries beneath a stable category root without blanking it."""
     root.mkdir(parents=True, exist_ok=True)
-    # Keep the category root inode stable because live sandboxes bind-mount that
-    # directory. Clear before staging so allocation/copy failures cannot leave a
-    # stale enabled view behind.
-    _clear_category(root)
-    try:
-        with tempfile.TemporaryDirectory(prefix=f".{root.name}.projection-", dir=root.parent) as staging_dir:
-            staging = Path(staging_dir)
-            for relative_path, skill in desired.items():
-                nested_roots = {boundary.relative_to(relative_path) for boundary in skill_boundaries if boundary != relative_path and boundary.is_relative_to(relative_path)}
-                _stage_skill(skill.skill_dir, staging / relative_path, nested_roots)
-            for path in staging.iterdir():
-                path.replace(root / path.name)
-    except Exception:
-        _clear_category(root)
-        raise
+    with tempfile.TemporaryDirectory(prefix=f".{root.name}.projection-", dir=root.parent) as staging_dir:
+        staging = Path(staging_dir)
+        for relative_path, skill in desired.items():
+            nested_roots = {boundary.relative_to(relative_path) for boundary in skill_boundaries if boundary != relative_path and boundary.is_relative_to(relative_path)}
+            _stage_skill(skill.skill_dir, staging / relative_path, nested_roots)
+        _sync_staged_category(root, staging)
 
 
 def _clear_category(root: Path) -> None:
@@ -205,6 +261,8 @@ def _source_signature(storage: SkillStorage, scope: str) -> str:
         user_custom_root = storage.get_user_custom_root()
         _update_tree_digest(digest, user_custom_root, "custom")
         _update_tree_digest(digest, host_root / SkillCategory.CUSTOM.value, "legacy")
+        # CUSTOM/LEGACY visibility is the intersection of the per-user state
+        # and the global extensions default, so both belong in this signature.
         state = {
             "extensions": _extensions_state(),
             "user": storage._read_skill_states(),
@@ -253,6 +311,9 @@ def _load_public_skills(storage: SkillStorage, *, enabled_only: bool) -> list[Sk
         dir_names[:] = sorted(name for name in dir_names if not name.startswith("."))
         if SKILL_MD_FILE not in file_names:
             continue
+        # Match the runtime loader: nested SKILL.md files inside a package are
+        # support data, not independently configurable skills.
+        dir_names.clear()
         skill_file = Path(current_root) / SKILL_MD_FILE
         skill = parse_skill_file(
             skill_file,
@@ -343,18 +404,35 @@ def rebuild_skill_projections(
     return paths
 
 
+def _public_projection_is_fresh(storage: SkillStorage, paths: SkillProjectionPaths) -> bool:
+    if not paths.public.is_dir():
+        return False
+    manifest_before = _read_manifest(paths.public.parent)
+    if manifest_before is None or manifest_before.get("version") != _MANIFEST_VERSION:
+        return False
+    signature = _source_signature(storage, "public")
+    manifest_after = _read_manifest(paths.public.parent)
+    return manifest_before == manifest_after and manifest_before.get("source_signature") == signature
+
+
 def ensure_skill_projections(storage: SkillStorage) -> SkillProjectionPaths:
     """Repair stale projection scopes, otherwise leave their inodes untouched."""
     paths = get_skill_projection_paths(storage)
-    with _projection_lock(paths.public.parent):
-        try:
-            manifest = _read_manifest(paths.public.parent)
-            signature = _source_signature(storage, "public")
-            if not paths.public.is_dir() or manifest is None or manifest.get("version") != _MANIFEST_VERSION or manifest.get("source_signature") != signature:
-                _rebuild_public_locked(storage, paths)
-        except Exception:
-            _clear_projection_scope(paths.public.parent, paths.public)
-            raise
+
+    try:
+        public_is_fresh = _public_projection_is_fresh(storage, paths)
+    except Exception:
+        # Re-check under the mutation lock before failing closed. A concurrent
+        # writer may have exposed a transient source/manifest state.
+        public_is_fresh = False
+    if not public_is_fresh:
+        with _projection_lock(paths.public.parent):
+            try:
+                if not _public_projection_is_fresh(storage, paths):
+                    _rebuild_public_locked(storage, paths)
+            except Exception:
+                _clear_projection_scope(paths.public.parent, paths.public)
+                raise
 
     if getattr(storage, "user_id", None) is not None:
         with _projection_lock(paths.custom.parent):
@@ -370,7 +448,13 @@ def ensure_skill_projections(storage: SkillStorage) -> SkillProjectionPaths:
 
 
 @contextmanager
-def skill_projection_mutation(storage: SkillStorage, scope: str) -> Iterator[None]:
+def skill_projection_mutation(
+    storage: SkillStorage,
+    scope: str,
+    *,
+    remove: tuple[tuple[SkillCategory, Path], ...] = (),
+    remove_names: tuple[str, ...] = (),
+) -> Iterator[None]:
     """Hold a projection scope lock across a source/state mutation."""
     if not isinstance(storage.get_skills_root_path(), Path):
         # Lightweight unit-test doubles sometimes return MagicMock here. The
@@ -381,14 +465,17 @@ def skill_projection_mutation(storage: SkillStorage, scope: str) -> Iterator[Non
     paths = get_skill_projection_paths(storage)
     if scope == "public":
         scope_root = paths.public.parent
-        category_roots = (paths.public,)
+        category_roots = {SkillCategory.PUBLIC: paths.public}
 
         def rebuild() -> None:
             _rebuild_public_locked(storage, paths)
 
     elif scope == "user":
         scope_root = paths.custom.parent
-        category_roots = (paths.custom, paths.legacy)
+        category_roots = {
+            SkillCategory.CUSTOM: paths.custom,
+            SkillCategory.LEGACY: paths.legacy,
+        }
 
         def rebuild() -> None:
             _rebuild_user_locked(storage, paths)
@@ -396,16 +483,34 @@ def skill_projection_mutation(storage: SkillStorage, scope: str) -> Iterator[Non
     else:
         raise ValueError(f"Unknown skill projection scope: {scope}")
 
+    removals: set[tuple[Path, Path]] = set()
+    for category, relative_path in remove:
+        root = category_roots.get(category)
+        if root is None:
+            raise ValueError(f"Skill category {category.value!r} does not belong to projection scope {scope!r}")
+        _validate_projection_relative_path(relative_path)
+        removals.add((root, relative_path))
+
     with _projection_lock(scope_root):
-        for category_root in category_roots:
-            _clear_category(category_root)
-        _manifest_path(scope_root).unlink(missing_ok=True)
-        yield
-        # Only reached on success — a raise from the mutation propagates past
-        # this point, leaving the view empty (already cleared above). A later
-        # acquire compares the missing manifest with the actual source state
-        # and repairs it under the same lock.
-        rebuild()
+        if remove_names:
+            names = set(remove_names)
+            skills = _load_public_skills(storage, enabled_only=False) if scope == "public" else storage.load_skills(enabled_only=False)
+            for skill in skills:
+                root = category_roots.get(skill.category)
+                if skill.name not in names or root is None:
+                    continue
+                _validate_projection_relative_path(skill.relative_path)
+                removals.add((root, skill.relative_path))
+
+        try:
+            _manifest_path(scope_root).unlink(missing_ok=True)
+            for root, relative_path in removals:
+                _remove_projection_relative(root, relative_path)
+            yield
+            rebuild()
+        except Exception:
+            _clear_projection_scope(scope_root, *category_roots.values())
+            raise
 
 
 def ensure_public_skill_projection(*, app_config=None) -> bool:

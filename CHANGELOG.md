@@ -27,7 +27,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   used; Docker/AIO and hostPath deployments derive projection paths from
   `DEER_FLOW_HOST_BASE_DIR`. E2B operator mounts targeting `/mnt/skills` or any
   child path are skipped with a warning so they cannot shadow the managed
-  projection; move extra E2B content to a different container path. ([#4178])
+  projection; move extra E2B content to a different container path. PVC-backed
+  provisioner deployments still mount the operator-supplied PVC snapshot
+  directly, so disabled-skill filesystem isolation does not apply in PVC mode
+  until dynamic PVC materialization is implemented. ([#4178])
 - **skills:** A directory containing `SKILL.md` is now a runtime package
   boundary. Nested `SKILL.md` files inside that package are supporting data and
   are no longer registered as independent skills; unusual custom layouts must

@@ -152,7 +152,8 @@ class UserScopedSkillStorage(LocalSkillStorage):
 
     def set_skill_enabled_state(self, skill_name: str, enabled: bool) -> None:
         """Set the enabled state for a custom/legacy skill and persist."""
-        with self._skill_projection_mutation():
+        removal_names = (skill_name,) if not enabled else ()
+        with self._skill_projection_mutation(remove_names=removal_names):
             states = self._read_skill_states()
             states[skill_name] = {"enabled": enabled}
             self._write_skill_states(states)

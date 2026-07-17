@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import errno
+import shutil
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from threading import Event
+from threading import Barrier, Event
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -14,7 +15,7 @@ import pytest
 
 from deerflow.config.extensions_config import ExtensionsConfig, SkillStateConfig
 from deerflow.config.paths import Paths
-from deerflow.skills.projection import ensure_public_skill_projection, ensure_skill_projections, rebuild_skill_projections
+from deerflow.skills.projection import ensure_public_skill_projection, ensure_skill_projections, rebuild_skill_projections, skill_projection_mutation
 from deerflow.skills.storage.user_scoped_skill_storage import UserScopedSkillStorage
 
 
@@ -85,7 +86,7 @@ def test_projection_rebuild_removes_newly_disabled_skill(projection_env) -> None
     assert not (projected.public / "demo-skill").exists()
 
 
-def test_disabled_nested_skill_is_not_copied_with_enabled_parent(projection_env) -> None:
+def test_nested_skill_frontmatter_is_supporting_data_inside_parent_package(projection_env) -> None:
     env = projection_env
     parent_root = env.skills_root / "public" / "parent-skill"
     _write_skill(env.skills_root / "public", "parent-skill")
@@ -96,10 +97,6 @@ def test_disabled_nested_skill_is_not_copied_with_enabled_parent(projection_env)
     nested_view = projected.public / nested.parent.relative_to(env.skills_root / "public")
 
     assert (projected.public / "parent-skill" / "SKILL.md").is_file()
-    assert not nested_view.exists()
-
-    env.extensions.skills["nested-skill"] = SkillStateConfig(enabled=True)
-    rebuild_skill_projections(env.storage)
     assert (nested_view / "SKILL.md").is_file()
 
 
@@ -131,6 +128,38 @@ def test_atomic_custom_skill_rewrite_refreshes_projection(projection_env) -> Non
     assert target.stat().st_ino != old_inode
 
 
+def test_custom_content_write_keeps_unrelated_skill_visible_during_rebuild(projection_env, monkeypatch) -> None:
+    env = projection_env
+    env.storage.write_custom_skill("alpha", "SKILL.md", _skill_content("alpha"))
+    env.storage.write_custom_skill("beta", "SKILL.md", _skill_content("beta", "before"))
+    projected = rebuild_skill_projections(env.storage)
+    alpha_view = projected.custom / "alpha" / "SKILL.md"
+
+    from deerflow.skills import projection as projection_module
+
+    real_stage_skill = projection_module._stage_skill
+    staging_started = Event()
+    release_staging = Event()
+
+    def _delayed_stage_skill(*args, **kwargs):
+        if not staging_started.is_set():
+            staging_started.set()
+            assert release_staging.wait(timeout=5)
+        return real_stage_skill(*args, **kwargs)
+
+    monkeypatch.setattr(projection_module, "_stage_skill", _delayed_stage_skill)
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        write_future = executor.submit(env.storage.write_custom_skill, "beta", "SKILL.md", _skill_content("beta", "after"))
+        assert staging_started.wait(timeout=5)
+        unrelated_skill_remained_visible = alpha_view.is_file()
+        release_staging.set()
+        write_future.result(timeout=5)
+
+    assert unrelated_skill_remained_visible
+    assert "after" in (projected.custom / "beta" / "SKILL.md").read_text(encoding="utf-8")
+
+
 def test_per_user_toggle_removes_custom_skill_before_returning(projection_env) -> None:
     env = projection_env
     env.storage.write_custom_skill("demo-skill", "SKILL.md", _skill_content("demo-skill"))
@@ -140,6 +169,100 @@ def test_per_user_toggle_removes_custom_skill_before_returning(projection_env) -
     env.storage.set_skill_enabled_state("demo-skill", False)
 
     assert not (projected.custom / "demo-skill").exists()
+
+
+def test_disabling_custom_skill_hides_only_target_while_rebuilding(projection_env, monkeypatch) -> None:
+    env = projection_env
+    env.storage.write_custom_skill("alpha", "SKILL.md", _skill_content("alpha"))
+    env.storage.write_custom_skill("beta", "SKILL.md", _skill_content("beta"))
+    projected = rebuild_skill_projections(env.storage)
+
+    from deerflow.skills import projection as projection_module
+
+    real_stage_skill = projection_module._stage_skill
+    staging_started = Event()
+    release_staging = Event()
+
+    def _delayed_stage_skill(*args, **kwargs):
+        if not staging_started.is_set():
+            staging_started.set()
+            assert release_staging.wait(timeout=5)
+        return real_stage_skill(*args, **kwargs)
+
+    monkeypatch.setattr(projection_module, "_stage_skill", _delayed_stage_skill)
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        disable_future = executor.submit(env.storage.set_skill_enabled_state, "beta", False)
+        assert staging_started.wait(timeout=5)
+        alpha_remained_visible = (projected.custom / "alpha" / "SKILL.md").is_file()
+        beta_was_hidden = not (projected.custom / "beta").exists()
+        release_staging.set()
+        disable_future.result(timeout=5)
+
+    assert alpha_remained_visible
+    assert beta_was_hidden
+
+
+def test_disabling_namespaced_skill_hides_its_real_projection_path(projection_env) -> None:
+    env = projection_env
+    _write_skill(env.skills_root / "custom" / "team", "helper")
+    projected = rebuild_skill_projections(env.storage)
+    target = projected.legacy / "team" / "helper"
+    assert (target / "SKILL.md").is_file()
+
+    with skill_projection_mutation(env.storage, "user", remove_names=("helper",)):
+        env.storage._write_skill_states({"helper": {"enabled": False}})
+        assert not target.exists()
+
+    assert not target.exists()
+
+
+def test_disabling_duplicate_namespaced_public_skills_hides_every_path(projection_env) -> None:
+    env = projection_env
+    _write_skill(env.skills_root / "public" / "team-a", "helper")
+    _write_skill(env.skills_root / "public" / "team-b", "helper")
+    projected = rebuild_skill_projections(env.storage)
+    targets = [projected.public / team / "helper" for team in ("team-a", "team-b")]
+    assert all((target / "SKILL.md").is_file() for target in targets)
+
+    with skill_projection_mutation(env.storage, "public", remove_names=("helper",)):
+        env.extensions.skills["helper"] = SkillStateConfig(enabled=False)
+        assert all(not target.exists() for target in targets)
+
+    assert all(not target.exists() for target in targets)
+
+
+def test_mutation_failure_clears_projection_scope(projection_env) -> None:
+    env = projection_env
+    env.storage.write_custom_skill("alpha", "SKILL.md", _skill_content("alpha"))
+    projected = rebuild_skill_projections(env.storage)
+    manifest = projected.custom.parent / ".projection-manifest.json"
+    assert (projected.custom / "alpha" / "SKILL.md").is_file()
+
+    with pytest.raises(OSError, match="mutation failed"):
+        with skill_projection_mutation(env.storage, "user"):
+            raise OSError("mutation failed")
+
+    assert list(projected.custom.iterdir()) == []
+    assert list(projected.legacy.iterdir()) == []
+    assert not manifest.exists()
+
+
+def test_targeted_removal_failure_clears_drifted_projection_scope(projection_env) -> None:
+    env = projection_env
+    _write_skill(env.skills_root / "public" / "team", "helper")
+    projected = rebuild_skill_projections(env.storage)
+    manifest = projected.public.parent / ".projection-manifest.json"
+    namespace = projected.public / "team"
+    shutil.rmtree(namespace)
+    namespace.write_text("drifted file", encoding="utf-8")
+
+    with pytest.raises(NotADirectoryError):
+        with skill_projection_mutation(env.storage, "public", remove_names=("helper",)):
+            env.extensions.skills["helper"] = SkillStateConfig(enabled=False)
+
+    assert list(projected.public.iterdir()) == []
+    assert not manifest.exists()
 
 
 def test_user_custom_skill_replaces_legacy_projection(projection_env) -> None:
@@ -180,6 +303,78 @@ def test_ensure_without_source_changes_keeps_projected_inode(projection_env) -> 
     ensure_skill_projections(env.storage)
 
     assert target.stat().st_ino == projected_inode
+
+
+def test_ensure_steady_state_public_signature_checks_do_not_serialize(projection_env, monkeypatch) -> None:
+    env = projection_env
+    _write_skill(env.skills_root / "public", "demo-skill")
+    rebuild_skill_projections(env.storage)
+
+    from deerflow.skills import projection as projection_module
+
+    real_source_signature = projection_module._source_signature
+    public_signatures = Barrier(2, timeout=2)
+
+    def _synchronized_source_signature(storage, scope):
+        if scope == "public":
+            public_signatures.wait()
+        return real_source_signature(storage, scope)
+
+    monkeypatch.setattr(projection_module, "_source_signature", _synchronized_source_signature)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(ensure_skill_projections, env.storage) for _ in range(2)]
+        for future in futures:
+            future.result(timeout=5)
+
+
+def test_unlocked_public_snapshot_detects_manifest_change_during_signature_scan(projection_env, monkeypatch) -> None:
+    env = projection_env
+    _write_skill(env.skills_root / "public", "demo-skill")
+    projected = rebuild_skill_projections(env.storage)
+    manifest = projected.public.parent / ".projection-manifest.json"
+
+    from deerflow.skills import projection as projection_module
+
+    real_source_signature = projection_module._source_signature
+    signature_read = Event()
+    release_signature = Event()
+
+    def _delayed_source_signature(storage, scope):
+        signature = real_source_signature(storage, scope)
+        if scope == "public":
+            signature_read.set()
+            assert release_signature.wait(timeout=5)
+        return signature
+
+    monkeypatch.setattr(projection_module, "_source_signature", _delayed_source_signature)
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        ensure_future = executor.submit(ensure_skill_projections, env.storage)
+        assert signature_read.wait(timeout=5)
+        manifest.unlink()
+        release_signature.set()
+        ensure_future.result(timeout=5)
+
+    assert manifest.is_file()
+
+
+def test_concurrent_stale_public_ensure_rebuilds_once_after_lock_recheck(projection_env) -> None:
+    env = projection_env
+    source = _write_skill(env.skills_root / "public", "demo-skill", "before")
+    rebuild_skill_projections(env.storage)
+
+    replacement = source.with_suffix(".replacement")
+    replacement.write_text(_skill_content("demo-skill", "after"), encoding="utf-8")
+    replacement.replace(source)
+
+    from deerflow.skills import projection as projection_module
+
+    with patch.object(projection_module, "_rebuild_public_locked", wraps=projection_module._rebuild_public_locked) as rebuild:
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            list(executor.map(ensure_skill_projections, [env.storage] * 8))
+
+    assert rebuild.call_count == 1
 
 
 def test_rebuild_keeps_category_root_inode_stable(projection_env) -> None:

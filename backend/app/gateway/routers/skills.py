@@ -111,7 +111,8 @@ def _persist_shared_skill_state(
     from deerflow.skills.projection import skill_projection_mutation
     from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
 
-    projection_update = skill_projection_mutation(storage, "public") if rebuild_public_projection and isinstance(storage, LocalSkillStorage) else nullcontext()
+    removal_names = (skill_name,) if not enabled else ()
+    projection_update = skill_projection_mutation(storage, "public", remove_names=removal_names) if rebuild_public_projection and isinstance(storage, LocalSkillStorage) else nullcontext()
     with projection_update:
         # The projection lock is cross-process, but the singleton cache is not.
         # Reload the latest disk state inside the lock before this RMW.

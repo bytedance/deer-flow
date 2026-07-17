@@ -117,7 +117,8 @@ class LocalSkillStorage(SkillStorage):
             raise
 
     def remove_custom_skill_file(self, name: str, relative_path: str) -> str:
-        with self._skill_projection_mutation():
+        removal = ((SkillCategory.CUSTOM, Path(name)),)
+        with self._skill_projection_mutation(remove=removal):
             return super().remove_custom_skill_file(name, relative_path)
 
     async def ainstall_skill_from_archive(self, archive_path: str | Path) -> dict:
@@ -233,16 +234,22 @@ class LocalSkillStorage(SkillStorage):
                     name,
                     e,
                 )
-        with self._skill_projection_mutation():
+        removal = ((SkillCategory.CUSTOM, Path(name)),)
+        with self._skill_projection_mutation(remove=removal):
             if target.exists():
                 shutil.rmtree(target)
 
-    def _skill_projection_mutation(self):
+    def _skill_projection_mutation(
+        self,
+        *,
+        remove: tuple[tuple[SkillCategory, Path], ...] = (),
+        remove_names: tuple[str, ...] = (),
+    ):
         if getattr(self, "user_id", None) is None:
             return nullcontext()
         from deerflow.skills.projection import skill_projection_mutation
 
-        return skill_projection_mutation(self, "user")
+        return skill_projection_mutation(self, "user", remove=remove, remove_names=remove_names)
 
     def append_history(self, name: str, record: dict) -> None:
         self.validate_skill_name(name)
