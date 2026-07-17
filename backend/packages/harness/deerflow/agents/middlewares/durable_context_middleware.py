@@ -98,6 +98,30 @@ def _retained_delegation_window(delegations: list[dict], existing: list[dict]) -
     return delegations[-_DELEGATION_LEDGER_MAX_ENTRIES:]
 
 
+def _count_ledger_evictions(new_delegations: list[dict], existing: list[dict]) -> int:
+    """Number of entries ``merge_delegations`` will permanently evict for this update.
+
+    Derived from the merge inputs themselves - never reconstructed by re-scanning
+    ``state["messages"]``: after summarization compacts old task messages, the
+    raw message list no longer witnesses previously captured delegations, so a
+    message-based recount under-counts exactly on the production path this
+    counter exists for (a new delegation evicting a durable entry
+    post-compaction). Counting the net-new delegation ids that overflow the
+    existing capped ledger matches ``merge_delegations`` semantics (union by id,
+    keep the newest ``_DELEGATION_LEDGER_MAX_ENTRIES``), stays O(update) on the
+    hot before/after-model path, and surfaces a single turn that emits more than
+    the cap of delegations immediately instead of on a later capture.
+
+    The caller persists ``existing_count + increment`` onto the parallel
+    ``delegations_truncated_count`` channel; the channel's max-reducer keeps the
+    write idempotent when the same update is replayed (D2 in the agent-core
+    hunt).
+    """
+    existing_ids = {entry.get("id") for entry in existing if isinstance(entry, dict)}
+    new_ids = {entry.get("id") for entry in new_delegations if isinstance(entry, dict)}
+    return max(0, len(existing_ids | new_ids) - _DELEGATION_LEDGER_MAX_ENTRIES)
+
+
 def _filter_changed_delegations(delegations: list[dict], existing: list[dict]) -> list[dict]:
     comparable_delegations = _retained_delegation_window(delegations, existing)
     existing_by_id = {entry.get("id"): entry for entry in existing if isinstance(entry, dict)}
@@ -231,39 +255,14 @@ class DurableContextMiddleware(AgentMiddleware[AgentState]):
             _with_run_id(extract_delegations(messages), run_id, existing),
             existing,
         )
-        updates: dict = {}
-        if delegations:
-            updates["delegations"] = delegations
-        truncated_count = self._compute_truncated_count(state)
-        if truncated_count is not None:
-            existing_count = state.get("delegations_truncated_count") or 0
-            updates["delegations_truncated_count"] = max(existing_count, truncated_count)
-        return updates or None
-
-    def _compute_truncated_count(self, state: AgentState) -> int | None:
-        """Compute the number of delegation entries silently dropped from the ledger.
-
-        Only emits a non-None count when the channel currently holds exactly the
-        cap of entries AND the in-message observation exceeds the cap. This keeps
-        the parallel ``delegations_truncated_count`` channel stable across
-        checkpoint round-trips: it does not regress when the ledger shrinks back
-        below the cap on a fresh thread. (D2 in the agent-core hunt.)
-
-        Known gap: a single turn that emits more than the cap of delegations
-        while the ledger is still below the cap returns ``None`` for that turn
-        (the guard sees a below-cap ledger); the channel's ``max``-reducer picks
-        the count up on a later capture, once the merged ledger sits at the cap.
-        The below-cap guard also runs before ``extract_delegations`` on purpose:
-        the common under-cap case skips the O(messages) scan on the hot
-        before/after-model path.
-        """
-        existing = state.get("delegations") or []
-        if len(existing) < _DELEGATION_LEDGER_MAX_ENTRIES:
+        if not delegations:
             return None
-        observed = extract_delegations(state["messages"])
-        if len(observed) > _DELEGATION_LEDGER_MAX_ENTRIES:
-            return len(observed) - _DELEGATION_LEDGER_MAX_ENTRIES
-        return None
+        updates: dict = {"delegations": delegations}
+        evicted = _count_ledger_evictions(delegations, existing)
+        if evicted:
+            existing_count = state.get("delegations_truncated_count") or 0
+            updates["delegations_truncated_count"] = existing_count + evicted
+        return updates
 
     def _capture(self, state: AgentState, runtime: Runtime | None) -> dict | None:
         updates: dict = {}
