@@ -181,6 +181,7 @@ class RunRecord:
     finalizing: bool = False
     owner_worker_id: str | None = None
     lease_expires_at: str | None = None
+    stop_reason: str | None = None
 
 
 class RunManager:
@@ -244,7 +245,7 @@ class RunManager:
         return [record for run_id in run_ids if (record := self._runs.get(run_id)) is not None]
 
     @staticmethod
-    def _store_put_payload(record: RunRecord, *, error: str | None = None) -> dict[str, Any]:
+    def _store_put_payload(record: RunRecord, *, error: str | None = None, stop_reason: str | None = None) -> dict[str, Any]:
         payload = {
             "thread_id": record.thread_id,
             "assistant_id": record.assistant_id,
@@ -260,6 +261,8 @@ class RunManager:
         }
         if record.user_id is not None:
             payload["user_id"] = record.user_id
+        if record.stop_reason is not None:
+            payload["stop_reason"] = record.stop_reason
         return payload
 
     async def _call_store_with_retry(
@@ -331,16 +334,16 @@ class RunManager:
             self._store_put_payload(record, error=error),
         )
 
-    async def _persist_status(self, record: RunRecord, status: RunStatus, *, error: str | None = None) -> bool:
+    async def _persist_status(self, record: RunRecord, status: RunStatus, *, error: str | None = None, stop_reason: str | None = None) -> bool:
         """Best-effort persist a status transition to the backing store."""
         if self._store is None:
             return True
-        row_recovery_payload = self._store_put_payload(record, error=error)
+        row_recovery_payload = self._store_put_payload(record, error=error, stop_reason=stop_reason)
         try:
             updated = await self._call_store_with_retry(
                 "update_status",
                 record.run_id,
-                lambda: self._store.update_status(record.run_id, status.value, error=error),
+                lambda: self._store.update_status(record.run_id, status.value, error=error, stop_reason=stop_reason),
             )
             if updated is False:
                 # ``update_status`` is now guarded by ``status IN ('pending','running')``.
@@ -407,6 +410,7 @@ class RunManager:
             first_human_message=row.get("first_human_message"),
             owner_worker_id=row.get("owner_worker_id"),
             lease_expires_at=row.get("lease_expires_at"),
+            stop_reason=row.get("stop_reason"),
         )
 
     async def update_run_completion(self, run_id: str, **kwargs) -> None:
@@ -656,7 +660,7 @@ class RunManager:
                 logger.warning("Failed to map store row for run %s", run_id, exc_info=True)
         return records_by_id
 
-    async def set_status(self, run_id: str, status: RunStatus, *, error: str | None = None) -> None:
+    async def set_status(self, run_id: str, status: RunStatus, *, error: str | None = None, stop_reason: str | None = None) -> None:
         """Transition a run to a new status."""
         async with self._lock:
             record = self._runs.get(run_id)
@@ -667,7 +671,9 @@ class RunManager:
             record.updated_at = _now_iso()
             if error is not None:
                 record.error = error
-        await self._persist_status(record, status, error=error)
+            if stop_reason is not None:
+                record.stop_reason = stop_reason
+        await self._persist_status(record, status, error=error, stop_reason=stop_reason)
         logger.info("Run %s -> %s", run_id, status.value)
 
     async def set_finalizing(self, run_id: str, finalizing: bool) -> None:

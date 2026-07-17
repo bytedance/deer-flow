@@ -241,3 +241,135 @@ def test_merge_stream_text_newline_split_across_chunks():
 def test_merge_stream_text_genuine_delta_append():
     """Normal deltas that don't overlap still append."""
     assert _merge_stream_text("Hello ", "world") == "Hello world"
+
+
+# ---------------------------------------------------------------------------
+# Empty/missing-id assistant deltas: some providers/paths never stamp
+# per-chunk ids (runtime._as_str coerces a missing id to ""). Matching by id
+# like the normal path would fold EVERY id-less turn into whichever id-less
+# row happened to exist first, since "" is shared across turns -- unlike a
+# genuine id. These pin the fix: an empty id always keys off the CURRENT
+# turn (never a stale row from an earlier turn), while still coalescing
+# multiple id-less chunks that legitimately arrive within one turn.
+# ---------------------------------------------------------------------------
+
+
+def test_assistant_delta_empty_id_starts_new_row_per_turn_not_merged_with_prior_turn():
+    state = initial_state()
+    state = reduce(state, RunStarted())
+    state = reduce(state, AssistantDelta(id="", text="First turn answer."))
+    state = reduce(state, RunEnded())
+
+    state = reduce(state, UserSubmitted("second question"))
+    state = reduce(state, RunStarted())
+    state = reduce(state, AssistantDelta(id="", text="Second turn answer."))
+    state = reduce(state, RunEnded())
+
+    assistants = [r for r in state.rows if r.kind == "assistant"]
+    # Pre-fix: both turns share id="" so the second folds into the first via
+    # the whole-transcript id scan, losing "First turn answer." entirely.
+    assert len(assistants) == 2
+    assert assistants[0].text == "First turn answer."
+    assert assistants[1].text == "Second turn answer."
+
+
+def test_assistant_delta_empty_id_coalesces_multiple_chunks_within_same_turn():
+    """An id-less provider still streams token by token; chunks within ONE
+    turn must accumulate into a single row, not fragment into many."""
+    state = initial_state()
+    state = reduce(state, RunStarted())
+    state = reduce(state, AssistantDelta(id="", text="Hel"))
+    state = reduce(state, AssistantDelta(id="", text="lo"))
+    state = reduce(state, AssistantDelta(id="", text=" world"))
+    state = reduce(state, RunEnded())
+
+    assistants = [r for r in state.rows if r.kind == "assistant"]
+    assert len(assistants) == 1
+    assert assistants[0].text == "Hello world"
+
+
+def test_assistant_delta_empty_id_starts_fresh_row_after_interleaved_tool_call():
+    """An empty id has no signal to distinguish "same message, paused for a
+    tool call" from "a new message that happens to also be id-less" -- unlike
+    a genuine id, which naturally changes across a tool round-trip (a new
+    AIMessage gets a new id; see
+    test_assistant_delta_with_new_id_after_tool_creates_separate_row). Once a
+    tool card has been appended, the previous anonymous row is no longer the
+    transcript tail, so the next empty-id delta must start a NEW row rather
+    than reach backward past the tool card and silently prepend text that
+    arrived after the tool ran."""
+    state = initial_state()
+    state = reduce(state, RunStarted())
+    state = reduce(state, AssistantDelta(id="", text="Let me check. "))
+    state = reduce(state, ToolStarted(tool_call_id="t1", tool_name="bash", args={}))
+    state = reduce(state, ToolResult(tool_call_id="t1", content="ok", is_error=False))
+    state = reduce(state, AssistantDelta(id="", text="Done."))
+    state = reduce(state, RunEnded())
+
+    kinds = [r.kind for r in state.rows]
+    assert kinds == ["assistant", "tool", "assistant"]
+    assistants = [r for r in state.rows if r.kind == "assistant"]
+    assert [a.text for a in assistants] == ["Let me check. ", "Done."]
+
+
+def test_assistant_delta_empty_id_coalesces_consecutive_chunks_before_a_tool_call():
+    """Multiple id-less chunks with NOTHING interleaved (the realistic
+    per-token streaming case) still coalesce into one row up until a tool
+    card breaks the streak."""
+    state = initial_state()
+    state = reduce(state, RunStarted())
+    state = reduce(state, AssistantDelta(id="", text="Let me "))
+    state = reduce(state, AssistantDelta(id="", text="check. "))
+    state = reduce(state, ToolStarted(tool_call_id="t1", tool_name="bash", args={}))
+    state = reduce(state, ToolResult(tool_call_id="t1", content="ok", is_error=False))
+    state = reduce(state, RunEnded())
+
+    kinds = [r.kind for r in state.rows]
+    assert kinds == ["assistant", "tool"]
+    assistants = [r for r in state.rows if r.kind == "assistant"]
+    assert assistants[0].text == "Let me check. "
+
+
+def test_assistant_delta_empty_id_does_not_disturb_legitimate_id_sequence():
+    """A normal, non-empty id sequence must keep coalescing correctly even
+    after the transcript has already seen an earlier, unrelated empty-id
+    turn (proves the two code paths -- id-keyed vs. anonymous -- don't
+    interfere with each other)."""
+    state = initial_state()
+    state = reduce(state, RunStarted())
+    state = reduce(state, AssistantDelta(id="", text="anonymous turn"))
+    state = reduce(state, RunEnded())
+
+    state = reduce(state, UserSubmitted("question"))
+    state = reduce(state, RunStarted())
+    state = reduce(state, AssistantDelta(id="m1", text="Hel"))
+    state = reduce(state, AssistantDelta(id="m1", text="lo"))
+    state = reduce(state, RunEnded())
+
+    assistants = [r for r in state.rows if r.kind == "assistant"]
+    assert [a.text for a in assistants] == ["anonymous turn", "Hello"]
+
+
+def test_assistant_delta_empty_id_resend_within_turn_is_noop():
+    """Same multi-char no-op re-send semantics apply to the anonymous path."""
+    state = initial_state()
+    state = reduce(state, RunStarted())
+    state = reduce(state, AssistantDelta(id="", text="Hey there!"))
+    state = reduce(state, AssistantDelta(id="", text="Hey there!"))
+    assistants = [r for r in state.rows if r.kind == "assistant"]
+    assert len(assistants) == 1
+    assert assistants[0].text == "Hey there!"
+
+
+def test_clear_rows_resets_anonymous_streaming_index():
+    """A stale anonymous-row index must not resurrect after ClearRows."""
+    state = initial_state()
+    state = reduce(state, RunStarted())
+    state = reduce(state, AssistantDelta(id="", text="before clear"))
+    state = reduce(state, ClearRows())
+    state = reduce(state, RunStarted())
+    state = reduce(state, AssistantDelta(id="", text="after clear"))
+
+    assistants = [r for r in state.rows if r.kind == "assistant"]
+    assert len(assistants) == 1
+    assert assistants[0].text == "after clear"

@@ -592,6 +592,11 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
             run_id = self._get_run_id(runtime)
             with self._lock:
                 self._stop_reason[run_id] = "loop_capped"
+            # Also write to runtime.context so the lead worker can read it
+            # without needing a reference to this middleware instance (#4176).
+            ctx = getattr(runtime, "context", None)
+            if isinstance(ctx, dict):
+                ctx["stop_reason"] = "loop_capped"
             # Strip tool_calls from the last AIMessage to force text output.
             # Once tool_calls are stripped, the AIMessage no longer requires
             # matching ToolMessage responses, so mutating it in place here

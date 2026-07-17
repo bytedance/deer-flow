@@ -29,6 +29,7 @@ from app.gateway.internal_auth import (
     get_trusted_internal_owner_user_id,
 )
 from app.gateway.utils import sanitize_log_param
+from deerflow.agents.middlewares.dynamic_context_middleware import _DYNAMIC_CONTEXT_REMINDER_KEY, _REMINDER_DATE_KEY
 from deerflow.config.app_config import get_app_config
 from deerflow.runtime import (
     END_SENTINEL,
@@ -56,6 +57,13 @@ _TERMINAL_RUN_STATUSES = {
     RunStatus.timeout,
     RunStatus.interrupted,
 }
+
+_SERVER_OWNED_DYNAMIC_CONTEXT_KEYS = frozenset(
+    {
+        _DYNAMIC_CONTEXT_REMINDER_KEY,
+        _REMINDER_DATE_KEY,
+    }
+)
 
 
 # ---------------------------------------------------------------------------
@@ -120,10 +128,14 @@ def normalize_stream_modes(raw: list[str] | str | None) -> list[str]:
 
 def _strip_external_message_metadata(message: Any) -> Any:
     """Remove server-owned metadata from an untrusted input message."""
-    if not isinstance(message, BaseMessage) or ORIGINAL_USER_CONTENT_KEY not in message.additional_kwargs:
+    if not isinstance(message, BaseMessage):
         return message
     additional_kwargs = dict(message.additional_kwargs)
     additional_kwargs.pop(ORIGINAL_USER_CONTENT_KEY, None)
+    for key in _SERVER_OWNED_DYNAMIC_CONTEXT_KEYS:
+        additional_kwargs.pop(key, None)
+    if additional_kwargs == message.additional_kwargs:
+        return message
     return message.model_copy(update={"additional_kwargs": additional_kwargs})
 
 
@@ -141,10 +153,9 @@ def normalize_input(raw_input: dict[str, Any] | None, *, trusted_internal: bool 
     of bubbling up as a 500.  The gateway is a system boundary, so per-entry
     validation errors are the right shape for clients to retry against.
 
-    ``original_user_content`` is server-owned provenance used to undo model-only
-    sanitization at persistence time. External callers cannot supply it; trusted
-    internal channel calls may preserve the value they captured before adding
-    transport or file context.
+    ``original_user_content`` and dynamic-context reminder markers are
+    server-owned. External callers cannot supply them; trusted internal channel
+    calls may preserve metadata they added before invoking this boundary.
     """
     if raw_input is None:
         return {}

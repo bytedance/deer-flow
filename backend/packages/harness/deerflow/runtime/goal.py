@@ -13,6 +13,7 @@ import hashlib
 import inspect
 import json
 import logging
+import os
 import threading
 import weakref
 from collections.abc import AsyncIterator
@@ -25,6 +26,7 @@ from langgraph.checkpoint.base import empty_checkpoint, uuid6
 import deerflow.utils.llm_text as llm_text
 from deerflow.agents.goal_state import GoalBlocker, GoalEvaluation, GoalState
 from deerflow.models import create_chat_model
+from deerflow.tracing import inject_langfuse_metadata
 from deerflow.utils.messages import message_to_text
 from deerflow.utils.time import now_iso
 
@@ -242,13 +244,27 @@ def create_goal_evaluator_model(
     model_name: str | None = None,
     app_config: Any | None = None,
 ) -> Any:
-    """Create the non-thinking chat model used by the goal evaluator."""
+    """Create the non-thinking chat model used by the goal evaluator.
+
+    The evaluator runs from ``runtime/runs/worker.py`` after the main graph
+    run has already completed, so — unlike ``make_lead_agent``/
+    ``DeerFlowClient.stream``, which attach ``build_tracing_callbacks()`` at
+    the graph root and correctly pass ``attach_tracing=False`` to avoid
+    double-attaching — there is no graph root here for the evaluator's model
+    call to inherit tracing from. It must attach its own model-level tracing
+    callbacks, same as the other standalone, non-graph callers
+    (``oneshot_llm.run_oneshot_llm``, ``MemoryUpdater``).
+    """
     return create_chat_model(
         name=model_name,
         thinking_enabled=False,
         app_config=app_config,
-        attach_tracing=False,
+        attach_tracing=True,
     )
+
+
+def _resolve_environment() -> str | None:
+    return os.environ.get("DEER_FLOW_ENV") or os.environ.get("ENVIRONMENT")
 
 
 async def evaluate_goal_completion(
@@ -258,8 +274,19 @@ async def evaluate_goal_completion(
     model: Any | None = None,
     model_name: str | None = None,
     app_config: Any | None = None,
+    thread_id: str | None = None,
+    user_id: str | None = None,
+    deerflow_trace_id: str | None = None,
 ) -> GoalEvaluation:
-    """Ask a small non-thinking model whether the active goal is satisfied."""
+    """Ask a small non-thinking model whether the active goal is satisfied.
+
+    ``thread_id``/``user_id``/``deerflow_trace_id`` are forwarded to Langfuse
+    trace metadata only (mirrors ``oneshot_llm.run_oneshot_llm``): this is a
+    standalone model call outside the main graph, so it must inject its own
+    Langfuse session/user attribution instead of relying on graph-root
+    callbacks to lift it — same fix as PR #2944 (main graph) and PR #3902
+    (memory_agent/suggest_agent).
+    """
     conversation = format_visible_conversation(messages)
     if not conversation or not has_visible_assistant_evidence(messages):
         return GoalEvaluation(
@@ -283,9 +310,19 @@ async def evaluate_goal_completion(
 
     if model is None:
         model = create_goal_evaluator_model(model_name=model_name, app_config=app_config)
+    invoke_config: dict[str, Any] = {"run_name": "goal_evaluator"}
+    inject_langfuse_metadata(
+        invoke_config,
+        thread_id=thread_id,
+        user_id=user_id,
+        assistant_id="goal_evaluator",
+        model_name=model_name,
+        environment=_resolve_environment(),
+        deerflow_trace_id=deerflow_trace_id,
+    )
     response = await model.ainvoke(
         [SystemMessage(content=system_instruction), HumanMessage(content=user_content)],
-        config={"run_name": "goal_evaluator"},
+        config=invoke_config,
     )
     return parse_goal_evaluation_response(_extract_response_text(response.content))
 

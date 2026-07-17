@@ -301,6 +301,43 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             except Exception:
                 logger.exception("Failed to stop scheduled task service")
 
+        # Drain the memory backend's pending-update buffer before the worker
+        # exits (best-effort, bounded). IM channels and the scheduler are
+        # already stopped above, so no new IM/scheduler updates arrive during
+        # the drain; the LangGraph runtime / in-flight HTTP requests can still
+        # complete memory enqueues in a narrow window, but anything added after
+        # the drain copies the buffer only resets the debounce Timer
+        # (best-effort, same as today).
+        #
+        # No host-level pending/processing guard: ``shutdown_flush``
+        # short-circuits on a truly idle buffer (returns True immediately), so
+        # calling it unconditionally is cheap and keeps the in-flight-worker
+        # race entirely inside the backend (where the buffer lives) -- the host
+        # cannot "forget" that case the way a ``pending_count > 0``-only guard
+        # would (review #6 on the original PR).
+        #
+        # K8s caveat: ``shutdown_flush_timeout_seconds`` must fit inside the
+        # pod's ``terminationGracePeriodSeconds`` (channel stop + this drain +
+        # buffer), set on the gateway Helm deployment -- or K8s SIGKILLs the
+        # drain mid-flight and the loss this is fixing is silently re-introduced.
+        try:
+            app_cfg = get_app_config()
+            if app_cfg.memory.enabled:
+                from deerflow.agents.memory import get_memory_manager
+
+                manager = get_memory_manager()
+                flush_timeout = app_cfg.memory.shutdown_flush_timeout_seconds
+                completed = await asyncio.to_thread(manager.shutdown_flush, flush_timeout)
+                if completed:
+                    logger.info("Memory queue flush completed within %.1fs", flush_timeout)
+                else:
+                    logger.warning(
+                        "Memory queue flush did not finish within %.1fs; remaining updates may be lost",
+                        flush_timeout,
+                    )
+        except Exception:
+            logger.exception("Failed to flush memory queue on shutdown")
+
     logger.info("Shutting down API Gateway")
 
 
