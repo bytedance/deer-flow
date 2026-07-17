@@ -56,7 +56,6 @@ import {
   isAssistantMessageGroupStreaming,
   isHiddenFromUIMessage,
 } from "@/core/messages/utils";
-import { useRehypeSplitWordsIntoSpans } from "@/core/rehype";
 import {
   buildMessageSidecarContext,
   type SidecarContext,
@@ -296,7 +295,6 @@ export function MessageList({
       .slice(lastHumanIndex)
       .some((g) => g.type === "assistant");
   }, [groupedMessages]);
-  const rehypePlugins = useRehypeSplitWordsIntoSpans(thread.isLoading);
   const updateSubtask = useUpdateSubtask();
   const lastGroupIndex = groupedMessages.length - 1;
   const turnUsageMessagesByGroupIndex =
@@ -852,7 +850,6 @@ export function MessageList({
                     <MarkdownContent
                       content={extractContentFromMessage(message)}
                       isLoading={thread.isLoading}
-                      rehypePlugins={rehypePlugins}
                     />
                     {renderTokenUsage({
                       messages: group.messages,
@@ -876,7 +873,6 @@ export function MessageList({
                     <MarkdownContent
                       content={extractContentFromMessage(group.messages[0])}
                       isLoading={thread.isLoading}
-                      rehypePlugins={rehypePlugins}
                       className="mb-4"
                     />
                   )}

@@ -13,8 +13,13 @@ import { type ClipboardSafeStreamdownProps } from "@/components/ai-elements/stre
 import {
   preprocessStreamdownMarkdown,
   streamdownPluginsWithoutRawHtml,
+  streamdownWordAnimation,
 } from "@/core/streamdown";
-import { SafeMessageResponse } from "@/core/streamdown/components";
+import {
+  SafeMessageResponse,
+  type StreamdownComponentOverrides,
+  toStreamdownComponents,
+} from "@/core/streamdown/components";
 import { cn } from "@/lib/utils";
 
 import { createMarkdownLinkComponent } from "./markdown-link";
@@ -25,7 +30,7 @@ export type MarkdownContentProps = {
   rehypePlugins?: ClipboardSafeStreamdownProps["rehypePlugins"];
   className?: string;
   remarkPlugins?: ClipboardSafeStreamdownProps["remarkPlugins"];
-  components?: ClipboardSafeStreamdownProps["components"];
+  components?: StreamdownComponentOverrides;
 };
 
 type StreamingCodeProps = ComponentProps<"code"> & {
@@ -132,8 +137,10 @@ export function MarkdownContent({
       className={className}
       remarkPlugins={remarkPlugins}
       rehypePlugins={effectiveRehypePlugins}
-      components={components}
+      components={toStreamdownComponents(components)}
       parseIncompleteMarkdown={isLoading}
+      animated={streamdownWordAnimation}
+      isAnimating={isLoading}
     >
       {normalizedContent}
     </SafeMessageResponse>

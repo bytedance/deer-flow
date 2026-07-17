@@ -5,16 +5,21 @@ import remarkGfm from "remark-gfm";
 import {
   reasoningPlugins,
   streamdownPlugins,
-  streamdownPluginsWithWordAnimation,
+  streamdownWordAnimation,
 } from "@/core/streamdown/plugins";
 
 test("shared streamdown configs disable single-tilde strikethrough", () => {
   const expectedGfmPlugin = [remarkGfm, { singleTilde: false }];
 
   expect(streamdownPlugins.remarkPlugins).toContainEqual(expectedGfmPlugin);
-  expect(streamdownPluginsWithWordAnimation.remarkPlugins).toContainEqual(
-    expectedGfmPlugin,
-  );
+});
+
+test("streaming word animation uses Streamdown's stable incremental animation", () => {
+  expect(streamdownWordAnimation).toEqual({
+    animation: "fadeIn",
+    duration: 200,
+    sep: "word",
+  });
 });
 
 test("streamdownPlugins includes rehypeRaw", () => {
