@@ -13,8 +13,6 @@ import pytest
 from deerflow.config.database_config import DatabaseConfig
 from deerflow.persistence import engine as engine_mod
 
-NGINX_PROXY_TIMEOUT_SECONDS = 60
-
 
 def test_postgres_engine_kwargs_include_connection_hardening() -> None:
     kwargs = engine_mod._postgres_engine_kwargs(echo=False, pool_size=5)
@@ -27,11 +25,10 @@ def test_postgres_engine_kwargs_include_connection_hardening() -> None:
     assert kwargs["json_serializer"] is engine_mod._json_serializer
 
 
-def test_database_command_timeout_defaults_inside_proxy_deadline() -> None:
+def test_database_command_timeout_defaults_to_30_seconds() -> None:
     config = DatabaseConfig()
 
     assert config.command_timeout == 30
-    assert config.command_timeout < NGINX_PROXY_TIMEOUT_SECONDS
 
 
 def test_postgres_engine_kwargs_preserve_caller_values() -> None:
@@ -52,7 +49,7 @@ def test_postgres_engine_kwargs_allow_command_timeout_opt_out() -> None:
 
 
 @pytest.mark.asyncio
-async def test_configured_command_timeout_ends_stalled_command_before_proxy_deadline() -> None:
+async def test_configured_command_timeout_ends_stalled_command() -> None:
     config = DatabaseConfig(
         backend="postgres",
         postgres_url="postgresql://user:password@localhost/deerflow",
@@ -65,7 +62,7 @@ async def test_configured_command_timeout_ends_stalled_command_before_proxy_dead
 
         async def checkout(self) -> None:
             async with asyncio.timeout(self.command_timeout):
-                await asyncio.sleep(NGINX_PROXY_TIMEOUT_SECONDS)
+                await asyncio.Event().wait()
 
         async def dispose(self) -> None:
             return None
@@ -93,7 +90,6 @@ async def test_configured_command_timeout_ends_stalled_command_before_proxy_dead
 
             assert engine.command_timeout == config.command_timeout
             assert elapsed < 1
-            assert elapsed < NGINX_PROXY_TIMEOUT_SECONDS
         finally:
             await engine_mod.close_engine()
 

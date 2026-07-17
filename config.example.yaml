@@ -1646,8 +1646,8 @@ skill_evolution:
 database:
   backend: sqlite
   sqlite_dir: .deer-flow/data
-  # App ORM PostgreSQL command timeout. Keep below nginx's 60s proxy deadline;
-  # set to null to disable it or raise it for intentionally long commands.
+  # App ORM PostgreSQL command timeout. Set to null to disable it or raise it
+  # for intentionally long commands.
   command_timeout: 30
 
 # ============================================================================

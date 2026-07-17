@@ -17,8 +17,7 @@ import logging
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 
 # Recycle pooled Postgres connections before stale idle sockets can hang
-# pool_pre_ping, and keep the default asyncpg command deadline inside nginx's
-# 60-second proxy timeout (#3882).
+# pool_pre_ping. The command timeout bounds stalled ORM queries independently.
 POSTGRES_POOL_RECYCLE_SECONDS = 300
 POSTGRES_COMMAND_TIMEOUT_SECONDS = 30
 
