@@ -2279,11 +2279,11 @@ def str_replace_tool(
             # Custom mount paths are resolved by LocalSandbox._resolve_path()
         with get_file_operation_lock(sandbox, path):
             content = sandbox.read_file(path)
-            if not content:
-                if not old_str:
-                    return "OK"
-                return f"Error: String to replace not found in file: {requested_path}"
-            if old_str not in content:
+            if not old_str:
+                # A no-op edit. str.replace("", new_str) would insert new_str at
+                # every character boundary, so this cannot fall through.
+                return "OK"
+            if not content or old_str not in content:
                 return f"Error: String to replace not found in file: {requested_path}"
             if replace_all:
                 content = content.replace(old_str, new_str)
