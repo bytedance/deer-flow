@@ -118,6 +118,7 @@ def safe_extract_skill_archive(
     zip_ref: zipfile.ZipFile,
     dest_path: Path,
     max_total_size: int = 512 * 1024 * 1024,
+    max_entries: int = 4096,
 ) -> None:
     """Safely extract a skill archive with security protections.
 
@@ -125,15 +126,28 @@ def safe_extract_skill_archive(
     - Reject absolute paths and directory traversal (..).
     - Skip symlink entries instead of materialising them.
     - Enforce a hard limit on total uncompressed size (zip bomb defence).
+    - Enforce a hard limit on member count (zip bomb defence by entry count —
+      a huge number of tiny/empty members can be cheap to store yet still
+      slow to extract, independent of total size).
     - Reject executable binaries (ELF/PE/Mach-O) by magic bytes.
 
     Raises:
-        ValueError: If unsafe members, executable binaries, or size limit exceeded.
+        ValueError: If unsafe members, executable binaries, entry count, or size limit exceeded.
     """
     dest_root = dest_path.resolve()
     total_written = 0
 
-    for info in zip_ref.infolist():
+    infos = zip_ref.infolist()
+    if len(infos) > max_entries:
+        # Early-abort before any per-member work below — mirrors the same
+        # early-abort in skillscan/orchestrator.py::scan_archive_preflight
+        # (its comment: "a huge member count is a bounded DoS vector even
+        # when the total size is small"). That scan is optional
+        # (skill_scan.enabled); this check must hold unconditionally since
+        # it lives in the extraction path every install goes through.
+        raise ValueError(f"Skill archive contains too many entries ({len(infos)} > {max_entries}).")
+
+    for info in infos:
         if is_unsafe_zip_member(info):
             raise ValueError(f"Archive contains unsafe member path: {info.filename!r}")
 
