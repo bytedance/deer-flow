@@ -736,12 +736,14 @@ def _find_client_handle_sink(tree: ast.AST) -> ast.AST | None:
 
 
 def _evaluated_annotation_nodes(tree: ast.AST) -> frozenset[int]:
-    """`id()`s of the annotated-assignment nodes whose annotation Python actually evaluates at runtime.
+    """`id()`s of the nodes whose annotation Python actually evaluates at runtime.
 
-    Only module- and class-body annotations are evaluated (a class body runs eagerly, even when nested
-    in a function); a function-local variable annotation is never evaluated, and `from __future__ import
-    annotations` postpones every annotation in the module to an unevaluated string. Annotations the
-    runtime never evaluates must not be scanned, or benign code is hard-blocked.
+    Two kinds land here. (1) An annotated assignment: only module- and class-body annotations are
+    evaluated (a class body runs eagerly, even when nested in a function); a function-local variable
+    annotation is never evaluated. (2) A function/async-function def: its parameter and return
+    annotations are evaluated at def time in the enclosing scope, regardless of nesting. Either way,
+    `from __future__ import annotations` postpones every annotation in the module to an unevaluated
+    string. Annotations the runtime never evaluates must not be scanned, or benign code is hard-blocked.
     """
     if any(isinstance(node, ast.ImportFrom) and node.module == "__future__" and any(alias.name == "annotations" for alias in node.names) for node in getattr(tree, "body", [])):
         return frozenset()
@@ -751,8 +753,11 @@ def _evaluated_annotation_nodes(tree: ast.AST) -> frozenset[int]:
         for child in ast.iter_child_nodes(node):
             if isinstance(child, ast.AnnAssign) and not in_function:
                 evaluated.add(id(child))
-            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                evaluated.add(id(child))  # signature annotations evaluate at def time in the enclosing scope
                 visit(child, True)
+            elif isinstance(child, ast.Lambda):
+                visit(child, True)  # a lambda has no annotations
             elif isinstance(child, ast.ClassDef):
                 visit(child, False)  # a class body evaluates its annotations even inside a function
             else:
@@ -843,7 +848,7 @@ def _walk_client_scope(node: ast.AST, scope: _ClientScope, inherited: _ClientSco
 
 
 def _walk_client_nested_scope(node: ast.AST, scope: _ClientScope, inherited: _ClientScope, walrus: _ClientScope, found: list[ast.AST], annotated: frozenset[int]) -> None:
-    for expr in _client_scope_prelude(node):
+    for expr in _client_scope_prelude(node, annotated):
         _walk_client_scope(expr, scope, inherited, walrus, found, annotated)
     if isinstance(node, ast.ClassDef):
         # A class body reads the enclosing scope, but the names it binds are not visible to the
@@ -884,14 +889,26 @@ def _match_capture_names(node: ast.AST) -> list[str]:
     return [node.name] if node.name else []
 
 
-def _client_scope_prelude(node: ast.AST) -> list[ast.AST]:
-    """Decorators, defaults, and bases are evaluated in the enclosing scope, not the new one."""
+def _client_scope_prelude(node: ast.AST, annotated: frozenset[int]) -> list[ast.AST]:
+    """Expressions a scope-defining statement evaluates in its *enclosing* scope, not the new one:
+    decorators, argument/keyword defaults, class bases/keywords, and -- when the runtime evaluates
+    them (`id(node) in annotated`, i.e. not postponed) -- a function's parameter and return annotations.
+    """
     if isinstance(node, ast.ClassDef):
         return [*node.decorator_list, *node.bases, *(keyword.value for keyword in node.keywords)]
     defaults = [default for default in [*node.args.defaults, *node.args.kw_defaults] if default is not None]
     if isinstance(node, ast.Lambda):
         return defaults
-    return [*node.decorator_list, *defaults]
+    annotations = _function_annotation_exprs(node) if id(node) in annotated else []
+    return [*node.decorator_list, *defaults, *annotations]
+
+
+def _function_annotation_exprs(node: ast.AST) -> list[ast.AST]:
+    args = node.args
+    exprs = [arg.annotation for arg in [*args.posonlyargs, *args.args, *args.kwonlyargs, args.vararg, args.kwarg] if arg is not None and arg.annotation is not None]
+    if node.returns is not None:
+        exprs.append(node.returns)
+    return exprs
 
 
 def _client_scope_bindings(node: ast.AST) -> set[str]:
