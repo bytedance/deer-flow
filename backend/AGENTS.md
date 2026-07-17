@@ -142,10 +142,13 @@ Blocking-IO runtime gate (`tests/blocking_io/`):
   `test_jsonl_run_event_store.py` (locks `JsonlRunEventStore`'s async
   API offloading its file IO via `asyncio.to_thread`);
   `test_uploads_middleware.py` (locks `UploadsMiddleware.abefore_agent`
-  offloading the uploads-directory scan off the event loop); and
+  offloading the uploads-directory scan off the event loop);
   `test_uploads_router.py` (locks Gateway upload/list/delete endpoints
   offloading upload directory creation, staged writes, chmod/cleanup,
-  directory scans/deletes, and remote sandbox sync off the event loop).
+  directory scans/deletes, and remote sandbox sync off the event loop); and
+  `test_workspace_changes_recorder.py` (locks the offload around the snapshot
+  text cache lifecycle — roots resolution, `mkdtemp`, and the `shutil.rmtree`
+  on both the capture-failure branch and `record_workspace_changes`' `finally`).
 - `test_gate_smoke.py` is a meta-test asserting the gate actually catches
   unoffloaded blocking IO and that the `@pytest.mark.allow_blocking_io`
   opt-out works.

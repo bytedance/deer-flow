@@ -38,6 +38,27 @@ def build_thread_workspace_roots(thread_id: str, *, user_id: str | None = None) 
     ]
 
 
+def _prepare_capture(thread_id: str, *, user_id: str | None, include_text: bool) -> tuple[list[WorkspaceRoot], Path | None]:
+    # Worker thread: resolving the sandbox roots hits the filesystem, and mkdtemp
+    # creates the text cache directory — both blocking IO that must stay off the
+    # event loop.
+    roots = build_thread_workspace_roots(thread_id, user_id=user_id)
+    text_cache_dir = Path(tempfile.mkdtemp(prefix="deerflow-workspace-changes-")) if include_text else None
+    return roots, text_cache_dir
+
+
+async def _remove_text_cache_dir(text_cache_dir: str | Path) -> None:
+    """Remove a snapshot's text cache off the event loop.
+
+    Best-effort by contract: every caller is a failure or teardown path, so a
+    cleanup error must never replace the exception or result already in flight.
+    """
+    try:
+        await asyncio.to_thread(shutil.rmtree, text_cache_dir, ignore_errors=True)
+    except Exception:
+        logger.warning("Failed to remove workspace text cache %s", text_cache_dir, exc_info=True)
+
+
 async def capture_workspace_snapshot(
     thread_id: str,
     *,
@@ -45,8 +66,7 @@ async def capture_workspace_snapshot(
     limits: WorkspaceChangeLimits | None = None,
     include_text: bool = True,
 ) -> WorkspaceSnapshot:
-    roots = build_thread_workspace_roots(thread_id, user_id=user_id)
-    text_cache_dir = Path(tempfile.mkdtemp(prefix="deerflow-workspace-changes-")) if include_text else None
+    roots, text_cache_dir = await asyncio.to_thread(_prepare_capture, thread_id, user_id=user_id, include_text=include_text)
     try:
         return await asyncio.to_thread(
             scan_workspace_roots,
@@ -57,7 +77,7 @@ async def capture_workspace_snapshot(
         )
     except Exception:
         if text_cache_dir is not None:
-            shutil.rmtree(text_cache_dir, ignore_errors=True)
+            await _remove_text_cache_dir(text_cache_dir)
         raise
 
 
@@ -71,7 +91,7 @@ async def record_workspace_changes(
     limits: WorkspaceChangeLimits | None = None,
 ) -> dict | None:
     try:
-        roots = build_thread_workspace_roots(thread_id, user_id=user_id)
+        roots = await asyncio.to_thread(build_thread_workspace_roots, thread_id, user_id=user_id)
         after_metadata = await asyncio.to_thread(
             scan_workspace_roots,
             roots,
@@ -103,9 +123,9 @@ async def record_workspace_changes(
             metadata={WORKSPACE_CHANGES_METADATA_KEY: payload},
         )
     finally:
-        _cleanup_snapshot_text_cache(before)
+        await _cleanup_snapshot_text_cache(before)
 
 
-def _cleanup_snapshot_text_cache(snapshot: WorkspaceSnapshot) -> None:
+async def _cleanup_snapshot_text_cache(snapshot: WorkspaceSnapshot) -> None:
     if snapshot.text_cache_dir:
-        shutil.rmtree(snapshot.text_cache_dir, ignore_errors=True)
+        await _remove_text_cache_dir(snapshot.text_cache_dir)
