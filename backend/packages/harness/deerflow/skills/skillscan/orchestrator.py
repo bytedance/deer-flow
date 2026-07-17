@@ -392,6 +392,11 @@ def _scan_python(rel_path: str, text: str) -> list[SecurityFinding]:
         elif call_name.startswith("subprocess.") or call_name in {"os.system", "os.popen"}:
             reverse_shell_parts.add("subprocess")
 
+    if not has_network_sink:
+        if handle_sink := _find_client_handle_sink(tree, aliases):
+            has_network_sink = True
+            network_node = network_node or handle_sink
+
     if {"dup2", "socket", "subprocess"} <= reverse_shell_parts:
         findings.append(_finding_for_node("python-reverse-shell", rel_path, reverse_shell_node, "socket + dup2 + subprocess"))
 
@@ -678,6 +683,109 @@ def _call_is_network_sink(call_name: str) -> bool:
         "socket.socket",
         "socket.create_connection",
     }
+
+
+# Instance clients split construction from egress: the constructor does no I/O and the
+# outbound call is an attribute call on a variable, so neither statement alone is a
+# call-name sink. Flagging the constructor would block benign construct-only code, so a
+# handle only counts once it is actually used. The binding map is deliberately one level
+# and scope-local -- `.get(`/`.post(` collide with dict.get and friends, so a name is a
+# sink receiver only where it was bound to a known constructor. Anything broader is the
+# taint engine RFC #2634 rules out of Phase 5.
+_PYTHON_CLIENT_CONSTRUCTORS = {
+    "http.client.HTTPConnection",
+    "http.client.HTTPSConnection",
+    "aiohttp.ClientSession",
+    "requests.Session",
+    "urllib3.PoolManager",
+}
+_PYTHON_CLIENT_SINK_METHODS = {"request", "connect", "get", "post", "put", "patch", "delete", "head", "options", "urlopen", "getresponse"}
+_PYTHON_SCOPE_NODES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)
+
+
+def _find_client_handle_sink(tree: ast.AST, aliases: dict[str, str]) -> ast.AST | None:
+    found: list[ast.AST] = []
+    _walk_client_scope(tree, {}, aliases, found)
+    return found[0] if found else None
+
+
+def _walk_client_scope(node: ast.AST, handles: dict[str, str], aliases: dict[str, str], found: list[ast.AST]) -> None:
+    """Walk one lexical scope in source order, tracking which names currently hold a client handle."""
+    if isinstance(node, _PYTHON_SCOPE_NODES):
+        _walk_client_nested_scope(node, handles, aliases, found)
+        return
+    if isinstance(node, ast.Call) and _call_is_client_handle_sink(node, handles):
+        found.append(node)
+    if isinstance(node, (ast.Assign, ast.AnnAssign)):
+        # The value is evaluated before the target is bound, so `s = s.get(x)` still sees the old handle.
+        if node.value is not None:
+            _walk_client_scope(node.value, handles, aliases, found)
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+        _rebind_client_handle(targets, node.value, handles, aliases)
+        return
+    if isinstance(node, ast.withitem):
+        _walk_client_scope(node.context_expr, handles, aliases, found)
+        if node.optional_vars is not None:
+            _rebind_client_handle([node.optional_vars], node.context_expr, handles, aliases)
+        return
+    if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+        handles.pop(node.id, None)
+    elif isinstance(node, ast.ExceptHandler) and node.name:
+        handles.pop(node.name, None)
+    elif isinstance(node, (ast.Import, ast.ImportFrom)):
+        for alias in node.names:
+            handles.pop(alias.asname or alias.name.split(".")[0], None)
+    for child in ast.iter_child_nodes(node):
+        _walk_client_scope(child, handles, aliases, found)
+
+
+def _walk_client_nested_scope(node: ast.AST, handles: dict[str, str], aliases: dict[str, str], found: list[ast.AST]) -> None:
+    for expr in _client_scope_prelude(node):
+        _walk_client_scope(expr, handles, aliases, found)
+    inner = {name: constructor for name, constructor in handles.items() if name not in _client_scope_params(node)}
+    body = node.body if isinstance(node.body, list) else [node.body]
+    for statement in body:
+        _walk_client_scope(statement, inner, aliases, found)
+    if not isinstance(node, ast.Lambda):
+        handles.pop(node.name, None)
+
+
+def _client_scope_prelude(node: ast.AST) -> list[ast.AST]:
+    """Decorators, defaults, and bases are evaluated in the enclosing scope, not the new one."""
+    if isinstance(node, ast.ClassDef):
+        return [*node.decorator_list, *node.bases, *(keyword.value for keyword in node.keywords)]
+    defaults = [default for default in [*node.args.defaults, *node.args.kw_defaults] if default is not None]
+    if isinstance(node, ast.Lambda):
+        return defaults
+    return [*node.decorator_list, *defaults]
+
+
+def _client_scope_params(node: ast.AST) -> set[str]:
+    if isinstance(node, ast.ClassDef):
+        return set()
+    args = node.args
+    names = {arg.arg for arg in [*args.posonlyargs, *args.args, *args.kwonlyargs]}
+    for extra in (args.vararg, args.kwarg):
+        if extra is not None:
+            names.add(extra.arg)
+    return names
+
+
+def _rebind_client_handle(targets: list[ast.AST], value: ast.AST | None, handles: dict[str, str], aliases: dict[str, str]) -> None:
+    for target in targets:
+        for name in ast.walk(target):
+            if isinstance(name, ast.Name):
+                handles.pop(name.id, None)
+    if len(targets) != 1 or not isinstance(targets[0], ast.Name) or not isinstance(value, ast.Call):
+        return
+    constructor = _python_call_name(value, aliases)
+    if constructor in _PYTHON_CLIENT_CONSTRUCTORS:
+        handles[targets[0].id] = constructor
+
+
+def _call_is_client_handle_sink(node: ast.Call, handles: dict[str, str]) -> bool:
+    func = node.func
+    return isinstance(func, ast.Attribute) and func.attr in _PYTHON_CLIENT_SINK_METHODS and isinstance(func.value, ast.Name) and func.value.id in handles
 
 
 def _yaml_load_uses_safe_loader(node: ast.Call) -> bool:
