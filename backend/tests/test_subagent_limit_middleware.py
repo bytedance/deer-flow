@@ -53,8 +53,9 @@ def _raw_tool_call(call_id: str, name: str = "task") -> dict:
 
 class TestClampSubagentLimit:
     def test_min_limit_is_one(self):
-        # MIN lowered from 2 to 1 so a user asking for a single subagent gets 1,
-        # matching the config clamp applied in agent.py / client.py.
+        # MIN lowered from 2 to 1 so a user asking for a single subagent gets 1.
+        # Both consumers (SubagentLimitMiddleware.__init__ and the prompt path)
+        # share this floor via clamp_subagent_concurrency in subagents_config.py.
         assert MIN_SUBAGENT_LIMIT == 1
         assert MAX_SUBAGENT_LIMIT == 4
 
