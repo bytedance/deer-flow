@@ -731,17 +731,46 @@ class _ClientScope:
 def _find_client_handle_sink(tree: ast.AST) -> ast.AST | None:
     found: list[ast.AST] = []
     module = _ClientScope(handles={}, aliases={})
-    _walk_client_scope(tree, module, module, module, found)
+    _walk_client_scope(tree, module, module, module, found, _evaluated_annotation_nodes(tree))
     return found[0] if found else None
 
 
-def _walk_client_scope(node: ast.AST, scope: _ClientScope, inherited: _ClientScope, walrus: _ClientScope, found: list[ast.AST]) -> None:
+def _evaluated_annotation_nodes(tree: ast.AST) -> frozenset[int]:
+    """`id()`s of the annotated-assignment nodes whose annotation Python actually evaluates at runtime.
+
+    Only module- and class-body annotations are evaluated (a class body runs eagerly, even when nested
+    in a function); a function-local variable annotation is never evaluated, and `from __future__ import
+    annotations` postpones every annotation in the module to an unevaluated string. Annotations the
+    runtime never evaluates must not be scanned, or benign code is hard-blocked.
+    """
+    if any(isinstance(node, ast.ImportFrom) and node.module == "__future__" and any(alias.name == "annotations" for alias in node.names) for node in getattr(tree, "body", [])):
+        return frozenset()
+    evaluated: set[int] = set()
+
+    def visit(node: ast.AST, in_function: bool) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, ast.AnnAssign) and not in_function:
+                evaluated.add(id(child))
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                visit(child, True)
+            elif isinstance(child, ast.ClassDef):
+                visit(child, False)  # a class body evaluates its annotations even inside a function
+            else:
+                visit(child, in_function)
+
+    visit(tree, False)
+    return frozenset(evaluated)
+
+
+def _walk_client_scope(node: ast.AST, scope: _ClientScope, inherited: _ClientScope, walrus: _ClientScope, found: list[ast.AST], annotated: frozenset[int]) -> None:
     """Walk one lexical scope in source order, tracking which names currently hold a client handle.
 
     ``scope`` resolves names read by the scope being walked. ``inherited`` is what a nested
     function scope closes over; it differs only inside a class body, whose namespace is not a
     closure scope for its methods. ``walrus`` is the scope an assignment expression binds into;
     it differs only inside a comprehension, whose walrus targets land in the containing scope.
+    ``annotated`` is the module-wide set of annotated-assignment nodes whose annotation the runtime
+    actually evaluates (see ``_evaluated_annotation_nodes``); it is threaded verbatim.
 
     Every construct that binds a name needs its own branch here: the generic child walk below
     yields fields in declaration order, which for `for`/`:=`/`+=` puts the target ahead of the
@@ -750,56 +779,53 @@ def _walk_client_scope(node: ast.AST, scope: _ClientScope, inherited: _ClientSco
     explicitly rather than left to the fallback.
     """
     if isinstance(node, _PYTHON_SCOPE_NODES):
-        _walk_client_nested_scope(node, scope, inherited, walrus, found)
+        _walk_client_nested_scope(node, scope, inherited, walrus, found, annotated)
         return
     if isinstance(node, _PYTHON_COMPREHENSION_NODES):
-        _walk_client_comprehension(node, scope, inherited, walrus, found)
+        _walk_client_comprehension(node, scope, inherited, walrus, found, annotated)
         return
     if isinstance(node, ast.Call) and _call_is_client_handle_sink(node, scope.handles):
         found.append(node)
     if isinstance(node, (ast.Assign, ast.AnnAssign)):
-        # The value is evaluated before the target is bound, so `s = s.get(x)` still sees the old handle.
-        # An attribute/subscript target then evaluates its receiver and index at bind time, so a sink
-        # placed there runs and must be scanned before the name-leaf rebind.
+        # Python evaluates the value, binds the targets left to right, then (for an annotated assignment
+        # whose annotation it actually evaluates) the annotation last. Applying each target before the
+        # next is analyzed keeps `session = out[session.post(...)] = cfg` from scanning the subscript
+        # against the handle the first target already dropped.
         if node.value is not None:
-            _walk_client_scope(node.value, scope, inherited, walrus, found)
-        if isinstance(node, ast.AnnAssign):
-            _walk_client_scope(node.annotation, scope, inherited, walrus, found)
+            _walk_client_scope(node.value, scope, inherited, walrus, found, annotated)
         targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-        for target in targets:
-            _walk_client_target_exprs(target, scope, inherited, walrus, found)
-        _rebind_client_scope(targets, node.value, scope)
+        _bind_client_targets(targets, node.value, scope, inherited, walrus, found, annotated)
+        if isinstance(node, ast.AnnAssign) and id(node) in annotated:
+            _walk_client_scope(node.annotation, scope, inherited, walrus, found, annotated)
         return
     if isinstance(node, ast.NamedExpr):
         # PEP 572: the value runs first, and inside a comprehension the binding lands in the
         # containing scope, so both maps have to see it.
-        _walk_client_scope(node.value, scope, inherited, walrus, found)
+        _walk_client_scope(node.value, scope, inherited, walrus, found, annotated)
         _rebind_client_scope([node.target], node.value, scope)
         if walrus is not scope:
             _rebind_client_scope([node.target], node.value, walrus)
         return
     if isinstance(node, ast.AugAssign):
         # `x[i] += v` evaluates the target receiver/index first, then the value, then rebinds; `s += s.get(x)`
-        # calls on the old handle before the name is dropped.
-        _walk_client_target_exprs(node.target, scope, inherited, walrus, found)
-        _walk_client_scope(node.value, scope, inherited, walrus, found)
+        # calls on the old handle before the name is dropped. The target is never a tuple here.
+        _walk_client_target_exprs(node.target, scope, inherited, walrus, found, annotated)
+        _walk_client_scope(node.value, scope, inherited, walrus, found, annotated)
         _rebind_client_scope([node.target], None, scope)
         return
     if isinstance(node, (ast.For, ast.AsyncFor)):
         # The iterable is evaluated against the pre-loop binding, so `for s in s.get(x)` is a real
         # call on the handle; the target's attribute/subscript receiver+index then run per iteration
         # and are scanned before the target rebinds the name.
-        _walk_client_scope(node.iter, scope, inherited, walrus, found)
-        _walk_client_target_exprs(node.target, scope, inherited, walrus, found)
-        _rebind_client_scope([node.target], None, scope)
+        _walk_client_scope(node.iter, scope, inherited, walrus, found, annotated)
+        _bind_client_targets([node.target], None, scope, inherited, walrus, found, annotated)
         for child in [*node.body, *node.orelse]:
-            _walk_client_scope(child, scope, inherited, walrus, found)
+            _walk_client_scope(child, scope, inherited, walrus, found, annotated)
         return
     if isinstance(node, ast.withitem):
-        _walk_client_scope(node.context_expr, scope, inherited, walrus, found)
+        _walk_client_scope(node.context_expr, scope, inherited, walrus, found, annotated)
         if node.optional_vars is not None:
-            _walk_client_target_exprs(node.optional_vars, scope, inherited, walrus, found)
-            _rebind_client_scope([node.optional_vars], node.context_expr, scope)
+            _bind_client_targets([node.optional_vars], node.context_expr, scope, inherited, walrus, found, annotated)
         return
     if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
         _drop_client_bindings(scope, {node.id})
@@ -813,12 +839,12 @@ def _walk_client_scope(node: ast.AST, scope: _ClientScope, inherited: _ClientSco
         # already treats a rebind under `if`/`try` that may equally not execute.
         _drop_client_bindings(scope, set(_match_capture_names(node)))
     for child in ast.iter_child_nodes(node):
-        _walk_client_scope(child, scope, inherited, walrus, found)
+        _walk_client_scope(child, scope, inherited, walrus, found, annotated)
 
 
-def _walk_client_nested_scope(node: ast.AST, scope: _ClientScope, inherited: _ClientScope, walrus: _ClientScope, found: list[ast.AST]) -> None:
+def _walk_client_nested_scope(node: ast.AST, scope: _ClientScope, inherited: _ClientScope, walrus: _ClientScope, found: list[ast.AST], annotated: frozenset[int]) -> None:
     for expr in _client_scope_prelude(node):
-        _walk_client_scope(expr, scope, inherited, walrus, found)
+        _walk_client_scope(expr, scope, inherited, walrus, found, annotated)
     if isinstance(node, ast.ClassDef):
         # A class body reads the enclosing scope, but the names it binds are not visible to the
         # methods defined in it, so what those methods close over stays the class's own `inherited`.
@@ -828,29 +854,28 @@ def _walk_client_nested_scope(node: ast.AST, scope: _ClientScope, inherited: _Cl
         nested = inner
     body = node.body if isinstance(node.body, list) else [node.body]
     for statement in body:
-        _walk_client_scope(statement, inner, nested, inner, found)
+        _walk_client_scope(statement, inner, nested, inner, found, annotated)
     if not isinstance(node, ast.Lambda):
         _drop_client_bindings(scope, {node.name})
 
 
-def _walk_client_comprehension(node: ast.AST, scope: _ClientScope, inherited: _ClientScope, walrus: _ClientScope, found: list[ast.AST]) -> None:
+def _walk_client_comprehension(node: ast.AST, scope: _ClientScope, inherited: _ClientScope, walrus: _ClientScope, found: list[ast.AST], annotated: frozenset[int]) -> None:
     """A comprehension is its own scope: only the outermost iterable is evaluated outside it, and
     each target and its filters run before the following iterable. An assignment expression inside
     it still binds in the containing scope, so `walrus` passes through.
     """
     generators = node.generators
-    _walk_client_scope(generators[0].iter, scope, inherited, walrus, found)
+    _walk_client_scope(generators[0].iter, scope, inherited, walrus, found, annotated)
     inner = inherited.copy_without()
     for index, generator in enumerate(generators):
         if index:
-            _walk_client_scope(generator.iter, inner, inner, walrus, found)
-        _walk_client_target_exprs(generator.target, inner, inner, walrus, found)
-        _rebind_client_scope([generator.target], None, inner)
+            _walk_client_scope(generator.iter, inner, inner, walrus, found, annotated)
+        _bind_client_targets([generator.target], None, inner, inner, walrus, found, annotated)
         for condition in generator.ifs:
-            _walk_client_scope(condition, inner, inner, walrus, found)
+            _walk_client_scope(condition, inner, inner, walrus, found, annotated)
     elements = [node.key, node.value] if isinstance(node, ast.DictComp) else [node.elt]
     for element in elements:
-        _walk_client_scope(element, inner, inner, walrus, found)
+        _walk_client_scope(element, inner, inner, walrus, found, annotated)
 
 
 def _match_capture_names(node: ast.AST) -> list[str]:
@@ -938,24 +963,35 @@ def _client_assignment_target_names(target: ast.AST) -> list[str]:
     return []
 
 
-def _walk_client_target_exprs(target: ast.AST, scope: _ClientScope, inherited: _ClientScope, walrus: _ClientScope, found: list[ast.AST]) -> None:
-    """Walk the sub-expressions Python evaluates while binding an assignment target.
+def _bind_client_targets(targets: list[ast.AST], value: ast.AST | None, scope: _ClientScope, inherited: _ClientScope, walrus: _ClientScope, found: list[ast.AST], annotated: frozenset[int]) -> None:
+    """Apply assignment targets in Python's left-to-right order: each target's executable sub-expressions
+    are scanned against the current bindings, then that target's name(s) are rebound before the next
+    target is analyzed. Tuple/list unpacking binds its elements left to right too; a destructured value
+    is not tracked one level deep, so those elements rebind with no constructor.
+    """
+    for target in targets:
+        if isinstance(target, (ast.List, ast.Tuple)):
+            _bind_client_targets(target.elts, None, scope, inherited, walrus, found, annotated)
+        elif isinstance(target, ast.Starred):
+            _bind_client_targets([target.value], None, scope, inherited, walrus, found, annotated)
+        else:
+            _walk_client_target_exprs(target, scope, inherited, walrus, found, annotated)
+            _rebind_client_scope([target], value, scope)
+
+
+def _walk_client_target_exprs(target: ast.AST, scope: _ClientScope, inherited: _ClientScope, walrus: _ClientScope, found: list[ast.AST], annotated: frozenset[int]) -> None:
+    """Walk the sub-expressions Python evaluates while binding a single (non-tuple) target.
 
     A plain `Name` target binds without evaluating anything, but an attribute or subscript target still
     evaluates its receiver (and a subscript its index), so a sink call placed there runs at bind time and
-    must be scanned. The Store name leaves themselves are handled by the caller's `_rebind_client_scope`
-    rebind, so they are deliberately not walked as reads here; tuple/list/starred targets recurse.
+    must be scanned. The Store name leaf is handled by the caller's `_rebind_client_scope` rebind, so it
+    is deliberately not walked as a read here. Tuple/list/starred structure is unpacked by the caller.
     """
     if isinstance(target, ast.Attribute):
-        _walk_client_scope(target.value, scope, inherited, walrus, found)
+        _walk_client_scope(target.value, scope, inherited, walrus, found, annotated)
     elif isinstance(target, ast.Subscript):
-        _walk_client_scope(target.value, scope, inherited, walrus, found)
-        _walk_client_scope(target.slice, scope, inherited, walrus, found)
-    elif isinstance(target, ast.Starred):
-        _walk_client_target_exprs(target.value, scope, inherited, walrus, found)
-    elif isinstance(target, (ast.List, ast.Tuple)):
-        for element in target.elts:
-            _walk_client_target_exprs(element, scope, inherited, walrus, found)
+        _walk_client_scope(target.value, scope, inherited, walrus, found, annotated)
+        _walk_client_scope(target.slice, scope, inherited, walrus, found, annotated)
 
 
 def _drop_client_bindings(scope: _ClientScope, names: set[str]) -> None:
