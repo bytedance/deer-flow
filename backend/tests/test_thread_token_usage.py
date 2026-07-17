@@ -595,6 +595,292 @@ def test_count_system_prompt_reuses_precomputed_section_counts(monkeypatch):
     assert tokens == 70
 
 
+def test_count_skills_section_forwards_deferred_skill_names(monkeypatch):
+    render = MagicMock(return_value="skill-index")
+    monkeypatch.setattr(
+        "deerflow.agents.lead_agent.prompt.get_skills_prompt_section",
+        render,
+    )
+    config = _config_with_counting("approximate")
+    skill_names = frozenset({"review", "research"})
+
+    assert (
+        context_usage._count_skills_section(
+            config,
+            {"review", "research"},
+            "user-1",
+            skill_names=skill_names,
+        )
+        > 0
+    )
+    render.assert_called_once_with(
+        available_skills={"review", "research"},
+        app_config=config,
+        user_id="user-1",
+        skill_names=skill_names,
+    )
+
+
+def test_count_subagent_section_uses_configured_total_limit(monkeypatch):
+    render = MagicMock(return_value="subagents")
+    monkeypatch.setattr(
+        "deerflow.agents.lead_agent.prompt._build_subagent_section",
+        render,
+    )
+    config = SimpleNamespace(
+        subagents=SimpleNamespace(
+            enabled=True,
+            max_concurrent_subagents=3,
+            max_total_per_run=11,
+        ),
+        token_usage=None,
+    )
+
+    assert context_usage._count_subagent_section(config) > 0
+    render.assert_called_once_with(3, 11, app_config=config)
+
+
+def test_count_system_prompt_forwards_current_agent_build_inputs(monkeypatch):
+    render = MagicMock(return_value="x" * 400)
+    monkeypatch.setattr(
+        "deerflow.agents.lead_agent.prompt.apply_prompt_template",
+        render,
+    )
+    config = _config_with_counting("approximate")
+    config.subagents = SimpleNamespace(enabled=True, max_concurrent_subagents=3, max_total_per_run=6)
+    config.tool_search = SimpleNamespace(enabled=True)
+    skill_names = frozenset({"review"})
+    deferred_names = frozenset({"mcp_search"})
+
+    assert (
+        context_usage._count_system_prompt(
+            config,
+            subagent_enabled=True,
+            max_concurrent_subagents=4,
+            max_total_subagents=9,
+            skills_tokens=10,
+            subagent_tokens=20,
+            skill_names=skill_names,
+            deferred_names=deferred_names,
+            mcp_routing_hints_section="routing hints",
+        )
+        == 70
+    )
+    assert render.call_args.kwargs["max_total_subagents"] == 9
+    assert render.call_args.kwargs["skill_names"] == skill_names
+    assert render.call_args.kwargs["deferred_names"] == deferred_names
+    assert render.call_args.kwargs["mcp_routing_hints_section"] == "routing hints"
+
+
+def test_build_context_skill_setup_filters_custom_agent_allowlist(monkeypatch):
+    enabled_skills = [SimpleNamespace(name="review"), SimpleNamespace(name="research")]
+    monkeypatch.setattr(
+        "deerflow.agents.lead_agent.prompt.get_enabled_skills_for_config",
+        lambda _config, user_id=None: enabled_skills,
+    )
+    describe_tool = object()
+    build_setup = MagicMock(
+        return_value=SimpleNamespace(
+            skill_names=frozenset({"review"}),
+            describe_skill_tool=describe_tool,
+        )
+    )
+    monkeypatch.setattr(
+        "deerflow.skills.describe.build_skill_search_setup",
+        build_setup,
+    )
+    config = SimpleNamespace(
+        skills=SimpleNamespace(
+            deferred_discovery=True,
+            container_path="/mnt/skills",
+        )
+    )
+
+    skill_names, resolved_tool = context_usage._build_context_skill_setup(
+        config,
+        {"review"},
+        "user-1",
+    )
+
+    assert skill_names == frozenset({"review"})
+    assert resolved_tool is describe_tool
+    build_setup.assert_called_once_with(
+        [enabled_skills[0]],
+        enabled=True,
+        container_base_path="/mnt/skills",
+    )
+
+
+def test_build_context_tool_setup_mirrors_lead_agent_static_tools(monkeypatch):
+    bash_tool = _make_tool("bash")
+    mcp_tool = _make_tool("mcp_search", mcp=True)
+    update_tool = _make_tool("update_agent")
+    tool_search = _make_tool("tool_search")
+    describe_tool = _make_tool("describe_skill")
+    memory_tool = _make_tool("memory_search")
+    get_tools = MagicMock(return_value=[bash_tool, mcp_tool])
+    monkeypatch.setattr("deerflow.tools.tools.get_available_tools", get_tools)
+    monkeypatch.setattr("deerflow.tools.builtins.update_agent", update_tool)
+    assemble = MagicMock(
+        return_value=(
+            [bash_tool, mcp_tool, update_tool, tool_search],
+            SimpleNamespace(deferred_names=frozenset({"mcp_search"})),
+        )
+    )
+    monkeypatch.setattr(
+        "deerflow.tools.builtins.tool_search.assemble_deferred_tools",
+        assemble,
+    )
+    routing_hints = MagicMock(return_value="routing hints")
+    monkeypatch.setattr(
+        "deerflow.tools.builtins.tool_search.get_mcp_routing_hints_prompt_section",
+        routing_hints,
+    )
+    monkeypatch.setattr(
+        "deerflow.config.memory_config.should_use_memory_tools",
+        lambda _config: True,
+    )
+    monkeypatch.setattr(
+        "deerflow.agents.memory.tools.get_memory_tools",
+        lambda: [memory_tool],
+    )
+    config = SimpleNamespace(
+        tool_search=SimpleNamespace(enabled=True),
+        memory=SimpleNamespace(),
+    )
+
+    tools, deferred_names, hints = context_usage._build_context_tool_setup(
+        config,
+        "model",
+        tool_groups=["web"],
+        subagent_enabled=True,
+        agent_name="reviewer",
+        runtime={"channel_name": "web", "non_interactive": False},
+        describe_skill_tool=describe_tool,
+    )
+
+    assert tools == [
+        bash_tool,
+        mcp_tool,
+        update_tool,
+        tool_search,
+        describe_tool,
+        memory_tool,
+    ]
+    assert deferred_names == frozenset({"mcp_search"})
+    assert hints == "routing hints"
+    get_tools.assert_called_once_with(
+        model_name="model",
+        groups=["web"],
+        subagent_enabled=True,
+        app_config=config,
+    )
+    assemble.assert_called_once_with(
+        [bash_tool, mcp_tool, update_tool],
+        enabled=True,
+    )
+    routing_hints.assert_called_once_with(
+        [bash_tool, mcp_tool, update_tool],
+        deferred_names=frozenset({"mcp_search"}),
+    )
+
+
+def test_build_context_tool_setup_applies_noninteractive_webhook_filters(monkeypatch):
+    ask_tool = _make_tool("ask_clarification")
+    bash_tool = _make_tool("bash")
+    update_tool = _make_tool("update_agent")
+    monkeypatch.setattr(
+        "deerflow.tools.tools.get_available_tools",
+        lambda **_: [ask_tool, bash_tool],
+    )
+    monkeypatch.setattr("deerflow.tools.builtins.update_agent", update_tool)
+    assemble = MagicMock(
+        return_value=(
+            [bash_tool],
+            SimpleNamespace(deferred_names=frozenset()),
+        )
+    )
+    monkeypatch.setattr(
+        "deerflow.tools.builtins.tool_search.assemble_deferred_tools",
+        assemble,
+    )
+    monkeypatch.setattr(
+        "deerflow.tools.builtins.tool_search.get_mcp_routing_hints_prompt_section",
+        lambda *_args, **_kwargs: "",
+    )
+    monkeypatch.setattr(
+        "deerflow.config.memory_config.should_use_memory_tools",
+        lambda _config: False,
+    )
+    config = SimpleNamespace(
+        tool_search=SimpleNamespace(enabled=False),
+        memory=SimpleNamespace(),
+    )
+
+    tools, _deferred_names, _hints = context_usage._build_context_tool_setup(
+        config,
+        "model",
+        tool_groups=None,
+        subagent_enabled=False,
+        agent_name="reviewer",
+        runtime={"channel_name": "github", "non_interactive": True},
+        describe_skill_tool=None,
+    )
+
+    assert tools == [bash_tool]
+    assemble.assert_called_once_with([bash_tool], enabled=False)
+
+
+def test_build_context_tool_setup_uses_bootstrap_branch_without_routing_hints(monkeypatch):
+    bash_tool = _make_tool("bash")
+    setup_tool = _make_tool("setup_agent")
+    describe_tool = _make_tool("describe_skill")
+    monkeypatch.setattr(
+        "deerflow.tools.tools.get_available_tools",
+        lambda **_: [bash_tool],
+    )
+    monkeypatch.setattr("deerflow.tools.builtins.setup_agent", setup_tool)
+    assemble = MagicMock(
+        return_value=(
+            [bash_tool, setup_tool],
+            SimpleNamespace(deferred_names=frozenset()),
+        )
+    )
+    monkeypatch.setattr(
+        "deerflow.tools.builtins.tool_search.assemble_deferred_tools",
+        assemble,
+    )
+    routing_hints = MagicMock(return_value="must not be rendered")
+    monkeypatch.setattr(
+        "deerflow.tools.builtins.tool_search.get_mcp_routing_hints_prompt_section",
+        routing_hints,
+    )
+    monkeypatch.setattr(
+        "deerflow.config.memory_config.should_use_memory_tools",
+        lambda _config: False,
+    )
+    config = SimpleNamespace(
+        tool_search=SimpleNamespace(enabled=False),
+        memory=SimpleNamespace(),
+    )
+
+    tools, deferred_names, hints = context_usage._build_context_tool_setup(
+        config,
+        "model",
+        tool_groups=["must-not-be-used"],
+        subagent_enabled=False,
+        agent_name="must-not-be-used",
+        runtime={"is_bootstrap": True},
+        describe_skill_tool=describe_tool,
+    )
+
+    assert tools == [bash_tool, setup_tool, describe_tool]
+    assert deferred_names == frozenset()
+    assert hints == ""
+    assemble.assert_called_once_with([bash_tool, setup_tool], enabled=False)
+    routing_hints.assert_not_called()
+
+
 # ---------------------------------------------------------------------------
 # Token-counting strategy dispatch (approximate vs exact / model tokenizer).
 # ---------------------------------------------------------------------------
@@ -1355,15 +1641,29 @@ def test_custom_agent_settings_flow_into_prompt_and_tools(monkeypatch):
     checkpoint_counter = MagicMock(return_value=(11, 3))
     monkeypatch.setattr(context_usage, "_count_checkpoint_tokens", checkpoint_counter)
     skills_counter = MagicMock(return_value=5)
+    subagent_counter = MagicMock(return_value=7)
     prompt_counter = MagicMock(return_value=13)
     tools_counter = MagicMock(return_value=(17, 19, 29))
+    describe_skill_tool = object()
+    skill_setup = MagicMock(return_value=(frozenset({"code-review"}), describe_skill_tool))
+    assembled_tools = [object()]
+    tool_setup = MagicMock(
+        return_value=(
+            assembled_tools,
+            frozenset({"mcp_search"}),
+            "routing hints",
+        )
+    )
+    monkeypatch.setattr(context_usage, "_build_context_skill_setup", skill_setup)
+    monkeypatch.setattr(context_usage, "_build_context_tool_setup", tool_setup)
     monkeypatch.setattr(context_usage, "_count_skills_section", skills_counter)
-    monkeypatch.setattr(context_usage, "_count_subagent_section", MagicMock(return_value=7))
+    monkeypatch.setattr(context_usage, "_count_subagent_section", subagent_counter)
     monkeypatch.setattr(context_usage, "_count_system_prompt", prompt_counter)
     monkeypatch.setattr(context_usage, "_split_tools", tools_counter)
 
     app_config = SimpleNamespace(
-        subagents=SimpleNamespace(enabled=False, max_concurrent_subagents=3),
+        subagents=SimpleNamespace(enabled=False, max_concurrent_subagents=3, max_total_per_run=6),
+        skills=SimpleNamespace(deferred_discovery=True, container_path="/mnt/skills"),
         get_model_config=lambda _name: SimpleNamespace(context_window=100_000),
         summarization=SimpleNamespace(enabled=False),
     )
@@ -1371,7 +1671,7 @@ def test_custom_agent_settings_flow_into_prompt_and_tools(monkeypatch):
         [],
         app_config,
         "large-model",
-        {"subagent_enabled": True, "max_concurrent_subagents": 6},
+        {"subagent_enabled": True, "max_concurrent_subagents": 6, "max_total_subagents": 9},
         "reviewer",
     )
 
@@ -1380,21 +1680,104 @@ def test_custom_agent_settings_flow_into_prompt_and_tools(monkeypatch):
     checkpoint_counter.assert_called_once_with([], app_config, model_name="large-model")
     scoped_user_id = skills_counter.call_args.args[2]
     assert skills_counter.call_args.args[:2] == (app_config, {"code-review"})
+    assert skills_counter.call_args.kwargs == {"skill_names": frozenset({"code-review"})}
     assert isinstance(scoped_user_id, str)
+    skill_setup.assert_called_once_with(app_config, {"code-review"}, scoped_user_id)
+    subagent_counter.assert_called_once_with(
+        app_config,
+        enabled=True,
+        max_concurrent=6,
+        max_total=9,
+    )
     assert prompt_counter.call_args.kwargs == {
         "agent_name": "reviewer",
         "available_skills": {"code-review"},
         "user_id": scoped_user_id,
         "subagent_enabled": True,
         "max_concurrent_subagents": 6,
+        "max_total_subagents": 9,
         "skills_tokens": 5,
         "subagent_tokens": 7,
+        "skill_names": frozenset({"code-review"}),
+        "deferred_names": frozenset({"mcp_search"}),
+        "mcp_routing_hints_section": "routing hints",
     }
+    tool_setup.assert_called_once_with(
+        app_config,
+        "large-model",
+        tool_groups=["web"],
+        subagent_enabled=True,
+        agent_name="reviewer",
+        runtime={"subagent_enabled": True, "max_concurrent_subagents": 6, "max_total_subagents": 9},
+        describe_skill_tool=describe_skill_tool,
+    )
     assert tools_counter.call_args.kwargs == {
         "tool_groups": ["web"],
         "subagent_enabled": True,
         "promoted": None,
+        "available_tools": assembled_tools,
     }
+
+
+def test_bootstrap_context_ignores_custom_agent_metadata_and_uses_runtime_defaults(monkeypatch):
+    from deerflow.config import agents_config as agents_config_module
+
+    load_agent_config = MagicMock(side_effect=AssertionError("bootstrap must not load a custom agent"))
+    monkeypatch.setattr(agents_config_module, "load_agent_config", load_agent_config)
+    monkeypatch.setattr(context_usage, "_count_checkpoint_tokens", MagicMock(return_value=(11, 3)))
+    skill_setup = MagicMock(return_value=(frozenset({"bootstrap"}), None))
+    tool_setup = MagicMock(return_value=([object()], frozenset(), ""))
+    skills_counter = MagicMock(return_value=5)
+    subagent_counter = MagicMock(return_value=0)
+    prompt_counter = MagicMock(return_value=13)
+    tools_counter = MagicMock(return_value=(17, 0, 0))
+    monkeypatch.setattr(context_usage, "_build_context_skill_setup", skill_setup)
+    monkeypatch.setattr(context_usage, "_build_context_tool_setup", tool_setup)
+    monkeypatch.setattr(context_usage, "_count_skills_section", skills_counter)
+    monkeypatch.setattr(context_usage, "_count_subagent_section", subagent_counter)
+    monkeypatch.setattr(context_usage, "_count_system_prompt", prompt_counter)
+    monkeypatch.setattr(context_usage, "_split_tools", tools_counter)
+
+    app_config = SimpleNamespace(
+        # These non-runtime values deliberately differ from the lead-agent
+        # factory defaults. Bootstrap must still use disabled / 3 here.
+        subagents=SimpleNamespace(enabled=True, max_concurrent_subagents=8, max_total_per_run=11),
+        get_model_config=lambda _name: SimpleNamespace(context_window=100_000),
+        summarization=SimpleNamespace(enabled=False),
+    )
+    runtime = {"is_bootstrap": True}
+
+    counts = context_usage._compute_context_counts(
+        [],
+        app_config,
+        "large-model",
+        runtime,
+        "stale-custom-agent-metadata",
+    )
+
+    assert counts["max_context_tokens"] == 100_000
+    load_agent_config.assert_not_called()
+    skill_setup.assert_called_once_with(app_config, {"bootstrap"}, ANY)
+    tool_setup.assert_called_once_with(
+        app_config,
+        "large-model",
+        tool_groups=None,
+        subagent_enabled=False,
+        agent_name=None,
+        runtime=runtime,
+        describe_skill_tool=None,
+    )
+    subagent_counter.assert_called_once_with(
+        app_config,
+        enabled=False,
+        max_concurrent=3,
+        max_total=11,
+    )
+    assert prompt_counter.call_args.kwargs["agent_name"] is None
+    assert prompt_counter.call_args.kwargs["available_skills"] == {"bootstrap"}
+    assert prompt_counter.call_args.kwargs["subagent_enabled"] is False
+    assert prompt_counter.call_args.kwargs["max_concurrent_subagents"] == 3
+    assert prompt_counter.call_args.kwargs["max_total_subagents"] == 11
 
 
 @pytest.mark.asyncio
@@ -1434,6 +1817,30 @@ async def test_context_rendering_is_offloaded_from_event_loop(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_context_rendering_overload_returns_unknown_usage(monkeypatch):
+    checkpointer = MagicMock()
+    messages = [HumanMessage(content="hello")]
+    monkeypatch.setattr(context_usage, "get_checkpointer", lambda _request: checkpointer)
+    monkeypatch.setattr(context_usage, "get_config", lambda: SimpleNamespace())
+    monkeypatch.setattr(
+        context_usage,
+        "_load_checkpoint_messages",
+        AsyncMock(return_value=(messages, None, "checkpoint-1")),
+    )
+    monkeypatch.setattr(
+        context_usage,
+        "_resolve_thread_runtime",
+        AsyncMock(return_value=("model", {"subagent_enabled": False})),
+    )
+    monkeypatch.setattr(context_usage, "_resolve_thread_agent_name", AsyncMock(return_value=None))
+    get_counts = AsyncMock(side_effect=context_usage._ContextCountOverloadedError)
+    monkeypatch.setattr(context_usage, "_get_context_counts", get_counts)
+
+    assert await context_usage.build_context_usage(MagicMock(), "thread-1", MagicMock()) is None
+    get_counts.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_context_count_timeout_reuses_inflight_task(monkeypatch):
     context_usage._CONTEXT_COUNT_CACHE.clear()
     context_usage._CONTEXT_COUNT_INFLIGHT.clear()
@@ -1465,3 +1872,94 @@ async def test_context_count_timeout_reuses_inflight_task(monkeypatch):
     assert started == 1
     context_usage._CONTEXT_COUNT_CACHE.clear()
     context_usage._CONTEXT_COUNT_INFLIGHT.clear()
+
+
+@pytest.mark.asyncio
+async def test_context_count_inflight_is_bounded_across_distinct_keys(monkeypatch):
+    context_usage._CONTEXT_COUNT_CACHE.clear()
+    context_usage._CONTEXT_COUNT_INFLIGHT.clear()
+    assert context_usage._CONTEXT_COUNT_INFLIGHT_LIMIT == context_usage._CONTEXT_COUNT_EXECUTOR_WORKERS
+    release = asyncio.Event()
+    all_started = asyncio.Event()
+    started = 0
+    counts = _kwargs(max_context_tokens=10_000, messages_tokens=4)
+
+    async def _blocked_count(*_args):
+        nonlocal started
+        started += 1
+        if started == context_usage._CONTEXT_COUNT_INFLIGHT_LIMIT:
+            all_started.set()
+        await release.wait()
+        return counts
+
+    monkeypatch.setattr(context_usage, "_run_context_count", _blocked_count)
+    args = ([], SimpleNamespace(), "model", {}, None, None)
+
+    def _key(index: int):
+        return (f"thread-{index}", f"checkpoint-{index}", "config", "model", "agent", "user", "{}", "null")
+
+    tasks = [asyncio.create_task(context_usage._get_context_counts(_key(index), *args, timeout_seconds=1)) for index in range(context_usage._CONTEXT_COUNT_INFLIGHT_LIMIT)]
+    results = []
+    try:
+        await asyncio.wait_for(all_started.wait(), timeout=1)
+        assert len(context_usage._CONTEXT_COUNT_INFLIGHT) == context_usage._CONTEXT_COUNT_INFLIGHT_LIMIT
+
+        with pytest.raises(context_usage._ContextCountOverloadedError):
+            await context_usage._get_context_counts(
+                _key(context_usage._CONTEXT_COUNT_INFLIGHT_LIMIT),
+                *args,
+                timeout_seconds=1,
+            )
+        assert len(context_usage._CONTEXT_COUNT_INFLIGHT) == context_usage._CONTEXT_COUNT_INFLIGHT_LIMIT
+        assert started == context_usage._CONTEXT_COUNT_INFLIGHT_LIMIT
+    finally:
+        release.set()
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        await asyncio.sleep(0)
+
+    assert results == [counts] * context_usage._CONTEXT_COUNT_INFLIGHT_LIMIT
+    assert context_usage._CONTEXT_COUNT_INFLIGHT == {}
+    context_usage._CONTEXT_COUNT_CACHE.clear()
+
+
+@pytest.mark.asyncio
+async def test_context_count_prunes_finished_task_into_cache_before_resubmitting(monkeypatch):
+    context_usage._CONTEXT_COUNT_CACHE.clear()
+    context_usage._CONTEXT_COUNT_INFLIGHT.clear()
+    counts = _kwargs(max_context_tokens=10_000, messages_tokens=4)
+    key = ("thread-1", "checkpoint-1", "config", "model", "agent", "user", "{}", "null")
+    args = ([], SimpleNamespace(), "model", {}, None, None)
+    finished = asyncio.create_task(asyncio.sleep(0, result=counts))
+    await finished
+    context_usage._CONTEXT_COUNT_INFLIGHT[key] = finished
+    run_count = AsyncMock(return_value=counts)
+    monkeypatch.setattr(context_usage, "_run_context_count", run_count)
+
+    assert await context_usage._get_context_counts(key, *args, timeout_seconds=1) == counts
+    run_count.assert_not_awaited()
+    assert context_usage._CONTEXT_COUNT_INFLIGHT == {}
+    assert context_usage._CONTEXT_COUNT_CACHE[key] == counts
+    context_usage._CONTEXT_COUNT_CACHE.clear()
+
+
+@pytest.mark.asyncio
+async def test_context_count_stale_done_callback_cannot_overwrite_new_owner():
+    context_usage._CONTEXT_COUNT_CACHE.clear()
+    context_usage._CONTEXT_COUNT_INFLIGHT.clear()
+    key = ("thread-1", "checkpoint-1", "config", "model", "agent", "user", "{}", "null")
+    stale_counts = _kwargs(max_context_tokens=10_000, messages_tokens=1)
+    stale_task = asyncio.create_task(asyncio.sleep(0, result=stale_counts))
+    await stale_task
+    release = asyncio.Event()
+    current_task = asyncio.create_task(release.wait())
+    context_usage._CONTEXT_COUNT_INFLIGHT[key] = current_task
+
+    try:
+        context_usage._finish_context_count(key, stale_task)
+        assert context_usage._CONTEXT_COUNT_INFLIGHT[key] is current_task
+        assert key not in context_usage._CONTEXT_COUNT_CACHE
+    finally:
+        release.set()
+        await current_task
+        context_usage._CONTEXT_COUNT_INFLIGHT.clear()
+        context_usage._CONTEXT_COUNT_CACHE.clear()

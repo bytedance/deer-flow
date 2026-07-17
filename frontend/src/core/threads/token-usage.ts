@@ -6,6 +6,13 @@ export function threadTokenUsageQueryKey(threadId?: string | null) {
   return ["thread-token-usage", threadId] as const;
 }
 
+export function retainThreadTokenUsagePlaceholder(
+  previous: ThreadTokenUsageResponse | null | undefined,
+  threadId?: string | null,
+): ThreadTokenUsageResponse | undefined {
+  return previous && previous.thread_id === threadId ? previous : undefined;
+}
+
 export function threadTokenUsageToTokenUsage(
   usage: ThreadTokenUsageResponse | null | undefined,
 ): TokenUsage | null {

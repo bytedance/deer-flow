@@ -34,8 +34,9 @@ class ModelConfig(BaseModel):
     supports_vision: bool = Field(default_factory=lambda: False, description="Whether the model supports vision/image inputs")
     context_window: int | None = Field(
         default=None,
+        gt=0,
         description=(
-            "Total context window size in tokens (prompt + completion). Used to compute the real-time "
+            "Positive total context window size in tokens (prompt + completion). Used to compute the real-time "
             "context usage percentage displayed in the chat UI. Distinct from `max_tokens`, which is the "
             "per-call output cap passed to the provider. Leave unset if unknown; the UI will hide the "
             "percentage."

@@ -32,7 +32,10 @@ logger = logging.getLogger(__name__)
 
 _CONTEXT_COUNT_TIMEOUT_SECONDS = 5.0
 _CONTEXT_COUNT_CACHE_SIZE = 64
+_CONTEXT_COUNT_EXECUTOR_WORKERS = 2
+_CONTEXT_COUNT_INFLIGHT_LIMIT = _CONTEXT_COUNT_EXECUTOR_WORKERS
 _CONTEXT_COUNT_EXECUTOR: ThreadPoolExecutor | None = None
+_BOOTSTRAP_SKILL_NAMES: frozenset[str] = frozenset({"bootstrap"})
 _MESSAGE_FRAME_TOKENS = 4
 _TOKENS_PER_IMAGE = 85
 _IMAGE_CONTENT_BLOCK_TYPES: frozenset[str] = frozenset({"image", "image_url", "input_image"})
@@ -55,10 +58,14 @@ _CONTEXT_COUNT_CACHE: OrderedDict[_ContextCountCacheKey, dict[str, Any]] = Order
 _CONTEXT_COUNT_INFLIGHT: dict[_ContextCountCacheKey, asyncio.Task[dict[str, Any]]] = {}
 
 
+class _ContextCountOverloadedError(RuntimeError):
+    """Raised when every bounded context-count worker slot is occupied."""
+
+
 def _get_context_count_executor() -> ThreadPoolExecutor:
     global _CONTEXT_COUNT_EXECUTOR
     if _CONTEXT_COUNT_EXECUTOR is None:
-        _CONTEXT_COUNT_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="context-usage")
+        _CONTEXT_COUNT_EXECUTOR = ThreadPoolExecutor(max_workers=_CONTEXT_COUNT_EXECUTOR_WORKERS, thread_name_prefix="context-usage")
     return _CONTEXT_COUNT_EXECUTOR
 
 
@@ -594,10 +601,99 @@ async def _resolve_thread_agent_name(request: Request, thread_id: str) -> str | 
     return agent_name if isinstance(agent_name, str) and agent_name else None
 
 
+def _build_context_skill_setup(
+    app_config: Any,
+    available_skills: set[str] | None,
+    user_id: str | None,
+) -> tuple[frozenset[str] | None, Any | None]:
+    """Mirror the lead agent's deferred-skill prompt/tool setup."""
+    skills_config = getattr(app_config, "skills", None)
+    if not bool(getattr(skills_config, "deferred_discovery", False)):
+        return None, None
+    try:
+        from deerflow.agents.lead_agent.prompt import get_enabled_skills_for_config
+        from deerflow.skills.describe import build_skill_search_setup
+
+        enabled_skills = get_enabled_skills_for_config(app_config, user_id=user_id)
+        if available_skills is not None:
+            enabled_skills = [skill for skill in enabled_skills if skill.name in available_skills]
+        setup = build_skill_search_setup(
+            enabled_skills,
+            enabled=True,
+            container_base_path=getattr(skills_config, "container_path", "/mnt/skills"),
+        )
+        return setup.skill_names or None, setup.describe_skill_tool
+    except Exception:
+        logger.warning("Failed to build deferred-skill context setup", exc_info=True)
+        return None, None
+
+
+def _build_context_tool_setup(
+    app_config: Any,
+    model_name: str | None,
+    *,
+    tool_groups: list[str] | None,
+    subagent_enabled: bool,
+    agent_name: str | None,
+    runtime: dict[str, Any],
+    describe_skill_tool: Any | None,
+) -> tuple[list[Any], frozenset[str], str]:
+    """Mirror the lead agent's static tool assembly for context counting."""
+    try:
+        from deerflow.config.memory_config import should_use_memory_tools
+        from deerflow.tools.builtins import setup_agent, update_agent
+        from deerflow.tools.builtins.tool_search import assemble_deferred_tools, get_mcp_routing_hints_prompt_section
+        from deerflow.tools.tools import get_available_tools
+
+        is_bootstrap = bool(runtime.get("is_bootstrap", False))
+        configured_tools = list(
+            get_available_tools(
+                model_name=model_name,
+                groups=None if is_bootstrap else tool_groups,
+                subagent_enabled=subagent_enabled,
+                app_config=app_config,
+            )
+        )
+        if is_bootstrap:
+            configured_tools.append(setup_agent)
+        elif agent_name and runtime.get("channel_name") != "github":
+            configured_tools.append(update_agent)
+        if bool(runtime.get("non_interactive", False)):
+            configured_tools = [tool for tool in configured_tools if getattr(tool, "name", None) != "ask_clarification"]
+
+        tool_search_enabled = bool(getattr(getattr(app_config, "tool_search", None), "enabled", False))
+        final_tools, deferred_setup = assemble_deferred_tools(configured_tools, enabled=tool_search_enabled)
+        # The bootstrap factory intentionally omits routing hints from its
+        # minimal system prompt. Normal/default/custom agents include them.
+        routing_hints = ""
+        if not is_bootstrap:
+            routing_hints = get_mcp_routing_hints_prompt_section(
+                configured_tools,
+                deferred_names=deferred_setup.deferred_names,
+            )
+        if describe_skill_tool is not None:
+            final_tools.append(describe_skill_tool)
+        if should_use_memory_tools(getattr(app_config, "memory", None)):
+            from deerflow.agents.memory.tools import get_memory_tools
+
+            existing_names = {getattr(tool, "name", None) for tool in final_tools}
+            for memory_tool in get_memory_tools():
+                if memory_tool.name in existing_names:
+                    continue
+                final_tools.append(memory_tool)
+                existing_names.add(memory_tool.name)
+        return final_tools, deferred_setup.deferred_names, routing_hints
+    except Exception:
+        logger.warning("Failed to assemble tools for context-usage breakdown", exc_info=True)
+        return [], frozenset(), ""
+
+
 def _count_skills_section(
     app_config: Any,
     available_skills: set[str] | None = None,
     user_id: str | None = None,
+    *,
+    skill_names: frozenset[str] | None = None,
 ) -> int:
     try:
         from deerflow.agents.lead_agent.prompt import get_skills_prompt_section
@@ -607,6 +703,7 @@ def _count_skills_section(
                 available_skills=available_skills,
                 app_config=app_config,
                 user_id=user_id,
+                skill_names=skill_names,
             ),
             app_config,
         )
@@ -620,6 +717,7 @@ def _count_subagent_section(
     *,
     enabled: bool | None = None,
     max_concurrent: int | None = None,
+    max_total: int | None = None,
 ) -> int:
     """Tokens for the subagent / custom-agents section when enabled."""
     try:
@@ -628,22 +726,22 @@ def _count_subagent_section(
         if not resolved_enabled:
             return 0
         from deerflow.agents.lead_agent.prompt import _build_subagent_section  # noqa: SLF001
+        from deerflow.config.subagents_config import DEFAULT_MAX_TOTAL_SUBAGENTS_PER_RUN
 
         resolved_max = max_concurrent if max_concurrent is not None else getattr(subagents_cfg, "max_concurrent_subagents", 3)
-        return _count_text(_build_subagent_section(resolved_max, app_config=app_config), app_config)
+        resolved_total = max_total if max_total is not None else getattr(subagents_cfg, "max_total_per_run", DEFAULT_MAX_TOTAL_SUBAGENTS_PER_RUN)
+        return _count_text(_build_subagent_section(resolved_max, resolved_total, app_config=app_config), app_config)
     except Exception:
         logger.warning("Failed to render subagent prompt section", exc_info=True)
         return 0
 
 
 def _compute_deferred_tool_names(app_config: Any) -> frozenset[str]:
-    """Derive the deferred tool-name set from config + MCP cache.
+    """Best-effort deferred names for standalone prompt-count helper calls.
 
-    Mirrors :func:`deerflow.tools.builtins.tool_search.build_deferred_tool_setup`:
-    when ``tool_search.enabled`` is on, every MCP-sourced tool is deferred;
-    otherwise the set is empty. The deferred set is produced at agent-build
-    time as a build-time closure (no global registry / ContextVar), so the
-    request path recomputes it deterministically from the same inputs.
+    Production context computation passes names from the policy-filtered
+    static tool assembly. Direct helper callers lack that list, so they fall
+    back to the cached MCP catalog when tool search is enabled.
     """
     ts_cfg = getattr(app_config, "tool_search", None)
     if not bool(getattr(ts_cfg, "enabled", False)):
@@ -665,8 +763,12 @@ def _count_system_prompt(
     user_id: str | None = None,
     subagent_enabled: bool | None = None,
     max_concurrent_subagents: int | None = None,
+    max_total_subagents: int | None = None,
     skills_tokens: int | None = None,
     subagent_tokens: int | None = None,
+    skill_names: frozenset[str] | None = None,
+    deferred_names: frozenset[str] | None = None,
+    mcp_routing_hints_section: str = "",
 ) -> int:
     """System prompt tokens *excluding* skills/subagent sections.
 
@@ -689,15 +791,18 @@ def _count_system_prompt(
         # Render the FULL prompt including the deferred-tools names section;
         # that section has no row of its own, so it must stay inside the
         # system_prompt count.
-        deferred_names = _compute_deferred_tool_names(app_config)
+        resolved_deferred_names = _compute_deferred_tool_names(app_config) if deferred_names is None else deferred_names
         full = apply_prompt_template(
             subagent_enabled=resolved_subagent_enabled,
             max_concurrent_subagents=resolved_max_concurrent,
+            max_total_subagents=max_total_subagents,
             agent_name=agent_name,
             available_skills=available_skills,
             app_config=app_config,
-            deferred_names=deferred_names,
+            deferred_names=resolved_deferred_names,
+            mcp_routing_hints_section=mcp_routing_hints_section,
             user_id=user_id,
+            skill_names=skill_names,
         )
         full_tokens = _count_text(full, app_config)
 
@@ -709,6 +814,7 @@ def _count_system_prompt(
                     available_skills=available_skills,
                     app_config=app_config,
                     user_id=user_id,
+                    skill_names=skill_names,
                 ),
                 app_config,
             )
@@ -718,6 +824,7 @@ def _count_system_prompt(
                 app_config,
                 enabled=resolved_subagent_enabled,
                 max_concurrent=resolved_max_concurrent,
+                max_total=max_total_subagents,
             )
 
         return max(0, full_tokens - resolved_skills_tokens - resolved_subagent_tokens)
@@ -764,6 +871,7 @@ def _split_tools(
     tool_groups: list[str] | None = None,
     subagent_enabled: bool | None = None,
     promoted: dict[str, Any] | None = None,
+    available_tools: list[Any] | None = None,
 ) -> tuple[int, int, int]:
     """Return (system_tools_active, mcp_tools_active, mcp_tools_deferred).
 
@@ -778,7 +886,7 @@ def _split_tools(
     reflects what is actually bound. The MCP-source tag is written by
     :func:`deerflow.tools.get_available_tools` via
     :func:`deerflow.tools.mcp_metadata.tag_mcp_tool`, so ``is_mcp_tool(tool)``
-    classifies the returned list directly — no registry lookup is needed.
+    classifies the assembled list directly — no registry lookup is needed.
 
     Skill ``allowed-tools`` filtering is intentionally not replayed here. On
     current main it is model-call-local and applies only to slash-activated or
@@ -788,16 +896,19 @@ def _split_tools(
     """
     try:
         from deerflow.tools.mcp_metadata import is_mcp_tool
-        from deerflow.tools.tools import get_available_tools
 
         resolved_subagent_enabled = bool(getattr(getattr(app_config, "subagents", None), "enabled", False)) if subagent_enabled is None else subagent_enabled
+        if available_tools is None:
+            from deerflow.tools.tools import get_available_tools
 
-        all_tools = get_available_tools(
-            model_name=model_name,
-            groups=tool_groups,
-            subagent_enabled=resolved_subagent_enabled,
-            app_config=app_config,
-        )
+            all_tools = get_available_tools(
+                model_name=model_name,
+                groups=tool_groups,
+                subagent_enabled=resolved_subagent_enabled,
+                app_config=app_config,
+            )
+        else:
+            all_tools = available_tools
 
         # deferred ⟺ (tool_search enabled AND MCP-sourced AND not promoted in this thread).
         ts_cfg = getattr(app_config, "tool_search", None)
@@ -842,43 +953,74 @@ def _compute_context_counts(
 ) -> dict[str, Any]:
     """Render and count all synchronous context components in a worker thread."""
     from deerflow.config.agents_config import load_agent_config
+    from deerflow.config.subagents_config import DEFAULT_MAX_TOTAL_SUBAGENTS_PER_RUN
     from deerflow.runtime.user_context import get_effective_user_id
 
     user_id = get_effective_user_id()
+    is_bootstrap = bool(runtime.get("is_bootstrap", False))
+    effective_agent_name = None if is_bootstrap else agent_name
     agent_config = None
-    if agent_name:
+    if effective_agent_name:
         try:
-            agent_config = load_agent_config(agent_name, user_id=user_id)
+            agent_config = load_agent_config(effective_agent_name, user_id=user_id)
         except Exception:
             logger.warning("Failed to load custom-agent config for context usage", exc_info=True)
 
-    available_skills = set(agent_config.skills) if agent_config and agent_config.skills is not None else None
+    if is_bootstrap:
+        available_skills = set(_BOOTSTRAP_SKILL_NAMES)
+    elif agent_config and agent_config.skills is not None:
+        available_skills = set(agent_config.skills)
+    else:
+        available_skills = None
     tool_groups = agent_config.tool_groups if agent_config else None
     subagents_cfg = getattr(app_config, "subagents", None)
-    subagent_enabled = bool(runtime.get("subagent_enabled", getattr(subagents_cfg, "enabled", False)))
-    max_concurrent = int(
-        runtime.get(
-            "max_concurrent_subagents",
-            getattr(subagents_cfg, "max_concurrent_subagents", 3),
-        )
-    )
+    # These defaults mirror ``_make_lead_agent``. In particular, enabling
+    # subagents in app config does not enable them for a run unless its runtime
+    # context says so, and concurrency defaults to three rather than the config
+    # object's legacy field.
+    subagent_enabled = bool(runtime.get("subagent_enabled", False))
+    configured_max_concurrent = 3
+    configured_max_total = getattr(subagents_cfg, "max_total_per_run", DEFAULT_MAX_TOTAL_SUBAGENTS_PER_RUN)
+    try:
+        max_concurrent = int(runtime.get("max_concurrent_subagents", configured_max_concurrent))
+    except (TypeError, ValueError):
+        max_concurrent = int(configured_max_concurrent)
+    try:
+        max_total = int(runtime.get("max_total_subagents", configured_max_total))
+    except (TypeError, ValueError):
+        max_total = int(configured_max_total)
 
+    skill_names, describe_skill_tool = _build_context_skill_setup(app_config, available_skills, user_id)
+    assembled_tools, deferred_names, mcp_routing_hints_section = _build_context_tool_setup(
+        app_config,
+        model_name,
+        tool_groups=tool_groups,
+        subagent_enabled=subagent_enabled,
+        agent_name=effective_agent_name,
+        runtime=runtime,
+        describe_skill_tool=describe_skill_tool,
+    )
     messages_tokens, memory_tokens = _count_checkpoint_tokens(messages, app_config, model_name=model_name)
-    skills_tokens = _count_skills_section(app_config, available_skills, user_id)
+    skills_tokens = _count_skills_section(app_config, available_skills, user_id, skill_names=skill_names)
     custom_agents_tokens = _count_subagent_section(
         app_config,
         enabled=subagent_enabled,
         max_concurrent=max_concurrent,
+        max_total=max_total,
     )
     system_prompt_tokens = _count_system_prompt(
         app_config,
-        agent_name=agent_name,
+        agent_name=effective_agent_name,
         available_skills=available_skills,
         user_id=user_id,
         subagent_enabled=subagent_enabled,
         max_concurrent_subagents=max_concurrent,
+        max_total_subagents=max_total,
         skills_tokens=skills_tokens,
         subagent_tokens=custom_agents_tokens,
+        skill_names=skill_names,
+        deferred_names=deferred_names,
+        mcp_routing_hints_section=mcp_routing_hints_section,
     )
     system_tools_active, mcp_tools_active, mcp_tools_deferred = _split_tools(
         app_config,
@@ -886,6 +1028,7 @@ def _compute_context_counts(
         tool_groups=tool_groups,
         subagent_enabled=subagent_enabled,
         promoted=promoted,
+        available_tools=assembled_tools,
     )
     model_cfg = app_config.get_model_config(model_name) if model_name else None
     max_context_tokens = int(model_cfg.context_window) if model_cfg is not None and getattr(model_cfg, "context_window", None) else None
@@ -1037,8 +1180,14 @@ async def _run_context_count(
 
 
 def _finish_context_count(cache_key: _ContextCountCacheKey, task: asyncio.Task[dict[str, Any]]) -> None:
-    if _CONTEXT_COUNT_INFLIGHT.get(cache_key) is task:
-        _CONTEXT_COUNT_INFLIGHT.pop(cache_key, None)
+    if _CONTEXT_COUNT_INFLIGHT.get(cache_key) is not task:
+        # A delayed callback must not overwrite the result owned by a newer
+        # task for the same key. Still retrieve a completed exception so it
+        # cannot surface later as an unobserved-task warning.
+        if task.done() and not task.cancelled():
+            task.exception()
+        return
+    _CONTEXT_COUNT_INFLIGHT.pop(cache_key, None)
     if task.cancelled():
         return
     try:
@@ -1065,7 +1214,20 @@ async def _get_context_counts(
     *,
     timeout_seconds: float = _CONTEXT_COUNT_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
-    """Return per-turn counts, reusing one tracked worker after waiter timeouts."""
+    """Return per-turn counts through a bounded, same-key-deduplicated worker set.
+
+    The inflight limit equals the executor's worker count, so a distinct cache
+    key never enters the executor's otherwise-unbounded queue. When every slot
+    is occupied, callers fail fast and render the existing unknown-usage
+    fallback. Timed-out same-key callers continue to share the tracked task.
+    """
+    # Done callbacks normally remove completed tasks before another request
+    # runs. Prune defensively so a callback awaiting its next loop turn cannot
+    # make an available worker look occupied.
+    for finished_key, finished_task in tuple(_CONTEXT_COUNT_INFLIGHT.items()):
+        if finished_task.done():
+            _finish_context_count(finished_key, finished_task)
+
     cached = _CONTEXT_COUNT_CACHE.get(cache_key)
     if cached is not None:
         _CONTEXT_COUNT_CACHE.move_to_end(cache_key)
@@ -1073,6 +1235,8 @@ async def _get_context_counts(
 
     task = _CONTEXT_COUNT_INFLIGHT.get(cache_key)
     if task is None:
+        if len(_CONTEXT_COUNT_INFLIGHT) >= _CONTEXT_COUNT_INFLIGHT_LIMIT:
+            raise _ContextCountOverloadedError("All context-count worker slots are occupied")
         task = asyncio.create_task(
             _run_context_count(
                 messages,
@@ -1158,6 +1322,9 @@ async def build_context_usage(request: Request, thread_id: str, run_store: Any) 
             agent_name,
             promoted,
         )
+    except _ContextCountOverloadedError:
+        logger.warning("Context-usage calculation skipped for thread %s because all worker slots are occupied", thread_id)
+        return None
     except TimeoutError:
         logger.warning("Context-usage calculation timed out for thread %s", thread_id)
         return None
