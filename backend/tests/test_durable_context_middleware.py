@@ -11,6 +11,7 @@ from langgraph.types import Command
 
 from deerflow.agents import thread_state as thread_state_module
 from deerflow.agents.lead_agent import agent as lead_agent_module
+from deerflow.agents.middlewares.delegation_ledger import render_delegation_ledger
 from deerflow.agents.middlewares.durable_context_middleware import DurableContextMiddleware
 from deerflow.agents.middlewares.subagent_limit_middleware import SubagentLimitMiddleware
 from deerflow.agents.middlewares.summarization_middleware import DeerFlowSummarizationMiddleware
@@ -446,6 +447,11 @@ class TestBeforeModelCapture:
         messages = _msgs_with_completed_tasks(cap + 1)
         first = middleware.before_model({"messages": messages}, None)
         assert first is not None
+        # A single turn that emits more than the cap of delegations surfaces the
+        # overflow on the same capture: the count is derived from the merge
+        # inputs (net-new ids overflowing the capped ledger), so there is no
+        # one-capture gap picked up only on a later turn.
+        assert first.get("delegations_truncated_count") == 1
         existing = merge_delegations(None, first["delegations"])
         assert len(existing) == cap
         assert [entry["id"] for entry in existing][:2] == ["call_1", "call_2"]
@@ -454,17 +460,106 @@ class TestBeforeModelCapture:
             {
                 "messages": messages,
                 "delegations": existing,
+                "delegations_truncated_count": first["delegations_truncated_count"],
             },
             None,
         )
 
-        # No new delegation entries to capture, but the observed count exceeds
-        # the cap so the parallel ``delegations_truncated_count`` channel must
-        # surface the dropped entry so the renderer can mark it. Without this
-        # signal the lead has no way to know history was silently clipped (D2).
+        # The evicted call_0 is not re-emitted, and the counter is not
+        # recomputed from the message list: the persisted count stays
+        # authoritative, so a capture with no ledger change emits no update.
+        assert out is None
+
+    def test_compaction_survivor_eviction_still_increments_truncated_count(self):
+        """A new delegation that evicts a durable ledger entry must increment
+        ``delegations_truncated_count`` even when summarization already
+        compacted the old task messages out of ``state["messages"]``. The
+        count is derived from the merge inputs, never reconstructed from the
+        compactable message list."""
+        cap = getattr(thread_state_module, "_DELEGATION_LEDGER_MAX_ENTRIES", None)
+        assert isinstance(cap, int)
+        middleware = DurableContextMiddleware()
+        existing = [
+            {
+                "id": f"old-{i}",
+                "description": f"old task {i}",
+                "subagent_type": "general-purpose",
+                "status": "completed",
+                "created_at": "2026-06-30T00:00:00Z",
+            }
+            for i in range(cap)
+        ]
+        # Compacted tail: only the single new task call survives in messages.
+        messages = [
+            HumanMessage(content="one more task"),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "task",
+                        "args": {"description": "new work", "prompt": "do new", "subagent_type": "general-purpose"},
+                        "id": "new-call",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+        ]
+
+        out = middleware.before_model({"messages": messages, "delegations": existing}, None)
+
         assert out is not None
-        assert "delegations" not in out
-        assert out.get("delegations_truncated_count") == 1
+        assert [entry["id"] for entry in out["delegations"]] == ["new-call"]
+        assert out["delegations_truncated_count"] == 1
+
+        merged = merge_delegations(existing, out["delegations"])
+        assert len(merged) == cap
+        assert all(entry["id"] != "old-0" for entry in merged)  # oldest entry evicted
+        assert merged[-1]["id"] == "new-call"
+
+        rendered = render_delegation_ledger(merged, truncated_count=out["delegations_truncated_count"])
+        assert "(+1 earlier delegations dropped permanently" in rendered
+
+    def test_truncated_count_accumulates_across_captures(self):
+        """The middleware writes ``existing_count + increment`` so earlier
+        permanent drops keep counting up under the channel's max-reducer."""
+        cap = getattr(thread_state_module, "_DELEGATION_LEDGER_MAX_ENTRIES", None)
+        assert isinstance(cap, int)
+        middleware = DurableContextMiddleware()
+        existing = [
+            {
+                "id": f"old-{i}",
+                "description": f"old task {i}",
+                "subagent_type": "general-purpose",
+                "status": "completed",
+                "created_at": "2026-06-30T00:00:00Z",
+            }
+            for i in range(cap)
+        ]
+        messages = [
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "task",
+                        "args": {"description": "another", "prompt": "do it", "subagent_type": "general-purpose"},
+                        "id": "another-call",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+        ]
+
+        out = middleware.before_model(
+            {
+                "messages": messages,
+                "delegations": existing,
+                "delegations_truncated_count": 3,
+            },
+            None,
+        )
+
+        assert out is not None
+        assert out["delegations_truncated_count"] == 4
 
     def test_durable_context_uses_structured_task_metadata_when_content_disagrees(self):
         middleware = DurableContextMiddleware()
