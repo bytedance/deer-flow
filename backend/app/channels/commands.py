@@ -77,7 +77,7 @@ def extract_connect_code(text: str) -> str | None:
     if index + 1 >= len(parts):
         return None
     command = parts[index].lower()
-    if command in {"/connect", "connect"}:
+    if command == "/connect":
         return parts[index + 1]
     return None
 
