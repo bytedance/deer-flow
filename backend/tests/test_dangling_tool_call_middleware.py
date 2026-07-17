@@ -850,10 +850,57 @@ class TestMalformedToolCallIdRecovery:
         assert patched is not None
         recovered_id = patched[0].tool_calls[0]["id"]
         assert recovered_id
-        assert _convert_message_to_dict(patched[0])["tool_calls"][0]["id"] == recovered_id
+        payload = _convert_message_to_dict(patched[0])
+        assert payload["tool_calls"][0]["id"] == recovered_id
         assert patched[1].tool_call_id == recovered_id
         # The unread view keeps the provider's value rather than a second invented id.
         assert patched[0].additional_kwargs["tool_calls"][0]["id"] == ""
+        # ...which is only safe while the serializer ignores raw once structured exists.
+        # If that ever changes, the id="" above would ride onto the wire as a second
+        # tool_calls entry and cause the 400 this recovery exists to prevent.
+        assert len(payload["tool_calls"]) == 1
+
+    def test_raw_view_shadowed_by_invalid_calls_gets_no_placeholder(self):
+        """A shadowed raw payload is not a call of its own, so it is owed no placeholder.
+
+        ``_convert_message_to_dict`` serializes ``tool_calls + invalid_tool_calls`` and
+        reaches for the raw ``additional_kwargs`` view only in its ``elif`` — i.e. never
+        while *either* structured view is non-empty. Relabelling raw here would mint a
+        second id for a call the provider never sees, and that id's placeholder would
+        reach the wire as a tool result with no matching tool_call: the exact HTTP 400
+        this middleware exists to prevent. Sibling of
+        ``test_only_the_serialized_view_of_a_call_gets_a_recovered_id`` — there the
+        shadowing view is ``tool_calls``, here it is ``invalid_tool_calls``.
+
+        This is the realistic malformed-``write_file`` shape (#2894): LangChain parks the
+        parse failure in ``invalid_tool_calls`` while the raw payload stays in
+        ``additional_kwargs``, so both views describe one call.
+        """
+        mw = DanglingToolCallMiddleware()
+        bad_args = '{"path": "/mnt/user-data/outputs/report.md", "content": "## Report {"'
+        msgs = [
+            AIMessage.model_construct(
+                content="",
+                type="ai",
+                tool_calls=[],
+                invalid_tool_calls=[{"name": "write_file", "args": bad_args, "id": "", "error": "Unterminated string"}],
+                additional_kwargs={"tool_calls": [{"id": "", "type": "function", "function": {"name": "write_file", "arguments": bad_args}}]},
+                response_metadata={},
+            ),
+            ToolMessage(content="REAL RESULT", tool_call_id="", name="write_file"),
+        ]
+
+        patched = mw._build_patched_messages(msgs)
+
+        assert patched is not None
+        # Assert on the serialized request, because that is where a strict provider rejects.
+        wire = [_convert_message_to_dict(m) for m in patched]
+        call_ids = [tc["id"] for m in wire if m["role"] == "assistant" for tc in m.get("tool_calls", [])]
+        result_ids = [m["tool_call_id"] for m in wire if m["role"] == "tool"]
+        assert [i for i in result_ids if i not in call_ids] == []
+        assert len(call_ids) == 1
+        assert result_ids == call_ids
+        assert patched[1].content == "REAL RESULT"
 
     def test_none_id_call_reclaims_its_own_none_id_result(self):
         """A ``None``-id result is an orphan only when no call used ``None`` as its id.
@@ -971,17 +1018,27 @@ class TestMalformedToolCallIdRecovery:
         """Delta-set guard: normalization must only fire on malformed ids.
 
         A valid id is matched against ``ToolMessage.tool_call_id`` verbatim, so
-        rewriting (e.g. stripping) one would break pairing that works today.
+        rewriting (e.g. stripping) one would break pairing that works today. The
+        malformed sibling is what makes this assert on the patched output rather than
+        on the no-op path: with only the whitespace id present the transcript is fully
+        responded, ``_build_patched_messages`` returns ``None``, and the guarantee is
+        never actually exercised through the rewriting code.
         """
         mw = DanglingToolCallMiddleware()
         msgs = [
-            _ai_with_tool_calls([_tc("bash", " call_1 ")]),
+            _ai_with_tool_calls([_tc("bash", " call_1 "), _tc("ls", "")]),
             ToolMessage(content="result", tool_call_id=" call_1 ", name="bash"),
         ]
 
         patched = mw._build_patched_messages(msgs)
 
-        assert patched is None or patched[0].tool_calls[0]["id"] == " call_1 "
+        assert patched is not None
+        kept_id, recovered_id = (tc["id"] for tc in patched[0].tool_calls)
+        assert kept_id == " call_1 "
+        assert recovered_id and recovered_id != " call_1 "
+        results = {m.tool_call_id: m for m in patched[1:]}
+        assert results[" call_1 "].content == "result"
+        assert results[recovered_id].status == "error"
 
 
 class TestWrapModelCall:

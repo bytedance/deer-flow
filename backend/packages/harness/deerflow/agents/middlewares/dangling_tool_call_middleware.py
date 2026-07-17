@@ -101,10 +101,10 @@ def _claim_synthetic_id(open_calls: list[dict], result: ToolMessage) -> str | No
     for the orphan pass to drop, which is what an unattributable result gets today —
     better than repurposing it as some other call's answer.
     """
-    for entry in open_calls:
+    for position, entry in enumerate(open_calls):
         if entry["original"] != result.tool_call_id or not _names_can_pair(entry["name"], result.name):
             continue
-        open_calls.remove(entry)
+        del open_calls[position]
         return entry["synthetic"]
     return None
 
@@ -359,13 +359,17 @@ class DanglingToolCallMiddleware(AgentMiddleware[AgentState]):
                 additional_kwargs = getattr(msg, "additional_kwargs", None) or {}
                 raw_tool_calls = additional_kwargs.get("tool_calls")
 
+                invalid = getattr(msg, "invalid_tool_calls", None) or []
                 sources: list[tuple[str, list, str]] = [
                     ("call", structured, "tool_calls"),
-                    ("invalid", getattr(msg, "invalid_tool_calls", None) or [], "invalid_tool_calls"),
+                    ("invalid", invalid, "invalid_tool_calls"),
                 ]
-                # Mirror _message_tool_calls: the raw payload is a fallback view of the same
-                # calls, so relabel it only when it is the view actually read and serialized.
-                if not structured and isinstance(raw_tool_calls, list):
+                # The raw payload is a fallback view of the same calls, so relabel it only when
+                # it is the view actually serialized: the OpenAI serializer reaches for it only
+                # once *both* structured views are empty. Minting an id for a shadowed raw view
+                # would owe a placeholder to a call the provider never sees, putting an orphan
+                # tool result on the wire.
+                if not structured and not invalid and isinstance(raw_tool_calls, list):
                     sources.append(("raw", raw_tool_calls, "additional_kwargs"))
 
                 for source, tool_calls, field in sources:
