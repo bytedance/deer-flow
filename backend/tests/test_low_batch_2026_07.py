@@ -4,8 +4,8 @@ Covers the unit-testable fixes shipped in PR ``fix/low-batch-deerflow``:
 
 - ``PortAllocator.allocate`` argument validation.
 - ``resolve_host_addresses`` ignores non-INET address families.
-- ``LocalSandbox.__init__`` accepts ``sandbox_id`` (and the public
-  ``Sandbox.id`` property still exposes the configured identifier).
+- ``LocalSandbox.__init__`` keeps accepting the historical ``id=`` keyword
+  (the bug-bash rename was dropped in review as an API break).
 - ``FileMemoryStorage.load`` is safe under concurrent first-time loads.
 - ``LocalSkillStorage.ainstall_skill_from_archive`` raises
   ``FileNotFoundError`` for missing/non-file paths before scanning.
@@ -95,27 +95,27 @@ class TestResolveHostAddressesFamilyFilter:
 
 
 # ---------------------------------------------------------------------------
-# LocalSandbox sandbox_id parameter (sandbox/local/local_sandbox.py)
+# LocalSandbox constructor compatibility (sandbox/local/local_sandbox.py)
 # ---------------------------------------------------------------------------
 
 
-class TestLocalSandboxSandboxIdParameter:
-    """The renamed parameter should still surface through the public API."""
+class TestLocalSandboxConstructorCompatibility:
+    """``LocalSandbox`` must keep accepting the historical ``id=`` keyword.
 
-    def test_positional_sandbox_id(self):
+    The 2026-07 bug bash proposed renaming the ``id`` parameter to
+    ``sandbox_id`` to stop shadowing the built-in, but the rename was dropped
+    in review: external consumers of the published harness construct
+    ``LocalSandbox(id="...")``, so removing the keyword is an API break.
+    These tests pin the public constructor shape.
+    """
+
+    def test_positional_id(self):
         sb = LocalSandbox("local:user:thread:42")
         assert sb.id == "local:user:thread:42"
 
-    def test_keyword_sandbox_id(self):
-        sb = LocalSandbox(sandbox_id="local:user:thread:42")
+    def test_keyword_id(self):
+        sb = LocalSandbox(id="local:user:thread:42")
         assert sb.id == "local:user:thread:42"
-
-    def test_id_does_not_shadow_builtin(self):
-        # If the parameter were still named ``id`` the implicit ``id(self)``
-        # call below would resolve to the parameter string and fail with a
-        # TypeError. With the renamed parameter the builtin works again.
-        sb = LocalSandbox(sandbox_id="local:user:thread:42")
-        builtin_id = id(sb)  # noqa: F841 — intentionally exercising the builtin
 
 
 # ---------------------------------------------------------------------------

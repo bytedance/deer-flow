@@ -38,7 +38,7 @@ def test_glob_tool_returns_virtual_paths_and_ignores_common_dirs(tmp_path, monke
     (workspace / "node_modules").mkdir()
     (workspace / "node_modules" / "skip.py").write_text("ignored\n", encoding="utf-8")
 
-    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: LocalSandbox(sandbox_id="local"))
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: LocalSandbox(id="local"))
 
     result = glob_tool.func(
         runtime=runtime,
@@ -60,7 +60,7 @@ def test_glob_tool_supports_skills_virtual_paths(tmp_path, monkeypatch) -> None:
     (skills_dir / "public" / "demo" / "SKILL.md").write_text("# Demo\n", encoding="utf-8")
 
     sandbox = LocalSandbox(
-        sandbox_id="local",
+        id="local",
         path_mappings=[
             PathMapping(container_path="/mnt/skills", local_path=str(skills_dir), read_only=True),
         ],
@@ -85,7 +85,7 @@ def test_grep_tool_filters_by_glob_and_skips_binary_files(tmp_path, monkeypatch)
     (workspace / "notes.txt").write_text("TODO in txt should be filtered\n", encoding="utf-8")
     (workspace / "image.bin").write_bytes(b"\0binary TODO")
 
-    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: LocalSandbox(sandbox_id="local"))
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: LocalSandbox(id="local"))
 
     result = grep_tool.func(
         runtime=runtime,
@@ -106,7 +106,7 @@ def test_grep_tool_truncates_results(tmp_path, monkeypatch) -> None:
     workspace = tmp_path / "workspace"
     (workspace / "main.py").write_text("TODO one\nTODO two\nTODO three\n", encoding="utf-8")
 
-    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: LocalSandbox(sandbox_id="local"))
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: LocalSandbox(id="local"))
     # Prevent config.yaml tool config from overriding the caller-supplied max_results=2.
     monkeypatch.setattr("deerflow.sandbox.tools.get_app_config", lambda: SimpleNamespace(get_tool_config=lambda name: None))
 
@@ -133,7 +133,7 @@ def test_glob_tool_include_dirs_filters_nested_ignored_paths(tmp_path, monkeypat
     (workspace / "node_modules").mkdir()
     (workspace / "node_modules" / "lib").mkdir()
 
-    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: LocalSandbox(sandbox_id="local"))
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: LocalSandbox(id="local"))
 
     result = glob_tool.func(
         runtime=runtime,
@@ -152,7 +152,7 @@ def test_grep_tool_literal_mode(tmp_path, monkeypatch) -> None:
     workspace = tmp_path / "workspace"
     (workspace / "file.py").write_text("price = (a+b)\nresult = a+b\n", encoding="utf-8")
 
-    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: LocalSandbox(sandbox_id="local"))
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: LocalSandbox(id="local"))
 
     # literal=True should treat (a+b) as a plain string, not a regex group
     result = grep_tool.func(
@@ -172,7 +172,7 @@ def test_grep_tool_case_sensitive(tmp_path, monkeypatch) -> None:
     workspace = tmp_path / "workspace"
     (workspace / "file.py").write_text("TODO: fix\ntodo: also fix\n", encoding="utf-8")
 
-    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: LocalSandbox(sandbox_id="local"))
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: LocalSandbox(id="local"))
 
     result = grep_tool.func(
         runtime=runtime,
@@ -189,7 +189,7 @@ def test_grep_tool_case_sensitive(tmp_path, monkeypatch) -> None:
 def test_grep_tool_invalid_regex_returns_error(tmp_path, monkeypatch) -> None:
     runtime = _make_runtime(tmp_path)
 
-    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: LocalSandbox(sandbox_id="local"))
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: LocalSandbox(id="local"))
 
     result = grep_tool.func(
         runtime=runtime,
@@ -327,7 +327,7 @@ def test_glob_tool_honors_smaller_requested_max_results(tmp_path, monkeypatch) -
     (workspace / "b.py").write_text("print('b')\n", encoding="utf-8")
     (workspace / "c.py").write_text("print('c')\n", encoding="utf-8")
 
-    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: LocalSandbox(sandbox_id="local"))
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: LocalSandbox(id="local"))
     monkeypatch.setattr(
         "deerflow.sandbox.tools.get_app_config",
         lambda: SimpleNamespace(get_tool_config=lambda name: SimpleNamespace(model_extra={"max_results": 50})),
@@ -409,7 +409,7 @@ def test_ls_tool_masks_user_data_host_paths(tmp_path, monkeypatch) -> None:
     (workspace / "report.txt").write_text("hello\n", encoding="utf-8")
     (workspace / "subdir").mkdir()
 
-    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: LocalSandbox(sandbox_id="local"))
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: LocalSandbox(id="local"))
 
     result = ls_tool.func(
         runtime=runtime,
@@ -432,7 +432,7 @@ def test_ls_tool_masks_skills_host_paths(tmp_path, monkeypatch) -> None:
     (skills_dir / "public" / "SKILL.md").write_text("# Skill\n", encoding="utf-8")
 
     sandbox = LocalSandbox(
-        sandbox_id="local",
+        id="local",
         path_mappings=[
             PathMapping(container_path="/mnt/skills", local_path=str(skills_dir), read_only=True),
         ],
@@ -456,7 +456,7 @@ def test_ls_tool_returns_empty_for_empty_directory(tmp_path, monkeypatch) -> Non
     """ls_tool should return '(empty)' for an empty directory."""
     runtime = _make_runtime(tmp_path)
 
-    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: LocalSandbox(sandbox_id="local"))
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: LocalSandbox(id="local"))
 
     result = ls_tool.func(
         runtime=runtime,
@@ -495,7 +495,7 @@ def test_ls_tool_skills_path_uses_sandbox_mapping_user_id_not_contextvar(tmp_pat
     # Create a sandbox with PathMappings that use user-abc's directory
     # (simulating a sandbox acquired for user-abc)
     sandbox = LocalSandbox(
-        sandbox_id="local:user-abc:thread-1",
+        id="local:user-abc:thread-1",
         path_mappings=[
             PathMapping(container_path="/mnt/skills/custom", local_path=str(user_abc_custom), read_only=True),
         ],
@@ -544,7 +544,7 @@ def test_ls_tool_filters_upload_staging_files(tmp_path, monkeypatch) -> None:
     (uploads / ".upload-active.part").write_text("partial\n", encoding="utf-8")
     (uploads / ".upload-note.txt").write_text("intentional\n", encoding="utf-8")
 
-    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: LocalSandbox(sandbox_id="local"))
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: LocalSandbox(id="local"))
 
     result = ls_tool.func(
         runtime=runtime,
@@ -576,7 +576,7 @@ def _make_skills_sandbox(tmp_path, monkeypatch, *, disabled: str):
     monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(ext))
 
     sandbox = LocalSandbox(
-        sandbox_id="local",
+        id="local",
         path_mappings=[PathMapping(container_path="/mnt/skills", local_path=str(skills_dir), read_only=True)],
     )
     monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: sandbox)
@@ -743,7 +743,7 @@ def _make_custom_skills_sandbox(tmp_path, monkeypatch, *, user_id: str, disabled
     )
 
     sandbox = LocalSandbox(
-        sandbox_id=f"local:{user_id}:thread-1",
+        id=f"local:{user_id}:thread-1",
         path_mappings=[PathMapping(container_path="/mnt/skills/custom", local_path=str(user_custom), read_only=True)],
     )
     monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: sandbox)

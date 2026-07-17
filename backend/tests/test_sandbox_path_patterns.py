@@ -108,7 +108,7 @@ def test_local_sandbox_reverse_patterns_route_through_the_helper(tmp_path: Path)
     local = tmp_path / "skills"
     local.mkdir()
     sandbox = LocalSandbox(
-        sandbox_id="local",
+        id="local",
         path_mappings=[PathMapping(container_path="/mnt/skills", local_path=str(local), read_only=True)],
     )
 

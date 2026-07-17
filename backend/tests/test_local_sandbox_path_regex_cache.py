@@ -19,7 +19,7 @@ def _make_sandbox(tmp_path: Path) -> LocalSandbox:
     ws.mkdir()
     skills.mkdir()
     return LocalSandbox(
-        sandbox_id="test",
+        id="test",
         path_mappings=[
             PathMapping(container_path="/mnt/user-data/workspace", local_path=str(ws)),
             PathMapping(container_path="/mnt/skills", local_path=str(skills), read_only=True),
@@ -38,7 +38,7 @@ def test_patterns_are_compiled_once_and_cached(tmp_path):
 
 
 def test_empty_mappings_yield_no_pattern(tmp_path):
-    sb = LocalSandbox(sandbox_id="empty", path_mappings=[])
+    sb = LocalSandbox(id="empty", path_mappings=[])
     assert sb._command_pattern is None
     assert sb._content_pattern is None
     assert sb._reverse_output_patterns == []
@@ -158,7 +158,7 @@ def test_reverse_resolve_path_matches_windows_backslash_containment(monkeypatch)
     real filesystem or requiring an actual Windows host.
     """
     sb = LocalSandbox(
-        sandbox_id="windows-sep-test",
+        id="windows-sep-test",
         path_mappings=[
             PathMapping(container_path="/mnt/user-data/workspace", local_path="C:\\Users\\test\\workspace"),
         ],

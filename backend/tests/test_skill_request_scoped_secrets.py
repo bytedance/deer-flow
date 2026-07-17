@@ -27,7 +27,7 @@ class TestLocalSandboxEnvInjection:
     """LocalSandbox.execute_command(env=...) injects per-call env into the subprocess."""
 
     def test_injected_env_visible_to_command(self):
-        sandbox = LocalSandbox(sandbox_id="local")
+        sandbox = LocalSandbox(id="local")
         out = sandbox.execute_command(
             "echo $DEERFLOW_TEST_SECRET",
             env={"DEERFLOW_TEST_SECRET": "s3cret-value"},
@@ -37,13 +37,13 @@ class TestLocalSandboxEnvInjection:
     def test_env_none_keeps_inherited_environment(self, monkeypatch):
         """env=None preserves the legacy inherited-os.environ behaviour."""
         monkeypatch.setenv("DEERFLOW_INHERITED_VAR", "inherited-value")
-        sandbox = LocalSandbox(sandbox_id="local")
+        sandbox = LocalSandbox(id="local")
         out = sandbox.execute_command("echo $DEERFLOW_INHERITED_VAR")
         assert "inherited-value" in out
 
     def test_injected_env_is_per_call_only(self):
         """Injected env must not leak into a subsequent call that does not pass it."""
-        sandbox = LocalSandbox(sandbox_id="local")
+        sandbox = LocalSandbox(id="local")
         sandbox.execute_command("true", env={"DEERFLOW_EPHEMERAL": "leaky"})
         out = sandbox.execute_command("echo [$DEERFLOW_EPHEMERAL]")
         assert "leaky" not in out
@@ -53,21 +53,21 @@ class TestLocalSandboxEnvInjection:
         subprocess (the baseline-env leak surface). Without this, scoped injection
         is security theatre — a skill script could simply read $OPENAI_API_KEY."""
         monkeypatch.setenv("OPENAI_API_KEY", "sk-platform-should-not-leak")
-        sandbox = LocalSandbox(sandbox_id="local")
+        sandbox = LocalSandbox(id="local")
         out = sandbox.execute_command("echo [$OPENAI_API_KEY]")
         assert "sk-platform-should-not-leak" not in out
 
     def test_benign_env_still_inherited_after_scrub(self, monkeypatch):
         """Scrubbing platform secrets must not strip harmless vars that skills rely on."""
         monkeypatch.setenv("DEERFLOW_PLAIN_VAR", "harmless-value")
-        sandbox = LocalSandbox(sandbox_id="local")
+        sandbox = LocalSandbox(id="local")
         out = sandbox.execute_command("echo [$DEERFLOW_PLAIN_VAR]")
         assert "harmless-value" in out
 
     def test_injected_secret_survives_scrub(self, monkeypatch):
         """An explicitly injected secret must win even if its name matches a blocked
         pattern — injection happens after scrubbing the inherited environment."""
-        sandbox = LocalSandbox(sandbox_id="local")
+        sandbox = LocalSandbox(id="local")
         out = sandbox.execute_command(
             "echo [$INJECTED_API_KEY]",
             env={"INJECTED_API_KEY": "scoped-value"},
@@ -1241,7 +1241,7 @@ class TestEndToEndRealSubprocess:
 
         # 2. A REAL LocalSandbox runs a script that writes the token to a file and echoes it.
         out_file = tmp_path / "token.txt"
-        sandbox = LocalSandbox(sandbox_id="local")
+        sandbox = LocalSandbox(id="local")
         raw = sandbox.execute_command(
             f'printf "%s" "$ERP_TOKEN" > {out_file}; echo "leaked:$ERP_TOKEN"; echo "platform:$OPENAI_API_KEY"',
             env=injected,

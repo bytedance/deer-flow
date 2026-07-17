@@ -425,7 +425,6 @@ class FileMemoryStorage(MemoryStorage):
         with self._cache_lock:
             return self._scope_locks.setdefault(key, threading.RLock())
 
-<<<<<<< HEAD
     def _get_memory_file_path(self, agent_name: str | None = None, *, user_id: str | None = None) -> Path:
         return memory_file_path(self._config, agent_name, user_id=user_id)
 
