@@ -1,8 +1,6 @@
-from contextlib import contextmanager
 from types import SimpleNamespace
 
 import pytest
-from langchain_core.runnables.config import var_child_runnable_config
 
 from deerflow.skills.security_scanner import _extract_json_object, scan_skill_content
 
@@ -153,36 +151,29 @@ async def test_scan_distinguishes_unparseable_executable(monkeypatch):
 # section of backend/AGENTS.md) ---
 
 
-@contextmanager
-def _in_graph():
-    """Simulate execution inside a LangGraph run (e.g. the skill_manage tool)."""
-    token = var_child_runnable_config.set({"metadata": {"langfuse_session_id": "parent-thread"}, "callbacks": ["graph-root-handler"], "tags": []})
-    try:
-        yield
-    finally:
-        var_child_runnable_config.reset(token)
-
-
 @pytest.mark.anyio
-async def test_scan_skill_content_does_not_attach_model_tracing_in_graph(monkeypatch):
-    """In-graph callers inherit tracing from the graph root and MUST NOT double-attach.
+async def test_scan_skill_content_forwards_attach_tracing_to_the_model(monkeypatch):
+    """In-graph callers pass ``attach_tracing=False``; it must reach the factory.
 
-    Reached in-graph via the ``skill_manage`` tool. Per the tracing INVARIANT,
-    attaching at the model as well emits duplicate spans and blocks the Langfuse
-    handler's ``propagate_attributes`` path, so session_id/user_id never land.
+    The graph root already attached the callbacks, so attaching again at the model
+    emits duplicate spans and blocks the Langfuse handler's ``propagate_attributes``
+    path, meaning session_id/user_id never land on the trace.
     """
     model = _make_env(monkeypatch, '{"decision":"allow","reason":"ok"}')
-    with _in_graph():
-        result = await scan_skill_content(SKILL_CONTENT, executable=False)
+    result = await scan_skill_content(SKILL_CONTENT, executable=False, attach_tracing=False)
     assert result.decision == "allow"
     assert model.create_kwargs["attach_tracing"] is False
 
 
 @pytest.mark.anyio
-async def test_scan_skill_content_attaches_model_tracing_when_standalone(monkeypatch):
+async def test_scan_skill_content_attaches_model_tracing_by_default(monkeypatch):
     """Standalone callers (Gateway skill routes, installer) have no graph root to
-    inherit from, so they keep model-level attachment."""
+    inherit from, so the default keeps model-level attachment.
+
+    Anchors the other direction of the change: narrowing the fix into an
+    unconditional ``attach_tracing=False`` would silently drop their spans.
+    """
     model = _make_env(monkeypatch, '{"decision":"allow","reason":"ok"}')
     result = await scan_skill_content(SKILL_CONTENT, executable=False)
     assert result.decision == "allow"
-    assert model.create_kwargs.get("attach_tracing", True) is True
+    assert model.create_kwargs["attach_tracing"] is True

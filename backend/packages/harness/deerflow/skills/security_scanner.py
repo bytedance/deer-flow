@@ -8,32 +8,12 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from langgraph.config import get_config
-
 from deerflow.config import get_app_config
 from deerflow.config.app_config import AppConfig
 from deerflow.models import create_chat_model
 from deerflow.skills.types import SKILL_MD_FILE
 
 logger = logging.getLogger(__name__)
-
-
-def _inherits_graph_tracing() -> bool:
-    """Whether this call runs inside a graph that already attached tracing.
-
-    ``scan_skill_content`` is reachable both in-graph (the ``skill_manage`` tool)
-    and standalone (Gateway skill routes, ``skills/installer.py``), and the two
-    need opposite wiring: in-graph must not attach at the model — the graph root
-    already did, and double-attaching emits duplicate spans *and* blocks the
-    Langfuse handler's ``propagate_attributes`` path (see the tracing INVARIANT in
-    ``agents/lead_agent/agent.py``) — while a standalone caller has no root to
-    inherit from and keeps model-level attachment.
-    """
-    try:
-        get_config()
-    except RuntimeError:
-        return False
-    return True
 
 
 @dataclass(slots=True)
@@ -107,8 +87,19 @@ async def scan_skill_content(
     location: str = SKILL_MD_FILE,
     app_config: AppConfig | None = None,
     static_findings: list[dict[str, Any]] | None = None,
+    attach_tracing: bool = True,
 ) -> ScanResult:
-    """Screen skill content before it is written to disk."""
+    """Screen skill content before it is written to disk.
+
+    ``attach_tracing`` follows the tracing INVARIANT in
+    ``agents/lead_agent/agent.py``: in-graph callers must pass ``False`` because
+    the graph root already attached the callbacks, and attaching again at the
+    model emits duplicate spans *and* blocks the Langfuse handler's
+    ``propagate_attributes`` path. This function is dual-use, so the flag is the
+    caller's to set — the in-graph choke point is ``_scan_or_raise`` in
+    ``tools/skill_manage_tool.py``. Standalone callers (Gateway skill routes,
+    ``skills/installer.py``) have no root to inherit from and keep the default.
+    """
     rubric = (
         "You are a security reviewer for AI agent skills. "
         "Classify the content as allow, warn, or block. "
@@ -123,8 +114,8 @@ async def scan_skill_content(
     try:
         config = app_config or get_app_config()
         model_name = config.skill_evolution.moderation_model_name
-        attach_tracing = not _inherits_graph_tracing()
-        model = create_chat_model(name=model_name, thinking_enabled=False, app_config=config, attach_tracing=attach_tracing) if model_name else create_chat_model(thinking_enabled=False, app_config=config, attach_tracing=attach_tracing)
+        model_kwargs = {"thinking_enabled": False, "app_config": config, "attach_tracing": attach_tracing}
+        model = create_chat_model(name=model_name, **model_kwargs) if model_name else create_chat_model(**model_kwargs)
         response = await model.ainvoke(
             [
                 {"role": "system", "content": rubric},
