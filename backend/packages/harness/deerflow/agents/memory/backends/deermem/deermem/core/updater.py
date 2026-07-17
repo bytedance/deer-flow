@@ -16,9 +16,9 @@ from typing import Any
 from ..config import DeerMemConfig
 from .prompt import (
     CONSOLIDATION_PROMPT,
-    MEMORY_UPDATE_PROMPT,
     STALENESS_REVIEW_PROMPT,
     format_conversation_for_update,
+    load_prompt_messages,
 )
 from .storage import (
     MemoryStorage,
@@ -531,7 +531,7 @@ def _build_consolidation_section(
 def _escape_memory_for_prompt(memory: Any) -> Any:
     """Return a copy of ``memory`` with every string leaf HTML-escaped.
 
-    ``MEMORY_UPDATE_PROMPT`` embeds the full memory state as a ``json.dumps``
+    The memory_update prompt embeds the full memory state as a ``json.dumps``
     blob inside a ``<current_memory>...</current_memory>`` block. ``json.dumps``
     escapes ``"`` and ``\\`` but leaves ``<``, ``>`` and ``&`` intact, so a
     user-influenced field - e.g. a fact ``content`` of
@@ -717,7 +717,7 @@ class MemoryUpdater:
         correction_detected: bool,
         reinforcement_detected: bool,
         user_id: str | None = None,
-    ) -> tuple[dict[str, Any], str] | None:
+    ) -> tuple[dict[str, Any], list[Any]] | None:
         """Load memory and build the update prompt for a conversation."""
         config = self._config
         if not messages:
@@ -751,13 +751,14 @@ class MemoryUpdater:
                     max_sources=config.consolidation_max_sources,
                 )
 
-        prompt = MEMORY_UPDATE_PROMPT.format(
-            current_memory=json.dumps(_escape_memory_for_prompt(current_memory), indent=2, ensure_ascii=False),
-            conversation=conversation_text,
-            correction_hint=correction_hint,
-            staleness_review_section=staleness_section,
-            consolidation_section=consolidation_section,
-        )
+        variables = {
+            "current_memory": json.dumps(_escape_memory_for_prompt(current_memory), indent=2, ensure_ascii=False),
+            "conversation": conversation_text,
+            "correction_hint": correction_hint,
+            "staleness_review_section": staleness_section,
+            "consolidation_section": consolidation_section,
+        }
+        prompt = load_prompt_messages("memory_update", variables, agent_name=agent_name)
         return current_memory, prompt
 
     def _finalize_update(

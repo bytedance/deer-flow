@@ -1019,7 +1019,8 @@ class TestPrepareUpdatePromptStaleness:
         )
 
         assert result is not None
-        _, prompt = result
+        _, messages = result
+        prompt = "\n".join(m.content for m in messages)
         assert "Staleness Review" in prompt
         assert "<stale_facts>" in prompt
 
@@ -1042,7 +1043,8 @@ class TestPrepareUpdatePromptStaleness:
         )
 
         assert result is not None
-        _, prompt = result
+        _, messages = result
+        prompt = "\n".join(m.content for m in messages)
         assert "Staleness Review" not in prompt
         assert "<stale_facts>" not in prompt
 
@@ -1066,7 +1068,8 @@ class TestPrepareUpdatePromptStaleness:
         )
 
         assert result is not None
-        _, prompt = result
+        _, messages = result
+        prompt = "\n".join(m.content for m in messages)
         assert "Staleness Review" not in prompt
 
     def test_staleness_section_shows_valid_annotation(self):
@@ -1090,4 +1093,6 @@ class TestPrepareUpdatePromptStaleness:
 
         assert result is not None
         _, prompt = result
-        assert "valid:365d" in prompt
+        # After chat-format externalization, prompt is [SystemMessage, HumanMessage];
+        # the staleness section is injected into the user message.
+        assert any("valid:365d" in getattr(m, "content", "") for m in prompt)

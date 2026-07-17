@@ -34,6 +34,7 @@ from .deermem.core.message_processing import (
     detect_correction,
     detect_reinforcement,
     filter_messages_for_memory,
+    load_patterns,
 )
 from .deermem.core.prompt import format_memory_for_injection, warm_tiktoken_cache
 from .deermem.core.queue import MemoryUpdateQueue
@@ -56,6 +57,11 @@ class DeerMem(MemoryManager):
         """
         self._config = DeerMemConfig.from_backend_config(backend_config)
         self._storage = create_storage(self._config)
+        # Signal-detection patterns (externalized YAML; ``patterns_dir`` override
+        # or bundled defaults = pre-externalization behavior). Loaded once at
+        # construction and reused by ``_prepare_update``'s detect_* calls.
+        self._correction_patterns = load_patterns("correction", patterns_dir=self._config.patterns_dir)
+        self._reinforcement_patterns = load_patterns("reinforcement", patterns_dir=self._config.patterns_dir)
         # host_llm (host-injected default model) takes precedence over build_llm(model)
         # so zero-config DeerMem (empty `model`) still extracts via the app default,
         # mirroring pre-abstraction `model_name: null`. Standalone (no factory) -> None.
@@ -127,8 +133,7 @@ class DeerMem(MemoryManager):
 
         Returns ``(filtered, correction_detected, reinforcement_detected)``
         or ``None`` when there is no meaningful conversation (missing a user
-        or an assistant turn). Identical logic to the pre-abstraction
-        middleware/hook so behaviour is unchanged.
+        or an assistant turn).
         """
         filtered = filter_messages_for_memory(
             messages,
@@ -138,8 +143,8 @@ class DeerMem(MemoryManager):
         assistant_messages = [m for m in filtered if getattr(m, "type", None) == "ai"]
         if not user_messages or not assistant_messages:
             return None
-        correction_detected = detect_correction(filtered)
-        reinforcement_detected = not correction_detected and detect_reinforcement(filtered)
+        correction_detected = detect_correction(filtered, patterns=self._correction_patterns)
+        reinforcement_detected = not correction_detected and detect_reinforcement(filtered, patterns=self._reinforcement_patterns)
         return filtered, correction_detected, reinforcement_detected
 
     # ── Read ─────────────────────────────────────────────────────────────
