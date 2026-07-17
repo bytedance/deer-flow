@@ -210,6 +210,15 @@ _CONTEXT_CONFIGURABLE_KEYS: frozenset[str] = frozenset(
 # arbitrary HTTP/IM clients must not be able to force autonomous execution.
 _CONTEXT_INTERNAL_CALLER_KEYS: frozenset[str] = frozenset({"non_interactive"})
 
+# Server-owned authorization identity fields. These must never be accepted from
+# client-supplied ``body.config.context`` or ``body.config.configurable``. They
+# are either produced by Gateway auth state or admitted from a separately
+# authenticated internal request channel.
+#   ``is_internal``       — derived from ``request.state.auth_source``
+#   ``authz_attributes`` — Phase 1A has no Gateway-side producer; always cleared.
+#   ``channel_user_id``  — accepted only from trusted internal ``body.context``.
+_SERVER_OWNED_AUTHZ_CONTEXT_KEYS: frozenset[str] = frozenset({"is_internal", "authz_attributes", "channel_user_id"})
+
 # Keys forwarded from ``body.context`` into ``config['context']`` ONLY (the
 # runtime context that becomes ``ToolRuntime.context`` / ``runtime.context``),
 # never into ``config['configurable']``. These are read by tools and
@@ -255,8 +264,9 @@ def merge_run_context_overrides(config: dict[str, Any], context: Mapping[str, An
     ``setdefault`` so a server-authenticated id stamped by
     :func:`inject_authenticated_user_context` always wins over the client-supplied one.
 
-    :data:`_CONTEXT_INTERNAL_CALLER_KEYS`; those keys are dropped from client
-    requests.
+    :data:`_CONTEXT_INTERNAL_CALLER_KEYS` are also forwarded when ``internal``
+    is True; for non-internal callers those keys are dropped from client requests
+    by :func:`strip_internal_context_keys`.
 
     A second set of keys (``_CONTEXT_RUNTIME_ONLY_KEYS`` — e.g. ``github_token``,
     ``disable_clarification``) is forwarded into ``config['context']`` only, never
@@ -282,11 +292,6 @@ def merge_run_context_overrides(config: dict[str, Any], context: Mapping[str, An
             runtime_context.setdefault(key, context[key])
     if "user_id" in context and isinstance(runtime_context, dict):
         runtime_context.setdefault("user_id", context["user_id"])
-    # The raw platform user id from IM channels (Feishu open_id, Slack Uxxx, ...)
-    # follows the same runtime-context-only rule as user_id: tools may read it,
-    # but it never enters ``configurable`` (checkpointed with the thread).
-    if "channel_user_id" in context and isinstance(runtime_context, dict):
-        runtime_context.setdefault("channel_user_id", context["channel_user_id"])
 
 
 async def resolve_trusted_internal_owner_for_attribution(request: Request, owner_user_id: str | None) -> Any | None:
@@ -309,13 +314,38 @@ def inject_authenticated_user_context(
     request: Request,
     *,
     internal_owner_user: Any | None = None,
+    request_context: Mapping[str, Any] | None = None,
 ) -> None:
     """Stamp the authenticated user into the run context for background tools.
 
     Tool execution may happen after the request handler has returned, so tools
     that persist user-scoped files should not rely only on ambient ContextVars.
     The value comes from server-side auth state, never from client context.
+
+    ``request_context.channel_user_id`` is the sole exception: it is honored
+    only after ``request.state.auth_source`` proves the caller is internal.
+    Values copied through the free-form RunnableConfig are always cleared.
     """
+
+    # --- Server-owned authorization identity fields ---
+    # Clear any client-forged values from both config sections, then write the
+    # authoritative is_internal. This runs before ALL early returns so that
+    # even user_id-is-None paths get a defined is_internal value.
+    runtime_context = config.setdefault("context", {})
+    if not isinstance(runtime_context, dict):
+        raise TypeError("run context must be a mapping")
+    for key in _SERVER_OWNED_AUTHZ_CONTEXT_KEYS:
+        runtime_context.pop(key, None)
+    configurable = config.get("configurable")
+    if isinstance(configurable, dict):
+        for key in _SERVER_OWNED_AUTHZ_CONTEXT_KEYS:
+            configurable.pop(key, None)
+    auth_source = getattr(getattr(request, "state", None), "auth_source", None)
+    runtime_context["is_internal"] = auth_source == AUTH_SOURCE_INTERNAL
+    if auth_source == AUTH_SOURCE_INTERNAL and request_context is not None:
+        channel_user_id = request_context.get("channel_user_id")
+        if channel_user_id is not None:
+            runtime_context["channel_user_id"] = channel_user_id
 
     user = getattr(request.state, "user", None)
     user_id = getattr(user, "id", None)
@@ -704,7 +734,12 @@ async def start_run(
             # ``build_run_config``; scrub internal-only keys smuggled there.
             strip_internal_context_keys(config)
         internal_owner_user = await resolve_trusted_internal_owner_for_attribution(request, owner_user_id)
-        inject_authenticated_user_context(config, request, internal_owner_user=internal_owner_user)
+        inject_authenticated_user_context(
+            config,
+            request,
+            internal_owner_user=internal_owner_user,
+            request_context=getattr(body, "context", None),
+        )
 
         stream_modes = normalize_stream_modes(body.stream_mode)
 

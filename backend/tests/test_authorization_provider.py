@@ -209,20 +209,30 @@ def _make_guardrail_request(
     tool_input: dict | None = None,
     user_id: str | None = "u1",
     user_role: str | None = "user",
+    oauth_provider: str | None = None,
+    oauth_id: str | None = None,
+    channel_user_id: str | None = None,
     thread_id: str | None = "t1",
     is_subagent: bool = False,
     agent_id: str | None = None,
     timestamp: str = "",
+    is_internal: bool = False,
+    authz_attributes: dict | None = None,
 ) -> GuardrailRequest:
     return GuardrailRequest(
         tool_name=tool_name,
         tool_input=tool_input or {},
         user_id=user_id,
         user_role=user_role,
+        oauth_provider=oauth_provider,
+        oauth_id=oauth_id,
+        channel_user_id=channel_user_id,
         thread_id=thread_id,
         is_subagent=is_subagent,
         agent_id=agent_id,
         timestamp=timestamp,
+        is_internal=is_internal,
+        authz_attributes=authz_attributes if authz_attributes is not None else {},
     )
 
 
@@ -254,8 +264,8 @@ class TestGuardrailAuthorizationAdapter:
         assert decision.allow is False
         assert decision.policy_id == "test.deny.v1"
 
-    def test_evaluate_maps_principal_identity(self):
-        """Verify user_role and user_id flow into the AuthzRequest principal."""
+    def test_evaluate_maps_complete_principal_identity(self):
+        """Every GuardrailRequest identity field flows into Principal."""
         captured: list[AuthzRequest] = []
 
         class _CapturingProvider:
@@ -272,25 +282,55 @@ class TestGuardrailAuthorizationAdapter:
                 return list(candidates)
 
         adapter = GuardrailAuthorizationAdapter(_CapturingProvider())
-        gr_req = _make_guardrail_request(user_id="user-42", user_role="admin", tool_name="write_file")
+        gr_req = _make_guardrail_request(
+            user_id="user-42",
+            user_role="admin",
+            oauth_provider="github",
+            oauth_id="gh-42",
+            channel_user_id="channel-42",
+            is_internal=True,
+            authz_attributes={"department": "engineering"},
+            tool_name="write_file",
+        )
         adapter.evaluate(gr_req)
 
         assert len(captured) == 1
         authz_req = captured[0]
         assert authz_req.principal.user_id == "user-42"
         assert authz_req.principal.role == "admin"
+        assert authz_req.principal.oauth_provider == "github"
+        assert authz_req.principal.oauth_id == "gh-42"
+        assert authz_req.principal.channel_user_id == "channel-42"
+        assert authz_req.principal.is_internal is True
+        assert authz_req.principal.attributes == {"department": "engineering"}
         assert authz_req.resource == "tool"
         assert authz_req.action == "call"
         assert authz_req.target == "write_file"
 
-    def test_evaluate_does_not_populate_is_internal_in_phase0(self):
-        """is_internal is not populated by the adapter in Phase 0.
+    def test_evaluate_maps_is_internal_true(self):
+        """is_internal=True on GuardrailRequest maps to Principal.is_internal=True."""
+        captured: list[AuthzRequest] = []
 
-        The correct signal (auth_source == AUTH_SOURCE_INTERNAL) lives on
-        request.state, not on GuardrailRequest. The adapter does not set
-        is_internal, so Principal retains its dataclass default (False).
-        Phase 1 will thread the signal into run context.
-        """
+        class _CapturingProvider:
+            name = "capturing"
+
+            def authorize(self, request: AuthzRequest) -> AuthzDecision:
+                captured.append(request)
+                return AuthzDecision(allow=True)
+
+            async def aauthorize(self, request: AuthzRequest) -> AuthzDecision:
+                return self.authorize(request)
+
+            def filter_resources(self, principal: Principal, resource_type: str, candidates: list[str]) -> list[str]:
+                return list(candidates)
+
+        adapter = GuardrailAuthorizationAdapter(_CapturingProvider())
+        gr_req = _make_guardrail_request(user_role="user", is_internal=True)
+        adapter.evaluate(gr_req)
+        assert captured[0].principal.is_internal is True
+
+    def test_evaluate_maps_is_internal_false(self):
+        """is_internal=False (default) maps to Principal.is_internal=False."""
         captured: list[AuthzRequest] = []
 
         class _CapturingProvider:
@@ -308,9 +348,99 @@ class TestGuardrailAuthorizationAdapter:
 
         adapter = GuardrailAuthorizationAdapter(_CapturingProvider())
         adapter.evaluate(_make_guardrail_request(user_role="user"))
-
-        # is_internal retains its dataclass default — adapter does not set it
         assert captured[0].principal.is_internal is False
+
+    def test_evaluate_applies_default_role_when_missing(self):
+        """Adapter uses default_role when user_role is absent."""
+        captured: list[AuthzRequest] = []
+
+        class _CapturingProvider:
+            name = "capturing"
+
+            def authorize(self, request: AuthzRequest) -> AuthzDecision:
+                captured.append(request)
+                return AuthzDecision(allow=True)
+
+            async def aauthorize(self, request: AuthzRequest) -> AuthzDecision:
+                return self.authorize(request)
+
+            def filter_resources(self, principal: Principal, resource_type: str, candidates: list[str]) -> list[str]:
+                return list(candidates)
+
+        adapter = GuardrailAuthorizationAdapter(_CapturingProvider(), default_role="guest")
+        gr_req = _make_guardrail_request(user_role=None)
+        adapter.evaluate(gr_req)
+        assert captured[0].principal.role == "guest"
+
+    def test_evaluate_preserves_unknown_role(self):
+        """Unknown non-empty role is NOT replaced by default_role."""
+        captured: list[AuthzRequest] = []
+
+        class _CapturingProvider:
+            name = "capturing"
+
+            def authorize(self, request: AuthzRequest) -> AuthzDecision:
+                captured.append(request)
+                return AuthzDecision(allow=True)
+
+            async def aauthorize(self, request: AuthzRequest) -> AuthzDecision:
+                return self.authorize(request)
+
+            def filter_resources(self, principal: Principal, resource_type: str, candidates: list[str]) -> list[str]:
+                return list(candidates)
+
+        adapter = GuardrailAuthorizationAdapter(_CapturingProvider(), default_role="user")
+        gr_req = _make_guardrail_request(user_role="editor")
+        adapter.evaluate(gr_req)
+        assert captured[0].principal.role == "editor"
+
+    def test_evaluate_sync_async_same_principal(self):
+        """Sync and async paths produce identical Principal fields."""
+        captured_sync: list[AuthzRequest] = []
+        captured_async: list[AuthzRequest] = []
+
+        class _SyncCapture:
+            name = "sync-capture"
+
+            def authorize(self, request: AuthzRequest) -> AuthzDecision:
+                captured_sync.append(request)
+                return AuthzDecision(allow=True)
+
+            async def aauthorize(self, request: AuthzRequest) -> AuthzDecision:
+                return self.authorize(request)
+
+            def filter_resources(self, principal: Principal, resource_type: str, candidates: list[str]) -> list[str]:
+                return list(candidates)
+
+        class _AsyncCapture:
+            name = "async-capture"
+
+            def authorize(self, request: AuthzRequest) -> AuthzDecision:
+                captured_async.append(request)
+                return AuthzDecision(allow=True)
+
+            async def aauthorize(self, request: AuthzRequest) -> AuthzDecision:
+                captured_async.append(request)
+                return AuthzDecision(allow=True)
+
+            def filter_resources(self, principal: Principal, resource_type: str, candidates: list[str]) -> list[str]:
+                return list(candidates)
+
+        gr_req = _make_guardrail_request(
+            user_id="user-42",
+            user_role="admin",
+            oauth_provider="github",
+            oauth_id="gh-42",
+            channel_user_id="channel-42",
+            is_internal=True,
+            authz_attributes={"department": "engineering"},
+        )
+        GuardrailAuthorizationAdapter(_SyncCapture()).evaluate(gr_req)
+        asyncio.run(GuardrailAuthorizationAdapter(_AsyncCapture()).aevaluate(gr_req))
+
+        p1 = captured_sync[0].principal
+        p2 = captured_async[0].principal
+        assert p1 == p2
 
     def test_evaluate_maps_context_fields(self):
         """Verify thread_id, tool_input, and is_subagent flow into AuthzRequest.context."""

@@ -367,23 +367,53 @@ def test_make_lead_agent_all_legacy_skills_preserve_all_tools(monkeypatch):
     assert tool_names == ["bash", "read_file", "update_agent", "describe_skill"]
 
 
-def test_make_lead_agent_does_not_apply_passive_skill_policy_when_cache_is_cold(monkeypatch):
+def test_make_lead_agent_passive_empty_skill_policy_preserves_mcp_and_other_tools_when_cache_is_cold(monkeypatch):
     from unittest.mock import MagicMock
+
+    from langchain_core.tools import tool
 
     from deerflow.agents.lead_agent import agent as lead_agent_module
     from deerflow.agents.lead_agent import prompt as prompt_module
+    from deerflow.tools.mcp_metadata import tag_mcp_tool
+
+    @tool
+    def lightrag_query(query: str) -> str:
+        """Query a LightRAG MCP server."""
+        return query
+
+    tag_mcp_tool(lightrag_query)
+
+    captured_deferred_setups = []
+
+    def capture_build_middlewares(*args, **kwargs):
+        captured_deferred_setups.append(kwargs["deferred_setup"])
+        return []
 
     monkeypatch.setattr(lead_agent_module, "_resolve_model_name", lambda x=None, **kwargs: "default-model")
     monkeypatch.setattr(lead_agent_module, "create_chat_model", lambda **kwargs: "model")
-    monkeypatch.setattr(lead_agent_module, "build_middlewares", lambda *args, **kwargs: [])
+    monkeypatch.setattr(lead_agent_module, "build_middlewares", capture_build_middlewares)
     monkeypatch.setattr(lead_agent_module, "apply_prompt_template", lambda **kwargs: "mock_prompt")
     monkeypatch.setattr(lead_agent_module, "create_agent", lambda **kwargs: kwargs)
-    monkeypatch.setattr(lead_agent_module, "load_agent_config", lambda x: AgentConfig(name="test", skills=["restricted"]))
-    monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [NamedTool("bash"), NamedTool("read_file"), NamedTool("web_search")])
+    monkeypatch.setattr(
+        lead_agent_module,
+        "load_agent_config",
+        lambda x: AgentConfig(name="test", skills=["example-safe-skill"]),
+    )
+    monkeypatch.setattr(
+        "deerflow.tools.get_available_tools",
+        lambda **kwargs: [
+            NamedTool("bash"),
+            NamedTool("read_file"),
+            NamedTool("web_search"),
+            lightrag_query,
+        ],
+    )
 
     mock_app_config = MagicMock()
     mock_app_config.get_model_config.return_value = SimpleNamespace(supports_thinking=False, supports_vision=False)
-    mock_storage = SimpleNamespace(load_skills=lambda *, enabled_only: [_make_skill("restricted", ["read_file"])])
+    mock_app_config.tool_search.enabled = True
+    mock_app_config.tool_search.auto_promote_top_k = 3
+    mock_storage = SimpleNamespace(load_skills=lambda *, enabled_only: [_make_skill("example-safe-skill", [])])
 
     with prompt_module._enabled_skills_lock:
         prompt_module._enabled_skills_cache = None
@@ -394,7 +424,9 @@ def test_make_lead_agent_does_not_apply_passive_skill_policy_when_cache_is_cold(
     agent_kwargs = lead_agent_module.make_lead_agent({"configurable": {"agent_name": "test"}})
 
     tool_names = [tool.name for tool in agent_kwargs["tools"]]
-    assert {"bash", "read_file", "web_search", "describe_skill"} <= set(tool_names)
+    assert {"bash", "read_file", "web_search", "lightrag_query", "tool_search", "describe_skill"} <= set(tool_names)
+    assert len(captured_deferred_setups) == 1
+    assert captured_deferred_setups[0].deferred_names == frozenset({"lightrag_query"})
 
 
 def test_make_lead_agent_fails_closed_when_skill_policy_load_fails(monkeypatch):

@@ -79,7 +79,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **skills:** Apply `allowed-tools` only to slash-activated or actually loaded
   lead-agent skills, preventing passive enabled skills and evaluation fixtures
-  from removing `task`, web, and file tools from every run. ([#4095], [#4098])
+  from removing MCP, web, file, and delegation tools from every run. ([#4095],
+  [#4098], [#4192])
 - **models:** Honor `api_base` on every `BaseChatOpenAI` subclass (`VllmChatModel`,
   `MindIEChatModel`, `PatchedChatMiMo`, `PatchedChatStepFun`, `PatchedChatMiniMax`),
   not just `ChatOpenAI` / `PatchedChatOpenAI`. Those five previously dropped the
@@ -604,3 +605,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#4098]: https://github.com/bytedance/deer-flow/pull/4098
 [#4146]: https://github.com/bytedance/deer-flow/pull/4146
 [#4190]: https://github.com/bytedance/deer-flow/pull/4190
+[#4192]: https://github.com/bytedance/deer-flow/issues/4192

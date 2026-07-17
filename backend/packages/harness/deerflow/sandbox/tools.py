@@ -1610,9 +1610,10 @@ CHANNEL_USER_ID_ENV = "DEERFLOW_CHANNEL_USER_ID"
 
 _CHANNEL_USER_ID_CONTEXT_KEY = "channel_user_id"
 
-# body.context is client-writable on web requests, so bound the value: real
-# platform ids are tens of chars; anything past this is hostile or corrupt and
-# must not bloat every command string sent to the sandbox.
+# Gateway accepts this identity only from internally authenticated channel
+# requests, but embedded runtimes can still construct context directly. Bound
+# the value defensively: real platform ids are tens of chars; anything past
+# this is corrupt and must not bloat every sandbox command string.
 _CHANNEL_USER_ID_MAX_LEN = 256
 
 

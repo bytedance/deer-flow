@@ -544,6 +544,9 @@ class TestGuardrailRequestAttribution:
         assert guardrail_request.oauth_id is None
         assert guardrail_request.run_id is None
         assert guardrail_request.tool_call_id is None
+        assert guardrail_request.channel_user_id is None
+        assert guardrail_request.is_internal is False
+        assert guardrail_request.authz_attributes == {}
 
     def test_only_user_id_present(self):
         runtime = self._make_runtime_mock(context={"user_id": "user_abc"})
@@ -559,12 +562,16 @@ class TestGuardrailRequestAttribution:
         assert guardrail_request.tool_call_id is None
 
     def test_authenticated_user_context_present(self):
+        attributes = {"department": "engineering"}
         runtime = self._make_runtime_mock(
             context={
                 "user_id": "user_abc",
                 "user_role": "admin",
                 "oauth_provider": "github",
                 "oauth_id": "gh_123",
+                "channel_user_id": "channel_123",
+                "is_internal": True,
+                "authz_attributes": attributes,
             }
         )
         req = self._make_request(runtime=runtime, tool_call={"name": "bash", "args": {}})
@@ -575,6 +582,19 @@ class TestGuardrailRequestAttribution:
         assert guardrail_request.user_role == "admin"
         assert guardrail_request.oauth_provider == "github"
         assert guardrail_request.oauth_id == "gh_123"
+        assert guardrail_request.channel_user_id == "channel_123"
+        assert guardrail_request.is_internal is True
+        assert guardrail_request.authz_attributes == {"department": "engineering"}
+
+        attributes["department"] = "changed"
+        assert guardrail_request.authz_attributes == {"department": "engineering"}
+
+    def test_non_mapping_authz_attributes_raise_type_error(self):
+        runtime = self._make_runtime_mock(context={"authz_attributes": ["not", "a", "mapping"]})
+        req = self._make_request(runtime=runtime, tool_call={"name": "bash", "args": {}})
+
+        with pytest.raises(TypeError, match="authz_attributes must be a Mapping"):
+            self._capture_guardrail_request(req)
 
     def test_only_run_id_present(self):
         runtime = self._make_runtime_mock(context={"run_id": "run_xyz"})
