@@ -15,7 +15,7 @@ from pathlib import Path
 from deerflow.config.runtime_paths import resolve_path
 from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
 from deerflow.skills.permissions import make_skill_written_path_sandbox_readable
-from deerflow.skills.storage.skill_storage import SKILL_MD_FILE, SkillStorage, walk_skill_directories
+from deerflow.skills.storage.skill_storage import SKILL_MD_FILE, SkillStorage, is_skill_support_data_dir, walk_skill_directories
 from deerflow.skills.types import SkillCategory
 
 logger = logging.getLogger(__name__)
@@ -79,7 +79,7 @@ class LocalSkillStorage(SkillStorage):
             if not category_path.exists() or not category_path.is_dir():
                 continue
             for current_root, dir_names, file_names in walk_skill_directories(category_path):
-                dir_names[:] = sorted(name for name in dir_names if not name.startswith(".") and name != "evals" and name != "fixtures")
+                dir_names[:] = sorted(name for name in dir_names if not name.startswith(".") and not is_skill_support_data_dir(Path(current_root), name))
                 if SKILL_MD_FILE not in file_names:
                     continue
                 # A directory containing SKILL.md is a package boundary. Any
