@@ -92,6 +92,37 @@ describe("legacy memory import compatibility (TDD)", () => {
     expect(normalizeMemoryPayload({})).toBeNull();
   });
 
+  it('rejects the truncated import envelope {"facts": []}', () => {
+    expect(normalizeMemoryPayload({ facts: [] })).toBeNull();
+  });
+
+  it("rejects imports with missing or malformed metadata", () => {
+    const valid = legacyMemoryWithoutCognitiveStyle();
+
+    expect(
+      normalizeMemoryPayload({
+        user: valid.user,
+        history: valid.history,
+        facts: valid.facts,
+      }),
+    ).toBeNull();
+    expect(normalizeMemoryPayload({ ...valid, version: 1 })).toBeNull();
+    expect(normalizeMemoryPayload({ ...valid, lastUpdated: null })).toBeNull();
+  });
+
+  it("rejects imports with missing or non-record user/history envelopes", () => {
+    const valid = legacyMemoryWithoutCognitiveStyle();
+
+    expect(normalizeMemoryPayload({ ...valid, user: undefined })).toBeNull();
+    expect(normalizeMemoryPayload({ ...valid, history: undefined })).toBeNull();
+    expect(
+      normalizeMemoryPayload({ ...valid, user: "not-an-object" }),
+    ).toBeNull();
+    expect(normalizeMemoryPayload({ ...valid, history: 123 })).toBeNull();
+    expect(normalizeMemoryPayload({ ...valid, user: [] })).toBeNull();
+    expect(normalizeMemoryPayload({ ...valid, history: [] })).toBeNull();
+  });
+
   it("normalizeMemoryPayload fills missing user sections like backend normalize", () => {
     const partial = {
       version: "1.0",

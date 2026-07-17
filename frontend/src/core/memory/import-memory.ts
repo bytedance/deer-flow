@@ -22,7 +22,7 @@ function emptySection(): ContextSection {
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function normalizeContextSection(value: unknown): ContextSection {
@@ -96,12 +96,19 @@ export function normalizeMemoryPayload(
   value: unknown,
   options: { invalidFactStrategy?: InvalidFactStrategy } = {},
 ): UserMemory | null {
-  if (!isRecord(value) || !Array.isArray(value.facts)) {
+  if (
+    !isRecord(value) ||
+    typeof value.version !== "string" ||
+    typeof value.lastUpdated !== "string" ||
+    !isRecord(value.user) ||
+    !isRecord(value.history) ||
+    !Array.isArray(value.facts)
+  ) {
     return null;
   }
 
-  const user = isRecord(value.user) ? value.user : {};
-  const history = isRecord(value.history) ? value.history : {};
+  const user = value.user;
+  const history = value.history;
   const invalidFactStrategy = options.invalidFactStrategy ?? "reject";
   const facts: MemoryFact[] = [];
 
@@ -127,8 +134,8 @@ export function normalizeMemoryPayload(
   ) as unknown as UserMemory["history"];
 
   return {
-    version: typeof value.version === "string" ? value.version : "1.0",
-    lastUpdated: typeof value.lastUpdated === "string" ? value.lastUpdated : "",
+    version: value.version,
+    lastUpdated: value.lastUpdated,
     user: normalizedUser,
     history: normalizedHistory,
     facts,
