@@ -727,6 +727,388 @@ class TestBuildPatchedMessagesPatching:
         assert ai_message.invalid_tool_calls[0]["args"] == _invalid_tc()["args"]
 
 
+class TestMalformedToolCallIdRecovery:
+    """Empty/missing tool-call ids get the same recovery as empty names (#4008).
+
+    A provider that omits the id parses into a well-formed ``tool_calls`` entry with
+    ``id=""``/``None``, so these reach the middleware through the normal path.
+    """
+
+    @pytest.mark.parametrize("tc_id", ["", "   ", None])
+    def test_malformed_structured_tool_call_id_is_normalized(self, tc_id):
+        mw = DanglingToolCallMiddleware()
+        msgs = [_ai_with_tool_calls([_tc("bash", tc_id)])]
+
+        patched = mw._build_patched_messages(msgs)
+
+        assert patched is not None
+        normalized_id = patched[0].tool_calls[0]["id"]
+        assert normalized_id
+        assert normalized_id.strip()
+        payload = _convert_message_to_dict(patched[0])
+        assert payload["tool_calls"][0]["id"] == normalized_id
+        assert isinstance(patched[1], ToolMessage)
+        assert patched[1].tool_call_id == normalized_id
+        assert patched[1].status == "error"
+
+    def test_empty_tool_call_id_keeps_its_paired_tool_result(self):
+        """The destructive case: the result exists, so it must survive and stay paired.
+
+        Without id normalization the empty id never enters the pairing set, so the
+        real result is dropped as an orphan while the AIMessage keeps ``id=""``.
+        """
+        mw = DanglingToolCallMiddleware()
+        msgs = [
+            _ai_with_tool_calls([_tc("bash", "")]),
+            ToolMessage(content="REAL RESULT", tool_call_id="", name="bash"),
+        ]
+
+        patched = mw._build_patched_messages(msgs)
+
+        assert patched is not None
+        assert len(patched) == 2
+        assert isinstance(patched[1], ToolMessage)
+        assert patched[1].content == "REAL RESULT"
+        assert patched[1].tool_call_id == patched[0].tool_calls[0]["id"]
+        assert patched[1].status != "error"
+
+    def test_multiple_empty_ids_get_distinct_ids_and_pair_in_order(self):
+        mw = DanglingToolCallMiddleware()
+        msgs = [
+            _ai_with_tool_calls([_tc("bash", ""), _tc("ls", "")]),
+            ToolMessage(content="first", tool_call_id="", name="bash"),
+            ToolMessage(content="second", tool_call_id="", name="ls"),
+        ]
+
+        patched = mw._build_patched_messages(msgs)
+
+        assert patched is not None
+        first_id, second_id = (tc["id"] for tc in patched[0].tool_calls)
+        assert first_id != second_id
+        assert [m.content for m in patched[1:]] == ["first", "second"]
+        assert [m.tool_call_id for m in patched[1:]] == [first_id, second_id]
+
+    def test_empty_id_invalid_tool_call_is_normalized(self):
+        mw = DanglingToolCallMiddleware()
+        msgs = [_ai_with_invalid_tool_calls([_invalid_tc(tc_id="")])]
+
+        patched = mw._build_patched_messages(msgs)
+
+        assert patched is not None
+        normalized_id = patched[0].invalid_tool_calls[0]["id"]
+        assert normalized_id
+        payload = _convert_message_to_dict(patched[0])
+        assert payload["tool_calls"][0]["id"] == normalized_id
+        assert patched[1].tool_call_id == normalized_id
+
+    def test_empty_id_raw_provider_tool_call_is_normalized(self):
+        mw = DanglingToolCallMiddleware()
+        msgs = [
+            AIMessage.model_construct(
+                content="",
+                type="ai",
+                tool_calls=[],
+                invalid_tool_calls=[],
+                additional_kwargs={"tool_calls": [{"id": "", "type": "function", "function": {"name": "bash", "arguments": "{}"}}]},
+                response_metadata={},
+            )
+        ]
+
+        patched = mw._build_patched_messages(msgs)
+
+        assert patched is not None
+        normalized_id = patched[0].additional_kwargs["tool_calls"][0]["id"]
+        assert normalized_id
+        payload = _convert_message_to_dict(patched[0])
+        assert payload["tool_calls"][0]["id"] == normalized_id
+        assert patched[1].tool_call_id == normalized_id
+
+    def test_only_the_serialized_view_of_a_call_gets_a_recovered_id(self):
+        """When both views of one call are present, only the read one is relabelled.
+
+        ``_message_tool_calls`` and the OpenAI serializer both prefer structured
+        tool_calls and ignore the raw payload while they coexist. Relabelling raw here
+        would invent a *second* id for a call that already got one, so the two views of
+        the same call would disagree; the raw ids cannot simply be copied from
+        structured either, since a partially-parsed turn splits calls across
+        ``invalid_tool_calls`` and breaks positional alignment.
+        """
+        mw = DanglingToolCallMiddleware()
+        msgs = [
+            AIMessage.model_construct(
+                content="",
+                type="ai",
+                tool_calls=[_tc("bash", "")],
+                invalid_tool_calls=[],
+                additional_kwargs={"tool_calls": [{"id": "", "type": "function", "function": {"name": "bash", "arguments": "{}"}}]},
+                response_metadata={},
+            )
+        ]
+
+        patched = mw._build_patched_messages(msgs)
+
+        assert patched is not None
+        recovered_id = patched[0].tool_calls[0]["id"]
+        assert recovered_id
+        payload = _convert_message_to_dict(patched[0])
+        assert payload["tool_calls"][0]["id"] == recovered_id
+        assert patched[1].tool_call_id == recovered_id
+        # The unread view keeps the provider's value rather than a second invented id.
+        assert patched[0].additional_kwargs["tool_calls"][0]["id"] == ""
+        # ...which is only safe while the serializer ignores raw once structured exists.
+        # If that ever changes, the id="" above would ride onto the wire as a second
+        # tool_calls entry and cause the 400 this recovery exists to prevent.
+        assert len(payload["tool_calls"]) == 1
+
+    def test_raw_view_shadowed_by_invalid_calls_gets_no_placeholder(self):
+        """A shadowed raw payload is not a call of its own, so it is owed no placeholder.
+
+        ``_convert_message_to_dict`` serializes ``tool_calls + invalid_tool_calls`` and
+        reaches for the raw ``additional_kwargs`` view only in its ``elif`` — i.e. never
+        while *either* structured view is non-empty. Relabelling raw here would mint a
+        second id for a call the provider never sees, and that id's placeholder would
+        reach the wire as a tool result with no matching tool_call: the exact HTTP 400
+        this middleware exists to prevent. Sibling of
+        ``test_only_the_serialized_view_of_a_call_gets_a_recovered_id`` — there the
+        shadowing view is ``tool_calls``, here it is ``invalid_tool_calls``.
+
+        This is the realistic malformed-``write_file`` shape (#2894): LangChain parks the
+        parse failure in ``invalid_tool_calls`` while the raw payload stays in
+        ``additional_kwargs``, so both views describe one call.
+        """
+        mw = DanglingToolCallMiddleware()
+        bad_args = '{"path": "/mnt/user-data/outputs/report.md", "content": "## Report {"'
+        msgs = [
+            AIMessage.model_construct(
+                content="",
+                type="ai",
+                tool_calls=[],
+                invalid_tool_calls=[{"name": "write_file", "args": bad_args, "id": "", "error": "Unterminated string"}],
+                additional_kwargs={"tool_calls": [{"id": "", "type": "function", "function": {"name": "write_file", "arguments": bad_args}}]},
+                response_metadata={},
+            ),
+            ToolMessage(content="REAL RESULT", tool_call_id="", name="write_file"),
+        ]
+
+        patched = mw._build_patched_messages(msgs)
+
+        assert patched is not None
+        # Assert on the serialized request, because that is where a strict provider rejects.
+        wire = [_convert_message_to_dict(m) for m in patched]
+        call_ids = [tc["id"] for m in wire if m["role"] == "assistant" for tc in m.get("tool_calls", [])]
+        result_ids = [m["tool_call_id"] for m in wire if m["role"] == "tool"]
+        assert [i for i in result_ids if i not in call_ids] == []
+        assert len(call_ids) == 1
+        assert result_ids == call_ids
+        assert patched[1].content == "REAL RESULT"
+
+    def test_none_id_call_reclaims_its_own_none_id_result(self):
+        """A ``None``-id result is an orphan only when no call used ``None`` as its id.
+
+        Sibling of ``test_tool_call_id_none_orphan_is_dropped``: there the call's id is
+        valid, so the result stays an orphan. Here the call itself carries the ``None``
+        id, so the result is its own and must follow the call to its recovered id
+        instead of being dropped. Both are reachable only from a corrupt serialized
+        payload, which is why the ToolMessage is built with ``model_construct``.
+        """
+        mw = DanglingToolCallMiddleware()
+        msgs = [
+            _ai_with_tool_calls([_tc("bash", None)]),
+            ToolMessage.model_construct(content="REAL RESULT", tool_call_id=None),
+        ]
+
+        patched = mw._build_patched_messages(msgs)
+
+        assert patched is not None
+        assert len(patched) == 2
+        assert isinstance(patched[1], ToolMessage)
+        assert patched[1].content == "REAL RESULT"
+        assert patched[1].tool_call_id == patched[0].tool_calls[0]["id"]
+
+    def test_dangling_call_does_not_consume_a_later_turns_result(self):
+        """A result answers the turn that issued it, never an earlier dangling call.
+
+        Malformed originals are all equally empty, so pairing on the original id alone
+        lets the first empty-id call claim a later turn's result: the real result is
+        served to the wrong call while the call that actually ran gets the placeholder.
+        The retried tool shares the interrupted one's name — the realistic shape, and
+        the one where nothing but document order can tell the two turns apart.
+        """
+        mw = DanglingToolCallMiddleware()
+        msgs = [
+            _ai_with_tool_calls([_tc("bash", "")]),  # interrupted: never produced a result
+            _ai_with_tool_calls([_tc("bash", "")]),  # retried, and this one ran
+            ToolMessage(content="REAL RESULT", tool_call_id="", name="bash"),
+        ]
+
+        patched = mw._build_patched_messages(msgs)
+
+        assert patched is not None
+        interrupted_call, interrupted_result, retried_call, retried_result = patched
+        assert interrupted_result.tool_call_id == interrupted_call.tool_calls[0]["id"]
+        assert interrupted_result.status == "error"
+        assert retried_result.tool_call_id == retried_call.tool_calls[0]["id"]
+        assert retried_result.content == "REAL RESULT"
+
+    def test_orphan_result_is_not_adopted_by_a_later_malformed_call(self):
+        """An orphan malformed result stays an orphan and is dropped.
+
+        A result whose originating AIMessage is gone (e.g. dropped by summarization)
+        has no call to return to. Pairing on the original id alone lets a *later*
+        malformed call adopt it, resurrecting a stale result as the answer to a call
+        that never produced it — and swallowing the placeholder that call is owed.
+        """
+        mw = DanglingToolCallMiddleware()
+        msgs = [
+            ToolMessage(content="STALE ORPHAN", tool_call_id="", name="search"),
+            HumanMessage(content="continue"),
+            _ai_with_tool_calls([_tc("write_file", "")]),
+        ]
+
+        patched = mw._build_patched_messages(msgs)
+
+        assert patched is not None
+        assert all(getattr(m, "content", None) != "STALE ORPHAN" for m in patched)
+        human, write_call, write_result = patched
+        assert isinstance(human, HumanMessage)
+        assert write_result.tool_call_id == write_call.tool_calls[0]["id"]
+        assert write_result.status == "error"
+
+    def test_sibling_call_does_not_consume_its_neighbours_result(self):
+        """Parallel calls in one turn: the result goes to the sibling that ran.
+
+        Interrupting one of several parallel calls is this middleware's own trigger,
+        and within a turn the empty originals cannot tell the siblings apart either.
+        The result's name can, so it must not be handed to whichever sibling is first.
+        """
+        mw = DanglingToolCallMiddleware()
+        msgs = [
+            _ai_with_tool_calls([_tc("search", ""), _tc("write_file", "")]),
+            ToolMessage(content="REAL RESULT", tool_call_id="", name="write_file"),
+        ]
+
+        patched = mw._build_patched_messages(msgs)
+
+        assert patched is not None
+        search_id, write_id = (tc["id"] for tc in patched[0].tool_calls)
+        results = {m.tool_call_id: m for m in patched[1:]}
+        assert results[write_id].content == "REAL RESULT"
+        assert results[search_id].status == "error"
+
+    def test_nameless_result_is_dropped_when_several_siblings_are_eligible(self):
+        """With nothing to tell two malformed siblings apart, the result names neither.
+
+        ``ToolMessage.name`` is optional, and a missing name cannot contradict any call,
+        so every open call in the turn stays eligible. Handing the result to whichever
+        sibling comes first is a guess: the interrupted call may be the first one, which
+        would serve a real result to the wrong call and give the one that actually ran a
+        placeholder — the same corruption as the cross-turn case, inside one turn.
+        Position cannot break the tie here either: one call has no result at all, so the
+        two no longer line up.
+        """
+        mw = DanglingToolCallMiddleware()
+        msgs = [
+            _ai_with_tool_calls([_tc("search", ""), _tc("write_file", "")]),
+            ToolMessage.model_construct(content="REAL RESULT", tool_call_id="", name=None),
+        ]
+
+        patched = mw._build_patched_messages(msgs)
+
+        assert patched is not None
+        assert all(getattr(m, "content", None) != "REAL RESULT" for m in patched)
+        assert [m.status for m in patched[1:]] == ["error", "error"]
+
+    def test_identical_parallel_calls_pair_with_their_results_in_order(self):
+        """Indistinguishable siblings that all answered are paired by position.
+
+        Two ``bash`` calls cannot be told apart by name, so a per-result "claim only a
+        unique candidate" rule would drop *both* real results and report two interrupted
+        calls. Position is real evidence precisely because nothing is missing: LangGraph's
+        ``ToolNode`` builds these results with ``asyncio.gather`` / ``executor.map`` over
+        ``tool_calls``, which yield in input order regardless of completion order, so a
+        fully answered turn lines up by construction. Contrast the test above, where one
+        call is unanswered and that alignment is gone.
+        """
+        mw = DanglingToolCallMiddleware()
+        msgs = [
+            _ai_with_tool_calls([_tc("bash", ""), _tc("bash", "")]),
+            ToolMessage(content="RESULT A", tool_call_id="", name="bash"),
+            ToolMessage(content="RESULT B", tool_call_id="", name="bash"),
+        ]
+
+        patched = mw._build_patched_messages(msgs)
+
+        assert patched is not None
+        first_id, second_id = (tc["id"] for tc in patched[0].tool_calls)
+        assert [m.tool_call_id for m in patched[1:]] == [first_id, second_id]
+        assert [m.content for m in patched[1:]] == ["RESULT A", "RESULT B"]
+
+    def test_identical_parallel_calls_drop_a_lone_ambiguous_result(self):
+        """Position is only evidence while the turn is fully answered.
+
+        Same two indistinguishable ``bash`` calls, but one result: the alignment that
+        justifies pairing by position no longer holds, and the name cannot narrow the
+        pair either, so there is no evidence tying the result to a call. Guards against
+        the positional tie-break widening into a first-sibling default.
+        """
+        mw = DanglingToolCallMiddleware()
+        msgs = [
+            _ai_with_tool_calls([_tc("bash", ""), _tc("bash", "")]),
+            ToolMessage(content="LONE RESULT", tool_call_id="", name="bash"),
+        ]
+
+        patched = mw._build_patched_messages(msgs)
+
+        assert patched is not None
+        assert all(getattr(m, "content", None) != "LONE RESULT" for m in patched)
+        assert [m.status for m in patched[1:]] == ["error", "error"]
+
+    def test_result_naming_no_call_is_dropped_rather_than_misattributed(self):
+        """An unattributable result is dropped, not repurposed.
+
+        When the name matches no open call there is no evidence tying the result to
+        any of them. Dropping it is what it already gets today; handing it to an
+        arbitrary call would invent a pairing and corrupt the transcript instead.
+        """
+        mw = DanglingToolCallMiddleware()
+        msgs = [
+            _ai_with_tool_calls([_tc("search", ""), _tc("write_file", "")]),
+            ToolMessage(content="RESULT OF NEITHER", tool_call_id="", name="grep"),
+        ]
+
+        patched = mw._build_patched_messages(msgs)
+
+        assert patched is not None
+        assert all(getattr(m, "content", None) != "RESULT OF NEITHER" for m in patched)
+        assert [m.status for m in patched[1:]] == ["error", "error"]
+
+    def test_valid_ids_are_left_byte_for_byte_unchanged(self):
+        """Delta-set guard: normalization must only fire on malformed ids.
+
+        A valid id is matched against ``ToolMessage.tool_call_id`` verbatim, so
+        rewriting (e.g. stripping) one would break pairing that works today. The
+        malformed sibling is what makes this assert on the patched output rather than
+        on the no-op path: with only the whitespace id present the transcript is fully
+        responded, ``_build_patched_messages`` returns ``None``, and the guarantee is
+        never actually exercised through the rewriting code.
+        """
+        mw = DanglingToolCallMiddleware()
+        msgs = [
+            _ai_with_tool_calls([_tc("bash", " call_1 "), _tc("ls", "")]),
+            ToolMessage(content="result", tool_call_id=" call_1 ", name="bash"),
+        ]
+
+        patched = mw._build_patched_messages(msgs)
+
+        assert patched is not None
+        kept_id, recovered_id = (tc["id"] for tc in patched[0].tool_calls)
+        assert kept_id == " call_1 "
+        assert recovered_id and recovered_id != " call_1 "
+        results = {m.tool_call_id: m for m in patched[1:]}
+        assert results[" call_1 "].content == "result"
+        assert results[recovered_id].status == "error"
+
+
 class TestWrapModelCall:
     def test_no_patch_passthrough(self):
         mw = DanglingToolCallMiddleware()
