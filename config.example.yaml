@@ -1083,9 +1083,13 @@ input_polish:
 #
 # Each middleware path uses module:Attribute colon-form (e.g.
 # "my_package.middleware:MyCustomMiddleware") and is resolved at agent-build
-# time via resolve_variable. The resolved class must be an AgentMiddleware
-# subclass and is instantiated with no arguments. Missing optional modules
-# are logged at INFO and skipped so the agent can still start. Set
+# time via resolve_class. The resolved class must be an AgentMiddleware
+# subclass and is instantiated with no arguments. Loading fails closed: if
+# the declared module itself is not installed the entry is logged at INFO
+# and skipped (optional-dependency pattern); any other failure — malformed
+# path, missing attribute, transitive import error, non-middleware class,
+# or constructor error — aborts agent startup with an actionable error so a
+# typo cannot silently disable a configured middleware. Set
 # "enabled": false to turn off extension middleware loading entirely.
 #
 # SECURITY: middleware entries are imported and instantiated inside the

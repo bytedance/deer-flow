@@ -137,7 +137,7 @@ class ExtensionsConfig(BaseModel):
     agent-assembly code (``AppConfig.from_file`` populates ``extensions``
     from that JSON file; the ``extensions`` key of ``config.yaml`` is not
     read).  Each value is a ``module:Attribute`` colon-path that is resolved
-    at agent-build time via :func:`deerflow.reflection.resolvers.resolve_variable`.
+    at agent-build time via :func:`deerflow.reflection.resolvers.resolve_class`.
     Set ``enabled: false`` to disable extension middleware loading entirely.
 
     Security: middleware entries are imported and instantiated in-process,

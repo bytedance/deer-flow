@@ -182,7 +182,7 @@ class TestLoadExtensionMiddlewares:
         assert isinstance(result[1], _AnotherMiddleware)
 
     def test_module_not_found_skipped(self):
-        """ModuleNotFoundError should log INFO and skip, not crash."""
+        """An absent declared top-level package logs INFO and is skipped (optional dependency)."""
         from deerflow.agents.factory import load_extension_middlewares
 
         cfg = ExtensionsConfig(
@@ -192,33 +192,65 @@ class TestLoadExtensionMiddlewares:
         result = load_extension_middlewares(app_cfg)
         assert result == []
 
-    def test_invalid_path_format_skipped(self):
-        """A malformed path (no colon) should be logged and skipped."""
+    def test_malformed_path_raises(self):
+        """A malformed path (no colon) is a misconfiguration and must abort, not skip."""
         from deerflow.agents.factory import load_extension_middlewares
 
         cfg = ExtensionsConfig(
             middlewares=["not_a_valid_path_without_colon"],
         )
         app_cfg = MagicMock(extensions=cfg)
-        result = load_extension_middlewares(app_cfg)
-        assert result == []
+        with pytest.raises(ImportError, match="doesn't look like a variable path"):
+            load_extension_middlewares(app_cfg)
 
-    def test_non_middleware_class_skipped(self):
-        """Resolved class that is not AgentMiddleware subclass → skipped."""
+    def test_missing_attribute_raises(self):
+        """A resolvable module without the declared attribute must abort, not skip."""
+        from deerflow.agents.factory import load_extension_middlewares
+
+        cfg = ExtensionsConfig(
+            middlewares=["test_extensions_config:_DoesNotExistMiddleware"],
+        )
+        app_cfg = MagicMock(extensions=cfg)
+        with pytest.raises(ImportError, match="does not define"):
+            load_extension_middlewares(app_cfg)
+
+    def test_transitive_import_failure_raises(self, tmp_path, monkeypatch):
+        """An installed module whose import fails on a missing transitive dependency must abort.
+
+        The declared module exists on ``sys.path`` but raises
+        ``ModuleNotFoundError`` for a *different* module while importing —
+        that is a broken dependency, not an absent optional package, so the
+        agent must not start with the middleware silently absent.
+        """
+        from deerflow.agents.factory import load_extension_middlewares
+
+        mod = tmp_path / "ext_mw_transitive_fail_mod.py"
+        mod.write_text("import definitely_missing_transitive_dep_xyz\n", encoding="utf-8")
+        monkeypatch.syspath_prepend(str(tmp_path))
+
+        cfg = ExtensionsConfig(
+            middlewares=["ext_mw_transitive_fail_mod:SomeMiddleware"],
+        )
+        app_cfg = MagicMock(extensions=cfg)
+        with pytest.raises(ImportError):
+            load_extension_middlewares(app_cfg)
+
+    def test_non_middleware_class_raises(self):
+        """A resolved class that is not an AgentMiddleware subclass must abort, not skip."""
         from deerflow.agents.factory import load_extension_middlewares
 
         cfg = ExtensionsConfig(
             middlewares=["test_extensions_config:_NotAMiddleware"],
         )
         app_cfg = MagicMock(extensions=cfg)
-        result = load_extension_middlewares(app_cfg)
-        assert result == []
+        with pytest.raises(ValueError, match="not a subclass of AgentMiddleware"):
+            load_extension_middlewares(app_cfg)
 
-    def test_instantiation_failure_skipped(self):
-        """If cls() raises, log and skip.
+    def test_instantiation_failure_raises(self):
+        """If cls() raises, agent construction must abort with the path in the error.
 
-        Uses module-level ``_BrokenMiddleware`` so ``resolve_variable`` can
-        find it — the test then exercises the ``except Exception`` branch when
+        Uses module-level ``_BrokenMiddleware`` so ``resolve_class`` can
+        find it — the test then exercises the constructor-failure branch when
         ``cls()`` raises at instantiation time.
         """
         from deerflow.agents.factory import load_extension_middlewares
@@ -227,11 +259,13 @@ class TestLoadExtensionMiddlewares:
             middlewares=["test_extensions_config:_BrokenMiddleware"],
         )
         app_cfg = MagicMock(extensions=cfg)
-        result = load_extension_middlewares(app_cfg)
-        assert result == []
+        with pytest.raises(RuntimeError, match="_BrokenMiddleware") as excinfo:
+            load_extension_middlewares(app_cfg)
+        assert isinstance(excinfo.value.__cause__, RuntimeError)
+        assert "boom" in str(excinfo.value.__cause__)
 
-    def test_mixed_valid_and_invalid(self):
-        """Valid middlewares load; invalid ones are skipped."""
+    def test_mixed_valid_and_missing_optional(self):
+        """Valid middlewares load; an absent optional package is skipped."""
         from deerflow.agents.factory import load_extension_middlewares
 
         cfg = ExtensionsConfig(
@@ -246,6 +280,25 @@ class TestLoadExtensionMiddlewares:
         assert len(result) == 2
         assert isinstance(result[0], _ValidMiddleware)
         assert isinstance(result[1], _AnotherMiddleware)
+
+    def test_duplicate_path_raises(self):
+        """The same path declared twice must abort with an actionable error.
+
+        LangChain's ``create_agent`` rejects duplicate middleware names with a
+        bare ``AssertionError`` deep inside agent assembly; the loader surfaces
+        the misconfiguration up front instead.
+        """
+        from deerflow.agents.factory import load_extension_middlewares
+
+        cfg = ExtensionsConfig(
+            middlewares=[
+                "test_extensions_config:_ValidMiddleware",
+                "  test_extensions_config:_ValidMiddleware  ",
+            ],
+        )
+        app_cfg = MagicMock(extensions=cfg)
+        with pytest.raises(ValueError, match="Duplicate extension middleware path"):
+            load_extension_middlewares(app_cfg)
 
     def test_paths_with_whitespace_trimmed(self):
         from deerflow.agents.factory import load_extension_middlewares
@@ -291,8 +344,8 @@ class TestExtensionsJsonIntegration:
         assert cfg.middlewares == ["my_package.middleware:MyCustomMiddleware"]
         assert cfg.mcp_servers["srv"].command == "echo"
 
-    def test_app_config_loads_extensions_from_json_not_yaml(self, tmp_path, monkeypatch):
-        """An ``extensions`` section in config.yaml is ignored; extensions_config.json wins."""
+    def test_app_config_loads_extensions_from_json_with_yaml_override(self, tmp_path, monkeypatch):
+        """Extensions load from extensions_config.json; explicit ``extensions`` fields in config.yaml override per-field."""
         extensions_path = tmp_path / "extensions_config.json"
         extensions_path.write_text(
             json.dumps({"mcpServers": {}, "skills": {}, "middlewares": ["json_module:JsonMiddleware"]}),
@@ -306,6 +359,27 @@ class TestExtensionsJsonIntegration:
                     "extensions": {"middlewares": ["yaml_module:YamlMiddleware"]},
                 }
             ),
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(extensions_path))
+
+        app_cfg = AppConfig.from_file(str(config_path))
+
+        # config.yaml explicitly declares `middlewares`, so it wins over the
+        # JSON value (replace-per-field, part of the AppConfig hot-reload
+        # contract). Fields not declared in config.yaml keep the JSON value.
+        assert app_cfg.extensions.middlewares == ["yaml_module:YamlMiddleware"]
+
+    def test_app_config_loads_extensions_from_json_when_yaml_silent(self, tmp_path, monkeypatch):
+        """Without an ``extensions`` section in config.yaml, extensions_config.json is the source of truth."""
+        extensions_path = tmp_path / "extensions_config.json"
+        extensions_path.write_text(
+            json.dumps({"mcpServers": {}, "skills": {}, "middlewares": ["json_module:JsonMiddleware"]}),
+            encoding="utf-8",
+        )
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            yaml.safe_dump({"sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"}}),
             encoding="utf-8",
         )
         monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(extensions_path))
