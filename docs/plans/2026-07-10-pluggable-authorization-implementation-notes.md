@@ -200,6 +200,28 @@ Phase 1 最低验证要求：
 - **延期：** RBAC provider、provider factory、Layer 1 过滤、Layer 2 自动接线移至
   Phase 1A-2 / Phase 1B。
 
+### 2026-07-17 — Phase 1A-2 / 内置 RBAC provider 与 provider factory
+
+- **背景：** Phase 1A-1 建立了可信 Principal 链路，但没有策略引擎。
+  Phase 1A-2 实现内置 RBAC provider 和统一 provider factory。
+- **决策：** `RbacAuthorizationProvider` 在构造时完成全部配置校验并编译为
+  不可变结构（`frozenset` / sentinel `_ALL`）。请求路径只做 O(1) membership 检查。
+- **决策：** deny 永远优先于 allow，无论 allow 是 `"*"`、`True`、列表还是缺失。
+- **决策：** 未知角色和缺失角色抛 `ValueError`（不返回 allow），由执行层
+  根据 `fail_closed` 决定。
+- **决策：** 资源名使用显式映射（`tool → tools`，`model → models` 等），
+  不通过加 `s` 猜测。未知 resource 使用原名查找；未配置时视为"不受限"。
+- **决策：** `resolve_authorization_provider()` 是唯一 provider 解析入口。
+  disabled 时返回 `None`（不 import provider 模块）；enabled 但缺少 provider
+  时抛 `ValueError`。不缓存实例。不注入 `fail_closed` 或 `default_role`。
+- **决策：** 内置和自定义 provider 使用完全相同的 `resolve_variable` class-path
+  解析路径，无特殊分支。
+- **证据：** 48 tests passed（37 RBAC + 11 factory）。
+- **兼容性：** 无运行时行为变化（`authorization.enabled: false`）。不修改
+  `config.example.yaml`，不 bump `config_version`。
+- **延期：** Layer 1 工具过滤、Layer 2 自动接线、DeerFlowClient、RBAC 配置示例
+  移至 Phase 1B。
+
 ### 新记录模板
 
 ```markdown
