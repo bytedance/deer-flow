@@ -3133,3 +3133,121 @@ class TestSubagentGuardrailAttribution:
         from langchain_core.messages import HumanMessage
 
         return ({"messages": [HumanMessage(content=task)]}, [], None)
+
+    @pytest.mark.anyio
+    async def test_aexecute_writes_is_internal_true(
+        self,
+        classes,
+        monkeypatch,
+    ):
+        """is_internal=True must propagate to subagent context."""
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentConfig = classes["SubagentConfig"]
+        executor = SubagentExecutor(
+            config=SubagentConfig(
+                name="general-purpose",
+                description="is_internal test",
+                system_prompt="test",
+                max_turns=5,
+                timeout_seconds=30,
+            ),
+            tools=[],
+            thread_id="t1",
+            is_internal=True,
+        )
+        fake_agent = _FakeStreamAgent()
+        monkeypatch.setattr(executor, "_build_initial_state", self._noop_build_initial_state)
+        monkeypatch.setattr(executor, "_create_agent", lambda *a, **kw: fake_agent)
+
+        await executor._aexecute("do something")
+
+        context = fake_agent.captured_context
+        assert context is not None
+        assert context.get("is_internal") is True
+
+    @pytest.mark.anyio
+    async def test_aexecute_writes_is_internal_false(
+        self,
+        classes,
+        monkeypatch,
+    ):
+        """is_internal=False must be written explicitly, not omitted."""
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentConfig = classes["SubagentConfig"]
+        executor = SubagentExecutor(
+            config=SubagentConfig(
+                name="general-purpose",
+                description="is_internal false test",
+                system_prompt="test",
+                max_turns=5,
+                timeout_seconds=30,
+            ),
+            tools=[],
+            thread_id="t1",
+            is_internal=False,
+        )
+        fake_agent = _FakeStreamAgent()
+        monkeypatch.setattr(executor, "_build_initial_state", self._noop_build_initial_state)
+        monkeypatch.setattr(executor, "_create_agent", lambda *a, **kw: fake_agent)
+
+        await executor._aexecute("do something")
+
+        context = fake_agent.captured_context
+        assert context is not None
+        assert context.get("is_internal") is False
+
+    @pytest.mark.anyio
+    async def test_aexecute_copies_attributes_on_writeback(
+        self,
+        classes,
+        monkeypatch,
+    ):
+        """authz_attributes must be copied on write-back; mutating context copy
+        doesn't affect executor's internal copy."""
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentConfig = classes["SubagentConfig"]
+        source_attributes = {"dept": "eng"}
+        executor = SubagentExecutor(
+            config=SubagentConfig(
+                name="general-purpose",
+                description="attributes copy test",
+                system_prompt="test",
+                max_turns=5,
+                timeout_seconds=30,
+            ),
+            tools=[],
+            thread_id="t1",
+            authz_attributes=source_attributes,
+        )
+        source_attributes["dept"] = "changed-before-run"
+        assert executor.authz_attributes == {"dept": "eng"}
+        fake_agent = _FakeStreamAgent()
+        monkeypatch.setattr(executor, "_build_initial_state", self._noop_build_initial_state)
+        monkeypatch.setattr(executor, "_create_agent", lambda *a, **kw: fake_agent)
+
+        await executor._aexecute("do something")
+
+        context = fake_agent.captured_context
+        assert context is not None
+        assert context.get("authz_attributes") == {"dept": "eng"}
+        # Mutate the context copy
+        context["authz_attributes"]["dept"] = "changed"
+        # Executor's internal copy should be unaffected
+        assert executor.authz_attributes["dept"] == "eng"
+
+    def test_executor_rejects_non_mapping_attributes(self, classes):
+        """Constructor must raise TypeError for non-Mapping authz_attributes."""
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentConfig = classes["SubagentConfig"]
+        with pytest.raises(TypeError, match="authz_attributes must be a Mapping"):
+            SubagentExecutor(
+                config=SubagentConfig(
+                    name="general-purpose",
+                    description="test",
+                    system_prompt="test",
+                    max_turns=5,
+                    timeout_seconds=30,
+                ),
+                tools=[],
+                authz_attributes=["not", "a", "mapping"],
+            )

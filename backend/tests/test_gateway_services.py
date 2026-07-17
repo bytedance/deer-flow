@@ -6,6 +6,7 @@ import json
 
 import pytest
 
+from app.gateway.auth_disabled import AUTH_SOURCE_INTERNAL
 from deerflow.config.app_config import AppConfig, reset_app_config, set_app_config
 
 
@@ -1062,6 +1063,7 @@ def test_start_run_uses_internal_owner_header_for_persistence(_stub_app_config):
     from langgraph.checkpoint.memory import InMemorySaver
     from langgraph.store.memory import InMemoryStore
 
+    from app.gateway.auth_disabled import AUTH_SOURCE_INTERNAL
     from app.gateway.internal_auth import INTERNAL_OWNER_USER_ID_HEADER_NAME, INTERNAL_SYSTEM_ROLE
     from app.gateway.services import start_run
     from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
@@ -1085,7 +1087,10 @@ def test_start_run_uses_internal_owner_header_for_persistence(_stub_app_config):
         )
         request = SimpleNamespace(
             headers={INTERNAL_OWNER_USER_ID_HEADER_NAME: "owner-1"},
-            state=SimpleNamespace(user=SimpleNamespace(id="default", system_role=INTERNAL_SYSTEM_ROLE)),
+            state=SimpleNamespace(
+                auth_source=AUTH_SOURCE_INTERNAL,
+                user=SimpleNamespace(id="default", system_role=INTERNAL_SYSTEM_ROLE),
+            ),
             app=SimpleNamespace(state=state),
         )
         body = SimpleNamespace(
@@ -1139,6 +1144,7 @@ def test_start_run_stamps_internal_owner_guardrail_attribution(_stub_app_config)
     from langgraph.checkpoint.memory import InMemorySaver
     from langgraph.store.memory import InMemoryStore
 
+    from app.gateway.auth_disabled import AUTH_SOURCE_INTERNAL
     from app.gateway.internal_auth import INTERNAL_OWNER_USER_ID_HEADER_NAME, INTERNAL_SYSTEM_ROLE
     from app.gateway.services import start_run
     from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
@@ -1170,7 +1176,10 @@ def test_start_run_stamps_internal_owner_guardrail_attribution(_stub_app_config)
         )
         request = SimpleNamespace(
             headers={INTERNAL_OWNER_USER_ID_HEADER_NAME: "owner-1"},
-            state=SimpleNamespace(user=SimpleNamespace(id="default", system_role=INTERNAL_SYSTEM_ROLE)),
+            state=SimpleNamespace(
+                auth_source=AUTH_SOURCE_INTERNAL,
+                user=SimpleNamespace(id="default", system_role=INTERNAL_SYSTEM_ROLE),
+            ),
             app=SimpleNamespace(state=state),
         )
         body = SimpleNamespace(
@@ -1182,9 +1191,10 @@ def test_start_run_stamps_internal_owner_guardrail_attribution(_stub_app_config)
                     "user_role": "admin",
                     "oauth_provider": "spoofed-provider",
                     "oauth_id": "spoofed-subject",
+                    "channel_user_id": "forged-config-sender",
                 }
             },
-            context={"user_id": "spoofed-client"},
+            context={"user_id": "spoofed-client", "channel_user_id": "trusted-im-sender"},
             on_disconnect="cancel",
             multitask_strategy="reject",
             stream_mode=None,
@@ -1213,6 +1223,92 @@ def test_start_run_stamps_internal_owner_guardrail_attribution(_stub_app_config)
     assert context["user_role"] == "user"
     assert context["oauth_provider"] == "keycloak"
     assert context["oauth_id"] == "subject-123"
+    assert context["channel_user_id"] == "trusted-im-sender"
+    assert context["is_internal"] is True
+
+
+def test_start_run_session_caller_anti_forgery(_stub_app_config):
+    """A session (non-internal) caller cannot forge is_internal, authz_attributes,
+    or channel_user_id via body.config. Exercises the real start_run path, not
+    a replay, so ordering or gating drift would be caught."""
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from langgraph.checkpoint.memory import InMemorySaver
+    from langgraph.store.memory import InMemoryStore
+
+    from app.gateway.services import start_run
+    from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
+    from deerflow.runtime import RunManager
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    async def _scenario():
+        thread_store = MemoryThreadMetaStore(InMemoryStore())
+        await thread_store.create("thread-session-authz", user_id="u1", metadata={})
+        run_manager = RunManager(store=MemoryRunStore())
+        state = SimpleNamespace(
+            stream_bridge=SimpleNamespace(),
+            run_manager=run_manager,
+            checkpointer=InMemorySaver(),
+            store=InMemoryStore(),
+            run_event_store=SimpleNamespace(),
+            run_events_config=None,
+            thread_store=thread_store,
+        )
+        request = SimpleNamespace(
+            headers={},
+            state=SimpleNamespace(
+                auth_source="session",
+                user=SimpleNamespace(id="u1", system_role="user"),
+            ),
+            app=SimpleNamespace(state=state),
+        )
+        body = SimpleNamespace(
+            assistant_id="lead_agent",
+            input={"messages": [{"role": "human", "content": "hi"}]},
+            metadata={},
+            config={
+                "context": {
+                    "is_internal": True,
+                    "authz_attributes": {"forged": True},
+                    "channel_user_id": "forged-sender",
+                },
+                "configurable": {
+                    "is_internal": True,
+                    "authz_attributes": {"forged": True},
+                },
+            },
+            context=None,
+            on_disconnect="cancel",
+            multitask_strategy="reject",
+            stream_mode=None,
+            stream_subgraphs=False,
+            interrupt_before=None,
+            interrupt_after=None,
+        )
+        captured_context: dict[str, object] = {}
+
+        async def fake_run_agent(*args, **kwargs):
+            captured_context.update(kwargs["config"]["context"])
+
+        with (
+            patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+            patch("app.gateway.services.run_agent", side_effect=fake_run_agent),
+        ):
+            record = await start_run(body, "thread-session-authz", request)
+            await record.task
+
+        return captured_context
+
+    context = asyncio.run(_scenario())
+
+    # is_internal must be False (server-derived from auth_source="session")
+    assert context["is_internal"] is False
+    # authz_attributes must be stripped (no Gateway-side producer)
+    assert "authz_attributes" not in context
+    # channel_user_id must not survive from body.config for a session caller
+    assert context.get("channel_user_id") is None
 
 
 def test_launch_scheduled_thread_run_marks_context_non_interactive(_stub_app_config):
@@ -1380,3 +1476,160 @@ def test_strip_internal_context_keys_scrubs_config_smuggled_non_interactive():
     via_configurable = build_run_config("thread-1", {"configurable": {"non_interactive": True}}, None)
     strip_internal_context_keys(via_configurable)
     assert "non_interactive" not in via_configurable["configurable"]
+
+
+# --- Authorization identity anti-forgery tests ---
+
+
+def _make_request_with_auth_source(auth_source: str | None, *, user_id="u1", system_role="user"):
+    """Build a minimal fake request with the given auth_source."""
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        state=SimpleNamespace(
+            auth_source=auth_source,
+            user=SimpleNamespace(id=user_id, system_role=system_role) if user_id else None,
+        ),
+    )
+
+
+def _assemble_authz_run_config(request_config: dict, request, *, body_context: dict | None = None):
+    """Replay the real start_run config sequence for authz identity tests."""
+    from app.gateway.services import (
+        build_run_config,
+        inject_authenticated_user_context,
+        merge_run_context_overrides,
+        strip_internal_context_keys,
+    )
+
+    is_internal = request.state.auth_source == AUTH_SOURCE_INTERNAL
+    config = build_run_config("thread-authz", request_config, None)
+    merge_run_context_overrides(config, body_context, internal=is_internal)
+    if not is_internal:
+        strip_internal_context_keys(config)
+    inject_authenticated_user_context(config, request, request_context=body_context)
+    return config
+
+
+class TestInjectAuthenticatedUserContextAuthz:
+    """Verify is_internal and authz_attributes anti-forgery in inject_authenticated_user_context."""
+
+    def test_clears_forged_is_internal_from_context_section(self):
+        """Client forges is_internal=True via body.config['context'] → must be cleared."""
+        request = _make_request_with_auth_source("session")
+        config = _assemble_authz_run_config({"context": {"is_internal": True}}, request)
+        # The forged value must be replaced by the server-side value (False for session)
+        assert config["context"]["is_internal"] is False
+
+    def test_clears_forged_is_internal_from_configurable_section(self):
+        """Client forges is_internal=True via body.config['configurable'] → must be cleared."""
+        request = _make_request_with_auth_source("session")
+        config = _assemble_authz_run_config({"configurable": {"is_internal": True}}, request)
+        assert "is_internal" not in config["configurable"]
+        assert config["context"]["is_internal"] is False
+
+    def test_clears_forged_authz_attributes_from_context_section(self):
+        """Client forges authz_attributes via body.config['context'] → must be cleared."""
+        request = _make_request_with_auth_source("session")
+        config = _assemble_authz_run_config(
+            {"context": {"authz_attributes": [("forged", True)]}},
+            request,
+        )
+        assert "authz_attributes" not in config["context"]
+
+    def test_clears_forged_authz_attributes_from_configurable_section(self):
+        """Client forges authz_attributes via body.config['configurable'] → must be cleared."""
+        request = _make_request_with_auth_source("session")
+        config = _assemble_authz_run_config({"configurable": {"authz_attributes": {"forged": True}}}, request)
+        assert "authz_attributes" not in config["configurable"]
+
+    def test_internal_auth_source_writes_is_internal_true(self):
+        """Internal caller gets is_internal=True."""
+        from app.gateway.services import inject_authenticated_user_context
+
+        config = {"context": {}, "configurable": {}}
+        inject_authenticated_user_context(config, _make_request_with_auth_source(AUTH_SOURCE_INTERNAL))
+        assert config["context"]["is_internal"] is True
+
+    def test_session_auth_source_writes_is_internal_false(self):
+        """Session caller gets is_internal=False."""
+        from app.gateway.services import inject_authenticated_user_context
+
+        config = {"context": {}, "configurable": {}}
+        inject_authenticated_user_context(config, _make_request_with_auth_source("session"))
+        assert config["context"]["is_internal"] is False
+
+    def test_user_none_still_writes_is_internal(self):
+        """Even when user_id is None (early return path), is_internal is written."""
+        from app.gateway.services import inject_authenticated_user_context
+
+        config = {"context": {}, "configurable": {}}
+        # user=None triggers the first early return, but is_internal must still be set
+        inject_authenticated_user_context(config, _make_request_with_auth_source("session", user_id=None))
+        assert config["context"]["is_internal"] is False
+
+    def test_user_none_internal_source_writes_true(self):
+        """When auth_source is internal but user is None, is_internal is still True."""
+        from app.gateway.services import inject_authenticated_user_context
+
+        config = {"context": {}, "configurable": {}}
+        inject_authenticated_user_context(config, _make_request_with_auth_source(AUTH_SOURCE_INTERNAL, user_id=None))
+        assert config["context"]["is_internal"] is True
+
+    def test_internal_caller_attributes_also_cleared(self):
+        """Even internal callers can't forge authz_attributes."""
+        request = _make_request_with_auth_source(AUTH_SOURCE_INTERNAL)
+        config = _assemble_authz_run_config({"context": {"authz_attributes": {"forged": True}}}, request)
+        assert "authz_attributes" not in config["context"]
+        assert config["context"]["is_internal"] is True
+
+    def test_session_body_context_cannot_inject_channel_user_id(self):
+        request = _make_request_with_auth_source("session")
+        config = _assemble_authz_run_config(
+            {},
+            request,
+            body_context={"channel_user_id": "forged-sender"},
+        )
+        assert "channel_user_id" not in config["context"]
+
+    def test_session_config_sections_cannot_inject_channel_user_id(self):
+        request = _make_request_with_auth_source("session")
+        config = _assemble_authz_run_config(
+            {
+                "context": {"channel_user_id": "forged-context-sender"},
+                "configurable": {"channel_user_id": "forged-configurable-sender"},
+            },
+            request,
+        )
+        assert "channel_user_id" not in config["context"]
+        assert "channel_user_id" not in config["configurable"]
+
+    def test_internal_body_context_preserves_channel_user_id(self):
+        request = _make_request_with_auth_source(AUTH_SOURCE_INTERNAL)
+        config = _assemble_authz_run_config(
+            {},
+            request,
+            body_context={"channel_user_id": "trusted-im-sender"},
+        )
+        assert config["context"]["channel_user_id"] == "trusted-im-sender"
+
+    def test_internal_config_sections_cannot_override_channel_user_id(self):
+        request = _make_request_with_auth_source(AUTH_SOURCE_INTERNAL)
+        config = _assemble_authz_run_config(
+            {
+                "context": {"channel_user_id": "forged-context-sender"},
+                "configurable": {"channel_user_id": "forged-configurable-sender"},
+            },
+            request,
+            body_context={"channel_user_id": "trusted-im-sender"},
+        )
+        assert config["context"]["channel_user_id"] == "trusted-im-sender"
+        assert "channel_user_id" not in config["configurable"]
+
+    def test_non_dict_context_raises_type_error(self):
+        """Non-dict runtime context must raise TypeError, not silently skip."""
+        from app.gateway.services import inject_authenticated_user_context
+
+        config = {"context": "not a dict"}
+        with pytest.raises(TypeError, match="run context must be a mapping"):
+            inject_authenticated_user_context(config, _make_request_with_auth_source("session"))
