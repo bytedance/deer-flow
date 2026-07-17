@@ -37,6 +37,25 @@ def test_known_channel_command_detection_only_matches_control_commands():
     assert not is_known_channel_command(" /new")
 
 
+def test_strip_leading_mentions_only_drops_flush_leading_mentions():
+    from app.channels.commands import is_known_channel_command, strip_leading_mentions
+
+    assert strip_leading_mentions("@bot /goal") == "/goal"
+    assert strip_leading_mentions("@_user_1 /goal ship") == "/goal ship"
+    assert strip_leading_mentions("<@U1> /status") == "/status"
+    assert strip_leading_mentions("@bot @_user_2 /help") == "/help"
+    assert strip_leading_mentions("@bot") == ""
+    assert strip_leading_mentions("") == ""
+    # No leading mention -> unchanged, including the leading-space non-command case.
+    assert strip_leading_mentions("/goal") == "/goal"
+    assert strip_leading_mentions(" /new") == " /new"
+    assert strip_leading_mentions("hello /goal") == "hello /goal"
+    # The shared classifier is deliberately NOT changed to strip mentions: Slack
+    # relies on it keeping a leading non-bot mention as chat (see Slack tests), so
+    # mention handling lives in the adapters, not here.
+    assert not is_known_channel_command("@bot /goal")
+
+
 def _make_channel_skill(tmp_path: Path, name: str, *, enabled: bool = True) -> Skill:
     skill_dir = tmp_path / name
     skill_dir.mkdir(parents=True, exist_ok=True)
