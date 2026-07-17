@@ -1,9 +1,8 @@
 """Tests for exposing the IM-channel platform user id to sandbox commands (#3914).
 
 Two halves:
-- Gateway: ``merge_run_context_overrides`` forwards ``channel_user_id`` from
-  ``body.context`` into ``config['context']`` (runtime context) only — never
-  into ``configurable`` (which is checkpointed).
+- Gateway: only an internally authenticated caller's top-level ``body.context``
+  may supply ``channel_user_id``; free-form RunnableConfig values are cleared.
 - Sandbox: ``bash_tool`` exposes the id as the fixed env var
   ``DEERFLOW_CHANNEL_USER_ID`` via an ``export`` prefix on the command string.
   It must NOT ride the ``env=`` parameter: on ``AioSandbox`` a non-empty env
@@ -52,33 +51,51 @@ def _run_bash(monkeypatch, runtime, command: str = "echo hi") -> _CapturingSandb
     return sandbox
 
 
-class TestMergeRunContextOverridesChannelUserId:
-    def test_channel_user_id_propagates_to_runtime_context_only(self):
-        from app.gateway.services import build_run_config, merge_run_context_overrides
+class TestGatewayChannelUserIdTrustBoundary:
+    @staticmethod
+    def _request(auth_source: str):
+        return SimpleNamespace(
+            state=SimpleNamespace(
+                auth_source=auth_source,
+                user=SimpleNamespace(id="u1", system_role="user"),
+            )
+        )
+
+    def test_internal_channel_user_id_propagates_to_runtime_context_only(self):
+        from app.gateway.services import build_run_config, inject_authenticated_user_context
 
         config = build_run_config("thread-1", None, None)
-        merge_run_context_overrides(config, {"channel_user_id": "ou_feishu_123"})
+        inject_authenticated_user_context(
+            config,
+            self._request("internal"),
+            request_context={"channel_user_id": "ou_feishu_123"},
+        )
 
         assert config["context"]["channel_user_id"] == "ou_feishu_123"
         # Never into configurable: that mapping is checkpointed with the thread.
         assert "channel_user_id" not in config["configurable"]
 
-    def test_existing_runtime_context_value_wins(self):
-        """setdefault semantics: a server-side value stamped earlier must not be
-        overridden by the client-supplied body.context."""
-        from app.gateway.services import build_run_config, merge_run_context_overrides
+    def test_free_form_config_value_cannot_override_internal_sender(self):
+        from app.gateway.services import build_run_config, inject_authenticated_user_context
 
-        config = build_run_config("thread-1", None, None)
-        config.setdefault("context", {})["channel_user_id"] = "server-stamped"
-        merge_run_context_overrides(config, {"channel_user_id": "client-supplied"})
+        config = build_run_config(
+            "thread-1",
+            {"context": {"channel_user_id": "forged-config-sender"}},
+            None,
+        )
+        inject_authenticated_user_context(
+            config,
+            self._request("internal"),
+            request_context={"channel_user_id": "trusted-im-sender"},
+        )
 
-        assert config["context"]["channel_user_id"] == "server-stamped"
+        assert config["context"]["channel_user_id"] == "trusted-im-sender"
 
     def test_absent_channel_user_id_adds_nothing(self):
-        from app.gateway.services import build_run_config, merge_run_context_overrides
+        from app.gateway.services import build_run_config, inject_authenticated_user_context
 
         config = build_run_config("thread-1", None, None)
-        merge_run_context_overrides(config, {"model_name": "gpt"})
+        inject_authenticated_user_context(config, self._request("internal"), request_context={"model_name": "gpt"})
 
         assert "channel_user_id" not in config.get("context", {})
 
@@ -191,6 +208,7 @@ class TestBashToolChannelIdentityPrefix:
         monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: sandbox)
         monkeypatch.setattr("deerflow.sandbox.tools.ensure_thread_directories_exist", lambda runtime: None)
         monkeypatch.setattr("deerflow.sandbox.tools.is_host_bash_allowed", lambda: True)
+        monkeypatch.setattr("deerflow.sandbox.tools._is_windows", lambda: False)
 
         bash_tool.func(runtime=runtime, description="test", command="echo hi")
 

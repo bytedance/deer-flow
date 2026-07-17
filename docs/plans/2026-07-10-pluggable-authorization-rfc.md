@@ -1,6 +1,11 @@
 <!-- Authored by @zhfeng, discussed in https://github.com/bytedance/deer-flow/issues/4063.
      Added to the PR per @WillemJiang's request for design tracking. -->
 
+> **实施连续性要求：** 每个阶段的 PR 都必须阅读并更新
+> [可插拔授权系统实施记录](2026-07-10-pluggable-authorization-implementation-notes.md)。
+> 该文件记录已合并契约、review 决策、延期工作和实施前检查项。旧 RFC 示例与已合并
+> 代码及测试不一致时，以已合并契约为准。
+
 # RFC: Pluggable Fine-Grained Authorization
 
 **Status:** Draft for feedback (responds to [#3462](https://github.com/bytedance/deer-flow/issues/3462)).
