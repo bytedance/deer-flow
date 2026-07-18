@@ -162,22 +162,52 @@ def _is_redundant_review_comment(payload: dict[str, Any]) -> bool:
     configured on the paired trigger; those are accepted as out of scope
     for this narrower fix, same as ``self_event``.
 
-    Residual caveat (PR #4131 review, Concern 3, zhfeng): GitHub documents
-    ``pull_request_review_id`` on the review-comment schema as nullable
-    ("integer or null"), confirming *some* review comments can lack a
-    backing review, but public docs do not state whether the "Add single
-    comment" UI action (as opposed to a multi-comment review) can ever
+    Residual caveat, VERIFIED (PR #4131 review, Concern 3, zhfeng --
+    follow-up): the open question was whether GitHub's "Add single comment"
+    UI action (posting one inline comment immediately, as opposed to a
+    multi-comment "Start a review" -> "Submit review" workflow) could ever
     produce a comment with ``pull_request_review_id`` set and
     ``in_reply_to_id`` absent *without* a companion ``pull_request_review``
-    event also firing. If that combination is possible, a binding with its
-    own ``pull_request_review`` trigger could still lose such a comment
-    under the per-binding gate. Confirmed via a real/documented webhook
-    payload capture before ruling this out; treat it as an open,
-    low-probability risk rather than a settled non-issue. (Distinct from
-    the ``require_mention`` gap above: this caveat questions whether the
+    event also firing -- which would let the per-binding gate below suppress
+    a standalone comment with no review event to recover it from.
+
+    Checked against GitHub's own canonical webhook example payloads (the
+    ``Codertocat/Hello-World`` fixtures backing GitHub's developer docs,
+    mirrored at ``octokit/webhooks`` ``payload-examples/api.github.com/``):
+    ``pull_request_review_comment/created.payload.json`` carries
+    ``"pull_request_review_id": 237895671`` with no ``in_reply_to_id`` key
+    at all, and ``pull_request_review/submitted.payload.json`` carries a
+    review with the EXACT SAME id, ``"body": null`` (no summary text -- a
+    lightweight, single/solo-comment review, not a batch review with a
+    written summary), ``submitted_at`` one second after the comment's
+    ``created_at``. GitHub's own official illustrative example for a
+    companion comment IS the single/solo case, and it fires the paired
+    review event alongside it.
+
+    This matches the documented review lifecycle: a PENDING review's
+    comments generate no webhook activity at all (nothing is delivered
+    while a review is still being drafted); only SUBMISSION does,
+    atomically, for the review event and every attached comment together --
+    regardless of whether that review has 1 comment or 30. The REST
+    schema's ``pull_request_review_id: integer or null`` reflects *some*
+    review comments genuinely lacking a backing review (historical/legacy
+    comments predating the Reviews API), not a live "Add single comment"
+    path that skips review submission -- the UI action itself is documented
+    as posting the comment "immediately" (collapsing "start review" +
+    "submit review" into one step), not as bypassing the review object.
+    There is no current GitHub code path, in public docs or the official
+    example fixtures, that produces a diff review comment with
+    ``pull_request_review_id`` set without a corresponding
+    ``pull_request_review`` submission having fired. Test coverage in
+    ``test_github_dispatcher.py`` locks this in with the exact
+    GitHub-canonical single-comment field shape (see
+    ``test_review_comment_github_canonical_single_comment_shape_is_suppressed_when_covered``
+    and its companion review-comment-only test), closing this as a
+    verified non-issue rather than an open follow-up. (Distinct from the
+    ``require_mention`` gap above: this caveat questioned whether the
     paired event fires *at all* for a given delivery shape; the
     ``require_mention`` gap is about a paired event that fires but is then
-    filtered by its own trigger config, which the gate now accounts for.)
+    filtered by its own trigger config, which the gate accounts for.)
     """
     comment = payload.get("comment")
     if not isinstance(comment, dict):

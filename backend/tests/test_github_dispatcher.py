@@ -1717,3 +1717,180 @@ async def test_review_comment_redundant_skip_prefers_own_trigger_reason_when_it_
     reason = result["skipped"][0]["reason"]
     assert reason != "redundant_review_comment", result
     assert "mention" in reason, result
+
+
+# ---------------------------------------------------------------------------
+# Standalone-comment edge, verified (PR #4131 review, Concern 3 -- zhfeng,
+# "residual risk on the standalone-comment edge" -- follow-up)
+#
+# The open question left on `_is_redundant_review_comment`'s docstring: does
+# GitHub's "Add single comment" UI action (posting one inline comment
+# immediately, without the multi-comment "Start a review" -> "Submit review"
+# workflow) ever produce a `pull_request_review_comment` payload with
+# `pull_request_review_id` SET and `in_reply_to_id` absent WITHOUT a
+# corresponding `pull_request_review` event ever firing? If so, a
+# dual-subscribed binding's per-binding gate would suppress that standalone
+# comment believing the paired review event covers it -- but no such event
+# would exist to recover it from. That is a silent-loss shape in the same
+# class as issue #4121, through the single-comment path rather than the
+# require_mention path already closed above.
+#
+# Verified against GitHub's own canonical webhook example payloads: the
+# `Codertocat/Hello-World` fixtures backing GitHub's developer docs (mirrored
+# at `octokit/webhooks`, `payload-examples/api.github.com/`).
+# `pull_request_review_comment/created.payload.json` carries
+# `"pull_request_review_id": 237895671` with no `in_reply_to_id` key present
+# at all (omitted entirely -- not set to `None`, unlike the hand-written
+# payloads used earlier in this file). `pull_request_review/submitted.
+# payload.json` carries a review with the EXACT SAME id (237895671),
+# `"body": null` (no summary text -- a lightweight, single/solo-comment
+# review, not a batch review with a written summary), and `submitted_at`
+# one second after the comment's `created_at`. GitHub's own official
+# illustrative example for a companion comment IS the single/solo case, and
+# it fires the paired review event alongside it.
+#
+# This is consistent with GitHub's documented review lifecycle: a PENDING
+# review's comments generate no webhook activity at all (nothing is
+# delivered while a review is still being drafted); only SUBMISSION does,
+# atomically, for the review event and every one of its attached comments
+# together -- regardless of whether that review has 1 comment or 30. GitHub's
+# REST schema documents `pull_request_review_id` as nullable ("integer or
+# null") only because *some* review comments genuinely lack a backing review
+# (historical/legacy comments predating the Reviews API); it does not
+# describe a live "Add single comment" path that skips review submission.
+# The UI action itself is documented (GitHub Docs + community discussion) as
+# posting the comment "immediately" -- i.e. collapsing "start review" +
+# "submit review" into one step -- not as bypassing the review object
+# entirely. There is no current GitHub code path, in public docs or the
+# official example fixtures, that produces a diff review comment with
+# `pull_request_review_id` set without a corresponding `pull_request_review`
+# submission having fired.
+#
+# The tests below use this exact real-world field shape (rather than the
+# hand-written shape used earlier in this file) to lock in that the gate's
+# behavior is correct for it, closing the open follow-up from PR #4131.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_review_comment_github_canonical_single_comment_shape_is_suppressed_when_covered(base_dir: Path) -> None:
+    """A companion comment built field-for-field from GitHub's own canonical
+    single-comment webhook example (the `Codertocat/Hello-World` fixture
+    backing GitHub's developer docs, `pull_request_review_comment/created.
+    payload.json`) is suppressed for a dual-subscribed binding with an
+    unconditional (non-mention-gated) `pull_request_review` trigger -- same
+    outcome as `test_review_comment_companion_to_review_is_suppressed`, but
+    exercised against the field shape GitHub actually sends: `in_reply_to_id`
+    is omitted entirely (not set to `None`, unlike the hand-written payloads
+    above), and the review id (237895671) is the same one GitHub's matching
+    `pull_request_review/submitted.payload.json` fixture confirms actually
+    fires paired with this exact comment -- i.e. the payload is not a
+    synthetic worst case, it is the shape GitHub's own docs illustrate.
+    """
+    bus = MessageBus()
+    _write_agent(
+        base_dir,
+        "default",
+        "reviewer",
+        {
+            "name": "reviewer",
+            "github": {
+                "bindings": [
+                    {
+                        "repo": "Codertocat/Hello-World",
+                        "triggers": {
+                            "pull_request_review": {},
+                            "pull_request_review_comment": {"require_mention": False},
+                        },
+                    }
+                ],
+            },
+        },
+    )
+    # Field-for-field shape from GitHub's own canonical example payload,
+    # trimmed to the fields this dispatcher actually reads plus enough of
+    # the surrounding realistic fields (diff_hunk/path/commit_id) to keep
+    # this traceable to the real fixture. `in_reply_to_id` is deliberately
+    # NOT present -- that is the real shape, not `None`.
+    payload = {
+        "action": "created",
+        "pull_request": {"number": 2},
+        "comment": {
+            "url": "https://api.github.com/repos/Codertocat/Hello-World/pulls/comments/284312630",
+            "pull_request_review_id": 237895671,
+            "id": 284312630,
+            "diff_hunk": "@@ -1 +1 @@\n-# Hello-World",
+            "path": "README.md",
+            "commit_id": "ec26c3e57ca3a959ca5aad62de7213c562f8c821",
+            "original_commit_id": "ec26c3e57ca3a959ca5aad62de7213c562f8c821",
+            "user": {"login": "Codertocat"},
+            "body": "Maybe you should use more emoji on this line.",
+            "created_at": "2019-05-15T15:20:37Z",
+            "updated_at": "2019-05-15T15:20:38Z",
+            "author_association": "OWNER",
+        },
+        "repository": {"full_name": "Codertocat/Hello-World"},
+        "sender": {"login": "Codertocat"},
+    }
+    result = await fanout_event(bus, "pull_request_review_comment", "del-canonical-1", payload)
+    assert result["matched_agents"] == ["reviewer"], result
+    assert result["fired_agents"] == [], result
+    assert any(s["agent"] == "reviewer" and s["reason"] == "redundant_review_comment" for s in result["skipped"]), result
+    assert await _drain(bus) == []
+
+
+@pytest.mark.asyncio
+async def test_review_comment_github_canonical_single_comment_shape_review_comment_only_still_fires(base_dir: Path) -> None:
+    """Same GitHub-canonical single-comment payload as the test above, but
+    for a `pull_request_review_comment`-only binding: it must still fire.
+
+    Confirms the review-comment-only immunity
+    (`test_review_comment_only_binding_not_suppressed`) holds against the
+    real single-comment field shape -- not just the hand-written shape used
+    earlier in this file -- so even if a genuinely reviewless single-comment
+    submission somehow existed, a binding that never had a `pull_request_
+    review` trigger to begin with is unaffected either way.
+    """
+    bus = MessageBus()
+    _write_agent(
+        base_dir,
+        "default",
+        "reviewer",
+        {
+            "name": "reviewer",
+            "github": {
+                "bindings": [
+                    {
+                        "repo": "Codertocat/Hello-World",
+                        "triggers": {"pull_request_review_comment": {"require_mention": False}},
+                    }
+                ],
+            },
+        },
+    )
+    payload = {
+        "action": "created",
+        "pull_request": {"number": 2},
+        "comment": {
+            "url": "https://api.github.com/repos/Codertocat/Hello-World/pulls/comments/284312630",
+            "pull_request_review_id": 237895671,
+            "id": 284312630,
+            "diff_hunk": "@@ -1 +1 @@\n-# Hello-World",
+            "path": "README.md",
+            "commit_id": "ec26c3e57ca3a959ca5aad62de7213c562f8c821",
+            "original_commit_id": "ec26c3e57ca3a959ca5aad62de7213c562f8c821",
+            "user": {"login": "Codertocat"},
+            "body": "Maybe you should use more emoji on this line.",
+            "created_at": "2019-05-15T15:20:37Z",
+            "updated_at": "2019-05-15T15:20:38Z",
+            "author_association": "OWNER",
+        },
+        "repository": {"full_name": "Codertocat/Hello-World"},
+        "sender": {"login": "Codertocat"},
+    }
+    result = await fanout_event(bus, "pull_request_review_comment", "del-canonical-2", payload)
+    assert result["fired_agents"] == ["reviewer"], result
+    assert result["skipped"] == [], result
+    messages = await _drain(bus)
+    assert len(messages) == 1
+    assert messages[0].metadata["agent_name"] == "reviewer"
