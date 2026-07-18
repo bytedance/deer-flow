@@ -1112,3 +1112,231 @@ def test_scan_file_still_treats_generator_outer_iterable_as_definition_time_eage
     assert findings[0]["location"]["function"] == "outer_async"
     assert findings[0]["event_loop_exposure"] == "DIRECT_ASYNC"
     assert findings[0]["blocking_call"]["symbol"] == "os.listdir"
+
+
+def test_scan_file_treats_immediately_invoked_lambda_as_eager(tmp_path: Path) -> None:
+    """An immediately invoked lambda executes its body right now, not lazily.
+
+    `(lambda: ...)()` is called at the exact expression that defines it, so
+    unlike a lambda that is merely created (see
+    `test_scan_file_still_treats_bare_uninvoked_lambda_as_lazy` below), its
+    body genuinely runs eagerly here and must not be suppressed.
+    """
+    source_file = _write_python(
+        tmp_path / "sample.py",
+        """
+        import os
+
+        async def route():
+            return (lambda: os.listdir("."))()
+        """,
+    )
+
+    findings = _payload(source_file, tmp_path)
+
+    assert len(findings) == 1
+    assert findings[0]["location"]["function"] == "route"
+    assert findings[0]["event_loop_exposure"] == "DIRECT_ASYNC"
+    assert findings[0]["blocking_call"]["symbol"] == "os.listdir"
+
+
+def test_scan_file_treats_generator_passed_to_list_as_eager(tmp_path: Path) -> None:
+    """A generator passed directly to `list(...)` is fully consumed right now.
+
+    Unlike an unconsumed generator sitting in a variable (see
+    `test_scan_file_still_treats_bare_unconsumed_generator_as_lazy` below),
+    `list(...)` iterates it immediately to build the result, so the blocking
+    call in its element expression must not be suppressed.
+    """
+    source_file = _write_python(
+        tmp_path / "sample.py",
+        """
+        import os
+
+        async def route():
+            return list(os.listdir(path) for path in ["."])
+        """,
+    )
+
+    findings = _payload(source_file, tmp_path)
+
+    assert len(findings) == 1
+    assert findings[0]["location"]["function"] == "route"
+    assert findings[0]["event_loop_exposure"] == "DIRECT_ASYNC"
+    assert findings[0]["blocking_call"]["symbol"] == "os.listdir"
+
+
+def test_scan_file_treats_reviewer_repro_both_eager_shapes_together(tmp_path: Path) -> None:
+    """Integration check mirroring the exact review repro.
+
+    Both eager shapes -- an immediately invoked lambda and a generator
+    consumed by `list(...)` -- appear together in one function, each on its
+    own line, and each must produce its own independent finding.
+    """
+    source_file = _write_python(
+        tmp_path / "sample.py",
+        """
+        import os
+
+        async def route():
+            first = (lambda: os.listdir("."))()
+            second = list(os.listdir(path) for path in ["."])
+            return first, second
+        """,
+    )
+
+    findings = _payload(source_file, tmp_path)
+
+    assert len(findings) == 2
+    assert {finding["location"]["function"] for finding in findings} == {"route"}
+    assert {finding["event_loop_exposure"] for finding in findings} == {"DIRECT_ASYNC"}
+    assert {finding["blocking_call"]["symbol"] for finding in findings} == {"os.listdir"}
+    assert len({finding["location"]["line"] for finding in findings}) == 2
+
+
+def test_scan_file_treats_generator_passed_to_other_eager_consumers_as_eager(tmp_path: Path) -> None:
+    """The same fix also covers `set`/`tuple`/`sorted`/`frozenset`/`dict`.
+
+    All names in `EAGER_ITERABLE_CONSUMER_NAMES` share the identical
+    `visit_Call` check; this exercises the remaining names beyond the `list`
+    case above so each one has real test coverage instead of shipping as an
+    unverified addition.
+    """
+    source_file = _write_python(
+        tmp_path / "sample.py",
+        """
+        import os
+
+        async def route():
+            a = set(os.listdir(p) for p in ["a"])
+            b = tuple(os.listdir(p) for p in ["b"])
+            c = sorted(os.listdir(p) for p in ["c"])
+            d = frozenset(os.listdir(p) for p in ["d"])
+            e = dict((p, os.listdir(p)) for p in ["e"])
+            return a, b, c, d, e
+        """,
+    )
+
+    findings = _payload(source_file, tmp_path)
+
+    assert len(findings) == 5
+    assert {finding["location"]["function"] for finding in findings} == {"route"}
+    assert {finding["blocking_call"]["symbol"] for finding in findings} == {"os.listdir"}
+    assert {finding["event_loop_exposure"] for finding in findings} == {"DIRECT_ASYNC"}
+
+
+def test_scan_file_treats_immediately_invoked_lambda_in_definition_time_default_as_eager_in_enclosing_scope(tmp_path: Path) -> None:
+    """The eager-invocation fix composes with the enclosing-scope fix.
+
+    An IIFE lambda used as a parameter default is eager (invoked right where
+    it's defined) AND attributed to the enclosing scope (parameter defaults
+    run at definition time in the enclosing scope, not the function being
+    defined) -- both axes established across this PR's rounds must hold at
+    the same time, not just individually.
+    """
+    source_file = _write_python(
+        tmp_path / "sample.py",
+        """
+        import os
+
+        async def outer_async():
+            def helper(flag=(lambda: os.listdir("."))()):
+                return flag
+            return None
+        """,
+    )
+
+    findings = _payload(source_file, tmp_path)
+
+    assert len(findings) == 1
+    assert findings[0]["location"]["function"] == "outer_async"
+    assert findings[0]["event_loop_exposure"] == "DIRECT_ASYNC"
+    assert findings[0]["blocking_call"]["symbol"] == "os.listdir"
+
+
+def test_scan_file_still_treats_bare_uninvoked_lambda_as_lazy(tmp_path: Path) -> None:
+    """Contrast case: a lambda that is merely created is still lazy.
+
+    Only a lambda's own parameter defaults are eager; a lambda assigned to a
+    variable and never called must still have its body suppressed, same as
+    before this fix.
+    """
+    source_file = _write_python(
+        tmp_path / "sample.py",
+        """
+        import os
+
+        async def route():
+            callback = lambda: os.listdir(".")
+            return callback
+        """,
+    )
+
+    assert detector.scan_file(source_file, repo_root=tmp_path) == []
+
+
+def test_scan_file_still_treats_lambda_invoked_through_stored_variable_as_lazy(tmp_path: Path) -> None:
+    """Scope boundary: calling a lambda through a variable is not recognized.
+
+    Only the literal `(lambda: ...)()` shape is treated as eager. Storing the
+    lambda first and invoking it later through the variable name is a
+    separate `Call` node whose `func` is a `Name`, not a `Lambda`, so it is
+    not recognized as eager -- a documented scope boundary (no cross-variable
+    dataflow tracking), not a regression target of this fix.
+    """
+    source_file = _write_python(
+        tmp_path / "sample.py",
+        """
+        import os
+
+        async def route():
+            callback = lambda: os.listdir(".")
+            return callback()
+        """,
+    )
+
+    assert detector.scan_file(source_file, repo_root=tmp_path) == []
+
+
+def test_scan_file_still_treats_bare_unconsumed_generator_as_lazy(tmp_path: Path) -> None:
+    """Contrast case: a generator that is merely created is still lazy.
+
+    Only a generator's outermost iterable is eager; a generator expression
+    assigned to a variable and never consumed must still have its element
+    suppressed, same as before this fix.
+    """
+    source_file = _write_python(
+        tmp_path / "sample.py",
+        """
+        import os
+
+        async def route():
+            items = (os.listdir(path) for path in ["."])
+            return items
+        """,
+    )
+
+    assert detector.scan_file(source_file, repo_root=tmp_path) == []
+
+
+def test_scan_file_still_treats_generator_wrapped_in_non_eager_builtin_as_lazy(tmp_path: Path) -> None:
+    """Scope boundary: `map(...)` wraps a generator without consuming it.
+
+    `map(str, gen)` returns another lazy iterator -- it does not iterate
+    `gen` at all until the map object itself is consumed later (or never).
+    `map`/`filter`/`zip`/`enumerate` are deliberately excluded from
+    `EAGER_ITERABLE_CONSUMER_NAMES`, so this must stay suppressed even though
+    `map(...)` is itself a call and even though it takes the generator as an
+    argument.
+    """
+    source_file = _write_python(
+        tmp_path / "sample.py",
+        """
+        import os
+
+        async def route():
+            return map(str, (os.listdir(path) for path in ["."]))
+        """,
+    )
+
+    assert detector.scan_file(source_file, repo_root=tmp_path) == []

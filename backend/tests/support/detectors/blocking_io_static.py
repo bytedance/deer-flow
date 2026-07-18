@@ -134,6 +134,24 @@ BLOCKING_SHUTIL_NAMES = {
     "shutil.move",
     "shutil.rmtree",
 }
+EAGER_ITERABLE_CONSUMER_NAMES = {
+    # Builtins that immediately materialize their entire argument into a
+    # concrete container -- so a generator expression passed as their sole
+    # positional argument runs its element expression, `if` filters, and any
+    # additional `for` clauses right now, not lazily whenever/if the
+    # generator is later iterated (see `visit_Call` / `visit_GeneratorExp`).
+    # Deliberately does NOT include reducer builtins that also consume
+    # eagerly (`sum`, `any`, `all`, `min`, `max`) or builtins that instead
+    # wrap the generator in ANOTHER lazy iterator without consuming it
+    # (`map`, `filter`, `zip`, `enumerate`) -- a documented scope boundary,
+    # not an oversight.
+    "dict",
+    "frozenset",
+    "list",
+    "set",
+    "sorted",
+    "tuple",
+}
 SYNC_AGENT_MIDDLEWARE_HOOKS = {
     "before_agent": "abefore_agent",
     "before_model": "abefore_model",
@@ -354,6 +372,20 @@ class BlockingIOStaticVisitor(ast.NodeVisitor):
         self.path_like_name_stack: list[set[str]] = []
         self.local_receiver_alias_stack: list[set[str]] = []
         self.potential_findings: list[_PotentialFinding] = []
+        # Identity-keyed markers set by `visit_Call` just before it visits a
+        # child it has determined is EAGERLY invoked/consumed at this exact
+        # expression, not merely created -- an immediately invoked lambda
+        # (`(lambda: ...)()`) or a generator expression passed directly as
+        # the sole argument to a known eager-consuming builtin (see
+        # `EAGER_ITERABLE_CONSUMER_NAMES`). `visit_Lambda`/`visit_GeneratorExp`
+        # check membership by `id()` and, on a match, visit the node fully
+        # instead of applying the defaults-only/outermost-iterable-only
+        # lazy traversal. Safe across a single synchronous AST pass: every
+        # node stays alive (referenced by its parent in the tree) for the
+        # traversal's duration, so `id()` cannot be reused for a different
+        # node before its marker is consumed and discarded.
+        self._eager_lambda_ids: set[int] = set()
+        self._eager_generator_ids: set[int] = set()
 
     @property
     def current_function(self) -> _FunctionContext | None:
@@ -481,17 +513,52 @@ class BlockingIOStaticVisitor(ast.NodeVisitor):
         if call_name is not None:
             self._record_call_ref(node, call_name, current)
             self._record_blocking_candidate(node, call_name, current)
+        if isinstance(node.func, ast.Lambda):
+            # `(lambda: ...)()` -- the lambda is invoked at the exact
+            # expression that defines it, so its body executes eagerly,
+            # right here, unlike a lambda that is merely created and might
+            # be called later from somewhere else (or never -- e.g. stored
+            # in a variable, passed as a callback, returned). Mark it by
+            # identity so the `visit_Lambda` call reached via
+            # `generic_visit` below visits the body instead of suppressing
+            # it. Only this exact literal shape is recognized: a lambda
+            # stored in a variable and invoked through that variable
+            # elsewhere is a separate Call node whose `func` is a Name, not
+            # a Lambda, so it stays out of scope here -- the same
+            # conservative no-cross-variable-dataflow boundary already used
+            # for receiver aliasing elsewhere in this module (see
+            # `_simple_receiver_name`).
+            self._eager_lambda_ids.add(id(node.func))
+        if call_name in EAGER_ITERABLE_CONSUMER_NAMES and len(node.args) == 1 and isinstance(node.args[0], ast.GeneratorExp):
+            # A generator expression passed directly as the sole argument to
+            # a known eager-consuming builtin (see
+            # `EAGER_ITERABLE_CONSUMER_NAMES`) is fully iterated right here to
+            # build the result, unlike an unconsumed generator sitting lazy
+            # in a variable. Only this exact direct-argument shape is
+            # recognized: a generator wrapped in another call first (e.g.
+            # `list(map(str, (x for x in gen)))`) is a separate, nested
+            # GeneratorExp that this check does not see, so it stays out of
+            # scope here too.
+            self._eager_generator_ids.add(id(node.args[0]))
         self.generic_visit(node)
 
     def visit_Lambda(self, node: ast.Lambda) -> None:
         # A lambda's parameter defaults run eagerly when the lambda object
         # itself is created (same timing as a regular function's defaults),
         # but its body only runs later, whenever/if the lambda is actually
-        # called -- possibly in a completely different scope, possibly never.
-        # This applies everywhere `self.visit` can reach a Lambda, including
-        # (via `_visit_definition_time_arguments` below) inside another
-        # function's own definition-time expressions, so `node.body` must
-        # never be visited from here.
+        # called -- possibly in a completely different scope, possibly never
+        # -- UNLESS this exact lambda is immediately invoked at its own
+        # definition site (`(lambda: ...)()`), which `visit_Call` above marks
+        # by id before this runs; the body executes right now too in that
+        # case, so this falls through to a full `generic_visit` (defaults
+        # AND body) instead of the defaults-only walk. This applies
+        # everywhere `self.visit` can reach a Lambda, including (via
+        # `_visit_definition_time_arguments` below) inside another
+        # function's own definition-time expressions.
+        if id(node) in self._eager_lambda_ids:
+            self._eager_lambda_ids.discard(id(node))
+            self.generic_visit(node)
+            return
         for default in node.args.defaults:
             self.visit(default)
         for default in node.args.kw_defaults:
@@ -502,10 +569,21 @@ class BlockingIOStaticVisitor(ast.NodeVisitor):
         # Only the outermost `for`'s iterable is evaluated eagerly, to build
         # the generator object; the element expression, any `if` filters, and
         # any additional `for` clauses live inside the generator's own frame
-        # and only run once it is iterated -- which may never happen. List/
-        # set/dict comprehensions differ (their implicit scope runs
-        # immediately as part of building the result) so they are left fully
-        # eager and are not given a matching override.
+        # and only run once it is iterated -- which may never happen --
+        # UNLESS this exact generator is passed directly as the sole
+        # argument to a known eager-consuming builtin, which `visit_Call`
+        # above marks by id before this runs; the whole generator runs
+        # immediately in that case to build the result, same as a list/set/
+        # dict comprehension, so this falls through to a full
+        # `generic_visit` (element, filters, and every `for` clause) instead
+        # of the outermost-iterable-only walk. List/set/dict comprehensions
+        # themselves always run their implicit scope immediately as part of
+        # building the result, regardless of context, so they are left
+        # fully eager unconditionally and are not given a matching override.
+        if id(node) in self._eager_generator_ids:
+            self._eager_generator_ids.discard(id(node))
+            self.generic_visit(node)
+            return
         if node.generators:
             self.visit(node.generators[0].iter)
 

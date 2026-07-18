@@ -159,13 +159,25 @@ is module/class level and therefore never async-reachable). PEP 695
 type-parameter bounds are not visited in either scope: CPython evaluates each
 one lazily, in its own hidden function, only if something like `T.__bound__`
 is actually accessed, never as part of running the `def` statement itself.
-Within whatever definition-time expressions are visited, a `lambda`'s body
-and a bare generator expression's element/filters/later `for` clauses are
-excluded the same way, since neither runs just because the lambda or
-generator object is created — only a lambda's own parameter defaults and a
-generator's outermost iterable are genuinely eager, and stay attributed to
-the enclosing scope. This is intentionally informational and is not run from
-CI in this round.
+A `lambda`'s body and a bare generator expression's element/filters/later
+`for` clauses are excluded from traversal the same way — not only within
+definition-time expressions, but everywhere in the file — since neither runs
+just because the lambda or generator object is created; only a lambda's own
+parameter defaults and a generator's outermost iterable are genuinely eager.
+This default is overridden in the two shapes where the body/elements
+genuinely do run immediately: a lambda invoked at its own definition site
+(`(lambda: ...)()`) executes its body right then, and a generator expression
+passed directly as the sole argument to a known eager-consuming builtin
+(`list`, `set`, `tuple`, `frozenset`, `dict`, `sorted`) is fully iterated
+right then to build the result — both are visited and attributed like any
+other eager expression at that same call site. Only these exact literal
+shapes are recognized: a lambda stored in a variable and invoked through
+that variable elsewhere, or a generator wrapped in another call before it
+reaches an eager consumer (e.g. `list(map(str, (x for x in gen)))`), stay
+unrecognized (i.e. still treated as lazy) — the same conservative,
+no-cross-variable-dataflow scope boundary already used for receiver
+aliasing above. This is intentionally informational and is not run from CI
+in this round.
 
 For a diff-scoped view of the same findings, `scripts/scan_changed_blocking_io.py`
 (repo root) reports findings on the added lines of `git diff <base>...HEAD`
