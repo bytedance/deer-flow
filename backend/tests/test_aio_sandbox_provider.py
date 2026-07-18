@@ -64,6 +64,7 @@ def _make_provider(tmp_path):
         provider._local_teardown = set()
         provider._acquire_epoch = {}
         provider._acquire_epoch_counter = 0
+        provider._acquire_inflight = {}
         provider._lock = MagicMock()
         provider._idle_checker_stop = MagicMock()
         provider._renewal_stop = MagicMock()
@@ -451,6 +452,7 @@ def _make_provider_with_active_sandbox(tmp_path, sandbox_id: str):
     provider._local_teardown = set()
     provider._acquire_epoch = {}
     provider._acquire_epoch_counter = 0
+    provider._acquire_inflight = {}
     provider._shutdown_called = False
     provider._idle_checker_thread = None
     provider._backend = SimpleNamespace(destroy=MagicMock())

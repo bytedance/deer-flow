@@ -435,6 +435,7 @@ def _make_provider_for_reconciliation(tmp_path=None, *, worker_id: str = "worker
     provider._local_teardown = set()
     provider._acquire_epoch = {}
     provider._acquire_epoch_counter = 0
+    provider._acquire_inflight = {}
     provider._shutdown_called = False
     provider._idle_checker_stop = threading.Event()
     provider._idle_checker_thread = None
@@ -2257,3 +2258,320 @@ def test_idle_destroy_skips_a_sandbox_re_acquired_after_the_idle_snapshot():
 
     provider._backend.destroy.assert_not_called()
     assert "idle2" in provider._sandboxes, "idle cleanup destroyed a sandbox that was re-acquired after the snapshot"
+
+
+# ── Guard visibility vs. the transition it guards ────────────────────────────
+#
+# A guard must become visible no later than the state transition it guards. The
+# epoch alone cannot satisfy that for `take()`: the takeover is durable before
+# `take()` returns (redis has committed the SET while the reply is in flight),
+# and the epoch can only be written after it returns. So the acquire path
+# publishes an *intent* mark before the round trip, and the epoch covers the
+# other half — "an acquire completed since you decided".
+
+
+class _TakeCommitsThenPauses:
+    """Store view whose ``take`` performs the real write, then pauses.
+
+    Not an artificial injection point: on redis the server has committed the
+    takeover while the reply is still travelling back, so `own:us` is externally
+    visible before the caller resumes.
+    """
+
+    def __init__(self, inner):
+        self._inner = inner
+        self.committed = threading.Event()
+        self.let_return = threading.Event()
+        self._armed = True
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+    @property
+    def supports_cross_process(self):
+        return True
+
+    def take(self, sandbox_id):
+        result = self._inner.take(sandbox_id)
+        if self._armed:
+            self._armed = False
+            self.committed.set()
+            assert self.let_return.wait(timeout=5), "the test never released take()"
+        return result
+
+
+def _hold_forget(provider):
+    """Park *provider*'s next `_forget_lost_sandbox` and return its two events."""
+    ready, release = threading.Event(), threading.Event()
+    original = provider._forget_lost_sandbox
+
+    def gated(sandbox_id, **kwargs):
+        ready.set()
+        assert release.wait(timeout=5), "the test never released the forget"
+        return original(sandbox_id, **kwargs)
+
+    provider._forget_lost_sandbox = gated
+    return ready, release
+
+
+def test_renewal_does_not_drop_a_sandbox_whose_takeover_is_mid_flight():
+    """The epoch is written after `take()` returns; the takeover is durable before it.
+
+    In that interval the store already says the container is ours while the
+    epoch still reads as it did when the renewal decided `LOST`. Without a guard
+    established *before* the round trip, the stale forget walks through, drops
+    the maps and closes the client — and the acquire path then returns an id the
+    provider no longer tracks, so `get()` answers `None` for the rest of the turn.
+    """
+    shared = _make_shared_ownership_store()
+    worker_a = _make_provider_for_reconciliation(worker_id="worker-a", store=shared)
+    worker_b = _make_provider_for_reconciliation(worker_id="worker-b", store=shared)
+    info = _info("midtake")
+    _active_sandbox(worker_a, "midtake", info)
+    worker_b._ownership.take("midtake")  # peer holds it -> renew() reports LOST
+
+    ready, release = _hold_forget(worker_a)
+    renewal = threading.Thread(target=worker_a._renew_owned_leases, daemon=True)
+    renewal.start()
+    assert ready.wait(timeout=5), "renewal never decided the lease was lost"
+
+    gate = _TakeCommitsThenPauses(worker_a._ownership)
+    worker_a._ownership = gate
+    result = {}
+    acquire = threading.Thread(target=lambda: result.update(id=worker_a._reuse_in_process_sandbox("t1", user_id="u")), daemon=True)
+    acquire.start()
+    try:
+        assert gate.committed.wait(timeout=5), "take() never committed the takeover"
+        assert shared.owner("midtake") == "worker-a", "precondition: the takeover must already be durable"
+        release.set()
+        renewal.join(timeout=5)
+    finally:
+        gate.let_return.set()
+        acquire.join(timeout=5)
+
+    assert result.get("id") == "midtake"
+    assert "midtake" in worker_a._sandboxes, "a stale LOST dropped a sandbox whose takeover was already committed"
+    assert worker_a.get("midtake") is not None, "acquire returned an id whose get() is None"
+
+
+def test_reuse_falls_through_when_its_entry_is_dropped_while_publishing():
+    """Before the intent mark is set, a `LOST` forget is both current and correct.
+
+    Distinct from the mid-flight window: here nothing is wrong with the forget —
+    the peer really does hold the lease and no acquire has taken it back yet, so
+    the epoch matches and no intent is registered. The bug is on the other side:
+    reuse decided to hand out a tracked entry, and must not return that decision
+    once the entry is gone. Falling through re-discovers and builds a fresh
+    client; returning the id would hand back a sandbox whose `get()` is `None`.
+    """
+    shared = _make_shared_ownership_store()
+    worker_a = _make_provider_for_reconciliation(worker_id="worker-a", store=shared)
+    worker_b = _make_provider_for_reconciliation(worker_id="worker-b", store=shared)
+    info = _info("prepub")
+    _active_sandbox(worker_a, "prepub", info)
+    worker_b._ownership.take("prepub")
+
+    ready, release = _hold_forget(worker_a)
+    renewal = threading.Thread(target=worker_a._renew_owned_leases, daemon=True)
+    renewal.start()
+    assert ready.wait(timeout=5), "renewal never decided the lease was lost"
+
+    # Park reuse in the gap between its map re-check and the intent mark.
+    at_publish, let_publish = threading.Event(), threading.Event()
+    real_publish = worker_a._publish_ownership
+
+    def gated_publish(sandbox_id):
+        at_publish.set()
+        assert let_publish.wait(timeout=5)
+        return real_publish(sandbox_id)
+
+    worker_a._publish_ownership = gated_publish
+    result = {}
+    acquire = threading.Thread(target=lambda: result.update(id=worker_a._reuse_in_process_sandbox("t1", user_id="u")), daemon=True)
+    acquire.start()
+    try:
+        assert at_publish.wait(timeout=5), "reuse never reached the ownership publish"
+        release.set()
+        renewal.join(timeout=5)
+    finally:
+        let_publish.set()
+        acquire.join(timeout=5)
+
+    assert result.get("id") is None, "reuse returned an id it no longer tracks"
+
+
+def test_reconcile_does_not_adopt_a_container_this_instance_is_tearing_down():
+    """Adoption is a promote, so it needs the same reservation check as the rest.
+
+    `_drop_unhealthy_sandbox` untracks before it claims, so in that window the
+    container is running, untracked, and still carries our own `own:` lease —
+    exactly the shape this loop adopts. Neither guard in the loop excludes it:
+    the claim succeeds because the lease is ours, and on the `memory` store the
+    recovery grace is skipped outright (`supports_cross_process = False`), so
+    nothing stands in the way at all. Adopting parks a container in the warm pool
+    moments before its stop lands, leaving a dead entry for the next reclaim.
+    """
+    provider = _make_provider_for_reconciliation()
+    info = _info("reap1")
+    _active_sandbox(provider, "reap1", info)
+    provider._ownership.take("reap1")
+    provider._backend.list_running.return_value = [info]
+
+    at_claim, let_claim = threading.Event(), threading.Event()
+    real_claim = provider._claim_ownership
+
+    def gated_claim(sandbox_id, *, for_destroy=False):
+        if for_destroy:
+            at_claim.set()
+            assert let_claim.wait(timeout=5)
+        return real_claim(sandbox_id, for_destroy=for_destroy)
+
+    provider._claim_ownership = gated_claim
+    reaper = threading.Thread(target=lambda: provider._drop_unhealthy_sandbox("reap1", "failed health check"), daemon=True)
+    reaper.start()
+    try:
+        assert at_claim.wait(timeout=5), "the drop never reached its claim"
+        # Untracked, still running, and the `del:` marker is not written yet.
+        provider._reconcile_orphans()
+        assert "reap1" not in provider._warm_pool, "reconcile adopted a container this instance is stopping"
+    finally:
+        let_claim.set()
+        reaper.join(timeout=5)
+
+
+def test_teardown_reservation_is_cleared_once_the_stop_returns():
+    """The reservation must not outlive the stop it guards.
+
+    Release ordering is the mirror of acquire ordering: the heartbeat drops the
+    `del:` lease before `_finish_local_teardown` clears the local mark. That
+    direction is the safe one — the mark only refuses *our* promotes, and the
+    container is gone anyway — but a mark left behind would keep refusing this
+    thread's cold-start until the process restarts.
+    """
+    provider = _make_provider_for_reconciliation()
+    info = _info("cleared")
+    provider._warm_pool["cleared"] = (info, time.time() - 10_000)
+    provider._ownership.take("cleared")
+
+    assert provider._destroy_warm_entry("cleared", info, reason="idle_timeout", still_reapable=lambda: True) is True
+    assert provider._local_teardown == set(), "a teardown reservation outlived the stop it guarded"
+    assert provider._acquire_inflight == {}, "an acquire intent mark leaked"
+
+
+def test_reclaim_does_not_hand_out_a_container_a_reaper_is_stopping():
+    """Reclaim's reservation check runs before its round trip, so it must run again.
+
+    A reaper can reserve *after* that first check — the warm entry is still
+    there, since the pop is deferred so a refused stop cannot lose the container
+    — and then claim `del:`, which succeeds because reclaim's own `take()` just
+    made the lease ours. With the reaper parked inside the container stop, the
+    entry is still in `_warm_pool` and still reserved, so only the re-check
+    stands between reclaim and installing a client for a dying container.
+    """
+    provider = _make_provider_for_reconciliation()
+    info = _info("handout")
+    provider._warm_pool["handout"] = (info, time.time() - 10_000)
+    provider._ownership.take("handout")
+
+    # Park reclaim between its `take()` and its install.
+    published, let_install = threading.Event(), threading.Event()
+    real_publish = provider._publish_ownership
+
+    def gated_publish(sandbox_id):
+        result = real_publish(sandbox_id)
+        published.set()
+        assert let_install.wait(timeout=5)
+        return result
+
+    provider._publish_ownership = gated_publish
+    out = {}
+    reclaim = threading.Thread(target=lambda: out.update(id=provider._reclaim_warm_pool_sandbox("t1", "handout", user_id="u")), daemon=True)
+    reclaim.start()
+    assert published.wait(timeout=5), "reclaim never published ownership"
+
+    # Reaper reserves and enters the stop, then parks there -- so when reclaim
+    # resumes the entry is still in `_warm_pool` and the reservation is held.
+    in_stop, let_stop_finish = threading.Event(), threading.Event()
+    provider._backend.destroy = MagicMock(side_effect=lambda entry: (in_stop.set(), let_stop_finish.wait(timeout=5)))
+    reaper = threading.Thread(target=lambda: provider._reap_expired_warm(600), daemon=True)
+    reaper.start()
+    try:
+        assert in_stop.wait(timeout=5), "the reaper never reached the container stop"
+        assert "handout" in provider._warm_pool, "precondition: the pop must still be pending"
+        let_install.set()
+        reclaim.join(timeout=5)
+    finally:
+        let_stop_finish.set()
+        reaper.join(timeout=5)
+
+    assert out.get("id") is None, "reclaim handed out a container a reaper was stopping"
+    assert "handout" not in provider._sandboxes
+
+
+def test_warm_entry_is_removed_before_its_teardown_reservation_is_released():
+    """Removal must happen under the reservation, not after it.
+
+    The reservation is what keeps promotes off the entry. If it is released when
+    the stop returns and the entry is removed afterwards, there is a gap in which
+    the container is already stopped, the entry is still in `_warm_pool`, and
+    nothing marks it — so a reclaim in that gap re-checks the reservation, finds
+    it clear, and hands out a dead container. Ordering is the guarantee, so the
+    assertion is on the ordering rather than on one interleaving.
+    """
+    provider = _make_provider_for_reconciliation()
+    info = _info("ordered")
+    provider._warm_pool["ordered"] = (info, time.time() - 10_000)
+    provider._ownership.take("ordered")
+
+    observed = {}
+    real_finish = provider._finish_local_teardown
+
+    def spy(sandbox_id):
+        observed["warm_at_release"] = sandbox_id in provider._warm_pool
+        return real_finish(sandbox_id)
+
+    provider._finish_local_teardown = spy
+    assert provider._destroy_warm_entry("ordered", info, reason="idle_timeout", still_reapable=lambda: True) is True
+
+    assert observed["warm_at_release"] is False, "the warm entry outlived the reservation that protected it"
+    assert "ordered" not in provider._warm_pool
+
+
+def test_reclaim_short_circuits_a_reserved_entry_without_touching_the_backend():
+    """The pre-round-trip reservation check earns its keep as an early-out.
+
+    Correctness is covered by the re-check after the publish, so this first check
+    is not what makes reclaim safe. What it does is refuse a doomed entry before
+    spending a container health check and an ownership round trip on it, so that
+    is what this pins — otherwise the clause is unanchored and a later edit can
+    drop it silently.
+    """
+    provider = _make_provider_for_reconciliation()
+    info = _info("shortcut")
+    provider._warm_pool["shortcut"] = (info, time.time())
+    provider._ownership = MagicMock(wraps=provider._ownership)
+    with provider._lock:
+        provider._local_teardown.add("shortcut")
+
+    assert provider._reclaim_warm_pool_sandbox("t1", "shortcut", user_id="u") is None
+    provider._backend.is_alive.assert_not_called()
+    provider._ownership.take.assert_not_called()
+
+
+def test_forget_without_an_epoch_still_refuses_an_id_being_acquired():
+    """ "No epoch supplied" must not read as "no guard at all".
+
+    The epoch-less callers are the two `SandboxBeingDestroyedError` handlers,
+    which cannot collide with a publish for the same id today. This pins the
+    primitive's contract rather than that reachability argument: an id whose
+    acquire is mid-publish is never dropped, whoever asks.
+    """
+    provider = _make_provider_for_reconciliation()
+    info = _info("guarded")
+    _active_sandbox(provider, "guarded", info)
+    with provider._lock:
+        provider._acquire_inflight["guarded"] = 1
+
+    provider._forget_lost_sandbox("guarded")
+
+    assert "guarded" in provider._sandboxes, "an id being acquired was dropped by an epoch-less forget"

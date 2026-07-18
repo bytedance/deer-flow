@@ -85,6 +85,7 @@ def _make_provider(tmp_path: Path):
     provider._local_teardown = set()
     provider._acquire_epoch = {}
     provider._acquire_epoch_counter = 0
+    provider._acquire_inflight = {}
     provider._shutdown_called = False
     provider._idle_checker_stop = threading.Event()
     provider._idle_checker_thread = None
