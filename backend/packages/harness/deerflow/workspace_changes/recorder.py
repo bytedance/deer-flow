@@ -59,6 +59,21 @@ async def _remove_text_cache_dir(text_cache_dir: str | Path) -> None:
         logger.warning("Failed to remove workspace text cache %s", text_cache_dir, exc_info=True)
 
 
+async def _reclaim_prepare_and_cleanup(prepare: asyncio.Future[tuple[list[WorkspaceRoot], Path | None]]) -> None:
+    """Await a cancelled prepare handoff and remove any dir it created.
+
+    Owned by its own task so that caller cancellation during reclaim can interrupt
+    the *await* but never abandon a just-created text cache dir. Best-effort,
+    mirroring `_remove_text_cache_dir`.
+    """
+    try:
+        _, orphaned = await prepare
+    except Exception:
+        return  # prepare failed before creating a dir; nothing to reclaim
+    if orphaned is not None:
+        await _remove_text_cache_dir(orphaned)
+
+
 async def capture_workspace_snapshot(
     thread_id: str,
     *,
@@ -74,13 +89,18 @@ async def capture_workspace_snapshot(
     try:
         roots, text_cache_dir = await asyncio.shield(prepare)
     except asyncio.CancelledError:
-        orphaned = None
-        try:
-            _, orphaned = await asyncio.shield(prepare)
-        except Exception:
-            orphaned = None  # prepare failed before creating a dir; nothing to reclaim
-        if orphaned is not None:
-            await asyncio.shield(_remove_text_cache_dir(orphaned))
+        # `prepare` is shielded, so it keeps running and may still create the dir
+        # after this cancel. Own the reclaim+remove in a task the caller cannot
+        # abandon: a repeat cancel can interrupt our await but not the task, so we
+        # drain repeated cancellation until cleanup finishes, then restore it. A
+        # second `shield()` on the await alone would let a re-cancel skip the
+        # reclaim and orphan the dir.
+        cleanup = asyncio.ensure_future(_reclaim_prepare_and_cleanup(prepare))
+        while not cleanup.done():
+            try:
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError:
+                pass
         raise
     try:
         return await asyncio.to_thread(

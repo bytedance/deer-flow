@@ -155,3 +155,55 @@ async def test_capture_workspace_snapshot_cancelled_handoff_leaks_no_text_cache(
 
     leftovers = await asyncio.to_thread(lambda: sorted(cache_root.glob("deerflow-workspace-changes-*")))
     assert leftovers == [], f"cancelled capture leaked a text cache dir: {leftovers}"
+
+
+async def test_capture_workspace_snapshot_repeated_cancellation_leaks_no_text_cache(tmp_path: Path, monkeypatch) -> None:
+    """A *second* cancellation during the reclaim await must not orphan the cache.
+
+    After the first cancel enters the reclaim path, the coroutine awaits the
+    shielded worker's result. A second cancel lands on that await: because the
+    reclaim+remove is owned by a task the caller cannot abandon, the guard drains
+    the repeated cancellation until the dir is removed, then restores the
+    cancellation. A plain re-await would let the second ``CancelledError`` skip
+    the reclaim (``except Exception`` does not catch it) while the shielded worker
+    still finishes and leaks its dir.
+    """
+    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+    import deerflow.config.paths as paths_mod
+
+    monkeypatch.setattr(paths_mod, "_paths", None)
+
+    cache_root = tmp_path / "tmp"
+    cache_root.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(cache_root))
+
+    entered = threading.Event()
+    release = threading.Event()
+    real_mkdtemp = tempfile.mkdtemp
+
+    def _blocking_mkdtemp(*args: Any, **kwargs: Any) -> str:
+        created = real_mkdtemp(*args, **kwargs)  # the dir really exists now
+        entered.set()
+        release.wait(timeout=5)  # park the worker mid-handoff, holding the result
+        return created
+
+    monkeypatch.setattr(recorder.tempfile, "mkdtemp", _blocking_mkdtemp)
+
+    task = asyncio.ensure_future(recorder.capture_workspace_snapshot("t1", include_text=True))
+    await asyncio.to_thread(entered.wait, 5)  # mkdtemp created the dir; worker is parked
+    parked = await asyncio.to_thread(lambda: sorted(cache_root.glob("deerflow-workspace-changes-*")))
+    assert parked, "text cache dir should exist while the worker is parked mid-handoff"
+
+    task.cancel()  # cancel #1 -> enters reclaim, awaits the shielded cleanup task
+    for _ in range(5):
+        await asyncio.sleep(0)  # let the reclaim path reach its await while the worker is still parked
+    task.cancel()  # cancel #2 -> lands on the reclaim await
+    for _ in range(5):
+        await asyncio.sleep(0)
+
+    release.set()  # worker finishes; the drained cleanup reclaims and removes the dir
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    leftovers = await asyncio.to_thread(lambda: sorted(cache_root.glob("deerflow-workspace-changes-*")))
+    assert leftovers == [], f"repeated-cancel capture leaked a text cache dir: {leftovers}"
