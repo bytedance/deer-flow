@@ -399,21 +399,34 @@ def _read_expected_valid_days(fact: dict[str, Any]) -> int | None:
     ``_normalize_memory_update_fact`` rule.  Coercing first matters for values
     in (0, 1): ``0.5`` passes a raw ``> 0`` check but truncates to ``0``, which
     would otherwise be returned as a (non-positive) lifetime instead of
-    ``None``.  Non-finite values (``NaN``, ``+/-inf``) are rejected before the
-    coercion - ``int(nan)`` raises ``ValueError`` and ``int(inf)`` raises
-    ``OverflowError`` - because Python's JSON decoder accepts them as floats by
-    default and they can appear in a hand-edited ``memory.json``; rejecting them
-    keeps a single malformed field from aborting staleness selection or
-    consolidation.  Hand-edited files and pre-feature facts may also carry
-    floats or lack the field entirely; returning ``None`` lets callers fall back
-    to the global age or omit the field rather than silently writing a
-    zero/negative/non-finite lifetime.
+    ``None``.  Non-finite floats (``NaN``, ``+/-inf``) are rejected, and a huge
+    ``int`` that exceeds ``timedelta.max.days`` is rejected too: Python's JSON
+    decoder parses an integer literal with no decimal point as an arbitrary-
+    precision ``int`` (so ``10**400`` stays an int rather than becoming ``inf``
+    like ``1e400`` would), and while ``float(10**400)`` raises ``OverflowError``
+    in the helper, an int just below the float limit but above
+    ``timedelta.max.days`` (e.g. ``10**12``) would pass the helper and raise
+    ``OverflowError`` downstream in ``timedelta(days=...)`` during staleness
+    selection or consolidation.  Capping at ``timedelta.max.days`` closes both.
+    Rejecting all of these keeps a single malformed field from aborting
+    staleness selection or consolidation.  Hand-edited files and pre-feature
+    facts may also lack the field entirely; returning ``None`` lets callers fall
+    back to the global age or omit the field rather than silently writing a
+    zero/negative/non-finite/absurd lifetime.
     """
     raw = fact.get("expected_valid_days")
-    if isinstance(raw, (int, float)) and not isinstance(raw, bool) and math.isfinite(float(raw)):
+    if isinstance(raw, bool):
+        return None
+    if isinstance(raw, int):
+        evd = raw  # arbitrary-precision int; never routed through float()
+    elif isinstance(raw, float) and math.isfinite(raw):
         evd = int(raw)  # coerce before the positivity guard
-        if evd > 0:
-            return evd
+    else:
+        return None
+    # Upper bound: anything above timedelta.max.days raises OverflowError in
+    # timedelta(days=evd) downstream (staleness selection / consolidation).
+    if 0 < evd <= timedelta.max.days:
+        return evd
     return None
 
 

@@ -1190,6 +1190,50 @@ class TestReviewerFindings:
         # to merged createdAt (same) = 90.
         assert merged[0]["expected_valid_days"] == 90
 
+    @pytest.mark.parametrize("bad_evd", [10**400, 10**12, 10**9], ids=["1e400", "1e12", "1e9"])
+    def test_consolidation_with_huge_int_source_evd_does_not_raise(self, bad_evd):
+        """A huge int expected_valid_days (above timedelta.max.days) in a
+        hand-edited memory.json must not abort consolidation. Python's JSON
+        decoder parses an integer literal with no decimal point as an
+        arbitrary-precision int, so 10**400 stays an int (not float inf); the
+        helper rejects it so it falls back to the global staleness_age_days
+        instead of raising OverflowError in float() or in timedelta() downstream."""
+        updater = _make_updater(
+            max_facts=100,
+            consolidation_enabled=True,
+            consolidation_min_facts=2,
+            consolidation_max_groups_per_cycle=3,
+            consolidation_max_sources=8,
+            staleness_age_days=90,
+            staleness_max_lifetime_multiplier=20.0,
+        )
+        created = _days_ago(100)
+        facts = [
+            {**_make_fact("fact_bad", "Bad evd", "knowledge", 0.9), "createdAt": created, "expected_valid_days": bad_evd},
+            {**_make_fact("fact_stable", "Stable", "knowledge", 0.85), "createdAt": created, "expected_valid_days": 3650},
+        ]
+        current_memory = _make_memory(facts)
+        update_data = {
+            "user": {},
+            "history": {},
+            "newFacts": [],
+            "factsToRemove": [],
+            "staleFactsToRemove": [],
+            "factsToConsolidate": [
+                {
+                    "sourceIds": ["fact_bad", "fact_stable"],
+                    "consolidated": {"content": "merged", "category": "knowledge", "confidence": 0.9},
+                },
+            ],
+        }
+        # Must not raise. The bad source's huge-int evd falls back to the global
+        # 90, whose deadline governs over the stable 3650.
+        result = updater._apply_updates(current_memory, update_data)
+
+        merged = [f for f in result["facts"] if f.get("source") == "consolidation"]
+        assert len(merged) == 1
+        assert merged[0]["expected_valid_days"] == 90
+
     def test_consolidated_evd_overdue_source_clamps_to_minimal_window(self):
         """When a source's review deadline (createdAt + evd) is earlier than the
         merged fact's createdAt (the newest source's) - e.g. a very old source

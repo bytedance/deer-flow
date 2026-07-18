@@ -170,6 +170,20 @@ class TestReadExpectedValidDays:
         # sanity: the helper no longer raises on these
         assert _read_expected_valid_days({"expected_valid_days": float("nan")}) is None
 
+    def test_rejects_huge_int_above_timedelta_max(self):
+        # Python's JSON decoder parses an integer literal with no decimal point as
+        # an arbitrary-precision int (not a float), so a hand-edited memory.json
+        # can carry 10**400. float(10**400) raises OverflowError, and any int above
+        # timedelta.max.days (999999999) would raise OverflowError downstream in
+        # timedelta(days=evd). The helper rejects both so a single malformed field
+        # cannot abort staleness selection or consolidation.
+        from datetime import timedelta
+
+        for bad in (10**400, 10**12, 10**9, timedelta.max.days + 1):
+            assert _read_expected_valid_days({"expected_valid_days": bad}) is None
+        # the boundary itself is accepted; one above is rejected
+        assert _read_expected_valid_days({"expected_valid_days": timedelta.max.days}) == timedelta.max.days
+
 
 # ── _effective_fact_staleness_age ─────────────────────────────────────────
 
@@ -228,6 +242,16 @@ class TestEffectiveFactStalenessAge:
         # Drives the persisted-fact read path the reviewer flagged.
         config = _memory_config(staleness_age_days=90)
         for bad in (float("nan"), float("inf"), float("-inf")):
+            fact = _make_fact("f1", days_ago=100)
+            fact["expected_valid_days"] = bad
+            assert _effective_fact_staleness_age(fact, config) == 90
+
+    def test_falls_back_for_huge_int_above_timedelta_max(self):
+        # A huge int (10**400) must fall back to the global age instead of raising
+        # OverflowError downstream in timedelta(days=evd) during staleness
+        # selection. Same hand-edited-memory.json robustness as the non-finite case.
+        config = _memory_config(staleness_age_days=90)
+        for bad in (10**400, 10**12, 10**9):
             fact = _make_fact("f1", days_ago=100)
             fact["expected_valid_days"] = bad
             assert _effective_fact_staleness_age(fact, config) == 90
