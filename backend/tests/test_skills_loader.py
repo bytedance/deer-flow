@@ -175,6 +175,25 @@ def test_namespace_dirs_named_evals_or_fixtures_are_recursed(tmp_path: Path):
     assert "orphan-fixture" not in names
 
 
+def test_recursive_namespace_dirs_named_evals_or_fixtures_are_discovered(tmp_path: Path):
+    """Recursive namespace directories (more than one level) named ``evals`` or
+    ``fixtures`` must be recursed into, not pruned (PR #4164 review round 3):
+    ``public/fixtures/team/deep-helper/SKILL.md`` is discovered even though
+    ``fixtures`` has no direct-child SKILL.md because ``team`` is not a
+    support-data name."""
+    skills_root = tmp_path / "skills"
+
+    # Recursive namespace: fixtures/team/deep-helper (two levels below fixtures)
+    _write_skill(skills_root / "public" / "fixtures" / "team" / "deep-helper", "deep-helper", "Deep helper under fixtures/team namespace")
+    # Single-level namespace: also works (existing coverage retained above)
+    _write_skill(skills_root / "public" / "evals" / "shallow-helper", "shallow-helper", "Shallow helper under evals namespace")
+
+    names = {skill.name for skill in get_or_new_skill_storage(skills_path=skills_root).load_skills(enabled_only=False)}
+
+    assert "deep-helper" in names
+    assert "shallow-helper" in names
+
+
 def test_eval_fixture_skills_cannot_clamp_tool_policy(tmp_path: Path):
     """End-to-end regression for issue #4095, exercising the real loader and the
     real tool-policy functions (no mocks): a restrictive eval-fixture SKILL.md

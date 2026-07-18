@@ -247,6 +247,38 @@ class TestSkillLoading:
         assert "team-helper" in names
         assert "sub-skill" in names
 
+    def test_recursive_namespace_dirs_named_evals_or_fixtures_are_discovered(self, user_storage: UserScopedSkillStorage, skills_root: Path, base_dir: Path):
+        """Recursive namespace directories (more than one level) named ``evals`` or
+        ``fixtures`` must be recursed into in all three discovery walks
+        (PR #4164 round 3): ``public/fixtures/team/deep-helper/SKILL.md`` is
+        discovered because ``team`` is not a support-data name, making
+        ``fixtures`` a legitimate namespace."""
+        # Public walk: fixtures/team/deep-helper (two levels below fixtures)
+        public_deep = skills_root / "public" / "fixtures" / "team" / "deep-helper"
+        public_deep.mkdir(parents=True)
+        (public_deep / "SKILL.md").write_text(_skill_content("deep-helper", "Deep helper under fixtures/team ns"), encoding="utf-8")
+
+        # User-custom walk: evals/group/nested-tool (two levels below evals)
+        user_custom_deep = base_dir / "users" / "test-user" / "skills" / "custom" / "evals" / "group" / "nested-tool"
+        user_custom_deep.mkdir(parents=True)
+        (user_custom_deep / "SKILL.md").write_text(_skill_content("nested-tool", "Nested tool under evals/group ns"), encoding="utf-8")
+
+        names = {skill.name for skill in user_storage.load_skills(enabled_only=False)}
+
+        assert "deep-helper" in names
+        assert "nested-tool" in names
+
+    def test_legacy_recursive_namespace_dirs_named_evals_or_fixtures_are_discovered(self, user_storage: UserScopedSkillStorage, skills_root: Path, base_dir: Path):
+        """Recursive namespace in the legacy global-custom fallback walk is also
+        recursed into (PR #4164 round 3)."""
+        legacy_deep = skills_root / "custom" / "fixtures" / "org" / "legacy-deep"
+        legacy_deep.mkdir(parents=True)
+        (legacy_deep / "SKILL.md").write_text(_skill_content("legacy-deep", "Legacy deep under fixtures/org ns"), encoding="utf-8")
+
+        names = {skill.name for skill in user_storage.load_skills(enabled_only=False)}
+
+        assert "legacy-deep" in names
+
     def test_legacy_namespace_dirs_named_evals_or_fixtures_are_recursed(self, user_storage: UserScopedSkillStorage, skills_root: Path, base_dir: Path):
         """Namespace directories named ``evals`` or ``fixtures`` in the legacy
         global-custom fallback walk are also recursed into (the fallback runs
