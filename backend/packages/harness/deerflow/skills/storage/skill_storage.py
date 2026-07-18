@@ -41,13 +41,16 @@ def is_skill_support_data_dir(parent: Path, name: str, *, category_root: Path | 
        then stops the walk from descending into ``evals/`` at all — this check
        is defense-in-depth.
 
-    2. **Orphan** — no ancestor skill package exists AND no immediate child
-       directory carries a ``SKILL.md`` of its own.  This prunes stray fixture
-       trees at the category root (issue #4095) while leaving legitimate
-       namespace directories (``public/fixtures/team-helper/``) untouched.
+    2. **Orphan** — no ancestor skill package exists AND every immediate child
+       of the directory is also named ``evals`` or ``fixtures``.  This prunes
+       stray fixture trees at the category root (issue #4095) while leaving
+       legitimate recursive namespace directories
+       (``public/fixtures/team/deep-helper/``) untouched — because ``team`` is
+       not a support-data name, the ``fixtures`` directory is treated as a
+       legitimate namespace and recursed into.
 
-    A directory that IS a skill package (own ``SKILL.md``) or whose immediate
-    children are skill packages (single-level namespace) is never pruned,
+    A directory that IS a skill package (own ``SKILL.md``) or that has at least
+    one immediate child whose name is NOT a support-data name is never pruned,
     regardless of ancestor state — so ``evals`` and ``fixtures`` are not
     reserved names.
     """
@@ -57,11 +60,16 @@ def is_skill_support_data_dir(parent: Path, name: str, *, category_root: Path | 
     # Direct SKILL.md — it is a skill package, not support data.
     if (dir_path / SKILL_MD_FILE).is_file():
         return False
-    # Check immediate children — if any carries a SKILL.md this is a namespace
-    # directory containing legitimate skill packages; do not prune.
+    # Check immediate children: if any child directory is named something other
+    # than evals/fixtures, treat this as a legitimate namespace (PR #4164 round 3).
+    # This handles recursive namespaces like public/fixtures/team/deep-helper/
+    # where fixtures has no direct-child SKILL.md but team is not a support-data
+    # name.  Orphan support-data trees like public/evals/fixtures/restrictive/ are
+    # still pruned because every immediate child of both evals and fixtures is
+    # itself named evals or fixtures.
     try:
         for child in dir_path.iterdir():
-            if child.is_dir() and (child / SKILL_MD_FILE).is_file():
+            if child.is_dir() and child.name not in SUPPORT_DATA_DIR_NAMES:
                 return False
     except OSError:
         pass
@@ -74,7 +82,8 @@ def is_skill_support_data_dir(parent: Path, name: str, *, category_root: Path | 
             if (ancestor / SKILL_MD_FILE).is_file():
                 return True
             ancestor = ancestor.parent
-    # No ancestor skill and no immediate-child skills — orphan support data.
+    # No ancestor skill and every immediate child is also a support-data name
+    # (or the directory is empty) — orphan support data.
     return True
 
 
