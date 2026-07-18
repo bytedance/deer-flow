@@ -128,11 +128,11 @@ def get_available_tools(
                 if mcp_tools:
                     logger.info(f"Using {len(mcp_tools)} cached MCP tool(s)")
 
-                    # Tag MCP-sourced tools so deferred-tool assembly (done at
-                    # the agent construction site, AFTER tool-policy filtering)
-                    # can identify them. No ContextVar / registry is built here;
-                    # the deferred catalog + tool_search tool are assembled per
-                    # agent from the policy-filtered tool list.
+                    # Tag MCP-sourced tools so deferred-tool assembly at each
+                    # agent construction site can identify them. Lead agents
+                    # assemble their full configured MCP catalog and apply active
+                    # skill policy at runtime; subagents may pass an already
+                    # policy-filtered list because their skills load at startup.
                     for t in mcp_tools:
                         tag_mcp_tool(t)
         except ImportError:

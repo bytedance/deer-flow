@@ -355,6 +355,13 @@ class DeerFlowTUI(App):
 
     def _handle_builtin(self, name: str, args: str) -> None:
         if name == "quit":
+            # Mirror action_interrupt (Ctrl+C): an active run must be interrupted
+            # before we tear the app down. Otherwise the worker thread is left
+            # running against an app that no longer exists — its next
+            # call_from_thread fails silently and the in-flight turn (plus any
+            # post-run persistence, e.g. thread title) is quietly abandoned.
+            if self._streaming:
+                self._interrupt_run()
             self.exit()
         elif name == "help":
             self._dispatch(SystemMessage(_HELP_TEXT))

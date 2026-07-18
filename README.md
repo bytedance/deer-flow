@@ -427,7 +427,10 @@ channels:
     ilink_bot_id: $WECHAT_ILINK_BOT_ID
     qrcode_login_enabled: true      # optional: allow first-time QR bootstrap when bot_token is absent
     allowed_users: []               # empty = allow all
-    polling_timeout: 35
+    polling_timeout: 35             # timing values must be positive finite seconds
+    polling_retry_delay: 5
+    qrcode_poll_interval: 2
+    qrcode_poll_timeout: 180
     state_dir: ./.deer-flow/wechat/state
     max_inbound_image_bytes: 20971520
     max_outbound_image_bytes: 20971520
@@ -653,6 +656,8 @@ An enabled skill's `allowed-tools` policy applies only after that skill is expli
 When you install `.skill` archives through the Gateway, DeerFlow accepts standard optional frontmatter metadata such as `version`, `author`, and `compatibility` instead of rejecting otherwise valid external skills.
 
 Disabling a skill also removes it from the sandbox filesystem view, so shell commands and structured file tools follow the same enabled state. Local, Docker/AIO, hostPath provisioner, and newly created E2B sandboxes source `/mnt/skills` from enabled-only projections that update when skills are toggled, edited, created, deleted, or installed. Multi-worker Gateways re-read on-disk enable state while rebuilding user projections, so a toggle handled by one worker is honored by another worker's next sandbox acquire. PVC-backed provisioner skills keep their configured PVC snapshot/layout for now; dynamic PVC materialization is tracked separately.
+
+If a trusted operator manages the configured skills directory through an external mount such as MinIO, NFS, or CSI, an administrator can call `POST /api/skills/reload` after changing files. This invalidates skill prompt caches for the current Gateway process and waits up to the bounded refresh timeout so subsequent runs rescan the latest files; running tasks are unchanged. A loader-level filesystem failure returns a generic server error and preserves the last successfully loaded process cache rather than publishing an empty catalog. Uvicorn workers and Kubernetes Pods must each be targeted separately. Direct mount writes bypass the validation, SkillScan, and history applied by DeerFlow's install/edit APIs, so only operator-controlled systems should have write access.
 
 Skill installs and agent-managed skill edits run through **SkillScan**, a native deterministic safety scanner before the LLM-based skill scanner. Phase 1 runs offline with no Semgrep/OpenGrep dependency, blocks high-confidence `CRITICAL` findings such as private keys or shell execution, and passes warning findings to the LLM scanner for contextual review. Set `skill_scan.enabled: false` in `config.yaml` to disable only the deterministic analyzers; safe archive extraction and the LLM scanner still run.
 

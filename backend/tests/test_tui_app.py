@@ -5,6 +5,7 @@ loop: keypress -> submit -> worker thread -> stream_actions -> reducer -> state.
 """
 
 import asyncio
+import threading
 
 import pytest
 
@@ -118,6 +119,89 @@ async def test_escape_interrupts_an_active_run():
         await pilot.pause()
     assert app._streaming is False
     assert any(r.kind == "system" and "Interrupt" in r.text for r in app.state.rows)
+
+
+# --------------------------------------------------------------------------- #
+# /quit vs. Ctrl+C during an active stream
+# --------------------------------------------------------------------------- #
+
+
+class _BlockedClient(_FakeClient):
+    """A client whose stream() blocks mid-run until the test releases it.
+
+    Unlike ``_FakeClient``, which finishes a turn synchronously, this lets a
+    test catch the app while a real worker thread is genuinely stuck inside
+    the streaming generator — the same shape as a live agent turn — instead
+    of only flipping the ``_streaming`` flag by hand.
+    """
+
+    def __init__(self):
+        self.release = threading.Event()
+
+    def stream(self, message, *, thread_id=None, **kwargs):
+        self.release.wait(timeout=5)
+        yield StreamEvent(type="messages-tuple", data={"type": "ai", "content": "done", "id": "m1"})
+        yield StreamEvent(type="end", data={"usage": {"total_tokens": 1}})
+
+
+class _BlockedSession(_FakeSession):
+    def __init__(self):
+        self.client = _BlockedClient()
+
+
+@pytest.mark.asyncio
+async def test_quit_interrupts_an_active_stream_before_exiting():
+    """/quit during a run must interrupt first, mirroring Ctrl+C.
+
+    Regression test: ``_handle_builtin``'s "quit" branch used to call
+    ``self.exit()`` unconditionally, unlike ``action_interrupt`` (Ctrl+C),
+    which checks ``self._streaming`` and interrupts before any teardown.
+    Left unfixed, the worker thread survives the app's exit; its next
+    ``call_from_thread`` call then fails silently and the in-flight turn is
+    abandoned without a trace.
+    """
+    session = _BlockedSession()
+    app = DeerFlowTUI(session, LaunchPlan(mode="tui"))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press("h", "i")
+        await pilot.press("enter")
+        await _wait_until(lambda: app._streaming, pilot)
+
+        for ch in "/quit":
+            await pilot.press(ch)
+        await pilot.press("enter")
+        await pilot.pause()
+
+        # The run must be interrupted (state cleaned up, message surfaced)
+        # before the app is allowed to exit — /quit still quits, but safely.
+        assert app._streaming is False
+        assert any(r.kind == "system" and "Interrupt" in r.text for r in app.state.rows)
+        assert app._exit is True
+
+    # Unblock the worker thread so it doesn't leak past the test.
+    session.client.release.set()
+
+
+@pytest.mark.asyncio
+async def test_ctrl_c_interrupts_an_active_stream_without_exiting():
+    """Contrast/control: Ctrl+C on a real blocked worker interrupts but stays open."""
+    session = _BlockedSession()
+    app = DeerFlowTUI(session, LaunchPlan(mode="tui"))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press("h", "i")
+        await pilot.press("enter")
+        await _wait_until(lambda: app._streaming, pilot)
+
+        await pilot.press("ctrl+c")
+        await pilot.pause()
+
+        assert app._streaming is False
+        assert any(r.kind == "system" and "Interrupt" in r.text for r in app.state.rows)
+        assert app._exit is False
+
+    session.client.release.set()
 
 
 @pytest.mark.asyncio

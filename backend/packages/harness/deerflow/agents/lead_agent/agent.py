@@ -358,8 +358,9 @@ def build_middlewares(
         middlewares.append(mcp_routing_middleware)
 
     # Hide deferred tool schemas from model binding until tool_search promotes them.
-    # The deferred set + catalog hash come from the build-time setup (assembled
-    # after tool-policy filtering); promotion is read from graph state.
+    # The lead deferred set + catalog hash come from the full build-time MCP
+    # catalog; SkillToolPolicyMiddleware separately filters model visibility,
+    # tool_search results, and execution for the active skill at runtime.
     if deferred_setup is not None and deferred_setup.deferred_names:
         from deerflow.agents.middlewares.deferred_tool_filter_middleware import DeferredToolFilterMiddleware
 
