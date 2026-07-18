@@ -19,7 +19,8 @@ This section accumulates work toward the **2.1.0** milestone
   child path are skipped with a warning so they cannot shadow the managed
   projection; move extra E2B content to a different container path. User
   projections re-read global enable state from disk so toggles propagate across
-  Gateway workers on the next sandbox acquire. PVC-backed provisioner
+  Gateway workers on the next sandbox acquire. Existing E2B sandboxes retain
+  their creation-time snapshot until they are recreated. PVC-backed provisioner
   deployments still mount the operator-supplied PVC snapshot directly, so
   disabled-skill filesystem isolation does not apply in PVC mode until dynamic
   PVC materialization is implemented. ([#4178])
