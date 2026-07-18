@@ -70,7 +70,34 @@ class OAuthTokenManager:
         # keeps the de-duplication behavior of the old `async with lock:` (only one
         # concurrent caller per server actually fetches a token) while remaining
         # safe when callers are on different event loops/threads.
-        await asyncio.to_thread(lock.acquire)
+        #
+        # The acquisition itself runs as an explicit Task, shielded from this
+        # coroutine's own cancellation. A bare `await asyncio.to_thread(lock.acquire)`
+        # cannot be safely cancelled: once the executor thread has started running
+        # lock.acquire(), Python has no way to stop it, so a cancellation delivered
+        # at that await would still let the thread go on to acquire the lock later
+        # (whenever the current holder releases it) with this coroutine already
+        # gone and nobody left to call release() -- the lock would stay locked
+        # forever and every later call for this server would block permanently at
+        # this same line. Shielding the acquisition task means a cancelled caller
+        # can instead wait for that (unstoppable) acquisition to actually land and
+        # release the lock immediately, rather than leaking ownership of it.
+        acquire_task = asyncio.create_task(asyncio.to_thread(lock.acquire), name=f"oauth-lock-acquire:{server_name}")
+        try:
+            await asyncio.shield(acquire_task)
+        except asyncio.CancelledError:
+            # Keep waiting -- shielded on every retry -- until the acquisition
+            # actually finishes, even if this coroutine is cancelled again while
+            # cleaning up: the underlying thread cannot be interrupted, so this is
+            # the only way to learn when the lock becomes ours and release it
+            # right away instead of leaving it locked forever.
+            while not acquire_task.done():
+                try:
+                    await asyncio.shield(acquire_task)
+                except asyncio.CancelledError:
+                    continue
+            lock.release()
+            raise
         try:
             token = self._tokens.get(server_name)
             if token and not self._is_expiring(token, oauth):
