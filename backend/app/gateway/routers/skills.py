@@ -258,7 +258,7 @@ async def get_custom_skill_history(skill_name: str, request: Request, config: Ap
             # Worker thread: storage construction, the existence probes, and the
             # history-file read are blocking filesystem IO that must stay off the
             # event loop. None signals 404 to the caller.
-            storage = get_or_new_skill_storage(app_config=config)
+            storage = _get_user_skill_storage(config)
             if not storage.custom_skill_exists(skill_name) and not storage.get_skill_history_file(skill_name).exists():
                 return None
             return storage.read_history(skill_name)
