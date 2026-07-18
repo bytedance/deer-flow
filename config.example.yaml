@@ -1224,6 +1224,13 @@ sandbox:
 #   # startup, but a sandbox whose ownership cannot be published is not handed out
 #   # — acquiring raises instead. The alternative (proceed unowned) is exactly the
 #   # #4206 cross-instance kill. Run Redis with HA / a restart policy.
+#   #
+#   # NOTE: the other boundary is the lease TTL (renewal_interval_seconds x
+#   # ttl_multiplier). A Redis outage longer than the TTL can let a reconciling
+#   # instance adopt a live owner's container: a lapsed lease is indistinguishable
+#   # from a dead owner, so one TTL of adoption grace is the whole safety margin.
+#   # Size the TTL against your Redis availability target (HA Redis keeps this
+#   # window out of reach).
 
 # Option 3: BoxLite micro-VM Sandbox
 # Runs each sandbox as a BoxLite micro-VM. Released boxes stay in an in-process

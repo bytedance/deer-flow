@@ -1456,6 +1456,128 @@ def test_destroy_releases_the_teardown_marker_when_the_stop_fails():
     assert worker._ownership.take("boom01") is True
 
 
+class _BlockHeartbeatClaim:
+    """Store view whose heartbeat *refresh* claim blocks until released.
+
+    ``claim(for_destroy=True)`` is issued twice per teardown: once by the
+    caller's gate (``_claim_ownership``) and then repeatedly by the heartbeat.
+    This lets the gate through and blocks from the second onward, so a refresh
+    can be held in flight while the context manager exits — the interleaving the
+    release-ordering fix has to survive.
+    """
+
+    def __init__(self, inner):
+        self._inner = inner
+        self._for_destroy_claims = 0
+        self._lock = threading.Lock()
+        self.heartbeat_blocked = threading.Event()
+        self.unblock = threading.Event()
+        self.refresh_completed = threading.Event()
+
+    @property
+    def owner_id(self):
+        return self._inner.owner_id
+
+    @property
+    def supports_cross_process(self):
+        return self._inner.supports_cross_process
+
+    def take(self, sandbox_id):
+        return self._inner.take(sandbox_id)
+
+    def renew(self, sandbox_id):
+        return self._inner.renew(sandbox_id)
+
+    def release(self, sandbox_id):
+        return self._inner.release(sandbox_id)
+
+    def owner(self, sandbox_id):
+        return self._inner.owner(sandbox_id)
+
+    def close(self):
+        pass
+
+    def claim(self, sandbox_id, *, for_destroy: bool = False):
+        if for_destroy:
+            with self._lock:
+                self._for_destroy_claims += 1
+                nth = self._for_destroy_claims
+            if nth >= 2:  # the heartbeat refresh, not the caller's gate claim
+                self.heartbeat_blocked.set()
+                self.unblock.wait(timeout=10)
+                result = self._inner.claim(sandbox_id, for_destroy=for_destroy)
+                # The refresh has now rewritten `del:`. Signalling only after it
+                # lands lets the test settle on the final state instead of racing
+                # the transient window between a caller-side release and this write.
+                self.refresh_completed.set()
+                return result
+        return self._inner.claim(sandbox_id, for_destroy=for_destroy)
+
+
+def test_teardown_release_waits_for_the_heartbeat_to_exit():
+    """A refresh still in flight when the stop finishes must not resurrect `del:`.
+
+    The `del:` marker's final release is the heartbeat's own last act, not the
+    caller's. If the caller cleared it, a refresh `claim` still blocked in the
+    store (redis has no infinitely-patient call, but it can be mid-round-trip)
+    would land *after* that release and rewrite `del:` on a container whose stop
+    already completed — refusing a fresh `take()` (or rolling back a fresh
+    create) until the TTL. Owning the release inside the heartbeat sequences it
+    strictly after the last refresh. (fancyboi999, PR #4221)
+    """
+    from deerflow.config.sandbox_config import SandboxOwnershipConfig
+
+    # Long store TTL so nothing lapses via TTL during the test — the only thing
+    # that may clear the marker is a real release.
+    shared = _make_shared_ownership_store(ttl_seconds=30)
+    worker_a = _make_provider_for_reconciliation(worker_id="worker-a", store=shared)
+    worker_b = _make_provider_for_reconciliation(worker_id="worker-b", store=shared)
+    worker_a._ownership_config = SandboxOwnershipConfig(renewal_interval_seconds=0.02, ttl_multiplier=2.0)
+    # Give up on the join while the heartbeat is still blocked, so the context
+    # returns with a refresh genuinely in flight.
+    worker_a._TEARDOWN_JOIN_TIMEOUT_SECONDS = 0.1
+    blocking = _BlockHeartbeatClaim(worker_a._ownership)
+    worker_a._ownership = blocking
+
+    info = SandboxInfo(
+        sandbox_id="defer1",
+        sandbox_url="http://localhost:8080",
+        container_name="deer-flow-sandbox-defer1",
+        created_at=time.time(),
+    )
+
+    def slow_destroy(entry):
+        # Return only once the heartbeat has entered (and blocked in) a refresh,
+        # so the context exit runs its bounded join against an in-flight claim.
+        assert blocking.heartbeat_blocked.wait(timeout=5), "the heartbeat never issued a refresh claim"
+
+    worker_a._backend.destroy = MagicMock(side_effect=slow_destroy)
+    worker_a._warm_pool["defer1"] = (info, time.time())
+
+    reaper = threading.Thread(
+        target=lambda: worker_a._destroy_warm_entry("defer1", info, reason="idle_timeout"),
+        daemon=True,
+    )
+    reaper.start()
+    # The join times out (heartbeat blocked), so the destroy path returns while
+    # the refresh is still in flight — exactly where the old caller-side release ran.
+    reaper.join(timeout=10)
+    assert not reaper.is_alive(), "the destroy path never returned while the heartbeat was blocked"
+
+    # Let the in-flight refresh complete: it rewrites `del:`. Wait until it has
+    # actually landed, so the assertion reads the settled state rather than the
+    # transient window between a caller-side release and this write. Only a
+    # heartbeat-owned release, sequenced after the refresh, can leave the id clean.
+    blocking.unblock.set()
+    assert blocking.refresh_completed.wait(timeout=5), "the in-flight refresh never completed"
+
+    deadline = time.time() + 5
+    while time.time() < deadline and shared.owner("defer1") is not None:
+        time.sleep(0.02)
+    assert shared.owner("defer1") is None, "a refresh that landed after the release stranded the id under a `del:` marker"
+    assert worker_b._ownership.take("defer1") is True
+
+
 def test_evict_keeps_the_warm_entry_when_the_claim_is_refused():
     """Replica eviction must not pop before it knows the container is going away.
 

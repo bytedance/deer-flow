@@ -80,7 +80,10 @@ def make_sandbox_ownership_store(config: SandboxOwnershipConfig | None, *, owner
 
     Caller owns the returned store and must ``close()`` it.
     """
-    resolved = resolve_ownership_config(config)
+    # Trust an already-resolved config; only fill in an omitted section. The
+    # provider resolves once (with the stream_bridge inference this factory
+    # cannot do) and passes that in, so re-resolving here would be a no-op.
+    resolved = config if config is not None else resolve_ownership_config(None)
     effective_owner_id = owner_id or generate_owner_id()
     ttl = compute_lease_ttl(resolved)
 

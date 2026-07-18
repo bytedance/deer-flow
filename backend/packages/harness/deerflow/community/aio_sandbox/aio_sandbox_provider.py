@@ -160,6 +160,13 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
           API_KEY: $MY_API_KEY
     """
 
+    # How long `_held_teardown_lease` waits for its heartbeat thread to exit
+    # before deferring the final lease release to that (still-running) thread.
+    # The store's socket timeout bounds a stalled refresh, so this only elapses
+    # under a genuine wedge; kept above that socket timeout so a normal network
+    # stall still releases synchronously before the context returns.
+    _TEARDOWN_JOIN_TIMEOUT_SECONDS = 8.0
+
     def __init__(self):
         self._lock = threading.Lock()
         self._sandboxes: dict[str, AioSandbox] = {}  # sandbox_id -> AioSandbox instance
@@ -392,27 +399,45 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         The TTL stays finite on purpose: the heartbeat dies with the process, so a
         destroyer that crashes mid-stop still releases the container one TTL later
         instead of marking it undestroyable forever.
+
+        The final release is the heartbeat's own last act, not the caller's. A
+        refresh ``claim`` still in flight when the context exits (the socket
+        timeout bounds it, but it can be mid-call) would otherwise land *after* a
+        caller-side release and rewrite the ``del:`` marker on a container whose
+        stop had already completed — stranding a fresh ``take()`` (or rolling back
+        a fresh create) until the TTL. Releasing from inside the heartbeat, after
+        its loop has stopped, sequences the release strictly after the last
+        refresh, so no claim can follow it.
         """
         stop = threading.Event()
 
         def beat() -> None:
             interval = self._ownership_config.renewal_interval_seconds
-            while not stop.wait(interval):
-                try:
-                    if not self._ownership.claim(sandbox_id, for_destroy=True):
-                        # Only reachable if the store lost our marker *and* a peer
-                        # took it (e.g. a flush mid-stop). The stop is already in
-                        # flight and cannot be recalled, so say so loudly rather
-                        # than let a peer's container die without a trace.
-                        logger.error(
-                            "Lost the teardown exclusion for %s while its container stop was still in flight; a peer may have taken it",
-                            sandbox_id,
-                        )
-                        return
-                except OwnershipBackendError as e:
-                    # Unknown, not lost: the marker may well still be live, and
-                    # the TTL bounds how long a stale one survives. Retry.
-                    logger.warning("Could not refresh the teardown lease for %s, will retry: %s", sandbox_id, e)
+            try:
+                while not stop.wait(interval):
+                    try:
+                        if not self._ownership.claim(sandbox_id, for_destroy=True):
+                            # Only reachable if the store lost our marker *and* a
+                            # peer took it (e.g. a flush mid-stop). The stop is
+                            # already in flight and cannot be recalled, so say so
+                            # loudly rather than let a peer's container die without
+                            # a trace.
+                            logger.error(
+                                "Lost the teardown exclusion for %s while its container stop was still in flight; a peer may have taken it",
+                                sandbox_id,
+                            )
+                            return
+                    except Exception as e:
+                        # Broad on purpose: a refresh that raises must not kill the
+                        # heartbeat and strand the marker for a stop that can run
+                        # unbounded. Unknown, not lost — the marker may still be
+                        # live and the TTL bounds a stale one. Retry on the next tick.
+                        logger.warning("Could not refresh the teardown lease for %s, will retry: %s", sandbox_id, e)
+            finally:
+                # Release last, from the heartbeat itself, so an in-flight refresh
+                # can never run after the marker is cleared. `release()` drops only
+                # our own lease, so this is a safe no-op if a peer took it above.
+                self._release_ownership(sandbox_id)
 
         beater = threading.Thread(target=beat, name="sandbox-teardown-lease", daemon=True)
         beater.start()
@@ -420,7 +445,18 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             yield
         finally:
             stop.set()
-            beater.join(timeout=5)
+            beater.join(timeout=self._TEARDOWN_JOIN_TIMEOUT_SECONDS)
+            if beater.is_alive():
+                # The socket timeout should have bounded any refresh, so reaching
+                # here means a genuine wedge. The release is the heartbeat's job
+                # and is still pending; clearing the marker here would reopen the
+                # exact race this owns, so leave it — the thread will release when
+                # it unblocks, or the TTL will reap it.
+                logger.warning(
+                    "Teardown heartbeat for %s did not exit within %.1fs; its lease release is deferred to that thread",
+                    sandbox_id,
+                    self._TEARDOWN_JOIN_TIMEOUT_SECONDS,
+                )
 
     # ── Startup reconciliation ────────────────────────────────────────────
 
@@ -1132,12 +1168,13 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 try:
                     # Held like the other two stop paths: this one untracks before
                     # claiming, so `_renew_owned_leases` cannot see the id either
-                    # and nothing else would refresh the marker.
+                    # and nothing else would refresh the marker. The heartbeat
+                    # releases the marker on exit (success or failure), so there is
+                    # no caller-side release to race a late refresh.
                     with self._held_teardown_lease(sandbox_id):
                         self._backend.destroy(info)
                 except Exception as e:
                     logger.warning(f"Error destroying unhealthy sandbox {sandbox_id}: {e}")
-                self._release_ownership(sandbox_id)
             else:
                 logger.info("Not destroying unhealthy sandbox %s: owned by another instance", sandbox_id)
 
@@ -1166,7 +1203,10 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             return False
 
         try:
-            # The marker must outlast the stop, not the TTL it was written with.
+            # The marker must outlast the stop, not the TTL it was written with,
+            # and is released by the heartbeat on exit. On a failed stop that
+            # release matters just as much — the container is probably still up,
+            # so a marker left behind would block its thread from re-acquiring it.
             with self._held_teardown_lease(sandbox_id):
                 self._backend.destroy(entry)
         except Exception as e:
@@ -1176,12 +1216,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 logger.error(f"Failed to destroy warm-pool sandbox {sandbox_id}: {e}")
             else:
                 logger.error(f"Failed to destroy warm-pool sandbox {sandbox_id} for {reason}: {e}")
-            # Drop the teardown marker: the container is still up, so leaving it
-            # marked would block its thread from ever re-acquiring it.
-            self._release_ownership(sandbox_id)
             return False
-
-        self._release_ownership(sandbox_id)
 
         if reason == "idle_timeout":
             logger.info(f"Destroyed idle warm-pool sandbox {sandbox_id}")
@@ -1508,23 +1543,20 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 logger.warning(f"Error closing sandbox {sandbox_id} during destroy: {e}")
 
         if info:
-            try:
-                # The marker must outlast the stop, not the TTL it was written with.
-                with self._held_teardown_lease(sandbox_id):
-                    self._backend.destroy(info)
-                logger.info(f"Destroyed sandbox {sandbox_id}")
-            except Exception:
-                # Release before propagating, like `_destroy_warm_entry` does: the
-                # stop failed, so the container is probably still up, and a marker
-                # left behind refuses its own thread's `take()` until the TTL
-                # lapses. Still raised — `shutdown()` logs per sandbox off it, so
-                # swallowing here would silently change what callers can see.
-                self._release_ownership(sandbox_id)
-                raise
-
-        # Clears the teardown marker whether or not there was a container to
-        # stop, so an untracked id cannot leave a lease stuck in `del:`.
-        self._release_ownership(sandbox_id)
+            # The marker must outlast the stop, not the TTL it was written with,
+            # and the heartbeat releases it on exit — on both outcomes. On a
+            # failed stop the container is probably still up, so a marker left
+            # behind would refuse its own thread's `take()` until the TTL lapses;
+            # the error still propagates out of the `with` (`shutdown()` logs per
+            # sandbox off it), it is just no longer this method's job to release.
+            with self._held_teardown_lease(sandbox_id):
+                self._backend.destroy(info)
+            logger.info(f"Destroyed sandbox {sandbox_id}")
+        else:
+            # No container to stop, so no teardown lease was held: clear the
+            # marker the claim above wrote, so an untracked id cannot leave a
+            # lease stuck in `del:`.
+            self._release_ownership(sandbox_id)
 
     def shutdown(self) -> None:
         """Shutdown all sandboxes. Thread-safe and idempotent."""

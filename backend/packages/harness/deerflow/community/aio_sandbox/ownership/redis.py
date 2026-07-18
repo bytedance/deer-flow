@@ -46,6 +46,13 @@ logger = logging.getLogger(__name__)
 _OWN = "own:"
 _DEL = "del:"
 
+# Bound every store round-trip so a stalled Redis cannot wedge a caller. This
+# matters most for the teardown heartbeat: its exit — and the final lease
+# release that exit performs — must stay finite, otherwise a refresh blocked on
+# a black-holed connection could hold a destroy path (and its deferred release)
+# open indefinitely. Without a socket timeout redis-py blocks forever.
+_STORE_SOCKET_TIMEOUT_SECONDS = 5.0
+
 # Acquire-path takeover. Overwrites a live peer's normal lease on purpose — a
 # thread's turn has routed here — but refuses a teardown in progress, which is
 # what stops us handing out a container a peer is about to stop.
@@ -119,8 +126,19 @@ class RedisOwnershipStore(SandboxOwnershipStore):
         self._ttl_ms = max(1, int(float(ttl_seconds) * 1000))
         self._key_prefix = key_prefix.rstrip(":")
         # Redis.from_url is lazy, so an unreachable Redis does not block provider
-        # construction; the first claim raises instead.
-        self._redis = client if client is not None else Redis.from_url(redis_url, decode_responses=True)
+        # construction; the first claim raises instead. socket_timeout bounds
+        # every round-trip (see _STORE_SOCKET_TIMEOUT_SECONDS) so no store call —
+        # in particular a teardown-heartbeat refresh — can block unbounded.
+        self._redis = (
+            client
+            if client is not None
+            else Redis.from_url(
+                redis_url,
+                decode_responses=True,
+                socket_timeout=_STORE_SOCKET_TIMEOUT_SECONDS,
+                socket_connect_timeout=_STORE_SOCKET_TIMEOUT_SECONDS,
+            )
+        )
         self._owns_client = client is None
         self._take = self._redis.register_script(_TAKE_SCRIPT)
         self._claim = self._redis.register_script(_CLAIM_SCRIPT)
