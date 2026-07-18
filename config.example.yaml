@@ -1856,11 +1856,12 @@ run_ownership:
 #     # Optional: sent as SKRouteTag header when provided
 #     route_tag: ""
 #     allowed_users: []               # empty = allow all
-#     # Optional: long-polling timeout in seconds
+#     # Optional: timing values must be positive finite seconds
 #     polling_timeout: 35
-#     # Optional: QR poll interval in seconds when qrcode_login_enabled is true
+#     polling_retry_delay: 5
+#     # QR poll interval when qrcode_login_enabled is true
 #     qrcode_poll_interval: 2
-#     # Optional: QR bootstrap timeout in seconds
+#     # QR bootstrap timeout
 #     qrcode_poll_timeout: 180
 #     # Optional: persist getupdates cursor under the gateway container volume
 #     state_dir: ./.deer-flow/wechat/state
