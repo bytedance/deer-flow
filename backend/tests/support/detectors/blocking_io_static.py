@@ -302,15 +302,20 @@ def _simple_receiver_name(node: ast.AST | None) -> str | None:
     receiver/alias tracking is wrong: it would make a Call or Subscript result
     inherit its base's alias-worthiness (e.g. treating `factory()` as if it
     were the traced name `factory`), which this restricted extractor refuses
-    to do by simply not recognizing those node shapes at all.
+    to do by simply not recognizing those node shapes at all -- including when
+    one is buried further down the chain (`factory().client`,
+    `clients[0].client`): an unsupported node anywhere in the chain makes the
+    whole receiver None, it never falls back to just the trailing attribute
+    name, or that trailing name alone could still collide with an unrelated
+    traced parameter or local alias of the same name.
     """
     if isinstance(node, ast.Name):
         return node.id
     if isinstance(node, ast.Attribute):
         parent = _simple_receiver_name(node.value)
-        if parent:
-            return f"{parent}.{node.attr}"
-        return node.attr
+        if parent is None:
+            return None
+        return f"{parent}.{node.attr}"
     return None
 
 
@@ -335,6 +340,7 @@ class BlockingIOStaticVisitor(ast.NodeVisitor):
         self.relative_path = relative_path
         self.source_lines = source_lines
         self.import_aliases: dict[str, str] = {}
+        self.postponed_annotations = False
         self.class_stack: list[str] = []
         self.function_stack: list[_FunctionContext] = []
         self.module_context = _FunctionContext("<module>", None, False)
@@ -370,6 +376,15 @@ class BlockingIOStaticVisitor(ast.NodeVisitor):
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
         if node.module is None:
             return
+        if node.module == "__future__" and any(alias.name == "annotations" for alias in node.names):
+            # `from __future__ import annotations` (PEP 563) makes CPython skip
+            # evaluating parameter/return annotations at runtime entirely --
+            # they are kept as unevaluated strings -- so a call written in one
+            # never actually runs at definition time in this module, in either
+            # scope. This is always visited before any function def that could
+            # use it: the statement is required to appear before any other
+            # code in the file (`ast.parse` itself rejects it elsewhere).
+            self.postponed_annotations = True
         for alias in node.names:
             local_name = alias.asname or alias.name
             self.import_aliases[local_name] = f"{node.module}.{alias.name}"
@@ -388,16 +403,28 @@ class BlockingIOStaticVisitor(ast.NodeVisitor):
         self._visit_function(node, is_async=True)
 
     def visit_Assign(self, node: ast.Assign) -> None:
+        # Visit the RHS before recording anything about the assignment's own
+        # target(s): Python evaluates the value before binding it, so a call
+        # in the RHS (e.g. `client = client.flush()`) must see the receiver-
+        # alias state as it stood immediately BEFORE this assignment, not
+        # after. Updating/killing the target's alias first would make the
+        # target's own old alias disappear before the RHS that still runs
+        # under it gets a chance to be resolved.
+        self.visit(node.value)
         self._record_sync_http_client_targets(node.value, node.targets)
         self._record_local_receiver_alias_targets(node.value, node.targets)
-        self.generic_visit(node)
+        for target in node.targets:
+            self.visit(target)
 
     def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
         self._record_path_like_annotation(node.annotation, [node.target])
         if node.value is not None:
+            # Same RHS-before-target-update ordering as visit_Assign above.
+            self.visit(node.value)
             self._record_sync_http_client_targets(node.value, [node.target])
             self._record_local_receiver_alias_targets(node.value, [node.target])
-        self.generic_visit(node)
+        self.visit(node.target)
+        self.visit(node.annotation)
 
     def visit_With(self, node: ast.With) -> None:
         temporary_clients: dict[str, str | None] = {}
@@ -456,6 +483,32 @@ class BlockingIOStaticVisitor(ast.NodeVisitor):
             self._record_blocking_candidate(node, call_name, current)
         self.generic_visit(node)
 
+    def visit_Lambda(self, node: ast.Lambda) -> None:
+        # A lambda's parameter defaults run eagerly when the lambda object
+        # itself is created (same timing as a regular function's defaults),
+        # but its body only runs later, whenever/if the lambda is actually
+        # called -- possibly in a completely different scope, possibly never.
+        # This applies everywhere `self.visit` can reach a Lambda, including
+        # (via `_visit_definition_time_arguments` below) inside another
+        # function's own definition-time expressions, so `node.body` must
+        # never be visited from here.
+        for default in node.args.defaults:
+            self.visit(default)
+        for default in node.args.kw_defaults:
+            if default is not None:
+                self.visit(default)
+
+    def visit_GeneratorExp(self, node: ast.GeneratorExp) -> None:
+        # Only the outermost `for`'s iterable is evaluated eagerly, to build
+        # the generator object; the element expression, any `if` filters, and
+        # any additional `for` clauses live inside the generator's own frame
+        # and only run once it is iterated -- which may never happen. List/
+        # set/dict comprehensions differ (their implicit scope runs
+        # immediately as part of building the result) so they are left fully
+        # eager and are not given a matching override.
+        if node.generators:
+            self.visit(node.generators[0].iter)
+
     def _visit_function(self, node: ast.FunctionDef | ast.AsyncFunctionDef, *, is_async: bool) -> None:
         qualname = ".".join((*self.class_stack, node.name)) if self.class_stack else node.name
         class_name = self.class_stack[-1] if self.class_stack else None
@@ -465,22 +518,29 @@ class BlockingIOStaticVisitor(ast.NodeVisitor):
         if class_name is not None:
             self.class_methods[class_name].add(node.name)
 
-        # Decorators, parameter defaults/annotations, the return annotation, and
-        # any PEP 695 type-parameter bounds all run at definition time in the
+        # Decorators and parameter defaults run at definition time in the
         # ENCLOSING scope, not inside the function body -- visit them before
         # pushing this function's own context. Otherwise a call/receiver there
         # (e.g. a default value referencing an outer variable that happens to
         # share a parameter's name) gets misattributed to the function being
-        # defined instead of to whatever actually executes it.
+        # defined instead of to whatever actually executes it. Parameter and
+        # return annotations get the same enclosing-scope treatment unless
+        # this module postpones annotation evaluation (`from __future__
+        # import annotations`), in which case they never execute at runtime at
+        # all, in either scope, so they are skipped entirely. PEP 695
+        # type-parameter bounds (`node.type_params`) are not visited at all,
+        # in either scope: CPython evaluates each one lazily, in its own
+        # hidden function, only when something like `T.__bound__` is actually
+        # accessed -- never as part of running this `def` statement.
+        # `visit_Lambda`/`visit_GeneratorExp` apply the same eager-vs-lazy
+        # split within whatever we do visit here, so a lambda body or
+        # generator element nested inside a decorator/default/annotation is
+        # not treated as running right now either.
         for decorator in node.decorator_list:
             self.visit(decorator)
         self._visit_definition_time_arguments(node.args)
-        if node.returns is not None:
+        if node.returns is not None and not self.postponed_annotations:
             self.visit(node.returns)
-        for type_param in node.type_params:
-            bound = getattr(type_param, "bound", None)
-            if bound is not None:
-                self.visit(bound)
 
         self.function_stack.append(context)
         self.sync_http_client_stack.append({})
@@ -499,6 +559,8 @@ class BlockingIOStaticVisitor(ast.NodeVisitor):
         for default in arguments.kw_defaults:
             if default is not None:
                 self.visit(default)
+        if self.postponed_annotations:
+            return
         for argument in _iter_arguments(arguments):
             if argument.annotation is not None:
                 self.visit(argument.annotation)

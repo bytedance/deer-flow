@@ -839,14 +839,18 @@ def test_decorator_default_annotation_and_return_annotation_all_use_enclosing_sc
     assert detector.scan_file(source_file, repo_root=tmp_path) == []
 
 
-def test_pep695_type_parameter_bound_uses_enclosing_scope(tmp_path: Path) -> None:
-    """PEP 695 type-parameter bounds are definition-time expressions too.
+def test_pep695_type_parameter_bound_is_never_treated_as_definition_time_eager(tmp_path: Path) -> None:
+    """PEP 695 type-parameter bounds are lazily evaluated, not definition-time code.
 
-    `ast.FunctionDef`/`ast.AsyncFunctionDef` gained a `type_params` field in
-    Python 3.12 (this repo's minimum version) that `generic_visit` already
-    walked; the enclosing-scope fix above must not silently drop it. Same
-    enclosing-attribution shape as the nested-default case above: the
-    never-called `helper` would otherwise swallow the finding entirely.
+    CPython compiles a `type_params` bound (`T` in `def helper[T: <bound>](...)`)
+    into its own hidden, lazily-invoked function: it only runs if and when
+    something accesses `T.__bound__` (e.g. a type checker or `typing` runtime
+    introspection), never as part of executing the `def` statement itself --
+    not in the function's own scope, and not in the enclosing one either. An
+    earlier version of this fix moved the previous `generic_visit` walk of
+    `type_params` into the enclosing scope alongside decorators/defaults/
+    annotations, on the assumption it was equally eager; that assumption was
+    wrong, so bounds are not visited in either scope now.
     """
     source_file = _write_python(
         tmp_path / "sample.py",
@@ -860,9 +864,251 @@ def test_pep695_type_parameter_bound_uses_enclosing_scope(tmp_path: Path) -> Non
         """,
     )
 
+    assert detector.scan_file(source_file, repo_root=tmp_path) == []
+
+
+def test_scan_file_traces_call_result_reassignment_using_pre_assignment_alias_state(tmp_path: Path) -> None:
+    """client = client.flush() must resolve the RHS against the PRE-assignment alias state.
+
+    Python evaluates an assignment's RHS before binding its target. `client`
+    starts aliased to `self.store` (traceable); reassigning it to
+    `client.flush()`'s result correctly kills the alias for code AFTER this
+    statement, but the call `client.flush()` itself happens first, while
+    `client` was still aliased, and must still be recorded -- updating/killing
+    the target's alias before visiting the RHS made this call invisible.
+    """
+    source_file = _write_python(
+        tmp_path / "sample.py",
+        """
+        class Store:
+            def flush(self):
+                with open("out.txt", "w") as handle:
+                    handle.write("x")
+
+        class Router:
+            def __init__(self, store):
+                self.store = store
+
+            async def get(self):
+                client = self.store
+                client = client.flush()
+                return client
+        """,
+    )
+
+    findings = _payload(source_file, tmp_path)
+
+    assert len(findings) == 1
+    assert findings[0]["location"]["function"] == "Store.flush"
+    assert findings[0]["event_loop_exposure"] == "ASYNC_REACHABLE_SAME_FILE"
+    assert findings[0]["blocking_call"]["symbol"] == "open"
+
+
+def test_scan_file_traces_annassign_call_result_reassignment_using_pre_assignment_alias_state(tmp_path: Path) -> None:
+    """Same pre-assignment-alias-state requirement, through an annotated assignment.
+
+    `visit_AnnAssign` shares `visit_Assign`'s RHS-then-target-update ordering
+    requirement; this pins it separately so a fix to one path cannot silently
+    leave the other regressed.
+    """
+    source_file = _write_python(
+        tmp_path / "sample.py",
+        """
+        class Store:
+            def flush(self):
+                with open("out.txt", "w") as handle:
+                    handle.write("x")
+
+        class Router:
+            def __init__(self, store):
+                self.store = store
+
+            async def get(self):
+                client: object = self.store
+                client: object = client.flush()
+                return client
+        """,
+    )
+
+    findings = _payload(source_file, tmp_path)
+
+    assert len(findings) == 1
+    assert findings[0]["location"]["function"] == "Store.flush"
+    assert findings[0]["event_loop_exposure"] == "ASYNC_REACHABLE_SAME_FILE"
+    assert findings[0]["blocking_call"]["symbol"] == "open"
+
+
+def test_scan_file_does_not_treat_call_rooted_attribute_chain_as_receiver_alias(tmp_path: Path) -> None:
+    """factory().client.flush() must not collapse to the traced name "client".
+
+    `_simple_receiver_name` fell back to returning the trailing attribute name
+    whenever the recursive parent lookup came back unsupported (e.g. a Call),
+    instead of refusing the whole chain. That let `factory().client` collapse
+    to plain "client", which -- because "client" is also a parameter here --
+    was then treated exactly like a bare `client.flush()` call on that
+    parameter, incorrectly linking this call to `Store.flush` below even
+    though `client` is never referenced in this expression at all.
+    """
+    source_file = _write_python(
+        tmp_path / "sample.py",
+        """
+        class Store:
+            def flush(self):
+                with open("out.txt", "w") as handle:
+                    handle.write("x")
+
+        class Router:
+            async def get(self, factory, client):
+                return factory().client.flush()
+        """,
+    )
+
+    assert detector.scan_file(source_file, repo_root=tmp_path) == []
+
+
+def test_scan_file_does_not_treat_subscript_rooted_attribute_chain_as_receiver_alias(tmp_path: Path) -> None:
+    """clients[0].client.flush() must not collapse to the traced name "client" either.
+
+    Same fallback gap as the Call-rooted case above, with `ast.Subscript`
+    (rather than `ast.Call`) underneath the final attribute access.
+    """
+    source_file = _write_python(
+        tmp_path / "sample.py",
+        """
+        class Store:
+            def flush(self):
+                with open("out.txt", "w") as handle:
+                    handle.write("x")
+
+        class Router:
+            async def get(self, clients, client):
+                return clients[0].client.flush()
+        """,
+    )
+
+    assert detector.scan_file(source_file, repo_root=tmp_path) == []
+
+
+def test_scan_file_does_not_treat_postponed_annotation_as_definition_time_eager(tmp_path: Path) -> None:
+    """`from __future__ import annotations` defers ALL annotation evaluation.
+
+    With this future import active, CPython never evaluates parameter/return
+    annotations at runtime at all (they are kept as unevaluated strings in
+    `__annotations__`) -- so a blocking call written in one must not be
+    attributed to definition time in any scope, unlike the same shape without
+    the future import (see
+    `test_decorator_default_annotation_and_return_annotation_all_use_enclosing_scope`).
+    """
+    source_file = _write_python(
+        tmp_path / "sample.py",
+        """
+        from __future__ import annotations
+
+        import os
+
+        async def outer_async():
+            def helper(x: os.listdir(".")) -> os.listdir("."):
+                return x
+            return None
+        """,
+    )
+
+    assert detector.scan_file(source_file, repo_root=tmp_path) == []
+
+
+def test_scan_file_does_not_treat_lambda_body_as_definition_time_eager(tmp_path: Path) -> None:
+    """A lambda default's BODY must not be treated as running at definition time.
+
+    `helper`'s default value creates a lambda object (eager), but
+    `os.listdir(".")` inside its body only runs if and when that lambda is
+    later called -- which this snippet never does.
+    """
+    source_file = _write_python(
+        tmp_path / "sample.py",
+        """
+        import os
+
+        async def outer_async():
+            def helper(callback=lambda: os.listdir(".")):
+                return callback
+            return None
+        """,
+    )
+
+    assert detector.scan_file(source_file, repo_root=tmp_path) == []
+
+
+def test_scan_file_still_treats_lambda_own_default_as_definition_time_eager(tmp_path: Path) -> None:
+    """Contrast case: a lambda's OWN parameter default is genuinely eager.
+
+    Unlike the lambda's body above, its parameter defaults are evaluated
+    immediately, when the lambda object itself is created -- so this must
+    still be attributed to the enclosing scope like any other default.
+    """
+    source_file = _write_python(
+        tmp_path / "sample.py",
+        """
+        import os
+
+        async def outer_async():
+            def helper(callback=lambda flag=os.listdir("."): flag):
+                return callback
+            return None
+        """,
+    )
+
     findings = _payload(source_file, tmp_path)
 
     assert len(findings) == 1
     assert findings[0]["location"]["function"] == "outer_async"
     assert findings[0]["event_loop_exposure"] == "DIRECT_ASYNC"
-    assert findings[0]["blocking_call"]["symbol"] == "time.sleep"
+    assert findings[0]["blocking_call"]["symbol"] == "os.listdir"
+
+
+def test_scan_file_does_not_treat_generator_element_as_definition_time_eager(tmp_path: Path) -> None:
+    """A bare generator expression's element only runs once iterated, if ever.
+
+    `helper`'s default builds a generator object (eager), but `os.listdir(x)`
+    -- the element expression -- is only evaluated lazily as the generator is
+    iterated, which this snippet never does.
+    """
+    source_file = _write_python(
+        tmp_path / "sample.py",
+        """
+        import os
+
+        async def outer_async():
+            def helper(items=(os.listdir(x) for x in [1])):
+                return items
+            return None
+        """,
+    )
+
+    assert detector.scan_file(source_file, repo_root=tmp_path) == []
+
+
+def test_scan_file_still_treats_generator_outer_iterable_as_definition_time_eager(tmp_path: Path) -> None:
+    """Contrast case: a generator's OUTERMOST iterable IS evaluated eagerly.
+
+    Only the first `for`'s iterable runs immediately, to build the generator
+    object -- so a blocking call there (unlike the element case above) must
+    still be attributed to the enclosing scope.
+    """
+    source_file = _write_python(
+        tmp_path / "sample.py",
+        """
+        import os
+
+        async def outer_async():
+            def helper(items=(x for x in os.listdir("."))):
+                return items
+            return None
+        """,
+    )
+
+    findings = _payload(source_file, tmp_path)
+
+    assert len(findings) == 1
+    assert findings[0]["location"]["function"] == "outer_async"
+    assert findings[0]["event_loop_exposure"] == "DIRECT_ASYNC"
+    assert findings[0]["blocking_call"]["symbol"] == "os.listdir"
