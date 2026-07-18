@@ -2086,6 +2086,99 @@ def test_idle_destroy_does_not_stop_a_container_this_instance_just_reused():
     assert handed_out is None, "a turn reused a sandbox whose container the idle checker was stopping"
 
 
+def test_reuse_does_not_return_a_sandbox_reserved_during_its_health_check():
+    """A teardown that wins during reuse's unlocked health check must stay won.
+
+    Reuse checks the local teardown reservation before calling ``is_alive``, but
+    that backend call runs outside ``_lock``.  The idle reaper can reserve the id
+    in that gap and then pause in its ownership claim while reuse publishes a
+    fresh ``own:`` lease.  Map membership alone is not a safe final check: the
+    reaper deliberately keeps the active entry tracked until its claim succeeds.
+    """
+    provider = _make_provider_for_reconciliation()
+    gate = _GateOnClaim(provider._ownership)
+    provider._ownership = gate
+    info = _info("idlerace")
+    _active_sandbox(provider, "idlerace", info)
+    provider._last_activity["idlerace"] = 0.0
+    provider._ownership._inner.take("idlerace")
+
+    health_started, let_health_finish = threading.Event(), threading.Event()
+
+    def gated_health(_info):
+        health_started.set()
+        assert let_health_finish.wait(timeout=5), "the test never released the health check"
+        return True
+
+    provider._backend.is_alive.side_effect = gated_health
+    result = {}
+    acquire = threading.Thread(target=lambda: result.update(id=provider._reuse_in_process_sandbox("t1", user_id="u")), daemon=True)
+    reaper = threading.Thread(target=lambda: provider._cleanup_idle_sandboxes(600), daemon=True)
+
+    acquire.start()
+    try:
+        assert health_started.wait(timeout=5), "reuse never reached its unlocked health check"
+        reaper.start()
+        assert gate.entered.wait(timeout=5), "the idle reaper never reserved the sandbox and reached its ownership claim"
+        assert "idlerace" in provider._local_teardown, "precondition: the idle reaper must hold the local reservation"
+
+        let_health_finish.set()
+        acquire.join(timeout=5)
+        assert not acquire.is_alive(), "reuse never completed"
+        handed_out = result.get("id")
+    finally:
+        let_health_finish.set()
+        gate.let_through.set()
+        acquire.join(timeout=5)
+        reaper.join(timeout=5)
+
+    assert not reaper.is_alive(), "the idle reaper never finished"
+    assert handed_out is None, "reuse returned a sandbox whose local teardown reservation had already won"
+    provider._backend.destroy.assert_called_once_with(info)
+    assert provider.get("idlerace") is None
+
+
+def test_discovery_does_not_install_a_sandbox_reserved_while_publishing():
+    """Discovery must re-check the local reservation after its store round trip."""
+    provider = _make_provider_for_reconciliation()
+    info = _info("discoverrace")
+    published, let_install = threading.Event(), threading.Event()
+    real_publish = provider._publish_ownership
+
+    def gated_publish(sandbox_id):
+        result = real_publish(sandbox_id)
+        published.set()
+        assert let_install.wait(timeout=5), "the test never released discovery after publish"
+        return result
+
+    provider._publish_ownership = gated_publish
+    result = {}
+
+    def register():
+        try:
+            result["id"] = provider._register_discovered_sandbox("t1", info, user_id="u")
+        except Exception as e:
+            result["error"] = e
+
+    registrar = threading.Thread(target=register, daemon=True)
+    registrar.start()
+    try:
+        assert published.wait(timeout=5), "discovery never published ownership"
+        assert provider._reserve_local_teardown("discoverrace", lambda: True), "the test could not reserve the discovered sandbox"
+        let_install.set()
+        registrar.join(timeout=5)
+    finally:
+        let_install.set()
+        registrar.join(timeout=5)
+        provider._finish_local_teardown("discoverrace")
+
+    assert not registrar.is_alive(), "discovery never completed"
+    assert isinstance(result.get("error"), SandboxBeingDestroyedError)
+    assert result.get("id") is None
+    assert "discoverrace" not in provider._sandboxes
+    assert provider.get("discoverrace") is None
+
+
 def test_unhealthy_drop_refuses_discovery_of_the_container_it_is_stopping():
     """`_drop_unhealthy_sandbox` untracks first, so discovery is its open window.
 

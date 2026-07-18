@@ -1138,6 +1138,14 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             return None
 
         with self._lock:
+            if self._being_torn_down_locally(existing_id):
+                # The first reservation check ran before the backend health
+                # check and ownership round trip. A local reaper can win while
+                # either is in flight, and it deliberately keeps the entry in
+                # `_sandboxes` until its destroy claim succeeds. Membership
+                # alone therefore cannot prove this id is still safe to return.
+                logger.info("Cached sandbox %s was reserved for teardown while publishing ownership; not reusing it", existing_id)
+                return None
             if existing_id not in self._sandboxes:
                 # Dropped while we were publishing. The intent mark closes the
                 # window *inside* `_publish_ownership`, but not the gap before
@@ -1259,18 +1267,23 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         # same close-on-failure as `_register_created_sandbox`.
         try:
             self._publish_ownership(info.sandbox_id)
+            with self._lock:
+                if self._being_torn_down_locally(info.sandbox_id):
+                    # The pre-publish reservation check is only an early-out: a
+                    # local reaper can reserve the id during the store round
+                    # trip. Do not install a client for a container that reaper
+                    # has already committed to stopping.
+                    raise SandboxBeingDestroyedError(info.sandbox_id)
+                self._sandboxes[info.sandbox_id] = sandbox
+                self._sandbox_infos[info.sandbox_id] = info
+                self._last_activity[info.sandbox_id] = time.time()
+                self._thread_sandboxes[key] = info.sandbox_id
         except (OwnershipBackendError, SandboxBeingDestroyedError):
             try:
                 sandbox.close()
             except Exception as e:
                 logger.warning(f"Error closing sandbox {info.sandbox_id} after failed ownership publish: {e}")
             raise
-
-        with self._lock:
-            self._sandboxes[info.sandbox_id] = sandbox
-            self._sandbox_infos[info.sandbox_id] = info
-            self._last_activity[info.sandbox_id] = time.time()
-            self._thread_sandboxes[key] = info.sandbox_id
 
         logger.info(f"Discovered existing sandbox {info.sandbox_id} for user/thread {user_id}/{thread_id} at {info.sandbox_url}")
         return info.sandbox_id
