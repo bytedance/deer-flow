@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
 from _router_auth_helpers import make_authed_test_app
 from _run_message_pagination_helpers import assert_run_message_page
 from fastapi.testclient import TestClient
@@ -206,6 +207,20 @@ def test_run_messages_passes_before_seq_to_event_store():
         before_seq=10,
         after_seq=None,
     )
+
+
+@pytest.mark.parametrize("cursor", ["before_seq", "after_seq"])
+@pytest.mark.parametrize("value", [0, -1])
+def test_run_messages_rejects_non_positive_seq_cursors(cursor: str, value: int):
+    run_record = {"run_id": "run-6", "thread_id": "thread-6"}
+    app = _make_app(
+        run_store=_make_run_store(run_record),
+        event_store=_make_event_store([]),
+    )
+    with TestClient(app) as client:
+        response = client.get("/api/runs/run-6/messages", params={cursor: value})
+
+    assert response.status_code == 422
 
 
 def test_run_messages_empty_data():
