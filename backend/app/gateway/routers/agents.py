@@ -5,6 +5,7 @@ import logging
 import re
 import shutil
 import threading
+import zlib
 
 import yaml
 from fastapi import APIRouter, HTTPException
@@ -20,7 +21,7 @@ router = APIRouter(prefix="/api", tags=["agents"])
 
 AGENT_NAME_PATTERN = re.compile(r"^[A-Za-z0-9-]+$")
 
-# Per-agent write locks, keyed by (user_id, normalized name).
+# Per-agent write locks, as a fixed-size stripe array.
 #
 # The create/update/delete handlers each run their whole load-modify-write in a
 # worker thread, which removes the implicit serialization the single-threaded
@@ -33,19 +34,28 @@ AGENT_NAME_PATTERN = re.compile(r"^[A-Za-z0-9-]+$")
 # asyncio.Lock around the await: ownership then belongs to the thread doing the
 # writing, so cancelling the awaiting coroutine cannot release the critical
 # section while that thread is still mid-write.
-_agent_write_locks: dict[tuple[str, str], threading.Lock] = {}
-_agent_write_locks_guard = threading.Lock()
+#
+# Striping keeps the structure bounded. A registry keyed by (user_id, name)
+# would insert an entry per distinct name and never remove it — and because the
+# lock is taken before the agent's existence is known, repeated 404s for fresh
+# names would retain a lock per name for the process lifetime. A fixed array
+# avoids that without introducing eviction races: nothing is ever removed, so a
+# waiter can never be handed a lock that is concurrently being discarded. The
+# only cost is that two different agents may share a stripe and serialize
+# against each other, which is harmless for these low-frequency writes.
+_AGENT_WRITE_LOCK_STRIPES = 64
+_agent_write_locks: tuple[threading.Lock, ...] = tuple(threading.Lock() for _ in range(_AGENT_WRITE_LOCK_STRIPES))
 
 
 def _agent_write_lock(user_id: str, name: str) -> threading.Lock:
-    """Return the process-wide write lock for a single agent, creating it on demand."""
-    key = (user_id, name)
-    with _agent_write_locks_guard:
-        lock = _agent_write_locks.get(key)
-        if lock is None:
-            lock = threading.Lock()
-            _agent_write_locks[key] = lock
-        return lock
+    """Return the write lock guarding one agent's directory.
+
+    A given ``(user_id, name)`` always maps to the same stripe, which is what
+    provides same-agent exclusion. ``zlib.crc32`` is used rather than ``hash()``
+    so the mapping does not depend on per-process hash randomization.
+    """
+    key = f"{user_id}\x00{name}".encode()
+    return _agent_write_locks[zlib.crc32(key) % _AGENT_WRITE_LOCK_STRIPES]
 
 
 class AgentResponse(BaseModel):

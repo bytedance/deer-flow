@@ -25,6 +25,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from fastapi import HTTPException
 
 from app.gateway.routers import agents as agents_router
 from app.gateway.routers.agents import (
@@ -218,5 +219,102 @@ async def test_concurrent_partial_updates_do_not_lose_fields(tmp_path: Path, mon
         assert final["model"] == "new-model"
         # The second worker cannot enter the section while the first holds it.
         assert counters["max"] == 1
+    finally:
+        load_agents_api_config_from_dict({})
+
+
+async def test_agent_write_lock_structure_stays_bounded(tmp_path: Path, monkeypatch) -> None:
+    """Missing-agent requests must not retain a lock per name.
+
+    The per-agent lock is taken before the agent's existence is known, so a
+    registry keyed by ``(user_id, name)`` would gain an entry for every distinct
+    missing name and never release it — repeated 404s with fresh names would grow
+    process memory without creating anything on disk. The stripe array is
+    fixed-size, so the structure cannot grow at all.
+    """
+    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+    monkeypatch.setattr("deerflow.config.paths._paths", None)
+    load_agents_api_config_from_dict({"enabled": True})
+    try:
+        before = len(agents_router._agent_write_locks)
+
+        for index in range(250):
+            with pytest.raises(HTTPException) as deleted:
+                await delete_agent(f"missing-delete-{index}")
+            assert deleted.value.status_code == 404
+
+            with pytest.raises(HTTPException) as updated:
+                await update_agent(f"missing-update-{index}", AgentUpdateRequest(description="x"))
+            assert updated.value.status_code == 404
+
+        assert len(agents_router._agent_write_locks) == before == agents_router._AGENT_WRITE_LOCK_STRIPES
+
+        # Nothing was created on disk by those 404s.
+        agents_root = await asyncio.to_thread(get_paths().user_agent_dir, get_effective_user_id(), "missing-delete-0")
+        assert not await asyncio.to_thread(agents_root.exists)
+    finally:
+        load_agents_api_config_from_dict({})
+
+
+async def test_cancelled_update_keeps_the_agent_lock_until_its_worker_finishes(tmp_path: Path, monkeypatch) -> None:
+    """Cancelling the awaiting task must not release the agent to another writer.
+
+    The lock is a threading.Lock owned by the worker, so a cancelled request
+    cannot hand the critical section to a second writer while its thread is still
+    inside the load-modify-write.
+    """
+    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+    monkeypatch.setattr("deerflow.config.paths._paths", None)
+    load_agents_api_config_from_dict({"enabled": True})
+    try:
+        user_id = get_effective_user_id()
+        agent_dir = await asyncio.to_thread(get_paths().user_agent_dir, user_id, "cancel-agent")
+        await asyncio.to_thread(agent_dir.mkdir, parents=True, exist_ok=True)
+        await asyncio.to_thread(
+            (agent_dir / "config.yaml").write_text,
+            "name: cancel-agent\ndescription: base\nmodel: old-model\n",
+            encoding="utf-8",
+        )
+
+        real_load = agents_router.load_agent_config
+        order: list[str] = []
+        order_lock = threading.Lock()
+        first_inside = threading.Event()
+        release_first = threading.Event()
+        calls = {"n": 0}
+
+        def _gated_load(*args, **kwargs):
+            with order_lock:
+                index = calls["n"]
+                calls["n"] += 1
+                order.append(f"enter-{index}")
+            if index == 0:
+                first_inside.set()
+                release_first.wait(timeout=5)
+                with order_lock:
+                    order.append("exit-0")
+            return real_load(*args, **kwargs)
+
+        monkeypatch.setattr(agents_router, "load_agent_config", _gated_load)
+
+        first = asyncio.create_task(update_agent("cancel-agent", AgentUpdateRequest(description="first")))
+        assert await asyncio.to_thread(first_inside.wait, 5), "first worker never entered the critical section"
+
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+
+        second = asyncio.create_task(update_agent("cancel-agent", AgentUpdateRequest(model="new-model")))
+        await asyncio.sleep(0.1)
+
+        # The cancelled request's worker still owns the agent.
+        with order_lock:
+            assert order == ["enter-0"], f"second writer entered while the cancelled worker held the agent: {order}"
+
+        release_first.set()
+        await second
+
+        with order_lock:
+            assert order[:2] == ["enter-0", "exit-0"], order
     finally:
         load_agents_api_config_from_dict({})
