@@ -1063,9 +1063,11 @@ class TestChannelManager:
 
         PR #3584 added inbound dedupe for the IM channels; the GitHub channel
         added in PR #3754 never stamped the ``message_id`` / workspace the
-        dedupe keys on, so GitHub's native "Redeliver" button or a
-        retry-on-timeout re-ran the agent with real side effects (e.g. a
-        duplicate PR comment). The dispatcher now stamps the X-GitHub-Delivery
+        dedupe keys on, so a redelivered GitHub webhook (the native
+        "Redeliver" button, the REST API, or an operator's own recovery
+        script — GitHub does not auto-retry a failed delivery) re-ran the
+        agent with real side effects (e.g. a duplicate PR comment). The
+        dispatcher now stamps the X-GitHub-Delivery
         GUID (scoped per agent) plus the repo, so the same manager dedupe
         absorbs the replay — while a second agent bound to the same delivery,
         and a genuinely new delivery, still fire.

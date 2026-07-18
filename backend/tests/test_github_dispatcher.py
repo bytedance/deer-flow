@@ -1037,7 +1037,7 @@ async def test_coder_and_reviewer_on_same_pr_get_distinct_threads(base_dir: Path
 
 
 # ---------------------------------------------------------------------------
-# Inbound dedupe identity — redelivery / retry-on-timeout protection
+# Inbound dedupe identity — redelivery / replay protection
 # ---------------------------------------------------------------------------
 
 
@@ -1048,8 +1048,9 @@ async def test_delivery_id_populates_inbound_dedupe_identity(base_dir: Path) -> 
     The inbound dedupe added for the IM channels in PR #3584 keys on a
     top-level ``metadata["message_id"]`` plus a workspace id. The GitHub
     channel added later (PR #3754) never populated either, so a redelivered
-    webhook (native "Redeliver" button / retry-on-timeout) re-ran the agent.
-    Fan-out now stamps the ``X-GitHub-Delivery`` GUID (scoped per owning
+    webhook (native "Redeliver" button, REST API, or an operator's own
+    recovery script — GitHub does not auto-retry a failed delivery) re-ran
+    the agent. Fan-out now stamps the ``X-GitHub-Delivery`` GUID (scoped per owning
     user + agent) as the message id and the repo as the workspace id,
     exactly where ``ChannelManager._inbound_dedupe_key`` looks.
     """
