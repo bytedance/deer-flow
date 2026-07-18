@@ -405,8 +405,11 @@ async def fanout_event(
         # globally-unique per-delivery GUID; it is reused verbatim when a
         # delivery is retried after a timeout or replayed via the repo/App
         # "Redeliver" button, so keying on it lets the manager absorb those
-        # replays instead of re-running the agent (and its real side effects,
-        # e.g. a duplicate PR comment). One delivery fans out to N agents
+        # replays (within the in-memory dedupe TTL — see
+        # ``INBOUND_DEDUPE_TTL_SECONDS`` in ``app.channels.manager``; a late
+        # manual "Redeliver" or one after a Gateway restart is not deduped)
+        # instead of re-running the agent (and its real side effects, e.g. a
+        # duplicate PR comment). One delivery fans out to N agents
         # across potentially N different owning users, so the per-message id
         # is scoped to (delivery, user, agent): an identical redelivery
         # reproduces the same triples (deduped) while two agents matching the
