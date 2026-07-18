@@ -29,10 +29,39 @@ _config_signature: _ConfigSignature | None = None  # (mtime, size, sha256) at in
 
 
 def _resolve_config_path() -> Path | None:
-    """Resolve the extensions config file path, or ``None`` when unconfigured."""
+    """Resolve the extensions config file path, or ``None`` when unconfigured.
+
+    ``ExtensionsConfig.resolve_config_path()`` raises ``FileNotFoundError``
+    when an explicit `config_path` or `DEER_FLOW_EXTENSIONS_CONFIG_PATH`
+    points at a file that does not exist. That is deliberate for callers that
+    load the config for actual use (e.g. ``ExtensionsConfig.from_file()`` via
+    ``get_mcp_tools()``): an operator-asserted explicit path going missing is
+    a real misconfiguration and must be surfaced loudly.
+
+    This helper is not one of those callers — it only backs the cache's own
+    staleness check (``_is_cache_stale``, via ``_current_config_state``),
+    which runs on every ``get_cached_mcp_tools()`` call and just wants to know
+    whether the previously loaded config is still current. If the file behind
+    a previously-valid explicit/env-var path becomes unreadable later
+    (deleted mid-run, a Docker mount hiccup, ...), raising here would crash
+    every subsequent call to that hot per-request path instead of leaving the
+    cache serving its last-known-good MCP tools. So this wrapper catches that
+    specific failure and treats it the same as "unconfigured", matching
+    ``_is_cache_stale()``'s existing fail-soft handling of a ``None`` config
+    state (see its docstring). Scoping the catch here — rather than making
+    ``resolve_config_path()`` itself return ``None`` for every caller — keeps
+    the loud failure intact for callers that actually need the file.
+    """
     from deerflow.config.extensions_config import ExtensionsConfig
 
-    return ExtensionsConfig.resolve_config_path()
+    try:
+        return ExtensionsConfig.resolve_config_path()
+    except FileNotFoundError:
+        logger.debug(
+            "Extensions config path could not be resolved while checking MCP cache staleness; treating as unconfigured for this check.",
+            exc_info=True,
+        )
+        return None
 
 
 def _current_config_state() -> tuple[Path | None, _ConfigSignature | None]:
