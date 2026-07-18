@@ -1054,6 +1054,7 @@ def _summarization_trigger_tokens(app_config: Any) -> int | None:
             return None
         configured = getattr(summarization, "trigger", None)
         triggers = configured if isinstance(configured, (list, tuple)) else [configured] if configured is not None else []
+        token_thresholds: list[int] = []
         for trig in triggers:
             if isinstance(trig, dict):
                 ttype = trig.get("type")
@@ -1062,7 +1063,12 @@ def _summarization_trigger_tokens(app_config: Any) -> int | None:
                 ttype = getattr(trig, "type", None)
                 tvalue = getattr(trig, "value", None)
             if ttype == "tokens" and isinstance(tvalue, int) and tvalue > 0:
-                return int(tvalue)
+                token_thresholds.append(tvalue)
+        if token_thresholds:
+            # Summarization runs when *any* configured threshold is met, so
+            # the smallest token threshold defines the actual reserved
+            # headroom regardless of the order in config.yaml.
+            return min(token_thresholds)
     except Exception:
         logger.warning("Failed to read summarization trigger for context usage", exc_info=True)
     return None

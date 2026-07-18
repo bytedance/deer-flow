@@ -306,6 +306,21 @@ def test_summarization_trigger_picks_tokens_type():
     assert context_usage._summarization_trigger_tokens(config) == 12345
 
 
+def test_summarization_trigger_uses_earliest_token_threshold():
+    config = SimpleNamespace(
+        summarization=SimpleNamespace(
+            enabled=True,
+            trigger=[
+                {"type": "tokens", "value": 12000},
+                {"type": "messages", "value": 10},
+                {"type": "tokens", "value": 4000},
+            ],
+        ),
+    )
+
+    assert context_usage._summarization_trigger_tokens(config) == 4000
+
+
 def test_summarization_trigger_accepts_single_context_size():
     from deerflow.config.summarization_config import ContextSize
 
