@@ -15,6 +15,7 @@ from typing import Annotated, Any
 from langchain.tools import InjectedToolArg, tool
 from langgraph.config import get_config
 
+from deerflow.agents.middlewares.input_sanitization_middleware import neutralize_untrusted_tags
 from deerflow.config.paths import get_paths
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.tools.types import Runtime
@@ -29,7 +30,7 @@ _MAX_MAX_RESULTS = 100
 
 def _extension_label(file_path: Path) -> str:
     suffix = file_path.suffix.lower()
-    return suffix or "(no extension)"
+    return neutralize_untrusted_tags(suffix) or "(no extension)"
 
 
 def _format_omitted_summary(omitted: list[str]) -> str:
@@ -151,19 +152,19 @@ def _list_uploaded_files_impl(
     for _, file_path, st_size in visible:
         filename = file_path.name
         file_info: dict = {
-            "filename": filename,
+            "filename": neutralize_untrusted_tags(filename),
             "size": st_size,
-            "path": f"/mnt/user-data/uploads/{filename}",
-            "extension": file_path.suffix,
+            "path": neutralize_untrusted_tags(f"/mnt/user-data/uploads/{filename}"),
+            "extension": neutralize_untrusted_tags(file_path.suffix),
         }
 
         should_include_outline = outline_for_all or filename in outline_filenames
         if should_include_outline:
             outline, preview = extract_outline_for_file(file_path)
             if outline:
-                file_info["outline"] = outline
+                file_info["outline"] = [{**entry, "title": neutralize_untrusted_tags(entry["title"])} if "title" in entry else entry for entry in outline]
             if preview:
-                file_info["outline_preview"] = preview
+                file_info["outline_preview"] = [neutralize_untrusted_tags(p) for p in preview]
 
         files.append(file_info)
 
