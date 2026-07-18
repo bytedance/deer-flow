@@ -105,7 +105,7 @@ _is_deerflow_pid() {
         return 0
     fi
 
-    files=$(lsof -p "$pid" 2>/dev/null) || return 1
+    files=$(lsof -b -w -p "$pid" 2>/dev/null) || return 1
     while IFS= read -r root; do
         [ -n "$root" ] || continue
         case "$files" in
@@ -122,7 +122,7 @@ _report_reclaimed_ports() {
     for port in 8001 3000 2026; do
         for pid in $(lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null); do
             _is_deerflow_pid "$pid" || continue
-            files=$(lsof -p "$pid" 2>/dev/null)
+            files=$(lsof -b -w -p "$pid" 2>/dev/null)
             case "$files" in *"$REPO_ROOT"/*) continue ;; esac  # this worktree — normal
             owner=""
             while IFS= read -r root; do
@@ -203,8 +203,10 @@ _is_repo_nginx_pid() {
     local args
 
     command=$(ps -p "$pid" -o comm= 2>/dev/null) || return 1
+    # nginx rewrites argv[0] for master/worker processes. On macOS,
+    # `ps -o comm=` can report that rewritten form instead of the binary name.
     case "$command" in
-        nginx|*/nginx) ;;
+        nginx|*/nginx|nginx:*) ;;
         *) return 1 ;;
     esac
 

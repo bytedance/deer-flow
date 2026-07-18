@@ -8,6 +8,8 @@ import { getI18n } from "@/core/i18n/server";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
 
+import { MobileNav } from "./mobile-nav";
+
 export type HeaderProps = {
   className?: string;
   homeURL?: string;
@@ -21,20 +23,21 @@ export async function Header({ className, homeURL, locale }: HeaderProps) {
   return (
     <header
       className={cn(
-        "container-md fixed top-0 right-0 left-0 z-20 mx-auto flex h-16 items-center justify-between backdrop-blur-xs",
+        "container-md fixed top-0 right-0 left-0 z-20 mx-auto flex h-16 items-center justify-between gap-3 px-4 backdrop-blur-xs",
         className,
       )}
     >
-      <div className="flex items-center gap-6">
+      <div className="flex min-w-0 items-center gap-6">
         <a
           href={homeURL ?? "https://github.com/bytedance/deer-flow"}
           target={isExternalHome ? "_blank" : "_self"}
           rel={isExternalHome ? "noopener noreferrer" : undefined}
+          className="font-serif text-xl whitespace-nowrap"
         >
-          <h1 className="font-serif text-xl">DeerFlow</h1>
+          DeerFlow
         </a>
       </div>
-      <nav className="mr-8 ml-auto flex items-center gap-8 text-sm font-medium">
+      <nav className="ml-auto hidden items-center gap-5 text-sm font-medium sm:flex md:mr-8 md:gap-8">
         <Link
           href={`/${lang}/docs`}
           className="text-secondary-foreground hover:text-foreground transition-colors"
@@ -68,12 +71,18 @@ export async function Header({ className, homeURL, locale }: HeaderProps) {
             rel="noopener noreferrer"
           >
             <GitHubLogoIcon className="size-4" />
-            Star on GitHub
+            <span className="hidden sm:inline">Star on GitHub</span>
             {env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true" &&
               env.GITHUB_OAUTH_TOKEN && <StarCounter />}
           </a>
         </Button>
       </div>
+      <MobileNav
+        links={[
+          { href: `/${lang}/docs`, label: t.home.docs },
+          { href: "/blog/posts", label: t.home.blog },
+        ]}
+      />
       <hr className="from-border/0 via-border/70 to-border/0 absolute top-16 right-0 left-0 z-10 m-0 h-px w-full border-none bg-linear-to-r" />
     </header>
   );

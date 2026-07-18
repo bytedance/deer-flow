@@ -132,6 +132,96 @@ class TestMemoryRunStore:
         await store.delete("nope")  # should not raise
 
     @pytest.mark.anyio
+    async def test_list_by_thread_unknown_thread_is_empty(self, store):
+        await store.put("r1", thread_id="t1")
+        assert await store.list_by_thread("missing") == []
+
+    @pytest.mark.anyio
+    async def test_list_by_thread_newest_first(self, store):
+        await store.put("r1", thread_id="t1", created_at="2024-01-01T00:00:00+00:00")
+        await store.put("r2", thread_id="t1", created_at="2024-01-03T00:00:00+00:00")
+        await store.put("r3", thread_id="t1", created_at="2024-01-02T00:00:00+00:00")
+        rows = await store.list_by_thread("t1")
+        assert [r["run_id"] for r in rows] == ["r2", "r3", "r1"]
+
+    @pytest.mark.anyio
+    async def test_list_by_thread_respects_limit(self, store):
+        for i in range(5):
+            await store.put(f"r{i}", thread_id="t1", created_at=f"2024-01-0{i + 1}T00:00:00+00:00")
+        rows = await store.list_by_thread("t1", limit=2)
+        assert [r["run_id"] for r in rows] == ["r4", "r3"]
+
+    @pytest.mark.anyio
+    async def test_delete_keeps_thread_index_consistent(self, store):
+        await store.put("r1", thread_id="t1")
+        await store.put("r2", thread_id="t1")
+        await store.delete("r1")
+        rows = await store.list_by_thread("t1")
+        assert [r["run_id"] for r in rows] == ["r2"]
+        # deleting the last run in a thread drops the now-empty index bucket
+        await store.delete("r2")
+        assert await store.list_by_thread("t1") == []
+        assert "t1" not in store._runs_by_thread
+
+    @pytest.mark.anyio
+    async def test_aggregate_tokens_by_thread_scopes_to_thread(self, store):
+        await store.put("r1", thread_id="t1")
+        await store.update_run_completion("r1", status="success", model_name="m-a", total_tokens=100)
+        await store.put("r2", thread_id="t1")
+        await store.update_run_completion("r2", status="error", model_name="m-a", total_tokens=20)
+        await store.put("r3", thread_id="t2")
+        await store.update_run_completion("r3", status="success", model_name="m-b", total_tokens=999)
+
+        agg = await store.aggregate_tokens_by_thread("t1")
+        assert agg["total_tokens"] == 120  # the other thread's run is excluded
+        assert agg["total_runs"] == 2
+        assert agg["by_model"]["m-a"] == {"tokens": 120, "runs": 2}
+        assert "m-b" not in agg["by_model"]
+
+    @pytest.mark.anyio
+    async def test_aggregate_tokens_by_thread_excludes_active_unless_requested(self, store):
+        await store.put("r1", thread_id="t1")
+        await store.update_run_completion("r1", status="success", total_tokens=10)
+        await store.put("r2", thread_id="t1")
+        await store.update_run_completion("r2", status="running", total_tokens=5)
+
+        assert (await store.aggregate_tokens_by_thread("t1"))["total_tokens"] == 10
+        assert (await store.aggregate_tokens_by_thread("t1", include_active=True))["total_tokens"] == 15
+
+    @pytest.mark.anyio
+    async def test_aggregate_tokens_by_thread_unknown_thread_is_zero(self, store):
+        await store.put("r1", thread_id="t1")
+        await store.update_run_completion("r1", status="success", total_tokens=10)
+        agg = await store.aggregate_tokens_by_thread("missing")
+        assert agg["total_tokens"] == 0
+        assert agg["total_runs"] == 0
+        assert agg["by_model"] == {}
+
+    @pytest.mark.anyio
+    async def test_aggregate_tokens_by_thread_matches_full_scan_reference(self, store):
+        plan = [
+            ("r0", "t1", "success", "m-a", 10),
+            ("r1", "t1", "error", "m-b", 20),
+            ("r2", "t1", "running", "m-a", 7),
+            ("r3", "t2", "success", "m-a", 999),
+            ("r4", "t1", "pending", "m-a", 3),
+        ]
+        for run_id, thread_id, status, model, tokens in plan:
+            await store.put(run_id, thread_id=thread_id)
+            await store.update_run_completion(run_id, status=status, model_name=model, total_tokens=tokens)
+
+        def _reference(thread_id, include_active):
+            statuses = ("success", "error", "running") if include_active else ("success", "error")
+            completed = [r for r in store._runs.values() if r["thread_id"] == thread_id and r.get("status") in statuses]
+            return len(completed), sum(r.get("total_tokens", 0) for r in completed)
+
+        for thread_id in ("t1", "t2", "missing"):
+            for include_active in (False, True):
+                agg = await store.aggregate_tokens_by_thread(thread_id, include_active=include_active)
+                ref_runs, ref_tokens = _reference(thread_id, include_active)
+                assert (agg["total_runs"], agg["total_tokens"]) == (ref_runs, ref_tokens), (thread_id, include_active)
+
+    @pytest.mark.anyio
     async def test_list_pending(self, store):
         await store.put("r1", thread_id="t1", status="pending")
         await store.put("r2", thread_id="t1", status="running")

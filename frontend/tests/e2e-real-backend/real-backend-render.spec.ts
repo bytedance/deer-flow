@@ -11,13 +11,15 @@ const here = dirname(fileURLToPath(import.meta.url));
  * API key) and assert the browser renders the backend's data correctly.
  *
  * The prompt is read from the same fixture the gateway replays, so the input
- * hash matches and the recorded turns (write_file -> auto-title -> read_file ->
- * final answer) reproduce deterministically.
+ * hash matches and the recorded model turns reproduce deterministically. The
+ * default auto-title is local fallback state, not a replayed model turn.
  */
 // Register through the frontend origin (same-origin proxy) so the auth cookies
-// are stored for and sent to localhost:3000 — the gateway is reached via the
+// are stored for and sent to the browser origin — the gateway is reached via the
 // next.config rewrite, never cross-origin from the browser.
-const APP = "http://localhost:3000";
+const APP =
+  process.env.E2E_APP_URL ??
+  `http://localhost:${process.env.E2E_FRONTEND_PORT ?? "3000"}`;
 const fixture = JSON.parse(
   readFileSync(
     join(
@@ -32,10 +34,17 @@ const fixture = JSON.parse(
 };
 
 const PROMPT = fixture.prompt;
-// Derive the assertions from the fixture so a re-record auto-updates them. Both
-// are model-generated strings absent from the user prompt, so a pass proves the
-// replay drove the render (not a prompt echo): the first plain-text turn is the
-// in-graph auto-title; the JSON-array turn is the follow-up suggestions.
+const FALLBACK_TITLE_MAX_CHARS = 50;
+
+function fallbackTitle(userMsg: string): string {
+  if (!userMsg) return "New Conversation";
+  if (userMsg.length <= FALLBACK_TITLE_MAX_CHARS) return userMsg;
+  return `${userMsg.slice(0, FALLBACK_TITLE_MAX_CHARS).trimEnd()}...`;
+}
+
+// Suggestions still come from the recorded model fixture. The default title no
+// longer does: TitleMiddleware uses a local fallback when title.model_name is
+// unset, so derive that expected title from the prompt.
 const textTurns = fixture.turns
   .map((t) => t.output?.data?.content)
   .filter((c): c is string => typeof c === "string" && c.trim().length > 0);
@@ -52,7 +61,7 @@ const EXPECTED_SUGGESTION = ((): string => {
     return "";
   }
 })();
-const EXPECTED_TITLE = textTurns.find((c) => !c.trim().startsWith("[")) ?? "";
+const EXPECTED_TITLE = fallbackTitle(PROMPT);
 
 test.describe("real backend render (replay, no API key)", () => {
   test.beforeEach(async ({ context }) => {
@@ -66,7 +75,7 @@ test.describe("real backend render (replay, no API key)", () => {
     expect(resp.status(), await resp.text()).toBe(201);
   });
 
-  test("renders the replayed auto-title + suggestions from a real backend", async ({
+  test("renders the local auto-title + replayed suggestions from a real backend", async ({
     page,
   }) => {
     // ultra mode so the context the frontend sends (is_plan_mode + subagent_enabled)
@@ -85,17 +94,13 @@ test.describe("real backend render (replay, no API key)", () => {
     await textarea.fill(PROMPT);
     await textarea.press("Enter");
 
-    // Replay-only DOM assertions (derived from the fixture): both are
-    // model-generated strings absent from the user prompt, so they render only if
-    // the recorded turns replayed AND the real frontend rendered them — the
-    // in-graph auto-title and the post-answer follow-up suggestion. Together they
-    // prove the whole pipeline (replay backend -> real frontend render). The
-    // record spec waits for the /suggestions response, so a re-recorded fixture
-    // always captures the suggestion turn — a missing one is a broken recording
-    // and must fail loud here, not pass silently.
+    // The title is the default local fallback, while the suggestion is a
+    // replayed model output absent from the prompt. Together they prove the
+    // backend state update and the replayed post-answer model call both render
+    // through the real frontend.
     expect(
       EXPECTED_TITLE,
-      "fixture should contain an auto-title turn",
+      "default local fallback title should be derived from the prompt",
     ).not.toBe("");
     expect(
       EXPECTED_SUGGESTION,

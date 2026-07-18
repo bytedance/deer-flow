@@ -143,6 +143,29 @@ const extensionMap: Record<string, string> = {
   v: "v",
 };
 
+const browserPreviewExtensions = new Set([
+  "pdf",
+  "apng",
+  "avif",
+  "bmp",
+  "gif",
+  "ico",
+  "jpg",
+  "jpeg",
+  "png",
+  "webp",
+  "mp3",
+  "wav",
+  "ogg",
+  "aac",
+  "m4a",
+  "flac",
+  "mp4",
+  "mov",
+  "m4v",
+  "webm",
+]);
+
 export function getFileName(filepath: string) {
   return filepath.split("/").pop()!;
 }
@@ -168,6 +191,10 @@ export function checkCodeFile(
     isCodeFile: false,
     language: null,
   };
+}
+
+export function canBrowserPreviewFile(filepath: string) {
+  return browserPreviewExtensions.has(getFileExtension(filepath));
 }
 
 export function getFileExtensionDisplayName(filepath: string) {

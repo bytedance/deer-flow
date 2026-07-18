@@ -153,7 +153,7 @@ def _make_model_config_name(model_name: str) -> str:
 
     Replaces path separators and dots with hyphens so the result is a clean
     YAML-friendly identifier (e.g. "google/gemini-2.5-pro" → "gemini-2-5-pro",
-    "gpt-5.4" → "gpt-5-4", "deepseek-chat" → "deepseek-chat").
+    "gpt-5.4" → "gpt-5-4", "deepseek-v4-pro" → "deepseek-v4-pro").
     """
     # Take only the last path component for namespaced models (e.g. "org/model-name")
     base = model_name.split("/")[-1]

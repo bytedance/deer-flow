@@ -1,10 +1,17 @@
-import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  test,
+  rs,
+} from "@rstest/core";
 
 import { AUTH_DISABLED_USER } from "@/core/auth/auth-disabled-user";
 import { STATIC_WEBSITE_USER } from "@/core/auth/static-user";
 
-vi.mock("next/headers", () => ({
-  cookies: vi.fn(() => {
+rs.mock("next/headers", () => ({
+  cookies: rs.fn(() => {
     throw new Error("cookies should not be read in static website mode");
   }),
 }));
@@ -44,7 +51,7 @@ function restoreEnv(snapshot: EnvSnapshot) {
 }
 
 async function loadFreshServerAuth() {
-  vi.resetModules();
+  rs.resetModules();
   return await import("@/core/auth/server");
 }
 
@@ -61,15 +68,15 @@ describe("getServerSideUser", () => {
 
   afterEach(() => {
     restoreEnv(saved);
-    vi.unstubAllGlobals();
+    rs.unstubAllGlobals();
   });
 
   test("bypasses gateway auth in static website mode", async () => {
     setEnv("NEXT_PUBLIC_STATIC_WEBSITE_ONLY", "true");
-    const fetchSpy = vi.fn(() => {
+    const fetchSpy = rs.fn(() => {
       throw new Error("fetch should not be called in static website mode");
     });
-    vi.stubGlobal("fetch", fetchSpy);
+    rs.stubGlobal("fetch", fetchSpy);
 
     const { getServerSideUser } = await loadFreshServerAuth();
 
@@ -82,10 +89,10 @@ describe("getServerSideUser", () => {
 
   test("bypasses gateway auth in auth-disabled mode", async () => {
     setEnv("DEER_FLOW_AUTH_DISABLED", "1");
-    const fetchSpy = vi.fn(() => {
+    const fetchSpy = rs.fn(() => {
       throw new Error("fetch should not be called in auth-disabled mode");
     });
-    vi.stubGlobal("fetch", fetchSpy);
+    rs.stubGlobal("fetch", fetchSpy);
 
     const { getServerSideUser } = await loadFreshServerAuth();
 
@@ -118,21 +125,21 @@ describe("getServerSideUser — gateway_unavailable contract (issue #3493)", () 
 
   afterEach(() => {
     restoreEnv(saved);
-    vi.unstubAllGlobals();
-    vi.doUnmock("next/headers");
+    rs.unstubAllGlobals();
+    rs.doUnmock("next/headers");
   });
 
   test("returns gateway_unavailable when /auth/me fetch rejects (e.g. AbortError)", async () => {
-    vi.doMock("next/headers", () => ({
-      cookies: vi.fn(async () => ({
+    rs.doMock("next/headers", () => ({
+      cookies: rs.fn(async () => ({
         get: (name: string) =>
           name === "access_token" ? { value: "stub-token" } : undefined,
       })),
     }));
     const abortErr = new DOMException("Aborted", "AbortError");
-    vi.stubGlobal(
+    rs.stubGlobal(
       "fetch",
-      vi.fn(() => Promise.reject(abortErr)),
+      rs.fn(() => Promise.reject(abortErr)),
     );
 
     const { getServerSideUser } = await loadFreshServerAuth();
@@ -143,15 +150,15 @@ describe("getServerSideUser — gateway_unavailable contract (issue #3493)", () 
   });
 
   test("returns gateway_unavailable when /auth/me responds with a 5xx", async () => {
-    vi.doMock("next/headers", () => ({
-      cookies: vi.fn(async () => ({
+    rs.doMock("next/headers", () => ({
+      cookies: rs.fn(async () => ({
         get: (name: string) =>
           name === "access_token" ? { value: "stub-token" } : undefined,
       })),
     }));
-    vi.stubGlobal(
+    rs.stubGlobal(
       "fetch",
-      vi.fn(() =>
+      rs.fn(() =>
         Promise.resolve(
           new Response("upstream error", {
             status: 503,

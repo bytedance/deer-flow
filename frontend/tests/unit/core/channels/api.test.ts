@@ -1,10 +1,10 @@
-import { beforeEach, describe, expect, test, vi } from "vitest";
+import { beforeEach, describe, expect, test, rs } from "@rstest/core";
 
-vi.mock("@/core/api/fetcher", () => ({
-  fetch: vi.fn(),
+rs.mock("@/core/api/fetcher", () => ({
+  fetch: rs.fn(),
 }));
 
-vi.mock("@/core/config", () => ({
+rs.mock("@/core/config", () => ({
   getBackendBaseURL: () => "/backend",
 }));
 
@@ -18,7 +18,7 @@ import {
   listChannelProviders,
 } from "@/core/channels/api";
 
-const mockedFetch = vi.mocked(fetcher);
+const mockedFetch = rs.mocked(fetcher);
 
 function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {

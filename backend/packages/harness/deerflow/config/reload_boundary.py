@@ -51,6 +51,11 @@ STARTUP_ONLY_FIELDS: dict[str, str] = {
     "log_level": (
         "apply_logging_level() runs only during app.py startup; it sets the deerflow/app logger levels and may lower root handler thresholds so configured messages can propagate. A freshly reloaded AppConfig does not retrigger it."
     ),
+    "logging": (
+        "configure_logging() runs only during app.py startup; it installs/removes the trace-context filter and the enhanced formatter on root handlers, "
+        "and TraceMiddleware captures logging.enhance.enabled once at startup so response X-Trace-Id headers, log trace_id fields, and Langfuse "
+        "deerflow_trace_id stay coherent. A freshly reloaded AppConfig does not retrigger any of this."
+    ),
     # Not part of the AppConfig Pydantic schema — channel credentials are
     # consumed directly by ``start_channel_service()`` once at lifespan
     # startup and the live channel clients are not rebuilt on
@@ -58,6 +63,14 @@ STARTUP_ONLY_FIELDS: dict[str, str] = {
     "channels": ("start_channel_service() is invoked once during startup; the live IM channel clients (Feishu, Slack, Telegram, DingTalk) are not rebuilt when channels.* changes."),
     "channel_connections": (
         "start_channel_service() wires the connection repository and channel workers once at startup, and the channel-connections router caches the merged provider config on app.state; channel_connections.* edits need a restart."
+    ),
+    "scheduler": (
+        "ScheduledTaskService is constructed and started once during Gateway lifespan startup; enabled, poll_interval_seconds, lease_seconds, "
+        "and max_concurrent_runs are captured into the service instance and the background poller task is not rebuilt on config.yaml edits."
+    ),
+    "run_ownership": (
+        "RunOwnershipConfig is captured once into RunManager at langgraph_runtime() startup; the lease heartbeat background task is created and "
+        "started there, and heartbeat_enabled / lease_seconds / grace_seconds are not re-read on config.yaml edits."
     ),
 }
 

@@ -78,6 +78,11 @@ EXACT_CALL_RULES: dict[str, _CallRule] = {
         "ASYNC_THREAD_OFFLOAD",
         "Offloads synchronous work from an async context into a worker thread.",
     ),
+    "deerflow.utils.file_io.run_file_io": _CallRule(
+        "INFO",
+        "ASYNC_FILE_IO_OFFLOAD",
+        "Offloads filesystem-oriented work from an async context into the dedicated file IO thread pool.",
+    ),
     "asyncio.new_event_loop": _CallRule(
         "WARN",
         "NEW_EVENT_LOOP",

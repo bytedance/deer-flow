@@ -1,0 +1,94 @@
+name: Publish Helm Chart
+
+# Publishes the DeerFlow Helm chart as an OCI artifact to GHCR alongside the
+# container images (see container.yaml). Triggers on the same `v*` tags.
+#
+# On pull requests touching the chart or config.example.yaml, `validate-chart`
+# runs lint + template render + a sandbox Service-type gating check + a
+# config_version drift check (the chart's embedded config_version must not lag
+# config.example.yaml) so a broken or stale chart fails the PR, not the release.
+#
+# Users then install with:
+#   helm install deer-flow oci://ghcr.io/${{ owner }}/charts/deer-flow --version <ver>
+
+on:
+  push:
+    tags:
+      - "v*"
+  pull_request:
+    paths:
+      - "deploy/helm/deer-flow/**"
+      - "config.example.yaml"
+      - ".github/workflows/chart.yaml"
+      - "scripts/check_config_version.sh"
+      - "scripts/check_chart_sandbox_service.sh"
+
+jobs:
+  validate-chart:
+    # Runs on PRs and release tags: catch a broken render or a stale
+    # config_version before merge / publish. A broken chart published under a
+    # vX.Y.Z tag is an immutable OCI artifact (GHCR won't let you overwrite
+    # --version), so a regression must fail here, not on install.
+    if: github.event_name == 'pull_request' || startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 #v6.0.3
+
+      # ubuntu-latest ships with helm 3 preinstalled - no setup-helm action needed.
+      - name: Lint chart
+        run: helm lint deploy/helm/deer-flow
+      - name: Validate templates render
+        run: helm template deer-flow deploy/helm/deer-flow --include-crds >/dev/null
+
+      # Assert the sandbox Service-type gating: default emits
+      # SANDBOX_SERVICE_TYPE=ClusterIP and no NODE_HOST; the NodePort opt-in
+      # emits both. Guards the #3929 default flip against regressions.
+      - name: Validate sandbox Service-type gating
+        run: bash scripts/check_chart_sandbox_service.sh
+
+      # The chart's `config:` block embeds a config_version that must not fall
+      # behind config.example.yaml. A stale version is silent in-cluster (the
+      # image ships no example to compare against, so _check_config_version
+      # never warns) but means the chart's config is authored against an older
+      # schema. Bump it in values.yaml and the README example. config_version
+      # gates no runtime behavior - it only drives the outdated-warning - so a
+      # bare version bump needs no field changes. Logic lives in
+      # scripts/check_config_version.sh (shared with nightly.yaml).
+      - name: config_version drift check
+        run: bash scripts/check_config_version.sh
+
+  verify-versions:
+    # Gate the release: every version source must match the v* tag. A forgotten
+    # bump in Chart.yaml, pyproject.toml, or package.json fails here and skips
+    # the publish. See scripts/verify_versions.sh.
+    if: startsWith(github.ref, 'refs/tags/v')
+    uses: ./.github/workflows/verify-versions.yml
+
+  publish-chart:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [verify-versions, validate-chart]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 #v6.0.3
+
+      - name: Log in to GHCR
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | \
+            helm registry login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: Package chart
+        run: helm package deploy/helm/deer-flow --destination ./packages
+
+      - name: Push chart to GHCR
+        run: |
+          for pkg in ./packages/*.tgz; do
+            echo "--- pushing $pkg"
+            helm push "$pkg" oci://ghcr.io/${{ github.repository_owner }}/charts
+          done

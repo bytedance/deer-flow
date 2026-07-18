@@ -27,6 +27,7 @@ def isolated_cwd(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("UV_EXTRAS", raising=False)
     monkeypatch.delenv("DEER_FLOW_CONFIG_PATH", raising=False)
+    monkeypatch.delenv("DEER_FLOW_STREAM_BRIDGE_REDIS_URL", raising=False)
     return tmp_path
 
 
@@ -142,6 +143,25 @@ def test_detect_from_config_sqlite_returns_no_extras(tmp_path):
     assert detect.detect_from_config(cfg) == []
 
 
+def test_detect_from_config_redis_via_stream_bridge(tmp_path):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("stream_bridge:\n  type: redis\n  redis_url: redis://localhost:6379/0\n")
+    assert detect.detect_from_config(cfg) == ["redis"]
+
+
+def test_detect_from_config_memory_stream_bridge_returns_no_extras(tmp_path):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("stream_bridge:\n  type: memory\n  queue_maxsize: 256\n")
+    assert detect.detect_from_config(cfg) == []
+
+
+def test_detect_from_config_combines_postgres_and_redis(tmp_path):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("database:\n  backend: postgres\nstream_bridge:\n  type: redis\n")
+    # Sorted unique extras across all detectors.
+    assert detect.detect_from_config(cfg) == ["postgres", "redis"]
+
+
 def test_detect_from_config_dedupes_when_both_present(tmp_path):
     cfg = tmp_path / "config.yaml"
     cfg.write_text("checkpointer:\n  type: postgres\ndatabase:\n  backend: postgres\n")
@@ -164,6 +184,17 @@ def test_resolve_extras_env_overrides_config(isolated_cwd, monkeypatch):
 def test_resolve_extras_env_supports_multiple(isolated_cwd, monkeypatch):
     monkeypatch.setenv("UV_EXTRAS", "postgres,ollama")
     assert detect.resolve_extras() == ["postgres", "ollama"]
+
+
+def test_resolve_extras_detects_redis_url_env_without_config(isolated_cwd, monkeypatch):
+    monkeypatch.setenv("DEER_FLOW_STREAM_BRIDGE_REDIS_URL", "redis://redis:6379/0")
+    assert detect.resolve_extras() == ["redis"]
+
+
+def test_resolve_extras_combines_uv_extras_with_redis_url_env(isolated_cwd, monkeypatch):
+    monkeypatch.setenv("UV_EXTRAS", "postgres")
+    monkeypatch.setenv("DEER_FLOW_STREAM_BRIDGE_REDIS_URL", "redis://redis:6379/0")
+    assert detect.resolve_extras() == ["postgres", "redis"]
 
 
 def test_resolve_extras_falls_back_to_config(isolated_cwd):

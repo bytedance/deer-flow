@@ -6,9 +6,9 @@ import { expect, test } from "@playwright/test";
  * RECORD driver (Plan A): drive the real frontend through the write/read-file
  * scenario against the real-model gateway. The gateway captures every model
  * call to DEERFLOW_RECORD_OUT; this just needs to drive the flow and wait until
- * the captures stop arriving (main turns + in-graph title + follow-up
- * suggestions all fired). It asserts nothing about content — it produces the
- * fixture, it doesn't verify it.
+ * the captures stop arriving (main turns + follow-up suggestions all fired;
+ * the default auto-title is local state). It asserts nothing about content —
+ * it produces the fixture, it doesn't verify it.
  */
 const APP = "http://localhost:3000";
 const SCENARIO = "write_read_file";

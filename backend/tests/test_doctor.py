@@ -198,6 +198,93 @@ class TestCheckWebSearch:
         assert result.fix is not None
         assert "make setup" in result.fix
 
+    def test_brave_with_key_ok(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("BRAVE_SEARCH_API_KEY", "bsa-test")
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: web_search\n    use: deerflow.community.brave.tools:web_search_tool\n")
+        result = doctor.check_web_search(cfg)
+        assert result.status == "ok"
+
+    def test_brave_without_key_warns(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("BRAVE_SEARCH_API_KEY", raising=False)
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: web_search\n    use: deerflow.community.brave.tools:web_search_tool\n")
+        result = doctor.check_web_search(cfg)
+        assert result.status == "warn"
+        assert result.fix is not None
+        assert "BRAVE_SEARCH_API_KEY" in result.fix
+
+    def test_brave_with_inline_api_key_warns(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("BRAVE_SEARCH_API_KEY", raising=False)
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text('config_version: 5\ntools:\n  - name: web_search\n    use: deerflow.community.brave.tools:web_search_tool\n    api_key: "inline-key"\n')
+        result = doctor.check_web_search(cfg)
+        assert result.status == "warn"
+        assert "literal api_key set in config" in result.detail
+        assert "BRAVE_SEARCH_API_KEY" in (result.fix or "")
+
+    def test_brave_with_api_key_env_ref_ok(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("BRAVE_SEARCH_API_KEY", "bsa-test")
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: web_search\n    use: deerflow.community.brave.tools:web_search_tool\n    api_key: $BRAVE_SEARCH_API_KEY\n")
+        result = doctor.check_web_search(cfg)
+        assert result.status == "ok"
+        assert "BRAVE_SEARCH_API_KEY set from config" in result.detail
+
+    def test_serper_with_key_ok(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SERPER_API_KEY", "test-key")
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: web_search\n    use: deerflow.community.serper.tools:web_search_tool\n")
+        result = doctor.check_web_search(cfg)
+        assert result.status == "ok"
+        assert "serper" in result.detail
+
+    def test_serper_without_key_warns(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("SERPER_API_KEY", raising=False)
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: web_search\n    use: deerflow.community.serper.tools:web_search_tool\n")
+        result = doctor.check_web_search(cfg)
+        assert result.status == "warn"
+        assert "SERPER_API_KEY" in (result.fix or "")
+
+    def test_serper_inline_api_key_warns(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("SERPER_API_KEY", raising=False)
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: web_search\n    use: deerflow.community.serper.tools:web_search_tool\n    api_key: inline-key\n")
+        result = doctor.check_web_search(cfg)
+        assert result.status == "warn"
+        assert "literal api_key set in config" in result.detail
+        assert "SERPER_API_KEY" in (result.fix or "")
+
+    def test_serper_config_env_ref_ok(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SERPER_API_KEY", "test-key")
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: web_search\n    use: deerflow.community.serper.tools:web_search_tool\n    api_key: $SERPER_API_KEY\n")
+        result = doctor.check_web_search(cfg)
+        assert result.status == "ok"
+        assert "SERPER_API_KEY set from config" in result.detail
+
+    def test_serper_unresolved_env_ref_falls_back_to_default_var(self, tmp_path, monkeypatch):
+        # The referenced $VAR is unset, but the default SERPER_API_KEY is set,
+        # which the tool uses as a runtime fallback; report ok rather than warn.
+        monkeypatch.delenv("MY_CUSTOM_SERPER_KEY", raising=False)
+        monkeypatch.setenv("SERPER_API_KEY", "test-key")
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: web_search\n    use: deerflow.community.serper.tools:web_search_tool\n    api_key: $MY_CUSTOM_SERPER_KEY\n")
+        result = doctor.check_web_search(cfg)
+        assert result.status == "ok"
+        assert "SERPER_API_KEY set" in result.detail
+
+    def test_serper_unresolved_env_ref_without_default_warns(self, tmp_path, monkeypatch):
+        # Neither the referenced $VAR nor the default SERPER_API_KEY is set.
+        monkeypatch.delenv("MY_CUSTOM_SERPER_KEY", raising=False)
+        monkeypatch.delenv("SERPER_API_KEY", raising=False)
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: web_search\n    use: deerflow.community.serper.tools:web_search_tool\n    api_key: $MY_CUSTOM_SERPER_KEY\n")
+        result = doctor.check_web_search(cfg)
+        assert result.status == "warn"
+        assert "SERPER_API_KEY" in (result.fix or "")
+
     def test_no_search_tool_warns(self, tmp_path):
         cfg = tmp_path / "config.yaml"
         cfg.write_text("config_version: 5\ntools: []\n")
@@ -249,6 +336,136 @@ class TestCheckWebFetch:
         cfg = tmp_path / "config.yaml"
         cfg.write_text("config_version: 5\ntools:\n  - name: web_fetch\n    use: deerflow.community.not_real.tools:web_fetch_tool\n")
         result = doctor.check_web_fetch(cfg)
+        assert result.status == "fail"
+
+
+# ---------------------------------------------------------------------------
+# check_web_capture
+# ---------------------------------------------------------------------------
+
+
+class TestCheckWebCapture:
+    def test_browserless_self_host_without_token_ok(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("BROWSERLESS_TOKEN", raising=False)
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: web_capture\n    use: deerflow.community.browserless.tools:web_capture_tool\n    base_url: http://localhost:3032\n")
+
+        result = doctor.check_web_capture(cfg)
+
+        assert result.status == "ok"
+        assert "self-hosted" in result.detail
+
+    def test_browserless_token_env_ref_ok(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("BROWSERLESS_TOKEN", "browserless-test")
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: web_capture\n    use: deerflow.community.browserless.tools:web_capture_tool\n    base_url: https://production-sfo.browserless.io\n    token: $BROWSERLESS_TOKEN\n")
+
+        result = doctor.check_web_capture(cfg)
+
+        assert result.status == "ok"
+        assert "BROWSERLESS_TOKEN set from config" in result.detail
+
+    def test_browserless_cloud_without_token_warns(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("BROWSERLESS_TOKEN", raising=False)
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: web_capture\n    use: deerflow.community.browserless.tools:web_capture_tool\n    base_url: https://production-sfo.browserless.io\n")
+
+        result = doctor.check_web_capture(cfg)
+
+        assert result.status == "warn"
+        assert "BROWSERLESS_TOKEN" in (result.fix or "")
+
+
+# ---------------------------------------------------------------------------
+# check_image_search
+# ---------------------------------------------------------------------------
+
+
+class TestCheckImageSearch:
+    def test_ddg_always_ok(self, tmp_path):
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: image_search\n    use: deerflow.community.image_search.tools:image_search_tool\n")
+        result = doctor.check_image_search(cfg)
+        assert result.status == "ok"
+        assert "DuckDuckGo" in result.detail
+
+    def test_serper_with_key_ok(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SERPER_API_KEY", "test-key")
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: image_search\n    use: deerflow.community.serper.tools:image_search_tool\n")
+        result = doctor.check_image_search(cfg)
+        assert result.status == "ok"
+        assert "serper" in result.detail
+
+    def test_serper_without_key_warns(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("SERPER_API_KEY", raising=False)
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: image_search\n    use: deerflow.community.serper.tools:image_search_tool\n")
+        result = doctor.check_image_search(cfg)
+        assert result.status == "warn"
+        assert "SERPER_API_KEY" in (result.fix or "")
+
+    def test_serper_inline_api_key_warns(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("SERPER_API_KEY", raising=False)
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: image_search\n    use: deerflow.community.serper.tools:image_search_tool\n    api_key: inline-key\n")
+        result = doctor.check_image_search(cfg)
+        assert result.status == "warn"
+        assert "literal api_key set in config" in result.detail
+        assert "SERPER_API_KEY" in (result.fix or "")
+
+    def test_serper_config_env_ref_without_env_warns(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("SERPER_API_KEY", raising=False)
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: image_search\n    use: deerflow.community.serper.tools:image_search_tool\n    api_key: $SERPER_API_KEY\n")
+        result = doctor.check_image_search(cfg)
+        assert result.status == "warn"
+        assert "SERPER_API_KEY" in (result.fix or "")
+
+    def test_brave_image_search_with_key_ok(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("BRAVE_SEARCH_API_KEY", "bsa-test")
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: image_search\n    use: deerflow.community.brave.tools:image_search_tool\n")
+        result = doctor.check_image_search(cfg)
+        assert result.status == "ok"
+        assert "brave" in result.detail
+
+    def test_brave_image_search_without_key_warns(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("BRAVE_SEARCH_API_KEY", raising=False)
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: image_search\n    use: deerflow.community.brave.tools:image_search_tool\n")
+        result = doctor.check_image_search(cfg)
+        assert result.status == "warn"
+        assert "BRAVE_SEARCH_API_KEY" in (result.fix or "")
+
+    def test_brave_image_search_inline_api_key_warns(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("BRAVE_SEARCH_API_KEY", raising=False)
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: image_search\n    use: deerflow.community.brave.tools:image_search_tool\n    api_key: inline-key\n")
+        result = doctor.check_image_search(cfg)
+        assert result.status == "warn"
+        assert "literal api_key set in config" in result.detail
+        assert "BRAVE_SEARCH_API_KEY" in (result.fix or "")
+
+    def test_infoquest_with_key_ok(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("INFOQUEST_API_KEY", "test-key")
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: image_search\n    use: deerflow.community.infoquest.tools:image_search_tool\n")
+        result = doctor.check_image_search(cfg)
+        assert result.status == "ok"
+        assert "infoquest" in result.detail
+
+    def test_no_image_search_tool_warns(self, tmp_path):
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools: []\n")
+        result = doctor.check_image_search(cfg)
+        assert result.status == "warn"
+        assert result.fix is not None
+
+    def test_invalid_provider_use_fails(self, tmp_path):
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: image_search\n    use: deerflow.community.not_real.tools:image_search_tool\n")
+        result = doctor.check_image_search(cfg)
         assert result.status == "fail"
 
 

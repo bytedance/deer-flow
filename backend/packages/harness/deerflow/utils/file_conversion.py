@@ -279,7 +279,11 @@ def extract_outline(md_path: Path) -> list[dict]:
                     if title:
                         outline.append({"title": title, "line": lineno})
 
-                if len(outline) >= MAX_OUTLINE_ENTRIES:
+                if len(outline) > MAX_OUTLINE_ENTRIES:
+                    # We collected one heading beyond the limit, which proves the
+                    # document genuinely has more than MAX_OUTLINE_ENTRIES headings.
+                    # Drop that extra entry and append the truncation sentinel.
+                    outline.pop()
                     outline.append({"truncated": True})
                     break
     except Exception:

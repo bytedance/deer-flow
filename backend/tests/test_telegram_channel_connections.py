@@ -72,6 +72,38 @@ async def test_start_with_deep_link_state_binds_telegram_chat(repo):
 
 
 @pytest.mark.anyio
+async def test_start_token_bypasses_allowed_users_filter(repo):
+    # A newly allowlisted-but-unbound user must be able to bootstrap their first
+    # bind via the deep-link start token even though their Telegram id is not yet
+    # in allowed_users. The allowed_users gate must run after token handling.
+    state = "telegram-bind-state"
+    await repo.create_oauth_state(
+        owner_user_id="deerflow-user-1",
+        provider="telegram",
+        state=state,
+        expires_at=datetime.now(UTC) + timedelta(minutes=5),
+    )
+    channel = TelegramChannel(
+        bus=MessageBus(),
+        config={
+            "bot_token": "test-token",
+            "connection_repo": repo,
+            "allowed_users": [999],  # newcomer (42) is not whitelisted
+        },
+    )
+    update = _telegram_update(text=f"/start {state}", user_id=42)
+    context = MagicMock()
+    context.args = [state]
+
+    await channel._cmd_start(update, context)
+
+    connections = await repo.list_connections("deerflow-user-1")
+    assert len(connections) == 1
+    assert connections[0]["external_account_id"] == "42"
+    assert "connected" in update.message.reply_text.await_args.args[0].lower()
+
+
+@pytest.mark.anyio
 async def test_bound_telegram_message_publishes_connection_identity(repo):
     connection = await repo.upsert_connection(
         owner_user_id="deerflow-user-1",

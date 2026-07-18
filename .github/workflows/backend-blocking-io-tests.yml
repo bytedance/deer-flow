@@ -2,7 +2,7 @@ name: Backend Blocking IO
 
 on:
   push:
-    branches: ["main"]
+    branches: ["main", "2.0.x-dev"]
     paths:
       - "backend/**"
       - ".github/workflows/backend-blocking-io-tests.yml"

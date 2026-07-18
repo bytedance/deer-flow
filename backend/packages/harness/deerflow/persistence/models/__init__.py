@@ -23,6 +23,8 @@ from deerflow.persistence.channel_connections.model import (
 from deerflow.persistence.feedback.model import FeedbackRow
 from deerflow.persistence.models.run_event import RunEventRow
 from deerflow.persistence.run.model import RunRow
+from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
+from deerflow.persistence.scheduled_tasks.model import ScheduledTaskRow
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
 from deerflow.persistence.user.model import UserRow
 
@@ -34,6 +36,8 @@ __all__ = [
     "FeedbackRow",
     "RunEventRow",
     "RunRow",
+    "ScheduledTaskRow",
+    "ScheduledTaskRunRow",
     "ThreadMetaRow",
     "UserRow",
 ]

@@ -1,3 +1,4 @@
+import asyncio
 import re
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -6,6 +7,8 @@ import pytest
 from _router_auth_helpers import make_authed_test_app
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langgraph.checkpoint.base import empty_checkpoint
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.store.memory import InMemoryStore
 
@@ -63,6 +66,35 @@ def _build_thread_app() -> tuple[FastAPI, InMemoryStore, InMemorySaver]:
     app.state.thread_store = _PermissiveThreadMetaStore(store)
     app.include_router(threads.router)
     return app, store, checkpointer
+
+
+async def _write_checkpoint(
+    checkpointer: InMemorySaver,
+    thread_id: str,
+    checkpoint_id: str,
+    messages: list[object],
+    *,
+    step: int,
+    metadata: dict | None = None,
+) -> dict:
+    checkpoint = empty_checkpoint()
+    checkpoint["id"] = checkpoint_id
+    checkpoint["channel_values"] = {"messages": messages}
+    checkpoint["channel_versions"] = {"messages": step}
+    checkpoint_metadata = {
+        "step": step,
+        "source": "loop",
+        "writes": {"test": {"messages": messages}},
+        "parents": {},
+        "created_at": f"2026-07-05T00:00:0{step}+00:00",
+    }
+    checkpoint_metadata.update(metadata or {})
+    return await checkpointer.aput(
+        {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}},
+        checkpoint,
+        checkpoint_metadata,
+        {"messages": step},
+    )
 
 
 def test_delete_thread_data_removes_thread_directory(tmp_path):
@@ -219,6 +251,190 @@ def test_create_thread_returns_iso_timestamps() -> None:
     assert body["created_at"] == body["updated_at"]
 
 
+def test_create_thread_returns_existing_when_insert_loses_race() -> None:
+    """A concurrent create that loses the INSERT race stays idempotent.
+
+    The idempotency ``get`` check and the ``create`` INSERT are not atomic:
+    a competing request for the same ``thread_id`` can commit in between, and
+    the SQL-backed store then rejects ours on the duplicate primary key. The
+    endpoint documents idempotency ("returns the existing record when
+    ``thread_id`` already exists"), so it must surface the now-present row
+    rather than turning the integrity error into an HTTP 500.
+    """
+    from sqlalchemy.exc import IntegrityError
+
+    app, store, _checkpointer = _build_thread_app()
+
+    class _RacingThreadMetaStore(_PermissiveThreadMetaStore):
+        """First create loses the race: the row is committed by a competing
+        request, then our INSERT fails with an integrity violation."""
+
+        def __init__(self, backing):
+            super().__init__(backing)
+            self._raised = False
+
+        async def create(self, thread_id, *, assistant_id=None, user_id=None, display_name=None, metadata=None):  # type: ignore[override]
+            if not self._raised:
+                self._raised = True
+                await super().create(
+                    thread_id,
+                    assistant_id=assistant_id,
+                    user_id=user_id,
+                    display_name=display_name,
+                    metadata=metadata,
+                )
+                raise IntegrityError(
+                    "INSERT INTO threads_meta",
+                    {},
+                    Exception("UNIQUE constraint failed: threads_meta.thread_id"),
+                )
+            return await super().create(
+                thread_id,
+                assistant_id=assistant_id,
+                user_id=user_id,
+                display_name=display_name,
+                metadata=metadata,
+            )
+
+    app.state.thread_store = _RacingThreadMetaStore(store)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/threads",
+            json={"thread_id": "race-thread", "metadata": {"k": "v"}},
+        )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["thread_id"] == "race-thread"
+    assert body["metadata"] == {"k": "v"}
+
+
+def test_insert_race_recovery_claims_unscoped_row_for_trusted_owner() -> None:
+    """The insert-race recovery mirrors the fast path's owner reconciliation.
+
+    When a competing request commits a legacy unscoped (``user_id=None``) row
+    between our idempotency read and our insert, and our insert then loses the
+    duplicate-key race, a trusted internal owner must still claim the row rather
+    than return it unowned — otherwise ownership of the same thread would depend
+    on whether the fast path or the recovery path resolved it.
+    """
+    import asyncio
+
+    from sqlalchemy.exc import IntegrityError
+
+    from app.gateway.internal_auth import INTERNAL_OWNER_USER_ID_HEADER_NAME, INTERNAL_SYSTEM_ROLE
+
+    store = InMemoryStore()
+    checkpointer = InMemorySaver()
+
+    class _RacingOwnerStore(MemoryThreadMetaStore):
+        """Our insert loses to a competing create that already wrote an
+        unscoped row, exactly the interleaving the recovery path exists for."""
+
+        async def create(self, thread_id, *, assistant_id=None, user_id=None, display_name=None, metadata=None):  # type: ignore[override]
+            # The competing request commits its (owner-less) row here, then our
+            # insert loses the primary-key race.
+            await super().create(thread_id, user_id=None, metadata=metadata)
+            raise IntegrityError(
+                "INSERT INTO threads_meta",
+                {},
+                Exception("UNIQUE constraint failed: threads_meta.thread_id"),
+            )
+
+    thread_store = _RacingOwnerStore(store)
+    request = SimpleNamespace(
+        headers={INTERNAL_OWNER_USER_ID_HEADER_NAME: "owner-1"},
+        state=SimpleNamespace(user=SimpleNamespace(id="default", system_role=INTERNAL_SYSTEM_ROLE)),
+        app=SimpleNamespace(state=SimpleNamespace(checkpointer=checkpointer, thread_store=thread_store)),
+    )
+
+    async def _scenario():
+        response = await threads.create_thread(
+            threads.ThreadCreateRequest(thread_id="channel-thread", metadata={"k": "v"}),
+            request,
+        )
+        owner_row = await thread_store.get("channel-thread", user_id="owner-1")
+        unscoped_lookup = await thread_store.get("channel-thread", user_id=None)
+        return response, owner_row, unscoped_lookup
+
+    response, owner_row, unscoped_lookup = asyncio.run(_scenario())
+
+    assert response.thread_id == "channel-thread"
+    # Recovery claimed the legacy row for the trusted owner, same as the fast path.
+    assert owner_row is not None
+    assert owner_row["user_id"] == "owner-1"
+    assert unscoped_lookup["user_id"] == "owner-1"
+
+
+def test_create_thread_does_not_swallow_non_integrity_errors() -> None:
+    """A non-race insert failure must surface as 500, even when a row now exists.
+
+    The recovery path only rescues the duplicate-key ``IntegrityError`` race; an
+    arbitrary failure that happens to coincide with an existing row must not be
+    silently returned as a 200 (previously the broad ``except`` did exactly that).
+    """
+    app, store, _checkpointer = _build_thread_app()
+
+    class _BrokenAfterWriteStore(_PermissiveThreadMetaStore):
+        async def create(self, thread_id, *, assistant_id=None, user_id=None, display_name=None, metadata=None):  # type: ignore[override]
+            # A row exists after this call, but the insert failed for a reason
+            # unrelated to the idempotency race.
+            await super().create(thread_id, metadata=metadata)
+            raise RuntimeError("unexpected store failure")
+
+    app.state.thread_store = _BrokenAfterWriteStore(store)
+
+    with TestClient(app) as client:
+        response = client.post("/api/threads", json={"thread_id": "broken-thread", "metadata": {}})
+
+    assert response.status_code == 500, response.text
+
+
+def test_put_goal_creates_missing_thread_checkpoint_and_returns_goal() -> None:
+    app, _store, _checkpointer = _build_thread_app()
+
+    with TestClient(app) as client:
+        response = client.put(
+            "/api/threads/goal-thread/goal",
+            json={"objective": "Finish the feature and make all tests pass"},
+        )
+        state_response = client.get("/api/threads/goal-thread/state")
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["goal"]["objective"] == "Finish the feature and make all tests pass"
+    assert body["goal"]["status"] == "active"
+    assert body["goal"]["continuation_count"] == 0
+    assert body["goal"]["max_continuations"] == 8
+    assert state_response.status_code == 200, state_response.text
+    assert state_response.json()["values"]["goal"]["objective"] == "Finish the feature and make all tests pass"
+
+
+def test_goal_status_and_clear_round_trip() -> None:
+    app, _store, _checkpointer = _build_thread_app()
+
+    with TestClient(app) as client:
+        set_response = client.put(
+            "/api/threads/goal-thread/goal",
+            json={"objective": "Ship it", "max_continuations": 3},
+        )
+        get_response = client.get("/api/threads/goal-thread/goal")
+        clear_response = client.delete("/api/threads/goal-thread/goal")
+        after_clear_response = client.get("/api/threads/goal-thread/goal")
+        state_response = client.get("/api/threads/goal-thread/state")
+
+    assert set_response.status_code == 200, set_response.text
+    assert get_response.status_code == 200, get_response.text
+    assert get_response.json()["goal"]["objective"] == "Ship it"
+    assert get_response.json()["goal"]["max_continuations"] == 3
+    assert clear_response.status_code == 200, clear_response.text
+    assert clear_response.json()["goal"] is None
+    assert after_clear_response.status_code == 200, after_clear_response.text
+    assert after_clear_response.json()["goal"] is None
+    assert "goal" not in state_response.json()["values"]
+
+
 def test_internal_owner_header_assigns_thread_to_owner() -> None:
     import asyncio
 
@@ -248,6 +464,35 @@ def test_internal_owner_header_assigns_thread_to_owner() -> None:
     assert owner_row is not None
     assert owner_row["user_id"] == "owner-1"
     assert internal_row is None
+
+
+def test_goal_thread_creation_uses_internal_owner_header() -> None:
+    import asyncio
+
+    from app.gateway.internal_auth import INTERNAL_OWNER_USER_ID_HEADER_NAME, INTERNAL_SYSTEM_ROLE
+
+    store = InMemoryStore()
+    checkpointer = InMemorySaver()
+    thread_store = MemoryThreadMetaStore(store)
+    request = SimpleNamespace(
+        headers={INTERNAL_OWNER_USER_ID_HEADER_NAME: "owner-1"},
+        state=SimpleNamespace(user=SimpleNamespace(id="default", system_role=INTERNAL_SYSTEM_ROLE)),
+        app=SimpleNamespace(state=SimpleNamespace(checkpointer=checkpointer, thread_store=thread_store)),
+    )
+
+    async def _scenario():
+        await threads._ensure_thread_for_goal("channel-goal-thread", request)
+        owner_row = await thread_store.get("channel-goal-thread", user_id="owner-1")
+        internal_row = await thread_store.get("channel-goal-thread", user_id="default")
+        owner_threads = await thread_store.search(user_id="owner-1")
+        return owner_row, internal_row, owner_threads
+
+    owner_row, internal_row, owner_threads = asyncio.run(_scenario())
+
+    assert owner_row is not None
+    assert owner_row["user_id"] == "owner-1"
+    assert internal_row is None
+    assert [thread["thread_id"] for thread in owner_threads] == ["channel-goal-thread"]
 
 
 def test_get_thread_returns_iso_for_legacy_unix_record() -> None:
@@ -464,6 +709,305 @@ def test_get_thread_history_returns_iso_for_legacy_checkpoint_metadata() -> None
     assert entries, "expected at least one history entry"
     for entry in entries:
         assert _ISO_TIMESTAMP_RE.match(entry["created_at"]), entry
+
+
+def test_get_thread_history_associates_tool_messages_from_checkpoint_turn() -> None:
+    app, _store, checkpointer = _build_thread_app()
+    thread_id = "history-tool-run"
+    messages = [
+        HumanMessage(id="human-1", content="Use a tool", additional_kwargs={"run_id": "run-1"}),
+        AIMessage(
+            id="ai-1",
+            content="Calling tool",
+            tool_calls=[{"name": "lookup", "args": {}, "id": "call-1"}],
+        ),
+        ToolMessage(id="tool-1", content="result", tool_call_id="call-1"),
+        AIMessage(id="ai-2", content="Done"),
+    ]
+
+    asyncio.run(
+        _write_checkpoint(
+            checkpointer,
+            thread_id,
+            "checkpoint-tool-run",
+            messages,
+            step=1,
+            metadata={"run_durations": {"run-1": 4}},
+        )
+    )
+
+    with TestClient(app) as client:
+        response = client.post(f"/api/threads/{thread_id}/history", json={"limit": 10})
+
+    assert response.status_code == 200, response.text
+    history_messages = response.json()[0]["values"]["messages"]
+    assert [message.get("run_id") for message in history_messages[1:]] == ["run-1", "run-1", "run-1"]
+
+    assert [message["additional_kwargs"]["turn_duration"] for message in history_messages if message["type"] == "ai"] == [4, 4]
+
+
+def test_get_thread_history_backfills_legacy_durations_with_exact_event_run_id() -> None:
+    app, _store, checkpointer = _build_thread_app()
+    thread_id = "legacy-history-run-id"
+    messages = [
+        HumanMessage(id="human-1", content="Question", additional_kwargs={"run_id": "boundary-run"}),
+        AIMessage(id="ai-1", content="Answer"),
+        ToolMessage(id="tool-1", content="result", tool_call_id="call-1"),
+    ]
+    asyncio.run(_write_checkpoint(checkpointer, thread_id, "00000000-0000-6000-8000-000000000001", messages, step=1))
+
+    async def list_by_thread(_: str) -> list[SimpleNamespace]:
+        return [
+            SimpleNamespace(
+                run_id="boundary-run",
+                created_at="2026-07-05T00:00:00+00:00",
+                updated_at="2026-07-05T00:00:03+00:00",
+            ),
+            SimpleNamespace(
+                run_id="exact-run",
+                created_at="2026-07-05T00:00:00+00:00",
+                updated_at="2026-07-05T00:00:07+00:00",
+            ),
+        ]
+
+    async def list_messages(_: str, *, limit: int) -> list[dict]:
+        assert limit == 1000
+        return [{"content": {"type": "ai", "id": "ai-1"}, "run_id": "exact-run"}]
+
+    app.state.run_manager = SimpleNamespace(list_by_thread=list_by_thread)
+    app.state.run_event_store = SimpleNamespace(list_messages=list_messages)
+
+    with TestClient(app) as client:
+        response = client.post(f"/api/threads/{thread_id}/history", json={"limit": 10})
+
+    assert response.status_code == 200, response.text
+    entry = response.json()[0]
+    history_messages = entry["values"]["messages"]
+    assert history_messages[1]["run_id"] == "exact-run"
+    assert history_messages[1]["additional_kwargs"]["turn_duration"] == 7
+    assert history_messages[2]["run_id"] == "boundary-run"
+    assert "run_durations" not in entry["metadata"]
+
+    latest = asyncio.run(checkpointer.aget_tuple({"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}))
+    assert latest is not None
+    assert latest.metadata["run_durations"] == {"boundary-run": 3, "exact-run": 7}
+
+
+def test_ai_message_lacks_duration_only_for_unannotated_ai_messages() -> None:
+    assert threads._ai_message_lacks_duration({"type": "ai"})
+    assert threads._ai_message_lacks_duration({"type": "ai", "additional_kwargs": []})
+    assert not threads._ai_message_lacks_duration({"type": "tool"})
+    assert not threads._ai_message_lacks_duration({"type": "ai", "additional_kwargs": {"turn_duration": 0}})
+
+
+# ── branch threads from completed assistant turns ─────────────────────────────
+
+
+def test_branch_thread_from_older_assistant_turn_creates_truncated_thread() -> None:
+    app, store, checkpointer = _build_thread_app()
+    source_thread_id = "source-thread"
+
+    human_1 = HumanMessage(id="human-1", content="First question")
+    ai_1 = AIMessage(id="ai-1", content="First answer")
+    human_2 = HumanMessage(id="human-2", content="Second question")
+    ai_2 = AIMessage(id="ai-2", content="Second answer")
+    human_3 = HumanMessage(id="human-3", content="Third question")
+    ai_3 = AIMessage(id="ai-3", content="Third answer")
+
+    async def _seed() -> None:
+        await _write_checkpoint(checkpointer, source_thread_id, "0001", [human_1, ai_1], step=1)
+        await _write_checkpoint(checkpointer, source_thread_id, "0002", [human_1, ai_1, human_2, ai_2], step=2)
+        await _write_checkpoint(checkpointer, source_thread_id, "0003", [human_1, ai_1, human_2, ai_2, human_3, ai_3], step=3)
+
+    asyncio.run(_seed())
+
+    with TestClient(app) as client:
+        created = client.post("/api/threads", json={"thread_id": source_thread_id, "metadata": {}, "assistant_id": "agent"})
+        assert created.status_code == 200, created.text
+        asyncio.run(
+            store.aput(
+                THREADS_NS,
+                source_thread_id,
+                {
+                    "thread_id": source_thread_id,
+                    "assistant_id": "agent",
+                    "user_id": None,
+                    "status": "idle",
+                    "created_at": "2026-07-05T00:00:00Z",
+                    "updated_at": "2026-07-05T00:00:00Z",
+                    "display_name": "Original chat",
+                    "metadata": {},
+                },
+            )
+        )
+
+        response = client.post(
+            f"/api/threads/{source_thread_id}/branches",
+            json={"message_id": "ai-2", "message_ids": ["ai-2"]},
+        )
+        assert response.status_code == 200, response.text
+        body = response.json()
+        new_thread_id = body["thread_id"]
+        state_response = client.get(f"/api/threads/{new_thread_id}/state")
+        search_response = client.post("/api/threads/search", json={"limit": 10})
+
+    assert body["parent_thread_id"] == source_thread_id
+    assert body["parent_checkpoint_id"] == "0002"
+    assert body["branched_from_message_id"] == "ai-2"
+    assert body["workspace_clone_mode"] == "skipped_historical_turn"
+
+    assert state_response.status_code == 200, state_response.text
+    messages = state_response.json()["values"]["messages"]
+    assert [message["id"] for message in messages] == ["human-1", "ai-1", "human-2", "ai-2"]
+    assert "Third answer" not in [message.get("content") for message in messages]
+    assert search_response.status_code == 200, search_response.text
+    branch_entry = next(item for item in search_response.json() if item["thread_id"] == new_thread_id)
+    assert branch_entry["values"]["title"] == "Original chat"
+
+
+def test_branch_display_name_strips_legacy_branch_prefix_only_for_branch_sources() -> None:
+    assert threads._default_branch_display_name("Original chat") == "Original chat"
+    assert threads._default_branch_display_name("Branch: Original chat") == "Branch: Original chat"
+    assert threads._default_branch_display_name("Branch: Branch: Original chat", source_is_branch=True) == "Original chat"
+
+
+def test_branch_thread_rejects_sidecar_threads() -> None:
+    app, _store, _checkpointer = _build_thread_app()
+
+    with TestClient(app) as client:
+        created = client.post(
+            "/api/threads",
+            json={"thread_id": "sidecar-thread", "metadata": {"deerflow_sidecar": True}},
+        )
+        assert created.status_code == 200, created.text
+
+        response = client.post(
+            "/api/threads/sidecar-thread/branches",
+            json={"message_id": "ai-1", "message_ids": ["ai-1"]},
+        )
+
+    assert response.status_code == 409
+    assert "main conversation" in response.json()["detail"]
+
+
+def test_branch_thread_rejects_non_assistant_targets() -> None:
+    app, _store, checkpointer = _build_thread_app()
+    source_thread_id = "source-human-target"
+    human = HumanMessage(id="human-1", content="Question")
+    ai = AIMessage(id="ai-1", content="Answer")
+
+    async def _seed() -> None:
+        await _write_checkpoint(checkpointer, source_thread_id, "0001", [human, ai], step=1)
+
+    asyncio.run(_seed())
+
+    with TestClient(app) as client:
+        created = client.post("/api/threads", json={"thread_id": source_thread_id, "metadata": {}})
+        assert created.status_code == 200, created.text
+
+        response = client.post(
+            f"/api/threads/{source_thread_id}/branches",
+            json={"message_id": "human-1", "message_ids": ["human-1"]},
+        )
+
+    assert response.status_code == 409
+    assert "can no longer be branched" in response.json()["detail"]
+
+
+def test_branch_thread_best_effort_copies_current_workspace(tmp_path) -> None:
+    paths = Paths(tmp_path)
+    app, _store, checkpointer = _build_thread_app()
+    source_thread_id = "source-with-files"
+    user_id = "branch-user"
+
+    source_user_data = paths.sandbox_user_data_dir(source_thread_id, user_id=user_id)
+    source_outputs = paths.sandbox_outputs_dir(source_thread_id, user_id=user_id)
+    source_uploads = paths.sandbox_uploads_dir(source_thread_id, user_id=user_id)
+    source_outputs.mkdir(parents=True, exist_ok=True)
+    source_uploads.mkdir(parents=True, exist_ok=True)
+    (source_outputs / "result.txt").write_text("answer", encoding="utf-8")
+    (source_uploads / ".upload-stale.part").write_text("partial", encoding="utf-8")
+
+    human = HumanMessage(id="human-file", content="Make a file")
+    ai = AIMessage(id="ai-file", content="Done")
+
+    async def _seed() -> None:
+        await _write_checkpoint(checkpointer, source_thread_id, "0001", [human, ai], step=1)
+
+    asyncio.run(_seed())
+
+    with (
+        patch("app.gateway.routers.threads.get_paths", return_value=paths),
+        patch("app.gateway.routers.threads.get_effective_user_id", return_value=user_id),
+        TestClient(app) as client,
+    ):
+        created = client.post("/api/threads", json={"thread_id": source_thread_id, "metadata": {}})
+        assert created.status_code == 200, created.text
+
+        response = client.post(
+            f"/api/threads/{source_thread_id}/branches",
+            json={"message_id": "ai-file", "message_ids": ["ai-file"]},
+        )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["workspace_clone_mode"] == "current_thread_best_effort"
+
+    target_user_data = paths.sandbox_user_data_dir(body["thread_id"], user_id=user_id)
+    assert target_user_data.exists()
+    assert (target_user_data / "outputs" / "result.txt").read_text(encoding="utf-8") == "answer"
+    assert not (target_user_data / "uploads" / ".upload-stale.part").exists()
+    assert source_user_data.exists()
+
+
+def test_branch_thread_from_historical_turn_skips_workspace_clone(tmp_path) -> None:
+    """Branching from a non-latest turn must not clone the current workspace.
+
+    Workspace files are not checkpointed, so cloning them onto a branch rooted at
+    an older turn would leak files created after that turn (regression for the
+    historical-turn workspace-leak review on PR #3950).
+    """
+    paths = Paths(tmp_path)
+    app, _store, checkpointer = _build_thread_app()
+    source_thread_id = "source-historical"
+    user_id = "branch-user"
+
+    source_outputs = paths.sandbox_outputs_dir(source_thread_id, user_id=user_id)
+    source_outputs.mkdir(parents=True, exist_ok=True)
+    # ``future.txt`` only exists in the current (latest) workspace timeline.
+    (source_outputs / "future.txt").write_text("future", encoding="utf-8")
+
+    human_1 = HumanMessage(id="human-1", content="First question")
+    ai_1 = AIMessage(id="ai-1", content="First answer")
+    human_2 = HumanMessage(id="human-2", content="Second question")
+    ai_2 = AIMessage(id="ai-2", content="Second answer")
+
+    async def _seed() -> None:
+        await _write_checkpoint(checkpointer, source_thread_id, "0001", [human_1, ai_1], step=1)
+        await _write_checkpoint(checkpointer, source_thread_id, "0002", [human_1, ai_1, human_2, ai_2], step=2)
+
+    asyncio.run(_seed())
+
+    with (
+        patch("app.gateway.routers.threads.get_paths", return_value=paths),
+        patch("app.gateway.routers.threads.get_effective_user_id", return_value=user_id),
+        TestClient(app) as client,
+    ):
+        created = client.post("/api/threads", json={"thread_id": source_thread_id, "metadata": {}})
+        assert created.status_code == 200, created.text
+
+        response = client.post(
+            f"/api/threads/{source_thread_id}/branches",
+            json={"message_id": "ai-1", "message_ids": ["ai-1"]},
+        )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["parent_checkpoint_id"] == "0001"
+    assert body["workspace_clone_mode"] == "skipped_historical_turn"
+
+    target_user_data = paths.sandbox_user_data_dir(body["thread_id"], user_id=user_id)
+    assert not target_user_data.exists()
 
 
 # ── Metadata filter validation at API boundary ────────────────────────────────

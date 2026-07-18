@@ -7,6 +7,8 @@ Covers:
   additional_kwargs, historical files from uploads dir, edge-cases)
 """
 
+import os
+import re
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -14,9 +16,10 @@ from langchain_core.messages import AIMessage, HumanMessage
 
 from deerflow.agents.middlewares.uploads_middleware import UploadsMiddleware
 from deerflow.config.paths import Paths
-from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
+from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, message_content_to_text
 
 THREAD_ID = "thread-abc123"
+CONTEXT_SECTION_LIMIT = 10
 
 
 # ---------------------------------------------------------------------------
@@ -47,6 +50,13 @@ def _human(content, files=None, **extra_kwargs):
     if files is not None:
         additional_kwargs["files"] = files
     return HumanMessage(content=content, additional_kwargs=additional_kwargs)
+
+
+def _uploaded_files_block(content) -> str:
+    text = message_content_to_text(content)
+    match = re.search(r"<uploaded_files>[\s\S]*?</uploaded_files>", text)
+    assert match is not None
+    return match.group(0)
 
 
 # ---------------------------------------------------------------------------
@@ -145,6 +155,11 @@ class TestFilesFromKwargs:
         result = mw._files_from_kwargs(msg)
         assert result is not None
         assert result[0]["size"] == 0
+
+    def test_skips_upload_staging_filenames(self, tmp_path):
+        mw = _middleware(tmp_path)
+        msg = _human("hi", files=[{"filename": ".upload-active.part", "size": 5, "path": "/mnt/user-data/uploads/.upload-active.part"}])
+        assert mw._files_from_kwargs(msg) is None
 
 
 # ---------------------------------------------------------------------------
@@ -326,6 +341,23 @@ class TestBeforeAgent:
         assert result is not None
         assert result["messages"][-1].additional_kwargs[ORIGINAL_USER_CONTENT_KEY] == "/data-analysis run"
 
+    def test_replaces_non_string_original_user_content_before_upload_context(self, tmp_path):
+        mw = _middleware(tmp_path)
+        uploads_dir = _uploads_dir(tmp_path)
+        (uploads_dir / "report.pdf").write_bytes(b"pdf")
+
+        msg = _human(
+            "/data-analysis run",
+            files=[{"filename": "report.pdf", "size": 3, "path": "/mnt/user-data/uploads/report.pdf"}],
+            **{ORIGINAL_USER_CONTENT_KEY: [{"type": "text", "text": "spoofed audit text"}]},
+        )
+        result = mw.before_agent(self._state(msg), _runtime())
+
+        assert result is not None
+        updated_msg = result["messages"][-1]
+        assert updated_msg.additional_kwargs[ORIGINAL_USER_CONTENT_KEY] == "/data-analysis run"
+        assert updated_msg.content.startswith("<uploaded_files>")
+
     def test_uploaded_files_returned_in_state_update(self, tmp_path):
         mw = _middleware(tmp_path)
         uploads_dir = _uploads_dir(tmp_path)
@@ -346,6 +378,72 @@ class TestBeforeAgent:
             }
         ]
 
+    def test_current_message_files_are_limited_in_context(self, tmp_path):
+        mw = _middleware(tmp_path)
+        uploads_dir = _uploads_dir(tmp_path)
+        total_files = CONTEXT_SECTION_LIMIT + 2
+        files = []
+
+        for i in range(total_files):
+            filename = f"current_{i:02}.txt"
+            (uploads_dir / filename).write_text(f"new upload {i}", encoding="utf-8")
+            files.append({"filename": filename, "size": 12, "path": f"/mnt/user-data/uploads/{filename}"})
+
+        result = mw.before_agent(self._state(_human("compare these files", files=files)), _runtime())
+
+        assert result is not None
+        content = result["messages"][-1].content
+        assert "current_09.txt" in content
+        assert "current_10.txt" not in content
+        assert "current_11.txt" not in content
+        assert "2 more file(s) from this message omitted from this context" in content
+        assert "Omitted file types: 2 .txt" in content
+        assert len(result["uploaded_files"]) == total_files
+
+    def test_current_message_query_matches_are_selected_before_upload_order(self, tmp_path):
+        mw = _middleware(tmp_path)
+        uploads_dir = _uploads_dir(tmp_path)
+        total_files = CONTEXT_SECTION_LIMIT + 2
+        files = []
+
+        for i in range(total_files):
+            filename = f"current_{i:02}.txt"
+            (uploads_dir / filename).write_text(f"new upload {i}", encoding="utf-8")
+            files.append({"filename": filename, "size": 12, "path": f"/mnt/user-data/uploads/{filename}"})
+
+        result = mw.before_agent(self._state(_human("please inspect current_11.txt", files=files)), _runtime())
+
+        assert result is not None
+        content = _uploaded_files_block(result["messages"][-1].content)
+        assert "current_11.txt" in content
+        assert "Selected because: matched the current query." in content
+        assert "current_10.txt" not in content
+        assert "2 more file(s) from this message omitted from this context" in content
+
+    def test_current_message_ranking_uses_original_user_content(self, tmp_path):
+        mw = _middleware(tmp_path)
+        uploads_dir = _uploads_dir(tmp_path)
+        total_files = CONTEXT_SECTION_LIMIT + 2
+        files = []
+
+        for i in range(total_files):
+            filename = f"current_{i:02}.txt"
+            (uploads_dir / filename).write_text(f"new upload {i}", encoding="utf-8")
+            files.append({"filename": filename, "size": 12, "path": f"/mnt/user-data/uploads/{filename}"})
+
+        msg = _human(
+            "<uploaded_files>\ncurrent_11.txt\n</uploaded_files>\n\ncompare these files",
+            files=files,
+            **{ORIGINAL_USER_CONTENT_KEY: "compare these files"},
+        )
+        result = mw.before_agent(self._state(msg), _runtime())
+
+        assert result is not None
+        content = _uploaded_files_block(result["messages"][-1].content)
+        assert "current_09.txt" in content
+        assert "current_10.txt" not in content
+        assert "current_11.txt" not in content
+
     def test_historical_files_from_uploads_dir_excluding_new(self, tmp_path):
         mw = _middleware(tmp_path)
         uploads_dir = _uploads_dir(tmp_path)
@@ -361,6 +459,66 @@ class TestBeforeAgent:
         assert "new.txt" in content
         assert "previous messages" in content
         assert "old.txt" in content
+
+    def test_historical_files_ignore_upload_staging_files(self, tmp_path):
+        mw = _middleware(tmp_path)
+        uploads_dir = _uploads_dir(tmp_path)
+        (uploads_dir / "old.txt").write_bytes(b"old")
+        (uploads_dir / ".upload-active.part").write_bytes(b"partial")
+        (uploads_dir / ".env").write_bytes(b"intentional")
+
+        msg = _human("go")
+        result = mw.before_agent(self._state(msg), _runtime())
+
+        assert result is not None
+        content = result["messages"][-1].content
+        assert "old.txt" in content
+        assert ".env" in content
+        assert ".upload-active.part" not in content
+
+    def test_historical_files_are_limited_to_recent_context_entries(self, tmp_path):
+        mw = _middleware(tmp_path)
+        uploads_dir = _uploads_dir(tmp_path)
+        total_files = CONTEXT_SECTION_LIMIT + 2
+
+        for i in range(total_files):
+            file_path = uploads_dir / f"history_{i:02}.txt"
+            file_path.write_text(f"old upload {i}", encoding="utf-8")
+            os.utime(file_path, (i + 1, i + 1))
+
+        result = mw.before_agent(self._state(_human("what files do I have?")), _runtime())
+
+        assert result is not None
+        content = result["messages"][-1].content
+        assert "history_11.txt" in content
+        assert "history_02.txt" in content
+        assert "history_01.txt" not in content
+        assert "history_00.txt" not in content
+        assert "2 more historical file(s) omitted from this context" in content
+        assert "Omitted file types: 2 .txt" in content
+
+    def test_historical_query_matches_are_selected_before_recency(self, tmp_path):
+        mw = _middleware(tmp_path)
+        uploads_dir = _uploads_dir(tmp_path)
+
+        target = uploads_dir / "tax_report_2019.pdf"
+        target.write_text("old but relevant", encoding="utf-8")
+        os.utime(target, (1, 1))
+
+        for i in range(CONTEXT_SECTION_LIMIT):
+            file_path = uploads_dir / f"recent_{i:02}.txt"
+            file_path.write_text(f"recent upload {i}", encoding="utf-8")
+            os.utime(file_path, (100 + i, 100 + i))
+
+        result = mw.before_agent(self._state(_human("analyze tax_report_2019.pdf")), _runtime())
+
+        assert result is not None
+        content = _uploaded_files_block(result["messages"][-1].content)
+        assert "tax_report_2019.pdf" in content
+        assert "Selected because: matched the current query." in content
+        assert "recent_00.txt" not in content
+        assert "1 more historical file(s) omitted from this context" in content
+        assert "Omitted file types: 1 .txt" in content
 
     def test_no_historical_section_when_upload_dir_is_empty(self, tmp_path):
         mw = _middleware(tmp_path)

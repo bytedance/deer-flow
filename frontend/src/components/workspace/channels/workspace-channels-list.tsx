@@ -117,7 +117,9 @@ export function WorkspaceChannelsList() {
       <SidebarMenu>
         {visibleProviders.map((provider) => {
           const canEditRuntimeConfig = providerCanEditRuntimeConfig(provider);
-          const isConnected = provider.connection_status === "connected";
+          const isConnected =
+            !provider.unavailable_reason &&
+            provider.connection_status === "connected";
           const isPending =
             (connectMutation.isPending &&
               connectMutation.variables === provider.provider) ||

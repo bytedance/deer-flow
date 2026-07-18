@@ -148,9 +148,27 @@ _DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 # Absolute temp/home roots used for per-run isolation (macOS + Linux + DEER_FLOW_HOME tmp).
 _PATH_RE = re.compile(r"(?:/private)?/(?:var/folders|tmp)/[^\s\"']*")
 
+# InputSanitizationMiddleware wraps user content in plain-text boundary markers.
+# This is a transport-layer transformation, not a semantic change — strip the
+# wrapper (including its surrounding newlines) before hashing so fixtures
+# recorded before the middleware remain valid.
+_BOUNDARY_BEGIN_RE = re.compile(r"--- BEGIN USER INPUT ---\n?")
+_BOUNDARY_END_RE = re.compile(r"\n?--- END USER INPUT ---")
+
+
+# After _SYSTEM_REMINDER_RE strips a <system-reminder> block, a role label like
+# "User: " or "Assistant: " may remain with nothing after it (just whitespace/newline).
+# Collapse those empty role lines so the hash is resilient to reminder leaks from the
+# frontend (e.g. a HumanMessage(hide_from_ui=True) whose <system-reminder> content
+# was stripped, leaving "User: \n" residue that would otherwise cause a hash mismatch).
+_EMPTY_ROLE_LINE_RE = re.compile(r"^(User|Assistant):\s*$\n?", re.MULTILINE)
+
 
 def _normalize_text(text: str) -> str:
     text = _SYSTEM_REMINDER_RE.sub("", text)
+    text = _EMPTY_ROLE_LINE_RE.sub("", text)
+    text = _BOUNDARY_BEGIN_RE.sub("", text)
+    text = _BOUNDARY_END_RE.sub("", text)
     text = _UUID_RE.sub("<UUID>", text)
     text = _ISO_TS_RE.sub("<TS>", text)
     text = _DATE_RE.sub("<DATE>", text)
@@ -192,6 +210,19 @@ def _canonical_messages(messages: list[BaseMessage]) -> str:
         # Exclude the system prompt from the match key — see docstring. It is the
         # most-edited part of the prompt and not part of the contract under test.
         if message.type == "system":
+            continue
+        # Exclude framework-injected hidden messages (dynamic-context reminders,
+        # memory injections, etc.) regardless of type.  These carry volatile
+        # per-session data (current date, user memory) and are not user-authored
+        # content, so they must not participate in the match key.  On the p1
+        # branch they were HumanMessages whose <system-reminder> content was
+        # stripped → empty → excluded by the empty-content check below.  On p0
+        # they may be SystemMessages (excluded by type) or HumanMessages with
+        # standalone <memory> content (not stripped by _SYSTEM_REMINDER_RE,
+        # not empty, so previously leaked into the hash).  Checking hide_from_ui
+        # directly makes the hash stable across all middleware implementations.
+        additional_kwargs = getattr(message, "additional_kwargs", None) or {}
+        if additional_kwargs.get("hide_from_ui"):
             continue
         content = _normalize_text(_content_to_text(message.content))
         tool_calls = getattr(message, "tool_calls", None)

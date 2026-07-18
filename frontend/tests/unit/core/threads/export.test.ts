@@ -1,5 +1,5 @@
 import type { Message } from "@langchain/langgraph-sdk";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "@rstest/core";
 
 import {
   formatThreadAsJSON,

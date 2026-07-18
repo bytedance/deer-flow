@@ -16,20 +16,20 @@
  * These tests pin both halves of the contract so a future refactor doesn't
  * silently drop the detail or leak the generated fallback into the UI.
  */
-import { beforeEach, describe, expect, test, vi } from "vitest";
+import { beforeEach, describe, expect, test, rs } from "@rstest/core";
 
-vi.mock("@/core/api/fetcher", () => ({
-  fetch: vi.fn(),
+rs.mock("@/core/api/fetcher", () => ({
+  fetch: rs.fn(),
 }));
 
-vi.mock("@/core/config", () => ({
+rs.mock("@/core/config", () => ({
   getBackendBaseURL: () => "",
 }));
 
 import { AgentsApiDisabledError, checkAgentName } from "@/core/agents/api";
 import { fetch as fetcher } from "@/core/api/fetcher";
 
-const mockedFetch = vi.mocked(fetcher);
+const mockedFetch = rs.mocked(fetcher);
 
 function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {

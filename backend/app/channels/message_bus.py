@@ -172,7 +172,7 @@ class MessageBus:
 
     def unsubscribe_outbound(self, callback: OutboundCallback) -> None:
         """Remove a previously registered outbound callback."""
-        self._outbound_listeners = [cb for cb in self._outbound_listeners if cb is not callback]
+        self._outbound_listeners = [cb for cb in self._outbound_listeners if cb != callback]
 
     async def publish_outbound(self, msg: OutboundMessage) -> None:
         """Dispatch an outbound message to all registered listeners."""

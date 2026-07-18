@@ -1,5 +1,10 @@
 import type { ThreadsClient } from "@langchain/langgraph-sdk/client";
 
+import {
+  SIDECAR_METADATA_KEY,
+  shouldShowInPrimaryThreadLists,
+} from "@/core/sidecar/thread";
+
 import type { AgentThread, AgentThreadState } from "./types";
 
 type ThreadsSearchClient = {
@@ -21,6 +26,28 @@ export const DEFAULT_THREAD_SEARCH_PARAMS: ThreadSearchParams = {
 
 export const THREAD_SEARCH_REFETCH_INTERVAL_MS = 5000;
 
+type ThreadSearchFilterParams = Pick<ThreadSearchParams, "metadata">;
+
+export function shouldIncludeSidecarThreads(params: ThreadSearchFilterParams) {
+  const metadata = params.metadata;
+  return (
+    typeof metadata === "object" &&
+    metadata !== null &&
+    !Array.isArray(metadata) &&
+    Reflect.get(metadata, SIDECAR_METADATA_KEY) === true
+  );
+}
+
+export function filterThreadSearchResults(
+  threads: AgentThread[],
+  params: ThreadSearchFilterParams,
+) {
+  if (shouldIncludeSidecarThreads(params)) {
+    return threads;
+  }
+  return threads.filter(shouldShowInPrimaryThreadLists);
+}
+
 export function buildThreadsSearchQueryOptions(
   apiClient: ThreadsSearchClient,
   params: ThreadSearchParams = DEFAULT_THREAD_SEARCH_PARAMS,
@@ -37,7 +64,7 @@ export function buildThreadsSearchQueryOptions(
       if (maxResults !== undefined && maxResults <= 0) {
         const response =
           await apiClient.threads.search<AgentThreadState>(params);
-        return response as AgentThread[];
+        return filterThreadSearchResults(response as AgentThread[], params);
       }
 
       const pageSize =
@@ -68,7 +95,7 @@ export function buildThreadsSearchQueryOptions(
           offset,
         })) as AgentThread[];
 
-        threads.push(...response);
+        threads.push(...filterThreadSearchResults(response, params));
 
         if (response.length < currentLimit) {
           break;

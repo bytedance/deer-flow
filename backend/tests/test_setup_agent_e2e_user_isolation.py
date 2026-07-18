@@ -46,13 +46,25 @@ from deerflow.runtime.runs.worker import _build_runtime_context, _install_runtim
 # ---------------------------------------------------------------------------
 
 
-def _make_request(user_id_str: str | None) -> SimpleNamespace:
+def _make_request(
+    user_id_str: str | None,
+    *,
+    system_role: str = "user",
+    oauth_provider: str | None = None,
+    oauth_id: str | None = None,
+) -> SimpleNamespace:
     """Build a fake FastAPI Request that carries an authenticated user."""
     if user_id_str is None:
         user = None
     else:
         # User.id is UUID in production; honour that
-        user = SimpleNamespace(id=UUID(user_id_str), email="alice@local")
+        user = SimpleNamespace(
+            id=UUID(user_id_str),
+            email="alice@local",
+            system_role=system_role,
+            oauth_provider=oauth_provider,
+            oauth_id=oauth_id,
+        )
     return SimpleNamespace(state=SimpleNamespace(user=user))
 
 
@@ -61,13 +73,24 @@ def _assemble_config(
     body_config: dict | None,
     body_context: dict | None,
     request_user_id: str | None,
+    request_user_role: str = "user",
+    request_oauth_provider: str | None = None,
+    request_oauth_id: str | None = None,
     thread_id: str = "thread-e2e",
     assistant_id: str = "lead_agent",
 ) -> dict:
     """Replay the **exact** start_run config-assembly sequence."""
     config = build_run_config(thread_id, body_config, None, assistant_id=assistant_id)
     merge_run_context_overrides(config, body_context)
-    inject_authenticated_user_context(config, _make_request(request_user_id))
+    inject_authenticated_user_context(
+        config,
+        _make_request(
+            request_user_id,
+            system_role=request_user_role,
+            oauth_provider=request_oauth_provider,
+            oauth_id=request_oauth_id,
+        ),
+    )
     return config
 
 
@@ -111,6 +134,22 @@ class TestConfigAssembly:
         runtime_ctx = _build_runtime_context("thread-e2e", "run-1", config.get("context"), None)
         assert runtime_ctx["user_id"] == "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 
+    def test_authenticated_user_context_includes_role_and_oauth_identity(self):
+        """Server-authenticated user attributes should reach runtime.context."""
+        config = _assemble_config(
+            body_config={"recursion_limit": 1000},
+            body_context=None,
+            request_user_id="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+            request_user_role="admin",
+            request_oauth_provider="github",
+            request_oauth_id="gh_123",
+        )
+        runtime_ctx = _build_runtime_context("thread-e2e", "run-1", config.get("context"), None)
+        assert runtime_ctx["user_id"] == "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        assert runtime_ctx["user_role"] == "admin"
+        assert runtime_ctx["oauth_provider"] == "github"
+        assert runtime_ctx["oauth_id"] == "gh_123"
+
     def test_body_context_empty_dict_still_injects_user_id(self):
         """body.context={} (falsy) path: inject must still produce user_id."""
         config = _assemble_config(
@@ -131,15 +170,60 @@ class TestConfigAssembly:
         runtime_ctx = _build_runtime_context("thread-e2e", "run-1", config.get("context"), None)
         assert runtime_ctx["user_id"] == "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 
-    def test_client_supplied_user_id_is_overridden(self):
-        """Spoofed client user_id must be overwritten by inject (auth-trusted source)."""
+    def test_body_context_user_id_is_overridden(self):
+        """``body.context`` may carry a legacy/non-web user_id, but server auth wins.
+
+        This covers the whitelisted ``body.context`` merge path only. Full
+        identity spoofing coverage lives in the ``body.config.context`` test
+        below, because that path copies arbitrary context keys before inject
+        overwrites them.
+        """
         config = _assemble_config(
             body_config={"recursion_limit": 1000},
-            body_context={"agent_name": "myagent", "user_id": "spoofed"},
+            body_context={
+                "agent_name": "myagent",
+                "user_id": "spoofed",
+            },
             request_user_id="11111111-2222-3333-4444-555555555555",
+            request_user_role="user",
         )
         runtime_ctx = _build_runtime_context("thread-e2e", "run-1", config.get("context"), None)
         assert runtime_ctx["user_id"] == "11111111-2222-3333-4444-555555555555"
+        assert runtime_ctx["user_role"] == "user"
+        assert runtime_ctx["oauth_provider"] is None
+        assert runtime_ctx["oauth_id"] is None
+
+    def test_spoofed_context_in_body_config_is_overridden_by_inject(self):
+        """The real spoofing vector is ``body.config.context``: ``build_run_config``
+        copies it wholesale (no whitelist, unlike ``body.context``), so only
+        ``inject_authenticated_user_context``'s unconditional assignment can
+        defeat a client that spoofs ``user_id``/``user_role``/``oauth_*`` there.
+
+        The companion test above covers only ``body.context.user_id``. This
+        test spoofs via ``body.config.context`` so all spoofed values actually
+        reach ``config['context']`` and ``inject``'s overwrite is the only thing
+        standing between them and ``runtime_ctx``.
+        """
+        config = _assemble_config(
+            body_config={
+                "context": {
+                    "user_id": "spoofed-id",
+                    "user_role": "admin",
+                    "oauth_provider": "spoofed-provider",
+                    "oauth_id": "spoofed-subject",
+                },
+            },
+            body_context=None,
+            request_user_id="11111111-2222-3333-4444-555555555555",
+            request_user_role="user",
+            request_oauth_provider="keycloak",
+            request_oauth_id="real-subject",
+        )
+        runtime_ctx = _build_runtime_context("thread-e2e", "run-1", config.get("context"), None)
+        assert runtime_ctx["user_id"] == "11111111-2222-3333-4444-555555555555"
+        assert runtime_ctx["user_role"] == "user"
+        assert runtime_ctx["oauth_provider"] == "keycloak"
+        assert runtime_ctx["oauth_id"] == "real-subject"
 
     def test_unauthenticated_request_does_not_inject(self):
         """If request.state.user is missing (impossible under fail-closed auth, but

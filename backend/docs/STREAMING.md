@@ -24,7 +24,7 @@
 | 事件传输 | `StreamBridge`（asyncio Queue）+ `sse_consumer` | 直接 `yield` |
 | 序列化 | `serialize(chunk)` → 纯 JSON dict，匹配 LangGraph Platform wire 格式 | `StreamEvent.data`，携带原生 LangChain 对象 |
 | 消费者 | 前端 `useStream` React hook、飞书/Slack/Telegram channel、LangGraph SDK 客户端 | Jupyter notebook、集成测试、内部 Python 脚本 |
-| 生命周期管理 | `RunManager`：run_id 跟踪、disconnect 语义、multitask 策略、heartbeat | 无；函数返回即结束 |
+| 生命周期管理 | `RunManager`：run_id 跟踪、disconnect 语义、multitask 策略、heartbeat | 每次 `stream()` 生成一个轻量 run_id 供 runtime context / tracing / per-run middleware 使用；函数返回即结束 |
 | 断连恢复 | `Last-Event-ID` SSE 重连 | 无需要 |
 
 **两条路径的存在是 DRY 的刻意妥协**：Gateway 的全部基础设施（async + Queue + JSON + RunManager）**都是为了跨网络边界把事件送给 HTTP 消费者**。当生产者（agent）和消费者（Python 调用栈）在同一个进程时，这整套东西都是纯开销。
@@ -137,7 +137,7 @@ sequenceDiagram
 关键组件：
 
 - `runtime/runs/worker.py::run_agent` — 在 `asyncio.Task` 里跑 `agent.astream()`，把每个 chunk 通过 `serialize(chunk, mode=mode)` 转成 JSON，再 `bridge.publish()`。
-- `runtime/stream_bridge` — 抽象 Queue。`publish/subscribe` 解耦生产者和消费者，支持 `Last-Event-ID` 重连、心跳、多订阅者 fan-out。
+- `runtime/stream_bridge` — 抽象 Queue。`publish/subscribe` 解耦生产者和消费者，支持 `Last-Event-ID` 重连、心跳、多订阅者 fan-out。Redis backend 会在每次 `publish()` / `publish_end()` 刷新 retained stream key TTL；启动恢复将 orphan run 标记为 error 后也会发布 `END_SENTINEL`，避免重连的 SSE 客户端只收到心跳。注意：TTL 是 Redis 内存安全网（防止 key 泄漏），不是 subscriber 终止机制——如果 worker 和 gateway 同时挂掉，已连接的 SSE 客户端在 TTL 过期后仍无法收到 END 信号，需要依赖客户端侧超时。完整的跨 pod subscriber 终止需要 worker 存活检测（liveness），当前版本不包含此功能。
 - `app/gateway/services.py::sse_consumer` — 从 bridge 订阅，格式化为 SSE wire 帧。
 - `runtime/serialization.py::serialize` — mode-aware 序列化；`messages` mode 下 `serialize_messages_tuple` 把 `(chunk, metadata)` 转成 `[chunk.model_dump(), metadata]`。
 
@@ -165,7 +165,7 @@ sequenceDiagram
 
 对比之下，sync 路径的每个环节都是显著更少的移动部件：
 
-- 没有 `RunManager` —— 一次 `stream()` 调用对应一次生命周期，无需 run_id。
+- 没有 `RunManager` —— 一次 `stream()` 调用对应一次生命周期，只生成轻量 `run_id` 供 runtime context、tracing 和 per-run middleware 使用。
 - 没有 `StreamBridge` —— 直接 `yield`，生产和消费在同一个 Python 调用栈，不需要跨 task 中介。
 - 没有 JSON 序列化 —— `StreamEvent.data` 直接装原生 LangChain 对象（`AIMessage.content`、`usage_metadata` 的 `UsageMetadata` TypedDict）。Jupyter 用户拿到的是真正的类型，不是匿名 dict。
 - 没有 asyncio —— 调用者可以直接 `for event in ...`，不必写 `async for`。

@@ -6,33 +6,40 @@ import type { StreamdownProps } from "streamdown";
 
 import { rehypeSplitWordsIntoSpans } from "../rehype";
 
+const katexOptions = {
+  output: "html",
+  throwOnError: false,
+  strict: false,
+} as const;
+
+const sharedRemarkPlugins = [
+  [remarkGfm, { singleTilde: false }],
+  [remarkMath, { singleDollarTextMath: true }],
+] as StreamdownProps["remarkPlugins"];
+
 export const streamdownPlugins = {
-  remarkPlugins: [
-    remarkGfm,
-    [remarkMath, { singleDollarTextMath: true }],
-  ] as StreamdownProps["remarkPlugins"],
+  remarkPlugins: sharedRemarkPlugins,
   rehypePlugins: [
     rehypeRaw,
-    [rehypeKatex, { output: "html" }],
+    [rehypeKatex, katexOptions],
   ] as StreamdownProps["rehypePlugins"],
 };
 
 export const streamdownPluginsWithWordAnimation = {
-  remarkPlugins: [
-    remarkGfm,
-    [remarkMath, { singleDollarTextMath: true }],
-  ] as StreamdownProps["remarkPlugins"],
+  remarkPlugins: sharedRemarkPlugins,
   rehypePlugins: [
-    [rehypeKatex, { output: "html" }],
+    [rehypeKatex, katexOptions],
     rehypeSplitWordsIntoSpans,
   ] as StreamdownProps["rehypePlugins"],
 };
 
-// Plugins for reasoning/thinking content — derived from streamdownPlugins but without rehypeRaw,
-// to prevent LLM-hallucinated HTML tags (e.g. <simd>) from being rendered as DOM elements.
-export const reasoningPlugins = {
+export const streamdownPluginsWithoutRawHtml = {
   remarkPlugins: streamdownPlugins.remarkPlugins,
   rehypePlugins: streamdownPlugins.rehypePlugins?.filter(
     (p) => p !== rehypeRaw,
   ) as StreamdownProps["rehypePlugins"],
 };
+
+// Plugins for reasoning/thinking content — derived from streamdownPlugins but without rehypeRaw,
+// to prevent LLM-hallucinated HTML tags (e.g. <simd>) from being rendered as DOM elements.
+export const reasoningPlugins = streamdownPluginsWithoutRawHtml;

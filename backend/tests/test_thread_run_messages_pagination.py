@@ -10,7 +10,7 @@ from _run_message_pagination_helpers import assert_run_message_page
 from fastapi.testclient import TestClient
 
 from app.gateway.routers import thread_runs
-from deerflow.runtime import RunManager
+from deerflow.runtime import END_SENTINEL, MemoryStreamBridge, RunManager
 from deerflow.runtime.runs.store.memory import MemoryRunStore
 
 # ---------------------------------------------------------------------------
@@ -18,17 +18,39 @@ from deerflow.runtime.runs.store.memory import MemoryRunStore
 # ---------------------------------------------------------------------------
 
 
-def _make_app(event_store=None, run_manager=None):
+def _make_app(event_store=None, run_manager=None, stream_bridge=None):
     """Build a test FastAPI app with stub auth and mocked state."""
     app = make_authed_test_app()
     app.include_router(thread_runs.router)
 
+    app.state.stream_bridge = stream_bridge or MemoryStreamBridge()
     if event_store is not None:
         app.state.run_event_store = event_store
-    if run_manager is not None:
-        app.state.run_manager = run_manager
+    if run_manager is None:
+        run_manager = AsyncMock()
+        run_manager.get.return_value = None
+    app.state.run_manager = run_manager
 
     return app
+
+
+class _EndingCrossProcessBridge:
+    supports_cross_process = True
+
+    async def publish(self, run_id, event, data):
+        return None
+
+    async def publish_end(self, run_id):
+        return None
+
+    def subscribe(self, run_id, *, last_event_id=None, heartbeat_interval=15.0):
+        async def _events():
+            yield END_SENTINEL
+
+        return _events()
+
+    async def cleanup(self, run_id, *, delay=0):
+        return None
 
 
 def _make_event_store(rows: list[dict]):
@@ -231,3 +253,95 @@ def test_stream_store_only_run_returns_409():
 
     assert response.status_code == 409
     assert "not active on this worker" in response.json()["detail"]
+
+
+def test_join_store_only_run_allowed_with_cross_process_bridge():
+    """Redis-like bridges can stream store-only runs hydrated on another worker."""
+    app = _make_app(run_manager=_make_store_only_run_manager(), stream_bridge=_EndingCrossProcessBridge())
+    with TestClient(app) as client:
+        response = client.get("/api/threads/thread-store/runs/store-only-run/join")
+
+    assert response.status_code == 200
+    assert "event: end" in response.text
+
+
+def test_list_run_messages_injects_turn_duration():
+    """Verify that list_run_messages injects turn_duration into ALL AI messages for the run."""
+    from unittest.mock import AsyncMock
+
+    from deerflow.runtime import RunRecord
+
+    # Mock a run record that took exactly 5 seconds
+    mock_run = RunRecord(
+        run_id="run-1",
+        thread_id="thread-1",
+        assistant_id=None,
+        status="success",
+        on_disconnect="cancel",
+        created_at="2026-06-20T10:00:00Z",
+        updated_at="2026-06-20T10:00:05Z",
+    )
+
+    rows = [
+        {"seq": 1, "run_id": "run-1", "content": {"type": "human", "text": "Hello"}},
+        {"seq": 2, "run_id": "run-1", "content": {"type": "ai", "text": "Thinking..."}},
+        {"seq": 3, "run_id": "run-1", "content": {"type": "ai", "text": "Response"}},
+    ]
+
+    event_store = _make_event_store(rows)
+    run_manager = AsyncMock()
+    run_manager.get.return_value = mock_run
+    app = _make_app(event_store=event_store, run_manager=run_manager)
+
+    with TestClient(app) as client:
+        response = client.get("/api/threads/thread-1/runs/run-1/messages")
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+
+    assert "turn_duration" not in data[0]["content"].get("additional_kwargs", {})
+
+    assert data[1]["content"]["additional_kwargs"]["turn_duration"] == 5
+    assert data[2]["content"]["additional_kwargs"]["turn_duration"] == 5
+
+
+def test_list_thread_messages_injects_turn_duration():
+    """Verify that list_thread_messages injects turn_duration into the inner content."""
+    from unittest.mock import AsyncMock
+
+    from deerflow.runtime import RunRecord
+
+    mock_run = RunRecord(
+        run_id="run-1",
+        thread_id="thread-1",
+        assistant_id=None,
+        status="success",
+        on_disconnect="cancel",
+        created_at="2026-06-20T10:00:00Z",
+        updated_at="2026-06-20T10:00:05Z",
+    )
+    rows = [
+        {"seq": 1, "run_id": "run-1", "content": {"type": "human", "text": "Hello"}},
+        {"seq": 2, "run_id": "run-1", "content": {"type": "ai", "text": "Response"}},
+    ]
+
+    event_store = MagicMock()
+    event_store.list_messages = AsyncMock(return_value=rows)
+
+    run_manager = AsyncMock()
+    run_manager.list_by_thread = AsyncMock(return_value=[mock_run])
+
+    feedback_repo = MagicMock()
+    feedback_repo.list_by_thread_grouped = AsyncMock(return_value={})
+
+    app = _make_app(event_store=event_store, run_manager=run_manager)
+    app.state.feedback_repo = feedback_repo
+
+    with TestClient(app) as client:
+        response = client.get("/api/threads/thread-1/messages")
+
+    assert response.status_code == 200
+    data = response.json()
+
+    assert "turn_duration" not in data[0].get("content", {}).get("additional_kwargs", {})
+    assert data[1]["content"]["additional_kwargs"]["turn_duration"] == 5

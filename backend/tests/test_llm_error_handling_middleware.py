@@ -224,6 +224,73 @@ async def test_async_circuit_half_open_graph_bubble_up_resets_probe() -> None:
     assert middleware._circuit_state == "half_open"
 
 
+def test_circuit_half_open_non_retriable_error_resets_probe() -> None:
+    """A non-retriable error during a half-open probe must release the probe.
+
+    Regression: the non-retriable branch neither recorded a failure (correct —
+    business errors like quota/auth must not trip the breaker) nor reset
+    ``_circuit_probe_in_flight``. So one non-retriable probe left the circuit
+    stuck at half_open with probe_in_flight=True, and every subsequent call
+    fast-failed forever because no later call could ever run the handler to
+    reach ``_record_success`` / ``_record_failure``.
+    """
+    import unittest.mock
+
+    middleware = _build_middleware()
+
+    # Enter half_open and let one probe through (probe_in_flight -> True).
+    middleware._circuit_state = "half_open"
+    middleware._circuit_probe_in_flight = False
+    assert middleware._check_circuit() is False
+    assert middleware._circuit_probe_in_flight is True
+
+    def handler(_request) -> AIMessage:
+        raise FakeError("insufficient_quota", status_code=429, code="insufficient_quota")
+
+    # _check_circuit already admitted the probe above; keep it False here so the
+    # top-of-call gate does not fast-fail before the handler runs. Force the
+    # error to classify as non-retriable regardless of heuristics.
+    with unittest.mock.patch.object(middleware, "_check_circuit", return_value=False):
+        with unittest.mock.patch.object(middleware, "_classify_error", return_value=(False, "quota")):
+            result = middleware.wrap_model_call(SimpleNamespace(), handler)
+
+    # Non-retriable errors still surface a graceful fallback (not a raise) and
+    # must NOT trip the breaker.
+    assert isinstance(result, AIMessage)
+    assert middleware._circuit_state == "half_open"
+    # The probe was released, so the real gate re-admits the next probe instead
+    # of fast-failing forever.
+    assert middleware._circuit_probe_in_flight is False
+    assert middleware._check_circuit() is False
+    assert middleware._circuit_probe_in_flight is True
+
+
+@pytest.mark.anyio
+async def test_async_circuit_half_open_non_retriable_error_resets_probe() -> None:
+    """Async mirror: a non-retriable error during a half-open probe releases it."""
+    import unittest.mock
+
+    middleware = _build_middleware()
+
+    middleware._circuit_state = "half_open"
+    middleware._circuit_probe_in_flight = False
+    assert middleware._check_circuit() is False
+    assert middleware._circuit_probe_in_flight is True
+
+    async def handler(_request) -> AIMessage:
+        raise FakeError("insufficient_quota", status_code=429, code="insufficient_quota")
+
+    with unittest.mock.patch.object(middleware, "_check_circuit", return_value=False):
+        with unittest.mock.patch.object(middleware, "_classify_error", return_value=(False, "quota")):
+            result = await middleware.awrap_model_call(SimpleNamespace(), handler)
+
+    assert isinstance(result, AIMessage)
+    assert middleware._circuit_state == "half_open"
+    assert middleware._circuit_probe_in_flight is False
+    assert middleware._check_circuit() is False
+    assert middleware._circuit_probe_in_flight is True
+
+
 # ---------- Circuit Breaker Tests ----------
 
 
@@ -678,3 +745,77 @@ def test_user_message_for_quota_unchanged() -> None:
 
     assert "out of quota" in message
     assert "streaming response was interrupted" not in message
+
+
+def test_classify_error_index_error_is_retriable_transient() -> None:
+    """``langchain_core.language_models.chat_models.ainvoke`` crashes with
+    ``IndexError: list index out of range`` when the upstream provider
+    returns ``200 OK`` with ``generations == []`` (observed against the
+    Volces "coding" endpoint at ark.cn-beijing.volces.com). That's an
+    upstream-payload glitch we don't want killing the entire run, so it
+    must classify as retriable/transient and go through the normal
+    retry/backoff path.
+    """
+    middleware = _build_middleware()
+    exc = IndexError("list index out of range")
+    retriable, reason = middleware._classify_error(exc)
+    assert retriable is True
+    assert reason == "transient"
+
+
+def test_async_index_error_retries_then_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Empty-``generations`` payloads from the upstream provider must not
+    abort the run on the first failure. Confirm that the retry loop kicks
+    in and the next attempt's successful AIMessage is returned to the
+    caller instead of an error fallback.
+    """
+    middleware = _build_middleware(retry_max_attempts=3, retry_base_delay_ms=10, retry_cap_delay_ms=10)
+    attempts = 0
+
+    async def fake_sleep(_delay: float) -> None:
+        return None
+
+    async def handler(_request) -> AIMessage:
+        nonlocal attempts
+        attempts += 1
+        if attempts < 2:
+            raise IndexError("list index out of range")
+        return AIMessage(content="ok")
+
+    monkeypatch.setattr("asyncio.sleep", fake_sleep)
+
+    result = asyncio.run(middleware.awrap_model_call(SimpleNamespace(), handler))
+
+    assert isinstance(result, AIMessage)
+    assert result.content == "ok"
+    assert attempts == 2
+
+
+def test_async_index_error_exhausted_returns_user_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If every retry hits the same empty-``generations`` IndexError, the
+    middleware must still produce a user-facing fallback AIMessage (with
+    ``deerflow_error_fallback=True``) instead of letting the IndexError
+    propagate out of the agent loop and ending the run in ``error``
+    status with no GitHub-side reply.
+    """
+    middleware = _build_middleware(retry_max_attempts=2, retry_base_delay_ms=10, retry_cap_delay_ms=10)
+
+    async def fake_sleep(_delay: float) -> None:
+        return None
+
+    async def handler(_request) -> AIMessage:
+        raise IndexError("list index out of range")
+
+    monkeypatch.setattr("asyncio.sleep", fake_sleep)
+
+    result = asyncio.run(middleware.awrap_model_call(SimpleNamespace(), handler))
+
+    assert isinstance(result, AIMessage)
+    assert result.additional_kwargs["deerflow_error_fallback"] is True
+    assert result.additional_kwargs["error_reason"] == "transient"
+    assert result.additional_kwargs["error_type"] == "IndexError"
+    assert "temporarily unavailable" in str(result.content)

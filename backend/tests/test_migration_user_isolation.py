@@ -190,3 +190,92 @@ class TestMigrateAgents:
 
         report = migrate_agents(paths, user_id="default")
         assert report == []
+
+
+class TestMigrateSkills:
+    @staticmethod
+    def _seed_legacy_skill(base_dir: Path, name: str, *, content: str = "skill doc") -> Path:
+        skill_dir = base_dir / "skills" / "custom" / name
+        skill_dir.mkdir(parents=True, exist_ok=True)
+        (skill_dir / "SKILL.md").write_text(content, encoding="utf-8")
+        return skill_dir
+
+    def test_moves_legacy_into_user_layout(self, base_dir: Path, paths: Paths):
+        self._seed_legacy_skill(base_dir, "my-skill", content="legacy skill")
+        (base_dir / "skills" / "public" / "bootstrap").mkdir(parents=True)
+
+        from scripts.migrate_user_isolation import migrate_skills
+
+        report = migrate_skills(paths, user_id="default")
+
+        assert len(report) == 1
+        assert report[0]["skill"] == "my-skill"
+        assert "moved -> " in report[0]["action"]
+
+        dest = paths.user_custom_skills_dir("default") / "my-skill" / "SKILL.md"
+        assert dest.exists()
+        assert dest.read_text() == "legacy skill"
+        # Legacy custom dir cleaned up
+        assert not (base_dir / "skills" / "custom").exists()
+        # But skills/ parent survives (public/ still in use)
+        assert (base_dir / "skills" / "public").exists()
+
+    def test_dry_run_does_not_move(self, base_dir: Path, paths: Paths):
+        legacy_dir = self._seed_legacy_skill(base_dir, "my-skill")
+
+        from scripts.migrate_user_isolation import migrate_skills
+
+        report = migrate_skills(paths, user_id="default", dry_run=True)
+
+        assert len(report) == 1
+        assert legacy_dir.exists(), "dry-run must not touch the filesystem"
+        assert not (paths.user_custom_skills_dir("default") / "my-skill").exists()
+
+    def test_existing_destination_is_conflict(self, base_dir: Path, paths: Paths):
+        self._seed_legacy_skill(base_dir, "my-skill", content="legacy")
+        dest = paths.user_custom_skills_dir("default") / "my-skill"
+        dest.mkdir(parents=True)
+        (dest / "SKILL.md").write_text("preexisting", encoding="utf-8")
+
+        from scripts.migrate_user_isolation import migrate_skills
+
+        report = migrate_skills(paths, user_id="default")
+
+        assert report[0]["action"].startswith("conflict -> ")
+        assert (dest / "SKILL.md").read_text() == "preexisting"
+        conflicts_dir = paths.base_dir / "migration-conflicts" / "skills" / "my-skill"
+        assert (conflicts_dir / "SKILL.md").read_text() == "legacy"
+
+    def test_no_legacy_dir_is_noop(self, base_dir: Path, paths: Paths):
+        from scripts.migrate_user_isolation import migrate_skills
+
+        report = migrate_skills(paths, user_id="default")
+        assert report == []
+
+    def test_migrates_history_dir(self, base_dir: Path, paths: Paths):
+        history_dir = base_dir / "skills" / "custom" / ".history"
+        history_dir.mkdir(parents=True)
+        (history_dir / "log.json").write_text("[]", encoding="utf-8")
+
+        from scripts.migrate_user_isolation import migrate_skills
+
+        migrate_skills(paths, user_id="default")
+
+        dest_history = paths.user_custom_skills_dir("default") / ".history" / "log.json"
+        assert dest_history.exists()
+        assert not history_dir.exists()
+
+    def test_skills_parent_dir_not_deleted_even_if_custom_empty(self, base_dir: Path, paths: Paths):
+        """skills/ parent must NOT be deleted — public/ may still be in use."""
+        # Create only custom dir (empty), public dir with content
+        (base_dir / "skills" / "custom").mkdir(parents=True)
+        (base_dir / "skills" / "public" / "bootstrap").mkdir(parents=True)
+
+        from scripts.migrate_user_isolation import migrate_skills
+
+        migrate_skills(paths, user_id="default")
+
+        # custom/ cleaned up (was empty), but skills/ survives
+        assert not (base_dir / "skills" / "custom").exists()
+        assert (base_dir / "skills").exists()
+        assert (base_dir / "skills" / "public").exists()

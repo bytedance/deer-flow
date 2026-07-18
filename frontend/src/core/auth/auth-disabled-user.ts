@@ -5,6 +5,7 @@ export const AUTH_DISABLED_USER: User = {
   email: "default@test.local",
   system_role: "admin",
   needs_setup: false,
+  oauth_provider: null,
 };
 
 const PRODUCTION_ENV_VALUES = new Set(["prod", "production"]);

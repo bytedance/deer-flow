@@ -1,6 +1,44 @@
+import re
 from abc import ABC, abstractmethod
 
 from deerflow.sandbox.search import GrepMatch
+
+# POSIX env-var name rule: letter or underscore, then letters/digits/underscores.
+# Used to validate ``env`` keys before they reach a sandbox implementation.
+# No current implementation splices a key into a shell string — the local
+# sandbox passes the dict to ``subprocess.run(env=...)`` (no shell), the AIO
+# sandbox forwards it via the ``bash.exec`` structured ``env`` field, and e2b
+# forwards it as the SDK's ``envs``. The check is defense-in-depth for the
+# contract: a future shell-splicing implementation must not have to re-derive
+# its own rule.
+_ENV_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _validate_extra_env(extra_env: dict[str, str] | None) -> None:
+    """Reject ``env`` keys that are not valid POSIX env-var names.
+
+    The :meth:`Sandbox.execute_command` contract accepts arbitrary ``str``
+    keys. Today no implementation splices a key into a shell string — the
+    local sandbox passes the dict to ``subprocess.run(env=...)`` (no shell),
+    the AIO sandbox forwards it via the ``bash.exec`` structured ``env``
+    field (no command-string splice), and e2b forwards it as the SDK's
+    ``envs``. Enforcing the POSIX env-name rule in the abstract layer is
+    defense-in-depth for the contract: a future implementation that does
+    route a key through a shell must not have to re-derive its own
+    validation rule, and a caller passing a key derived from config /
+    payload / user input fails fast with ``ValueError`` instead of silently
+    producing an exploit should a future implementation regress to splicing.
+
+    Raises:
+        ValueError: When ``extra_env`` is not None and any key does not
+            match ``^[A-Za-z_][A-Za-z0-9_]*$``. ``None`` and empty dicts
+            pass through unchanged.
+    """
+    if not extra_env:
+        return
+    for key in extra_env:
+        if not isinstance(key, str) or not _ENV_NAME_PATTERN.fullmatch(key):
+            raise ValueError(f"extra_env key {key!r} is not a valid POSIX environment variable name (must match ^[A-Za-z_][A-Za-z0-9_]*$). This protects shell-using sandbox implementations from command injection via the key.")
 
 
 class Sandbox(ABC):
@@ -16,14 +54,39 @@ class Sandbox(ABC):
         return self._id
 
     @abstractmethod
-    def execute_command(self, command: str) -> str:
+    def execute_command(
+        self,
+        command: str,
+        env: dict[str, str] | None = None,
+        timeout: float | None = None,
+    ) -> str:
         """Execute bash command in sandbox.
 
         Args:
             command: The command to execute.
+            env: Optional per-call environment variables to inject into the
+                command's process. Used to pass request-scoped secrets (e.g. a
+                short-lived end-user token for skill scripts, issue #3861, or a
+                GitHub App installation token for ``git push`` / ``gh``) without
+                placing them in the prompt, tool arguments, or the command
+                string. When ``None`` the sandbox uses its default environment.
+                Keys must be valid POSIX environment-variable names
+                (``^[A-Za-z_][A-Za-z0-9_]*$``); implementations validate
+                via :func:`_validate_extra_env` before use. Values are
+                arbitrary strings — shell-using implementations
+                ``shlex.quote`` them on splice.
+            timeout: Optional per-call wall-clock timeout in seconds. Local
+                sandboxes use this to bound host bash commands so long-lived
+                foreground processes cannot hang a turn indefinitely. Remote/AIO
+                implementations may ignore it when their backend does not expose
+                an equivalent command-timeout control separate from its own API
+                timeouts.
 
         Returns:
             The standard or error output of the command.
+
+        Raises:
+            ValueError: when an ``env`` key is not a valid env-var name.
         """
         pass
 
