@@ -88,6 +88,9 @@ def _make_provider_with_active_sandbox(tmp_path: Path, sandbox_id: str):
     provider._last_activity = {sandbox_id: 1.0}
     provider._warm_pool = {}
     provider._unowned_since = {}
+    provider._local_teardown = set()
+    provider._acquire_epoch = {}
+    provider._acquire_epoch_counter = 0
     provider._shutdown_called = False
     provider._idle_checker_stop = threading.Event()
     provider._idle_checker_thread = None

@@ -347,7 +347,23 @@ def _make_shared_ownership_store(**kwargs):
 
 
 class _ScopedOwnershipStore:
-    """View of a shared store as seen by one instance (rebinds ``owner_id``)."""
+    """View of a shared store as seen by one instance (rebinds ``owner_id``).
+
+    Rebinding is a test-only trick to model two instances against one store, and
+    it is only sound while one thread at a time is inside the shared store. The
+    heartbeat-hold tests deliberately run a main-thread ``take`` as worker-b
+    concurrently with a heartbeat-thread ``claim`` as worker-a, so the rebind has
+    to be serialized with the call it applies to: otherwise a ``claim`` can
+    execute under worker-b's id, read worker-a's ``del:`` lease as a peer's,
+    return ``False``, and kill the heartbeat — after which the marker lapses and
+    the next ``take`` succeeds spuriously. The GIL makes that window small, not
+    absent, so the tests flake rather than fail.
+    """
+
+    # Serializes owner_id rebind + call across every view of one shared store.
+    # A class-level lock is deliberate: each worker gets its own view object, and
+    # the thing being guarded is the single shared store they both mutate.
+    _rebind_lock = threading.Lock()
 
     def __init__(self, shared, owner_id: str):
         self._shared = shared
@@ -362,12 +378,13 @@ class _ScopedOwnershipStore:
         return True
 
     def _as_me(self, fn, *args):
-        previous = self._shared._owner_id
-        self._shared._owner_id = self._owner_id
-        try:
-            return fn(*args)
-        finally:
-            self._shared._owner_id = previous
+        with self._rebind_lock:
+            previous = self._shared._owner_id
+            self._shared._owner_id = self._owner_id
+            try:
+                return fn(*args)
+            finally:
+                self._shared._owner_id = previous
 
     def take(self, sandbox_id):
         return self._as_me(self._shared.take, sandbox_id)
@@ -415,6 +432,9 @@ def _make_provider_for_reconciliation(tmp_path=None, *, worker_id: str = "worker
     provider._last_activity = {}
     provider._warm_pool = {}
     provider._unowned_since = {}
+    provider._local_teardown = set()
+    provider._acquire_epoch = {}
+    provider._acquire_epoch_counter = 0
     provider._shutdown_called = False
     provider._idle_checker_stop = threading.Event()
     provider._idle_checker_thread = None
@@ -744,7 +764,7 @@ def test_destroy_fails_closed_when_ownership_unknown():
         created_at=time.time() - 50,
     )
 
-    worker._destroy_warm_entry("unknown1", info, reason="idle_timeout")
+    worker._destroy_warm_entry("unknown1", info, reason="idle_timeout", still_reapable=lambda: True)
 
     worker._backend.destroy.assert_not_called()
 
@@ -1295,7 +1315,7 @@ def test_teardown_marker_is_held_for_a_stop_that_outlives_the_lease_ttl():
     worker_a._warm_pool["doomed1"] = (info, time.time())
 
     reaper = threading.Thread(
-        target=lambda: worker_a._destroy_warm_entry("doomed1", info, reason="idle_timeout"),
+        target=lambda: worker_a._destroy_warm_entry("doomed1", info, reason="idle_timeout", still_reapable=lambda: True),
         daemon=True,
     )
     reaper.start()
@@ -1555,7 +1575,7 @@ def test_teardown_release_waits_for_the_heartbeat_to_exit():
     worker_a._warm_pool["defer1"] = (info, time.time())
 
     reaper = threading.Thread(
-        target=lambda: worker_a._destroy_warm_entry("defer1", info, reason="idle_timeout"),
+        target=lambda: worker_a._destroy_warm_entry("defer1", info, reason="idle_timeout", still_reapable=lambda: True),
         daemon=True,
     )
     reaper.start()
@@ -1713,7 +1733,7 @@ def test_teardown_heartbeat_stops_when_the_stop_returns():
     )
     worker_a._warm_pool["doomed2"] = (info, time.time())
 
-    assert worker_a._destroy_warm_entry("doomed2", info, reason="idle_timeout") is True
+    assert worker_a._destroy_warm_entry("doomed2", info, reason="idle_timeout", still_reapable=lambda: True) is True
 
     # Named rather than counted: threading.active_count() is global and other
     # tests' idle-checker/renewal threads make it noise, so a count comparison
@@ -1919,3 +1939,321 @@ def test_sighup_handler_registered():
         signal.signal(signal.SIGHUP, original_sighup)
         signal.signal(signal.SIGTERM, original_sigterm)
         signal.signal(signal.SIGINT, original_sigint)
+
+
+# ── Same-process reap vs. promote ────────────────────────────────────────────
+#
+# The ownership store excludes peers and nothing else: `claim()` and `take()`
+# both succeed against our *own* lease by design. So between this instance's
+# reaper threads and its own acquire path there is no store-level exclusion at
+# all, and every reaper decides outside `_lock` (a store round trip must not be
+# held under the lock that guards every acquire).
+#
+# Each test below blocks its reaper inside the store round trip — where the
+# window actually lives — lets a promote path run, then reads the SETTLED state
+# after both threads have finished. The assertion is never on a transient.
+
+
+def _active_sandbox(provider, sandbox_id, info, *, thread_key=("u", "t1")):
+    """Track *info* as an active sandbox on *provider*."""
+    from deerflow.community.aio_sandbox.aio_sandbox import AioSandbox
+
+    provider._sandboxes[sandbox_id] = AioSandbox(id=sandbox_id, base_url=info.sandbox_url)
+    provider._sandbox_infos[sandbox_id] = info
+    provider._last_activity[sandbox_id] = time.time()
+    provider._thread_sandboxes[thread_key] = sandbox_id
+    provider._backend.is_alive.return_value = True
+
+
+def _info(sandbox_id, *, created_at=None):
+    return SandboxInfo(
+        sandbox_id=sandbox_id,
+        sandbox_url="http://localhost:8080",
+        container_name=f"deer-flow-sandbox-{sandbox_id}",
+        created_at=time.time() if created_at is None else created_at,
+    )
+
+
+class _GateOnClaim:
+    """Store view that holds the first ``claim`` until released.
+
+    Models the Redis round trip the reaper makes outside ``_lock`` — the window
+    a same-process acquire slips through.
+    """
+
+    def __init__(self, inner):
+        self._inner = inner
+        self.entered = threading.Event()
+        # Not named `release`: __getattr__ forwards everything else to the real
+        # store, and an attribute by that name would shadow `store.release()`.
+        self.let_through = threading.Event()
+        self._armed = True
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+    @property
+    def supports_cross_process(self):
+        return True
+
+    def claim(self, sandbox_id, *, for_destroy=False):
+        if self._armed:
+            self._armed = False
+            self.entered.set()
+            assert self.let_through.wait(timeout=5), "the test never released the gated claim"
+        return self._inner.claim(sandbox_id, for_destroy=for_destroy)
+
+
+def _run_reap_vs_promote(provider, gate, reap, promote):
+    """Run *reap* until it blocks in the store, then *promote*; settle and return."""
+    reaper = threading.Thread(target=reap, daemon=True)
+    reaper.start()
+    try:
+        assert gate.entered.wait(timeout=5), "the reaper never reached the ownership store"
+        handed_out = promote()
+    finally:
+        gate.let_through.set()
+        reaper.join(timeout=5)
+    assert not reaper.is_alive(), "the reaper never finished"
+    return handed_out
+
+
+@pytest.mark.parametrize(
+    ("reason", "reap_name"),
+    [("replica_enforcement", "_evict_oldest_warm"), ("idle_timeout", "_reap_expired_warm")],
+)
+def test_warm_reaper_does_not_stop_a_container_this_instance_just_reclaimed(reason, reap_name):
+    """Both warm reapers defer the pop, so both need the same reservation.
+
+    The deferred pop is deliberate — popping first loses the container on a
+    refused claim — but it leaves the entry visible in `_warm_pool` for the whole
+    stop, so `_reclaim_warm_pool_sandbox` can promote it and hand it to an agent
+    while the stop is in flight. `claim(for_destroy=True)` does not refuse this:
+    the lease is already `own:us`, and a claim only refuses *peers*.
+
+    On `main` neither reaper could hit this — `WarmPoolLifecycleMixin` popped the
+    entry under the lock before destroying — so this is a regression these
+    overrides introduce, not a pre-existing gap.
+    """
+    provider = _make_provider_for_reconciliation()
+    gate = _GateOnClaim(provider._ownership)
+    provider._ownership = gate
+    info = _info("warm1")
+    # Old enough for the idle reaper; the only entry, so also the eviction pick.
+    provider._warm_pool["warm1"] = (info, time.time() - 10_000)
+    provider._ownership._inner.take("warm1")
+
+    reap = provider._evict_oldest_warm if reap_name == "_evict_oldest_warm" else lambda: provider._reap_expired_warm(600)
+    handed_out = _run_reap_vs_promote(
+        provider,
+        gate,
+        reap,
+        lambda: provider._reclaim_warm_pool_sandbox("t1", "warm1", user_id="u"),
+    )
+
+    assert handed_out is None, f"{reap_name} let a turn reclaim a container it was stopping ({reason})"
+    assert "warm1" not in provider._sandboxes, "the reclaimed sandbox was promoted into active tracking"
+
+
+def test_idle_destroy_does_not_stop_a_container_this_instance_just_reused():
+    """The idle checker's "still idle?" re-check must gate the reservation, not precede it.
+
+    `_cleanup_idle_sandboxes` re-verified idleness under the lock and then called
+    `destroy()`, which claims ownership *before* untracking — so the re-check and
+    the act are separated by a store round trip. A turn that reuses the sandbox
+    in that window gets its container stopped mid-turn.
+
+    The window is pre-existing in shape (main re-checks and destroys the same
+    way) but this PR widened it from a few instructions to a network round trip
+    by adding the ownership claim, so it is in scope here.
+    """
+    provider = _make_provider_for_reconciliation()
+    gate = _GateOnClaim(provider._ownership)
+    provider._ownership = gate
+    info = _info("idle1")
+    _active_sandbox(provider, "idle1", info)
+    provider._last_activity["idle1"] = 0.0  # long idle
+    provider._ownership._inner.take("idle1")
+
+    handed_out = _run_reap_vs_promote(
+        provider,
+        gate,
+        lambda: provider._cleanup_idle_sandboxes(600),
+        lambda: provider._reuse_in_process_sandbox("t1", user_id="u"),
+    )
+
+    assert handed_out is None, "a turn reused a sandbox whose container the idle checker was stopping"
+
+
+def test_unhealthy_drop_refuses_discovery_of_the_container_it_is_stopping():
+    """`_drop_unhealthy_sandbox` untracks first, so discovery is its open window.
+
+    Once the maps are cleared, an acquire misses both caches and falls through to
+    backend discovery, which finds the still-running container. `take()` only
+    refuses a `del:` lease, and this path's claim has not run yet — so without a
+    local reservation the acquire is handed a container this instance is about
+    to stop.
+    """
+    provider = _make_provider_for_reconciliation()
+    info = _info("sick1")
+    _active_sandbox(provider, "sick1", info)
+    provider._ownership.take("sick1")
+    # Block at the claim, not at the stop: after the claim the `del:` marker is
+    # already published and the store refuses the take by itself, so gating any
+    # later would pass without the reservation existing at all. The window that
+    # needs the reservation is untrack -> claim, where the lease still says
+    # `own:us` and `take()` succeeds.
+    gate = _GateOnClaim(provider._ownership)
+    provider._ownership = gate
+
+    reaper = threading.Thread(target=lambda: provider._drop_unhealthy_sandbox("sick1", "failed health check"), daemon=True)
+    reaper.start()
+    try:
+        assert gate.entered.wait(timeout=5), "the drop never reached the ownership claim"
+        assert provider._ownership._inner.owner("sick1") == provider._owner_id, "precondition: the lease must still read as ours, not a teardown"
+        with pytest.raises(SandboxBeingDestroyedError):
+            provider._register_discovered_sandbox("t1", info, user_id="u")
+    finally:
+        gate.let_through.set()
+        reaper.join(timeout=5)
+
+    assert "sick1" not in provider._sandboxes
+
+
+def test_renewal_does_not_drop_a_sandbox_this_instance_re_acquired():
+    """A `LOST` verdict is stale the moment an acquire takes the lease back.
+
+    `_renew_owned_leases` calls `renew()` outside `_lock`; between that answer
+    and `_forget_lost_sandbox`'s pop, this instance's own acquire can `take()`
+    the lease back and hand the sandbox to a turn. The reuse path hands out the
+    **same** tracked `AioSandbox`, so an object-identity check would not notice —
+    the pop then closes a client mid-turn and the agent's tool calls fail until
+    the next turn re-discovers.
+    """
+    shared = _make_shared_ownership_store()
+    worker_a = _make_provider_for_reconciliation(worker_id="worker-a", store=shared)
+    worker_b = _make_provider_for_reconciliation(worker_id="worker-b", store=shared)
+    info = _info("moved1")
+    _active_sandbox(worker_a, "moved1", info)
+    worker_b._ownership.take("moved1")  # peer holds it -> renew() will report LOST
+
+    entered = threading.Event()
+    release = threading.Event()
+    original_forget = worker_a._forget_lost_sandbox
+
+    def gated_forget(sandbox_id, **kwargs):
+        entered.set()
+        assert release.wait(timeout=5)
+        return original_forget(sandbox_id, **kwargs)
+
+    worker_a._forget_lost_sandbox = gated_forget
+
+    reaper = threading.Thread(target=worker_a._renew_owned_leases, daemon=True)
+    reaper.start()
+    try:
+        assert entered.wait(timeout=5), "renewal never decided the lease was lost"
+        assert worker_a._reuse_in_process_sandbox("t1", user_id="u") == "moved1"
+    finally:
+        release.set()
+        reaper.join(timeout=5)
+
+    assert shared.owner("moved1") == "worker-a", "the acquire should have taken the lease back"
+    assert "moved1" in worker_a._sandboxes, "renewal dropped a sandbox this instance owns again"
+
+
+def test_release_does_not_drop_a_warm_entry_this_instance_re_acquired():
+    """`release()` refreshes ownership outside the lock and has the same staleness.
+
+    Sibling of the renewal path: the turn ends, `release()` parks the entry warm
+    and refreshes its lease, and the thread's *next* turn can reclaim it while
+    that round trip is in flight.
+    """
+    shared = _make_shared_ownership_store()
+    worker_a = _make_provider_for_reconciliation(worker_id="worker-a", store=shared)
+    worker_b = _make_provider_for_reconciliation(worker_id="worker-b", store=shared)
+    info = _info("parked1")
+    _active_sandbox(worker_a, "parked1", info)
+    worker_b._ownership.take("parked1")  # peer holds it -> refresh reports LOST
+
+    entered = threading.Event()
+    release_gate = threading.Event()
+    original_forget = worker_a._forget_lost_sandbox
+
+    def gated_forget(sandbox_id, **kwargs):
+        entered.set()
+        assert release_gate.wait(timeout=5)
+        return original_forget(sandbox_id, **kwargs)
+
+    worker_a._forget_lost_sandbox = gated_forget
+
+    reaper = threading.Thread(target=lambda: worker_a.release("parked1"), daemon=True)
+    reaper.start()
+    try:
+        assert entered.wait(timeout=5), "release never decided the lease was lost"
+        assert worker_a._reclaim_warm_pool_sandbox("t1", "parked1", user_id="u") == "parked1"
+    finally:
+        release_gate.set()
+        reaper.join(timeout=5)
+
+    assert shared.owner("parked1") == "worker-a"
+    assert "parked1" in worker_a._sandboxes, "release dropped a warm entry this instance re-acquired"
+
+
+def test_discovered_sandbox_client_is_closed_when_ownership_publish_fails():
+    """The discover path owns a host-side client even though it owns no container.
+
+    "Nothing to roll back" is true of the container — we did not create it — but
+    not of the `AioSandbox` HTTP client constructed before the publish. The
+    sibling create path already closes it on the same failure.
+    """
+    from deerflow.community.aio_sandbox.ownership import OwnershipBackendError
+
+    provider = _make_provider_for_reconciliation()
+    provider._ownership = MagicMock()
+    provider._ownership.take.side_effect = OwnershipBackendError("store down")
+
+    created = []
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    real_sandbox_cls = aio_mod.AioSandbox
+
+    def tracking_sandbox(**kwargs):
+        sandbox = real_sandbox_cls(**kwargs)
+        sandbox.close = MagicMock(side_effect=sandbox.close)
+        created.append(sandbox)
+        return sandbox
+
+    with patch.object(aio_mod, "AioSandbox", side_effect=tracking_sandbox):
+        with pytest.raises(OwnershipBackendError):
+            provider._register_discovered_sandbox("t1", _info("found1"), user_id="u")
+
+    assert len(created) == 1, "the discover path should have constructed exactly one client"
+    created[0].close.assert_called_once()
+    assert "found1" not in provider._sandboxes
+
+
+def test_idle_destroy_skips_a_sandbox_re_acquired_after_the_idle_snapshot():
+    """The idle predicate must read live activity, not just gate the reservation.
+
+    `_cleanup_idle_sandboxes` snapshots idle candidates under the lock and acts
+    on them one at a time; a turn landing in between makes the snapshot wrong.
+    The reservation alone does not catch this — nothing is being torn down yet —
+    so the "still idle?" check has to travel with it as a live predicate.
+    """
+    provider = _make_provider_for_reconciliation()
+    info = _info("idle2")
+    _active_sandbox(provider, "idle2", info)
+    provider._last_activity["idle2"] = 0.0
+    provider._ownership.take("idle2")
+
+    real_destroy_tracked = provider._destroy_tracked
+
+    def turn_lands_first(sandbox_id, **kwargs):
+        # A turn arrives between the idle snapshot and the reservation.
+        provider._last_activity[sandbox_id] = time.time()
+        return real_destroy_tracked(sandbox_id, **kwargs)
+
+    provider._destroy_tracked = turn_lands_first
+    provider._cleanup_idle_sandboxes(600)
+
+    provider._backend.destroy.assert_not_called()
+    assert "idle2" in provider._sandboxes, "idle cleanup destroyed a sandbox that was re-acquired after the snapshot"

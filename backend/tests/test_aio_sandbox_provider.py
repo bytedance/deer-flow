@@ -61,6 +61,9 @@ def _make_provider(tmp_path):
         provider = aio_mod.AioSandboxProvider.__new__(aio_mod.AioSandboxProvider)
         provider._config = {"idle_timeout": 600, "replicas": 3}
         provider._sandboxes = {}
+        provider._local_teardown = set()
+        provider._acquire_epoch = {}
+        provider._acquire_epoch_counter = 0
         provider._lock = MagicMock()
         provider._idle_checker_stop = MagicMock()
         provider._renewal_stop = MagicMock()
@@ -445,6 +448,9 @@ def _make_provider_with_active_sandbox(tmp_path, sandbox_id: str):
     }
     provider._thread_sandboxes = {}
     provider._last_activity = {sandbox_id: 0.0}
+    provider._local_teardown = set()
+    provider._acquire_epoch = {}
+    provider._acquire_epoch_counter = 0
     provider._shutdown_called = False
     provider._idle_checker_thread = None
     provider._backend = SimpleNamespace(destroy=MagicMock())
@@ -666,12 +672,19 @@ def test_cleanup_idle_sandboxes_keeps_active_cleanup_and_delegates_warm_expiry(t
     }
 
     calls = []
-    provider.destroy = MagicMock(side_effect=lambda _sandbox_id: calls.append("active"))
+    # The idle path destroys through `_destroy_tracked`, not `destroy()`: its
+    # "still idle?" re-check has to run in the same critical section that
+    # reserves the teardown, so it is passed down as a predicate. Asserting on
+    # `destroy` here would pass vacuously — it is no longer on this path.
+    provider._destroy_tracked = MagicMock(side_effect=lambda _sandbox_id, **_kw: calls.append("active"))
     provider._reap_expired_warm = MagicMock(side_effect=lambda _idle_timeout: calls.append("warm"))
 
     provider._cleanup_idle_sandboxes(1.0)
 
-    provider.destroy.assert_called_once_with("active-old")
+    assert provider._destroy_tracked.call_count == 1
+    assert provider._destroy_tracked.call_args.args == ("active-old",)
+    # The gate must actually be a live predicate, not a constant-true placeholder.
+    assert provider._destroy_tracked.call_args.kwargs["still_reapable"]() is True
     provider._reap_expired_warm.assert_called_once_with(1.0)
     assert calls == ["active", "warm"]
 
