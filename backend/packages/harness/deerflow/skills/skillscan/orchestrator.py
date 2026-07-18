@@ -395,9 +395,14 @@ def _scan_python(rel_path: str, text: str) -> list[SecurityFinding]:
             reverse_shell_parts.add("subprocess")
 
     if not has_network_sink:
-        if handle_sink := _find_client_handle_sink(tree):
-            has_network_sink = True
-            network_node = network_node or handle_sink
+        try:
+            if handle_sink := _find_client_handle_sink(tree):
+                has_network_sink = True
+                network_node = network_node or handle_sink
+        except RecursionError:
+            # The AST is untrusted. Preserve deterministic findings collected above when an
+            # adversarially deep tree exceeds the recursive handle-analysis budget.
+            logger.warning("SkillScan client-handle analysis hit recursion limit for %s", rel_path)
 
     if {"dup2", "socket", "subprocess"} <= reverse_shell_parts:
         findings.append(_finding_for_node("python-reverse-shell", rel_path, reverse_shell_node, "socket + dup2 + subprocess"))
@@ -714,13 +719,25 @@ _PYTHON_CLIENT_SINK_METHODS = {"request", "connect", "get", "post", "put", "patc
 _PYTHON_SCOPE_NODES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)
 _PYTHON_COMPREHENSION_NODES = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
 _PYTHON_MATCH_CAPTURE_NODES = (ast.MatchAs, ast.MatchStar, ast.MatchMapping)
+_PYTHON_EAGER_GENERATOR_CONSUMERS = {"dict", "frozenset", "list", "set", "sorted", "tuple"}
+
+
+@dataclass(frozen=True)
+class _ClientFunctionSummary:
+    """A deliberately small exact summary for a source-fixed zero-argument helper."""
+
+    raised: type[BaseException] | None = None
+    returned_group: tuple[type[BaseException], ...] | None = None
 
 
 @dataclass
 class _ClientScope:
     handles: dict[str, str]
     aliases: dict[str, str]
+    # Names rebound to a non-client on some path. Pruning consults this set to avoid treating a
+    # shadowed builtin as fixed; sink detection intentionally consults `handles`, not this may-set.
     shadowed: set[str] = field(default_factory=set)
+    functions: dict[str, _ClientFunctionSummary] = field(default_factory=dict)
 
     def copy_without(self, names: set[str] | None = None) -> _ClientScope:
         names = names or set()
@@ -728,6 +745,7 @@ class _ClientScope:
             handles={name: constructor for name, constructor in self.handles.items() if name not in names},
             aliases={name: target for name, target in self.aliases.items() if name not in names},
             shadowed=self.shadowed | names,
+            functions={name: summary for name, summary in self.functions.items() if name not in names},
         )
 
     @staticmethod
@@ -759,6 +777,10 @@ class _ClientScope:
                     joined.aliases[name] = target
         for name, constructor in (path_local or {}).items():
             joined.handles.setdefault(name, constructor)
+        if branches:
+            for name, summary in branches[0].functions.items():
+                if all(branch.functions.get(name) == summary for branch in branches[1:]):
+                    joined.functions[name] = summary
         return joined
 
     def replace_with(self, other: _ClientScope) -> None:
@@ -768,6 +790,8 @@ class _ClientScope:
         self.aliases.update(other.aliases)
         self.shadowed.clear()
         self.shadowed.update(other.shadowed)
+        self.functions.clear()
+        self.functions.update(other.functions)
 
 
 @dataclass(frozen=True)
@@ -834,7 +858,7 @@ def _selected_handler_index(handlers: list[ast.ExceptHandler], raised: type[Base
     return True, None
 
 
-def _raised_group_classes(node: ast.AST | None, scope: _ClientScope) -> tuple[type[BaseException], ...] | None:
+def _literal_group_classes(node: ast.AST | None, scope: _ClientScope) -> tuple[type[BaseException], ...] | None:
     """The classes in a literal unshadowed ``ExceptionGroup`` construction, when decidable."""
     if not isinstance(node, ast.Call):
         return None
@@ -847,6 +871,43 @@ def _raised_group_classes(node: ast.AST | None, scope: _ClientScope) -> tuple[ty
             return None
         classes.append(found)
     return tuple(classes)
+
+
+def _raised_group_classes(node: ast.AST | None, scope: _ClientScope) -> tuple[type[BaseException], ...] | None:
+    direct = _literal_group_classes(node, scope)
+    if direct is not None:
+        return direct
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and not node.args and not node.keywords:
+        summary = scope.functions.get(node.func.id)
+        if summary is not None:
+            return summary.returned_group
+    return None
+
+
+def _client_function_summary(node: ast.FunctionDef, scope: _ClientScope) -> _ClientFunctionSummary | None:
+    """Summarize only helpers whose result/raise is fixed by one side-effect-free statement.
+
+    This is intentionally narrower than interprocedural analysis. It lets exception-group selection
+    preserve exact clause order for a common local-helper spelling without claiming that arbitrary
+    calls are safe or deterministic.
+    """
+    args = node.args
+    if node.decorator_list or args.posonlyargs or args.args or args.vararg or args.kwonlyargs or args.kwarg:
+        return None
+    body = list(node.body)
+    if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) and isinstance(body[0].value.value, str):
+        body.pop(0)
+    if len(body) != 1:
+        return None
+    statement = body[0]
+    if isinstance(statement, ast.Raise) and statement.cause is None:
+        raised = statement.exc.func if isinstance(statement.exc, ast.Call) else statement.exc
+        exception = _literal_exception_class(raised, scope)
+        return _ClientFunctionSummary(raised=exception) if exception is not None else None
+    if isinstance(statement, ast.Return):
+        group = _literal_group_classes(statement.value, scope)
+        return _ClientFunctionSummary(returned_group=group) if group is not None else None
+    return None
 
 
 def _match_case_decision(subject: ast.AST, case: ast.match_case, scope: _ClientScope) -> bool | None:
@@ -948,6 +1009,33 @@ def _literal_iterable_length(node: ast.AST) -> int | None:
     return None
 
 
+def _literal_comparison(left: ast.AST, operator: ast.cmpop, right: ast.AST) -> bool | None:
+    """Evaluate comparisons only when both operands are inert literal constants."""
+    if not isinstance(left, ast.Constant) or not isinstance(right, ast.Constant):
+        return None
+    lhs, rhs = left.value, right.value
+    try:
+        if isinstance(operator, ast.Eq):
+            return lhs == rhs
+        if isinstance(operator, ast.NotEq):
+            return lhs != rhs
+        if isinstance(operator, ast.Is):
+            return lhs is rhs
+        if isinstance(operator, ast.IsNot):
+            return lhs is not rhs
+        if isinstance(operator, ast.Lt):
+            return lhs < rhs
+        if isinstance(operator, ast.LtE):
+            return lhs <= rhs
+        if isinstance(operator, ast.Gt):
+            return lhs > rhs
+        if isinstance(operator, ast.GtE):
+            return lhs >= rhs
+    except (TypeError, ValueError):
+        return None
+    return None
+
+
 def _normalize_client_paths(paths: list[_ClientPath]) -> list[_ClientPath]:
     """Bound path growth without erasing the completion an enclosing construct still needs.
 
@@ -985,7 +1073,9 @@ def _walk_client_statements(
                 continue
             path_inherited = _client_branch_scope(scope, path.scope, inherited)
             path_walrus = _client_branch_scope(scope, path.scope, walrus)
-            next_paths.extend(_walk_client_scope(statement, path.scope, path_inherited, path_walrus, found, annotated))
+            implicit_raises: list[_ClientPath] = []
+            next_paths.extend(_walk_client_scope(statement, path.scope, path_inherited, path_walrus, found, annotated, implicit_raises))
+            next_paths.extend(implicit_raises)
         paths = _normalize_client_paths(next_paths)
     return paths
 
@@ -997,6 +1087,7 @@ def _walk_client_boolop(
     walrus: _ClientScope,
     found: list[ast.AST],
     annotated: frozenset[int],
+    implicit_raises: list[_ClientPath] | None = None,
 ) -> None:
     first_scope = scope.copy_without()
     first_walrus = first_scope if walrus is scope else walrus.copy_without()
@@ -1007,7 +1098,7 @@ def _walk_client_boolop(
         following: list[tuple[_ClientScope, _ClientScope]] = []
         for branch, branch_walrus in active:
             branch_inherited = _client_branch_scope(scope, branch, inherited)
-            _walk_client_scope(value, branch, branch_inherited, branch_walrus, found, annotated)
+            _walk_client_scope(value, branch, branch_inherited, branch_walrus, found, annotated, implicit_raises)
             if index == len(node.values) - 1:
                 completed.append((branch, branch_walrus))
                 continue
@@ -1044,17 +1135,6 @@ def _walk_client_handler_body(
         for path in paths:
             _drop_client_bindings(path.scope, {handler.name})
     return paths
-
-
-def _client_body_is_proven_non_raising(statements: list[ast.stmt]) -> bool:
-    """The deliberately tiny proof used to prune exception handlers.
-
-    Absence of an explicit `raise` is not proof: calls, imports, attribute access, iteration, and
-    most expressions can raise through runtime behavior this one-level analysis does not model. An
-    empty body or `pass` sequence is the useful source-proven case and does not trade the false
-    positive fix for handler false negatives.
-    """
-    return all(isinstance(statement, ast.Pass) for statement in statements)
 
 
 def _walk_client_raise_handlers(
@@ -1129,42 +1209,77 @@ def _walk_client_scope(
     walrus: _ClientScope,
     found: list[ast.AST],
     annotated: frozenset[int],
+    implicit_raises: list[_ClientPath] | None = None,
+    *,
+    consume_generator: bool = False,
 ) -> list[_ClientPath]:
     """Walk executable AST in CPython order and carry a conservative client-handle may-state."""
     if isinstance(node, ast.Module):
         return _walk_client_statements(node.body, scope, inherited, walrus, found, annotated)
     if isinstance(node, _PYTHON_SCOPE_NODES):
+        summary = _client_function_summary(node, scope) if isinstance(node, ast.FunctionDef) else None
         _walk_client_nested_scope(node, scope, inherited, walrus, found, annotated)
+        if summary is not None:
+            scope.functions[node.name] = summary
         return [_ClientPath(scope)]
     if isinstance(node, _PYTHON_COMPREHENSION_NODES):
-        _walk_client_comprehension(node, scope, inherited, walrus, found, annotated)
+        _walk_client_comprehension(node, scope, inherited, walrus, found, annotated, consume=consume_generator)
         return [_ClientPath(scope)]
-    if isinstance(node, ast.Call) and _call_is_client_handle_sink(node, scope.handles):
-        found.append(node)
+    if isinstance(node, ast.Call):
+        if _call_is_client_handle_sink(node, scope.handles):
+            found.append(node)
+        _walk_client_scope(node.func, scope, inherited, walrus, found, annotated, implicit_raises)
+        eager_generator = isinstance(node.func, ast.Name) and node.func.id in _PYTHON_EAGER_GENERATOR_CONSUMERS and node.func.id not in scope.shadowed
+        for argument in node.args:
+            _walk_client_scope(
+                argument,
+                scope,
+                inherited,
+                walrus,
+                found,
+                annotated,
+                implicit_raises,
+                consume_generator=eager_generator and isinstance(argument, ast.GeneratorExp),
+            )
+        for keyword in node.keywords:
+            _walk_client_scope(keyword.value, scope, inherited, walrus, found, annotated, implicit_raises)
+        if implicit_raises is not None:
+            summary = scope.functions.get(node.func.id) if isinstance(node.func, ast.Name) and not node.args and not node.keywords else None
+            fixed_builtin_exception = _literal_exception_class(node.func, scope) is not None
+            fixed_builtin_group = _literal_group_classes(node, scope) is not None
+            if not fixed_builtin_exception and not fixed_builtin_group and (summary is None or summary.returned_group is None):
+                exception = summary.raised if summary is not None else None
+                implicit_raises.append(
+                    _ClientPath(
+                        scope.copy_without(),
+                        _ClientExit(kind="raise", exception=exception, exception_known=exception is not None),
+                    )
+                )
+        return [_ClientPath(scope)]
     if isinstance(node, (ast.Assign, ast.AnnAssign)):
         if node.value is not None:
-            _walk_client_scope(node.value, scope, inherited, walrus, found, annotated)
+            _walk_client_scope(node.value, scope, inherited, walrus, found, annotated, implicit_raises)
         targets = node.targets if isinstance(node, ast.Assign) else [node.target]
         _bind_client_targets(targets, node.value, scope, inherited, walrus, found, annotated)
         if isinstance(node, ast.AnnAssign) and id(node) in annotated:
-            _walk_client_scope(node.annotation, scope, inherited, walrus, found, annotated)
+            _walk_client_scope(node.annotation, scope, inherited, walrus, found, annotated, implicit_raises)
         return [_ClientPath(scope)]
     if isinstance(node, ast.NamedExpr):
-        _walk_client_scope(node.value, scope, inherited, walrus, found, annotated)
+        _walk_client_scope(node.value, scope, inherited, walrus, found, annotated, implicit_raises)
         _rebind_client_scope([node.target], node.value, scope)
         if walrus is not scope:
             _rebind_client_scope([node.target], node.value, walrus)
         return [_ClientPath(scope)]
     if isinstance(node, ast.AugAssign):
         _walk_client_target_exprs(node.target, scope, inherited, walrus, found, annotated)
-        _walk_client_scope(node.value, scope, inherited, walrus, found, annotated)
+        _walk_client_scope(node.value, scope, inherited, walrus, found, annotated, implicit_raises)
         _rebind_client_scope([node.target], None, scope)
         return [_ClientPath(scope)]
     if isinstance(node, ast.BoolOp):
-        _walk_client_boolop(node, scope, inherited, walrus, found, annotated)
+        _walk_client_boolop(node, scope, inherited, walrus, found, annotated, implicit_raises)
         return [_ClientPath(scope)]
     if isinstance(node, ast.IfExp):
-        _walk_client_scope(node.test, scope, inherited, walrus, found, annotated)
+        _walk_client_scope(node.test, scope, inherited, walrus, found, annotated, implicit_raises)
         truth = _literal_truth(node.test)
         branches = [node.body] if truth is True else [node.orelse] if truth is False else [node.body, node.orelse]
         states: list[tuple[_ClientScope, _ClientScope]] = []
@@ -1172,14 +1287,71 @@ def _walk_client_scope(
             branch = scope.copy_without()
             branch_walrus = branch if walrus is scope else walrus.copy_without()
             branch_inherited = _client_branch_scope(scope, branch, inherited)
-            _walk_client_scope(expression, branch, branch_inherited, branch_walrus, found, annotated)
+            _walk_client_scope(expression, branch, branch_inherited, branch_walrus, found, annotated, implicit_raises)
             states.append((branch, branch_walrus))
         scope.replace_with(_ClientScope.join([branch for branch, _ in states]))
         if walrus is not scope:
             walrus.replace_with(_ClientScope.join([branch_walrus for _, branch_walrus in states]))
         return [_ClientPath(scope)]
+    if isinstance(node, ast.Dict):
+        # CPython evaluates one key/value pair at a time. ``ast`` stores parallel key/value arrays,
+        # so generic child order (all keys, then all values) is observably wrong after a walrus.
+        for key, value in zip(node.keys, node.values, strict=True):
+            if key is not None:
+                _walk_client_scope(key, scope, inherited, walrus, found, annotated, implicit_raises)
+            _walk_client_scope(value, scope, inherited, walrus, found, annotated, implicit_raises)
+        return [_ClientPath(scope)]
+    if isinstance(node, ast.Compare):
+        _walk_client_scope(node.left, scope, inherited, walrus, found, annotated, implicit_raises)
+        first_scope = scope.copy_without()
+        first_walrus = first_scope if walrus is scope else walrus.copy_without()
+        active = [(first_scope, first_walrus)]
+        completed: list[tuple[_ClientScope, _ClientScope]] = []
+        left = node.left
+        for operator, comparator in zip(node.ops, node.comparators, strict=True):
+            following: list[tuple[_ClientScope, _ClientScope]] = []
+            for branch, branch_walrus in active:
+                branch_inherited = _client_branch_scope(scope, branch, inherited)
+                _walk_client_scope(comparator, branch, branch_inherited, branch_walrus, found, annotated, implicit_raises)
+                decision = _literal_comparison(left, operator, comparator)
+                if decision is False:
+                    completed.append((branch, branch_walrus))
+                elif decision is True:
+                    following.append((branch, branch_walrus))
+                else:
+                    completed.append((branch.copy_without(), branch_walrus.copy_without()))
+                    following.append((branch, branch_walrus))
+            active = following
+            left = comparator
+            if not active:
+                break
+        completed.extend(active)
+        outcomes = completed or [(scope, walrus)]
+        scope.replace_with(_ClientScope.join([branch for branch, _ in outcomes]))
+        if walrus is not scope:
+            walrus.replace_with(_ClientScope.join([branch_walrus for _, branch_walrus in outcomes]))
+        return [_ClientPath(scope)]
+    if isinstance(node, ast.Assert):
+        _walk_client_scope(node.test, scope, inherited, walrus, found, annotated, implicit_raises)
+        truth = _literal_truth(node.test)
+        if truth is True:
+            return [_ClientPath(scope)]
+        if truth is False:
+            if node.msg is not None:
+                _walk_client_scope(node.msg, scope, inherited, walrus, found, annotated, implicit_raises)
+            return [_ClientPath(scope, _ClientExit(kind="raise", exception=AssertionError, exception_known=True))]
+        passed = scope.copy_without()
+        failed = scope.copy_without()
+        failed_inherited = _client_branch_scope(scope, failed, inherited)
+        failed_walrus = _client_branch_scope(scope, failed, walrus)
+        if node.msg is not None:
+            _walk_client_scope(node.msg, failed, failed_inherited, failed_walrus, found, annotated, implicit_raises)
+        return [
+            _ClientPath(passed),
+            _ClientPath(failed, _ClientExit(kind="raise", exception=AssertionError, exception_known=True)),
+        ]
     if isinstance(node, ast.If):
-        _walk_client_scope(node.test, scope, inherited, walrus, found, annotated)
+        _walk_client_scope(node.test, scope, inherited, walrus, found, annotated, implicit_raises)
         truth = _literal_truth(node.test)
         alternatives = [node.body] if truth is True else [node.orelse] if truth is False else [node.body, node.orelse]
         paths: list[_ClientPath] = []
@@ -1190,7 +1362,7 @@ def _walk_client_scope(
             paths.extend(_walk_client_statements(statements, branch, branch_inherited, branch_walrus, found, annotated))
         return _normalize_client_paths(paths)
     if isinstance(node, ast.While):
-        _walk_client_scope(node.test, scope, inherited, walrus, found, annotated)
+        _walk_client_scope(node.test, scope, inherited, walrus, found, annotated, implicit_raises)
         truth = _literal_truth(node.test)
         if truth is False:
             return _walk_client_statements(node.orelse, scope, inherited, walrus, found, annotated)
@@ -1233,8 +1405,20 @@ def _walk_client_scope(
             loop_head = widened
         return _normalize_client_paths(paths)
     if isinstance(node, (ast.For, ast.AsyncFor)):
-        _walk_client_scope(node.iter, scope, inherited, walrus, found, annotated)
+        consume_iter = isinstance(node, ast.For) and isinstance(node.iter, ast.GeneratorExp)
+        _walk_client_scope(
+            node.iter,
+            scope,
+            inherited,
+            walrus,
+            found,
+            annotated,
+            implicit_raises,
+            consume_generator=consume_iter,
+        )
         length = _literal_iterable_length(node.iter) if isinstance(node, ast.For) else None
+        if consume_iter and len(node.iter.generators) == 1 and not node.iter.generators[0].ifs:
+            length = _literal_iterable_length(node.iter.generators[0].iter)
         if length == 0:
             return _walk_client_statements(node.orelse, scope, inherited, walrus, found, annotated)
         entry = scope.copy_without()
@@ -1302,26 +1486,26 @@ def _walk_client_scope(
             loop_head = widened
         return _normalize_client_paths(completed)
     if isinstance(node, ast.withitem):
-        _walk_client_scope(node.context_expr, scope, inherited, walrus, found, annotated)
+        _walk_client_scope(node.context_expr, scope, inherited, walrus, found, annotated, implicit_raises)
         if node.optional_vars is not None:
             _bind_client_targets([node.optional_vars], node.context_expr, scope, inherited, walrus, found, annotated)
         return [_ClientPath(scope)]
     if isinstance(node, (ast.With, ast.AsyncWith)):
         for item in node.items:
-            _walk_client_scope(item, scope, inherited, walrus, found, annotated)
+            _walk_client_scope(item, scope, inherited, walrus, found, annotated, implicit_raises)
         return _walk_client_statements(node.body, scope, inherited, walrus, found, annotated)
     if isinstance(node, ast.Raise):
         if node.exc is not None:
-            _walk_client_scope(node.exc, scope, inherited, walrus, found, annotated)
+            _walk_client_scope(node.exc, scope, inherited, walrus, found, annotated, implicit_raises)
         if node.cause is not None:
-            _walk_client_scope(node.cause, scope, inherited, walrus, found, annotated)
+            _walk_client_scope(node.cause, scope, inherited, walrus, found, annotated, implicit_raises)
         group = _raised_group_classes(node.exc, scope)
         raised = node.exc.func if isinstance(node.exc, ast.Call) else node.exc
         exception = _literal_exception_class(raised, scope)
         return [_ClientPath(scope, _ClientExit(kind="raise", exception=exception, exception_known=exception is not None or group is not None, group=group))]
     if isinstance(node, ast.Return):
         if node.value is not None:
-            _walk_client_scope(node.value, scope, inherited, walrus, found, annotated)
+            _walk_client_scope(node.value, scope, inherited, walrus, found, annotated, implicit_raises)
         return [_ClientPath(scope, _ClientExit(kind="return"))]
     if isinstance(node, ast.Break):
         return [_ClientPath(scope, _ClientExit(kind="break"))]
@@ -1329,12 +1513,8 @@ def _walk_client_scope(
         return [_ClientPath(scope, _ClientExit(kind="continue"))]
     if isinstance(node, ast.TryStar):
         body_paths = _walk_client_statements(node.body, scope, inherited, walrus, found, annotated)
-        candidates = list(body_paths)
-        normal_scopes = [path.scope for path in body_paths if path.exit.kind == "fallthrough"]
-        if normal_scopes and not _client_body_is_proven_non_raising(node.body):
-            candidates.append(_ClientPath(_ClientScope.join([scope.copy_without(), *normal_scopes]), _ClientExit(kind="raise")))
         results: list[_ClientPath] = []
-        for body_path in candidates:
+        for body_path in body_paths:
             if body_path.exit.kind == "fallthrough":
                 else_scope = body_path.scope.copy_without()
                 else_inherited = _client_branch_scope(scope, else_scope, inherited)
@@ -1355,11 +1535,28 @@ def _walk_client_scope(
             caught_types = [_literal_exception_classes(handler.type, selection) for handler in node.handlers]
             decidable = group is not None and all(caught is not None or handler.type is None for handler, caught in zip(node.handlers, caught_types, strict=True))
             if not decidable:
+                # `except*` clauses are sequential even when subgroup membership is unknown. Carry
+                # both the unmatched state and every matching fallthrough into the next clause;
+                # restarting every body from `selection` loses mutations made by an earlier match.
+                states = [selection]
+                terminals: list[_ClientPath] = []
                 for handler in node.handlers:
-                    if handler.type is not None:
-                        _walk_client_scope(handler.type, selection, selection_inherited, selection_walrus, found, annotated)
-                    results.extend(_walk_client_handler_body(handler, selection, selection_inherited, selection_walrus, found, annotated))
-                results.append(_ClientPath(selection, body_path.exit))
+                    following: list[_ClientScope] = []
+                    for state in states:
+                        state_inherited = _client_branch_scope(selection, state, selection_inherited)
+                        state_walrus = _client_branch_scope(selection, state, selection_walrus)
+                        if handler.type is not None:
+                            _walk_client_scope(handler.type, state, state_inherited, state_walrus, found, annotated)
+                            following.append(state.copy_without())  # this subgroup may not match
+                        clause_paths = _walk_client_handler_body(handler, state, state_inherited, state_walrus, found, annotated)
+                        following.extend(path.scope for path in clause_paths if path.exit.kind == "fallthrough")
+                        terminals.extend(path for path in clause_paths if path.exit.kind != "fallthrough")
+                    states = following
+                results.extend(terminals)
+                if states:
+                    final_state = _ClientScope.join(states)
+                    results.append(_ClientPath(final_state))  # every subgroup may have been handled
+                    results.append(_ClientPath(final_state.copy_without(), body_path.exit))  # or a remainder may escape
                 continue
             remaining = list(group)
             handler_terminals: list[_ClientPath] = []
@@ -1388,7 +1585,6 @@ def _walk_client_scope(
     if isinstance(node, ast.Try):
         body_paths = _walk_client_statements(node.body, scope, inherited, walrus, found, annotated)
         results: list[_ClientPath] = []
-        normal_scopes = [path.scope for path in body_paths if path.exit.kind == "fallthrough"]
         for body_path in body_paths:
             if body_path.exit.kind == "fallthrough":
                 else_scope = body_path.scope.copy_without()
@@ -1401,17 +1597,9 @@ def _walk_client_scope(
                 results.extend(_walk_client_raise_handlers(node.handlers, body_path, path_inherited, path_walrus, found, annotated))
             else:
                 results.append(body_path)
-        # No explicit raise does not prove that runtime evaluation cannot raise. Preserve the old
-        # conservative handler edge except for the small source-proven no-op subset above.
-        if normal_scopes and not _client_body_is_proven_non_raising(node.body):
-            possible_raise_scope = _ClientScope.join([scope.copy_without(), *normal_scopes])
-            possible_raise = _ClientPath(possible_raise_scope, _ClientExit(kind="raise"))
-            possible_inherited = _client_branch_scope(scope, possible_raise_scope, inherited)
-            possible_walrus = _client_branch_scope(scope, possible_raise_scope, walrus)
-            results.extend(_walk_client_raise_handlers(node.handlers, possible_raise, possible_inherited, possible_walrus, found, annotated))
         return _walk_client_finally(node.finalbody, _normalize_client_paths(results), scope, inherited, walrus, found, annotated)
     if isinstance(node, ast.Match):
-        _walk_client_scope(node.subject, scope, inherited, walrus, found, annotated)
+        _walk_client_scope(node.subject, scope, inherited, walrus, found, annotated, implicit_raises)
         pending = [scope.copy_without()]
         completed: list[_ClientPath] = []
         for case in node.cases:
@@ -1450,8 +1638,11 @@ def _walk_client_scope(
     elif isinstance(node, (ast.Import, ast.ImportFrom)):
         _bind_client_import(node, scope)
         return [_ClientPath(scope)]
+    # Every node with conditional execution or non-AST-field evaluation order is handled above
+    # (`Call`, `Dict`, `BoolOp`, `Compare`, `IfExp`, comprehensions, and compound statements).
+    # The remaining children are unconditional and `ast.iter_child_nodes` exposes runtime order.
     for child in ast.iter_child_nodes(node):
-        _walk_client_scope(child, scope, inherited, walrus, found, annotated)
+        _walk_client_scope(child, scope, inherited, walrus, found, annotated, implicit_raises)
     return [_ClientPath(scope)]
 
 
@@ -1471,15 +1662,24 @@ def _walk_client_nested_scope(node: ast.AST, scope: _ClientScope, inherited: _Cl
         _drop_client_bindings(scope, {node.name})
 
 
-def _walk_client_comprehension(node: ast.AST, scope: _ClientScope, inherited: _ClientScope, walrus: _ClientScope, found: list[ast.AST], annotated: frozenset[int]) -> None:
+def _walk_client_comprehension(
+    node: ast.AST,
+    scope: _ClientScope,
+    inherited: _ClientScope,
+    walrus: _ClientScope,
+    found: list[ast.AST],
+    annotated: frozenset[int],
+    *,
+    consume: bool = False,
+) -> None:
     """A comprehension is its own scope: only the outermost iterable is evaluated outside it, and
     each target and its filters run before the following iterable. Empty iterables and false filters
     stop the rest of that iteration. Assignment expressions update a path-local copy of the containing
     scope, and eager comprehensions join those feasible effects when evaluation completes.
 
     A generator expression is lazy after evaluating its outer iterable. Its body is still scanned as
-    potentially executable code, but body-side walrus effects are not credited to the creation-time
-    state that the following statement observes.
+    potentially executable code, but body-side walrus effects are credited to the containing scope
+    only when an enclosing operation is known to consume it eagerly.
     """
     generators = node.generators
     _walk_client_scope(generators[0].iter, scope, inherited, walrus, found, annotated)
@@ -1568,7 +1768,7 @@ def _walk_client_comprehension(node: ast.AST, scope: _ClientScope, inherited: _C
         return join_pairs(completed)
 
     outcomes = run_generator(0, initial)
-    if not isinstance(node, ast.GeneratorExp) and outcomes:
+    if (not isinstance(node, ast.GeneratorExp) or consume) and outcomes:
         walrus.replace_with(_ClientScope.join([outer for _, outer in outcomes]))
 
 
@@ -1721,6 +1921,7 @@ def _drop_client_bindings(scope: _ClientScope, names: set[str]) -> None:
     for name in names:
         scope.handles.pop(name, None)
         scope.aliases.pop(name, None)
+        scope.functions.pop(name, None)
 
 
 def _bind_client_import(node: ast.Import | ast.ImportFrom, scope: _ClientScope) -> None:
