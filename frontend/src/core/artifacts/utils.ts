@@ -4,8 +4,31 @@ import type { AgentThreadState } from "../threads";
 
 const EMPTY_ARTIFACT_PATHS: readonly string[] = [];
 
+function decodePathSegment(segment: string) {
+  try {
+    return decodeURIComponent(segment);
+  } catch {
+    return segment;
+  }
+}
+
+function splitPathSuffix(src: string) {
+  const [path = ""] = src.split(/[?#]/, 1);
+  return {
+    path,
+    suffix: src.slice(path.length),
+  };
+}
+
 function encodeArtifactPath(filepath: string) {
-  return filepath.split("/").map(encodeURIComponent).join("/");
+  return filepath
+    .split("/")
+    .map((segment) => encodeURIComponent(decodePathSegment(segment)))
+    .join("/");
+}
+
+function decodeRelativeArtifactPath(filepath: string) {
+  return filepath.split("/").map(decodePathSegment).join("/");
 }
 
 export function urlOfArtifact({
@@ -43,17 +66,23 @@ export function resolveArtifactURL(absolutePath: string, threadId: string) {
   return `${getBackendBaseURL()}/api/threads/${encodeURIComponent(threadId)}/artifacts${encodeArtifactPath(absolutePath)}`;
 }
 
+export function resolveMarkdownArtifactURL(src: string, threadId: string) {
+  const { path, suffix } = splitPathSuffix(src);
+  return `${resolveArtifactURL(path, threadId)}${suffix}`;
+}
+
 export function resolveMessageImageURL(
   src: string,
   threadId: string,
   artifactPaths: readonly string[],
 ) {
   if (src.startsWith("/mnt/")) {
-    return resolveArtifactURL(src, threadId);
+    return resolveMarkdownArtifactURL(src, threadId);
   }
 
-  const [relativePath = ""] = src.split(/[?#]/, 1);
+  const { path: relativePath, suffix } = splitPathSuffix(src);
   const normalizedPath = relativePath.replace(/^(?:\.\/)+/, "");
+  const decodedNormalizedPath = decodeRelativeArtifactPath(normalizedPath);
   if (
     !normalizedPath ||
     normalizedPath.startsWith("/") ||
@@ -65,13 +94,13 @@ export function resolveMessageImageURL(
   }
 
   const matches = artifactPaths.filter((path) =>
-    path.endsWith(`/${normalizedPath}`),
+    path.endsWith(`/${decodedNormalizedPath}`),
   );
   if (matches.length !== 1) {
     return src;
   }
 
-  return `${resolveArtifactURL(matches[0]!, threadId)}${src.slice(relativePath.length)}`;
+  return `${resolveArtifactURL(matches[0]!, threadId)}${suffix}`;
 }
 
 function staticDemoArtifactURL({
