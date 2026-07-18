@@ -4,6 +4,10 @@ import type { AgentThreadState } from "../threads";
 
 const EMPTY_ARTIFACT_PATHS: readonly string[] = [];
 
+function encodeArtifactPath(filepath: string) {
+  return filepath.split("/").map(encodeURIComponent).join("/");
+}
+
 export function urlOfArtifact({
   filepath,
   threadId,
@@ -18,10 +22,12 @@ export function urlOfArtifact({
   if (isStaticWebsiteOnly()) {
     return staticDemoArtifactURL({ filepath, threadId, download });
   }
+  const encodedThreadId = encodeURIComponent(threadId);
+  const encodedFilepath = encodeArtifactPath(filepath);
   if (isMock) {
-    return `${getBackendBaseURL()}/mock/api/threads/${threadId}/artifacts${filepath}${download ? "?download=true" : ""}`;
+    return `${getBackendBaseURL()}/mock/api/threads/${encodedThreadId}/artifacts${encodedFilepath}${download ? "?download=true" : ""}`;
   }
-  return `${getBackendBaseURL()}/api/threads/${threadId}/artifacts${filepath}${download ? "?download=true" : ""}`;
+  return `${getBackendBaseURL()}/api/threads/${encodedThreadId}/artifacts${encodedFilepath}${download ? "?download=true" : ""}`;
 }
 
 export function extractArtifactsFromThread(thread: {
@@ -34,7 +40,7 @@ export function resolveArtifactURL(absolutePath: string, threadId: string) {
   if (isStaticWebsiteOnly()) {
     return staticDemoArtifactURL({ filepath: absolutePath, threadId });
   }
-  return `${getBackendBaseURL()}/api/threads/${threadId}/artifacts${absolutePath}`;
+  return `${getBackendBaseURL()}/api/threads/${encodeURIComponent(threadId)}/artifacts${encodeArtifactPath(absolutePath)}`;
 }
 
 export function resolveMessageImageURL(
@@ -77,6 +83,6 @@ function staticDemoArtifactURL({
   threadId: string;
   download?: boolean;
 }) {
-  const demoPath = filepath.replace(/^\/mnt\//, "/");
-  return `${getBackendBaseURL()}/demo/threads/${threadId}${demoPath}${download ? "?download=true" : ""}`;
+  const demoPath = encodeArtifactPath(filepath.replace(/^\/mnt\//, "/"));
+  return `${getBackendBaseURL()}/demo/threads/${encodeURIComponent(threadId)}${demoPath}${download ? "?download=true" : ""}`;
 }
