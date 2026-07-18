@@ -80,7 +80,7 @@ class LocalSkillStorage(SkillStorage):
             if not category_path.exists() or not category_path.is_dir():
                 continue
             for current_root, dir_names, file_names in os.walk(category_path, followlinks=True):
-                dir_names[:] = sorted(name for name in dir_names if not name.startswith(".") and not is_skill_support_data_dir(Path(current_root), name))
+                dir_names[:] = sorted(name for name in dir_names if not name.startswith(".") and not is_skill_support_data_dir(Path(current_root), name, category_root=category_path))
                 if SKILL_MD_FILE not in file_names:
                     continue
                 # A directory containing SKILL.md is a package boundary. Any

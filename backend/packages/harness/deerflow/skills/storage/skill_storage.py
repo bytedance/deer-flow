@@ -18,16 +18,64 @@ _SKILL_NAME_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 
 # Directory names conventionally used for skill support data (eval suites and
 # their fixtures, e.g. skills/public/skill-reviewer/evals/fixtures/). They are
-# NOT reserved skill names: discovery prunes such a directory only when it is
-# not itself a skill package (no SKILL.md directly inside), so orphaned fixture
-# trees never reach the runtime registry (issue #4095) while a package
-# legitimately named `evals` or `fixtures` remains discoverable.
+# NOT reserved skill names: discovery prunes an evals/fixtures directory only
+# when it is support data — i.e. when a real skill package exists somewhere in
+# its ancestor chain (the common case) or when none of its immediate children
+# carries SKILL.md (the orphan case).  A direct package (``evals/SKILL.md``)
+# and a namespace directory whose parent chain is skill-free and whose children
+# are skill packages (``public/fixtures/team-helper/``) both remain discoverable.
 SUPPORT_DATA_DIR_NAMES = frozenset({"evals", "fixtures"})
 
 
-def is_skill_support_data_dir(parent: Path, name: str) -> bool:
-    """Return True when *name* under *parent* is an evals/fixtures support-data directory rather than a skill package of that name."""
-    return name in SUPPORT_DATA_DIR_NAMES and not (parent / name / SKILL_MD_FILE).is_file()
+def is_skill_support_data_dir(parent: Path, name: str, *, category_root: Path | None = None) -> bool:
+    """Return True when *name* under *parent* is a support-data directory to prune.
+
+    A directory named ``evals`` or ``fixtures`` is pruned from discovery walks
+    in two cases:
+
+    1. **Ancestor skill boundary** — a real skill package (``SKILL.md``)
+       exists somewhere in the directory's ancestor chain (between *parent*
+       and *category_root*).  The bundled ``skill-reviewer/evals/fixtures/``
+       tree is excluded this way in production because ``skill-reviewer`` is
+       a real skill; the existing package-boundary rule (``dir_names.clear()``)
+       then stops the walk from descending into ``evals/`` at all — this check
+       is defense-in-depth.
+
+    2. **Orphan** — no ancestor skill package exists AND no immediate child
+       directory carries a ``SKILL.md`` of its own.  This prunes stray fixture
+       trees at the category root (issue #4095) while leaving legitimate
+       namespace directories (``public/fixtures/team-helper/``) untouched.
+
+    A directory that IS a skill package (own ``SKILL.md``) or whose immediate
+    children are skill packages (single-level namespace) is never pruned,
+    regardless of ancestor state — so ``evals`` and ``fixtures`` are not
+    reserved names.
+    """
+    if name not in SUPPORT_DATA_DIR_NAMES:
+        return False
+    dir_path = parent / name
+    # Direct SKILL.md — it is a skill package, not support data.
+    if (dir_path / SKILL_MD_FILE).is_file():
+        return False
+    # Check immediate children — if any carries a SKILL.md this is a namespace
+    # directory containing legitimate skill packages; do not prune.
+    try:
+        for child in dir_path.iterdir():
+            if child.is_dir() and (child / SKILL_MD_FILE).is_file():
+                return False
+    except OSError:
+        pass
+    # If a skill package exists anywhere in the ancestor chain this is support
+    # data nested under a real skill — prune (defense-in-depth; the package-
+    # boundary rule normally handles this).
+    if category_root is not None:
+        ancestor = parent
+        while ancestor != category_root and ancestor != ancestor.parent:
+            if (ancestor / SKILL_MD_FILE).is_file():
+                return True
+            ancestor = ancestor.parent
+    # No ancestor skill and no immediate-child skills — orphan support data.
+    return True
 
 
 class SkillStorage(ABC):
