@@ -22,7 +22,7 @@ except Exception:  # pragma: no cover - exercised only in broken environments
 
 SECRET_KEY_RE = re.compile(
     r"(api[_-]?key|access[_-]?key|private[_-]?key|(?<![a-zA-Z])key(?![a-zA-Z])"
-    r"|token|secret|password|passwd|pwd|(?<![a-zA-Z])pass(?![a-zA-Z])"
+    r"|token|secret|password|passwd|pwd|(?<![a-zA-Z])pass(?!port)"
     r"|authorization|cookie|credential|(?<![a-zA-Z])dsn(?![a-zA-Z]))",
     re.IGNORECASE,
 )
@@ -34,8 +34,12 @@ SECRET_KEY_RE = re.compile(
 # password/passwd/pwd forms predate this and stay for their glued-compound coverage
 # (e.g. "apikey" with no separator); the new bare key/pass/dsn alternatives are
 # boundary-guarded so they match only their own delimited token and not an
-# unrelated word that merely starts with the same letters (keywords, keyboard,
-# passport, ...).
+# unrelated word that merely starts with the same letters (keywords, keyboard).
+# `pass` only excludes a trailing "port" (passport) rather than any trailing
+# letter: excluding any trailing letter also missed genuine secret-bearing
+# names like passphrase/passcode, which env_policy.py's *PASS* substring match
+# does catch -- `compass`/`bypass` stay excluded via the leading-letter
+# lookbehind regardless of the lookahead.
 #
 # Case-insensitive exact key names that carry a bare credential with no
 # distinguishing keyword substring, mirroring env_policy.py's no-flag credential

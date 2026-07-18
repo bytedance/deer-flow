@@ -256,6 +256,41 @@ def test_redact_data_does_not_over_redact_lookalike_non_secret_keys():
     assert redacted["guardrails"]["passport"] == "/etc/deer-flow/passport.json"
 
 
+def test_redact_data_masks_passphrase_and_passcode_without_over_redacting_passport():
+    """Guards the gap flagged on this PR's review: the original token-boundary
+    `pass` match, (?<![a-zA-Z])pass(?![a-zA-Z]), correctly excludes "passport"
+    (a real, non-secret field, per the test above) but its blanket
+    not-followed-by-any-letter lookahead also excluded genuine secret-bearing
+    key names like "passphrase" and "passcode" -- both of which
+    env_policy.py's *PASS* substring match does catch, so they'd still leak
+    into config-summary.json. Narrowing the lookahead to only exclude a
+    trailing "port" (pass(?!port)) closes that gap while leaving passport,
+    compass, and bypass alone (those stay excluded via the leading-letter
+    lookbehind, independent of the lookahead)."""
+    data = {
+        "guardrails": {
+            "provider": {
+                "config": {
+                    "passphrase": "hunter2-literal",
+                    "passcode": "0000-literal",
+                    "passport": "/etc/deer-flow/passport.json",
+                    "compass_bearing": 42,
+                    "bypass_reason": "maintenance window",
+                }
+            }
+        }
+    }
+
+    redacted = support_bundle.redact_data(data)
+    config = redacted["guardrails"]["provider"]["config"]
+
+    assert config["passphrase"] == "<redacted>"
+    assert config["passcode"] == "<redacted>"
+    assert config["passport"] == "/etc/deer-flow/passport.json"
+    assert config["compass_bearing"] == 42
+    assert config["bypass_reason"] == "maintenance window"
+
+
 def test_create_support_bundle_masks_provider_config_secret_shaped_keys(tmp_path):
     """End-to-end: an open-ended guardrails.provider.config block in config.yaml
     must not leak into config-summary.json even though manifest.json declares
