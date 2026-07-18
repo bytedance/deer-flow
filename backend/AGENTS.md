@@ -308,6 +308,8 @@ Configuration priority:
 3. `extensions_config.json` in current directory (backend/)
 4. `extensions_config.json` in parent directory (project root - **recommended location**)
 
+Extensions are optional throughout: `ExtensionsConfig.resolve_config_path()` returns `None` when the file cannot be found under any of the four resolution modes above — including an explicit `config_path` or `DEER_FLOW_EXTENSIONS_CONFIG_PATH` that pointed at a file that has since been deleted — rather than raising. Callers (e.g. the MCP tools cache's staleness check) rely on this clean "no config" signal.
+
 ### Gateway API (`app/gateway/`)
 
 FastAPI application on port 8001 with health check at `GET /health`. Set `GATEWAY_ENABLE_DOCS=false` to disable `/docs`, `/redoc`, and `/openapi.json` in production (default: enabled).
@@ -435,7 +437,7 @@ Additional providers also live here (`boxlite`, `brave`, `browserless`, `crawl4a
 
 - Uses `langchain-mcp-adapters` `MultiServerMCPClient` for multi-server management
 - **Lazy initialization**: Tools loaded on first use via `get_cached_mcp_tools()`
-- **Cache invalidation**: Detects extensions-config changes by comparing the resolved config path and a `(mtime, size, sha256)` content signature against the values recorded at initialization (mirrors `config/app_config.py::get_app_config()`), not a strict mtime `>` comparison. This catches same-second edits, mtime that stays put or moves backward (`git checkout`, `cp -p` / backup restore, `tar` / `rsync`, object-store / network mounts), and a switch to a different config file with an equal-or-older mtime
+- **Cache invalidation**: Detects extensions-config changes by comparing the resolved config path and a `(mtime, size, sha256)` content signature against the values recorded at initialization, not a strict mtime `>` comparison. This catches same-second edits, mtime that stays put or moves backward (`git checkout`, `cp -p` / backup restore, `tar` / `rsync`, object-store / network mounts), and a switch to a different config file with an equal-or-older mtime. The signature helper (`config/file_signature.py::get_config_signature`) is shared with `config/app_config.py::get_app_config()` for the sibling runtime-editable config file, rather than each maintaining its own copy — `ExtensionsConfig.resolve_config_path()` (used by the MCP cache's path resolution) always returns `None` on a missing file rather than raising, including when an explicit `config_path` or `DEER_FLOW_EXTENSIONS_CONFIG_PATH` points at a file that has since been deleted, so this staleness check degrades to "not stale" instead of propagating an exception
 - **Transports**: stdio (command-based), SSE, HTTP
 - **OAuth (HTTP/SSE)**: Supports token endpoint flows (`client_credentials`, `refresh_token`) with automatic token refresh + Authorization header injection
 - **Routing hints**: `extensions_config.json -> mcpServers.<server>.routing` and

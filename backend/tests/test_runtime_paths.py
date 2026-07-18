@@ -179,3 +179,48 @@ def test_extensions_config_falls_back_to_legacy_when_project_root_lacks_file(tmp
     monkeypatch.setattr(extensions_config_module, "__file__", str(fake_paths_module_file))
 
     assert ExtensionsConfig.resolve_config_path() == legacy_extensions
+
+
+def test_extensions_config_explicit_path_missing_file_returns_none(tmp_path: Path, monkeypatch):
+    """An explicit ``config_path`` argument pointing at a file that does not
+    exist (e.g. it existed earlier and was deleted) must return ``None``,
+    not raise.
+
+    Regression for the follow-up flagged on PR #4124: ``resolve_config_path``
+    used to raise ``FileNotFoundError`` for this branch while its own
+    docstring promised a clean ``None`` for "extensions are optional". Every
+    resolution mode must degrade the same way so callers (e.g. the MCP
+    tools-cache staleness check) can rely on a clean "no config" signal
+    instead of handling an exception.
+    """
+    _clear_path_env(monkeypatch)
+    missing = tmp_path / "extensions_config.json"
+    # Never created (equivalent to "existed, then got deleted" from the
+    # resolver's point of view -- it only sees that the path doesn't exist).
+
+    assert ExtensionsConfig.resolve_config_path(config_path=str(missing)) is None
+
+
+def test_extensions_config_env_var_missing_file_returns_none(tmp_path: Path, monkeypatch):
+    """``DEER_FLOW_EXTENSIONS_CONFIG_PATH`` pointing at a file that has since
+    been deleted must return ``None``, not raise.
+
+    This is the exact resolution mode Docker dev/prod uses (see
+    backend/AGENTS.md: "Docker development ... points `DEER_FLOW_CONFIG_PATH`
+    / `DEER_FLOW_EXTENSIONS_CONFIG_PATH`" at the mounted config directory), so
+    a config file deleted after being valid must not crash callers that
+    resolve with no explicit argument -- e.g. the MCP tools cache's
+    staleness check (`deerflow.mcp.cache._resolve_config_path`), which calls
+    `ExtensionsConfig.resolve_config_path()` with no args and therefore hits
+    this exact branch whenever the env var is set.
+    """
+    _clear_path_env(monkeypatch)
+    cfg = tmp_path / "extensions_config.json"
+    cfg.write_text('{"mcpServers": {}, "skills": {}}', encoding="utf-8")
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(cfg))
+
+    assert ExtensionsConfig.resolve_config_path() == cfg  # sanity: resolves while present
+
+    cfg.unlink()
+
+    assert ExtensionsConfig.resolve_config_path() is None

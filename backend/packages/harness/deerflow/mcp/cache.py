@@ -1,11 +1,13 @@
 """Cache for MCP tools to avoid repeated loading."""
 
 import asyncio
-import hashlib
 import logging
 from pathlib import Path
 
 from langchain_core.tools import BaseTool
+
+from deerflow.config.file_signature import ConfigSignature as _ConfigSignature
+from deerflow.config.file_signature import get_config_signature as _get_config_signature
 
 logger = logging.getLogger(__name__)
 
@@ -14,14 +16,14 @@ _cache_initialized = False
 _initialization_lock = asyncio.Lock()
 
 # Cache-invalidation key for the resolved extensions config file. We track the
-# resolved path *and* a ``(mtime, size, sha256)`` content signature — mirroring
+# resolved path *and* a ``(mtime, size, sha256)`` content signature — via the
+# shared ``deerflow.config.file_signature`` helper also used by
 # ``deerflow.config.app_config`` for the sibling runtime-editable config file —
 # rather than only the mtime. A strict mtime ``>`` comparison misses same-second
 # edits and mtime that stays put or moves backward (object-store / network
 # mounts, ``git checkout``, ``cp -p`` / backup restore, ``tar`` / ``rsync`` that
 # preserve timestamps), and tracking no path at all makes a switch to a
 # different config file with an equal-or-older mtime structurally invisible.
-_ConfigSignature = tuple[float | None, int | None, str | None]
 _config_path: Path | None = None  # Resolved extensions config path at init time
 _config_signature: _ConfigSignature | None = None  # (mtime, size, sha256) at init time
 
@@ -31,36 +33,6 @@ def _resolve_config_path() -> Path | None:
     from deerflow.config.extensions_config import ExtensionsConfig
 
     return ExtensionsConfig.resolve_config_path()
-
-
-def _get_config_signature(config_path: Path) -> _ConfigSignature | None:
-    """Get cache metadata for the extensions config file, including a content digest.
-
-    Mirrors ``deerflow.config.app_config._get_config_signature`` so both
-    runtime-editable config files (``config.yaml`` and ``extensions_config.json``)
-    share the same content-based staleness signal. Returns ``None`` when the
-    file cannot be stat-ed (e.g. it does not exist).
-    """
-    try:
-        stat_result = config_path.stat()
-    except OSError:
-        return None
-
-    # Always hash the full file here rather than short-circuiting when
-    # mtime/size already match a previously recorded signature: swapping in a
-    # different MCP server config of identical byte length within the same
-    # second leaves mtime *and* size unchanged, so only the sha256 catches
-    # that swap. Skipping the hash on an mtime/size match would reopen the
-    # narrow gap this signature was built to close.
-    digest = hashlib.sha256()
-    try:
-        with config_path.open("rb") as f:
-            for chunk in iter(lambda: f.read(1024 * 1024), b""):
-                digest.update(chunk)
-    except OSError:
-        return (stat_result.st_mtime, stat_result.st_size, None)
-
-    return (stat_result.st_mtime, stat_result.st_size, digest.hexdigest())
 
 
 def _current_config_state() -> tuple[Path | None, _ConfigSignature | None]:

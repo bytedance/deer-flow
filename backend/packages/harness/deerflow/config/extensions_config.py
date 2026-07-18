@@ -165,17 +165,31 @@ class ExtensionsConfig(BaseModel):
             4. Finally, search backend/repository-root defaults for monorepo compatibility.
 
         Returns:
-            Path to the extensions config file if found, otherwise None.
+            Path to the extensions config file if found, otherwise None. Every
+            resolution mode returns ``None`` on a missing file rather than
+            raising — including an explicit `config_path` argument or a
+            `DEER_FLOW_EXTENSIONS_CONFIG_PATH` that points at a file that has
+            since been deleted — so callers (e.g. the MCP tools-cache
+            staleness check) can rely on a clean "no config" signal instead of
+            an exception. Extensions are optional throughout.
         """
         if config_path:
             path = Path(config_path)
             if not path.exists():
-                raise FileNotFoundError(f"Extensions config file specified by param `config_path` not found at {path}")
+                logger.warning(
+                    "Extensions config file specified by param `config_path` not found at %s; treating extensions as unconfigured.",
+                    path,
+                )
+                return None
             return path
         elif os.getenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH"):
             path = Path(os.getenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH"))
             if not path.exists():
-                raise FileNotFoundError(f"Extensions config file specified by environment variable `DEER_FLOW_EXTENSIONS_CONFIG_PATH` not found at {path}")
+                logger.warning(
+                    "Extensions config file specified by environment variable `DEER_FLOW_EXTENSIONS_CONFIG_PATH` not found at %s; treating extensions as unconfigured.",
+                    path,
+                )
+                return None
             return path
         else:
             project_config = existing_project_file(("extensions_config.json", "mcp_config.json"))
