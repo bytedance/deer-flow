@@ -36,6 +36,11 @@ except ImportError:
 
 _PROMPTS_DEFAULT_DIR = Path(__file__).resolve().parent / "prompts"
 
+# Cache for load_prompt: repeated calls with the same (name, agent, dir) return
+# the cached template string without re-reading the yaml file. The shim constants
+# below also populate this cache at import time for the bundled defaults.
+_PROMPT_CACHE: dict[tuple[str, str | None, str | None], str] = {}
+
 
 def load_prompt(
     name: str,
@@ -50,10 +55,15 @@ def load_prompt(
     bundled ``core/prompts/``. Returns the raw ``template`` string (``.format``
     syntax); the caller renders it with ``.format(**vars)``.
 
-    Zero-config (bundled defaults) is byte-identical to the former module-level
-    ``STALENESS_REVIEW_PROMPT`` / ``CONSOLIDATION_PROMPT`` / ``FACT_EXTRACTION_PROMPT``
-    constants (memory_update uses the chat form, see :func:`load_prompt_messages`).
+    Results are cached per ``(name, agent_name, prompts_dir)`` so the filesystem
+    read happens at most once per combination (typically once per process for
+    the bundled defaults).
     """
+    cache_key = (name, agent_name, prompts_dir)
+    cached = _PROMPT_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
     base = Path(prompts_dir) if prompts_dir else _PROMPTS_DEFAULT_DIR
     candidates: list[Path] = [base / f"{name}.yaml"]
     if agent_name:
@@ -68,6 +78,7 @@ def load_prompt(
             template = data.get("template")
             if not isinstance(template, str) or not template:
                 raise ValueError(f"Missing or empty 'template' key in {path}")
+            _PROMPT_CACHE[cache_key] = template
             return template
     searched = ", ".join(str(c) for c in candidates)
     raise FileNotFoundError(f"prompt template not found: {name} (searched: {searched})")

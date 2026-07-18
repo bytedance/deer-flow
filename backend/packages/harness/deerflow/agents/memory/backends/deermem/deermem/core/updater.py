@@ -15,9 +15,8 @@ from typing import Any
 
 from ..config import DeerMemConfig
 from .prompt import (
-    CONSOLIDATION_PROMPT,
-    STALENESS_REVIEW_PROMPT,
     format_conversation_for_update,
+    load_prompt,
     load_prompt_messages,
 )
 from .storage import (
@@ -445,6 +444,8 @@ def _select_stale_candidates(
 def _build_staleness_section(
     stale_candidates: list[dict[str, Any]],
     config: Any,
+    *,
+    prompts_dir: str | None = None,
 ) -> str:
     """Format the staleness review prompt section from candidate facts.
 
@@ -468,7 +469,7 @@ def _build_staleness_section(
         content = html.escape(str(fact.get("content", "")), quote=False)
         effective_age = _effective_fact_staleness_age(fact, config)
         lines.append(f'- [{fid} | {cat} | {conf:.2f} | {created_short} | valid:{effective_age}d] "{content}"')
-    return STALENESS_REVIEW_PROMPT.format(stale_facts="\n".join(lines))
+    return load_prompt("staleness_review", prompts_dir=prompts_dir).format(stale_facts="\n".join(lines))
 
 
 # ── Consolidation helpers ───────────────────────────────────────────────
@@ -504,6 +505,8 @@ def _build_consolidation_section(
     candidates: dict[str, list[dict[str, Any]]],
     max_groups: int = 3,
     max_sources: int = 8,
+    *,
+    prompts_dir: str | None = None,
 ) -> str:
     """Format consolidation candidate groups into the prompt section.
 
@@ -525,7 +528,7 @@ def _build_consolidation_section(
             lines.append(f'- [{fid} | {conf:.2f}] "{content}"')
         shown = min(len(group), max_sources)
         parts.append(f'<consolidation_candidates category="{html.escape(cat)}" count="{shown}">\n' + "\n".join(lines) + "\n</consolidation_candidates>")
-    return CONSOLIDATION_PROMPT.format(consolidation_groups="\n\n".join(parts), max_groups=max_groups)
+    return load_prompt("consolidation", prompts_dir=prompts_dir).format(consolidation_groups="\n\n".join(parts), max_groups=max_groups)
 
 
 def _escape_memory_for_prompt(memory: Any) -> Any:
@@ -559,7 +562,7 @@ def _escape_memory_for_prompt(memory: Any) -> Any:
 class MemoryUpdater:
     """Updates memory using LLM based on conversation context."""
 
-    def __init__(self, config: DeerMemConfig, storage: MemoryStorage, llm: Any = None):
+    def __init__(self, config: DeerMemConfig, storage: MemoryStorage, llm: Any = None, *, prompts_dir: str | None = None):
         """Initialize the memory updater with injected config + storage + llm (DI).
 
         Args:
@@ -567,10 +570,13 @@ class MemoryUpdater:
             storage: Memory storage instance (owned by DeerMem, injected here).
             llm: The chat model for memory extraction (owned by DeerMem, injected
                 here). None when no LLM is configured; an update raises in that case.
+            prompts_dir: Optional custom prompt-template directory forwarded to
+                ``load_prompt`` / ``load_prompt_messages``. None = bundled defaults.
         """
         self._config = config
         self._storage = storage
         self._llm = llm
+        self._prompts_dir = prompts_dir
 
     # ── Data access + fact CRUD (formerly module-level functions; use self._storage) ──
 
@@ -738,7 +744,7 @@ class MemoryUpdater:
         if config.staleness_review_enabled:
             stale_candidates = _select_stale_candidates(current_memory, config)
             if len(stale_candidates) >= config.staleness_min_candidates:
-                staleness_section = _build_staleness_section(stale_candidates, config)
+                staleness_section = _build_staleness_section(stale_candidates, config, prompts_dir=self._prompts_dir)
 
         # ── Build consolidation section ──
         consolidation_section = ""
@@ -749,6 +755,7 @@ class MemoryUpdater:
                     consolidation_candidates,
                     max_groups=config.consolidation_max_groups_per_cycle,
                     max_sources=config.consolidation_max_sources,
+                    prompts_dir=self._prompts_dir,
                 )
 
         variables = {
@@ -758,7 +765,7 @@ class MemoryUpdater:
             "staleness_review_section": staleness_section,
             "consolidation_section": consolidation_section,
         }
-        prompt = load_prompt_messages("memory_update", variables, agent_name=agent_name)
+        prompt = load_prompt_messages("memory_update", variables, agent_name=agent_name, prompts_dir=self._prompts_dir)
         return current_memory, prompt
 
     def _finalize_update(

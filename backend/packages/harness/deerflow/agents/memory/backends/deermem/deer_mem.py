@@ -66,7 +66,7 @@ class DeerMem(MemoryManager):
         # so zero-config DeerMem (empty `model`) still extracts via the app default,
         # mirroring pre-abstraction `model_name: null`. Standalone (no factory) -> None.
         self._llm = self._config.host_llm if self._config.host_llm is not None else build_llm(self._config.model)
-        self._updater = MemoryUpdater(self._config, self._storage, self._llm)
+        self._updater = MemoryUpdater(self._config, self._storage, self._llm, prompts_dir=self._config.prompts_dir)
         self._queue = MemoryUpdateQueue(self._config, self._updater)
 
     # ── Write ────────────────────────────────────────────────────────────

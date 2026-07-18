@@ -30,8 +30,12 @@ def load_patterns(name: str, *, patterns_dir: str | None = None) -> list[re.Patt
     Each YAML list entry is either a string (compiled with no flags) or a
     mapping ``{pattern: <regex>, flags: [...]}`` where ``flags`` may contain
     ``"ignorecase"``. Raises ``ValueError`` for invalid YAML or a file whose
-    top-level value is not a list. A missing or unreadable file (OSError) logs a
-    WARNING and returns ``[]`` (detection disabled rather than crashing startup).
+    top-level value is not a list. When *patterns_dir* is explicitly set and a
+    file is missing, raises ``FileNotFoundError`` so a typo or missing mount is
+    caught immediately. When *patterns_dir* is ``None`` (bundled defaults) and a
+    file is unexpectedly absent, logs a WARNING and returns ``[]`` (detection
+    disabled instead of crashing startup -- a packaging bug, not a configuration
+    error).
     """
     cache_key = (name, patterns_dir)
     cached = _PATTERN_CACHE.get(cache_key)
@@ -41,6 +45,8 @@ def load_patterns(name: str, *, patterns_dir: str | None = None) -> list[re.Patt
     base = Path(patterns_dir) if patterns_dir else Path(__file__).parent / "message_patterns"
     path = base / f"{name}.yaml"
     if not path.exists():
+        if patterns_dir is not None:
+            raise FileNotFoundError(f"Signal patterns file not found: {path}")
         logger.warning("Signal patterns file not found (%s); %s detection disabled.", path, name)
         _PATTERN_CACHE[cache_key] = []
         return []

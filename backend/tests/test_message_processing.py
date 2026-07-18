@@ -53,8 +53,11 @@ def test_load_patterns_custom_dir_overrides(tmp_path):
     assert len(load_patterns("correction")) > 1
 
 
-def test_load_patterns_missing_file_returns_empty(tmp_path):
-    assert load_patterns("nope", patterns_dir=str(tmp_path)) == []
+def test_load_patterns_missing_file_explicit_dir_raises(tmp_path):
+    import pytest
+
+    with pytest.raises(FileNotFoundError, match="nope"):
+        load_patterns("nope", patterns_dir=str(tmp_path))
 
 
 # ---------------------------------------------------------------------------
