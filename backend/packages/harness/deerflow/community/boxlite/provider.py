@@ -176,6 +176,7 @@ class BoxliteProvider(WarmPoolLifecycleMixin[BoxliteBox], SandboxProvider):
         self._boxes: dict[str, BoxliteBox] = {}
         self._thread_boxes: dict[tuple[str, str], str] = {}
         self._warm_pool: dict[str, tuple[BoxliteBox, float]] = {}
+        self._skip_health_check_warm_ids: set[str] = set()
         self._acquire_locks: dict[str, threading.Lock] = {}
         self._idle_checker_stop = threading.Event()
         self._idle_checker_thread: threading.Thread | None = None
@@ -196,6 +197,7 @@ class BoxliteProvider(WarmPoolLifecycleMixin[BoxliteBox], SandboxProvider):
         # (which raises on a missing var), so the environment dict is used as-is.
         replicas = _opt("replicas")
         idle_timeout = _opt("idle_timeout")
+        health_check_skip_seconds = _opt("health_check_skip_seconds")
         return {
             "image": _opt("image") or DEFAULT_IMAGE,
             "memory_mib": _opt("memory_mib"),
@@ -203,6 +205,7 @@ class BoxliteProvider(WarmPoolLifecycleMixin[BoxliteBox], SandboxProvider):
             "environment": dict(_opt("environment") or {}),
             "replicas": replicas if replicas is not None else self.DEFAULT_REPLICAS,
             "idle_timeout": idle_timeout if idle_timeout is not None else self.DEFAULT_IDLE_TIMEOUT,
+            "health_check_skip_seconds": float(health_check_skip_seconds if health_check_skip_seconds is not None else 0.0),
         }
 
     @staticmethod
@@ -241,6 +244,8 @@ class BoxliteProvider(WarmPoolLifecycleMixin[BoxliteBox], SandboxProvider):
 
     def _destroy_warm_entry(self, sandbox_id: str, entry: BoxliteBox, *, reason: str) -> None:
         """Close a removed warm-pool entry and log with context."""
+        with self._lock:
+            self._skip_health_check_warm_ids.discard(sandbox_id)
         try:
             entry.close()
             if reason == "idle_timeout":
@@ -256,6 +261,24 @@ class BoxliteProvider(WarmPoolLifecycleMixin[BoxliteBox], SandboxProvider):
                 logger.warning("Error closing evicted BoxLite box %s: %s", sandbox_id, e)
             else:
                 logger.warning("Error closing BoxLite box %s (reason=%s): %s", sandbox_id, reason, e)
+
+    def _invalidate_box(self, sandbox_id: str, reason: str) -> None:
+        """Destroy and deregister a box after a terminal command-path failure."""
+        box_to_close: BoxliteBox | None = None
+        with self._lock:
+            active_box = self._boxes.pop(sandbox_id, None)
+            warm_entry = self._warm_pool.pop(sandbox_id, None)
+            self._skip_health_check_warm_ids.discard(sandbox_id)
+            for key in [k for k, sid in self._thread_boxes.items() if sid == sandbox_id]:
+                self._thread_boxes.pop(key, None)
+            box_to_close = active_box or (warm_entry[0] if warm_entry is not None else None)
+
+        if box_to_close is None:
+            logger.warning("BoxLite box %s failed terminally but was not tracked: %s", sandbox_id, reason)
+            return
+
+        logger.warning("Invalidating BoxLite box %s after terminal failure: %s", sandbox_id, reason)
+        box_to_close.close()
 
     def _reconcile_orphans(self) -> None:
         """Adopt DeerFlow-owned BoxLite boxes left by a previous provider/process.
@@ -306,7 +329,7 @@ class BoxliteProvider(WarmPoolLifecycleMixin[BoxliteBox], SandboxProvider):
                 box_runtime.stop()
                 continue
 
-            wrapped = BoxliteBox(sandbox_id, _SyncBoxAdapter(box_runtime, box), _run_sync_adapter, default_env=self._config["environment"])
+            wrapped = BoxliteBox(sandbox_id, _SyncBoxAdapter(box_runtime, box), _run_sync_adapter, default_env=self._config["environment"], on_terminal_failure=self._invalidate_box)
             with self._lock:
                 if sandbox_id in self._boxes or sandbox_id in self._warm_pool:
                     box_runtime.stop()
@@ -371,7 +394,7 @@ class BoxliteProvider(WarmPoolLifecycleMixin[BoxliteBox], SandboxProvider):
 
         box = self._loop.run(_make())
         logger.info("Created BoxLite box %s (name=%s, image=%s)", sandbox_id, self._box_name(sandbox_id), self._config["image"])
-        return BoxliteBox(sandbox_id, box, self._loop.run, default_env=self._config["environment"])
+        return BoxliteBox(sandbox_id, box, self._loop.run, default_env=self._config["environment"], on_terminal_failure=self._invalidate_box)
 
     def get(self, sandbox_id: str) -> Sandbox | None:
         with self._lock:
@@ -393,8 +416,10 @@ class BoxliteProvider(WarmPoolLifecycleMixin[BoxliteBox], SandboxProvider):
                 return
             if self._shutdown_called:
                 close_box = box
+                self._skip_health_check_warm_ids.discard(sandbox_id)
             else:
                 self._warm_pool[sandbox_id] = (box, time.time())
+                self._skip_health_check_warm_ids.add(sandbox_id)
 
         if close_box is not None:
             close_box.close()
@@ -406,11 +431,44 @@ class BoxliteProvider(WarmPoolLifecycleMixin[BoxliteBox], SandboxProvider):
         """Try to reclaim a warm-pool box by sandbox_id.
 
         Returns sandbox_id on success, None if not found or dead.
+
+        Only boxes that *this provider instance* placed in the warm pool via
+        ``release()`` may skip the health check when reclaimed shortly after
+        release; startup-adopted/orphaned boxes always validate before reuse.
         """
+
         with self._lock:
             if sandbox_id not in self._warm_pool:
                 return None
-            box, _ = self._warm_pool[sandbox_id]
+            box, released_at = self._warm_pool[sandbox_id]
+            skip_eligible = sandbox_id in self._skip_health_check_warm_ids
+
+        skip_seconds = self._config.get("health_check_skip_seconds", 0.0)
+        if skip_eligible and skip_seconds > 0 and (time.time() - released_at) < skip_seconds:
+            # Recently released by this provider — promote directly without a
+            # health-check round trip, but never return an adapter that this
+            # process already knows is closed.
+            with self._lock:
+                warm_entry = self._warm_pool.pop(sandbox_id, None)
+                if warm_entry is None:
+                    return None  # Raced with another thread
+                self._skip_health_check_warm_ids.discard(sandbox_id)
+                box, _ = warm_entry
+                if box.is_closed:
+                    logger.warning("Warm-pool box %s was closed before skipped health check reclaim", sandbox_id)
+                    close_box = box
+                else:
+                    close_box = None
+                    self._boxes[sandbox_id] = box
+            if close_box is not None:
+                close_box.close()
+                return None
+            logger.debug(
+                "Reclaimed warm-pool box %s (skipped health check, age=%.1fs)",
+                sandbox_id,
+                time.time() - released_at,
+            )
+            return sandbox_id
 
         # Health check: run a simple command to verify the VM is alive
         try:
@@ -418,14 +476,16 @@ class BoxliteProvider(WarmPoolLifecycleMixin[BoxliteBox], SandboxProvider):
             if "ok" not in result:
                 logger.warning("Warm pool box %s health check failed: %s", sandbox_id, result)
                 with self._lock:
-                    self._warm_pool.pop(sandbox_id, None)
-                box.close()
+                    warm_entry = self._warm_pool.pop(sandbox_id, None)
+                if warm_entry is not None:
+                    self._destroy_warm_entry(sandbox_id, warm_entry[0], reason="health_check_failed")
                 return None
         except Exception as e:
             logger.warning("Warm pool box %s health check error: %s", sandbox_id, e)
             with self._lock:
-                self._warm_pool.pop(sandbox_id, None)
-            box.close()
+                warm_entry = self._warm_pool.pop(sandbox_id, None)
+            if warm_entry is not None:
+                self._destroy_warm_entry(sandbox_id, warm_entry[0], reason="health_check_failed")
             return None
 
         # Promote from warm pool to active
@@ -433,6 +493,7 @@ class BoxliteProvider(WarmPoolLifecycleMixin[BoxliteBox], SandboxProvider):
             warm_entry = self._warm_pool.pop(sandbox_id, None)
             if warm_entry is None:
                 return None  # Raced with another thread
+            self._skip_health_check_warm_ids.discard(sandbox_id)
             box, _ = warm_entry
             self._boxes[sandbox_id] = box
 
@@ -452,6 +513,7 @@ class BoxliteProvider(WarmPoolLifecycleMixin[BoxliteBox], SandboxProvider):
             now = time.time()
             for sandbox_id, box in self._boxes.items():
                 self._warm_pool.setdefault(sandbox_id, (box, now))
+                self._skip_health_check_warm_ids.discard(sandbox_id)
             self._boxes.clear()
             self._thread_boxes.clear()
             self._acquire_locks.clear()
@@ -471,6 +533,7 @@ class BoxliteProvider(WarmPoolLifecycleMixin[BoxliteBox], SandboxProvider):
             self._warm_pool.clear()
             self._thread_boxes.clear()
             self._acquire_locks.clear()
+            self._skip_health_check_warm_ids.clear()
 
         for box in active + warm:
             try:

@@ -122,13 +122,13 @@ class TestMergeViewedImages:
     """Sanity check for the existing viewed_images reducer."""
 
     def test_merges_dicts(self):
-        existing = {"k1": {"base64": "x", "mime_type": "image/png"}}
-        new = {"k2": {"base64": "y", "mime_type": "image/jpeg"}}
+        existing = {"k1": {"mime_type": "image/png", "size": 1, "actual_path": "/a"}}
+        new = {"k2": {"mime_type": "image/jpeg", "size": 2, "actual_path": "/b"}}
         merged = merge_viewed_images(existing, new)
         assert set(merged.keys()) == {"k1", "k2"}
 
     def test_empty_dict_clears(self):
-        existing = {"k1": {"base64": "x", "mime_type": "image/png"}}
+        existing = {"k1": {"mime_type": "image/png", "size": 1, "actual_path": "/a"}}
         assert merge_viewed_images(existing, {}) == {}
 
 

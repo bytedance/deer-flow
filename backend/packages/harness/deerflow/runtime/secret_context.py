@@ -25,6 +25,12 @@ SECRETS_CONTEXT_KEY = "secrets"
 # tool. Both reserved keys are stripped from trace payloads (see tracing redactor).
 ACTIVE_SECRETS_CONTEXT_KEY = "__active_skill_secrets"
 
+# Reserved sub-key holding the active skill tool-policy decision for one model
+# step. The decision includes a middleware-instance owner token that prevents a
+# caller from forging an allow-all decision in its mergeable run context, so the
+# entire value must be stripped from every observable serialization surface.
+SKILL_TOOL_POLICY_DECISION_CONTEXT_KEY = "__skill_tool_policy_decision"
+
 
 def _string_pairs(raw: Any) -> dict[str, str]:
     if not isinstance(raw, dict):
@@ -51,13 +57,48 @@ def read_active_secrets(context: Any) -> dict[str, str]:
     return _string_pairs(context.get(ACTIVE_SECRETS_CONTEXT_KEY))
 
 
+def write_slash_skill_source_path(context: Any, path: str, *, owner_token: str) -> None:
+    """Persist an authenticated slash-activated skill path in a run context.
+
+    The source contains a path reference plus a middleware-chain-local token.
+    Consumers must authenticate the token and resolve the path against the live
+    skill registry before trusting any skill metadata.
+    """
+    if isinstance(context, dict) and isinstance(path, str) and path and isinstance(owner_token, str) and owner_token:
+        context[_SLASH_SECRET_SOURCE_KEY] = {"path": path, "owner_token": owner_token}
+
+
+def read_slash_skill_source_path(context: Any, *, owner_token: str) -> str | None:
+    """Return the authenticated slash-activated skill path, if well formed."""
+    if not isinstance(context, dict):
+        return None
+    source = context.get(_SLASH_SECRET_SOURCE_KEY)
+    if not isinstance(source, dict):
+        return None
+    path = source.get("path")
+    source_owner_token = source.get("owner_token")
+    if not isinstance(owner_token, str) or not owner_token or source_owner_token != owner_token:
+        return None
+    return path if isinstance(path, str) and path else None
+
+
 # Private run-context keys the skill-activation middleware uses to carry secret
 # bindings across a run. Only ``secrets`` / ``__active_skill_secrets`` hold
-# values; the binding-source and audit keys hold names only. All are listed so
-# the redaction allowlist stays a complete guard even if a future edit starts
-# storing a value under one of the name-only keys.
+# secret values; the slash source holds a middleware-chain owner token, while
+# the audit keys hold names only. All are listed so the redaction allowlist
+# remains a complete guard.
 _SLASH_SECRET_SOURCE_KEY = "__slash_skill_secret_source"
 _SECRETS_BINDING_AUDIT_KEY = "__skill_secrets_binding_audit"
+
+# Identity of the latest slash activation that has already fired in this run, so
+# the reminder injection, skill disk read, and ``activate`` audit event happen
+# once per user slash command rather than on every model call of the tool loop.
+# The reminder is injected into the per-call model request only and never written
+# back to graph state, so a scan of ``request.messages`` cannot detect a prior
+# activation on the 2nd..Nth model call — the run context is the only signal that
+# survives (mirroring ``_SLASH_SECRET_SOURCE_KEY``). Holds a message id / content
+# digest, never a secret value; listed below to keep the redaction guard complete.
+_SLASH_SKILL_ACTIVATION_RUN_KEY = "__slash_skill_activation_run"
 
 # Run-context keys whose values are request-scoped secrets and must be stripped
 # before a context mapping is serialized anywhere observable (traces, logs).
@@ -67,6 +108,8 @@ REDACTED_CONTEXT_KEYS = frozenset(
         ACTIVE_SECRETS_CONTEXT_KEY,
         _SLASH_SECRET_SOURCE_KEY,
         _SECRETS_BINDING_AUDIT_KEY,
+        _SLASH_SKILL_ACTIVATION_RUN_KEY,
+        SKILL_TOOL_POLICY_DECISION_CONTEXT_KEY,
     }
 )
 

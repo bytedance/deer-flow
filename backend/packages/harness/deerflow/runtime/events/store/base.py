@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import abc
 
+from deerflow.runtime.user_context import AUTO, _AutoSentinel
+
 
 class RunEventStore(abc.ABC):
     """Run event stream storage interface.
@@ -55,6 +57,7 @@ class RunEventStore(abc.ABC):
         limit: int = 50,
         before_seq: int | None = None,
         after_seq: int | None = None,
+        user_id: str | None | _AutoSentinel = AUTO,
     ) -> list[dict]:
         """Return displayable messages (category=message) for a thread, ordered by seq ascending.
 
@@ -62,6 +65,9 @@ class RunEventStore(abc.ABC):
         - before_seq: return the last ``limit`` records with seq < before_seq (ascending)
         - after_seq: return the first ``limit`` records with seq > after_seq (ascending)
         - neither: return the latest ``limit`` records (ascending)
+
+        ``user_id`` may be passed explicitly by request-independent callers;
+        user-scoped backends must apply it according to their isolation model.
         """
 
     @abc.abstractmethod
@@ -100,6 +106,20 @@ class RunEventStore(abc.ABC):
         - after_seq: return the first ``limit`` records with seq > after_seq (ascending)
         - before_seq: return the last ``limit`` records with seq < before_seq (ascending)
         - neither: return the latest ``limit`` records (ascending)
+        """
+
+    @abc.abstractmethod
+    async def get_last_visible_ai_seq_by_run(
+        self,
+        thread_id: str,
+        run_ids: set[str],
+        *,
+        user_id: str | None | _AutoSentinel = AUTO,
+    ) -> dict[str, int]:
+        """Return each run's last non-middleware AI message sequence.
+
+        ``user_id`` follows the same explicit-caller semantics as
+        :meth:`list_messages`.
         """
 
     @abc.abstractmethod

@@ -6,6 +6,7 @@ import json
 import logging
 import re
 from dataclasses import dataclass
+from typing import Any
 
 from deerflow.config import get_app_config
 from deerflow.config.app_config import AppConfig
@@ -67,7 +68,26 @@ def _extract_json_object(raw: str) -> dict | None:
     return None
 
 
-async def scan_skill_content(content: str, *, executable: bool = False, location: str = SKILL_MD_FILE, app_config: AppConfig | None = None) -> ScanResult:
+def _format_static_findings_context(static_findings: list[dict[str, Any]]) -> str:
+    if not static_findings:
+        return "None."
+    lines = []
+    for finding in static_findings:
+        finding_location = finding.get("file") or "<unknown>"
+        if finding.get("line") is not None:
+            finding_location = f"{finding_location}:{finding['line']}"
+        lines.append(f"- {finding.get('rule_id')} ({finding.get('severity')}): {finding.get('message')} at {finding_location}. Evidence: {finding.get('evidence') or '<none>'}. Remediation: {finding.get('remediation')}")
+    return "\n".join(lines)
+
+
+async def scan_skill_content(
+    content: str,
+    *,
+    executable: bool = False,
+    location: str = SKILL_MD_FILE,
+    app_config: AppConfig | None = None,
+    static_findings: list[dict[str, Any]] | None = None,
+) -> ScanResult:
     """Screen skill content before it is written to disk."""
     rubric = (
         "You are a security reviewer for AI agent skills. "
@@ -77,7 +97,7 @@ async def scan_skill_content(content: str, *, executable: bool = False, location
         "Respond with ONLY a single JSON object on one line, no code fences, no commentary:\n"
         '{"decision":"allow|warn|block","reason":"..."}'
     )
-    prompt = f"Location: {location}\nExecutable: {str(executable).lower()}\n\nReview this content:\n-----\n{content}\n-----"
+    prompt = f"Location: {location}\nExecutable: {str(executable).lower()}\nDeterministic SkillScan findings:\n{_format_static_findings_context(static_findings or [])}\n\nReview this content:\n-----\n{content}\n-----"
 
     model_responded = False
     try:

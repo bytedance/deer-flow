@@ -20,7 +20,12 @@ import copy
 import inspect
 import logging
 import os
+import threading
+import weakref
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from datetime import datetime
 from functools import lru_cache
 from typing import Any, Literal, cast
 
@@ -28,6 +33,7 @@ from langgraph.checkpoint.base import empty_checkpoint
 
 from deerflow.agents.goal_state import GoalEvaluation, GoalState
 from deerflow.config.app_config import AppConfig
+from deerflow.runtime.context_keys import CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY
 from deerflow.runtime.goal import (
     DEFAULT_MAX_GOAL_CONTINUATIONS,
     DEFAULT_MAX_NO_PROGRESS_CONTINUATIONS,
@@ -62,6 +68,28 @@ from .schemas import RunStatus
 
 logger = logging.getLogger(__name__)
 
+_checkpoint_locks_guard = threading.Lock()
+_checkpoint_locks_by_loop: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, dict[str, asyncio.Lock]] = weakref.WeakKeyDictionary()
+
+
+@asynccontextmanager
+async def _checkpoint_thread_lock(thread_id: str) -> AsyncIterator[None]:
+    """Serialize checkpoint mutations for one thread without blocking goal commands."""
+    loop = asyncio.get_running_loop()
+    with _checkpoint_locks_guard:
+        locks = _checkpoint_locks_by_loop.get(loop)
+        if locks is None:
+            locks = {}
+            _checkpoint_locks_by_loop[loop] = locks
+        lock = locks.get(thread_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            locks[thread_id] = lock
+
+    async with lock:
+        yield
+
+
 # Valid stream_mode values for LangGraph's graph.astream()
 _VALID_LG_MODES = {"values", "updates", "checkpoints", "tasks", "debug", "messages", "custom"}
 
@@ -87,6 +115,8 @@ def _build_runtime_context(
     runtime_ctx: dict[str, Any] = {"thread_id": thread_id, "run_id": run_id}
     if isinstance(caller_context, dict):
         for key, value in caller_context.items():
+            if key == CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY:
+                continue
             runtime_ctx.setdefault(key, value)
     if app_config is not None:
         runtime_ctx["app_config"] = app_config
@@ -120,6 +150,8 @@ def _install_runtime_context(config: dict, runtime_context: dict[str, Any]) -> N
             existing_context.setdefault(DEERFLOW_TRACE_METADATA_KEY, runtime_context[DEERFLOW_TRACE_METADATA_KEY])
         if "app_config" in runtime_context:
             existing_context["app_config"] = runtime_context["app_config"]
+        if CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY in runtime_context:
+            existing_context[CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY] = runtime_context[CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY]
         return
 
     config["context"] = dict(runtime_context)
@@ -201,6 +233,9 @@ class _SubagentEventBuffer:
         try:
             await self._event_store.put_batch(batch)
         except Exception:
+            # Re-buffer the failed batch (ahead of any events queued since) so a
+            # transient store error does not silently drop subagent step events.
+            self._pending = batch + self._pending
             logger.warning("Run %s: failed to persist %d subagent step event(s)", self._run_id, len(batch), exc_info=True)
 
 
@@ -326,6 +361,7 @@ async def run_agent(
         # manually here because we drive the graph through ``agent.astream(config=...)``
         # without passing the official ``context=`` parameter.
         runtime_ctx = _build_runtime_context(thread_id, run_id, config.get("context"), ctx.app_config)
+        runtime_ctx[CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY] = frozenset(pre_existing_message_ids)
         incoming_metadata = config.get("metadata") if isinstance(config.get("metadata"), dict) else {}
         deerflow_trace_id = normalize_trace_id(incoming_metadata.get(DEERFLOW_TRACE_METADATA_KEY)) or get_current_trace_id()
         if deerflow_trace_id:
@@ -445,41 +481,48 @@ async def run_agent(
 
         async def _stream_once(input_payload: Any, stream_config: RunnableConfig) -> None:
             nonlocal llm_error_fallback_message
-            if len(lg_modes) == 1 and not stream_subgraphs:
-                # Single mode, no subgraphs: astream yields raw chunks
-                single_mode = lg_modes[0]
-                async for chunk in agent.astream(input_payload, config=stream_config, stream_mode=single_mode):
+            async with _checkpoint_thread_lock(thread_id):
+                if len(lg_modes) == 1 and not stream_subgraphs:
+                    # Single mode, no subgraphs: astream yields raw chunks
+                    single_mode = lg_modes[0]
+                    async for chunk in agent.astream(input_payload, config=stream_config, stream_mode=single_mode):
+                        if record.abort_event.is_set():
+                            logger.info("Run %s abort requested — stopping", run_id)
+                            break
+                        llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(chunk, pre_existing_message_ids)
+                        sse_event = _lg_mode_to_sse_event(single_mode)
+                        await bridge.publish(run_id, sse_event, serialize(chunk, mode=single_mode))
+                        if single_mode == "custom":
+                            await subagent_events.add(chunk)
+                    return
+                # Multiple modes or subgraphs: astream yields tuples
+                async for item in agent.astream(
+                    input_payload,
+                    config=stream_config,
+                    stream_mode=lg_modes,
+                    subgraphs=stream_subgraphs,
+                ):
                     if record.abort_event.is_set():
                         logger.info("Run %s abort requested — stopping", run_id)
                         break
+
+                    mode, chunk = _unpack_stream_item(item, lg_modes, stream_subgraphs)
+                    if mode is None:
+                        continue
+
                     llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(chunk, pre_existing_message_ids)
-                    sse_event = _lg_mode_to_sse_event(single_mode)
-                    await bridge.publish(run_id, sse_event, serialize(chunk, mode=single_mode))
-                    if single_mode == "custom":
+                    sse_event = _lg_mode_to_sse_event(mode)
+                    await bridge.publish(run_id, sse_event, serialize(chunk, mode=mode))
+                    if mode == "custom":
                         await subagent_events.add(chunk)
-                return
-            # Multiple modes or subgraphs: astream yields tuples
-            async for item in agent.astream(
-                input_payload,
-                config=stream_config,
-                stream_mode=lg_modes,
-                subgraphs=stream_subgraphs,
-            ):
-                if record.abort_event.is_set():
-                    logger.info("Run %s abort requested — stopping", run_id)
-                    break
-
-                mode, chunk = _unpack_stream_item(item, lg_modes, stream_subgraphs)
-                if mode is None:
-                    continue
-
-                llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(chunk, pre_existing_message_ids)
-                sse_event = _lg_mode_to_sse_event(mode)
-                await bridge.publish(run_id, sse_event, serialize(chunk, mode=mode))
-                if mode == "custom":
-                    await subagent_events.add(chunk)
 
         # 7. Stream the requested turn, then optionally continue hidden goal turns.
+        # Clear any stale stop_reason before the first (user-visible) turn only.
+        # Continuation turns preserve a cap reason from the user turn: a run that
+        # hits a cap during the user turn IS capped even if hidden goal-evaluator
+        # turns complete cleanly afterward (#4176 review).
+        if isinstance(runtime.context, dict):
+            runtime.context.pop("stop_reason", None)
         await _stream_once(graph_input, initial_runnable_config)
         while not record.abort_event.is_set() and not llm_error_fallback_message and (journal is None or not journal.had_llm_error_fallback):
             continuation_input = await _prepare_goal_continuation_input(
@@ -491,6 +534,8 @@ async def run_agent(
                 app_config=ctx.app_config,
                 evaluator_model_factory=_get_goal_evaluator_model,
                 abort_event=record.abort_event,
+                user_id=resolve_runtime_user_id(runtime),
+                deerflow_trace_id=deerflow_trace_id,
             )
             if continuation_input is None or record.abort_event.is_set():
                 break
@@ -523,7 +568,22 @@ async def run_agent(
             error_msg = error_msg or "LLM provider failed after retries"
             await run_manager.set_status(run_id, RunStatus.error, error=error_msg)
         else:
-            await run_manager.set_status(run_id, RunStatus.success)
+            runtime_context = runtime.context if isinstance(runtime.context, dict) else None
+            # Guard middlewares that hard-stop a run by stripping tool_calls
+            # stamp stop_reason into runtime.context so the worker can surface
+            # it on the run record:
+            #   loop_detection      -> "loop_capped"
+            #   token_budget        -> "token_capped"
+            #   safety_finish_reason -> "safety_capped"
+            #   subagent_limit       -> "subagent_limit_capped"
+            #
+            # If more guards grow stop_reason semantics, consider a publish/
+            # collect pattern (e.g. each guard middleware publishes its cap
+            # reason to a dedicated runtime.context channel, and the worker
+            # collects the most severe / first / all reasons) instead of each
+            # guard writing directly to the same key.
+            stop_reason = runtime_context.get("stop_reason") if runtime_context is not None else None
+            await run_manager.set_status(run_id, RunStatus.success, stop_reason=stop_reason)
 
     except asyncio.CancelledError:
         await run_manager.set_finalizing(run_id, True)
@@ -611,6 +671,25 @@ async def run_agent(
                         await thread_store.update_display_name(thread_id, title)
             except Exception:
                 logger.debug("Failed to sync title for thread %s (non-fatal)", thread_id)
+
+        # Persist run duration to checkpoint metadata so history reads
+        # don't need to correlate runs and events.
+        if checkpointer is not None and record.status == RunStatus.success:
+            try:
+                created = datetime.fromisoformat(record.created_at.replace("Z", "+00:00"))
+                updated = datetime.fromisoformat(record.updated_at.replace("Z", "+00:00"))
+                # Match legacy history semantics: turn_duration is the whole
+                # RunRecord lifetime in integer seconds, including admission
+                # delay. Persist zero for sub-second successful turns.
+                duration = max(0, int((updated - created).total_seconds()))
+                await _persist_run_duration(
+                    checkpointer=checkpointer,
+                    thread_id=thread_id,
+                    run_id=run_id,
+                    duration_seconds=duration,
+                )
+            except Exception:
+                logger.debug("Failed to persist run duration for thread %s run %s (non-fatal)", thread_id, run_id)
 
         # Update threads_meta status based on run outcome
         if thread_store is not None:
@@ -732,6 +811,12 @@ async def _persist_goal_evaluation(
             current_goal = _read_checkpoint_goal(checkpoint_tuple)
             if current_goal is None or not _goal_instance_matches(goal, current_goal):
                 return None
+            # Defensive: compute continuation_count from the fresh current_goal
+            # inside the lock.  The caller computed it from a possibly-stale goal
+            # snapshot; a racing continuation may have already bumped the count.
+            if continuation_count is not None:
+                current_count = int(current_goal.get("continuation_count", 0))
+                continuation_count = max(continuation_count, current_count + 1)
             expected_checkpoint_id = _checkpoint_id(checkpoint_tuple)
             updated_goal = attach_goal_evaluation(
                 current_goal,
@@ -780,6 +865,8 @@ async def _prepare_goal_continuation_input(
     app_config: AppConfig | None,
     evaluator_model_factory: Any | None = None,
     abort_event: asyncio.Event | None = None,
+    user_id: str | None = None,
+    deerflow_trace_id: str | None = None,
 ) -> dict[str, Any] | None:
     """Evaluate the active goal and return a hidden continuation input if needed.
 
@@ -857,6 +944,9 @@ async def _prepare_goal_continuation_input(
             model=evaluator_model,
             model_name=model_name,
             app_config=app_config,
+            thread_id=thread_id,
+            user_id=user_id,
+            deerflow_trace_id=deerflow_trace_id,
         )
         if abort_event is not None and abort_event.is_set():
             return None
@@ -931,11 +1021,18 @@ async def _prepare_goal_continuation_input(
     if not _goal_instance_matches(updated_goal, latest_goal) or latest_checkpoint_tuple is None:
         return None
     if visible_conversation_signature(_read_checkpoint_messages(latest_checkpoint_tuple)) != conversation_signature_before:
+        # Do not pass continuation_count here: the persist above already
+        # committed it (as next_count). Re-passing next_count would make
+        # _persist_goal_evaluation's race guard (#4088) see that same write as
+        # a "current_count" bump and add another +1 on top of it, silently
+        # double-counting this single continuation attempt against the
+        # continuation budget even though it is being stood down, not
+        # delivered. Omitting it leaves the already-committed count untouched,
+        # matching every other stand-down call site in this function.
         await _persist(
             latest_goal,
             evaluation,
             no_progress_count,
-            continuation_count=next_count,
             stand_down_reason="thread_changed_before_continuation",
         )
         return None
@@ -1125,6 +1222,93 @@ def _title_generation_state(channel_values: dict[str, Any], graph_input: Any | N
         if fallback_messages:
             state["messages"] = fallback_messages
     return state
+
+
+def valid_duration_entry(run_id: Any, duration_seconds: Any) -> bool:
+    """Check that (run_id, duration_seconds) is a well-formed duration entry."""
+    return isinstance(run_id, str) and bool(run_id) and isinstance(duration_seconds, int) and not isinstance(duration_seconds, bool)
+
+
+async def persist_run_durations(
+    *,
+    checkpointer: Any,
+    thread_id: str,
+    durations: dict[str, int],
+) -> bool:
+    """Merge validated run durations into a metadata-only checkpoint.
+
+    Durations accumulate so the history fast path can serve every known turn
+    from the latest checkpoint.  Per-entry overhead is negligible (~50 bytes
+    per run_id) compared to the messages channel blob written on every graph
+    checkpoint, so no pruning is needed.
+    """
+    updates = {run_id: max(0, duration_seconds) for run_id, duration_seconds in durations.items() if valid_duration_entry(run_id, duration_seconds)}
+    if not updates:
+        return False
+
+    ckpt_config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+    async with _checkpoint_thread_lock(thread_id):
+        for _attempt in range(3):
+            ckpt_tuple = await _call_checkpointer_method(checkpointer, "aget_tuple", "get_tuple", ckpt_config)
+            if ckpt_tuple is None:
+                return False
+
+            checkpoint = dict(getattr(ckpt_tuple, "checkpoint", {}) or {})
+            metadata = dict(getattr(ckpt_tuple, "metadata", {}) or {})
+            raw_run_durations = metadata.get("run_durations")
+            run_durations = {key: value for key, value in raw_run_durations.items() if valid_duration_entry(key, value)} if isinstance(raw_run_durations, dict) else {}
+            changed_durations = {run_id: duration for run_id, duration in updates.items() if run_durations.get(run_id) != duration}
+            if not changed_durations:
+                return False
+
+            run_durations.update(changed_durations)
+            parent_checkpoint_id = _checkpoint_identity(ckpt_tuple, checkpoint)
+            latest_tuple = await _call_checkpointer_method(checkpointer, "aget_tuple", "get_tuple", ckpt_config)
+            latest_checkpoint = dict(getattr(latest_tuple, "checkpoint", {}) or {}) if latest_tuple is not None else {}
+            if _checkpoint_identity(latest_tuple, latest_checkpoint) != parent_checkpoint_id:
+                continue
+
+            checkpoint.update(_new_checkpoint_marker())
+            metadata["source"] = "update"
+            prev_step = metadata.get("step")
+            metadata["step"] = (prev_step + 1) if isinstance(prev_step, int) else 1
+            metadata["run_durations"] = run_durations
+            metadata["writes"] = {"runtime_run_duration": {"run_ids": sorted(changed_durations)}}
+
+            checkpoint_ns = _checkpoint_namespace(ckpt_tuple)
+            write_config = {
+                "configurable": {
+                    "thread_id": thread_id,
+                    "checkpoint_ns": checkpoint_ns,
+                    "checkpoint_id": parent_checkpoint_id,
+                }
+            }
+            await _call_checkpointer_method(
+                checkpointer,
+                "aput",
+                "put",
+                write_config,
+                checkpoint,
+                metadata,
+                {},
+            )
+            return True
+    return False
+
+
+async def _persist_run_duration(
+    *,
+    checkpointer: Any,
+    thread_id: str,
+    run_id: str,
+    duration_seconds: int,
+) -> None:
+    """Persist one completed run duration in the thread checkpoint metadata."""
+    await persist_run_durations(
+        checkpointer=checkpointer,
+        thread_id=thread_id,
+        durations={run_id: duration_seconds},
+    )
 
 
 async def _ensure_interrupted_title(*, checkpointer: Any, thread_id: str, app_config: AppConfig | None, graph_input: Any | None = None) -> str | None:

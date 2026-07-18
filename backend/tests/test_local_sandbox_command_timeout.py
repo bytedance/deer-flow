@@ -147,6 +147,11 @@ def test_sandbox_config_exposes_command_timeout_default():
     assert cfg.bash_command_timeout == 600
 
 
+def test_sandbox_config_exposes_health_check_skip_seconds_default():
+    cfg = SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider")
+    assert cfg.health_check_skip_seconds is None
+
+
 def test_bash_tool_description_guides_backgrounding_long_lived_processes():
     """The bash tool description (seen by the model) must tell it to background
     long-lived processes like servers, so it doesn't block the turn in the

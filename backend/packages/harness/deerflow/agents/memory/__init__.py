@@ -1,57 +1,25 @@
-"""Memory module for DeerFlow.
+"""Pluggable memory for DeerFlow.
 
-This module provides a global memory mechanism that:
-- Stores user context and conversation history in memory.json
-- Uses LLM to summarize and extract facts from conversations
-- Injects relevant memory into system prompts for personalized responses
+The shared, backend-agnostic core: the :class:`MemoryManager` contract, the
+:func:`get_memory_manager` singleton factory, and :func:`reset_memory_manager`.
+Backends live under :mod:`backends` (each self-contained, exposing
+``MANAGER_CLASS``); the default DeerMem backend's functional modules live in
+``backends/deermem/core/``. Swap backend = drop a ``backends/<name>/`` folder +
+set ``MemoryConfig.manager_class`` -- nothing else in deer-flow changes.
+
+DeerMem-private symbols (``format_memory_for_injection``, ``get_memory_data``,
+``MemoryUpdater``, ``FileMemoryStorage``, ...) are NOT re-exported here -- import
+them directly from ``deerflow.agents.memory.backends.deermem.deermem.core.*``.
 """
 
-from deerflow.agents.memory.prompt import (
-    FACT_EXTRACTION_PROMPT,
-    MEMORY_UPDATE_PROMPT,
-    format_conversation_for_update,
-    format_memory_for_injection,
-)
-from deerflow.agents.memory.queue import (
-    ConversationContext,
-    MemoryUpdateQueue,
-    get_memory_queue,
-    reset_memory_queue,
-)
-from deerflow.agents.memory.storage import (
-    FileMemoryStorage,
-    MemoryStorage,
-    get_memory_storage,
-)
-from deerflow.agents.memory.updater import (
-    MemoryUpdater,
-    clear_memory_data,
-    delete_memory_fact,
-    get_memory_data,
-    reload_memory_data,
-    update_memory_from_conversation,
+from deerflow.agents.memory.manager import (
+    MemoryManager,
+    get_memory_manager,
+    reset_memory_manager,
 )
 
 __all__ = [
-    # Prompt utilities
-    "MEMORY_UPDATE_PROMPT",
-    "FACT_EXTRACTION_PROMPT",
-    "format_memory_for_injection",
-    "format_conversation_for_update",
-    # Queue
-    "ConversationContext",
-    "MemoryUpdateQueue",
-    "get_memory_queue",
-    "reset_memory_queue",
-    # Storage
-    "MemoryStorage",
-    "FileMemoryStorage",
-    "get_memory_storage",
-    # Updater
-    "MemoryUpdater",
-    "clear_memory_data",
-    "delete_memory_fact",
-    "get_memory_data",
-    "reload_memory_data",
-    "update_memory_from_conversation",
+    "MemoryManager",
+    "get_memory_manager",
+    "reset_memory_manager",
 ]

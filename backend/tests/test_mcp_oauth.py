@@ -189,3 +189,146 @@ def test_get_initial_oauth_headers(monkeypatch):
 
     assert headers == {"secure-http": "Bearer token-initial"}
     assert len(post_calls) == 1
+
+
+def test_get_initial_oauth_headers_one_failing_server_does_not_drop_others(monkeypatch):
+    """A single OAuth server whose token endpoint fails must not drop headers
+    (and therefore tools) from healthy servers."""
+
+    class _FailingClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url: str, data: dict[str, Any]):
+            raise RuntimeError("token endpoint unreachable")
+
+    class _OkClient:
+        def __init__(self, post_calls: list[dict[str, Any]], **kwargs):
+            self._post_calls = post_calls
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url: str, data: dict[str, Any]):
+            self._post_calls.append({"url": url, "data": data})
+            return _MockResponse(
+                payload={
+                    "access_token": "token-ok",
+                    "token_type": "Bearer",
+                    "expires_in": 3600,
+                }
+            )
+
+    ok_post_calls: list[dict[str, Any]] = []
+
+    def _client_factory(**kwargs):
+        # The first call is for the failing server, second for the healthy one,
+        # because OAuthTokenManager iterates _oauth_by_server in dict order
+        # ('broken-http' < 'secure-http').
+        if not hasattr(_client_factory, "_count"):
+            _client_factory._count = 0  # type: ignore[attr-defined]
+        _client_factory._count += 1  # type: ignore[attr-defined]
+        if _client_factory._count == 1:  # type: ignore[attr-defined]
+            return _FailingClient()
+        return _OkClient(post_calls=ok_post_calls)
+
+    monkeypatch.setattr("httpx.AsyncClient", _client_factory)
+
+    config = ExtensionsConfig.model_validate(
+        {
+            "mcpServers": {
+                "broken-http": {
+                    "enabled": True,
+                    "type": "http",
+                    "url": "https://broken.example.com/mcp",
+                    "oauth": {
+                        "enabled": True,
+                        "token_url": "https://auth.broken.example.com/oauth/token",
+                        "grant_type": "client_credentials",
+                        "client_id": "client-id",
+                        "client_secret": "client-secret",
+                    },
+                },
+                "secure-http": {
+                    "enabled": True,
+                    "type": "http",
+                    "url": "https://api.example.com/mcp",
+                    "oauth": {
+                        "enabled": True,
+                        "token_url": "https://auth.example.com/oauth/token",
+                        "grant_type": "client_credentials",
+                        "client_id": "client-id-2",
+                        "client_secret": "client-secret-2",
+                    },
+                },
+            }
+        }
+    )
+
+    headers = asyncio.run(get_initial_oauth_headers(config))
+
+    # The healthy server's header must still be present.
+    assert headers == {"secure-http": "Bearer token-ok"}
+    assert len(ok_post_calls) == 1
+
+
+def test_oauth_refresh_token_rotation_persists_rotated_value(monkeypatch):
+    """When a provider rotates the refresh_token, _fetch_token must capture
+    the new value so the next refresh uses it instead of the stale original."""
+    post_calls: list[dict[str, Any]] = []
+
+    def _client_factory(*args, **kwargs):
+        return _MockAsyncClient(
+            payload={
+                "access_token": "at-1",
+                "token_type": "Bearer",
+                "expires_in": 3600,
+                "refresh_token": "rt-rotated-1",
+            },
+            post_calls=post_calls,
+            **kwargs,
+        )
+
+    monkeypatch.setattr("httpx.AsyncClient", _client_factory)
+
+    config = ExtensionsConfig.model_validate(
+        {
+            "mcpServers": {
+                "rotating-srv": {
+                    "enabled": True,
+                    "type": "http",
+                    "url": "https://api.example.com/mcp",
+                    "oauth": {
+                        "enabled": True,
+                        "token_url": "https://auth.example.com/oauth/token",
+                        "grant_type": "refresh_token",
+                        "refresh_token": "rt-original-seed",
+                    },
+                }
+            }
+        }
+    )
+
+    manager = OAuthTokenManager.from_extensions_config(config)
+
+    # Force the _is_expiring check to always return True so we hit _fetch_token.
+    monkeypatch.setattr(OAuthTokenManager, "_is_expiring", lambda self, token, oauth: True)
+
+    first = asyncio.run(manager.get_authorization_header("rotating-srv"))
+    assert first == "Bearer at-1"
+    assert len(post_calls) == 1
+    # First call posted the original seed token.
+    assert post_calls[0]["data"]["refresh_token"] == "rt-original-seed"
+
+    # On the second call, the rotated refresh_token from the first response
+    # must be used.
+    second = asyncio.run(manager.get_authorization_header("rotating-srv"))
+    assert second == "Bearer at-1"
+    assert len(post_calls) == 2
+    assert post_calls[1]["data"]["refresh_token"] == "rt-rotated-1"

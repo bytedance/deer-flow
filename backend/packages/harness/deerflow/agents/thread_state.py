@@ -18,8 +18,17 @@ class ThreadDataState(TypedDict):
 
 
 class ViewedImageData(TypedDict):
-    base64: str
+    """Metadata for a viewed image file.
+
+    Only lightweight metadata is persisted in checkpoint state; the actual
+    image bytes are read on-demand from disk when the model needs them.
+    This avoids duplicating large base64 payloads across every checkpoint
+    (see #4138).
+    """
+
     mime_type: str
+    size: int
+    actual_path: str
 
 
 def merge_sandbox(existing: SandboxState | None, new: SandboxState | None) -> SandboxState | None:
@@ -125,12 +134,17 @@ _DELEGATION_LEDGER_MAX_ENTRIES = 50
 
 class DelegationEntry(TypedDict):
     id: str
+    run_id: NotRequired[str]
     description: str
     subagent_type: str
     status: str
     result_brief: NotRequired[str]
     result_sha256: NotRequired[str]
     result_ref: NotRequired[str]
+    # Why a guardrail cap ended the run early (#3875 Phase 2): token_capped /
+    # turn_capped / loop_capped. The status stays completed/failed; this field
+    # is the additive signal that distinguishes a capped run from a clean one.
+    stop_reason: NotRequired[str]
     created_at: str
 
 
@@ -156,6 +170,8 @@ def merge_delegations(existing: list[DelegationEntry] | None, new: list[Delegati
             order.append(entry_id)
         elif previous.get("created_at"):
             entry = {**entry, "created_at": previous["created_at"]}
+            if previous.get("run_id") and not entry.get("run_id"):
+                entry["run_id"] = previous["run_id"]
         by_id[entry_id] = entry
     merged = [by_id[entry_id] for entry_id in order]
     if len(merged) > _DELEGATION_LEDGER_MAX_ENTRIES:
@@ -228,7 +244,7 @@ class ThreadState(AgentState):
     todos: Annotated[list | None, merge_todos]
     goal: Annotated[GoalState | None, merge_goal]
     uploaded_files: NotRequired[list[dict] | None]
-    viewed_images: Annotated[dict[str, ViewedImageData], merge_viewed_images]  # image_path -> {base64, mime_type}
+    viewed_images: Annotated[dict[str, ViewedImageData], merge_viewed_images]  # image_path -> metadata (no base64)
     promoted: Annotated[PromotedTools | None, merge_promoted]
     delegations: Annotated[list[DelegationEntry], merge_delegations]
     skill_context: Annotated[list[SkillEntry], merge_skill_context]

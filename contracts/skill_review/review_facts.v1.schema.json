@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://deerflow.dev/contracts/skill_review/review_facts.v1.schema.json",
+  "title": "DeerFlow Skill Review Facts v1",
+  "type": "object",
+  "required": ["schema_version", "subject", "profile", "completeness", "summary", "findings", "resources", "evals", "analyzer_errors"],
+  "properties": {
+    "schema_version": { "const": "deerflow.skill-review.facts.v1" },
+    "subject": {
+      "type": "object",
+      "required": ["display_ref", "source", "package_digest"],
+      "properties": {
+        "display_ref": { "type": ["string", "null"] },
+        "source": { "type": ["string", "null"] },
+        "category": { "type": ["string", "null"] },
+        "declared_name": { "type": ["string", "null"] },
+        "package_digest": { "type": "string" }
+      }
+    },
+    "profile": { "enum": ["deerflow", "agentskills"] },
+    "completeness": {
+      "type": "object",
+      "required": ["package_enumerated", "text_content_complete", "truncated", "not_assessed"],
+      "properties": {
+        "package_enumerated": { "type": "boolean" },
+        "text_content_complete": { "type": "boolean" },
+        "truncated": { "type": "boolean" },
+        "not_assessed": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "required": ["blockers", "errors", "warnings", "infos"],
+      "properties": {
+        "blockers": { "type": "integer", "minimum": 0 },
+        "errors": { "type": "integer", "minimum": 0 },
+        "warnings": { "type": "integer", "minimum": 0 },
+        "infos": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["rule_id", "source", "profile", "severity", "path", "line", "message", "remediation", "evidence"],
+        "properties": {
+          "rule_id": { "type": "string" },
+          "source": { "type": "string" },
+          "profile": { "type": "string" },
+          "severity": { "enum": ["blocker", "error", "warning", "info"] },
+          "path": { "type": ["string", "null"] },
+          "line": { "type": ["integer", "null"] },
+          "message": { "type": "string" },
+          "remediation": { "type": "string" },
+          "evidence": {}
+        },
+        "additionalProperties": true
+      }
+    },
+    "resources": { "type": "object" },
+    "evals": { "type": "object" },
+    "reader_errors": { "type": "array", "items": { "type": "object" } },
+    "analyzer_errors": { "type": "array", "items": { "type": "object" } }
+  },
+  "additionalProperties": true
+}

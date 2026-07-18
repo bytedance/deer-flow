@@ -283,6 +283,11 @@ class SafetyFinishReasonMiddleware(AgentMiddleware[AgentState]):
         if termination is None:
             return None
 
+        # Stamp stop_reason so the worker can surface this capped completion
+        # alongside loop_capped / token_capped (#4176).
+        ctx = getattr(runtime, "context", None)
+        if isinstance(ctx, dict):
+            ctx["stop_reason"] = "safety_capped"
         patched = self._build_suppressed_message(last, termination)
 
         thread_id = None

@@ -36,6 +36,9 @@ class SandboxConfig(BaseModel):
         idle_timeout: Idle timeout in seconds before released warm sandboxes/VMs are stopped (default: 600 = 10 minutes). Set to 0 to disable.
         environment: Environment variables to inject into the sandbox (values starting with $ are resolved from host env)
 
+    BoxliteProvider specific options:
+        health_check_skip_seconds: Optional reclaim-time skip window in seconds for recently released warm VMs. Default behavior is 0.0 = always validate before reuse.
+
     AioSandboxProvider specific options:
         port: Base port for sandbox containers (default: 8080)
         container_prefix: Prefix for container names (default: deer-flow-sandbox)
@@ -70,6 +73,11 @@ class SandboxConfig(BaseModel):
         default=None,
         description="Idle timeout in seconds before released warm sandboxes/VMs are stopped (default: 600 = 10 minutes). Set to 0 to disable.",
     )
+    health_check_skip_seconds: float | None = Field(
+        default=None,
+        ge=0,
+        description="BoxLite-only reclaim skip window in seconds for boxes recently released by this provider instance. Set to 0 to always validate before warm reuse.",
+    )
     mounts: list[VolumeMountConfig] = Field(
         default_factory=list,
         description="List of volume mounts to share directories between host and container",
@@ -100,6 +108,16 @@ class SandboxConfig(BaseModel):
         description=(
             "Maximum wall-clock seconds a host bash command may run before it is terminated, process group and all (LocalSandboxProvider). "
             "Keeps a blocking foreground command (e.g. an un-backgrounded server) from hanging the turn; background `&` processes return immediately."
+        ),
+    )
+
+    provisioner_api_key: str | None = Field(
+        default=None,
+        description=(
+            "API key sent as X-API-Key header to the provisioner service. "
+            "Must match PROVISIONER_API_KEY on the provisioner container. "
+            "Both sides must be set to the same value; "
+            "the provisioner rejects all /api/* requests when the key is unset or mismatched."
         ),
     )
 

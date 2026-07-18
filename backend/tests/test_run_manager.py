@@ -10,7 +10,7 @@ import pytest
 from sqlalchemy.exc import DatabaseError as SQLAlchemyDatabaseError
 
 from deerflow.runtime import DisconnectMode, RunManager, RunStatus
-from deerflow.runtime.runs.manager import ConflictError, PersistenceRetryPolicy
+from deerflow.runtime.runs.manager import CancelOutcome, ConflictError, PersistenceRetryPolicy
 from deerflow.runtime.runs.store.memory import MemoryRunStore
 
 ISO_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}")
@@ -29,19 +29,19 @@ class FlakyStatusRunStore(MemoryRunStore):
         self.status_failures = status_failures
         self.status_update_attempts = 0
 
-    async def update_status(self, run_id, status, *, error=None):
+    async def update_status(self, run_id, status, *, error=None, stop_reason=None):
         self.status_update_attempts += 1
         if self.status_failures > 0:
             self.status_failures -= 1
             raise sqlite3.OperationalError("database is locked")
-        return await super().update_status(run_id, status, error=error)
+        return await super().update_status(run_id, status, error=error, stop_reason=stop_reason)
 
 
 class MissingRowStatusRunStore(MemoryRunStore):
     """Memory run store that reports a missing row for status updates."""
 
-    async def update_status(self, run_id, status, *, error=None):
-        await super().update_status(run_id, status, error=error)
+    async def update_status(self, run_id, status, *, error=None, stop_reason=None):
+        await super().update_status(run_id, status, error=error, stop_reason=stop_reason)
         return False
 
 
@@ -52,7 +52,7 @@ class PermanentStatusRunStore(MemoryRunStore):
         super().__init__()
         self.status_update_attempts = 0
 
-    async def update_status(self, run_id, status, *, error=None):
+    async def update_status(self, run_id, status, *, error=None, stop_reason=None):
         self.status_update_attempts += 1
         raise SQLAlchemyDatabaseError(
             "UPDATE runs SET status = :status WHERE run_id = :run_id",
@@ -68,7 +68,7 @@ class FailingStatusRunStore(MemoryRunStore):
         super().__init__()
         self.status_update_attempts = 0
 
-    async def update_status(self, run_id, status, *, error=None):
+    async def update_status(self, run_id, status, *, error=None, stop_reason=None):
         self.status_update_attempts += 1
         raise sqlite3.OperationalError("database is locked")
 
@@ -151,7 +151,7 @@ async def test_cancel(manager: RunManager):
     await manager.set_status(record.run_id, RunStatus.running)
 
     cancelled = await manager.cancel(record.run_id)
-    assert cancelled is True
+    assert cancelled == CancelOutcome.cancelled
     assert record.abort_event.is_set()
     assert record.status == RunStatus.interrupted
 
@@ -167,7 +167,7 @@ async def test_cancel_persists_interrupted_status_to_store():
     cancelled = await manager.cancel(record.run_id)
 
     stored = await store.get(record.run_id)
-    assert cancelled is True
+    assert cancelled == CancelOutcome.cancelled
     assert stored is not None
     assert stored["status"] == "interrupted"
 
@@ -323,12 +323,12 @@ async def test_reconcile_orphaned_inflight_runs_skips_rows_when_error_status_is_
 
 @pytest.mark.anyio
 async def test_cancel_not_inflight(manager: RunManager):
-    """Cancelling a completed run should return False."""
+    """Cancelling a completed run should return not_cancellable."""
     record = await manager.create("thread-1")
     await manager.set_status(record.run_id, RunStatus.success)
 
     cancelled = await manager.cancel(record.run_id)
-    assert cancelled is False
+    assert cancelled == CancelOutcome.not_cancellable
 
 
 @pytest.mark.anyio
@@ -643,7 +643,7 @@ async def test_create_or_reject_does_not_interrupt_old_run_when_new_run_store_wr
     manager = RunManager(store=store)
     old = await manager.create("thread-1")
     await manager.set_status(old.run_id, RunStatus.running)
-    store.put = AsyncMock(side_effect=RuntimeError("db down"))
+    store.create_run_atomic = AsyncMock(side_effect=RuntimeError("db down"))
 
     with pytest.raises(RuntimeError, match="db down"):
         await manager.create_or_reject("thread-1", multitask_strategy="interrupt")
@@ -664,10 +664,10 @@ async def test_create_or_reject_does_not_interrupt_old_run_when_new_run_store_wr
     old = await manager.create("thread-1")
     await manager.set_status(old.run_id, RunStatus.running)
 
-    async def cancelled_put(run_id, **kwargs):
+    async def cancelled_create(run_id, **kwargs):
         raise asyncio.CancelledError
 
-    store.put = cancelled_put
+    store.create_run_atomic = cancelled_create
 
     with pytest.raises(asyncio.CancelledError):
         await manager.create_or_reject("thread-1", multitask_strategy="interrupt")
@@ -881,9 +881,12 @@ async def test_list_by_thread_falls_back_to_store_with_user_filter():
 
 
 class _FailingPutRunStore(MemoryRunStore):
-    """Memory run store whose every ``put`` fails (non-retryably)."""
+    """Memory run store whose every ``put`` and ``create_run_atomic`` fails (non-retryably)."""
 
     async def put(self, run_id, **kwargs):
+        raise ValueError("simulated persist failure")
+
+    async def create_run_atomic(self, run_id, **kwargs):
         raise ValueError("simulated persist failure")
 
 

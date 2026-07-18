@@ -56,6 +56,8 @@ DeerFlow intègre désormais le toolkit de recherche et de crawling intelligent 
       - [Serveur MCP](#serveur-mcp)
       - [Canaux de messagerie](#canaux-de-messagerie)
       - [Traçage LangSmith](#traçage-langsmith)
+      - [Traçage Langfuse](#traçage-langfuse)
+      - [Utiliser les deux fournisseurs](#utiliser-les-deux-fournisseurs)
   - [Du Deep Research au Super Agent Harness](#du-deep-research-au-super-agent-harness)
   - [Fonctionnalités principales](#fonctionnalités-principales)
     - [Skills et outils](#skills-et-outils)
@@ -471,6 +473,37 @@ LANGSMITH_ENDPOINT=https://api.smith.langchain.com
 LANGSMITH_API_KEY=lsv2_pt_xxxxxxxxxxxxxxxx
 LANGSMITH_PROJECT=xxx
 ```
+
+#### Traçage Langfuse
+
+DeerFlow prend également en charge l'observabilité via [Langfuse](https://langfuse.com) pour les exécutions compatibles LangChain.
+
+Ajoutez les lignes suivantes à votre fichier `.env` :
+
+```bash
+LANGFUSE_TRACING=true
+LANGFUSE_PUBLIC_KEY=pk-lf-xxxxxxxxxxxxxxxx
+LANGFUSE_SECRET_KEY=sk-lf-xxxxxxxxxxxxxxxx
+LANGFUSE_BASE_URL=https://cloud.langfuse.com
+```
+
+Si vous utilisez une instance Langfuse auto-hébergée, définissez `LANGFUSE_BASE_URL` sur l'URL de votre déploiement.
+
+**Champs de corrélation des traces.** Chaque exécution d'agent est annotée avec les attributs de trace réservés de Langfuse afin que les pages Sessions et Users se remplissent automatiquement :
+
+- `session_id` = `thread_id` de LangGraph — regroupe toutes les traces d'une même conversation
+- `user_id` = utilisateur effectif issu de `get_effective_user_id()` (revient à `default` en mode sans authentification)
+- `trace_name` = assistant id (par défaut `lead-agent`)
+- `tags` = `[env:<DEER_FLOW_ENV>, model:<model_name>]` (omis lorsqu'ils ne sont pas définis)
+- `metadata.deerflow_trace_id` = id de corrélation de requête DeerFlow, identique à `X-Trace-Id` lorsque la corrélation de trace des requêtes est activée
+
+Ces champs sont injectés dans `RunnableConfig.metadata` à la racine de l'invocation du graphe, à la fois pour le chemin gateway (`runtime/runs/worker.py::run_agent`) et le chemin embarqué (`client.py::DeerFlowClient.stream`), de sorte que tout callback compatible LangChain puisse les lire. Définissez `DEER_FLOW_ENV` (ou `ENVIRONMENT`) pour étiqueter les traces par environnement de déploiement.
+
+#### Utiliser les deux fournisseurs
+
+Si LangSmith et Langfuse sont tous deux activés, DeerFlow attache les deux callbacks de traçage et rapporte la même activité de modèle aux deux systèmes.
+
+Si un fournisseur est explicitement activé mais qu'il manque les identifiants requis, ou si son callback échoue à s'initialiser, DeerFlow échoue immédiatement (fail fast) lors de l'initialisation du traçage à la création du modèle, et le message d'erreur indique le fournisseur à l'origine de l'échec.
 
 Pour les déploiements Docker, le traçage est désactivé par défaut. Définissez `LANGSMITH_TRACING=true` et `LANGSMITH_API_KEY` dans votre `.env` pour l'activer.
 

@@ -8,16 +8,21 @@ minutes -- we don't hold connections across long execution.
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import select, update
+from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.persistence.run.model import RunRow
 from deerflow.runtime.runs.store.base import RunStore
 from deerflow.runtime.user_context import AUTO, _AutoSentinel, resolve_user_id
 from deerflow.utils.time import coerce_iso
+
+
+def _lease_expired_or_null(lease_col, cutoff: datetime):
+    """SQLAlchemy filter: True when the lease is NULL or has expired past *cutoff*."""
+    return or_(lease_col.is_(None), lease_col < cutoff)
 
 
 class RunRepository(RunStore):
@@ -72,7 +77,7 @@ class RunRepository(RunStore):
         # Convert datetime to ISO string for consistency with MemoryRunStore.
         # SQLite drops tzinfo on read despite ``DateTime(timezone=True)`` —
         # ``coerce_iso`` normalizes naive datetimes as UTC.
-        for key in ("created_at", "updated_at"):
+        for key in ("created_at", "updated_at", "lease_expires_at"):
             val = d.get(key)
             if isinstance(val, datetime):
                 d[key] = coerce_iso(val)
@@ -91,8 +96,11 @@ class RunRepository(RunStore):
         metadata=None,
         kwargs=None,
         error=None,
+        stop_reason: str | None = None,
         created_at=None,
         follow_up_to_run_id=None,
+        owner_worker_id: str | None = None,
+        lease_expires_at: str | None = None,
     ):
         """Insert or update a run row.
 
@@ -103,6 +111,7 @@ class RunRepository(RunStore):
         resolved_user_id = resolve_user_id(user_id, method_name="RunRepository.put")
         now = datetime.now(UTC)
         created = datetime.fromisoformat(created_at) if created_at else now
+        lease_dt = datetime.fromisoformat(lease_expires_at) if lease_expires_at else None
         values = {
             "thread_id": thread_id,
             "assistant_id": assistant_id,
@@ -113,7 +122,10 @@ class RunRepository(RunStore):
             "metadata_json": self._safe_json(metadata) or {},
             "kwargs_json": self._safe_json(kwargs) or {},
             "error": error,
+            "stop_reason": stop_reason,
             "follow_up_to_run_id": follow_up_to_run_id,
+            "owner_worker_id": owner_worker_id,
+            "lease_expires_at": lease_dt,
             "updated_at": now,
         }
         async with self._sf() as session:
@@ -156,12 +168,56 @@ class RunRepository(RunStore):
             result = await session.execute(stmt)
             return [self._row_to_dict(r) for r in result.scalars()]
 
-    async def update_status(self, run_id, status, *, error=None) -> bool:
+    async def list_successful_regenerate_sources(
+        self,
+        thread_id,
+        *,
+        user_id: str | None | _AutoSentinel = AUTO,
+    ):
+        resolved_user_id = resolve_user_id(user_id, method_name="RunRepository.list_successful_regenerate_sources")
+        source = RunRow.metadata_json["regenerate_from_run_id"].as_string()
+        stmt = select(source).where(
+            RunRow.thread_id == thread_id,
+            RunRow.status == "success",
+            source.is_not(None),
+            source != "",
+        )
+        if resolved_user_id is not None:
+            stmt = stmt.where(RunRow.user_id == resolved_user_id)
+        async with self._sf() as session:
+            result = await session.execute(stmt)
+            return {value for value in result.scalars() if isinstance(value, str) and value}
+
+    async def get_many_by_thread(
+        self,
+        thread_id,
+        run_ids,
+        *,
+        user_id: str | None | _AutoSentinel = AUTO,
+    ):
+        if not run_ids:
+            return {}
+        resolved_user_id = resolve_user_id(user_id, method_name="RunRepository.get_many_by_thread")
+        stmt = select(RunRow).where(RunRow.thread_id == thread_id, RunRow.run_id.in_(run_ids))
+        if resolved_user_id is not None:
+            stmt = stmt.where(RunRow.user_id == resolved_user_id)
+        async with self._sf() as session:
+            result = await session.execute(stmt)
+            return {row.run_id: self._row_to_dict(row) for row in result.scalars()}
+
+    async def update_status(self, run_id, status, *, error=None, stop_reason=None) -> bool:
         values: dict[str, Any] = {"status": status, "updated_at": datetime.now(UTC)}
         if error is not None:
             values["error"] = error
+        if stop_reason is not None:
+            values["stop_reason"] = stop_reason
+        # Guard: only transition rows that are still active. ``interrupted`` is
+        # included because the rollback path goes ``running → interrupted``
+        # (cancel acknowledged) then ``interrupted → error`` (task finalize).
+        # ``error`` and ``success`` remain locked so a peer's takeover (or a
+        # completed run) cannot be overwritten by a late writer.
         async with self._sf() as session:
-            result = await session.execute(update(RunRow).where(RunRow.run_id == run_id).values(**values))
+            result = await session.execute(update(RunRow).where(RunRow.run_id == run_id, RunRow.status.in_(("pending", "running", "interrupted"))).values(**values))
             await session.commit()
             return result.rowcount != 0
 
@@ -376,3 +432,169 @@ class RunRepository(RunStore):
                 "middleware": middleware,
             },
         }
+
+    # ------------------------------------------------------------------
+    # Multi-worker run ownership methods
+    # ------------------------------------------------------------------
+
+    async def update_lease(
+        self,
+        run_id: str,
+        *,
+        owner_worker_id: str,
+        lease_expires_at: str,
+    ) -> bool:
+        lease_dt = datetime.fromisoformat(lease_expires_at)
+        values: dict[str, Any] = {
+            "owner_worker_id": owner_worker_id,
+            "lease_expires_at": lease_dt,
+            "updated_at": datetime.now(UTC),
+        }
+        async with self._sf() as session:
+            result = await session.execute(update(RunRow).where(RunRow.run_id == run_id, RunRow.owner_worker_id == owner_worker_id, RunRow.status.in_(("pending", "running"))).values(**values))
+            await session.commit()
+            return result.rowcount != 0
+
+    async def claim_for_takeover(
+        self,
+        run_id: str,
+        *,
+        grace_seconds: int,
+        error: str,
+    ) -> bool:
+        cutoff = datetime.now(UTC) - timedelta(seconds=grace_seconds)
+        async with self._sf() as session:
+            result = await session.execute(
+                update(RunRow)
+                .where(
+                    RunRow.run_id == run_id,
+                    RunRow.status.in_(("pending", "running")),
+                    _lease_expired_or_null(RunRow.lease_expires_at, cutoff),
+                )
+                .values(status="error", error=error, updated_at=datetime.now(UTC))
+            )
+            await session.commit()
+            return result.rowcount != 0
+
+    async def list_inflight_with_expired_lease(
+        self,
+        *,
+        before: str | None = None,
+        grace_seconds: int = 10,
+    ) -> list[dict[str, Any]]:
+        if before is None:
+            before_dt = datetime.now(UTC)
+        elif isinstance(before, datetime):
+            before_dt = before
+        else:
+            before_dt = datetime.fromisoformat(before)
+        cutoff = datetime.now(UTC) - timedelta(seconds=grace_seconds)
+        stmt = (
+            select(RunRow)
+            .where(
+                RunRow.status.in_(("pending", "running")),
+                RunRow.created_at <= before_dt,
+                _lease_expired_or_null(RunRow.lease_expires_at, cutoff),
+            )
+            .order_by(RunRow.created_at.asc())
+        )
+        async with self._sf() as session:
+            result = await session.execute(stmt)
+            return [self._row_to_dict(r) for r in result.scalars()]
+
+    async def create_run_atomic(
+        self,
+        run_id: str,
+        *,
+        thread_id: str,
+        owner_worker_id: str,
+        lease_expires_at: str | None,
+        multitask_strategy: str = "reject",
+        assistant_id: str | None = None,
+        user_id: str | None = None,
+        model_name: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        kwargs: dict[str, Any] | None = None,
+        created_at: str | None = None,
+        grace_seconds: int = 10,
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        """Atomically create a run with cross-process thread-uniqueness.
+
+        - For ``reject``: INSERT, let the partial unique index enforce
+          single-active-run. Returns ``(row_dict, [])`` on success, raises
+          ``IntegrityError`` on conflict.
+        - For ``interrupt`` / ``rollback``: SELECT FOR UPDATE inflight
+          rows for the thread, cancel them (unless their lease is still valid),
+          then INSERT the new row — all in one transaction. Returns
+          ``(row_dict, claimed_row_dicts)``.
+
+        Returns:
+            Tuple of ``(new_run_dict, claimed_run_dicts)``.
+        """
+        from deerflow.runtime.runs.manager import ConflictError
+
+        resolved_user_id = resolve_user_id(user_id or AUTO, method_name="RunRepository.create_run_atomic")
+        now = datetime.now(UTC)
+        created = datetime.fromisoformat(created_at) if created_at else now
+        lease_dt = datetime.fromisoformat(lease_expires_at) if lease_expires_at else None
+        cutoff = now - timedelta(seconds=grace_seconds)
+
+        values = {
+            "thread_id": thread_id,
+            "assistant_id": assistant_id,
+            "user_id": resolved_user_id,
+            "model_name": self._normalize_model_name(model_name),
+            "status": "pending",
+            "multitask_strategy": multitask_strategy,
+            "metadata_json": self._safe_json(metadata) or {},
+            "kwargs_json": self._safe_json(kwargs) or {},
+            "owner_worker_id": owner_worker_id,
+            "lease_expires_at": lease_dt,
+            "created_at": created,
+            "updated_at": now,
+        }
+
+        async with self._sf() as session:
+            claimed: list[dict[str, Any]] = []
+
+            if multitask_strategy in ("interrupt", "rollback"):
+                stmt = (
+                    select(RunRow)
+                    .where(
+                        RunRow.thread_id == thread_id,
+                        RunRow.status.in_(("pending", "running")),
+                    )
+                    .with_for_update()
+                )
+                result = await session.execute(stmt)
+                for row in result.scalars():
+                    if row.lease_expires_at is not None:
+                        # SQLite drops tzinfo on read despite
+                        # ``DateTime(timezone=True)`` (see ``_row_to_dict``).
+                        # Treat naive values as UTC — same convention as
+                        # ``coerce_iso`` — so the Python-side comparison
+                        # against the aware ``cutoff`` does not raise
+                        # ``TypeError: can't compare offset-naive and
+                        # offset-aware datetimes`` when heartbeat is enabled
+                        # on SQLite.
+                        row_lease = row.lease_expires_at
+                        if row_lease.tzinfo is None:
+                            row_lease = row_lease.replace(tzinfo=UTC)
+                        if row_lease >= cutoff and row.owner_worker_id != owner_worker_id:
+                            # Live run owned by another worker — we cannot
+                            # interrupt it and the partial unique index would
+                            # reject our INSERT anyway. Surface as
+                            # ConflictError so the caller gets a clean signal
+                            # instead of a retry loop on IntegrityError.
+                            raise ConflictError(f"Thread {thread_id} already has an active run owned by another worker")
+                    row.status = "interrupted"
+                    row.error = "Cancelled by newer run"
+                    row.owner_worker_id = owner_worker_id
+                    row.updated_at = now
+                    claimed.append(self._row_to_dict(row))
+
+            session.add(RunRow(run_id=run_id, **values))
+            await session.commit()
+
+            new_row = await session.get(RunRow, run_id)
+            return self._row_to_dict(new_row), claimed

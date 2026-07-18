@@ -41,20 +41,62 @@ _SUMMARY_MESSAGE_NAME = "summary"
 # Finite set of blocked tag names: system-reserved + common injection patterns.
 _BLOCKED_TAG_NAMES: frozenset[str] = frozenset(
     {
-        # System-reserved tags (used by the agent framework for structured context)
+        # Framework-injected structured/authority blocks. The lead-agent system
+        # prompt's "System-Context Confidentiality" section (agents/lead_agent/
+        # prompt.py) declares *every* such tag trusted internal data — it names a
+        # few then says "and all other structured tags". So the denylist must
+        # cover the framework's authority blocks as a class, not a hand-picked
+        # subset: any one of them, forged in untrusted input, mimics trusted
+        # framework context. Enumerated from the block tags the framework actually
+        # emits into model input (system prompt + hidden-context/reminder
+        # middlewares) and pinned against drift by
+        # test_input_sanitization_middleware.py::test_denylist_covers_framework_authority_blocks.
+        # Both spellings of the reminder block are covered: "system-reminder"
+        # (dynamic-context) and "system_reminder" (todo/terminal middlewares).
+        #
+        # Subagents share this denylist: build_subagent_runtime_middlewares reuses
+        # the same _build_runtime_middlewares base, so both sanitization paths guard
+        # subagent model input too. The subagent system-prompt blocks
+        # (file_editing_workflow / guidelines / output_format / working_directory)
+        # are therefore authority blocks of the same class as the lead-agent ones.
         "system-reminder",
+        "system_reminder",
         "memory",
         "current_date",
         "think",
         "analysis",
+        "role",
+        "soul",
+        "self_update",
+        "thinking_style",
+        "clarification_system",
+        "critical_reminders",
+        "response_style",
+        "citations",
         "subagent_system",
         "skill_system",
+        "skill_index",
+        "available_skills",
+        "disabled_skills",
+        "memory_tool_system",
         "uploaded_files",
         "todo_list_system",
+        "durable_context_data",
+        "slash_skill_activation",
+        "mcp_routing_hints",
+        "available-deferred-tools",
+        "goal_continuation",
+        "file_editing_workflow",
+        "guidelines",
+        "output_format",
+        "working_directory",
+        # Subagent system-prompt block (general_purpose.py): declares the task
+        # tool off-limits. Forging this in untrusted input could trick the
+        # model into believing it has (or lacks) tool restrictions it does not.
+        "tool_restrictions",
         # Common prompt-injection tag patterns
         "system",
         "instruction",
-        "role",
         "important",
         "override",
         "ignore",
@@ -86,6 +128,42 @@ _BOUNDARY_TOKEN_RE = re.compile(
 def _escape_tag_match(match: re.Match) -> str:
     """Escape < and > in a blocked-tag match so it renders as literal text."""
     return match.group(0).replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _neutralize_boundary_tokens(text: str) -> str:
+    """Replace real BEGIN/END USER INPUT markers with look-alike inert forms."""
+    return _BOUNDARY_TOKEN_RE.sub(
+        lambda m: _NEUTRALIZED_BEGIN if m.group(0) == _USER_INPUT_BEGIN else _NEUTRALIZED_END,
+        text,
+    )
+
+
+def neutralize_untrusted_tags(text: str) -> str:
+    """Neutralize framework/injection control tokens in untrusted text.
+
+    Shared primitive for any content that originates outside the trust boundary
+    and is about to enter the model context as *data* — currently the genuine
+    user message (via :func:`_check_user_content`) and remote tool results
+    (web_fetch / web_search and friends, via
+    :class:`ToolResultSanitizationMiddleware`).
+
+    Applies exactly the two structural defenses, and nothing else:
+
+    * blocked framework/injection tags (e.g. ``<system-reminder>``) are
+      HTML-escaped to ``&lt;system-reminder&gt;`` so they lose their structural
+      meaning while staying human-readable;
+    * the plain-text ``--- BEGIN/END USER INPUT ---`` boundary markers are
+      neutralized so untrusted content cannot forge or break out of the
+      user-input boundary.
+
+    It intentionally does **not** wrap the text in boundary markers: that
+    framing is specific to the user message. Empty/whitespace-only text is
+    returned unchanged so callers do not emit marker noise.
+    """
+    if not text.strip():
+        return text
+    text = _BLOCKED_TAG_PATTERN.sub(_escape_tag_match, text)
+    return _neutralize_boundary_tokens(text)
 
 
 def _is_genuine_user_message(message: object) -> bool:
@@ -122,20 +200,14 @@ def _check_user_content(text: str) -> str:
         # can forge the outer wrapping to bypass the neutralization below
         # and inject inner boundary markers (break-out attack).
         inner = text[len(_USER_INPUT_BEGIN) : -len(_USER_INPUT_END)]
-        neutralized_inner = _BOUNDARY_TOKEN_RE.sub(
-            lambda m: _NEUTRALIZED_BEGIN if m.group(0) == _USER_INPUT_BEGIN else _NEUTRALIZED_END,
-            inner,
-        )
+        neutralized_inner = _neutralize_boundary_tokens(inner)
         if neutralized_inner == inner:
             return text
         return f"{_USER_INPUT_BEGIN}{neutralized_inner}{_USER_INPUT_END}"
     # Neutralize any boundary tokens the user may have embedded, preventing
     # both self-suppression (begin token skips wrapping) and break-out
     # (end token creates a premature boundary inside the payload).
-    text = _BOUNDARY_TOKEN_RE.sub(
-        lambda m: _NEUTRALIZED_BEGIN if m.group(0) == _USER_INPUT_BEGIN else _NEUTRALIZED_END,
-        text,
-    )
+    text = _neutralize_boundary_tokens(text)
     return f"{_USER_INPUT_BEGIN}\n{text}\n{_USER_INPUT_END}"
 
 
@@ -238,10 +310,19 @@ class InputSanitizationMiddleware(AgentMiddleware[AgentState]):
 
             # Preserve the pre-sanitization user text so downstream consumers that
             # must see the genuine input (slash skill activation, regenerate) can
-            # recover it after the BEGIN/END wrapping. setdefault keeps an existing
-            # value (e.g. set by UploadsMiddleware or an IM channel) authoritative.
+            # recover it after the BEGIN/END wrapping. Keep a valid value set by
+            # UploadsMiddleware or an IM channel, but repair malformed metadata so
+            # persistence never falls back to the wrapped model-facing content.
             preserved_kwargs = dict(msg.additional_kwargs or {})
-            preserved_kwargs.setdefault(ORIGINAL_USER_CONTENT_KEY, message_content_to_text(content))
+            original_user_content = preserved_kwargs.get(ORIGINAL_USER_CONTENT_KEY)
+            if not isinstance(original_user_content, str):
+                if ORIGINAL_USER_CONTENT_KEY in preserved_kwargs:
+                    logger.warning(
+                        "InputSanitizationMiddleware replaced non-string %s metadata: type=%s",
+                        ORIGINAL_USER_CONTENT_KEY,
+                        type(original_user_content).__name__,
+                    )
+                preserved_kwargs[ORIGINAL_USER_CONTENT_KEY] = message_content_to_text(content)
             messages[i] = HumanMessage(
                 content=new_content,
                 id=msg.id,

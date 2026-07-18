@@ -10,6 +10,7 @@ from langchain_core.messages import AIMessage
 from langgraph.checkpoint.base import empty_checkpoint
 from langgraph.checkpoint.memory import InMemorySaver
 
+from deerflow.runtime.context_keys import CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY
 from deerflow.runtime.runs.manager import ConflictError, RunManager
 from deerflow.runtime.runs.schemas import RunStatus
 from deerflow.runtime.runs.worker import (
@@ -70,6 +71,21 @@ def test_install_runtime_context_preserves_existing_thread_id_and_threads_app_co
     assert config["context"]["app_config"] is app_config
 
 
+def test_install_runtime_context_overrides_internal_pre_existing_message_ids():
+    config = {"context": {CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY: {"spoofed"}}}
+
+    _install_runtime_context(
+        config,
+        {
+            "thread_id": "record-thread",
+            "run_id": "run-1",
+            CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY: frozenset({"old-ai"}),
+        },
+    )
+
+    assert config["context"][CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY] == frozenset({"old-ai"})
+
+
 @pytest.mark.anyio
 async def test_run_agent_threads_explicit_app_config_into_config_only_factory():
     run_manager = RunManager()
@@ -109,6 +125,81 @@ async def test_run_agent_threads_explicit_app_config_into_config_only_factory():
     assert fetched.status == RunStatus.success
     bridge.publish_end.assert_awaited_once_with(record.run_id)
     bridge.cleanup.assert_awaited_once_with(record.run_id, delay=60)
+
+
+@pytest.mark.anyio
+async def test_run_agent_threads_pre_existing_message_ids_into_runtime_context():
+    run_manager = RunManager()
+    record = await run_manager.create("thread-1")
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+    captured: dict[str, object] = {}
+
+    class DummyCheckpointer:
+        async def aget_tuple(self, _config):
+            return SimpleNamespace(
+                config={"configurable": {"checkpoint_id": "checkpoint-1"}},
+                checkpoint={"channel_values": {"messages": [AIMessage(id="old-ai", content="old")]}},
+                metadata={},
+                pending_writes=[],
+            )
+
+    class DummyAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            captured["context"] = config["context"]
+            yield {"messages": []}
+
+    def factory(*, config):
+        return DummyAgent()
+
+    await run_agent(
+        bridge,
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=DummyCheckpointer()),
+        agent_factory=factory,
+        graph_input={},
+        config={},
+    )
+
+    context = captured["context"]
+    assert context[CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY] == frozenset({"old-ai"})
+
+
+@pytest.mark.anyio
+async def test_run_agent_overrides_spoofed_pre_existing_message_ids_without_snapshot():
+    run_manager = RunManager()
+    record = await run_manager.create("thread-1")
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+    captured: dict[str, object] = {}
+
+    class DummyAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            captured["context"] = config["context"]
+            yield {"messages": []}
+
+    def factory(*, config):
+        return DummyAgent()
+
+    await run_agent(
+        bridge,
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None),
+        agent_factory=factory,
+        graph_input={},
+        config={"context": {CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY: {"spoofed"}}},
+    )
+
+    context = captured["context"]
+    assert context[CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY] == frozenset()
 
 
 @pytest.mark.anyio
@@ -533,6 +624,14 @@ def test_build_runtime_context_caller_cannot_override_thread_id_or_run_id():
     assert ctx["thread_id"] == "real-thread"
     assert ctx["run_id"] == "real-run"
     assert ctx["agent_name"] == "ok"
+
+
+def test_build_runtime_context_ignores_caller_pre_existing_message_ids():
+    caller_context = {CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY: {"spoofed"}}
+
+    ctx = _build_runtime_context("thread-1", "run-1", caller_context)
+
+    assert CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY not in ctx
 
 
 def test_build_runtime_context_ignores_non_dict_caller_context():

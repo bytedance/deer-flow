@@ -24,7 +24,7 @@
 | 事件传输 | `StreamBridge`（asyncio Queue）+ `sse_consumer` | 直接 `yield` |
 | 序列化 | `serialize(chunk)` → 纯 JSON dict，匹配 LangGraph Platform wire 格式 | `StreamEvent.data`，携带原生 LangChain 对象 |
 | 消费者 | 前端 `useStream` React hook、飞书/Slack/Telegram channel、LangGraph SDK 客户端 | Jupyter notebook、集成测试、内部 Python 脚本 |
-| 生命周期管理 | `RunManager`：run_id 跟踪、disconnect 语义、multitask 策略、heartbeat | 无；函数返回即结束 |
+| 生命周期管理 | `RunManager`：run_id 跟踪、disconnect 语义、multitask 策略、heartbeat | 每次 `stream()` 生成一个轻量 run_id 供 runtime context / tracing / per-run middleware 使用；函数返回即结束 |
 | 断连恢复 | `Last-Event-ID` SSE 重连 | 无需要 |
 
 **两条路径的存在是 DRY 的刻意妥协**：Gateway 的全部基础设施（async + Queue + JSON + RunManager）**都是为了跨网络边界把事件送给 HTTP 消费者**。当生产者（agent）和消费者（Python 调用栈）在同一个进程时，这整套东西都是纯开销。
@@ -165,7 +165,7 @@ sequenceDiagram
 
 对比之下，sync 路径的每个环节都是显著更少的移动部件：
 
-- 没有 `RunManager` —— 一次 `stream()` 调用对应一次生命周期，无需 run_id。
+- 没有 `RunManager` —— 一次 `stream()` 调用对应一次生命周期，只生成轻量 `run_id` 供 runtime context、tracing 和 per-run middleware 使用。
 - 没有 `StreamBridge` —— 直接 `yield`，生产和消费在同一个 Python 调用栈，不需要跨 task 中介。
 - 没有 JSON 序列化 —— `StreamEvent.data` 直接装原生 LangChain 对象（`AIMessage.content`、`usage_metadata` 的 `UsageMetadata` TypedDict）。Jupyter 用户拿到的是真正的类型，不是匿名 dict。
 - 没有 asyncio —— 调用者可以直接 `for event in ...`，不必写 `async for`。

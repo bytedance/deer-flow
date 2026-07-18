@@ -11,7 +11,7 @@ from deerflow.runtime import RunStatus
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
 
 
-def _checkpoint(checkpoint_id: str, messages: list[object]):
+def _checkpoint(checkpoint_id: str, messages: list[object], *, metadata: dict | None = None):
     return SimpleNamespace(
         config={
             "configurable": {
@@ -22,6 +22,7 @@ def _checkpoint(checkpoint_id: str, messages: list[object]):
             }
         },
         checkpoint={"channel_values": {"messages": messages}},
+        metadata=metadata or {},
     )
 
 
@@ -230,7 +231,7 @@ def test_prepare_regenerate_payload_requires_addressable_checkpoint_before_human
 
     assert exc.value.status_code == 409
     assert exc.value.detail == "Could not find an addressable checkpoint before the target user message"
-    assert checkpointer.alist_limits == [200]
+    assert checkpointer.alist_limits == [400]
 
 
 def test_prepare_regenerate_payload_reports_recent_checkpoint_scan_limit():
@@ -258,4 +259,26 @@ def test_prepare_regenerate_payload_reports_recent_checkpoint_scan_limit():
 
     assert exc.value.status_code == 409
     assert exc.value.detail == "Could not locate target user message in recent checkpoint history (limit=200)"
-    assert checkpointer.alist_limits == [200]
+    assert checkpointer.alist_limits == [400]
+
+
+def test_find_base_checkpoint_ignores_duration_only_checkpoints() -> None:
+    from app.gateway.routers.thread_runs import _find_base_checkpoint_before_human
+
+    human = HumanMessage(id="human-1", content="question")
+    duration_checkpoints = [
+        _checkpoint(
+            f"duration-{index}",
+            [],
+            metadata={"writes": {"runtime_run_duration": {"run_ids": [f"run-{index}"]}}},
+        )
+        for index in range(200)
+    ]
+    base = _checkpoint("ckpt-base", [])
+    after_human = _checkpoint("ckpt-human", [human])
+    checkpointer = FakeCheckpointer([*duration_checkpoints, after_human, base])
+
+    result = asyncio.run(_find_base_checkpoint_before_human("thread-1", "human-1", _request(checkpointer, FakeEventStore([]))))
+
+    assert result is base
+    assert checkpointer.alist_limits == [400]

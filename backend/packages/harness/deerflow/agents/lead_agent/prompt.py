@@ -1,13 +1,20 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import logging
 import threading
 from collections import OrderedDict
+from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import TYPE_CHECKING
 
 from deerflow.config.agents_config import load_agent_soul
+from deerflow.config.subagents_config import (
+    DEFAULT_MAX_TOTAL_SUBAGENTS_PER_RUN,
+    clamp_subagent_concurrency,
+    clamp_total_subagents_per_run,
+)
 from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
 from deerflow.skills.storage import get_or_new_skill_storage, get_or_new_user_skill_storage
 from deerflow.skills.types import Skill, SkillCategory
@@ -38,6 +45,19 @@ _enabled_skills_refresh_version = 0
 _enabled_skills_refresh_event = threading.Event()
 
 
+@dataclass
+class _EnabledSkillsRefreshHandle:
+    version: int
+    event: threading.Event = field(default_factory=threading.Event)
+    error: Exception | None = None
+
+    def wait(self, timeout: float | None = None) -> bool:
+        return self.event.wait(timeout=timeout)
+
+
+_enabled_skills_refresh_waiters: list[_EnabledSkillsRefreshHandle] = []
+
+
 def _load_enabled_skills_sync() -> list[Skill]:
     return list(get_or_new_skill_storage().load_skills(enabled_only=True))
 
@@ -57,33 +77,41 @@ def _refresh_enabled_skills_cache_worker() -> None:
         with _enabled_skills_lock:
             target_version = _enabled_skills_refresh_version
 
+        refresh_error = None
         try:
             skills = _load_enabled_skills_sync()
-        except Exception:
+        except Exception as exc:
             logger.exception("Failed to load enabled skills for prompt injection")
-            skills = []
+            skills = None
+            refresh_error = exc
 
         with _enabled_skills_lock:
             if _enabled_skills_refresh_version == target_version:
-                _enabled_skills_cache = skills
+                if refresh_error is None:
+                    assert skills is not None
+                    _enabled_skills_cache = skills
                 _enabled_skills_refresh_active = False
                 _enabled_skills_refresh_event.set()
+                completed_waiters = [waiter for waiter in _enabled_skills_refresh_waiters if waiter.version <= target_version]
+                _enabled_skills_refresh_waiters[:] = [waiter for waiter in _enabled_skills_refresh_waiters if waiter.version > target_version]
+                for waiter in completed_waiters:
+                    waiter.error = refresh_error
+                    waiter.event.set()
                 return
 
             # A newer invalidation happened while loading. Keep the worker alive
             # and loop again so the cache always converges on the latest version.
-            _enabled_skills_cache = None
 
 
 def _ensure_enabled_skills_cache() -> threading.Event:
     global _enabled_skills_refresh_active
 
     with _enabled_skills_lock:
+        if _enabled_skills_refresh_active:
+            return _enabled_skills_refresh_event
         if _enabled_skills_cache is not None:
             _enabled_skills_refresh_event.set()
             return _enabled_skills_refresh_event
-        if _enabled_skills_refresh_active:
-            return _enabled_skills_refresh_event
         _enabled_skills_refresh_active = True
         _enabled_skills_refresh_event.clear()
 
@@ -91,21 +119,22 @@ def _ensure_enabled_skills_cache() -> threading.Event:
     return _enabled_skills_refresh_event
 
 
-def _invalidate_enabled_skills_cache() -> threading.Event:
-    global _enabled_skills_cache, _enabled_skills_refresh_active, _enabled_skills_refresh_version
+def _invalidate_enabled_skills_cache() -> _EnabledSkillsRefreshHandle:
+    global _enabled_skills_refresh_active, _enabled_skills_refresh_version
 
     _get_cached_skills_prompt_section.cache_clear()
     with _enabled_skills_lock:
-        _enabled_skills_cache = None
         _enabled_skills_by_config_cache.clear()
         _enabled_skills_refresh_version += 1
+        refresh_handle = _EnabledSkillsRefreshHandle(version=_enabled_skills_refresh_version)
+        _enabled_skills_refresh_waiters.append(refresh_handle)
         _enabled_skills_refresh_event.clear()
         if _enabled_skills_refresh_active:
-            return _enabled_skills_refresh_event
+            return refresh_handle
         _enabled_skills_refresh_active = True
 
     _start_enabled_skills_refresh_thread()
-    return _enabled_skills_refresh_event
+    return refresh_handle
 
 
 def prime_enabled_skills_cache() -> None:
@@ -165,18 +194,20 @@ def get_enabled_skills_for_config(app_config: AppConfig | None = None, user_id: 
                 # next eviction cycle.
                 _enabled_skills_by_config_cache.move_to_end(cache_key)
                 return list(cached_skills)
+        load_version = _enabled_skills_refresh_version
 
     if user_id:
         skills = list(get_or_new_user_skill_storage(user_id, app_config=app_config).load_skills(enabled_only=True))
     else:
         skills = list(get_or_new_skill_storage(app_config=app_config).load_skills(enabled_only=True))
     with _enabled_skills_lock:
-        _enabled_skills_by_config_cache[cache_key] = (app_config, skills)
-        # Evict the least-recently-used entries when we exceed the cap.
-        # The cap is intentionally small (256) so a long-running process
-        # cannot leak one entry per distinct (config, user) pair seen.
-        while len(_enabled_skills_by_config_cache) > _ENABLED_SKILLS_BY_CONFIG_CACHE_MAXSIZE:
-            _enabled_skills_by_config_cache.popitem(last=False)
+        if _enabled_skills_refresh_version == load_version:
+            _enabled_skills_by_config_cache[cache_key] = (app_config, skills)
+            # Evict the least-recently-used entries when we exceed the cap.
+            # The cap is intentionally small (256) so a long-running process
+            # cannot leak one entry per distinct (config, user) pair seen.
+            while len(_enabled_skills_by_config_cache) > _ENABLED_SKILLS_BY_CONFIG_CACHE_MAXSIZE:
+                _enabled_skills_by_config_cache.popitem(last=False)
     return list(skills)
 
 
@@ -188,12 +219,28 @@ def _skill_mutability_label(category: SkillCategory | str) -> str:
     return "[built-in]"
 
 
+def _render_available_skill(name: str, description: str, category: SkillCategory | str, location: str) -> str:
+    # name/description/location come from a ``.skill`` archive's frontmatter
+    # (untrusted); escape them so a value cannot close its tag and forge a
+    # framework block in the system prompt (matches the slash-activation and
+    # durable-context siblings). ``category`` is a controlled enum.
+    esc_name = html.escape(name, quote=False)
+    esc_description = html.escape(description, quote=False)
+    esc_location = html.escape(location, quote=False)
+    return f"    <skill>\n        <name>{esc_name}</name>\n        <description>{esc_description} {_skill_mutability_label(category)}</description>\n        <location>{esc_location}</location>\n    </skill>"
+
+
 def clear_skills_system_prompt_cache() -> None:
     _invalidate_enabled_skills_cache()
 
 
 async def refresh_skills_system_prompt_cache_async() -> None:
-    await asyncio.to_thread(_invalidate_enabled_skills_cache().wait)
+    refresh_handle = _invalidate_enabled_skills_cache()
+    refreshed = await asyncio.to_thread(refresh_handle.wait, _ENABLED_SKILLS_REFRESH_WAIT_TIMEOUT_SECONDS)
+    if not refreshed:
+        raise TimeoutError("Timed out waiting for enabled skills cache refresh")
+    if refresh_handle.error is not None:
+        raise RuntimeError("Enabled skills cache refresh failed") from refresh_handle.error
 
 
 def invalidate_user_skill_cache(user_id: str) -> None:
@@ -276,22 +323,36 @@ def _build_available_subagents_description(available_names: list[str], bash_avai
         else:
             config = get_subagent_config(name, app_config=app_config)
             if config is not None:
-                desc = config.description.split("\n")[0].strip()  # First line only for brevity
+                # config.description is agent-editable (persisted by setup_agent /
+                # update_agent), so escape it before it renders into the
+                # <subagent_system> block. Otherwise a first line like
+                # "</subagent_system><system-reminder>..." could break out of the
+                # block and forge framework-reserved tags in the lead-agent system
+                # prompt — the same class as the #4137 <soul>, #4097 memory, and
+                # #4128 skill render-site fixes.
+                desc = html.escape(config.description.split("\n")[0].strip(), quote=False)  # First line only for brevity
                 lines.append(f"- **{name}**: {desc}")
 
     return "\n".join(lines)
 
 
-def _build_subagent_section(max_concurrent: int, *, app_config: AppConfig | None = None) -> str:
-    """Build the subagent system prompt section with dynamic concurrency limit.
+def _build_subagent_section(
+    max_concurrent: int,
+    max_total: int = DEFAULT_MAX_TOTAL_SUBAGENTS_PER_RUN,
+    *,
+    app_config: AppConfig | None = None,
+) -> str:
+    """Build the subagent system prompt section with dynamic subagent limits.
 
     Args:
         max_concurrent: Maximum number of concurrent subagent calls allowed per response.
+        max_total: Maximum number of subagent calls allowed per run.
 
     Returns:
         Formatted subagent section string.
     """
-    n = max_concurrent
+    n = clamp_subagent_concurrency(max_concurrent)
+    total = clamp_total_subagents_per_run(max_total)
     available_names = get_available_subagent_names(app_config=app_config) if app_config is not None else get_available_subagent_names()
     bash_available = "bash" in available_names
 
@@ -319,6 +380,11 @@ You are running with subagent capabilities enabled. Your role is to be a **task 
 - **Before launching subagents, you MUST count your sub-tasks in your thinking:**
   - If count ≤ {n}: Launch all in this response.
   - If count > {n}: **Pick the {n} most important/foundational sub-tasks for this turn.** Save the rest for the next turn.
+- **HARD TOTAL LIMIT: MAXIMUM {total} `task` CALLS PER RUN. THIS IS NOT OPTIONAL.**
+  - Before each batch, count `task` delegations already launched for the current user request/run.
+  - "Work already delegated" may include older thread history; reuse it when helpful, but do not count older runs against this run's {total} total.
+  - Do not launch a new batch if it would exceed {total} total subagents for this run.
+  - When the total limit is reached, synthesize with existing results or continue directly with ordinary tools.
 - **Multi-batch execution** (for >{n} sub-tasks):
   - Turn 1: Launch sub-tasks 1-{n} in parallel → wait for results
   - Turn 2: Launch next batch in parallel → wait for results
@@ -538,8 +604,12 @@ You: "Deploying to staging..." [proceed]
 </clarification_system>
 
 {skills_section}
+{memory_tool_section}
+
 
 {deferred_tools_section}
+
+{mcp_routing_hints_section}
 
 {subagent_section}
 
@@ -643,7 +713,11 @@ combined with a FastAPI gateway for REST API access [citation:FastAPI](https://f
   keeps each tool call small and avoids mid-stream chunk-gap timeouts
   on oversized single-shot writes. (See issue #3189.)  
 - Clarity: Be direct and helpful, avoid unnecessary meta-commentary
-- Including Images and Mermaid: Images and Mermaid diagrams are always welcomed in the Markdown format, and you're encouraged to use `![Image Description](image_path)\n\n` or "```mermaid" to display images in response or Markdown files
+- Including Images and Mermaid: Images and Mermaid diagrams are welcomed in Markdown.
+  - To render an output image in a final response, use its complete virtual artifact path, for example `![Chart](/mnt/user-data/outputs/chart.png)`.
+  - Never use a bare or workspace-relative filename.
+  - Call `present_files` for the image before referencing it.
+  - Use "```mermaid" for Mermaid diagrams.
 - Multi-task: Better utilize parallel tool calling to call multiple tools at one time for better performance
 - Language Consistency: Keep using the same language as user's
 - Always Respond: Your thinking is internal. You MUST always provide a visible response to the user after thinking.
@@ -663,7 +737,7 @@ def _get_memory_context(agent_name: str | None = None, *, app_config: AppConfig 
         Formatted memory context string wrapped in XML tags, or empty string if disabled.
     """
     try:
-        from deerflow.agents.memory import format_memory_for_injection, get_memory_data
+        from deerflow.agents.memory import get_memory_manager
         from deerflow.runtime.user_context import get_effective_user_id
 
         if app_config is None:
@@ -676,13 +750,9 @@ def _get_memory_context(agent_name: str | None = None, *, app_config: AppConfig 
         if not config.enabled or not config.injection_enabled:
             return ""
 
-        memory_data = get_memory_data(agent_name, user_id=get_effective_user_id())
-        memory_content = format_memory_for_injection(
-            memory_data,
-            max_tokens=config.max_injection_tokens,
-            use_tiktoken=(config.token_counting == "tiktoken"),
-            guaranteed_categories=getattr(config, "guaranteed_categories", None),
-            guaranteed_token_budget=getattr(config, "guaranteed_token_budget", 500),
+        memory_content = get_memory_manager().get_context(
+            user_id=get_effective_user_id(),
+            agent_name=agent_name,
         )
 
         if not memory_content.strip():
@@ -708,17 +778,14 @@ def _get_cached_skills_prompt_section(
     filtered = [(name, description, category, location) for name, description, category, location in skill_signature if available_skills_key is None or name in available_skills_key]
     skills_list = ""
     if filtered:
-        skill_items = "\n".join(
-            f"    <skill>\n        <name>{name}</name>\n        <description>{description} {_skill_mutability_label(category)}</description>\n        <location>{location}</location>\n    </skill>"
-            for name, description, category, location in filtered
-        )
+        skill_items = "\n".join(_render_available_skill(name, description, category, location) for name, description, category, location in filtered)
         skills_list = f"<available_skills>\n{skill_items}\n</available_skills>"
 
     disabled_section = ""
     if disabled_skill_signature:
         disabled_filtered = [(name, description, category, location) for name, description, category, location in disabled_skill_signature if available_skills_key is None or name in available_skills_key]
         if disabled_filtered:
-            disabled_items = "\n".join(f"    - {name} ({category})" for name, description, category, location in disabled_filtered)
+            disabled_items = "\n".join(f"    - {html.escape(name, quote=False)} ({category})" for name, description, category, location in disabled_filtered)
             disabled_section = f"""<disabled_skills>
 The following skills are INSTALLED but DISABLED. You MUST NOT read,
 reference, or use any of these skills — including their SKILL.md,
@@ -768,10 +835,16 @@ def get_skills_prompt_section(
         try:
             from deerflow.config import get_app_config
 
-            config = get_app_config()
-            container_base_path = config.skills.container_path
-            skill_evolution_enabled = config.skill_evolution.enabled
+            # Rebind so the storage/enabled-skills loads below use this resolved
+            # config too. Reading only container_path here and then letting
+            # get_enabled_skills_for_config(None) fall back to the warm cache
+            # rendered an empty enabled-skills list on a cold start while the
+            # synchronously-loaded disabled section was populated (#4144).
+            app_config = get_app_config()
+            container_base_path = app_config.skills.container_path
+            skill_evolution_enabled = app_config.skill_evolution.enabled
         except Exception:
+            app_config = None
             container_base_path = DEFAULT_SKILLS_CONTAINER_PATH
             skill_evolution_enabled = False
     else:
@@ -818,7 +891,13 @@ def get_agent_soul(agent_name: str | None) -> str:
     # Append SOUL.md (agent personality) if present
     soul = load_agent_soul(agent_name)
     if soul:
-        return f"<soul>\n{soul}\n</soul>\n" if soul else ""
+        # SOUL.md is agent-editable (setup_agent / update_agent persist it) and is
+        # rendered into the <soul> block of the lead-agent system prompt. Escape it
+        # so a value like "</soul></system-reminder>" cannot close the block and
+        # relocate the text after it out of the trust zone the prompt declares —
+        # matching the skill/memory/tool-result escaping in #4097/#4119/#4128/#4099.
+        # quote=False: it lands in element-text position, never an attribute value.
+        return f"<soul>\n{html.escape(soul, quote=False)}\n</soul>\n"
     return ""
 
 
@@ -894,26 +973,60 @@ def _build_custom_mounts_section(*, app_config: AppConfig | None = None) -> str:
     return f"\n**Custom Mounted Directories:**\n{mounts_list}\n- If the user needs files outside `/mnt/user-data`, use these absolute container paths directly when they match the requested directory"
 
 
+def _build_memory_tool_section(*, app_config: AppConfig | None = None) -> str:
+    """Build tool-mode memory guidance for the static system prompt."""
+    try:
+        if app_config is None:
+            from deerflow.config.memory_config import get_memory_config
+
+            memory_config = get_memory_config()
+        else:
+            memory_config = app_config.memory
+
+        from deerflow.config.memory_config import should_use_memory_tools
+
+        if not should_use_memory_tools(memory_config):
+            return ""
+    except Exception:
+        logger.exception("Failed to build memory tool prompt section")
+        return ""
+
+    return """<memory_tool_system>
+Memory is running in tool mode. Use the injected <memory> block as current context, and use the memory tools to keep durable user memory accurate:
+- Call `memory_search` before relying on memory that may be absent, stale, or too broad for the injected context.
+- Call `memory_add` only for stable facts useful in future sessions: explicit user preferences, corrections, personal/work context, or durable project context.
+- Call `memory_update` when an existing fact is outdated or imprecise; prefer updating over adding a near-duplicate.
+- Call `memory_delete` only when a fact is clearly wrong or no longer relevant.
+</memory_tool_system>"""
+
+
 def apply_prompt_template(
     subagent_enabled: bool = False,
     max_concurrent_subagents: int = 3,
+    max_total_subagents: int | None = None,
     *,
     agent_name: str | None = None,
     available_skills: set[str] | None = None,
     app_config: AppConfig | None = None,
     deferred_names: frozenset[str] = frozenset(),
+    mcp_routing_hints_section: str = "",
     user_id: str | None = None,
     skill_names: frozenset[str] | None = None,
 ) -> str:
     # Include subagent section only if enabled (from runtime parameter)
-    n = max_concurrent_subagents
-    subagent_section = _build_subagent_section(n, app_config=app_config) if subagent_enabled else ""
+    n = clamp_subagent_concurrency(max_concurrent_subagents)
+    total = max_total_subagents
+    if total is None:
+        subagents_config = getattr(app_config, "subagents", None) if app_config is not None else None
+        total = getattr(subagents_config, "max_total_per_run", DEFAULT_MAX_TOTAL_SUBAGENTS_PER_RUN)
+    total = clamp_total_subagents_per_run(total)
+    subagent_section = _build_subagent_section(n, total, app_config=app_config) if subagent_enabled else ""
 
     # Add subagent reminder to critical_reminders if enabled
     subagent_reminder = (
         "- **Orchestrator Mode**: You are a task orchestrator - decompose complex tasks into parallel sub-tasks. "
-        f"**HARD LIMIT: max {n} `task` calls per response.** "
-        f"If >{n} sub-tasks, split into sequential batches of ≤{n}. Synthesize after ALL batches complete.\n"
+        f"**HARD LIMITS: max {n} `task` calls per response, max {total} per run.** "
+        f"If >{n} sub-tasks, split into sequential batches of ≤{n} without exceeding {total} total. Synthesize after batches complete.\n"
         if subagent_enabled
         else ""
     )
@@ -922,7 +1035,7 @@ def apply_prompt_template(
     subagent_thinking = (
         "- **DECOMPOSITION CHECK: Can this task be broken into 2+ parallel sub-tasks? If YES, COUNT them. "
         f"If count > {n}, you MUST plan batches of ≤{n} and only launch the FIRST batch now. "
-        f"NEVER launch more than {n} `task` calls in one response.**\n"
+        f"NEVER launch more than {n} `task` calls in one response or {total} total in this run.**\n"
         if subagent_enabled
         else ""
     )
@@ -951,6 +1064,8 @@ def apply_prompt_template(
         else "- Skill First: Always load the relevant skill before starting **complex** tasks.\n"
     )
 
+    memory_tool_section = _build_memory_tool_section(app_config=app_config)
+
     # Build and return the fully static system prompt.
     # Memory and current date are injected per-turn via DynamicContextMiddleware
     # as a <system-reminder> in the first HumanMessage, keeping this prompt
@@ -961,7 +1076,9 @@ def apply_prompt_template(
         self_update_section=_build_self_update_section(agent_name),
         skills_section=skills_section,
         deferred_tools_section=deferred_tools_section,
+        mcp_routing_hints_section=mcp_routing_hints_section,
         subagent_section=subagent_section,
+        memory_tool_section=memory_tool_section,
         subagent_reminder=subagent_reminder,
         skill_first_reminder=skill_first_reminder,
         subagent_thinking=subagent_thinking,

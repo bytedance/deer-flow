@@ -29,7 +29,8 @@ from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import AIMessage, AnyMessage, BaseMessage, HumanMessage, ToolMessage
 from langgraph.types import Command
 
-from deerflow.utils.messages import message_to_text
+from deerflow.agents.human_input import read_human_input_response
+from deerflow.utils.messages import message_to_text, restore_original_human_message
 
 if TYPE_CHECKING:
     from deerflow.runtime.events.store.base import RunEventStore
@@ -37,10 +38,19 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _LEGACY_SUMMARY_MESSAGE_NAME = "summary"
+_RECONCILED_TOOL_MESSAGE_NAMES = frozenset({"ask_clarification"})
+_PERSISTED_HIDDEN_HUMAN_INPUT_RESPONSE_SOURCES = frozenset({"ask_clarification"})
 
 
-def _is_user_visible_human_message(message: BaseMessage) -> bool:
-    return isinstance(message, HumanMessage) and message.name != _LEGACY_SUMMARY_MESSAGE_NAME and message.additional_kwargs.get("hide_from_ui") is not True
+def _should_persist_human_input_message(message: BaseMessage) -> bool:
+    if not isinstance(message, HumanMessage):
+        return False
+    if message.name == _LEGACY_SUMMARY_MESSAGE_NAME:
+        return False
+    if message.additional_kwargs.get("hide_from_ui") is not True:
+        return True
+    response = read_human_input_response(message.additional_kwargs)
+    return response is not None and response["source"] in _PERSISTED_HIDDEN_HUMAN_INPUT_RESPONSE_SOURCES
 
 
 class RunJournal(BaseCallbackHandler):
@@ -92,6 +102,7 @@ class RunJournal(BaseCallbackHandler):
         self._counted_llm_run_ids: set[str] = set()
         self._counted_external_source_ids: set[str] = set()
         self._counted_message_llm_run_ids: set[str] = set()
+        self._memory_context_recorded = False
 
         # Convenience fields
         self._last_ai_msg: str | None = None
@@ -106,6 +117,8 @@ class RunJournal(BaseCallbackHandler):
         # LLM request/response tracking
         self._llm_call_index = 0
         self._seen_llm_starts: set[str] = set()  # langchain run_ids that fired on_chat_model_start
+        self._current_run_tool_call_names: dict[str, str] = {}
+        self._persisted_tool_message_identities: set[str] = set()
 
     # -- Lifecycle callbacks --
 
@@ -161,6 +174,7 @@ class RunJournal(BaseCallbackHandler):
         # represents the user-visible run lifecycle.
         if parent_run_id is not None:
             return
+        self._reconcile_final_tool_messages(outputs)
         self._put(event_type="run.end", category="outputs", content=outputs, metadata={"status": "success"})
         self._flush_sync()
 
@@ -208,15 +222,16 @@ class RunJournal(BaseCallbackHandler):
         if caller == "lead_agent" and not self._first_human_msg and messages:
             for batch in reversed(messages):
                 for m in reversed(batch):
-                    if _is_user_visible_human_message(m):
-                        self.set_first_human_message(m.text)
+                    if _should_persist_human_input_message(m):
+                        persisted_message = restore_original_human_message(m)
+                        self.set_first_human_message(self._message_text(persisted_message))
                         self._put(
                             event_type="llm.human.input",
                             category="message",
-                            content=m.model_dump(),
+                            content=persisted_message.model_dump(),
                             metadata={"caller": caller},
                         )
-                        self._record_message_summary(m, caller=caller)
+                        self._record_message_summary(persisted_message, caller=caller)
                         break
                 if self._first_human_msg:
                     break
@@ -245,6 +260,7 @@ class RunJournal(BaseCallbackHandler):
 
         for message in messages:
             caller = self._identify_caller(tags)
+            self._remember_current_run_tool_calls(message, caller=caller)
 
             # Latency
             rid = str(run_id)
@@ -338,15 +354,13 @@ class RunJournal(BaseCallbackHandler):
         try:
             if isinstance(output, ToolMessage):
                 msg = cast(ToolMessage, output)
-                self._put(event_type="llm.tool.result", category="message", content=msg.model_dump())
-                self._record_message_summary(msg)
+                self._persist_tool_result_message(msg)
             elif isinstance(output, Command):
                 cmd = cast(Command, output)
                 messages = cmd.update.get("messages", [])
                 for message in messages:
                     if isinstance(message, BaseMessage):
-                        self._put(event_type="llm.tool.result", category="message", content=message.model_dump())
-                        self._record_message_summary(message)
+                        self._persist_tool_result_message(message)
                     else:
                         logger.warning(f"on_tool_end {run_id}: command update message is not BaseMessage: {type(message)}")
             else:
@@ -355,6 +369,73 @@ class RunJournal(BaseCallbackHandler):
             logger.debug("Tool end for node %s", run_id)
 
     # -- Internal methods --
+
+    @staticmethod
+    def _message_identity(message: BaseMessage) -> str | None:
+        tool_call_id = getattr(message, "tool_call_id", None)
+        if isinstance(tool_call_id, str) and tool_call_id:
+            return f"tool:{tool_call_id}"
+        message_id = getattr(message, "id", None)
+        if isinstance(message_id, str) and message_id:
+            return f"message:{message_id}"
+        return None
+
+    @staticmethod
+    def _tool_call_value(tool_call: Any, key: str) -> Any:
+        if isinstance(tool_call, Mapping):
+            return tool_call.get(key)
+        return getattr(tool_call, key, None)
+
+    def _remember_current_run_tool_calls(self, message: AnyMessage, *, caller: str) -> None:
+        if caller != "lead_agent":
+            return
+        is_ai_message = isinstance(message, AIMessage) or getattr(message, "type", None) == "ai"
+        if not is_ai_message:
+            return
+        tool_calls = getattr(message, "tool_calls", None) or []
+        if not isinstance(tool_calls, list):
+            return
+        for tool_call in tool_calls:
+            tool_call_id = self._tool_call_value(tool_call, "id")
+            if not isinstance(tool_call_id, str) or not tool_call_id:
+                continue
+            name = self._tool_call_value(tool_call, "name")
+            self._current_run_tool_call_names[tool_call_id] = str(name or "")
+
+    def _persist_tool_result_message(self, message: BaseMessage) -> None:
+        self._put(event_type="llm.tool.result", category="message", content=message.model_dump())
+        identity = self._message_identity(message)
+        if identity:
+            self._persisted_tool_message_identities.add(identity)
+        self._record_message_summary(message)
+
+    def _final_output_messages(self, outputs: Any) -> list[Any]:
+        if isinstance(outputs, Mapping):
+            messages = outputs.get("messages", [])
+            return messages if isinstance(messages, list) else []
+        return []
+
+    def _should_reconcile_tool_message(self, message: ToolMessage) -> bool:
+        if message.additional_kwargs.get("hide_from_ui") is True:
+            return False
+        tool_call_id = getattr(message, "tool_call_id", None)
+        if not isinstance(tool_call_id, str) or not tool_call_id:
+            return False
+        tool_call_name = self._current_run_tool_call_names.get(tool_call_id)
+        if tool_call_name is None:
+            return False
+        message_name = getattr(message, "name", None)
+        if message_name not in _RECONCILED_TOOL_MESSAGE_NAMES and tool_call_name not in _RECONCILED_TOOL_MESSAGE_NAMES:
+            return False
+        identity = self._message_identity(message)
+        return identity is not None and identity not in self._persisted_tool_message_identities
+
+    def _reconcile_final_tool_messages(self, outputs: Any) -> None:
+        for message in self._final_output_messages(outputs):
+            if not isinstance(message, ToolMessage):
+                continue
+            if self._should_reconcile_tool_message(message):
+                self._persist_tool_result_message(message)
 
     def _put(self, *, event_type: str, category: str, content: str | dict = "", metadata: dict | None = None) -> None:
         self._buffer.append(
@@ -549,6 +630,23 @@ class RunJournal(BaseCallbackHandler):
             category="middleware",
             content={"name": name, "hook": hook, "action": action, "changes": changes},
         )
+
+    def record_memory_context(self, *, content_sha256: str) -> None:
+        """Record the effective hidden memory block for this run.
+
+        The full block already lives in checkpoint state and may contain user
+        data, so the event stores only its exact SHA-256 identity. Operators
+        consume it through the existing run-events debug API to compare the
+        effective memory used by different runs without copying that content.
+        """
+        if self._memory_context_recorded:
+            return
+        self._put(
+            event_type="context:memory",
+            category="context",
+            content={"content_sha256": content_sha256},
+        )
+        self._memory_context_recorded = True
 
     async def flush(self) -> None:
         """Force flush remaining buffer. Called in worker's finally block."""

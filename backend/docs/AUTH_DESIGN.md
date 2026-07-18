@@ -1,6 +1,6 @@
 # 用户认证与隔离设计
 
-本文档描述 DeerFlow 当前内置认证模块的设计，而不是历史 RFC。它覆盖浏览器登录、API 认证、CSRF、用户隔离、首次初始化、密码重置、内部调用和升级迁移。
+本文档描述 DeerFlow 当前内置认证模块的设计，而不是历史 RFC。它覆盖浏览器登录、OIDC/SSO、平台信任接入（IM Channel 与 Internal Auth）、API 认证、CSRF、用户隔离、首次初始化、密码重置和升级迁移。
 
 ## 设计目标
 
@@ -245,15 +245,128 @@ agent 在 sandbox 内看到统一虚拟路径：
 
 旧布局 `{base_dir}/agents/{agent_name}/` 只作为只读兼容回退。更新或删除旧共享 agent 会要求先运行迁移脚本。
 
-## 内部调用与 IM 渠道
+## 认证方式总览
 
-IM channel worker 不是浏览器用户，不持有浏览器 cookie。它们通过 Gateway 内部认证：
+DeerFlow 支持四类彼此独立的 HTTP 身份来源。它们共享同一套 **thread / run 隔离语义**（`threads_meta.user_id`、`runs.user_id`、`.deer-flow/users/{user_id}/threads/...`），但在 **是否写入 `users` 表** 和 **外部身份如何映射** 上不同。
 
-- 请求带 `X-DeerFlow-Internal-Token`。
-- 同时带匹配的 CSRF cookie/header。
-- 服务端识别为内部用户，`id="default"`、`system_role="internal"`。
+| 方式 | 典型入口 | 写入 `users` 表 | 外部身份映射 | 用户 / thread 隔离 |
+|---|---|---|---|---|
+| **浏览器本地账号** | `POST /api/v1/auth/login/local` 或 `/register` → `access_token` cookie | 是 | 邮箱即 DeerFlow `users.id` | `threads_meta.user_id = users.id` |
+| **OIDC / SSO** | `GET /api/v1/auth/oauth/{provider}` → callback → cookie | 是（自动创建或关联） | IdP `sub` → `users.oauth_id` | 同上 |
+| **IM Channel 绑定** | Settings 里 Connect + 平台侧 `/connect <code>` | 绑定到**已注册** DeerFlow 用户 | `channel_connections` / `channel_conversations` | `owner_user_id` → `users.id` |
+| **Internal Auth（直接 HTTP）** | `X-DeerFlow-Internal-Token` + `X-DeerFlow-Owner-User-Id` | **否**（合成 internal 用户） | 平台在 header 中自声明 owner 字符串 | `threads_meta.user_id = owner`（经 `make_safe_user_id` 规范化） |
 
-这意味着 channel 产生的数据默认进入 `default` 用户桶。这个选择适合“平台级 bot 身份”，但不是“每个 IM 用户单独隔离”。如果后续要做到外部 IM 用户隔离，需要把外部 platform user 映射到 DeerFlow user，并让 channel manager 设置对应的 scoped identity。
+```mermaid
+graph TB
+  classDef browser fill:#C9D7D2,stroke:#5D706A,color:#21302C
+  classDef platform fill:#D7D3E8,stroke:#6B6680,color:#29263A
+  classDef store fill:#E5D2C4,stroke:#806A5B,color:#30251E
+
+  Browser["浏览器会话<br/>cookie JWT"]:::browser
+  OIDC["OIDC / SSO<br/>OAuth callback"]:::browser
+  IM["IM Channel 绑定<br/>connect code"]:::platform
+  Internal["Internal Auth<br/>共享平台密钥 + Owner header"]:::platform
+  Users[("users 表")]:::store
+  Threads[("threads_meta / runs / checkpoints")]:::store
+  Bindings[("channel_connections<br/>channel_conversations")]:::store
+
+  Browser --> Users
+  OIDC --> Users
+  IM --> Bindings --> Users
+  IM --> Threads
+  Internal --> Threads
+```
+
+OIDC 细节见 [SSO.md](SSO.md)。IM 绑定细节见 [IM_CHANNEL_CONNECTIONS.md](IM_CHANNEL_CONNECTIONS.md)。
+
+## 平台信任接入
+
+**IM Channel 绑定** 与 **Internal Auth** 可归为同一大类：**平台信任模型**——DeerFlow 把渠道/合作平台视为已认证边界，由平台把“自己的用户”映射到 DeerFlow 的运行时身份，而不是让每个终端用户再走 DeerFlow 注册登录。
+
+| 维度 | IM Channel 绑定（子类 A） | Internal Auth 直接 HTTP（子类 B） |
+|---|---|---|
+| 平台凭证 | `channels.*` 机器人配置 + Gateway 内部调用 | 部署级 `DEER_FLOW_INTERNAL_AUTH_TOKEN` |
+| DeerFlow 用户来源 | 必须绑定到 `users` 表中的真实账号 | **不创建** `users` 行；使用合成 `system_role=internal` 用户 |
+| 外部身份登记 | `channel_connections` + `channel_conversations`（可审计、可撤销） | 请求头 `X-DeerFlow-Owner-User-Id`（平台自声明，如 `feishu_ou_alice`） |
+| 典型调用方 | DeerFlow 内置 IM worker（飞书 / 企业微信 / Slack / Telegram …） | 合作方后端（如飞书或企业微信自建应用网关） |
+| 身份可信度 | Connect code 一次性绑定，DB 唯一约束保证单 owner | 完全信任平台对 `Owner-User-Id` 的正确性 |
+| 用户 / thread 隔离 | 有（按绑定的 `owner_user_id`） | 有（按 header 中的 owner 字符串） |
+| 本地文件布局 | `.deer-flow/users/{owner}/threads/{thread_id}/...` | 同上 |
+
+两类接入在 run 生命周期上共用同一持久化面：`threads_meta`、`runs`、`run_events`、`checkpoints`、`checkpoint_blobs` 都按解析后的 `user_id` 做隔离；差异只在 owner 是否来自 `users.id` 还是平台声明的字符串。
+
+### Internal Auth (direct HTTP)
+
+适用于“平台后端代替终端用户调用 DeerFlow API”的集成：平台持有共享密钥，替每个业务用户附带 owner 标识。类似飞书或企业微信机器人网关把已认证用户代理到 DeerFlow，但**不经过** IM connect-code 绑定表。
+
+#### 配置
+
+Gateway 启动时设置环境变量：
+
+```bash
+export DEER_FLOW_INTERNAL_AUTH_TOKEN="<long-random-secret>"
+```
+
+未配置时 Gateway 会为每个 worker 进程生成随机 token（不利于多副本或与集成方对齐）；生产环境应显式配置并仅在内网可达的调用链中分发。
+
+#### 请求头
+
+| Header | 必填 | 说明 |
+|---|---|---|
+| `X-DeerFlow-Internal-Token` | 是 | 必须等于 Gateway 的 `DEER_FLOW_INTERNAL_AUTH_TOKEN`；缺失或错误 → `401` |
+| `X-DeerFlow-Owner-User-Id` | 需要用户隔离时必填 | 平台侧用户标识，如 `feishu_ou_alice`（飞书 `open_id`）或 `wecom_user_bob`（企业微信成员 id）；同一用户的建 thread / 续聊应保持一致。缺失时落到 `default` 用户桶 |
+
+Internal Auth **不使用**浏览器 `access_token` cookie，也**不参与**前端 CSRF double-submit cookie 流程。DeerFlow 内置 IM worker 在进程内同时附带 Internal Token 与 CSRF cookie/header；第三方平台做 server-to-server HTTP 集成时通常只发送 Internal 相关 header。
+
+合成用户由 `get_internal_user()` 构造：`system_role="internal"`，`id` 为 `make_safe_user_id(owner)` 或 `default`。**不会**向 `users` 表插入记录。
+
+#### 数据落库与隔离
+
+| 存储 | Internal Auth 行为 |
+|---|---|
+| `users` | 不写入 |
+| `threads_meta.user_id` | `X-DeerFlow-Owner-User-Id`（规范化后） |
+| `runs.user_id` | 同上 |
+| `run_events` / `checkpoints` / `checkpoint_blobs` | 随 thread / run 归属，与浏览器用户相同隔离规则 |
+| 本地目录 | `.deer-flow/users/{owner}/threads/{thread_id}/user-data/...` |
+
+`threads/search`、thread owner check、文件路径解析均按上述 `user_id` 过滤；不同 owner 之间 thread 互不可见。
+
+#### 信任边界与 DeerFlow 职责
+
+Internal Auth 是**平台信任模型**，不是终端用户认证：
+
+- DeerFlow **只校验**调用方是否持有有效的 `X-DeerFlow-Internal-Token`（平台级共享密钥）。
+- DeerFlow **不校验** `X-DeerFlow-Owner-User-Id` 是否对应真实、活跃、已授权的业务用户；该字段仅作为运行时隔离键使用。
+- DeerFlow **不管理**这类用户的注册、登录、登出、密码、禁用或吊销；终端用户的有效性、会话与权限**全部由渠道/平台自行维护**。
+- DeerFlow **不写入** `users` 表，不为 Internal Auth 用户签发 JWT，也不提供面向终端的账号生命周期 API。
+
+因此，DeerFlow 与渠道之间的契约是：**信任渠道已经替终端用户完成认证，并诚实地在每次请求中标注 owner**。若共享 token 泄露给终端，或平台未校验用户身份就转发请求，DeerFlow 无法阻止 `Owner-User-Id` 被伪造。
+
+#### 对接方式
+
+接入方使用与普通 Gateway API **相同的** thread / run 端点，在每次请求中附带 Internal 相关 header 即可，例如：
+
+1. `POST /api/threads` — 创建会话（`thread_id`、`metadata` 等 body 字段语义不变）
+2. `POST /api/threads/{thread_id}/runs/stream` — 流式对话；续聊时保持同一 `thread_id` 与同一 `X-DeerFlow-Owner-User-Id`
+
+具体路径、请求体与 `stream_mode` 等参数见 [API.md](API.md) 与 [STREAMING.md](STREAMING.md)。本文档不展开 curl 测试用例。
+
+#### 安全建议
+
+- **推荐**：平台后端持有 `DEER_FLOW_INTERNAL_AUTH_TOKEN`，按已认证业务用户设置 `X-DeerFlow-Owner-User-Id`。
+- **不推荐**：把共享 token 直接发给每个终端用户自行调用——此时终端用户只需伪造 `Owner-User-Id` 即可冒充他人，DeerFlow 无法验证平台侧身份。
+- Token 应视为部署密钥：不进 git、不写入前端、仅通过内网或 mTLS 保护的后端链路传输。
+
+### IM Channel 绑定（子类 A）
+
+IM worker 通过 Gateway 内部 HTTP 调用 agent runtime，并携带：
+
+- `X-DeerFlow-Internal-Token`
+- 匹配的 CSRF cookie / `X-CSRF-Token`（进程内生成，供 worker 使用）
+- 绑定成功后附带 `X-DeerFlow-Owner-User-Id`（来自 `channel_connections.owner_user_id`，对应 `users.id`）
+
+与 Internal Auth 直接 HTTP 相比，IM 路径多了 **connect-code 绑定** 与 **`users` 表关联**，外部身份可追溯、可撤销。配置与运维见 [IM_CHANNEL_CONNECTIONS.md](IM_CHANNEL_CONNECTIONS.md)。
 
 ## LangGraph-compatible 认证
 
@@ -306,7 +419,8 @@ PYTHONPATH=. python scripts/migrate_user_isolation.py --user-id <target-user-id>
 | 无 admin 时注册普通用户 | 允许注册普通 `user` | 如产品要求先初始化 admin，给 `/register` 加 gate |
 | 登录限速 | 进程内 dict，单 worker 精确，多 worker 近似 | Redis / DB-backed rate limiter |
 | OAuth / OIDC | 已实现通用 OIDC SSO（Keycloak, Google, Azure AD, Okta 等），支持 PKCE + nonce、auto-provisioning、email domain 限制（详见 [SSO.md](SSO.md)） | 支持 RP-initiated logout、自定义 scope 映射 |
-| IM 用户隔离 | channel 使用 `default` 内部用户 | 建立外部用户到 DeerFlow user 的映射 |
+| IM 用户隔离 | `channel_connections` 绑定到 `users.id`；未绑定消息在 `require_bound_identity: true` 时被拒绝 | 更多渠道与审计能力 |
+| Internal Auth 终端直持 token | 平台可把共享密钥下发给终端，导致 `Owner-User-Id` 可伪造 | 仅平台后端持 token；终端走平台自己的认证 |
 | 绝对 memory path | 显式共享 memory | UI / docs 明确提示 opt-out 风险 |
 
 ## 相关文件
@@ -331,7 +445,8 @@ PYTHONPATH=. python scripts/migrate_user_isolation.py --user-id <target-user-id>
 | `deerflow/agents/middlewares/thread_data_middleware.py` | run 时解析用户线程目录 |
 | `deerflow/agents/memory/storage.py` | per-user memory storage |
 | `deerflow/config/agents_config.py` | per-user custom agents |
-| `app/channels/manager.py` | IM channel 内部认证调用 |
+| `app/channels/manager.py` | IM channel 内部认证调用与 owner header |
+| `app/gateway/internal_auth.py` | Internal Auth header 常量、token 校验、合成用户 |
 | `scripts/migrate_user_isolation.py` | legacy 数据迁移到 per-user layout |
 | `.deer-flow/data/deerflow.db` | 统一 SQLite 数据库，包含 users / threads_meta / runs / feedback 等表 |
 | `.deer-flow/users/{user_id}/agents/{agent_name}/` | 用户自定义 agent 配置、SOUL 和 agent memory |

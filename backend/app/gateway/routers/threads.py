@@ -19,17 +19,33 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from langgraph.checkpoint.base import empty_checkpoint, uuid6
 from pydantic import BaseModel, Field, field_validator
+from sqlalchemy.exc import IntegrityError
 
 from app.gateway.authz import require_permission
-from app.gateway.deps import get_checkpointer
+from app.gateway.deps import get_checkpointer, get_run_manager
 from app.gateway.internal_auth import get_trusted_internal_owner_user_id
 from app.gateway.utils import sanitize_log_param
 from deerflow.config.paths import Paths, get_paths
+from deerflow.config.summarization_config import ContextSize
 from deerflow.runtime import serialize_channel_values_for_api
-from deerflow.runtime.goal import DEFAULT_MAX_GOAL_CONTINUATIONS, build_goal_state, ensure_thread_checkpoint, goal_thread_lock, read_thread_goal, write_thread_goal
+from deerflow.runtime.context_compaction import (
+    ContextCompactionDisabled,
+    ContextCompactionFailed,
+    ThreadCompactionResult,
+    compact_thread_context,
+)
+from deerflow.runtime.goal import (
+    DEFAULT_MAX_GOAL_CONTINUATIONS,
+    build_goal_state,
+    ensure_thread_checkpoint,
+    goal_thread_lock,
+    read_thread_goal,
+    write_thread_goal,
+)
+from deerflow.runtime.runs.worker import valid_duration_entry
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.utils.file_io import run_file_io
 from deerflow.utils.time import coerce_iso, now_iso
@@ -319,6 +335,27 @@ class ThreadGoalResponse(BaseModel):
     goal: dict[str, Any] | None = Field(default=None, description="Current goal state, or null when no goal is active")
 
 
+class ThreadCompactRequest(BaseModel):
+    """Request body for manually compacting a thread's active context."""
+
+    force: bool = Field(default=True, description="Run compaction even if automatic summarization thresholds are not met")
+    keep: ContextSize | None = Field(default=None, description="Optional retention policy for this compaction only")
+    agent_name: str | None = Field(default=None, max_length=128, description="Optional custom agent name for memory attribution")
+
+
+class ThreadCompactResponse(BaseModel):
+    """Response model for manual thread-context compaction."""
+
+    thread_id: str
+    compacted: bool
+    reason: str | None = None
+    removed_message_count: int = 0
+    preserved_message_count: int = 0
+    summary_updated: bool = False
+    checkpoint_id: str | None = None
+    total_tokens: int = 0
+
+
 class HistoryEntry(BaseModel):
     """Single checkpoint history entry."""
 
@@ -467,6 +504,39 @@ async def delete_thread_data(thread_id: str, request: Request) -> ThreadDeleteRe
     return response
 
 
+async def _resolve_existing_thread(
+    thread_store: Any,
+    thread_id: str,
+    thread_owner_user_id: str | None,
+    thread_owner_kwargs: dict[str, Any],
+) -> dict | None:
+    """Return the existing thread_meta record for an idempotent create.
+
+    When the caller carries a trusted internal owner but only a legacy unscoped
+    (``user_id=None``) row exists, claim it for that owner before returning.
+    Both the fast path and the insert-race recovery path resolve through here so
+    a thread's ownership does not diverge based on which path found the record.
+    """
+    existing_record = await thread_store.get(thread_id, **thread_owner_kwargs)
+    if existing_record is None and thread_owner_user_id:
+        unscoped_record = await thread_store.get(thread_id, user_id=None)
+        if unscoped_record is not None:
+            if unscoped_record.get("user_id") != thread_owner_user_id:
+                await thread_store.update_owner(thread_id, thread_owner_user_id, user_id=None)
+            existing_record = await thread_store.get(thread_id, **thread_owner_kwargs)
+    return existing_record
+
+
+def _existing_thread_response(thread_id: str, record: dict) -> ThreadResponse:
+    return ThreadResponse(
+        thread_id=thread_id,
+        status=record.get("status", "idle"),
+        created_at=coerce_iso(record.get("created_at", "")),
+        updated_at=coerce_iso(record.get("updated_at", "")),
+        metadata=record.get("metadata", {}),
+    )
+
+
 @router.post("", response_model=ThreadResponse)
 async def create_thread(body: ThreadCreateRequest, request: Request) -> ThreadResponse:
     """Create a new thread.
@@ -487,21 +557,9 @@ async def create_thread(body: ThreadCreateRequest, request: Request) -> ThreadRe
     # ``ThreadCreateRequest._strip_reserved`` — see the model definition.
 
     # Idempotency: return existing record when already present
-    existing_record = await thread_store.get(thread_id, **thread_owner_kwargs)
-    if existing_record is None and thread_owner_user_id:
-        unscoped_record = await thread_store.get(thread_id, user_id=None)
-        if unscoped_record is not None:
-            if unscoped_record.get("user_id") != thread_owner_user_id:
-                await thread_store.update_owner(thread_id, thread_owner_user_id, user_id=None)
-            existing_record = await thread_store.get(thread_id, **thread_owner_kwargs)
+    existing_record = await _resolve_existing_thread(thread_store, thread_id, thread_owner_user_id, thread_owner_kwargs)
     if existing_record is not None:
-        return ThreadResponse(
-            thread_id=thread_id,
-            status=existing_record.get("status", "idle"),
-            created_at=coerce_iso(existing_record.get("created_at", "")),
-            updated_at=coerce_iso(existing_record.get("updated_at", "")),
-            metadata=existing_record.get("metadata", {}),
-        )
+        return _existing_thread_response(thread_id, existing_record)
 
     # Write thread_meta so the thread appears in /threads/search immediately
     try:
@@ -511,7 +569,22 @@ async def create_thread(body: ThreadCreateRequest, request: Request) -> ThreadRe
             **thread_owner_kwargs,
             metadata=body.metadata,
         )
+    except IntegrityError:
+        # The idempotency read above and this insert are not atomic: a
+        # concurrent request for the same thread_id can commit in between, so
+        # the SQL-backed store rejects ours on the duplicate primary key.
+        # Honour the documented idempotency contract by resolving the
+        # now-existing record — running the same owner reconciliation the fast
+        # path does — instead of surfacing the conflict as a 500. (The memory
+        # store overwrites rather than raising, so it never reaches here.)
+        existing_record = await _resolve_existing_thread(thread_store, thread_id, thread_owner_user_id, thread_owner_kwargs)
+        if existing_record is not None:
+            return _existing_thread_response(thread_id, existing_record)
+        # A duplicate-key error with no row we can read back is a real failure.
+        logger.exception("Failed to write thread_meta for %s", sanitize_log_param(thread_id))
+        raise HTTPException(status_code=500, detail="Failed to create thread")
     except Exception:
+        # Any non-race failure must surface, not be silently swallowed as a 200.
         logger.exception("Failed to write thread_meta for %s", sanitize_log_param(thread_id))
         raise HTTPException(status_code=500, detail="Failed to create thread")
 
@@ -807,6 +880,52 @@ async def clear_thread_goal(thread_id: str, request: Request) -> ThreadGoalRespo
     return ThreadGoalResponse(goal=None)
 
 
+def _thread_compact_response(result: ThreadCompactionResult) -> ThreadCompactResponse:
+    return ThreadCompactResponse(
+        thread_id=result.thread_id,
+        compacted=result.compacted,
+        reason=result.reason,
+        removed_message_count=result.removed_message_count,
+        preserved_message_count=result.preserved_message_count,
+        summary_updated=result.summary_updated,
+        checkpoint_id=result.checkpoint_id,
+        total_tokens=result.total_tokens,
+    )
+
+
+@router.post("/{thread_id}/compact", response_model=ThreadCompactResponse)
+@require_permission("threads", "write", owner_check=True, require_existing=True)
+async def compact_thread(thread_id: str, body: ThreadCompactRequest, request: Request) -> ThreadCompactResponse:
+    """Manually summarize old thread context while preserving the visible history."""
+    run_manager = get_run_manager(request)
+    checkpointer = get_checkpointer(request)
+    keep = body.keep.to_tuple() if body.keep is not None else None
+    try:
+        async with goal_thread_lock(thread_id):
+            if await run_manager.has_inflight(thread_id):
+                raise HTTPException(status_code=409, detail="Thread has a run in flight. Compact after the run finishes.")
+            result = await compact_thread_context(
+                checkpointer,
+                thread_id,
+                keep=keep,
+                force=body.force,
+                user_id=get_effective_user_id(),
+                agent_name=body.agent_name,
+            )
+    except ContextCompactionDisabled:
+        raise HTTPException(status_code=409, detail="Context compaction is disabled.") from None
+    except ContextCompactionFailed:
+        raise HTTPException(status_code=500, detail="Failed to compact thread context.") from None
+    except LookupError:
+        raise HTTPException(status_code=404, detail=f"Thread {thread_id} not found") from None
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("Failed to compact thread %s", sanitize_log_param(thread_id))
+        raise HTTPException(status_code=500, detail="Failed to compact thread context.") from None
+    return _thread_compact_response(result)
+
+
 # ---------------------------------------------------------------------------
 @router.get("/{thread_id}/state", response_model=ThreadStateResponse)
 @require_permission("threads", "read", owner_check=True)
@@ -962,9 +1081,36 @@ async def update_thread_state(thread_id: str, body: ThreadStateUpdateRequest, re
     )
 
 
+def _ai_message_lacks_duration(message: dict[str, Any]) -> bool:
+    additional_kwargs = message.get("additional_kwargs")
+    return message.get("type") == "ai" and (not isinstance(additional_kwargs, dict) or "turn_duration" not in additional_kwargs)
+
+
+def _checkpoint_run_durations(metadata: Any) -> dict[str, int]:
+    raw_durations = metadata.get("run_durations") if isinstance(metadata, dict) else None
+    if not isinstance(raw_durations, dict):
+        return {}
+    return {run_id: duration_seconds for run_id, duration_seconds in raw_durations.items() if valid_duration_entry(run_id, duration_seconds)}
+
+
+def _set_message_turn_duration(message: dict[str, Any], run_id: str, run_durations: dict[str, int]) -> None:
+    if message.get("type") != "ai" or run_id not in run_durations:
+        return
+    additional_kwargs = message.get("additional_kwargs")
+    if not isinstance(additional_kwargs, dict):
+        additional_kwargs = {}
+        message["additional_kwargs"] = additional_kwargs
+    additional_kwargs.setdefault("turn_duration", run_durations[run_id])
+
+
 @router.post("/{thread_id}/history", response_model=list[HistoryEntry])
 @require_permission("threads", "read", owner_check=True)
-async def get_thread_history(thread_id: str, body: ThreadHistoryRequest, request: Request) -> list[HistoryEntry]:
+async def get_thread_history(
+    thread_id: str,
+    body: ThreadHistoryRequest,
+    request: Request,
+    background_tasks: BackgroundTasks,
+) -> list[HistoryEntry]:
     """Get checkpoint history for a thread.
 
     Messages are read from the checkpointer's channel values (the
@@ -1008,56 +1154,76 @@ async def get_thread_history(thread_id: str, body: ThreadHistoryRequest, request
                 if messages:
                     serialized_msgs = serialize_channel_values_for_api({"messages": messages}).get("messages", [])
                     try:
-                        from app.gateway.deps import get_run_event_store, get_run_manager
-                        from app.gateway.routers.thread_runs import compute_run_durations
+                        # Human messages define turn boundaries. New checkpoints
+                        # carry the completed turns' durations in metadata, so the
+                        # messages channel stays unchanged.
+                        checkpoint_run_durations = _checkpoint_run_durations(metadata)
+                        current_turn_run_id = None
+                        for msg in serialized_msgs:
+                            if msg.get("type") == "human":
+                                additional_kwargs = msg.get("additional_kwargs")
+                                if isinstance(additional_kwargs, dict):
+                                    run_id = additional_kwargs.get("run_id")
+                                    if isinstance(run_id, str) and run_id:
+                                        current_turn_run_id = run_id
+                                continue
 
-                        run_mgr = get_run_manager(request)
-                        event_store = get_run_event_store(request)
+                            if msg.get("type") not in {"ai", "tool"} or not current_turn_run_id:
+                                continue
 
-                        runs = await run_mgr.list_by_thread(thread_id)
+                            msg.setdefault("run_id", current_turn_run_id)
+                            _set_message_turn_duration(msg, current_turn_run_id, checkpoint_run_durations)
 
-                        # FIXME: Fetching limit=1000 silently drops durations for messages older than the cap on long threads.
-                        # We do this full fetch because raw LangGraph messages lack a native run_id link.
+                        # Legacy checkpoints without duration metadata are
+                        # correlated once via event-store + run-manager, then
+                        # upgraded by a metadata-only checkpoint write.
+                        if any(_ai_message_lacks_duration(msg) for msg in serialized_msgs):
+                            from app.gateway.deps import get_run_event_store, get_run_manager
+                            from app.gateway.routers.thread_runs import compute_run_durations
+                            from deerflow.runtime.runs.worker import persist_run_durations
 
-                        events = await event_store.list_messages(thread_id, limit=1000)
+                            run_mgr = get_run_manager(request)
+                            event_store = get_run_event_store(request)
 
-                        if runs and serialized_msgs:
-                            # 1. Map each run_id to its actual duration
-                            run_durations = compute_run_durations(runs)
+                            runs = await run_mgr.list_by_thread(thread_id)
+                            events = await event_store.list_messages(thread_id, limit=1000)
 
-                            # 2. Map every message id directly to its parent run_id
-                            msg_to_run = {}
-                            for e in events:
-                                content = e.get("content", {})
-                                if isinstance(content, dict) and content.get("type") == "ai" and "id" in content:
-                                    msg_to_run[content["id"]] = e["run_id"]
+                            if runs:
+                                run_durations = compute_run_durations(runs)
+                                msg_to_run = {}
+                                for event in events:
+                                    content = event.get("content", {})
+                                    run_id = event.get("run_id")
+                                    if isinstance(content, dict) and content.get("type") == "ai" and "id" in content and isinstance(run_id, str) and run_id:
+                                        msg_to_run[content["id"]] = run_id
 
-                            # 3. Attach the owning run_id to replayed messages.
-                            # Raw LangGraph checkpoint messages do not carry a
-                            # native run link. Message events are exact when
-                            # present, but historical/runtime stores can miss
-                            # them; the user-input message already records the
-                            # run id for the whole turn, so use it as the
-                            # fallback for following AI/tool messages.
-                            current_turn_run_id = None
-                            for msg in serialized_msgs:
-                                if msg.get("type") == "human":
-                                    additional_kwargs = msg.get("additional_kwargs")
-                                    if isinstance(additional_kwargs, dict):
-                                        run_id = additional_kwargs.get("run_id")
-                                        if isinstance(run_id, str) and run_id:
-                                            current_turn_run_id = run_id
-                                    continue
+                                current_turn_run_id = None
+                                for msg in serialized_msgs:
+                                    if msg.get("type") == "human":
+                                        additional_kwargs = msg.get("additional_kwargs")
+                                        if isinstance(additional_kwargs, dict):
+                                            run_id = additional_kwargs.get("run_id")
+                                            if isinstance(run_id, str) and run_id:
+                                                current_turn_run_id = run_id
+                                        continue
 
-                                if msg.get("type") in {"ai", "tool"}:
-                                    msg_id = msg.get("id")
-                                    run_id = msg_to_run.get(msg_id) or current_turn_run_id
+                                    if msg.get("type") not in {"ai", "tool"}:
+                                        continue
+                                    run_id = msg_to_run.get(msg.get("id")) or current_turn_run_id
                                     if run_id:
                                         msg["run_id"] = run_id
-                                        if msg.get("type") == "ai" and run_id in run_durations:
-                                            if "additional_kwargs" not in msg:
-                                                msg["additional_kwargs"] = {}
-                                            msg["additional_kwargs"]["turn_duration"] = run_durations[run_id]
+                                        _set_message_turn_duration(msg, run_id, run_durations)
+
+                                # Intentional, best-effort write-on-read migration:
+                                # persist legacy metadata after the response so the
+                                # history request never waits on an active stream's
+                                # same-thread checkpoint lock.
+                                background_tasks.add_task(
+                                    persist_run_durations,
+                                    checkpointer=checkpointer,
+                                    thread_id=thread_id,
+                                    durations=run_durations,
+                                )
 
                     except Exception:
                         logger.warning("Failed to inject turn_duration for thread %s", thread_id, exc_info=True)
@@ -1071,7 +1237,7 @@ async def get_thread_history(thread_id: str, body: ThreadHistoryRequest, request
             next_tasks = [t.name for t in tasks_raw if hasattr(t, "name")]
 
             # Strip LangGraph internal keys from metadata
-            user_meta = {k: v for k, v in metadata.items() if k not in ("created_at", "updated_at", "step", "source", "writes", "parents")}
+            user_meta = {k: v for k, v in metadata.items() if k not in ("created_at", "updated_at", "step", "source", "writes", "parents", "run_durations")}
             # Keep step for ordering context
             if "step" in metadata:
                 user_meta["step"] = metadata["step"]

@@ -9,7 +9,7 @@ import time
 import urllib.parse
 from ipaddress import ip_address, ip_network
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi import APIRouter, Depends, Form, HTTPException, Request, Response, status
 from fastapi.security import OAuth2PasswordRequestForm
 from pydantic import BaseModel, EmailStr, Field, field_validator
 from starlette.responses import RedirectResponse
@@ -31,8 +31,10 @@ from app.gateway.auth.oidc_state import (
     get_state_cookie,
     set_state_cookie,
 )
+from app.gateway.auth.session_cookie import ACCESS_TOKEN_COOKIE_NAME, SESSION_PERSISTENCE_COOKIE_NAME, set_session_cookie
+from app.gateway.auth.session_cookie_state import SKIP_AUTH_CSRF_COOKIE_STATE_ATTR
 from app.gateway.auth.user_provisioning import get_or_provision_oidc_user
-from app.gateway.csrf_middleware import CSRF_COOKIE_NAME, _request_origin, generate_csrf_token, is_secure_request
+from app.gateway.csrf_middleware import CSRF_COOKIE_NAME, _request_origin, auth_csrf_cookie_settings, generate_csrf_token, is_secure_request
 from app.gateway.deps import get_current_user_from_request, get_local_provider
 from deerflow.config.auth_config import OIDCProviderConfig
 
@@ -126,6 +128,7 @@ class RegisterRequest(BaseModel):
 
     email: EmailStr
     password: str = Field(..., min_length=8)
+    remember_me: bool = True
 
     _strong_password = field_validator("password")(classmethod(lambda cls, v: _validate_strong_password(v)))
 
@@ -136,6 +139,7 @@ class ChangePasswordRequest(BaseModel):
     current_password: str
     new_password: str = Field(..., min_length=8)
     new_email: EmailStr | None = None
+    remember_me: bool | None = None
 
     _strong_password = field_validator("new_password")(classmethod(lambda cls, v: _validate_strong_password(v)))
 
@@ -149,18 +153,9 @@ class MessageResponse(BaseModel):
 # ── Helpers ───────────────────────────────────────────────────────────────
 
 
-def _set_session_cookie(response: Response, token: str, request: Request) -> None:
+def _set_session_cookie(response: Response, token: str, request: Request, *, remember_me: bool | None = None) -> None:
     """Set the access_token HttpOnly cookie on the response."""
-    config = get_auth_config()
-    is_https = is_secure_request(request)
-    response.set_cookie(
-        key="access_token",
-        value=token,
-        httponly=True,
-        secure=is_https,
-        samesite="lax",
-        max_age=config.token_expiry_days * 24 * 3600 if is_https else None,
-    )
+    set_session_cookie(response, request, token, remember_me=remember_me)
 
 
 # ── Rate Limiting ────────────────────────────────────────────────────────
@@ -295,6 +290,7 @@ async def login_local(
     request: Request,
     response: Response,
     form_data: OAuth2PasswordRequestForm = Depends(),
+    remember_me: bool = Form(default=True),
 ):
     """Local email/password login."""
     client_ip = _get_client_ip(request)
@@ -311,7 +307,7 @@ async def login_local(
 
     _record_login_success(client_ip)
     token = create_access_token(str(user.id), token_version=user.token_version)
-    _set_session_cookie(response, token, request)
+    _set_session_cookie(response, token, request, remember_me=remember_me)
 
     return LoginResponse(
         expires_in=get_auth_config().token_expiry_days * 24 * 3600,
@@ -335,7 +331,7 @@ async def register(request: Request, response: Response, body: RegisterRequest):
         )
 
     token = create_access_token(str(user.id), token_version=user.token_version)
-    _set_session_cookie(response, token, request)
+    _set_session_cookie(response, token, request, remember_me=body.remember_me)
 
     return UserResponse(id=str(user.id), email=user.email, system_role=user.system_role, oauth_provider=user.oauth_provider)
 
@@ -343,7 +339,11 @@ async def register(request: Request, response: Response, body: RegisterRequest):
 @router.post("/logout", response_model=MessageResponse)
 async def logout(request: Request, response: Response):
     """Logout current user by clearing the cookie."""
-    response.delete_cookie(key="access_token", secure=is_secure_request(request), samesite="lax")
+    is_https = is_secure_request(request)
+    response.delete_cookie(key=ACCESS_TOKEN_COOKIE_NAME, secure=is_https, samesite="lax")
+    response.delete_cookie(key=CSRF_COOKIE_NAME, secure=is_https, samesite="strict")
+    response.delete_cookie(key=SESSION_PERSISTENCE_COOKIE_NAME, secure=is_https, samesite="lax")
+    setattr(request.state, SKIP_AUTH_CSRF_COOKIE_STATE_ATTR, True)
     return MessageResponse(message="Successfully logged out")
 
 
@@ -398,7 +398,8 @@ async def change_password(request: Request, response: Response, body: ChangePass
 
     # Re-issue cookie with new token_version
     token = create_access_token(str(user.id), token_version=user.token_version)
-    _set_session_cookie(response, token, request)
+    _set_session_cookie(response, token, request, remember_me=body.remember_me)
+    _set_csrf_cookie(response, request)
 
     return MessageResponse(message="Password changed successfully")
 
@@ -489,6 +490,7 @@ class InitializeAdminRequest(BaseModel):
 
     email: EmailStr
     password: str = Field(..., min_length=8)
+    remember_me: bool = True
 
     _strong_password = field_validator("password")(classmethod(lambda cls, v: _validate_strong_password(v)))
 
@@ -525,7 +527,7 @@ async def initialize_admin(request: Request, response: Response, body: Initializ
         )
 
     token = create_access_token(str(user.id), token_version=user.token_version)
-    _set_session_cookie(response, token, request)
+    _set_session_cookie(response, token, request, remember_me=body.remember_me)
 
     return UserResponse(id=str(user.id), email=user.email, system_role=user.system_role, oauth_provider=user.oauth_provider)
 
@@ -552,17 +554,17 @@ async def close_oidc_service() -> None:
 def _set_csrf_cookie(response: Response, request: Request) -> None:
     """Set the CSRF double-submit cookie (needed for GET-based OIDC callback)."""
     csrf_token = generate_csrf_token()
-    is_https = is_secure_request(request)
+    secure, max_age = auth_csrf_cookie_settings(request)
     response.set_cookie(
         key=CSRF_COOKIE_NAME,
         value=csrf_token,
         httponly=False,  # Must be JS-readable for Double Submit Cookie pattern
-        secure=is_https,
+        secure=secure,
         samesite="strict",
         # Persist for the same lifetime as the access_token (see _set_session_cookie)
         # so the double-submit pair is evicted together, never leaving a logged-in
         # session whose csrf_token was dropped (e.g. iOS Safari PWA termination).
-        max_age=get_auth_config().token_expiry_days * 24 * 3600 if is_https else None,
+        max_age=max_age,
     )
 
 
@@ -617,6 +619,7 @@ async def oauth_login(
     request: Request,
     provider: str,
     next: str | None = None,  # noqa: A002 (shadowing built-in is intentional — this is the query param name)
+    remember_me: bool = True,
 ):
     """Initiate OIDC login flow.
 
@@ -682,6 +685,7 @@ async def oauth_login(
         nonce=nonce_value,
         code_verifier=code_verifier,
         next_path=redirect_path,
+        remember_me=remember_me,
     )
     redirect_response = RedirectResponse(url=auth_url, status_code=status.HTTP_302_FOUND)
     set_state_cookie(redirect_response, request, state_payload)
@@ -797,7 +801,7 @@ async def oauth_callback(
     redirect_response = RedirectResponse(url=callback_redirect, status_code=status.HTTP_302_FOUND)
 
     # Set session cookie (reuse existing helper)
-    _set_session_cookie(redirect_response, token, request)
+    _set_session_cookie(redirect_response, token, request, remember_me=state_payload.remember_me)
 
     # Set CSRF cookie (callback is a GET, so CSRF middleware won't set it)
     _set_csrf_cookie(redirect_response, request)

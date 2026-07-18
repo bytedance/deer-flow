@@ -114,6 +114,19 @@ class TestAllowlistProvider:
         decision = provider.evaluate(req)
         assert decision.allow is True
 
+    def test_empty_allowlist_blocks_all(self):
+        """An explicitly empty allowlist means "permit no tools" and must fail closed.
+
+        Regression test: a truthiness check would collapse ``[]`` into the
+        ``None`` sentinel ("no allowlist -> allow all"), silently letting every
+        tool through when the operator intended to permit none.
+        """
+        provider = AllowlistProvider(allowed_tools=[])
+        for tool in ("bash", "web_search", "read_file"):
+            decision = provider.evaluate(GuardrailRequest(tool_name=tool, tool_input={}))
+            assert decision.allow is False, f"empty allowlist should block {tool!r}"
+            assert decision.reasons[0].code == "oap.tool_not_allowed"
+
     def test_both_allowed_and_denied(self):
         provider = AllowlistProvider(allowed_tools=["bash", "web_search"], denied_tools=["bash"])
         # bash is in both: allowlist passes, denylist blocks
@@ -531,6 +544,9 @@ class TestGuardrailRequestAttribution:
         assert guardrail_request.oauth_id is None
         assert guardrail_request.run_id is None
         assert guardrail_request.tool_call_id is None
+        assert guardrail_request.channel_user_id is None
+        assert guardrail_request.is_internal is False
+        assert guardrail_request.authz_attributes == {}
 
     def test_only_user_id_present(self):
         runtime = self._make_runtime_mock(context={"user_id": "user_abc"})
@@ -546,12 +562,16 @@ class TestGuardrailRequestAttribution:
         assert guardrail_request.tool_call_id is None
 
     def test_authenticated_user_context_present(self):
+        attributes = {"department": "engineering"}
         runtime = self._make_runtime_mock(
             context={
                 "user_id": "user_abc",
                 "user_role": "admin",
                 "oauth_provider": "github",
                 "oauth_id": "gh_123",
+                "channel_user_id": "channel_123",
+                "is_internal": True,
+                "authz_attributes": attributes,
             }
         )
         req = self._make_request(runtime=runtime, tool_call={"name": "bash", "args": {}})
@@ -562,6 +582,19 @@ class TestGuardrailRequestAttribution:
         assert guardrail_request.user_role == "admin"
         assert guardrail_request.oauth_provider == "github"
         assert guardrail_request.oauth_id == "gh_123"
+        assert guardrail_request.channel_user_id == "channel_123"
+        assert guardrail_request.is_internal is True
+        assert guardrail_request.authz_attributes == {"department": "engineering"}
+
+        attributes["department"] = "changed"
+        assert guardrail_request.authz_attributes == {"department": "engineering"}
+
+    def test_non_mapping_authz_attributes_raise_type_error(self):
+        runtime = self._make_runtime_mock(context={"authz_attributes": ["not", "a", "mapping"]})
+        req = self._make_request(runtime=runtime, tool_call={"name": "bash", "args": {}})
+
+        with pytest.raises(TypeError, match="authz_attributes must be a Mapping"):
+            self._capture_guardrail_request(req)
 
     def test_only_run_id_present(self):
         runtime = self._make_runtime_mock(context={"run_id": "run_xyz"})

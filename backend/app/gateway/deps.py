@@ -47,9 +47,17 @@ _RUN_DRAIN_TIMEOUT_SECONDS = 5.0
 
 
 def _enforce_postgres_for_multi_worker(config: AppConfig) -> None:
-    """Refuse to start when GATEWAY_WORKERS > 1 and the DB backend is not Postgres.
+    """Refuse to start when GATEWAY_WORKERS > 1 and safety preconditions are not met.
 
-    SQLite write-locks cannot support concurrent multi-process access.
+    Two checks (both must pass for multi-worker):
+
+    1. The DB backend must be Postgres — SQLite write-locks cannot support
+       concurrent multi-process access.
+    2. ``run_ownership.heartbeat_enabled`` must be True — without heartbeat,
+       every run has a NULL lease, so reconciliation treats all inflight
+       runs as orphans and Worker B would kill Worker A's live runs on
+       every rolling update or scale-up.
+
     This gate runs once at startup before any persistence engine is
     initialised so the error message is clear and the process exits
     immediately.
@@ -65,6 +73,16 @@ def _enforce_postgres_for_multi_worker(config: AppConfig) -> None:
     backend = getattr(config.database, "backend", None)
     if backend != "postgres":
         raise SystemExit(f"GATEWAY_WORKERS={workers} requires database.backend='postgres', but database.backend is '{backend}'. SQLite cannot support concurrent multi-process access. Set GATEWAY_WORKERS=1 or switch to Postgres.")
+
+    run_ownership = getattr(config, "run_ownership", None)
+    if run_ownership is None or not run_ownership.heartbeat_enabled:
+        raise SystemExit(
+            f"GATEWAY_WORKERS={workers} requires run_ownership.heartbeat_enabled=true. "
+            "Without heartbeat, every run has a NULL lease, so reconciliation "
+            "treats all inflight runs as orphans — Worker B would kill Worker A's "
+            "live runs on every rolling update or scale-up. "
+            "Set run_ownership.heartbeat_enabled=true in config.yaml."
+        )
 
 
 async def _drain_inflight_runs(run_manager: RunManager) -> None:
@@ -287,20 +305,29 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         app.state.run_event_store = make_run_event_store(run_events_config)
 
         # RunManager with store backing for persistence
-        app.state.run_manager = RunManager(store=app.state.run_store)
-        if getattr(config.database, "backend", None) == "sqlite":
-            from deerflow.utils.time import now_iso
+        run_ownership_config = getattr(config, "run_ownership", None)
+        app.state.run_manager = RunManager(
+            store=app.state.run_store,
+            run_ownership_config=run_ownership_config,
+        )
+        # Startup recovery: mark inflight runs whose lease has expired as error.
+        # In single-worker mode (SQLite / backend=memory), no run has a lease, so
+        # all inflight rows are reclaimed (unchanged behaviour). In multi-worker
+        # mode (Postgres), only runs with an expired lease are reclaimed; runs
+        # owned by another live worker are skipped.
+        from deerflow.utils.time import now_iso
 
-            # Startup-only recovery: clean shutdowns return no active rows and
-            # the thread-status update below becomes a no-op.
-            recovered_runs = await app.state.run_manager.reconcile_orphaned_inflight_runs(
-                error="Gateway restarted before this run reached a durable final state.",
-                before=now_iso(),
-            )
-            sb_config = getattr(config, "stream_bridge", None)
-            cleanup_delay = getattr(sb_config, "recovered_stream_cleanup_delay_seconds", 60.0) if sb_config else 60.0
-            await _publish_recovered_run_stream_end(app.state.stream_bridge, recovered_runs, cleanup_delay=cleanup_delay)
-            await _mark_latest_recovered_threads_error(app.state.run_manager, app.state.thread_store, recovered_runs)
+        recovered_runs = await app.state.run_manager.reconcile_orphaned_inflight_runs(
+            error="Gateway restarted before this run reached a durable final state.",
+            before=now_iso(),
+        )
+        sb_config = getattr(config, "stream_bridge", None)
+        cleanup_delay = getattr(sb_config, "recovered_stream_cleanup_delay_seconds", 60.0) if sb_config else 60.0
+        await _publish_recovered_run_stream_end(app.state.stream_bridge, recovered_runs, cleanup_delay=cleanup_delay)
+        await _mark_latest_recovered_threads_error(app.state.run_manager, app.state.thread_store, recovered_runs)
+
+        # Start the lease heartbeat if enabled (multi-worker deployments).
+        await app.state.run_manager.start_heartbeat()
 
         try:
             yield

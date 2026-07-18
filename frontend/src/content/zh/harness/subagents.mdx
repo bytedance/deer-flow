@@ -83,14 +83,15 @@ subagents:
 
 按 Agent 覆盖优先于全局 `timeout_seconds` 和 `max_turns` 设置。
 
-## 并发限制
+## 委派限制
 
-`SubagentLimitMiddleware` 控制 Lead Agent 在单次轮次中可以并行调用多少个子 Agent，通过每次请求的配置控制：
+`SubagentLimitMiddleware` 控制 Lead Agent 在单次轮次中可以并行调用多少个子 Agent，也控制一次 Lead Agent run 内最多可以启动多少次子 Agent 委派。
 
 - `subagent_enabled`：是否为此会话激活子 Agent 委派
 - `max_concurrent_subagents`：单次轮次中最大并行任务调用数（默认：3）
+- `max_total_subagents`：可选的每次请求总量上限；默认使用 `config.yaml` 中的 `subagents.max_total_per_run`（默认：6，有效范围：1-50）
 
-如果 Agent 尝试调用超过限制的子 Agent，中间件会裁剪多余的调用。
+如果 Agent 尝试调用超过限制的子 Agent，中间件会裁剪多余的调用。当总量上限耗尽时，它会停止本次 run 的新 `task` 调用，让 Agent 基于已收集结果进行综合。
 
 ## ACP Agent（外部 Agent）
 

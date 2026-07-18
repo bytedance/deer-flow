@@ -224,6 +224,73 @@ async def test_async_circuit_half_open_graph_bubble_up_resets_probe() -> None:
     assert middleware._circuit_state == "half_open"
 
 
+def test_circuit_half_open_non_retriable_error_resets_probe() -> None:
+    """A non-retriable error during a half-open probe must release the probe.
+
+    Regression: the non-retriable branch neither recorded a failure (correct —
+    business errors like quota/auth must not trip the breaker) nor reset
+    ``_circuit_probe_in_flight``. So one non-retriable probe left the circuit
+    stuck at half_open with probe_in_flight=True, and every subsequent call
+    fast-failed forever because no later call could ever run the handler to
+    reach ``_record_success`` / ``_record_failure``.
+    """
+    import unittest.mock
+
+    middleware = _build_middleware()
+
+    # Enter half_open and let one probe through (probe_in_flight -> True).
+    middleware._circuit_state = "half_open"
+    middleware._circuit_probe_in_flight = False
+    assert middleware._check_circuit() is False
+    assert middleware._circuit_probe_in_flight is True
+
+    def handler(_request) -> AIMessage:
+        raise FakeError("insufficient_quota", status_code=429, code="insufficient_quota")
+
+    # _check_circuit already admitted the probe above; keep it False here so the
+    # top-of-call gate does not fast-fail before the handler runs. Force the
+    # error to classify as non-retriable regardless of heuristics.
+    with unittest.mock.patch.object(middleware, "_check_circuit", return_value=False):
+        with unittest.mock.patch.object(middleware, "_classify_error", return_value=(False, "quota")):
+            result = middleware.wrap_model_call(SimpleNamespace(), handler)
+
+    # Non-retriable errors still surface a graceful fallback (not a raise) and
+    # must NOT trip the breaker.
+    assert isinstance(result, AIMessage)
+    assert middleware._circuit_state == "half_open"
+    # The probe was released, so the real gate re-admits the next probe instead
+    # of fast-failing forever.
+    assert middleware._circuit_probe_in_flight is False
+    assert middleware._check_circuit() is False
+    assert middleware._circuit_probe_in_flight is True
+
+
+@pytest.mark.anyio
+async def test_async_circuit_half_open_non_retriable_error_resets_probe() -> None:
+    """Async mirror: a non-retriable error during a half-open probe releases it."""
+    import unittest.mock
+
+    middleware = _build_middleware()
+
+    middleware._circuit_state = "half_open"
+    middleware._circuit_probe_in_flight = False
+    assert middleware._check_circuit() is False
+    assert middleware._circuit_probe_in_flight is True
+
+    async def handler(_request) -> AIMessage:
+        raise FakeError("insufficient_quota", status_code=429, code="insufficient_quota")
+
+    with unittest.mock.patch.object(middleware, "_check_circuit", return_value=False):
+        with unittest.mock.patch.object(middleware, "_classify_error", return_value=(False, "quota")):
+            result = await middleware.awrap_model_call(SimpleNamespace(), handler)
+
+    assert isinstance(result, AIMessage)
+    assert middleware._circuit_state == "half_open"
+    assert middleware._circuit_probe_in_flight is False
+    assert middleware._check_circuit() is False
+    assert middleware._circuit_probe_in_flight is True
+
+
 # ---------- Circuit Breaker Tests ----------
 
 

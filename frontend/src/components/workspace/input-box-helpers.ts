@@ -19,6 +19,7 @@ export type GoalCommand =
 
 export type InputSubmitAction =
   | { kind: "goal"; command: GoalCommand }
+  | { kind: "compact" }
   | { kind: "stop" }
   | { kind: "empty" }
   | { kind: "message" };
@@ -184,6 +185,21 @@ export function parseGoalCommand(value: string): GoalCommand | null {
   return { kind: "set", objective: args };
 }
 
+export function parseCompactCommand(value: string): boolean {
+  return /^\/(?:compact|context\s+compact)\s*$/i.test(value.trim());
+}
+
+export function canPolishInput(value: string): boolean {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return false;
+  }
+  // Reserved builtin command lines are routed to their own handlers, not the
+  // LLM, so they must not be rewritten. Reuse the same parsers the composer
+  // uses to dispatch them instead of maintaining a third parallel list.
+  return parseGoalCommand(trimmed) === null && !parseCompactCommand(trimmed);
+}
+
 export function getInputSubmitAction({
   text,
   fileCount,
@@ -196,6 +212,9 @@ export function getInputSubmitAction({
   const goalCommand = parseGoalCommand(text);
   if (goalCommand && fileCount === 0) {
     return { kind: "goal", command: goalCommand };
+  }
+  if (parseCompactCommand(text) && fileCount === 0) {
+    return { kind: "compact" };
   }
   if (status === "streaming") {
     return { kind: "stop" };

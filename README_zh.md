@@ -55,11 +55,14 @@ DeerFlow 新近集成了 BytePlus 自研的智能搜索与抓取工具集——[
       - [MCP Server](#mcp-server)
       - [IM 渠道](#im-渠道)
       - [LangSmith 链路追踪](#langsmith-链路追踪)
+      - [Langfuse 链路追踪](#langfuse-链路追踪)
+      - [同时使用两种追踪服务](#同时使用两种追踪服务)
   - [从 Deep Research 到 Super Agent Harness](#从-deep-research-到-super-agent-harness)
   - [核心特性](#核心特性)
     - [Skills 与 Tools](#skills-与-tools)
       - [Claude Code 集成](#claude-code-集成)
     - [Session Goals](#session-goals)
+    - [手动上下文压缩](#手动上下文压缩)
     - [Sub-Agents](#sub-agents)
     - [Sandbox 与文件系统](#sandbox-与文件系统)
     - [Context Engineering](#context-engineering)
@@ -484,6 +487,37 @@ LANGSMITH_API_KEY=lsv2_pt_xxxxxxxxxxxxxxxx
 LANGSMITH_PROJECT=xxx
 ```
 
+#### Langfuse 链路追踪
+
+DeerFlow 同样支持 [Langfuse](https://langfuse.com) 可观测性，适用于兼容 LangChain 的运行。
+
+在 `.env` 文件中添加以下配置：
+
+```bash
+LANGFUSE_TRACING=true
+LANGFUSE_PUBLIC_KEY=pk-lf-xxxxxxxxxxxxxxxx
+LANGFUSE_SECRET_KEY=sk-lf-xxxxxxxxxxxxxxxx
+LANGFUSE_BASE_URL=https://cloud.langfuse.com
+```
+
+如果你使用自托管的 Langfuse 实例，请将 `LANGFUSE_BASE_URL` 设置为你的部署地址。
+
+**链路关联字段。** 每次 agent 运行都会标注 Langfuse 的保留追踪属性，这样 Sessions 和 Users 页面就能自动填充数据：
+
+- `session_id` = LangGraph 的 `thread_id`——将同一会话的所有 trace 归为一组
+- `user_id` = 来自 `get_effective_user_id()` 的有效用户（在无鉴权模式下回退为 `default`）
+- `trace_name` = assistant id（默认为 `lead-agent`）
+- `tags` = `[env:<DEER_FLOW_ENV>, model:<model_name>]`（未设置时省略）
+- `metadata.deerflow_trace_id` = DeerFlow 的请求关联 id，当启用请求链路关联（request trace correlation）时与 `X-Trace-Id` 一致
+
+这些字段会在图（graph）调用的根部注入到 `RunnableConfig.metadata`，同时覆盖 gateway 路径（`runtime/runs/worker.py::run_agent`）和内嵌路径（`client.py::DeerFlowClient.stream`），因此任何兼容 LangChain 的 callback 都能读取到它们。设置 `DEER_FLOW_ENV`（或 `ENVIRONMENT`）可按部署环境为 trace 打标签。
+
+#### 同时使用两种追踪服务
+
+如果同时启用 LangSmith 和 Langfuse，DeerFlow 会挂载两个追踪 callback，并将相同的模型活动上报到两个系统。
+
+如果某个 provider 被显式启用但缺少必要的凭据，或其 callback 初始化失败，DeerFlow 会在创建模型、初始化追踪时快速失败（fail fast），错误信息会指明导致失败的 provider。
+
 Docker 部署时，追踪默认关闭。在 `.env` 中设置 `LANGSMITH_TRACING=true` 和 `LANGSMITH_API_KEY` 即可启用。
 
 ## 从 Deep Research 到 Super Agent Harness
@@ -558,6 +592,8 @@ DEERFLOW_LANGGRAPH_URL=http://localhost:2026/api/langgraph  # LangGraph API
 
 完整 API 说明见 [`skills/public/claude-to-deerflow/SKILL.md`](skills/public/claude-to-deerflow/SKILL.md)。
 
+Web UI 输入框支持浏览器侧语音听写。浏览器提供 Web Speech API 时，麦克风按钮会把语音转写为本地草稿；DeerFlow 只接收转写后的文本，音频处理交由浏览器或操作系统语音识别服务按其环境策略完成。用户可以在发送前继续检查和编辑文本。
+
 ### Session Goals
 
 用 `/goal <完成条件>` 为当前 thread 绑定一个激活态的完成条件。这个 goal 是 thread 维度的状态，而不是技能激活，所以它会跨轮次持续生效，直到 DeerFlow 判定它已被满足、或者你手动清除它。
@@ -573,6 +609,10 @@ DEERFLOW_LANGGRAPH_URL=http://localhost:2026/api/langgraph  # LangGraph API
 每次 Gateway 驱动的 run 结束后，DeerFlow 会用一个 non-thinking 的评估模型，把可见的对话内容拿去和激活的 goal 比对。评估模型必须返回一个带类型的 blocker（`missing_evidence`、`needs_user_input`、`run_failed`、`external_wait` 或 `goal_not_met_yet`），并附上可见证据。只有在最近一轮 assistant 回复已被持久化 checkpoint、blocker 是 `goal_not_met_yet`、评估期间 thread 没有变化、且无进展熔断器没有触发时，DeerFlow 才会注入一次 hidden continuation。安全上限默认是 8 次 hidden continuation；连续两次相同的无进展评估后就会停止。`/goal clear` 以及任何用户手动输入的新内容，优先级都高于排队中的 continuation。当 goal 被满足时，DeerFlow 会自动清除它，并发布更新后的 thread 状态。
 
 Web UI 会在输入框上方展示当前激活的 goal。同样的命令在 TUI 和受支持的 IM 渠道里也可用。在 Web UI 和受支持的 IM 渠道里，设置 `/goal <完成条件>` 还会以该条件作为任务启动一次 run；状态查询和清除命令则只管理 goal 状态本身。
+
+### 手动上下文压缩
+
+在 Web UI 输入框中使用 `/compact`，可以把当前 thread 的早期上下文压缩成摘要。完整聊天记录仍会保留在界面上，但后续模型调用会基于压缩摘要和最近消息继续。当前历史不足时不会压缩；thread 正在运行任务时会阻止压缩。
 
 ### Sub-Agents
 

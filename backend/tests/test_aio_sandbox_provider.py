@@ -368,11 +368,12 @@ def test_remote_backend_create_forwards_effective_user_id(monkeypatch):
         def json(self):
             return {"sandbox_url": "http://sandbox.local"}
 
-    def _post(url, json, timeout):  # noqa: A002 - mirrors requests.post kwarg
+    def _post(url, json, timeout, headers=None):  # noqa: A002 - mirrors requests.post kwarg
         posted.update({"url": url, "json": json, "timeout": timeout})
         return _Response()
 
     monkeypatch.setattr(remote_mod.requests, "post", _post)
+    monkeypatch.setattr(remote_mod, "user_should_see_legacy_skills", lambda user_id: True)
 
     try:
         backend.create("thread-42", "sandbox-42")
@@ -384,6 +385,7 @@ def test_remote_backend_create_forwards_effective_user_id(monkeypatch):
         "sandbox_id": "sandbox-42",
         "thread_id": "thread-42",
         "user_id": "user-7",
+        "include_legacy_skills": True,
     }
 
 
@@ -400,16 +402,18 @@ def test_remote_backend_create_prefers_explicit_user_id(monkeypatch):
         def json(self):
             return {"sandbox_url": "http://sandbox.local"}
 
-    def _post(url, json, timeout):  # noqa: A002 - mirrors requests.post kwarg
+    def _post(url, json, timeout, headers=None):  # noqa: A002 - mirrors requests.post kwarg
         posted.update({"url": url, "json": json, "timeout": timeout})
         return _Response()
 
     monkeypatch.setattr(remote_mod.requests, "post", _post)
     monkeypatch.setattr(remote_mod, "get_effective_user_id", lambda: "default")
+    monkeypatch.setattr(remote_mod, "user_should_see_legacy_skills", lambda user_id: False)
 
     backend.create("thread-42", "sandbox-42", user_id="ou-user")
 
     assert posted["json"]["user_id"] == "ou-user"
+    assert posted["json"]["include_legacy_skills"] is False
 
 
 # ── Sandbox client teardown (#2872) ──────────────────────────────────────────

@@ -29,44 +29,64 @@ Each category is updated over time as the agent learns from ongoing conversation
 
 ## How it works
 
-Memory is managed by `MemoryMiddleware`, which runs on every Lead Agent turn:
+Memory has two operation modes:
 
-1. **Injection**: at the start of each conversation, the agent's current memory is injected into the system prompt at a controlled token budget (`max_injection_tokens`).
-2. **Learning**: after a conversation, a background job extracts new facts and updates the relevant memory categories. Updates are debounced by `debounce_seconds` to batch rapid changes.
-3. **Per-agent memory**: when a custom agent is active, its memory is stored separately from the global memory. This keeps different agents' knowledge isolated.
+1. **Injection in both modes**: at the start of each conversation, the agent's current memory is injected into the system prompt at a controlled token budget (`max_injection_tokens`).
+2. **Middleware mode (default)**: `MemoryMiddleware` runs after each Lead Agent turn. It filters the conversation, queues a background update, and extracts new facts automatically. Updates are debounced by `debounce_seconds` to batch rapid changes.
+3. **Tool mode (experimental)**: DeerFlow registers `memory_search`, `memory_add`, `memory_update`, and `memory_delete` as agent tools and skips `MemoryMiddleware`. The model decides when to search or write memory, so effectiveness depends on model tool-use behavior. These explicit CRUD tools are not the passive staleness-review path; operators who enable tool mode are opting into model-directed updates/deletes instead of the middleware staleness guardrails.
+4. **Per-agent memory**: when a custom agent is active, its memory is stored separately from the global memory. This keeps different agents' knowledge isolated.
+
+In tool mode, the four `memory_*` tool names are reserved. If an MCP server or custom tool already uses `memory_search`, `memory_add`, `memory_update`, or `memory_delete`, the existing tool keeps that name and the colliding memory tool is skipped with a warning.
 
 ## Configuration
 
 ```yaml
 memory:
   enabled: true
-
-  # Storage path for the global memory file.
-  # Default: {base_dir}/memory.json  (resolves to backend/.deer-flow/memory.json)
-  # Absolute paths are used as-is.
-  # Relative paths are resolved against base_dir (not the backend working directory).
-  storage_path: memory.json
-
-  # Storage class (default: file-based JSON storage)
-  storage_class: deerflow.agents.memory.storage.FileMemoryStorage
-
-  # Seconds to wait before processing queued memory updates (debounce)
-  debounce_seconds: 30
-
-  # Model for memory update extraction (null = use default model)
-  model_name: null
-
-  # Maximum number of facts to store
-  max_facts: 100
-
-  # Minimum confidence score required to store a fact (0.0–1.0)
-  fact_confidence_threshold: 0.7
-
-  # Whether to inject memory into the system prompt
   injection_enabled: true
 
-  # Maximum tokens to use for memory injection into system prompt
-  max_injection_tokens: 2000
+  # Backend selector: deermem (default) | noop | a dotted path to a custom
+  # MemoryManager subclass. Swap backend = drop a backends/<name>/ folder and
+  # set this (see backend/.../agents/memory/backends/).
+  manager_class: deermem
+
+  # Operation mode:
+  #   middleware - default; passive background extraction after each turn
+  #   tool - experimental; model calls memory_* tools directly
+  mode: middleware
+
+  # DeerMem-private knobs. These live under backend_config (NOT at the top
+  # level) because they are DeerMem-specific -- a different backend
+  # self-interprets its own backend_config. Unknown keys are ignored.
+  backend_config:
+    # Data root. Empty = deer-flow base_dir; per-user memory at
+    # {root}/users/{user_id}/memory.json. Absolute path = that root.
+    storage_path: ""
+
+    # Storage class (empty = FileMemoryStorage, the portable default; no importlib).
+    storage_class: ""
+
+    # Seconds to wait before processing queued memory updates (debounce)
+    debounce_seconds: 30
+
+    # LLM for memory extraction. Omit all fields = the host factory injects the
+    # app default model (mirrors the old model_name: null). Set explicitly to
+    # use a different/cheaper model.
+    model:
+      # provider: openai
+      # model: gpt-4o-mini
+      # api_key: $OPENAI_API_KEY
+      # base_url:               # optional, for OpenAI-compatible gateways
+      # temperature:            # optional
+
+    # Maximum number of facts to store
+    max_facts: 100
+
+    # Minimum confidence score required to store a fact (0.0–1.0)
+    fact_confidence_threshold: 0.7
+
+    # Maximum tokens to use for memory injection into system prompt
+    max_injection_tokens: 2000
 ```
 
 ## Global vs per-agent memory
