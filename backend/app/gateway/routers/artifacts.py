@@ -250,7 +250,6 @@ async def get_artifact(thread_id: str, path: str, request: Request, download: bo
         # reset playback to the start instead of jumping to the new position.
         return FileResponse(
             path=actual_path,
-            filename=actual_path.name,
             media_type=mime_type,
             headers={"Content-Disposition": _build_content_disposition("inline", actual_path.name)},
         )

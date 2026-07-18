@@ -7,11 +7,16 @@ handler offloads each branch's IO via ``asyncio.to_thread``; if any regresses
 back onto the event loop, the strict Blockbuster gate raises ``BlockingError``
 and these tests fail.
 
-Binary (non-text, non-active-content) artifacts are handled by returning a
+Binary (non-text, non-active-content) artifacts still run the same
+``exists`` / ``is_file`` / ``mimetypes.guess_type`` / ``is_text_file_by_content``
+probes as the text branch, offloaded the same way via ``asyncio.to_thread``.
+What differs is the payload: instead of a read, the handler returns a
 ``FileResponse`` that defers its own file IO to ASGI response time (streamed
 via ``anyio.open_file`` when the response is actually sent, which this test
 never triggers) — so awaiting ``get_artifact`` itself for a binary artifact
-does zero filesystem IO and the gate has nothing to catch there either way.
+does no full-file read; ``FileResponse`` streams the bytes at ASGI send
+time, off the loop, which is why the gate has nothing to catch there
+either way.
 
 The ``@require_permission`` decorator is bypassed via ``__wrapped__`` so the
 anchor exercises the handler's own filesystem IO, not the authz layer. Imports
