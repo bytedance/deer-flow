@@ -84,7 +84,7 @@ def _setup_executor_classes():
         sys.modules[name] = MagicMock()
     storage_module = ModuleType("deerflow.skills.storage")
     storage_module.get_or_new_skill_storage = lambda **kwargs: SimpleNamespace(load_skills=lambda *, enabled_only: [])
-    storage_module.get_or_new_user_skill_storage = lambda user_id, **kwargs: SimpleNamespace(load_skills=lambda *, enabled_only: [])
+tstorage_module.get_or_new_user_skill_storage = lambda user_id, **kwargs: SimpleNamespace(load_skills=lambda *, enabled_only: [])
     sys.modules["deerflow.skills.storage"] = storage_module
 
     # Import real classes inside fixture
@@ -1571,6 +1571,84 @@ class TestAsyncExecutionPath:
             # and all skill content; nothing should be split across two messages.
             assert base_config.system_prompt in system_messages[0].content
             assert "Skill instruction text" in system_messages[0].content
+
+    @pytest.mark.anyio
+    async def test_aexecute_accumulates_tool_output_chunks_from_custom_stream(
+        self,
+        classes,
+        base_config,
+        msg,
+    ):
+        """When stream_mode includes "custom", the async loop must accumulate
+        custom event chunks (emitted by ToolStreamingMiddleware via
+        get_stream_writer) into result.tool_output_chunks so the task_tool
+        polling loop can forward them to the parent SSE stream (#4150).
+        """
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentStatus = classes["SubagentStatus"]
+        AIMessage = classes["AIMessage"]
+
+        custom_chunk = {"type": "tool_output_chunk", "tool_call_id": "tc-1", "status": "start"}
+        final_state = {"messages": [AIMessage(content="Done", id="msg-1")]}
+
+        # Simulate LangGraph yielding (mode, chunk) tuples when stream_mode is a
+        # list: one custom chunk, then one values chunk.
+        async def mixed_astream(state, *, config, context, stream_mode):
+            yield ("custom", custom_chunk)
+            yield final_state
+
+        mock_agent = MagicMock()
+        mock_agent.astream = mixed_astream
+
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+        )
+
+        with patch.object(executor, "_create_agent", return_value=mock_agent):
+            result = await executor._aexecute("Task")
+
+        assert result.status == SubagentStatus.COMPLETED
+        assert result.tool_output_chunks == [custom_chunk]
+
+    @pytest.mark.anyio
+    async def test_aexecute_ignores_invalid_tuple_items(
+        self,
+        classes,
+        base_config,
+        msg,
+    ):
+        """Tuples with unexpected mode strings or wrong length must not crash the
+        loop — they fall through to the else branch and are treated as state
+        chunks. The mode string must be exactly "custom" for accumulation.
+        """
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentStatus = classes["SubagentStatus"]
+        AIMessage = classes["AIMessage"]
+
+        final_state = {"messages": [AIMessage(content="Done", id="msg-1")]}
+
+        # "values" mode in a tuple should NOT be treated as a custom chunk
+        async def mixed_astream(state, *, config, context, stream_mode):
+            yield ("values", final_state)
+
+        mock_agent = MagicMock()
+        mock_agent.astream = mixed_astream
+
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+        )
+
+        with patch.object(executor, "_create_agent", return_value=mock_agent):
+            result = await executor._aexecute("Task")
+
+        assert result.status == SubagentStatus.COMPLETED
+        # "values" tuple should not be accumulated as a custom chunk — the chunk
+        # falls through to the else branch and is handled as state.
+        assert result.tool_output_chunks == []
 
 
 class TestSkillAllowedTools:

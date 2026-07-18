@@ -106,6 +106,7 @@ class SubagentResult:
     token_usage_records: list[dict[str, int | str | None]] = field(default_factory=list)
     usage_reported: bool = False
     cancel_event: threading.Event = field(default_factory=threading.Event, repr=False)
+    tool_output_chunks: list[dict[str, Any]] = field(default_factory=list)
     _state_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
 
     def __post_init__(self):
@@ -846,7 +847,19 @@ class SubagentExecutor:
                 )
                 return result
 
-            async for chunk in agent.astream(state, config=run_config, context=context, stream_mode="values"):  # type: ignore[arg-type]
+            async for item in agent.astream(state, config=run_config, context=context, stream_mode=["values", "custom"]):  # type: ignore[arg-type]
+                # When stream_mode is a list/tuple, LangGraph yields (mode, chunk)
+                # tuples. Custom events (emitted by middlewares via get_stream_writer)
+                # carry tool output chunks that need to propagate to the parent
+                # stream so they are not lost inside the subagent context (#4150).
+                if isinstance(item, tuple) and len(item) == 2:
+                    mode, chunk = item
+                    if mode == "custom":
+                        result.tool_output_chunks.append(chunk)
+                        continue
+                else:
+                    chunk = item
+
                 # Cooperative cancellation: check if parent requested stop.
                 # Note: cancellation is only detected at astream iteration boundaries,
                 # so long-running tool calls within a single iteration will not be

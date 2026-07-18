@@ -413,6 +413,7 @@ async def task_tool(
     poll_count = 0
     last_status = None
     last_message_count = 0  # Track how many AI messages we've already sent
+    forwarded_chunk_count = 0  # Track how many tool_output_chunks we've forwarded from the subagent
     # Polling timeout: execution timeout + 60s buffer, checked every 5s
     max_poll_count = (config.timeout_seconds + 60) // 5
 
@@ -447,6 +448,16 @@ async def task_tool(
                     status="failed",
                     error=error,
                 )
+
+            # Forward any new tool_output_chunks from the subagent to the
+            # parent stream writer so custom events (emitted by middlewares
+            # like ToolStreamingMiddleware) propagate out of the subagent
+            # context to the lead agent's SSE stream (#4150).
+            if hasattr(result, "tool_output_chunks"):
+                chunks = result.tool_output_chunks[forwarded_chunk_count:]
+                for chunk in chunks:
+                    writer(chunk)
+                forwarded_chunk_count = len(result.tool_output_chunks)
 
             # Log status changes for debugging
             if result.status != last_status:

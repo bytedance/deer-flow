@@ -1849,3 +1849,104 @@ def test_subagent_usage_cache_is_cleared_when_polling_raises(monkeypatch):
         )
 
     assert task_tool_module.pop_cached_subagent_usage("tc-error") is None
+
+
+def test_task_tool_polling_forwards_tool_output_chunks_to_parent_writer(monkeypatch):
+    """When a SubagentResult carries tool_output_chunks, the polling loop must
+    forward new chunks to the parent stream writer so custom events from the
+    subagent (emitted by ToolStreamingMiddleware) propagate to the lead agent's
+    SSE stream (#4150).
+    """
+    config = _make_subagent_config()
+    events = []
+
+    custom_chunk_1 = {"type": "tool_output_chunk", "tool_call_id": "tc-1", "status": "start"}
+    custom_chunk_2 = {"type": "tool_output_chunk", "tool_call_id": "tc-1", "status": "final", "preview": "Done"}
+
+    # Build a result with tool_output_chunks — two chunks, completed.
+    result = _make_result(
+        FakeSubagentStatus.COMPLETED,
+        result="done",
+    )
+    # _make_result returns SimpleNamespace; attach extra field.
+    result.tool_output_chunks = [custom_chunk_1, custom_chunk_2]
+
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(
+        task_tool_module,
+        "SubagentExecutor",
+        type("DummyExecutor", (), {"__init__": lambda self, **kwargs: None, "execute_async": lambda self, prompt, task_id=None: task_id}),
+    )
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: config)
+    monkeypatch.setattr(task_tool_module, "get_background_task_result", lambda _: result)
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: events.append)
+    monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [])
+
+    output = _run_task_tool(
+        runtime=_make_runtime(),
+        description="test streaming",
+        prompt="do work",
+        subagent_type="general-purpose",
+        tool_call_id="tc-chunks",
+    )
+
+    # Assertions: result is a Command wrapping a ToolMessage.
+    message = _task_tool_message(output)
+    assert "Task Succeeded" in str(message.content)
+
+    # Events captured in order: task_started first, then the two custom
+    # chunks, then task_completed last.
+    started_events = [e for e in events if e.get("type") == "task_started"]
+    completed_events = [e for e in events if e.get("type") == "task_completed"]
+    assert len(started_events) == 1
+    assert len(completed_events) == 1
+
+    # Both custom chunks must be forwarded exactly once.
+    assert custom_chunk_1 in events
+    assert custom_chunk_2 in events
+
+    # Order check: task_started < chunks < task_completed
+    chunk1_idx = events.index(custom_chunk_1)
+    chunk2_idx = events.index(custom_chunk_2)
+    started_idx = events.index(started_events[0])
+    completed_idx = events.index(completed_events[0])
+    assert started_idx < chunk1_idx < chunk2_idx < completed_idx
+
+
+def test_task_tool_polling_skips_forward_when_result_lacks_tool_output_chunks(monkeypatch):
+    """When result has no tool_output_chunks (legacy SubagentResult), the
+    hasattr check must not crash and no chunks must be forwarded.
+    """
+    config = _make_subagent_config()
+    events = []
+
+    result = _make_result(FakeSubagentStatus.COMPLETED, result="done")
+    # No tool_output_chunks attribute at all — the code uses hasattr check.
+
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(
+        task_tool_module,
+        "SubagentExecutor",
+        type("DummyExecutor", (), {"__init__": lambda self, **kwargs: None, "execute_async": lambda self, prompt, task_id=None: task_id}),
+    )
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: config)
+    monkeypatch.setattr(task_tool_module, "get_background_task_result", lambda _: result)
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: events.append)
+    monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [])
+
+    output = _run_task_tool(
+        runtime=_make_runtime(),
+        description="test",
+        prompt="do work",
+        subagent_type="general-purpose",
+        tool_call_id="tc-no-chunks",
+    )
+
+    message = _task_tool_message(output)
+    assert "Task Succeeded" in str(message.content)
+
+    # Only the expected task_* events — no tool_output_chunk events.
+    types = [e.get("type") for e in events]
+    assert types == ["task_started", "task_completed"]
