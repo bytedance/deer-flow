@@ -457,7 +457,7 @@ async def task_tool(
                 chunks = result.tool_output_chunks[forwarded_chunk_count:]
                 for chunk in chunks:
                     writer(chunk)
-                forwarded_chunk_count = len(result.tool_output_chunks)
+                forwarded_chunk_count += len(chunks)
 
             # Log status changes for debugging
             if result.status != last_status:
