@@ -20,10 +20,13 @@ handlers' own filesystem access is exercised on the loop.
 from __future__ import annotations
 
 import asyncio
+import threading
 from pathlib import Path
 
 import pytest
+import yaml
 
+from app.gateway.routers import agents as agents_router
 from app.gateway.routers.agents import (
     AgentCreateRequest,
     AgentUpdateRequest,
@@ -141,5 +144,79 @@ async def test_update_user_profile_does_not_block_event_loop(tmp_path: Path, mon
             return get_paths().user_md_file.read_text(encoding="utf-8")
 
         assert await asyncio.to_thread(_read) == "Profile body."
+    finally:
+        load_agents_api_config_from_dict({})
+
+
+async def test_concurrent_partial_updates_do_not_lose_fields(tmp_path: Path, monkeypatch) -> None:
+    """Two overlapping partial updates to one agent must both survive.
+
+    ``update_agent`` runs its whole load-modify-write in a worker thread, which
+    removed the implicit serialization the single-threaded event loop provided.
+    Each request loads a full ``AgentConfig`` snapshot and rewrites the complete
+    ``config.yaml``, so without the per-agent lock the later write silently
+    restores every field it read before the earlier update landed.
+
+    The instrumented load below widens the load->write window and counts how many
+    workers are inside the critical section at once, which also proves the second
+    mutation cannot enter until the first worker has exited.
+    """
+    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+    monkeypatch.setattr("deerflow.config.paths._paths", None)
+    load_agents_api_config_from_dict({"enabled": True})
+    try:
+        user_id = get_effective_user_id()
+        agent_dir = await asyncio.to_thread(get_paths().user_agent_dir, user_id, "race-agent")
+        await asyncio.to_thread(agent_dir.mkdir, parents=True, exist_ok=True)
+        await asyncio.to_thread(
+            (agent_dir / "config.yaml").write_text,
+            "name: race-agent\ndescription: base\nmodel: old-model\n",
+            encoding="utf-8",
+        )
+
+        real_load = agents_router.load_agent_config
+        state_lock = threading.Lock()
+        counters = {"active": 0, "max": 0, "calls": 0}
+        # Rendezvous for the two requests' *initial* loads. Unserialized, both
+        # requests meet here and therefore both hold the same starting snapshot
+        # — the exact interleaving that loses a field. Serialized, the second
+        # request cannot reach it while the first holds the agent, so the first
+        # simply times out and the barrier breaks (harmless).
+        initial_load_barrier = threading.Barrier(2, timeout=0.3)
+
+        def _slow_load(*args, **kwargs):
+            # Runs inside the offloaded worker, so blocking here stays off the
+            # event loop.
+            with state_lock:
+                call_index = counters["calls"]
+                counters["calls"] += 1
+                counters["active"] += 1
+                counters["max"] = max(counters["max"], counters["active"])
+            try:
+                if call_index < 2:
+                    try:
+                        initial_load_barrier.wait()
+                    except threading.BrokenBarrierError:
+                        pass
+                return real_load(*args, **kwargs)
+            finally:
+                with state_lock:
+                    counters["active"] -= 1
+
+        monkeypatch.setattr(agents_router, "load_agent_config", _slow_load)
+
+        await asyncio.gather(
+            update_agent("race-agent", AgentUpdateRequest(description="first")),
+            update_agent("race-agent", AgentUpdateRequest(model="new-model")),
+        )
+
+        text = await asyncio.to_thread((agent_dir / "config.yaml").read_text, encoding="utf-8")
+        final = yaml.safe_load(text)
+
+        # Disjoint updates: neither may be rolled back by the other's rewrite.
+        assert final["description"] == "first"
+        assert final["model"] == "new-model"
+        # The second worker cannot enter the section while the first holds it.
+        assert counters["max"] == 1
     finally:
         load_agents_api_config_from_dict({})
