@@ -26,8 +26,9 @@ The suite has two:
   worked example for writing your own assertions.
 - **Two live tests** drive the agent end-to-end and assert on the trace the real
   run emits. These are the behavioural guards: a change that alters routing, tool
-  selection, or token cost is caught here. They need `OPENAI_API_KEY` and the
-  DeerFlow app, so they skip by default.
+  selection, or token cost is caught here. They are explicit opt-in via
+  `MONOCLE_LIVE_TESTS=1` and skip by default, so a plain run never spends model
+  tokens or hits the network, even on a fully configured checkout.
 
 ## Layout
 
@@ -68,24 +69,29 @@ requirements installed) when changing agent behaviour, tools, or routing.
 # from the repo root
 pip install -r backend/tests/monocle/requirements.txt
 
-# offline example — no network, no keys
+# offline — no network, no keys; the live tests skip unless opted in
 pytest backend/tests/monocle/
 
-# add the live behavioural tests (needs OPENAI_API_KEY + the DeerFlow app)
-pytest backend/tests/monocle/ -k live
+# opt in to the live behavioural tests (real model calls + web requests)
+MONOCLE_LIVE_TESTS=1 pytest backend/tests/monocle/
 ```
 
 Or, following the backend convention (from `backend/`, with uv):
 
 ```bash
 uv pip install -r tests/monocle/requirements.txt
-uv run pytest tests/monocle/            # offline
-uv run pytest tests/monocle/ -k live    # + live
+uv run pytest tests/monocle/                          # offline
+MONOCLE_LIVE_TESTS=1 uv run pytest tests/monocle/     # + live
 ```
 
-The live tests skip automatically when `OPENAI_API_KEY` is unset, when the
-DeerFlow app is not importable, or when `config.yaml` is missing. DeerFlow's
-`web_search` is DuckDuckGo, so a live run needs only `OPENAI_API_KEY`.
+The live tests are opt-in by design: without `MONOCLE_LIVE_TESTS=1` they skip
+even on a checkout where credentials and `config.yaml` are present, so the
+default command can never spend tokens or write to a sandbox. When opted in,
+they still skip if the DeerFlow app is not importable or `config.yaml` is
+missing. Model credentials are validated by the configured model itself —
+`config.yaml` may select any provider (OpenAI, Anthropic, Gemini, and so on),
+so there is no hard-coded key requirement. DeerFlow's `web_search` is
+DuckDuckGo and needs no key of its own.
 
 The `monocle_trace_asserter` fixture is provided by `monocle_test_tools`' own
 pytest plugin, which registers automatically on install (a `pytest11` entry

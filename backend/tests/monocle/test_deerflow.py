@@ -9,14 +9,16 @@ Two layers:
   worked example for writing your own assertions.
 * Two **live tests** drive the agent end-to-end through ``run_agent`` and assert
   on the trace the real run emits. These are the behavioural guards: a change
-  that alters routing, tool selection, or token cost is caught here. They need
-  ``OPENAI_API_KEY`` and the DeerFlow app, so they skip by default.
+  that alters routing, tool selection, or token cost is caught here. They are
+  **explicit opt-in** via ``MONOCLE_LIVE_TESTS=1`` (default off, so a plain run
+  never spends tokens or hits the network) and need the DeerFlow app plus the
+  configured model's credentials.
 
 The whole module is skipped when ``monocle_test_tools`` is not installed (see the
 ``importorskip`` below), so a plain backend venv collects it without error.
 
-    pytest backend/tests/monocle/            # offline example (no keys)
-    pytest backend/tests/monocle/ -k live    # add the live behavioural tests
+    pytest backend/tests/monocle/                                  # offline only
+    MONOCLE_LIVE_TESTS=1 pytest backend/tests/monocle/             # + live tests
 
 See ``README.md`` for how to add your own.
 """
@@ -31,10 +33,26 @@ import pytest
 # a plain backend CI venv) instead of erroring at collection.
 pytest.importorskip("monocle_test_tools", reason="pip install -r tests/monocle/requirements.txt")
 
+from _helpers import live_tests_enabled  # noqa: E402
 from monocle_test_tools import TraceAssertion  # noqa: E402
 
 TRACES = Path(__file__).resolve().parent / "traces"
 EXAMPLE_TRACE = str(TRACES / "web_research_ev_battery.json")
+
+
+def test_live_gate_defaults_off(monkeypatch):
+    """The live tests must be opt-in: gate closed by default, open only on the flag.
+
+    This is what keeps the plain ``pytest backend/tests/monocle/`` run incapable
+    of model calls, web requests, or sandbox writes, even on a checkout where
+    credentials and ``config.yaml`` are present.
+    """
+    monkeypatch.delenv("MONOCLE_LIVE_TESTS", raising=False)
+    assert live_tests_enabled() is False
+    monkeypatch.setenv("MONOCLE_LIVE_TESTS", "1")
+    assert live_tests_enabled() is True
+    monkeypatch.setenv("MONOCLE_LIVE_TESTS", "0")
+    assert live_tests_enabled() is False
 
 
 # --- Offline example: the full assertion vocabulary against a recorded trace ---
