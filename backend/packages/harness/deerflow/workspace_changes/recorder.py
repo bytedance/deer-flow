@@ -66,7 +66,22 @@ async def capture_workspace_snapshot(
     limits: WorkspaceChangeLimits | None = None,
     include_text: bool = True,
 ) -> WorkspaceSnapshot:
-    roots, text_cache_dir = await asyncio.to_thread(_prepare_capture, thread_id, user_id=user_id, include_text=include_text)
+    # `_prepare_capture` creates the text cache dir inside the worker, so the
+    # handoff must be cancellation-safe: if the run is cancelled after mkdtemp
+    # but before we receive the path, the shielded worker still finishes and we
+    # reclaim its result to remove the orphaned dir before re-raising.
+    prepare = asyncio.ensure_future(asyncio.to_thread(_prepare_capture, thread_id, user_id=user_id, include_text=include_text))
+    try:
+        roots, text_cache_dir = await asyncio.shield(prepare)
+    except asyncio.CancelledError:
+        orphaned = None
+        try:
+            _, orphaned = await asyncio.shield(prepare)
+        except Exception:
+            orphaned = None  # prepare failed before creating a dir; nothing to reclaim
+        if orphaned is not None:
+            await asyncio.shield(_remove_text_cache_dir(orphaned))
+        raise
     try:
         return await asyncio.to_thread(
             scan_workspace_roots,

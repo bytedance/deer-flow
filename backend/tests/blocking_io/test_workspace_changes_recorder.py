@@ -14,6 +14,11 @@ Both cleanup branches are driven explicitly — the failure branch of
 ``record_workspace_changes`` — because the happy path alone never reaches the
 rmtree this anchor exists to guard.
 
+Because ``mkdtemp`` must be offloaded, its worker handoff is also a cancellation
+hazard: a run cancelled after ``mkdtemp`` but before the coroutine receives the
+path would orphan the dir. The last test pins the shield+reclaim guard that
+removes such a dir instead of leaking it.
+
 Imports are kept at module top so any import-time IO runs at collection (outside
 the gate); the surface under test runs on the event loop inside the gated test.
 """
@@ -22,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import tempfile
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -106,3 +112,46 @@ async def test_record_workspace_changes_cleanup_does_not_block_event_loop(tmp_pa
 
     still_there = await asyncio.to_thread(cache_dir.exists)
     assert not still_there, "record_workspace_changes must remove the snapshot text cache"
+
+
+async def test_capture_workspace_snapshot_cancelled_handoff_leaks_no_text_cache(tmp_path: Path, monkeypatch) -> None:
+    """A run cancelled during the mkdtemp handoff must not orphan the text cache.
+
+    ``mkdtemp`` runs in the ``_prepare_capture`` worker, so if the run is
+    cancelled after the dir is created but before the coroutine receives the
+    path, nothing downstream owns it. The shield+reclaim guard waits for the
+    worker and removes the dir; without it the dir leaks into the temp root.
+    """
+    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+    import deerflow.config.paths as paths_mod
+
+    monkeypatch.setattr(paths_mod, "_paths", None)
+
+    cache_root = tmp_path / "tmp"
+    cache_root.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(cache_root))
+
+    entered = threading.Event()
+    release = threading.Event()
+    real_mkdtemp = tempfile.mkdtemp
+
+    def _blocking_mkdtemp(*args: Any, **kwargs: Any) -> str:
+        created = real_mkdtemp(*args, **kwargs)  # the dir really exists now
+        entered.set()
+        release.wait(timeout=5)  # park the worker mid-handoff, holding the result
+        return created
+
+    monkeypatch.setattr(recorder.tempfile, "mkdtemp", _blocking_mkdtemp)
+
+    task = asyncio.ensure_future(recorder.capture_workspace_snapshot("t1", include_text=True))
+    await asyncio.to_thread(entered.wait, 5)  # mkdtemp created the dir; worker is parked
+    parked = await asyncio.to_thread(lambda: sorted(cache_root.glob("deerflow-workspace-changes-*")))
+    assert parked, "text cache dir should exist while the worker is parked mid-handoff"
+
+    task.cancel()
+    release.set()  # let the worker finish and hand its result to the reclaim path
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    leftovers = await asyncio.to_thread(lambda: sorted(cache_root.glob("deerflow-workspace-changes-*")))
+    assert leftovers == [], f"cancelled capture leaked a text cache dir: {leftovers}"
