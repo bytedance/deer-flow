@@ -47,8 +47,55 @@ class BrowserlessClient:
         wait_for_selector_timeout_ms: int = 5000,
         reject_resource_types: list[str] | None = None,
         reject_request_pattern: list[str] | None = None,
-    ) -> BrowserlessFetchResult | str:
+    ) -> str:
         """Fetch the rendered HTML of a page using Browserless.
+
+        Public string contract: this always returns either the rendered HTML or
+        an "Error: ..." string, never a richer result object. Callers that also
+        need the target page's real status (Browserless returns HTTP 200 for the
+        render request itself even when the target page responded with a 4xx/5xx
+        or an anti-bot block page) should use fetch_html_with_status() instead.
+
+        Args:
+            url: The URL to fetch.
+            wait_for_event: Wait for a page event (e.g. "networkidle", "load").
+            wait_for_timeout_ms: Extra wait after page load.
+            wait_for_selector: CSS selector to wait for.
+            wait_for_selector_timeout_ms: Timeout for selector wait.
+            reject_resource_types: Resource types to block (e.g. ["image"]).
+            reject_request_pattern: URL patterns to block.
+
+        Returns:
+            Rendered HTML content, or an "Error: ..." string on failure.
+        """
+        result = await self.fetch_html_with_status(
+            url=url,
+            wait_for_event=wait_for_event,
+            wait_for_timeout_ms=wait_for_timeout_ms,
+            wait_for_selector=wait_for_selector,
+            wait_for_selector_timeout_ms=wait_for_selector_timeout_ms,
+            reject_resource_types=reject_resource_types,
+            reject_request_pattern=reject_request_pattern,
+        )
+        return result.html if isinstance(result, BrowserlessFetchResult) else result
+
+    async def fetch_html_with_status(
+        self,
+        url: str,
+        wait_for_event: str = "",
+        wait_for_timeout_ms: int = 0,
+        wait_for_selector: str = "",
+        wait_for_selector_timeout_ms: int = 5000,
+        reject_resource_types: list[str] | None = None,
+        reject_request_pattern: list[str] | None = None,
+    ) -> BrowserlessFetchResult | str:
+        """Fetch the rendered HTML of a page using Browserless, with target status.
+
+        Same request/response handling as fetch_html(), except a successful fetch
+        returns a BrowserlessFetchResult carrying the target page's real status
+        headers instead of a bare string, so a caller can tell a genuine 200 apart
+        from a render-succeeded-but-target-errored (or anti-bot blocked) response.
+        Use fetch_html() instead when only the HTML/error string is needed.
 
         Only sends accepted parameters for the current Browserless API version.
         Sets a default navigation timeout (30s) via query param.
@@ -64,7 +111,7 @@ class BrowserlessClient:
 
         Returns:
             Fetch result with the rendered HTML and target-page status headers,
-            or an error string.
+            or an "Error: ..." string on failure.
         """
         payload: dict[str, Any] = {
             "url": url,

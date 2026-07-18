@@ -224,7 +224,7 @@ async def web_fetch_tool(url: str) -> str:
         wait_for_selector = cfg.get("wait_for_selector", wait_for_selector)
 
         client = _get_browserless_client("web_fetch")
-        result = await client.fetch_html(
+        result = await client.fetch_html_with_status(
             url=url,
             wait_for_event=wait_for_event,
             wait_for_timeout_ms=wait_for_timeout_ms,

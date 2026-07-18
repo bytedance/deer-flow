@@ -22,7 +22,15 @@ class TestBrowserlessClient:
     """Tests for the BrowserlessClient class."""
 
     async def test_fetch_html_success(self):
-        """fetch_html returns a BrowserlessFetchResult with the rendered HTML on success."""
+        """fetch_html returns the rendered HTML as a plain string on success.
+
+        Regression guard for the fetch_html() public string contract:
+        BrowserlessClient is re-exported from deerflow.community.browserless.__all__,
+        so harness consumers that call string methods, compare the result, or pass
+        it directly to a parser must keep getting a str back. Status-aware callers
+        (e.g. web_fetch_tool) use fetch_html_with_status() instead - see
+        test_fetch_html_with_status_surfaces_target_status_headers below.
+        """
         with patch("deerflow.community.browserless.browserless_client.httpx.AsyncClient") as mock_cls:
             mock_ctx = MagicMock()
             mock_cls.return_value.__aenter__.return_value = mock_ctx
@@ -36,20 +44,25 @@ class TestBrowserlessClient:
             client = BrowserlessClient(base_url="http://browserless:3000")
             result = await client.fetch_html("https://example.com")
 
-            assert isinstance(result, BrowserlessFetchResult)
-            assert result.html == "<html><body>Page content</body></html>"
+            assert isinstance(result, str)
+            assert result == "<html><body>Page content</body></html>"
             call_kwargs = mock_ctx.post.call_args.kwargs
             assert call_kwargs["json"]["url"] == "https://example.com"
             assert "waitUntil" not in call_kwargs["json"]
             assert "gotoTimeout" not in call_kwargs["json"]
             assert "bestAttempt" not in call_kwargs["json"]
 
-    async def test_fetch_html_surfaces_target_status_headers(self):
-        """fetch_html carries the target page's real status headers on the result.
+    async def test_fetch_html_returns_plain_string_even_when_target_page_errored(self):
+        """fetch_html stays a plain string even when the target page itself errored.
 
         Browserless returns HTTP 200 for the render request itself even when the
-        target page responded with a 404 (or an anti-bot block page), so callers
-        need the X-Response-Code/X-Response-Status headers to tell the two apart.
+        target page responded with a 404 (or an anti-bot block page). Before this
+        fix, a successful fetch_html() call started returning a BrowserlessFetchResult
+        object instead of a string in exactly this case, breaking existing callers
+        (.lower(), string concatenation, parsers expecting str) even though their
+        fetch technically succeeded. fetch_html() must keep unwrapping to the plain
+        HTML string regardless of the target status; only fetch_html_with_status()
+        exposes the richer result.
         """
         with patch("deerflow.community.browserless.browserless_client.httpx.AsyncClient") as mock_cls:
             mock_ctx = MagicMock()
@@ -66,6 +79,34 @@ class TestBrowserlessClient:
 
             client = BrowserlessClient(base_url="http://browserless:3000")
             result = await client.fetch_html("https://example.com/blocked")
+
+            assert isinstance(result, str)
+            assert result == "<html><body>Access Denied</body></html>"
+
+    async def test_fetch_html_with_status_surfaces_target_status_headers(self):
+        """fetch_html_with_status carries the target page's real status headers on the result.
+
+        Browserless returns HTTP 200 for the render request itself even when the
+        target page responded with a 404 (or an anti-bot block page), so status-aware
+        callers need the X-Response-Code/X-Response-Status headers to tell the two
+        apart. This richer result is opt-in via fetch_html_with_status(); plain
+        fetch_html() stays a str (see test_fetch_html_success above).
+        """
+        with patch("deerflow.community.browserless.browserless_client.httpx.AsyncClient") as mock_cls:
+            mock_ctx = MagicMock()
+            mock_cls.return_value.__aenter__.return_value = mock_ctx
+
+            mock_resp = MagicMock()
+            mock_resp.status_code = 200
+            mock_resp.text = "<html><body>Access Denied</body></html>"
+            mock_resp.headers = {
+                "X-Response-Code": "404",
+                "X-Response-Status": "Not Found",
+            }
+            mock_ctx.post = AsyncMock(return_value=mock_resp)
+
+            client = BrowserlessClient(base_url="http://browserless:3000")
+            result = await client.fetch_html_with_status("https://example.com/blocked")
 
             assert isinstance(result, BrowserlessFetchResult)
             assert result.html == "<html><body>Access Denied</body></html>"
@@ -282,7 +323,7 @@ class TestBrowserlessTools:
     async def test_web_fetch_tool_success(self, mock_get_client):
         """web_fetch_tool successfully fetches and extracts content."""
         mock_client = MagicMock()
-        mock_client.fetch_html = AsyncMock(
+        mock_client.fetch_html_with_status = AsyncMock(
             return_value=BrowserlessFetchResult(
                 html="<html><body><article><h1>Title</h1><p>Content</p></article></body></html>",
                 target_status_code="200",
@@ -301,7 +342,7 @@ class TestBrowserlessTools:
     async def test_web_fetch_tool_error(self, mock_get_client):
         """web_fetch_tool returns error when fetch fails."""
         mock_client = MagicMock()
-        mock_client.fetch_html = AsyncMock(return_value="Error: Browserless returned empty response")
+        mock_client.fetch_html_with_status = AsyncMock(return_value="Error: Browserless returned empty response")
         mock_get_client.return_value = mock_client
 
         with patch("deerflow.community.browserless.tools._get_tool_config", return_value=None):
@@ -313,7 +354,7 @@ class TestBrowserlessTools:
     async def test_web_fetch_tool_exception(self, mock_get_client):
         """web_fetch_tool returns error when client raises exception."""
         mock_client = MagicMock()
-        mock_client.fetch_html = AsyncMock(side_effect=Exception("Unexpected error"))
+        mock_client.fetch_html_with_status = AsyncMock(side_effect=Exception("Unexpected error"))
         mock_get_client.return_value = mock_client
 
         with patch("deerflow.community.browserless.tools._get_tool_config", return_value=None):
@@ -347,7 +388,7 @@ class TestBrowserlessTools:
     async def test_web_fetch_tool_allows_private_when_opted_in(self, mock_get_client):
         """web_fetch_tool allows internal targets only when explicitly configured."""
         mock_client = MagicMock()
-        mock_client.fetch_html = AsyncMock(
+        mock_client.fetch_html_with_status = AsyncMock(
             return_value=BrowserlessFetchResult(
                 html="<html><body><article><p>internal</p></article></body></html>",
                 target_status_code="200",
@@ -360,7 +401,7 @@ class TestBrowserlessTools:
             result = await tools.web_fetch_tool.ainvoke("http://10.0.0.5/dashboard")
 
         assert "Error:" not in result
-        mock_client.fetch_html.assert_called_once()
+        mock_client.fetch_html_with_status.assert_called_once()
 
     @patch("deerflow.community.browserless.tools._get_browserless_client")
     async def test_web_fetch_tool_warns_on_target_error_status(self, mock_get_client):
@@ -368,12 +409,12 @@ class TestBrowserlessTools:
 
         Mirrors test_web_capture_tool_warns_on_target_error_status below:
         Browserless returns HTTP 200 for the render request even when the target
-        page is a 404 or an anti-bot block page, so fetch_html's target-status
-        headers must produce the same visible warning web_capture_tool already
-        gives via _target_status_warning.
+        page is a 404 or an anti-bot block page, so fetch_html_with_status's
+        target-status headers must produce the same visible warning
+        web_capture_tool already gives via _target_status_warning.
         """
         mock_client = MagicMock()
-        mock_client.fetch_html = AsyncMock(
+        mock_client.fetch_html_with_status = AsyncMock(
             return_value=BrowserlessFetchResult(
                 html="<html><body><article><h1>Not Found</h1><p>The page does not exist.</p></article></body></html>",
                 target_status_code="404",
@@ -396,7 +437,7 @@ class TestBrowserlessTools:
         by the target-status warning added for error/blocked pages.
         """
         mock_client = MagicMock()
-        mock_client.fetch_html = AsyncMock(
+        mock_client.fetch_html_with_status = AsyncMock(
             return_value=BrowserlessFetchResult(
                 html="<html><body><article><h1>Title</h1><p>Content</p></article></body></html>",
                 target_status_code="200",
@@ -417,17 +458,17 @@ class TestBrowserlessTools:
         Both tools sit on top of the same Browserless target-status headers
         (X-Response-Code / X-Response-Status). Before this fix, only
         web_capture_tool (via capture_screenshot + _target_status_warning)
-        surfaced them; web_fetch_tool (via fetch_html) silently returned the
-        blocked page's raw content with no indication anything was wrong. This
-        drives both real tool functions with the same headers and asserts they
-        now agree.
+        surfaced them; web_fetch_tool (via fetch_html_with_status) silently
+        returned the blocked page's raw content with no indication anything was
+        wrong. This drives both real tool functions with the same headers and
+        asserts they now agree.
         """
         outputs_dir = tmp_path / "outputs"
         outputs_dir.mkdir()
         runtime = SimpleNamespace(state={"thread_data": {"outputs_path": str(outputs_dir)}})
 
         fetch_client = MagicMock()
-        fetch_client.fetch_html = AsyncMock(
+        fetch_client.fetch_html_with_status = AsyncMock(
             return_value=BrowserlessFetchResult(
                 html="<html><body><article><h1>Blocked</h1><p>Access denied.</p></article></body></html>",
                 target_status_code="404",
