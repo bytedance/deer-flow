@@ -78,6 +78,11 @@ INBOUND_DEDUPE_MAX_ENTRIES = 4096
 # client_id) are not guaranteed identical across a provider's own redelivery, so
 # keying dedupe on them would miss exactly the retries we want to absorb.
 INBOUND_DEDUPE_METADATA_KEYS = ("event_id", "message_id", "msg_id")
+# Providers that persist connection.workspace_id = chat_id (telegram / feishu /
+# wechat upsert_connection). Unbound inbound has no connection, so msg.workspace_id
+# is unset; chat_id is still the tenant scope and is safe for the dedupe key.
+# Slack is intentionally excluded: its channel ids are not globally unique.
+CHAT_SCOPED_WORKSPACE_CHANNELS = frozenset({"telegram", "feishu", "wechat"})
 
 CHANNEL_CAPABILITIES = {
     "dingtalk": {"supports_streaming": False},
@@ -1170,7 +1175,13 @@ class ChannelManager:
         # Fail closed: without a workspace/team/guild identifier we cannot tell two
         # workspaces apart (e.g. Slack channel ids are not globally unique), so
         # skip dedupe rather than risk collapsing distinct workspaces' messages.
-        workspace_id = msg.workspace_id or metadata.get("workspace_id") or metadata.get("team_id") or metadata.get("guild_id") or metadata.get("aibotid")
+        # conversation_id covers DingTalk (group + P2P) which stamps it on every
+        # inbound; chat-scoped providers fall back to chat_id so unbound
+        # redeliveries still dedupe — mirrors how those adapters bind workspace
+        # and how GitHub's dispatcher documents Telegram/WeChat keying.
+        workspace_id = msg.workspace_id or metadata.get("workspace_id") or metadata.get("team_id") or metadata.get("guild_id") or metadata.get("aibotid") or metadata.get("conversation_id")
+        if not workspace_id and msg.channel_name in CHAT_SCOPED_WORKSPACE_CHANNELS:
+            workspace_id = msg.chat_id or None
         if not workspace_id:
             return None
         return (msg.channel_name, str(workspace_id), msg.chat_id, message_id)
