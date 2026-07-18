@@ -72,6 +72,11 @@ class MemoryOwnershipStore(SandboxOwnershipStore):
             lease = self._live_lease_locked(sandbox_id)
             if lease is not None and lease.owner_id != self._owner_id:
                 return False
+            if not for_destroy and lease is not None and lease.destroying:
+                # Never unwind our own teardown: the stop is already in flight
+                # and cannot be recalled, so downgrading to `own:` would let a
+                # `take()` hand out a container that is about to die.
+                return False
             self._write_locked(sandbox_id, destroying=for_destroy)
             return True
 

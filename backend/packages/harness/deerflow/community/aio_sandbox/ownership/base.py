@@ -114,6 +114,18 @@ class SandboxOwnershipStore(abc.ABC):
         Exclusive: succeeds only when the container is unowned or already ours,
         which is what gates every adopt/reap path.
 
+        Exclusive against **peers**, not against the caller's own process: a
+        claim against our own ``own:`` lease succeeds by design, which is what
+        lets a destroy path claim what it already owns. Same-process exclusion
+        between an instance's reaper threads and its own acquire path is the
+        provider's job, not this store's (``_reserve_local_teardown``).
+
+        One exception, so ``for_destroy`` cannot be silently unwound: a
+        **non**-destroy claim against our own ``del:`` lease is refused. The stop
+        it marks is already in flight and cannot be recalled, so downgrading the
+        marker would let a :meth:`take` hand out a container that is about to
+        die.
+
         The read-modify-write must not interleave. On redis that is Lua (one
         script, server-side); the memory store serializes on a process-local lock
         and is single-instance anyway, so "different instances" cannot arise

@@ -16,6 +16,7 @@ still covers the contract.
 from __future__ import annotations
 
 import os
+import threading
 import time
 import uuid
 
@@ -442,6 +443,61 @@ def test_redis_backend_error_is_wrapped_not_leaked():
         store.release("s1")
     with pytest.raises(OwnershipBackendError):
         store.owner("s1")
+
+
+def test_non_destroy_claim_does_not_unwind_our_own_teardown(stores):
+    """A `for_destroy=False` claim must not downgrade our own `del:` marker.
+
+    The stop it marks is already in flight and cannot be recalled, so turning the
+    lease back into `own:` would let a `take()` hand out a container that is
+    about to die — the #4206 failure, self-inflicted. No caller does this today
+    (the non-destroy callers run against an absent or unowned key), but the
+    contract has to forbid it rather than rely on that staying true.
+
+    Runs against both backends on purpose: the redis rule lives in Lua and the
+    memory rule in Python, so a fix applied to one only would drift silently.
+    """
+    a = stores.make("A")
+
+    assert a.claim("s1", for_destroy=True) is True
+    assert a.claim("s1") is False, "a non-destroy claim unwound our own in-flight teardown"
+    # Still a teardown: the marker survived the refused claim intact.
+    assert a.renew("s1") is RenewOutcome.LOST
+    b = stores.make("B")
+    assert b.take("s1") is False, "the teardown marker stopped refusing takes"
+
+    # Refreshing the teardown itself is still allowed — that is the heartbeat.
+    assert a.claim("s1", for_destroy=True) is True
+
+
+def test_concurrent_claims_serialize_to_one_winner(stores):
+    """The exclusion must hold under contention, not just in sequence.
+
+    The rest of this suite drives sequential calls, so it pins the predicate and
+    not the atomicity the predicate depends on — redis carries it in Lua, the
+    memory store in a process lock. Eight instances race for one container; the
+    read-modify-write is only atomic if exactly one wins.
+    """
+    barrier = threading.Barrier(8)
+    results = {}
+    lock = threading.Lock()
+
+    def contend(name):
+        store = stores.make(name)
+        barrier.wait(timeout=5)
+        won = store.claim("s1")
+        with lock:
+            results[name] = won
+
+    threads = [threading.Thread(target=contend, args=(f"W{i}",), daemon=True) for i in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+        assert not t.is_alive(), "a contending claim never finished"
+
+    winners = [name for name, won in results.items() if won]
+    assert len(winners) == 1, f"claim is not atomic under contention: {len(winners)} winners ({winners})"
 
 
 @pytest.mark.integration

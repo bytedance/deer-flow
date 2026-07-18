@@ -67,10 +67,19 @@ return 1
 
 # Adopt/reap gate: only if unowned or already ours (in either state).
 # ARGV[3] selects the state written: '1' marks a teardown in progress.
+#
+# A non-destroy claim never unwinds our *own* teardown: a stop is already in
+# flight and cannot be recalled, so downgrading the marker to `own:` would let a
+# `take()` hand out a container that is about to die. No caller does this today
+# (the `for_destroy=false` callers run against an absent or unowned key), but the
+# contract has to forbid it rather than rely on that staying true.
 _CLAIM_SCRIPT = """
 local current = redis.call('GET', KEYS[1])
 local mine_own = 'own:' .. ARGV[1]
 local mine_del = 'del:' .. ARGV[1]
+if ARGV[3] == '0' and current == mine_del then
+    return 0
+end
 if current == false or current == mine_own or current == mine_del then
     local value = mine_own
     if ARGV[3] == '1' then
