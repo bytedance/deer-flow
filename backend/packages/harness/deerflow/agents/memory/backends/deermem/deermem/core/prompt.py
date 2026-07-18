@@ -60,8 +60,15 @@ def load_prompt(
         candidates.insert(0, base / agent_name / f"{name}.yaml")
     for path in candidates:
         if path.is_file():
-            data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-            return data.get("template", "")
+            try:
+                data = yaml.safe_load(path.read_text(encoding="utf-8"))
+            except yaml.YAMLError as e:
+                raise ValueError(f"Invalid YAML in {path}: {e}") from e
+            data = data or {}
+            template = data.get("template")
+            if not isinstance(template, str) or not template:
+                raise ValueError(f"Missing or empty 'template' key in {path}")
+            return template
     searched = ", ".join(str(c) for c in candidates)
     raise FileNotFoundError(f"prompt template not found: {name} (searched: {searched})")
 
@@ -89,10 +96,23 @@ def load_prompt_messages(
         candidates.insert(0, base / agent_name / f"{name}.chat.yaml")
     for path in candidates:
         if path.is_file():
-            data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+            try:
+                data = yaml.safe_load(path.read_text(encoding="utf-8"))
+            except yaml.YAMLError as e:
+                raise ValueError(f"Invalid YAML in {path}: {e}") from e
+            data = data or {}
+            msg_list = data.get("messages")
+            if not isinstance(msg_list, list) or not msg_list:
+                raise ValueError(f"Missing or empty 'messages' key in {path}")
             messages: list[BaseMessage] = []
-            for msg in data.get("messages", []):
-                content = msg.get("content", "").format(**variables)
+            for msg in msg_list:
+                content = msg.get("content", "")
+                if not isinstance(content, str):
+                    content = str(content)
+                try:
+                    content = content.format(**variables)
+                except (KeyError, ValueError) as e:
+                    raise ValueError(f"Invalid placeholder in {path} (content of role={msg.get('role', '?')!r}): {e}") from e
                 if msg.get("role") == "system":
                     messages.append(SystemMessage(content=content))
                 else:

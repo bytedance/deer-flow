@@ -29,8 +29,9 @@ def load_patterns(name: str, *, patterns_dir: str | None = None) -> list[re.Patt
 
     Each YAML list entry is either a string (compiled with no flags) or a
     mapping ``{pattern: <regex>, flags: [...]}`` where ``flags`` may contain
-    ``"ignorecase"``. A missing or unreadable file logs a WARNING and returns
-    ``[]`` so that signal's detection is disabled rather than crashing startup.
+    ``"ignorecase"``. Raises ``ValueError`` for invalid YAML or a file whose
+    top-level value is not a list. A missing or unreadable file (OSError) logs a
+    WARNING and returns ``[]`` (detection disabled rather than crashing startup).
     """
     cache_key = (name, patterns_dir)
     cached = _PATTERN_CACHE.get(cache_key)
@@ -47,15 +48,15 @@ def load_patterns(name: str, *, patterns_dir: str | None = None) -> list[re.Patt
     try:
         with path.open(encoding="utf-8") as f:
             data = yaml.safe_load(f) or []
-    except (OSError, yaml.YAMLError) as e:  # noqa: BLE001 - degrade, don't crash
-        logger.warning("Failed to load signal patterns %s: %s; %s detection disabled.", path, e, name)
+    except yaml.YAMLError as e:
+        raise ValueError(f"Invalid YAML in {path}: {e}") from e
+    except OSError as e:
+        logger.warning("Failed to read signal patterns %s: %s; %s detection disabled.", path, e, name)
         _PATTERN_CACHE[cache_key] = []
         return []
 
     if not isinstance(data, list):
-        logger.warning("Signal patterns file %s is not a list; %s detection disabled.", path, name)
-        _PATTERN_CACHE[cache_key] = []
-        return []
+        raise ValueError(f"Signal patterns file {path} must contain a list, not {type(data).__name__}")
 
     compiled: list[re.Pattern[str]] = []
     for entry in data:
