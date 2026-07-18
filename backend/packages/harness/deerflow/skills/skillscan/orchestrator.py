@@ -11,6 +11,7 @@ that match them so a rule is authored, read, and tested in one place.
 from __future__ import annotations
 
 import ast
+import builtins
 import io
 import logging
 import posixpath
@@ -727,32 +728,119 @@ class _ClientScope:
             aliases={name: target for name, target in self.aliases.items() if name not in names},
         )
 
-    def merge_branch(self, entry: _ClientScope, branch: _ClientScope, path_local: set[str]) -> None:
-        """Fold one branch's net effect into this post-statement scope.
+    @staticmethod
+    def join(branches: list[_ClientScope], path_local: dict[str, str] | None = None) -> _ClientScope:
+        """The may-state after a set of alternative branches: what could hold a client on *any* of them.
 
-        A branch that binds a client makes it observable to `finally`, to the code after the
-        statement, and to anything defined inside the branch; a branch that rebinds the name away
-        makes it stop being a handle there. Both directions have to survive the branch, or the
-        walker either misses an exfil or blocks a name the branch already replaced.
+        Alternatives are not applied one after another -- only one of them runs. Folding them into a
+        single destructive map lets whichever branch happens to be visited last erase what another
+        branch still holds, which misses a client Python really calls (a branch that rebinds the name
+        hides one that does not) and invents one that it never calls. Joining instead keeps a name a
+        sink receiver when any feasible branch leaves it a client, and drops it only when every
+        feasible branch replaced it.
 
-        ``path_local`` holds names Python unbinds only on the path that executed -- an
-        `except ... as` target. On every other path the pre-statement binding is untouched, so
-        their absence from the branch is not evidence of a rebind and is not merged out.
+        Alias targets join the same way, except that a disagreement resolves toward the target that
+        can still name a constructor: a name that resolves to a client module on one path resolves to
+        one after the join, so replacing an alias on a path that may not run cannot hide the sink.
+
+        ``path_local`` carries bindings Python unbinds only on the branch that ran -- an
+        `except ... as` target -- which every other path leaves untouched, so they are restored here.
         """
-        for entry_names, source, target in ((entry.handles, branch.handles, self.handles), (entry.aliases, branch.aliases, self.aliases)):
-            for name, value in source.items():
-                if name not in entry_names:  # only genuinely new bindings; a branch that left a name
-                    target[name] = value  # alone must not resurrect what a sibling branch replaced
-        for entry_names, branch_names, target in ((entry.handles, branch.handles, self.handles), (entry.aliases, branch.aliases, self.aliases)):
-            for name in entry_names:
-                if name not in branch_names and name not in path_local:
-                    target.pop(name, None)
+        joined = _ClientScope(handles={}, aliases={})
+        for branch in branches:
+            for name, constructor in branch.handles.items():
+                joined.handles.setdefault(name, constructor)
+            for name, target in branch.aliases.items():
+                current = joined.aliases.get(name)
+                if current is None or (not _alias_names_a_constructor(current) and _alias_names_a_constructor(target)):
+                    joined.aliases[name] = target
+        for name, constructor in (path_local or {}).items():
+            joined.handles.setdefault(name, constructor)
+        return joined
 
     def replace_with(self, other: _ClientScope) -> None:
         self.handles.clear()
         self.handles.update(other.handles)
         self.aliases.clear()
         self.aliases.update(other.aliases)
+
+
+def _alias_names_a_constructor(target: str) -> bool:
+    return any(constructor == target or constructor.startswith(f"{target}.") for constructor in _PYTHON_CLIENT_CONSTRUCTORS)
+
+
+def _literal_exception_class(node: ast.AST | None) -> type[BaseException] | None:
+    """The builtin exception class a bare name denotes, when that is decidable here."""
+    if not isinstance(node, ast.Name):
+        return None
+    candidate = getattr(builtins, node.id, None)
+    return candidate if isinstance(candidate, type) and issubclass(candidate, BaseException) else None
+
+
+def _unconditional_raise_class(body: list[ast.stmt]) -> type[BaseException] | None:
+    """The class a block always raises, when the block ends in a literal `raise Name(...)`.
+
+    Only the tail is inspected: that is enough to know the fall-through path cannot be reached, which
+    is what makes a rebind on the handler path the only surviving state instead of one alternative
+    among several.
+    """
+    if not body or not isinstance(body[-1], ast.Raise) or body[-1].exc is None:
+        return None
+    raised = body[-1].exc
+    return _literal_exception_class(raised.func if isinstance(raised, ast.Call) else raised)
+
+
+def _selected_handler_index(node: ast.Try) -> int | None:
+    """Which handler a literal always-raising body selects, when every type involved is decidable."""
+    raised = _unconditional_raise_class(node.body)
+    if raised is None:
+        return None
+    for index, handler in enumerate(node.handlers):
+        if handler.type is None:
+            return index
+        caught = _literal_exception_class(handler.type)
+        if caught is None:
+            return None  # an expression we cannot evaluate -- every handler stays feasible
+        if issubclass(raised, caught):
+            return index
+    return None
+
+
+def _raised_group_classes(body: list[ast.stmt]) -> list[type[BaseException]] | None:
+    """The classes in a literal `raise ExceptionGroup("...", [A(), B()])`, when decidable."""
+    if not body or not isinstance(body[-1], ast.Raise) or not isinstance(body[-1].exc, ast.Call):
+        return None
+    call = body[-1].exc
+    if not isinstance(call.func, ast.Name) or call.func.id not in {"ExceptionGroup", "BaseExceptionGroup"} or len(call.args) != 2 or not isinstance(call.args[1], (ast.List, ast.Tuple)):
+        return None
+    classes = []
+    for element in call.args[1].elts:
+        found = _literal_exception_class(element.func if isinstance(element, ast.Call) else element)
+        if found is None:
+            return None
+        classes.append(found)
+    return classes
+
+
+def _match_case_always_runs(subject: ast.AST, case: ast.match_case) -> bool:
+    """Whether this case provably matches, so no later case and no fall-through state is reachable.
+
+    Only the forms whose outcome is fixed by the source are decided here -- a wildcard, a catch-all
+    class pattern, and a literal subject against a literal value. Anything else stays undecidable and
+    keeps every alternative alive, which is the safe direction for a blocking rule.
+    """
+    if case.guard is not None:
+        return False
+    pattern = case.pattern
+    while isinstance(pattern, ast.MatchAs) and pattern.pattern is not None:
+        pattern = pattern.pattern
+    if isinstance(pattern, ast.MatchAs):  # `case _:` / `case name:`
+        return True
+    if isinstance(pattern, ast.MatchClass) and isinstance(pattern.cls, ast.Name) and pattern.cls.id == "object" and not pattern.patterns and not pattern.kwd_patterns:
+        return True
+    if isinstance(pattern, ast.MatchValue) and isinstance(pattern.value, ast.Constant) and isinstance(subject, ast.Constant):
+        return type(subject.value) is type(pattern.value.value) and subject.value == pattern.value.value
+    return False
 
 
 def _find_client_handle_sink(tree: ast.AST) -> ast.AST | None:
@@ -860,95 +948,96 @@ def _walk_client_scope(node: ast.AST, scope: _ClientScope, inherited: _ClientSco
             _bind_client_targets([node.optional_vars], node.context_expr, scope, inherited, walrus, found, annotated)
         return
     if isinstance(node, ast.TryStar):
-        # `except*` clauses are sequential, not alternatives: every clause whose type matches a
-        # subgroup runs, in source order, and each one observes what the previous clauses left
-        # behind. So a single scope is threaded straight through -- body, then each clause's type
-        # and body in order -- with the clause's own `as` target deleted at its end the way Python
-        # deletes it, before the next clause is analyzed. Reusing ordinary `except`'s mutually
-        # exclusive copies here both misses a client an earlier clause created and blocks a name an
-        # earlier clause already replaced.
+        # Every `except*` clause whose type matches a subgroup runs, in source order, and observes
+        # what earlier clauses left. But which clauses match is usually not decidable here, so a
+        # clause is analyzed as *optional*: the state after it is the join of "it ran" and "it did
+        # not". Threading every clause body unconditionally would let a clause that never matched
+        # erase a handle the next clause still calls. When the raise is a literal exception group,
+        # membership is decidable and only the clauses that really match are applied.
         for stmt in node.body:
             _walk_client_scope(stmt, scope, inherited, walrus, found, annotated)
+        raised_group = _raised_group_classes(node.body)
         for handler in node.handlers:
             if handler.type is not None:
                 _walk_client_scope(handler.type, scope, inherited, walrus, found, annotated)
-            shadowed_handle = scope.handles.pop(handler.name, None) if handler.name else None
-            shadowed_alias = scope.aliases.pop(handler.name, None) if handler.name else None
+            caught = _literal_exception_class(handler.type)
+            decidable = raised_group is not None and (handler.type is None or caught is not None)
+            matches = decidable and (handler.type is None or any(issubclass(raised, caught) for raised in raised_group))
+            if decidable and not matches:
+                continue  # this clause provably never runs, so its rebinds are not real
+            before = scope.copy_without()
+            shadowed = {name: value for name, value in scope.handles.items() if name == handler.name}
+            clause_scope = scope.copy_without({handler.name} if handler.name else None)
             for stmt in handler.body:
-                _walk_client_scope(stmt, scope, inherited, walrus, found, annotated)
-            # Python deletes the `as` target when a clause finishes, but a clause whose type did not
-            # match never bound it and leaves the pre-clause binding untouched -- and which clauses
-            # match is not decidable here. Restore what the name held before, unless the body itself
-            # rebound it; erasing a live handle on the paths this clause never ran would be a bypass.
-            if handler.name and shadowed_handle is not None:
-                scope.handles.setdefault(handler.name, shadowed_handle)
-            if handler.name and shadowed_alias is not None:
-                scope.aliases.setdefault(handler.name, shadowed_alias)
+                _walk_client_scope(stmt, clause_scope, inherited=clause_scope, walrus=clause_scope, found=found, annotated=annotated)
+            # Python deletes the `as` target when a clause finishes; a clause that never matched
+            # leaves the pre-clause binding untouched, so it is restored rather than dropped.
+            scope.replace_with(clause_scope if decidable else _ClientScope.join([before, clause_scope], shadowed))
         for stmt in node.orelse:
             _walk_client_scope(stmt, scope, inherited, walrus, found, annotated)
         for stmt in node.finalbody:
             _walk_client_scope(stmt, scope, inherited, walrus, found, annotated)
         return
     if isinstance(node, ast.Try):
-        # The body runs first, mutating this scope in source order. Exception selection then
-        # evaluates each handler *type* in order -- Python binds only the matching handler's `as`
-        # target, so during selection no name is bound: a non-matching earlier handler must not drop
-        # a handle a later type reads. Walk every type against the shared scope (walrus side effects
-        # still accumulate in order) without dropping any `as` name. Ordinary handlers are mutually
-        # exclusive, so each body reads an isolated copy with only its own `as` target bound, and
-        # each body is also what definitions inside it close over.
+        # The body runs first. Exception selection then evaluates each handler *type* in order --
+        # Python binds only the matching handler's `as` target, so during selection no name is
+        # bound and a non-matching earlier handler must not drop a handle a later type reads.
         #
-        # The branch's net effect is then folded back: whichever branch ran, `finally` and the code
-        # after the statement see what it did. Only the `as` target itself stays path-local -- Python
-        # unbinds it at the end of the handler that ran, and a handler that never ran leaves the
-        # pre-statement binding alone, so dropping every `as` name unconditionally would erase a live
-        # handle on the paths where no such handler executed.
+        # Ordinary handlers are alternatives: exactly one of them (or none) runs. They are therefore
+        # walked on isolated copies -- which is also what definitions inside them close over -- and
+        # *joined*, not folded one after another, so a branch that rebinds a name cannot hide a
+        # branch that leaves the client in place. The fall-through state (no exception, or `else`)
+        # is one more alternative, dropped only when the body provably always raises into a handler.
         for stmt in node.body:
             _walk_client_scope(stmt, scope, inherited, walrus, found, annotated)
-        entry = scope.copy_without()
-        post = scope.copy_without()
-        for handler in node.handlers:
+        selected = _selected_handler_index(node)
+        branches: list[_ClientScope] = []
+        for index, handler in enumerate(node.handlers):
             if handler.type is not None:
                 _walk_client_scope(handler.type, scope, inherited, walrus, found, annotated)
-            handler_names = {handler.name} if handler.name else set()
-            body_scope = scope.copy_without(handler_names)
+            if selected is not None and index != selected:
+                continue  # a literal always-raising body proves this handler is not the one that runs
+            body_scope = scope.copy_without({handler.name} if handler.name else None)
             for stmt in handler.body:
                 _walk_client_scope(stmt, body_scope, inherited=body_scope, walrus=body_scope, found=found, annotated=annotated)
-            post.merge_branch(entry, body_scope, handler_names)
-        else_scope = scope.copy_without()
-        for stmt in node.orelse:
-            _walk_client_scope(stmt, else_scope, inherited=else_scope, walrus=else_scope, found=found, annotated=annotated)
-        post.merge_branch(entry, else_scope, set())
-        scope.replace_with(post)
+            branches.append(body_scope)
+        if selected is None:
+            else_scope = scope.copy_without()
+            for stmt in node.orelse:
+                _walk_client_scope(stmt, else_scope, inherited=else_scope, walrus=else_scope, found=found, annotated=annotated)
+            branches.append(else_scope)
+        scope.replace_with(_ClientScope.join(branches or [scope]))
         for stmt in node.finalbody:
             _walk_client_scope(stmt, scope, inherited, walrus, found, annotated)
         return
     if isinstance(node, ast.Match):
-        # The subject is evaluated once here. Guards are then evaluated in source order until one
-        # holds, and a guard that returned false still leaves its side effects behind -- so guards
-        # share a fallthrough scope that accumulates across cases. Capture names stay isolated to
-        # their own case, because Python binds them only when that case's pattern matched. Case
-        # bodies are alternatives: each reads its own copy, is what definitions inside it close over,
-        # and has its net effect folded back so the code after the statement sees whichever ran.
-        # The pattern itself holds no client sink (patterns are literals/dotted names, never calls).
+        # The subject is evaluated once. Guards then run in source order until one holds, and a guard
+        # that returned false still leaves its side effects behind -- so guards share a fallthrough
+        # scope that accumulates across cases. Capture names stay isolated to their own case, because
+        # Python binds them only when that case's pattern matched. Case bodies are alternatives, so
+        # they are joined rather than folded: a case that rebinds the name cannot hide a case that
+        # leaves the client in place. A wildcard case means some case always runs, so the
+        # nothing-matched state is only kept when no case is unconditional.
         _walk_client_scope(node.subject, scope, inherited, walrus, found, annotated)
-        entry = scope.copy_without()
-        post = scope.copy_without()
+        branches = []
+        exhaustive = False
         for case in node.cases:
             captures = _match_pattern_capture_names(case.pattern)
             case_scope = scope.copy_without(captures)
             if case.guard is not None:
                 _walk_client_scope(case.guard, case_scope, inherited, case_scope, found, annotated)
-                scope.merge_branch(entry, case_scope, captures)  # a false guard's side effects reach the next case
+                scope.replace_with(_ClientScope.join([case_scope]))  # a false guard's side effects reach the next case
+            else:
+                exhaustive = _match_case_always_runs(node.subject, case)
             body_scope = case_scope.copy_without()
             for stmt in case.body:
                 _walk_client_scope(stmt, body_scope, inherited=body_scope, walrus=body_scope, found=found, annotated=annotated)
-            # Captures are path-local only between cases. After the statement a matched capture has
-            # rebound the name for real, so it is merged like any other rebind -- the same stance the
-            # walker already takes for a conditional rebind it cannot prove did not run.
-            post.merge_branch(entry, body_scope, set())
-        post.merge_branch(entry, scope, set())  # guard side effects survive when no case body ran
-        scope.replace_with(post)
+            branches.append(body_scope)
+            if exhaustive:
+                break  # this case provably runs, so later cases and the fall-through are unreachable
+        if not exhaustive:
+            branches.append(scope.copy_without())
+        scope.replace_with(_ClientScope.join(branches or [scope]))
         return
     if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
         _drop_client_bindings(scope, {node.id})
