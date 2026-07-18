@@ -55,10 +55,11 @@ async def test_concurrent_mcp_updates_are_serialized(monkeypatch) -> None:
     """The write lock keeps the offloaded read-modify-write atomic within the process.
 
     Offloading the RMW to a worker thread dropped the implicit serialization the
-    single-threaded event loop provided. ``_mcp_config_write_lock`` restores it:
-    even with several concurrent ``PUT /api/mcp/config`` calls, only one
-    ``_apply_mcp_config_update`` runs at a time. (Without the lock the tracked
-    max concurrency would exceed 1.)
+    single-threaded event loop provided. ``extensions_config_write_lock`` restores
+    it — and, being shared with the skills router (the other writer of this file),
+    also serializes against skill toggles: even with several concurrent
+    ``PUT /api/mcp/config`` calls, only one ``_apply_mcp_config_update`` runs at a
+    time. (Without the lock the tracked max concurrency would exceed 1.)
     """
 
     async def _noop_admin(_request, **_kwargs) -> None:

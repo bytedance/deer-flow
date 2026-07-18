@@ -1,8 +1,10 @@
 """Unified extensions configuration for MCP servers and skills."""
 
+import asyncio
 import json
 import logging
 import os
+import weakref
 from pathlib import Path
 from typing import Any, Literal
 
@@ -303,6 +305,33 @@ def get_extensions_config() -> ExtensionsConfig:
     if _extensions_config is None:
         _extensions_config = ExtensionsConfig.from_file()
     return _extensions_config
+
+
+_extensions_config_write_locks: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+
+
+def get_extensions_config_write_lock() -> asyncio.Lock:
+    """Return the ``extensions_config.json`` read-modify-write lock for this loop.
+
+    Every writer of the file must hold this for the whole read→write window. Both
+    the skills router (skill enable/disable) and the MCP router (server config
+    updates) read the file, merge a change and write it back. While each RMW ran
+    inline on the event loop they were implicitly serialized against each other;
+    once a writer offloads its RMW to a worker thread the loop is free to
+    interleave the other writer inside the window, and the second write silently
+    drops the first one's change.
+
+    The lock is keyed by the running loop rather than being a module-level
+    singleton because asyncio primitives bind to the first loop that awaits them,
+    which makes a plain module-level lock unusable once a process runs more than
+    one loop (test suites being the common case).
+    """
+    loop = asyncio.get_running_loop()
+    lock = _extensions_config_write_locks.get(loop)
+    if lock is None:
+        lock = asyncio.Lock()
+        _extensions_config_write_locks[loop] = lock
+    return lock
 
 
 def reload_extensions_config(config_path: str | None = None) -> ExtensionsConfig:

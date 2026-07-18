@@ -10,18 +10,12 @@ from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.gateway.deps import require_admin_user
-from deerflow.config.extensions_config import ExtensionsConfig, McpRoutingConfig, McpToolOverride, get_extensions_config, reload_extensions_config
+from deerflow.config.extensions_config import ExtensionsConfig, McpRoutingConfig, McpToolOverride, get_extensions_config, get_extensions_config_write_lock, reload_extensions_config
 from deerflow.mcp.cache import reset_mcp_tools_cache
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["mcp"])
 
-# Serializes the read-modify-write of extensions_config.json within this worker
-# process. Offloading the RMW to a thread removed the implicit serialization the
-# single-threaded event loop used to provide, so two concurrent
-# PUT /api/mcp/config calls could otherwise interleave and clobber each other.
-# (Cross-process writers remain a separate, pre-existing concern.)
-_mcp_config_write_lock = asyncio.Lock()
 _ADMIN_REQUIRED_DETAIL = "Admin privileges required to manage MCP configuration."
 
 
@@ -467,8 +461,9 @@ async def update_mcp_configuration(request: Request, body: McpConfigUpdateReques
         # Offload the blocking read-modify-write of extensions_config.json
         # (path resolve, existence probe, raw read, merged write, reload). The
         # lock serializes concurrent updates within this process so the RMW stays
-        # atomic now that it no longer runs inline on the event loop.
-        async with _mcp_config_write_lock:
+        # atomic now that it no longer runs inline on the event loop. It is shared
+        # with the skills router, which performs the same RMW on the same file.
+        async with get_extensions_config_write_lock():
             reloaded_servers = await asyncio.to_thread(_apply_mcp_config_update, body)
 
         servers = {name: _mask_server_config(McpServerConfigResponse(**server.model_dump())) for name, server in reloaded_servers.items()}
