@@ -832,10 +832,21 @@ def _walk_client_scope(node: ast.AST, scope: _ClientScope, inherited: _ClientSco
         if node.optional_vars is not None:
             _bind_client_targets([node.optional_vars], node.context_expr, scope, inherited, walrus, found, annotated)
         return
+    if isinstance(node, ast.ExceptHandler):
+        # Python evaluates the exception-matching type first -- while `node.name` still holds its
+        # prior binding -- then binds the caught exception to the name and runs the body. The generic
+        # child order drops the handle before visiting `node.type`, hiding a sink placed there
+        # (`except session.post(...) as session:`) that really runs on the live handle. Keep the drop
+        # unconditional (like a rebind under `if`/`try` that may not execute) but only after the type.
+        if node.type is not None:
+            _walk_client_scope(node.type, scope, inherited, walrus, found, annotated)
+        if node.name:
+            _drop_client_bindings(scope, {node.name})
+        for child in node.body:
+            _walk_client_scope(child, scope, inherited, walrus, found, annotated)
+        return
     if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
         _drop_client_bindings(scope, {node.id})
-    elif isinstance(node, ast.ExceptHandler) and node.name:
-        _drop_client_bindings(scope, {node.name})
     elif isinstance(node, (ast.Import, ast.ImportFrom)):
         _bind_client_import(node, scope)
     elif isinstance(node, _PYTHON_MATCH_CAPTURE_NODES):
@@ -904,8 +915,13 @@ def _client_scope_prelude(node: ast.AST, annotated: frozenset[int]) -> list[ast.
 
 
 def _function_annotation_exprs(node: ast.AST) -> list[ast.AST]:
+    # CPython evaluates parameter annotations at def time as: ordinary positional, positional-only,
+    # `*args`, keyword-only, `**kwargs`, then the return annotation -- not the declaration order that
+    # puts positional-only first. A walrus in one annotation rebinds a handle the next annotation
+    # reads, so emitting them out of runtime order both misses real exfil and hard-blocks benign code.
     args = node.args
-    exprs = [arg.annotation for arg in [*args.posonlyargs, *args.args, *args.kwonlyargs, args.vararg, args.kwarg] if arg is not None and arg.annotation is not None]
+    ordered = [*args.args, *args.posonlyargs, args.vararg, *args.kwonlyargs, args.kwarg]
+    exprs = [arg.annotation for arg in ordered if arg is not None and arg.annotation is not None]
     if node.returns is not None:
         exprs.append(node.returns)
     return exprs
