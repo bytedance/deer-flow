@@ -832,28 +832,54 @@ def _walk_client_scope(node: ast.AST, scope: _ClientScope, inherited: _ClientSco
         if node.optional_vars is not None:
             _bind_client_targets([node.optional_vars], node.context_expr, scope, inherited, walrus, found, annotated)
         return
-    if isinstance(node, ast.ExceptHandler):
-        # Python evaluates the exception-matching type first -- while `node.name` still holds its
-        # prior binding -- then binds the caught exception to the name and runs the body. The generic
-        # child order drops the handle before visiting `node.type`, hiding a sink placed there
-        # (`except session.post(...) as session:`) that really runs on the live handle. Keep the drop
-        # unconditional (like a rebind under `if`/`try` that may not execute) but only after the type.
-        if node.type is not None:
-            _walk_client_scope(node.type, scope, inherited, walrus, found, annotated)
-        if node.name:
-            _drop_client_bindings(scope, {node.name})
-        for child in node.body:
-            _walk_client_scope(child, scope, inherited, walrus, found, annotated)
+    if isinstance(node, (ast.Try, ast.TryStar)):
+        # The body runs first, mutating this scope in source order. Exception selection then
+        # evaluates each handler *type* in order -- Python binds only the matching handler's `as`
+        # target, so during selection no name is bound: a non-matching earlier handler must not drop
+        # a handle a later type reads. Walk every type against the shared scope (walrus side effects
+        # still accumulate in order) without dropping any `as` name. Each handler *body* then runs
+        # with ONLY its own `as` target bound, so it drops that one name on its own scope copy and
+        # never a sibling's. `else` runs only when the body did not raise (no handler executed), so
+        # it sees the post-body scope. After the statement any handler may have run and deleted its
+        # `as` name, so drop those names conservatively before `finally` and the following code.
+        for stmt in node.body:
+            _walk_client_scope(stmt, scope, inherited, walrus, found, annotated)
+        else_scope = scope.copy_without()
+        for handler in node.handlers:
+            if handler.type is not None:
+                _walk_client_scope(handler.type, scope, inherited, walrus, found, annotated)
+            body_scope = scope.copy_without({handler.name} if handler.name else None)
+            for stmt in handler.body:
+                _walk_client_scope(stmt, body_scope, inherited, body_scope, found, annotated)
+        for stmt in node.orelse:
+            _walk_client_scope(stmt, else_scope, inherited, else_scope, found, annotated)
+        _drop_client_bindings(scope, {handler.name for handler in node.handlers if handler.name})
+        for stmt in node.finalbody:
+            _walk_client_scope(stmt, scope, inherited, walrus, found, annotated)
+        return
+    if isinstance(node, ast.Match):
+        # The subject is evaluated once here. A case binds its capture names only when its pattern
+        # matches, and which case matches is unknowable -- so one case's capture drop must not reach a
+        # sibling case's guard or body, where Python never bound that name. Walk each case's guard and
+        # body against a scope copy that drops only that case's own captures. The pattern itself holds
+        # no client sink (match patterns are literals/dotted names, never calls), so it is not walked.
+        # After the statement any case may have matched, so drop every capture name conservatively.
+        _walk_client_scope(node.subject, scope, inherited, walrus, found, annotated)
+        all_captures: set[str] = set()
+        for case in node.cases:
+            captures = _match_pattern_capture_names(case.pattern)
+            all_captures |= captures
+            case_scope = scope.copy_without(captures)
+            if case.guard is not None:
+                _walk_client_scope(case.guard, case_scope, inherited, case_scope, found, annotated)
+            for stmt in case.body:
+                _walk_client_scope(stmt, case_scope, inherited, case_scope, found, annotated)
+        _drop_client_bindings(scope, all_captures)
         return
     if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
         _drop_client_bindings(scope, {node.id})
     elif isinstance(node, (ast.Import, ast.ImportFrom)):
         _bind_client_import(node, scope)
-    elif isinstance(node, _PYTHON_MATCH_CAPTURE_NODES):
-        # Captures bind through a plain `name` string rather than a Name node, so the Store branch
-        # above never sees them. A capture that may rebind drops the handle, matching how the walk
-        # already treats a rebind under `if`/`try` that may equally not execute.
-        _drop_client_bindings(scope, set(_match_capture_names(node)))
     for child in ast.iter_child_nodes(node):
         _walk_client_scope(child, scope, inherited, walrus, found, annotated)
 
@@ -898,6 +924,17 @@ def _match_capture_names(node: ast.AST) -> list[str]:
     if isinstance(node, ast.MatchMapping):
         return [node.rest] if node.rest else []
     return [node.name] if node.name else []
+
+
+def _match_pattern_capture_names(pattern: ast.AST) -> set[str]:
+    """Every name a case pattern binds when it matches (nested captures included)."""
+    names: set[str] = set()
+    for node in ast.walk(pattern):
+        if isinstance(node, (ast.MatchAs, ast.MatchStar)) and node.name:
+            names.add(node.name)
+        elif isinstance(node, ast.MatchMapping) and node.rest:
+            names.add(node.rest)
+    return names
 
 
 def _client_scope_prelude(node: ast.AST, annotated: frozenset[int]) -> list[ast.AST]:
