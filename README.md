@@ -682,6 +682,8 @@ Interrupted first-turn runs still persist a fallback conversation title, so stop
 
 In the Web UI, completed assistant turns can be branched into a new main conversation. The new thread starts from that turn's checkpoint. Because workspace files are not checkpointed, the branch only receives a best-effort copy of the current workspace when you branch from the latest turn; branching from an older turn keeps just the restored message history so the branch never inherits files that were created in a later part of the conversation.
 
+Web UI chat links percent-encode custom thread identifiers before placing them in route segments, so reserved URL characters such as `#` and `?` do not change which conversation is opened.
+
 ```
 # Paths inside the sandbox container
 /mnt/skills/public
