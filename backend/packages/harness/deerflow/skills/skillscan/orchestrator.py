@@ -695,9 +695,10 @@ def _call_is_network_sink(call_name: str) -> bool:
 # outbound call is an attribute call on a variable, so neither statement alone is a
 # call-name sink. The signal therefore follows only the minimum high-confidence chain:
 # known constructor -> simple name/alias -> constructor-supported direct method call in
-# the same lexical scope. Nested scopes inherit import aliases but never client handles.
-# Comprehensions, walrus-bearing statements, annotations, and executable expressions in
-# complex binding targets deliberately produce no finding from this signal.
+# the same lexical scope. Nested scopes inherit only stable import aliases and never client
+# handles. Comprehensions, walrus-bearing statements, annotations, and executable expressions
+# in complex binding targets deliberately produce no finding from this signal; any names those
+# skipped constructs may bind are invalidated so stale state cannot create a finding.
 #
 # Compound bodies are still walked from isolated entry-state copies so `if True:` is not a
 # universal bypass, but ambiguous bindings are dropped rather than joined. Every AST visit
@@ -712,10 +713,11 @@ class _ClientSpec:
     async_context: bool = False
 
 
+# Keep response-only operations such as `getresponse()` out: this signal needs outbound I/O.
 _PYTHON_CLIENT_SPECS = {
-    "http.client.HTTPConnection": _ClientSpec(frozenset({"request", "connect", "getresponse"})),
-    "http.client.HTTPSConnection": _ClientSpec(frozenset({"request", "connect", "getresponse"})),
-    "requests.Session": _ClientSpec(frozenset({"request", "get", "post", "put", "patch", "delete", "head", "options"}), sync_context=True),
+    "http.client.HTTPConnection": _ClientSpec(frozenset({"request", "connect", "send"})),
+    "http.client.HTTPSConnection": _ClientSpec(frozenset({"request", "connect", "send"})),
+    "requests.Session": _ClientSpec(frozenset({"request", "get", "post", "put", "patch", "delete", "head", "options", "send"}), sync_context=True),
     "urllib3.PoolManager": _ClientSpec(frozenset({"request", "urlopen"}), sync_context=True),
     "aiohttp.ClientSession": _ClientSpec(frozenset({"request", "get", "post", "put", "patch", "delete", "head", "options"}), async_context=True),
 }
@@ -734,6 +736,7 @@ _PYTHON_BRANCHING_NODES = (ast.If, ast.For, ast.AsyncFor, ast.While, ast.Try, as
 class _ClientScope:
     handles: dict[str, str]
     aliases: dict[str, str]
+    unstable_aliases: frozenset[str] = frozenset()
 
     def copy_without(self, analysis: _ClientAnalysis, names: set[str] | None = None) -> _ClientScope:
         names = names or set()
@@ -741,12 +744,17 @@ class _ClientScope:
         return _ClientScope(
             handles={name: constructor for name, constructor in self.handles.items() if name not in names},
             aliases={name: target for name, target in self.aliases.items() if name not in names},
+            unstable_aliases=self.unstable_aliases,
         )
 
-    def aliases_only(self, analysis: _ClientAnalysis, names: set[str] | None = None) -> _ClientScope:
+    def aliases_only(self, analysis: _ClientAnalysis, names: set[str] | None = None, unstable_aliases: frozenset[str] = frozenset()) -> _ClientScope:
         names = names or set()
         analysis.charge(len(self.aliases) + 1)
-        return _ClientScope(handles={}, aliases={name: target for name, target in self.aliases.items() if name not in names})
+        return _ClientScope(
+            handles={},
+            aliases={name: target for name, target in self.aliases.items() if name not in names and name not in self.unstable_aliases},
+            unstable_aliases=unstable_aliases,
+        )
 
 
 class _ClientAnalysisBudgetExceeded(Exception):
@@ -768,6 +776,8 @@ def _find_client_handle_sink(tree: ast.AST, rel_path: str) -> ast.AST | None:
     analysis = _ClientAnalysis(remaining=_PYTHON_CLIENT_ANALYSIS_BUDGET)
     module = _ClientScope(handles={}, aliases={})
     try:
+        if isinstance(tree, ast.Module):
+            module.unstable_aliases = _client_unstable_aliases(tree.body, analysis)
         _walk_client_scope(tree, module, module, analysis)
     except _ClientAnalysisBudgetExceeded:
         logger.warning("SkillScan client-handle analysis exhausted work budget for %s", rel_path)
@@ -781,7 +791,10 @@ def _walk_client_statements(body: list[ast.AST], scope: _ClientScope, inherited:
             return
         walrus_names = set() if isinstance(statement, _PYTHON_SCOPE_NODES) else _walrus_target_names(statement, analysis)
         if walrus_names:
-            _drop_client_bindings(scope, walrus_names)
+            bound_names: set[str] = set()
+            declared_names: set[str] = set()
+            _collect_client_scope_bindings(statement, bound_names, declared_names, analysis)
+            _drop_client_bindings(scope, walrus_names | (bound_names - declared_names))
             continue
         _walk_client_scope(statement, scope, inherited, analysis)
 
@@ -924,32 +937,36 @@ def _branching_bound_names(node: ast.AST, analysis: _ClientAnalysis) -> set[str]
 
 def _walrus_target_names(node: ast.AST, analysis: _ClientAnalysis) -> set[str]:
     """Return walrus targets in this scope so the entire ambiguous statement can be skipped."""
+    if isinstance(node, _PYTHON_SCOPE_NODES):
+        return set()
     found: set[str] = set()
-
-    def visit(current: ast.AST) -> None:
+    stack = [node]
+    while stack:
+        current = stack.pop()
         analysis.charge()
+        if isinstance(current, ast.NamedExpr):
+            found.update(_client_assignment_target_names(current.target))
         for child in ast.iter_child_nodes(current):
             if isinstance(child, _PYTHON_SCOPE_NODES):
                 continue
-            if isinstance(child, ast.NamedExpr):
-                found.update(_client_assignment_target_names(child.target))
-            visit(child)
-
-    visit(node)
+            stack.append(child)
     return found
 
 
 def _walk_client_nested_scope(node: ast.AST, scope: _ClientScope, inherited: _ClientScope, analysis: _ClientAnalysis) -> None:
+    annotation_bindings = {name for annotation in _client_scope_annotations(node) for name in _walrus_target_names(annotation, analysis)}
+    _drop_client_bindings(scope, annotation_bindings)
     for expr in _client_scope_prelude(node):
         _walk_client_scope(expr, scope, inherited, analysis)
         if analysis.found is not None:
             return
-    if isinstance(node, ast.ClassDef):
-        inner, nested = inherited.aliases_only(analysis), inherited
-    else:
-        inner = inherited.aliases_only(analysis, _client_scope_bindings(node, analysis))
-        nested = inner
     body = node.body if isinstance(node.body, list) else [node.body]
+    unstable_aliases = _client_unstable_aliases(body, analysis)
+    if isinstance(node, ast.ClassDef):
+        inner, nested = inherited.aliases_only(analysis, unstable_aliases=unstable_aliases), inherited
+    else:
+        inner = inherited.aliases_only(analysis, _client_scope_bindings(node, analysis), unstable_aliases)
+        nested = inner
     _walk_client_statements(body, inner, nested, analysis)
     if not isinstance(node, ast.Lambda):
         _drop_client_bindings(scope, {node.name})
@@ -963,10 +980,10 @@ def _match_capture_names(node: ast.AST) -> list[str]:
 
 def _client_scope_prelude(node: ast.AST) -> list[ast.AST]:
     """Expressions a scope-defining statement evaluates in its *enclosing* scope, not the new one:
-    decorators, argument/keyword defaults, and class bases/keywords. Annotations are deliberately
-    not walked -- whether the runtime evaluates one depends on the scope, on `from __future__ import
-    annotations`, and on the Python version, which is exactly the kind of ambiguity this signal
-    resolves by not reporting.
+    decorators, argument/keyword defaults, and class bases/keywords. Annotations are not walked for
+    sinks -- whether the runtime evaluates one depends on the scope, on `from __future__ import
+    annotations`, and on the Python version. Their possible binding effects are invalidated
+    separately so skipping an annotation cannot leave a stale handle behind.
     """
     if isinstance(node, ast.ClassDef):
         return [*node.decorator_list, *node.bases, *(keyword.value for keyword in node.keywords)]
@@ -974,6 +991,66 @@ def _client_scope_prelude(node: ast.AST) -> list[ast.AST]:
     if isinstance(node, ast.Lambda):
         return defaults
     return [*node.decorator_list, *defaults]
+
+
+def _client_scope_annotations(node: ast.AST) -> list[ast.AST]:
+    if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return []
+    args = node.args
+    annotations = [arg.annotation for arg in [*args.posonlyargs, *args.args, *args.kwonlyargs] if arg.annotation is not None]
+    for extra in (args.vararg, args.kwarg):
+        if extra is not None and extra.annotation is not None:
+            annotations.append(extra.annotation)
+    if node.returns is not None:
+        annotations.append(node.returns)
+    return annotations
+
+
+def _client_unstable_aliases(body: list[ast.AST], analysis: _ClientAnalysis) -> frozenset[str]:
+    """Names whose import-alias value is not stable for a nested scope.
+
+    This is a binding-only prepass: it never interprets expression values or paths. Any ordinary
+    binding makes a same-named import alias non-inheritable, as does a repeated/star import. Scope
+    bodies are skipped, while walrus targets in their enclosing-scope preludes are invalidated.
+    """
+    imported: set[str] = set()
+    unstable: set[str] = set()
+    saw_star_import = False
+    stack = list(reversed(body))
+    while stack:
+        current = stack.pop()
+        analysis.charge()
+        if isinstance(current, (ast.Import, ast.ImportFrom)):
+            for alias in current.names:
+                if alias.name == "*":
+                    saw_star_import = True
+                    continue
+                name = alias.asname or alias.name.split(".")[0]
+                if name in imported:
+                    unstable.add(name)
+                imported.add(name)
+            continue
+        if isinstance(current, _PYTHON_SCOPE_NODES):
+            if not isinstance(current, ast.Lambda):
+                unstable.add(current.name)
+            for expr in [*_client_scope_prelude(current), *_client_scope_annotations(current)]:
+                unstable.update(_walrus_target_names(expr, analysis))
+            continue
+        if isinstance(current, _PYTHON_COMPREHENSION_NODES):
+            unstable.update(_walrus_target_names(current, analysis))
+            continue
+        if isinstance(current, ast.Global | ast.Nonlocal):
+            continue
+        if isinstance(current, ast.Name) and isinstance(current.ctx, (ast.Store, ast.Del)):
+            unstable.add(current.id)
+        elif isinstance(current, ast.ExceptHandler) and current.name:
+            unstable.add(current.name)
+        elif isinstance(current, _PYTHON_MATCH_CAPTURE_NODES):
+            unstable.update(_match_capture_names(current))
+        stack.extend(reversed(list(ast.iter_child_nodes(current))))
+    if saw_star_import:
+        unstable.update(imported)
+    return frozenset(unstable)
 
 
 def _client_scope_bindings(node: ast.AST, analysis: _ClientAnalysis) -> set[str]:

