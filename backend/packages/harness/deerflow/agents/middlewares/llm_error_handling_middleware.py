@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 import threading
 import time
 from collections.abc import Awaitable, Callable
@@ -98,12 +99,50 @@ _STREAM_DROP_EXCEPTIONS: frozenset[str] = frozenset(
 )
 
 
+# Process-global LLM concurrency cap. A single ``asyncio.Semaphore`` shared
+# across every ``LLMErrorHandlingMiddleware`` instance bounds the number of
+# in-flight model calls process-wide. This is the lever for smoothing a
+# provider burst-rate (``limit_burst_rate``) spike: that limit fires on the
+# *slope* of the request rate, so capping aggregate concurrency caps that
+# slope. Lazily (re)created per running event loop so it survives the
+# loop-per-call pattern used by ``asyncio.run`` in tests; in production there
+# is one long-lived loop, so the semaphore is created exactly once.
+_GLOBAL_CONCURRENCY_SEMAPHORE: asyncio.Semaphore | None = None
+_GLOBAL_CONCURRENCY_LOOP: asyncio.AbstractEventLoop | None = None
+_GLOBAL_CONCURRENCY_LIMIT: int = 0
+
+
+def _get_global_concurrency_semaphore(limit: int) -> asyncio.Semaphore | None:
+    """Return the process-global LLM-call semaphore, or ``None`` when disabled.
+
+    ``limit <= 0`` disables the cap (callers run unbounded, preserving the
+    default behavior). Otherwise the semaphore is (re)created when the running
+    event loop changes or the configured limit changes, so a fresh loop (e.g. a
+    new ``asyncio.run`` in tests) never reuses a semaphore bound to a closed
+    loop.
+    """
+    global _GLOBAL_CONCURRENCY_SEMAPHORE, _GLOBAL_CONCURRENCY_LOOP, _GLOBAL_CONCURRENCY_LIMIT
+    if limit <= 0:
+        return None
+    loop = asyncio.get_running_loop()
+    if _GLOBAL_CONCURRENCY_SEMAPHORE is None or _GLOBAL_CONCURRENCY_LOOP is not loop or _GLOBAL_CONCURRENCY_LIMIT != limit:
+        _GLOBAL_CONCURRENCY_SEMAPHORE = asyncio.Semaphore(limit)
+        _GLOBAL_CONCURRENCY_LOOP = loop
+        _GLOBAL_CONCURRENCY_LIMIT = limit
+    return _GLOBAL_CONCURRENCY_SEMAPHORE
+
+
 class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
     """Retry transient LLM errors and surface graceful assistant messages."""
 
     retry_max_attempts: int = 3
     retry_base_delay_ms: int = 1000
     retry_cap_delay_ms: int = 8000
+    # Process-wide cap on concurrently in-flight LLM calls. 0 disables the cap
+    # (default) so existing deployments see no behavior change; set to a
+    # positive int to bound aggregate concurrency and smooth provider
+    # burst-rate (limit_burst_rate) spikes. See _get_global_concurrency_semaphore.
+    max_concurrent_llm_calls: int = 0
 
     def __init__(self, *, app_config: AppConfig, **kwargs: Any) -> None:
         super().__init__(**kwargs)
@@ -232,12 +271,48 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
 
         return False, "generic"
 
-    def _build_retry_delay_ms(self, attempt: int, exc: BaseException) -> int:
+    async def _bounded_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
+    ) -> ModelResponse:
+        """Run one model attempt under the process-global concurrency cap.
+
+        The semaphore wraps a *single* attempt only, not the whole retry loop,
+        so backoff sleeps release the slot for other callers - we bound
+        in-flight requests, not waiting ones. When the cap is disabled
+        (``max_concurrent_llm_calls <= 0``) this is a direct passthrough.
+        """
+        semaphore = _get_global_concurrency_semaphore(self.max_concurrent_llm_calls)
+        if semaphore is None:
+            return await handler(request)
+        async with semaphore:
+            return await handler(request)
+
+    def _build_retry_delay_ms(self, prev_delay_ms: int, exc: BaseException) -> int:
+        """Compute the next retry delay (ms) using decorrelated jitter.
+
+        An explicit ``Retry-After`` from the provider is honored as-is (no
+        jitter) - the server told us exactly when to come back. Otherwise
+        AWS-style "decorrelated jitter" is applied:
+        ``delay = min(cap, random(base, prev * 3))``, seeded with
+        ``retry_base_delay_ms`` on the first retry.
+
+        Deterministic exponential backoff (``base * 2^(attempt-1)``) makes
+        every concurrent retryer realign on the same backoff ticks; when a
+        whole fleet fails at once (e.g. a provider burst-rate limit at the
+        morning peak) that synchronized retry storm re-triggers the very limit
+        we are backing off from. Decorrelated jitter spreads those retries
+        across a random window so they don't re-peak in lockstep.
+        """
         retry_after = _extract_retry_after_ms(exc)
         if retry_after is not None:
             return retry_after
-        backoff = self.retry_base_delay_ms * (2 ** max(0, attempt - 1))
-        return min(backoff, self.retry_cap_delay_ms)
+        base = self.retry_base_delay_ms
+        cap = self.retry_cap_delay_ms
+        high = max(base, prev_delay_ms * 3)
+        delay = random.randint(base, high)
+        return min(delay, cap)
 
     def _build_retry_message(self, attempt: int, wait_ms: int, reason: str) -> str:
         seconds = max(1, round(wait_ms / 1000))
@@ -330,6 +405,7 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
             )
 
         attempt = 1
+        prev_delay_ms = self.retry_base_delay_ms
         while True:
             try:
                 response = handler(request)
@@ -343,7 +419,8 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
                 retriable, reason = self._classify_error(exc)
                 max_attempts = self._max_attempts_for(exc)
                 if retriable and attempt < max_attempts:
-                    wait_ms = self._build_retry_delay_ms(attempt, exc)
+                    wait_ms = self._build_retry_delay_ms(prev_delay_ms, exc)
+                    prev_delay_ms = wait_ms
                     logger.warning(
                         "Transient LLM error on attempt %d/%d; retrying in %dms: %s",
                         attempt,
@@ -383,9 +460,10 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
             )
 
         attempt = 1
+        prev_delay_ms = self.retry_base_delay_ms
         while True:
             try:
-                response = await handler(request)
+                response = await self._bounded_model_call(request, handler)
                 self._record_success()
                 return response
             except GraphBubbleUp:
@@ -396,7 +474,8 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
                 retriable, reason = self._classify_error(exc)
                 max_attempts = self._max_attempts_for(exc)
                 if retriable and attempt < max_attempts:
-                    wait_ms = self._build_retry_delay_ms(attempt, exc)
+                    wait_ms = self._build_retry_delay_ms(prev_delay_ms, exc)
+                    prev_delay_ms = wait_ms
                     logger.warning(
                         "Transient LLM error on attempt %d/%d; retrying in %dms: %s",
                         attempt,

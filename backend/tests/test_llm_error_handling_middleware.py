@@ -819,3 +819,267 @@ def test_async_index_error_exhausted_returns_user_fallback(
     assert result.additional_kwargs["error_reason"] == "transient"
     assert result.additional_kwargs["error_type"] == "IndexError"
     assert "temporarily unavailable" in str(result.content)
+
+
+# ---------- Process-global concurrency semaphore ----------
+
+
+async def _run_concurrent(
+    middleware: LLMErrorHandlingMiddleware,
+    count: int,
+    event: asyncio.Event,
+) -> tuple[int, int]:
+    """Fire ``count`` concurrent awrap_model_call tasks whose handlers park on
+    ``event`` until the test releases them.
+
+    Returns ``(max_in_flight, in_flight_at_steady_state)`` so callers can assert
+    the concurrency cap. Handlers increment a shared counter on entry and
+    decrement on exit, so the counter reflects only calls that got past the
+    semaphore - parked-on-semaphore tasks do not count as in-flight.
+    """
+    in_flight = 0
+    max_in_flight = 0
+
+    async def handler(_request) -> AIMessage:
+        nonlocal in_flight, max_in_flight
+        in_flight += 1
+        if in_flight > max_in_flight:
+            max_in_flight = in_flight
+        try:
+            await event.wait()
+        finally:
+            in_flight -= 1
+        return AIMessage(content="ok")
+
+    tasks = [asyncio.create_task(middleware.awrap_model_call(SimpleNamespace(), handler)) for _ in range(count)]
+
+    # Yield until the steady state is reached: the cap is hit (capped case), or
+    # every task has been admitted (uncapped case).
+    limit = middleware.max_concurrent_llm_calls
+    target = count if limit <= 0 else min(count, limit)
+    for _ in range(100):
+        if max_in_flight >= target:
+            break
+        await asyncio.sleep(0)
+    steady_in_flight = in_flight
+
+    event.set()
+    await asyncio.gather(*tasks)
+    return max_in_flight, steady_in_flight
+
+
+@pytest.mark.anyio
+async def test_global_semaphore_caps_concurrent_llm_calls() -> None:
+    """With max_concurrent_llm_calls=2, five concurrent calls must never exceed
+    two in-flight at once - the rest park on the process-global semaphore.
+    """
+    middleware = _build_middleware(max_concurrent_llm_calls=2)
+    event = asyncio.Event()
+
+    max_in_flight, steady_in_flight = await _run_concurrent(middleware, 5, event)
+
+    assert max_in_flight == 2
+    # At steady state exactly two handlers are parked on the event; the other
+    # three are blocked on the semaphore and have not entered the handler.
+    assert steady_in_flight == 2
+
+
+@pytest.mark.anyio
+async def test_global_semaphore_disabled_by_default() -> None:
+    """max_concurrent_llm_calls defaults to 0 (disabled): no cap, so all five
+    concurrent calls run at once. Guards against the semaphore accidentally
+    engaging for existing deployments that never opted in.
+    """
+    middleware = _build_middleware()  # default max_concurrent_llm_calls=0
+    event = asyncio.Event()
+
+    max_in_flight, _ = await _run_concurrent(middleware, 5, event)
+
+    assert max_in_flight == 5
+
+
+@pytest.mark.anyio
+async def test_global_semaphore_is_shared_across_instances() -> None:
+    """The semaphore is process-global, not per-middleware-instance: two
+    middlewares with the same limit share one cap, so four calls spread across
+    them still never exceed two in-flight.
+    """
+    mw_a = _build_middleware(max_concurrent_llm_calls=2)
+    mw_b = _build_middleware(max_concurrent_llm_calls=2)
+    event = asyncio.Event()
+
+    in_flight = 0
+    max_in_flight = 0
+
+    async def handler(_request) -> AIMessage:
+        nonlocal in_flight, max_in_flight
+        in_flight += 1
+        if in_flight > max_in_flight:
+            max_in_flight = in_flight
+        try:
+            await event.wait()
+        finally:
+            in_flight -= 1
+        return AIMessage(content="ok")
+
+    tasks = [
+        asyncio.create_task(mw_a.awrap_model_call(SimpleNamespace(), handler)),
+        asyncio.create_task(mw_b.awrap_model_call(SimpleNamespace(), handler)),
+        asyncio.create_task(mw_a.awrap_model_call(SimpleNamespace(), handler)),
+        asyncio.create_task(mw_b.awrap_model_call(SimpleNamespace(), handler)),
+    ]
+    for _ in range(100):
+        if max_in_flight >= 2:
+            break
+        await asyncio.sleep(0)
+
+    assert max_in_flight == 2  # shared global cap, not 2+2 per instance
+    event.set()
+    await asyncio.gather(*tasks)
+
+
+@pytest.mark.anyio
+async def test_global_semaphore_releases_slot_during_backoff_sleep(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The semaphore wraps a single attempt only, not the retry loop. A call in
+    its backoff sleep must release its slot so another caller can proceed -
+    otherwise backoff would waste concurrency slots and worsen the burst we are
+    trying to smooth.
+
+    ``fake_sleep`` parks call A in backoff on ``backoff_gate`` so the test has a
+    deterministic window in which to observe call B being admitted to the freed
+    slot. ``asyncio.Event.wait`` / ``asyncio.wait_for`` do not route through
+    ``asyncio.sleep``, so the monkeypatch does not disturb test orchestration.
+    """
+    middleware = _build_middleware(
+        max_concurrent_llm_calls=1,
+        retry_max_attempts=2,
+        retry_base_delay_ms=10000,
+        retry_cap_delay_ms=10000,
+    )
+    a_entered_backoff = asyncio.Event()
+    backoff_gate = asyncio.Event()
+    b_admitted = asyncio.Event()
+    attempts_a = 0
+
+    async def fake_sleep(_delay: float) -> None:
+        a_entered_backoff.set()
+        # Park call A in backoff until the test releases it.
+        await backoff_gate.wait()
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    async def handler_a(_request) -> AIMessage:
+        nonlocal attempts_a
+        attempts_a += 1
+        # Always fails -> call A enters backoff after attempt 1, exhausts after 2.
+        raise FakeError("server busy", status_code=503)
+
+    async def handler_b(_request) -> AIMessage:
+        b_admitted.set()
+        return AIMessage(content="b-ok")
+
+    task_a = asyncio.create_task(middleware.awrap_model_call(SimpleNamespace(), handler_a))
+    # Wait until call A has failed attempt 1 and parked in its backoff sleep -
+    # at which point its semaphore slot has been released.
+    await asyncio.wait_for(a_entered_backoff.wait(), timeout=2.0)
+
+    task_b = asyncio.create_task(middleware.awrap_model_call(SimpleNamespace(), handler_b))
+    # Call B must be admitted to the single slot while A is still parked in
+    # backoff (A has not retried yet).
+    await asyncio.wait_for(b_admitted.wait(), timeout=2.0)
+    assert attempts_a == 1
+
+    # Release A: it retries once more, fails again, and exhausts its budget.
+    backoff_gate.set()
+    result_a = await task_a
+    result_b = await task_b
+    assert result_b.content == "b-ok"
+    assert result_a.additional_kwargs.get("deerflow_error_fallback") is True
+
+
+# ---------- Decorrelated jitter ----------
+
+
+def test_retry_delay_decorrelated_jitter_within_bounds() -> None:
+    """First retry seeds from base: high = max(base, base*3) = base*3, so the
+    delay lands in [base, base*3].
+    """
+    middleware = _build_middleware(retry_base_delay_ms=100, retry_cap_delay_ms=10000)
+    delay = middleware._build_retry_delay_ms(100, FakeError("server busy", status_code=503))
+    assert 100 <= delay <= 300
+
+
+def test_retry_delay_grows_from_previous_delay() -> None:
+    """Decorrelated jitter grows off the previous delay, not a fixed schedule:
+    prev=1000 -> high = max(100, 3000) = 3000 -> delay in [100, 3000].
+    """
+    middleware = _build_middleware(retry_base_delay_ms=100, retry_cap_delay_ms=10000)
+    delay = middleware._build_retry_delay_ms(1000, FakeError("server busy", status_code=503))
+    assert 100 <= delay <= 3000
+
+
+def test_retry_delay_respects_cap() -> None:
+    """The cap always bounds the jittered delay, even when prev*3 would exceed it."""
+    middleware = _build_middleware(retry_base_delay_ms=100, retry_cap_delay_ms=200)
+    delay = middleware._build_retry_delay_ms(1000, FakeError("server busy", status_code=503))
+    assert delay <= 200
+
+
+def test_retry_delay_base_equals_cap_is_deterministic() -> None:
+    """When base == cap the jittered delay collapses to exactly cap regardless
+    of the RNG draw - this is what keeps the fast/retry-budget tests stable.
+    """
+    middleware = _build_middleware(retry_base_delay_ms=25, retry_cap_delay_ms=25)
+    for _ in range(20):
+        delay = middleware._build_retry_delay_ms(25, FakeError("server busy", status_code=503))
+        assert delay == 25
+
+
+def test_retry_delay_honors_retry_after_without_jitter() -> None:
+    """An explicit Retry-After is honored verbatim - the server said exactly
+    when to come back, so jitter must not perturb it.
+    """
+    middleware = _build_middleware(retry_base_delay_ms=100, retry_cap_delay_ms=10000)
+    exc = FakeError("rate limited", status_code=429, headers={"retry-after-ms": "5000"})
+    delay = middleware._build_retry_delay_ms(100, exc)
+    assert delay == 5000
+
+
+@pytest.mark.anyio
+async def test_async_retry_loop_emits_jittered_delays_within_bounds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end: the async retry loop emits decorrelated-jitter delays, each
+    within [base, cap], and prev_delay threads through so the second delay can
+    grow off the first.
+    """
+    middleware = _build_middleware(
+        retry_max_attempts=3,
+        retry_base_delay_ms=100,
+        retry_cap_delay_ms=10000,
+    )
+    waits: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        waits.append(delay)
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    attempts = 0
+
+    async def handler(_request) -> AIMessage:
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            raise FakeError("server busy", status_code=503)
+        return AIMessage(content="ok")
+
+    result = await middleware.awrap_model_call(SimpleNamespace(), handler)
+
+    assert result.content == "ok"
+    assert attempts == 3
+    assert len(waits) == 2
+    for w in waits:
+        assert 0.1 <= w <= 10.0
