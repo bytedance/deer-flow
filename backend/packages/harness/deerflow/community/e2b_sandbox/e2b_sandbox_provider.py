@@ -1026,11 +1026,10 @@ class E2BSandboxProvider(SandboxProvider):
         """Kill a remote VM and return an exception for the caller to log."""
         if client is None:
             return None
-        kill = getattr(client, "kill", None)
-        if not callable(kill):
-            return None
         try:
-            kill()
+            kill = getattr(client, "kill", None)
+            if callable(kill):
+                kill()
         except Exception as e:
             return e
         return None
