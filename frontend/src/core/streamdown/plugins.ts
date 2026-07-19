@@ -1,3 +1,5 @@
+import { code } from "@streamdown/code";
+import { mermaid } from "@streamdown/mermaid";
 import rehypeKatex from "rehype-katex";
 import rehypeRaw from "rehype-raw";
 import remarkGfm from "remark-gfm";
@@ -15,7 +17,13 @@ const sharedRemarkPlugins = [
   [remarkMath, { singleDollarTextMath: true }],
 ] as StreamdownProps["remarkPlugins"];
 
+export const streamdownRenderingPlugins = {
+  code,
+  mermaid,
+} satisfies NonNullable<StreamdownProps["plugins"]>;
+
 export const streamdownPlugins = {
+  plugins: streamdownRenderingPlugins,
   remarkPlugins: sharedRemarkPlugins,
   rehypePlugins: [
     rehypeRaw,
@@ -30,6 +38,7 @@ export const streamdownWordAnimation = {
 } as const satisfies Exclude<StreamdownProps["animated"], boolean | undefined>;
 
 export const streamdownPluginsWithoutRawHtml = {
+  plugins: streamdownPlugins.plugins,
   remarkPlugins: streamdownPlugins.remarkPlugins,
   rehypePlugins: streamdownPlugins.rehypePlugins?.filter(
     (p) => p !== rehypeRaw,

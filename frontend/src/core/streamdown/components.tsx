@@ -13,6 +13,7 @@ import {
 } from "@/components/ai-elements/streamdown";
 import { cn } from "@/lib/utils";
 
+import { streamdownRenderingPlugins } from "./plugins";
 import {
   useSafeStreamdownChildren,
   useSafeStreamdownMarkdown,
@@ -42,18 +43,22 @@ export function toStreamdownComponents(
 
 export function SafeStreamdown({
   children,
+  plugins = streamdownRenderingPlugins,
   ...props
 }: ClipboardSafeStreamdownProps) {
   const safeChildren = useSafeStreamdownChildren(children);
 
   return (
-    <ClipboardSafeStreamdown {...props}>{safeChildren}</ClipboardSafeStreamdown>
+    <ClipboardSafeStreamdown plugins={plugins} {...props}>
+      {safeChildren}
+    </ClipboardSafeStreamdown>
   );
 }
 
 export function SafeMessageResponse({
   children,
   className,
+  plugins = streamdownRenderingPlugins,
   ...props
 }: ClipboardSafeStreamdownProps) {
   const safeChildren = useSafeStreamdownChildren(children);
@@ -67,6 +72,7 @@ export function SafeMessageResponse({
         "size-full [&>*:first-child]:mt-0 [&>*:last-child]:mb-0",
         className,
       )}
+      plugins={plugins}
       {...props}
     >
       {safeChildren}

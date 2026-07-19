@@ -43,9 +43,9 @@ describe("MarkdownContent streaming code blocks", () => {
     expect(html).not.toContain('data-streaming-inline-code="true"');
   });
 
-  it("restores Streamdown highlighting after streaming finishes", () => {
+  it("restores Streamdown code rendering after streaming finishes", () => {
     const html = renderMarkdown(
-      ["```html", '<main class="report">Hello</main>', "```"].join("\n"),
+      ["```typescript", "const answer: number = 42;", "```"].join("\n"),
       false,
     );
 
