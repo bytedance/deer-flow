@@ -31,7 +31,10 @@ from langchain_core.language_models.fake_chat_models import FakeMessagesListChat
 from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage, SystemMessage, ToolMessage
 from langgraph.graph.message import add_messages
 
-from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
+from deerflow.agents.middlewares.view_image_middleware import (
+    _IMAGE_CONTEXT_MESSAGE_MARKER_KEY,
+    ViewImageMiddleware,
+)
 
 
 def _view_image_call(call_id: str = "call_1", path: str = "/mnt/user-data/uploads/img.png") -> dict:
@@ -434,6 +437,7 @@ class TestInjectImageMessage:
         # Internal injection: must be hidden from the chat UI (and IM channels),
         # like the other middleware-injected context messages.
         assert injected.additional_kwargs.get("hide_from_ui") is True
+        assert injected.additional_kwargs.get(_IMAGE_CONTEXT_MESSAGE_MARKER_KEY) is True
         assert injected.id is not None
         assert injected.id.startswith("view-image-context:")
 
@@ -532,7 +536,7 @@ class TestAfterModel:
         state = {
             "messages": [
                 HumanMessage(
-                    id="ordinary-hidden-message",
+                    id="view-image-context:client-supplied",
                     content="Here are the images you've viewed: user-authored text",
                     additional_kwargs={"hide_from_ui": True},
                 ),
@@ -541,6 +545,54 @@ class TestAfterModel:
         }
 
         assert mw.after_model(state, _runtime()) is None
+
+    def test_graph_preserves_normalized_client_message_with_reserved_prefix(self, tmp_path):
+        from app.gateway.services import normalize_input
+
+        client_id = "view-image-context:client-supplied"
+        normalized = normalize_input(
+            {
+                "messages": [
+                    {
+                        "role": "user",
+                        "id": client_id,
+                        "content": "client-authored message",
+                        "additional_kwargs": {
+                            _IMAGE_CONTEXT_MESSAGE_MARKER_KEY: True,
+                            "custom": "keep-me",
+                        },
+                    }
+                ]
+            }
+        )
+        client_message = normalized["messages"][0]
+        assert _IMAGE_CONTEXT_MESSAGE_MARKER_KEY not in client_message.additional_kwargs
+
+        capture = _CaptureChatMessages()
+        model = FakeMessagesListChatModel(
+            responses=[AIMessage(content="I can see the image.")],
+            callbacks=[capture],
+        )
+        graph = create_agent(model=model, tools=[], middleware=[ViewImageMiddleware()])
+        assistant = AIMessage(content="", tool_calls=[_view_image_call("c1")])
+
+        result = graph.invoke(
+            {
+                "messages": [
+                    client_message,
+                    assistant,
+                    ToolMessage(content="ok", tool_call_id="c1"),
+                ],
+                "viewed_images": {"/img.png": _make_viewed_image(tmp_path)},
+            }
+        )
+
+        assert any(message.id == client_id for message in capture.messages)
+        assert any(isinstance(message, HumanMessage) and message.id != client_id and message.additional_kwargs.get(_IMAGE_CONTEXT_MESSAGE_MARKER_KEY) is True for message in capture.messages)
+        persisted_client = next(message for message in result["messages"] if message.id == client_id)
+        assert persisted_client.content == "client-authored message"
+        assert persisted_client.additional_kwargs == {"custom": "keep-me"}
+        assert all(message.additional_kwargs.get(_IMAGE_CONTEXT_MESSAGE_MARKER_KEY) is not True for message in result["messages"] if isinstance(message, HumanMessage))
 
     @pytest.mark.anyio
     async def test_aafter_model_matches_sync_cleanup(self, tmp_path):

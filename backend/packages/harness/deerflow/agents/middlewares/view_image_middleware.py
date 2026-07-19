@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 # case the file grew on disk between view and injection.
 _MAX_IMAGE_BYTES = 20 * 1024 * 1024
 _IMAGE_CONTEXT_MESSAGE_ID_PREFIX = "view-image-context:"
+_IMAGE_CONTEXT_MESSAGE_MARKER_KEY = "deerflow_view_image_context"
 
 
 class ViewImageMiddlewareState(ThreadState):
@@ -42,6 +43,11 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
     """
 
     state_schema = ViewImageMiddlewareState
+
+    @staticmethod
+    def _is_image_context_message(message: object) -> bool:
+        """Return whether a message is trusted transient image context."""
+        return isinstance(message, HumanMessage) and bool(message.id) and message.id.startswith(_IMAGE_CONTEXT_MESSAGE_ID_PREFIX) and message.additional_kwargs.get(_IMAGE_CONTEXT_MESSAGE_MARKER_KEY) is True
 
     def _get_last_assistant_message(self, messages: list) -> AIMessage | None:
         """Get the last assistant message from the message list.
@@ -207,7 +213,7 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
         assistant_idx = messages.index(last_assistant_msg)
         for msg in messages[assistant_idx + 1 :]:
             if isinstance(msg, HumanMessage):
-                if msg.id and msg.id.startswith(_IMAGE_CONTEXT_MESSAGE_ID_PREFIX):
+                if self._is_image_context_message(msg):
                     return False
                 content_str = str(msg.content)
                 if "Here are the images you've viewed" in content_str or "Here are the details of the images you've viewed" in content_str:
@@ -222,13 +228,16 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
         return HumanMessage(
             id=f"{_IMAGE_CONTEXT_MESSAGE_ID_PREFIX}{uuid4().hex}",
             content=content,
-            additional_kwargs={"hide_from_ui": True},
+            additional_kwargs={
+                "hide_from_ui": True,
+                _IMAGE_CONTEXT_MESSAGE_MARKER_KEY: True,
+            },
         )
 
     @staticmethod
     def _remove_image_context_messages(state: ViewImageMiddlewareState) -> dict | None:
         """Remove transient image context messages after the model consumed them."""
-        removals = [RemoveMessage(id=msg.id) for msg in state.get("messages", []) if isinstance(msg, HumanMessage) and msg.id and msg.id.startswith(_IMAGE_CONTEXT_MESSAGE_ID_PREFIX)]
+        removals = [RemoveMessage(id=msg.id) for msg in state.get("messages", []) if ViewImageMiddleware._is_image_context_message(msg)]
         if not removals:
             return None
         return {"messages": removals}

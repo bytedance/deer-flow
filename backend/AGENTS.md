@@ -913,7 +913,7 @@ See [docs/summarization.md](docs/summarization.md) for details.
 For models with `supports_vision: true`:
 - `ViewImageMiddleware` processes images in conversation
 - `view_image_tool` added to agent's toolset
-- Images are converted to base64 and injected into an ID-marked hidden message for the model call; the middleware removes that message immediately afterward so subsequent checkpoints retain only lightweight `viewed_images` metadata
+- Images are converted to base64 and injected into a hidden message carrying both a reserved ID prefix and a server-owned metadata marker for the model call; Gateway strips that marker from untrusted input, and the middleware requires both identifiers before removing the message immediately afterward so client-chosen IDs survive while subsequent checkpoints retain only lightweight `viewed_images` metadata
 
 ## Code Style
 

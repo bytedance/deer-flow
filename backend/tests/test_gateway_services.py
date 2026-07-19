@@ -186,6 +186,31 @@ def test_normalize_input_strips_external_dynamic_context_metadata():
     assert result["messages"][0].additional_kwargs == {"hide_from_ui": True, "custom": "keep-me"}
 
 
+def test_normalize_input_strips_external_view_image_context_marker():
+    from app.gateway.services import normalize_input
+    from deerflow.agents.middlewares.view_image_middleware import _IMAGE_CONTEXT_MESSAGE_MARKER_KEY
+
+    result = normalize_input(
+        {
+            "messages": [
+                {
+                    "role": "user",
+                    "id": "view-image-context:client-supplied",
+                    "content": "client-authored message",
+                    "additional_kwargs": {
+                        _IMAGE_CONTEXT_MESSAGE_MARKER_KEY: True,
+                        "custom": "keep-me",
+                    },
+                }
+            ]
+        }
+    )
+
+    message = result["messages"][0]
+    assert message.id == "view-image-context:client-supplied"
+    assert message.additional_kwargs == {"custom": "keep-me"}
+
+
 def test_normalize_input_preserves_trusted_internal_original_user_content():
     from app.gateway.services import normalize_input
     from deerflow.agents.middlewares.dynamic_context_middleware import _DYNAMIC_CONTEXT_REMINDER_KEY, _REMINDER_DATE_KEY
