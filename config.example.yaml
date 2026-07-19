@@ -15,7 +15,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 26
+config_version: 27
 
 # ============================================================================
 # Logging
@@ -1577,6 +1577,7 @@ agents_api:
 skill_evolution:
   enabled: false # Set to true to allow agent-managed writes under skills/custom
   moderation_model_name: null # Model for LLM-based security scanning (null = use default model)
+  security_fail_closed: true # Moderation model unavailable: true blocks all writes; false allows non-executable content with a warning (executable is always blocked)
 
 # ============================================================================
 # Checkpointer Configuration (DEPRECATED — use `database` instead)
