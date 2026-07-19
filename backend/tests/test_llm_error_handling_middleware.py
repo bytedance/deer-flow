@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
+import threading
+import time
+from collections.abc import Iterator
 from types import SimpleNamespace
 from typing import Any
 
@@ -13,6 +17,21 @@ from deerflow.agents.middlewares.llm_error_handling_middleware import (
 )
 from deerflow.config.app_config import AppConfig, LlmCallConfig
 from deerflow.config.sandbox_config import SandboxConfig
+
+
+@pytest.fixture(autouse=True)
+def _reset_process_limiter() -> Iterator[None]:
+    """Reset the module-global limiter between tests.
+
+    The limiter is a process singleton shared across all middleware instances,
+    so cap / in-flight state from one test would otherwise bleed into the next
+    (notably the limit-change test, which asserts the singleton is reused).
+    """
+    from deerflow.agents.middlewares import llm_error_handling_middleware as mod
+
+    mod._PROCESS_LIMITER = None
+    yield
+    mod._PROCESS_LIMITER = None
 
 
 def _make_app_config() -> AppConfig:
@@ -821,7 +840,7 @@ def test_async_index_error_exhausted_returns_user_fallback(
     assert "temporarily unavailable" in str(result.content)
 
 
-# ---------- Process-global concurrency semaphore ----------
+# ---------- Process-wide concurrency limiter ----------
 
 
 async def _run_concurrent(
@@ -869,7 +888,7 @@ async def _run_concurrent(
 
 
 @pytest.mark.anyio
-async def test_global_semaphore_caps_concurrent_llm_calls() -> None:
+async def test_limiter_caps_concurrent_llm_calls() -> None:
     """With max_concurrent_llm_calls=2, five concurrent calls must never exceed
     two in-flight at once - the rest park on the process-global semaphore.
     """
@@ -885,7 +904,7 @@ async def test_global_semaphore_caps_concurrent_llm_calls() -> None:
 
 
 @pytest.mark.anyio
-async def test_global_semaphore_disabled_by_default() -> None:
+async def test_limiter_disabled_by_default() -> None:
     """max_concurrent_llm_calls defaults to 0 (disabled): no cap, so all five
     concurrent calls run at once. Guards against the semaphore accidentally
     engaging for existing deployments that never opted in.
@@ -899,7 +918,7 @@ async def test_global_semaphore_disabled_by_default() -> None:
 
 
 @pytest.mark.anyio
-async def test_global_semaphore_is_shared_across_instances() -> None:
+async def test_limiter_is_shared_across_instances() -> None:
     """The semaphore is process-global, not per-middleware-instance: two
     middlewares with the same limit share one cap, so four calls spread across
     them still never exceed two in-flight.
@@ -939,7 +958,7 @@ async def test_global_semaphore_is_shared_across_instances() -> None:
 
 
 @pytest.mark.anyio
-async def test_global_semaphore_releases_slot_during_backoff_sleep(
+async def test_limiter_releases_slot_during_backoff_sleep(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The semaphore wraps a single attempt only, not the retry loop. A call in
@@ -1098,7 +1117,7 @@ def test_max_concurrent_llm_calls_defaults_to_disabled() -> None:
 
 def test_max_concurrent_llm_calls_wired_from_config() -> None:
     """llm_call.max_concurrent_calls flows through AppConfig into the middleware
-    attribute that _get_global_concurrency_semaphore reads.
+    attribute that _get_process_limiter reads.
     """
     app_config = AppConfig(
         sandbox=SandboxConfig(use="test"),
@@ -1111,7 +1130,7 @@ def test_max_concurrent_llm_calls_wired_from_config() -> None:
 @pytest.mark.anyio
 async def test_configured_cap_bounds_concurrency_end_to_end() -> None:
     """A cap set via config.yaml (not via setattr) actually bounds in-flight
-    calls end-to-end: AppConfig -> middleware -> process-global semaphore.
+    calls end-to-end: AppConfig -> middleware -> process-wide limiter.
     """
     app_config = AppConfig(
         sandbox=SandboxConfig(use="test"),
@@ -1316,3 +1335,304 @@ def test_burst_retry_base_delay_is_configurable_end_to_end() -> None:
     exc = FakeError("rate increased too quickly", status_code=429, code="limit_burst_rate")
     delay = middleware._build_retry_delay_ms(100, exc, reason="burst_rate")
     assert 100 <= delay <= 200
+
+
+# ---------- Process-wide limiter across call paths (review P1) ----------
+
+
+def _run_on_isolated_loop(coro_factory: Any) -> concurrent.futures.Future:
+    """Run ``coro_factory()`` on a freshly-created event loop in a worker thread.
+
+    Mirrors how ``subagents/executor.py`` runs subagent calls on an isolated
+    persistent loop separate from the lead agent's loop. Returns a
+    ``concurrent.futures.Future`` holding the result/exception.
+    """
+    done: concurrent.futures.Future = concurrent.futures.Future()
+
+    def runner() -> None:
+        loop = asyncio.new_event_loop()
+        try:
+            asyncio.set_event_loop(loop)
+            done.set_result(loop.run_until_complete(coro_factory()))
+        except BaseException as exc:  # propagate to the awaiting test
+            done.set_exception(exc)
+        finally:
+            loop.close()
+
+    threading.Thread(target=runner, daemon=True).start()
+    return done
+
+
+@pytest.mark.anyio
+async def test_limiter_is_process_wide_across_event_loops() -> None:
+    """A lead-agent call (main loop) and a subagent call (isolated loop) share
+    one process-wide cap - the limiter is NOT loop-bound (unlike
+    asyncio.Semaphore). With cap=1, two concurrent calls on different loops must
+    never both be in-flight. Regression for the per-loop cap the reviewer found.
+    """
+    middleware = _build_middleware(max_concurrent_llm_calls=1)
+    gate = threading.Event()  # cross-loop-safe block
+    in_flight = 0
+    max_in_flight = 0
+    lock = threading.Lock()
+
+    async def handler(_request) -> AIMessage:
+        nonlocal in_flight, max_in_flight
+        with lock:
+            in_flight += 1
+            max_in_flight = max(max_in_flight, in_flight)
+        try:
+            await asyncio.to_thread(gate.wait)
+        finally:
+            with lock:
+                in_flight -= 1
+        return AIMessage(content="ok")
+
+    # Call A on the test (main) loop; call B on a separate event loop / thread.
+    task_a = asyncio.create_task(middleware.awrap_model_call(SimpleNamespace(), handler))
+    fut_b = _run_on_isolated_loop(lambda: middleware.awrap_model_call(SimpleNamespace(), handler))
+
+    # Let both loops run; with cap=1 only one handler may be in-flight at a time
+    # across BOTH loops.
+    for _ in range(100):
+        await asyncio.sleep(0)
+        with lock:
+            if max_in_flight >= 1:
+                break
+    with lock:
+        assert max_in_flight == 1
+
+    gate.set()
+    await task_a
+    await asyncio.wait_for(asyncio.wrap_future(fut_b), timeout=5)
+    with lock:
+        assert max_in_flight == 1  # never exceeded the cap on either loop
+
+
+def test_limiter_caps_concurrent_sync_calls() -> None:
+    """The sync graph path now acquires the limiter too (previously bypassed it
+    entirely). With cap=1, two concurrent sync calls must never both be
+    in-flight. Regression for the sync-wrapper bypass the reviewer found.
+    """
+    middleware = _build_middleware(max_concurrent_llm_calls=1)
+    gate = threading.Event()
+    in_flight = 0
+    max_in_flight = 0
+    lock = threading.Lock()
+
+    def handler(_request) -> AIMessage:
+        nonlocal in_flight, max_in_flight
+        with lock:
+            in_flight += 1
+            max_in_flight = max(max_in_flight, in_flight)
+        gate.wait()
+        with lock:
+            in_flight -= 1
+        return AIMessage(content="ok")
+
+    results: list[AIMessage] = []
+
+    def run_one() -> None:
+        results.append(middleware.wrap_model_call(SimpleNamespace(), handler))
+
+    t1 = threading.Thread(target=run_one)
+    t2 = threading.Thread(target=run_one)
+    t1.start()
+    t2.start()
+    # Wait until one handler is in-flight; the other blocks on the limiter.
+    for _ in range(400):
+        with lock:
+            if max_in_flight >= 1:
+                break
+        time.sleep(0.005)
+    with lock:
+        assert max_in_flight == 1
+
+    gate.set()
+    t1.join(timeout=5)
+    t2.join(timeout=5)
+    assert not t1.is_alive() and not t2.is_alive()
+    with lock:
+        assert max_in_flight == 1
+    assert len(results) == 2
+
+
+def test_limit_change_does_not_recreate_limiter_or_abandon_permits() -> None:
+    """Changing the configured cap updates the limiter in place - same instance,
+    in-flight permit preserved (not abandoned). In-flight never exceeds the
+    effective cap during the transition. Regression for the recreate-on-change
+    permit-abandonment the reviewer found.
+    """
+    from deerflow.agents.middlewares.llm_error_handling_middleware import _get_process_limiter
+
+    middleware = _build_middleware(max_concurrent_llm_calls=1)
+    limiter_at_cap1 = _get_process_limiter(1)
+    assert limiter_at_cap1 is not None
+
+    gate = threading.Event()
+    in_flight = 0
+    max_in_flight = 0
+    lock = threading.Lock()
+
+    def handler(_request) -> AIMessage:
+        nonlocal in_flight, max_in_flight
+        with lock:
+            in_flight += 1
+            max_in_flight = max(max_in_flight, in_flight)
+        gate.wait()
+        with lock:
+            in_flight -= 1
+        return AIMessage(content="ok")
+
+    holder = threading.Thread(target=lambda: middleware.wrap_model_call(SimpleNamespace(), handler))
+    holder.start()
+    # Wait until the holder has taken the single permit (cap=1).
+    for _ in range(400):
+        with lock:
+            if max_in_flight >= 1:
+                break
+        time.sleep(0.005)
+    with lock:
+        assert max_in_flight == 1
+
+    # Simulate a config reload raising the cap: the next limiter lookup with a
+    # new limit updates the cap in place (a fresh middleware instance would do
+    # the same on its first model call).
+    limiter_at_cap3 = _get_process_limiter(3)
+    # Same instance, cap updated in place - NOT recreated.
+    assert limiter_at_cap3 is limiter_at_cap1
+    assert limiter_at_cap3.limit == 3
+    # The holder's permit is still counted against the new cap (not abandoned).
+    assert limiter_at_cap3._in_flight == 1
+
+    # Release the holder; it returns its permit to the SAME limiter.
+    gate.set()
+    holder.join(timeout=5)
+    assert not holder.is_alive()
+    with lock:
+        assert max_in_flight == 1  # never exceeded cap=1 while held
+    assert limiter_at_cap3._in_flight == 0  # permit returned, not leaked
+
+
+@pytest.mark.anyio
+async def test_limiter_cancellation_does_not_leak_capacity() -> None:
+    """A caller cancelled while waiting on the limiter must not leak a permit:
+    after it's cancelled and the in-flight call releases, a fresh call is still
+    admitted to the same cap. Regression for the cancellation-capacity-leak
+    concern the reviewer raised.
+    """
+    middleware = _build_middleware(max_concurrent_llm_calls=1)
+    gate = threading.Event()
+    a_started = asyncio.Event()
+
+    async def handler_a(_request) -> AIMessage:
+        a_started.set()
+        await asyncio.to_thread(gate.wait)
+        return AIMessage(content="a-ok")
+
+    async def handler_b(_request) -> AIMessage:
+        return AIMessage(content="b-ok")
+
+    # A acquires the single permit and blocks.
+    task_a = asyncio.create_task(middleware.awrap_model_call(SimpleNamespace(), handler_a))
+    await asyncio.wait_for(a_started.wait(), timeout=2)
+
+    # B queues on the limiter (no permit available).
+    task_b = asyncio.create_task(middleware.awrap_model_call(SimpleNamespace(), handler_b))
+    await asyncio.sleep(0.05)
+    assert not task_b.done()  # B is waiting, not admitted
+
+    # Cancel B while it waits on the limiter.
+    task_b.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task_b
+
+    # Release A; its permit returns. B's cancellation must not have consumed it.
+    gate.set()
+    await task_a
+
+    # A fresh call C must be admitted immediately - proving B's cancellation
+    # didn't leak capacity (in_flight back to 0, not stuck at 1).
+    task_c = asyncio.create_task(middleware.awrap_model_call(SimpleNamespace(), handler_b))
+    result_c = await asyncio.wait_for(task_c, timeout=2)
+    assert result_c.content == "b-ok"
+
+
+# ---------- Burst-rate first-retry jitter (review P1) ----------
+
+
+def test_burst_first_retry_is_non_degenerate_with_default_config() -> None:
+    """With shipped defaults (burst_base=5000, cap=8000, normal_base=1000), the
+    first burst retry must be drawn from a NON-degenerate window [5000, 8000],
+    not fixed at 5000ms. Regression for the deterministic-herd bug (prev was
+    seeded from the 1000ms normal base, collapsing the window to a point).
+    """
+    middleware = _build_middleware()  # defaults
+    exc = FakeError("rate increased too quickly", status_code=429, code="limit_burst_rate")
+    # prev_delay_ms=None simulates the first retry (loops now init it to None).
+    delays = {middleware._build_retry_delay_ms(None, exc, reason="burst_rate") for _ in range(20)}
+    assert all(5000 <= d <= 8000 for d in delays)
+    assert len(delays) > 1  # non-degenerate: more than one distinct value observed
+
+
+def test_burst_first_retry_uses_jitter_not_fixed_value(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Controlled RNG: forcing randint to an upper-window value yields that
+    value (capped), proving the first burst retry is jittered rather than a
+    constant 5000ms."""
+    middleware = _build_middleware()  # defaults
+    exc = FakeError("rate increased too quickly", status_code=429, code="limit_burst_rate")
+    monkeypatch.setattr(
+        "deerflow.agents.middlewares.llm_error_handling_middleware.random.randint",
+        lambda lo, hi: 7000,
+    )
+    assert middleware._build_retry_delay_ms(None, exc, reason="burst_rate") == 7000
+
+
+@pytest.mark.anyio
+async def test_async_burst_first_retry_non_degenerate_default_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end on the real async wrapper with default burst config: the
+    first (and only) burst retry lands at a jittered value, not fixed at 5s."""
+    middleware = _build_middleware()  # defaults: burst_base=5000, cap=8000
+    waits: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        waits.append(delay)
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(
+        "deerflow.agents.middlewares.llm_error_handling_middleware.random.randint",
+        lambda lo, hi: 7000,
+    )
+
+    async def handler(_request) -> AIMessage:
+        raise FakeError("rate increased too quickly", status_code=429, code="limit_burst_rate")
+
+    result = await middleware.awrap_model_call(SimpleNamespace(), handler)
+    assert len(waits) == 1
+    assert waits[0] == 7.0  # 7000ms, jittered - not the fixed 5.0s
+    assert result.additional_kwargs.get("error_reason") == "burst_rate"
+
+
+def test_concurrent_burst_failures_get_distinct_jittered_delays() -> None:
+    """De-synchronization invariant: concurrent burst-rate failures get distinct
+    retry delays, so a fleet that failed together does not realign on one tick.
+
+    Uses a seeded real RNG (not a monkeypatch) so the window computation still
+    runs - on the old code the window collapsed to ``randint(5000, 5000)`` and
+    every delay was 5000ms (``len(set) == 1``); the jittered window yields many
+    distinct values.
+    """
+    import random as _random
+
+    middleware = _build_middleware()  # defaults
+    exc = FakeError("rate increased too quickly", status_code=429, code="limit_burst_rate")
+    saved_state = _random.getstate()
+    _random.seed(42)
+    try:
+        delays = [middleware._build_retry_delay_ms(None, exc, reason="burst_rate") for _ in range(50)]
+    finally:
+        _random.setstate(saved_state)
+    assert all(5000 <= d <= 8000 for d in delays)
+    assert len(set(delays)) > 1  # de-synchronized, not a single 5000ms tick

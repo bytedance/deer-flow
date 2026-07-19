@@ -7,8 +7,8 @@ import logging
 import random
 import threading
 import time
+from collections import deque
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
 from email.utils import parsedate_to_datetime
 from typing import Any, override
 
@@ -124,53 +124,155 @@ _STREAM_DROP_EXCEPTIONS: frozenset[str] = frozenset(
 )
 
 
-# Process-global LLM concurrency cap. A single ``asyncio.Semaphore`` shared
-# across every ``LLMErrorHandlingMiddleware`` instance bounds the number of
-# in-flight model calls process-wide. This is the lever for smoothing a
-# provider burst-rate (``limit_burst_rate``) spike: that limit fires on the
-# *slope* of the request rate, so capping aggregate concurrency caps that
-# slope. Lazily (re)created per running event loop so it survives the
-# loop-per-call pattern used by ``asyncio.run`` in tests; in production there
-# is one long-lived loop, so the semaphore is created exactly once.
+# Process-global LLM call concurrency cap. ONE limiter is shared across every
+# ``LLMErrorHandlingMiddleware`` instance and every call path: the lead agent
+# (main event loop), subagents (the isolated persistent loop in
+# subagents/executor.py), ``asyncio.run`` tests, and the sync graph path. That
+# matters because a provider burst-rate (``limit_burst_rate``) limit fires on
+# the *slope* of the request rate, so the cap must bound aggregate in-flight
+# calls process-wide - a per-loop cap (which is what asyncio.Semaphore would
+# give) is defeated the moment subagent fan-out runs on a second loop.
 
 
-@dataclass
-class _ConcurrencyState:
-    """Mutable holder for the process-global LLM-call semaphore.
+class _ProcessWideLimiter:
+    """In-flight call limiter shared across event loops and sync/async wrappers.
 
-    Encapsulating (semaphore, loop, limit) in a single instance - instead of
-    three bare module-level globals - keeps the recreate condition and the
-    state it reads co-located. The semaphore is (re)created when the running
-    event loop changes or the configured limit changes, so a fresh loop never
-    reuses a semaphore bound to a closed loop.
+    ``asyncio.Semaphore`` binds to the first event loop that uses it and raises
+    if acquired from another, so it cannot cap lead-agent and subagent calls
+    together (they run on different loops), nor the sync graph path. This
+    limiter is built on ``threading`` primitives (not loop-bound): every call
+    path shares one in-flight counter and one cap.
+
+    The cap is mutable via ``set_limit``: changing it updates the cap in place
+    - the limiter is never recreated, so in-flight permits are never abandoned
+    (an old limiter is never orphaned holding permits a caller will later
+    release). A lower cap takes effect for the next acquire; in-flight callers
+    keep their permit until they release. Permits are released in a ``finally``
+    and async waiters unregister on cancellation, so a cancelled caller never
+    leaks capacity.
     """
 
-    semaphore: asyncio.Semaphore | None = None
-    loop: asyncio.AbstractEventLoop | None = None
-    limit: int = 0
+    def __init__(self, limit: int) -> None:
+        self._lock = threading.Lock()
+        self._cond = threading.Condition(self._lock)
+        self._in_flight = 0
+        self._limit = max(0, limit)
+        # FIFO of (owner_loop, event) for async callers waiting on capacity.
+        # Each event lives on its caller's loop; release() wakes one across
+        # loops via call_soon_threadsafe so the wakeup runs on the right loop.
+        self._async_waiters: deque[tuple[asyncio.AbstractEventLoop, asyncio.Event]] = deque()
+
+    @property
+    def limit(self) -> int:
+        return self._limit
+
+    def set_limit(self, limit: int) -> None:
+        """Update the cap in place; never recreates the limiter.
+
+        A higher cap may now admit waiting callers, so wake them. A lower cap
+        takes effect for subsequent acquires; in-flight permits are preserved.
+        No-op when the limit is unchanged.
+        """
+        new_limit = max(0, limit)
+        with self._cond:
+            if new_limit == self._limit:
+                return
+            self._limit = new_limit
+            self._wake_waiters_locked(wake_all=True)
+
+    def acquire_sync(self) -> None:
+        """Block the calling thread until a permit is available, then take one."""
+        with self._cond:
+            while not self._try_acquire_locked():
+                self._cond.wait()
+
+    def release(self) -> None:
+        """Return one permit and wake a single waiter (async preferred)."""
+        with self._cond:
+            if self._in_flight > 0:
+                self._in_flight -= 1
+            self._wake_waiters_locked(wake_all=False)
+
+    async def acquire_async(self) -> None:
+        """Acquire a permit without blocking the event loop.
+
+        Capacity available -> returns immediately. Otherwise registers an
+        ``asyncio.Event`` on the caller's loop and awaits it; ``release`` wakes
+        one waiter across loops via ``call_soon_threadsafe``. On cancellation
+        the registration is removed, so no later wakeup leaks a permit to a
+        dead coroutine - and no permit was taken while waiting, so there is
+        nothing to release.
+        """
+        loop = asyncio.get_running_loop()
+        while True:
+            event = asyncio.Event()
+            with self._cond:
+                if self._try_acquire_locked():
+                    return
+                self._async_waiters.append((loop, event))
+            try:
+                await event.wait()
+            except asyncio.CancelledError:
+                with self._cond:
+                    try:
+                        self._async_waiters.remove((loop, event))
+                    except ValueError:
+                        # Already popped by a release(); that wakeup did not
+                        # reserve a permit for us (we only take a permit inside
+                        # _try_acquire_locked, which we hadn't re-run), so
+                        # there is nothing to release.
+                        pass
+                raise
+
+    def _try_acquire_locked(self) -> bool:
+        if self._in_flight < self._limit:
+            self._in_flight += 1
+            return True
+        return False
+
+    def _wake_waiters_locked(self, *, wake_all: bool) -> None:
+        # Wake async waiters first (one per release, or all on a cap change);
+        # remaining wakeups go to sync waiters via the condition. The woken
+        # async waiter re-checks capacity on its own loop and either takes the
+        # permit or re-registers, so waking is always safe (never over-grants).
+        while self._async_waiters:
+            loop, event = self._async_waiters.popleft()
+            try:
+                loop.call_soon_threadsafe(event.set)
+            except RuntimeError:
+                continue  # owner loop closed; drop the dead waiter
+            if not wake_all:
+                return
+        if wake_all:
+            self._cond.notify_all()
+        else:
+            self._cond.notify()
 
 
-_GLOBAL_CONCURRENCY_STATE = _ConcurrencyState()
+_LIMITER_LOCK = threading.Lock()
+_PROCESS_LIMITER: _ProcessWideLimiter | None = None
 
 
-def _get_global_concurrency_semaphore(limit: int) -> asyncio.Semaphore | None:
-    """Return the process-global LLM-call semaphore, or ``None`` when disabled.
+def _get_process_limiter(limit: int) -> _ProcessWideLimiter | None:
+    """Return the process-wide LLM-call limiter, or ``None`` when disabled.
 
-    ``limit <= 0`` disables the cap (callers run unbounded, preserving the
-    default behavior). Otherwise the semaphore is (re)created when the running
-    event loop changes or the configured limit changes, so a fresh loop (e.g. a
-    new ``asyncio.run`` in tests) never reuses a semaphore bound to a closed
-    loop.
+    Created once (double-checked under a lock so concurrent first-calls don't
+    create two). A subsequent change to ``limit`` updates the cap in place via
+    ``set_limit`` - the limiter is never replaced, so in-flight permits are
+    never abandoned. ``limit <= 0`` disables the cap entirely (passthrough).
     """
+    global _PROCESS_LIMITER
     if limit <= 0:
         return None
-    loop = asyncio.get_running_loop()
-    state = _GLOBAL_CONCURRENCY_STATE
-    if state.semaphore is None or state.loop is not loop or state.limit != limit:
-        state.semaphore = asyncio.Semaphore(limit)
-        state.loop = loop
-        state.limit = limit
-    return state.semaphore
+    limiter = _PROCESS_LIMITER
+    if limiter is None:
+        with _LIMITER_LOCK:
+            if _PROCESS_LIMITER is None:
+                _PROCESS_LIMITER = _ProcessWideLimiter(limit)
+            limiter = _PROCESS_LIMITER
+    elif limiter.limit != limit:
+        limiter.set_limit(limit)
+    return limiter
 
 
 class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
@@ -185,7 +287,7 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
     # Process-wide cap on concurrently in-flight LLM calls. 0 disables the cap
     # (default) so existing deployments see no behavior change; set to a
     # positive int to bound aggregate concurrency and smooth provider
-    # burst-rate (limit_burst_rate) spikes. See _get_global_concurrency_semaphore.
+    # burst-rate (limit_burst_rate) spikes. See _get_process_limiter.
     max_concurrent_llm_calls: int = 0
 
     def __init__(self, *, app_config: AppConfig, **kwargs: Any) -> None:
@@ -339,35 +441,70 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
 
         return False, "generic"
 
+    def _bounded_model_call_sync(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], ModelResponse],
+    ) -> ModelResponse:
+        """Run one sync model attempt under the process-global concurrency cap.
+
+        The limiter wraps a *single* attempt only (not the retry loop), so
+        backoff sleeps release the slot for other callers. ``limiter=None``
+        (cap disabled) is a direct passthrough. Permits release on any exit
+        (return or raise) via ``finally`` so a raised handler never leaks a slot.
+        """
+        limiter = _get_process_limiter(self.max_concurrent_llm_calls)
+        if limiter is None:
+            return handler(request)
+        limiter.acquire_sync()
+        try:
+            return handler(request)
+        finally:
+            limiter.release()
+
     async def _bounded_model_call(
         self,
         request: ModelRequest,
         handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
     ) -> ModelResponse:
-        """Run one model attempt under the process-global concurrency cap.
+        """Run one async model attempt under the process-global concurrency cap.
 
-        The semaphore wraps a *single* attempt only, not the whole retry loop,
-        so backoff sleeps release the slot for other callers - we bound
-        in-flight requests, not waiting ones. When the cap is disabled
-        (``max_concurrent_llm_calls <= 0``) this is a direct passthrough.
+        The limiter wraps a *single* attempt only (not the retry loop), so
+        backoff sleeps release the slot for other callers - we bound in-flight
+        requests, not waiting ones. ``limiter=None`` (cap disabled) is a direct
+        passthrough. Permits release on any exit (return, raise, or
+        cancellation) via ``finally``; ``acquire_async`` separately cleans up if
+        cancelled while waiting, so capacity never leaks.
         """
-        semaphore = _get_global_concurrency_semaphore(self.max_concurrent_llm_calls)
-        if semaphore is None:
+        limiter = _get_process_limiter(self.max_concurrent_llm_calls)
+        if limiter is None:
             return await handler(request)
-        async with semaphore:
+        await limiter.acquire_async()
+        try:
             return await handler(request)
+        finally:
+            limiter.release()
 
-    def _build_retry_delay_ms(self, prev_delay_ms: int, exc: BaseException, reason: str = "transient") -> int:
+    def _build_retry_delay_ms(self, prev_delay_ms: int | None, exc: BaseException, reason: str = "transient") -> int:
         """Compute the next retry delay (ms) using decorrelated jitter.
 
         An explicit ``Retry-After`` from the provider is honored as-is (no
         jitter) - the server told us exactly when to come back, and for a
         burst-rate 429 this is strongly preferred over any computed delay.
         Otherwise AWS-style "decorrelated jitter" is applied:
-        ``delay = min(cap, random(base, prev * 3))``, seeded with the base on
-        the first retry. ``reason="burst_rate"`` swaps in
+        ``delay = min(cap, random(base, seed * 3))`` where ``seed`` is the
+        previous delay, or the reason-specific base on the first retry
+        (``prev_delay_ms is None``). ``reason="burst_rate"`` swaps in
         ``burst_retry_base_delay_ms`` (longer than the normal base) so the
         single burst retry lands after the throttle window subsides.
+
+        Seeding the first retry from the *reason-specific* base (not always the
+        normal base) is what keeps the first-and-only burst retry
+        non-degenerate: with the normal base (1000ms) the burst window would
+        collapse to ``randint(5000, max(5000, 1000*3)) = randint(5000, 5000)``
+        and every concurrent burst failure would realign on the same 5s tick.
+        Seeding from 5000ms gives ``randint(5000, 15000)`` (capped at
+        ``retry_cap_delay_ms``), so a fleet that failed together spreads out.
 
         Deterministic exponential backoff (``base * 2^(attempt-1)``) makes
         every concurrent retryer realign on the same backoff ticks; when a
@@ -381,7 +518,8 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
             return retry_after
         base = self.burst_retry_base_delay_ms if reason == "burst_rate" else self.retry_base_delay_ms
         cap = self.retry_cap_delay_ms
-        high = max(base, prev_delay_ms * 3)
+        seed = base if prev_delay_ms is None else prev_delay_ms
+        high = max(base, seed * 3)
         delay = random.randint(base, high)
         return min(delay, cap)
 
@@ -481,10 +619,10 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
             )
 
         attempt = 1
-        prev_delay_ms = self.retry_base_delay_ms
+        prev_delay_ms: int | None = None
         while True:
             try:
-                response = handler(request)
+                response = self._bounded_model_call_sync(request, handler)
                 self._record_success()
                 return response
             except GraphBubbleUp:
@@ -536,7 +674,7 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
             )
 
         attempt = 1
-        prev_delay_ms = self.retry_base_delay_ms
+        prev_delay_ms: int | None = None
         while True:
             try:
                 response = await self._bounded_model_call(request, handler)
