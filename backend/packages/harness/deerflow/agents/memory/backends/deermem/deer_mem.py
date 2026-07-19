@@ -36,7 +36,7 @@ from .deermem.core.message_processing import (
     filter_messages_for_memory,
     load_patterns,
 )
-from .deermem.core.prompt import format_memory_for_injection, warm_tiktoken_cache
+from .deermem.core.prompt import format_memory_for_injection, load_prompt, load_prompt_messages, warm_tiktoken_cache
 from .deermem.core.queue import MemoryUpdateQueue
 from .deermem.core.storage import create_storage
 from .deermem.core.updater import MemoryUpdater, _coerce_source_confidence
@@ -67,6 +67,20 @@ class DeerMem(MemoryManager):
         # mirroring pre-abstraction `model_name: null`. Standalone (no factory) -> None.
         self._llm = self._config.host_llm if self._config.host_llm is not None else build_llm(self._config.model)
         self._updater = MemoryUpdater(self._config, self._storage, self._llm, prompts_dir=self._config.prompts_dir)
+        # Validate explicit prompt templates at construction so a misconfigured
+        # prompts_dir surfaces at startup rather than as a silent dropped update.
+        if self._config.prompts_dir is not None:
+            _dummy_vars = {
+                "current_memory": "{}",
+                "conversation": "(validation)",
+                "correction_hint": "",
+                "staleness_review_section": "",
+                "consolidation_section": "",
+            }
+            load_prompt("staleness_review", prompts_dir=self._config.prompts_dir)
+            load_prompt("consolidation", prompts_dir=self._config.prompts_dir)
+            load_prompt("fact_extraction", prompts_dir=self._config.prompts_dir)
+            load_prompt_messages("memory_update", _dummy_vars, prompts_dir=self._config.prompts_dir)
         self._queue = MemoryUpdateQueue(self._config, self._updater)
 
     # ── Write ────────────────────────────────────────────────────────────

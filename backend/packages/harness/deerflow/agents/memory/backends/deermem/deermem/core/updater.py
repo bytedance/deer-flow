@@ -446,6 +446,7 @@ def _build_staleness_section(
     config: Any,
     *,
     prompts_dir: str | None = None,
+    agent_name: str | None = None,
 ) -> str:
     """Format the staleness review prompt section from candidate facts.
 
@@ -469,7 +470,7 @@ def _build_staleness_section(
         content = html.escape(str(fact.get("content", "")), quote=False)
         effective_age = _effective_fact_staleness_age(fact, config)
         lines.append(f'- [{fid} | {cat} | {conf:.2f} | {created_short} | valid:{effective_age}d] "{content}"')
-    return load_prompt("staleness_review", prompts_dir=prompts_dir).format(stale_facts="\n".join(lines))
+    return load_prompt("staleness_review", prompts_dir=prompts_dir, agent_name=agent_name).format(stale_facts="\n".join(lines))
 
 
 # ── Consolidation helpers ───────────────────────────────────────────────
@@ -507,6 +508,7 @@ def _build_consolidation_section(
     max_sources: int = 8,
     *,
     prompts_dir: str | None = None,
+    agent_name: str | None = None,
 ) -> str:
     """Format consolidation candidate groups into the prompt section.
 
@@ -528,7 +530,7 @@ def _build_consolidation_section(
             lines.append(f'- [{fid} | {conf:.2f}] "{content}"')
         shown = min(len(group), max_sources)
         parts.append(f'<consolidation_candidates category="{html.escape(cat)}" count="{shown}">\n' + "\n".join(lines) + "\n</consolidation_candidates>")
-    return load_prompt("consolidation", prompts_dir=prompts_dir).format(consolidation_groups="\n\n".join(parts), max_groups=max_groups)
+    return load_prompt("consolidation", prompts_dir=prompts_dir, agent_name=agent_name).format(consolidation_groups="\n\n".join(parts), max_groups=max_groups)
 
 
 def _escape_memory_for_prompt(memory: Any) -> Any:
@@ -744,7 +746,7 @@ class MemoryUpdater:
         if config.staleness_review_enabled:
             stale_candidates = _select_stale_candidates(current_memory, config)
             if len(stale_candidates) >= config.staleness_min_candidates:
-                staleness_section = _build_staleness_section(stale_candidates, config, prompts_dir=self._prompts_dir)
+                staleness_section = _build_staleness_section(stale_candidates, config, prompts_dir=self._prompts_dir, agent_name=agent_name)
 
         # ── Build consolidation section ──
         consolidation_section = ""
@@ -756,6 +758,7 @@ class MemoryUpdater:
                     max_groups=config.consolidation_max_groups_per_cycle,
                     max_sources=config.consolidation_max_sources,
                     prompts_dir=self._prompts_dir,
+                    agent_name=agent_name,
                 )
 
         variables = {
