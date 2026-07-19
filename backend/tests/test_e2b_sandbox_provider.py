@@ -575,6 +575,51 @@ def test_kill_client_returns_exception_without_raising():
     assert p._kill_client(client) is error
 
 
+def test_kill_client_ignores_missing_or_uncallable_clients():
+    p = _make_provider()
+
+    assert p._kill_client(None) is None
+    assert p._kill_client(SimpleNamespace()) is None
+
+
+def test_evict_oldest_warm_closes_client_when_kill_lookup_raises(monkeypatch):
+    p = _make_provider()
+    fake_cls = _install_fake_sdk(monkeypatch, p)
+    error = RuntimeError("kill unavailable")
+
+    class ClientWithBrokenKill:
+        def __init__(self) -> None:
+            self.closed = False
+
+        @property
+        def kill(self):
+            raise error
+
+        def close(self) -> None:
+            self.closed = True
+
+    client = ClientWithBrokenKill()
+    fake_cls.connect_factory = lambda _sid, **_kw: client
+    p._warm_pool["sb-warm"] = ("seed", 12345.0)
+
+    assert p._evict_oldest_warm() == "sb-warm"
+    assert client.closed is True
+
+
+def test_evict_oldest_warm_uses_kill_helper_and_closes_client(monkeypatch):
+    p = _make_provider()
+    fake_cls = _install_fake_sdk(monkeypatch, p)
+    client = FakeClient(sandbox_id="sb-warm")
+    fake_cls.connect_factory = lambda _sid, **_kw: client
+    p._warm_pool["sb-warm"] = ("seed", 12345.0)
+    kill_client = MagicMock(return_value=None)
+    p._kill_client = kill_client
+
+    assert p._evict_oldest_warm() == "sb-warm"
+    kill_client.assert_called_once_with(client)
+    assert client.closed is True
+
+
 def test_discover_remote_sandbox_returns_none_when_list_raises(monkeypatch):
     p = _make_provider()
     fake_cls = _install_fake_sdk(monkeypatch, p)
