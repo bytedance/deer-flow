@@ -271,7 +271,6 @@ class E2BSandboxProvider(SandboxProvider):
         return sid
 
     def _reclaim_warm_pool_sandbox(self, thread_id: str, *, user_id: str) -> str | None:
-        key = self._thread_key(thread_id, user_id)
         seed = self._stable_seed(thread_id, user_id)
         with self._lock:
             target_id = next(
@@ -282,9 +281,8 @@ class E2BSandboxProvider(SandboxProvider):
                 return None
             self._warm_pool.pop(target_id)
 
-        sandbox_cls = self._get_sandbox_cls()
         try:
-            client = self._reconnect_client(sandbox_cls, target_id)
+            client = self._reconnect_live_client(self._get_sandbox_cls(), target_id)
         except Exception as e:
             logger.warning(
                 "Warm-pool e2b sandbox %s failed to reconnect, dropping: %s",
@@ -293,18 +291,11 @@ class E2BSandboxProvider(SandboxProvider):
             )
             return None
 
-        # Verify the reconnected client actually corresponds to a live VM.
-        # ``Sandbox.connect`` succeeds for paused/expired sandboxes too on
-        # some SDK versions, but the very next command then fails with
-        # "sandbox not found" mid-tool-call. Pinging here moves that failure
-        # into the acquire path, where we cleanly fall back to creating a
-        # fresh sandbox.
-        if not self._client_alive(client):
+        if client is None:
             logger.warning(
                 "Warm-pool e2b sandbox %s is no longer alive (reaped by control plane); dropping and falling back to create",
                 target_id,
             )
-            self._safe_close_client(client)
             return None
 
         self._refresh_remote_timeout(client)
@@ -312,10 +303,7 @@ class E2BSandboxProvider(SandboxProvider):
             self._bootstrap_sandbox_paths(client)
         except Exception as e:
             logger.debug("bootstrap on warm-pool reclaim failed: %s", e)
-        sandbox = E2BSandbox(id=target_id, client=client, home_dir=self._config["home_dir"])
-        with self._lock:
-            self._sandboxes[target_id] = sandbox
-            self._thread_sandboxes[key] = target_id
+        self._register_connected_sandbox(target_id, client, thread_id=thread_id, user_id=user_id)
         logger.info(
             "Reclaimed warm-pool e2b sandbox %s for user/thread %s/%s",
             target_id,
@@ -410,7 +398,7 @@ class E2BSandboxProvider(SandboxProvider):
             return None
 
         try:
-            client = self._reconnect_client(sandbox_cls, target_id)
+            client = self._reconnect_live_client(sandbox_cls, target_id)
         except Exception as e:
             logger.warning(
                 "Discovered e2b sandbox %s could not be reconnected: %s",
@@ -419,12 +407,11 @@ class E2BSandboxProvider(SandboxProvider):
             )
             return None
 
-        if not self._client_alive(client):
+        if client is None:
             logger.warning(
                 "Discovered e2b sandbox %s is no longer alive; falling back to create",
                 target_id,
             )
-            self._safe_close_client(client)
             return None
 
         self._refresh_remote_timeout(client)
@@ -432,10 +419,7 @@ class E2BSandboxProvider(SandboxProvider):
             self._bootstrap_sandbox_paths(client)
         except Exception as e:
             logger.debug("bootstrap on remote discovery failed: %s", e)
-        sandbox = E2BSandbox(id=target_id, client=client, home_dir=self._config["home_dir"])
-        with self._lock:
-            self._sandboxes[target_id] = sandbox
-            self._thread_sandboxes[self._thread_key(thread_id, user_id)] = target_id
+        self._register_connected_sandbox(target_id, client, thread_id=thread_id, user_id=user_id)
         logger.info(
             "Discovered remote e2b sandbox %s for user/thread %s/%s (seed=%s)",
             target_id,
@@ -535,6 +519,37 @@ class E2BSandboxProvider(SandboxProvider):
     def _reconnect_client(self, sandbox_cls: type[E2BClientSandbox], sandbox_id: str) -> E2BClientSandbox:
         """Connect to an existing e2b sandbox by id, with consistent kwargs."""
         return sandbox_cls.connect(sandbox_id, **self._common_kwargs())  # type: ignore[attr-defined]
+
+    def _reconnect_live_client(
+        self,
+        sandbox_cls: type[E2BClientSandbox],
+        sandbox_id: str,
+    ) -> E2BClientSandbox | None:
+        """Reconnect to *sandbox_id* and reject clients for reaped VMs.
+
+        ``Sandbox.connect`` may succeed even after the E2B control plane has
+        reaped the VM. Closing that host-side client before returning ``None``
+        keeps both acquire paths from leaking a connection.
+        """
+        client = self._reconnect_client(sandbox_cls, sandbox_id)
+        if self._client_alive(client):
+            return client
+        self._safe_close_client(client)
+        return None
+
+    def _register_connected_sandbox(
+        self,
+        sandbox_id: str,
+        client: E2BClientSandbox,
+        *,
+        thread_id: str,
+        user_id: str,
+    ) -> None:
+        """Track a live reconnected sandbox under its thread ownership."""
+        sandbox = E2BSandbox(id=sandbox_id, client=client, home_dir=self._config["home_dir"])
+        with self._lock:
+            self._sandboxes[sandbox_id] = sandbox
+            self._thread_sandboxes[self._thread_key(thread_id, user_id)] = sandbox_id
 
     def _refresh_remote_timeout(self, client: E2BClientSandbox) -> None:
         """Push the configured idle timeout to the e2b control plane."""
@@ -909,19 +924,14 @@ class E2BSandboxProvider(SandboxProvider):
             )
             return evict_id
 
-        try:
-            kill = getattr(client, "kill", None)
-            if callable(kill):
-                kill()
-        except Exception as e:
-            logger.warning("Failed to kill evicted e2b sandbox %s: %s", evict_id, e)
-        finally:
-            close = getattr(client, "close", None)
-            if callable(close):
-                try:
-                    close()
-                except Exception:
-                    pass
+        if error := self._kill_client(client):
+            logger.warning("Failed to kill evicted e2b sandbox %s: %s", evict_id, error)
+        close = getattr(client, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:
+                pass
         logger.info("Evicted warm-pool e2b sandbox %s", evict_id)
         return evict_id
 
@@ -998,22 +1008,31 @@ class E2BSandboxProvider(SandboxProvider):
         logger.info("Released e2b sandbox %s to warm pool", sandbox_id)
 
     def _kill_and_close(self, sandbox: E2BSandbox) -> None:
-        client = getattr(sandbox, "_client", None)
-        if client is not None:
-            kill = getattr(client, "kill", None)
-            if callable(kill):
-                try:
-                    kill()
-                except Exception as e:
-                    logger.debug(
-                        "kill() on e2b sandbox %s raised (probably already gone): %s",
-                        sandbox.id,
-                        e,
-                    )
+        if error := self._kill_client(getattr(sandbox, "_client", None)):
+            logger.debug(
+                "kill() on e2b sandbox %s raised (probably already gone): %s",
+                sandbox.id,
+                error,
+            )
         try:
             sandbox.close()
         except Exception:
             pass
+
+    @staticmethod
+    def _kill_client(
+        client: E2BClientSandbox | None,
+    ) -> Exception | None:
+        """Kill a remote VM and return an exception for the caller to log."""
+        if client is None:
+            return None
+        try:
+            kill = getattr(client, "kill", None)
+            if callable(kill):
+                kill()
+        except Exception as e:
+            return e
+        return None
 
     def reset(self) -> None:
         with self._lock:
@@ -1040,15 +1059,11 @@ class E2BSandboxProvider(SandboxProvider):
         )
 
         for sandbox_id, sandbox in active:
-            try:
-                kill = getattr(sandbox.client, "kill", None)
-                if callable(kill):
-                    kill()
-            except Exception as e:
+            if error := self._kill_client(sandbox.client):
                 logger.warning(
                     "Failed to kill active e2b sandbox %s during shutdown: %s",
                     sandbox_id,
-                    e,
+                    error,
                 )
             try:
                 sandbox.close()
@@ -1066,15 +1081,11 @@ class E2BSandboxProvider(SandboxProvider):
                     e,
                 )
                 continue
-            try:
-                kill = getattr(client, "kill", None)
-                if callable(kill):
-                    kill()
-            except Exception as e:
+            if error := self._kill_client(client):
                 logger.warning(
                     "Failed to kill warm-pool e2b sandbox %s during shutdown: %s",
                     sandbox_id,
-                    e,
+                    error,
                 )
             close = getattr(client, "close", None)
             if callable(close):

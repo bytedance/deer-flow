@@ -4,11 +4,13 @@ import { useRouter } from "next/navigation";
 import { useTheme } from "next-themes";
 import { useEffect, useState } from "react";
 
+import { RememberSessionOption } from "@/components/auth/remember-session-option";
 import { Button } from "@/components/ui/button";
 import { FlickeringGrid } from "@/components/ui/flickering-grid";
 import { Input } from "@/components/ui/input";
 import { getCsrfHeaders } from "@/core/api/fetcher";
 import { useAuth } from "@/core/auth/AuthProvider";
+import { loadRememberLoginPreference } from "@/core/auth/remember-login";
 import {
   fetchSetupStatus,
   isSystemAlreadyInitializedError,
@@ -29,6 +31,9 @@ export default function SetupPage() {
   const [confirmPassword, setConfirmPassword] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const [rememberMe, setRememberMe] = useState(
+    () => loadRememberLoginPreference().rememberMe,
+  );
 
   // --- Change-password mode only ---
   const [currentPassword, setCurrentPassword] = useState("");
@@ -82,6 +87,7 @@ export default function SetupPage() {
         body: JSON.stringify({
           email,
           password: newPassword,
+          remember_me: rememberMe,
         }),
       });
 
@@ -131,6 +137,7 @@ export default function SetupPage() {
           current_password: currentPassword,
           new_password: newPassword,
           new_email: email || undefined,
+          remember_me: rememberMe,
         }),
       });
 
@@ -221,6 +228,10 @@ export default function SetupPage() {
                 minLength={8}
               />
             </div>
+            <RememberSessionOption
+              checked={rememberMe}
+              onCheckedChange={setRememberMe}
+            />
             {error && <p className="ms-1 text-sm text-red-500">{error}</p>}
             <Button type="submit" className="w-full" disabled={loading}>
               {loading ? "Creating account…" : "Create Admin Account"}
@@ -282,6 +293,10 @@ export default function SetupPage() {
             onChange={(e) => setConfirmPassword(e.target.value)}
             required
             minLength={8}
+          />
+          <RememberSessionOption
+            checked={rememberMe}
+            onCheckedChange={setRememberMe}
           />
           {error && <p className="text-sm text-red-500">{error}</p>}
           <Button type="submit" className="w-full" disabled={loading}>
