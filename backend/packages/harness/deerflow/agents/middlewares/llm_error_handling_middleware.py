@@ -132,6 +132,41 @@ _STREAM_DROP_EXCEPTIONS: frozenset[str] = frozenset(
 # the *slope* of the request rate, so the cap must bound aggregate in-flight
 # calls process-wide - a per-loop cap (which is what asyncio.Semaphore would
 # give) is defeated the moment subagent fan-out runs on a second loop.
+#
+# Correctness invariants the design below preserves:
+#   * P1 #1 (lossless waiter handoff): a permit handed to a waiter is *reserved*
+#     for that waiter at dequeue time (``granted=True``). If the waiter is
+#     cancelled before it wakes, the reserved permit is re-handed to the next
+#     waiter (or freed) - so a cancellation in the post-dequeue/pre-reacquire
+#     window never strands the next waiter with capacity idle.
+#   * P1 #2 (generation-aware cap): the cap is set by a single owner
+#     (``_apply_configured_cap`` from each middleware ``__init__``) carrying a
+#     monotonic instance seq (a proxy for config freshness). Per-attempt
+#     callers only acquire/release - they never rewrite the cap - so a stale
+#     in-flight run cannot bump a freshly-lowered cap back up.
+
+
+class _AsyncWaiter:
+    """A parked async caller awaiting a transferred permit.
+
+    ``granted`` is flipped to ``True`` (under the limiter lock) at the exact
+    moment a permit is reserved for this waiter - by ``release`` handing off a
+    returning permit, by ``set_limit_if_newer`` admitting queued callers on a
+    cap raise, or by another cancelling waiter handing off its reserved permit.
+    The reservation is atomic with the dequeue, so the invariant
+    ``granted is True  <=>  not in _async_waiters`` always holds: once granted,
+    the permit is already counted in ``_in_flight`` and the waiter need only
+    wake and return. A cancelled waiter therefore knows from ``granted``
+    whether it owes a handoff (granted) or is merely unregistering (not yet
+    granted).
+    """
+
+    __slots__ = ("loop", "event", "granted")
+
+    def __init__(self, loop: asyncio.AbstractEventLoop, event: asyncio.Event) -> None:
+        self.loop = loop
+        self.event = event
+        self.granted = False
 
 
 class _ProcessWideLimiter:
@@ -143,42 +178,56 @@ class _ProcessWideLimiter:
     limiter is built on ``threading`` primitives (not loop-bound): every call
     path shares one in-flight counter and one cap.
 
-    The cap is mutable via ``set_limit``: changing it updates the cap in place
-    - the limiter is never recreated, so in-flight permits are never abandoned
-    (an old limiter is never orphaned holding permits a caller will later
-    release). A lower cap takes effect for the next acquire; in-flight callers
-    keep their permit until they release. Permits are released in a ``finally``
-    and async waiters unregister on cancellation, so a cancelled caller never
-    leaks capacity.
+    The cap has a single generation-aware owner: ``set_limit_if_newer`` accepts
+    an ``owner_seq`` (a monotonic proxy for config freshness - see
+    ``_next_instance_seq``) and ignores writes from an older instance, so a
+    stale in-flight run cannot rewrite a cap set by a newer config. Per-attempt
+    callers (``acquire_sync``/``acquire_async``/``release``) never touch the
+    cap. A lower cap takes effect for subsequent acquires; in-flight permits are
+    preserved (holders keep theirs until release). Permits are released in a
+    ``finally`` and an async waiter that is cancelled after its permit was
+    reserved hands the reservation to the next waiter, so capacity never leaks
+    and a cancellation never strands a later waiter.
     """
 
-    def __init__(self, limit: int) -> None:
+    def __init__(self, limit: int, owner_seq: int) -> None:
         self._lock = threading.Lock()
         self._cond = threading.Condition(self._lock)
         self._in_flight = 0
         self._limit = max(0, limit)
-        # FIFO of (owner_loop, event) for async callers waiting on capacity.
-        # Each event lives on its caller's loop; release() wakes one across
-        # loops via call_soon_threadsafe so the wakeup runs on the right loop.
-        self._async_waiters: deque[tuple[asyncio.AbstractEventLoop, asyncio.Event]] = deque()
+        self._owner_seq = owner_seq
+        # FIFO of async callers waiting on capacity. Each waiter lives on its
+        # caller's loop; release/handoff wakes one across loops via
+        # call_soon_threadsafe so the wakeup runs on the right loop.
+        self._async_waiters: deque[_AsyncWaiter] = deque()
 
     @property
     def limit(self) -> int:
         return self._limit
 
-    def set_limit(self, limit: int) -> None:
-        """Update the cap in place; never recreates the limiter.
+    @property
+    def in_flight(self) -> int:
+        return self._in_flight
 
-        A higher cap may now admit waiting callers, so wake them. A lower cap
-        takes effect for subsequent acquires; in-flight permits are preserved.
-        No-op when the limit is unchanged.
+    def set_limit_if_newer(self, limit: int, owner_seq: int) -> None:
+        """Update the cap iff *owner_seq* is at least as new as the current owner.
+
+        Generation-aware ownership: a stale middleware instance (older config)
+        captured an older cap; its ``__init__`` still calls this, but its
+        ``owner_seq`` is lower than the current owner's, so the write is ignored
+        and a freshly-lowered cap survives. A raise admits queued callers; a
+        lower takes effect for subsequent acquires while in-flight permits are
+        preserved. No-op when the limit is unchanged.
         """
         new_limit = max(0, limit)
         with self._cond:
+            if owner_seq < self._owner_seq:
+                return  # stale owner: cannot rewrite the active cap
+            self._owner_seq = owner_seq
             if new_limit == self._limit:
                 return
             self._limit = new_limit
-            self._wake_waiters_locked(wake_all=True)
+            self._grant_to_queued_locked()
 
     def acquire_sync(self) -> None:
         """Block the calling thread until a permit is available, then take one."""
@@ -187,42 +236,67 @@ class _ProcessWideLimiter:
                 self._cond.wait()
 
     def release(self) -> None:
-        """Return one permit and wake a single waiter (async preferred)."""
+        """Return one permit, handing it to a waiter if one is queued.
+
+        If an async waiter is queued, the returning permit *transfers* to it
+        (ownership moves; ``_in_flight`` is unchanged) and its event is set so
+        it wakes already owning a permit. Otherwise the permit returns to the
+        free pool (``_in_flight -= 1``) and one sync waiter is notified to grab
+        it on its next ``_try_acquire_locked`` re-check.
+        """
         with self._cond:
+            if self._async_waiters:
+                waiter = self._async_waiters.popleft()
+                waiter.granted = True
+                if not self._wake_locked(waiter):
+                    # Owner loop closed: the transferred permit is stranded;
+                    # hand it to the next waiter or free it.
+                    self._handoff_granted_permit_locked()
+                return
             if self._in_flight > 0:
                 self._in_flight -= 1
-            self._wake_waiters_locked(wake_all=False)
+            self._cond.notify()
 
     async def acquire_async(self) -> None:
         """Acquire a permit without blocking the event loop.
 
-        Capacity available -> returns immediately. Otherwise registers an
-        ``asyncio.Event`` on the caller's loop and awaits it; ``release`` wakes
-        one waiter across loops via ``call_soon_threadsafe``. On cancellation
-        the registration is removed, so no later wakeup leaks a permit to a
-        dead coroutine - and no permit was taken while waiting, so there is
-        nothing to release.
+        Free capacity -> take one immediately. Otherwise park on an
+        ``asyncio.Event``; ``release`` / a cap-raise transfers a permit to us
+        (``granted=True``) and sets the event. On cancellation, if a permit was
+        already reserved for us, hand it to the next waiter (or free it) so the
+        reservation is never lost; if we were still queued (not yet granted),
+        just unregister - no permit was reserved for us, so there is nothing to
+        release.
         """
         loop = asyncio.get_running_loop()
         while True:
-            event = asyncio.Event()
+            waiter = _AsyncWaiter(loop=loop, event=asyncio.Event())
             with self._cond:
                 if self._try_acquire_locked():
                     return
-                self._async_waiters.append((loop, event))
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug(
+                        "LLM call parking on process-wide limiter (in_flight=%d, limit=%d, queued=%d)",
+                        self._in_flight,
+                        self._limit,
+                        len(self._async_waiters) + 1,
+                    )
+                self._async_waiters.append(waiter)
             try:
-                await event.wait()
+                await waiter.event.wait()
             except asyncio.CancelledError:
                 with self._cond:
-                    try:
-                        self._async_waiters.remove((loop, event))
-                    except ValueError:
-                        # Already popped by a release(); that wakeup did not
-                        # reserve a permit for us (we only take a permit inside
-                        # _try_acquire_locked, which we hadn't re-run), so
-                        # there is nothing to release.
-                        pass
+                    if waiter.granted:
+                        # A permit was reserved for us but we're cancelling
+                        # before waking. Pass the reservation to the next
+                        # waiter (or free it) so it is not stranded.
+                        self._handoff_granted_permit_locked()
+                    else:
+                        # Still queued, never granted (granted is set only when
+                        # dequeued, under the lock): just unregister.
+                        self._async_waiters.remove(waiter)
                 raise
+            return  # woken => granted => we own a permit (already in _in_flight)
 
     def _try_acquire_locked(self) -> bool:
         if self._in_flight < self._limit:
@@ -230,49 +304,107 @@ class _ProcessWideLimiter:
             return True
         return False
 
-    def _wake_waiters_locked(self, *, wake_all: bool) -> None:
-        # Wake async waiters first (one per release, or all on a cap change);
-        # remaining wakeups go to sync waiters via the condition. The woken
-        # async waiter re-checks capacity on its own loop and either takes the
-        # permit or re-registers, so waking is always safe (never over-grants).
-        while self._async_waiters:
-            loop, event = self._async_waiters.popleft()
-            try:
-                loop.call_soon_threadsafe(event.set)
-            except RuntimeError:
-                continue  # owner loop closed; drop the dead waiter
-            if not wake_all:
-                return
-        if wake_all:
+    def _grant_to_queued_locked(self) -> None:
+        """Admit queued callers to newly-available capacity (cap raise).
+
+        Reserves a permit (counts it in ``_in_flight``) for each queued async
+        waiter that fits under the current cap, then notifies sync waiters for
+        any remaining free capacity so they re-check ``_try_acquire_locked``.
+        """
+        while self._in_flight < self._limit and self._async_waiters:
+            waiter = self._async_waiters.popleft()
+            waiter.granted = True
+            self._in_flight += 1  # commit the reservation to this waiter
+            if not self._wake_locked(waiter):
+                # Owner loop closed: reclaim the reservation and try the next.
+                self._in_flight -= 1
+        if self._in_flight < self._limit:
             self._cond.notify_all()
-        else:
-            self._cond.notify()
+
+    def _handoff_granted_permit_locked(self) -> None:
+        """Transfer an already-reserved permit to the next queued waiter, or free it.
+
+        Used when a waiter that had a permit reserved cancels before waking, or
+        when a reservation target's loop is dead. The permit is already counted
+        in ``_in_flight``; transferring keeps it counted (ownership moves to the
+        next waiter), freeing returns it to the pool. Either way ``_in_flight``
+        stays correct and the reservation is never lost.
+        """
+        while self._async_waiters:
+            waiter = self._async_waiters.popleft()
+            waiter.granted = True
+            if self._wake_locked(waiter):
+                return  # ownership transferred; _in_flight unchanged
+            # dead loop; try the next waiter
+        # No async waiter to take it: free the permit and wake a sync waiter.
+        if self._in_flight > 0:
+            self._in_flight -= 1
+        self._cond.notify()
+
+    def _wake_locked(self, waiter: _AsyncWaiter) -> bool:
+        """Schedule ``event.set`` on the waiter's loop. False if the loop is dead."""
+        try:
+            waiter.loop.call_soon_threadsafe(waiter.event.set)
+            return True
+        except RuntimeError:
+            return False  # owner loop closed: the wakeup cannot land
 
 
 _LIMITER_LOCK = threading.Lock()
 _PROCESS_LIMITER: _ProcessWideLimiter | None = None
 
+# Monotonic counter of middleware construction order - a proxy for config
+# generation: ``get_app_config()`` reloads on file mtime change, so a later
+# ``LLMErrorHandlingMiddleware`` always captured config at least as fresh as an
+# earlier one. The cap owner (``_apply_configured_cap``) passes this seq to
+# ``set_limit_if_newer`` so a stale instance cannot overwrite a cap set by a
+# newer config (P1 #2).
+_INSTANCE_SEQ_LOCK = threading.Lock()
+_INSTANCE_SEQ: int = 0
 
-def _get_process_limiter(limit: int) -> _ProcessWideLimiter | None:
-    """Return the process-wide LLM-call limiter, or ``None`` when disabled.
 
-    Created once (double-checked under a lock so concurrent first-calls don't
-    create two). A subsequent change to ``limit`` updates the cap in place via
-    ``set_limit`` - the limiter is never replaced, so in-flight permits are
-    never abandoned. ``limit <= 0`` disables the cap entirely (passthrough).
+def _next_instance_seq() -> int:
+    global _INSTANCE_SEQ
+    with _INSTANCE_SEQ_LOCK:
+        _INSTANCE_SEQ += 1
+        return _INSTANCE_SEQ
+
+
+def _get_process_limiter() -> _ProcessWideLimiter | None:
+    """Return the process-wide LLM-call limiter, or ``None`` until first configured.
+
+    Per-attempt callers use this to acquire/release only - it never changes the
+    cap. The cap is owned solely by ``_apply_configured_cap`` (called once per
+    middleware ``__init__``), which makes updates generation-aware so a stale
+    in-flight run cannot rewrite the active cap.
+    """
+    return _PROCESS_LIMITER
+
+
+def _apply_configured_cap(limit: int, owner_seq: int) -> None:
+    """Set the process-wide limiter cap from the latest config (single owner).
+
+    Called once per middleware ``__init__`` (which captures the live ``llm_call``
+    config). Creates the limiter on first use, then updates the cap in place via
+    ``set_limit_if_newer`` - a stale instance (older ``owner_seq``) cannot
+    overwrite a cap set by a newer one. ``limit <= 0`` disables the cap: a prior
+    positive cap keeps serving its in-flight callers (which release normally),
+    while new callers see ``max_concurrent_llm_calls <= 0`` and skip the limiter
+    entirely.
     """
     global _PROCESS_LIMITER
     if limit <= 0:
-        return None
+        return  # disabled: callers short-circuit before consulting the limiter
     limiter = _PROCESS_LIMITER
     if limiter is None:
         with _LIMITER_LOCK:
             if _PROCESS_LIMITER is None:
-                _PROCESS_LIMITER = _ProcessWideLimiter(limit)
+                _PROCESS_LIMITER = _ProcessWideLimiter(limit, owner_seq)
             limiter = _PROCESS_LIMITER
-    elif limiter.limit != limit:
-        limiter.set_limit(limit)
-    return limiter
+    # Apply our cap. No-op if we just created the limiter with this exact cap;
+    # ignored by the generation guard if a newer owner already set a different
+    # cap (e.g. a racing thread created it with a fresher seq).
+    limiter.set_limit_if_newer(limit, owner_seq)
 
 
 class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
@@ -293,6 +425,12 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
     def __init__(self, *, app_config: AppConfig, **kwargs: Any) -> None:
         super().__init__(**kwargs)
 
+        # Monotonic construction-order id - a proxy for config generation (a
+        # later instance captured config at least as fresh as an earlier one).
+        # Passed to the process limiter so cap updates are generation-aware and
+        # a stale in-flight instance cannot rewrite a cap set by a newer config.
+        self._instance_seq = _next_instance_seq()
+
         self.circuit_failure_threshold = app_config.circuit_breaker.failure_threshold
         self.circuit_recovery_timeout_sec = app_config.circuit_breaker.recovery_timeout_sec
 
@@ -305,6 +443,12 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         self.retry_cap_delay_ms = llm_call.retry_cap_delay_ms
         self.burst_retry_base_delay_ms = llm_call.burst_retry_base_delay_ms
         self.max_concurrent_llm_calls = llm_call.max_concurrent_calls
+
+        # Apply the configured cap to the process-wide limiter. This is the
+        # SINGLE owner of the cap (per-attempt callers only acquire/release);
+        # the instance seq makes it generation-aware so a stale in-flight run
+        # cannot overwrite a cap set by a newer config (P1 #2).
+        _apply_configured_cap(self.max_concurrent_llm_calls, self._instance_seq)
 
         # Circuit Breaker state
         self._circuit_lock = threading.Lock()
@@ -453,8 +597,8 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         (cap disabled) is a direct passthrough. Permits release on any exit
         (return or raise) via ``finally`` so a raised handler never leaks a slot.
         """
-        limiter = _get_process_limiter(self.max_concurrent_llm_calls)
-        if limiter is None:
+        limiter = _get_process_limiter()
+        if limiter is None or self.max_concurrent_llm_calls <= 0:
             return handler(request)
         limiter.acquire_sync()
         try:
@@ -476,8 +620,8 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         cancellation) via ``finally``; ``acquire_async`` separately cleans up if
         cancelled while waiting, so capacity never leaks.
         """
-        limiter = _get_process_limiter(self.max_concurrent_llm_calls)
-        if limiter is None:
+        limiter = _get_process_limiter()
+        if limiter is None or self.max_concurrent_llm_calls <= 0:
             return await handler(request)
         await limiter.acquire_async()
         try:
@@ -492,9 +636,11 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         jitter) - the server told us exactly when to come back, and for a
         burst-rate 429 this is strongly preferred over any computed delay.
         Otherwise AWS-style "decorrelated jitter" is applied:
-        ``delay = min(cap, random(base, seed * 3))`` where ``seed`` is the
-        previous delay, or the reason-specific base on the first retry
-        (``prev_delay_ms is None``). ``reason="burst_rate"`` swaps in
+        ``delay = random(base, min(cap, max(base, seed * 3)))`` where ``seed``
+        is the previous delay, or the reason-specific base on the first retry
+        (``prev_delay_ms is None``). The window is clamped to the cap *before*
+        drawing (not after) so the distribution stays uniform up to the cap
+        rather than piling up at it. ``reason="burst_rate"`` swaps in
         ``burst_retry_base_delay_ms`` (longer than the normal base) so the
         single burst retry lands after the throttle window subsides.
 
@@ -503,8 +649,9 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         non-degenerate: with the normal base (1000ms) the burst window would
         collapse to ``randint(5000, max(5000, 1000*3)) = randint(5000, 5000)``
         and every concurrent burst failure would realign on the same 5s tick.
-        Seeding from 5000ms gives ``randint(5000, 15000)`` (capped at
-        ``retry_cap_delay_ms``), so a fleet that failed together spreads out.
+        Seeding from 5000ms gives ``randint(5000, min(8000, 15000)) =
+        randint(5000, 8000)`` with defaults, so a fleet that failed together
+        spreads out across the whole window.
 
         Deterministic exponential backoff (``base * 2^(attempt-1)``) makes
         every concurrent retryer realign on the same backoff ticks; when a
@@ -519,9 +666,15 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         base = self.burst_retry_base_delay_ms if reason == "burst_rate" else self.retry_base_delay_ms
         cap = self.retry_cap_delay_ms
         seed = base if prev_delay_ms is None else prev_delay_ms
-        high = max(base, seed * 3)
-        delay = random.randint(base, high)
-        return min(delay, cap)
+        # Clamp the window to the cap *before* drawing so the jitter spreads
+        # uniformly across [base, min(cap, seed*3)] instead of concentrating at
+        # the cap: with defaults seed*3 (=15000) >> cap (=8000), drawing
+        # randint(base, seed*3) then min(delay, cap) would put ~70% of draws at
+        # exactly cap, re-clustering a fleet that the jitter is meant to spread.
+        high = min(cap, max(base, seed * 3))
+        if high < base:
+            return cap  # base exceeds cap (misconfiguration): the cap wins
+        return random.randint(base, high)
 
     def _build_retry_message(self, attempt: int, wait_ms: int, reason: str) -> str:
         seconds = max(1, round(wait_ms / 1000))
@@ -652,10 +805,14 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
                     _extract_error_detail(exc),
                     exc_info=exc,
                 )
-                if retriable:
+                if retriable and reason != "burst_rate":
                     self._record_failure()
                 else:
-                    # Non-retriable: release the probe without recording a failure.
+                    # Non-retriable, OR burst_rate (a transient provider
+                    # slope-throttle, not "provider down"): release the half-open
+                    # probe without recording a failure so the circuit doesn't
+                    # trip and fast-fail ALL calls for the recovery window - the
+                    # exact self-inflicted outage #4290 is trying to prevent.
                     self._release_half_open_probe()
                 return self._build_user_fallback_message(exc, reason)
 
@@ -707,10 +864,14 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
                     _extract_error_detail(exc),
                     exc_info=exc,
                 )
-                if retriable:
+                if retriable and reason != "burst_rate":
                     self._record_failure()
                 else:
-                    # Non-retriable: release the probe without recording a failure.
+                    # Non-retriable, OR burst_rate (a transient provider
+                    # slope-throttle, not "provider down"): release the half-open
+                    # probe without recording a failure so the circuit doesn't
+                    # trip and fast-fail ALL calls for the recovery window - the
+                    # exact self-inflicted outage #4290 is trying to prevent.
                     self._release_half_open_probe()
                 return self._build_user_fallback_message(exc, reason)
 

@@ -21,17 +21,21 @@ from deerflow.config.sandbox_config import SandboxConfig
 
 @pytest.fixture(autouse=True)
 def _reset_process_limiter() -> Iterator[None]:
-    """Reset the module-global limiter between tests.
+    """Reset the module-global limiter + instance seq between tests.
 
     The limiter is a process singleton shared across all middleware instances,
     so cap / in-flight state from one test would otherwise bleed into the next
-    (notably the limit-change test, which asserts the singleton is reused).
+    (notably the limit-change test, which asserts the singleton is reused). The
+    instance seq is reset too so the generation ordering in the stale-instance
+    regression tests is deterministic within each test.
     """
     from deerflow.agents.middlewares import llm_error_handling_middleware as mod
 
     mod._PROCESS_LIMITER = None
+    mod._INSTANCE_SEQ = 0
     yield
     mod._PROCESS_LIMITER = None
+    mod._INSTANCE_SEQ = 0
 
 
 def _make_app_config() -> AppConfig:
@@ -56,10 +60,30 @@ class FakeError(Exception):
         self.response = SimpleNamespace(status_code=status_code, headers=headers or {}) if status_code is not None or headers else None
 
 
+# Middleware-level attribute -> ``LlmCallConfig`` field. ``llm_call`` knobs are
+# routed through ``AppConfig`` so ``__init__`` applies the cap to the process
+# limiter (the single generation-aware owner). Circuit-breaker knobs are read
+# per-call from ``self`` (not via the limiter), so setattr after ``__init__``
+# still works for them.
+_LLM_CALL_ATTR_MAP: dict[str, str] = {
+    "max_concurrent_llm_calls": "max_concurrent_calls",
+    "retry_max_attempts": "retry_max_attempts",
+    "retry_base_delay_ms": "retry_base_delay_ms",
+    "retry_cap_delay_ms": "retry_cap_delay_ms",
+    "burst_retry_base_delay_ms": "burst_retry_base_delay_ms",
+}
+
+
 def _build_middleware(**attrs: int) -> LLMErrorHandlingMiddleware:
-    middleware = LLMErrorHandlingMiddleware(app_config=_make_app_config())
+    llm_call_fields = {_LLM_CALL_ATTR_MAP[key]: value for key, value in attrs.items() if key in _LLM_CALL_ATTR_MAP}
+    app_config = AppConfig(
+        sandbox=SandboxConfig(use="test"),
+        llm_call=LlmCallConfig(**llm_call_fields),
+    )
+    middleware = LLMErrorHandlingMiddleware(app_config=app_config)
     for key, value in attrs.items():
-        setattr(middleware, key, value)
+        if key not in _LLM_CALL_ATTR_MAP:
+            setattr(middleware, key, value)
     return middleware
 
 
@@ -1117,7 +1141,8 @@ def test_max_concurrent_llm_calls_defaults_to_disabled() -> None:
 
 def test_max_concurrent_llm_calls_wired_from_config() -> None:
     """llm_call.max_concurrent_calls flows through AppConfig into the middleware
-    attribute that _get_process_limiter reads.
+    attribute that ``__init__`` applies to the process limiter via
+    ``_apply_configured_cap`` (the single generation-aware cap owner).
     """
     app_config = AppConfig(
         sandbox=SandboxConfig(use="test"),
@@ -1291,6 +1316,65 @@ async def test_async_burst_rate_uses_tight_budget_and_longer_base(
     assert result.additional_kwargs.get("error_reason") == "burst_rate"
 
 
+def test_burst_rate_exhaustion_does_not_trip_circuit_breaker(monkeypatch: pytest.MonkeyPatch) -> None:
+    """P2: burst-rate (limit_burst_rate) is a transient provider slope-throttle,
+    not "provider down". Exhausting its retry budget must NOT count toward the
+    circuit breaker - otherwise N consecutive burst failures flip the CB open
+    and fast-fail ALL calls for the recovery window, the exact self-inflicted
+    outage #4290 is trying to prevent. The burst reason is already distinctively
+    classified by this PR, so it is the natural place to exclude it.
+    """
+    monkeypatch.setattr("time.sleep", lambda _d: None)
+    middleware = _build_middleware(circuit_failure_threshold=3, retry_max_attempts=3)
+
+    def handler(_request) -> AIMessage:
+        raise FakeError("rate increased too quickly", status_code=429, code="limit_burst_rate")
+
+    # Exceed the failure threshold with burst-rate failures: the CB must stay
+    # closed (burst-rate is transient-by-design, not a provider outage).
+    for _ in range(5):
+        result = middleware.wrap_model_call(SimpleNamespace(), handler)
+        assert result.additional_kwargs.get("error_reason") == "burst_rate"
+
+    assert middleware._circuit_failure_count == 0
+    assert middleware._circuit_state == "closed"
+    assert middleware._check_circuit() is False  # still admitting calls
+
+    # A subsequent successful call still goes through (CB never opened).
+    def ok_handler(_request) -> AIMessage:
+        return AIMessage(content="ok")
+
+    result = middleware.wrap_model_call(SimpleNamespace(), ok_handler)
+    assert result.content == "ok"
+
+
+@pytest.mark.anyio
+async def test_async_burst_rate_exhaustion_does_not_trip_circuit_breaker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Async mirror: burst-rate exhaustion on the async path also stays out of
+    the circuit breaker (the gate lives in both ``wrap_model_call`` and
+    ``awrap_model_call``).
+    """
+
+    async def _noop_sleep(_d: float) -> None:
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", _noop_sleep)
+    middleware = _build_middleware(circuit_failure_threshold=3, retry_max_attempts=3)
+
+    async def handler(_request) -> AIMessage:
+        raise FakeError("rate increased too quickly", status_code=429, code="limit_burst_rate")
+
+    for _ in range(5):
+        result = await middleware.awrap_model_call(SimpleNamespace(), handler)
+        assert result.additional_kwargs.get("error_reason") == "burst_rate"
+
+    assert middleware._circuit_failure_count == 0
+    assert middleware._circuit_state == "closed"
+    assert middleware._check_circuit() is False
+
+
 # ---------- Retry params config wiring ----------
 
 
@@ -1455,17 +1539,18 @@ def test_limiter_caps_concurrent_sync_calls() -> None:
     assert len(results) == 2
 
 
-def test_limit_change_does_not_recreate_limiter_or_abandon_permits() -> None:
-    """Changing the configured cap updates the limiter in place - same instance,
-    in-flight permit preserved (not abandoned). In-flight never exceeds the
-    effective cap during the transition. Regression for the recreate-on-change
-    permit-abandonment the reviewer found.
+def test_cap_raise_via_newer_instance_updates_in_place_and_preserves_in_flight() -> None:
+    """A newer middleware instance (higher instance seq = newer config) raises
+    the cap in place - same limiter instance, in-flight permits preserved (not
+    abandoned). Replaces the old recreate-on-change behavior with
+    generation-aware in-place updates.
     """
     from deerflow.agents.middlewares.llm_error_handling_middleware import _get_process_limiter
 
-    middleware = _build_middleware(max_concurrent_llm_calls=1)
-    limiter_at_cap1 = _get_process_limiter(1)
-    assert limiter_at_cap1 is not None
+    old_mw = _build_middleware(max_concurrent_llm_calls=1)
+    limiter = _get_process_limiter()
+    assert limiter is not None
+    assert limiter.limit == 1
 
     gate = threading.Event()
     in_flight = 0
@@ -1482,32 +1567,148 @@ def test_limit_change_does_not_recreate_limiter_or_abandon_permits() -> None:
             in_flight -= 1
         return AIMessage(content="ok")
 
-    holder = threading.Thread(target=lambda: middleware.wrap_model_call(SimpleNamespace(), handler))
+    holder = threading.Thread(target=lambda: old_mw.wrap_model_call(SimpleNamespace(), handler))
     holder.start()
-    # Wait until the holder has taken the single permit (cap=1).
-    for _ in range(400):
+    try:
+        # Wait until the holder has taken the single permit (cap=1).
+        for _ in range(400):
+            with lock:
+                if max_in_flight >= 1:
+                    break
+            time.sleep(0.005)
         with lock:
-            if max_in_flight >= 1:
-                break
-        time.sleep(0.005)
-    with lock:
-        assert max_in_flight == 1
+            assert max_in_flight == 1
+        assert limiter.in_flight == 1  # holder holds the single permit
 
-    # Simulate a config reload raising the cap: the next limiter lookup with a
-    # new limit updates the cap in place (a fresh middleware instance would do
-    # the same on its first model call).
-    limiter_at_cap3 = _get_process_limiter(3)
-    # Same instance, cap updated in place - NOT recreated.
-    assert limiter_at_cap3 is limiter_at_cap1
-    assert limiter_at_cap3.limit == 3
-    # The holder's permit is still counted against the new cap (not abandoned).
-    assert limiter_at_cap3._in_flight == 1
-
-    # Release the holder; it returns its permit to the SAME limiter.
-    gate.set()
-    holder.join(timeout=5)
+        # A newer instance raises the cap to 3: same limiter, cap updated in place.
+        _build_middleware(max_concurrent_llm_calls=3)
+        assert _get_process_limiter() is limiter  # same instance, not recreated
+        assert limiter.limit == 3
+        assert limiter.in_flight == 1  # holder's permit preserved, not abandoned
+    finally:
+        # Always release the holder so a failing assertion doesn't leak the thread.
+        gate.set()
+        holder.join(timeout=5)
     assert not holder.is_alive()
-    assert limiter_at_cap3._in_flight == 0  # permit returned, not leaked
+    assert limiter.in_flight == 0  # permit returned, not leaked
+
+
+def test_stale_instance_does_not_overwrite_lowered_cap() -> None:
+    """P1 #2 regression: a stale middleware instance (older config, captured
+    cap 3) making calls after a newer instance lowered the cap to 1 must NOT
+    rewrite it back to 3, and aggregate in-flight calls must never exceed 1.
+    The per-attempt path only acquires/releases - it never rewrites the cap -
+    so a stale in-flight run cannot bump a freshly-lowered cap back up.
+    """
+    from deerflow.agents.middlewares.llm_error_handling_middleware import _get_process_limiter
+
+    # Old instance created first (lower instance seq = older config generation).
+    old_mw = _build_middleware(max_concurrent_llm_calls=3)
+    # New instance created later (higher seq) lowers the cap to 1.
+    _build_middleware(max_concurrent_llm_calls=1)
+    limiter = _get_process_limiter()
+    assert limiter is not None
+    assert limiter.limit == 1  # newer instance won
+
+    gate = threading.Event()
+    in_flight = 0
+    max_in_flight = 0
+    lock = threading.Lock()
+
+    def handler(_request) -> AIMessage:
+        nonlocal in_flight, max_in_flight
+        with lock:
+            in_flight += 1
+            max_in_flight = max(max_in_flight, in_flight)
+        gate.wait()
+        with lock:
+            in_flight -= 1
+        return AIMessage(content="ok")
+
+    # The OLD instance (captured cap 3) makes overlapping calls; the live cap
+    # is 1, so only one may be in-flight at a time.
+    threads = [threading.Thread(target=lambda: old_mw.wrap_model_call(SimpleNamespace(), handler)) for _ in range(3)]
+    for t in threads:
+        t.start()
+    try:
+        for _ in range(400):
+            with lock:
+                if max_in_flight >= 1:
+                    break
+            time.sleep(0.005)
+        # Give the queued calls a chance to (incorrectly) exceed the lowered cap.
+        time.sleep(0.05)
+        with lock:
+            assert max_in_flight == 1  # never exceeded the lowered cap
+        assert limiter.limit == 1  # stale instance did NOT rewrite it back to 3
+    finally:
+        # Always release the holder threads so a failing assertion doesn't hang.
+        gate.set()
+        for t in threads:
+            t.join(timeout=5)
+    assert all(not t.is_alive() for t in threads)
+    assert limiter.in_flight == 0
+
+
+@pytest.mark.anyio
+async def test_stale_instance_respects_lowered_cap_across_isolated_loop() -> None:
+    """P1 #2 regression (cross-loop): a stale instance (captured cap 3) making
+    async calls on an isolated event loop after a newer instance lowered the cap
+    to 1 respects the lowered cap across loops - it cannot rewrite it back to 3,
+    and aggregate in-flight calls never exceed 1 across the lead loop and the
+    isolated subagent loop.
+    """
+    from deerflow.agents.middlewares.llm_error_handling_middleware import _get_process_limiter
+
+    old_mw = _build_middleware(max_concurrent_llm_calls=3)
+    _build_middleware(max_concurrent_llm_calls=1)  # newer instance lowers cap
+    limiter = _get_process_limiter()
+    assert limiter is not None
+    assert limiter.limit == 1  # newer instance lowered it; stale one didn't rewrite
+
+    gate = threading.Event()
+    counter_lock = threading.Lock()
+    in_flight = 0
+    max_in_flight = 0
+
+    async def handler(_request) -> AIMessage:
+        nonlocal in_flight, max_in_flight
+        with counter_lock:
+            in_flight += 1
+            max_in_flight = max(max_in_flight, in_flight)
+        try:
+            await asyncio.to_thread(gate.wait)
+        finally:
+            with counter_lock:
+                in_flight -= 1
+        return AIMessage(content="ok")
+
+    # Lead-loop call + isolated-loop call, both on the OLD (stale, cap 3) instance.
+    task_lead = asyncio.create_task(old_mw.awrap_model_call(SimpleNamespace(), handler))
+    fut_iso = _run_on_isolated_loop(lambda: old_mw.awrap_model_call(SimpleNamespace(), handler))
+    try:
+        for _ in range(100):
+            await asyncio.sleep(0)
+            with counter_lock:
+                if max_in_flight >= 1:
+                    break
+        await asyncio.sleep(0.05)  # let the second call queue on the limiter
+        with counter_lock:
+            assert max_in_flight == 1  # never exceeded the lowered cap across loops
+        assert limiter.limit == 1  # still 1 - stale instance did not rewrite it
+    finally:
+        # Always release the parked calls so a failing assertion doesn't hang.
+        gate.set()
+        try:
+            await asyncio.wait_for(task_lead, timeout=5)
+        except TimeoutError:
+            pass
+        try:
+            await asyncio.wait_for(asyncio.wrap_future(fut_iso), timeout=5)
+        except TimeoutError:
+            pass
+    with counter_lock:
+        assert in_flight == 0
 
 
 @pytest.mark.anyio
@@ -1553,6 +1754,83 @@ async def test_limiter_cancellation_does_not_leak_capacity() -> None:
     task_c = asyncio.create_task(middleware.awrap_model_call(SimpleNamespace(), handler_b))
     result_c = await asyncio.wait_for(task_c, timeout=2)
     assert result_c.content == "b-ok"
+
+
+@pytest.mark.anyio
+async def test_limiter_cancellation_after_dequeue_hands_off_to_next_waiter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """P1 #1 regression: cap=1, A holds the permit; B and C queue. A releases
+    (reserving/granting B); B is cancelled in the post-dequeue / pre-reacquire
+    handoff window; C must still complete WITHOUT another release - the reserved
+    permit is handed off to C rather than stranded with capacity idle.
+
+    ``test_limiter_cancellation_does_not_leak_capacity`` cancels B while it is
+    still purely queued (before A releases); this test cancels B *after* it has
+    been dequeued+granted but *before* it wakes, which is the window the prior
+    limiter stranded the next waiter in.
+    """
+    from deerflow.agents.middlewares.llm_error_handling_middleware import _get_process_limiter
+
+    middleware = _build_middleware(max_concurrent_llm_calls=1)
+    a_started = asyncio.Event()
+    gate = threading.Event()
+
+    async def handler_a(_request) -> AIMessage:
+        a_started.set()
+        await asyncio.to_thread(gate.wait)
+        return AIMessage(content="a-ok")
+
+    async def handler_ok(_request) -> AIMessage:
+        return AIMessage(content="ok")
+
+    task_a = asyncio.create_task(middleware.awrap_model_call(SimpleNamespace(), handler_a))
+    await asyncio.wait_for(a_started.wait(), timeout=2)
+
+    # B and C queue on the limiter (no permit available).
+    task_b = asyncio.create_task(middleware.awrap_model_call(SimpleNamespace(), handler_ok))
+    task_c = asyncio.create_task(middleware.awrap_model_call(SimpleNamespace(), handler_ok))
+    await asyncio.sleep(0.05)  # let B and C register as waiters
+    assert not task_b.done() and not task_c.done()
+
+    limiter = _get_process_limiter()
+    assert limiter is not None
+
+    # Patch the wake so the FIRST granted waiter (B) does NOT wake yet - this
+    # is the post-dequeue / pre-reacquire handoff window. Later wakes (C, handed
+    # off from B's cancellation) proceed via the real path. ``_wake_locked`` is
+    # called under the limiter lock and must not block, so we only toggle which
+    # branch runs; B's event is simply never set, leaving B parked until cancel.
+    real_wake = type(limiter)._wake_locked
+    state = {"first_done": False}
+
+    def patched_wake(waiter: Any) -> bool:
+        if not state["first_done"]:
+            state["first_done"] = True
+            return True  # pretend the loop is alive; do NOT set B's event
+        return real_wake(limiter, waiter)
+
+    monkeypatch.setattr(limiter, "_wake_locked", patched_wake)
+
+    # Release A: reserves the permit for B (dequeues B, granted=True) but B does
+    # not wake (patched). B sits in the handoff window.
+    gate.set()
+    await task_a
+    await asyncio.sleep(0.02)  # let A's release grant B
+    assert state["first_done"]  # B was dequeued+granted, never woken
+
+    # Cancel B while it is granted-but-not-yet-awake. Its cancellation must hand
+    # the reserved permit to C (the next waiter), waking C via the real path.
+    task_b.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task_b
+
+    # C completes WITHOUT another release - no stranded permit.
+    result_c = await asyncio.wait_for(task_c, timeout=2)
+    assert result_c.content == "ok"
+
+    # No permit leaked: in_flight is back to 0 after C completes and releases.
+    assert limiter.in_flight == 0
 
 
 # ---------- Burst-rate first-retry jitter (review P1) ----------

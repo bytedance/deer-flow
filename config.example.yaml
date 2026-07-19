@@ -1986,6 +1986,13 @@ authorization:
 # middleware, and ideally an nginx `limit_req` at the ingress.
 #
 # 0 disables the cap (default) - existing deployments see no behavior change.
+#
+# Per-process, not per-cluster: the cap bounds in-flight LLM calls within ONE
+# gateway process. With GATEWAY_WORKERS > 1 the aggregate cap across the
+# deployment is effectively `max_concurrent_calls * GATEWAY_WORKERS`, and a
+# multi-node rollout multiplies it further - size the per-process value with
+# that in mind (and pair it with an nginx `limit_req` at the ingress for a
+# true cluster-wide slope cap).
 
 # llm_call:
 #   # Max concurrently in-flight LLM calls across the whole process (default: 0 = disabled)

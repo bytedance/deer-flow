@@ -81,7 +81,12 @@ class LlmCallConfig(BaseModel):
             "Process-wide cap on concurrently in-flight LLM calls. 0 disables "
             "the cap (default, preserving existing behavior). Set to a positive "
             "int to smooth provider burst-rate (limit_burst_rate) spikes by "
-            "bounding the request-rate slope at the morning peak."
+            "bounding the request-rate slope at the morning peak. Per-process, "
+            "not per-cluster: with GATEWAY_WORKERS > 1 the aggregate cap is "
+            "effectively max_concurrent_calls * GATEWAY_WORKERS (and a "
+            "multi-node rollout multiplies it further), so size the per-process "
+            "value accordingly and pair it with an nginx limit_req at the ingress "
+            "for a true cluster-wide slope cap."
         ),
     )
     retry_max_attempts: int = Field(
