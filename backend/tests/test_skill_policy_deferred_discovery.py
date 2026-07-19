@@ -41,8 +41,10 @@ def denied_lookup(query: str) -> str:
 class _StorageStub:
     def __init__(self, skills: list[Skill]):
         self._skills = skills
+        self.load_calls = 0
 
     def load_skills(self, *, enabled_only: bool = False) -> list[Skill]:
+        self.load_calls += 1
         return [skill for skill in self._skills if skill.enabled or not enabled_only]
 
     def get_container_root(self) -> str:
@@ -92,6 +94,65 @@ def _deferred_setup():
         [tag_mcp_tool(calc), tag_mcp_tool(denied_lookup)],
         enabled=True,
     )
+
+
+def test_passive_empty_skill_policy_preserves_deferred_mcp_discovery_and_calling():
+    passive_fixture = _skill("example-safe-skill", [])
+    storage = _StorageStub([passive_fixture])
+    policy = SkillToolPolicyMiddleware(slash_source_owner_token=_SLASH_SOURCE_OWNER_TOKEN)
+    policy._storage = lambda: storage
+    setup = _deferred_setup()
+    model = _RecordingModel(
+        [
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "tool_search",
+                        "args": {"query": "select:calc"},
+                        "id": "passive-search-call",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "calc",
+                        "args": {"expression": "2 + 2"},
+                        "id": "passive-calc-call",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            AIMessage(content="done"),
+        ]
+    )
+    _CALC_CALLS.clear()
+    graph = create_agent(
+        model=model,
+        tools=[calc, denied_lookup, setup.tool_search_tool],
+        middleware=[
+            policy,
+            DeferredToolFilterMiddleware(setup.deferred_names, setup.catalog_hash),
+        ],
+        state_schema=ThreadState,
+    )
+
+    result = graph.invoke(
+        {"messages": [HumanMessage(content="use the configured MCP calculator")]},
+        context={},
+    )
+
+    assert model.bound_tool_names[0] == ["tool_search"]
+    assert "calc" in model.bound_tool_names[1]
+    # This tool remains hidden because it was not promoted, not because the passive
+    # skill applied a policy restriction.
+    assert "denied_lookup" not in model.bound_tool_names[1]
+    assert _CALC_CALLS == ["2 + 2"]
+    assert result["promoted"] == {"catalog_hash": setup.catalog_hash, "names": ["calc"]}
+    assert storage.load_calls == 0
 
 
 def test_active_skill_can_search_promote_and_call_allowed_deferred_tool():
