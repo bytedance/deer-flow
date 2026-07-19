@@ -190,6 +190,150 @@ def test_redact_data_masks_broadened_secret_key_names():
     assert redacted["signing_private_key"] == "<redacted>"
 
 
+def test_redact_data_masks_secret_shaped_keys_in_arbitrary_provider_config():
+    """Guards the gap flagged on PR #3886's review: a fixed keyword allowlist
+    misses secrets stored under an unanticipated key name inside an
+    open-ended config dict, e.g. guardrails.provider.config (GuardrailProviderConfig.config
+    is an arbitrary dict of provider-specific kwargs)."""
+    data = {
+        "guardrails": {
+            "enabled": True,
+            "provider": {
+                "use": "my_org.guardrails:CustomProvider",
+                "config": {
+                    "db_pass": "hunter2-literal",
+                    "encryption_key": "0123456789abcdef-literal",
+                    "redis_pass": "redis-literal-secret",
+                    "webhook_signing_key": "whsec_literal_secret",
+                    "SUPABASE_SERVICE_ROLE_KEY": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.no-env-wrapper.sig",
+                    "gh_pat": "ghp_literalPatValue",
+                    "endpoint": "https://policy.internal/v1",
+                    "timeout_seconds": 30,
+                },
+            },
+        }
+    }
+
+    redacted = support_bundle.redact_data(data)
+    config = redacted["guardrails"]["provider"]["config"]
+
+    assert config["db_pass"] == "<redacted>"
+    assert config["encryption_key"] == "<redacted>"
+    assert config["redis_pass"] == "<redacted>"
+    assert config["webhook_signing_key"] == "<redacted>"
+    assert config["SUPABASE_SERVICE_ROLE_KEY"] == "<redacted>"
+    assert config["gh_pat"] == "<redacted>"
+    # Legitimate, non-secret fields in the same open-ended dict must survive.
+    assert config["endpoint"] == "https://policy.internal/v1"
+    assert config["timeout_seconds"] == 30
+
+    dumped = json.dumps(redacted)
+    for secret in (
+        "hunter2-literal",
+        "0123456789abcdef-literal",
+        "redis-literal-secret",
+        "whsec_literal_secret",
+        "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9",
+        "ghp_literalPatValue",
+    ):
+        assert secret not in dumped
+
+
+def test_redact_data_does_not_over_redact_lookalike_non_secret_keys():
+    """Broadening the key-name match must not catch fields that merely start
+    with the same letters as a secret keyword: MCP routing "keywords" hints
+    (extensions_config.json -> mcpServers.*.routing.keywords) and the
+    guardrails "passport" path/ID are real, non-secret fields."""
+    data = {
+        "routing": {"mode": "prefer", "priority": 50, "keywords": ["database", "SQL", "table"]},
+        "guardrails": {"passport": "/etc/deer-flow/passport.json"},
+    }
+
+    redacted = support_bundle.redact_data(data)
+
+    assert redacted["routing"]["keywords"] == ["database", "SQL", "table"]
+    assert redacted["routing"]["priority"] == 50
+    assert redacted["guardrails"]["passport"] == "/etc/deer-flow/passport.json"
+
+
+def test_redact_data_masks_passphrase_and_passcode_without_over_redacting_passport():
+    """Guards the gap flagged on this PR's review: the original token-boundary
+    `pass` match, (?<![a-zA-Z])pass(?![a-zA-Z]), correctly excludes "passport"
+    (a real, non-secret field, per the test above) but its blanket
+    not-followed-by-any-letter lookahead also excluded genuine secret-bearing
+    key names like "passphrase" and "passcode" -- both of which
+    env_policy.py's *PASS* substring match does catch, so they'd still leak
+    into config-summary.json. Narrowing the lookahead to only exclude a
+    trailing "port" (pass(?!port)) closes that gap while leaving passport,
+    compass, and bypass alone (those stay excluded via the leading-letter
+    lookbehind, independent of the lookahead)."""
+    data = {
+        "guardrails": {
+            "provider": {
+                "config": {
+                    "passphrase": "hunter2-literal",
+                    "passcode": "0000-literal",
+                    "passport": "/etc/deer-flow/passport.json",
+                    "compass_bearing": 42,
+                    "bypass_reason": "maintenance window",
+                }
+            }
+        }
+    }
+
+    redacted = support_bundle.redact_data(data)
+    config = redacted["guardrails"]["provider"]["config"]
+
+    assert config["passphrase"] == "<redacted>"
+    assert config["passcode"] == "<redacted>"
+    assert config["passport"] == "/etc/deer-flow/passport.json"
+    assert config["compass_bearing"] == 42
+    assert config["bypass_reason"] == "maintenance window"
+
+
+def test_create_support_bundle_masks_provider_config_secret_shaped_keys(tmp_path):
+    """End-to-end: an open-ended guardrails.provider.config block in config.yaml
+    must not leak into config-summary.json even though manifest.json declares
+    redacted_secret_fields=true."""
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    (project_root / "config.yaml").write_text(
+        "config_version: 26\n"
+        "models:\n  - name: default\n"
+        "guardrails:\n"
+        "  enabled: true\n"
+        "  provider:\n"
+        "    use: my_org.guardrails:CustomProvider\n"
+        "    config:\n"
+        "      db_pass: hunter2-literal\n"
+        "      encryption_key: 0123456789abcdef-literal\n"
+        "      redis_pass: redis-literal-secret\n"
+        "      webhook_signing_key: whsec_literal_secret\n",
+        encoding="utf-8",
+    )
+
+    output_path = tmp_path / "support.zip"
+    support_bundle.create_support_bundle(
+        project_root=project_root,
+        out_path=output_path,
+        include_doctor=False,
+    )
+
+    config_summary = json.loads(_zip_text(output_path, "config-summary.json"))
+    provider_config = config_summary["guardrails"]["provider"]["config"]
+    assert provider_config["db_pass"] == "<redacted>"
+    assert provider_config["encryption_key"] == "<redacted>"
+    assert provider_config["redis_pass"] == "<redacted>"
+    assert provider_config["webhook_signing_key"] == "<redacted>"
+
+    manifest = json.loads(_zip_text(output_path, "manifest.json"))
+    assert manifest["privacy"]["redacted_secret_fields"] is True
+
+    all_text = "\n".join(_zip_text(output_path, name) for name in zipfile.ZipFile(output_path).namelist())
+    for secret in ("hunter2-literal", "0123456789abcdef-literal", "redis-literal-secret", "whsec_literal_secret"):
+        assert secret not in all_text
+
+
 def test_create_support_bundle_masks_hardcoded_env_secret(tmp_path):
     project_root = tmp_path / "project"
     project_root.mkdir()

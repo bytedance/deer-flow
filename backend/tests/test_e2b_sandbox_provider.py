@@ -458,7 +458,11 @@ def test_reclaim_warm_pool_sandbox_happy_path(monkeypatch):
 def test_reclaim_warm_pool_sandbox_drops_dead_entry(monkeypatch):
     p = _make_provider()
     fake_cls = _install_fake_sdk(monkeypatch, p)
-    fake_cls.connect_factory = lambda sid, **kw: FakeClient(sandbox_id=sid, commands=FakeCommandsAPI([FakeCommandsAPI.GONE]))
+    client = FakeClient(
+        sandbox_id="sb-zombie",
+        commands=FakeCommandsAPI([FakeCommandsAPI.GONE]),
+    )
+    fake_cls.connect_factory = lambda _sid, **_kw: client
     seed = p._stable_seed("t1", "u1")
     p._warm_pool["sb-zombie"] = (seed, 12345.0)
 
@@ -466,6 +470,7 @@ def test_reclaim_warm_pool_sandbox_drops_dead_entry(monkeypatch):
     assert sid is None
     assert "sb-zombie" not in p._sandboxes
     assert "sb-zombie" not in p._warm_pool
+    assert client.closed is True
 
 
 def test_reclaim_warm_pool_sandbox_handles_reconnect_exception(monkeypatch):
@@ -550,10 +555,24 @@ def test_discover_remote_sandbox_skips_dead_candidate(monkeypatch):
     p = _make_provider()
     fake_cls = _install_fake_sdk(monkeypatch, p)
     fake_cls.list_return = [_info("sb-dead", "u1", "t1")]
-    fake_cls.connect_factory = lambda sid, **kw: FakeClient(sandbox_id=sid, commands=FakeCommandsAPI([FakeCommandsAPI.GONE]))
+    client = FakeClient(
+        sandbox_id="sb-dead",
+        commands=FakeCommandsAPI([FakeCommandsAPI.GONE]),
+    )
+    fake_cls.connect_factory = lambda _sid, **_kw: client
 
     assert p._discover_remote_sandbox("t1", user_id="u1") is None
     assert ("u1", "t1") not in p._thread_sandboxes
+    assert client.closed is True
+
+
+def test_kill_client_returns_exception_without_raising():
+    p = _make_provider()
+    client = FakeClient()
+    error = RuntimeError("already gone")
+    client.kill = MagicMock(side_effect=error)
+
+    assert p._kill_client(client) is error
 
 
 def test_discover_remote_sandbox_returns_none_when_list_raises(monkeypatch):

@@ -5,7 +5,11 @@ from fastapi.responses import Response, StreamingResponse
 from starlette.testclient import TestClient
 
 from app.gateway.trace_middleware import TraceMiddleware, resolve_trace_enabled
-from deerflow.trace_context import TRACE_ID_HEADER, get_current_trace_id
+from deerflow.trace_context import (
+    TRACE_ID_HEADER,
+    get_current_trace_id,
+    is_trace_id_from_request_header,
+)
 
 
 def _make_app(*, enabled: bool) -> FastAPI:
@@ -15,6 +19,10 @@ def _make_app(*, enabled: bool) -> FastAPI:
     @app.get("/plain")
     async def plain() -> dict[str, str | None]:
         return {"trace_id": get_current_trace_id()}
+
+    @app.get("/header-flag")
+    async def header_flag() -> dict[str, bool]:
+        return {"from_header": is_trace_id_from_request_header()}
 
     @app.get("/stream")
     async def stream() -> StreamingResponse:
@@ -74,6 +82,16 @@ def test_trace_header_overwrites_duplicate_downstream_value() -> None:
 
     assert response.headers[TRACE_ID_HEADER] == "canonical-trace"
     assert response.headers.get_list(TRACE_ID_HEADER) == ["canonical-trace"]
+
+
+def test_trace_header_marks_inbound_header_flag() -> None:
+    client = TestClient(_make_app(enabled=True))
+
+    with_header = client.get("/header-flag", headers={TRACE_ID_HEADER: "trace-from-upstream"})
+    without_header = client.get("/header-flag")
+
+    assert with_header.json() == {"from_header": True}
+    assert without_header.json() == {"from_header": False}
 
 
 def test_trace_header_rejects_crafted_non_ascii_and_generates_fresh_id() -> None:
