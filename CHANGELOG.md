@@ -241,6 +241,13 @@ This section accumulates work toward the **2.1.0** milestone
   blocking filesystem IO in artifact serving, gateway uploads, and the Discord
   channel; limit the uploaded-file context manifest; and live-tail malformed
   Redis reconnect ids. ([#3651], [#3551], [#3935], [#3927], [#3917], [#4012])
+- **uploads:** Claim the converted-Markdown companion filename before writing
+  it, so two convertible uploads sharing a stem (or a convertible plus a
+  same-stem `.md` upload) no longer silently clobber each other within one
+  request. When `uploads.auto_convert_documents` is on, the companion `.md` now
+  gets a unique name (e.g. `a_1.md`); `POST /threads/{id}/uploads` and
+  `DeerFlowClient.upload_files` both report the actual name in `markdown_file`.
+  ([#4288])
 - **config:** Coerce null object config sections to their defaults; honor the
   unified database configuration in the store and sync checkpointer; and have
   legacy DB backfill create missing `Index` objects on existing tables. ([#3573],
@@ -1087,3 +1094,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#4246]: https://github.com/bytedance/deer-flow/pull/4246
 [#4251]: https://github.com/bytedance/deer-flow/pull/4251
 [#4264]: https://github.com/bytedance/deer-flow/pull/4264
+[#4288]: https://github.com/bytedance/deer-flow/pull/4288
