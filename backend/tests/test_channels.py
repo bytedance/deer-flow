@@ -1241,13 +1241,14 @@ class TestChannelManager:
         _run(go())
 
     def test_streaming_transient_failure_releases_dedupe_key(self, tmp_path, monkeypatch):
-        """A swallowed streaming error must not black-hole the message_id.
+        """Release a swallowed streaming error only after its final outbound.
 
         _release_inbound_dedupe_key lives in _handle_message's `except Exception`
         handler, but _handle_streaming_chat handles its own errors and never
         re-raises — so without an explicit release the key recorded on receipt
         survives the full dedupe TTL and the provider's redelivery (the retry
-        that would recover the failure) is silently dropped.
+        that would recover the failure) is silently dropped. Releasing before
+        the final outbound would let that retry overtake the terminal reply.
         """
         monkeypatch.setattr("app.channels.manager.STREAM_UPDATE_MIN_INTERVAL_SECONDS", 0.0)
         from app.channels.manager import ChannelManager
@@ -1257,9 +1258,13 @@ class TestChannelManager:
             store = ChannelStore(path=tmp_path / "store.json")
             manager = ChannelManager(bus=bus, store=store)
             outbound_received: list[OutboundMessage] = []
+            key_present_during_final_publish: list[bool] = []
 
             async def capture_outbound(msg: OutboundMessage) -> None:
                 outbound_received.append(msg)
+                if msg.is_final:
+                    key = manager._inbound_dedupe_key(_inbound())
+                    key_present_during_final_publish.append(key in manager._recent_inbound_events)
 
             bus.subscribe_outbound(capture_outbound)
 
@@ -1290,6 +1295,7 @@ class TestChannelManager:
             await _wait_for(lambda: any(m.is_final for m in outbound_received))
             await asyncio.sleep(0.05)
             assert manager._client.runs.stream.call_count == 1
+            assert key_present_during_final_publish == [True]
 
             # The provider redelivers the same message after the failure.
             await bus.publish_inbound(_inbound())

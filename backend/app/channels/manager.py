@@ -1823,12 +1823,6 @@ class ChannelManager:
                 len(artifacts),
                 stream_error,
             )
-            if stream_error is not None:
-                # This path swallows its own errors, so _handle_message's generic
-                # handler never runs and never releases the key. Mirror it here:
-                # the key was recorded on receipt, and without this a transient
-                # stream failure black-holes the message_id for the dedupe TTL.
-                self._release_inbound_dedupe_key(msg)
             await self.bus.publish_outbound(
                 OutboundMessage(
                     channel_name=msg.channel_name,
@@ -1844,6 +1838,12 @@ class ChannelManager:
                     metadata=_response_metadata(msg.metadata, pending_clarification=pending_clarification),
                 )
             )
+            if stream_error is not None:
+                # This path swallows its own errors, so _handle_message's generic
+                # handler never runs and never releases the key. Release only
+                # after publishing the final outbound so a provider redelivery
+                # cannot overtake this attempt's terminal reply.
+                self._release_inbound_dedupe_key(msg)
 
     # -- command handling --------------------------------------------------
 
