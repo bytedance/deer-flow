@@ -357,6 +357,7 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
             evicted_id, _ = self._history.popitem(last=False)
             self._warned.pop(evicted_id, None)
             self._tool_name_history.pop(evicted_id, None)
+            self._tool_name_counter.pop(evicted_id, None)
             self._tool_freq_warned.pop(evicted_id, None)
             for key in list(self._pending_warnings):
                 if key[0] == evicted_id:
@@ -718,6 +719,7 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
                 self._history.pop(thread_id, None)
                 self._warned.pop(thread_id, None)
                 self._tool_name_history.pop(thread_id, None)
+                self._tool_name_counter.pop(thread_id, None)
                 self._tool_freq_warned.pop(thread_id, None)
                 for key in list(self._pending_warnings):
                     if key[0] == thread_id:
@@ -726,6 +728,7 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
                 self._history.clear()
                 self._warned.clear()
                 self._tool_name_history.clear()
+                self._tool_name_counter.clear()
                 self._tool_freq_warned.clear()
                 self._pending_warnings.clear()
                 self._pending_warning_touch_order.clear()
