@@ -17,6 +17,10 @@ DEERFLOW_TRACE_METADATA_KEY: Final[str] = "deerflow_trace_id"
 _MAX_TRACE_ID_LENGTH: Final[int] = 512
 
 _current_trace_id: Final[ContextVar[str | None]] = ContextVar("deerflow_current_trace_id", default=None)
+_trace_id_from_request_header: Final[ContextVar[bool]] = ContextVar(
+    "deerflow_trace_id_from_request_header",
+    default=False,
+)
 
 
 def generate_trace_id() -> str:
@@ -63,6 +67,34 @@ def reset_current_trace_id(token: Token[str | None]) -> None:
 def get_current_trace_id() -> str | None:
     """Return the current request trace id, if one is bound."""
     return _current_trace_id.get()
+
+
+def mark_trace_id_from_request_header(*, from_header: bool) -> Token[bool]:
+    """Record whether the current trace id came from a valid inbound header."""
+    return _trace_id_from_request_header.set(from_header)
+
+
+def reset_trace_id_from_request_header(token: Token[bool]) -> None:
+    """Restore the inbound-header flag captured by *token*."""
+    _trace_id_from_request_header.reset(token)
+
+
+def is_trace_id_from_request_header() -> bool:
+    """Return ``True`` when a valid ``X-Trace-Id`` header bound the request."""
+    return _trace_id_from_request_header.get()
+
+
+def resolve_deerflow_trace_id(metadata_trace_id: object) -> str | None:
+    """Resolve the effective ``deerflow_trace_id`` for a run.
+
+    When Gateway ``TraceMiddleware`` bound a valid inbound ``X-Trace-Id``,
+    that value wins over ``config.metadata.deerflow_trace_id`` so logs,
+    response headers, Langfuse, and runtime context stay aligned. Otherwise
+    caller metadata wins, then the ambient request trace context.
+    """
+    if is_trace_id_from_request_header():
+        return get_current_trace_id()
+    return normalize_trace_id(metadata_trace_id) or get_current_trace_id()
 
 
 @contextmanager
