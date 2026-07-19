@@ -69,9 +69,9 @@ class LlmCallConfig(BaseModel):
 
     Distinct from :class:`CircuitBreakerConfig` (which handles a *failing*
     provider) and from :class:`ModelConfig` (which describes model endpoints):
-    these knobs shape how many LLM calls run at once. Capping concurrency caps
-    the *slope* of the request rate, which is what a provider burst-rate
-    (``limit_burst_rate``) limit fires on.
+    these knobs shape how many LLM calls run at once and how the retry/backoff
+    loop behaves. Capping concurrency caps the *slope* of the request rate,
+    which is what a provider burst-rate (``limit_burst_rate``) limit fires on.
     """
 
     max_concurrent_calls: int = Field(
@@ -82,6 +82,31 @@ class LlmCallConfig(BaseModel):
             "the cap (default, preserving existing behavior). Set to a positive "
             "int to smooth provider burst-rate (limit_burst_rate) spikes by "
             "bounding the request-rate slope at the morning peak."
+        ),
+    )
+    retry_max_attempts: int = Field(
+        default=3,
+        ge=1,
+        description="Max LLM call attempts (1 = no retry) for retriable transient errors.",
+    )
+    retry_base_delay_ms: int = Field(
+        default=1000,
+        ge=0,
+        description="Base (ms) for the decorrelated-jitter retry backoff; seeds the first retry delay.",
+    )
+    retry_cap_delay_ms: int = Field(
+        default=8000,
+        ge=0,
+        description="Hard cap (ms) on any single retry backoff delay.",
+    )
+    burst_retry_base_delay_ms: int = Field(
+        default=5000,
+        ge=0,
+        description=(
+            "Base (ms) for the backoff when the provider returns a burst-rate "
+            "(limit_burst_rate) 429. Higher than retry_base_delay_ms so the "
+            "single burst retry lands after the throttle window subsides. "
+            "Ignored when the provider sends Retry-After (honored verbatim)."
         ),
     )
 

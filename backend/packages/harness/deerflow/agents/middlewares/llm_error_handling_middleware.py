@@ -63,6 +63,18 @@ _AUTH_PATTERNS = (
     "未授权",
 )
 
+# Provider burst-rate (``limit_burst_rate``) signals. This is a *rate-of-change*
+# limit, not a quota limit: the provider throttles when request RPM ramps up too
+# steeply (e.g. the 08:30 morning peak going 0 -> full throttle in seconds).
+# Matched against both the error message and the error ``code``/``type``.
+_BURST_PATTERNS = (
+    "limit_burst_rate",
+    "rate increased too quickly",
+    "burst rate",
+    "请求速率增长过快",
+    "突发速率",
+)
+
 # Per-exception retry budget overrides.
 #
 # Some transient errors are retriable in principle but expensive to retry at
@@ -81,6 +93,18 @@ _AUTH_PATTERNS = (
 # "keep one retry" behavior).
 _RETRY_BUDGET_OVERRIDES: dict[str, int] = {
     "StreamChunkTimeoutError": 2,
+}
+
+# Per-reason retry budget overrides, applied in addition to the per-exception
+# overrides above; the tightest bound wins (so neither loosens the other) and
+# the user-configured ``retry_max_attempts`` still caps everything.
+#
+# A burst-rate (``limit_burst_rate``) 429 gets a tight budget on purpose:
+# retrying into the burst adds demand to the very request-rate slope being
+# throttled, so we keep at most one retry (with a longer backoff) and then shed
+# load rather than hammering the provider. Keys are ``_classify_error`` reasons.
+_REASON_RETRY_BUDGETS: dict[str, int] = {
+    "burst_rate": 2,
 }
 
 # Exception class names that indicate the upstream stream-chunk watchdog
@@ -138,6 +162,9 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
     retry_max_attempts: int = 3
     retry_base_delay_ms: int = 1000
     retry_cap_delay_ms: int = 8000
+    # Longer backoff base used only for burst-rate (limit_burst_rate) 429s, so
+    # the single burst retry lands after the throttle window subsides.
+    burst_retry_base_delay_ms: int = 5000
     # Process-wide cap on concurrently in-flight LLM calls. 0 disables the cap
     # (default) so existing deployments see no behavior change; set to a
     # positive int to bound aggregate concurrency and smooth provider
@@ -150,10 +177,15 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         self.circuit_failure_threshold = app_config.circuit_breaker.failure_threshold
         self.circuit_recovery_timeout_sec = app_config.circuit_breaker.recovery_timeout_sec
 
-        # Process-wide in-flight LLM call cap (0 disables). Configured via
-        # ``llm_call.max_concurrent_calls`` in config.yaml; overrides the class
-        # default so operators can tune it without code changes.
-        self.max_concurrent_llm_calls = app_config.llm_call.max_concurrent_calls
+        # Retry / backoff / concurrency knobs are all configured via the
+        # ``llm_call`` section of config.yaml; they override the class defaults
+        # above so operators can tune them without code changes.
+        llm_call = app_config.llm_call
+        self.retry_max_attempts = llm_call.retry_max_attempts
+        self.retry_base_delay_ms = llm_call.retry_base_delay_ms
+        self.retry_cap_delay_ms = llm_call.retry_cap_delay_ms
+        self.burst_retry_base_delay_ms = llm_call.burst_retry_base_delay_ms
+        self.max_concurrent_llm_calls = llm_call.max_concurrent_calls
 
         # Circuit Breaker state
         self._circuit_lock = threading.Lock()
@@ -162,17 +194,24 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         self._circuit_state = "closed"
         self._circuit_probe_in_flight = False
 
-    def _max_attempts_for(self, exc: BaseException) -> int:
+    def _max_attempts_for(self, exc: BaseException, reason: str = "transient") -> int:
         """Return the effective max attempt count for this exception.
 
-        Falls back to `self.retry_max_attempts` unless the exception class name
-        appears in the per-exception override table.
+        The user-configured ``retry_max_attempts`` is the ceiling; per-exception
+        (``_RETRY_BUDGET_OVERRIDES``, keyed by class name) and per-reason
+        (``_REASON_RETRY_BUDGETS``, keyed by ``_classify_error`` reason)
+        overrides can only *tighten* it. The tightest bound wins, so a burst-rate
+        429 never gets more attempts than its dedicated budget even if the
+        operator raised the global cap.
         """
-        override = _RETRY_BUDGET_OVERRIDES.get(type(exc).__name__)
-        if override is None:
-            return self.retry_max_attempts
-
-        return min(override, self.retry_max_attempts)
+        candidates = [self.retry_max_attempts]
+        class_override = _RETRY_BUDGET_OVERRIDES.get(type(exc).__name__)
+        if class_override is not None:
+            candidates.append(class_override)
+        reason_override = _REASON_RETRY_BUDGETS.get(reason)
+        if reason_override is not None:
+            candidates.append(reason_override)
+        return min(candidates)
 
     def _check_circuit(self) -> bool:
         """Returns True if circuit is OPEN (fast fail), False otherwise."""
@@ -247,6 +286,13 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
             return False, "quota"
         if _matches_any(lowered, _AUTH_PATTERNS):
             return False, "auth"
+        # Burst-rate (limit_burst_rate) 429 is retriable but needs its own
+        # policy: a tight retry budget and a longer backoff base (see
+        # _REASON_RETRY_BUDGETS / _build_retry_delay_ms). Detected before the
+        # generic 429->transient mapping so it isn't lumped in with ordinary
+        # transient errors.
+        if _matches_any(lowered, _BURST_PATTERNS) or _matches_any(str(error_code).lower(), _BURST_PATTERNS):
+            return True, "burst_rate"
 
         exc_name = exc.__class__.__name__
         if exc_name in {
@@ -294,14 +340,17 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         async with semaphore:
             return await handler(request)
 
-    def _build_retry_delay_ms(self, prev_delay_ms: int, exc: BaseException) -> int:
+    def _build_retry_delay_ms(self, prev_delay_ms: int, exc: BaseException, reason: str = "transient") -> int:
         """Compute the next retry delay (ms) using decorrelated jitter.
 
         An explicit ``Retry-After`` from the provider is honored as-is (no
-        jitter) - the server told us exactly when to come back. Otherwise
-        AWS-style "decorrelated jitter" is applied:
-        ``delay = min(cap, random(base, prev * 3))``, seeded with
-        ``retry_base_delay_ms`` on the first retry.
+        jitter) - the server told us exactly when to come back, and for a
+        burst-rate 429 this is strongly preferred over any computed delay.
+        Otherwise AWS-style "decorrelated jitter" is applied:
+        ``delay = min(cap, random(base, prev * 3))``, seeded with the base on
+        the first retry. ``reason="burst_rate"`` swaps in
+        ``burst_retry_base_delay_ms`` (longer than the normal base) so the
+        single burst retry lands after the throttle window subsides.
 
         Deterministic exponential backoff (``base * 2^(attempt-1)``) makes
         every concurrent retryer realign on the same backoff ticks; when a
@@ -313,7 +362,7 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         retry_after = _extract_retry_after_ms(exc)
         if retry_after is not None:
             return retry_after
-        base = self.retry_base_delay_ms
+        base = self.burst_retry_base_delay_ms if reason == "burst_rate" else self.retry_base_delay_ms
         cap = self.retry_cap_delay_ms
         high = max(base, prev_delay_ms * 3)
         delay = random.randint(base, high)
@@ -321,7 +370,10 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
 
     def _build_retry_message(self, attempt: int, wait_ms: int, reason: str) -> str:
         seconds = max(1, round(wait_ms / 1000))
-        reason_text = "provider is busy" if reason == "busy" else "provider request failed temporarily"
+        reason_text = {
+            "busy": "provider is busy",
+            "burst_rate": "provider is throttling request burst rate",
+        }.get(reason, "provider request failed temporarily")
         return f"LLM request retry {attempt}/{self.retry_max_attempts}: {reason_text}. Retrying in {seconds}s."
 
     def _build_circuit_breaker_message(self) -> str:
@@ -351,6 +403,8 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
             return "The configured LLM provider rejected the request because the account is out of quota, billing is unavailable, or usage is restricted. Please fix the provider account and try again."
         if reason == "auth":
             return "The configured LLM provider rejected the request because authentication or access is invalid. Please check the provider credentials and try again."
+        if reason == "burst_rate":
+            return "The configured LLM provider is temporarily throttling requests because the request rate increased too quickly (burst-rate limit). Please wait a moment and try again."
         if reason in {"busy", "transient"}:
             # Stream-drop failures (chunk-gap timeout, peer-closed connection,
             # raw read error) almost always point at a single oversized
@@ -422,9 +476,9 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
                 raise
             except Exception as exc:
                 retriable, reason = self._classify_error(exc)
-                max_attempts = self._max_attempts_for(exc)
+                max_attempts = self._max_attempts_for(exc, reason)
                 if retriable and attempt < max_attempts:
-                    wait_ms = self._build_retry_delay_ms(prev_delay_ms, exc)
+                    wait_ms = self._build_retry_delay_ms(prev_delay_ms, exc, reason)
                     prev_delay_ms = wait_ms
                     logger.warning(
                         "Transient LLM error on attempt %d/%d; retrying in %dms: %s",
@@ -477,9 +531,9 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
                 raise
             except Exception as exc:
                 retriable, reason = self._classify_error(exc)
-                max_attempts = self._max_attempts_for(exc)
+                max_attempts = self._max_attempts_for(exc, reason)
                 if retriable and attempt < max_attempts:
-                    wait_ms = self._build_retry_delay_ms(prev_delay_ms, exc)
+                    wait_ms = self._build_retry_delay_ms(prev_delay_ms, exc, reason)
                     prev_delay_ms = wait_ms
                     logger.warning(
                         "Transient LLM error on attempt %d/%d; retrying in %dms: %s",

@@ -1124,3 +1124,195 @@ async def test_configured_cap_bounds_concurrency_end_to_end() -> None:
 
     assert max_in_flight == 2
     assert steady_in_flight == 2
+
+
+# ---------- Burst-rate (limit_burst_rate) classification ----------
+
+
+def test_classify_error_limit_burst_rate_by_code() -> None:
+    """A 429 with error code ``limit_burst_rate`` classifies as burst_rate,
+    not generic transient - so it gets the tight budget + longer backoff.
+    """
+    middleware = _build_middleware()
+    exc = FakeError("Request rate increased too quickly", status_code=429, code="limit_burst_rate")
+    assert middleware._classify_error(exc) == (True, "burst_rate")
+
+
+def test_classify_error_limit_burst_rate_by_message() -> None:
+    """Burst-rate is also detectable from the message alone (no code field),
+    matching how Volcano Engine phrases the error.
+    """
+    middleware = _build_middleware()
+    exc = FakeError("Request rate increased too quickly. To ensure system stability, please adjust your client logic.", status_code=429)
+    assert middleware._classify_error(exc) == (True, "burst_rate")
+
+
+def test_classify_error_normal_429_stays_transient() -> None:
+    """A non-burst 429 (generic 'too many requests') must NOT be classified as
+    burst_rate - it keeps the full retry budget and normal backoff.
+    """
+    middleware = _build_middleware()
+    exc = FakeError("Too many requests", status_code=429)
+    assert middleware._classify_error(exc) == (True, "transient")
+
+
+def test_classify_error_burst_takes_precedence_over_transient_status() -> None:
+    """Burst-rate detection runs before the generic 429->transient mapping."""
+    middleware = _build_middleware()
+    exc = FakeError("limit_burst_rate triggered", status_code=429, code="limit_burst_rate")
+    assert middleware._classify_error(exc) == (True, "burst_rate")
+
+
+def test_max_attempts_for_burst_rate_is_tight() -> None:
+    """burst_rate gets a 2-attempt budget (1 + 1 retry) even when the global
+    cap is higher - retrying into the burst adds demand to the throttled slope.
+    """
+    middleware = _build_middleware(retry_max_attempts=3)
+    exc = FakeError("rate increased too quickly", status_code=429, code="limit_burst_rate")
+    assert middleware._max_attempts_for(exc, "burst_rate") == 2
+
+
+def test_max_attempts_for_burst_rate_respects_user_cap() -> None:
+    """If the operator lowered retry_max_attempts below the burst budget, the
+    user cap wins - overrides only ever tighten, never loosen."""
+    middleware = _build_middleware(retry_max_attempts=1)
+    exc = FakeError("rate increased too quickly", status_code=429, code="limit_burst_rate")
+    assert middleware._max_attempts_for(exc, "burst_rate") == 1
+
+
+def test_burst_rate_delay_uses_longer_base() -> None:
+    """burst_rate backoff uses burst_retry_base_delay_ms (not the normal base),
+    so the single retry lands after the throttle window subsides."""
+    middleware = _build_middleware(
+        retry_base_delay_ms=10,
+        retry_cap_delay_ms=200,
+        burst_retry_base_delay_ms=100,
+    )
+    exc = FakeError("rate increased too quickly", status_code=429, code="limit_burst_rate")
+    # prev = burst base (100) -> high = max(100, 300) = 300 -> delay in [100, 200] (capped)
+    delay = middleware._build_retry_delay_ms(100, exc, reason="burst_rate")
+    assert 100 <= delay <= 200
+
+
+def test_normal_transient_delay_uses_normal_base_not_burst() -> None:
+    """Non-burst transient errors keep using the normal base - the burst base
+    only applies to reason='burst_rate'."""
+    middleware = _build_middleware(
+        retry_base_delay_ms=10,
+        retry_cap_delay_ms=200,
+        burst_retry_base_delay_ms=100,
+    )
+    exc = FakeError("server busy", status_code=503)
+    # prev = 10 -> high = max(10, 30) = 30 -> delay in [10, 30]
+    delay = middleware._build_retry_delay_ms(10, exc, reason="transient")
+    assert 10 <= delay <= 30
+
+
+def test_burst_rate_delay_prefers_retry_after() -> None:
+    """An explicit Retry-After is honored verbatim for burst-rate errors - the
+    server said exactly when to come back, so no jitter / longer base applies."""
+    middleware = _build_middleware(
+        retry_base_delay_ms=10,
+        retry_cap_delay_ms=200,
+        burst_retry_base_delay_ms=100,
+    )
+    exc = FakeError(
+        "rate increased too quickly",
+        status_code=429,
+        code="limit_burst_rate",
+        headers={"retry-after-ms": "5000"},
+    )
+    assert middleware._build_retry_delay_ms(100, exc, reason="burst_rate") == 5000
+
+
+def test_burst_rate_exhausted_returns_distinct_message() -> None:
+    """When the burst retry budget is exhausted, the user-facing message names
+    the burst-rate throttle rather than the generic 'temporarily unavailable'."""
+    middleware = _build_middleware()
+    exc = FakeError("Request rate increased too quickly", status_code=429, code="limit_burst_rate")
+    message = middleware._build_user_message(exc, reason="burst_rate")
+    assert "burst-rate" in message
+    assert "temporarily unavailable" not in message
+
+
+@pytest.mark.anyio
+async def test_async_burst_rate_uses_tight_budget_and_longer_base(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end: a handler raising limit_burst_rate retries at most once
+    (budget 2) with a delay drawn from the burst base, then surfaces a fallback.
+    """
+    middleware = _build_middleware(
+        retry_max_attempts=3,
+        retry_base_delay_ms=10,
+        retry_cap_delay_ms=200,
+        burst_retry_base_delay_ms=100,
+    )
+    waits: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        waits.append(delay)
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    attempts = 0
+
+    async def handler(_request) -> AIMessage:
+        nonlocal attempts
+        attempts += 1
+        raise FakeError("Request rate increased too quickly", status_code=429, code="limit_burst_rate")
+
+    result = await middleware.awrap_model_call(SimpleNamespace(), handler)
+
+    assert attempts == 2  # tight budget: 1 first attempt + 1 retry
+    assert len(waits) == 1
+    # Longer burst base: delay in [burst_base, cap] = [0.1s, 0.2s]
+    assert 0.1 <= waits[0] <= 0.2
+    assert result.additional_kwargs.get("deerflow_error_fallback") is True
+    assert result.additional_kwargs.get("error_reason") == "burst_rate"
+
+
+# ---------- Retry params config wiring ----------
+
+
+def test_retry_params_default_values() -> None:
+    """With no llm_call config, retry params fall back to their documented
+    defaults (matching the previous hard-coded class attributes)."""
+    middleware = LLMErrorHandlingMiddleware(app_config=_make_app_config())
+    assert middleware.retry_max_attempts == 3
+    assert middleware.retry_base_delay_ms == 1000
+    assert middleware.retry_cap_delay_ms == 8000
+    assert middleware.burst_retry_base_delay_ms == 5000
+    assert middleware.max_concurrent_llm_calls == 0
+
+
+def test_retry_params_wired_from_config() -> None:
+    """All retry/backoff knobs flow from config.yaml -> AppConfig -> middleware."""
+    app_config = AppConfig(
+        sandbox=SandboxConfig(use="test"),
+        llm_call=LlmCallConfig(
+            retry_max_attempts=7,
+            retry_base_delay_ms=123,
+            retry_cap_delay_ms=999,
+            burst_retry_base_delay_ms=777,
+            max_concurrent_calls=4,
+        ),
+    )
+    middleware = LLMErrorHandlingMiddleware(app_config=app_config)
+    assert middleware.retry_max_attempts == 7
+    assert middleware.retry_base_delay_ms == 123
+    assert middleware.retry_cap_delay_ms == 999
+    assert middleware.burst_retry_base_delay_ms == 777
+    assert middleware.max_concurrent_llm_calls == 4
+
+
+def test_burst_retry_base_delay_is_configurable_end_to_end() -> None:
+    """A burst base set via config actually drives the burst retry delay."""
+    app_config = AppConfig(
+        sandbox=SandboxConfig(use="test"),
+        llm_call=LlmCallConfig(burst_retry_base_delay_ms=100, retry_cap_delay_ms=200),
+    )
+    middleware = LLMErrorHandlingMiddleware(app_config=app_config)
+    exc = FakeError("rate increased too quickly", status_code=429, code="limit_burst_rate")
+    delay = middleware._build_retry_delay_ms(100, exc, reason="burst_rate")
+    assert 100 <= delay <= 200

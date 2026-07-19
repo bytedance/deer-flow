@@ -1990,6 +1990,16 @@ authorization:
 # llm_call:
 #   # Max concurrently in-flight LLM calls across the whole process (default: 0 = disabled)
 #   max_concurrent_calls: 0
+#   # Max LLM call attempts for retriable transient errors, 1 = no retry (default: 3)
+#   retry_max_attempts: 3
+#   # Base delay (ms) for the decorrelated-jitter retry backoff (default: 1000)
+#   retry_base_delay_ms: 1000
+#   # Hard cap (ms) on any single retry backoff delay (default: 8000)
+#   retry_cap_delay_ms: 8000
+#   # Backoff base (ms) used ONLY for burst-rate (limit_burst_rate) 429s - higher
+#   # than retry_base_delay_ms so the single burst retry lands after the throttle
+#   # window subsides. Ignored when the provider sends Retry-After (default: 5000)
+#   burst_retry_base_delay_ms: 5000
 
 # ============================================================================
 # SSO / OIDC Authentication (optional)
