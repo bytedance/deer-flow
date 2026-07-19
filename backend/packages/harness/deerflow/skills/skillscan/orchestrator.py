@@ -651,6 +651,16 @@ def _python_name(node: ast.AST, aliases: dict[str, str]) -> str:
     return ""
 
 
+def _python_import_name(node: ast.AST, aliases: dict[str, str]) -> str:
+    """Resolve only names proven by the scope-local import map."""
+    if isinstance(node, ast.Name):
+        return aliases.get(node.id, "")
+    if isinstance(node, ast.Attribute):
+        base = _python_import_name(node.value, aliases)
+        return f"{base}.{node.attr}" if base else ""
+    return ""
+
+
 def _python_call_name(node: ast.Call, aliases: dict[str, str]) -> str:
     return _python_name(node.func, aliases)
 
@@ -1098,7 +1108,7 @@ def _collect_client_scope_bindings(node: ast.AST, names: set[str], declared: set
 
 def _client_constructor_from_value(value: ast.AST | None, scope: _ClientScope) -> str:
     if isinstance(value, ast.Call):
-        called = _python_call_name(value, scope.aliases)
+        called = _python_import_name(value.func, scope.aliases)
         return called if called in _PYTHON_CLIENT_CONSTRUCTORS else ""
     if isinstance(value, ast.Name):
         return scope.handles.get(value.id, "")

