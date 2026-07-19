@@ -629,6 +629,20 @@ def _make_stream_part(event: str, data):
     return SimpleNamespace(event=event, data=data)
 
 
+def _ok_stream_events():
+    """Minimal successful streaming run: one text chunk plus a final values frame."""
+    return [
+        _make_stream_part(
+            "messages-tuple",
+            [{"id": "ai-1", "content": "Hello", "type": "AIMessageChunk"}, {"langgraph_node": "agent"}],
+        ),
+        _make_stream_part(
+            "values",
+            {"messages": [{"type": "human", "content": "hi"}, {"type": "ai", "content": "Hello"}], "artifacts": []},
+        ),
+    ]
+
+
 def _make_async_iterator(items):
     async def iterator():
         for item in items:
@@ -1057,6 +1071,347 @@ class TestChannelManager:
             metadata={"message_id": "m1"},
         )
         assert ChannelManager._inbound_dedupe_key(without_workspace) is None
+
+    def test_inbound_dedupe_key_uses_chat_id_for_chat_scoped_providers_when_unbound(self):
+        """Unbound telegram/feishu/wechat must still form a dedupe key via chat_id.
+
+        Those adapters persist connection.workspace_id = chat_id, but
+        attach_connection_identity only sets msg.workspace_id when a connection
+        exists. Provider redeliveries on unbound (or not-yet-bound) chats would
+        otherwise skip the entire inbound dedupe path and run the agent N times.
+        """
+        from app.channels.manager import ChannelManager
+
+        for channel, chat_id, message_id in (
+            ("telegram", "12345", "42"),
+            ("feishu", "oc_abc", "om_1"),
+            ("wechat", "wx_user_1", "m1"),
+        ):
+            unbound = InboundMessage(
+                channel_name=channel,
+                chat_id=chat_id,
+                user_id="u1",
+                text="hi",
+                metadata={"message_id": message_id},
+            )
+            assert ChannelManager._inbound_dedupe_key(unbound) == (channel, chat_id, chat_id, message_id)
+
+            # Bound shape (workspace already on the message) must keep the same key
+            # so bound and unbound redeliveries of the same chat share the cache.
+            bound = InboundMessage(
+                channel_name=channel,
+                chat_id=chat_id,
+                user_id="u1",
+                text="hi",
+                workspace_id=chat_id,
+                metadata={"message_id": message_id},
+            )
+            assert ChannelManager._inbound_dedupe_key(bound) == (channel, chat_id, chat_id, message_id)
+
+    def test_inbound_dedupe_key_uses_dingtalk_conversation_id_when_unbound(self):
+        """DingTalk stamps conversation_id on every inbound; use it when unbound.
+
+        Group connections store workspace_id=conversation_id; P2P stores None.
+        Without a metadata fallback, unbound groups and all P2P traffic skipped
+        dedupe entirely (including bound P2P, whose connection.workspace_id is
+        None). conversation_id is already on the message and is the natural
+        tenant scope — same role as Slack team_id / Discord guild_id.
+        """
+        from app.channels.manager import ChannelManager
+
+        group_unbound = InboundMessage(
+            channel_name="dingtalk",
+            chat_id="cid123",
+            user_id="staff1",
+            text="hi",
+            metadata={
+                "conversation_type": "2",
+                "conversation_id": "cid123",
+                "message_id": "mid1",
+            },
+        )
+        assert ChannelManager._inbound_dedupe_key(group_unbound) == ("dingtalk", "cid123", "cid123", "mid1")
+
+        p2p = InboundMessage(
+            channel_name="dingtalk",
+            chat_id="staff1",
+            user_id="staff1",
+            text="hi",
+            # Bound P2P still has workspace_id=None on the connection record.
+            connection_id="conn1",
+            owner_user_id="owner1",
+            workspace_id=None,
+            metadata={
+                "conversation_type": "1",
+                "conversation_id": "cid_p2p",
+                "message_id": "mid1",
+            },
+        )
+        assert ChannelManager._inbound_dedupe_key(p2p) == ("dingtalk", "cid_p2p", "staff1", "mid1")
+
+    def test_inbound_dedupe_chat_scoped_fallback_does_not_collapse_distinct_chats(self):
+        """newly_missed guard: chat_id fallback must not cross-dedupe two chats.
+
+        Same stable message_id string in two different chats is legitimate and
+        must produce distinct keys (message_ids are only unique per chat on
+        Telegram/Feishu/WeChat).
+        """
+        from app.channels.manager import ChannelManager
+
+        a = InboundMessage(
+            channel_name="telegram",
+            chat_id="111",
+            user_id="u1",
+            text="hi",
+            metadata={"message_id": "42"},
+        )
+        b = InboundMessage(
+            channel_name="telegram",
+            chat_id="222",
+            user_id="u2",
+            text="hi",
+            metadata={"message_id": "42"},
+        )
+        assert ChannelManager._inbound_dedupe_key(a) == ("telegram", "111", "111", "42")
+        assert ChannelManager._inbound_dedupe_key(b) == ("telegram", "222", "222", "42")
+        assert ChannelManager._inbound_dedupe_key(a) != ChannelManager._inbound_dedupe_key(b)
+
+    @pytest.mark.parametrize(
+        ("channel", "chat_id"),
+        (
+            ("wechat", "wx_user_1"),
+            ("telegram", "12345"),
+            ("feishu", "oc_abc"),
+        ),
+    )
+    def test_dispatch_loop_dedupes_unbound_chat_scoped_redelivery(self, tmp_path, monkeypatch, channel, chat_id):
+        """Provider redelivery of an unbound chat-scoped message runs the agent once.
+
+        Shaped like wechat.py / telegram.py inbound metadata (message_id only, no
+        workspace_id / team_id) before attach_connection_identity finds a binding.
+        Parametrized across all three CHAT_SCOPED_WORKSPACE_CHANNELS so the
+        streaming dispatch path (telegram/feishu) is covered end-to-end too, not
+        only WeChat's runs.wait path.
+        """
+        monkeypatch.setattr("app.channels.manager.STREAM_UPDATE_MIN_INTERVAL_SECONDS", 0.0)
+        from app.channels.manager import ChannelManager
+
+        streaming = ChannelManager._channel_supports_streaming(channel)
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=tmp_path / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+            manager._client = _make_mock_langgraph_client()
+            manager._client.runs.stream = MagicMock(side_effect=lambda *a, **kw: _make_async_iterator(_ok_stream_events()))
+            outbound_received: list[OutboundMessage] = []
+
+            async def capture_outbound(msg: OutboundMessage) -> None:
+                outbound_received.append(msg)
+
+            bus.subscribe_outbound(capture_outbound)
+            await manager.start()
+
+            # The mock the channel's dispatch path actually drives.
+            run_call = manager._client.runs.stream if streaming else manager._client.runs.wait
+
+            def _inbound(message_id: str) -> InboundMessage:
+                return InboundMessage(
+                    channel_name=channel,
+                    chat_id=chat_id,
+                    user_id="u1",
+                    text=f"hello from {channel}",
+                    metadata={"message_id": message_id},
+                )
+
+            await bus.publish_inbound(_inbound("m-1"))
+            await bus.publish_inbound(_inbound("m-1"))
+            await _wait_for(lambda: run_call.call_count == 1 and any(m.is_final for m in outbound_received))
+            await asyncio.sleep(0.05)
+            assert run_call.call_count == 1
+
+            # Distinct message_id still processes (negative control / newly_missed).
+            await bus.publish_inbound(_inbound("m-2"))
+            await _wait_for(lambda: run_call.call_count == 2)
+            await asyncio.sleep(0.05)
+            await manager.stop()
+
+            assert run_call.call_count == 2
+
+        _run(go())
+
+    def test_streaming_transient_failure_releases_dedupe_key(self, tmp_path, monkeypatch):
+        """Release a swallowed streaming error only after its final outbound.
+
+        _release_inbound_dedupe_key lives in _handle_message's `except Exception`
+        handler, but _handle_streaming_chat handles its own errors and never
+        re-raises — so without an explicit release the key recorded on receipt
+        survives the full dedupe TTL and the provider's redelivery (the retry
+        that would recover the failure) is silently dropped. Releasing before
+        the final outbound would let that retry overtake the terminal reply.
+        """
+        monkeypatch.setattr("app.channels.manager.STREAM_UPDATE_MIN_INTERVAL_SECONDS", 0.0)
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=tmp_path / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+            outbound_received: list[OutboundMessage] = []
+            key_present_during_final_publish: list[bool] = []
+
+            async def capture_outbound(msg: OutboundMessage) -> None:
+                outbound_received.append(msg)
+                if msg.is_final:
+                    key = manager._inbound_dedupe_key(_inbound())
+                    key_present_during_final_publish.append(key in manager._recent_inbound_events)
+
+            bus.subscribe_outbound(capture_outbound)
+
+            def _failing_stream(*args, **kwargs):
+                async def gen():
+                    yield _make_stream_part(
+                        "messages-tuple",
+                        [{"id": "ai-1", "content": "Partial", "type": "AIMessageChunk"}, {"langgraph_node": "agent"}],
+                    )
+                    raise ConnectionError("stream broken")
+
+                return gen()
+
+            manager._client = _make_mock_langgraph_client()
+            manager._client.runs.stream = MagicMock(side_effect=_failing_stream)
+            await manager.start()
+
+            def _inbound() -> InboundMessage:
+                return InboundMessage(
+                    channel_name="feishu",
+                    chat_id="chat1",
+                    user_id="u1",
+                    text="hi",
+                    metadata={"message_id": "m-1"},
+                )
+
+            await bus.publish_inbound(_inbound())
+            await _wait_for(lambda: any(m.is_final for m in outbound_received))
+            await asyncio.sleep(0.05)
+            assert manager._client.runs.stream.call_count == 1
+            assert key_present_during_final_publish == [True]
+
+            # The provider redelivers the same message after the failure.
+            await bus.publish_inbound(_inbound())
+            await _wait_for(lambda: manager._client.runs.stream.call_count == 2)
+            await manager.stop()
+
+            assert manager._client.runs.stream.call_count == 2
+
+        _run(go())
+
+    def test_thread_busy_releases_dedupe_key(self, tmp_path):
+        """A busy thread is transient, so its redelivery must stay reprocessable.
+
+        runs.wait's ConflictError is handled in place (busy message, no re-raise),
+        so it bypasses _handle_message's release just like the streaming path.
+        """
+        import httpx
+        from langgraph_sdk.errors import ConflictError
+
+        from app.channels.manager import THREAD_BUSY_MESSAGE, ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=tmp_path / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+            outbound_received: list[OutboundMessage] = []
+
+            async def capture_outbound(msg: OutboundMessage) -> None:
+                outbound_received.append(msg)
+
+            bus.subscribe_outbound(capture_outbound)
+
+            request = httpx.Request("POST", "http://127.0.0.1:2024/threads/t/runs")
+            conflict = ConflictError(
+                "Thread is already running a task.",
+                response=httpx.Response(409, request=request),
+                body={"message": "Thread is already running a task."},
+            )
+            manager._client = _make_mock_langgraph_client()
+            manager._client.runs.wait = AsyncMock(side_effect=conflict)
+            await manager.start()
+
+            def _inbound() -> InboundMessage:
+                return InboundMessage(
+                    channel_name="wechat",
+                    chat_id="wx_user_1",
+                    user_id="wx_user_1",
+                    text="hi",
+                    metadata={"message_id": "m-1"},
+                )
+
+            await bus.publish_inbound(_inbound())
+            await _wait_for(lambda: any(m.text == THREAD_BUSY_MESSAGE for m in outbound_received))
+            await asyncio.sleep(0.05)
+            assert manager._client.runs.wait.call_count == 1
+
+            await bus.publish_inbound(_inbound())
+            await _wait_for(lambda: manager._client.runs.wait.call_count == 2)
+            await manager.stop()
+
+            assert manager._client.runs.wait.call_count == 2
+
+        _run(go())
+
+    def test_fire_and_forget_thread_busy_releases_dedupe_key(self, tmp_path):
+        """Same invariant on the third swallow site: runs.create's busy branch."""
+        import httpx
+        from langgraph_sdk.errors import ConflictError
+
+        import app.gateway.github.run_policy  # noqa: F401 — register policy
+        from app.channels.manager import THREAD_BUSY_MESSAGE, ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=tmp_path / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+            outbound_received: list[OutboundMessage] = []
+
+            async def capture_outbound(msg: OutboundMessage) -> None:
+                outbound_received.append(msg)
+
+            bus.subscribe_outbound(capture_outbound)
+
+            request = httpx.Request("POST", "http://127.0.0.1:2024/threads/t/runs")
+            conflict = ConflictError(
+                "Thread is already running a task.",
+                response=httpx.Response(409, request=request),
+                body={"message": "Thread is already running a task."},
+            )
+            manager._client = _make_mock_langgraph_client()
+            manager._client.runs.create = AsyncMock(side_effect=conflict)
+            await manager.start()
+
+            def _inbound() -> InboundMessage:
+                return InboundMessage(
+                    channel_name="github",
+                    chat_id="owner/repo",
+                    user_id="dev",
+                    owner_user_id="agent-owner-1",
+                    workspace_id="owner/repo",
+                    text="hi",
+                    metadata={"message_id": "delivery-1:dev:agent"},
+                )
+
+            await bus.publish_inbound(_inbound())
+            await _wait_for(lambda: any(m.text == THREAD_BUSY_MESSAGE for m in outbound_received))
+            await asyncio.sleep(0.05)
+            assert manager._client.runs.create.call_count == 1
+
+            await bus.publish_inbound(_inbound())
+            await _wait_for(lambda: manager._client.runs.create.call_count == 2)
+            await manager.stop()
+
+            assert manager._client.runs.create.call_count == 2
+
+        _run(go())
 
     def test_github_redelivery_is_deduped_like_other_channels(self, tmp_path):
         """A redelivered GitHub webhook must dispatch the agent only once.
