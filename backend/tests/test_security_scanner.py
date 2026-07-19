@@ -1,3 +1,4 @@
+import logging
 from types import SimpleNamespace
 
 import pytest
@@ -177,3 +178,12 @@ async def test_fail_closed_blocks_non_executable_when_model_unavailable(monkeypa
     result = await scan_skill_content(SKILL_CONTENT, executable=False)
     assert result.decision == "block"
     assert "unavailable" in result.reason
+
+
+@pytest.mark.anyio
+async def test_fail_open_logs_operator_visible_warning(monkeypatch, caplog):
+    _make_unavailable_env(monkeypatch, security_fail_closed=False)
+    with caplog.at_level(logging.WARNING, logger="deerflow.skills.security_scanner"):
+        result = await scan_skill_content(SKILL_CONTENT, executable=False)
+    assert result.decision == "warn"
+    assert "failing open" in caplog.text

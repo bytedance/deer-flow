@@ -129,7 +129,7 @@ async def scan_skill_content(
                 return ScanResult(decision, str(parsed.get("reason") or "No reason provided."))
         logger.warning("Security scan produced unparseable output: %s", raw[:200])
     except Exception:
-        logger.warning("Skill security scan model call failed; using conservative fallback", exc_info=True)
+        logger.warning("Skill security scan model call failed; applying configured fail-closed/fail-open policy", exc_info=True)
 
     if model_responded:
         return ScanResult("block", "Security scan produced unparseable output; manual review required.")
@@ -137,4 +137,5 @@ async def scan_skill_content(
         return ScanResult("block", "Security scan unavailable for executable content; manual review required.")
     if _resolve_fail_closed(app_config):
         return ScanResult("block", "Security scan unavailable for skill content; manual review required.")
+    logger.warning("Security scan unavailable; failing open for non-executable skill content at %s (manual review recommended)", location)
     return ScanResult("warn", "Security scan unavailable for non-executable skill content; manual review recommended.")
