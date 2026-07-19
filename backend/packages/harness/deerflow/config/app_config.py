@@ -64,6 +64,28 @@ class CircuitBreakerConfig(BaseModel):
     recovery_timeout_sec: int = Field(default=60, description="Time in seconds before attempting to recover the circuit")
 
 
+class LlmCallConfig(BaseModel):
+    """Configuration for LLM call execution (concurrency / rate shaping).
+
+    Distinct from :class:`CircuitBreakerConfig` (which handles a *failing*
+    provider) and from :class:`ModelConfig` (which describes model endpoints):
+    these knobs shape how many LLM calls run at once. Capping concurrency caps
+    the *slope* of the request rate, which is what a provider burst-rate
+    (``limit_burst_rate``) limit fires on.
+    """
+
+    max_concurrent_calls: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Process-wide cap on concurrently in-flight LLM calls. 0 disables "
+            "the cap (default, preserving existing behavior). Set to a positive "
+            "int to smooth provider burst-rate (limit_burst_rate) spikes by "
+            "bounding the request-rate slope at the morning peak."
+        ),
+    )
+
+
 class LoggingEnhanceConfig(BaseModel):
     """Request trace logging enhancement settings."""
 
@@ -174,6 +196,7 @@ class AppConfig(BaseModel):
     input_polish: InputPolishConfig = Field(default_factory=InputPolishConfig, description="Pre-send input polishing configuration.")
     suggestions: SuggestionsConfig = Field(default_factory=SuggestionsConfig, description="Follow-up suggestions configuration.")
     circuit_breaker: CircuitBreakerConfig = Field(default_factory=CircuitBreakerConfig, description="LLM circuit breaker configuration")
+    llm_call: LlmCallConfig = Field(default_factory=LlmCallConfig, description="LLM call execution configuration (concurrency / rate shaping)")
     channel_connections: ChannelConnectionsConfig = Field(
         default_factory=ChannelConnectionsConfig,
         description=format_field_description(

@@ -11,7 +11,7 @@ from langgraph.errors import GraphBubbleUp
 from deerflow.agents.middlewares.llm_error_handling_middleware import (
     LLMErrorHandlingMiddleware,
 )
-from deerflow.config.app_config import AppConfig
+from deerflow.config.app_config import AppConfig, LlmCallConfig
 from deerflow.config.sandbox_config import SandboxConfig
 
 
@@ -1083,3 +1083,44 @@ async def test_async_retry_loop_emits_jittered_delays_within_bounds(
     assert len(waits) == 2
     for w in waits:
         assert 0.1 <= w <= 10.0
+
+
+# ---------- Config wiring ----------
+
+
+def test_max_concurrent_llm_calls_defaults_to_disabled() -> None:
+    """With no llm_call config, the cap defaults to 0 (disabled) - existing
+    deployments see no behavior change.
+    """
+    middleware = LLMErrorHandlingMiddleware(app_config=_make_app_config())
+    assert middleware.max_concurrent_llm_calls == 0
+
+
+def test_max_concurrent_llm_calls_wired_from_config() -> None:
+    """llm_call.max_concurrent_calls flows through AppConfig into the middleware
+    attribute that _get_global_concurrency_semaphore reads.
+    """
+    app_config = AppConfig(
+        sandbox=SandboxConfig(use="test"),
+        llm_call=LlmCallConfig(max_concurrent_calls=8),
+    )
+    middleware = LLMErrorHandlingMiddleware(app_config=app_config)
+    assert middleware.max_concurrent_llm_calls == 8
+
+
+@pytest.mark.anyio
+async def test_configured_cap_bounds_concurrency_end_to_end() -> None:
+    """A cap set via config.yaml (not via setattr) actually bounds in-flight
+    calls end-to-end: AppConfig -> middleware -> process-global semaphore.
+    """
+    app_config = AppConfig(
+        sandbox=SandboxConfig(use="test"),
+        llm_call=LlmCallConfig(max_concurrent_calls=2),
+    )
+    middleware = LLMErrorHandlingMiddleware(app_config=app_config)
+    event = asyncio.Event()
+
+    max_in_flight, steady_in_flight = await _run_concurrent(middleware, 5, event)
+
+    assert max_in_flight == 2
+    assert steady_in_flight == 2

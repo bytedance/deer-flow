@@ -150,6 +150,11 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         self.circuit_failure_threshold = app_config.circuit_breaker.failure_threshold
         self.circuit_recovery_timeout_sec = app_config.circuit_breaker.recovery_timeout_sec
 
+        # Process-wide in-flight LLM call cap (0 disables). Configured via
+        # ``llm_call.max_concurrent_calls`` in config.yaml; overrides the class
+        # default so operators can tune it without code changes.
+        self.max_concurrent_llm_calls = app_config.llm_call.max_concurrent_calls
+
         # Circuit Breaker state
         self._circuit_lock = threading.Lock()
         self._circuit_failure_count = 0

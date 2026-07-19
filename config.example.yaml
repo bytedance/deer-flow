@@ -15,7 +15,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 26
+config_version: 27
 
 # ============================================================================
 # Logging
@@ -1972,6 +1972,24 @@ authorization:
 #   failure_threshold: 5
 #   # Time in seconds before attempting to recover (default: 60)
 #   recovery_timeout_sec: 60
+
+# ============================================================================
+# LLM Call Concurrency Configuration
+# ============================================================================
+# Cap the number of concurrently in-flight LLM calls process-wide. A provider
+# burst-rate (limit_burst_rate) error fires on the *slope* of the request rate,
+# not on a static quota - so the morning peak (e.g. 08:30) ramping from ~0 to
+# full throttle in seconds gets rejected even when total RPM is within budget.
+# Capping concurrency caps that slope. Retries alone make it worse (they add
+# demand inside the very burst being throttled); pair this cap with the
+# decorrelated-jitter backoff already built into the LLM error-handling
+# middleware, and ideally an nginx `limit_req` at the ingress.
+#
+# 0 disables the cap (default) - existing deployments see no behavior change.
+
+# llm_call:
+#   # Max concurrently in-flight LLM calls across the whole process (default: 0 = disabled)
+#   max_concurrent_calls: 0
 
 # ============================================================================
 # SSO / OIDC Authentication (optional)
