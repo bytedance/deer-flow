@@ -1175,10 +1175,12 @@ class ChannelManager:
         # Fail closed: without a workspace/team/guild identifier we cannot tell two
         # workspaces apart (e.g. Slack channel ids are not globally unique), so
         # skip dedupe rather than risk collapsing distinct workspaces' messages.
-        # conversation_id covers DingTalk (group + P2P) which stamps it on every
-        # inbound; chat-scoped providers fall back to chat_id so unbound
-        # redeliveries still dedupe — mirrors how those adapters bind workspace
-        # and how GitHub's dispatcher documents Telegram/WeChat keying.
+        # Both fallbacks are appended last and gated on every earlier source being
+        # absent, so they can only turn "no key" into a key — never change one.
+        # A conversation_id not reused across a provider's own redelivery would
+        # degrade to today's no-dedupe behaviour, never collapse two conversations
+        # (chat_id and message_id stay in the tuple). conversation_id covers
+        # DingTalk (group + P2P); chat-scoped providers fall back to chat_id.
         workspace_id = msg.workspace_id or metadata.get("workspace_id") or metadata.get("team_id") or metadata.get("guild_id") or metadata.get("aibotid") or metadata.get("conversation_id")
         if not workspace_id and msg.channel_name in CHAT_SCOPED_WORKSPACE_CHANNELS:
             workspace_id = msg.chat_id or None
@@ -1643,6 +1645,10 @@ class ChannelManager:
             except Exception as exc:
                 if _is_thread_busy_error(exc):
                     logger.warning("[Manager] thread busy (concurrent run rejected): thread_id=%s", thread_id)
+                    # Swallowed like the generic handler would not be: release the
+                    # key so the provider's redelivery can retry once the thread
+                    # frees, instead of being dropped for the dedupe TTL.
+                    self._release_inbound_dedupe_key(msg)
                     await self._send_error(msg, THREAD_BUSY_MESSAGE)
                     return
                 raise
@@ -1658,6 +1664,9 @@ class ChannelManager:
         except Exception as exc:
             if _is_thread_busy_error(exc):
                 logger.warning("[Manager] thread busy (concurrent run rejected): thread_id=%s", thread_id)
+                # Same reason as the fire-and-forget branch above: this error is
+                # handled here rather than re-raised, so release explicitly.
+                self._release_inbound_dedupe_key(msg)
                 await self._send_error(msg, THREAD_BUSY_MESSAGE)
                 return
             else:
@@ -1814,6 +1823,12 @@ class ChannelManager:
                 len(artifacts),
                 stream_error,
             )
+            if stream_error is not None:
+                # This path swallows its own errors, so _handle_message's generic
+                # handler never runs and never releases the key. Mirror it here:
+                # the key was recorded on receipt, and without this a transient
+                # stream failure black-holes the message_id for the dedupe TTL.
+                self._release_inbound_dedupe_key(msg)
             await self.bus.publish_outbound(
                 OutboundMessage(
                     channel_name=msg.channel_name,
