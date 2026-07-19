@@ -21,21 +21,22 @@ from deerflow.config.sandbox_config import SandboxConfig
 
 @pytest.fixture(autouse=True)
 def _reset_process_limiter() -> Iterator[None]:
-    """Reset the module-global limiter + instance seq between tests.
+    """Reset the module-global limiter + cap-resolved flag between tests.
 
     The limiter is a process singleton shared across all middleware instances,
-    so cap / in-flight state from one test would otherwise bleed into the next
-    (notably the limit-change test, which asserts the singleton is reused). The
-    instance seq is reset too so the generation ordering in the stale-instance
-    regression tests is deterministic within each test.
+    so cap / in-flight state from one test would otherwise bleed into the next.
+    The cap is startup-only (frozen at first ``__init__``), so ``_CAP_RESOLVED``
+    must be reset too - otherwise the first test to construct a middleware
+    would freeze the cap for every later test regardless of what cap they ask
+    for.
     """
     from deerflow.agents.middlewares import llm_error_handling_middleware as mod
 
     mod._PROCESS_LIMITER = None
-    mod._INSTANCE_SEQ = 0
+    mod._CAP_RESOLVED = False
     yield
     mod._PROCESS_LIMITER = None
-    mod._INSTANCE_SEQ = 0
+    mod._CAP_RESOLVED = False
 
 
 def _make_app_config() -> AppConfig:
@@ -61,10 +62,10 @@ class FakeError(Exception):
 
 
 # Middleware-level attribute -> ``LlmCallConfig`` field. ``llm_call`` knobs are
-# routed through ``AppConfig`` so ``__init__`` applies the cap to the process
-# limiter (the single generation-aware owner). Circuit-breaker knobs are read
-# per-call from ``self`` (not via the limiter), so setattr after ``__init__``
-# still works for them.
+# routed through ``AppConfig`` so ``__init__`` resolves the cap on the process
+# limiter (startup-only: the first construction freezes it). Circuit-breaker
+# knobs are read per-call from ``self`` (not via the limiter), so setattr after
+# ``__init__`` still works for them.
 _LLM_CALL_ATTR_MAP: dict[str, str] = {
     "max_concurrent_llm_calls": "max_concurrent_calls",
     "retry_max_attempts": "retry_max_attempts",
@@ -1375,6 +1376,88 @@ async def test_async_burst_rate_exhaustion_does_not_trip_circuit_breaker(
     assert middleware._check_circuit() is False
 
 
+# ---------- Effective retry budget in retry events (review P2) ----------
+
+
+def _capture_retry_events(monkeypatch: pytest.MonkeyPatch) -> list[dict]:
+    """Capture the ``llm_retry`` stream events emitted by ``_emit_retry_event``.
+
+    ``_emit_retry_event`` lazily imports ``get_stream_writer`` from
+    ``langgraph.config`` on each call, so monkeypatching the module attribute is
+    enough to intercept the payloads without standing up a LangGraph run context
+    (the real writer raises ``RuntimeError`` outside one - which the middleware
+    swallows - so the patched writer must simply return a callable).
+    """
+    captured: list[dict] = []
+
+    def _writer(payload: dict) -> None:
+        captured.append(payload)
+
+    monkeypatch.setattr("langgraph.config.get_stream_writer", lambda: _writer)
+    return captured
+
+
+def test_burst_rate_retry_event_reports_effective_budget_sync(monkeypatch: pytest.MonkeyPatch) -> None:
+    """P2: a burst-rate (limit_burst_rate) call is capped at 2 attempts, so the
+    emitted ``llm_retry`` event and its user-facing message must report the
+    *effective* budget (``max_attempts=2``, message ``1/2``), not the configured
+    ceiling (``retry_max_attempts=3``) - otherwise the frontend promises a retry
+    that never happens. Exactly two handler attempts occur (1 first + 1 retry).
+    """
+    monkeypatch.setattr("time.sleep", lambda _d: None)
+    events = _capture_retry_events(monkeypatch)
+    middleware = _build_middleware(retry_max_attempts=3)  # default global budget
+
+    attempts = 0
+
+    def handler(_request) -> AIMessage:
+        nonlocal attempts
+        attempts += 1
+        raise FakeError("rate increased too quickly", status_code=429, code="limit_burst_rate")
+
+    result = middleware.wrap_model_call(SimpleNamespace(), handler)
+
+    assert attempts == 2  # 1 first attempt + 1 retry; budget is 2, not 3
+    assert result.additional_kwargs.get("error_reason") == "burst_rate"
+    assert len(events) == 1  # exactly one retry event (attempt 1 -> 2)
+    assert events[0]["max_attempts"] == 2  # effective budget, not the ceiling 3
+    assert events[0]["attempt"] == 1
+    assert "1/2" in events[0]["message"]
+
+
+@pytest.mark.anyio
+async def test_burst_rate_retry_event_reports_effective_budget_async(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Async mirror of the sync P2 test: the async burst-rate path also reports
+    the effective budget (``max_attempts=2``, message ``1/2``) and runs exactly
+    two handler attempts.
+    """
+
+    async def _noop_sleep(_d: float) -> None:
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", _noop_sleep)
+    events = _capture_retry_events(monkeypatch)
+    middleware = _build_middleware(retry_max_attempts=3)
+
+    attempts = 0
+
+    async def handler(_request) -> AIMessage:
+        nonlocal attempts
+        attempts += 1
+        raise FakeError("rate increased too quickly", status_code=429, code="limit_burst_rate")
+
+    result = await middleware.awrap_model_call(SimpleNamespace(), handler)
+
+    assert attempts == 2
+    assert result.additional_kwargs.get("error_reason") == "burst_rate"
+    assert len(events) == 1
+    assert events[0]["max_attempts"] == 2
+    assert events[0]["attempt"] == 1
+    assert "1/2" in events[0]["message"]
+
+
 # ---------- Retry params config wiring ----------
 
 
@@ -1487,8 +1570,10 @@ async def test_limiter_is_process_wide_across_event_loops() -> None:
         assert max_in_flight == 1
 
     gate.set()
-    await task_a
-    await asyncio.wait_for(asyncio.wrap_future(fut_b), timeout=5)
+    result_a = await task_a
+    assert result_a.content == "ok"
+    result_b = await asyncio.wait_for(asyncio.wrap_future(fut_b), timeout=5)
+    assert result_b.content == "ok"
     with lock:
         assert in_flight == 0  # both calls completed; no handler left in-flight
 
@@ -1539,19 +1624,26 @@ def test_limiter_caps_concurrent_sync_calls() -> None:
     assert len(results) == 2
 
 
-def test_cap_raise_via_newer_instance_updates_in_place_and_preserves_in_flight() -> None:
-    """A newer middleware instance (higher instance seq = newer config) raises
-    the cap in place - same limiter instance, in-flight permits preserved (not
-    abandoned). Replaces the old recreate-on-change behavior with
-    generation-aware in-place updates.
+def test_cap_is_frozen_at_first_construction_and_unchanged_by_later_instances() -> None:
+    """Startup-only cap: the first ``__init__`` resolves the cap and freezes it;
+    later instances - whether they would raise it, lower it, or disable it - are
+    no-ops (same limiter instance, cap unchanged, in-flight permits preserved).
+    Replaces the prior generation-aware in-place update with a frozen-at-startup
+    controller. There is no cap mutation at runtime, so the downscale race
+    (review P1 Part A: a lowered cap handing excess permits to queued waiters,
+    keeping ``in_flight`` pegged at the old cap) is structurally unreachable,
+    and the construction-order / config-freshness race (Part B) has nothing to
+    race on.
     """
     from deerflow.agents.middlewares.llm_error_handling_middleware import _get_process_limiter
 
-    old_mw = _build_middleware(max_concurrent_llm_calls=1)
+    first_mw = _build_middleware(max_concurrent_llm_calls=1)
     limiter = _get_process_limiter()
     assert limiter is not None
     assert limiter.limit == 1
 
+    # A holder takes the single permit so we can observe whether later instances
+    # disturb in-flight state (they must not).
     gate = threading.Event()
     in_flight = 0
     max_in_flight = 0
@@ -1567,10 +1659,9 @@ def test_cap_raise_via_newer_instance_updates_in_place_and_preserves_in_flight()
             in_flight -= 1
         return AIMessage(content="ok")
 
-    holder = threading.Thread(target=lambda: old_mw.wrap_model_call(SimpleNamespace(), handler))
+    holder = threading.Thread(target=lambda: first_mw.wrap_model_call(SimpleNamespace(), handler))
     holder.start()
     try:
-        # Wait until the holder has taken the single permit (cap=1).
         for _ in range(400):
             with lock:
                 if max_in_flight >= 1:
@@ -1580,11 +1671,13 @@ def test_cap_raise_via_newer_instance_updates_in_place_and_preserves_in_flight()
             assert max_in_flight == 1
         assert limiter.in_flight == 1  # holder holds the single permit
 
-        # A newer instance raises the cap to 3: same limiter, cap updated in place.
+        # Later instances try to raise (3) and to disable (0): both ignored.
         _build_middleware(max_concurrent_llm_calls=3)
         assert _get_process_limiter() is limiter  # same instance, not recreated
-        assert limiter.limit == 3
-        assert limiter.in_flight == 1  # holder's permit preserved, not abandoned
+        assert limiter.limit == 1  # frozen; raise attempt had no effect
+        _build_middleware(max_concurrent_llm_calls=0)
+        assert limiter.limit == 1  # frozen; disable attempt had no effect
+        assert limiter.in_flight == 1  # holder's permit untouched
     finally:
         # Always release the holder so a failing assertion doesn't leak the thread.
         gate.set()
@@ -1593,22 +1686,30 @@ def test_cap_raise_via_newer_instance_updates_in_place_and_preserves_in_flight()
     assert limiter.in_flight == 0  # permit returned, not leaked
 
 
-def test_stale_instance_does_not_overwrite_lowered_cap() -> None:
-    """P1 #2 regression: a stale middleware instance (older config, captured
-    cap 3) making calls after a newer instance lowered the cap to 1 must NOT
-    rewrite it back to 3, and aggregate in-flight calls must never exceed 1.
-    The per-attempt path only acquires/releases - it never rewrites the cap -
-    so a stale in-flight run cannot bump a freshly-lowered cap back up.
+def test_first_constructed_cap_wins_over_later_config_snapshot() -> None:
+    """Startup-only cap (review P1 Part B): the cap is frozen at the FIRST
+    middleware construction, so a later instance holding an OLDER config
+    snapshot (higher cap) cannot restore it - regardless of construction timing
+    or config freshness. This is the startup-only replacement for the prior
+    generation-aware guard: there is no "newer config wins" race because no
+    instance can mutate the cap at all.
+
+    Mirrors the reviewer's reverse-construction probe: the lower (newer) cap is
+    constructed first, the higher (older/stale) cap second, and the older
+    snapshot must NOT raise the live cap. Three overlapping calls through the
+    older-cap instance are still bounded by the frozen cap of 1 - which also
+    proves the Part A invariant (a sustained queue never admits callers above
+    the frozen cap).
     """
     from deerflow.agents.middlewares.llm_error_handling_middleware import _get_process_limiter
 
-    # Old instance created first (lower instance seq = older config generation).
-    old_mw = _build_middleware(max_concurrent_llm_calls=3)
-    # New instance created later (higher seq) lowers the cap to 1.
+    # "Newer" config (cap 1) constructed FIRST -> freezes the cap at 1.
     _build_middleware(max_concurrent_llm_calls=1)
+    # "Older/stale" config (cap 3) constructed AFTER -> must not raise the cap.
+    older_mw = _build_middleware(max_concurrent_llm_calls=3)
     limiter = _get_process_limiter()
     assert limiter is not None
-    assert limiter.limit == 1  # newer instance won
+    assert limiter.limit == 1  # frozen at first construction; older snapshot did not raise
 
     gate = threading.Event()
     in_flight = 0
@@ -1625,9 +1726,10 @@ def test_stale_instance_does_not_overwrite_lowered_cap() -> None:
             in_flight -= 1
         return AIMessage(content="ok")
 
-    # The OLD instance (captured cap 3) makes overlapping calls; the live cap
-    # is 1, so only one may be in-flight at a time.
-    threads = [threading.Thread(target=lambda: old_mw.wrap_model_call(SimpleNamespace(), handler)) for _ in range(3)]
+    # 3 overlapping calls through the OLDER-cap (cap 3) instance: the live cap is
+    # frozen at 1, so only one may be in-flight - the older snapshot cannot
+    # restore 3 AND callers cannot be admitted above the frozen cap.
+    threads = [threading.Thread(target=lambda: older_mw.wrap_model_call(SimpleNamespace(), handler)) for _ in range(3)]
     for t in threads:
         t.start()
     try:
@@ -1636,11 +1738,11 @@ def test_stale_instance_does_not_overwrite_lowered_cap() -> None:
                 if max_in_flight >= 1:
                     break
             time.sleep(0.005)
-        # Give the queued calls a chance to (incorrectly) exceed the lowered cap.
+        # Give the queued calls a chance to (incorrectly) exceed the frozen cap.
         time.sleep(0.05)
         with lock:
-            assert max_in_flight == 1  # never exceeded the lowered cap
-        assert limiter.limit == 1  # stale instance did NOT rewrite it back to 3
+            assert max_in_flight == 1  # never exceeded the frozen cap of 1
+        assert limiter.limit == 1  # still 1; older snapshot did not restore 3
     finally:
         # Always release the holder threads so a failing assertion doesn't hang.
         gate.set()
@@ -1651,20 +1753,20 @@ def test_stale_instance_does_not_overwrite_lowered_cap() -> None:
 
 
 @pytest.mark.anyio
-async def test_stale_instance_respects_lowered_cap_across_isolated_loop() -> None:
-    """P1 #2 regression (cross-loop): a stale instance (captured cap 3) making
-    async calls on an isolated event loop after a newer instance lowered the cap
-    to 1 respects the lowered cap across loops - it cannot rewrite it back to 3,
-    and aggregate in-flight calls never exceed 1 across the lead loop and the
-    isolated subagent loop.
+async def test_frozen_cap_binds_calls_across_isolated_loop() -> None:
+    """Startup-only cap (cross-loop): the cap frozen at first construction binds
+    async calls across the lead loop AND an isolated subagent loop - a later
+    instance (higher cap) cannot raise it, so cross-loop in-flight calls never
+    exceed the frozen cap. Replaces the prior generation-aware cross-loop test.
     """
     from deerflow.agents.middlewares.llm_error_handling_middleware import _get_process_limiter
 
-    old_mw = _build_middleware(max_concurrent_llm_calls=3)
-    _build_middleware(max_concurrent_llm_calls=1)  # newer instance lowers cap
+    # First construction (cap 1) freezes the cap; a later cap=3 instance can't raise it.
+    _build_middleware(max_concurrent_llm_calls=1)
+    older_mw = _build_middleware(max_concurrent_llm_calls=3)
     limiter = _get_process_limiter()
     assert limiter is not None
-    assert limiter.limit == 1  # newer instance lowered it; stale one didn't rewrite
+    assert limiter.limit == 1  # frozen at 1; later cap=3 instance did not raise
 
     gate = threading.Event()
     counter_lock = threading.Lock()
@@ -1683,9 +1785,10 @@ async def test_stale_instance_respects_lowered_cap_across_isolated_loop() -> Non
                 in_flight -= 1
         return AIMessage(content="ok")
 
-    # Lead-loop call + isolated-loop call, both on the OLD (stale, cap 3) instance.
-    task_lead = asyncio.create_task(old_mw.awrap_model_call(SimpleNamespace(), handler))
-    fut_iso = _run_on_isolated_loop(lambda: old_mw.awrap_model_call(SimpleNamespace(), handler))
+    # Lead-loop call + isolated-loop call, both on the cap-3 (older) instance:
+    # the frozen cap is 1, so only one may be in-flight across BOTH loops.
+    task_lead = asyncio.create_task(older_mw.awrap_model_call(SimpleNamespace(), handler))
+    fut_iso = _run_on_isolated_loop(lambda: older_mw.awrap_model_call(SimpleNamespace(), handler))
     try:
         for _ in range(100):
             await asyncio.sleep(0)
@@ -1694,19 +1797,15 @@ async def test_stale_instance_respects_lowered_cap_across_isolated_loop() -> Non
                     break
         await asyncio.sleep(0.05)  # let the second call queue on the limiter
         with counter_lock:
-            assert max_in_flight == 1  # never exceeded the lowered cap across loops
-        assert limiter.limit == 1  # still 1 - stale instance did not rewrite it
+            assert max_in_flight == 1  # never exceeded the frozen cap across loops
+        assert limiter.limit == 1  # still 1; later cap=3 instance did not raise
     finally:
-        # Always release the parked calls so a failing assertion doesn't hang.
+        # Release the gate so parked handlers unblock and complete, then drain
+        # both tasks. return_exceptions surfaces any late failure as a value
+        # rather than masking the assertion above with a raise; gate.set()
+        # guarantees both complete, so no timeout/empty-except is needed.
         gate.set()
-        try:
-            await asyncio.wait_for(task_lead, timeout=5)
-        except TimeoutError:
-            pass
-        try:
-            await asyncio.wait_for(asyncio.wrap_future(fut_iso), timeout=5)
-        except TimeoutError:
-            pass
+        await asyncio.gather(task_lead, asyncio.wrap_future(fut_iso), return_exceptions=True)
     with counter_lock:
         assert in_flight == 0
 
@@ -1815,15 +1914,20 @@ async def test_limiter_cancellation_after_dequeue_hands_off_to_next_waiter(
     # Release A: reserves the permit for B (dequeues B, granted=True) but B does
     # not wake (patched). B sits in the handoff window.
     gate.set()
-    await task_a
+    result_a = await task_a
+    assert result_a.content == "a-ok"
     await asyncio.sleep(0.02)  # let A's release grant B
     assert state["first_done"]  # B was dequeued+granted, never woken
 
     # Cancel B while it is granted-but-not-yet-awake. Its cancellation must hand
     # the reserved permit to C (the next waiter), waking C via the real path.
     task_b.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task_b
+    # gather(return_exceptions=True) surfaces B's cancellation as a value so we
+    # can assert on it directly, instead of a bare ``await task_b`` inside
+    # pytest.raises (whose discarded result trips the "statement has no effect"
+    # analyzer without adding any assertion strength here).
+    b_outcomes = await asyncio.gather(task_b, return_exceptions=True)
+    assert isinstance(b_outcomes[0], asyncio.CancelledError)
 
     # C completes WITHOUT another release - no stranded permit.
     result_c = await asyncio.wait_for(task_c, timeout=2)

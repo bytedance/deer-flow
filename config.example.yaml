@@ -1993,6 +1993,14 @@ authorization:
 # multi-node rollout multiplies it further - size the per-process value with
 # that in mind (and pair it with an nginx `limit_req` at the ingress for a
 # true cluster-wide slope cap).
+#
+# Startup-only: the cap is captured at the first LLM run and frozen for the
+# process lifetime. Editing `max_concurrent_calls` here takes effect only after
+# a gateway restart; the other `llm_call.*` knobs below remain hot-reloadable.
+# Freezing the cap avoids the downscale and config-freshness races that a
+# runtime-mutable, process-wide/cross-loop limiter would otherwise hit (a
+# lowered cap could keep admitting queued waiters, or a stale config snapshot
+# constructed after a fresher one could restore a higher cap).
 
 # llm_call:
 #   # Max concurrently in-flight LLM calls across the whole process (default: 0 = disabled)

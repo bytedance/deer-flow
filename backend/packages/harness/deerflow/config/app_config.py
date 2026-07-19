@@ -86,7 +86,12 @@ class LlmCallConfig(BaseModel):
             "effectively max_concurrent_calls * GATEWAY_WORKERS (and a "
             "multi-node rollout multiplies it further), so size the per-process "
             "value accordingly and pair it with an nginx limit_req at the ingress "
-            "for a true cluster-wide slope cap."
+            "for a true cluster-wide slope cap. Startup-only: the cap is captured "
+            "at the first LLM run and frozen for the process lifetime, so editing "
+            "it in config.yaml takes effect only after a gateway restart (the "
+            "other llm_call.* knobs remain hot-reloadable). Freezing avoids the "
+            "downscale/config-freshness races a runtime-mutable cap would "
+            "introduce on a process-wide, cross-loop limiter."
         ),
     )
     retry_max_attempts: int = Field(

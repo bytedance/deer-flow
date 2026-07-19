@@ -134,16 +134,21 @@ _STREAM_DROP_EXCEPTIONS: frozenset[str] = frozenset(
 # give) is defeated the moment subagent fan-out runs on a second loop.
 #
 # Correctness invariants the design below preserves:
-#   * P1 #1 (lossless waiter handoff): a permit handed to a waiter is *reserved*
-#     for that waiter at dequeue time (``granted=True``). If the waiter is
+#   * Lossless waiter handoff: a permit handed to a waiter is *reserved* for
+#     that waiter at dequeue time (``granted=True``). If the waiter is
 #     cancelled before it wakes, the reserved permit is re-handed to the next
 #     waiter (or freed) - so a cancellation in the post-dequeue/pre-reacquire
 #     window never strands the next waiter with capacity idle.
-#   * P1 #2 (generation-aware cap): the cap is set by a single owner
-#     (``_apply_configured_cap`` from each middleware ``__init__``) carrying a
-#     monotonic instance seq (a proxy for config freshness). Per-attempt
-#     callers only acquire/release - they never rewrite the cap - so a stale
-#     in-flight run cannot bump a freshly-lowered cap back up.
+#   * Startup-only cap: the cap is resolved ONCE, at the first middleware
+#     construction (``_apply_configured_cap``), and frozen thereafter. Later
+#     ``__init__`` calls never touch the cap - whether they hold a newer or an
+#     older ``AppConfig`` snapshot. This removes the pseudo-generation path
+#     entirely: with no cap mutation at runtime there is no downscale that
+#     could hand excess permits to queued waiters (keeping ``in_flight`` pegged
+#     at the old cap), and no construction-order race where a stale config
+#     constructed after a fresher one could restore a higher cap. Per-attempt
+#     callers only acquire/release. Changing the cap requires a gateway
+#     restart (see ``LlmCallConfig.max_concurrent_calls``).
 
 
 class _AsyncWaiter:
@@ -151,9 +156,8 @@ class _AsyncWaiter:
 
     ``granted`` is flipped to ``True`` (under the limiter lock) at the exact
     moment a permit is reserved for this waiter - by ``release`` handing off a
-    returning permit, by ``set_limit_if_newer`` admitting queued callers on a
-    cap raise, or by another cancelling waiter handing off its reserved permit.
-    The reservation is atomic with the dequeue, so the invariant
+    returning permit, or by another cancelling waiter handing off its reserved
+    permit. The reservation is atomic with the dequeue, so the invariant
     ``granted is True  <=>  not in _async_waiters`` always holds: once granted,
     the permit is already counted in ``_in_flight`` and the waiter need only
     wake and return. A cancelled waiter therefore knows from ``granted``
@@ -178,24 +182,24 @@ class _ProcessWideLimiter:
     limiter is built on ``threading`` primitives (not loop-bound): every call
     path shares one in-flight counter and one cap.
 
-    The cap has a single generation-aware owner: ``set_limit_if_newer`` accepts
-    an ``owner_seq`` (a monotonic proxy for config freshness - see
-    ``_next_instance_seq``) and ignores writes from an older instance, so a
-    stale in-flight run cannot rewrite a cap set by a newer config. Per-attempt
-    callers (``acquire_sync``/``acquire_async``/``release``) never touch the
-    cap. A lower cap takes effect for subsequent acquires; in-flight permits are
-    preserved (holders keep theirs until release). Permits are released in a
-    ``finally`` and an async waiter that is cancelled after its permit was
-    reserved hands the reservation to the next waiter, so capacity never leaks
-    and a cancellation never strands a later waiter.
+    The cap is **immutable**: it is set once at construction (by
+    ``_apply_configured_cap`` on the first middleware ``__init__``) and never
+    mutated afterwards. Because the cap never changes at runtime there is no
+    downscale race (a lowered cap could otherwise keep admitting queued
+    waiters until ``in_flight`` drains) and no config-freshness race (a stale
+    snapshot constructed later could otherwise restore a higher cap). Per-
+    attempt callers (``acquire_sync``/``acquire_async``/``release``) never
+    touch the cap. Permits are released in a ``finally`` and an async waiter
+    that is cancelled after its permit was reserved hands the reservation to
+    the next waiter, so capacity never leaks and a cancellation never strands
+    a later waiter.
     """
 
-    def __init__(self, limit: int, owner_seq: int) -> None:
+    def __init__(self, limit: int) -> None:
         self._lock = threading.Lock()
         self._cond = threading.Condition(self._lock)
         self._in_flight = 0
         self._limit = max(0, limit)
-        self._owner_seq = owner_seq
         # FIFO of async callers waiting on capacity. Each waiter lives on its
         # caller's loop; release/handoff wakes one across loops via
         # call_soon_threadsafe so the wakeup runs on the right loop.
@@ -208,26 +212,6 @@ class _ProcessWideLimiter:
     @property
     def in_flight(self) -> int:
         return self._in_flight
-
-    def set_limit_if_newer(self, limit: int, owner_seq: int) -> None:
-        """Update the cap iff *owner_seq* is at least as new as the current owner.
-
-        Generation-aware ownership: a stale middleware instance (older config)
-        captured an older cap; its ``__init__`` still calls this, but its
-        ``owner_seq`` is lower than the current owner's, so the write is ignored
-        and a freshly-lowered cap survives. A raise admits queued callers; a
-        lower takes effect for subsequent acquires while in-flight permits are
-        preserved. No-op when the limit is unchanged.
-        """
-        new_limit = max(0, limit)
-        with self._cond:
-            if owner_seq < self._owner_seq:
-                return  # stale owner: cannot rewrite the active cap
-            self._owner_seq = owner_seq
-            if new_limit == self._limit:
-                return
-            self._limit = new_limit
-            self._grant_to_queued_locked()
 
     def acquire_sync(self) -> None:
         """Block the calling thread until a permit is available, then take one."""
@@ -304,23 +288,6 @@ class _ProcessWideLimiter:
             return True
         return False
 
-    def _grant_to_queued_locked(self) -> None:
-        """Admit queued callers to newly-available capacity (cap raise).
-
-        Reserves a permit (counts it in ``_in_flight``) for each queued async
-        waiter that fits under the current cap, then notifies sync waiters for
-        any remaining free capacity so they re-check ``_try_acquire_locked``.
-        """
-        while self._in_flight < self._limit and self._async_waiters:
-            waiter = self._async_waiters.popleft()
-            waiter.granted = True
-            self._in_flight += 1  # commit the reservation to this waiter
-            if not self._wake_locked(waiter):
-                # Owner loop closed: reclaim the reservation and try the next.
-                self._in_flight -= 1
-        if self._in_flight < self._limit:
-            self._cond.notify_all()
-
     def _handoff_granted_permit_locked(self) -> None:
         """Transfer an already-reserved permit to the next queued waiter, or free it.
 
@@ -353,58 +320,49 @@ class _ProcessWideLimiter:
 _LIMITER_LOCK = threading.Lock()
 _PROCESS_LIMITER: _ProcessWideLimiter | None = None
 
-# Monotonic counter of middleware construction order - a proxy for config
-# generation: ``get_app_config()`` reloads on file mtime change, so a later
-# ``LLMErrorHandlingMiddleware`` always captured config at least as fresh as an
-# earlier one. The cap owner (``_apply_configured_cap``) passes this seq to
-# ``set_limit_if_newer`` so a stale instance cannot overwrite a cap set by a
-# newer config (P1 #2).
-_INSTANCE_SEQ_LOCK = threading.Lock()
-_INSTANCE_SEQ: int = 0
-
-
-def _next_instance_seq() -> int:
-    global _INSTANCE_SEQ
-    with _INSTANCE_SEQ_LOCK:
-        _INSTANCE_SEQ += 1
-        return _INSTANCE_SEQ
+# Whether the process-wide cap has been resolved yet. The cap is startup-only:
+# the first ``LLMErrorHandlingMiddleware`` ``__init__`` resolves it (creating a
+# limiter for a positive cap, or leaving it ``None`` for a disabled cap) and
+# every subsequent ``__init__`` is a no-op - regardless of whether its
+# ``AppConfig`` snapshot is newer or older than the first. This is the single
+# owner of the cap; per-attempt callers only acquire/release.
+_CAP_RESOLVED: bool = False
 
 
 def _get_process_limiter() -> _ProcessWideLimiter | None:
-    """Return the process-wide LLM-call limiter, or ``None`` until first configured.
+    """Return the process-wide LLM-call limiter, or ``None`` when the cap is
+    disabled (or before the first middleware construction resolves it).
 
     Per-attempt callers use this to acquire/release only - it never changes the
-    cap. The cap is owned solely by ``_apply_configured_cap`` (called once per
-    middleware ``__init__``), which makes updates generation-aware so a stale
-    in-flight run cannot rewrite the active cap.
+    cap. ``limiter is None`` is the sole gate for "cap disabled": a per-call
+    short-circuit on the instance's configured value would let a later
+    (reloaded) instance with ``max_concurrent_calls=0`` silently drop the cap
+    mid-process, which is exactly the hot-reload churn the startup-only design
+    removes.
     """
     return _PROCESS_LIMITER
 
 
-def _apply_configured_cap(limit: int, owner_seq: int) -> None:
-    """Set the process-wide limiter cap from the latest config (single owner).
+def _apply_configured_cap(limit: int) -> None:
+    """Resolve the process-wide cap from the first middleware ``__init__``.
 
-    Called once per middleware ``__init__`` (which captures the live ``llm_call``
-    config). Creates the limiter on first use, then updates the cap in place via
-    ``set_limit_if_newer`` - a stale instance (older ``owner_seq``) cannot
-    overwrite a cap set by a newer one. ``limit <= 0`` disables the cap: a prior
-    positive cap keeps serving its in-flight callers (which release normally),
-    while new callers see ``max_concurrent_llm_calls <= 0`` and skip the limiter
-    entirely.
+    Startup-only: the very first call wins and freezes the cap. A positive
+    ``limit`` creates the limiter at that cap; ``limit <= 0`` resolves the cap
+    as disabled (limiter stays ``None``, callers short-circuit on
+    ``limiter is None``). Every later call - whether it carries a newer or an
+    older ``AppConfig`` snapshot, and whether it would raise or lower the cap -
+    is ignored, so the cap can never be mutated at runtime. Changing it requires
+    a gateway restart.
     """
-    global _PROCESS_LIMITER
-    if limit <= 0:
-        return  # disabled: callers short-circuit before consulting the limiter
-    limiter = _PROCESS_LIMITER
-    if limiter is None:
-        with _LIMITER_LOCK:
-            if _PROCESS_LIMITER is None:
-                _PROCESS_LIMITER = _ProcessWideLimiter(limit, owner_seq)
-            limiter = _PROCESS_LIMITER
-    # Apply our cap. No-op if we just created the limiter with this exact cap;
-    # ignored by the generation guard if a newer owner already set a different
-    # cap (e.g. a racing thread created it with a fresher seq).
-    limiter.set_limit_if_newer(limit, owner_seq)
+    global _PROCESS_LIMITER, _CAP_RESOLVED
+    if _CAP_RESOLVED:
+        return  # cap already frozen at first construction; this instance is a no-op
+    with _LIMITER_LOCK:
+        if _CAP_RESOLVED:
+            return
+        _CAP_RESOLVED = True
+        if limit > 0:
+            _PROCESS_LIMITER = _ProcessWideLimiter(limit)
 
 
 class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
@@ -425,12 +383,6 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
     def __init__(self, *, app_config: AppConfig, **kwargs: Any) -> None:
         super().__init__(**kwargs)
 
-        # Monotonic construction-order id - a proxy for config generation (a
-        # later instance captured config at least as fresh as an earlier one).
-        # Passed to the process limiter so cap updates are generation-aware and
-        # a stale in-flight instance cannot rewrite a cap set by a newer config.
-        self._instance_seq = _next_instance_seq()
-
         self.circuit_failure_threshold = app_config.circuit_breaker.failure_threshold
         self.circuit_recovery_timeout_sec = app_config.circuit_breaker.recovery_timeout_sec
 
@@ -444,11 +396,12 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         self.burst_retry_base_delay_ms = llm_call.burst_retry_base_delay_ms
         self.max_concurrent_llm_calls = llm_call.max_concurrent_calls
 
-        # Apply the configured cap to the process-wide limiter. This is the
-        # SINGLE owner of the cap (per-attempt callers only acquire/release);
-        # the instance seq makes it generation-aware so a stale in-flight run
-        # cannot overwrite a cap set by a newer config (P1 #2).
-        _apply_configured_cap(self.max_concurrent_llm_calls, self._instance_seq)
+        # Resolve the process-wide cap (startup-only: the first ``__init__`` in
+        # the process wins and freezes it; later instances - newer or older
+        # config - are no-ops). Per-attempt callers only acquire/release, so the
+        # cap can never be mutated at runtime and there is no downscale or
+        # config-freshness race to admit waiters above the live cap.
+        _apply_configured_cap(self.max_concurrent_llm_calls)
 
         # Circuit Breaker state
         self._circuit_lock = threading.Lock()
@@ -593,12 +546,15 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         """Run one sync model attempt under the process-global concurrency cap.
 
         The limiter wraps a *single* attempt only (not the retry loop), so
-        backoff sleeps release the slot for other callers. ``limiter=None``
-        (cap disabled) is a direct passthrough. Permits release on any exit
-        (return or raise) via ``finally`` so a raised handler never leaks a slot.
+        backoff sleeps release the slot for other callers. ``limiter is None``
+        (cap disabled at startup) is a direct passthrough; a non-``None``
+        limiter is always consulted - the cap is frozen at the first
+        ``__init__``, so a later instance whose ``max_concurrent_llm_calls`` is
+        0 cannot silently drop it. Permits release on any exit (return or
+        raise) via ``finally`` so a raised handler never leaks a slot.
         """
         limiter = _get_process_limiter()
-        if limiter is None or self.max_concurrent_llm_calls <= 0:
+        if limiter is None:
             return handler(request)
         limiter.acquire_sync()
         try:
@@ -615,13 +571,15 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
 
         The limiter wraps a *single* attempt only (not the retry loop), so
         backoff sleeps release the slot for other callers - we bound in-flight
-        requests, not waiting ones. ``limiter=None`` (cap disabled) is a direct
-        passthrough. Permits release on any exit (return, raise, or
-        cancellation) via ``finally``; ``acquire_async`` separately cleans up if
-        cancelled while waiting, so capacity never leaks.
+        requests, not waiting ones. ``limiter is None`` (cap disabled at
+        startup) is a direct passthrough; a non-``None`` limiter is always
+        consulted (cap frozen at first ``__init__``). Permits release on any
+        exit (return, raise, or cancellation) via ``finally``;
+        ``acquire_async`` separately cleans up if cancelled while waiting, so
+        capacity never leaks.
         """
         limiter = _get_process_limiter()
-        if limiter is None or self.max_concurrent_llm_calls <= 0:
+        if limiter is None:
             return await handler(request)
         await limiter.acquire_async()
         try:
@@ -676,13 +634,25 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
             return cap  # base exceeds cap (misconfiguration): the cap wins
         return random.randint(base, high)
 
-    def _build_retry_message(self, attempt: int, wait_ms: int, reason: str) -> str:
+    def _build_retry_message(
+        self,
+        attempt: int,
+        wait_ms: int,
+        reason: str,
+        *,
+        max_attempts: int,
+    ) -> str:
         seconds = max(1, round(wait_ms / 1000))
         reason_text = {
             "busy": "provider is busy",
             "burst_rate": "provider is throttling request burst rate",
         }.get(reason, "provider request failed temporarily")
-        return f"LLM request retry {attempt}/{self.retry_max_attempts}: {reason_text}. Retrying in {seconds}s."
+        # ``max_attempts`` is the *effective* budget for this call (from
+        # ``_max_attempts_for``), not the configured ceiling: a burst-rate call
+        # is capped at 2 attempts, so its message must read ``1/2`` not ``1/3``
+        # even when ``retry_max_attempts`` is the default 3 - otherwise the UI
+        # promises a retry that will never happen.
+        return f"LLM request retry {attempt}/{max_attempts}: {reason_text}. Retrying in {seconds}s."
 
     def _build_circuit_breaker_message(self) -> str:
         return "The configured LLM provider is currently unavailable due to continuous failures. Circuit breaker is engaged to protect the system. Please wait a moment before trying again."
@@ -739,7 +709,14 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
             detail=_extract_error_detail(exc),
         )
 
-    def _emit_retry_event(self, attempt: int, wait_ms: int, reason: str) -> None:
+    def _emit_retry_event(
+        self,
+        attempt: int,
+        wait_ms: int,
+        reason: str,
+        *,
+        max_attempts: int,
+    ) -> None:
         try:
             from langgraph.config import get_stream_writer
 
@@ -748,10 +725,13 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
                 {
                     "type": "llm_retry",
                     "attempt": attempt,
-                    "max_attempts": self.retry_max_attempts,
+                    # Effective budget for this call (burst-rate == 2), not the
+                    # configured ceiling - the frontend renders this and the
+                    # ``message`` below, so both must describe the loop that runs.
+                    "max_attempts": max_attempts,
                     "wait_ms": wait_ms,
                     "reason": reason,
-                    "message": self._build_retry_message(attempt, wait_ms, reason),
+                    "message": self._build_retry_message(attempt, wait_ms, reason, max_attempts=max_attempts),
                 }
             )
         except Exception:
@@ -791,11 +771,11 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
                     logger.warning(
                         "Transient LLM error on attempt %d/%d; retrying in %dms: %s",
                         attempt,
-                        self.retry_max_attempts,
+                        max_attempts,
                         wait_ms,
                         _extract_error_detail(exc),
                     )
-                    self._emit_retry_event(attempt, wait_ms, reason)
+                    self._emit_retry_event(attempt, wait_ms, reason, max_attempts=max_attempts)
                     time.sleep(wait_ms / 1000)
                     attempt += 1
                     continue
@@ -850,11 +830,11 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
                     logger.warning(
                         "Transient LLM error on attempt %d/%d; retrying in %dms: %s",
                         attempt,
-                        self.retry_max_attempts,
+                        max_attempts,
                         wait_ms,
                         _extract_error_detail(exc),
                     )
-                    self._emit_retry_event(attempt, wait_ms, reason)
+                    self._emit_retry_event(attempt, wait_ms, reason, max_attempts=max_attempts)
                     await asyncio.sleep(wait_ms / 1000)
                     attempt += 1
                     continue
