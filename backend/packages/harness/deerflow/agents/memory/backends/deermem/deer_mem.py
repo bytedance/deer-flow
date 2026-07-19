@@ -69,6 +69,8 @@ class DeerMem(MemoryManager):
         self._updater = MemoryUpdater(self._config, self._storage, self._llm, prompts_dir=self._config.prompts_dir)
         # Validate explicit prompt templates at construction so a misconfigured
         # prompts_dir surfaces at startup rather than as a silent dropped update.
+        # Text templates are both loaded *and* rendered with dummy variables so
+        # an unknown placeholder is caught here, not during the first update.
         if self._config.prompts_dir is not None:
             _dummy_vars = {
                 "current_memory": "{}",
@@ -77,9 +79,9 @@ class DeerMem(MemoryManager):
                 "staleness_review_section": "",
                 "consolidation_section": "",
             }
-            load_prompt("staleness_review", prompts_dir=self._config.prompts_dir)
-            load_prompt("consolidation", prompts_dir=self._config.prompts_dir)
-            load_prompt("fact_extraction", prompts_dir=self._config.prompts_dir)
+            load_prompt("staleness_review", prompts_dir=self._config.prompts_dir).format(stale_facts="")
+            load_prompt("consolidation", prompts_dir=self._config.prompts_dir).format(consolidation_groups="", max_groups=1)
+            load_prompt("fact_extraction", prompts_dir=self._config.prompts_dir).format(message="")
             load_prompt_messages("memory_update", _dummy_vars, prompts_dir=self._config.prompts_dir)
         self._queue = MemoryUpdateQueue(self._config, self._updater)
 

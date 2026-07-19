@@ -16,6 +16,14 @@ from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 
 logger = logging.getLogger(__name__)
 
+
+class PromptConfigurationError(ValueError):
+    """A prompt-template configuration error (bad yaml, missing key, invalid
+    placeholder). Raised by :func:`load_prompt` and :func:`load_prompt_messages`
+    instead of a bare :class:`ValueError` so callers can distinguish permanent
+    configuration failures from recoverable runtime errors."""
+
+
 try:
     import tiktoken
 
@@ -59,7 +67,7 @@ def _render_messages(
         try:
             content = content.format(**variables)
         except (KeyError, ValueError) as e:
-            raise ValueError(f"Invalid placeholder in {source_path!r} (content of role={tmpl['role']!r}): {e}") from e
+            raise PromptConfigurationError(f"Invalid placeholder in {source_path!r} (content of role={tmpl['role']!r}): {e}") from e
         if tmpl["role"] == "system":
             messages.append(SystemMessage(content=content))
         else:
@@ -98,14 +106,14 @@ def load_prompt(
             try:
                 data = yaml.safe_load(path.read_text(encoding="utf-8"))
             except yaml.YAMLError as e:
-                raise ValueError(f"Invalid YAML in {path}: {e}") from e
+                raise PromptConfigurationError(f"Invalid YAML in {path}: {e}") from e
             data = data or {}
             fmt = data.get("format", "text")
             if fmt != "text":
-                raise ValueError(f"Expected format='text' in {path}, got {fmt!r}; use load_prompt_messages() for chat-format templates")
+                raise PromptConfigurationError(f"Expected format='text' in {path}, got {fmt!r}; use load_prompt_messages() for chat-format templates")
             template = data.get("template")
             if not isinstance(template, str) or not template:
-                raise ValueError(f"Missing or empty 'template' key in {path}")
+                raise PromptConfigurationError(f"Missing or empty 'template' key in {path}")
             _PROMPT_CACHE[cache_key] = template
             return template
     searched = ", ".join(str(c) for c in candidates)
@@ -148,14 +156,14 @@ def load_prompt_messages(
             try:
                 data = yaml.safe_load(path.read_text(encoding="utf-8"))
             except yaml.YAMLError as e:
-                raise ValueError(f"Invalid YAML in {path}: {e}") from e
+                raise PromptConfigurationError(f"Invalid YAML in {path}: {e}") from e
             data = data or {}
             fmt = data.get("format", "chat")
             if fmt != "chat":
-                raise ValueError(f"Expected format='chat' in {path}, got {fmt!r}; use load_prompt() for text-format templates")
+                raise PromptConfigurationError(f"Expected format='chat' in {path}, got {fmt!r}; use load_prompt() for text-format templates")
             msg_list = data.get("messages")
             if not isinstance(msg_list, list) or not msg_list:
-                raise ValueError(f"Missing or empty 'messages' key in {path}")
+                raise PromptConfigurationError(f"Missing or empty 'messages' key in {path}")
             raw_templates: list[dict[str, str]] = []
             for msg in msg_list:
                 role = msg.get("role", "user")

@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from ..config import DeerMemConfig
+from .prompt import PromptConfigurationError
 
 if TYPE_CHECKING:
     from .updater import MemoryUpdater
@@ -228,6 +229,8 @@ class MemoryUpdateQueue:
                     else:
                         failed += 1
                         logger.warning("Memory update skipped/failed for thread %s (trace_id=%s)", context.thread_id, context.trace_id)
+                except (PromptConfigurationError, FileNotFoundError, OSError):
+                    raise
                 except Exception as e:
                     failed += 1
                     logger.error("Error updating memory for thread %s (trace_id=%s): %s", context.thread_id, context.trace_id, e)
