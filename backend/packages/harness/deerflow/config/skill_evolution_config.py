@@ -14,9 +14,5 @@ class SkillEvolutionConfig(BaseModel):
     )
     security_fail_closed: bool = Field(
         default=True,
-        description=(
-            "When the moderation model is unavailable, block skill writes if True "
-            "(fail-closed). If False, non-executable content is allowed with a warning "
-            "while executable content is still blocked."
-        ),
+        description=("When the moderation model is unavailable, block skill writes if True (fail-closed). If False, non-executable content is allowed with a warning while executable content is still blocked."),
     )
