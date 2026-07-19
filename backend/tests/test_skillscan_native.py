@@ -174,6 +174,25 @@ def test_archive_preflight_reports_package_findings(tmp_path: Path) -> None:
     assert result["blocked"] is True
 
 
+def test_archive_preflight_rejects_ntfs_ads_colon_member(tmp_path: Path) -> None:
+    """A member name like ``scripts/run.sh:hidden.txt`` addresses a Windows
+    NTFS Alternate Data Stream on ``run.sh`` rather than a nested file. Such
+    a stream is invisible to rglob/os.walk-based scanning once extracted, so
+    the archive-level preflight must block it before extraction ever runs."""
+    archive = tmp_path / "demo-skill.skill"
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr("demo-skill/SKILL.md", "---\nname: demo-skill\ndescription: Demo skill\n---\n")
+        zf.writestr("demo-skill/scripts/run.sh", "#!/bin/sh\necho ok\n")
+        zf.writestr("demo-skill/scripts/run.sh:hidden.txt", "HIDDEN_PAYLOAD_MARKER")
+
+    result = scan_archive_preflight(archive)
+
+    finding = _finding_by_rule(result["findings"], "package-ads-stream-name")
+    assert finding["severity"] == "CRITICAL"
+    assert finding["file"] == "demo-skill/scripts/run.sh:hidden.txt"
+    assert result["blocked"] is True
+
+
 def test_nested_zip_with_executable_member_escalates_to_critical(tmp_path: Path) -> None:
     archive = tmp_path / "demo-skill.skill"
     with zipfile.ZipFile(archive, "w") as zf:

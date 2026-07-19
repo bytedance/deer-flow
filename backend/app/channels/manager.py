@@ -72,6 +72,36 @@ MESSAGE_STREAM_EVENTS = ("messages-tuple", "messages")
 THREAD_BUSY_MESSAGE = "This conversation is already processing another request. Please wait for it to finish and try again."
 BOUND_IDENTITY_REQUIRED_MESSAGE = "Connect this channel from DeerFlow Settings, complete the in-channel connect step, then send your message again."
 BOUND_IDENTITY_UNAVAILABLE_MESSAGE = "Channel connection verification is temporarily unavailable. Please try again later or contact the DeerFlow operator."
+# Inbound-redelivery dedup window. ``_recent_inbound_events`` (below) is a
+# process-local, in-memory-only OrderedDict — it is never persisted to
+# ``ChannelStore`` — so a recorded key survives only for this TTL (or until
+# evicted by the entry cap below) and is gone entirely across a Gateway
+# restart. 10 minutes is a deliberately bounded window: long enough to
+# absorb a near-term redelivery of the same event — whether a provider's
+# own automatic retry (where the provider implements one) or an operator
+# explicitly triggering a resend — without keeping a growing in-memory
+# ledger.
+#
+# For GitHub specifically: GitHub does NOT automatically retry or redeliver
+# a failed delivery (non-2xx response, timeout, or connection error) — it
+# is simply recorded as failed. See GitHub's own documentation:
+# https://docs.github.com/en/webhooks/using-webhooks/handling-failed-webhook-deliveries.
+# Every redelivery of the same ``X-GitHub-Delivery`` GUID is therefore an
+# explicit action — the repo/App "Redeliver" button, the REST API, or an
+# operator's own scheduled recovery script polling the failed-deliveries
+# endpoint (the pattern GitHub's own docs recommend) — never an automatic
+# GitHub-side retry. This TTL exists to absorb exactly those explicit
+# near-term replays.
+#
+# At the boundary: a manual redelivery (e.g. GitHub's "Redeliver" button)
+# clicked *after* the TTL has elapsed, or any redelivery following a Gateway
+# restart, is no longer recognized as a duplicate — the key has already been
+# evicted, or never existed in the new process — so the agent runs again
+# and may repeat a real side effect (e.g. a duplicate PR comment on
+# GitHub). This is parity with every other IM channel's dedupe (same
+# mechanism, same TTL), not a channel-specific gap. True idempotency against
+# a late/manual redelivery would require persisting the dedupe key in
+# ``ChannelStore`` instead, which is not implemented here.
 INBOUND_DEDUPE_TTL_SECONDS = 10 * 60
 INBOUND_DEDUPE_MAX_ENTRIES = 4096
 # Only server-stable provider message ids: client-generated ids (client_msg_id,
