@@ -8,6 +8,7 @@ import random
 import threading
 import time
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from email.utils import parsedate_to_datetime
 from typing import Any, override
 
@@ -131,9 +132,25 @@ _STREAM_DROP_EXCEPTIONS: frozenset[str] = frozenset(
 # slope. Lazily (re)created per running event loop so it survives the
 # loop-per-call pattern used by ``asyncio.run`` in tests; in production there
 # is one long-lived loop, so the semaphore is created exactly once.
-_GLOBAL_CONCURRENCY_SEMAPHORE: asyncio.Semaphore | None = None
-_GLOBAL_CONCURRENCY_LOOP: asyncio.AbstractEventLoop | None = None
-_GLOBAL_CONCURRENCY_LIMIT: int = 0
+
+
+@dataclass
+class _ConcurrencyState:
+    """Mutable holder for the process-global LLM-call semaphore.
+
+    Encapsulating (semaphore, loop, limit) in a single instance - instead of
+    three bare module-level globals - keeps the recreate condition and the
+    state it reads co-located. The semaphore is (re)created when the running
+    event loop changes or the configured limit changes, so a fresh loop never
+    reuses a semaphore bound to a closed loop.
+    """
+
+    semaphore: asyncio.Semaphore | None = None
+    loop: asyncio.AbstractEventLoop | None = None
+    limit: int = 0
+
+
+_GLOBAL_CONCURRENCY_STATE = _ConcurrencyState()
 
 
 def _get_global_concurrency_semaphore(limit: int) -> asyncio.Semaphore | None:
@@ -145,15 +162,15 @@ def _get_global_concurrency_semaphore(limit: int) -> asyncio.Semaphore | None:
     new ``asyncio.run`` in tests) never reuses a semaphore bound to a closed
     loop.
     """
-    global _GLOBAL_CONCURRENCY_SEMAPHORE, _GLOBAL_CONCURRENCY_LOOP, _GLOBAL_CONCURRENCY_LIMIT
     if limit <= 0:
         return None
     loop = asyncio.get_running_loop()
-    if _GLOBAL_CONCURRENCY_SEMAPHORE is None or _GLOBAL_CONCURRENCY_LOOP is not loop or _GLOBAL_CONCURRENCY_LIMIT != limit:
-        _GLOBAL_CONCURRENCY_SEMAPHORE = asyncio.Semaphore(limit)
-        _GLOBAL_CONCURRENCY_LOOP = loop
-        _GLOBAL_CONCURRENCY_LIMIT = limit
-    return _GLOBAL_CONCURRENCY_SEMAPHORE
+    state = _GLOBAL_CONCURRENCY_STATE
+    if state.semaphore is None or state.loop is not loop or state.limit != limit:
+        state.semaphore = asyncio.Semaphore(limit)
+        state.loop = loop
+        state.limit = limit
+    return state.semaphore
 
 
 class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
