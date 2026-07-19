@@ -289,9 +289,12 @@ This section accumulates work toward the **2.1.0** milestone
   codes and don't treat a bare "connect" as a bind command; stop Feishu from
   creating thread topics and throttle card updates; let the UI runtime channel
   config win over `config.yaml`; fix `require_mention` gating on
-  whitespace-only `bot_login` / `mention_login`; and guard null quote fields in
-  WeCom. ([#4100], [#4104], [#4131], [#4129], [#3753], [#4229], [#4222], [#4251],
-  [#3810], [#3674], [#4055], [#4069])
+  whitespace-only `bot_login` / `mention_login`; guard null quote fields in
+  WeCom; and key inbound dedupe on chat-scoped workspaces so Telegram, Feishu,
+  WeChat and DingTalk redeliveries stop re-running the agent on a default
+  (unbound) configuration, releasing the dedupe key on transient failures so a
+  redelivery can still recover. ([#4100], [#4104], [#4131], [#4129], [#3753],
+  [#4229], [#4222], [#4251], [#3810], [#3674], [#4055], [#4069], [#4287])
 - **frontend:** Preserve messages and durable context across summarization;
   preserve artifacts and stabilize artifact paths during streaming; resolve
   relative artifact image paths; retain presented artifacts in the header
@@ -1094,4 +1097,5 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#4246]: https://github.com/bytedance/deer-flow/pull/4246
 [#4251]: https://github.com/bytedance/deer-flow/pull/4251
 [#4264]: https://github.com/bytedance/deer-flow/pull/4264
+[#4287]: https://github.com/bytedance/deer-flow/pull/4287
 [#4288]: https://github.com/bytedance/deer-flow/pull/4288
