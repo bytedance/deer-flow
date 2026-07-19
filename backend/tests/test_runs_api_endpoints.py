@@ -304,3 +304,26 @@ class TestRunFeedback:
         with TestClient(app) as client:
             response = client.get("/api/runs/run-fb-3/feedback")
         assert response.status_code == 503
+
+
+def test_resolve_thread_id_handles_null_configurable():
+    """A client may send ``config.configurable`` as JSON ``null``.
+
+    The key is then present with value ``None``, so the old
+    ``.get("configurable", {}).get("thread_id")`` raised ``AttributeError``
+    (an unhandled HTTP 500). Per the docstring it should generate a new id.
+    """
+    import uuid
+
+    from app.gateway.routers.thread_runs import RunCreateRequest
+
+    tid = runs._resolve_thread_id(RunCreateRequest(config={"configurable": None}))
+    uuid.UUID(tid)  # a freshly generated id, not a crash
+
+    # working inputs are unaffected
+    assert (
+        runs._resolve_thread_id(
+            RunCreateRequest(config={"configurable": {"thread_id": "t1"}})
+        )
+        == "t1"
+    )
