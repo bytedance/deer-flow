@@ -67,10 +67,12 @@ class DeerMem(MemoryManager):
         # mirroring pre-abstraction `model_name: null`. Standalone (no factory) -> None.
         self._llm = self._config.host_llm if self._config.host_llm is not None else build_llm(self._config.model)
         self._updater = MemoryUpdater(self._config, self._storage, self._llm, prompts_dir=self._config.prompts_dir)
-        # Validate explicit prompt templates at construction so a misconfigured
-        # prompts_dir surfaces at startup rather than as a silent dropped update.
-        # Text templates are both loaded *and* rendered with dummy variables so
-        # an unknown placeholder is caught here, not during the first update.
+        # Validate the *global* explicit prompt templates at construction so a
+        # misconfigured prompts_dir surfaces at startup rather than as a silent
+        # dropped update. Per-agent overrides ({prompts_dir}/{agent}/*.yaml)
+        # cannot be known here -- they are validated lazily at first use and
+        # logged at ERROR by the updater's exception handler.
+        # fact_extraction is dormant (not wired to any runtime caller); excluded.
         if self._config.prompts_dir is not None:
             _dummy_vars = {
                 "current_memory": "{}",
@@ -81,7 +83,6 @@ class DeerMem(MemoryManager):
             }
             load_prompt("staleness_review", prompts_dir=self._config.prompts_dir).format(stale_facts="")
             load_prompt("consolidation", prompts_dir=self._config.prompts_dir).format(consolidation_groups="", max_groups=1)
-            load_prompt("fact_extraction", prompts_dir=self._config.prompts_dir).format(message="")
             load_prompt_messages("memory_update", _dummy_vars, prompts_dir=self._config.prompts_dir)
         self._queue = MemoryUpdateQueue(self._config, self._updater)
 

@@ -15,7 +15,6 @@ from typing import Any
 
 from ..config import DeerMemConfig
 from .prompt import (
-    PromptConfigurationError,
     format_conversation_for_update,
     load_prompt,
     load_prompt_messages,
@@ -915,8 +914,6 @@ class MemoryUpdater:
                 agent_name=agent_name,
                 user_id=user_id,
             )
-        except (PromptConfigurationError, FileNotFoundError, OSError):
-            raise
         except json.JSONDecodeError as e:
             logger.warning("Failed to parse LLM response for memory update: %s", e)
             return False
@@ -974,8 +971,6 @@ class MemoryUpdater:
                     trace_id=trace_id,
                 )
                 return future.result()
-            except (PromptConfigurationError, FileNotFoundError, OSError):
-                raise
             except Exception:
                 logger.exception("Failed to offload memory update to executor")
                 return False
