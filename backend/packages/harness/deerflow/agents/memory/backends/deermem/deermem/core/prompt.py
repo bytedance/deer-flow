@@ -41,6 +41,31 @@ _PROMPTS_DEFAULT_DIR = Path(__file__).resolve().parent / "prompts"
 # below also populate this cache at import time for the bundled defaults.
 _PROMPT_CACHE: dict[tuple[str, str | None, str | None], str] = {}
 
+# Cache for load_prompt_messages: stores parsed raw templates (list of {role,
+# content} dicts) keyed by (name, agent, dir). On a cache hit the templates are
+# rendered with the caller's variables; the file is only read once per key.
+_CHAT_TEMPLATE_CACHE: dict[tuple[str, str | None, str | None], tuple[list[dict[str, str]], str]] = {}
+
+
+def _render_messages(
+    raw_templates: list[dict[str, str]],
+    variables: dict[str, Any],
+    source_path: str,
+) -> list[BaseMessage]:
+    """Render cached chat templates with fresh *variables*."""
+    messages: list[BaseMessage] = []
+    for tmpl in raw_templates:
+        content = tmpl["content"]
+        try:
+            content = content.format(**variables)
+        except (KeyError, ValueError) as e:
+            raise ValueError(f"Invalid placeholder in {source_path!r} (content of role={tmpl['role']!r}): {e}") from e
+        if tmpl["role"] == "system":
+            messages.append(SystemMessage(content=content))
+        else:
+            messages.append(HumanMessage(content=content))
+    return messages
+
 
 def load_prompt(
     name: str,
@@ -75,6 +100,9 @@ def load_prompt(
             except yaml.YAMLError as e:
                 raise ValueError(f"Invalid YAML in {path}: {e}") from e
             data = data or {}
+            fmt = data.get("format", "text")
+            if fmt != "text":
+                raise ValueError(f"Expected format='text' in {path}, got {fmt!r}; use load_prompt_messages() for chat-format templates")
             template = data.get("template")
             if not isinstance(template, str) or not template:
                 raise ValueError(f"Missing or empty 'template' key in {path}")
@@ -99,8 +127,18 @@ def load_prompt_messages(
     literal ``{{ }}`` JSON braces), so it renders byte-identical every call --
     prefix-cache friendly, mirroring the lead agent's static system prompt.
 
+    The raw templates (role + content before substitution) are cached per
+    ``(name, agent, prompts_dir)`` so the yaml file is only read once; only
+    per-call rendering runs on each invocation.
+
     For the text form (single string), use :func:`load_prompt` instead.
     """
+    cache_key = (name, agent_name, prompts_dir)
+    cached_chat = _CHAT_TEMPLATE_CACHE.get(cache_key)
+    if cached_chat is not None:
+        raw_templates, source_path = cached_chat
+        return _render_messages(raw_templates, variables, source_path)
+
     base = Path(prompts_dir) if prompts_dir else _PROMPTS_DEFAULT_DIR
     candidates: list[Path] = [base / f"{name}.chat.yaml"]
     if agent_name:
@@ -112,23 +150,21 @@ def load_prompt_messages(
             except yaml.YAMLError as e:
                 raise ValueError(f"Invalid YAML in {path}: {e}") from e
             data = data or {}
+            fmt = data.get("format", "chat")
+            if fmt != "chat":
+                raise ValueError(f"Expected format='chat' in {path}, got {fmt!r}; use load_prompt() for text-format templates")
             msg_list = data.get("messages")
             if not isinstance(msg_list, list) or not msg_list:
                 raise ValueError(f"Missing or empty 'messages' key in {path}")
-            messages: list[BaseMessage] = []
+            raw_templates: list[dict[str, str]] = []
             for msg in msg_list:
+                role = msg.get("role", "user")
                 content = msg.get("content", "")
                 if not isinstance(content, str):
                     content = str(content)
-                try:
-                    content = content.format(**variables)
-                except (KeyError, ValueError) as e:
-                    raise ValueError(f"Invalid placeholder in {path} (content of role={msg.get('role', '?')!r}): {e}") from e
-                if msg.get("role") == "system":
-                    messages.append(SystemMessage(content=content))
-                else:
-                    messages.append(HumanMessage(content=content))
-            return messages
+                raw_templates.append({"role": role, "content": content})
+            _CHAT_TEMPLATE_CACHE[cache_key] = (raw_templates, str(path))
+            return _render_messages(raw_templates, variables, str(path))
     searched = ", ".join(str(c) for c in candidates)
     raise FileNotFoundError(f"chat prompt template not found: {name} (searched: {searched})")
 

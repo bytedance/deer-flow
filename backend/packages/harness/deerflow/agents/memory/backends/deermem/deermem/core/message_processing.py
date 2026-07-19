@@ -29,13 +29,13 @@ def load_patterns(name: str, *, patterns_dir: str | None = None) -> list[re.Patt
 
     Each YAML list entry is either a string (compiled with no flags) or a
     mapping ``{pattern: <regex>, flags: [...]}`` where ``flags`` may contain
-    ``"ignorecase"``. Raises ``ValueError`` for invalid YAML or a file whose
-    top-level value is not a list. When *patterns_dir* is explicitly set and a
-    file is missing, raises ``FileNotFoundError`` so a typo or missing mount is
-    caught immediately. When *patterns_dir* is ``None`` (bundled defaults) and a
-    file is unexpectedly absent, logs a WARNING and returns ``[]`` (detection
-    disabled instead of crashing startup -- a packaging bug, not a configuration
-    error).
+    ``"ignorecase"``. Raises ``ValueError`` for invalid YAML, a non-list
+    top-level value, or an invalid regex (all with the file path in the message).
+    For explicit *patterns_dir*: missing files raise ``FileNotFoundError``;
+    unreadable files (OSError) are re-raised. Malformed entries and unknown flag
+    names are skipped with a WARNING. For bundled defaults (*patterns_dir* is
+    ``None``): missing/unreadable files log a WARNING and return ``[]``
+    (packaging bug, not a configuration error).
     """
     cache_key = (name, patterns_dir)
     cached = _PATTERN_CACHE.get(cache_key)
@@ -57,6 +57,8 @@ def load_patterns(name: str, *, patterns_dir: str | None = None) -> list[re.Patt
     except yaml.YAMLError as e:
         raise ValueError(f"Invalid YAML in {path}: {e}") from e
     except OSError as e:
+        if patterns_dir is not None:
+            raise OSError(f"Failed to read signal patterns file {path}: {e}") from e
         logger.warning("Failed to read signal patterns %s: %s; %s detection disabled.", path, e, name)
         _PATTERN_CACHE[cache_key] = []
         return []
@@ -65,21 +67,28 @@ def load_patterns(name: str, *, patterns_dir: str | None = None) -> list[re.Patt
         raise ValueError(f"Signal patterns file {path} must contain a list, not {type(data).__name__}")
 
     compiled: list[re.Pattern[str]] = []
-    for entry in data:
+    for i, entry in enumerate(data):
         if isinstance(entry, str):
             pattern_text, flag_names = entry, []
         elif isinstance(entry, Mapping):
             pattern_text = entry.get("pattern")
             flag_names = entry.get("flags", []) or []
         else:
+            logger.warning("Skipping non-string/non-mapping entry %d in %s (type %s)", i, path, type(entry).__name__)
             continue
         if not isinstance(pattern_text, str) or not pattern_text:
+            logger.warning("Skipping entry %d in %s: missing or empty 'pattern'", i, path)
             continue
         flags = 0
         for flag_name in flag_names:
             if flag_name == "ignorecase":
                 flags |= re.IGNORECASE
-        compiled.append(re.compile(pattern_text, flags))
+            else:
+                logger.warning("Ignoring unknown flag %r in entry %d of %s", flag_name, i, path)
+        try:
+            compiled.append(re.compile(pattern_text, flags))
+        except re.error as e:
+            raise ValueError(f"Invalid regex in {path} entry {i}: {e} (pattern={pattern_text!r})") from e
 
     _PATTERN_CACHE[cache_key] = compiled
     return compiled
