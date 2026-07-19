@@ -1,0 +1,25 @@
+format: text
+version: "1.0"
+template: |-
+  ## Memory Consolidation
+
+  The following fact categories have accumulated many individual entries.
+  Review each group and identify facts that can be synthesized into a single,
+  richer consolidated fact that preserves all key information.
+
+  {consolidation_groups}
+
+  For each group, decide:
+  - CONSOLIDATE: Multiple facts can be merged into one richer fact.
+    Specify the source fact IDs and the consolidated content.
+  - SKIP: Facts are distinct enough to remain separate.
+
+  Add consolidation decisions to "factsToConsolidate" in your output JSON.
+  Each entry: {{"sourceIds": ["fact_id_1", "fact_id_2"], "consolidated": {{"content": "...", "category": "...", "confidence": 0.9}}}}
+
+  Rules:
+  - The consolidated fact must preserve ALL key details from source facts
+  - Only consolidate facts that describe the same aspect of the user
+  - Confidence of consolidated fact = max of source confidences
+  - Be conservative - when in doubt, keep facts separate
+  - Maximum {max_groups} consolidation groups per cycle

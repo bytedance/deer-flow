@@ -179,6 +179,15 @@ class DeerMemConfig(BaseModel):
         le=20,
         description=("Maximum number of source facts per consolidation group. Prevents the LLM from merging too many facts into one and losing important details."),
     )
+    # ── Message processing (externalized patterns / prompts) ──
+    patterns_dir: str | None = Field(
+        default=None,
+        description=("Directory with correction.yaml / reinforcement.yaml overriding the bundled signal-detection patterns. None (default) = bundled core/message_patterns/. When set explicitly, both files must exist."),
+    )
+    prompts_dir: str | None = Field(
+        default=None,
+        description=("Directory with custom memory-extraction prompt templates (memory_update.chat.yaml, staleness_review.yaml, consolidation.yaml, fact_extraction.yaml). None (default) = bundled core/prompts/."),
+    )
     # ── LLM (step 13: structured model sub-config consumed by core/llm.py build_llm) ──
     model: DeerMemModelConfig = Field(
         default_factory=DeerMemModelConfig,

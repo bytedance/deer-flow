@@ -15,7 +15,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 27
+config_version: 28
 
 # ============================================================================
 # Logging
@@ -1561,6 +1561,17 @@ memory:
     consolidation_min_facts: 8         # min facts in one category to trigger review (3-30)
     consolidation_max_groups_per_cycle: 3  # max groups merged per update cycle (1-10)
     consolidation_max_sources: 8       # max source facts per consolidation group (2-20)
+    # Message processing (externalized patterns / prompt templates):
+    #   patterns_dir        - dir with correction.yaml / reinforcement.yaml overriding
+    #                         the bundled signal-detection patterns. None (default) =
+    #                         bundled core/message_patterns/. When explicitly set, both
+    #                         files must exist (typos or missing mounts raise an error).
+    #   prompts_dir         - dir with custom memory-extraction prompt templates
+    #                         (memory_update.chat.yaml, staleness_review.yaml,
+    #                         consolidation.yaml, fact_extraction.yaml). None (default)
+    #                         = bundled core/prompts/. Supports per-agent subdirectories.
+    # patterns_dir: ""            # empty = bundled defaults
+    # prompts_dir: ""             # empty = bundled defaults
 
 # ============================================================================
 # Custom Agent Management API
