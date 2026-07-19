@@ -321,9 +321,4 @@ def test_resolve_thread_id_handles_null_configurable():
     uuid.UUID(tid)  # a freshly generated id, not a crash
 
     # working inputs are unaffected
-    assert (
-        runs._resolve_thread_id(
-            RunCreateRequest(config={"configurable": {"thread_id": "t1"}})
-        )
-        == "t1"
-    )
+    assert runs._resolve_thread_id(RunCreateRequest(config={"configurable": {"thread_id": "t1"}})) == "t1"
