@@ -395,7 +395,7 @@ def _scan_python(rel_path: str, text: str) -> list[SecurityFinding]:
 
     if not has_network_sink:
         try:
-            if handle_sink := _find_client_handle_sink(tree):
+            if handle_sink := _find_client_handle_sink(tree, rel_path):
                 has_network_sink = True
                 network_node = network_node or handle_sink
         except RecursionError:
@@ -693,39 +693,35 @@ def _call_is_network_sink(call_name: str) -> bool:
 
 # Instance clients split construction from egress: the constructor does no I/O and the
 # outbound call is an attribute call on a variable, so neither statement alone is a
-# call-name sink. Flagging the constructor would block benign construct-only code, so a
-# handle only counts once it is actually used. The binding map is deliberately one level
-# and scope-local -- `.get(`/`.post(` collide with dict.get and friends, so a name is a
-# sink receiver only where it was bound to a known constructor. Anything broader is the
-# taint engine RFC #2634 rules out of Phase 5.
+# call-name sink. The signal therefore follows only the minimum high-confidence chain:
+# known constructor -> simple name/alias -> constructor-supported direct method call in
+# the same lexical scope. Nested scopes inherit import aliases but never client handles.
+# Comprehensions, walrus-bearing statements, annotations, and executable expressions in
+# complex binding targets deliberately produce no finding from this signal.
 #
-# The walk is ordinary statement order over one lexical scope, and nothing more. A sink is
-# recorded at the call, so a later rebind cannot retract a call that already happened.
-# Where a compound statement (`if`, `try`, loop, `match`) leaves a name's post-statement
-# value ambiguous, that name is simply dropped instead of being resolved: modelling which
-# branch runs is a control-flow interpreter, and this signal feeds a `CRITICAL` rule that
-# hard-blocks installation, so an ambiguous case must not be resolved by reporting. The
-# resulting blind spots are false negatives by construction and are listed in #4296.
-#
-# Bodies are still walked -- from an isolated copy of the entry state, with their bindings
-# discarded at the end -- because skipping them would make wrapping any construction in
-# `if True:` a universal bypass. Copies are what keep one branch's bindings out of a
-# sibling branch, which is the same over-reporting that made a benign fetch look like an
-# exfil in the first place.
-#
-# Which scope sees which handle follows Python's own name resolution, not "every live
-# binding": a class namespace is not a closure scope for its methods, a function-local
-# binding shadows an enclosing name across the whole body, and comprehensions bind their
-# targets in a scope of their own. Approximating that with a flat copy reports benign
-# code that provably cannot reach the tracked client.
-_PYTHON_CLIENT_CONSTRUCTORS = {
-    "http.client.HTTPConnection",
-    "http.client.HTTPSConnection",
-    "aiohttp.ClientSession",
-    "requests.Session",
-    "urllib3.PoolManager",
+# Compound bodies are still walked from isolated entry-state copies so `if True:` is not a
+# universal bypass, but ambiguous bindings are dropped rather than joined. Every AST visit
+# and copied scope entry consumes a deterministic work budget, and the walk stops as soon
+# as it finds one sink. This bounds the branch-copy cost on untrusted source.
+
+
+@dataclass(frozen=True)
+class _ClientSpec:
+    methods: frozenset[str]
+    sync_context: bool = False
+    async_context: bool = False
+
+
+_PYTHON_CLIENT_SPECS = {
+    "http.client.HTTPConnection": _ClientSpec(frozenset({"request", "connect", "getresponse"})),
+    "http.client.HTTPSConnection": _ClientSpec(frozenset({"request", "connect", "getresponse"})),
+    "requests.Session": _ClientSpec(frozenset({"request", "get", "post", "put", "patch", "delete", "head", "options"}), sync_context=True),
+    "urllib3.PoolManager": _ClientSpec(frozenset({"request", "urlopen"}), sync_context=True),
+    "aiohttp.ClientSession": _ClientSpec(frozenset({"request", "get", "post", "put", "patch", "delete", "head", "options"}), async_context=True),
 }
-_PYTHON_CLIENT_SINK_METHODS = {"request", "connect", "get", "post", "put", "patch", "delete", "head", "options", "urlopen", "getresponse"}
+_PYTHON_CLIENT_CONSTRUCTORS = frozenset(_PYTHON_CLIENT_SPECS)
+_PYTHON_CLIENT_SINK_METHODS = frozenset().union(*(spec.methods for spec in _PYTHON_CLIENT_SPECS.values()))
+_PYTHON_CLIENT_ANALYSIS_BUDGET = 100_000
 _PYTHON_SCOPE_NODES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)
 _PYTHON_COMPREHENSION_NODES = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
 _PYTHON_MATCH_CAPTURE_NODES = (ast.MatchAs, ast.MatchStar, ast.MatchMapping)
@@ -739,85 +735,120 @@ class _ClientScope:
     handles: dict[str, str]
     aliases: dict[str, str]
 
-    def copy_without(self, names: set[str] | None = None) -> _ClientScope:
+    def copy_without(self, analysis: _ClientAnalysis, names: set[str] | None = None) -> _ClientScope:
         names = names or set()
+        analysis.charge(len(self.handles) + len(self.aliases) + 1)
         return _ClientScope(
             handles={name: constructor for name, constructor in self.handles.items() if name not in names},
             aliases={name: target for name, target in self.aliases.items() if name not in names},
         )
 
+    def aliases_only(self, analysis: _ClientAnalysis, names: set[str] | None = None) -> _ClientScope:
+        names = names or set()
+        analysis.charge(len(self.aliases) + 1)
+        return _ClientScope(handles={}, aliases={name: target for name, target in self.aliases.items() if name not in names})
 
-def _find_client_handle_sink(tree: ast.AST) -> ast.AST | None:
-    found: list[ast.AST] = []
+
+class _ClientAnalysisBudgetExceeded(Exception):
+    pass
+
+
+@dataclass
+class _ClientAnalysis:
+    remaining: int
+    found: ast.AST | None = None
+
+    def charge(self, cost: int = 1) -> None:
+        if cost > self.remaining:
+            raise _ClientAnalysisBudgetExceeded
+        self.remaining -= cost
+
+
+def _find_client_handle_sink(tree: ast.AST, rel_path: str) -> ast.AST | None:
+    analysis = _ClientAnalysis(remaining=_PYTHON_CLIENT_ANALYSIS_BUDGET)
     module = _ClientScope(handles={}, aliases={})
-    _walk_client_scope(tree, module, module, found)
-    return found[0] if found else None
+    try:
+        _walk_client_scope(tree, module, module, analysis)
+    except _ClientAnalysisBudgetExceeded:
+        logger.warning("SkillScan client-handle analysis exhausted work budget for %s", rel_path)
+    return analysis.found
 
 
-def _walk_client_statements(body: list[ast.AST], scope: _ClientScope, inherited: _ClientScope, found: list[ast.AST]) -> None:
-    """Run statements in source order, dropping every name a walrus in the statement may rebind.
-
-    Two things about a walrus are undecidable here and both are resolved by dropping. *Whether* it
-    runs: it can sit behind a short-circuit, an `assert` message, or a comprehension over an empty
-    iterable. *When* it runs: CPython's order inside an expression is not child order (`Dict`
-    evaluates all keys before all values, `Compare` short-circuits), so the same source can rebind
-    before or after a sink call on the same name. Dropping the name for the rest of the scope
-    settles both without modelling either; binding it instead would hard-block benign files whose
-    walrus never executed.
-    """
+def _walk_client_statements(body: list[ast.AST], scope: _ClientScope, inherited: _ClientScope, analysis: _ClientAnalysis) -> None:
+    """Walk ordinary statements; a walrus-bearing statement is an explicit false negative."""
     for statement in body:
-        _drop_client_bindings(scope, {name for walrus in _walrus_nodes(statement) for name in _client_assignment_target_names(walrus.target)})
-        _walk_client_scope(statement, scope, inherited, found)
+        if analysis.found is not None:
+            return
+        walrus_names = set() if isinstance(statement, _PYTHON_SCOPE_NODES) else _walrus_target_names(statement, analysis)
+        if walrus_names:
+            _drop_client_bindings(scope, walrus_names)
+            continue
+        _walk_client_scope(statement, scope, inherited, analysis)
 
 
-def _walk_client_scope(node: ast.AST, scope: _ClientScope, inherited: _ClientScope, found: list[ast.AST]) -> None:
+def _walk_client_scope(node: ast.AST, scope: _ClientScope, inherited: _ClientScope, analysis: _ClientAnalysis) -> None:
     """Walk executable AST in statement order, carrying a one-level client-handle map."""
+    if analysis.found is not None:
+        return
+    analysis.charge()
     if isinstance(node, ast.Module):
-        _walk_client_statements(node.body, scope, inherited, found)
+        _walk_client_statements(node.body, scope, inherited, analysis)
         return
     if isinstance(node, _PYTHON_SCOPE_NODES):
-        _walk_client_nested_scope(node, scope, inherited, found)
+        _walk_client_nested_scope(node, scope, inherited, analysis)
         return
     if isinstance(node, _PYTHON_COMPREHENSION_NODES):
-        _walk_client_comprehension(node, scope, inherited, found)
+        return
+    if isinstance(node, ast.NamedExpr):
+        _drop_client_bindings(scope, set(_client_assignment_target_names(node.target)))
         return
     if isinstance(node, _PYTHON_BRANCHING_NODES):
-        _walk_client_branching(node, scope, inherited, found)
+        _walk_client_branching(node, scope, inherited, analysis)
         return
     if isinstance(node, (ast.Import, ast.ImportFrom)):
         _bind_client_import(node, scope)
         return
     if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
         if node.value is not None:
-            _walk_client_scope(node.value, scope, inherited, found)
+            _walk_client_scope(node.value, scope, inherited, analysis)
+        if analysis.found is not None:
+            return
         targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-        for target in targets:
-            _walk_client_target_exprs(target, scope, inherited, found)
         _rebind_client_scope(targets, node.value if isinstance(node, (ast.Assign, ast.AnnAssign)) else None, scope)
         return
     if isinstance(node, (ast.With, ast.AsyncWith)):
-        # A `with` body runs exactly once, so it is ordinary statement order, not a branch. The
-        # tracked constructors all return themselves from `__enter__`/`__aenter__`, so
-        # `with requests.Session() as s` binds the handle exactly like an assignment would --
-        # and it is the idiomatic way to open an `aiohttp.ClientSession`.
+        bound_names = {name for item in node.items if item.optional_vars is not None for name in _client_assignment_target_names(item.optional_vars)}
         for item in node.items:
-            _walk_client_scope(item.context_expr, scope, inherited, found)
+            _walk_client_scope(item.context_expr, scope, inherited, analysis)
+            if analysis.found is not None:
+                return
+            constructor = _client_constructor_from_value(item.context_expr, scope)
             if item.optional_vars is not None:
-                _walk_client_target_exprs(item.optional_vars, scope, inherited, found)
-                _rebind_client_scope([item.optional_vars], item.context_expr, scope)
-        _walk_client_statements(node.body, scope, inherited, found)
+                _drop_client_bindings(scope, set(_client_assignment_target_names(item.optional_vars)))
+            if constructor:
+                spec = _PYTHON_CLIENT_SPECS[constructor]
+                supported = spec.async_context if isinstance(node, ast.AsyncWith) else spec.sync_context
+                if not supported:
+                    _drop_client_bindings(scope, bound_names)
+                    return
+                if isinstance(item.optional_vars, ast.Name):
+                    scope.handles[item.optional_vars.id] = constructor
+        _walk_client_statements(node.body, scope, inherited, analysis)
         return
     if isinstance(node, ast.Delete):
         _drop_client_bindings(scope, {name for target in node.targets for name in _client_assignment_target_names(target)})
         return
     if isinstance(node, ast.Call):
         if _call_is_client_handle_sink(node, scope.handles):
-            found.append(node)  # recorded at the call: a later rebind cannot retract it
+            analysis.found = node
+            return
     for child in ast.iter_child_nodes(node):
-        _walk_client_scope(child, scope, inherited, found)
+        _walk_client_scope(child, scope, inherited, analysis)
+        if analysis.found is not None:
+            return
 
 
-def _walk_client_branching(node: ast.AST, scope: _ClientScope, inherited: _ClientScope, found: list[ast.AST]) -> None:
+def _walk_client_branching(node: ast.AST, scope: _ClientScope, inherited: _ClientScope, analysis: _ClientAnalysis) -> None:
     """Analyze a compound statement without deciding which of its parts run, or in what order.
 
     Every name the statement may bind is dropped *before* any body is walked, not after. Dropping
@@ -830,14 +861,20 @@ def _walk_client_branching(node: ast.AST, scope: _ClientScope, inherited: _Clien
     into a sibling and a sink inside a branch is still seen. What is lost is a name that the same
     statement both calls and rebinds; that is the documented false negative.
     """
-    _drop_client_bindings(scope, _branching_bound_names(node))
+    _drop_client_bindings(scope, _branching_bound_names(node, analysis))
     for header in _branching_header_exprs(node):
-        _walk_client_scope(header, scope, inherited, found)
-    if isinstance(node, (ast.For, ast.AsyncFor)):
-        # `for out[sink()] in ...` really evaluates the subscript receiver and index each pass.
-        _walk_client_target_exprs(node.target, scope, inherited, found)
+        walrus_names = _walrus_target_names(header, analysis)
+        if walrus_names:
+            _drop_client_bindings(scope, walrus_names)
+            continue
+        _walk_client_scope(header, scope, inherited, analysis)
+        if analysis.found is not None:
+            return
     for body in _branching_bodies(node):
-        _walk_client_statements(body, scope.copy_without(), inherited, found)
+        branch_scope = scope.copy_without(analysis)
+        _walk_client_statements(body, branch_scope, inherited, analysis)
+        if analysis.found is not None:
+            return
 
 
 def _branching_header_exprs(node: ast.AST) -> list[ast.AST]:
@@ -868,7 +905,7 @@ def _branching_bodies(node: ast.AST) -> list[list[ast.AST]]:
     return []
 
 
-def _branching_bound_names(node: ast.AST) -> set[str]:
+def _branching_bound_names(node: ast.AST, analysis: _ClientAnalysis) -> set[str]:
     """Every name the statement may bind, including the loop/handler/capture targets themselves."""
     names: set[str] = set()
     declared: set[str] = set()
@@ -876,87 +913,52 @@ def _branching_bound_names(node: ast.AST) -> set[str]:
         names.update(_client_assignment_target_names(node.target))
     for body in _branching_bodies(node):
         for statement in body:
-            _collect_client_scope_bindings(statement, names, declared)
+            _collect_client_scope_bindings(statement, names, declared, analysis)
     if isinstance(node, (ast.Try, ast.TryStar)):
         names.update(handler.name for handler in node.handlers if handler.name)
     if isinstance(node, ast.Match):
         for case in node.cases:
-            names.update(_match_pattern_capture_names(case.pattern))
+            _collect_client_scope_bindings(case.pattern, names, declared, analysis)
     return names - declared
 
 
-def _walrus_nodes(node: ast.AST) -> list[ast.NamedExpr]:
-    """Walrus nodes binding in *this* scope; a nested function or class body is a different scope."""
-    found: list[ast.NamedExpr] = []
+def _walrus_target_names(node: ast.AST, analysis: _ClientAnalysis) -> set[str]:
+    """Return walrus targets in this scope so the entire ambiguous statement can be skipped."""
+    found: set[str] = set()
 
     def visit(current: ast.AST) -> None:
+        analysis.charge()
         for child in ast.iter_child_nodes(current):
             if isinstance(child, _PYTHON_SCOPE_NODES):
                 continue
             if isinstance(child, ast.NamedExpr):
-                found.append(child)
+                found.update(_client_assignment_target_names(child.target))
             visit(child)
 
     visit(node)
     return found
 
 
-def _walk_client_nested_scope(node: ast.AST, scope: _ClientScope, inherited: _ClientScope, found: list[ast.AST]) -> None:
+def _walk_client_nested_scope(node: ast.AST, scope: _ClientScope, inherited: _ClientScope, analysis: _ClientAnalysis) -> None:
     for expr in _client_scope_prelude(node):
-        _walk_client_scope(expr, scope, inherited, found)
-    # The nested body is analyzed against the enclosing state at its definition position. Resolving
-    # a closure against its eventual call-time state would require the control-flow tracking this
-    # lexical model excludes; the resulting define-then-bind false negative is pinned in tests.
+        _walk_client_scope(expr, scope, inherited, analysis)
+        if analysis.found is not None:
+            return
     if isinstance(node, ast.ClassDef):
-        # A class body reads the enclosing scope, but the names it binds are not visible to the
-        # methods defined in it, so what those methods close over stays the class's own `inherited`.
-        inner, nested = inherited.copy_without(), inherited
+        inner, nested = inherited.aliases_only(analysis), inherited
     else:
-        inner = inherited.copy_without(_client_scope_bindings(node))
+        inner = inherited.aliases_only(analysis, _client_scope_bindings(node, analysis))
         nested = inner
     body = node.body if isinstance(node.body, list) else [node.body]
-    _walk_client_statements(body, inner, nested, found)
+    _walk_client_statements(body, inner, nested, analysis)
     if not isinstance(node, ast.Lambda):
         _drop_client_bindings(scope, {node.name})
-
-
-def _walk_client_comprehension(node: ast.AST, scope: _ClientScope, inherited: _ClientScope, found: list[ast.AST]) -> None:
-    """A comprehension is its own scope: its targets shadow the enclosing names for the whole thing.
-
-    The outermost iterable is evaluated in the enclosing scope; everything else runs inside. How many
-    times the element and the filters run -- or whether a generator runs at all -- is not decided here,
-    so the inner scope is a copy and nothing it binds escapes.
-    """
-    targets = {name for generator in node.generators for name in _client_assignment_target_names(generator.target)}
-    if node.generators:
-        _walk_client_scope(node.generators[0].iter, scope, inherited, found)
-    inner = scope.copy_without(targets)
-    for index, generator in enumerate(node.generators):
-        if index:
-            _walk_client_scope(generator.iter, inner, inherited, found)
-        _walk_client_target_exprs(generator.target, inner, inherited, found)
-        for condition in generator.ifs:
-            _walk_client_scope(condition, inner, inherited, found)
-    for element in (getattr(node, "key", None), getattr(node, "value", None), getattr(node, "elt", None)):
-        if element is not None:
-            _walk_client_scope(element, inner, inherited, found)
 
 
 def _match_capture_names(node: ast.AST) -> list[str]:
     if isinstance(node, ast.MatchMapping):
         return [node.rest] if node.rest else []
     return [node.name] if node.name else []
-
-
-def _match_pattern_capture_names(pattern: ast.AST) -> set[str]:
-    """Every name a case pattern binds when it matches (nested captures included)."""
-    names: set[str] = set()
-    for node in ast.walk(pattern):
-        if isinstance(node, (ast.MatchAs, ast.MatchStar)) and node.name:
-            names.add(node.name)
-        elif isinstance(node, ast.MatchMapping) and node.rest:
-            names.add(node.rest)
-    return names
 
 
 def _client_scope_prelude(node: ast.AST) -> list[ast.AST]:
@@ -974,13 +976,8 @@ def _client_scope_prelude(node: ast.AST) -> list[ast.AST]:
     return [*node.decorator_list, *defaults]
 
 
-def _client_scope_bindings(node: ast.AST) -> set[str]:
-    """Names local to a function scope: parameters plus everything its body binds anywhere.
-
-    A function-local binding shadows an enclosing name across the whole body rather than from the
-    assignment onward, so an inherited handle must not survive into a scope that rebinds the name
-    at all. `global`/`nonlocal` opt a name back out of that shadowing.
-    """
+def _client_scope_bindings(node: ast.AST, analysis: _ClientAnalysis) -> set[str]:
+    """Names that shadow inherited constructor aliases throughout a function scope."""
     args = node.args
     names = {arg.arg for arg in [*args.posonlyargs, *args.args, *args.kwonlyargs]}
     for extra in (args.vararg, args.kwarg):
@@ -988,11 +985,12 @@ def _client_scope_bindings(node: ast.AST) -> set[str]:
             names.add(extra.arg)
     declared: set[str] = set()
     for statement in node.body if isinstance(node.body, list) else [node.body]:
-        _collect_client_scope_bindings(statement, names, declared)
+        _collect_client_scope_bindings(statement, names, declared, analysis)
     return names - declared
 
 
-def _collect_client_scope_bindings(node: ast.AST, names: set[str], declared: set[str]) -> None:
+def _collect_client_scope_bindings(node: ast.AST, names: set[str], declared: set[str], analysis: _ClientAnalysis) -> None:
+    analysis.charge()
     if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
         names.add(node.name)  # The statement binds its own name here; its body is a separate scope.
         return
@@ -1011,13 +1009,23 @@ def _collect_client_scope_bindings(node: ast.AST, names: set[str], declared: set
     elif isinstance(node, _PYTHON_MATCH_CAPTURE_NODES):
         names.update(_match_capture_names(node))
     if isinstance(node, _PYTHON_COMPREHENSION_NODES):
-        # Comprehension targets bind in the comprehension's own scope; a walrus inside it binds here.
-        for child in ast.walk(node):
-            if isinstance(child, ast.NamedExpr):
-                _collect_client_scope_bindings(child.target, names, declared)
+        # The expression is not analyzed for sinks, but a walrus target is local to the
+        # containing function. Removing a same-named inherited constructor alias prevents a
+        # definition-order false positive; whether the comprehension executes remains a false
+        # negative by design.
+        names.update(_walrus_target_names(node, analysis))
         return
     for child in ast.iter_child_nodes(node):
-        _collect_client_scope_bindings(child, names, declared)
+        _collect_client_scope_bindings(child, names, declared, analysis)
+
+
+def _client_constructor_from_value(value: ast.AST | None, scope: _ClientScope) -> str:
+    if isinstance(value, ast.Call):
+        called = _python_call_name(value, scope.aliases)
+        return called if called in _PYTHON_CLIENT_CONSTRUCTORS else ""
+    if isinstance(value, ast.Name):
+        return scope.handles.get(value.id, "")
+    return ""
 
 
 def _rebind_client_scope(targets: list[ast.AST], value: ast.AST | None, scope: _ClientScope) -> None:
@@ -1027,12 +1035,7 @@ def _rebind_client_scope(targets: list[ast.AST], value: ast.AST | None, scope: _
     keep the handle. Name-to-name propagation is what stops a two-character rename from shedding it;
     it stays one level, so a handle reached through an attribute or an item is not tracked.
     """
-    constructor = ""
-    if isinstance(value, ast.Call):
-        called = _python_call_name(value, scope.aliases)
-        constructor = called if called in _PYTHON_CLIENT_CONSTRUCTORS else ""
-    elif isinstance(value, ast.Name):
-        constructor = scope.handles.get(value.id, "")
+    constructor = _client_constructor_from_value(value, scope)
     names = {name for target in targets for name in _client_assignment_target_names(target)}
     _drop_client_bindings(scope, names)
     if constructor:
@@ -1049,24 +1052,6 @@ def _client_assignment_target_names(target: ast.AST) -> list[str]:
     if isinstance(target, (ast.List, ast.Tuple)):
         return [name for element in target.elts for name in _client_assignment_target_names(element)]
     return []
-
-
-def _walk_client_target_exprs(target: ast.AST, scope: _ClientScope, inherited: _ClientScope, found: list[ast.AST]) -> None:
-    """Walk the sub-expressions Python evaluates while binding a target.
-
-    A plain `Name` target binds without evaluating anything, but an attribute or subscript target
-    still evaluates its receiver (and a subscript its index), so a sink call placed there really runs.
-    """
-    if isinstance(target, ast.Attribute):
-        _walk_client_scope(target.value, scope, inherited, found)
-    elif isinstance(target, ast.Subscript):
-        _walk_client_scope(target.value, scope, inherited, found)
-        _walk_client_scope(target.slice, scope, inherited, found)
-    elif isinstance(target, (ast.List, ast.Tuple)):
-        for element in target.elts:
-            _walk_client_target_exprs(element, scope, inherited, found)
-    elif isinstance(target, ast.Starred):
-        _walk_client_target_exprs(target.value, scope, inherited, found)
 
 
 def _drop_client_bindings(scope: _ClientScope, names: set[str]) -> None:
@@ -1089,7 +1074,10 @@ def _bind_client_import(node: ast.Import | ast.ImportFrom, scope: _ClientScope) 
 
 def _call_is_client_handle_sink(node: ast.Call, handles: dict[str, str]) -> bool:
     func = node.func
-    return isinstance(func, ast.Attribute) and func.attr in _PYTHON_CLIENT_SINK_METHODS and isinstance(func.value, ast.Name) and func.value.id in handles
+    if not isinstance(func, ast.Attribute) or not isinstance(func.value, ast.Name):
+        return False
+    constructor = handles.get(func.value.id)
+    return bool(constructor and func.attr in _PYTHON_CLIENT_SPECS[constructor].methods)
 
 
 def _yaml_load_uses_safe_loader(node: ast.Call) -> bool:
