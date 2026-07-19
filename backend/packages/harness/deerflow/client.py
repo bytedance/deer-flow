@@ -1455,6 +1455,11 @@ class DeerFlowClient:
                         info["markdown_path"] = str(uploads_dir / md_path.name)
                         info["markdown_virtual_path"] = upload_virtual_path(md_path.name)
                         info["markdown_artifact_url"] = upload_artifact_url(thread_id, md_path.name)
+                    else:
+                        # Conversion failed and wrote nothing, so release the
+                        # claim; holding it would rename a later same-stem
+                        # upload against a name nothing occupies.
+                        seen_names.discard(unique_md_name)
 
                 uploaded_files.append(info)
         finally:

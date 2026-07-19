@@ -397,6 +397,11 @@ async def upload_files(
                     file_info["markdown_path"] = str(sandbox_uploads / md_path.name)
                     file_info["markdown_virtual_path"] = md_virtual_path
                     file_info["markdown_artifact_url"] = upload_artifact_url(thread_id, md_path.name)
+                else:
+                    # Conversion failed and wrote nothing, so release the claim;
+                    # holding it would rename a later same-stem upload against
+                    # a name nothing occupies.
+                    seen_filenames.discard(unique_md_name)
 
             uploaded_files.append(file_info)
 

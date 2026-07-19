@@ -951,3 +951,75 @@ def test_upload_files_user_markdown_after_convertible_is_renamed_not_overwritten
     assert result.files[1].original_filename == "notes.md"
     assert (thread_uploads_dir / "notes.md").read_text(encoding="utf-8") == "FROM_DOCX"
     assert (thread_uploads_dir / "notes_1.md").read_bytes() == b"USER_MARKDOWN"
+
+
+def test_upload_files_failed_conversion_releases_the_claimed_markdown_name(tmp_path):
+    """A conversion that writes nothing must not reserve stem.md against later uploads."""
+    thread_uploads_dir = tmp_path / "uploads"
+    thread_uploads_dir.mkdir(parents=True)
+
+    with (
+        patch.object(uploads, "get_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "ensure_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "get_sandbox_provider", return_value=_mounted_provider()),
+        patch.object(uploads, "_auto_convert_documents_enabled", return_value=True),
+        patch.object(uploads, "convert_file_to_markdown", AsyncMock(return_value=None)),
+    ):
+        result = asyncio.run(
+            call_unwrapped(
+                uploads.upload_files,
+                "thread-local",
+                request=MagicMock(),
+                files=[
+                    UploadFile(filename="notes.docx", file=BytesIO(b"DOCX")),
+                    UploadFile(filename="notes.md", file=BytesIO(b"USER_MARKDOWN")),
+                ],
+                config=SimpleNamespace(),
+            )
+        )
+
+    assert result.success is True
+    assert result.files[0].markdown_file is None
+    assert result.files[1].filename == "notes.md"
+    assert result.files[1].original_filename is None
+    assert (thread_uploads_dir / "notes.md").read_bytes() == b"USER_MARKDOWN"
+    assert not (thread_uploads_dir / "notes_1.md").exists()
+
+
+def test_upload_files_failed_conversion_does_not_push_the_next_companion_to_suffix(tmp_path):
+    """The second victim of a stale claim: a later convertible's companion."""
+    thread_uploads_dir = tmp_path / "uploads"
+    thread_uploads_dir.mkdir(parents=True)
+
+    async def convert_failing_on_docx(file_path: Path, output_path: Path | None = None) -> Path | None:
+        if file_path.suffix.lower() == ".docx":
+            return None
+        md_path = output_path if output_path is not None else file_path.with_suffix(".md")
+        md_path.write_text(f"FROM:{file_path.name}", encoding="utf-8")
+        return md_path
+
+    with (
+        patch.object(uploads, "get_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "ensure_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "get_sandbox_provider", return_value=_mounted_provider()),
+        patch.object(uploads, "_auto_convert_documents_enabled", return_value=True),
+        patch.object(uploads, "convert_file_to_markdown", AsyncMock(side_effect=convert_failing_on_docx)),
+    ):
+        result = asyncio.run(
+            call_unwrapped(
+                uploads.upload_files,
+                "thread-local",
+                request=MagicMock(),
+                files=[
+                    UploadFile(filename="notes.docx", file=BytesIO(b"DOCX")),
+                    UploadFile(filename="notes.pdf", file=BytesIO(b"PDF")),
+                ],
+                config=SimpleNamespace(),
+            )
+        )
+
+    assert result.success is True
+    assert result.files[0].markdown_file is None
+    assert result.files[1].markdown_file == "notes.md"
+    assert (thread_uploads_dir / "notes.md").read_text(encoding="utf-8") == "FROM:notes.pdf"
+    assert not (thread_uploads_dir / "notes_1.md").exists()
