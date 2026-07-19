@@ -322,3 +322,23 @@ def test_resolve_thread_id_handles_null_configurable():
 
     # working inputs are unaffected
     assert runs._resolve_thread_id(RunCreateRequest(config={"configurable": {"thread_id": "t1"}})) == "t1"
+
+
+def test_build_run_config_handles_null_configurable():
+    """A null ``configurable`` must also survive ``build_run_config``.
+
+    ``_resolve_thread_id`` is not the only place that reads it: ``build_run_config``
+    does ``configurable.update(request_config.get("configurable", {}))`` and, in the
+    ``context`` branch, ``request_config.get("configurable", {}).keys()``. With the
+    key present and ``None``, ``.get(..., {})`` returns ``None``, so both raised
+    (``dict.update(None)`` / ``None.keys()``) -- an unhandled HTTP 500 that the
+    isolated ``_resolve_thread_id`` test could not catch.
+    """
+    from app.gateway.services import build_run_config
+
+    config = build_run_config("t1", {"configurable": None}, None)
+    assert config["configurable"]["thread_id"] == "t1"
+
+    # the context branch logs the caller's configurable keys; a null value must not crash
+    config = build_run_config("t1", {"context": {}, "configurable": None}, None)
+    assert config["configurable"]["thread_id"] == "t1"
