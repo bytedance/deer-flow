@@ -904,6 +904,9 @@ def _walrus_nodes(node: ast.AST) -> list[ast.NamedExpr]:
 def _walk_client_nested_scope(node: ast.AST, scope: _ClientScope, inherited: _ClientScope, found: list[ast.AST]) -> None:
     for expr in _client_scope_prelude(node):
         _walk_client_scope(expr, scope, inherited, found)
+    # The nested body is analyzed against the enclosing state at its definition position. Resolving
+    # a closure against its eventual call-time state would require the control-flow tracking this
+    # lexical model excludes; the resulting define-then-bind false negative is pinned in tests.
     if isinstance(node, ast.ClassDef):
         # A class body reads the enclosing scope, but the names it binds are not visible to the
         # methods defined in it, so what those methods close over stays the class's own `inherited`.
