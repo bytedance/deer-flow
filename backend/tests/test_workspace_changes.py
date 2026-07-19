@@ -182,6 +182,33 @@ def test_count_diff_lines_ignores_only_real_headers():
     assert deletions == 2
 
 
+def test_count_diff_lines_counts_content_starting_with_dashes_or_pluses():
+    """Hunk-body lines whose content starts with '-- '/'++ ' must be counted.
+
+    difflib prefixes a deleted line "-- get users" to "--- get users"; the old
+    prefix skip mistook that for a file header and dropped it, undercounting
+    deletions in the user-visible +N/-M summary.
+    """
+    import difflib
+
+    from deerflow.workspace_changes.diff import _count_diff_lines
+
+    lines = list(
+        difflib.unified_diff(
+            ["SELECT 1", "-- get users"],
+            ["SELECT 1", "SELECT 2"],
+            fromfile="a/x.sql",
+            tofile="b/x.sql",
+            lineterm="",
+        )
+    )
+
+    additions, deletions = _count_diff_lines(lines)
+
+    assert additions == 1
+    assert deletions == 1
+
+
 def test_scan_workspace_roots_skips_excluded_directories(tmp_path):
     roots = _roots(tmp_path)
     workspace = roots[0].host_path
