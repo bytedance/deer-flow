@@ -1541,7 +1541,7 @@ async def test_limiter_cancellation_does_not_leak_capacity() -> None:
     # Cancel B while it waits on the limiter.
     task_b.cancel()
     with pytest.raises(asyncio.CancelledError):
-        await task_b
+        await asyncio.gather(task_b)
 
     # Release A; its permit returns. B's cancellation must not have consumed it.
     gate.set()
