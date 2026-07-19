@@ -1418,9 +1418,11 @@ class TestChannelManager:
 
         PR #3584 added inbound dedupe for the IM channels; the GitHub channel
         added in PR #3754 never stamped the ``message_id`` / workspace the
-        dedupe keys on, so GitHub's native "Redeliver" button or a
-        retry-on-timeout re-ran the agent with real side effects (e.g. a
-        duplicate PR comment). The dispatcher now stamps the X-GitHub-Delivery
+        dedupe keys on, so a redelivered GitHub webhook (the native
+        "Redeliver" button, the REST API, or an operator's own recovery
+        script — GitHub does not auto-retry a failed delivery) re-ran the
+        agent with real side effects (e.g. a duplicate PR comment). The
+        dispatcher now stamps the X-GitHub-Delivery
         GUID (scoped per agent) plus the repo, so the same manager dedupe
         absorbs the replay — while a second agent bound to the same delivery,
         and a genuinely new delivery, still fire.
@@ -1429,20 +1431,25 @@ class TestChannelManager:
 
         manager = ChannelManager(bus=MessageBus(), store=ChannelStore(path=tmp_path / "store.json"))
 
-        def _gh(delivery: str, agent: str = "reviewer") -> InboundMessage:
-            # Shaped exactly as app.gateway.github.dispatcher.fanout_event emits.
+        def _gh(delivery: str, agent: str = "reviewer", owner_user_id: str = "alice") -> InboundMessage:
+            # Shaped exactly as app.gateway.github.dispatcher.fanout_event
+            # emits: a 3-part (delivery, owner_user_id, agent) message_id —
+            # ``dedupe_message_id = f"{delivery_id}:{match.user_id}:{agent.name}"``
+            # — plus the matching ``owner_user_id`` field fanout_event sets
+            # from ``match.user_id``.
             return InboundMessage(
                 channel_name="github",
                 chat_id="zhfeng/llm-gateway",
                 user_id="alice",
+                owner_user_id=owner_user_id,
                 text="@bot please review",
                 topic_id=f"7:{agent}",
                 workspace_id="zhfeng/llm-gateway",
-                metadata={"message_id": f"{delivery}:{agent}", "agent_name": agent},
+                metadata={"message_id": f"{delivery}:{owner_user_id}:{agent}", "agent_name": agent},
             )
 
         # The dedupe key matches the other channels' 4-tuple shape.
-        assert ChannelManager._inbound_dedupe_key(_gh("d1")) == ("github", "zhfeng/llm-gateway", "zhfeng/llm-gateway", "d1:reviewer")
+        assert ChannelManager._inbound_dedupe_key(_gh("d1")) == ("github", "zhfeng/llm-gateway", "zhfeng/llm-gateway", "d1:alice:reviewer")
 
         # First delivery fires; an identical redelivery of the same GUID is dropped.
         assert manager._is_duplicate_inbound(_gh("d1")) is False
@@ -1451,6 +1458,12 @@ class TestChannelManager:
         assert manager._is_duplicate_inbound(_gh("d2")) is False
         # A second agent fanned out from the SAME delivery is not cross-deduped.
         assert manager._is_duplicate_inbound(_gh("d1", agent="coder")) is False
+        # A second user's SAME-named agent on the SAME delivery is not
+        # cross-deduped either. A helper still stamping the old 2-part
+        # (delivery, agent) id could not even express this case — it would
+        # collide with the very first assertion's "d1"+"reviewer" key and
+        # silently drop this user's run (willem-bd, PR #4104 review).
+        assert manager._is_duplicate_inbound(_gh("d1", owner_user_id="bob")) is False
 
     def test_dispatch_loop_releases_dedupe_key_when_handling_fails(self, tmp_path):
         """A transient handling failure must not black-hole a provider redelivery (ShenAC #1)."""
