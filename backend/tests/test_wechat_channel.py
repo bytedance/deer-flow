@@ -84,6 +84,33 @@ class _MockAsyncClient:
         return None
 
 
+def test_timing_config_requires_positive_finite_values():
+    from app.channels.wechat import WechatChannel
+
+    timing_defaults = {
+        "polling_timeout": WechatChannel.DEFAULT_POLLING_TIMEOUT,
+        "polling_retry_delay": WechatChannel.DEFAULT_RETRY_DELAY,
+        "qrcode_poll_interval": WechatChannel.DEFAULT_QRCODE_POLL_INTERVAL,
+        "qrcode_poll_timeout": WechatChannel.DEFAULT_QRCODE_POLL_TIMEOUT,
+    }
+    attributes = {
+        "polling_timeout": "_polling_timeout",
+        "polling_retry_delay": "_retry_delay",
+        "qrcode_poll_interval": "_qrcode_poll_interval",
+        "qrcode_poll_timeout": "_qrcode_poll_timeout",
+    }
+
+    for invalid in (0, -1, float("nan"), float("inf"), float("-inf"), 10**1000):
+        channel = WechatChannel(
+            bus=MessageBus(),
+            config={"bot_token": "test-token", **dict.fromkeys(timing_defaults, invalid)},
+        )
+        assert {key: getattr(channel, attributes[key]) for key in timing_defaults} == timing_defaults
+
+    channel = WechatChannel(bus=MessageBus(), config={"bot_token": "test-token", "polling_retry_delay": "0.25"})
+    assert channel._retry_delay == 0.25
+
+
 def test_handle_update_publishes_private_chat_message():
     from app.channels.wechat import WechatChannel
 
