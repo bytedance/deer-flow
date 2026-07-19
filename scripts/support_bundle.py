@@ -21,9 +21,35 @@ except Exception:  # pragma: no cover - exercised only in broken environments
 
 
 SECRET_KEY_RE = re.compile(
-    r"(api[_-]?key|access[_-]?key|token|secret|password|passwd|pwd|authorization|cookie|credential|private[_-]?key)",
+    r"(api[_-]?key|access[_-]?key|private[_-]?key|(?<![a-zA-Z])key(?![a-zA-Z])"
+    r"|token|secret|password|passwd|pwd|(?<![a-zA-Z])pass(?!port)"
+    r"|authorization|cookie|credential|(?<![a-zA-Z])dsn(?![a-zA-Z]))",
     re.IGNORECASE,
 )
+# Bare-word coverage above mirrors env_policy.py's *KEY*/*SECRET*/*TOKEN*/*PASS*/
+# *CREDENTIAL*/*DSN* sandbox-env denylist (backend/packages/harness/deerflow/sandbox/env_policy.py):
+# a fixed keyword allowlist misses a secret stored under an unanticipated key name
+# inside an open-ended config dict (e.g. guardrails.provider.config, which is an
+# arbitrary dict of provider-specific kwargs). The api_key/access_key/private_key/
+# password/passwd/pwd forms predate this and stay for their glued-compound coverage
+# (e.g. "apikey" with no separator); the new bare key/pass/dsn alternatives are
+# boundary-guarded so they match only their own delimited token and not an
+# unrelated word that merely starts with the same letters (keywords, keyboard).
+# `pass` only excludes a trailing "port" (passport) rather than any trailing
+# letter: excluding any trailing letter also missed genuine secret-bearing
+# names like passphrase/passcode, which env_policy.py's *PASS* substring match
+# does catch -- `compass`/`bypass` stay excluded via the leading-letter
+# lookbehind regardless of the lookahead.
+#
+# Case-insensitive exact key names that carry a bare credential with no
+# distinguishing keyword substring, mirroring env_policy.py's no-flag credential
+# sources (GH_PAT/GITHUB_PAT/REDIS_AUTH/REDISCLI_AUTH/PGSERVICEFILE). Matched as a
+# full key name, not a substring: a bare "pat"/"auth" wildcard would false-positive
+# on unrelated fields (author, authenticated, compatible, pattern, ...). Connection
+# strings (DATABASE_URL, REDIS_URL, ...) are deliberately not in this set -- their
+# embedded credentials are already stripped in place by URL_USERINFO_RE, which
+# preserves the host/port/db-name diagnostic value instead of blanking the field.
+NO_FLAG_CREDENTIAL_KEY_NAMES = frozenset({"gh_pat", "github_pat", "redis_auth", "rediscli_auth", "pgservicefile"})
 ENV_KEY_RE = re.compile(r"(?i)^env$")
 VAR_REFERENCE_RE = re.compile(r"^\$\{?[A-Za-z_][A-Za-z0-9_]*\}?$")
 ENV_SECRET_RE = re.compile(r"(?im)^([A-Z0-9_]*(?:API[_-]?KEY|TOKEN|SECRET|PASSWORD|PASSWD|AUTHORIZATION|COOKIE|CREDENTIAL)[A-Z0-9_]*\s*=\s*)(.+)$")
@@ -104,11 +130,12 @@ def redact_data(value: Any) -> Any:
     if isinstance(value, dict):
         redacted: dict[Any, Any] = {}
         for key, item in value.items():
-            if SECRET_KEY_RE.search(str(key)):
+            key_str = str(key)
+            if SECRET_KEY_RE.search(key_str) or key_str.lower() in NO_FLAG_CREDENTIAL_KEY_NAMES:
                 redacted[key] = "<redacted>"
-            elif ENV_KEY_RE.fullmatch(str(key)) and isinstance(item, dict):
+            elif ENV_KEY_RE.fullmatch(key_str) and isinstance(item, dict):
                 redacted[key] = {k: _redact_env_value(v) for k, v in item.items()}
-            elif HEADER_KEY_RE.search(str(key)) and isinstance(item, dict):
+            elif HEADER_KEY_RE.search(key_str) and isinstance(item, dict):
                 redacted[key] = {k: "<redacted>" for k in item}
             else:
                 redacted[key] = redact_data(item)
