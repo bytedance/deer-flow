@@ -23,9 +23,11 @@ import { useSearchParams } from "next/navigation";
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
+  type ChangeEvent,
   type ComponentProps,
   type ClipboardEvent,
   type FormEvent,
@@ -67,6 +69,7 @@ import {
   DropdownMenuSeparator,
 } from "@/components/ui/dropdown-menu";
 import { fetch } from "@/core/api/fetcher";
+import { useAuth } from "@/core/auth/AuthProvider";
 import { getBackendBaseURL } from "@/core/config";
 import { useI18n } from "@/core/i18n/hooks";
 import { polishInputDraft } from "@/core/input-polish/api";
@@ -81,6 +84,15 @@ import { useSkills } from "@/core/skills/hooks";
 import { useSuggestionsConfig } from "@/core/suggestions/hooks";
 import type { AgentThreadContext, GoalState } from "@/core/threads";
 import { compactThreadContext } from "@/core/threads/api";
+import {
+  buildComposerDraftKey,
+  clearComposerDraft,
+  getSessionComposerDraftStorage,
+  readComposerDraft,
+  resolveComposerDraft,
+  type ComposerDraft,
+  writeComposerDraft,
+} from "@/core/threads/composer-draft";
 import { threadTokenUsageQueryKey } from "@/core/threads/token-usage";
 import { textOfMessage } from "@/core/threads/utils";
 import {
@@ -144,6 +156,8 @@ import { SlashSkillChip } from "./slash-skill-chip";
 import { Tooltip } from "./tooltip";
 
 type InputMode = "flash" | "thinking" | "pro" | "ultra";
+
+const COMPOSER_DRAFT_SAVE_DELAY_MS = 300;
 
 function focusContentEditableEnd(element: HTMLElement | null) {
   if (!element) {
@@ -273,6 +287,8 @@ export function InputBox({
   extraHeader,
   isWelcomeMode,
   threadId,
+  draftThreadId = threadId,
+  draftAgentName,
   initialValue,
   onContextChange,
   onFollowupsVisibilityChange,
@@ -299,6 +315,8 @@ export function InputBox({
    */
   isWelcomeMode?: boolean;
   threadId: string;
+  draftThreadId?: string;
+  draftAgentName?: string | null;
   initialValue?: string;
   onContextChange?: (
     context: Omit<
@@ -322,12 +340,14 @@ export function InputBox({
   const searchParams = useSearchParams();
   const [modelDialogOpen, setModelDialogOpen] = useState(false);
   const { models } = useModels();
+  const { user } = useAuth();
   const { thread, isMock } = useThread();
   const { attachments, textInput } = usePromptInputController();
+  const setTextInput = textInput.setInput;
   const sidecar = useMaybeSidecar();
   const attachmentParts = attachments.files;
   const removeAttachment = attachments.remove;
-  const { skills } = useSkills();
+  const { skills, isLoading: skillsLoading } = useSkills();
   const { data: uploadLimits } = useUploadLimits(threadId);
   const promptRootRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -355,6 +375,13 @@ export function InputBox({
   >(null);
   const promptHistoryIndexRef = useRef<number | null>(null);
   const promptHistoryDraftRef = useRef("");
+  const pendingDraftSubmissionKeyRef = useRef<string | null>(null);
+  const latestDraftRef = useRef<{
+    key: string;
+    draft: { text: string; skillName: string | null };
+  } | null>(null);
+  const draftSaveTimerRef = useRef<number | null>(null);
+  const draftSaveGenerationRef = useRef(0);
 
   const [followups, setFollowups] = useState<string[]>([]);
   const { data: suggestionsConfig } = useSuggestionsConfig();
@@ -372,6 +399,7 @@ export function InputBox({
   const [skillSuggestionIndex, setSkillSuggestionIndex] = useState(0);
   const [selectedSlashSkill, setSelectedSlashSkill] =
     useState<SlashSuggestion | null>(null);
+  const [hydratedDraftKey, setHydratedDraftKey] = useState<string | null>(null);
   const [dismissedSkillSuggestionValue, setDismissedSkillSuggestionValue] =
     useState<string | null>(null);
   const lastGeneratedForAiIdRef = useRef<string | null>(null);
@@ -550,6 +578,83 @@ export function InputBox({
     [selectedModel],
   );
 
+  const draftKey = useMemo(
+    () =>
+      buildComposerDraftKey({
+        userId: user?.id ?? "anonymous",
+        agentName:
+          draftAgentName ??
+          (typeof context.agent_name === "string" ? context.agent_name : null),
+        threadId: draftThreadId,
+      }),
+    [context.agent_name, draftAgentName, draftThreadId, user?.id],
+  );
+  const enabledSkillNames = useMemo(
+    () =>
+      new Set(
+        skills.filter((skill) => skill.enabled).map((skill) => skill.name),
+      ),
+    [skills],
+  );
+  const cancelDraftSaveTimer = useCallback(() => {
+    if (draftSaveTimerRef.current === null) {
+      return;
+    }
+    window.clearTimeout(draftSaveTimerRef.current);
+    draftSaveTimerRef.current = null;
+  }, []);
+  const invalidateDraftSaveTimer = useCallback(() => {
+    draftSaveGenerationRef.current += 1;
+    cancelDraftSaveTimer();
+  }, [cancelDraftSaveTimer]);
+  const scheduleDraftSave = useCallback(
+    (draft: ComposerDraft, key = draftKey) => {
+      if (
+        !draft.text &&
+        !draft.skillName &&
+        pendingDraftSubmissionKeyRef.current === key
+      ) {
+        return null;
+      }
+      if (draft.text || draft.skillName) {
+        pendingDraftSubmissionKeyRef.current = null;
+      }
+
+      latestDraftRef.current = { key, draft };
+      cancelDraftSaveTimer();
+      draftSaveGenerationRef.current += 1;
+      const generation = draftSaveGenerationRef.current;
+      const timer = window.setTimeout(() => {
+        if (
+          draftSaveGenerationRef.current !== generation ||
+          draftSaveTimerRef.current !== timer
+        ) {
+          return;
+        }
+        draftSaveTimerRef.current = null;
+        writeComposerDraft(getSessionComposerDraftStorage(), key, draft);
+      }, COMPOSER_DRAFT_SAVE_DELAY_MS);
+      draftSaveTimerRef.current = timer;
+      return timer;
+    },
+    [cancelDraftSaveTimer, draftKey],
+  );
+  const flushLatestDraft = useCallback(
+    (expectedKey?: string) => {
+      const latest = latestDraftRef.current;
+      if (!latest || (expectedKey && latest.key !== expectedKey)) {
+        return;
+      }
+      cancelDraftSaveTimer();
+      writeComposerDraft(
+        getSessionComposerDraftStorage(),
+        latest.key,
+        latest.draft,
+      );
+    },
+    [cancelDraftSaveTimer],
+  );
+
   const promptHistory = useMemo(() => {
     const history: string[] = [];
     for (const message of thread.messages) {
@@ -575,12 +680,97 @@ export function InputBox({
     return history;
   }, [thread.messages]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     promptHistoryIndexRef.current = null;
     promptHistoryDraftRef.current = "";
+    setTextInput("");
     setSelectedSlashSkill(null);
     setInputPolishUndo(null);
-  }, [threadId]);
+    setHydratedDraftKey(null);
+    pendingDraftSubmissionKeyRef.current = null;
+    latestDraftRef.current = null;
+    invalidateDraftSaveTimer();
+    return () => flushLatestDraft(draftKey);
+  }, [draftKey, flushLatestDraft, invalidateDraftSaveTimer, setTextInput]);
+
+  useLayoutEffect(() => {
+    const handlePageHide = () => flushLatestDraft();
+    window.addEventListener("pagehide", handlePageHide);
+    return () => window.removeEventListener("pagehide", handlePageHide);
+  }, [flushLatestDraft]);
+
+  useEffect(() => {
+    if (skillsLoading || hydratedDraftKey === draftKey) {
+      return;
+    }
+
+    const savedDraft = readComposerDraft(
+      getSessionComposerDraftStorage(),
+      draftKey,
+    );
+    if (!savedDraft) {
+      if (!textInput.value && initialValue) {
+        setTextInput(initialValue);
+      }
+      setHydratedDraftKey(draftKey);
+      return;
+    }
+
+    const resolvedDraft = resolveComposerDraft(savedDraft, enabledSkillNames);
+    setTextInput(resolvedDraft.text);
+    const restoredSkill = resolvedDraft.skillName
+      ? skills.find(
+          (skill) => skill.enabled && skill.name === resolvedDraft.skillName,
+        )
+      : undefined;
+    setSelectedSlashSkill(
+      restoredSkill
+        ? {
+            name: restoredSkill.name,
+            description: restoredSkill.description,
+            kind: "skill",
+          }
+        : null,
+    );
+    setHydratedDraftKey(draftKey);
+  }, [
+    draftKey,
+    enabledSkillNames,
+    hydratedDraftKey,
+    initialValue,
+    setTextInput,
+    skills,
+    skillsLoading,
+    textInput.value,
+  ]);
+
+  useEffect(() => {
+    if (hydratedDraftKey !== draftKey) {
+      return;
+    }
+
+    const draft: ComposerDraft = {
+      text: textInput.value ?? "",
+      skillName:
+        selectedSlashSkill?.kind === "skill" ? selectedSlashSkill.name : null,
+    };
+    const timer = scheduleDraftSave(draft, draftKey);
+    return () => {
+      if (timer === null) {
+        return;
+      }
+      window.clearTimeout(timer);
+      if (draftSaveTimerRef.current === timer) {
+        draftSaveTimerRef.current = null;
+      }
+    };
+  }, [
+    draftKey,
+    hydratedDraftKey,
+    scheduleDraftSave,
+    selectedSlashSkill,
+    textInput.value,
+  ]);
 
   useEffect(() => {
     const goalRequestState = goalRequestStateRef.current;
@@ -875,22 +1065,30 @@ export function InputBox({
       const quotes = sidecar?.conversationQuotes ?? [];
       const quoteIds = quotes.map((quote) => quote.id);
       const quoteContexts = quotes.map((quote) => quote.context);
-      const submitOptions: InputBoxSubmitOptions | undefined = quotes.length
-        ? {
-            additionalKwargs: buildReferenceMessageMetadata(quoteContexts),
-            additionalInputMessages: [
-              buildHiddenConversationQuoteMessage({
-                contexts: quoteContexts,
-              }),
-            ],
-            // Clear quotes only once the send genuinely proceeds. If the send
-            // is dropped by the in-flight guard, `onSent` never fires and the
-            // quotes stay attached so they aren't silently lost.
-            onSent: () => {
-              sidecar?.clearConversationQuotes(quoteIds);
-            },
+      pendingDraftSubmissionKeyRef.current = draftKey;
+      const submitOptions: InputBoxSubmitOptions = {
+        ...(quotes.length
+          ? {
+              additionalKwargs: buildReferenceMessageMetadata(quoteContexts),
+              additionalInputMessages: [
+                buildHiddenConversationQuoteMessage({
+                  contexts: quoteContexts,
+                }),
+              ],
+            }
+          : {}),
+        // Clear one-time state only once the send genuinely proceeds. If the
+        // send is dropped by the in-flight guard, `onSent` never fires.
+        onSent: () => {
+          if (pendingDraftSubmissionKeyRef.current === draftKey) {
+            pendingDraftSubmissionKeyRef.current = null;
+            latestDraftRef.current = null;
+            invalidateDraftSaveTimer();
+            clearComposerDraft(getSessionComposerDraftStorage(), draftKey);
           }
-        : undefined;
+          sidecar?.clearConversationQuotes(quoteIds);
+        },
+      };
       const submit = () => onSubmit?.(message, submitOptions);
 
       // Guard against submitting before the initial model auto-selection
@@ -915,6 +1113,8 @@ export function InputBox({
     },
     [
       context,
+      draftKey,
+      invalidateDraftSaveTimer,
       onContextChange,
       onSubmit,
       reportUploadLimitViolations,
@@ -1550,15 +1750,29 @@ export function InputBox({
     ],
   );
 
-  const handlePromptTextareaChange = useCallback(() => {
-    if (voiceListening) {
-      abortVoiceInput();
-    }
-    abortInputPolishRequest();
-    setInputPolishUndo(null);
-    promptHistoryIndexRef.current = null;
-    promptHistoryDraftRef.current = "";
-  }, [abortInputPolishRequest, abortVoiceInput, voiceListening]);
+  const handlePromptTextareaChange = useCallback(
+    (event: ChangeEvent<HTMLTextAreaElement>) => {
+      if (voiceListening) {
+        abortVoiceInput();
+      }
+      abortInputPolishRequest();
+      setInputPolishUndo(null);
+      promptHistoryIndexRef.current = null;
+      promptHistoryDraftRef.current = "";
+      scheduleDraftSave({
+        text: event.currentTarget.value,
+        skillName:
+          selectedSlashSkill?.kind === "skill" ? selectedSlashSkill.name : null,
+      });
+    },
+    [
+      abortInputPolishRequest,
+      abortVoiceInput,
+      scheduleDraftSave,
+      selectedSlashSkill,
+      voiceListening,
+    ],
+  );
 
   const updateInlineSkillTextInput = useCallback(
     (element: HTMLElement) => {
@@ -1567,9 +1781,21 @@ export function InputBox({
       }
       promptHistoryIndexRef.current = null;
       promptHistoryDraftRef.current = "";
-      textInput.setInput(element.textContent ?? "");
+      const nextText = element.textContent ?? "";
+      textInput.setInput(nextText);
+      scheduleDraftSave({
+        text: nextText,
+        skillName:
+          selectedSlashSkill?.kind === "skill" ? selectedSlashSkill.name : null,
+      });
     },
-    [abortVoiceInput, textInput, voiceListening],
+    [
+      abortVoiceInput,
+      scheduleDraftSave,
+      selectedSlashSkill,
+      textInput,
+      voiceListening,
+    ],
   );
 
   useEffect(() => {

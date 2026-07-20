@@ -378,6 +378,7 @@ export default function ChatPage() {
                       )}
                       isWelcomeMode={isWelcomeMode}
                       threadId={threadId}
+                      draftThreadId={isNewThread ? "new" : threadId}
                       autoFocus={isWelcomeMode}
                       status={
                         thread.error
