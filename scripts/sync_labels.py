@@ -58,9 +58,9 @@ def sync_label(label: dict[str, str], repo: str | None, dry_run: bool) -> bool:
 
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
-        print(f"  ✗ {name}: {result.stderr.strip()}", file=sys.stderr)
+        print(f"  [FAIL] {name}: {result.stderr.strip()}", file=sys.stderr)
         return False
-    print(f"  ✓ {name}")
+    print(f"  [OK] {name}")
     return True
 
 

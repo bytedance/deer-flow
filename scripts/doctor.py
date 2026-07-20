@@ -57,7 +57,7 @@ def bold(t: str) -> str:
 
 
 def _icon(status: Status) -> str:
-    icons = {"ok": green("✓"), "warn": yellow("!"), "fail": red("✗"), "skip": "—"}
+    icons = {"ok": green("[OK]"), "warn": yellow("!"), "fail": red("[FAIL]"), "skip": "—"}
     return icons[status]
 
 
@@ -123,7 +123,7 @@ class CheckResult:
         print(f"  {icon} {self.label}{detail_str}")
         if self.fix:
             for line in self.fix.splitlines():
-                print(f"      {cyan('→')} {line}")
+                print(f"      {cyan('->')} {line}")
 
 
 # ---------------------------------------------------------------------------
@@ -352,7 +352,7 @@ def check_llm_package(config_path: Path) -> list[CheckResult]:
             use = model.get("use", "")
             if ":" in use:
                 package_path = use.split(":")[0]
-                # e.g. langchain_openai → langchain-openai
+                # e.g. langchain_openai -> langchain-openai
                 top_level = package_path.split(".")[0]
                 pip_name = top_level.replace("_", "-")
                 if pip_name in seen_packages:

@@ -131,30 +131,30 @@ def main() -> int:
             print_success("frontend/.env created from example")
 
         print_header("Setup complete!")
-        print(f"  {green('✓')} LLM:        {llm.provider.display_name} / {llm.model_name}")
+        print(f"  {green('[OK]')} LLM:        {llm.provider.display_name} / {llm.model_name}")
         if search_provider:
-            print(f"  {green('✓')} Web search: {search_provider.display_name}")
+            print(f"  {green('[OK]')} Web search: {search_provider.display_name}")
         else:
             print(f"  {'—':>3} Web search: not configured")
         if fetch_provider:
-            print(f"  {green('✓')} Web fetch:  {fetch_provider.display_name}")
+            print(f"  {green('[OK]')} Web fetch:  {fetch_provider.display_name}")
         else:
             print(f"  {'—':>3} Web fetch:  not configured")
         sandbox_label = "Local sandbox" if execution.sandbox_use.endswith("LocalSandboxProvider") else "Container sandbox"
-        print(f"  {green('✓')} Execution:  {sandbox_label}")
+        print(f"  {green('[OK]')} Execution:  {sandbox_label}")
         if execution.include_bash_tool:
             bash_label = "enabled"
             if execution.allow_host_bash:
                 bash_label += " (host bash)"
-            print(f"  {green('✓')} Bash:       {bash_label}")
+            print(f"  {green('[OK]')} Bash:       {bash_label}")
         else:
             print(f"  {'—':>3} Bash:       disabled")
         if execution.include_write_tools:
-            print(f"  {green('✓')} File write: enabled")
+            print(f"  {green('[OK]')} File write: enabled")
         else:
             print(f"  {'—':>3} File write: disabled")
         if channels.enabled_providers:
-            print(f"  {green('✓')} IM channels: {', '.join(channels.enabled_providers)}")
+            print(f"  {green('[OK]')} IM channels: {', '.join(channels.enabled_providers)}")
         else:
             print(f"  {'—':>3} IM channels: disabled")
         print()
