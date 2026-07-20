@@ -123,3 +123,68 @@ def test_newer_user_version_no_warning(caplog):
                 config_path,
             )
         assert "outdated" not in caplog.text
+
+
+def _load_repo_example() -> dict:
+    """Load the real repo config.example.yaml (first-run template)."""
+    example_path = Path(__file__).resolve().parents[2] / "config.example.yaml"
+    with open(example_path, encoding="utf-8") as f:
+        return yaml.safe_load(f) or {}
+
+
+def _merge_missing(target: dict, source: dict) -> None:
+    """Add-missing-keys-only recursive merge mirroring scripts/config-upgrade.sh."""
+    for key, value in source.items():
+        if key not in target:
+            import copy
+
+            target[key] = copy.deepcopy(value)
+        elif isinstance(value, dict) and isinstance(target[key], dict):
+            _merge_missing(target[key], value)
+
+
+def test_security_fail_closed_bumped_config_version():
+    """The example must ship security_fail_closed under a version > 26 so v26 configs upgrade."""
+    example = _load_repo_example()
+    assert example.get("config_version", 0) >= 27
+    assert example["skill_evolution"]["security_fail_closed"] is True
+
+
+def test_version_26_config_reported_outdated_against_example(caplog):
+    """A version-26 user config is flagged outdated against the real example version."""
+    example = _load_repo_example()
+    example_version = example["config_version"]
+    with tempfile.TemporaryDirectory() as tmpdir:
+        config_path = _make_config_files(
+            Path(tmpdir),
+            user_config={"config_version": 26},
+            example_config=example,
+        )
+        with caplog.at_level(logging.WARNING, logger="deerflow.config.app_config"):
+            AppConfig._check_config_version({"config_version": 26}, config_path)
+        assert "outdated" in caplog.text
+        assert "version 26" in caplog.text
+        assert f"version is {example_version}" in caplog.text
+
+
+def test_config_upgrade_adds_security_fail_closed_preserving_user_values():
+    """config-upgrade merges security_fail_closed: true without touching existing skill_evolution values."""
+    example = _load_repo_example()
+    # A version-26 user who customized skill_evolution but predates the new field.
+    user = {
+        "config_version": 26,
+        "skill_evolution": {
+            "enabled": True,
+            "moderation_model_name": "custom-moderation-model",
+        },
+    }
+
+    _merge_missing(user, example)
+    user["config_version"] = example["config_version"]
+
+    # New persisted field is merged in with the example's fail-closed default.
+    assert user["skill_evolution"]["security_fail_closed"] is True
+    # The user's existing skill_evolution values are preserved unchanged.
+    assert user["skill_evolution"]["enabled"] is True
+    assert user["skill_evolution"]["moderation_model_name"] == "custom-moderation-model"
+    assert user["config_version"] == example["config_version"]

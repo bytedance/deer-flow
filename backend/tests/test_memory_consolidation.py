@@ -956,7 +956,8 @@ class TestPrepareUpdatePromptConsolidation:
             )
 
         assert result is not None
-        _, prompt = result
+        _, messages = result
+        prompt = "\n".join(m.content for m in messages)
         assert "Memory Consolidation" in prompt
         assert "consolidation_candidates" in prompt
 
@@ -980,7 +981,8 @@ class TestPrepareUpdatePromptConsolidation:
             )
 
         assert result is not None
-        _, prompt = result
+        _, messages = result
+        prompt = "\n".join(m.content for m in messages)
         assert "Memory Consolidation" not in prompt
 
     def test_consolidation_section_omitted_when_disabled(self):
@@ -1003,7 +1005,8 @@ class TestPrepareUpdatePromptConsolidation:
             )
 
         assert result is not None
-        _, prompt = result
+        _, messages = result
+        prompt = "\n".join(m.content for m in messages)
         assert "Memory Consolidation" not in prompt
 
 

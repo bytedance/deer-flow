@@ -35,6 +35,14 @@ class TestIsUnsafeZipMember:
         info = zipfile.ZipInfo("C:\\Windows\\system32\\drivers\\etc\\hosts")
         assert is_unsafe_zip_member(info) is True
 
+    def test_colon_in_member_name_ntfs_ads(self):
+        """A colon after the first path component addresses a Windows NTFS
+        Alternate Data Stream (e.g. ``run.sh:hidden.txt`` hides content inside
+        ``run.sh`` instead of creating a new file), invisible to rglob/os.walk
+        based scanning. Must be rejected outright."""
+        info = zipfile.ZipInfo("my-skill/scripts/run.sh:hidden.txt")
+        assert is_unsafe_zip_member(info) is True
+
     def test_dotdot_traversal(self):
         info = zipfile.ZipInfo("foo/../../../etc/passwd")
         assert is_unsafe_zip_member(info) is True
@@ -133,6 +141,21 @@ class TestSafeExtract:
         zip_path = tmp_path / "abs.zip"
         with zipfile.ZipFile(zip_path, "w") as zf:
             zf.writestr("/etc/passwd", "root:x:0:0")
+        dest = tmp_path / "out"
+        dest.mkdir()
+        with zipfile.ZipFile(zip_path) as zf:
+            with pytest.raises(ValueError, match="unsafe"):
+                safe_extract_skill_archive(zf, dest)
+
+    def test_rejects_ntfs_ads_colon_member(self, tmp_path):
+        """A zip member named like ``scripts/run.sh:hidden.txt`` is an NTFS
+        Alternate-Data-Stream address, not a nested path. Extraction must
+        reject the whole archive instead of silently attaching hidden
+        content to ``run.sh``."""
+        zip_path = tmp_path / "ads.zip"
+        with zipfile.ZipFile(zip_path, "w") as zf:
+            zf.writestr("my-skill/scripts/run.sh", "#!/bin/sh\necho ok\n")
+            zf.writestr("my-skill/scripts/run.sh:hidden.txt", "HIDDEN_PAYLOAD_MARKER")
         dest = tmp_path / "out"
         dest.mkdir()
         with zipfile.ZipFile(zip_path) as zf:
@@ -552,6 +575,42 @@ class TestInstallSkillFromArchive:
             get_or_new_skill_storage(skills_path=skills_root).install_skill_from_archive(zip_path)
 
         assert not (skills_root / "custom" / "test-skill").exists()
+
+    def test_ntfs_ads_smuggling_prevented(self, tmp_path, monkeypatch):
+        """End-to-end regression: an archive member name like
+        ``scripts/run.sh:hidden.txt`` addresses a Windows NTFS Alternate Data
+        Stream rather than a nested file. It must be rejected by the archive
+        preflight scan before extraction — not installed with its payload
+        left invisible to directory-based scanning."""
+        marker = "HIDDEN_ADS_PAYLOAD_MARKER_TEST"
+        zip_path = tmp_path / "ads-skill.skill"
+        with zipfile.ZipFile(zip_path, "w") as zf:
+            zf.writestr("ads-skill/SKILL.md", "---\nname: ads-skill\ndescription: A test skill\n---\n\n# ads-skill\n")
+            zf.writestr("ads-skill/scripts/run.sh", "#!/bin/sh\necho ok\n")
+            zf.writestr("ads-skill/scripts/run.sh:hidden.txt", marker)
+        skills_root = tmp_path / "skills"
+        skills_root.mkdir()
+        llm_calls = []
+
+        async def _scan(*args, **kwargs):
+            llm_calls.append({"args": args, "kwargs": kwargs})
+            return ScanResult(decision="allow", reason="ok")
+
+        monkeypatch.setattr("deerflow.skills.installer.scan_skill_content", _scan)
+
+        with pytest.raises(SkillSecurityScanError) as excinfo:
+            get_or_new_skill_storage(skills_path=skills_root).install_skill_from_archive(zip_path)
+
+        assert "Static security scan blocked" in str(excinfo.value)
+        assert excinfo.value.findings
+        assert excinfo.value.findings[0]["rule_id"] == "package-ads-stream-name"
+        assert llm_calls == []
+        assert not (skills_root / "custom" / "ads-skill").exists()
+        # The marker must not have leaked into skills_root anywhere (e.g. a
+        # partially-extracted temp dir surviving past cleanup).
+        for path in skills_root.rglob("*"):
+            if path.is_file():
+                assert marker not in path.read_text(encoding="utf-8", errors="ignore")
 
     def test_nested_skill_markdown_prevents_install(self, tmp_path):
         zip_path = tmp_path / "test-skill.skill"

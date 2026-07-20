@@ -179,3 +179,101 @@ def test_extensions_config_falls_back_to_legacy_when_project_root_lacks_file(tmp
     monkeypatch.setattr(extensions_config_module, "__file__", str(fake_paths_module_file))
 
     assert ExtensionsConfig.resolve_config_path() == legacy_extensions
+
+
+def test_extensions_config_explicit_path_missing_file_raises(tmp_path: Path, monkeypatch):
+    """An explicit ``config_path`` argument pointing at a file that does not
+    exist (e.g. it existed earlier and was deleted) must raise
+    ``FileNotFoundError`` identifying the explicit `config_path` argument as
+    the culprit, not silently degrade to ``None``.
+
+    An explicit ``config_path`` is an operator assertion that one specific
+    file must be used (PR #4275 review, fancyboi999 [P1]): a bad path, typo,
+    or deleted file must surface as a loud, actionable error instead of
+    silently constructing an empty extensions config (no MCP servers, no
+    skills). Only the fallback *search* mode (no explicit argument, no env
+    var) treats "nothing found" as the legitimate optional-extensions case
+    and returns ``None`` — see
+    ``test_extensions_config_falls_back_to_legacy_when_project_root_lacks_file``
+    and ``test_extensions_config_search_finds_nothing_returns_none`` below.
+    """
+    _clear_path_env(monkeypatch)
+    missing = tmp_path / "extensions_config.json"
+    # Never created (equivalent to "existed, then got deleted" from the
+    # resolver's point of view -- it only sees that the path doesn't exist).
+
+    with pytest.raises(FileNotFoundError, match="config_path"):
+        ExtensionsConfig.resolve_config_path(config_path=str(missing))
+
+
+def test_extensions_config_env_var_missing_file_raises(tmp_path: Path, monkeypatch):
+    """``DEER_FLOW_EXTENSIONS_CONFIG_PATH`` pointing at a file that has since
+    been deleted must raise ``FileNotFoundError`` identifying the environment
+    variable as the culprit, not silently return ``None``.
+
+    This is the exact resolution mode Docker dev/prod uses (see
+    backend/AGENTS.md: "Docker development ... points `DEER_FLOW_CONFIG_PATH`
+    / `DEER_FLOW_EXTENSIONS_CONFIG_PATH`" at the mounted config directory), so
+    a bad mount or deleted file at this explicit, operator-configured path is
+    a real misconfiguration that must surface loudly (PR #4275 review,
+    fancyboi999 [P1]) instead of silently starting with every MCP server and
+    skill absent.
+
+    ``deerflow.mcp.cache._resolve_config_path`` calls
+    ``ExtensionsConfig.resolve_config_path()`` with no args and therefore
+    hits this exact branch whenever the env var is set; that module has its
+    own narrower catch around this specific exception so the MCP tools-cache
+    staleness check does not crash on every request once the file goes
+    missing after a successful init — see
+    ``test_config_deleted_after_init_via_real_env_resolution_does_not_raise``
+    in ``test_mcp_cache.py`` for that regression.
+    """
+    _clear_path_env(monkeypatch)
+    cfg = tmp_path / "extensions_config.json"
+    cfg.write_text('{"mcpServers": {}, "skills": {}}', encoding="utf-8")
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(cfg))
+
+    assert ExtensionsConfig.resolve_config_path() == cfg  # sanity: resolves while present
+
+    cfg.unlink()
+
+    with pytest.raises(FileNotFoundError, match="DEER_FLOW_EXTENSIONS_CONFIG_PATH"):
+        ExtensionsConfig.resolve_config_path()
+
+
+def test_extensions_config_search_finds_nothing_returns_none(tmp_path: Path, monkeypatch):
+    """The fallback *search* mode (no explicit ``config_path``, no
+    ``DEER_FLOW_EXTENSIONS_CONFIG_PATH``) must still return ``None`` — not
+    raise — when none of the search locations (project root, legacy
+    backend/repo-root) have an extensions config file.
+
+    This is the one resolution mode where "not found" is the expected,
+    non-error case (extensions are entirely optional throughout the
+    application), so it must keep its pre-existing ``None`` contract even
+    though the explicit `config_path`/`DEER_FLOW_EXTENSIONS_CONFIG_PATH`
+    branches now raise ``FileNotFoundError`` for the analogous "missing file"
+    condition (see ``test_extensions_config_explicit_path_missing_file_raises``
+    and ``test_extensions_config_env_var_missing_file_raises`` above).
+    Regression guard for the original #4124 fix:
+    ``deerflow.mcp.cache._is_cache_stale`` depends on this fallback ``None``
+    to treat "never configured" as "not stale".
+    """
+    _clear_path_env(monkeypatch)
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    monkeypatch.chdir(cwd)
+
+    fake_backend = tmp_path / "fake-backend-empty"
+    fake_repo = tmp_path / "fake-repo-empty"
+    fake_backend.mkdir()
+    fake_repo.mkdir()
+    # No extensions_config.json / mcp_config.json anywhere: not in cwd, not in
+    # the legacy backend dir, not in the legacy repo root.
+
+    fake_paths_module_file = fake_backend / "packages" / "harness" / "deerflow" / "config" / "extensions_config.py"
+    fake_paths_module_file.parent.mkdir(parents=True)
+    fake_paths_module_file.write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(extensions_config_module, "__file__", str(fake_paths_module_file))
+
+    assert ExtensionsConfig.resolve_config_path() is None
