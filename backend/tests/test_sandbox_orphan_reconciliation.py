@@ -874,6 +874,35 @@ def test_renewal_keeps_the_sandbox_when_the_store_cannot_answer():
     worker._backend.destroy.assert_not_called()
 
 
+def test_renewal_keeps_the_sandbox_when_lapsed_reclaim_cannot_answer():
+    """A store outage after LAPSED is still unknown, not proof of a peer.
+
+    ``renew()`` and the follow-up ``claim()`` are separate store round trips. A
+    key can be observed absent and the store can then become unreachable before
+    the claim. Renewal must keep the sandbox and retry rather than route the
+    claim through the ordinary fail-closed reap helper and evict a live entry.
+    """
+    from deerflow.community.aio_sandbox.ownership import OwnershipBackendError, RenewOutcome
+
+    worker = _make_provider_for_reconciliation(worker_id="worker-a")
+    worker._ownership = MagicMock()
+    worker._ownership.renew.return_value = RenewOutcome.LAPSED
+    worker._ownership.claim.side_effect = OwnershipBackendError("store down after lapsed renew")
+    info = _info("live03")
+    sandbox = MagicMock()
+    worker._sandboxes["live03"] = sandbox
+    worker._sandbox_infos["live03"] = info
+    worker._thread_sandboxes[("u1", "t1")] = "live03"
+
+    worker._renew_owned_leases()
+
+    worker._ownership.claim.assert_called_once_with("live03")
+    assert "live03" in worker._sandboxes, "a failed LAPSED re-claim evicted a live sandbox nobody had taken"
+    assert worker._thread_sandboxes[("u1", "t1")] == "live03"
+    sandbox.close.assert_not_called()
+    worker._backend.destroy.assert_not_called()
+
+
 def test_load_config_carries_the_stream_bridge_section():
     """Hop 1 of the "no extra config for multi-instance" promise.
 
@@ -992,6 +1021,62 @@ def test_renewal_covers_warm_entries_not_just_active():
     worker._renew_owned_leases()
 
     assert set(renewed) == {"active01", "warm01"}
+
+
+def test_renewal_does_not_forget_a_warm_entry_mid_teardown():
+    """Renewal must not pop the warm entry retained by an in-flight stop.
+
+    A warm teardown deliberately leaves the entry visible until the backend stop
+    succeeds. Its ``del:us`` marker makes ordinary ``renew()`` report LOST, but
+    that is local teardown state rather than a peer takeover. If the stop then
+    fails, the warm entry must still be present for retry or reclaim.
+    """
+    worker = _make_provider_for_reconciliation(worker_id="worker-a")
+    info = SandboxInfo(
+        sandbox_id="warm-stop",
+        sandbox_url="http://localhost:8080",
+        container_name="deer-flow-sandbox-warm-stop",
+        created_at=time.time(),
+    )
+    worker._warm_pool["warm-stop"] = (info, time.time())
+    worker._publish_ownership("warm-stop")
+
+    stop_started = threading.Event()
+    let_stop_fail = threading.Event()
+
+    def failing_stop(_entry):
+        stop_started.set()
+        assert let_stop_fail.wait(timeout=5), "the test never released the backend stop"
+        raise RuntimeError("stop failed")
+
+    worker._backend.destroy.side_effect = failing_stop
+    result = {}
+    reaper = threading.Thread(
+        target=lambda: result.update(
+            destroyed=worker._destroy_warm_entry(
+                "warm-stop",
+                info,
+                reason="idle_timeout",
+                still_reapable=lambda: True,
+            )
+        ),
+        daemon=True,
+    )
+    reaper.start()
+    try:
+        assert stop_started.wait(timeout=5), "the warm teardown never reached the backend stop"
+        assert "warm-stop" in worker._local_teardown, "precondition: the local teardown reservation is not held"
+
+        worker._renew_owned_leases()
+
+        assert "warm-stop" in worker._warm_pool, "renewal forgot a warm entry while this instance was stopping it"
+    finally:
+        let_stop_fail.set()
+        reaper.join(timeout=5)
+
+    assert not reaper.is_alive(), "the failed warm teardown did not finish"
+    assert result.get("destroyed") is False
+    assert "warm-stop" in worker._warm_pool, "a failed stop lost the warm entry it promised to retain"
 
 
 def test_lost_lease_drops_sandbox_without_destroying_container():
@@ -1533,6 +1618,20 @@ class _BlockHeartbeatClaim:
                 self.refresh_completed.set()
                 return result
         return self._inner.claim(sandbox_id, for_destroy=for_destroy)
+
+
+def test_teardown_join_budget_covers_refresh_and_final_release():
+    """A normally timing-out refresh plus release must fit before deferral.
+
+    Redis bounds each store operation at five seconds. Context exit can catch
+    the heartbeat in a refresh and must then wait for its final release, so the
+    join budget needs to exceed both sequential operation bounds rather than
+    only one of them.
+    """
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    store_operation_timeout_seconds = 5.0
+
+    assert aio_mod.AioSandboxProvider._TEARDOWN_JOIN_TIMEOUT_SECONDS > 2 * store_operation_timeout_seconds
 
 
 def test_teardown_release_waits_for_the_heartbeat_to_exit():

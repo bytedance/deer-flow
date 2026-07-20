@@ -163,10 +163,11 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
 
     # How long `_held_teardown_lease` waits for its heartbeat thread to exit
     # before deferring the final lease release to that (still-running) thread.
-    # The store's socket timeout bounds a stalled refresh, so this only elapses
-    # under a genuine wedge; kept above that socket timeout so a normal network
-    # stall still releases synchronously before the context returns.
-    _TEARDOWN_JOIN_TIMEOUT_SECONDS = 8.0
+    # The store's socket timeout bounds each operation, but context exit can
+    # catch the heartbeat in one final refresh and must then wait for its final
+    # release. Keep this above both sequential five-second operation bounds so a
+    # normally timing-out refresh + release still finishes synchronously.
+    _TEARDOWN_JOIN_TIMEOUT_SECONDS = 12.0
 
     def __init__(self):
         self._lock = threading.Lock()
@@ -473,9 +474,18 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         if outcome is RenewOutcome.RENEWED:
             return True
         if outcome is RenewOutcome.LAPSED:
-            # Free: re-establish. Only fails if a peer claimed it in the meantime.
-            if self._claim_ownership(sandbox_id):
-                logger.info("Re-established a lapsed ownership lease for %s", sandbox_id)
+            # Free: re-establish. This is the deliberate fail-open renewal path,
+            # so it cannot use `_claim_ownership`: that helper turns a backend
+            # error into False for adopt/reap callers, which would conflate an
+            # outage between these two round trips with a peer takeover and
+            # evict a live sandbox. Unknown means keep-and-retry here, exactly as
+            # it does when the `renew()` call itself cannot answer above.
+            try:
+                if self._ownership.claim(sandbox_id):
+                    logger.info("Re-established a lapsed ownership lease for %s", sandbox_id)
+                    return True
+            except OwnershipBackendError as e:
+                logger.warning("Could not re-establish lapsed lease for %s, will retry: %s", sandbox_id, e)
                 return True
             logger.warning("Lapsed ownership lease for %s was taken by a peer", sandbox_id)
             return False
@@ -486,13 +496,16 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         """Keep *sandbox_id*'s teardown marker alive for as long as its stop runs.
 
         ``claim(..., for_destroy=True)`` writes the ``del:`` marker with the
-        ordinary lease TTL, and nothing else refreshes it: ``renew()`` extends
-        only ``own:`` and deliberately reports a teardown as ``LOST``, and the
+        ordinary lease TTL, and normal ``renew()`` extends only ``own:`` while
+        deliberately reporting a teardown as ``LOST``. Active and unhealthy
         destroy paths drop the sandbox from the maps ``_renew_owned_leases``
-        iterates. A container stop that outlives the TTL therefore let the marker
-        lapse, a peer's ``take()`` succeeded against the still-running container,
-        and the stop landed on the turn that had just been handed it — the very
-        window the ``del:`` state exists to close, reopened by its own expiry.
+        iterates; the warm path keeps its entry visible until the stop succeeds,
+        so ``_forget_lost_sandbox`` separately honours ``_local_teardown`` rather
+        than misreading our own marker as a peer takeover. Without this heartbeat,
+        a container stop that outlived the TTL let the marker lapse, a peer's
+        ``take()`` succeeded against the still-running container, and the stop
+        landed on the turn that had just been handed it — the very window the
+        ``del:`` state exists to close, reopened by its own expiry.
 
         This is what the per-sandbox ``flock`` used to cover for free: a held lock
         cannot expire. A lease can, so the exclusion has to be held deliberately
@@ -554,11 +567,11 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             stop.set()
             beater.join(timeout=self._TEARDOWN_JOIN_TIMEOUT_SECONDS)
             if beater.is_alive():
-                # The socket timeout should have bounded any refresh, so reaching
-                # here means a genuine wedge. The release is the heartbeat's job
-                # and is still pending; clearing the marker here would reopen the
-                # exact race this owns, so leave it — the thread will release when
-                # it unblocks, or the TTL will reap it.
+                # The budget covers a normally timing-out refresh plus the final
+                # release. The release is the heartbeat's job and is still
+                # pending; clearing the marker here would reopen the exact race
+                # this owns, so leave it — the thread will release when it
+                # unblocks, or the TTL will reap it.
                 logger.warning(
                     "Teardown heartbeat for %s did not exit within %.1fs; its lease release is deferred to that thread",
                     sandbox_id,
@@ -917,6 +930,14 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         the agent holding an id whose tool calls fail until the next turn.
         """
         with self._lock:
+            # A warm teardown deliberately keeps its entry visible until the
+            # backend stop succeeds. Its own `del:` marker makes `renew()` report
+            # LOST, but that is not a peer takeover and must not pop the retained
+            # entry — especially when the stop fails and the container remains
+            # live for retry/reclaim. The teardown path removes it on success.
+            if sandbox_id in self._local_teardown:
+                logger.debug("Not dropping sandbox %s: this instance is tearing it down", sandbox_id)
+                return
             # The in-flight check is deliberately *not* conditional on
             # `expected_epoch`. Today's epoch-less callers (the two
             # `SandboxBeingDestroyedError` handlers) cannot collide with a
