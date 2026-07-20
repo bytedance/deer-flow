@@ -231,6 +231,23 @@ Phase 1 最低验证要求：
   `rbac:allow` / `rbac:deny` / `rbac:unrestricted`。接入审计日志前应决定是否通过
   更具体的 policy id 或 decision metadata 记录 role / resource / target。
 
+### 2026-07-20 — Phase 1A-2 / PR #4260 请求边界收口
+
+- **背景：** review 发现 `request.target` 未经运行时校验；通配符策略会允许
+  `None` 或空字符串，而列表策略会拒绝，形成依赖策略形态的不一致结果。进一步审查
+  发现无效 resource 和批量过滤候选项也存在相同的“不受限/通配符路径放行”风险。
+- **决策：** 内置 RBAC 在请求边界要求 resource、resource type、target 和每个
+  candidate 都是非空字符串；`filter_resources()` 还要求 candidates 是 list。
+  非法输入统一抛 `ValueError`，不能进入 `rbac:unrestricted` 或通配符 allow 路径。
+- **决策：** `filter_resources()` 对缺失/未知角色继续与 `authorize()` 一致地抛
+  `ValueError`，不在 provider 内静默返回空列表。Phase 1B 集成层负责按
+  `fail_closed` 处理 provider 异常，避免隐藏身份或部署配置错误。
+- **证据：** 90 tests passed（75 RBAC + 15 factory），覆盖 unrestricted、
+  wildcard、allow-list、同步/异步、非法 resource/target/candidates，以及
+  `filter_resources()` 的缺失/未知角色错误语义。
+- **兼容性：** 只拒绝不符合 `AuthzRequest` / `filter_resources` 类型契约的运行时
+  输入；Phase 1A-2 仍未接入运行时，`authorization.enabled: false` 行为不变。
+
 ### 新记录模板
 
 ```markdown

@@ -161,18 +161,6 @@ class TestRbacErrorPropagation:
             pytest.fail("Expected ValueError for invalid RBAC config")
 
 
-class _IncompleteProvider:
-    """Has name + authorize but missing filter_resources — fails Protocol."""
-
-    name = "incomplete"
-
-    def authorize(self, request):
-        pass
-
-    async def aauthorize(self, request):
-        pass
-
-
 class TestNoFactoryInjection:
     """Factory must not inject fail_closed or default_role into provider kwargs."""
 

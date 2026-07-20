@@ -213,6 +213,80 @@ class TestFilterResources:
         per_item = [c for c in candidates if p.authorize(_make_request(target=c)).allow]
         assert filtered == per_item
 
+    @pytest.mark.parametrize("role", [None, ""])
+    def test_filter_missing_role_raises(self, role):
+        """Visibility filtering propagates missing-role errors like authorize."""
+        p = _provider({"user": {"tools": {"allow": "*"}}})
+        with pytest.raises(ValueError, match="no role"):
+            p.filter_resources(Principal(role=role), "tool", ["bash"])
+
+    def test_filter_unknown_role_raises(self):
+        """Visibility filtering propagates unknown-role errors like authorize."""
+        p = _provider({"user": {"tools": {"allow": "*"}}})
+        with pytest.raises(ValueError, match="Unknown role"):
+            p.filter_resources(Principal(role="editor"), "tool", ["bash"])
+
+    @pytest.mark.parametrize("resource_type", [None, ""])
+    def test_filter_invalid_resource_type_raises(self, resource_type):
+        p = _provider({"user": {}})
+        with pytest.raises(ValueError, match="resource_type must be a non-empty string"):
+            p.filter_resources(Principal(role="user"), resource_type, ["bash"])
+
+    @pytest.mark.parametrize(
+        "roles",
+        [
+            {"user": {}},
+            {"user": {"tools": {"allow": "*"}}},
+            {"user": {"tools": {"allow": ["bash"]}}},
+        ],
+        ids=["unrestricted", "wildcard", "allow-list"],
+    )
+    @pytest.mark.parametrize("candidates", [["bash", None], ["bash", ""]], ids=["null", "empty"])
+    def test_filter_invalid_candidate_raises_for_every_policy_shape(self, roles, candidates):
+        p = _provider(roles)
+        with pytest.raises(ValueError, match=r"candidates\[1\] must be a non-empty string"):
+            p.filter_resources(Principal(role="user"), "tool", candidates)
+
+    @pytest.mark.parametrize("candidates", [None, ("bash",), "bash"])
+    def test_filter_non_list_candidates_raises(self, candidates):
+        p = _provider({"user": {"tools": {"allow": "*"}}})
+        with pytest.raises(ValueError, match="candidates must be a list"):
+            p.filter_resources(Principal(role="user"), "tool", candidates)
+
+
+# --- Request validation ---
+
+
+class TestRequestValidation:
+    """Malformed request identifiers must fail before any allow decision."""
+
+    @pytest.mark.parametrize(
+        "roles",
+        [
+            {"user": {}},
+            {"user": {"tools": {"allow": "*"}}},
+            {"user": {"tools": {"allow": ["bash"]}}},
+        ],
+        ids=["unrestricted", "wildcard", "allow-list"],
+    )
+    @pytest.mark.parametrize("target", [None, ""], ids=["null", "empty"])
+    def test_authorize_invalid_target_raises_for_every_policy_shape(self, roles, target):
+        p = _provider(roles)
+        with pytest.raises(ValueError, match="target must be a non-empty string"):
+            p.authorize(_make_request(target=target))
+
+    @pytest.mark.parametrize("resource", [None, ""], ids=["null", "empty"])
+    def test_authorize_invalid_resource_raises(self, resource):
+        p = _provider({"user": {"tools": {"allow": "*"}}})
+        with pytest.raises(ValueError, match="resource must be a non-empty string"):
+            p.authorize(_make_request(resource=resource))
+
+    @pytest.mark.parametrize("target", [None, ""], ids=["null", "empty"])
+    def test_aauthorize_invalid_target_matches_sync_validation(self, target):
+        p = _provider({"user": {"tools": {"allow": "*"}}})
+        with pytest.raises(ValueError, match="target must be a non-empty string"):
+            asyncio.run(p.aauthorize(_make_request(target=target)))
+
 
 # --- Sync / async parity ---
 

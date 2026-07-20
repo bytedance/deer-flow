@@ -41,6 +41,13 @@ _ABSENT = object()  # sentinel meaning "key not present in dict"
 _SUPPORTED_POLICY_KEYS: frozenset[str] = frozenset({"allow", "deny"})
 
 
+def _require_non_empty_string(value: object, *, field: str) -> str:
+    """Return a validated request identifier or raise a stable boundary error."""
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{field} must be a non-empty string, got {value!r}")
+    return value
+
+
 class _CompiledPolicy:
     """Immutable, pre-validated policy for a single (role, resource_type) pair."""
 
@@ -63,8 +70,9 @@ class RbacAuthorizationProvider:
     """Built-in role-based authorization provider.
 
     Configured via ``roles`` mapping where each role maps resource-type keys
-    to ``{allow: ..., deny: [...]}`` policies. All validation happens at
-    construction; the request path is pure membership checks.
+    to ``{allow: ..., deny: [...]}`` policies. Policy configuration is fully
+    validated at construction; the request path validates identifiers before
+    performing membership checks.
 
     Policies are scoped by role, resource, and target. ``AuthzRequest.action``
     is accepted for protocol compatibility but is not a rule dimension in this
@@ -169,11 +177,18 @@ class RbacAuthorizationProvider:
 
         return _CompiledPolicy(allowed=allowed, denied=denied)
 
-    def _resolve_policy(self, principal: Principal, resource: str) -> _CompiledPolicy | None:
+    def _resolve_policy(
+        self,
+        principal: Principal,
+        resource: str,
+        *,
+        resource_field: str = "resource",
+    ) -> _CompiledPolicy | None:
         """Look up the compiled policy for (role, resource_type).
 
         Returns ``None`` if no policy is configured for this role+resource
-        (meaning: unrestricted). Raises ``ValueError`` for unknown roles.
+        (meaning: unrestricted). Raises ``ValueError`` for invalid resource
+        identifiers and unknown or missing roles.
         """
         role = principal.role
         if role is None or role == "":
@@ -182,12 +197,14 @@ class RbacAuthorizationProvider:
         if role not in self._known_roles:
             raise ValueError(f"Unknown role '{role}'; known roles: {sorted(self._known_roles)}")
 
+        resource = _require_non_empty_string(resource, field=resource_field)
         resource_key = _RESOURCE_POLICY_KEYS.get(resource, resource)
         return self._policies.get((role, resource_key))
 
     def authorize(self, request: AuthzRequest) -> AuthzDecision:
         """Evaluate a single authorization request."""
         policy = self._resolve_policy(request.principal, request.resource)
+        target = _require_non_empty_string(request.target, field="target")
         if policy is None:
             # No policy for this role+resource → unrestricted.
             return AuthzDecision(
@@ -196,7 +213,7 @@ class RbacAuthorizationProvider:
                 policy_id="rbac:unrestricted",
             )
 
-        if policy.is_allowed(request.target):
+        if policy.is_allowed(target):
             return AuthzDecision(
                 allow=True,
                 reasons=[AuthzReason(code="authz.allowed")],
@@ -207,7 +224,7 @@ class RbacAuthorizationProvider:
             reasons=[
                 AuthzReason(
                     code="authz.denied",
-                    message=f"role '{request.principal.role}' is denied '{request.target}' on resource '{request.resource}'",
+                    message=f"role '{request.principal.role}' is denied '{target}' on resource '{request.resource}'",
                 )
             ],
             policy_id="rbac:deny",
@@ -222,9 +239,16 @@ class RbacAuthorizationProvider:
         resource_type: str,
         candidates: list[str],
     ) -> list[str]:
-        """Batch visibility filter. Preserves candidate order; never adds items not in candidates."""
-        policy = self._resolve_policy(principal, resource_type)
-        if policy is None:
-            return list(candidates)
+        """Batch visibility filter.
 
-        return [c for c in candidates if policy.is_allowed(c)]
+        Preserves candidate order and duplicates, never adds items, and raises
+        the same role/resource errors as :meth:`authorize`.
+        """
+        policy = self._resolve_policy(principal, resource_type, resource_field="resource_type")
+        if not isinstance(candidates, list):
+            raise ValueError(f"candidates must be a list, got {type(candidates).__name__}")
+        validated_candidates = [_require_non_empty_string(candidate, field=f"candidates[{index}]") for index, candidate in enumerate(candidates)]
+        if policy is None:
+            return validated_candidates
+
+        return [candidate for candidate in validated_candidates if policy.is_allowed(candidate)]
