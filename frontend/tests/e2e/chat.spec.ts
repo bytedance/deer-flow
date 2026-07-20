@@ -2,6 +2,25 @@ import { expect, test } from "@playwright/test";
 
 import { handleRunStream, mockLangGraphAPI } from "./utils/mock-api";
 
+function textFromMessageContent(content: unknown) {
+  if (typeof content === "string") {
+    return content;
+  }
+  if (!Array.isArray(content)) {
+    return undefined;
+  }
+  return content
+    .map((block) =>
+      typeof block === "object" &&
+      block !== null &&
+      "text" in block &&
+      typeof block.text === "string"
+        ? block.text
+        : "",
+    )
+    .join("");
+}
+
 test.describe("Chat workspace", () => {
   test.beforeEach(async ({ page }) => {
     mockLangGraphAPI(page);
@@ -23,6 +42,204 @@ test.describe("Chat workspace", () => {
 
     await textarea.fill("Hello, DeerFlow!");
     await expect(textarea).toHaveValue("Hello, DeerFlow!");
+  });
+
+  test("restores a draft after reload and clears it after sending", async ({
+    page,
+  }) => {
+    await page.goto("/workspace/chats/new");
+
+    const textarea = page.getByPlaceholder(/how can i assist you/i);
+    await expect(textarea).toBeVisible({ timeout: 15_000 });
+    await textarea.fill("Keep this unfinished draft");
+
+    await page.reload();
+
+    const restoredTextarea = page.getByPlaceholder(/how can i assist you/i);
+    await expect(restoredTextarea).toHaveValue("Keep this unfinished draft");
+    await restoredTextarea.press("Enter");
+    await expect(page.getByText("Hello from DeerFlow!")).toBeVisible({
+      timeout: 10_000,
+    });
+
+    await page.reload();
+    await expect(page.getByPlaceholder(/how can i assist you/i)).toHaveValue(
+      "",
+    );
+  });
+
+  test("restores a repeated draft that matches the last sent prompt", async ({
+    page,
+  }) => {
+    await page.goto("/workspace/chats/new");
+
+    const textarea = page.getByPlaceholder(/how can i assist you/i);
+    await expect(textarea).toBeVisible({ timeout: 15_000 });
+    await textarea.fill("Repeat this request");
+    await textarea.press("Enter");
+    await expect(page.getByText("Hello from DeerFlow!")).toBeVisible({
+      timeout: 10_000,
+    });
+    await expect(textarea).toHaveValue("");
+
+    await textarea.fill("Repeat this request");
+    await expect
+      .poll(() =>
+        page.evaluate(() => Object.values(window.sessionStorage).join("\n")),
+      )
+      .toContain("Repeat this request");
+
+    await page.reload();
+    await expect(page.getByPlaceholder(/how can i assist you/i)).toHaveValue(
+      "Repeat this request",
+    );
+  });
+
+  test("restores a selected slash skill draft after reload", async ({
+    page,
+  }) => {
+    await page.goto("/workspace/chats/new");
+
+    const textarea = page.getByPlaceholder(/how can i assist you/i);
+    await expect(textarea).toBeVisible({ timeout: 15_000 });
+    await textarea.fill("/dat");
+    await textarea.press("Enter");
+
+    await expect(page.getByText("/data-analysis")).toBeVisible();
+    const skillInput = page.getByRole("textbox", {
+      name: /how can i assist you/i,
+    });
+    await skillInput.fill("Analyze the latest results");
+    await expect
+      .poll(() =>
+        page.evaluate(() => Object.values(window.sessionStorage).join("\n")),
+      )
+      .toContain("Analyze the latest results");
+
+    await page.reload();
+
+    await expect(page.getByText("/data-analysis")).toBeVisible();
+    await expect(
+      page.getByRole("textbox", {
+        name: /how can i assist you/i,
+      }),
+    ).toHaveText("Analyze the latest results");
+  });
+
+  test("continues without draft persistence when sessionStorage is blocked", async ({
+    page,
+  }) => {
+    let submittedText: string | undefined;
+    await page.addInitScript(() => {
+      const realSessionStorage = window.sessionStorage;
+      Reflect.set(window, "__blockComposerDraftStorage", false);
+      Object.defineProperty(window, "sessionStorage", {
+        configurable: true,
+        get() {
+          if (Reflect.get(window, "__blockComposerDraftStorage") === true) {
+            throw new DOMException("Blocked", "SecurityError");
+          }
+          return realSessionStorage;
+        },
+      });
+    });
+    await page.route("**/runs/stream", (route) => {
+      const body = route.request().postDataJSON() as {
+        input?: { messages?: Array<{ content?: unknown }> };
+      };
+      const content = body.input?.messages?.at(-1)?.content;
+      submittedText = textFromMessageContent(content);
+      return handleRunStream(route);
+    });
+
+    await page.goto("/workspace/chats/new");
+
+    const textarea = page.getByPlaceholder(/how can i assist you/i);
+    await expect(textarea).toBeVisible({ timeout: 15_000 });
+    await page.evaluate(() => {
+      Reflect.set(window, "__blockComposerDraftStorage", true);
+    });
+    await textarea.fill("Send while storage is blocked");
+    await textarea.press("Enter");
+
+    await expect
+      .poll(() => submittedText, { timeout: 10_000 })
+      .toBe("Send while storage is blocked");
+    await expect(page.getByText("Hello from DeerFlow!")).toBeVisible({
+      timeout: 10_000,
+    });
+  });
+
+  test("does not rewrite an accepted attachment draft from a stale debounce", async ({
+    page,
+  }) => {
+    let releaseUpload!: () => void;
+    const uploadHeld = new Promise<void>((resolve) => {
+      releaseUpload = resolve;
+    });
+    let submittedText: string | undefined;
+
+    await page.route("**/api/threads/*/uploads", async (route) => {
+      await uploadHeld;
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          success: true,
+          message: "Uploaded",
+          files: [
+            {
+              filename: "notes.txt",
+              size: 12,
+              path: "notes.txt",
+              virtual_path: "/mnt/user-data/uploads/notes.txt",
+              artifact_url: "/api/threads/test/uploads/notes.txt",
+              extension: ".txt",
+            },
+          ],
+        }),
+      });
+    });
+    await page.route("**/runs/stream", (route) => {
+      const body = route.request().postDataJSON() as {
+        input?: { messages?: Array<{ content?: unknown }> };
+      };
+      const content = body.input?.messages?.at(-1)?.content;
+      submittedText = textFromMessageContent(content);
+      return handleRunStream(route);
+    });
+
+    await page.goto("/workspace/chats/new");
+
+    const textarea = page.getByPlaceholder(/how can i assist you/i);
+    await expect(textarea).toBeVisible({ timeout: 15_000 });
+    await page.getByLabel("Upload files").setInputFiles({
+      name: "notes.txt",
+      mimeType: "text/plain",
+      buffer: Buffer.from("fake notes"),
+    });
+    await textarea.fill("Send this immediately");
+    await textarea.press("Enter");
+
+    await page.waitForTimeout(500);
+    expect(
+      await page.evaluate(() =>
+        Object.values(window.sessionStorage).join("\n"),
+      ),
+    ).not.toContain("Send this immediately");
+
+    releaseUpload();
+    await expect
+      .poll(() => submittedText, { timeout: 10_000 })
+      .toBe("Send this immediately");
+    await expect(page.getByText("Hello from DeerFlow!")).toBeVisible({
+      timeout: 10_000,
+    });
+
+    await page.reload();
+    await expect(page.getByPlaceholder(/how can i assist you/i)).toHaveValue(
+      "",
+    );
   });
 
   test("polishes draft input before sending", async ({ page }) => {
