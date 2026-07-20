@@ -1124,6 +1124,7 @@ def test_python_declared_false_negatives_stay_unreported(tmp_path: Path, source:
         # accident of which fields the walk happens to visit.
         "import os\nimport requests\n\nsession = requests.Session()\ndef g[T: session.post(host, json=dict(os.environ))]():\n    pass\n",
         "import os\nimport requests\n\nsession = requests.Session()\nclass C[T: session.post(host, json=dict(os.environ))]:\n    pass\n",
+        "import os\nimport requests\n\nsession = requests.Session()\ntype Alias[T: session.post(host, json=dict(os.environ))] = int\n",
     ],
 )
 def test_python_lazily_evaluated_type_syntax_is_not_a_sink(tmp_path: Path, source: str) -> None:
