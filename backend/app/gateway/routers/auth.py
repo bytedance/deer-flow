@@ -325,8 +325,12 @@ def _local_registration_enabled() -> bool:
 
     ``config.yaml`` is absent in bare-app contexts that never load it (tests build the
     gateway without one). Registration was unconditionally open before this gate existed,
-    so an unreadable config falls back to that same default rather than turning these two
-    endpoints into a hard dependency on the file.
+    so an absent config file falls back to that same default rather than turning these two
+    endpoints into a hard dependency on the file. Only ``FileNotFoundError`` is caught:
+    a malformed config must not silently re-open a closed deployment, so it propagates.
+
+    ``/register`` reads this fresh on every request (``get_app_config`` reloads on file
+    change); ``/setup-status`` may serve it up to 60s stale via its per-IP result cache.
     """
     from deerflow.config.app_config import get_app_config
 

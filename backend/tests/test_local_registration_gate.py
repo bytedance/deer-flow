@@ -130,7 +130,7 @@ def test_registration_defaults_to_allowed():
     assert AuthAppConfig().local.allow_registration is True
 
 
-def test_gate_falls_back_to_open_when_config_is_unreadable(monkeypatch):
+def test_gate_falls_back_to_open_when_config_is_absent(monkeypatch):
     """No config.yaml → the pre-gate default (open), not a 500.
 
     Bare-app contexts never load a config file. Before this gate, /register and
