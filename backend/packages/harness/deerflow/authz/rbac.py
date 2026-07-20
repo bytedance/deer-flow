@@ -66,6 +66,10 @@ class RbacAuthorizationProvider:
     to ``{allow: ..., deny: [...]}`` policies. All validation happens at
     construction; the request path is pure membership checks.
 
+    Policies are scoped by role, resource, and target. ``AuthzRequest.action``
+    is accepted for protocol compatibility but is not a rule dimension in this
+    built-in provider.
+
     Example config::
 
         roles:
@@ -79,7 +83,11 @@ class RbacAuthorizationProvider:
 
     name = "rbac"
 
-    def __init__(self, *, roles: dict[str, Any], **_kwargs: Any) -> None:
+    def __init__(self, *, roles: dict[str, Any] | object = _ABSENT, **kwargs: Any) -> None:
+        if kwargs:
+            raise ValueError(f"unknown provider config keys {sorted(kwargs, key=repr)}; supported: ['roles']")
+        if roles is _ABSENT:
+            raise ValueError("missing required provider config key 'roles'")
         if not isinstance(roles, dict):
             raise ValueError(f"roles must be a dict, got {type(roles).__name__}")
 

@@ -204,6 +204,14 @@ class TestSyncAsyncParity:
 class TestConstructionValidation:
     """Invalid config must fail at construction, not at request time."""
 
+    def test_unknown_provider_config_key_raises(self):
+        with pytest.raises(ValueError, match="unknown provider config keys.*bogus"):
+            RbacAuthorizationProvider(roles={"user": {}}, bogus=True)
+
+    def test_misspelled_roles_key_raises(self):
+        with pytest.raises(ValueError, match="unknown provider config keys.*rolez"):
+            RbacAuthorizationProvider(rolez={"user": {}})
+
     def test_non_dict_roles_raises(self):
         with pytest.raises(ValueError, match="roles must be a dict"):
             RbacAuthorizationProvider(roles=["not", "a", "dict"])

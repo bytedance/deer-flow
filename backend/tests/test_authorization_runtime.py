@@ -118,6 +118,18 @@ class TestProtocolConformance:
 class TestRbacErrorPropagation:
     """Factory must surface RBAC construction errors with class path and __cause__."""
 
+    def test_unknown_provider_config_key_surfaces_through_factory(self):
+        config = AuthorizationConfig(
+            enabled=True,
+            provider=AuthorizationProviderConfig(
+                use="deerflow.authz.rbac:RbacAuthorizationProvider",
+                config={"roles": {"user": {}}, "bogus": True},
+            ),
+        )
+        with pytest.raises(ValueError, match="RbacAuthorizationProvider.*bogus") as exc_info:
+            resolve_authorization_provider(config)
+        assert isinstance(exc_info.value.__cause__, ValueError)
+
     def test_invalid_rbac_config_surfaces_class_path(self):
         """RBAC construction failure (e.g. bad roles) must produce a ValueError
         containing the class path."""

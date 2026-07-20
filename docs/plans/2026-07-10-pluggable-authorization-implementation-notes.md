@@ -216,11 +216,18 @@ Phase 1 最低验证要求：
   时抛 `ValueError`。不缓存实例。不注入 `fail_closed` 或 `default_role`。
 - **决策：** 内置和自定义 provider 使用完全相同的 `resolve_variable` class-path
   解析路径，无特殊分支。
-- **证据：** 48 tests passed（37 RBAC + 11 factory）。
+- **证据：** 59 tests passed（44 RBAC + 15 factory，其中 5 条为 malformed-policy
+  回归测试）。
 - **兼容性：** 无运行时行为变化（`authorization.enabled: false`）。不修改
   `config.example.yaml`，不 bump `config_version`。
 - **延期：** Layer 1 工具过滤、Layer 2 自动接线、DeerFlowClient、RBAC 配置示例
   移至 Phase 1B。
+- **Phase 1B 注意：** 已知角色缺少某个 resource policy 时语义是“不受限”，不是
+  fail-closed。配置示例必须明确提醒，并枚举部署方希望限制的每种 resource。
+- **Phase 1B 注意：** 内置 RBAC 当前按 role + resource + target 决策，不区分
+  `AuthzRequest.action`；`policy_id` 也是稳定但粗粒度的
+  `rbac:allow` / `rbac:deny` / `rbac:unrestricted`。接入审计日志前应决定是否通过
+  更具体的 policy id 或 decision metadata 记录 role / resource / target。
 
 ### 新记录模板
 
