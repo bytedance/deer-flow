@@ -96,8 +96,19 @@ async def scan_skill_content(
     location: str = SKILL_MD_FILE,
     app_config: AppConfig | None = None,
     static_findings: list[dict[str, Any]] | None = None,
+    attach_tracing: bool = True,
 ) -> ScanResult:
-    """Screen skill content before it is written to disk."""
+    """Screen skill content before it is written to disk.
+
+    ``attach_tracing`` follows the tracing INVARIANT in
+    ``agents/lead_agent/agent.py``: in-graph callers must pass ``False`` because
+    the graph root already attached the callbacks, and attaching again at the
+    model emits duplicate spans *and* blocks the Langfuse handler's
+    ``propagate_attributes`` path. This function is dual-use, so the flag is the
+    caller's to set — the in-graph choke point is ``_scan_or_raise`` in
+    ``tools/skill_manage_tool.py``. Standalone callers (Gateway skill routes,
+    ``skills/installer.py``) have no root to inherit from and keep the default.
+    """
     rubric = (
         "You are a security reviewer for AI agent skills. "
         "Classify the content as allow, warn, or block. "
@@ -112,7 +123,8 @@ async def scan_skill_content(
     try:
         config = app_config or get_app_config()
         model_name = config.skill_evolution.moderation_model_name
-        model = create_chat_model(name=model_name, thinking_enabled=False, app_config=config) if model_name else create_chat_model(thinking_enabled=False, app_config=config)
+        model_kwargs = {"thinking_enabled": False, "app_config": config, "attach_tracing": attach_tracing}
+        model = create_chat_model(name=model_name, **model_kwargs) if model_name else create_chat_model(**model_kwargs)
         response = await model.ainvoke(
             [
                 {"role": "system", "content": rubric},
