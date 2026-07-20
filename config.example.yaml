@@ -15,7 +15,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 28
+config_version: 29
 
 # ============================================================================
 # Logging
@@ -2003,7 +2003,24 @@ authorization:
 #   2. Add Valid Redirect URI: http://localhost:8001/api/v1/auth/callback/keycloak
 #   3. Add Web Origin: http://localhost:8001 (or your frontend origin)
 
+# ============================================================================
+# Local (email/password) authentication
+# ============================================================================
+# Self-registration via POST /api/v1/auth/register is open by default: anyone
+# who can reach the Gateway may create a regular user account.
+#
+# The OIDC provisioning policy below (allowed_email_domains, require_verified_email,
+# auto_create_users) is enforced only in the SSO callback. It does NOT constrain local
+# registration, so on an SSO-provisioned deployment leaving this open lets a visitor
+# create an account outside that policy. Set allow_registration: false there.
+#
+# The first admin account is always created through /initialize regardless of this
+# setting, so turning it off cannot lock you out of a fresh install.
+
 # auth:
+#   local:
+#     allow_registration: false
+#
 #   oidc:
 #     enabled: true
 #     # Base URL of the frontend, used for redirects after SSO callback.
