@@ -18,8 +18,12 @@ from app.gateway.routers.models import ModelResponse, ModelsListResponse
 from app.gateway.routers.skills import SkillInstallResponse, SkillResponse, SkillsListResponse
 from app.gateway.routers.threads import ThreadGoalResponse
 from app.gateway.routers.uploads import UploadResponse
+from deerflow.agents.features import RuntimeFeatures
 from deerflow.client import DeerFlowClient
+from deerflow.config.app_config import AppConfig, get_app_config, peek_current_app_config
+from deerflow.config.model_config import ModelConfig
 from deerflow.config.paths import Paths
+from deerflow.config.sandbox_config import SandboxConfig
 from deerflow.skills.types import SkillCategory
 from deerflow.uploads.manager import PathTraversalError
 
@@ -78,10 +82,12 @@ class TestClientInit:
     def test_default_params(self, client):
         assert client._model_name is None
         assert client._thinking_enabled is True
+        assert client._features is None
         assert client._subagent_enabled is False
         assert client._plan_mode is False
         assert client._agent_name is None
         assert client._available_skills is None
+        assert client._extra_middlewares == []
         assert client._checkpointer is None
         assert client._agent is None
 
@@ -111,6 +117,54 @@ class TestClientInit:
         ):
             DeerFlowClient(config_path="/tmp/custom.yaml")
             mock_reload.assert_called_once_with("/tmp/custom.yaml")
+
+    def test_code_config_is_threaded_to_model_and_tool_factories(self):
+        file_config = AppConfig(
+            sandbox=SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider"),
+        )
+        code_model = {
+            "name": "code-model",
+            "display_name": "Code Model",
+            "description": "Configured from Python",
+            "use": "langchain_openai:ChatOpenAI",
+            "model": "code-model",
+        }
+
+        with patch("deerflow.client.get_app_config", return_value=file_config):
+            client = DeerFlowClient(config={"models": [code_model]}, model_name="code-model")
+
+        assert client._app_config.get_model_config("code-model") == ModelConfig.model_validate(code_model)
+
+        with (
+            patch("deerflow.client.create_chat_model") as mock_create_model,
+            patch("deerflow.client.create_agent", return_value=MagicMock()),
+            patch("deerflow.client.build_middlewares", return_value=[]),
+            patch("deerflow.client.apply_prompt_template", return_value="prompt"),
+            patch("deerflow.client.get_enabled_skills_for_config", return_value=[]),
+            patch("deerflow.tools.get_available_tools", return_value=[]) as mock_get_tools,
+            patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=None),
+        ):
+            client._ensure_agent(client._get_runnable_config("config-overlay"))
+
+        assert mock_create_model.call_args.kwargs["app_config"] is client._app_config
+        assert mock_get_tools.call_args.kwargs["app_config"] is client._app_config
+
+    def test_code_config_is_scoped_during_runtime_iteration_without_leaking(self):
+        file_config = AppConfig(
+            sandbox=SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider"),
+        )
+        with patch("deerflow.client.get_app_config", return_value=file_config):
+            client = DeerFlowClient(config={"title": {"enabled": False}})
+
+        seen_configs = []
+
+        def runtime_iterator():
+            seen_configs.append(get_app_config())
+            yield "event"
+
+        assert list(client._iterate_with_app_config(runtime_iterator())) == ["event"]
+        assert seen_configs == [client._app_config]
+        assert peek_current_app_config() is None
 
     def test_checkpointer_stored(self, mock_app_config):
         cp = MagicMock()
@@ -965,6 +1019,46 @@ class TestEnsureAgent:
         assert mock_apply_prompt.call_args.kwargs.get("agent_name") == "custom-agent"
         assert mock_apply_prompt.call_args.kwargs.get("available_skills") == {"test_skill"}
 
+    def test_passes_runtime_features_to_middleware_builder(self, client):
+        mock_agent = MagicMock()
+        features = RuntimeFeatures(token_usage=True)
+        client._features = features
+        config = client._get_runnable_config("t1")
+
+        with (
+            patch("deerflow.client.create_chat_model"),
+            patch("deerflow.client.create_agent", return_value=mock_agent),
+            patch("deerflow.client.build_middlewares", return_value=[]) as mock_build_middlewares,
+            patch("deerflow.client.apply_prompt_template", return_value="prompt"),
+            patch("deerflow.client.get_enabled_skills_for_config", return_value=[]),
+            patch.object(client, "_get_tools", return_value=[]),
+            patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=None),
+        ):
+            client._ensure_agent(config)
+
+        assert client._agent is mock_agent
+        assert mock_build_middlewares.call_args.kwargs["runtime_features"] is features
+
+    def test_passes_extra_middlewares_separately_from_legacy_middlewares(self, client):
+        legacy = MagicMock(name="legacy")
+        positioned = MagicMock(name="positioned")
+        client._middlewares = [legacy]
+        client._extra_middlewares = [positioned]
+
+        with (
+            patch("deerflow.client.create_chat_model"),
+            patch("deerflow.client.create_agent", return_value=MagicMock()),
+            patch("deerflow.client.build_middlewares", return_value=[]) as mock_build_middlewares,
+            patch("deerflow.client.apply_prompt_template", return_value="prompt"),
+            patch("deerflow.client.get_enabled_skills_for_config", return_value=[]),
+            patch.object(client, "_get_tools", return_value=[]),
+            patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=None),
+        ):
+            client._ensure_agent(client._get_runnable_config("t1"))
+
+        assert mock_build_middlewares.call_args.kwargs["custom_middlewares"] == [legacy]
+        assert mock_build_middlewares.call_args.kwargs["extra_middlewares"] == [positioned]
+
     def test_uses_default_checkpointer_when_available(self, client):
         mock_agent = MagicMock()
         mock_checkpointer = MagicMock()
@@ -1033,7 +1127,7 @@ class TestEnsureAgent:
         """_ensure_agent does not recreate if config key unchanged."""
         mock_agent = MagicMock()
         client._agent = mock_agent
-        client._agent_config_key = (None, True, False, False, None, None, None, None)
+        client._agent_config_key = (None, True, False, False, None, None, None, None, None)
 
         config = client._get_runnable_config("t1")
         client._ensure_agent(config)

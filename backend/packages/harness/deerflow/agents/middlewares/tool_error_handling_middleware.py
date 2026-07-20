@@ -29,6 +29,7 @@ from deerflow.subagents.status_contract import (
 )
 
 if TYPE_CHECKING:
+    from deerflow.config.guardrails_config import GuardrailsConfig
     from deerflow.tools.builtins.tool_search import DeferredToolSetup
 
 logger = logging.getLogger(__name__)
@@ -36,6 +37,32 @@ logger = logging.getLogger(__name__)
 _MISSING_TOOL_CALL_ID = "missing_tool_call_id"
 _TASK_TOOL_NAME = "task"
 _RECOVERY_HINT = "Continue with available context, or choose an alternative tool."
+
+
+def create_guardrail_middleware_from_config(guardrails_config: "GuardrailsConfig") -> AgentMiddleware | None:
+    """Create GuardrailMiddleware from config, or ``None`` when disabled."""
+    if not guardrails_config.enabled or not guardrails_config.provider:
+        return None
+
+    import inspect
+
+    from deerflow.guardrails.middleware import GuardrailMiddleware
+    from deerflow.reflection import resolve_variable
+
+    provider_cls = resolve_variable(guardrails_config.provider.use)
+    provider_kwargs = dict(guardrails_config.provider.config) if guardrails_config.provider.config else {}
+    # Pass framework hint if the provider accepts it (e.g. for config discovery).
+    # Built-in providers like AllowlistProvider don't need it, so only inject
+    # when the constructor accepts 'framework' or '**kwargs'.
+    if "framework" not in provider_kwargs:
+        try:
+            sig = inspect.signature(provider_cls.__init__)
+            if "framework" in sig.parameters or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
+                provider_kwargs["framework"] = "deerflow"
+        except (ValueError, TypeError):
+            pass
+    provider = provider_cls(**provider_kwargs)
+    return GuardrailMiddleware(provider, fail_closed=guardrails_config.fail_closed, passport=guardrails_config.passport)
 
 
 def _stamp_task_exception_status(message: ToolMessage, *, tool_name: str, error: str) -> ToolMessage:
@@ -200,27 +227,9 @@ def _build_runtime_middlewares(
     tail.append(LLMErrorHandlingMiddleware(app_config=app_config))
 
     # Guardrail middleware (if configured)
-    guardrails_config = app_config.guardrails
-    if guardrails_config.enabled and guardrails_config.provider:
-        import inspect
-
-        from deerflow.guardrails.middleware import GuardrailMiddleware
-        from deerflow.reflection import resolve_variable
-
-        provider_cls = resolve_variable(guardrails_config.provider.use)
-        provider_kwargs = dict(guardrails_config.provider.config) if guardrails_config.provider.config else {}
-        # Pass framework hint if the provider accepts it (e.g. for config discovery).
-        # Built-in providers like AllowlistProvider don't need it, so only inject
-        # when the constructor accepts 'framework' or '**kwargs'.
-        if "framework" not in provider_kwargs:
-            try:
-                sig = inspect.signature(provider_cls.__init__)
-                if "framework" in sig.parameters or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
-                    provider_kwargs["framework"] = "deerflow"
-            except (ValueError, TypeError):
-                pass
-        provider = provider_cls(**provider_kwargs)
-        tail.append(GuardrailMiddleware(provider, fail_closed=guardrails_config.fail_closed, passport=guardrails_config.passport))
+    guardrail_middleware = create_guardrail_middleware_from_config(app_config.guardrails)
+    if guardrail_middleware is not None:
+        tail.append(guardrail_middleware)
 
     from deerflow.agents.middlewares.sandbox_audit_middleware import SandboxAuditMiddleware
 

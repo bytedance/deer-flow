@@ -21,7 +21,7 @@ from langchain.agents.middleware import AgentMiddleware
 from deerflow.agents.features import RuntimeFeatures
 from deerflow.agents.middlewares.clarification_middleware import ClarificationMiddleware
 from deerflow.agents.middlewares.dangling_tool_call_middleware import DanglingToolCallMiddleware
-from deerflow.agents.middlewares.tool_error_handling_middleware import ToolErrorHandlingMiddleware
+from deerflow.agents.middlewares.tool_error_handling_middleware import ToolErrorHandlingMiddleware, create_guardrail_middleware_from_config
 from deerflow.agents.thread_state import ThreadState
 from deerflow.tools.builtins import ask_clarification_tool
 
@@ -32,6 +32,7 @@ if TYPE_CHECKING:
     from langgraph.graph.state import CompiledStateGraph
 
     from deerflow.config.memory_config import MemoryConfig
+    from deerflow.tools.builtins.tool_search import DeferredToolSetup
 
 logger = logging.getLogger(__name__)
 
@@ -71,13 +72,13 @@ def create_deerflow_agent(
     plan_mode: bool = False,
     state_schema: type | None = None,
     checkpointer: BaseCheckpointSaver | None = None,
-    name: str = "default",
+    name: str | None = None,
 ) -> CompiledStateGraph:
     """Create a DeerFlow agent from plain Python arguments.
 
-    The factory assembly itself reads no config files.  Some injected runtime
-    components (e.g. ``task_tool``) may still depend on global config at
-    invocation time — see Phase 2 roadmap for full config-free runtime.
+    The factory accepts fully constructed models and tools. Config-backed
+    defaults such as ``guardrail=True`` resolve their corresponding DeerFlow
+    config section when they are requested.
 
     Parameters
     ----------
@@ -102,7 +103,8 @@ def create_deerflow_agent(
     checkpointer:
         Optional persistence backend.
     name:
-        Agent name (passed to middleware that cares, e.g. ``MemoryMiddleware``).
+        Optional graph/agent name. ``None`` preserves LangChain's unnamed-agent
+        behavior; middleware that needs a storage name uses ``"default"``.
 
     Raises
     ------
@@ -125,11 +127,17 @@ def create_deerflow_agent(
         effective_middleware = list(middleware)
     else:
         feat = features or RuntimeFeatures()
+        deferred_setup: DeferredToolSetup | None = None
+        if feat.deferred_tool_filter is True:
+            from deerflow.tools.builtins.tool_search import assemble_deferred_tools
+
+            effective_tools, deferred_setup = assemble_deferred_tools(effective_tools, enabled=True)
         effective_middleware, extra_tools = _assemble_from_features(
             feat,
-            name=name,
+            name=name or "default",
             plan_mode=plan_mode,
             extra_middleware=extra_middleware or [],
+            deferred_setup=deferred_setup,
         )
         # Deduplicate by tool name — user-provided tools take priority.
         existing_names = {t.name for t in effective_tools}
@@ -160,10 +168,11 @@ def _assemble_from_features(
     name: str = "default",
     plan_mode: bool = False,
     extra_middleware: list[AgentMiddleware] | None = None,
+    deferred_setup: DeferredToolSetup | None = None,
 ) -> tuple[list[AgentMiddleware], list[BaseTool]]:
     """Build an ordered middleware chain + extra tools from *feat*.
 
-    Middleware order matches ``make_lead_agent`` (14 middlewares):
+    Middleware order follows the matching ``make_lead_agent`` components:
 
       0-2. Sandbox infrastructure (ThreadData → Uploads → Sandbox)
       3.   DanglingToolCallMiddleware (always)
@@ -171,12 +180,15 @@ def _assemble_from_features(
       5.   ToolErrorHandlingMiddleware (always)
       6.   SummarizationMiddleware (summarization feature)
       7.   TodoMiddleware (plan_mode parameter)
-      8.   TitleMiddleware (auto_title feature)
-      9.   MemoryMiddleware (memory feature)
-      10.  ViewImageMiddleware (vision feature)
-      11.  SubagentLimitMiddleware (subagent feature)
-      12.  LoopDetectionMiddleware (loop_detection feature)
-      13.  ClarificationMiddleware (always last)
+      8.   TokenUsageMiddleware (token_usage feature)
+      9.   TitleMiddleware (auto_title feature)
+      10.  MemoryMiddleware (memory feature)
+      11.  ViewImageMiddleware (vision feature)
+      12.  SubagentLimitMiddleware (subagent feature)
+      13.  DeferredToolFilterMiddleware (deferred_tool_filter feature)
+      14.  LoopDetectionMiddleware (loop_detection feature)
+      15.  TokenBudgetMiddleware (token_budget feature)
+      16.  ClarificationMiddleware (always last)
 
     Two-phase ordering:
       1. Built-in chain — fixed sequential append.
@@ -185,7 +197,7 @@ def _assemble_from_features(
     Each feature value is handled as:
       - ``False``: skip
       - ``True``: create the built-in default middleware (not available for
-        ``summarization`` and ``guardrail`` — these require a custom instance)
+        ``summarization`` — this requires a custom instance)
       - ``AgentMiddleware`` instance: use directly (custom replacement)
     """
     chain: list[AgentMiddleware] = []
@@ -212,7 +224,12 @@ def _assemble_from_features(
         if isinstance(feat.guardrail, AgentMiddleware):
             chain.append(feat.guardrail)
         else:
-            raise ValueError("guardrail=True requires a custom AgentMiddleware instance (no built-in GuardrailMiddleware yet)")
+            from deerflow.config.guardrails_config import get_guardrails_config
+
+            guardrail_middleware = create_guardrail_middleware_from_config(get_guardrails_config())
+            if guardrail_middleware is None:
+                raise ValueError("guardrail=True requires guardrails.enabled and guardrails.provider to be configured")
+            chain.append(guardrail_middleware)
 
     # --- [5] ToolErrorHandling (always) ---
     chain.append(ToolErrorHandlingMiddleware())
@@ -230,7 +247,16 @@ def _assemble_from_features(
 
         chain.append(TodoMiddleware(system_prompt=_TODO_SYSTEM_PROMPT, tool_description=_TODO_TOOL_DESCRIPTION))
 
-    # --- [8] Auto Title ---
+    # --- [8] TokenUsage ---
+    if feat.token_usage is not False:
+        if isinstance(feat.token_usage, AgentMiddleware):
+            chain.append(feat.token_usage)
+        else:
+            from deerflow.agents.middlewares.token_usage_middleware import TokenUsageMiddleware
+
+            chain.append(TokenUsageMiddleware())
+
+    # --- [9] Auto Title ---
     if feat.auto_title is not False:
         if isinstance(feat.auto_title, AgentMiddleware):
             chain.append(feat.auto_title)
@@ -239,7 +265,7 @@ def _assemble_from_features(
 
             chain.append(TitleMiddleware())
 
-    # --- [9] Memory ---
+    # --- [10] Memory ---
     if feat.memory is not False:
         if isinstance(feat.memory, AgentMiddleware):
             chain.append(feat.memory)
@@ -266,7 +292,7 @@ def _assemble_from_features(
 
                 chain.append(MemoryMiddleware(agent_name=name, memory_config=memory_cfg))
 
-    # --- [10] Vision ---
+    # --- [11] Vision ---
     if feat.vision is not False:
         if isinstance(feat.vision, AgentMiddleware):
             chain.append(feat.vision)
@@ -280,7 +306,7 @@ def _assemble_from_features(
 
             extra_tools.append(view_image_tool)
 
-    # --- [11] Subagent ---
+    # --- [12] Subagent ---
     if feat.subagent is not False:
         if isinstance(feat.subagent, AgentMiddleware):
             chain.append(feat.subagent)
@@ -292,7 +318,16 @@ def _assemble_from_features(
 
         extra_tools.append(task_tool)
 
-    # --- [12] LoopDetection ---
+    # --- [13] DeferredToolFilter ---
+    if feat.deferred_tool_filter is not False:
+        if isinstance(feat.deferred_tool_filter, AgentMiddleware):
+            chain.append(feat.deferred_tool_filter)
+        elif deferred_setup is not None and deferred_setup.deferred_names:
+            from deerflow.agents.middlewares.deferred_tool_filter_middleware import DeferredToolFilterMiddleware
+
+            chain.append(DeferredToolFilterMiddleware(deferred_setup.deferred_names, deferred_setup.catalog_hash))
+
+    # --- [14] LoopDetection ---
     if feat.loop_detection is not False:
         if isinstance(feat.loop_detection, AgentMiddleware):
             chain.append(feat.loop_detection)
@@ -302,7 +337,7 @@ def _assemble_from_features(
 
             chain.append(LoopDetectionMiddleware.from_config(LoopDetectionConfig()))
 
-    # --- [13] TokenBudget ---
+    # --- [15] TokenBudget ---
     if feat.token_budget is not False:
         if isinstance(feat.token_budget, AgentMiddleware):
             chain.append(feat.token_budget)
@@ -312,13 +347,13 @@ def _assemble_from_features(
 
             chain.append(TokenBudgetMiddleware.from_config(TokenBudgetConfig()))
 
-    # --- [14] Clarification (always last among built-ins) ---
+    # --- [16] Clarification (always last among built-ins) ---
     chain.append(ClarificationMiddleware())
     extra_tools.append(ask_clarification_tool)
 
     # --- Insert extra_middleware via @Next/@Prev ---
     if extra_middleware:
-        _insert_extra(chain, extra_middleware)
+        insert_extra_middlewares(chain, extra_middleware)
         # Invariant: ClarificationMiddleware must always be last.
         # @Next(ClarificationMiddleware) could push it off the tail.
         clar_idx = next(i for i, m in enumerate(chain) if isinstance(m, ClarificationMiddleware))
@@ -333,7 +368,7 @@ def _assemble_from_features(
 # ---------------------------------------------------------------------------
 
 
-def _insert_extra(chain: list[AgentMiddleware], extras: list[AgentMiddleware]) -> None:
+def insert_extra_middlewares(chain: list[AgentMiddleware], extras: list[AgentMiddleware]) -> None:
     """Insert extra middlewares into *chain* using ``@Next``/``@Prev`` anchors.
 
     Algorithm:

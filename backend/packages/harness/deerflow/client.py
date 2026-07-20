@@ -29,17 +29,26 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
-from langchain.agents import create_agent
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 
+from deerflow.agents.factory import create_deerflow_agent as create_agent
+from deerflow.agents.features import RuntimeFeatures
 from deerflow.agents.lead_agent.agent import build_middlewares
 from deerflow.agents.lead_agent.prompt import apply_prompt_template, get_enabled_skills_for_config
 from deerflow.agents.thread_state import ThreadState
 from deerflow.config.agents_config import AGENT_NAME_PATTERN
-from deerflow.config.app_config import get_app_config, is_trace_correlation_enabled, reload_app_config
+from deerflow.config.app_config import (
+    AppConfig,
+    get_app_config,
+    is_trace_correlation_enabled,
+    pop_current_app_config,
+    push_current_app_config,
+    reload_app_config,
+)
 from deerflow.config.extensions_config import ExtensionsConfig, SkillStateConfig, get_extensions_config, reload_extensions_config
+from deerflow.config.merge import deep_merge
 from deerflow.config.paths import get_paths
 from deerflow.models import create_chat_model
 from deerflow.runtime.goal import DEFAULT_MAX_GOAL_CONTINUATIONS, build_goal_state, goal_thread_lock, read_thread_goal, write_thread_goal
@@ -143,6 +152,9 @@ class DeerFlowClient:
         agent_name: str | None = None,
         available_skills: set[str] | None = None,
         middlewares: Sequence[AgentMiddleware] | None = None,
+        config: dict[str, Any] | None = None,
+        features: RuntimeFeatures | None = None,
+        extra_middleware: Sequence[AgentMiddleware] | None = None,
         environment: str | None = None,
     ):
         """Initialize the client.
@@ -161,6 +173,11 @@ class DeerFlowClient:
             agent_name: Name of the agent to use.
             available_skills: Optional set of skill names to make available. If None (default), all scanned skills are available.
             middlewares: Optional list of custom middlewares to inject into the agent.
+            config: Optional configuration overlay. Nested mapping values merge
+                with ``config.yaml``; scalar and list values replace file values.
+            features: Optional declarative runtime middleware replacements.
+            extra_middleware: Additional middlewares to inject alongside the
+                legacy ``middlewares`` parameter.
             environment: Deployment environment label that ends up in
                 ``langfuse_tags`` (e.g. ``"production"`` / ``"staging"``).
                 When ``None`` the worker/client falls back to the
@@ -170,7 +187,15 @@ class DeerFlowClient:
         """
         if config_path is not None:
             reload_app_config(config_path)
-        self._app_config = get_app_config()
+        file_app_config = get_app_config()
+        if config is not None:
+            if not isinstance(config, dict):
+                raise TypeError("config must be a dictionary when provided")
+            if not isinstance(file_app_config, AppConfig):
+                raise TypeError("config overlays require an AppConfig instance")
+            self._app_config = AppConfig.model_validate(deep_merge(file_app_config.model_dump(), config))
+        else:
+            self._app_config = file_app_config
 
         if agent_name is not None and not AGENT_NAME_PATTERN.match(agent_name):
             raise ValueError(f"Invalid agent name '{agent_name}'. Must match pattern: {AGENT_NAME_PATTERN.pattern}")
@@ -182,7 +207,9 @@ class DeerFlowClient:
         self._plan_mode = plan_mode
         self._agent_name = agent_name
         self._available_skills = set(available_skills) if available_skills is not None else None
-        self._middlewares = list(middlewares) if middlewares else []
+        self._middlewares = list(middlewares or [])
+        self._extra_middlewares = list(extra_middleware or [])
+        self._features = features
         self._environment = environment
 
         # Lazy agent — created on first call, recreated when config changes.
@@ -236,6 +263,14 @@ class DeerFlowClient:
         )
 
     def _ensure_agent(self, config: RunnableConfig):
+        """Create the agent under this client's runtime-scoped AppConfig."""
+        push_current_app_config(self._app_config)
+        try:
+            return self._ensure_agent_scoped(config)
+        finally:
+            pop_current_app_config()
+
+    def _ensure_agent_scoped(self, config: RunnableConfig):
         """Create (or recreate) the agent when config-dependent params change."""
         cfg = config.get("configurable", {})
         key = (
@@ -247,6 +282,7 @@ class DeerFlowClient:
             cfg.get("max_total_subagents"),
             self._agent_name,
             frozenset(self._available_skills) if self._available_skills is not None else None,
+            id(self._features) if self._features is not None else None,
         )
 
         if self._agent is not None and self._agent_config_key == key:
@@ -258,7 +294,11 @@ class DeerFlowClient:
         max_concurrent_subagents = cfg.get("max_concurrent_subagents", 3)
         max_total_subagents = cfg.get("max_total_subagents", self._app_config.subagents.max_total_per_run)
 
-        tools = self._get_tools(model_name=model_name, subagent_enabled=subagent_enabled)
+        tools = self._get_tools(
+            model_name=model_name,
+            subagent_enabled=subagent_enabled,
+            app_config=self._app_config,
+        )
         final_tools, deferred_setup = assemble_deferred_tools(tools, enabled=self._app_config.tool_search.enabled)
         mcp_routing_middleware = build_mcp_routing_middleware(
             final_tools,
@@ -284,7 +324,12 @@ class DeerFlowClient:
             # callbacks at the graph invocation root so a single embedded run
             # produces one trace with correct session_id / user_id propagation.
             # Attaching them again on the model would emit duplicate spans.
-            "model": create_chat_model(name=model_name, thinking_enabled=thinking_enabled, attach_tracing=False),
+            "model": create_chat_model(
+                name=model_name,
+                thinking_enabled=thinking_enabled,
+                app_config=self._app_config,
+                attach_tracing=False,
+            ),
             "tools": final_tools,
             "middleware": build_middlewares(
                 config,
@@ -292,10 +337,12 @@ class DeerFlowClient:
                 agent_name=self._agent_name,
                 available_skills=self._available_skills,
                 custom_middlewares=self._middlewares,
+                extra_middlewares=self._extra_middlewares,
                 app_config=self._app_config,
                 deferred_setup=deferred_setup,
                 mcp_routing_middleware=mcp_routing_middleware,
                 user_id=get_effective_user_id(),
+                runtime_features=self._features,
             ),
             "system_prompt": apply_prompt_template(
                 subagent_enabled=subagent_enabled,
@@ -319,16 +366,43 @@ class DeerFlowClient:
         if checkpointer is not None:
             kwargs["checkpointer"] = checkpointer
 
-        self._agent = create_agent(**kwargs)
+        self._agent = create_agent(middleware=kwargs.pop("middleware"), **kwargs)
         self._agent_config_key = key
         logger.info("Agent created: agent_name=%s, model=%s, thinking=%s", self._agent_name, model_name, thinking_enabled)
 
     @staticmethod
-    def _get_tools(*, model_name: str | None, subagent_enabled: bool):
+    def _get_tools(
+        *,
+        model_name: str | None,
+        subagent_enabled: bool,
+        app_config: AppConfig,
+    ):
         """Lazy import to avoid circular dependency at module level."""
         from deerflow.tools import get_available_tools
 
-        return get_available_tools(model_name=model_name, subagent_enabled=subagent_enabled)
+        return get_available_tools(
+            model_name=model_name,
+            subagent_enabled=subagent_enabled,
+            app_config=app_config,
+        )
+
+    def _iterate_with_app_config(self, iterator):
+        """Advance a runtime iterator with this client's config ContextVar bound."""
+        try:
+            while True:
+                push_current_app_config(self._app_config)
+                try:
+                    try:
+                        item = next(iterator)
+                    except StopIteration:
+                        return
+                finally:
+                    pop_current_app_config()
+                yield item
+        finally:
+            close = getattr(iterator, "close", None)
+            if close is not None:
+                close()
 
     @staticmethod
     def _serialize_tool_calls(tool_calls) -> list[dict]:
@@ -822,12 +896,13 @@ class DeerFlowClient:
             sent.update(delta)
             return delta
 
-        for item in self._agent.stream(
+        agent_stream = self._agent.stream(
             state,
             config=config,
             context=context,
             stream_mode=["values", "messages", "custom"],
-        ):
+        )
+        for item in self._iterate_with_app_config(agent_stream):
             if isinstance(item, tuple) and len(item) == 2:
                 mode, chunk = item
                 mode = str(mode)
