@@ -210,13 +210,15 @@ Phase 1 最低验证要求：
 - **决策：** 未知角色和缺失角色抛 `ValueError`（不返回 allow），由执行层
   根据 `fail_closed` 决定。
 - **决策：** 资源名使用显式映射（`tool → tools`，`model → models` 等），
-  不通过加 `s` 猜测。未知 resource 使用原名查找；未配置时视为"不受限"。
+  不通过加 `s` 猜测。配置中的保留请求别名（如 `tool`）在构造期拒绝，并提示使用
+  对应配置键（如 `tools`），防止策略被存储在永远无法命中的键下。未知 resource
+  使用原名查找；未配置时视为"不受限"。
 - **决策：** `resolve_authorization_provider()` 是唯一 provider 解析入口。
   disabled 时返回 `None`（不 import provider 模块）；enabled 但缺少 provider
   时抛 `ValueError`。不缓存实例。不注入 `fail_closed` 或 `default_role`。
 - **决策：** 内置和自定义 provider 使用完全相同的 `resolve_variable` class-path
   解析路径，无特殊分支。
-- **证据：** 59 tests passed（44 RBAC + 15 factory，其中 5 条为 malformed-policy
+- **证据：** 66 tests passed（51 RBAC + 15 factory，其中 5 条为 malformed-policy
   回归测试）。
 - **兼容性：** 无运行时行为变化（`authorization.enabled: false`）。不修改
   `config.example.yaml`，不 bump `config_version`。

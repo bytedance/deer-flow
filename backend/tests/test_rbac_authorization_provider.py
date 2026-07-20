@@ -95,6 +95,35 @@ class TestDenySemantics:
 class TestResourceMapping:
     """tool → tools, model → models, etc."""
 
+    @pytest.mark.parametrize(
+        ("request_alias", "config_key"),
+        [
+            ("tool", "tools"),
+            ("model", "models"),
+            ("skill", "skills"),
+            ("mcp_server", "mcp_servers"),
+            ("route", "routes"),
+        ],
+    )
+    def test_reserved_request_alias_is_rejected(self, request_alias, config_key):
+        with pytest.raises(ValueError, match=rf"resource key '{request_alias}'.*use '{config_key}'"):
+            _provider({"user": {request_alias: {"allow": []}}})
+
+    def test_alias_is_rejected_when_mapped_key_is_also_configured(self):
+        with pytest.raises(ValueError, match=r"resource key 'tool'.*use 'tools'"):
+            _provider(
+                {
+                    "user": {
+                        "tools": {"allow": "*"},
+                        "tool": {"allow": []},
+                    }
+                }
+            )
+
+    def test_same_name_mapping_is_valid(self):
+        p = _provider({"user": {"sandbox": {"allow": []}}})
+        assert p.authorize(_make_request(resource="sandbox", target="default")).allow is False
+
     def test_tool_maps_to_tools(self):
         p = _provider({"user": {"tools": {"allow": ["web_search"]}}})
         assert p.authorize(_make_request(resource="tool", target="web_search")).allow is True

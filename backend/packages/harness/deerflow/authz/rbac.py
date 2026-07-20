@@ -104,6 +104,9 @@ class RbacAuthorizationProvider:
             for resource_key, resource_policy in role_config.items():
                 if not isinstance(resource_key, str) or not resource_key:
                     raise ValueError(f"role '{role_name}' has invalid resource key {resource_key!r}")
+                mapped_resource_key = _RESOURCE_POLICY_KEYS.get(resource_key)
+                if mapped_resource_key is not None and mapped_resource_key != resource_key:
+                    raise ValueError(f"role '{role_name}' resource key '{resource_key}' is a reserved request alias; use '{mapped_resource_key}' in RBAC config")
                 if not isinstance(resource_policy, dict):
                     raise ValueError(f"role '{role_name}' resource '{resource_key}' must be a dict, got {type(resource_policy).__name__}")
 
