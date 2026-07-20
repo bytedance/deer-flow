@@ -16,15 +16,12 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { useAgentsApiEnabled } from "@/core/agents";
-import { useConnectorProviders } from "@/core/connector/hooks";
 import { useI18n } from "@/core/i18n/hooks";
 
 export function WorkspaceNavChatList() {
   const { t } = useI18n();
   const pathname = usePathname();
   const { enabled: agentsEnabled } = useAgentsApiEnabled();
-  const { providers } = useConnectorProviders();
-  const hasConnectors = providers.length > 0;
   return (
     <SidebarGroup className="pt-1">
       <SidebarMenu>
@@ -92,22 +89,20 @@ export function WorkspaceNavChatList() {
             </Link>
           </SidebarMenuButton>
         </SidebarMenuItem>
-        {hasConnectors && (
-          <SidebarMenuItem>
-            <SidebarMenuButton
-              isActive={pathname.startsWith("/workspace/connector")}
-              asChild
+        <SidebarMenuItem>
+          <SidebarMenuButton
+            isActive={pathname.startsWith("/workspace/connector")}
+            asChild
+          >
+            <Link
+              className="text-muted-foreground group-hover/menu-item:text-sidebar-accent-foreground group-active/menu-item:text-sidebar-accent-foreground"
+              href="/workspace/connector"
             >
-              <Link
-                className="text-muted-foreground group-hover/menu-item:text-sidebar-accent-foreground group-active/menu-item:text-sidebar-accent-foreground"
-                href="/workspace/connector"
-              >
-                <PlugIcon />
-                <span>{t.sidebar.connectedApps}</span>
-              </Link>
-            </SidebarMenuButton>
-          </SidebarMenuItem>
-        )}
+              <PlugIcon />
+              <span>{t.sidebar.connectedApps}</span>
+            </Link>
+          </SidebarMenuButton>
+        </SidebarMenuItem>
       </SidebarMenu>
     </SidebarGroup>
   );
