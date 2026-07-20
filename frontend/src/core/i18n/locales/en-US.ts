@@ -272,7 +272,8 @@ export const enUS: Translations = {
     connect: "Connect",
     disconnect: "Disconnect",
     noResults: "No providers match your search.",
-    noProvidersAvailable: "No apps available right now. Please try again later.",
+    noProvidersAvailable:
+      "No apps available right now. Please try again later.",
     apiKeyDialogTitle: (name: string) => `Connect ${name}`,
     apiKeyDialogDescription: (service: string) =>
       `Paste your API key for ${service}. It will be stored securely.`,
@@ -280,7 +281,8 @@ export const enUS: Translations = {
     cancel: "Cancel",
     loading: "Loading providers…",
     errorTitle: "Cannot load connectors",
-    errorDescription: "The service is temporarily unavailable. Please try again later.",
+    errorDescription:
+      "The service is temporarily unavailable. Please try again later.",
     errorAction: "Open Console",
     oauthToast:
       "Complete authorization in the opened window, then refresh this page.",

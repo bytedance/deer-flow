@@ -247,8 +247,7 @@ export const zhCN: Translations = {
     title: "连接器",
     subtitleConnected: (count: number) =>
       `已连接 ${count} 个应用 — 你的智能体可以直接使用它们。`,
-    subtitleEmpty:
-      "连接你的第三方应用，让 AI 智能体可以操作它们。",
+    subtitleEmpty: "连接你的第三方应用，让 AI 智能体可以操作它们。",
     consoleAction: "控制台",
     searchPlaceholder: "按名称、分类或服务搜索…",
     statusAll: "全部",
