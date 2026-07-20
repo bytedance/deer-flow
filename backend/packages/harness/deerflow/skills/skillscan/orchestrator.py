@@ -379,7 +379,7 @@ def _scan_python(rel_path: str, text: str) -> list[SecurityFinding]:
         call_name = _python_call_name(node, aliases)
         if call_name in {"eval", "exec"} or (call_name == "compile" and _compile_mode_is_exec(node)):
             findings.append(_finding_for_node("python-dynamic-exec", rel_path, node, call_name))
-        elif call_name in {"os.system", "os.popen"} or (call_name.startswith("subprocess.") and _call_has_shell_true(node)):
+        elif call_name in {"os.system", "os.popen"} or (call_name.startswith("subprocess.") and _call_shell_may_be_true(node)):
             findings.append(_finding_for_node("python-shell-exec", rel_path, node, call_name))
         elif call_name.startswith("subprocess."):
             findings.append(_finding_for_node("python-subprocess", rel_path, node, call_name))
@@ -691,8 +691,27 @@ def _compile_mode_is_exec(node: ast.Call) -> bool:
     return any(keyword.arg == "mode" and isinstance(keyword.value, ast.Constant) and keyword.value.value == "exec" for keyword in node.keywords)
 
 
-def _call_has_shell_true(node: ast.Call) -> bool:
-    return any(keyword.arg == "shell" and isinstance(keyword.value, ast.Constant) and keyword.value.value is True for keyword in node.keywords)
+def _call_shell_may_be_true(node: ast.Call) -> bool:
+    # Fail closed on ambiguity: a ``shell=`` keyword is only safe when it is a
+    # literal, statically-provable ``False``. Any other value under that keyword,
+    # the literal ``True``, any other literal, or a non-literal expression such as
+    # a variable or a function call (``shell=shell_flag``, ``shell=bool(1)``),
+    # cannot be proven safe by static analysis, so it is treated the same as an
+    # explicit ``shell=True`` rather than silently falling through to the
+    # non-blocking ``python-subprocess`` classification.
+    for keyword in node.keywords:
+        if keyword.arg is None:
+            # ``**mapping`` / ``**kwargs`` unpacking: represented in the AST as a
+            # keyword with ``arg is None``. The mapping's contents (and whether it
+            # even carries a ``shell`` key) are not knowable by static analysis, so
+            # this fails closed the same as a variable/expression shell= value.
+            # Deliberate, documented over-block: a harmless kwargs-unpack with no
+            # ``shell`` key also blocks, since the alternative (inspecting the
+            # unpacked mapping's contents) is not generally possible statically.
+            return True
+        if keyword.arg == "shell":
+            return not (isinstance(keyword.value, ast.Constant) and keyword.value.value is False)
+    return False
 
 
 def _call_is_network_sink(call_name: str) -> bool:
