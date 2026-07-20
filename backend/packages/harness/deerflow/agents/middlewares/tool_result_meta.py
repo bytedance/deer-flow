@@ -96,7 +96,11 @@ _ATTRS_BY_ERROR_TYPE: dict[str, dict[str, object]] = {str(attrs["error_type"]): 
 
 # Reason phrases (RFC 9110 §15 plus the wording real servers ship) mapped onto the
 # error_type they already have in _ERROR_RULES. Restricted to the statuses a fetch
-# actually lands on as a rendered page; 5xx maps to ``internal`` per issue #4273.
+# actually lands on as a rendered page. The 5xx split mirrors _ERROR_RULES' own:
+# 500/501 sit with its "500"/"internal error" keywords (internal → stop), while
+# 502/503/504 sit with its "timeout"/"temporarily unavailable" keywords (transient
+# → try_alternative) — a gateway error is the try-a-different-source case, and the
+# same words must not classify differently here than through _classify_error_text.
 _ERROR_SHELL_PHRASES: dict[str, str] = {
     "unauthorized": "auth",
     "proxy authentication required": "auth",
@@ -104,20 +108,19 @@ _ERROR_SHELL_PHRASES: dict[str, str] = {
     "access denied": "permission",
     "permission denied": "permission",
     "not found": "not_found",
-    "gone": "not_found",
     "too many requests": "rate_limited",
     "internal server error": "internal",
     "not implemented": "internal",
-    "bad gateway": "internal",
-    "service unavailable": "internal",
-    "service temporarily unavailable": "internal",
-    "gateway timeout": "internal",
+    "bad gateway": "transient",
+    "service unavailable": "transient",
+    "service temporarily unavailable": "transient",
+    "gateway timeout": "transient",
 }
 
 # Generic subject nouns a server may prefix onto the reason phrase ("Page not found",
 # IIS's "404 - File or directory not found."). Stripped from the *front* only, so any
 # word left over after the phrase still rejects the title.
-_STATUS_TITLE_FILLER: frozenset[str] = frozenset({"http", "error", "page", "the", "file", "or", "directory", "url", "resource", "oops"})
+_STATUS_TITLE_FILLER: frozenset[str] = frozenset({"http", "error", "page", "the", "file", "or", "directory", "url", "resource"})
 
 
 # Pre-compiled at module load from _ERROR_RULES. Anchoring bare numeric codes (401, 403, 404,
@@ -195,7 +198,7 @@ def _classify_error_shell(msg: ToolMessage, content: str) -> dict[str, object] |
     title = next((line for line in content.splitlines() if line.strip()), "")
     phrase = _as_status_line(title.lstrip("#").strip())
     error_type = _ERROR_SHELL_PHRASES.get(phrase) if phrase else None
-    return _ATTRS_BY_ERROR_TYPE[error_type] if error_type else None
+    return {**_ATTRS_BY_ERROR_TYPE[error_type]} if error_type else None
 
 
 def _as_status_line(title: str) -> str | None:
