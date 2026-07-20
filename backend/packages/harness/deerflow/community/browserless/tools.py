@@ -18,7 +18,7 @@ from deerflow.config.paths import VIRTUAL_PATH_PREFIX
 from deerflow.tools.types import Runtime
 from deerflow.utils.readability import ReadabilityExtractor
 
-from .browserless_client import BrowserlessClient, BrowserlessScreenshotResult
+from .browserless_client import BrowserlessClient, BrowserlessFetchResult, BrowserlessScreenshotResult
 
 logger = logging.getLogger(__name__)
 
@@ -173,13 +173,13 @@ def _write_capture_output(outputs_path: Path, output_name: str, content: bytes) 
     return final_name
 
 
-def _target_status_warning(result: BrowserlessScreenshotResult) -> str:
-    """Return a human-readable warning when the captured page itself errored.
+def _target_status_warning(result: BrowserlessScreenshotResult | BrowserlessFetchResult) -> str:
+    """Return a human-readable warning when the fetched/captured page itself errored.
 
     Browserless returns HTTP 200 for the render request even when the target
     page responded with a 4xx/5xx (or was an error/anti-bot page), so the raw
-    image alone cannot be trusted as valid visual evidence. The target's real
-    status is surfaced via the X-Response-Code header.
+    content alone cannot be trusted as a normal successful response. The
+    target's real status is surfaced via the X-Response-Code header.
     """
     code = result.target_status_code.strip()
     if not code or code.startswith(("2", "3")):
@@ -224,7 +224,7 @@ async def web_fetch_tool(url: str) -> str:
         wait_for_selector = cfg.get("wait_for_selector", wait_for_selector)
 
         client = _get_browserless_client("web_fetch")
-        html = await client.fetch_html(
+        result = await client.fetch_html_with_status(
             url=url,
             wait_for_event=wait_for_event,
             wait_for_timeout_ms=wait_for_timeout_ms,
@@ -234,11 +234,11 @@ async def web_fetch_tool(url: str) -> str:
             reject_request_pattern=reject_request_pattern,
         )
 
-        if html.startswith("Error:"):
-            return html
+        if isinstance(result, str):
+            return result
 
-        article = await asyncio.to_thread(_readability_extractor.extract_article, html)
-        return article.to_markdown()[:4096]
+        article = await asyncio.to_thread(_readability_extractor.extract_article, result.html)
+        return f"{article.to_markdown()[:4096]}{_target_status_warning(result)}"
 
     except Exception as e:
         logger.error(f"Error in web_fetch_tool: {e}")

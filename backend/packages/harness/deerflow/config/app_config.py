@@ -1,4 +1,3 @@
-import hashlib
 import logging
 import os
 from collections.abc import Mapping
@@ -18,6 +17,8 @@ from deerflow.config.channel_connections_config import ChannelConnectionsConfig
 from deerflow.config.checkpointer_config import CheckpointerConfig, load_checkpointer_config_from_dict
 from deerflow.config.database_config import DatabaseConfig
 from deerflow.config.extensions_config import ExtensionsConfig
+from deerflow.config.file_signature import ConfigSignature as _ConfigSignature
+from deerflow.config.file_signature import get_config_signature as _get_config_signature
 from deerflow.config.guardrails_config import GuardrailsConfig, load_guardrails_config_from_dict
 from deerflow.config.input_polish_config import InputPolishConfig
 from deerflow.config.loop_detection_config import LoopDetectionConfig
@@ -516,7 +517,6 @@ class AppConfig(BaseModel):
 _app_config: AppConfig | None = None
 _app_config_path: Path | None = None
 _app_config_mtime: float | None = None
-_ConfigSignature = tuple[float | None, int | None, str | None]
 _app_config_signature: _ConfigSignature | None = None
 _app_config_is_custom = False
 _current_app_config: ContextVar[AppConfig | None] = ContextVar("deerflow_current_app_config", default=None)
@@ -529,24 +529,6 @@ def _get_config_mtime(config_path: Path) -> float | None:
         return config_path.stat().st_mtime
     except OSError:
         return None
-
-
-def _get_config_signature(config_path: Path) -> _ConfigSignature | None:
-    """Get cache metadata for a config file, including a content digest."""
-    try:
-        stat_result = config_path.stat()
-    except OSError:
-        return None
-
-    digest = hashlib.sha256()
-    try:
-        with config_path.open("rb") as f:
-            for chunk in iter(lambda: f.read(1024 * 1024), b""):
-                digest.update(chunk)
-    except OSError:
-        return (stat_result.st_mtime, stat_result.st_size, None)
-
-    return (stat_result.st_mtime, stat_result.st_size, digest.hexdigest())
 
 
 def _load_and_cache_app_config(config_path: str | None = None) -> AppConfig:

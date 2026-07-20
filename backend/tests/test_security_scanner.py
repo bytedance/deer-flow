@@ -1,3 +1,4 @@
+import logging
 from types import SimpleNamespace
 
 import pytest
@@ -139,3 +140,50 @@ async def test_scan_distinguishes_unparseable_executable(monkeypatch):
     # Even for executable content, unparseable uses the unparseable message
     assert result.decision == "block"
     assert "unparseable" in result.reason
+
+
+def _make_unavailable_env(monkeypatch, *, security_fail_closed):
+    config = SimpleNamespace(
+        skill_evolution=SimpleNamespace(
+            moderation_model_name=None,
+            security_fail_closed=security_fail_closed,
+        )
+    )
+    monkeypatch.setattr("deerflow.skills.security_scanner.get_app_config", lambda: config)
+    monkeypatch.setattr(
+        "deerflow.skills.security_scanner.create_chat_model",
+        lambda **kwargs: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+
+
+@pytest.mark.anyio
+async def test_fail_open_allows_non_executable_when_model_unavailable(monkeypatch):
+    _make_unavailable_env(monkeypatch, security_fail_closed=False)
+    result = await scan_skill_content(SKILL_CONTENT, executable=False)
+    assert result.decision == "warn"
+    assert "unavailable" in result.reason
+
+
+@pytest.mark.anyio
+async def test_fail_open_still_blocks_executable_when_model_unavailable(monkeypatch):
+    _make_unavailable_env(monkeypatch, security_fail_closed=False)
+    result = await scan_skill_content(SKILL_CONTENT, executable=True)
+    assert result.decision == "block"
+    assert "executable" in result.reason
+
+
+@pytest.mark.anyio
+async def test_fail_closed_blocks_non_executable_when_model_unavailable(monkeypatch):
+    _make_unavailable_env(monkeypatch, security_fail_closed=True)
+    result = await scan_skill_content(SKILL_CONTENT, executable=False)
+    assert result.decision == "block"
+    assert "unavailable" in result.reason
+
+
+@pytest.mark.anyio
+async def test_fail_open_logs_operator_visible_warning(monkeypatch, caplog):
+    _make_unavailable_env(monkeypatch, security_fail_closed=False)
+    with caplog.at_level(logging.WARNING, logger="deerflow.skills.security_scanner"):
+        result = await scan_skill_content(SKILL_CONTENT, executable=False)
+    assert result.decision == "warn"
+    assert "failing open" in caplog.text

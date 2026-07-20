@@ -9,7 +9,15 @@ from __future__ import annotations
 
 import pytest
 
-from deerflow.trace_context import _MAX_TRACE_ID_LENGTH, normalize_trace_id
+from deerflow.trace_context import (
+    _MAX_TRACE_ID_LENGTH,
+    is_trace_id_from_request_header,
+    mark_trace_id_from_request_header,
+    normalize_trace_id,
+    request_trace_context,
+    reset_trace_id_from_request_header,
+    resolve_deerflow_trace_id,
+)
 
 
 class TestNormalizeTraceIdAcceptsPrintableAscii:
@@ -84,3 +92,30 @@ class TestNormalizeTraceIdRejectsUnsafeInput:
 
     def test_rejects_surrogate_pair_pieces(self) -> None:
         assert normalize_trace_id("trace-\ud83d") is None
+
+
+class TestResolveDeerflowTraceId:
+    def test_header_marker_defaults_false_and_resets(self) -> None:
+        assert is_trace_id_from_request_header() is False
+        token = mark_trace_id_from_request_header(from_header=True)
+        try:
+            assert is_trace_id_from_request_header() is True
+        finally:
+            reset_trace_id_from_request_header(token)
+        assert is_trace_id_from_request_header() is False
+
+    def test_metadata_wins_without_inbound_header(self) -> None:
+        with request_trace_context("ambient-trace"):
+            assert resolve_deerflow_trace_id("metadata-trace") == "metadata-trace"
+
+    def test_inbound_header_overrides_metadata(self) -> None:
+        with request_trace_context("header-trace"):
+            token = mark_trace_id_from_request_header(from_header=True)
+            try:
+                assert resolve_deerflow_trace_id("metadata-trace") == "header-trace"
+            finally:
+                reset_trace_id_from_request_header(token)
+
+    def test_falls_back_to_ambient_context(self) -> None:
+        with request_trace_context("ambient-only"):
+            assert resolve_deerflow_trace_id(None) == "ambient-only"

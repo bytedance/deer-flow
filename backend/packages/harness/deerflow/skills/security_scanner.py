@@ -22,6 +22,15 @@ class ScanResult:
     reason: str
 
 
+def _resolve_fail_closed(app_config: AppConfig | None) -> bool:
+    """Resolve the fail-closed policy, defaulting to True if config is unavailable."""
+    try:
+        config = app_config or get_app_config()
+        return bool(getattr(config.skill_evolution, "security_fail_closed", True))
+    except Exception:
+        return True
+
+
 def _extract_json_object(raw: str) -> dict | None:
     raw = raw.strip()
 
@@ -120,10 +129,13 @@ async def scan_skill_content(
                 return ScanResult(decision, str(parsed.get("reason") or "No reason provided."))
         logger.warning("Security scan produced unparseable output: %s", raw[:200])
     except Exception:
-        logger.warning("Skill security scan model call failed; using conservative fallback", exc_info=True)
+        logger.warning("Skill security scan model call failed; applying configured fail-closed/fail-open policy", exc_info=True)
 
     if model_responded:
         return ScanResult("block", "Security scan produced unparseable output; manual review required.")
     if executable:
         return ScanResult("block", "Security scan unavailable for executable content; manual review required.")
-    return ScanResult("block", "Security scan unavailable for skill content; manual review required.")
+    if _resolve_fail_closed(app_config):
+        return ScanResult("block", "Security scan unavailable for skill content; manual review required.")
+    logger.warning("Security scan unavailable; failing open for non-executable skill content at %s (manual review recommended)", location)
+    return ScanResult("warn", "Security scan unavailable for non-executable skill content; manual review recommended.")

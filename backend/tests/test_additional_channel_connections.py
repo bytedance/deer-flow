@@ -60,6 +60,23 @@ def test_pending_connect_code_accepts_leading_platform_mentions():
     assert channel._pending_connect_code("@_user_1 /connect via-base") == "via-base"
 
 
+def test_bare_connect_without_slash_does_not_bind():
+    """A message that merely starts with the word "connect" is normal chat.
+
+    Every other channel control command requires a leading slash
+    (``is_known_channel_command`` only matches ``/``-prefixed tokens, and
+    ``KNOWN_CHANNEL_COMMANDS`` holds only slash forms), so a bare ``connect``
+    must not be treated as ``/connect <code>`` and swallow the next word as a
+    bind code — otherwise "connect the database to the api" binds to "the".
+    """
+    assert extract_connect_code("connect the database to the api") is None
+    assert extract_connect_code("connect abc") is None
+    assert extract_connect_code("@bot connect abc") is None
+    # The real slash command still binds, including after a mention prefix.
+    assert extract_connect_code("/connect abc") == "abc"
+    assert extract_connect_code("@bot /connect abc") == "abc"
+
+
 def test_pending_connect_code_is_none_when_connections_disabled():
     # With no connection repo, binding is not configured and connect codes are
     # ignored so the message falls through to normal handling.

@@ -797,6 +797,9 @@ export const zhCN: Translations = {
     emailPlaceholder: "you@example.com",
     password: "密码",
     passwordPlaceholder: "•••••••",
+    rememberMe: "保持登录",
+    rememberMeDescription:
+      "下次打开 DeerFlow 时尽量保持当前会话，仅保存邮箱，不保存密码。",
     pleaseWait: "请稍候...",
     signIn: "登录",
     createAccount: "创建账号",
