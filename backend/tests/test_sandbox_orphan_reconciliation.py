@@ -2668,3 +2668,76 @@ def test_forget_without_an_epoch_still_refuses_an_id_being_acquired():
     provider._forget_lost_sandbox("guarded")
 
     assert "guarded" in provider._sandboxes, "an id being acquired was dropped by an epoch-less forget"
+
+
+@pytest.mark.parametrize("register", ["discovered", "created"])
+def test_registering_a_sandbox_clears_any_stale_warm_entry(register):
+    """Active and warm are exclusive states, and only register can violate it.
+
+    Reconciliation adopts an untracked-but-running container into the warm pool,
+    and on the `memory` store that happens on sight — `_adoptable_after_grace`
+    short-circuits when `supports_cross_process` is False, so an id carrying this
+    process's *own* lease is treated as adoptable. That is reachable during the
+    publish → track window of either register path, which this branch introduced
+    (on `main` the track was a single locked insert with nothing before it).
+
+    Leaving both entries gives one container two reapers: `_reap_expired_warm`
+    judges it by the warm timestamp and never consults `_last_activity`, so it
+    stops a container an agent is using while `_sandboxes` still hands out its
+    client — #4206's symptom on the default backend.
+
+    The exclusivity is what actually fixes this, so it is asserted directly and
+    on both register paths rather than through one interleaving.
+    """
+    provider = _make_provider_for_reconciliation()
+    info = _info("stale")
+    provider._warm_pool["stale"] = (info, time.time())
+
+    if register == "discovered":
+        provider._register_discovered_sandbox("t1", info, user_id="u")
+    else:
+        provider._register_created_sandbox("t1", "stale", info, user_id="u")
+
+    assert "stale" in provider._sandboxes
+    assert "stale" not in provider._warm_pool, "a stale warm entry survived the id becoming active"
+
+
+def test_a_container_adopted_during_register_is_not_reaped_from_the_warm_pool():
+    """The end-to-end harm the exclusivity rule removes.
+
+    Reconcile runs inside the register's publish → track window and adopts the
+    container; once tracking lands, the warm entry must be gone, otherwise warm
+    expiry stops the container this turn is holding.
+    """
+    provider = _make_provider_for_reconciliation()
+    info = _info("adopted")
+    provider._backend.list_running.return_value = [info]
+    provider._backend.is_alive.return_value = True
+
+    at_gap, go = threading.Event(), threading.Event()
+    real_publish = provider._publish_ownership
+
+    def gated_publish(sandbox_id):
+        result = real_publish(sandbox_id)
+        at_gap.set()
+        assert go.wait(timeout=5)
+        return result
+
+    provider._publish_ownership = gated_publish
+    out = {}
+    registrar = threading.Thread(target=lambda: out.update(id=provider._register_discovered_sandbox("t1", info, user_id="u")), daemon=True)
+    registrar.start()
+    try:
+        assert at_gap.wait(timeout=5), "register never reached the publish → track window"
+        provider._reconcile_orphans()
+    finally:
+        go.set()
+        registrar.join(timeout=5)
+
+    assert out.get("id") == "adopted"
+    assert "adopted" not in provider._warm_pool, "the adopted entry survived, giving the container two reapers"
+
+    time.sleep(0.02)
+    provider._reap_expired_warm(0.01)
+    provider._backend.destroy.assert_not_called()
+    assert provider.get("adopted") is not None, "warm expiry stopped a container this turn is holding"

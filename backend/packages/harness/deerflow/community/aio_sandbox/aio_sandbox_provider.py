@@ -1274,6 +1274,14 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                     # trip. Do not install a client for a container that reaper
                     # has already committed to stopping.
                     raise SandboxBeingDestroyedError(info.sandbox_id)
+                # Active and warm are exclusive states, and only this insert can
+                # violate that: a warm entry for the same id is stale the moment
+                # the id becomes active. Leaving it there gives the container two
+                # reapers — `_reap_expired_warm` judges it by the warm timestamp
+                # and never looks at `_last_activity`, so it stops a container an
+                # agent is actively using while `_sandboxes` still hands out its
+                # client.
+                self._warm_pool.pop(info.sandbox_id, None)
                 self._sandboxes[info.sandbox_id] = sandbox
                 self._sandbox_infos[info.sandbox_id] = info
                 self._last_activity[info.sandbox_id] = time.time()
@@ -1313,6 +1321,8 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             raise
 
         with self._lock:
+            # Same exclusivity rule as the discover path.
+            self._warm_pool.pop(sandbox_id, None)
             self._sandboxes[sandbox_id] = sandbox
             self._sandbox_infos[sandbox_id] = info
             self._last_activity[sandbox_id] = time.time()
