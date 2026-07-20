@@ -1,6 +1,6 @@
 import type { AnchorHTMLAttributes } from "react";
 
-import { resolveArtifactURL } from "@/core/artifacts/utils";
+import { resolveMarkdownArtifactURL } from "@/core/artifacts/utils";
 import { cn } from "@/lib/utils";
 
 import { CitationLink } from "../citations/citation-link";
@@ -34,7 +34,7 @@ export function createMarkdownLinkComponent(threadId?: string) {
       return (
         <a
           {...props}
-          href={resolveArtifactURL(href, threadId)}
+          href={resolveMarkdownArtifactURL(href, threadId)}
           target="_blank"
           rel="noopener noreferrer"
         />

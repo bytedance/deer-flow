@@ -828,6 +828,9 @@ export const enUS: Translations = {
     emailPlaceholder: "you@example.com",
     password: "Password",
     passwordPlaceholder: "•••••••",
+    rememberMe: "Keep me signed in",
+    rememberMeDescription:
+      "Keep this browser session when possible. DeerFlow stores only your email, never your password.",
     pleaseWait: "Please wait...",
     signIn: "Sign In",
     createAccount: "Create Account",

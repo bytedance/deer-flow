@@ -36,7 +36,7 @@ def _extension_label(file_path: Path) -> str:
 def _format_omitted_summary(omitted: list[str]) -> str:
     counts = Counter(_extension_label(Path(f)) for f in omitted)
     parts = [f"{count} {ext}" for ext, count in sorted(counts.items())]
-    return ", ".join(parts)
+    return neutralize_untrusted_tags(", ".join(parts))
 
 
 def _resolve_thread_id(runtime: Runtime) -> str | None:
@@ -116,7 +116,7 @@ def _list_uploaded_files_impl(
     candidates: list[tuple[float, Path, int]] = []
     try:
         # Collect file entries once to build the name set and iterate.
-        entries = [e for e in os.scandir(uploads_dir) if e.is_file() and not is_upload_staging_file(e.name)]
+        entries = [e for e in os.scandir(uploads_dir) if e.is_file() and not e.is_symlink() and not is_upload_staging_file(e.name)]
         all_names: set[str] = {e.name for e in entries}
 
         for entry in entries:

@@ -8,6 +8,7 @@ import binascii
 import hashlib
 import json
 import logging
+import math
 import mimetypes
 import secrets
 import tempfile
@@ -1456,9 +1457,10 @@ class WechatChannel(Channel):
     @staticmethod
     def _coerce_float(value: Any, default: float) -> float:
         try:
-            return float(value)
-        except (TypeError, ValueError):
+            parsed = float(value)
+        except (OverflowError, TypeError, ValueError):
             return default
+        return parsed if math.isfinite(parsed) and parsed > 0 else default
 
     @staticmethod
     def _coerce_int(value: Any, default: int) -> int:

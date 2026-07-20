@@ -39,6 +39,12 @@ logger = logging.getLogger(__name__)
 _SUMMARY_MESSAGE_NAME = "summary"
 
 # Finite set of blocked tag names: system-reserved + common injection patterns.
+#
+# Maintenance: when adding a new framework block tag that the system emits into
+# model input, you MUST also update the expected count in
+# test_input_sanitization_middleware.py::test_denylist_covers_framework_authority_blocks.
+# The test pins the exact number of blocked tags so a new framework tag cannot
+# be added without the corresponding regression guard.
 _BLOCKED_TAG_NAMES: frozenset[str] = frozenset(
     {
         # Framework-injected structured/authority blocks. The lead-agent system

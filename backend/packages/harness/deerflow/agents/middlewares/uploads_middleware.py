@@ -35,7 +35,7 @@ def _extension_label(file: dict) -> str:
 def _format_omitted_file_types(files: list[dict]) -> str:
     counts = Counter(_extension_label(file) for file in files)
     parts = [f"{count} {extension}" for extension, count in sorted(counts.items())]
-    return ", ".join(parts)
+    return neutralize_untrusted_tags(", ".join(parts))
 
 
 class UploadsMiddlewareState(AgentState):

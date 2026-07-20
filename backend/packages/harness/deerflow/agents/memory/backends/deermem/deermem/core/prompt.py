@@ -8,9 +8,21 @@ import math
 import re
 import threading
 import time
+from pathlib import Path
 from typing import Any, cast
 
+import yaml
+from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
+
 logger = logging.getLogger(__name__)
+
+
+class PromptConfigurationError(ValueError):
+    """A prompt-template configuration error (bad yaml, missing key, invalid
+    placeholder). Raised by :func:`load_prompt` and :func:`load_prompt_messages`
+    instead of a bare :class:`ValueError` so callers can distinguish permanent
+    configuration failures from recoverable runtime errors."""
+
 
 try:
     import tiktoken
@@ -19,241 +31,160 @@ try:
 except ImportError:
     TIKTOKEN_AVAILABLE = False
 
-# Prompt template for updating memory based on conversation
-MEMORY_UPDATE_PROMPT = """You are a memory management system. Your task is to analyze a conversation and update the user's memory profile.
+# ── Externalized prompt templates ───────────────────────────────────────
+#
+# The four memory prompts live as yaml files under ``core/prompts/`` (loaded by
+# :func:`load_prompt`) so they can be overridden per-agent or from an external
+# dir without code changes. The bundled defaults are byte-identical to the former
+# module-level constants, so zero-config behaviour is unchanged. Templates use
+# ``.format`` syntax (``{var}`` substitution, ``{{``/``}}`` for literal braces);
+# html-escaping stays at the assembly layer (``_escape_memory_for_prompt`` in
+# updater.py / ``format_conversation_for_update`` here), never inside the
+# template strings, so values are not double-escaped.
 
-Current Memory State:
-<current_memory>
-{current_memory}
-</current_memory>
+_PROMPTS_DEFAULT_DIR = Path(__file__).resolve().parent / "prompts"
 
-New Conversation to Process:
-<conversation>
-{conversation}
-</conversation>
+# Cache for load_prompt: repeated calls with the same (name, agent, dir) return
+# the cached template string without re-reading the yaml file. The shim constants
+# below also populate this cache at import time for the bundled defaults.
+_PROMPT_CACHE: dict[tuple[str, str | None, str | None], str] = {}
 
-Instructions:
-1. Analyze the conversation for important information about the user
-2. Extract relevant facts, preferences, and context with specific details (numbers, names, technologies)
-3. Update the memory sections as needed following the detailed length guidelines below
-
-Before extracting facts, perform a structured reflection on the conversation:
-1. Error/Retry Detection: Did the agent encounter errors, require retries, or produce incorrect results?
-   If yes, record the root cause and correct approach as a high-confidence fact with category "correction".
-2. User Correction Detection: Did the user correct the agent's direction, understanding, or output?
-   If yes, record the correct interpretation or approach as a high-confidence fact with category "correction".
-   Include what went wrong in "sourceError" only when category is "correction" and the mistake is explicit in the conversation.
-3. Project Constraint Discovery: Were any project-specific constraints discovered during the conversation?
-   If yes, record them as facts with the most appropriate category and confidence.
-
-{correction_hint}
-
-Memory Section Guidelines:
-
-**User Context** (Current state - concise summaries):
-- workContext: Professional role, company, key projects, main technologies (2-3 sentences)
-  Example: Core contributor, project names with metrics (16k+ stars), technical stack
-- personalContext: Languages, communication preferences, key interests (1-2 sentences)
-  Example: Bilingual capabilities, specific interest areas, expertise domains
-- topOfMind: Multiple ongoing focus areas and priorities (3-5 sentences, detailed paragraph)
-  Example: Primary project work, parallel technical investigations, ongoing learning/tracking
-  Include: Active implementation work, troubleshooting issues, market/research interests
-  Note: This captures SEVERAL concurrent focus areas, not just one task
-
-**History** (Temporal context - rich paragraphs):
-- recentMonths: Detailed summary of recent activities (4-6 sentences or 1-2 paragraphs)
-  Timeline: Last 1-3 months of interactions
-  Include: Technologies explored, projects worked on, problems solved, interests demonstrated
-- earlierContext: Important historical patterns (3-5 sentences or 1 paragraph)
-  Timeline: 3-12 months ago
-  Include: Past projects, learning journeys, established patterns
-- longTermBackground: Persistent background and foundational context (2-4 sentences)
-  Timeline: Overall/foundational information
-  Include: Core expertise, longstanding interests, fundamental working style
-
-**Facts Extraction**:
-- Extract specific, quantifiable details (e.g., "16k+ GitHub stars", "200+ datasets")
-- Include proper nouns (company names, project names, technology names)
-- Preserve technical terminology and version numbers
-- Categories:
-  * preference: Tools, styles, approaches user prefers/dislikes
-  * knowledge: Specific expertise, technologies mastered, domain knowledge
-  * context: Background facts (job title, projects, locations, languages)
-  * behavior: Working patterns, communication habits, problem-solving approaches
-  * goal: Stated objectives, learning targets, project ambitions
-  * correction: Explicit agent mistakes or user corrections, including the correct approach
-- Fact lifetime (``expected_valid_days``, optional integer):
-  How many days before this fact should be reviewed for possible removal.
-  The system schedules review automatically; omit when uncertain.
-  * <= 14: highly transient - active bugs, immediate tasks, today's focus
-  * 15-60: short-term - current experiments, in-progress side projects, near-term goals
-  * 60-180: medium-term - current role, active tech stack, ongoing preferences
-  * 180-365: stable - professional background, established working patterns
-  * > 365: very stable - core skills, native language, personality traits
-  Assign the value that semantically fits; values above the server-configured
-  ceiling are silently reduced on storage.
-- Confidence levels:
-  * 0.9-1.0: Explicitly stated facts ("I work on X", "My role is Y")
-  * 0.7-0.8: Strongly implied from actions/discussions
-  * 0.5-0.6: Inferred patterns (use sparingly, only for clear patterns)
-
-**What Goes Where**:
-- workContext: Current job, active projects, primary tech stack
-- personalContext: Languages, personality, interests outside direct work tasks
-- topOfMind: Multiple ongoing priorities and focus areas user cares about recently (gets updated most frequently)
-  Should capture 3-5 concurrent themes: main work, side explorations, learning/tracking interests
-- recentMonths: Detailed account of recent technical explorations and work
-- earlierContext: Patterns from slightly older interactions still relevant
-- longTermBackground: Unchanging foundational facts about the user
-
-**Multilingual Content**:
-- Preserve original language for proper nouns and company names
-- Keep technical terms in their original form (DeepSeek, LangGraph, etc.)
-- Note language capabilities in personalContext
-
-Output Format (JSON):
-{{
-  "user": {{
-    "workContext": {{ "summary": "...", "shouldUpdate": true/false }},
-    "personalContext": {{ "summary": "...", "shouldUpdate": true/false }},
-    "topOfMind": {{ "summary": "...", "shouldUpdate": true/false }}
-  }},
-  "history": {{
-    "recentMonths": {{ "summary": "...", "shouldUpdate": true/false }},
-    "earlierContext": {{ "summary": "...", "shouldUpdate": true/false }},
-    "longTermBackground": {{ "summary": "...", "shouldUpdate": true/false }}
-  }},
-  "newFacts": [
-    {{ "content": "...", "category": "preference|knowledge|context|behavior|goal|correction", "confidence": 0.0-1.0, "expected_valid_days": 90 }}
-  ],
-  "factsToRemove": ["fact_id_1", "fact_id_2"],
-  "staleFactsToRemove": [{{ "id": "fact_id", "reason": "brief explanation" }}],
-  "staleFactsToExtend": [{{ "id": "fact_id", "extend_by_days": 365, "reason": "brief explanation" }}],
-  "factsToConsolidate": [
-    {{
-      "sourceIds": ["fact_id_1", "fact_id_2"],
-      "consolidated": {{ "content": "synthesized fact", "category": "knowledge", "confidence": 0.9 }}
-    }}
-  ]
-}}
-
-Important Rules:
-- Only set shouldUpdate=true if there's meaningful new information
-- Follow length guidelines: workContext/personalContext are concise (1-3 sentences), topOfMind and history sections are detailed (paragraphs)
-- Include specific metrics, version numbers, and proper nouns in facts
-- Only add facts that are clearly stated (0.9+) or strongly implied (0.7+)
-- Use category "correction" for explicit agent mistakes or user corrections; assign confidence >= 0.95 when the correction is explicit
-- Include "sourceError" only for explicit correction facts when the prior mistake or wrong approach is clearly stated; omit it otherwise
-- Remove facts that are contradicted by new information
-- When updating topOfMind, integrate new focus areas while removing completed/abandoned ones
-  Keep 3-5 concurrent focus themes that are still active and relevant
-- For history sections, integrate new information chronologically into appropriate time period
-- Preserve technical accuracy - keep exact names of technologies, companies, projects
-- Focus on information useful for future interactions and personalization
-- IMPORTANT: Do NOT record file upload events in memory. Uploaded files are
-  session-specific and ephemeral — they will not be accessible in future sessions.
-  Recording upload events causes confusion in subsequent conversations.
-
-{staleness_review_section}
-
-{consolidation_section}
-
-Return ONLY valid JSON, no explanation or markdown."""
+# Cache for load_prompt_messages: stores parsed raw templates (list of {role,
+# content} dicts) keyed by (name, agent, dir). On a cache hit the templates are
+# rendered with the caller's variables; the file is only read once per key.
+_CHAT_TEMPLATE_CACHE: dict[tuple[str, str | None, str | None], tuple[list[dict[str, str]], str]] = {}
 
 
-# Prompt section injected into MEMORY_UPDATE_PROMPT when staleness review triggers.
-# Surfaces aged facts explicitly so the LLM can semantically judge each one,
-# rather than relying on passive contradiction from the current conversation.
-STALENESS_REVIEW_PROMPT = """## Staleness Review
-
-The following facts have reached their individual review window and may no longer
-accurately reflect the user's current situation. Each entry shows a ``valid:Nd``
-annotation - the number of days this fact was expected to remain valid before
-re-evaluation. Use it to calibrate conservatism: a ``valid:30d`` fact was
-considered volatile at creation; a ``valid:365d`` fact was considered stable.
-
-<stale_facts>
-{stale_facts}
-</stale_facts>
-
-For each fact, decide KEEP, REMOVE, or EXTEND:
-- KEEP: Still likely valid - even if not mentioned in this conversation.
-  Stable attributes (native language, core expertise, personality traits) often
-  remain true indefinitely.
-- REMOVE: Outdated, contradicted by recent context, or no longer relevant.
-  Examples: tech-stack migrations, job changes, relocated offices, abandoned projects.
-- EXTEND: Keep but recalibrate the review window (see below).
-
-Add REMOVE decisions to "staleFactsToRemove" in your output JSON.
-Each entry must be {{"id": "fact_id", "reason": "brief explanation"}}.
-The reason should cite what signal in the conversation (or absence thereof)
-supports the removal.
-
-Optionally, for facts you KEEP and wish to recalibrate, add them to
-"staleFactsToExtend" with the number of days from now before the next review:
-{{"id": "fact_id", "extend_by_days": 365, "reason": "brief explanation"}}
-Use this when the current window seems miscalibrated - e.g. a core skill marked
-``valid:30d`` that is clearly stable, or a goal nearing completion whose window
-should shrink. Omit facts whose current window already seems appropriate.
-
-Be conservative - when in doubt, KEEP. Removing a valid fact is worse than
-keeping a slightly stale one, because the next review cycle will re-evaluate it."""
+def _render_messages(
+    raw_templates: list[dict[str, str]],
+    variables: dict[str, Any],
+    source_path: str,
+) -> list[BaseMessage]:
+    """Render cached chat templates with fresh *variables*."""
+    messages: list[BaseMessage] = []
+    for tmpl in raw_templates:
+        content = tmpl["content"]
+        try:
+            content = content.format(**variables)
+        except (KeyError, ValueError) as e:
+            raise PromptConfigurationError(f"Invalid placeholder in {source_path!r} (content of role={tmpl['role']!r}): {e}") from e
+        if tmpl["role"] == "system":
+            messages.append(SystemMessage(content=content))
+        else:
+            messages.append(HumanMessage(content=content))
+    return messages
 
 
-# Prompt section injected into MEMORY_UPDATE_PROMPT when consolidation triggers.
-# Surfaces fact groups that have accumulated many entries in the same category
-# so the LLM can synthesize them into fewer, richer facts.
-CONSOLIDATION_PROMPT = """## Memory Consolidation
+def load_prompt(
+    name: str,
+    *,
+    agent_name: str | None = None,
+    prompts_dir: str | None = None,
+) -> str:
+    """Load a prompt template by name (agent override > default).
 
-The following fact categories have accumulated many individual entries.
-Review each group and identify facts that can be synthesized into a single,
-richer consolidated fact that preserves all key information.
+    Reads ``{prompts_dir}/{agent_name}/{name}.yaml`` if present, else
+    ``{prompts_dir}/{name}.yaml``. ``prompts_dir`` defaults to the package's
+    bundled ``core/prompts/``. Returns the raw ``template`` string (``.format``
+    syntax); the caller renders it with ``.format(**vars)``.
 
-{consolidation_groups}
+    Results are cached per ``(name, agent_name, prompts_dir)`` so the filesystem
+    read happens at most once per combination (typically once per process for
+    the bundled defaults).
+    """
+    cache_key = (name, agent_name, prompts_dir)
+    cached = _PROMPT_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
 
-For each group, decide:
-- CONSOLIDATE: Multiple facts can be merged into one richer fact.
-  Specify the source fact IDs and the consolidated content.
-- SKIP: Facts are distinct enough to remain separate.
+    base = Path(prompts_dir) if prompts_dir else _PROMPTS_DEFAULT_DIR
+    candidates: list[Path] = [base / f"{name}.yaml"]
+    if agent_name:
+        candidates.insert(0, base / agent_name / f"{name}.yaml")
+    for path in candidates:
+        if path.is_file():
+            try:
+                data = yaml.safe_load(path.read_text(encoding="utf-8"))
+            except yaml.YAMLError as e:
+                raise PromptConfigurationError(f"Invalid YAML in {path}: {e}") from e
+            data = data or {}
+            fmt = data.get("format", "text")
+            if fmt != "text":
+                raise PromptConfigurationError(f"Expected format='text' in {path}, got {fmt!r}; use load_prompt_messages() for chat-format templates")
+            template = data.get("template")
+            if not isinstance(template, str) or not template:
+                raise PromptConfigurationError(f"Missing or empty 'template' key in {path}")
+            _PROMPT_CACHE[cache_key] = template
+            return template
+    searched = ", ".join(str(c) for c in candidates)
+    raise FileNotFoundError(f"prompt template not found: {name} (searched: {searched})")
 
-Add consolidation decisions to "factsToConsolidate" in your output JSON.
-Each entry: {{"sourceIds": ["fact_id_1", "fact_id_2"], "consolidated": {{"content": "...", "category": "...", "confidence": 0.9}}}}
 
-Rules:
-- The consolidated fact must preserve ALL key details from source facts
-- Only consolidate facts that describe the same aspect of the user
-- Confidence of consolidated fact = max of source confidences
-- Be conservative - when in doubt, keep facts separate
-- Maximum {max_groups} consolidation groups per cycle"""
+def load_prompt_messages(
+    name: str,
+    variables: dict[str, Any],
+    *,
+    agent_name: str | None = None,
+    prompts_dir: str | None = None,
+) -> list[BaseMessage]:
+    """Load + render a chat-form prompt template. Returns ``list[BaseMessage]``.
+
+    Reads ``{prompts_dir}/{agent_name}/{name}.chat.yaml`` if present, else
+    ``{prompts_dir}/{name}.chat.yaml``. Each message's ``content`` is rendered
+    with ``.format(**variables)``. The system content has no variables (only
+    literal ``{{ }}`` JSON braces), so it renders byte-identical every call --
+    prefix-cache friendly, mirroring the lead agent's static system prompt.
+
+    The raw templates (role + content before substitution) are cached per
+    ``(name, agent, prompts_dir)`` so the yaml file is only read once; only
+    per-call rendering runs on each invocation.
+
+    For the text form (single string), use :func:`load_prompt` instead.
+    """
+    cache_key = (name, agent_name, prompts_dir)
+    cached_chat = _CHAT_TEMPLATE_CACHE.get(cache_key)
+    if cached_chat is not None:
+        raw_templates, source_path = cached_chat
+        return _render_messages(raw_templates, variables, source_path)
+
+    base = Path(prompts_dir) if prompts_dir else _PROMPTS_DEFAULT_DIR
+    candidates: list[Path] = [base / f"{name}.chat.yaml"]
+    if agent_name:
+        candidates.insert(0, base / agent_name / f"{name}.chat.yaml")
+    for path in candidates:
+        if path.is_file():
+            try:
+                data = yaml.safe_load(path.read_text(encoding="utf-8"))
+            except yaml.YAMLError as e:
+                raise PromptConfigurationError(f"Invalid YAML in {path}: {e}") from e
+            data = data or {}
+            fmt = data.get("format", "chat")
+            if fmt != "chat":
+                raise PromptConfigurationError(f"Expected format='chat' in {path}, got {fmt!r}; use load_prompt() for text-format templates")
+            msg_list = data.get("messages")
+            if not isinstance(msg_list, list) or not msg_list:
+                raise PromptConfigurationError(f"Missing or empty 'messages' key in {path}")
+            raw_templates: list[dict[str, str]] = []
+            for msg in msg_list:
+                role = msg.get("role", "user")
+                content = msg.get("content", "")
+                if not isinstance(content, str):
+                    content = str(content)
+                raw_templates.append({"role": role, "content": content})
+            _CHAT_TEMPLATE_CACHE[cache_key] = (raw_templates, str(path))
+            return _render_messages(raw_templates, variables, str(path))
+    searched = ", ".join(str(c) for c in candidates)
+    raise FileNotFoundError(f"chat prompt template not found: {name} (searched: {searched})")
 
 
-# Prompt template for extracting facts from a single message
-FACT_EXTRACTION_PROMPT = """Extract factual information about the user from this message.
-
-Message:
-{message}
-
-Extract facts in this JSON format:
-{{
-  "facts": [
-    {{ "content": "...", "category": "preference|knowledge|context|behavior|goal|correction", "confidence": 0.0-1.0 }}
-  ]
-}}
-
-Categories:
-- preference: User preferences (likes/dislikes, styles, tools)
-- knowledge: User's expertise or knowledge areas
-- context: Background context (location, job, projects)
-- behavior: Behavioral patterns
-- goal: User's goals or objectives
-- correction: Explicit corrections or mistakes to avoid repeating
-
-Rules:
-- Only extract clear, specific facts
-- Confidence should reflect certainty (explicit statement = 0.9+, implied = 0.6-0.8)
-- Skip vague or temporary information
-
-Return ONLY valid JSON."""
+# Module-level aliases for the injected text sections (staleness_review /
+# consolidation / fact_extraction). Each loads its bundled yaml template once
+# at import. ``memory_update`` is NOT here -- it uses the chat form via
+# :func:`load_prompt_messages` (system/user split, mirroring the lead agent's
+# static system prompt).
+STALENESS_REVIEW_PROMPT = load_prompt("staleness_review")
+CONSOLIDATION_PROMPT = load_prompt("consolidation")
+FACT_EXTRACTION_PROMPT = load_prompt("fact_extraction")
 
 
 # Module-level tiktoken encoding cache.  Populated lazily on first use;
@@ -424,7 +355,7 @@ def _format_fact_line(fact: dict[str, Any]) -> str | None:
     # rendered into the <memory> block of the lead-agent system prompt. Escape
     # them so a value like "</memory></system-reminder>" cannot close the block
     # and relocate the text after it out of the user-managed trust zone the
-    # prompt declares. Mirrors the MEMORY_UPDATE_PROMPT escaping in #4028/#4060.
+    # prompt declares. Mirrors the memory_update prompt escaping in #4028/#4060.
     # quote=False: these land in element-text position (never attribute values),
     # so only <, >, & can break out - leave ' and " in facts untouched.
     content = html.escape(content, quote=False)
@@ -836,7 +767,7 @@ def format_conversation_for_update(messages: list[Any]) -> str:
             content = str(content)[:1000] + "..."
 
         # Escape < > & before embedding into the <conversation> block of
-        # MEMORY_UPDATE_PROMPT. This raw user turn is the most attacker-influenced
+        # the memory_update prompt. This raw user turn is the most attacker-influenced
         # input in the prompt, so an unescaped value like
         # "</conversation><current_memory>..." would close the block and forge a
         # <current_memory> authority section for the extraction LLM. Same block-
