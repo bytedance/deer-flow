@@ -386,7 +386,15 @@ if ! $SKIP_INSTALL; then
     # in particular). Required for postgres extras — see PR #2584.
     # Intentionally unquoted to splat multiple `--extra X` pairs.
     (cd backend && uv sync --quiet --all-packages $UV_EXTRAS_FLAGS) || { echo "✗ Backend dependency install failed"; exit 1; }
-    (cd frontend && pnpm install --silent) || { echo "✗ Frontend dependency install failed"; exit 1; }
+    if command -v pnpm &>/dev/null; then
+        (cd frontend && pnpm install --silent) || { echo "✗ Frontend dependency install failed"; exit 1; }
+    elif command -v npm &>/dev/null; then
+        echo "  ⚠ pnpm not found, falling back to npm"
+        (cd frontend && npm install --legacy-peer-deps --silent) || { echo "✗ Frontend dependency install failed"; exit 1; }
+    else
+        echo "✗ Neither pnpm nor npm found. Please install one of them."
+        exit 1
+    fi
     echo "✓ Dependencies synced"
 else
     echo "⏩ Skipping dependency install (--skip-install)"
@@ -467,10 +475,19 @@ run_service "Frontend" \
     "cd frontend && $FRONTEND_CMD > ../logs/frontend.log 2>&1" \
     3000 120
 
-# 3. Nginx
-run_service "Nginx" \
-    "nginx -g 'daemon off;' -c '$REPO_ROOT/docker/nginx/nginx.local.conf' -p '$REPO_ROOT' > logs/nginx.log 2>&1" \
-    2026 10
+# 3. Nginx (optional — skip if not installed)
+if command -v nginx &>/dev/null; then
+    run_service "Nginx" \
+        "nginx -g 'daemon off;' -c '$REPO_ROOT/docker/nginx/nginx.local.conf' -p '$REPO_ROOT' > logs/nginx.log 2>&1" \
+        2026 10
+    NGINX_OK=true
+else
+    echo "  ⚠ Nginx not found — skipping reverse proxy"
+    echo "    Services available directly:"
+    echo "    Gateway  → http://localhost:8001"
+    echo "    Frontend → http://localhost:3000"
+    NGINX_OK=false
+fi
 
 # ── Ready ────────────────────────────────────────────────────────────────────
 
@@ -479,9 +496,16 @@ echo "=========================================="
 echo "  ✓ DeerFlow is running!  [$MODE_LABEL]"
 echo "=========================================="
 echo ""
-echo "  🌐 http://localhost:2026"
-echo ""
-echo "  Routing: Frontend → Nginx → Gateway"
+if $NGINX_OK; then
+    echo "  🌐 http://localhost:2026"
+    echo ""
+    echo "  Routing: Frontend → Nginx → Gateway"
+else
+    echo "  🌐 Gateway:  http://localhost:8001"
+    echo "  🌐 Frontend: http://localhost:3000"
+    echo ""
+    echo "  (Nginx not installed — services accessed directly)"
+fi
 echo "  API:     /api/langgraph/*  →  Gateway agent runtime"
 echo "           /api/*              →  Gateway REST API (8001)"
 echo ""
