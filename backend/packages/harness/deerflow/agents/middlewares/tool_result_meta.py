@@ -87,6 +87,10 @@ _UNKNOWN_ERROR: dict[str, object] = {
 # ``web_fetch`` (see community/*/tools.py), so the gate stays provider-agnostic.
 # The gate is required because normalize_tool_message() runs for *every* tool —
 # a short "not found" line is legitimate output from many of them.
+# ``web_capture`` is deliberately absent: its result is a tool message about an
+# artifact ("Captured screenshot: <path> (warning: ...)"), not a rendered page, so
+# a title rule cannot apply. A dead-target capture still yields the artifact plus a
+# model-visible warning; stamping it belongs to the provider boundary (#4239).
 _PAGE_CONTENT_TOOL_NAMES: frozenset[str] = frozenset({"web_fetch"})
 
 # Category attributes reused by the error-shell path, indexed by the error_type

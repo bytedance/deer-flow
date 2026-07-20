@@ -312,3 +312,54 @@ class TestRenderedByRealProducer:
             assert _meta(executed)["error_type"] == "transient"
         assert _meta(results[5])["error_type"] == "blocked_by_progress_guard"
         assert results[5].content.startswith("[TOOL_BLOCKED]")
+
+
+# Measured output of crawl4ai 0.9.2's DefaultMarkdownGenerator over the same corpus
+# HTML: "fit" (PruningContentFilter — the tool's default f=fit) shown; "raw" agrees on
+# the leading line. The body heading renders first, so the title rule keys on the same
+# line the in-process renderers produce.
+_CRAWL4AI_NGINX_404_FIT = "# 404 Not Found\nnginx/1.24.0\n"
+_CRAWL4AI_NGINX_503_FIT = "# 503 Service Temporarily Unavailable\nnginx\n"
+_CRAWL4AI_ARTICLE_FIT = "# 404 Ways to Cook Rice\nRice is a staple for most of the planet, and great rice is technique.\n"
+
+
+def _render_crawl4ai(markdown: str) -> str:
+    """Run the real crawl4ai web_fetch_tool; only the remote /md call is faked."""
+    from deerflow.community.crawl4ai import tools as crawl4ai_tools
+
+    client = MagicMock()
+    client.fetch_markdown = AsyncMock(return_value=markdown)
+    with (
+        patch.object(crawl4ai_tools, "_build_client", return_value=client),
+        patch.object(crawl4ai_tools, "_get_tool_config", return_value=None),
+        patch.object(crawl4ai_tools, "validate_public_http_url", return_value=None),
+    ):
+        return asyncio.run(crawl4ai_tools.web_fetch_tool.ainvoke("https://example.org/x"))
+
+
+class TestCrawl4aiRecordedProducer:
+    """crawl4ai renders server-side (POST /md), so its renderer cannot run in-repo.
+
+    The fixtures above are recorded from the real generator (provenance in the comment);
+    these tests pin our handling of that recorded shape through the real tool and the
+    real middleware chain. A future server-side format change is out of this repo's
+    reach and would degrade to a silent success — the safe direction (no false
+    positives), accepted in review.
+    """
+
+    @pytest.mark.parametrize(
+        "markdown,error_type,recoverable,next_action",
+        [
+            (_CRAWL4AI_NGINX_404_FIT, "not_found", True, "rewrite_query"),
+            (_CRAWL4AI_NGINX_503_FIT, "transient", False, "try_alternative"),
+        ],
+    )
+    def test_recorded_error_pages_are_classified(self, markdown: str, error_type: str, recoverable: bool, next_action: str):
+        rendered = _render_crawl4ai(markdown)
+
+        assert _meta(_through_chain(rendered)) == _tuple("error", error_type, recoverable, next_action)
+
+    def test_recorded_legitimate_page_stays_successful(self):
+        rendered = _render_crawl4ai(_CRAWL4AI_ARTICLE_FIT)
+
+        assert _meta(_through_chain(rendered)) == _SUCCESS
