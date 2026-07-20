@@ -399,20 +399,17 @@ def _read_expected_valid_days(fact: dict[str, Any]) -> int | None:
     ``_normalize_memory_update_fact`` rule.  Coercing first matters for values
     in (0, 1): ``0.5`` passes a raw ``> 0`` check but truncates to ``0``, which
     would otherwise be returned as a (non-positive) lifetime instead of
-    ``None``.  Non-finite floats (``NaN``, ``+/-inf``) are rejected, and a huge
-    ``int`` that exceeds ``timedelta.max.days`` is rejected too: Python's JSON
-    decoder parses an integer literal with no decimal point as an arbitrary-
-    precision ``int`` (so ``10**400`` stays an int rather than becoming ``inf``
-    like ``1e400`` would), and while ``float(10**400)`` raises ``OverflowError``
-    in the helper, an int just below the float limit but above
-    ``timedelta.max.days`` (e.g. ``10**12``) would pass the helper and raise
-    ``OverflowError`` downstream in ``timedelta(days=...)`` during staleness
-    selection or consolidation.  Capping at ``timedelta.max.days`` closes both.
-    Rejecting all of these keeps a single malformed field from aborting
-    staleness selection or consolidation.  Hand-edited files and pre-feature
-    facts may also lack the field entirely; returning ``None`` lets callers fall
-    back to the global age or omit the field rather than silently writing a
-    zero/negative/non-finite/absurd lifetime.
+    ``None``.  Non-finite floats (``NaN``, ``+/-inf``) are rejected, and huge
+    ints are returned as-is rather than routed through ``float()`` (which
+    raises ``OverflowError`` for ``10**400``): Python's JSON decoder parses an
+    integer literal with no decimal point as an arbitrary-precision ``int``,
+    so a hand-edited ``memory.json`` can carry one.  An int that is too large
+    to participate in ``datetime`` arithmetic is bounded by the caller via
+    :func:`_safe_add_days` - the helper's job is type/positivity validation,
+    not datetime-range validation, because the safe bound depends on the
+    ``datetime`` it is added to, not on the value alone.  Returning ``None``
+    lets callers fall back to the global age or omit the field rather than
+    silently writing a zero/negative/non-finite lifetime.
     """
     raw = fact.get("expected_valid_days")
     if isinstance(raw, bool):
@@ -423,11 +420,23 @@ def _read_expected_valid_days(fact: dict[str, Any]) -> int | None:
         evd = int(raw)  # coerce before the positivity guard
     else:
         return None
-    # Upper bound: anything above timedelta.max.days raises OverflowError in
-    # timedelta(days=evd) downstream (staleness selection / consolidation).
-    if 0 < evd <= timedelta.max.days:
-        return evd
-    return None
+    return evd if evd > 0 else None
+
+
+def _safe_add_days(dt: datetime, days: int) -> datetime | None:
+    """Return ``dt + timedelta(days=days)``, or ``None`` if it overflows.
+
+    A huge persisted ``expected_valid_days`` (e.g. ``10**12``) can exceed
+    ``timedelta.max.days`` or push the result past ``datetime.max`` / below
+    ``datetime.min``.  Both raise ``OverflowError``.  The staleness and
+    consolidation paths add an evd to a ``datetime`` to compute a review
+    deadline; returning ``None`` lets the caller fall back to the configured
+    global lifetime instead of aborting the whole update cycle.
+    """
+    try:
+        return dt + timedelta(days=days)
+    except (OverflowError, ValueError):
+        return None
 
 
 def _effective_fact_staleness_age(fact: dict[str, Any], config: Any) -> int:
@@ -472,7 +481,11 @@ def _select_stale_candidates(
         if created_at is None:
             continue
         effective_age = _effective_fact_staleness_age(fact, config)
-        if created_at < now - timedelta(days=effective_age):
+        # now - timedelta(days=effective_age) can overflow datetime.min when
+        # effective_age is a huge persisted value; a window that large means the
+        # fact cannot yet be stale, so skip it rather than aborting the cycle.
+        cutoff = _safe_add_days(now, -effective_age)
+        if cutoff is not None and created_at < cutoff:
             candidates.append(fact)
     return candidates
 
@@ -1330,7 +1343,20 @@ class MemoryUpdater:
                     # Capped at the creation-time multiplier (hoisted above the loop)
                     # like any new fact so consolidation cannot defer first review
                     # indefinitely.
-                    source_deadlines = [dt + timedelta(days=_effective_fact_staleness_age(fact_index[sid], config)) for sid, dt in zip(source_ids, _source_dts)]
+                    # Compute each source's absolute review deadline
+                    # (createdAt + effective lifetime). A huge persisted evd can
+                    # overflow datetime arithmetic; _safe_add_days returns None
+                    # then, and the source falls back to the global lifetime's
+                    # deadline - the same treatment as a legacy (no-evd) source,
+                    # so one malformed field cannot abort the merge.
+                    global_age = config.staleness_age_days
+                    source_deadlines: list[datetime] = []
+                    for sid, dt in zip(source_ids, _source_dts):
+                        eff = _effective_fact_staleness_age(fact_index[sid], config)
+                        deadline = _safe_add_days(dt, eff)
+                        if deadline is None:
+                            deadline = _safe_add_days(dt, global_age) or _newest_dt
+                        source_deadlines.append(deadline)
                     earliest_deadline = min(source_deadlines)
                     # int(total_seconds() // 86400) avoids the .days toward-zero
                     # truncation inconsistency flagged in #4143; a negative result

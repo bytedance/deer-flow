@@ -27,6 +27,7 @@ from deerflow.agents.memory.backends.deermem.deermem.core.updater import (
     _normalize_memory_update_data,
     _parse_fact_datetime,
     _read_expected_valid_days,
+    _safe_add_days,
     _select_stale_candidates,
 )
 
@@ -170,19 +171,18 @@ class TestReadExpectedValidDays:
         # sanity: the helper no longer raises on these
         assert _read_expected_valid_days({"expected_valid_days": float("nan")}) is None
 
-    def test_rejects_huge_int_above_timedelta_max(self):
+    def test_accepts_huge_int_without_routing_through_float(self):
         # Python's JSON decoder parses an integer literal with no decimal point as
         # an arbitrary-precision int (not a float), so a hand-edited memory.json
-        # can carry 10**400. float(10**400) raises OverflowError, and any int above
-        # timedelta.max.days (999999999) would raise OverflowError downstream in
-        # timedelta(days=evd). The helper rejects both so a single malformed field
-        # cannot abort staleness selection or consolidation.
+        # can carry 10**400. The helper must not route it through float() (which
+        # raises OverflowError); it returns the int as-is. Whether that int can
+        # participate in datetime arithmetic is the caller's concern, handled by
+        # _safe_add_days - the helper's job is type/positivity validation only.
         from datetime import timedelta
 
-        for bad in (10**400, 10**12, 10**9, timedelta.max.days + 1):
-            assert _read_expected_valid_days({"expected_valid_days": bad}) is None
-        # the boundary itself is accepted; one above is rejected
+        assert _read_expected_valid_days({"expected_valid_days": 10**400}) == 10**400
         assert _read_expected_valid_days({"expected_valid_days": timedelta.max.days}) == timedelta.max.days
+        assert _read_expected_valid_days({"expected_valid_days": timedelta.max.days + 1}) == timedelta.max.days + 1
 
 
 # ── _effective_fact_staleness_age ─────────────────────────────────────────
@@ -246,15 +246,55 @@ class TestEffectiveFactStalenessAge:
             fact["expected_valid_days"] = bad
             assert _effective_fact_staleness_age(fact, config) == 90
 
-    def test_falls_back_for_huge_int_above_timedelta_max(self):
-        # A huge int (10**400) must fall back to the global age instead of raising
-        # OverflowError downstream in timedelta(days=evd) during staleness
-        # selection. Same hand-edited-memory.json robustness as the non-finite case.
+    def test_returns_huge_int_as_is(self):
+        # A huge int is returned as-is (not routed through float, not rejected);
+        # datetime-overflow safety is the caller's job (_safe_add_days). The read
+        # path itself must not raise on such a stored value.
         config = _memory_config(staleness_age_days=90)
-        for bad in (10**400, 10**12, 10**9):
+        for v in (10**400, 10**12, 10**9):
             fact = _make_fact("f1", days_ago=100)
-            fact["expected_valid_days"] = bad
-            assert _effective_fact_staleness_age(fact, config) == 90
+            fact["expected_valid_days"] = v
+            assert _effective_fact_staleness_age(fact, config) == v
+
+
+# ── _safe_add_days ────────────────────────────────────────────────────────
+
+
+class TestSafeAddDays:
+    """Guards datetime arithmetic against huge persisted expected_valid_days.
+
+    A stored evd above timedelta.max.days (or that pushes the result past
+    datetime.min/max) raises OverflowError in timedelta(days=...) or in the
+    addition. _safe_add_days returns None so callers can fall back instead of
+    aborting the whole staleness/consolidation cycle.
+    """
+
+    def test_normal_shift(self):
+        from datetime import UTC, datetime, timedelta
+
+        dt = datetime.now(UTC)
+        assert _safe_add_days(dt, 365) == dt + timedelta(days=365)
+
+    def test_negative_shift(self):
+        from datetime import UTC, datetime, timedelta
+
+        dt = datetime.now(UTC)
+        assert _safe_add_days(dt, -365) == dt + timedelta(days=-365)
+
+    def test_huge_int_returns_none(self):
+        from datetime import UTC, datetime
+
+        dt = datetime.now(UTC)
+        for bad in (10**400, 10**12, 10**9):
+            assert _safe_add_days(dt, bad) is None
+
+    def test_overflow_past_datetime_max_returns_none(self):
+        # timedelta.max.days itself constructs but now + timedelta.max.days
+        # overflows datetime.max - must return None, not raise.
+        from datetime import UTC, datetime, timedelta
+
+        dt = datetime.now(UTC)
+        assert _safe_add_days(dt, timedelta.max.days) is None
 
 
 # ── _select_stale_candidates ──────────────────────────────────────────────
@@ -304,6 +344,16 @@ class TestSelectStaleCandidates:
         candidates = _select_stale_candidates(memory, config)
         assert len(candidates) == 1
         assert candidates[0]["id"] == "f1"
+
+    def test_huge_evd_does_not_abort_selection(self):
+        # A huge persisted expected_valid_days (10**400) makes the review window
+        # unrepresentable in datetime arithmetic. The fact cannot yet be stale
+        # (its window is astronomically large), so it is skipped - not selected,
+        # and crucially the selection does not raise.
+        config = _memory_config(staleness_age_days=90)
+        for bad in (10**400, 10**12, 10**9):
+            memory = _make_memory([_make_fact("f1", days_ago=100, expected_valid_days=bad)])
+            assert _select_stale_candidates(memory, config) == []
 
 
 # ── Trigger conditions via _select_stale_candidates + config ─────────────

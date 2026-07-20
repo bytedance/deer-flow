@@ -1190,7 +1190,11 @@ class TestReviewerFindings:
         # to merged createdAt (same) = 90.
         assert merged[0]["expected_valid_days"] == 90
 
-    @pytest.mark.parametrize("bad_evd", [10**400, 10**12, 10**9], ids=["1e400", "1e12", "1e9"])
+    @pytest.mark.parametrize(
+        "bad_evd",
+        [10**400, 10**12, 10**9, timedelta.max.days],
+        ids=["1e400", "1e12", "1e9", "timedelta_max"],
+    )
     def test_consolidation_with_huge_int_source_evd_does_not_raise(self, bad_evd):
         """A huge int expected_valid_days (above timedelta.max.days) in a
         hand-edited memory.json must not abort consolidation. Python's JSON
