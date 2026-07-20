@@ -148,6 +148,42 @@ def test_app_config_preserves_config_yaml_extension_middlewares(tmp_path, monkey
     assert config.extensions.middlewares == ["pkg.from_yaml:YamlMiddleware"]
 
 
+def test_app_config_normalizes_config_yaml_extension_aliases_before_override(tmp_path, monkeypatch):
+    config_path = tmp_path / "config.yaml"
+    extensions_path = tmp_path / "extensions_config.json"
+    extensions_path.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "from-file": {
+                        "command": "file-mcp",
+                    }
+                },
+                "skills": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    _write_config_with_sections(
+        config_path,
+        {
+            "extensions": {
+                "mcp_servers": {
+                    "from-yaml": {
+                        "command": "yaml-mcp",
+                    }
+                },
+            }
+        },
+    )
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(extensions_path))
+
+    config = AppConfig.from_file(str(config_path))
+
+    assert set(config.extensions.mcp_servers) == {"from-yaml"}
+    assert config.extensions.mcp_servers["from-yaml"].command == "yaml-mcp"
+
+
 def test_app_config_loads_extension_middlewares_from_extensions_config(tmp_path, monkeypatch):
     config_path = tmp_path / "config.yaml"
     extensions_path = tmp_path / "extensions_config.json"

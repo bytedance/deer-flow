@@ -327,7 +327,8 @@ class AppConfig(BaseModel):
         extensions_config = ExtensionsConfig.from_file()
         extensions_data = extensions_config.model_dump(by_alias=True)
         if isinstance(yaml_extensions, Mapping):
-            extensions_data.update(yaml_extensions)
+            yaml_extensions_config = ExtensionsConfig.model_validate(yaml_extensions)
+            extensions_data.update(yaml_extensions_config.model_dump(by_alias=True, exclude_unset=True))
         config_data["extensions"] = extensions_data
 
         result = cls.model_validate(config_data)

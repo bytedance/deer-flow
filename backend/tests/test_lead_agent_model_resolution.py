@@ -112,6 +112,15 @@ class ConfiguredAuditMiddleware(AgentMiddleware):
     pass
 
 
+class ConfiguredInitFailureMiddleware(AgentMiddleware):
+    def __init__(self) -> None:
+        raise RuntimeError("configured middleware init failed")
+
+
+class ConfiguredNonMiddleware:
+    pass
+
+
 def test_make_lead_agent_signature_matches_langgraph_server_factory_abi():
     assert list(inspect.signature(lead_agent_module.make_lead_agent).parameters) == ["config"]
 
@@ -782,6 +791,46 @@ def test_build_middlewares_rejects_invalid_configured_extension_middleware(monke
     monkeypatch.setattr(lead_agent_module, "_create_todo_list_middleware", lambda is_plan_mode: None)
 
     with pytest.raises(ValueError, match="not an instance of type"):
+        lead_agent_module.build_middlewares(
+            {"configurable": {"is_plan_mode": False, "subagent_enabled": False}},
+            model_name="safe-model",
+            app_config=app_config,
+        )
+
+
+def test_build_middlewares_rejects_configured_extension_class_with_wrong_base(monkeypatch):
+    app_config = _make_app_config(
+        [_make_model("safe-model", supports_thinking=False)],
+        loop_detection=LoopDetectionConfig(enabled=False),
+    )
+    app_config.extensions = ExtensionsConfig(middlewares=[f"{__name__}:ConfiguredNonMiddleware"])
+
+    monkeypatch.setattr(lead_agent_module, "get_app_config", lambda: app_config)
+    monkeypatch.setattr(lead_agent_module, "build_lead_runtime_middlewares", lambda *, app_config, lazy_init=True: [])
+    monkeypatch.setattr(lead_agent_module, "_create_summarization_middleware", lambda *, app_config=None: None)
+    monkeypatch.setattr(lead_agent_module, "_create_todo_list_middleware", lambda is_plan_mode: None)
+
+    with pytest.raises(ValueError, match="is not a subclass of AgentMiddleware"):
+        lead_agent_module.build_middlewares(
+            {"configurable": {"is_plan_mode": False, "subagent_enabled": False}},
+            model_name="safe-model",
+            app_config=app_config,
+        )
+
+
+def test_build_middlewares_reraises_configured_extension_instantiation_failure(monkeypatch):
+    app_config = _make_app_config(
+        [_make_model("safe-model", supports_thinking=False)],
+        loop_detection=LoopDetectionConfig(enabled=False),
+    )
+    app_config.extensions = ExtensionsConfig(middlewares=[f"{__name__}:ConfiguredInitFailureMiddleware"])
+
+    monkeypatch.setattr(lead_agent_module, "get_app_config", lambda: app_config)
+    monkeypatch.setattr(lead_agent_module, "build_lead_runtime_middlewares", lambda *, app_config, lazy_init=True: [])
+    monkeypatch.setattr(lead_agent_module, "_create_summarization_middleware", lambda *, app_config=None: None)
+    monkeypatch.setattr(lead_agent_module, "_create_todo_list_middleware", lambda is_plan_mode: None)
+
+    with pytest.raises(RuntimeError, match="configured middleware init failed"):
         lead_agent_module.build_middlewares(
             {"configurable": {"is_plan_mode": False, "subagent_enabled": False}},
             model_name="safe-model",
