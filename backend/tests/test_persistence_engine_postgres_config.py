@@ -31,12 +31,18 @@ def test_database_command_timeout_defaults_to_30_seconds() -> None:
     assert config.command_timeout == 30
 
 
+def test_database_pool_recycle_defaults_to_300_seconds() -> None:
+    config = DatabaseConfig()
+
+    assert config.pool_recycle == 300
+
+
 def test_postgres_engine_kwargs_preserve_caller_values() -> None:
-    kwargs = engine_mod._postgres_engine_kwargs(echo=True, pool_size=20, command_timeout=90)
+    kwargs = engine_mod._postgres_engine_kwargs(echo=True, pool_size=20, pool_recycle=120, command_timeout=90)
 
     assert kwargs["echo"] is True
     assert kwargs["pool_size"] == 20
-    assert kwargs["pool_recycle"] == engine_mod.POSTGRES_POOL_RECYCLE_SECONDS
+    assert kwargs["pool_recycle"] == 120
     assert kwargs["connect_args"] == {"command_timeout": 90}
 
 
@@ -99,6 +105,7 @@ async def test_init_engine_from_config_preserves_longer_command_timeout_override
     config = DatabaseConfig(
         backend="postgres",
         postgres_url="postgresql://user:password@localhost/deerflow",
+        pool_recycle=120,
         command_timeout=90,
     )
     mock_engine = MagicMock()
@@ -116,7 +123,7 @@ async def test_init_engine_from_config_preserves_longer_command_timeout_override
 
             kwargs = create_engine.call_args.kwargs
             assert kwargs["connect_args"]["command_timeout"] == 90
-            assert kwargs["pool_recycle"] == engine_mod.POSTGRES_POOL_RECYCLE_SECONDS
+            assert kwargs["pool_recycle"] == 120
         finally:
             await engine_mod.close_engine()
 
