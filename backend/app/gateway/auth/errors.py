@@ -21,6 +21,7 @@ class AuthErrorCode(StrEnum):
     PROVIDER_NOT_FOUND = "provider_not_found"
     NOT_AUTHENTICATED = "not_authenticated"
     SYSTEM_ALREADY_INITIALIZED = "system_already_initialized"
+    REGISTRATION_DISABLED = "registration_disabled"
 
 
 class TokenError(StrEnum):
