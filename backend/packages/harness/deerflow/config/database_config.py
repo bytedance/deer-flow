@@ -98,5 +98,8 @@ class DatabaseConfig(BaseModel):
             url = self.postgres_url
             if url.startswith("postgresql://"):
                 url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
+            elif url.startswith("postgres://"):
+                # libpq's short alias: accepted by the psycopg checkpointer, but not a SQLAlchemy dialect.
+                url = url.replace("postgres://", "postgresql+asyncpg://", 1)
             return url
         raise ValueError(f"No SQLAlchemy URL for backend={self.backend!r}")

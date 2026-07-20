@@ -145,6 +145,13 @@ def update_agent(
     if soul is None and description is None and skills is None and tool_groups is None and model is None:
         return _err('No fields provided. Pass at least one of: soul, description, skills, tool_groups, model. Omit unchanged fields instead of passing null-like strings such as "null", "none", or "undefined".')
 
+    # Reject empty / whitespace-only soul before touching the filesystem.
+    # setup_agent already refuses this (#3553 / #3549); update_agent must too,
+    # otherwise a custom agent can report success while wiping a working
+    # SOUL.md and leaving the next turn with an empty personality.
+    if soul is not None and not soul.strip():
+        return _err("soul content is empty; refusing to update agent with an empty SOUL.md. Omit the soul field if you do not want to change it.")
+
     try:
         agent_name = validate_agent_name(agent_name_raw)
     except ValueError as e:

@@ -115,6 +115,39 @@ class DeerMemConfig(BaseModel):
         default_factory=lambda: ["correction"],
         description="Fact categories exempt from staleness review.",
     )
+    staleness_max_lifetime_multiplier: float = Field(
+        default=20.0,
+        ge=1.0,
+        le=100.0,
+        description=(
+            "Creation-time cap multiplier for a fact's LLM-assigned "
+            "expected_valid_days. When a new fact is stored, its "
+            "expected_valid_days is clamped to "
+            "staleness_age_days * staleness_max_lifetime_multiplier so the "
+            "model cannot set an initial lifetime so long that the fact is "
+            "never re-evaluated. Default 20.0 (90 x 20 = 1800 d ~= 5 years) "
+            "is generous enough to support the 'very stable' prompt tier "
+            "(core skills, native language) without needing multiple review "
+            "cycles to escape the cap. Lifetime extensions (staleFactsToExtend) "
+            "are subject to staleness_max_extension_days instead."
+        ),
+    )
+    staleness_max_extension_days: int = Field(
+        default=3650,
+        ge=90,
+        le=36500,
+        description=(
+            "Absolute upper bound (in days) on expected_valid_days after a "
+            "lifetime extension (staleFactsToExtend). Applied at write time "
+            "during staleness review: new_evd = min(days_since + extend_by, "
+            "staleness_max_extension_days). Separate from the creation-time "
+            "multiplier cap because extensions are deliberate recalibration "
+            "decisions and are not subject to the staleness_age_days scale. "
+            "The ceiling prevents a single LLM misfire from permanently "
+            "deferring a fact or causing timedelta overflow on the next "
+            "candidate-selection pass. Default 3650 (10 years)."
+        ),
+    )
     # ── Memory consolidation ────────────────────────────────────────────
     consolidation_enabled: bool = Field(
         default=False,
@@ -145,6 +178,15 @@ class DeerMemConfig(BaseModel):
         ge=2,
         le=20,
         description=("Maximum number of source facts per consolidation group. Prevents the LLM from merging too many facts into one and losing important details."),
+    )
+    # ── Message processing (externalized patterns / prompts) ──
+    patterns_dir: str | None = Field(
+        default=None,
+        description=("Directory with correction.yaml / reinforcement.yaml overriding the bundled signal-detection patterns. None (default) = bundled core/message_patterns/. When set explicitly, both files must exist."),
+    )
+    prompts_dir: str | None = Field(
+        default=None,
+        description=("Directory with custom memory-extraction prompt templates (memory_update.chat.yaml, staleness_review.yaml, consolidation.yaml, fact_extraction.yaml). None (default) = bundled core/prompts/."),
     )
     # ── LLM (step 13: structured model sub-config consumed by core/llm.py build_llm) ──
     model: DeerMemModelConfig = Field(

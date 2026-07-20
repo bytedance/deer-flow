@@ -84,6 +84,33 @@ class _MockAsyncClient:
         return None
 
 
+def test_timing_config_requires_positive_finite_values():
+    from app.channels.wechat import WechatChannel
+
+    timing_defaults = {
+        "polling_timeout": WechatChannel.DEFAULT_POLLING_TIMEOUT,
+        "polling_retry_delay": WechatChannel.DEFAULT_RETRY_DELAY,
+        "qrcode_poll_interval": WechatChannel.DEFAULT_QRCODE_POLL_INTERVAL,
+        "qrcode_poll_timeout": WechatChannel.DEFAULT_QRCODE_POLL_TIMEOUT,
+    }
+    attributes = {
+        "polling_timeout": "_polling_timeout",
+        "polling_retry_delay": "_retry_delay",
+        "qrcode_poll_interval": "_qrcode_poll_interval",
+        "qrcode_poll_timeout": "_qrcode_poll_timeout",
+    }
+
+    for invalid in (0, -1, float("nan"), float("inf"), float("-inf"), 10**1000):
+        channel = WechatChannel(
+            bus=MessageBus(),
+            config={"bot_token": "test-token", **dict.fromkeys(timing_defaults, invalid)},
+        )
+        assert {key: getattr(channel, attributes[key]) for key in timing_defaults} == timing_defaults
+
+    channel = WechatChannel(bus=MessageBus(), config={"bot_token": "test-token", "polling_retry_delay": "0.25"})
+    assert channel._retry_delay == 0.25
+
+
 def test_handle_update_publishes_private_chat_message():
     from app.channels.wechat import WechatChannel
 
@@ -1230,6 +1257,139 @@ def test_poll_loop_updates_server_timeout(monkeypatch):
         assert channel._get_updates_buf == "cursor-next"
         assert channel._server_longpoll_timeout_seconds == 42.0
         assert post_calls[0]["url"].endswith("/ilink/bot/getupdates")
+
+    _run(go())
+
+
+def test_poll_loop_one_bad_message_does_not_permanently_lose_its_siblings(monkeypatch, tmp_path: Path, caplog):
+    """A single message that fails to process must not sink the rest of its batch.
+
+    Regression test for a permanent message-loss bug: the long-poll cursor was
+    persisted for the *whole* batch before the per-message loop ran, and the loop
+    had no per-message error isolation, so one bad message (e.g. an attachment
+    that fails to decrypt) aborted processing of every message after it in the
+    same batch. Because the cursor had already advanced past the whole batch,
+    the next poll would never re-fetch the unprocessed tail -- silent, permanent
+    loss of every message after the first failure in a batch.
+
+    This test sends a real 3-message batch through the *real* (unstubbed)
+    ``_handle_update`` -- message 1 is fine, message 2 is a WeChat image item
+    whose "encrypted" bytes are deliberately not a multiple of the AES block
+    size, so ``_decrypt_aes_128_ecb`` raises a genuine ``cryptography`` library
+    ``ValueError`` (matching how a real corrupt/undecryptable attachment would
+    fail), and message 3 is fine again. The fix must:
+      - still deliver message 1 and message 3 to the bus despite message 2's
+        failure (per-message isolation instead of one bad apple aborting the
+        for loop), and
+      - log message 2's failure instead of swallowing it silently, and
+      - only advance/persist the cursor once the whole batch has been
+        attempted (so a crash mid-batch re-delivers rather than silently
+        drops).
+    """
+    from app.channels.wechat import WechatChannel
+
+    async def go():
+        bus = MessageBus()
+        published: list[Any] = []
+
+        async def capture(msg):
+            published.append(msg)
+
+        bus.publish_inbound = capture  # type: ignore[method-assign]
+
+        aes_key = b"1234567890abcdef"
+        non_block_aligned_ciphertext = b"\x01\x02\x03\x04\x05"  # 5 bytes: not a multiple of 16
+
+        msg_good_1 = {
+            "message_type": 1,
+            "message_id": "msg-1-good",
+            "from_user_id": "wx-user-1",
+            "context_token": "ctx-1",
+            "item_list": [{"type": 1, "text_item": {"text": "message one"}}],
+        }
+        msg_bad_2 = {
+            "message_type": 1,
+            "message_id": "msg-2-bad",
+            "from_user_id": "wx-user-1",
+            "context_token": "ctx-2",
+            "item_list": [
+                {
+                    "type": 2,
+                    "image_item": {
+                        "aeskey": aes_key.hex(),
+                        "media": {"full_url": "https://cdn.example/corrupt-attachment.bin"},
+                    },
+                }
+            ],
+        }
+        msg_good_3 = {
+            "message_type": 1,
+            "message_id": "msg-3-good",
+            "from_user_id": "wx-user-1",
+            "context_token": "ctx-3",
+            "item_list": [{"type": 1, "text_item": {"text": "message three"}}],
+        }
+
+        state_dir = tmp_path / "wechat-state"
+
+        def _client_factory(*args, **kwargs):
+            return _MockAsyncClient(
+                post_responses=[
+                    {
+                        "ret": 0,
+                        "msgs": [msg_good_1, msg_bad_2, msg_good_3],
+                        "get_updates_buf": "cursor-after-batch",
+                    }
+                ],
+                **kwargs,
+            )
+
+        monkeypatch.setattr("app.channels.wechat.httpx.AsyncClient", _client_factory)
+
+        channel = WechatChannel(
+            bus=bus,
+            config={"bot_token": "test-token", "state_dir": str(state_dir), "polling_retry_delay": 0.001},
+        )
+
+        async def _fake_download(_url: str, *, timeout: float | None = None) -> bytes:
+            return non_block_aligned_ciphertext
+
+        channel._download_cdn_bytes = _fake_download  # type: ignore[method-assign]
+
+        # _handle_update is intentionally left as the REAL implementation so
+        # message 2 hits the genuine cryptography ValueError. To keep the test
+        # deterministic without depending on the bug/fix under test, force the
+        # poll loop to stop after exactly one getupdates cycle via
+        # _ensure_authenticated (called at the top of every iteration, before
+        # any message is processed) rather than via message content.
+        real_ensure_authenticated = channel._ensure_authenticated
+        auth_calls = {"n": 0}
+
+        async def _ensure_auth_then_stop() -> bool:
+            auth_calls["n"] += 1
+            if auth_calls["n"] > 1:
+                channel._running = False
+                return False
+            return await real_ensure_authenticated()
+
+        channel._ensure_authenticated = _ensure_auth_then_stop  # type: ignore[method-assign]
+        channel._running = True
+
+        with caplog.at_level(logging.INFO, logger="app.channels.wechat"):
+            await channel._poll_loop()
+
+        # Message 1 and message 3 must both survive message 2's failure.
+        assert [m.text for m in published] == ["message one", "message three"]
+
+        # Message 2's failure must be logged, not silently swallowed.
+        messages = [record.getMessage() for record in caplog.records]
+        assert any("msg-2-bad" in message for message in messages)
+
+        # The cursor must reflect that the whole batch was attempted -- both
+        # in memory and in the persisted state file used to resume polling.
+        assert channel._get_updates_buf == "cursor-after-batch"
+        persisted = json.loads((state_dir / "wechat-getupdates.json").read_text(encoding="utf-8"))
+        assert persisted["get_updates_buf"] == "cursor-after-batch"
 
     _run(go())
 

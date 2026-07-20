@@ -41,6 +41,8 @@ _LEGACY_DEERMEM_FIELDS = frozenset(
         "staleness_min_candidates",
         "staleness_max_removals_per_cycle",
         "staleness_protected_categories",
+        "staleness_max_lifetime_multiplier",
+        "staleness_max_extension_days",
         "consolidation_enabled",
         "consolidation_min_facts",
         "consolidation_max_groups_per_cycle",

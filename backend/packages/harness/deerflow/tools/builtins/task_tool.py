@@ -12,6 +12,7 @@ from langchain_core.messages import ToolMessage
 from langgraph.config import get_stream_writer
 from langgraph.types import Command
 
+from deerflow.authz.principal import normalize_authz_attributes
 from deerflow.config import get_app_config
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.sandbox.security import LOCAL_BASH_SUBAGENT_DISABLED_MESSAGE, is_host_bash_allowed
@@ -341,6 +342,11 @@ async def task_tool(
     # IM-channel sender identity: group chats share one thread across senders,
     # so delegated bash commands need the dispatching turn's channel_user_id.
     channel_user_id = parent_context.get("channel_user_id")
+    # Propagate authorization identity: is_internal (strict bool) and
+    # authz_attributes (validated Mapping, copied). These follow the same
+    # server-side provenance as user_role/oauth — see inject_authenticated_user_context.
+    is_internal = parent_context.get("is_internal") is True
+    authz_attributes = normalize_authz_attributes(parent_context.get("authz_attributes"))
     deerflow_trace_id = normalize_trace_id(parent_context.get(DEERFLOW_TRACE_METADATA_KEY)) or normalize_trace_id(metadata.get(DEERFLOW_TRACE_METADATA_KEY)) or get_current_trace_id()
 
     parent_available_skills = metadata.get("available_skills")
@@ -386,6 +392,8 @@ async def task_tool(
         "oauth_id": oauth_id,
         "run_id": run_id,
         "channel_user_id": channel_user_id,
+        "is_internal": is_internal,
+        "authz_attributes": authz_attributes,
         "deerflow_trace_id": deerflow_trace_id,
     }
     if resolved_app_config is not None:

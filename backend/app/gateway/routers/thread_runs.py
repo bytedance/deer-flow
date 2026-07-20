@@ -708,9 +708,9 @@ async def stream_existing_run(
 async def list_thread_messages(
     thread_id: str,
     request: Request,
-    limit: int = Query(default=50, le=200),
-    before_seq: int | None = Query(default=None),
-    after_seq: int | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=200),
+    before_seq: int | None = Query(default=None, ge=1),
+    after_seq: int | None = Query(default=None, ge=1),
 ) -> list[dict]:
     """Return displayable messages for a thread (across all runs), with feedback attached."""
     event_store = get_run_event_store(request)
@@ -910,8 +910,8 @@ async def list_run_messages(
     run_id: str,
     request: Request,
     limit: int = Query(default=50, le=200, ge=1),
-    before_seq: int | None = Query(default=None),
-    after_seq: int | None = Query(default=None),
+    before_seq: int | None = Query(default=None, ge=1),
+    after_seq: int | None = Query(default=None, ge=1),
 ) -> dict:
     """Return paginated messages for a specific run.
 
@@ -954,8 +954,8 @@ async def list_run_events(
     request: Request,
     event_types: str | None = Query(default=None),
     task_id: str | None = Query(default=None),
-    limit: int = Query(default=500, le=2000),
-    after_seq: int | None = Query(default=None),
+    limit: int = Query(default=500, ge=1, le=2000),
+    after_seq: int | None = Query(default=None, ge=1),
 ) -> list[dict]:
     """Return the full event stream for a run (debug/audit).
 

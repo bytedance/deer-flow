@@ -56,7 +56,11 @@ from deerflow.runtime.goal import (
 from deerflow.runtime.serialization import serialize
 from deerflow.runtime.stream_bridge import StreamBridge
 from deerflow.runtime.user_context import get_effective_user_id, resolve_runtime_user_id
-from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, get_current_trace_id, normalize_trace_id
+from deerflow.trace_context import (
+    DEERFLOW_TRACE_METADATA_KEY,
+    is_trace_id_from_request_header,
+    resolve_deerflow_trace_id,
+)
 from deerflow.tracing import inject_langfuse_metadata
 from deerflow.utils.messages import message_to_text
 from deerflow.workspace_changes import capture_workspace_snapshot, record_workspace_changes
@@ -363,9 +367,13 @@ async def run_agent(
         runtime_ctx = _build_runtime_context(thread_id, run_id, config.get("context"), ctx.app_config)
         runtime_ctx[CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY] = frozenset(pre_existing_message_ids)
         incoming_metadata = config.get("metadata") if isinstance(config.get("metadata"), dict) else {}
-        deerflow_trace_id = normalize_trace_id(incoming_metadata.get(DEERFLOW_TRACE_METADATA_KEY)) or get_current_trace_id()
+        deerflow_trace_id = resolve_deerflow_trace_id(incoming_metadata.get(DEERFLOW_TRACE_METADATA_KEY))
         if deerflow_trace_id:
             runtime_ctx[DEERFLOW_TRACE_METADATA_KEY] = deerflow_trace_id
+            if is_trace_id_from_request_header():
+                merged_metadata = dict(incoming_metadata)
+                merged_metadata[DEERFLOW_TRACE_METADATA_KEY] = deerflow_trace_id
+                config["metadata"] = merged_metadata
         # Expose the run-scoped journal under a sentinel key so middleware can
         # write audit events (e.g. SafetyFinishReasonMiddleware recording
         # suppressed tool calls). Double-underscore prefix marks it as a

@@ -564,6 +564,8 @@ Custom agents can restrict which skills they load by defining a `skills` field i
 - **`[]` (empty list)**: Disables all skills for this specific agent.
 - **`["skill-name"]`**: Loads only the explicitly specified skills.
 
+This field is a discovery and activation allowlist; it does not activate every listed skill's `allowed-tools` policy when the agent is constructed. Use `tool_groups` to define the agent's baseline tools. A listed skill's policy applies only after slash activation or an actual `SKILL.md` load.
+
 ### Title Generation
 
 Automatic conversation title generation:
