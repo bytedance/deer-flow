@@ -1115,12 +1115,13 @@ def test_scan_file_still_treats_generator_outer_iterable_as_definition_time_eage
 
 
 def test_scan_file_treats_immediately_invoked_lambda_as_eager(tmp_path: Path) -> None:
-    """An immediately invoked lambda executes its body right now, not lazily.
+    """An immediately invoked lambda's body is scanned like any other expression.
 
-    `(lambda: ...)()` is called at the exact expression that defines it, so
-    unlike a lambda that is merely created (see
-    `test_scan_file_still_treats_bare_uninvoked_lambda_as_lazy` below), its
-    body genuinely runs eagerly here and must not be suppressed.
+    `(lambda: ...)()` calls the lambda at the exact expression that defines
+    it, in ordinary function-body code -- outside another function's
+    definition-time expressions (see `_visit_function`), a lambda's body is
+    always scanned regardless of how or whether it is invoked (see also
+    `test_scan_file_treats_bare_uninvoked_lambda_as_eager_in_ordinary_code`).
     """
     source_file = _write_python(
         tmp_path / "sample.py",
@@ -1141,12 +1142,13 @@ def test_scan_file_treats_immediately_invoked_lambda_as_eager(tmp_path: Path) ->
 
 
 def test_scan_file_treats_generator_passed_to_list_as_eager(tmp_path: Path) -> None:
-    """A generator passed directly to `list(...)` is fully consumed right now.
+    """A generator passed to `list(...)` is scanned like any other expression.
 
-    Unlike an unconsumed generator sitting in a variable (see
-    `test_scan_file_still_treats_bare_unconsumed_generator_as_lazy` below),
-    `list(...)` iterates it immediately to build the result, so the blocking
-    call in its element expression must not be suppressed.
+    In ordinary function-body code -- outside another function's
+    definition-time expressions (see `_visit_function`) -- a generator's
+    element is always scanned regardless of what, if anything, consumes it
+    (see also `test_scan_file_treats_generator_consumed_by_any_builtin_as_eager`
+    and `test_scan_file_treats_generator_wrapped_in_map_as_eager`).
     """
     source_file = _write_python(
         tmp_path / "sample.py",
@@ -1194,13 +1196,17 @@ def test_scan_file_treats_reviewer_repro_both_eager_shapes_together(tmp_path: Pa
     assert len({finding["location"]["line"] for finding in findings}) == 2
 
 
-def test_scan_file_treats_generator_passed_to_other_eager_consumers_as_eager(tmp_path: Path) -> None:
-    """The same fix also covers `set`/`tuple`/`sorted`/`frozenset`/`dict`.
+def test_scan_file_treats_generator_consumed_by_any_builtin_as_eager(tmp_path: Path) -> None:
+    """A generator's element is scanned no matter what consumes it.
 
-    All names in `EAGER_ITERABLE_CONSUMER_NAMES` share the identical
-    `visit_Call` check; this exercises the remaining names beyond the `list`
-    case above so each one has real test coverage instead of shipping as an
-    unverified addition.
+    In ordinary function-body code, this file does not try to distinguish a
+    builtin that eagerly materializes its argument into a container
+    (`list`, `set`, `tuple`, `sorted`, `frozenset`, `dict`) from one that
+    eagerly reduces it to a scalar (`sum`, `any`, `all`, `min`, `max`) --
+    every one of them is scanned the same way, unconditionally, along with a
+    builtin that instead wraps the generator in another lazy iterator
+    without consuming it at all (see
+    `test_scan_file_treats_generator_wrapped_in_map_as_eager`).
     """
     source_file = _write_python(
         tmp_path / "sample.py",
@@ -1213,26 +1219,63 @@ def test_scan_file_treats_generator_passed_to_other_eager_consumers_as_eager(tmp
             c = sorted(os.listdir(p) for p in ["c"])
             d = frozenset(os.listdir(p) for p in ["d"])
             e = dict((p, os.listdir(p)) for p in ["e"])
-            return a, b, c, d, e
+            f = sum(len(os.listdir(p)) for p in ["f"])
+            g = any(os.listdir(p) for p in ["g"])
+            h = all(os.listdir(p) for p in ["h"])
+            i = min(len(os.listdir(p)) for p in ["i"])
+            j = max(len(os.listdir(p)) for p in ["j"])
+            return a, b, c, d, e, f, g, h, i, j
         """,
     )
 
     findings = _payload(source_file, tmp_path)
 
-    assert len(findings) == 5
+    assert len(findings) == 10
     assert {finding["location"]["function"] for finding in findings} == {"route"}
     assert {finding["blocking_call"]["symbol"] for finding in findings} == {"os.listdir"}
     assert {finding["event_loop_exposure"] for finding in findings} == {"DIRECT_ASYNC"}
 
 
-def test_scan_file_treats_immediately_invoked_lambda_in_definition_time_default_as_eager_in_enclosing_scope(tmp_path: Path) -> None:
-    """The eager-invocation fix composes with the enclosing-scope fix.
+def test_scan_file_treats_generator_reduced_by_sum_as_eager(tmp_path: Path) -> None:
+    """`sum(...)` iterates its generator argument immediately, same as `list(...)`.
 
-    An IIFE lambda used as a parameter default is eager (invoked right where
-    it's defined) AND attributed to the enclosing scope (parameter defaults
-    run at definition time in the enclosing scope, not the function being
-    defined) -- both axes established across this PR's rounds must hold at
-    the same time, not just individually.
+    A reducer builtin that folds a generator down to a scalar still consumes
+    it eagerly to do so, so ordinary code scans it the same as any other
+    generator (see also
+    `test_scan_file_treats_generator_consumed_by_any_builtin_as_eager`).
+    """
+    source_file = _write_python(
+        tmp_path / "sample.py",
+        """
+        import os
+
+        async def route():
+            return sum(len(os.listdir(path)) for path in ["."])
+        """,
+    )
+
+    findings = _payload(source_file, tmp_path)
+
+    assert len(findings) == 1
+    assert findings[0]["location"]["function"] == "route"
+    assert findings[0]["event_loop_exposure"] == "DIRECT_ASYNC"
+    assert findings[0]["blocking_call"]["symbol"] == "os.listdir"
+
+
+def test_scan_file_does_not_treat_immediately_invoked_lambda_in_definition_time_default_as_eager(tmp_path: Path) -> None:
+    """Definition-time expressions never scan a nested lambda's body, even an IIFE.
+
+    `helper`'s default value is itself an immediately invoked lambda, so its
+    body does run the instant `outer_async` evaluates the default. This file
+    does not special-case that: any lambda body or generator element reached
+    while walking another function's decorators, parameter defaults/
+    annotations, or return annotation is always excluded, full stop (see
+    `_visit_function`), the same as an uninvoked one (see
+    `test_scan_file_does_not_treat_lambda_body_as_definition_time_eager`
+    above). This is a narrow, intentional limitation specific to
+    definition-time expressions -- contrast with
+    `test_scan_file_treats_immediately_invoked_lambda_as_eager`, where the
+    identical shape outside a definition-time context is scanned.
     """
     source_file = _write_python(
         tmp_path / "sample.py",
@@ -1246,20 +1289,20 @@ def test_scan_file_treats_immediately_invoked_lambda_in_definition_time_default_
         """,
     )
 
-    findings = _payload(source_file, tmp_path)
-
-    assert len(findings) == 1
-    assert findings[0]["location"]["function"] == "outer_async"
-    assert findings[0]["event_loop_exposure"] == "DIRECT_ASYNC"
-    assert findings[0]["blocking_call"]["symbol"] == "os.listdir"
+    assert detector.scan_file(source_file, repo_root=tmp_path) == []
 
 
-def test_scan_file_still_treats_bare_uninvoked_lambda_as_lazy(tmp_path: Path) -> None:
-    """Contrast case: a lambda that is merely created is still lazy.
+def test_scan_file_treats_bare_uninvoked_lambda_as_eager_in_ordinary_code(tmp_path: Path) -> None:
+    """Ordinary code scans a lambda's body even if it is never called.
 
-    Only a lambda's own parameter defaults are eager; a lambda assigned to a
-    variable and never called must still have its body suppressed, same as
-    before this fix.
+    Unlike a lambda used as another function's decorator/default/annotation
+    value (see
+    `test_scan_file_does_not_treat_lambda_body_as_definition_time_eager`
+    above), a lambda created inside a function body is not part of that
+    narrow, definition-time-only exclusion. It is scanned unconditionally --
+    the same conservative, over-report-rather-than-infer stance this file
+    takes for reachability everywhere else: it does not try to prove that a
+    lambda (or any other reachable code) is never actually invoked.
     """
     source_file = _write_python(
         tmp_path / "sample.py",
@@ -1272,17 +1315,22 @@ def test_scan_file_still_treats_bare_uninvoked_lambda_as_lazy(tmp_path: Path) ->
         """,
     )
 
-    assert detector.scan_file(source_file, repo_root=tmp_path) == []
+    findings = _payload(source_file, tmp_path)
+
+    assert len(findings) == 1
+    assert findings[0]["location"]["function"] == "route"
+    assert findings[0]["event_loop_exposure"] == "DIRECT_ASYNC"
+    assert findings[0]["blocking_call"]["symbol"] == "os.listdir"
 
 
-def test_scan_file_still_treats_lambda_invoked_through_stored_variable_as_lazy(tmp_path: Path) -> None:
-    """Scope boundary: calling a lambda through a variable is not recognized.
+def test_scan_file_treats_lambda_invoked_through_stored_variable_as_eager(tmp_path: Path) -> None:
+    """A lambda stored in a local and called through that name is still scanned.
 
-    Only the literal `(lambda: ...)()` shape is treated as eager. Storing the
-    lambda first and invoking it later through the variable name is a
-    separate `Call` node whose `func` is a `Name`, not a `Lambda`, so it is
-    not recognized as eager -- a documented scope boundary (no cross-variable
-    dataflow tracking), not a regression target of this fix.
+    This is the same unconditional lambda-body scan as
+    `test_scan_file_treats_bare_uninvoked_lambda_as_eager_in_ordinary_code`
+    just above: ordinary code does not track which variable a lambda value
+    ends up in or whether/how it is later called, so calling it through the
+    stored name makes no difference to the outcome.
     """
     source_file = _write_python(
         tmp_path / "sample.py",
@@ -1295,15 +1343,24 @@ def test_scan_file_still_treats_lambda_invoked_through_stored_variable_as_lazy(t
         """,
     )
 
-    assert detector.scan_file(source_file, repo_root=tmp_path) == []
+    findings = _payload(source_file, tmp_path)
+
+    assert len(findings) == 1
+    assert findings[0]["location"]["function"] == "route"
+    assert findings[0]["event_loop_exposure"] == "DIRECT_ASYNC"
+    assert findings[0]["blocking_call"]["symbol"] == "os.listdir"
 
 
-def test_scan_file_still_treats_bare_unconsumed_generator_as_lazy(tmp_path: Path) -> None:
-    """Contrast case: a generator that is merely created is still lazy.
+def test_scan_file_treats_bare_unconsumed_generator_as_eager_in_ordinary_code(tmp_path: Path) -> None:
+    """Ordinary code scans a generator's element even if it is never iterated.
 
-    Only a generator's outermost iterable is eager; a generator expression
-    assigned to a variable and never consumed must still have its element
-    suppressed, same as before this fix.
+    Unlike a generator used as another function's decorator/default/
+    annotation value (see
+    `test_scan_file_does_not_treat_generator_element_as_definition_time_eager`
+    above), a generator expression created inside a function body is not
+    part of that narrow, definition-time-only exclusion. It is scanned
+    unconditionally -- the same stance as
+    `test_scan_file_treats_bare_uninvoked_lambda_as_eager_in_ordinary_code`.
     """
     source_file = _write_python(
         tmp_path / "sample.py",
@@ -1316,18 +1373,27 @@ def test_scan_file_still_treats_bare_unconsumed_generator_as_lazy(tmp_path: Path
         """,
     )
 
-    assert detector.scan_file(source_file, repo_root=tmp_path) == []
+    findings = _payload(source_file, tmp_path)
+
+    assert len(findings) == 1
+    assert findings[0]["location"]["function"] == "route"
+    assert findings[0]["event_loop_exposure"] == "DIRECT_ASYNC"
+    assert findings[0]["blocking_call"]["symbol"] == "os.listdir"
 
 
-def test_scan_file_still_treats_generator_wrapped_in_non_eager_builtin_as_lazy(tmp_path: Path) -> None:
-    """Scope boundary: `map(...)` wraps a generator without consuming it.
+def test_scan_file_treats_generator_wrapped_in_map_as_eager(tmp_path: Path) -> None:
+    """`map(...)` wraps a generator without consuming it, but is still scanned.
 
     `map(str, gen)` returns another lazy iterator -- it does not iterate
-    `gen` at all until the map object itself is consumed later (or never).
-    `map`/`filter`/`zip`/`enumerate` are deliberately excluded from
-    `EAGER_ITERABLE_CONSUMER_NAMES`, so this must stay suppressed even though
-    `map(...)` is itself a call and even though it takes the generator as an
-    argument.
+    `gen` at all until the map object itself is consumed, later or never.
+    Ordinary code does not try to tell this apart from a builtin that
+    consumes the generator eagerly (see
+    `test_scan_file_treats_generator_consumed_by_any_builtin_as_eager`) or a
+    bare, unconsumed generator (see
+    `test_scan_file_treats_bare_unconsumed_generator_as_eager_in_ordinary_code`)
+    -- all three are scanned the same way, since telling them apart in
+    general means inferring evaluation order across arbitrary code rather
+    than reading a fixed, structural fact.
     """
     source_file = _write_python(
         tmp_path / "sample.py",
@@ -1339,4 +1405,9 @@ def test_scan_file_still_treats_generator_wrapped_in_non_eager_builtin_as_lazy(t
         """,
     )
 
-    assert detector.scan_file(source_file, repo_root=tmp_path) == []
+    findings = _payload(source_file, tmp_path)
+
+    assert len(findings) == 1
+    assert findings[0]["location"]["function"] == "route"
+    assert findings[0]["event_loop_exposure"] == "DIRECT_ASYNC"
+    assert findings[0]["blocking_call"]["symbol"] == "os.listdir"

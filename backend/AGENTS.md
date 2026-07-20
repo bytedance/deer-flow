@@ -160,24 +160,34 @@ type-parameter bounds are not visited in either scope: CPython evaluates each
 one lazily, in its own hidden function, only if something like `T.__bound__`
 is actually accessed, never as part of running the `def` statement itself.
 A `lambda`'s body and a bare generator expression's element/filters/later
-`for` clauses are excluded from traversal the same way — not only within
-definition-time expressions, but everywhere in the file — since neither runs
-just because the lambda or generator object is created; only a lambda's own
-parameter defaults and a generator's outermost iterable are genuinely eager.
-This default is overridden in the two shapes where the body/elements
-genuinely do run immediately: a lambda invoked at its own definition site
-(`(lambda: ...)()`) executes its body right then, and a generator expression
-passed directly as the sole argument to a known eager-consuming builtin
-(`list`, `set`, `tuple`, `frozenset`, `dict`, `sorted`) is fully iterated
-right then to build the result — both are visited and attributed like any
-other eager expression at that same call site. Only these exact literal
-shapes are recognized: a lambda stored in a variable and invoked through
-that variable elsewhere, or a generator wrapped in another call before it
-reaches an eager consumer (e.g. `list(map(str, (x for x in gen)))`), stay
-unrecognized (i.e. still treated as lazy) — the same conservative,
-no-cross-variable-dataflow scope boundary already used for receiver
-aliasing above. This is intentionally informational and is not run from CI
-in this round.
+`for` clauses are excluded from traversal ONLY while walking another
+function's own definition-time expressions (decorators, parameter defaults/
+annotations, return annotation): there, we know structurally that the
+enclosing `def` statement is executing right now, and neither a lambda body
+nor a generator's element runs just because the lambda/generator object is
+created — only a lambda's own parameter defaults and a generator's
+outermost iterable are genuinely eager at that moment. This exclusion is
+absolute and has no exceptions: even a lambda that is immediately invoked at
+its own definition site (`(lambda: ...)()`), or a generator passed directly
+to an eager-consuming builtin, is still excluded when it appears inside
+another function's decorator/default/annotation — a narrow, intentional
+limitation given how rarely a definition-time expression contains an
+executed call at all, preferred over special-casing specific shapes there.
+
+Everywhere else — module level, class bodies, and ordinary function-body
+statements — a lambda body or generator expression's element is scanned
+unconditionally, the same conservative, over-report-rather-than-infer stance
+this file already takes for reachability elsewhere (the `ast.If` may-alias
+union, the bare-name call-graph resolution). This file does not attempt to
+distinguish a lambda that is invoked immediately, invoked later through a
+stored variable, passed as a callback, or never called at all, nor a
+generator that is consumed by an eager builtin (`list`, `sum`, `any`, etc.),
+wrapped in another lazy iterator (`map`, `filter`), or never consumed —
+telling these apart in the general case would mean inferring evaluation
+order and consumption across arbitrary code rather than reading a fixed,
+structural fact, so none of them are special-cased; all are scanned the
+same way. This is intentionally informational and is not run from CI in
+this round.
 
 For a diff-scoped view of the same findings, `scripts/scan_changed_blocking_io.py`
 (repo root) reports findings on the added lines of `git diff <base>...HEAD`
