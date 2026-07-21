@@ -90,6 +90,7 @@ export interface Translations {
     largeUnavailable: string;
     sensitiveUnavailable: string;
     truncatedUnavailable: string;
+    symlinkUnavailable: string;
     truncatedSummary: string;
   };
 

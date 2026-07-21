@@ -23,7 +23,7 @@ def compare_snapshots(
     resolved_limits = limits or WorkspaceChangeLimits()
     all_paths = sorted(set(before.files) | set(after.files))
     changes: list[WorkspaceFileChange] = []
-    created = modified = deleted = additions = deletions = 0
+    created = modified = deleted = symlink_created = additions = deletions = 0
     total_diff_bytes = 0
     truncated = before.truncated or after.truncated
 
@@ -38,6 +38,8 @@ def compare_snapshots(
             created += 1
         elif status == "modified":
             modified += 1
+        elif status == "symlink_created":
+            symlink_created += 1
         else:
             deleted += 1
 
@@ -73,6 +75,9 @@ def compare_snapshots(
                     diff_unavailable_reason=reason,
                     additions=line_additions,
                     deletions=line_deletions,
+                    symlink=bool((after_file or before_file).symlink if (after_file or before_file) else False),
+                    symlink_target_before=before_file.symlink_target if before_file else None,
+                    symlink_target_after=after_file.symlink_target if after_file else None,
                 )
             )
         else:
@@ -83,6 +88,7 @@ def compare_snapshots(
             created=created,
             modified=modified,
             deleted=deleted,
+            symlink_created=symlink_created,
             additions=additions,
             deletions=deletions,
             truncated=truncated,
@@ -107,6 +113,15 @@ def _status(
     before_file: FileSnapshot | None,
     after_file: FileSnapshot | None,
 ) -> WorkspaceChangeStatus:
+    # A symlink now occupying a path that was not already a symlink is always
+    # surfaced distinctly - whether it is brand new (before_file is None) or it
+    # just replaced a regular file (before_file is None => "deleted" would
+    # otherwise be reported even though the path is still alive on disk, just
+    # as a symlink that may point anywhere on the host).
+    before_was_symlink = before_file is not None and before_file.symlink
+    after_is_symlink = after_file is not None and after_file.symlink
+    if after_is_symlink and not before_was_symlink:
+        return "symlink_created"
     if before_file is None:
         return "created"
     if after_file is None:
@@ -160,7 +175,7 @@ def _diff_unavailable_reason(
     after_file: FileSnapshot | None,
 ) -> DiffUnavailableReason | None:
     files = [file for file in (before_file, after_file) if file is not None]
-    for preferred in ("sensitive", "binary", "large"):
+    for preferred in ("symlink", "sensitive", "binary", "large"):
         if any(file.content_unavailable_reason == preferred for file in files):
             return preferred  # type: ignore[return-value]
     return None
