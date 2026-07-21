@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import json
 import os
 import threading
 from collections import OrderedDict
@@ -754,7 +755,7 @@ def test_sync_outputs_to_host_updates_changed_same_size_file(monkeypatch, tmp_pa
     assert target.stat().st_mtime_ns == 2_000_000_000
 
 
-def test_sync_outputs_to_host_skips_matching_size_and_mtime(monkeypatch, tmp_path):
+def test_sync_outputs_to_host_skips_file_when_manifest_matches(monkeypatch, tmp_path):
     p = _make_provider()
     _setup_paths(monkeypatch, tmp_path)
     out_dir = Paths(base_dir=tmp_path).thread_dir("t1", user_id="u1") / "user-data" / "outputs"
@@ -765,13 +766,99 @@ def test_sync_outputs_to_host_skips_matching_size_and_mtime(monkeypatch, tmp_pat
 
     listing = "13\t2.000000000\t/home/user/outputs/random.pdf\x00"
     files = FakeFilesAPI(store={"/home/user/outputs/random.pdf": b"%PDF-1.4hello"})
-    cmds = FakeCommandsAPI([SimpleNamespace(stdout=listing, stderr="", exit_code=0)])
+    cmds = FakeCommandsAPI(
+        [
+            SimpleNamespace(stdout=listing, stderr="", exit_code=0),
+            SimpleNamespace(stdout=listing, stderr="", exit_code=0),
+        ]
+    )
     client = FakeClient(commands=cmds, files=files)
     sb = _make_sandbox(client, sandbox_id="sb-sync-unchanged")
 
     p._sync_outputs_to_host(sb, thread_id="t1", user_id="u1")
+    files.read_calls.clear()
+    p._sync_outputs_to_host(sb, thread_id="t1", user_id="u1")
 
     assert files.read_calls == []
+    assert target.read_bytes() == b"%PDF-1.4hello"
+
+
+def test_sync_outputs_to_host_uses_manifest_when_host_mtime_is_rounded(monkeypatch, tmp_path):
+    p = _make_provider()
+    _setup_paths(monkeypatch, tmp_path)
+    paths = Paths(base_dir=tmp_path)
+    thread_dir = paths.thread_dir("t1", user_id="u1")
+    target = thread_dir / "user-data" / "outputs" / "random.pdf"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(b"%PDF-1.4hello")
+    rounded_host_mtime_ns = 1_720_000_000_123_456_800
+    os.utime(target, ns=(rounded_host_mtime_ns, rounded_host_mtime_ns))
+    (thread_dir / ".e2b-output-sync.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "files": {
+                    "outputs/random.pdf": {
+                        "remote_size": 13,
+                        "remote_mtime_ns": 1_720_000_000_123_456_789,
+                        "host_size": 13,
+                        "host_mtime_ns": rounded_host_mtime_ns,
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    listing = "13\t1720000000.1234567890\t/home/user/outputs/random.pdf\x00"
+    files = FakeFilesAPI(store={"/home/user/outputs/random.pdf": b"%PDF-1.4hello"})
+    cmds = FakeCommandsAPI([SimpleNamespace(stdout=listing, stderr="", exit_code=0)])
+    client = FakeClient(commands=cmds, files=files)
+    sb = _make_sandbox(client, sandbox_id="sb-sync-manifest")
+
+    p._sync_outputs_to_host(sb, thread_id="t1", user_id="u1")
+
+    assert files.read_calls == []
+
+
+def test_sync_outputs_to_host_records_variable_precision_remote_mtime(monkeypatch, tmp_path):
+    p = _make_provider()
+    _setup_paths(monkeypatch, tmp_path)
+    listing = "13\t1720000000.1234567890\t/home/user/outputs/random.pdf\x00"
+    files = FakeFilesAPI(store={"/home/user/outputs/random.pdf": b"%PDF-1.4hello"})
+    cmds = FakeCommandsAPI([SimpleNamespace(stdout=listing, stderr="", exit_code=0)])
+    client = FakeClient(commands=cmds, files=files)
+    sb = _make_sandbox(client, sandbox_id="sb-sync-precision")
+
+    p._sync_outputs_to_host(sb, thread_id="t1", user_id="u1")
+
+    manifest_path = Paths(base_dir=tmp_path).thread_dir("t1", user_id="u1") / ".e2b-output-sync.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["files"]["outputs/random.pdf"]["remote_mtime_ns"] == 1_720_000_000_123_456_789
+
+
+def test_sync_outputs_to_host_restores_externally_modified_file(monkeypatch, tmp_path):
+    p = _make_provider()
+    _setup_paths(monkeypatch, tmp_path)
+    listing = "13\t1720000000.1234567890\t/home/user/outputs/random.pdf\x00"
+    files = FakeFilesAPI(store={"/home/user/outputs/random.pdf": b"%PDF-1.4hello"})
+    cmds = FakeCommandsAPI(
+        [
+            SimpleNamespace(stdout=listing, stderr="", exit_code=0),
+            SimpleNamespace(stdout=listing, stderr="", exit_code=0),
+        ]
+    )
+    client = FakeClient(commands=cmds, files=files)
+    sb = _make_sandbox(client, sandbox_id="sb-sync-local-change")
+
+    p._sync_outputs_to_host(sb, thread_id="t1", user_id="u1")
+    target = Paths(base_dir=tmp_path).thread_dir("t1", user_id="u1") / "user-data" / "outputs" / "random.pdf"
+    target.write_bytes(b"changed-value")
+    os.utime(target, ns=(1_720_000_001_000_000_000, 1_720_000_001_000_000_000))
+
+    p._sync_outputs_to_host(sb, thread_id="t1", user_id="u1")
+
+    assert len(files.read_calls) == 2
     assert target.read_bytes() == b"%PDF-1.4hello"
 
 
