@@ -517,7 +517,7 @@ class FeishuChannel(Channel):
         request = self._ReplyMessageRequest.builder().message_id(message_id).request_body(self._ReplyMessageRequestBody.builder().msg_type("interactive").content(content).build()).build()
         response = await asyncio.to_thread(self._api_client.im.v1.message.reply, request)
         if not response.success():
-            raise RuntimeError(f"Feishu card reply failed: code={response.code}, msg={response.msg}")
+            raise RuntimeError(f"Feishu card reply failed: code={response.code}, msg={response.msg}, log_id={response.get_log_id()}")
         response_data = getattr(response, "data", None)
         return getattr(response_data, "message_id", None)
 
@@ -530,7 +530,7 @@ class FeishuChannel(Channel):
         request = self._CreateMessageRequest.builder().receive_id_type("chat_id").request_body(self._CreateMessageRequestBody.builder().receive_id(chat_id).msg_type("interactive").content(content).build()).build()
         response = await asyncio.to_thread(self._api_client.im.v1.message.create, request)
         if not response.success():
-            raise RuntimeError(f"Feishu card creation failed: code={response.code}, msg={response.msg}")
+            raise RuntimeError(f"Feishu card creation failed: code={response.code}, msg={response.msg}, log_id={response.get_log_id()}")
 
     async def _update_card(self, message_id: str, text: str) -> None:
         """Patch an existing card message in place."""
@@ -541,7 +541,7 @@ class FeishuChannel(Channel):
         request = self._PatchMessageRequest.builder().message_id(message_id).request_body(self._PatchMessageRequestBody.builder().content(content).build()).build()
         response = await asyncio.to_thread(self._api_client.im.v1.message.patch, request)
         if not response.success():
-            raise RuntimeError(f"Feishu card update failed: code={response.code}, msg={response.msg}")
+            raise RuntimeError(f"Feishu card update failed: code={response.code}, msg={response.msg}, log_id={response.get_log_id()}")
 
     def _track_background_task(self, task: asyncio.Task, *, name: str, msg_id: str) -> None:
         """Keep a strong reference to fire-and-forget tasks and surface errors."""

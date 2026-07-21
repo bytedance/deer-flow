@@ -5482,10 +5482,12 @@ class TestFeishuCardSuccessChecks:
             failure_response.success.return_value = False
             failure_response.code = 99991400
             failure_response.msg = "param invalid"
+            failure_response.get_log_id.return_value = "log-reply-1"
             channel._api_client.im.v1.message.reply = MagicMock(return_value=failure_response)
 
-            with pytest.raises(RuntimeError, match="99991400"):
+            with pytest.raises(RuntimeError, match="99991400") as exc_info:
                 await channel._reply_card("om-source-msg", "hello")
+            assert "log-reply-1" in str(exc_info.value)
 
         _run(go())
 
@@ -5505,10 +5507,12 @@ class TestFeishuCardSuccessChecks:
             failure_response.success.return_value = False
             failure_response.code = 99991400
             failure_response.msg = "param invalid"
+            failure_response.get_log_id.return_value = "log-create-1"
             channel._api_client.im.v1.message.create = MagicMock(return_value=failure_response)
 
-            with pytest.raises(RuntimeError, match="99991400"):
+            with pytest.raises(RuntimeError, match="99991400") as exc_info:
                 await channel._create_card("chat-1", "hello")
+            assert "log-create-1" in str(exc_info.value)
 
         _run(go())
 
@@ -5528,10 +5532,12 @@ class TestFeishuCardSuccessChecks:
             failure_response.success.return_value = False
             failure_response.code = 99991400
             failure_response.msg = "card has expired"
+            failure_response.get_log_id.return_value = "log-update-1"
             channel._api_client.im.v1.message.patch = MagicMock(return_value=failure_response)
 
-            with pytest.raises(RuntimeError, match="99991400"):
+            with pytest.raises(RuntimeError, match="99991400") as exc_info:
                 await channel._update_card("om-running-card", "hello")
+            assert "log-update-1" in str(exc_info.value)
 
         _run(go())
 
@@ -5667,6 +5673,44 @@ class TestFeishuCardSuccessChecks:
             await channel.send(msg, _max_retries=2)
 
             assert channel._update_card.await_count == 2
+            sleep.assert_awaited_once_with(1)
+
+        _run(go())
+
+    def test_send_retries_after_create_card_business_failure_then_succeeds(self, monkeypatch):
+        """End-to-end through ``send()`` for the no-``thread_ts`` path: a
+        business failure from ``_create_card`` (unwrapped at the tail of
+        ``_send_card_message``) must also engage ``_send_with_retry``,
+        mirroring ``test_send_retries_after_update_card_business_failure_then_succeeds``
+        for the ``_update_card`` path above."""
+        from app.channels.feishu import FeishuChannel
+
+        async def go():
+            bus = MessageBus()
+            channel = FeishuChannel(bus, config={})
+            channel._api_client = MagicMock()
+            sleep = AsyncMock()
+            monkeypatch.setattr("app.channels.base.asyncio.sleep", sleep)
+
+            channel._create_card = AsyncMock(
+                side_effect=[
+                    RuntimeError("Feishu card creation failed: code=99991400, msg=param invalid, log_id=log-1"),
+                    None,
+                ]
+            )
+
+            msg = OutboundMessage(
+                channel_name="feishu",
+                chat_id="chat-1",
+                thread_id="thread-1",
+                text="new card message",
+                is_final=True,
+                thread_ts=None,
+            )
+
+            await channel.send(msg, _max_retries=2)
+
+            assert channel._create_card.await_count == 2
             sleep.assert_awaited_once_with(1)
 
         _run(go())
