@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import os
 import threading
 from collections import OrderedDict
 from types import SimpleNamespace
@@ -718,7 +719,7 @@ def _setup_paths(monkeypatch, tmp_path):
 def test_sync_outputs_to_host_writes_new_files(monkeypatch, tmp_path):
     p = _make_provider()
     _setup_paths(monkeypatch, tmp_path)
-    listing = "13\t/home/user/outputs/random.pdf\x00"
+    listing = "13\t2.000000000\t/home/user/outputs/random.pdf\x00"
     files = FakeFilesAPI(store={"/home/user/outputs/random.pdf": b"%PDF-1.4hello"})
     cmds = FakeCommandsAPI([SimpleNamespace(stdout=listing, stderr="", exit_code=0)])
     client = FakeClient(commands=cmds, files=files)
@@ -731,23 +732,46 @@ def test_sync_outputs_to_host_writes_new_files(monkeypatch, tmp_path):
     assert expected.read_bytes() == b"%PDF-1.4hello"
 
 
-def test_sync_outputs_to_host_skips_unchanged_files(monkeypatch, tmp_path):
+def test_sync_outputs_to_host_updates_changed_same_size_file(monkeypatch, tmp_path):
     p = _make_provider()
     _setup_paths(monkeypatch, tmp_path)
     out_dir = Paths(base_dir=tmp_path).thread_dir("t1", user_id="u1") / "user-data" / "outputs"
     out_dir.mkdir(parents=True, exist_ok=True)
     target = out_dir / "random.pdf"
     target.write_bytes(b"%PDF-1.4hello")
+    os.utime(target, ns=(1_000_000_000, 1_000_000_000))
 
-    listing = "13\t/home/user/outputs/random.pdf\x00"
-    files = FakeFilesAPI(store={"/home/user/outputs/random.pdf": b"DIFFERENT-SAME-LEN"})
+    listing = "13\t2.000000000\t/home/user/outputs/random.pdf\x00"
+    files = FakeFilesAPI(store={"/home/user/outputs/random.pdf": b"changed-value"})
     cmds = FakeCommandsAPI([SimpleNamespace(stdout=listing, stderr="", exit_code=0)])
     client = FakeClient(commands=cmds, files=files)
     sb = _make_sandbox(client, sandbox_id="sb-sync-2")
 
     p._sync_outputs_to_host(sb, thread_id="t1", user_id="u1")
 
-    assert files.read_calls == [], "size match should skip the download round-trip"
+    assert files.read_calls, "same-size files must be checked for updates"
+    assert target.read_bytes() == b"changed-value"
+    assert target.stat().st_mtime_ns == 2_000_000_000
+
+
+def test_sync_outputs_to_host_skips_matching_size_and_mtime(monkeypatch, tmp_path):
+    p = _make_provider()
+    _setup_paths(monkeypatch, tmp_path)
+    out_dir = Paths(base_dir=tmp_path).thread_dir("t1", user_id="u1") / "user-data" / "outputs"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    target = out_dir / "random.pdf"
+    target.write_bytes(b"%PDF-1.4hello")
+    os.utime(target, ns=(2_000_000_000, 2_000_000_000))
+
+    listing = "13\t2.000000000\t/home/user/outputs/random.pdf\x00"
+    files = FakeFilesAPI(store={"/home/user/outputs/random.pdf": b"%PDF-1.4hello"})
+    cmds = FakeCommandsAPI([SimpleNamespace(stdout=listing, stderr="", exit_code=0)])
+    client = FakeClient(commands=cmds, files=files)
+    sb = _make_sandbox(client, sandbox_id="sb-sync-unchanged")
+
+    p._sync_outputs_to_host(sb, thread_id="t1", user_id="u1")
+
+    assert files.read_calls == []
     assert target.read_bytes() == b"%PDF-1.4hello"
 
 
@@ -770,7 +794,7 @@ def test_sync_outputs_to_host_uses_virtual_path_for_download(monkeypatch, tmp_pa
     p = _make_provider()
     _setup_paths(monkeypatch, tmp_path)
 
-    listing = "5\t/home/user/outputs/sub/x.txt\x00"
+    listing = "5\t2.000000000\t/home/user/outputs/sub/x.txt\x00"
     files = FakeFilesAPI(store={"/home/user/outputs/sub/x.txt": b"hello"})
     cmds = FakeCommandsAPI([SimpleNamespace(stdout=listing, stderr="", exit_code=0)])
     client = FakeClient(commands=cmds, files=files)
@@ -891,7 +915,7 @@ def test_sync_outputs_to_host_skips_oversize_files(monkeypatch, tmp_path):
     _setup_paths(monkeypatch, tmp_path)
 
     oversize = e2b_sb_mod._MAX_DOWNLOAD_SIZE + 1
-    listing = f"{oversize}\t/home/user/outputs/huge.bin\x00"
+    listing = f"{oversize}\t2.000000000\t/home/user/outputs/huge.bin\x00"
     files = FakeFilesAPI()  # no store entry: any read attempt would raise
     cmds = FakeCommandsAPI([SimpleNamespace(stdout=listing, stderr="", exit_code=0)])
     client = FakeClient(commands=cmds, files=files)
