@@ -57,6 +57,17 @@ BUILTIN_COMMANDS: tuple[Command, ...] = (
 _BUILTIN_NAMES = frozenset(c.name for c in BUILTIN_COMMANDS)
 
 
+def format_command_help() -> str:
+    """One-line summary of every built-in slash command, for ``/help``.
+
+    Derived from :data:`BUILTIN_COMMANDS` so the help text can never drift out
+    of sync with the registry (and, therefore, the picker). Adding a built-in
+    surfaces it in ``/help`` automatically.
+    """
+    names = "  ".join(f"/{command.name}" for command in BUILTIN_COMMANDS)
+    return f"Commands:  {names}"
+
+
 def build_registry(skills: list[dict]) -> list[Command]:
     """Merge built-ins with one command per enabled skill."""
     commands = list(BUILTIN_COMMANDS)
