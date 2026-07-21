@@ -797,6 +797,7 @@ def test_sync_outputs_to_host_uses_manifest_when_host_mtime_is_rounded(monkeypat
         json.dumps(
             {
                 "version": 1,
+                "sandbox_id": "sb-sync-manifest",
                 "files": {
                     "outputs/random.pdf": {
                         "remote_size": 13,
@@ -813,7 +814,7 @@ def test_sync_outputs_to_host_uses_manifest_when_host_mtime_is_rounded(monkeypat
     listing = "13\t1720000000.1234567890\t/home/user/outputs/random.pdf\x00"
     files = FakeFilesAPI(store={"/home/user/outputs/random.pdf": b"%PDF-1.4hello"})
     cmds = FakeCommandsAPI([SimpleNamespace(stdout=listing, stderr="", exit_code=0)])
-    client = FakeClient(commands=cmds, files=files)
+    client = FakeClient(sandbox_id="sb-sync-manifest", commands=cmds, files=files)
     sb = _make_sandbox(client, sandbox_id="sb-sync-manifest")
 
     p._sync_outputs_to_host(sb, thread_id="t1", user_id="u1")
@@ -835,6 +836,116 @@ def test_sync_outputs_to_host_records_variable_precision_remote_mtime(monkeypatc
     manifest_path = Paths(base_dir=tmp_path).thread_dir("t1", user_id="u1") / ".e2b-output-sync.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert manifest["files"]["outputs/random.pdf"]["remote_mtime_ns"] == 1_720_000_000_123_456_789
+
+
+def test_sync_outputs_to_host_removes_manifest_entries_for_deleted_files(monkeypatch, tmp_path):
+    p = _make_provider()
+    _setup_paths(monkeypatch, tmp_path)
+    paths = Paths(base_dir=tmp_path)
+    thread_dir = paths.thread_dir("t1", user_id="u1")
+    thread_dir.mkdir(parents=True, exist_ok=True)
+    (thread_dir / ".e2b-output-sync.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "sandbox_id": "sb-sync-cleanup",
+                "files": {
+                    "outputs/deleted.txt": {
+                        "remote_size": 3,
+                        "remote_mtime_ns": 1,
+                        "host_size": 3,
+                        "host_mtime_ns": 1,
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    listing = "5\t1720000000.1234567890\t/home/user/outputs/live.txt\x00"
+    files = FakeFilesAPI(store={"/home/user/outputs/live.txt": b"alive"})
+    cmds = FakeCommandsAPI([SimpleNamespace(stdout=listing, stderr="", exit_code=0)])
+    client = FakeClient(commands=cmds, files=files)
+    sb = _make_sandbox(client, sandbox_id="sb-sync-cleanup")
+
+    p._sync_outputs_to_host(sb, thread_id="t1", user_id="u1")
+
+    manifest = json.loads((thread_dir / ".e2b-output-sync.json").read_text(encoding="utf-8"))
+    assert set(manifest["files"]) == {"outputs/live.txt"}
+
+
+def test_sync_outputs_to_host_discards_manifest_from_another_sandbox(monkeypatch, tmp_path):
+    p = _make_provider()
+    _setup_paths(monkeypatch, tmp_path)
+    paths = Paths(base_dir=tmp_path)
+    thread_dir = paths.thread_dir("t1", user_id="u1")
+    target = thread_dir / "user-data" / "outputs" / "random.pdf"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(b"%PDF-1.4hello")
+    remote_mtime_ns = 1_720_000_000_123_456_789
+    os.utime(target, ns=(remote_mtime_ns, remote_mtime_ns))
+    (thread_dir / ".e2b-output-sync.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "sandbox_id": "sb-old",
+                "files": {
+                    "outputs/random.pdf": {
+                        "remote_size": 13,
+                        "remote_mtime_ns": remote_mtime_ns,
+                        "host_size": 13,
+                        "host_mtime_ns": remote_mtime_ns,
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    listing = "13\t1720000000.1234567890\t/home/user/outputs/random.pdf\x00"
+    files = FakeFilesAPI(store={"/home/user/outputs/random.pdf": b"%PDF-1.4hello"})
+    cmds = FakeCommandsAPI([SimpleNamespace(stdout=listing, stderr="", exit_code=0)])
+    client = FakeClient(sandbox_id="sb-new", commands=cmds, files=files)
+    sb = _make_sandbox(client, sandbox_id="sb-new")
+
+    p._sync_outputs_to_host(sb, thread_id="t1", user_id="u1")
+
+    assert files.read_calls
+    manifest = json.loads((thread_dir / ".e2b-output-sync.json").read_text(encoding="utf-8"))
+    assert manifest["sandbox_id"] == "sb-new"
+
+
+def test_sync_outputs_to_host_resets_empty_manifest_for_new_sandbox(monkeypatch, tmp_path):
+    p = _make_provider()
+    _setup_paths(monkeypatch, tmp_path)
+    thread_dir = Paths(base_dir=tmp_path).thread_dir("t1", user_id="u1")
+    thread_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path = thread_dir / ".e2b-output-sync.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "sandbox_id": "sb-old",
+                "files": {
+                    "outputs/stale.txt": {
+                        "remote_size": 1,
+                        "remote_mtime_ns": 1,
+                        "host_size": 1,
+                        "host_mtime_ns": 1,
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    client = FakeClient(
+        sandbox_id="sb-new",
+        commands=FakeCommandsAPI([SimpleNamespace(stdout="", stderr="", exit_code=0)]),
+    )
+    sb = _make_sandbox(client, sandbox_id="sb-new")
+
+    p._sync_outputs_to_host(sb, thread_id="t1", user_id="u1")
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest == {"version": 1, "sandbox_id": "sb-new", "files": {}}
 
 
 def test_sync_outputs_to_host_restores_externally_modified_file(monkeypatch, tmp_path):
