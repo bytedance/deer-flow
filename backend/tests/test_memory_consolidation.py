@@ -30,6 +30,7 @@ from deerflow.agents.memory.backends.deermem.deermem.core.updater import (
     _build_consolidation_section,
     _normalize_memory_update_data,
     _select_consolidation_candidates,
+    _select_stale_candidates,
 )
 
 # ── Helpers ────────────────────────────────────────────────────────────────
@@ -92,6 +93,13 @@ def _make_memory(facts: list[dict] | None = None) -> dict:
         },
         "facts": facts or [],
     }
+
+
+def _days_ago(days: int) -> str:
+    """ISO-Z createdAt `days` before now - keeps evd-deadline tests time-stable
+    (a hardcoded 2025-01-01 would silently flip assertions once the fact exceeds
+    its window, e.g. around 2029 for a 1800-day cap)."""
+    return (datetime.now(UTC) - timedelta(days=days)).isoformat().replace("+00:00", "Z")
 
 
 # ── _select_consolidation_candidates ──────────────────────────────────────
@@ -894,6 +902,519 @@ class TestReviewerFindings:
         assert "consolidatedAt" in merged[0], "consolidatedAt must be set for auditability"
         # consolidatedAt should be more recent than the source dates
         assert merged[0]["consolidatedAt"] > newer_date
+
+    def test_consolidated_evd_uses_earliest_source_deadline(self):
+        """A merged fact is re-reviewed at the earliest source review deadline
+        (createdAt + expected_valid_days), not the longest source window. With
+        equal createdAt, that resolves to the smallest source evd - the merge
+        keeps every source's detail, so the soonest-expiring source governs
+        when the combined fact must be re-validated."""
+        updater = _make_updater(
+            max_facts=100,
+            consolidation_enabled=True,
+            consolidation_min_facts=2,
+            consolidation_max_groups_per_cycle=3,
+            consolidation_max_sources=8,
+            staleness_age_days=90,
+            staleness_max_lifetime_multiplier=20.0,  # creation cap = 1800
+        )
+        # Both sources 100 days old; evd 365 and 730 -> earliest deadline is the
+        # 365-day source's, so the merged fact inherits 365 (under the 1800 cap).
+        created = _days_ago(100)
+        facts = [
+            {**_make_fact("fact_a", "Fact A", "knowledge", 0.9), "createdAt": created, "expected_valid_days": 365},
+            {**_make_fact("fact_b", "Fact B", "knowledge", 0.85), "createdAt": created, "expected_valid_days": 730},
+        ]
+        current_memory = _make_memory(facts)
+        update_data = {
+            "user": {},
+            "history": {},
+            "newFacts": [],
+            "factsToRemove": [],
+            "staleFactsToRemove": [],
+            "factsToConsolidate": [
+                {
+                    "sourceIds": ["fact_a", "fact_b"],
+                    "consolidated": {"content": "A and B merged", "category": "knowledge", "confidence": 0.9},
+                },
+            ],
+        }
+        result = updater._apply_updates(current_memory, update_data)
+
+        merged = [f for f in result["facts"] if f.get("source") == "consolidation"]
+        assert len(merged) == 1
+        # earliest deadline (365-day source) - merged createdAt (same) = 365, under cap
+        assert merged[0]["expected_valid_days"] == 365
+
+    def test_consolidated_evd_capped_by_creation_multiplier(self):
+        """Inherited expected_valid_days is capped at the creation-time multiplier,
+        consistent with newFacts - consolidation cannot defer first review indefinitely."""
+        updater = _make_updater(
+            max_facts=100,
+            consolidation_enabled=True,
+            consolidation_min_facts=2,
+            consolidation_max_groups_per_cycle=3,
+            consolidation_max_sources=8,
+            staleness_age_days=90,
+            staleness_max_lifetime_multiplier=3.0,  # creation cap = 270
+        )
+        # Both sources fresh (10 days old) with long evd: earliest deadline is far
+        # out, but the creation cap (270) still clamps the inherited window.
+        created = _days_ago(10)
+        facts = [
+            {**_make_fact("fact_a", "Fact A", "knowledge", 0.9), "createdAt": created, "expected_valid_days": 3650},
+            {**_make_fact("fact_b", "Fact B", "knowledge", 0.85), "createdAt": created, "expected_valid_days": 3650},
+        ]
+        current_memory = _make_memory(facts)
+        update_data = {
+            "user": {},
+            "history": {},
+            "newFacts": [],
+            "factsToRemove": [],
+            "staleFactsToRemove": [],
+            "factsToConsolidate": [
+                {
+                    "sourceIds": ["fact_a", "fact_b"],
+                    "consolidated": {"content": "merged", "category": "knowledge", "confidence": 0.9},
+                },
+            ],
+        }
+        result = updater._apply_updates(current_memory, update_data)
+
+        merged = [f for f in result["facts"] if f.get("source") == "consolidation"]
+        assert len(merged) == 1
+        # earliest deadline (10 + 3650) - merged createdAt (10 days ago) = 3650, clamped to 270
+        assert merged[0]["expected_valid_days"] == 270
+
+    def test_consolidated_evd_all_legacy_sources_uses_global_fallback_deadline(self):
+        """When no source carries expected_valid_days, every source's effective
+        lifetime is the global staleness_age_days (matching the read-time
+        fallback). The merged fact's deadline is derived from that fallback, not
+        omitted - so a merge of aged legacy facts still re-enters review rather
+        than silently inheriting nothing."""
+        updater = _make_updater(
+            max_facts=100,
+            consolidation_enabled=True,
+            consolidation_min_facts=2,
+            consolidation_max_groups_per_cycle=3,
+            consolidation_max_sources=8,
+            staleness_age_days=90,
+            staleness_max_lifetime_multiplier=20.0,
+        )
+        # Both legacy facts 100 days old, no evd -> effective lifetime 90 (global),
+        # deadline = createdAt + 90 = 10 days ago... but relative to the merged
+        # createdAt (100 days ago, same as both sources) that deadline is 90 days
+        # AFTER the merged createdAt, so the inherited window is 90 (not overdue:
+        # the deadline is a point in time; its offset from merged createdAt is 90).
+        created = _days_ago(100)
+        facts = [
+            {**_make_fact("fact_a", "Fact A", "knowledge", 0.9), "createdAt": created},
+            {**_make_fact("fact_b", "Fact B", "knowledge", 0.85), "createdAt": created},
+        ]
+        current_memory = _make_memory(facts)
+        update_data = {
+            "user": {},
+            "history": {},
+            "newFacts": [],
+            "factsToRemove": [],
+            "staleFactsToRemove": [],
+            "factsToConsolidate": [
+                {
+                    "sourceIds": ["fact_a", "fact_b"],
+                    "consolidated": {"content": "merged", "category": "knowledge", "confidence": 0.9},
+                },
+            ],
+        }
+        result = updater._apply_updates(current_memory, update_data)
+
+        merged = [f for f in result["facts"] if f.get("source") == "consolidation"]
+        assert len(merged) == 1
+        # Legacy fallback deadline (createdAt + 90) - merged createdAt (same) = 90.
+        assert merged[0]["expected_valid_days"] == 90
+        # The 100-day-old merged fact (age 100 > 90) is immediately a staleness
+        # candidate next cycle.
+        next_cycle_candidates = _select_stale_candidates(result, updater._config)
+        assert any(f.get("source") == "consolidation" for f in next_cycle_candidates)
+
+    def test_consolidated_evd_legacy_source_not_swallowed_by_stable_sibling(self):
+        """A legacy source (no evd -> global 90-day fallback) merged with a
+        long-lived source (evd=3650) must not inherit the long window. The merged
+        fact is re-reviewed at the legacy source's 90-day deadline, so the legacy
+        detail is not buried for years. Covers the mixed legacy/stable case with
+        equal and different createdAt values."""
+        updater = _make_updater(
+            max_facts=100,
+            consolidation_enabled=True,
+            consolidation_min_facts=2,
+            consolidation_max_groups_per_cycle=3,
+            consolidation_max_sources=8,
+            staleness_age_days=90,
+            staleness_max_lifetime_multiplier=20.0,  # cap 1800
+        )
+        # Equal createdAt, 50 days old. Legacy source's fallback deadline is
+        # createdAt + 90 = 40 days from now; stable source's is far future.
+        # earliest = legacy's; relative to merged createdAt (same) = 90.
+        created = _days_ago(50)
+        facts = [
+            {**_make_fact("fact_legacy", "Legacy", "knowledge", 0.9), "createdAt": created},
+            {**_make_fact("fact_stable", "Stable", "knowledge", 0.85), "createdAt": created, "expected_valid_days": 3650},
+        ]
+        current_memory = _make_memory(facts)
+        update_data = {
+            "user": {},
+            "history": {},
+            "newFacts": [],
+            "factsToRemove": [],
+            "staleFactsToRemove": [],
+            "factsToConsolidate": [
+                {
+                    "sourceIds": ["fact_legacy", "fact_stable"],
+                    "consolidated": {"content": "merged", "category": "knowledge", "confidence": 0.9},
+                },
+            ],
+        }
+        result = updater._apply_updates(current_memory, update_data)
+
+        merged = [f for f in result["facts"] if f.get("source") == "consolidation"]
+        assert len(merged) == 1
+        # Legacy source's 90-day deadline governs (not the stable 3650/cap-1800).
+        assert merged[0]["expected_valid_days"] == 90
+
+        # Different createdAt: legacy source older, so its fallback deadline is
+        # earlier still. Legacy 200 days old (deadline 110 days ago, past), stable
+        # 10 days old (deadline far future). merged createdAt = stable (10 days
+        # ago); earliest deadline is legacy's (110 days ago) -> negative, clamped.
+        facts_diff = [
+            {**_make_fact("fact_legacy", "Legacy", "knowledge", 0.9), "createdAt": _days_ago(200)},
+            {**_make_fact("fact_stable", "Stable", "knowledge", 0.85), "createdAt": _days_ago(10), "expected_valid_days": 3650},
+        ]
+        result_diff = updater._apply_updates(_make_memory(facts_diff), update_data)
+        merged_diff = [f for f in result_diff["facts"] if f.get("source") == "consolidation"]
+        assert len(merged_diff) == 1
+        # Legacy deadline (200 + 90 = 110 days ago) is before merged createdAt
+        # (10 days ago) -> negative delta clamped to 1.
+        assert merged_diff[0]["expected_valid_days"] == 1
+
+    def test_consolidated_evd_volatile_source_governs_earliest_deadline(self):
+        """A transient source (evd=7) merged with a stable source (evd=3650) must
+        not inherit the stable window - the merged fact is re-reviewed at the
+        volatile source's much sooner deadline, so the volatile sub-detail cannot
+        escape staleness review for years (staleness KEEP/REMOVE is the only path
+        that re-validates a merged fact)."""
+        updater = _make_updater(
+            max_facts=100,
+            consolidation_enabled=True,
+            consolidation_min_facts=2,
+            consolidation_max_groups_per_cycle=3,
+            consolidation_max_sources=8,
+            staleness_age_days=90,
+            staleness_max_lifetime_multiplier=20.0,
+        )
+        # Both sources 100 days old. The volatile source (evd=7) makes the merged
+        # fact's review window 7 days (the earliest source deadline relative to
+        # the merged createdAt) - NOT the stable source's 3650/cap-1800.
+        created = _days_ago(100)
+        facts = [
+            {**_make_fact("fact_stable", "Stable", "knowledge", 0.9), "createdAt": created, "expected_valid_days": 3650},
+            {**_make_fact("fact_volatile", "Volatile", "knowledge", 0.85), "createdAt": created, "expected_valid_days": 7},
+        ]
+        current_memory = _make_memory(facts)
+        update_data = {
+            "user": {},
+            "history": {},
+            "newFacts": [],
+            "factsToRemove": [],
+            "staleFactsToRemove": [],
+            "factsToConsolidate": [
+                {
+                    "sourceIds": ["fact_stable", "fact_volatile"],
+                    "consolidated": {"content": "merged", "category": "knowledge", "confidence": 0.9},
+                },
+            ],
+        }
+        result = updater._apply_updates(current_memory, update_data)
+
+        merged = [f for f in result["facts"] if f.get("source") == "consolidation"]
+        assert len(merged) == 1
+        # earliest deadline = createdAt + 7 (volatile source); relative to merged
+        # createdAt (same) the window is 7 - far below the stable source's 3650.
+        assert merged[0]["expected_valid_days"] == 7
+        # The merged fact is 100 days old but has a 7-day window, so it is
+        # immediately a staleness candidate next cycle - the volatile sub-detail
+        # gets re-reviewed instead of being buried for years.
+        next_cycle_candidates = _select_stale_candidates(result, updater._config)
+        assert any(f.get("source") == "consolidation" for f in next_cycle_candidates), "volatile-source merge must re-enter staleness review"
+
+    @pytest.mark.parametrize("bad_evd", [float("nan"), float("inf"), float("-inf")], ids=["nan", "inf", "-inf"])
+    def test_consolidation_with_non_finite_source_evd_does_not_raise(self, bad_evd):
+        """A malformed non-finite expected_valid_days (NaN / +/-inf) in a
+        hand-edited memory.json must not abort consolidation. The source's
+        effective lifetime falls back to the global staleness_age_days, so its
+        deadline still participates in the earliest-deadline computation instead
+        of raising ValueError/OverflowError during int() coercion."""
+        updater = _make_updater(
+            max_facts=100,
+            consolidation_enabled=True,
+            consolidation_min_facts=2,
+            consolidation_max_groups_per_cycle=3,
+            consolidation_max_sources=8,
+            staleness_age_days=90,
+            staleness_max_lifetime_multiplier=20.0,
+        )
+        created = _days_ago(100)
+        facts = [
+            {**_make_fact("fact_bad", "Bad evd", "knowledge", 0.9), "createdAt": created, "expected_valid_days": bad_evd},
+            {**_make_fact("fact_stable", "Stable", "knowledge", 0.85), "createdAt": created, "expected_valid_days": 3650},
+        ]
+        current_memory = _make_memory(facts)
+        update_data = {
+            "user": {},
+            "history": {},
+            "newFacts": [],
+            "factsToRemove": [],
+            "staleFactsToRemove": [],
+            "factsToConsolidate": [
+                {
+                    "sourceIds": ["fact_bad", "fact_stable"],
+                    "consolidated": {"content": "merged", "category": "knowledge", "confidence": 0.9},
+                },
+            ],
+        }
+        # Must not raise. The bad source's non-finite evd falls back to the global
+        # 90, whose deadline (createdAt + 90) governs over the stable 3650.
+        result = updater._apply_updates(current_memory, update_data)
+
+        merged = [f for f in result["facts"] if f.get("source") == "consolidation"]
+        assert len(merged) == 1
+        # earliest deadline = createdAt + 90 (non-finite source fallback), relative
+        # to merged createdAt (same) = 90.
+        assert merged[0]["expected_valid_days"] == 90
+
+    @pytest.mark.parametrize(
+        "bad_evd",
+        [10**400, 10**12, 10**9, timedelta.max.days],
+        ids=["1e400", "1e12", "1e9", "timedelta_max"],
+    )
+    def test_consolidation_with_huge_int_source_evd_does_not_raise(self, bad_evd):
+        """A huge int expected_valid_days (above timedelta.max.days) in a
+        hand-edited memory.json must not abort consolidation. Python's JSON
+        decoder parses an integer literal with no decimal point as an
+        arbitrary-precision int, so 10**400 stays an int (not float inf); the
+        helper rejects it so it falls back to the global staleness_age_days
+        instead of raising OverflowError in float() or in timedelta() downstream."""
+        updater = _make_updater(
+            max_facts=100,
+            consolidation_enabled=True,
+            consolidation_min_facts=2,
+            consolidation_max_groups_per_cycle=3,
+            consolidation_max_sources=8,
+            staleness_age_days=90,
+            staleness_max_lifetime_multiplier=20.0,
+        )
+        created = _days_ago(100)
+        facts = [
+            {**_make_fact("fact_bad", "Bad evd", "knowledge", 0.9), "createdAt": created, "expected_valid_days": bad_evd},
+            {**_make_fact("fact_stable", "Stable", "knowledge", 0.85), "createdAt": created, "expected_valid_days": 3650},
+        ]
+        current_memory = _make_memory(facts)
+        update_data = {
+            "user": {},
+            "history": {},
+            "newFacts": [],
+            "factsToRemove": [],
+            "staleFactsToRemove": [],
+            "factsToConsolidate": [
+                {
+                    "sourceIds": ["fact_bad", "fact_stable"],
+                    "consolidated": {"content": "merged", "category": "knowledge", "confidence": 0.9},
+                },
+            ],
+        }
+        # Must not raise. The bad source's huge-int evd falls back to the global
+        # 90, whose deadline governs over the stable 3650.
+        result = updater._apply_updates(current_memory, update_data)
+
+        merged = [f for f in result["facts"] if f.get("source") == "consolidation"]
+        assert len(merged) == 1
+        assert merged[0]["expected_valid_days"] == 90
+
+    def test_consolidated_evd_overdue_source_clamps_to_minimal_window(self):
+        """When a source's review deadline (createdAt + evd) is earlier than the
+        merged fact's createdAt (the newest source's) - e.g. a very old source
+        with a short window merged with a fresh source - the inherited window
+        would be negative. It is clamped to a minimal positive value so the
+        merged fact is re-reviewed next cycle instead of carrying a non-positive
+        lifetime or falling back to the (longer) global age."""
+        updater = _make_updater(
+            max_facts=100,
+            consolidation_enabled=True,
+            consolidation_min_facts=2,
+            consolidation_max_groups_per_cycle=3,
+            consolidation_max_sources=8,
+            staleness_age_days=90,
+            staleness_max_lifetime_multiplier=20.0,
+        )
+        # Old source: 200 days old, evd=7 -> deadline 193 days ago.
+        # Fresh source: 10 days old, evd=3650 -> deadline far in future.
+        # merged createdAt = fresh source (10 days ago); earliest deadline is the
+        # old source's (193 days ago), which is BEFORE the merged createdAt ->
+        # negative delta clamped to 1.
+        facts = [
+            {**_make_fact("fact_old", "Old volatile", "knowledge", 0.9), "createdAt": _days_ago(200), "expected_valid_days": 7},
+            {**_make_fact("fact_fresh", "Fresh stable", "knowledge", 0.85), "createdAt": _days_ago(10), "expected_valid_days": 3650},
+        ]
+        current_memory = _make_memory(facts)
+        update_data = {
+            "user": {},
+            "history": {},
+            "newFacts": [],
+            "factsToRemove": [],
+            "staleFactsToRemove": [],
+            "factsToConsolidate": [
+                {
+                    "sourceIds": ["fact_old", "fact_fresh"],
+                    "consolidated": {"content": "merged", "category": "knowledge", "confidence": 0.9},
+                },
+            ],
+        }
+        result = updater._apply_updates(current_memory, update_data)
+
+        merged = [f for f in result["facts"] if f.get("source") == "consolidation"]
+        assert len(merged) == 1
+        # Overdue deadline relative to merged createdAt -> clamped to 1.
+        assert merged[0]["expected_valid_days"] == 1
+
+    def test_consolidated_evd_volatile_source_with_equal_created_at_future_deadline(self):
+        """When the volatile source's deadline has NOT yet passed, the merged fact
+        inherits exactly the remaining days to that deadline (not the stable
+        source's long window). Sources created recently so the volatile deadline
+        is still in the future."""
+        updater = _make_updater(
+            max_facts=100,
+            consolidation_enabled=True,
+            consolidation_min_facts=2,
+            consolidation_max_groups_per_cycle=3,
+            consolidation_max_sources=8,
+            staleness_age_days=90,
+            staleness_max_lifetime_multiplier=20.0,
+        )
+        # The window is relative to the merged createdAt, not elapsed-since-
+        # creation: days_until = (createdAt + 7) - createdAt = 7, regardless of
+        # the source's current age.
+        created = _days_ago(3)
+        facts = [
+            {**_make_fact("fact_stable", "Stable", "knowledge", 0.9), "createdAt": created, "expected_valid_days": 3650},
+            {**_make_fact("fact_volatile", "Volatile", "knowledge", 0.85), "createdAt": created, "expected_valid_days": 7},
+        ]
+        current_memory = _make_memory(facts)
+        update_data = {
+            "user": {},
+            "history": {},
+            "newFacts": [],
+            "factsToRemove": [],
+            "staleFactsToRemove": [],
+            "factsToConsolidate": [
+                {
+                    "sourceIds": ["fact_stable", "fact_volatile"],
+                    "consolidated": {"content": "merged", "category": "knowledge", "confidence": 0.9},
+                },
+            ],
+        }
+        result = updater._apply_updates(current_memory, update_data)
+
+        merged = [f for f in result["facts"] if f.get("source") == "consolidation"]
+        assert len(merged) == 1
+        # earliest deadline is the volatile source's (createdAt + 7); relative to
+        # merged createdAt (same) that is 7 days - well under the 1800 cap.
+        assert merged[0]["expected_valid_days"] == 7
+
+    def test_consolidated_evd_float_source_coerced_to_int(self):
+        """A hand-edited memory.json may store expected_valid_days as a float;
+        the inherited deadline is computed from the int-coerced value like every
+        other read path."""
+        updater = _make_updater(
+            max_facts=100,
+            consolidation_enabled=True,
+            consolidation_min_facts=2,
+            consolidation_max_groups_per_cycle=3,
+            consolidation_max_sources=8,
+            staleness_age_days=90,
+            staleness_max_lifetime_multiplier=20.0,
+        )
+        # Sources 10 days old; float evds 365.7 and 180.2 -> int 365 and 180.
+        # Earliest deadline is the 180-day source's -> inherited window = 180.
+        created = _days_ago(10)
+        facts = [
+            {**_make_fact("fact_a", "Fact A", "knowledge", 0.9), "createdAt": created, "expected_valid_days": 365.7},
+            {**_make_fact("fact_b", "Fact B", "knowledge", 0.85), "createdAt": created, "expected_valid_days": 180.2},
+        ]
+        current_memory = _make_memory(facts)
+        update_data = {
+            "user": {},
+            "history": {},
+            "newFacts": [],
+            "factsToRemove": [],
+            "staleFactsToRemove": [],
+            "factsToConsolidate": [
+                {
+                    "sourceIds": ["fact_a", "fact_b"],
+                    "consolidated": {"content": "merged", "category": "knowledge", "confidence": 0.9},
+                },
+            ],
+        }
+        result = updater._apply_updates(current_memory, update_data)
+
+        merged = [f for f in result["facts"] if f.get("source") == "consolidation"]
+        assert len(merged) == 1
+        # int(180.2) = 180 governs (earliest deadline), under the 1800 cap
+        assert merged[0]["expected_valid_days"] == 180
+
+    def test_consolidation_preserves_stable_lifetime_across_cycle(self):
+        """End-to-end: merging aged-but-stable sources must not make the merged
+        fact immediately stale next cycle. Before this fix the merged fact had no
+        expected_valid_days, fell back to staleness_age_days=90, and (with an old
+        createdAt) re-entered the staleness candidate set right away."""
+        updater = _make_updater(
+            max_facts=100,
+            consolidation_enabled=True,
+            consolidation_min_facts=2,
+            consolidation_max_groups_per_cycle=3,
+            consolidation_max_sources=8,
+            staleness_age_days=90,
+            staleness_max_lifetime_multiplier=20.0,
+            staleness_min_candidates=1,
+        )
+        # Two 200-day-old stable facts (evd 5 years) in the same category.
+        created = _days_ago(200)
+        facts = [
+            {**_make_fact("fact_a", "Fact A", "knowledge", 0.9), "createdAt": created, "expected_valid_days": 3650},
+            {**_make_fact("fact_b", "Fact B", "knowledge", 0.85), "createdAt": created, "expected_valid_days": 3650},
+        ]
+        current_memory = _make_memory(facts)
+        update_data = {
+            "user": {},
+            "history": {},
+            "newFacts": [],
+            "factsToRemove": [],
+            "staleFactsToRemove": [],
+            "factsToConsolidate": [
+                {
+                    "sourceIds": ["fact_a", "fact_b"],
+                    "consolidated": {"content": "merged stable skill", "category": "knowledge", "confidence": 0.9},
+                },
+            ],
+        }
+        result = updater._apply_updates(current_memory, update_data)
+
+        merged = [f for f in result["facts"] if f.get("source") == "consolidation"]
+        assert len(merged) == 1
+        # Both sources share createdAt + evd=3650, so earliest deadline is
+        # createdAt+3650; relative to the merged createdAt that is 3650, clamped
+        # to the 1800 creation cap. The 200-day-old merged fact (200 < 1800) is
+        # therefore NOT yet stale and stays out of the next-cycle candidate set.
+        assert merged[0]["expected_valid_days"] == 1800
+        next_cycle_candidates = _select_stale_candidates(result, updater._config)
+        assert all(f.get("source") != "consolidation" for f in next_cycle_candidates), "merged stable fact must not re-enter staleness review immediately"
 
     def test_confidence_fallback_to_max_source_when_llm_omits_field(self):
         """Finding 5: when LLM omits confidence field entirely, merged fact uses max_source_conf."""
