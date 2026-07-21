@@ -1638,6 +1638,11 @@ memory:
   # Each backend self-interprets it (DeerMem parses it into DeerMemConfig).
   backend_config:
     storage_path: ""            # empty = deer-flow base_dir (factory injects absolute runtime_home); a non-empty path is the root DIRECTORY (per-user memory under {storage_path}/users/{uid}/memory.json)
+    storage_class: file         # file (default) or a dotted MemoryStorage class path; invalid persistent backends fail fast
+    strict_user_scope: false    # set true in authenticated deployments after all callers propagate user_id
+    manifest_filename: memory.json # user-global JSON: version/revision/time + user/history only; no facts or fact index
+    file_lock_timeout_seconds: 10 # per-scope cross-process advisory lock timeout (single-machine local filesystem)
+    retrieval_adapter: ""       # optional dotted factory(config) supplied by the retrieval module
     debounce_seconds: 30 # Wait time before processing queued updates
     model:                      # LLM for memory extraction; omit all fields = no extraction (non-LLM ops still work; an update raises)
       # provider: openai
