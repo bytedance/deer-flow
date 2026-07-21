@@ -13,8 +13,12 @@ middleware reachable from this graph (e.g. ``TitleMiddleware``) — MUST pass
 Forgetting that flag emits duplicate spans (one rooted at the graph, one at
 the model) AND prevents the Langfuse handler's ``propagate_attributes``
 path from firing, so ``session_id`` / ``user_id`` never reach the trace.
-The four current sites are: bootstrap agent, default agent, summarization
-middleware, and the async path inside ``TitleMiddleware``. Any new in-graph
+The five current sites are: bootstrap agent, default agent, summarization
+middleware, the async path inside ``TitleMiddleware``, and the skill security
+scanner reached from the ``skill_manage`` tool (``skills/security_scanner.py``'s
+``scan_skill_content``, which is dual-use: ``_scan_or_raise`` in
+``tools/skill_manage_tool.py`` is the in-graph choke point and passes the flag,
+while its standalone callers keep the default). Any new in-graph
 ``create_chat_model`` call must add to this list and pass the flag.
 """
 
@@ -29,6 +33,7 @@ from langchain_core.runnables import RunnableConfig
 
 from deerflow.agents.lead_agent.prompt import apply_prompt_template
 from deerflow.agents.middlewares.clarification_middleware import ClarificationMiddleware
+from deerflow.agents.middlewares.configured_extensions import load_configured_extension_middlewares
 from deerflow.agents.middlewares.loop_detection_middleware import LoopDetectionMiddleware
 from deerflow.agents.middlewares.memory_middleware import MemoryMiddleware
 from deerflow.agents.middlewares.safety_finish_reason_middleware import SafetyFinishReasonMiddleware
@@ -399,6 +404,10 @@ def build_middlewares(
     if custom_middlewares:
         middlewares.extend(custom_middlewares)
 
+    configured_middlewares = load_configured_extension_middlewares(resolved_app_config)
+    if configured_middlewares:
+        middlewares.extend(configured_middlewares)
+
     # A provider may return an empty AIMessage after tool execution. Retry the
     # final response once, then persist a visible error fallback rather than
     # allowing LangChain's no-tool-call router to end a silent successful run.
@@ -406,9 +415,9 @@ def build_middlewares(
 
     # SafetyFinishReasonMiddleware — suppress tool execution when the provider
     # safety-terminated the response. Registered after the terminal-response
-    # and custom middlewares so LangChain's reverse-order after_model dispatch
-    # runs Safety first; cleared tool_calls then flow through the remaining
-    # accounting/terminal guards without firing extra alarms.
+    # and custom/configured middlewares so LangChain's reverse-order after_model
+    # dispatch runs Safety first; cleared tool_calls then flow through the
+    # remaining accounting/terminal guards without firing extra alarms.
     safety_config = resolved_app_config.safety_finish_reason
     if safety_config.enabled:
         middlewares.append(SafetyFinishReasonMiddleware.from_config(safety_config))

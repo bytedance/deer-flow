@@ -1,7 +1,7 @@
 import asyncio
 import re
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from _router_auth_helpers import make_authed_test_app
@@ -156,6 +156,29 @@ def test_delete_thread_route_cleans_thread_directory(tmp_path):
     assert response.status_code == 200
     assert response.json() == {"success": True, "message": "Deleted local thread data for thread-route"}
     assert not thread_dir.exists()
+
+
+def test_delete_thread_route_closes_browser_session(tmp_path):
+    """Deleting a thread tears down its live browser session so a later caller
+    who reuses the id cannot inherit the retained page/cookies."""
+    paths = Paths(tmp_path)
+
+    app = make_authed_test_app()
+    app.include_router(threads.router)
+
+    manager = SimpleNamespace(close_session=AsyncMock(return_value=True))
+    with (
+        patch("app.gateway.routers.threads.get_paths", return_value=paths),
+        patch(
+            "deerflow.community.browser_automation.get_browser_session_manager",
+            return_value=manager,
+        ),
+    ):
+        with TestClient(app) as client:
+            response = client.delete("/api/threads/thread-browser")
+
+    assert response.status_code == 200
+    manager.close_session.assert_awaited_once_with("thread-browser")
 
 
 def test_delete_thread_route_rejects_invalid_thread_id(tmp_path):

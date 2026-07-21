@@ -104,6 +104,14 @@ def _write_extensions_config(path: Path) -> None:
     path.write_text(json.dumps({"mcpServers": {}, "skills": {}}), encoding="utf-8")
 
 
+def test_config_example_does_not_enable_empty_extensions_block_by_default():
+    config_example_path = Path(__file__).resolve().parents[2] / "config.example.yaml"
+
+    config_data = yaml.safe_load(config_example_path.read_text(encoding="utf-8"))
+
+    assert "extensions" not in config_data
+
+
 def test_app_config_defaults_missing_database_to_sqlite(tmp_path, monkeypatch):
     config_path = tmp_path / "config.yaml"
     extensions_path = tmp_path / "extensions_config.json"
@@ -116,6 +124,79 @@ def test_app_config_defaults_missing_database_to_sqlite(tmp_path, monkeypatch):
 
     assert config.database.backend == "sqlite"
     assert config.database.sqlite_dir == ".deer-flow/data"
+
+
+def test_app_config_preserves_config_yaml_extension_middlewares(tmp_path, monkeypatch):
+    config_path = tmp_path / "config.yaml"
+    extensions_path = tmp_path / "extensions_config.json"
+    extensions_path.write_text(
+        json.dumps({"mcpServers": {}, "skills": {}, "middlewares": ["pkg.from_file:FileMiddleware"]}),
+        encoding="utf-8",
+    )
+    _write_config_with_sections(
+        config_path,
+        {
+            "extensions": {
+                "middlewares": ["pkg.from_yaml:YamlMiddleware"],
+            }
+        },
+    )
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(extensions_path))
+
+    config = AppConfig.from_file(str(config_path))
+
+    assert config.extensions.middlewares == ["pkg.from_yaml:YamlMiddleware"]
+
+
+def test_app_config_normalizes_config_yaml_extension_aliases_before_override(tmp_path, monkeypatch):
+    config_path = tmp_path / "config.yaml"
+    extensions_path = tmp_path / "extensions_config.json"
+    extensions_path.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "from-file": {
+                        "command": "file-mcp",
+                    }
+                },
+                "skills": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    _write_config_with_sections(
+        config_path,
+        {
+            "extensions": {
+                "mcp_servers": {
+                    "from-yaml": {
+                        "command": "yaml-mcp",
+                    }
+                },
+            }
+        },
+    )
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(extensions_path))
+
+    config = AppConfig.from_file(str(config_path))
+
+    assert set(config.extensions.mcp_servers) == {"from-yaml"}
+    assert config.extensions.mcp_servers["from-yaml"].command == "yaml-mcp"
+
+
+def test_app_config_loads_extension_middlewares_from_extensions_config(tmp_path, monkeypatch):
+    config_path = tmp_path / "config.yaml"
+    extensions_path = tmp_path / "extensions_config.json"
+    extensions_path.write_text(
+        json.dumps({"mcpServers": {}, "skills": {}, "middlewares": ["pkg.from_file:FileMiddleware"]}),
+        encoding="utf-8",
+    )
+    _write_config_with_sections(config_path)
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(extensions_path))
+
+    config = AppConfig.from_file(str(config_path))
+
+    assert config.extensions.middlewares == ["pkg.from_file:FileMiddleware"]
 
 
 def test_app_config_defaults_empty_database_to_sqlite(tmp_path, monkeypatch):
@@ -528,5 +609,65 @@ def test_get_app_config_does_not_mutate_singletons_when_reload_validation_fails(
         assert get_checkpointer_config() is not None
         assert get_checkpointer() is initial_checkpointer
         assert get_store() is initial_store
+    finally:
+        _reset_config_singletons()
+
+
+def test_get_memory_config_self_syncs_without_prior_get_app_config(tmp_path, monkeypatch):
+    """get_memory_config() triggers reload when file changes without prior get_app_config().
+
+    Background memory paths (updater/queue/storage) never call get_app_config()
+    directly.  This test pins the fix: calling get_memory_config() in isolation
+    — after mutating the file, with no intervening get_app_config() — reflects
+    the new value.
+    """
+    config_path = tmp_path / "config.yaml"
+    extensions_path = tmp_path / "extensions_config.json"
+    _write_extensions_config(extensions_path)
+
+    _write_config_with_sections(config_path, {"memory": {"enabled": False}})
+
+    monkeypatch.setenv("DEER_FLOW_CONFIG_PATH", str(config_path))
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(extensions_path))
+    reset_app_config()
+
+    try:
+        get_app_config()
+        assert get_memory_config().enabled is False
+
+        _write_config_with_sections(config_path, {"memory": {"enabled": True}})
+        next_mtime = config_path.stat().st_mtime + 5
+        os.utime(config_path, (next_mtime, next_mtime))
+
+        assert get_memory_config().enabled is True
+    finally:
+        _reset_config_singletons()
+
+
+def test_get_memory_config_falls_back_on_broken_config(tmp_path, monkeypatch):
+    """get_memory_config() does not crash on transiently broken config.yaml.
+
+    get_app_config() can raise yaml.YAMLError, ValidationError, or ValueError.
+    get_memory_config() catches them and returns the last-good singleton.
+    """
+    config_path = tmp_path / "config.yaml"
+    extensions_path = tmp_path / "extensions_config.json"
+    _write_extensions_config(extensions_path)
+
+    _write_config_with_sections(config_path, {"memory": {"enabled": False}})
+
+    monkeypatch.setenv("DEER_FLOW_CONFIG_PATH", str(config_path))
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(extensions_path))
+    reset_app_config()
+
+    try:
+        get_app_config()
+        assert get_memory_config().enabled is False
+
+        config_path.write_text("memory: {enabled: true\n")
+        next_mtime = config_path.stat().st_mtime + 5
+        os.utime(config_path, (next_mtime, next_mtime))
+
+        assert get_memory_config().enabled is False
     finally:
         _reset_config_singletons()

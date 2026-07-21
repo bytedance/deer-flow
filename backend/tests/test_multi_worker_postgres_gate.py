@@ -19,13 +19,15 @@ import pytest
 from fastapi import FastAPI
 
 from app.gateway.deps import _enforce_postgres_for_multi_worker, langgraph_runtime
+from app.gateway.routers.browser import _browser_tools_enabled
 from deerflow.config.database_config import DatabaseConfig
 from deerflow.config.run_ownership_config import RunOwnershipConfig
 
 
-def _config_with_backend(backend: str, *, heartbeat_enabled: bool | None = None) -> SimpleNamespace:
+def _config_with_backend(backend: str, *, heartbeat_enabled: bool | None = None, browser_enabled: bool = False) -> SimpleNamespace:
     run_ownership = RunOwnershipConfig(heartbeat_enabled=heartbeat_enabled) if heartbeat_enabled is not None else None
-    return SimpleNamespace(database=DatabaseConfig(backend=backend), run_ownership=run_ownership)
+    tools = [SimpleNamespace(name="browser_navigate")] if browser_enabled else []
+    return SimpleNamespace(database=DatabaseConfig(backend=backend), run_ownership=run_ownership, tools=tools)
 
 
 # ---------------------------------------------------------------------------
@@ -50,6 +52,25 @@ def test_gate_noop_for_single_worker(monkeypatch):
 def test_gate_allows_multi_worker_with_postgres_and_heartbeat(monkeypatch):
     monkeypatch.setenv("GATEWAY_WORKERS", "2")
     _enforce_postgres_for_multi_worker(_config_with_backend("postgres", heartbeat_enabled=True))
+
+
+def test_gate_rejects_process_local_browser_with_multi_worker(monkeypatch):
+    monkeypatch.setenv("GATEWAY_WORKERS", "2")
+    with pytest.raises(SystemExit) as exc_info:
+        _enforce_postgres_for_multi_worker(
+            _config_with_backend("postgres", heartbeat_enabled=True, browser_enabled=True),
+        )
+    msg = str(exc_info.value)
+    assert "process-local" in msg
+    assert "GATEWAY_WORKERS=1" in msg
+
+
+def test_runtime_browser_surface_stays_disabled_after_incompatible_hot_reload(monkeypatch):
+    monkeypatch.setenv("GATEWAY_WORKERS", "2")
+    live_config = SimpleNamespace(tools=[SimpleNamespace(name="browser_navigate", model_extra={})])
+
+    with patch("deerflow.config.get_app_config", return_value=live_config):
+        assert _browser_tools_enabled() is False
 
 
 def test_gate_rejects_multi_worker_with_sqlite(monkeypatch):

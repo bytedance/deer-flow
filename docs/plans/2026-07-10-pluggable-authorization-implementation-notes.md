@@ -200,6 +200,54 @@ Phase 1 最低验证要求：
 - **延期：** RBAC provider、provider factory、Layer 1 过滤、Layer 2 自动接线移至
   Phase 1A-2 / Phase 1B。
 
+### 2026-07-17 — Phase 1A-2 / 内置 RBAC provider 与 provider factory
+
+- **背景：** Phase 1A-1 建立了可信 Principal 链路，但没有策略引擎。
+  Phase 1A-2 实现内置 RBAC provider 和统一 provider factory。
+- **决策：** `RbacAuthorizationProvider` 在构造时完成全部配置校验并编译为
+  不可变结构（`frozenset` / sentinel `_ALL`）。请求路径只做 O(1) membership 检查。
+- **决策：** deny 永远优先于 allow，无论 allow 是 `"*"`、`True`、列表还是缺失。
+- **决策：** 未知角色和缺失角色抛 `ValueError`（不返回 allow），由执行层
+  根据 `fail_closed` 决定。
+- **决策：** 资源名使用显式映射（`tool → tools`，`model → models` 等），
+  不通过加 `s` 猜测。配置中的保留请求别名（如 `tool`）在构造期拒绝，并提示使用
+  对应配置键（如 `tools`），防止策略被存储在永远无法命中的键下。未知 resource
+  使用原名查找；未配置时视为"不受限"。
+- **决策：** `resolve_authorization_provider()` 是唯一 provider 解析入口。
+  disabled 时返回 `None`（不 import provider 模块）；enabled 但缺少 provider
+  时抛 `ValueError`。不缓存实例。不注入 `fail_closed` 或 `default_role`。
+- **决策：** 内置和自定义 provider 使用完全相同的 `resolve_variable` class-path
+  解析路径，无特殊分支。
+- **证据：** 66 tests passed（51 RBAC + 15 factory，其中 5 条为 malformed-policy
+  回归测试）。
+- **兼容性：** 无运行时行为变化（`authorization.enabled: false`）。不修改
+  `config.example.yaml`，不 bump `config_version`。
+- **延期：** Layer 1 工具过滤、Layer 2 自动接线、DeerFlowClient、RBAC 配置示例
+  移至 Phase 1B。
+- **Phase 1B 注意：** 已知角色缺少某个 resource policy 时语义是“不受限”，不是
+  fail-closed。配置示例必须明确提醒，并枚举部署方希望限制的每种 resource。
+- **Phase 1B 注意：** 内置 RBAC 当前按 role + resource + target 决策，不区分
+  `AuthzRequest.action`；`policy_id` 也是稳定但粗粒度的
+  `rbac:allow` / `rbac:deny` / `rbac:unrestricted`。接入审计日志前应决定是否通过
+  更具体的 policy id 或 decision metadata 记录 role / resource / target。
+
+### 2026-07-20 — Phase 1A-2 / PR #4260 请求边界收口
+
+- **背景：** review 发现 `request.target` 未经运行时校验；通配符策略会允许
+  `None` 或空字符串，而列表策略会拒绝，形成依赖策略形态的不一致结果。进一步审查
+  发现无效 resource 和批量过滤候选项也存在相同的“不受限/通配符路径放行”风险。
+- **决策：** 内置 RBAC 在请求边界要求 resource、resource type、target 和每个
+  candidate 都是非空字符串；`filter_resources()` 还要求 candidates 是 list。
+  非法输入统一抛 `ValueError`，不能进入 `rbac:unrestricted` 或通配符 allow 路径。
+- **决策：** `filter_resources()` 对缺失/未知角色继续与 `authorize()` 一致地抛
+  `ValueError`，不在 provider 内静默返回空列表。Phase 1B 集成层负责按
+  `fail_closed` 处理 provider 异常，避免隐藏身份或部署配置错误。
+- **证据：** 90 tests passed（75 RBAC + 15 factory），覆盖 unrestricted、
+  wildcard、allow-list、同步/异步、非法 resource/target/candidates，以及
+  `filter_resources()` 的缺失/未知角色错误语义。
+- **兼容性：** 只拒绝不符合 `AuthzRequest` / `filter_resources` 类型契约的运行时
+  输入；Phase 1A-2 仍未接入运行时，`authorization.enabled: false` 行为不变。
+
 ### 新记录模板
 
 ```markdown

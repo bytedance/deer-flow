@@ -53,6 +53,8 @@ export const enUS: Translations = {
     regenerate: "Regenerate",
     branch: "Branch conversation",
     showArtifacts: "Show artifacts of this conversation",
+    browser: "Browser",
+    showBrowser: "Open browser panel",
   },
 
   // Home
@@ -107,6 +109,7 @@ export const enUS: Translations = {
     largeUnavailable: "Large file. Diff omitted.",
     sensitiveUnavailable: "Sensitive path. Content hidden.",
     truncatedUnavailable: "Diff omitted because the change set is too large.",
+    symlinkUnavailable: "Symlink change. Diff unavailable.",
     truncatedSummary: "Some changes were truncated.",
   },
 
@@ -566,6 +569,15 @@ export const enUS: Translations = {
     clickToViewContent: "Click to view file content",
     writeTodos: "Update to-do list",
     skillInstallTooltip: "Install skill and make it available to DeerFlow",
+    browserNavigate: (url: string) => `Open ${url} in browser`,
+    browserNavigateGeneric: "Open page in browser",
+    browserClick: "Click element in browser",
+    browserType: "Type into browser field",
+    browserSnapshot: "Read page in browser",
+    browserGetText: "Read page text in browser",
+    browserBack: "Go back in browser",
+    browserScreenshot: "Capture browser screenshot",
+    browserClose: "Close browser",
   },
 
   humanInput: {
@@ -828,6 +840,9 @@ export const enUS: Translations = {
     emailPlaceholder: "you@example.com",
     password: "Password",
     passwordPlaceholder: "•••••••",
+    rememberMe: "Keep me signed in",
+    rememberMeDescription:
+      "Keep this browser session when possible. DeerFlow stores only your email, never your password.",
     pleaseWait: "Please wait...",
     signIn: "Sign In",
     createAccount: "Create Account",

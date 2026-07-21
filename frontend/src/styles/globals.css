@@ -85,6 +85,16 @@
     }
   }
 
+  --animate-loading-bar: loading-bar 1s ease-in-out infinite;
+  @keyframes loading-bar {
+    0% {
+      transform: translateX(-100%);
+    }
+    100% {
+      transform: translateX(400%);
+    }
+  }
+
   --animate-fade-in-up: fade-in-up 0.15s ease-in-out forwards;
   @keyframes fade-in-up {
     0% {

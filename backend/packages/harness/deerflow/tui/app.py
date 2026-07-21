@@ -36,7 +36,7 @@ from .view_state import (
 )
 from .widgets.composer import ComposerInput
 
-_HELP_TEXT = "Commands:  /new  /threads  /goal  /model  /skills  /tools  /mcp  /memory  /usage  /config  /quit\nKeys:  Enter send · Ctrl+C interrupt or quit · Ctrl+L redraw · / commands · Esc close overlay"
+_HELP_TEXT = "Commands:  /new  /clear  /threads  /goal  /model  /skills  /tools  /mcp  /memory  /usage  /config  /quit\nKeys:  Enter send · Ctrl+C interrupt or quit · Ctrl+L redraw · / commands · Esc close overlay"
 
 
 class SelectScreen(ModalScreen):
@@ -353,6 +353,9 @@ class DeerFlowTUI(App):
         # which applies skill-activation semantics on the raw text.
         self._send_to_agent(text)
 
+    def _dispatch_still_working(self) -> None:
+        self._dispatch(SystemMessage("Still working — wait for the current run to finish.", tone="info"))
+
     def _handle_builtin(self, name: str, args: str) -> None:
         if name == "quit":
             # Mirror action_interrupt (Ctrl+C): an active run must be interrupted
@@ -366,10 +369,16 @@ class DeerFlowTUI(App):
         elif name == "help":
             self._dispatch(SystemMessage(_HELP_TEXT))
         elif name == "new":
+            if self._streaming:
+                self._dispatch_still_working()
+                return
             self._conv_thread_id = None
             self.state = initial_state()
             self._dispatch(SystemMessage("Started a new thread."))
         elif name == "clear":
+            if self._streaming:
+                self._dispatch_still_working()
+                return
             self._dispatch(ClearRows())
         elif name == "model":
             self._open_model_picker()
@@ -553,7 +562,7 @@ class DeerFlowTUI(App):
 
     def _send_to_agent(self, text: str) -> None:
         if self._streaming:
-            self._dispatch(SystemMessage("Still working — wait for the current run to finish.", tone="info"))
+            self._dispatch_still_working()
             return
         if self._conv_thread_id is None:
             self._conv_thread_id = str(uuid.uuid4())
