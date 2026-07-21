@@ -1662,6 +1662,11 @@ skill_evolution:
 database:
   backend: sqlite
   sqlite_dir: .deer-flow/data
+  # Recycle app ORM PostgreSQL connections before the environment's idle cutoff.
+  pool_recycle: 300
+  # App ORM PostgreSQL command timeout. Set to null to disable it or raise it
+  # for intentionally long commands.
+  command_timeout: 30
 
 # ============================================================================
 # Run Events Configuration

@@ -137,6 +137,8 @@ config: |
   database:
     backend: postgres
     postgres_url: $DATABASE_URL
+    pool_recycle: 300
+    command_timeout: 30
   checkpointer:
     type: postgres
     connection_string: $DATABASE_URL
