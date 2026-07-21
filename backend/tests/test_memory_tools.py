@@ -493,7 +493,7 @@ class TestModeGating:
         monkeypatch.setattr(lead_agent_module, "create_chat_model", lambda **kwargs: "model")
         monkeypatch.setattr(lead_agent_module, "build_middlewares", lambda *args, **kwargs: [])
         monkeypatch.setattr(lead_agent_module, "apply_prompt_template", lambda **kwargs: "mock_prompt")
-        monkeypatch.setattr(lead_agent_module, "create_agent", lambda **kwargs: kwargs)
+        monkeypatch.setattr(lead_agent_module, "create_deerflow_agent", lambda **kwargs: kwargs)
         monkeypatch.setattr(lead_agent_module, "build_tracing_callbacks", lambda: [])
         monkeypatch.setattr(
             lead_agent_module,
@@ -525,7 +525,7 @@ class TestModeGating:
         monkeypatch.setattr(lead_agent_module, "create_chat_model", lambda **kwargs: "model")
         monkeypatch.setattr(lead_agent_module, "build_middlewares", lambda *args, **kwargs: [])
         monkeypatch.setattr(lead_agent_module, "apply_prompt_template", lambda **kwargs: "mock_prompt")
-        monkeypatch.setattr(lead_agent_module, "create_agent", lambda **kwargs: kwargs)
+        monkeypatch.setattr(lead_agent_module, "create_deerflow_agent", lambda **kwargs: kwargs)
         monkeypatch.setattr(lead_agent_module, "build_tracing_callbacks", lambda: [])
         monkeypatch.setattr(
             lead_agent_module,
