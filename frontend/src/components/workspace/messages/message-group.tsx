@@ -15,7 +15,7 @@ import {
   SquareTerminalIcon,
   WrenchIcon,
 } from "lucide-react";
-import { memo, useMemo, useState } from "react";
+import { memo, useEffect, useMemo, useState } from "react";
 
 import {
   ChainOfThought,
@@ -564,6 +564,30 @@ function ToolCall({
     ) : (
       fallback
     );
+  const writeFilePath =
+    (name === "write_file" || name === "str_replace") &&
+    typeof args.path === "string"
+      ? args.path
+      : undefined;
+  const autoOpenArtifactUrl =
+    isLoading && isLast && autoOpen && autoSelect && writeFilePath && !result
+      ? new URL(
+          `write-file:${writeFilePath}?message_id=${messageId}&tool_call_id=${id}`,
+        ).toString()
+      : null;
+
+  useEffect(() => {
+    if (!autoOpenArtifactUrl || selectedArtifact === autoOpenArtifactUrl) {
+      return;
+    }
+
+    const timeout = window.setTimeout(() => {
+      select(autoOpenArtifactUrl, true);
+      setOpen(true);
+    }, 100);
+
+    return () => window.clearTimeout(timeout);
+  }, [autoOpenArtifactUrl, select, selectedArtifact, setOpen]);
 
   if (name.startsWith("browser_")) {
     const shot = browserView?.screenshot;
@@ -759,19 +783,6 @@ function ToolCall({
     if (!description) {
       description = t.toolCalls.writeFile;
     }
-    const path: string | undefined = (args as { path: string })?.path;
-    if (isLoading && isLast && autoOpen && autoSelect && path && !result) {
-      setTimeout(() => {
-        const url = new URL(
-          `write-file:${path}?message_id=${messageId}&tool_call_id=${id}`,
-        ).toString();
-        if (selectedArtifact === url) {
-          return;
-        }
-        select(url, true);
-        setOpen(true);
-      }, 100);
-    }
 
     return (
       <ChainOfThoughtStep
@@ -782,15 +793,15 @@ function ToolCall({
         onClick={() => {
           select(
             new URL(
-              `write-file:${path}?message_id=${messageId}&tool_call_id=${id}`,
+              `write-file:${writeFilePath}?message_id=${messageId}&tool_call_id=${id}`,
             ).toString(),
           );
           setOpen(true);
         }}
       >
-        {path && (
+        {writeFilePath && (
           <ChainOfThoughtSearchResult className="cursor-pointer">
-            {path}
+            {writeFilePath}
           </ChainOfThoughtSearchResult>
         )}
       </ChainOfThoughtStep>

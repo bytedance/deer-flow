@@ -92,6 +92,34 @@ describe("MessageGroup", () => {
     expect(html).toContain("1 more step");
   });
 
+  it("does not schedule artifact auto-open during render", () => {
+    const timeoutSpy = rs.spyOn(globalThis, "setTimeout");
+    const html = renderGroup(
+      [
+        {
+          id: "ai-write",
+          type: "ai",
+          content: "",
+          tool_calls: [
+            {
+              id: "call-write",
+              name: "write_file",
+              args: {
+                path: "/mnt/user-data/outputs/report.md",
+                content: "# Report",
+              },
+            },
+          ],
+        } as Message,
+      ],
+      { isLoading: true },
+    );
+
+    expect(html).toContain("/mnt/user-data/outputs/report.md");
+    expect(timeoutSpy).not.toHaveBeenCalled();
+    timeoutSpy.mockRestore();
+  });
+
   it("keeps tool-calling assistant text visible when reasoning is also present", () => {
     const html = renderGroup([
       {
