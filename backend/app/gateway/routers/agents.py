@@ -3,15 +3,14 @@
 import asyncio
 import logging
 import re
-import shutil
 
-import yaml
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from deerflow.config.agents_api_config import get_agents_api_config
 from deerflow.config.agents_config import AgentConfig, list_custom_agents, load_agent_config, load_agent_soul, preserve_non_managed_fields
 from deerflow.config.paths import get_paths
+from deerflow.persistence.agents import AgentExistsError, get_agent_store
 from deerflow.runtime.user_context import get_effective_user_id
 
 logger = logging.getLogger(__name__)
@@ -148,11 +147,9 @@ async def check_agent_name(name: str) -> dict:
     _validate_agent_name(name)
     normalized = _normalize_agent_name(name)
     user_id = get_effective_user_id()
-    paths = get_paths()
-    # Treat the name as taken if either the per-user path or the legacy shared
-    # path holds an agent — picking a name that collides with an unmigrated
-    # legacy agent would shadow the legacy entry once migration runs.
-    available = not paths.user_agent_dir(user_id, normalized).exists() and not paths.agent_dir(normalized).exists()
+    # Availability is defined by the active backend and stays consistent with
+    # create()'s conflict rule (file: per-user or legacy dir; db: a row).
+    available = not get_agent_store().exists(normalized, user_id=user_id)
     return {"available": available, "name": normalized}
 
 
@@ -212,62 +209,36 @@ async def create_agent_endpoint(request: AgentCreateRequest) -> AgentResponse:
     _validate_agent_name(request.name)
     normalized_name = _normalize_agent_name(request.name)
     user_id = get_effective_user_id()
-    paths = get_paths()
 
-    def _create_agent() -> AgentResponse | None:
-        # Worker thread: base-dir resolution, existence checks, directory/file
-        # creation, read-back, and failure cleanup are all blocking filesystem
-        # IO that must stay off the event loop.
-        agent_dir = paths.user_agent_dir(user_id, normalized_name)
-        legacy_dir = paths.agent_dir(normalized_name)
+    # Config document — only the fields the caller set, matching the historical
+    # writer (an omitted field stays absent rather than being materialized).
+    config_data: dict = {"name": normalized_name}
+    if request.description:
+        config_data["description"] = request.description
+    if request.model is not None:
+        config_data["model"] = request.model
+    if request.tool_groups is not None:
+        config_data["tool_groups"] = request.tool_groups
+    if request.skills is not None:
+        config_data["skills"] = request.skills
 
-        if legacy_dir.exists():
-            return None  # signals 409 to the caller
+    store = get_agent_store()
 
-        try:
-            try:
-                agent_dir.mkdir(parents=True, exist_ok=False)
-            except FileExistsError:
-                return None  # signals 409 to the caller
-            # Write config.yaml
-            config_data: dict = {"name": normalized_name}
-            if request.description:
-                config_data["description"] = request.description
-            if request.model is not None:
-                config_data["model"] = request.model
-            if request.tool_groups is not None:
-                config_data["tool_groups"] = request.tool_groups
-            if request.skills is not None:
-                config_data["skills"] = request.skills
-
-            config_file = agent_dir / "config.yaml"
-            with open(config_file, "w", encoding="utf-8") as f:
-                yaml.dump(config_data, f, default_flow_style=False, allow_unicode=True)
-
-            # Write SOUL.md
-            soul_file = agent_dir / "SOUL.md"
-            soul_file.write_text(request.soul, encoding="utf-8")
-
-            logger.info(f"Created agent '{normalized_name}' at {agent_dir}")
-
-            agent_cfg = load_agent_config(normalized_name, user_id=user_id)
-            return _agent_config_to_response(agent_cfg, include_soul=True, user_id=user_id)
-        except Exception:
-            # Clean up partial state on failure before surfacing the error.
-            if agent_dir.exists():
-                shutil.rmtree(agent_dir)
-            raise
+    def _create_agent() -> AgentResponse:
+        # Worker thread: existence checks + persistence (file IO or a DB round
+        # trip) must stay off the event loop.
+        store.create(normalized_name, config_data, request.soul, user_id=user_id)
+        logger.info("Created agent '%s'", normalized_name)
+        agent_cfg = load_agent_config(normalized_name, user_id=user_id)
+        return _agent_config_to_response(agent_cfg, include_soul=True, user_id=user_id)
 
     try:
-        response = await asyncio.to_thread(_create_agent)
+        return await asyncio.to_thread(_create_agent)
+    except AgentExistsError:
+        raise HTTPException(status_code=409, detail=f"Agent '{normalized_name}' already exists")
     except Exception as e:
         logger.error(f"Failed to create agent '{request.name}': {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to create agent: {str(e)}")
-
-    if response is None:
-        raise HTTPException(status_code=409, detail=f"Agent '{normalized_name}' already exists")
-
-    return response
 
 
 @router.put(
@@ -308,7 +279,8 @@ async def update_agent(name: str, request: AgentUpdateRequest) -> AgentResponse:
     # is ever called). Bare .exists() would miss that case and let this
     # fall through to a silent fork of a brand-new config.yaml/SOUL.md
     # into the memory-only directory instead of blocking (mirrors
-    # resolve_agent_dir's guard, see #3390).
+    # resolve_agent_dir's guard, see #3390). The db backend has no legacy
+    # shared layout, so this file-only guard is a no-op there.
     if not (agent_dir / "config.yaml").exists() and (legacy_dir / "config.yaml").exists():
         raise HTTPException(
             status_code=409,
@@ -322,8 +294,9 @@ async def update_agent(name: str, request: AgentUpdateRequest) -> AgentResponse:
         fields_set = request.model_fields_set
         config_changed = bool(fields_set & {"description", "model", "tool_groups", "skills"})
 
+        updated: dict | None = None
         if config_changed:
-            updated: dict = {
+            updated = {
                 "name": agent_cfg.name,
                 "description": request.description if "description" in fields_set else agent_cfg.description,
             }
@@ -354,14 +327,11 @@ async def update_agent(name: str, request: AgentUpdateRequest) -> AgentResponse:
             for key, value in preserve_non_managed_fields(agent_cfg).items():
                 updated.setdefault(key, value)
 
-            config_file = agent_dir / "config.yaml"
-            with open(config_file, "w", encoding="utf-8") as f:
-                yaml.dump(updated, f, default_flow_style=False, allow_unicode=True)
-
-        # Update SOUL.md if provided
-        if request.soul is not None:
-            soul_path = agent_dir / "SOUL.md"
-            soul_path.write_text(request.soul, encoding="utf-8")
+        store = get_agent_store()
+        # Persist config (when changed) and/or soul (when provided) off the
+        # event loop. A no-change PATCH commits nothing and re-reads current state.
+        if updated is not None or request.soul is not None:
+            await asyncio.to_thread(store.update, name, updated, request.soul, user_id=user_id)
 
         logger.info(f"Updated agent '{name}'")
 
@@ -460,21 +430,11 @@ async def delete_agent(name: str) -> None:
     _validate_agent_name(name)
     name = _normalize_agent_name(name)
     user_id = get_effective_user_id()
-    paths = get_paths()
-
-    def _remove_agent_dir() -> tuple[str, str]:
-        # Runs in a worker thread: resolving the base dir, probing the directory
-        # (`exists`), and removing it (`rmtree`) are all blocking filesystem IO
-        # that must stay off the event loop.
-        agent_dir = paths.user_agent_dir(user_id, name)
-        if not agent_dir.exists():
-            outcome = "legacy" if paths.agent_dir(name).exists() else "missing"
-            return outcome, str(agent_dir)
-        shutil.rmtree(agent_dir)
-        return "deleted", str(agent_dir)
+    store = get_agent_store()
 
     try:
-        outcome, agent_dir = await asyncio.to_thread(_remove_agent_dir)
+        # Off the event loop: file rmtree or a DB delete plus memory cleanup.
+        outcome = await asyncio.to_thread(store.delete, name, user_id=user_id)
     except Exception as e:
         logger.error(f"Failed to delete agent '{name}': {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to delete agent: {str(e)}")
@@ -487,4 +447,4 @@ async def delete_agent(name: str) -> None:
     if outcome == "missing":
         raise HTTPException(status_code=404, detail=f"Agent '{name}' not found")
 
-    logger.info(f"Deleted agent '{name}' from {agent_dir}")
+    logger.info(f"Deleted agent '{name}'")
