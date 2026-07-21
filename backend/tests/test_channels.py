@@ -7153,6 +7153,110 @@ class TestSlackMarkdownConversion:
         assert "*Title*" in result
         assert "#" not in result
 
+    def test_converter_passes_reserved_characters_through_unchanged(self):
+        # The library itself never escapes Slack's reserved characters -- this
+        # pins that assumption so SlackChannel.send() knows it must do so itself.
+        from app.channels.slack import _slack_md_converter
+
+        result = _slack_md_converter.convert("if a < b && b > c:")
+        assert result == "if a < b && b > c:"
+
+
+# ---------------------------------------------------------------------------
+# Slack outbound text escaping tests (Slack's &/</> HTML-entity requirement)
+#
+# Slack requires callers to replace &, <, and > with their HTML entity
+# equivalents before sending message text, because an unescaped `<...>`
+# triggers Slack's own mention/link syntax (e.g. `<@USERID>`,
+# `<http://url|label>`). See:
+# https://api.slack.com/reference/surfaces/formatting#escaping
+# ---------------------------------------------------------------------------
+
+
+class TestSlackTextEscaping:
+    @staticmethod
+    def _sent_text(text: str) -> str:
+        """Send *text* through SlackChannel.send() and return the resulting
+        Slack API ``text`` kwarg, without actually hitting the network."""
+        from app.channels.slack import SlackChannel
+
+        captured: dict[str, object] = {}
+
+        async def go():
+            bus = MessageBus()
+            ch = SlackChannel(bus=bus, config={"bot_token": "xoxb-test", "app_token": "xapp-test"})
+
+            mock_web = MagicMock()
+
+            def post_message(**kwargs):
+                captured.update(kwargs)
+                return MagicMock()
+
+            mock_web.chat_postMessage = post_message
+            ch._web_client = mock_web
+
+            msg = OutboundMessage(channel_name="slack", chat_id="C123", thread_id="t1", text=text)
+            await ch.send(msg)
+
+        _run(go())
+        return captured["text"]
+
+    def test_raw_angle_brackets_and_ampersand_are_escaped(self):
+        # Realistic technical/code content containing all three reserved
+        # characters must arrive escaped, so Slack renders it as literal text
+        # instead of attempting to parse a broken mention/link.
+        sent = self._sent_text("if a < b && b > c:")
+        assert sent == "if a &lt; b &amp;&amp; b &gt; c:"
+        assert "<" not in sent
+        assert ">" not in sent
+
+    def test_bot_mention_syntax_is_neutralized_not_interpreted(self):
+        # Raw text that happens to look like a mention must not survive as
+        # live `<@...>` syntax -- Slack would otherwise try to resolve it.
+        sent = self._sent_text("please ask <@U12345> for review")
+        assert sent == "please ask &lt;@U12345&gt; for review"
+
+    def test_real_markdown_link_still_converts_without_double_escaping(self):
+        # Critical non-regression case: escaping must run BEFORE mrkdwn
+        # conversion, not after. The converter's own generated `<url|label>`
+        # syntax for a real markdown link must survive untouched -- if
+        # escaping ran after conversion instead, this would corrupt into
+        # `&lt;url|label&gt;` and Slack would render a dead link.
+        sent = self._sent_text("See [DeerFlow docs](https://example.com/docs) for more.")
+        assert "<https://example.com/docs|DeerFlow docs>" in sent
+        assert "&lt;" not in sent
+        assert "&gt;" not in sent
+
+    def test_ampersand_in_link_url_is_escaped_before_conversion(self):
+        # & must be escaped first (before < and >) so it doesn't double-escape
+        # the &amp;/&lt;/&gt; entities being introduced, and a literal '&' in a
+        # URL must still come through as &amp; per Slack's escaping rule --
+        # even inside the converter's own generated <url|label> syntax.
+        sent = self._sent_text("[Search](https://example.com?a=1&b=2)")
+        assert "<https://example.com?a=1&amp;b=2|Search>" in sent
+
+    def test_blockquote_marker_at_line_start_is_preserved(self):
+        # A ">" at the very start of a line is Slack's own blockquote marker
+        # (the mrkdwn converter passes it through unchanged), not part of the
+        # <...> mention/link syntax that & and < neutralize. Escaping it would
+        # turn a quoted line into visible "&gt;" text instead of a rendered
+        # blockquote.
+        sent = self._sent_text("> quoted text")
+        assert sent == "> quoted text"
+
+    def test_blockquote_marker_exemption_is_line_start_only(self):
+        # The line-start exemption must not widen into "never escape '>'":
+        # a "<"/"&" anywhere, and a ">" that is NOT at the start of a line,
+        # still escape -- only the leading marker is restored.
+        sent = self._sent_text("> a < b & c > d")
+        assert sent == "> a &lt; b &amp; c &gt; d"
+
+    def test_blockquote_marker_restored_on_every_line(self):
+        # The restoration must apply per-line (re.MULTILINE), not just once
+        # at the start of the whole string.
+        sent = self._sent_text("intro\n> first quote\nmiddle\n> second quote")
+        assert sent == "intro\n> first quote\nmiddle\n> second quote"
+
 
 # ---------------------------------------------------------------------------
 # Telegram streaming tests
