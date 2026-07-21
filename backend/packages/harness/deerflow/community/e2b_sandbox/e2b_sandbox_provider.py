@@ -471,7 +471,8 @@ class E2BSandboxProvider(SandboxProvider):
         # use the same /mnt/user-data prefix as LocalSandbox / AioSandbox — fail
         # with PermissionError because /mnt is owned by root in the e2b
         # template. See the path-mapping note in :class:`E2BSandbox`.
-        if error := self._bootstrap_or_discard(client, sandbox_id):
+        error = self._bootstrap_or_discard(client, sandbox_id)
+        if error is not None:
             raise RuntimeError(f"Failed to bootstrap e2b sandbox {sandbox_id}") from error
 
         # One-shot mount uploads.  e2b has no host bind-mount, so we copy

@@ -719,6 +719,25 @@ def test_acquire_cleans_up_and_fails_when_bootstrap_fails(monkeypatch):
     assert provider.get("bootstrap-failure") is None
 
 
+def test_acquire_rejects_falsey_bootstrap_error(monkeypatch):
+    class FalseyError(RuntimeError):
+        def __bool__(self) -> bool:
+            return False
+
+    provider = _make_provider()
+    fake_cls = _install_fake_sdk(monkeypatch, provider)
+    client = FakeClient(sandbox_id="bootstrap-failure")
+    error = FalseyError("bootstrap failed")
+    fake_cls.create_factory = lambda **kwargs: client
+    provider._bootstrap_or_discard = MagicMock(return_value=error)
+
+    with pytest.raises(RuntimeError, match="bootstrap") as caught:
+        provider.acquire("thread-1", user_id="user-1")
+
+    assert caught.value.__cause__ is error
+    assert provider.get("bootstrap-failure") is None
+
+
 def test_acquire_closes_client_when_bootstrap_cleanup_kill_fails(monkeypatch):
     provider = _make_provider()
     fake_cls = _install_fake_sdk(monkeypatch, provider)
