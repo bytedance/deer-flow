@@ -529,5 +529,3 @@ A search of `bytedance/deer-flow` confirms **no RBAC implementation exists**; RB
 - **[#3929](https://github.com/bytedance/deer-flow/issues/3929)** (open) - sandbox NodePort->ClusterIP (same author family of security hardening RFCs).
 
 **Net takeaway:** the upstream has spent real effort plumbing identity into the guardrail execution point (#3665, #3839) and has explicitly deferred the RBAC policy brain. The two-layer design in this RFC is the natural next step the prior work points at - not a competing or redundant proposal.
-
-

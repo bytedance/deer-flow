@@ -68,6 +68,10 @@ boxlite = ["boxlite>=0.9.7"]
 # Agent observability (Monocle). Optional so a default install stays free of the
 # OpenTelemetry stack; only pulled in when MONOCLE_TRACING is used.
 monocle = ["monocle_apptrace>=0.8.8"]
+# Agentic browser control (browser_navigate/click/type/... tool group). Optional
+# so the core harness install stays lean; import is lazy inside the private
+# Playwright loop. After install, run `playwright install chromium` once.
+browser = ["playwright>=1.40"]
 
 [build-system]
 requires = ["hatchling"]

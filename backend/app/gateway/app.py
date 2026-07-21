@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.gateway.auth_disabled import warn_if_auth_disabled_enabled
 from app.gateway.auth_middleware import AuthMiddleware
+from app.gateway.browser_capability import ensure_browser_runtime_available
 from app.gateway.config import get_gateway_config
 from app.gateway.csrf_middleware import CSRFMiddleware, get_configured_cors_origins
 from app.gateway.deps import langgraph_runtime
@@ -16,6 +17,7 @@ from app.gateway.routers import (
     artifacts,
     assistants_compat,
     auth,
+    browser,
     channel_connections,
     channels,
     console,
@@ -181,6 +183,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     try:
         startup_config = get_app_config()
         configure_logging(startup_config)
+        ensure_browser_runtime_available(startup_config)
         logger.info("Configuration loaded successfully")
         warn_if_auth_disabled_enabled()
     except Exception as e:
@@ -301,6 +304,23 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             except Exception:
                 logger.exception("Failed to stop scheduled task service")
 
+        try:
+            from deerflow.community.browser_automation import get_browser_session_manager
+
+            closed = await asyncio.wait_for(
+                get_browser_session_manager().close_all_sessions(),
+                timeout=_SHUTDOWN_HOOK_TIMEOUT_SECONDS,
+            )
+            if closed:
+                logger.info("Closed %d browser session(s)", closed)
+        except TimeoutError:
+            logger.warning(
+                "Browser session shutdown exceeded %.1fs; proceeding with worker exit.",
+                _SHUTDOWN_HOOK_TIMEOUT_SECONDS,
+            )
+        except Exception:
+            logger.exception("Failed to close browser sessions")
+
         # Drain the memory backend's pending-update buffer before the worker
         # exits (best-effort, bounded). IM channels and the scheduler are
         # already stopped above, so no new IM/scheduler updates arrive during
@@ -317,9 +337,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         # would (review #6 on the original PR).
         #
         # K8s caveat: ``shutdown_flush_timeout_seconds`` must fit inside the
-        # pod's ``terminationGracePeriodSeconds`` (channel stop + this drain +
-        # buffer), set on the gateway Helm deployment -- or K8s SIGKILLs the
-        # drain mid-flight and the loss this is fixing is silently re-introduced.
+        # pod's ``terminationGracePeriodSeconds`` (channel stop + browser
+        # session close + this drain + buffer), set on the gateway Helm
+        # deployment -- or K8s SIGKILLs the drain mid-flight and the loss this
+        # is fixing is silently re-introduced.
         try:
             app_cfg = get_app_config()
             if app_cfg.memory.enabled:
@@ -486,6 +507,9 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
 
     # Artifacts API is mounted at /api/threads/{thread_id}/artifacts
     app.include_router(artifacts.router)
+
+    # Browser API is mounted at /api/threads/{thread_id}/browser
+    app.include_router(browser.router)
 
     # Uploads API is mounted at /api/threads/{thread_id}/uploads
     app.include_router(uploads.router)

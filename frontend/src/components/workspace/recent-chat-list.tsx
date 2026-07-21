@@ -81,10 +81,16 @@ export function RecentChatList() {
     hasNextPage,
     isFetchingNextPage,
   } = useInfiniteThreads();
-  const threads = useMemo(
-    () => infiniteThreads?.pages.flat() ?? [],
-    [infiniteThreads],
-  );
+  const threads = useMemo(() => {
+    const seen = new Set<string>();
+    return (infiniteThreads?.pages.flat() ?? []).filter((thread) => {
+      if (seen.has(thread.thread_id)) {
+        return false;
+      }
+      seen.add(thread.thread_id);
+      return true;
+    });
+  }, [infiniteThreads]);
 
   const sentinelRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {

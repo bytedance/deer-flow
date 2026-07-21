@@ -1,6 +1,6 @@
 import type { Message } from "@langchain/langgraph-sdk";
 import { describe, expect, it, rs } from "@rstest/core";
-import { createElement } from "react";
+import { createElement, type ComponentProps } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import { MessageGroup } from "@/components/workspace/messages/message-group";
@@ -121,9 +121,55 @@ describe("MessageGroup", () => {
     expect(html).toContain("1 more step");
     expect(html).not.toContain("Check how processing groups convert messages.");
   });
+
+  it("defers browser screenshot previews while the thread is loading", () => {
+    const messages = [
+      {
+        id: "ai-1",
+        type: "ai",
+        content: "",
+        tool_calls: [
+          {
+            id: "call-1",
+            name: "browser_navigate",
+            args: { url: "https://github.com/bytedance/deer-flow" },
+          },
+        ],
+      } as Message,
+      {
+        id: "tool-1",
+        type: "tool",
+        name: "browser_navigate",
+        tool_call_id: "call-1",
+        content: "Opened",
+        additional_kwargs: {
+          browser_view: {
+            screenshot: "/mnt/user-data/outputs/browser.png",
+            url: "https://github.com/bytedance/deer-flow",
+          },
+        },
+      } as Message,
+    ];
+
+    const visibleHtml = renderGroup(messages, {
+      threadId: "thread-1",
+      deferBrowserPreviews: false,
+    });
+    const deferredHtml = renderGroup(messages, {
+      threadId: "thread-1",
+      deferBrowserPreviews: true,
+    });
+
+    expect(visibleHtml).toContain("<img");
+    expect(visibleHtml).toContain('decoding="async"');
+    expect(deferredHtml).not.toContain("<img");
+  });
 });
 
-function renderGroup(messages: Message[]) {
+function renderGroup(
+  messages: Message[],
+  props: Omit<ComponentProps<typeof MessageGroup>, "messages"> = {},
+) {
   return renderToStaticMarkup(
     createElement(
       I18nContext.Provider,
@@ -133,7 +179,7 @@ function renderGroup(messages: Message[]) {
           setLocale: () => undefined,
         },
       },
-      createElement(MessageGroup, { messages }),
+      createElement(MessageGroup, { ...props, messages }),
     ),
   );
 }
