@@ -74,6 +74,79 @@ describe("artifact URL helpers", () => {
     ).toBe("/demo/threads/thread-1/user-data/outputs/style.css");
   });
 
+  test("encodes reserved characters in artifact URL path segments", async () => {
+    const { resolveArtifactURL, urlOfArtifact } =
+      await loadFreshArtifactUtils();
+
+    expect(
+      urlOfArtifact({
+        filepath: "/mnt/user-data/outputs/a#b?.txt",
+        threadId: "thread #1",
+        download: true,
+      }),
+    ).toBe(
+      "/api/threads/thread%20%231/artifacts/mnt/user-data/outputs/a%23b%3F.txt?download=true",
+    );
+    expect(
+      urlOfArtifact({
+        filepath: "/mnt/user-data/outputs/a#b?.txt",
+        threadId: "thread #1",
+        isMock: true,
+      }),
+    ).toBe(
+      "/mock/api/threads/thread%20%231/artifacts/mnt/user-data/outputs/a%23b%3F.txt",
+    );
+    expect(
+      resolveArtifactURL("/mnt/user-data/outputs/中 文#?.png", "thread #1"),
+    ).toBe(
+      "/api/threads/thread%20%231/artifacts/mnt/user-data/outputs/%E4%B8%AD%20%E6%96%87%23%3F.png",
+    );
+    expect(
+      resolveArtifactURL("/mnt/user-data/outputs/a%23b%3F.txt", "thread-1"),
+    ).toBe(
+      "/api/threads/thread-1/artifacts/mnt/user-data/outputs/a%23b%3F.txt",
+    );
+  });
+
+  test("preserves markdown query and fragment suffixes on artifact URLs", async () => {
+    const { resolveMarkdownArtifactURL, resolveMessageImageURL } =
+      await loadFreshArtifactUtils();
+
+    expect(
+      resolveMarkdownArtifactURL(
+        "/mnt/user-data/outputs/chart.png?v=2#detail",
+        "thread-1",
+      ),
+    ).toBe(
+      "/api/threads/thread-1/artifacts/mnt/user-data/outputs/chart.png?v=2#detail",
+    );
+    expect(
+      resolveMessageImageURL(
+        "/mnt/user-data/outputs/a%23b%3F.png?v=2#detail",
+        "thread-1",
+        [],
+      ),
+    ).toBe(
+      "/api/threads/thread-1/artifacts/mnt/user-data/outputs/a%23b%3F.png?v=2#detail",
+    );
+  });
+
+  test("encodes reserved characters in static demo artifact URLs", async () => {
+    setEnv("NEXT_PUBLIC_STATIC_WEBSITE_ONLY", "true");
+
+    const { urlOfArtifact } = await loadFreshArtifactUtils();
+
+    expect(
+      urlOfArtifact({
+        filepath: "/mnt/user-data/outputs/a#b?.txt",
+        threadId: "thread #1",
+        download: true,
+      }),
+    ).toBe(
+      "/demo/threads/thread%20%231/user-data/outputs/a%23b%3F.txt?download=true",
+    );
+  });
+
   test("returns stable artifact path references", async () => {
     const { extractArtifactsFromThread } = await loadFreshArtifactUtils();
     const threadWithoutArtifacts = { values: {} };
@@ -93,6 +166,7 @@ describe("artifact URL helpers", () => {
       "/mnt/user-data/outputs/aws-agent-overview.png",
       "/mnt/user-data/outputs/aws-agent-console-config.png",
       "/mnt/user-data/outputs/chart.png",
+      "/mnt/user-data/outputs/a#b?.png",
     ];
 
     expect(
@@ -119,6 +193,11 @@ describe("artifact URL helpers", () => {
     expect(
       resolveMessageImageURL("outputs/chart.png", "thread-1", artifacts),
     ).toBe("/api/threads/thread-1/artifacts/mnt/user-data/outputs/chart.png");
+    expect(
+      resolveMessageImageURL("a%23b%3F.png#detail", "thread-1", artifacts),
+    ).toBe(
+      "/api/threads/thread-1/artifacts/mnt/user-data/outputs/a%23b%3F.png#detail",
+    );
   });
 
   test("does not rewrite unregistered, ambiguous, or external message images", async () => {

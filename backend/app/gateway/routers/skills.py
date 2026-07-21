@@ -443,10 +443,7 @@ async def update_skill(skill_name: str, body: SkillUpdateRequest, request: Reque
             extensions_config = get_extensions_config()
             extensions_config.skills[skill_name] = SkillStateConfig(enabled=body.enabled)
 
-            config_data = {
-                "mcpServers": {name: server.model_dump() for name, server in extensions_config.mcp_servers.items()},
-                "skills": {name: {"enabled": skill_config.enabled} for name, skill_config in extensions_config.skills.items()},
-            }
+            config_data = extensions_config.to_file_dict()
 
             with open(config_path, "w", encoding="utf-8") as f:
                 json.dump(config_data, f, indent=2)
@@ -466,10 +463,7 @@ async def update_skill(skill_name: str, body: SkillUpdateRequest, request: Reque
                     config_path = Path.cwd().parent / "extensions_config.json"
                 extensions_config = get_extensions_config()
                 extensions_config.skills[skill_name] = SkillStateConfig(enabled=body.enabled)
-                config_data = {
-                    "mcpServers": {name: server.model_dump() for name, server in extensions_config.mcp_servers.items()},
-                    "skills": {name: {"enabled": skill_config.enabled} for name, skill_config in extensions_config.skills.items()},
-                }
+                config_data = extensions_config.to_file_dict()
                 with open(config_path, "w", encoding="utf-8") as f:
                     json.dump(config_data, f, indent=2)
                 reload_extensions_config()

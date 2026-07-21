@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import importlib
+import json
+import os
 import threading
 from collections import OrderedDict
 from types import SimpleNamespace
@@ -208,6 +210,13 @@ def _make_sandbox(client: FakeClient, *, sandbox_id: str | None = None) -> Any:
 def test_thread_key_returns_user_thread_tuple():
     p = _make_provider()
     assert p._thread_key("t1", "u1") == ("u1", "t1")
+
+
+def test_sandbox_id_falls_back_when_client_id_is_none():
+    client = FakeClient(sandbox_id=None)
+    sandbox = _make_sandbox(client, sandbox_id="fallback-id")
+
+    assert sandbox.sandbox_id == "fallback-id"
 
 
 def test_stable_seed_is_deterministic_and_user_scoped():
@@ -458,7 +467,11 @@ def test_reclaim_warm_pool_sandbox_happy_path(monkeypatch):
 def test_reclaim_warm_pool_sandbox_drops_dead_entry(monkeypatch):
     p = _make_provider()
     fake_cls = _install_fake_sdk(monkeypatch, p)
-    fake_cls.connect_factory = lambda sid, **kw: FakeClient(sandbox_id=sid, commands=FakeCommandsAPI([FakeCommandsAPI.GONE]))
+    client = FakeClient(
+        sandbox_id="sb-zombie",
+        commands=FakeCommandsAPI([FakeCommandsAPI.GONE]),
+    )
+    fake_cls.connect_factory = lambda _sid, **_kw: client
     seed = p._stable_seed("t1", "u1")
     p._warm_pool["sb-zombie"] = (seed, 12345.0)
 
@@ -466,6 +479,7 @@ def test_reclaim_warm_pool_sandbox_drops_dead_entry(monkeypatch):
     assert sid is None
     assert "sb-zombie" not in p._sandboxes
     assert "sb-zombie" not in p._warm_pool
+    assert client.closed is True
 
 
 def test_reclaim_warm_pool_sandbox_handles_reconnect_exception(monkeypatch):
@@ -482,6 +496,29 @@ def test_reclaim_warm_pool_sandbox_handles_reconnect_exception(monkeypatch):
     sid = p._reclaim_warm_pool_sandbox("t1", user_id="u1")
     assert sid is None
     assert "sb-broken" not in p._warm_pool
+
+
+def test_acquire_discards_warm_sandbox_when_bootstrap_fails(monkeypatch):
+    p = _make_provider()
+    fake_cls = _install_fake_sdk(monkeypatch, p)
+    warm_client = FakeClient(
+        sandbox_id="sb-warm",
+        commands=FakeCommandsAPI(
+            [
+                SimpleNamespace(stdout="ok", stderr="", exit_code=0),
+                SimpleNamespace(stdout="", stderr="permission denied", exit_code=1),
+            ]
+        ),
+    )
+    fresh_client = FakeClient(sandbox_id="sb-fresh")
+    fake_cls.connect_factory = lambda _sid, **_kw: warm_client
+    fake_cls.create_factory = lambda **_kw: fresh_client
+    p._warm_pool["sb-warm"] = (p._stable_seed("t1", "u1"), 12345.0)
+
+    assert p.acquire("t1", user_id="u1") == "sb-fresh"
+    assert warm_client.killed is True
+    assert warm_client.closed is True
+    assert p.get("sb-warm") is None
 
 
 def test_reclaim_warm_pool_sandbox_returns_none_on_seed_mismatch(monkeypatch):
@@ -550,10 +587,90 @@ def test_discover_remote_sandbox_skips_dead_candidate(monkeypatch):
     p = _make_provider()
     fake_cls = _install_fake_sdk(monkeypatch, p)
     fake_cls.list_return = [_info("sb-dead", "u1", "t1")]
-    fake_cls.connect_factory = lambda sid, **kw: FakeClient(sandbox_id=sid, commands=FakeCommandsAPI([FakeCommandsAPI.GONE]))
+    client = FakeClient(
+        sandbox_id="sb-dead",
+        commands=FakeCommandsAPI([FakeCommandsAPI.GONE]),
+    )
+    fake_cls.connect_factory = lambda _sid, **_kw: client
 
     assert p._discover_remote_sandbox("t1", user_id="u1") is None
     assert ("u1", "t1") not in p._thread_sandboxes
+    assert client.closed is True
+
+
+def test_discover_remote_sandbox_discards_candidate_when_bootstrap_fails(monkeypatch):
+    p = _make_provider()
+    fake_cls = _install_fake_sdk(monkeypatch, p)
+    fake_cls.list_return = [_info("sb-broken", "u1", "t1")]
+    client = FakeClient(
+        sandbox_id="sb-broken",
+        commands=FakeCommandsAPI(
+            [
+                SimpleNamespace(stdout="ok", stderr="", exit_code=0),
+                SimpleNamespace(stdout="", stderr="permission denied", exit_code=1),
+            ]
+        ),
+    )
+    fake_cls.connect_factory = lambda _sid, **_kw: client
+
+    assert p._discover_remote_sandbox("t1", user_id="u1") is None
+    assert client.killed is True
+    assert client.closed is True
+    assert ("u1", "t1") not in p._thread_sandboxes
+
+
+def test_kill_client_returns_exception_without_raising():
+    p = _make_provider()
+    client = FakeClient()
+    error = RuntimeError("already gone")
+    client.kill = MagicMock(side_effect=error)
+
+    assert p._kill_client(client) is error
+
+
+def test_kill_client_ignores_missing_or_uncallable_clients():
+    p = _make_provider()
+
+    assert p._kill_client(None) is None
+    assert p._kill_client(SimpleNamespace()) is None
+
+
+def test_evict_oldest_warm_closes_client_when_kill_lookup_raises(monkeypatch):
+    p = _make_provider()
+    fake_cls = _install_fake_sdk(monkeypatch, p)
+    error = RuntimeError("kill unavailable")
+
+    class ClientWithBrokenKill:
+        def __init__(self) -> None:
+            self.closed = False
+
+        @property
+        def kill(self):
+            raise error
+
+        def close(self) -> None:
+            self.closed = True
+
+    client = ClientWithBrokenKill()
+    fake_cls.connect_factory = lambda _sid, **_kw: client
+    p._warm_pool["sb-warm"] = ("seed", 12345.0)
+
+    assert p._evict_oldest_warm() == "sb-warm"
+    assert client.closed is True
+
+
+def test_evict_oldest_warm_uses_kill_helper_and_closes_client(monkeypatch):
+    p = _make_provider()
+    fake_cls = _install_fake_sdk(monkeypatch, p)
+    client = FakeClient(sandbox_id="sb-warm")
+    fake_cls.connect_factory = lambda _sid, **_kw: client
+    p._warm_pool["sb-warm"] = ("seed", 12345.0)
+    kill_client = MagicMock(return_value=None)
+    p._kill_client = kill_client
+
+    assert p._evict_oldest_warm() == "sb-warm"
+    kill_client.assert_called_once_with(client)
+    assert client.closed is True
 
 
 def test_discover_remote_sandbox_returns_none_when_list_raises(monkeypatch):
@@ -581,14 +698,69 @@ def test_bootstrap_sandbox_paths_emits_expected_script():
         assert f"/home/user/{sub}" in script
 
 
-def test_bootstrap_sandbox_paths_swallows_command_failure():
+def test_bootstrap_sandbox_paths_raises_on_command_failure():
     p = _make_provider()
 
     def boom(_cmd: str) -> Any:
         raise RuntimeError("sudo not allowed")
 
     client = FakeClient(commands=FakeCommandsAPI([boom]))
-    p._bootstrap_sandbox_paths(client)
+    with pytest.raises(RuntimeError, match="bootstrap script raised"):
+        p._bootstrap_sandbox_paths(client)
+
+
+def test_acquire_cleans_up_and_fails_when_bootstrap_fails(monkeypatch):
+    provider = _make_provider()
+    fake_cls = _install_fake_sdk(monkeypatch, provider)
+    client = FakeClient(
+        sandbox_id="bootstrap-failure",
+        commands=FakeCommandsAPI([SimpleNamespace(stdout="", stderr="permission denied", exit_code=1)]),
+    )
+    fake_cls.create_factory = lambda **kwargs: client
+
+    with pytest.raises(RuntimeError, match="bootstrap") as error:
+        provider.acquire("thread-1", user_id="user-1")
+
+    assert error.value.__cause__ is not None
+    assert "permission denied" in str(error.value.__cause__)
+    assert client.killed is True
+    assert client.closed is True
+    assert provider.get("bootstrap-failure") is None
+
+
+def test_acquire_rejects_falsey_bootstrap_error(monkeypatch):
+    class FalseyError(RuntimeError):
+        def __bool__(self) -> bool:
+            return False
+
+    provider = _make_provider()
+    fake_cls = _install_fake_sdk(monkeypatch, provider)
+    client = FakeClient(sandbox_id="bootstrap-failure")
+    error = FalseyError("bootstrap failed")
+    fake_cls.create_factory = lambda **kwargs: client
+    provider._bootstrap_or_discard = MagicMock(return_value=error)
+
+    with pytest.raises(RuntimeError, match="bootstrap") as caught:
+        provider.acquire("thread-1", user_id="user-1")
+
+    assert caught.value.__cause__ is error
+    assert provider.get("bootstrap-failure") is None
+
+
+def test_acquire_closes_client_when_bootstrap_cleanup_kill_fails(monkeypatch):
+    provider = _make_provider()
+    fake_cls = _install_fake_sdk(monkeypatch, provider)
+    client = FakeClient(
+        sandbox_id="bootstrap-failure",
+        commands=FakeCommandsAPI([SimpleNamespace(stdout="", stderr="permission denied", exit_code=1)]),
+    )
+    client.kill = MagicMock(side_effect=RuntimeError("sandbox already gone"))
+    fake_cls.create_factory = lambda **kwargs: client
+
+    with pytest.raises(RuntimeError, match="bootstrap"):
+        provider.acquire("thread-1", user_id="user-1")
+
+    assert client.closed is True
 
 
 def test_release_unknown_sandbox_id_is_noop():
@@ -654,7 +826,7 @@ def _setup_paths(monkeypatch, tmp_path):
 def test_sync_outputs_to_host_writes_new_files(monkeypatch, tmp_path):
     p = _make_provider()
     _setup_paths(monkeypatch, tmp_path)
-    listing = "13\t/home/user/outputs/random.pdf\x00"
+    listing = "13\t2.000000000\t/home/user/outputs/random.pdf\x00"
     files = FakeFilesAPI(store={"/home/user/outputs/random.pdf": b"%PDF-1.4hello"})
     cmds = FakeCommandsAPI([SimpleNamespace(stdout=listing, stderr="", exit_code=0)])
     client = FakeClient(commands=cmds, files=files)
@@ -667,23 +839,243 @@ def test_sync_outputs_to_host_writes_new_files(monkeypatch, tmp_path):
     assert expected.read_bytes() == b"%PDF-1.4hello"
 
 
-def test_sync_outputs_to_host_skips_unchanged_files(monkeypatch, tmp_path):
+def test_sync_outputs_to_host_updates_changed_same_size_file(monkeypatch, tmp_path):
     p = _make_provider()
     _setup_paths(monkeypatch, tmp_path)
     out_dir = Paths(base_dir=tmp_path).thread_dir("t1", user_id="u1") / "user-data" / "outputs"
     out_dir.mkdir(parents=True, exist_ok=True)
     target = out_dir / "random.pdf"
     target.write_bytes(b"%PDF-1.4hello")
+    os.utime(target, ns=(1_000_000_000, 1_000_000_000))
 
-    listing = "13\t/home/user/outputs/random.pdf\x00"
-    files = FakeFilesAPI(store={"/home/user/outputs/random.pdf": b"DIFFERENT-SAME-LEN"})
+    listing = "13\t2.000000000\t/home/user/outputs/random.pdf\x00"
+    files = FakeFilesAPI(store={"/home/user/outputs/random.pdf": b"changed-value"})
     cmds = FakeCommandsAPI([SimpleNamespace(stdout=listing, stderr="", exit_code=0)])
     client = FakeClient(commands=cmds, files=files)
     sb = _make_sandbox(client, sandbox_id="sb-sync-2")
 
     p._sync_outputs_to_host(sb, thread_id="t1", user_id="u1")
 
-    assert files.read_calls == [], "size match should skip the download round-trip"
+    assert files.read_calls, "same-size files must be checked for updates"
+    assert target.read_bytes() == b"changed-value"
+    assert target.stat().st_mtime_ns == 2_000_000_000
+
+
+def test_sync_outputs_to_host_skips_file_when_manifest_matches(monkeypatch, tmp_path):
+    p = _make_provider()
+    _setup_paths(monkeypatch, tmp_path)
+    out_dir = Paths(base_dir=tmp_path).thread_dir("t1", user_id="u1") / "user-data" / "outputs"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    target = out_dir / "random.pdf"
+    target.write_bytes(b"%PDF-1.4hello")
+    os.utime(target, ns=(2_000_000_000, 2_000_000_000))
+
+    listing = "13\t2.000000000\t/home/user/outputs/random.pdf\x00"
+    files = FakeFilesAPI(store={"/home/user/outputs/random.pdf": b"%PDF-1.4hello"})
+    cmds = FakeCommandsAPI(
+        [
+            SimpleNamespace(stdout=listing, stderr="", exit_code=0),
+            SimpleNamespace(stdout=listing, stderr="", exit_code=0),
+        ]
+    )
+    client = FakeClient(commands=cmds, files=files)
+    sb = _make_sandbox(client, sandbox_id="sb-sync-unchanged")
+
+    p._sync_outputs_to_host(sb, thread_id="t1", user_id="u1")
+    files.read_calls.clear()
+    p._sync_outputs_to_host(sb, thread_id="t1", user_id="u1")
+
+    assert files.read_calls == []
+    assert target.read_bytes() == b"%PDF-1.4hello"
+
+
+def test_sync_outputs_to_host_uses_manifest_when_host_mtime_is_rounded(monkeypatch, tmp_path):
+    p = _make_provider()
+    _setup_paths(monkeypatch, tmp_path)
+    paths = Paths(base_dir=tmp_path)
+    thread_dir = paths.thread_dir("t1", user_id="u1")
+    target = thread_dir / "user-data" / "outputs" / "random.pdf"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(b"%PDF-1.4hello")
+    rounded_host_mtime_ns = 1_720_000_000_123_456_800
+    os.utime(target, ns=(rounded_host_mtime_ns, rounded_host_mtime_ns))
+    (thread_dir / ".e2b-output-sync.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "sandbox_id": "sb-sync-manifest",
+                "files": {
+                    "outputs/random.pdf": {
+                        "remote_size": 13,
+                        "remote_mtime_ns": 1_720_000_000_123_456_789,
+                        "host_size": 13,
+                        "host_mtime_ns": rounded_host_mtime_ns,
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    listing = "13\t1720000000.1234567890\t/home/user/outputs/random.pdf\x00"
+    files = FakeFilesAPI(store={"/home/user/outputs/random.pdf": b"%PDF-1.4hello"})
+    cmds = FakeCommandsAPI([SimpleNamespace(stdout=listing, stderr="", exit_code=0)])
+    client = FakeClient(sandbox_id="sb-sync-manifest", commands=cmds, files=files)
+    sb = _make_sandbox(client, sandbox_id="sb-sync-manifest")
+
+    p._sync_outputs_to_host(sb, thread_id="t1", user_id="u1")
+
+    assert files.read_calls == []
+
+
+def test_sync_outputs_to_host_records_variable_precision_remote_mtime(monkeypatch, tmp_path):
+    p = _make_provider()
+    _setup_paths(monkeypatch, tmp_path)
+    listing = "13\t1720000000.1234567890\t/home/user/outputs/random.pdf\x00"
+    files = FakeFilesAPI(store={"/home/user/outputs/random.pdf": b"%PDF-1.4hello"})
+    cmds = FakeCommandsAPI([SimpleNamespace(stdout=listing, stderr="", exit_code=0)])
+    client = FakeClient(commands=cmds, files=files)
+    sb = _make_sandbox(client, sandbox_id="sb-sync-precision")
+
+    p._sync_outputs_to_host(sb, thread_id="t1", user_id="u1")
+
+    manifest_path = Paths(base_dir=tmp_path).thread_dir("t1", user_id="u1") / ".e2b-output-sync.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["files"]["outputs/random.pdf"]["remote_mtime_ns"] == 1_720_000_000_123_456_789
+
+
+def test_sync_outputs_to_host_removes_manifest_entries_for_deleted_files(monkeypatch, tmp_path):
+    p = _make_provider()
+    _setup_paths(monkeypatch, tmp_path)
+    paths = Paths(base_dir=tmp_path)
+    thread_dir = paths.thread_dir("t1", user_id="u1")
+    thread_dir.mkdir(parents=True, exist_ok=True)
+    (thread_dir / ".e2b-output-sync.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "sandbox_id": "sb-sync-cleanup",
+                "files": {
+                    "outputs/deleted.txt": {
+                        "remote_size": 3,
+                        "remote_mtime_ns": 1,
+                        "host_size": 3,
+                        "host_mtime_ns": 1,
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    listing = "5\t1720000000.1234567890\t/home/user/outputs/live.txt\x00"
+    files = FakeFilesAPI(store={"/home/user/outputs/live.txt": b"alive"})
+    cmds = FakeCommandsAPI([SimpleNamespace(stdout=listing, stderr="", exit_code=0)])
+    client = FakeClient(commands=cmds, files=files)
+    sb = _make_sandbox(client, sandbox_id="sb-sync-cleanup")
+
+    p._sync_outputs_to_host(sb, thread_id="t1", user_id="u1")
+
+    manifest = json.loads((thread_dir / ".e2b-output-sync.json").read_text(encoding="utf-8"))
+    assert set(manifest["files"]) == {"outputs/live.txt"}
+
+
+def test_sync_outputs_to_host_discards_manifest_from_another_sandbox(monkeypatch, tmp_path):
+    p = _make_provider()
+    _setup_paths(monkeypatch, tmp_path)
+    paths = Paths(base_dir=tmp_path)
+    thread_dir = paths.thread_dir("t1", user_id="u1")
+    target = thread_dir / "user-data" / "outputs" / "random.pdf"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(b"%PDF-1.4hello")
+    remote_mtime_ns = 1_720_000_000_123_456_789
+    os.utime(target, ns=(remote_mtime_ns, remote_mtime_ns))
+    (thread_dir / ".e2b-output-sync.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "sandbox_id": "sb-old",
+                "files": {
+                    "outputs/random.pdf": {
+                        "remote_size": 13,
+                        "remote_mtime_ns": remote_mtime_ns,
+                        "host_size": 13,
+                        "host_mtime_ns": remote_mtime_ns,
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    listing = "13\t1720000000.1234567890\t/home/user/outputs/random.pdf\x00"
+    files = FakeFilesAPI(store={"/home/user/outputs/random.pdf": b"%PDF-1.4hello"})
+    cmds = FakeCommandsAPI([SimpleNamespace(stdout=listing, stderr="", exit_code=0)])
+    client = FakeClient(sandbox_id="sb-new", commands=cmds, files=files)
+    sb = _make_sandbox(client, sandbox_id="sb-new")
+
+    p._sync_outputs_to_host(sb, thread_id="t1", user_id="u1")
+
+    assert files.read_calls
+    manifest = json.loads((thread_dir / ".e2b-output-sync.json").read_text(encoding="utf-8"))
+    assert manifest["sandbox_id"] == "sb-new"
+
+
+def test_sync_outputs_to_host_resets_empty_manifest_for_new_sandbox(monkeypatch, tmp_path):
+    p = _make_provider()
+    _setup_paths(monkeypatch, tmp_path)
+    thread_dir = Paths(base_dir=tmp_path).thread_dir("t1", user_id="u1")
+    thread_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path = thread_dir / ".e2b-output-sync.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "sandbox_id": "sb-old",
+                "files": {
+                    "outputs/stale.txt": {
+                        "remote_size": 1,
+                        "remote_mtime_ns": 1,
+                        "host_size": 1,
+                        "host_mtime_ns": 1,
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    client = FakeClient(
+        sandbox_id="sb-new",
+        commands=FakeCommandsAPI([SimpleNamespace(stdout="", stderr="", exit_code=0)]),
+    )
+    sb = _make_sandbox(client, sandbox_id="sb-new")
+
+    p._sync_outputs_to_host(sb, thread_id="t1", user_id="u1")
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest == {"version": 1, "sandbox_id": "sb-new", "files": {}}
+
+
+def test_sync_outputs_to_host_restores_externally_modified_file(monkeypatch, tmp_path):
+    p = _make_provider()
+    _setup_paths(monkeypatch, tmp_path)
+    listing = "13\t1720000000.1234567890\t/home/user/outputs/random.pdf\x00"
+    files = FakeFilesAPI(store={"/home/user/outputs/random.pdf": b"%PDF-1.4hello"})
+    cmds = FakeCommandsAPI(
+        [
+            SimpleNamespace(stdout=listing, stderr="", exit_code=0),
+            SimpleNamespace(stdout=listing, stderr="", exit_code=0),
+        ]
+    )
+    client = FakeClient(commands=cmds, files=files)
+    sb = _make_sandbox(client, sandbox_id="sb-sync-local-change")
+
+    p._sync_outputs_to_host(sb, thread_id="t1", user_id="u1")
+    target = Paths(base_dir=tmp_path).thread_dir("t1", user_id="u1") / "user-data" / "outputs" / "random.pdf"
+    target.write_bytes(b"changed-value")
+    os.utime(target, ns=(1_720_000_001_000_000_000, 1_720_000_001_000_000_000))
+
+    p._sync_outputs_to_host(sb, thread_id="t1", user_id="u1")
+
+    assert len(files.read_calls) == 2
     assert target.read_bytes() == b"%PDF-1.4hello"
 
 
@@ -706,7 +1098,7 @@ def test_sync_outputs_to_host_uses_virtual_path_for_download(monkeypatch, tmp_pa
     p = _make_provider()
     _setup_paths(monkeypatch, tmp_path)
 
-    listing = "5\t/home/user/outputs/sub/x.txt\x00"
+    listing = "5\t2.000000000\t/home/user/outputs/sub/x.txt\x00"
     files = FakeFilesAPI(store={"/home/user/outputs/sub/x.txt": b"hello"})
     cmds = FakeCommandsAPI([SimpleNamespace(stdout=listing, stderr="", exit_code=0)])
     client = FakeClient(commands=cmds, files=files)
@@ -827,7 +1219,7 @@ def test_sync_outputs_to_host_skips_oversize_files(monkeypatch, tmp_path):
     _setup_paths(monkeypatch, tmp_path)
 
     oversize = e2b_sb_mod._MAX_DOWNLOAD_SIZE + 1
-    listing = f"{oversize}\t/home/user/outputs/huge.bin\x00"
+    listing = f"{oversize}\t2.000000000\t/home/user/outputs/huge.bin\x00"
     files = FakeFilesAPI()  # no store entry: any read attempt would raise
     cmds = FakeCommandsAPI([SimpleNamespace(stdout=listing, stderr="", exit_code=0)])
     client = FakeClient(commands=cmds, files=files)

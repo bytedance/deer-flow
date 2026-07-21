@@ -56,6 +56,28 @@ describe("auth setup helpers", () => {
     expect(canCreateRegularAccount({ checked: true, status: null })).toBe(true);
   });
 
+  test("regular sign-up follows the gateway's registration_enabled flag", () => {
+    expect(
+      canCreateRegularAccount({
+        checked: true,
+        status: { needs_setup: false, registration_enabled: false },
+      }),
+    ).toBe(false);
+    expect(
+      canCreateRegularAccount({
+        checked: true,
+        status: { needs_setup: false, registration_enabled: true },
+      }),
+    ).toBe(true);
+    // Older Gateways omit the field; absent must not hide the signup entry.
+    expect(
+      canCreateRegularAccount({
+        checked: true,
+        status: { needs_setup: false },
+      }),
+    ).toBe(true);
+  });
+
   test("detects already-initialized setup conflicts", () => {
     expect(
       isSystemAlreadyInitializedError({

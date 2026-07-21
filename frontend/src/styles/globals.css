@@ -77,6 +77,26 @@
     ui-sans-serif, system-ui, sans-serif, "Apple Color Emoji", "Segoe UI Emoji",
     "Segoe UI Symbol", "Noto Color Emoji";
 
+  --animate-fade-in: fade-in 1.1s;
+  @keyframes fade-in {
+    0% {
+      opacity: 0;
+    }
+    100% {
+      opacity: 1;
+    }
+  }
+
+  --animate-loading-bar: loading-bar 1s ease-in-out infinite;
+  @keyframes loading-bar {
+    0% {
+      transform: translateX(-100%);
+    }
+    100% {
+      transform: translateX(400%);
+    }
+  }
+
   --animate-fade-in-up: fade-in-up 0.15s ease-in-out forwards;
   @keyframes fade-in-up {
     0% {

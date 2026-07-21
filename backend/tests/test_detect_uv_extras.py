@@ -149,6 +149,22 @@ def test_detect_from_config_redis_via_stream_bridge(tmp_path):
     assert detect.detect_from_config(cfg) == ["redis"]
 
 
+def test_detect_from_config_browser_via_browser_navigate_tool(tmp_path):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        "tools:\n  - name: browser_navigate\n    group: browser\n    use: deerflow.community.browser_automation.tools:browser_navigate_tool\n",
+    )
+    assert detect.detect_from_config(cfg) == ["browser"]
+
+
+def test_detect_from_config_ignores_commented_browser_tool(tmp_path):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        "tools:\n  # - name: browser_navigate\n  #   group: browser\n  - name: web_fetch\n    group: web\n",
+    )
+    assert detect.detect_from_config(cfg) == []
+
+
 def test_detect_from_config_memory_stream_bridge_returns_no_extras(tmp_path):
     cfg = tmp_path / "config.yaml"
     cfg.write_text("stream_bridge:\n  type: memory\n  queue_maxsize: 256\n")

@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import atexit
 import hashlib
+import json
 import logging
 import os
 import shlex
@@ -34,6 +35,7 @@ import threading
 import time
 import uuid
 from collections import OrderedDict
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
@@ -271,7 +273,6 @@ class E2BSandboxProvider(SandboxProvider):
         return sid
 
     def _reclaim_warm_pool_sandbox(self, thread_id: str, *, user_id: str) -> str | None:
-        key = self._thread_key(thread_id, user_id)
         seed = self._stable_seed(thread_id, user_id)
         with self._lock:
             target_id = next(
@@ -282,9 +283,8 @@ class E2BSandboxProvider(SandboxProvider):
                 return None
             self._warm_pool.pop(target_id)
 
-        sandbox_cls = self._get_sandbox_cls()
         try:
-            client = self._reconnect_client(sandbox_cls, target_id)
+            client = self._reconnect_live_client(self._get_sandbox_cls(), target_id)
         except Exception as e:
             logger.warning(
                 "Warm-pool e2b sandbox %s failed to reconnect, dropping: %s",
@@ -293,29 +293,17 @@ class E2BSandboxProvider(SandboxProvider):
             )
             return None
 
-        # Verify the reconnected client actually corresponds to a live VM.
-        # ``Sandbox.connect`` succeeds for paused/expired sandboxes too on
-        # some SDK versions, but the very next command then fails with
-        # "sandbox not found" mid-tool-call. Pinging here moves that failure
-        # into the acquire path, where we cleanly fall back to creating a
-        # fresh sandbox.
-        if not self._client_alive(client):
+        if client is None:
             logger.warning(
                 "Warm-pool e2b sandbox %s is no longer alive (reaped by control plane); dropping and falling back to create",
                 target_id,
             )
-            self._safe_close_client(client)
             return None
 
         self._refresh_remote_timeout(client)
-        try:
-            self._bootstrap_sandbox_paths(client)
-        except Exception as e:
-            logger.debug("bootstrap on warm-pool reclaim failed: %s", e)
-        sandbox = E2BSandbox(id=target_id, client=client, home_dir=self._config["home_dir"])
-        with self._lock:
-            self._sandboxes[target_id] = sandbox
-            self._thread_sandboxes[key] = target_id
+        if self._bootstrap_or_discard(client, target_id) is not None:
+            return None
+        self._register_connected_sandbox(target_id, client, thread_id=thread_id, user_id=user_id)
         logger.info(
             "Reclaimed warm-pool e2b sandbox %s for user/thread %s/%s",
             target_id,
@@ -410,7 +398,7 @@ class E2BSandboxProvider(SandboxProvider):
             return None
 
         try:
-            client = self._reconnect_client(sandbox_cls, target_id)
+            client = self._reconnect_live_client(sandbox_cls, target_id)
         except Exception as e:
             logger.warning(
                 "Discovered e2b sandbox %s could not be reconnected: %s",
@@ -419,23 +407,17 @@ class E2BSandboxProvider(SandboxProvider):
             )
             return None
 
-        if not self._client_alive(client):
+        if client is None:
             logger.warning(
                 "Discovered e2b sandbox %s is no longer alive; falling back to create",
                 target_id,
             )
-            self._safe_close_client(client)
             return None
 
         self._refresh_remote_timeout(client)
-        try:
-            self._bootstrap_sandbox_paths(client)
-        except Exception as e:
-            logger.debug("bootstrap on remote discovery failed: %s", e)
-        sandbox = E2BSandbox(id=target_id, client=client, home_dir=self._config["home_dir"])
-        with self._lock:
-            self._sandboxes[target_id] = sandbox
-            self._thread_sandboxes[self._thread_key(thread_id, user_id)] = target_id
+        if self._bootstrap_or_discard(client, target_id) is not None:
+            return None
+        self._register_connected_sandbox(target_id, client, thread_id=thread_id, user_id=user_id)
         logger.info(
             "Discovered remote e2b sandbox %s for user/thread %s/%s (seed=%s)",
             target_id,
@@ -491,14 +473,9 @@ class E2BSandboxProvider(SandboxProvider):
         # use the same /mnt/user-data prefix as LocalSandbox / AioSandbox — fail
         # with PermissionError because /mnt is owned by root in the e2b
         # template. See the path-mapping note in :class:`E2BSandbox`.
-        try:
-            self._bootstrap_sandbox_paths(client)
-        except Exception as e:
-            logger.warning(
-                "Failed to bootstrap virtual paths in e2b sandbox %s: %s",
-                sandbox_id,
-                e,
-            )
+        error = self._bootstrap_or_discard(client, sandbox_id)
+        if error is not None:
+            raise RuntimeError(f"Failed to bootstrap e2b sandbox {sandbox_id}") from error
 
         # One-shot mount uploads.  e2b has no host bind-mount, so we copy
         # files from ``host_path`` into ``container_path`` at sandbox start.
@@ -535,6 +512,37 @@ class E2BSandboxProvider(SandboxProvider):
     def _reconnect_client(self, sandbox_cls: type[E2BClientSandbox], sandbox_id: str) -> E2BClientSandbox:
         """Connect to an existing e2b sandbox by id, with consistent kwargs."""
         return sandbox_cls.connect(sandbox_id, **self._common_kwargs())  # type: ignore[attr-defined]
+
+    def _reconnect_live_client(
+        self,
+        sandbox_cls: type[E2BClientSandbox],
+        sandbox_id: str,
+    ) -> E2BClientSandbox | None:
+        """Reconnect to *sandbox_id* and reject clients for reaped VMs.
+
+        ``Sandbox.connect`` may succeed even after the E2B control plane has
+        reaped the VM. Closing that host-side client before returning ``None``
+        keeps both acquire paths from leaking a connection.
+        """
+        client = self._reconnect_client(sandbox_cls, sandbox_id)
+        if self._client_alive(client):
+            return client
+        self._safe_close_client(client)
+        return None
+
+    def _register_connected_sandbox(
+        self,
+        sandbox_id: str,
+        client: E2BClientSandbox,
+        *,
+        thread_id: str,
+        user_id: str,
+    ) -> None:
+        """Track a live reconnected sandbox under its thread ownership."""
+        sandbox = E2BSandbox(id=sandbox_id, client=client, home_dir=self._config["home_dir"])
+        with self._lock:
+            self._sandboxes[sandbox_id] = sandbox
+            self._thread_sandboxes[self._thread_key(thread_id, user_id)] = sandbox_id
 
     def _refresh_remote_timeout(self, client: E2BClientSandbox) -> None:
         """Push the configured idle timeout to the e2b control plane."""
@@ -597,6 +605,18 @@ class E2BSandboxProvider(SandboxProvider):
                 logger.debug("e2b client close raised: %s", e)
                 return
 
+    def _bootstrap_or_discard(self, client: E2BClientSandbox, sandbox_id: str) -> Exception | None:
+        """Bootstrap a sandbox or return its error after cleanup."""
+        try:
+            self._bootstrap_sandbox_paths(client)
+        except Exception as e:
+            logger.exception("Failed to bootstrap e2b sandbox %s. Discarding the unusable sandbox.", sandbox_id)
+            if error := self._kill_client(client):
+                logger.warning("Failed to kill e2b sandbox %s after bootstrap failure: %s", sandbox_id, error)
+            self._safe_close_client(client)
+            return e
+        return None
+
     def _bootstrap_sandbox_paths(self, client: E2BClientSandbox) -> None:
         """Materialise DeerFlow's virtual path layout inside the e2b VM.
 
@@ -622,11 +642,9 @@ class E2BSandboxProvider(SandboxProvider):
            writes through the symlink target succeed.
 
         The e2b code-interpreter template puts ``user`` in the ``sudo`` group
-        with passwordless sudo, so the ``sudo`` calls below succeed without
-        interactive prompts. If the customer template removes that, the
-        commands fail loudly here and we fall back to silently relying on the
-        path remap inside ``E2BSandbox`` — agent shell commands will still
-        fail, but the read/write/list APIs continue to work.
+        with passwordless sudo. Custom templates must provide equivalent
+        permissions. Bootstrap failure makes the sandbox unusable. The
+        provider discards it instead of returning a partially functional VM.
         """
         # Use the configured ``home_dir`` so a custom template can move HOME.
         home_dir = self._config["home_dir"].rstrip("/") or "/home/user"
@@ -654,21 +672,13 @@ class E2BSandboxProvider(SandboxProvider):
         try:
             result = client.commands.run(bootstrap_script)
         except Exception as e:
-            logger.warning(
-                "e2b bootstrap script raised: %s (agent shell commands using /mnt/user-data may fail until the VM is recycled)",
-                e,
-            )
-            return
+            raise RuntimeError("e2b bootstrap script raised") from e
 
         stdout = getattr(result, "stdout", "") or ""
         stderr = getattr(result, "stderr", "") or ""
         exit_code = getattr(result, "exit_code", 0)
         if exit_code not in (0, None) or "BOOTSTRAP_OK" not in stdout:
-            logger.warning(
-                "e2b bootstrap script exited with code=%s; stderr=%s",
-                exit_code,
-                stderr.strip(),
-            )
+            raise RuntimeError(f"e2b bootstrap script failed with exit code {exit_code}; stderr={stderr.strip()}")
 
     def _apply_mounts(self, client: E2BClientSandbox) -> None:
         mounts = self._config.get("mounts") or []
@@ -708,6 +718,52 @@ class E2BSandboxProvider(SandboxProvider):
 
     # ── Output mirroring ────────────────────────────────────────────────
     _SYNC_BACK_SUBDIRS = ("outputs", "workspace")
+    _SYNC_MANIFEST_NAME = ".e2b-output-sync.json"
+
+    @staticmethod
+    def _load_sync_manifest(manifest_path: Path, sandbox_id: str) -> tuple[dict[str, dict[str, int]], bool]:
+        """Load verified remote and host versions from a prior output sync."""
+        try:
+            data = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return {}, False
+        except (OSError, json.JSONDecodeError) as e:
+            logger.warning("e2b sync: failed to load manifest %s: %s", manifest_path, e)
+            return {}, True
+
+        if not isinstance(data, dict) or data.get("version") != 1 or not isinstance(data.get("files"), dict):
+            logger.warning("e2b sync: ignoring invalid manifest %s", manifest_path)
+            return {}, True
+        if data.get("sandbox_id") != sandbox_id:
+            logger.debug("e2b sync: ignoring manifest from another sandbox %s", manifest_path)
+            return {}, True
+
+        files: dict[str, dict[str, int]] = {}
+        for key, value in data["files"].items():
+            if not isinstance(key, str) or not isinstance(value, dict):
+                continue
+            required = ("remote_size", "remote_mtime_ns", "host_size", "host_mtime_ns")
+            if all(isinstance(value.get(field), int) for field in required):
+                files[key] = {field: value[field] for field in required}
+        return files, False
+
+    @staticmethod
+    def _write_sync_manifest(
+        manifest_path: Path,
+        sandbox_id: str,
+        files: dict[str, dict[str, int]],
+    ) -> None:
+        """Atomically store output-sync versions after host files are written."""
+        try:
+            manifest_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path = manifest_path.with_name(f"{manifest_path.name}.tmp")
+            tmp_path.write_text(
+                json.dumps({"version": 1, "sandbox_id": sandbox_id, "files": files}, sort_keys=True),
+                encoding="utf-8",
+            )
+            tmp_path.replace(manifest_path)
+        except OSError as e:
+            logger.warning("e2b sync: failed to write manifest %s: %s", manifest_path, e)
 
     def _sync_outputs_to_host(
         self,
@@ -725,11 +781,14 @@ class E2BSandboxProvider(SandboxProvider):
         local provider. The e2b VM has no shared host filesystem, so we
         explicitly pull artifacts back at release time.
 
-        We only mirror files whose host-side counterpart is missing or has a
-        different size — this gives an effective per-file dedup with a single
-        round-trip per release for unchanged trees, and avoids re-downloading
-        large generated files (e.g. PDFs, datasets) on every tool turn that
-        triggers a release.
+        We mirror files whose host-side counterpart is missing, has a different
+        size, or has a different remote modification time. A thread-local
+        manifest stores the remote version and the actual host metadata after
+        each write. This avoids false updates on host filesystems that round
+        modification times.
+
+        The remote file is the source of truth. The next sync overwrites a
+        host-side edit when its size or modification time differs.
 
         Failures are logged at WARNING level but never raised: artifact
         download is non-critical for sandbox lifecycle, and we already log
@@ -745,13 +804,17 @@ class E2BSandboxProvider(SandboxProvider):
         home_dir = sandbox.home_dir.rstrip("/") or "/home/user"
         paths = get_paths()
 
-        thread_root = paths.thread_dir(thread_id, user_id=user_id) / "user-data"
+        thread_dir = paths.thread_dir(thread_id, user_id=user_id)
+        thread_root = thread_dir / "user-data"
         host_targets: dict[str, Path] = {sub: thread_root / sub for sub in self._SYNC_BACK_SUBDIRS}
+        manifest_path = thread_dir / self._SYNC_MANIFEST_NAME
+        remote_sandbox_id = sandbox.sandbox_id
+        manifest, manifest_dirty = self._load_sync_manifest(manifest_path, remote_sandbox_id)
 
         # Build a single shell command that lists all files in the sync dirs
-        # with size + path, NUL-separated for safe parsing of weird filenames.
-        # find -printf '%s\t%p\0' keeps us to one round-trip regardless of
-        # how many subdirs we mirror.
+        # with size, modification time, and path, NUL-separated for safe
+        # parsing of weird filenames. This keeps us to one round-trip
+        # regardless of how many subdirs we mirror.
         #
         # We list using the *physical* /home/user paths (the bootstrap symlink
         # /mnt/user-data -> /home/user follows transparently), then translate
@@ -760,7 +823,7 @@ class E2BSandboxProvider(SandboxProvider):
         # that the path is under ``VIRTUAL_PATH_PREFIX`` (/mnt/user-data) and
         # internally re-resolves it to /home/user via ``_resolve_path``.
         find_targets = " ".join(shlex.quote(f"{home_dir}/{sub}") for sub in self._SYNC_BACK_SUBDIRS)
-        list_cmd = f'for d in {find_targets}; do   [ -d "$d" ] && find "$d" -type f -printf \'%s\\t%p\\0\' 2>/dev/null; done'
+        list_cmd = f'for d in {find_targets}; do   [ -d "$d" ] && find "$d" -type f -printf \'%s\\t%T@\\t%p\\0\' 2>/dev/null; done'
 
         try:
             result = client.commands.run(list_cmd)
@@ -773,10 +836,13 @@ class E2BSandboxProvider(SandboxProvider):
 
         stdout = getattr(result, "stdout", "") or ""
         if not stdout:
+            if manifest or manifest_dirty:
+                self._write_sync_manifest(manifest_path, remote_sandbox_id, {})
             return
 
         synced = 0
         skipped = 0
+        seen_manifest_keys: set[str] = set()
         from .e2b_sandbox import _MAX_DOWNLOAD_SIZE
 
         for entry in stdout.split("\0"):
@@ -784,20 +850,11 @@ class E2BSandboxProvider(SandboxProvider):
             if not entry:
                 continue
             try:
-                size_str, remote_path = entry.split("\t", 1)
+                size_str, remote_mtime_str, remote_path = entry.split("\t", 2)
                 remote_size = int(size_str)
-            except ValueError:
+                remote_mtime_ns = int(Decimal(remote_mtime_str) * 1_000_000_000)
+            except (InvalidOperation, ValueError):
                 logger.debug("e2b sync: unparseable entry %r", entry)
-                continue
-
-            if remote_size > _MAX_DOWNLOAD_SIZE:
-                logger.warning(
-                    "e2b sync: skipping oversize artefact %s (%d bytes > %d cap)",
-                    remote_path,
-                    remote_size,
-                    _MAX_DOWNLOAD_SIZE,
-                )
-                skipped += 1
                 continue
 
             # Determine which subdir this file belongs to so we can compute
@@ -816,9 +873,28 @@ class E2BSandboxProvider(SandboxProvider):
             if sub_match is None:
                 continue
             _sub, host_path, virtual_path = sub_match
+            manifest_key = host_path.relative_to(thread_root).as_posix()
+            seen_manifest_keys.add(manifest_key)
+
+            if remote_size > _MAX_DOWNLOAD_SIZE:
+                logger.warning(
+                    "e2b sync: skipping oversize artefact %s (%d bytes > %d cap)",
+                    remote_path,
+                    remote_size,
+                    _MAX_DOWNLOAD_SIZE,
+                )
+                skipped += 1
+                continue
 
             try:
-                if host_path.exists() and host_path.stat().st_size == remote_size:
+                host_stat = host_path.stat()
+                entry = manifest.get(manifest_key)
+                if entry == {
+                    "remote_size": remote_size,
+                    "remote_mtime_ns": remote_mtime_ns,
+                    "host_size": host_stat.st_size,
+                    "host_mtime_ns": host_stat.st_mtime_ns,
+                }:
                     skipped += 1
                     continue
             except OSError:
@@ -839,10 +915,28 @@ class E2BSandboxProvider(SandboxProvider):
                 host_path.parent.mkdir(parents=True, exist_ok=True)
                 tmp_path = host_path.with_name(host_path.name + ".e2bsync.tmp")
                 tmp_path.write_bytes(data)
+                os.utime(tmp_path, ns=(remote_mtime_ns, remote_mtime_ns))
                 tmp_path.replace(host_path)
+                host_stat = host_path.stat()
+                manifest[manifest_key] = {
+                    "remote_size": remote_size,
+                    "remote_mtime_ns": remote_mtime_ns,
+                    "host_size": host_stat.st_size,
+                    "host_mtime_ns": host_stat.st_mtime_ns,
+                }
+                manifest_dirty = True
                 synced += 1
             except OSError as e:
                 logger.warning("e2b sync: failed to write %s on host: %s", host_path, e)
+
+        stale_keys = set(manifest) - seen_manifest_keys
+        if stale_keys:
+            for key in stale_keys:
+                manifest.pop(key)
+            manifest_dirty = True
+
+        if manifest_dirty:
+            self._write_sync_manifest(manifest_path, remote_sandbox_id, manifest)
 
         if synced or skipped:
             logger.info(
@@ -909,19 +1003,14 @@ class E2BSandboxProvider(SandboxProvider):
             )
             return evict_id
 
-        try:
-            kill = getattr(client, "kill", None)
-            if callable(kill):
-                kill()
-        except Exception as e:
-            logger.warning("Failed to kill evicted e2b sandbox %s: %s", evict_id, e)
-        finally:
-            close = getattr(client, "close", None)
-            if callable(close):
-                try:
-                    close()
-                except Exception:
-                    pass
+        if error := self._kill_client(client):
+            logger.warning("Failed to kill evicted e2b sandbox %s: %s", evict_id, error)
+        close = getattr(client, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:
+                pass
         logger.info("Evicted warm-pool e2b sandbox %s", evict_id)
         return evict_id
 
@@ -998,22 +1087,31 @@ class E2BSandboxProvider(SandboxProvider):
         logger.info("Released e2b sandbox %s to warm pool", sandbox_id)
 
     def _kill_and_close(self, sandbox: E2BSandbox) -> None:
-        client = getattr(sandbox, "_client", None)
-        if client is not None:
-            kill = getattr(client, "kill", None)
-            if callable(kill):
-                try:
-                    kill()
-                except Exception as e:
-                    logger.debug(
-                        "kill() on e2b sandbox %s raised (probably already gone): %s",
-                        sandbox.id,
-                        e,
-                    )
+        if error := self._kill_client(getattr(sandbox, "_client", None)):
+            logger.debug(
+                "kill() on e2b sandbox %s raised (probably already gone): %s",
+                sandbox.id,
+                error,
+            )
         try:
             sandbox.close()
         except Exception:
             pass
+
+    @staticmethod
+    def _kill_client(
+        client: E2BClientSandbox | None,
+    ) -> Exception | None:
+        """Kill a remote VM and return an exception for the caller to log."""
+        if client is None:
+            return None
+        try:
+            kill = getattr(client, "kill", None)
+            if callable(kill):
+                kill()
+        except Exception as e:
+            return e
+        return None
 
     def reset(self) -> None:
         with self._lock:
@@ -1040,15 +1138,11 @@ class E2BSandboxProvider(SandboxProvider):
         )
 
         for sandbox_id, sandbox in active:
-            try:
-                kill = getattr(sandbox.client, "kill", None)
-                if callable(kill):
-                    kill()
-            except Exception as e:
+            if error := self._kill_client(sandbox.client):
                 logger.warning(
                     "Failed to kill active e2b sandbox %s during shutdown: %s",
                     sandbox_id,
-                    e,
+                    error,
                 )
             try:
                 sandbox.close()
@@ -1066,15 +1160,11 @@ class E2BSandboxProvider(SandboxProvider):
                     e,
                 )
                 continue
-            try:
-                kill = getattr(client, "kill", None)
-                if callable(kill):
-                    kill()
-            except Exception as e:
+            if error := self._kill_client(client):
                 logger.warning(
                     "Failed to kill warm-pool e2b sandbox %s during shutdown: %s",
                     sandbox_id,
-                    e,
+                    error,
                 )
             close = getattr(client, "close", None)
             if callable(close):

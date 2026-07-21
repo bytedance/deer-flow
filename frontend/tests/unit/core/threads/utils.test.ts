@@ -16,6 +16,18 @@ test("uses standard chat route when thread has no agent context", () => {
   ).toBe("/workspace/chats/thread-123");
 });
 
+test("encodes thread ids in standard chat routes", () => {
+  expect(pathOfThread("thread#1?draft")).toBe(
+    "/workspace/chats/thread%231%3Fdraft",
+  );
+});
+
+test("encodes thread ids in agent chat routes", () => {
+  expect(pathOfThread("thread#1?draft", { agent_name: "researcher" })).toBe(
+    "/workspace/agents/researcher/chats/thread%231%3Fdraft",
+  );
+});
+
 test("uses agent chat route when thread context has agent_name", () => {
   expect(
     pathOfThread({

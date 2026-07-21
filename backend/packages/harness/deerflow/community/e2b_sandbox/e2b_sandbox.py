@@ -74,7 +74,7 @@ class E2BSandbox(Sandbox):
     @property
     def sandbox_id(self) -> str:
         """e2b-side sandbox id (different from DeerFlow's ``self.id`` cache key)."""
-        return getattr(self._client, "sandbox_id", self.id)
+        return getattr(self._client, "sandbox_id", None) or self.id
 
     def close(self) -> None:
         with self._lock:
