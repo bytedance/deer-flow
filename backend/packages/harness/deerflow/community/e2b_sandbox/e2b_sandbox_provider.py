@@ -728,19 +728,22 @@ class E2BSandboxProvider(SandboxProvider):
     _SYNC_MANIFEST_NAME = ".e2b-output-sync.json"
 
     @staticmethod
-    def _load_sync_manifest(manifest_path: Path) -> dict[str, dict[str, int]]:
+    def _load_sync_manifest(manifest_path: Path, sandbox_id: str) -> tuple[dict[str, dict[str, int]], bool]:
         """Load verified remote and host versions from a prior output sync."""
         try:
             data = json.loads(manifest_path.read_text(encoding="utf-8"))
         except FileNotFoundError:
-            return {}
+            return {}, False
         except (OSError, json.JSONDecodeError) as e:
             logger.warning("e2b sync: failed to load manifest %s: %s", manifest_path, e)
-            return {}
+            return {}, True
 
         if not isinstance(data, dict) or data.get("version") != 1 or not isinstance(data.get("files"), dict):
             logger.warning("e2b sync: ignoring invalid manifest %s", manifest_path)
-            return {}
+            return {}, True
+        if data.get("sandbox_id") != sandbox_id:
+            logger.debug("e2b sync: ignoring manifest from another sandbox %s", manifest_path)
+            return {}, True
 
         files: dict[str, dict[str, int]] = {}
         for key, value in data["files"].items():
@@ -749,16 +752,20 @@ class E2BSandboxProvider(SandboxProvider):
             required = ("remote_size", "remote_mtime_ns", "host_size", "host_mtime_ns")
             if all(isinstance(value.get(field), int) for field in required):
                 files[key] = {field: value[field] for field in required}
-        return files
+        return files, False
 
     @staticmethod
-    def _write_sync_manifest(manifest_path: Path, files: dict[str, dict[str, int]]) -> None:
+    def _write_sync_manifest(
+        manifest_path: Path,
+        sandbox_id: str,
+        files: dict[str, dict[str, int]],
+    ) -> None:
         """Atomically store output-sync versions after host files are written."""
         try:
             manifest_path.parent.mkdir(parents=True, exist_ok=True)
             tmp_path = manifest_path.with_name(f"{manifest_path.name}.tmp")
             tmp_path.write_text(
-                json.dumps({"version": 1, "files": files}, sort_keys=True),
+                json.dumps({"version": 1, "sandbox_id": sandbox_id, "files": files}, sort_keys=True),
                 encoding="utf-8",
             )
             tmp_path.replace(manifest_path)
@@ -805,8 +812,8 @@ class E2BSandboxProvider(SandboxProvider):
         thread_root = thread_dir / "user-data"
         host_targets: dict[str, Path] = {sub: thread_root / sub for sub in self._SYNC_BACK_SUBDIRS}
         manifest_path = thread_dir / self._SYNC_MANIFEST_NAME
-        manifest = self._load_sync_manifest(manifest_path)
-        manifest_dirty = False
+        remote_sandbox_id = sandbox.sandbox_id
+        manifest, manifest_dirty = self._load_sync_manifest(manifest_path, remote_sandbox_id)
 
         # Build a single shell command that lists all files in the sync dirs
         # with size, modification time, and path, NUL-separated for safe
@@ -833,10 +840,13 @@ class E2BSandboxProvider(SandboxProvider):
 
         stdout = getattr(result, "stdout", "") or ""
         if not stdout:
+            if manifest or manifest_dirty:
+                self._write_sync_manifest(manifest_path, remote_sandbox_id, {})
             return
 
         synced = 0
         skipped = 0
+        seen_manifest_keys: set[str] = set()
         from .e2b_sandbox import _MAX_DOWNLOAD_SIZE
 
         for entry in stdout.split("\0"):
@@ -849,16 +859,6 @@ class E2BSandboxProvider(SandboxProvider):
                 remote_mtime_ns = int(Decimal(remote_mtime_str) * 1_000_000_000)
             except (InvalidOperation, ValueError):
                 logger.debug("e2b sync: unparseable entry %r", entry)
-                continue
-
-            if remote_size > _MAX_DOWNLOAD_SIZE:
-                logger.warning(
-                    "e2b sync: skipping oversize artefact %s (%d bytes > %d cap)",
-                    remote_path,
-                    remote_size,
-                    _MAX_DOWNLOAD_SIZE,
-                )
-                skipped += 1
                 continue
 
             # Determine which subdir this file belongs to so we can compute
@@ -878,6 +878,17 @@ class E2BSandboxProvider(SandboxProvider):
                 continue
             _sub, host_path, virtual_path = sub_match
             manifest_key = host_path.relative_to(thread_root).as_posix()
+            seen_manifest_keys.add(manifest_key)
+
+            if remote_size > _MAX_DOWNLOAD_SIZE:
+                logger.warning(
+                    "e2b sync: skipping oversize artefact %s (%d bytes > %d cap)",
+                    remote_path,
+                    remote_size,
+                    _MAX_DOWNLOAD_SIZE,
+                )
+                skipped += 1
+                continue
 
             try:
                 host_stat = host_path.stat()
@@ -922,8 +933,14 @@ class E2BSandboxProvider(SandboxProvider):
             except OSError as e:
                 logger.warning("e2b sync: failed to write %s on host: %s", host_path, e)
 
+        stale_keys = set(manifest) - seen_manifest_keys
+        if stale_keys:
+            for key in stale_keys:
+                manifest.pop(key)
+            manifest_dirty = True
+
         if manifest_dirty:
-            self._write_sync_manifest(manifest_path, manifest)
+            self._write_sync_manifest(manifest_path, remote_sandbox_id, manifest)
 
         if synced or skipped:
             logger.info(
