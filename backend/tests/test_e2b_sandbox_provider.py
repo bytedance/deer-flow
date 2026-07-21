@@ -645,14 +645,32 @@ def test_bootstrap_sandbox_paths_emits_expected_script():
         assert f"/home/user/{sub}" in script
 
 
-def test_bootstrap_sandbox_paths_swallows_command_failure():
+def test_bootstrap_sandbox_paths_raises_on_command_failure():
     p = _make_provider()
 
     def boom(_cmd: str) -> Any:
         raise RuntimeError("sudo not allowed")
 
     client = FakeClient(commands=FakeCommandsAPI([boom]))
-    p._bootstrap_sandbox_paths(client)
+    with pytest.raises(RuntimeError, match="bootstrap script raised"):
+        p._bootstrap_sandbox_paths(client)
+
+
+def test_acquire_cleans_up_and_fails_when_bootstrap_fails(monkeypatch):
+    provider = _make_provider()
+    fake_cls = _install_fake_sdk(monkeypatch, provider)
+    client = FakeClient(
+        sandbox_id="bootstrap-failure",
+        commands=FakeCommandsAPI([SimpleNamespace(stdout="", stderr="permission denied", exit_code=1)]),
+    )
+    fake_cls.create_factory = lambda **kwargs: client
+
+    with pytest.raises(RuntimeError, match="bootstrap"):
+        provider.acquire("thread-1", user_id="user-1")
+
+    assert client.killed is True
+    assert client.closed is True
+    assert provider.get("bootstrap-failure") is None
 
 
 def test_release_unknown_sandbox_id_is_noop():
