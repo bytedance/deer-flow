@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from dataclasses import dataclass
 from typing import Any
@@ -11,7 +12,9 @@ from typing import Any
 from deerflow.config import get_app_config
 from deerflow.config.app_config import AppConfig
 from deerflow.models import create_chat_model
+from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.skills.types import SKILL_MD_FILE
+from deerflow.tracing import inject_langfuse_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -125,12 +128,31 @@ async def scan_skill_content(
         model_name = config.skill_evolution.moderation_model_name
         model_kwargs = {"thinking_enabled": False, "app_config": config, "attach_tracing": attach_tracing}
         model = create_chat_model(name=model_name, **model_kwargs) if model_name else create_chat_model(**model_kwargs)
+        invoke_config: dict[str, Any] = {"run_name": "security_agent"}
+        if attach_tracing:
+            # Standalone callers own the trace root, so they must inject their own
+            # Langfuse attribution -- the other half of the standalone pattern that
+            # already attaches model-level callbacks here (attach_tracing default),
+            # mirroring oneshot_llm.run_oneshot_llm / MemoryUpdater / the goal
+            # evaluator (see the Tracing System INVARIANT in backend/AGENTS.md).
+            # In-graph callers pass attach_tracing=False: the graph root already
+            # lifts session/user attribution, so injecting here is inert at best
+            # and diverges from that documented split. thread_id=None because the
+            # skill-moderation call is not thread-scoped (same as oneshot_llm).
+            inject_langfuse_metadata(
+                invoke_config,
+                thread_id=None,
+                user_id=get_effective_user_id(),
+                assistant_id="security_agent",
+                model_name=model_name,
+                environment=os.environ.get("DEER_FLOW_ENV") or os.environ.get("ENVIRONMENT"),
+            )
         response = await model.ainvoke(
             [
                 {"role": "system", "content": rubric},
                 {"role": "user", "content": prompt},
             ],
-            config={"run_name": "security_agent"},
+            config=invoke_config,
         )
         model_responded = True
         raw = str(getattr(response, "content", "") or "")
