@@ -489,6 +489,29 @@ def test_reclaim_warm_pool_sandbox_handles_reconnect_exception(monkeypatch):
     assert "sb-broken" not in p._warm_pool
 
 
+def test_acquire_discards_warm_sandbox_when_bootstrap_fails(monkeypatch):
+    p = _make_provider()
+    fake_cls = _install_fake_sdk(monkeypatch, p)
+    warm_client = FakeClient(
+        sandbox_id="sb-warm",
+        commands=FakeCommandsAPI(
+            [
+                SimpleNamespace(stdout="ok", stderr="", exit_code=0),
+                SimpleNamespace(stdout="", stderr="permission denied", exit_code=1),
+            ]
+        ),
+    )
+    fresh_client = FakeClient(sandbox_id="sb-fresh")
+    fake_cls.connect_factory = lambda _sid, **_kw: warm_client
+    fake_cls.create_factory = lambda **_kw: fresh_client
+    p._warm_pool["sb-warm"] = (p._stable_seed("t1", "u1"), 12345.0)
+
+    assert p.acquire("t1", user_id="u1") == "sb-fresh"
+    assert warm_client.killed is True
+    assert warm_client.closed is True
+    assert p.get("sb-warm") is None
+
+
 def test_reclaim_warm_pool_sandbox_returns_none_on_seed_mismatch(monkeypatch):
     p = _make_provider()
     _install_fake_sdk(monkeypatch, p)
@@ -564,6 +587,27 @@ def test_discover_remote_sandbox_skips_dead_candidate(monkeypatch):
     assert p._discover_remote_sandbox("t1", user_id="u1") is None
     assert ("u1", "t1") not in p._thread_sandboxes
     assert client.closed is True
+
+
+def test_discover_remote_sandbox_discards_candidate_when_bootstrap_fails(monkeypatch):
+    p = _make_provider()
+    fake_cls = _install_fake_sdk(monkeypatch, p)
+    fake_cls.list_return = [_info("sb-broken", "u1", "t1")]
+    client = FakeClient(
+        sandbox_id="sb-broken",
+        commands=FakeCommandsAPI(
+            [
+                SimpleNamespace(stdout="ok", stderr="", exit_code=0),
+                SimpleNamespace(stdout="", stderr="permission denied", exit_code=1),
+            ]
+        ),
+    )
+    fake_cls.connect_factory = lambda _sid, **_kw: client
+
+    assert p._discover_remote_sandbox("t1", user_id="u1") is None
+    assert client.killed is True
+    assert client.closed is True
+    assert ("u1", "t1") not in p._thread_sandboxes
 
 
 def test_kill_client_returns_exception_without_raising():
