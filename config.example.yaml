@@ -1185,6 +1185,54 @@ sandbox:
 #   #   DEBUG: "false"
 #   #   API_KEY: $MY_API_KEY        # Reads from host's MY_API_KEY env var
 #   #   DATABASE_URL: $DATABASE_URL  # Reads from host's DATABASE_URL env var
+#
+#   # Optional: Cross-instance container ownership (issue #4206).
+#   #
+#   # Gateway instances share sandbox containers but each keeps its own in-memory
+#   # warm pool. Without shared ownership state, one instance's startup
+#   # reconciliation adopts a container another instance is actively using and
+#   # later idle-destroys it — tool calls then fail with 502 / connection refused.
+#   #
+#   # Single gateway instance? Leave this out; `memory` is the default and the
+#   # cross-instance kill cannot happen.
+#   #
+#   # MULTIPLE gateway instances / workers sharing one container backend
+#   # (load-balanced deployments, Docker Compose) MUST set type: redis. Docker
+#   # Compose already sets DEER_FLOW_STREAM_BRIDGE_REDIS_URL, which is taken as
+#   # proof the deployment is multi-instance, so redis ownership is inferred even
+#   # if this section is omitted.
+#   #
+#   # The redis ownership store requires the optional `redis` extra. It is
+#   # auto-detected from this section on `make dev` and always installed in the
+#   # Docker image. To install it manually:
+#   #     cd backend && uv sync --all-packages --extra redis
+#   #
+#   # ownership:
+#   #   type: memory                 # single gateway instance only
+#   #
+#   # ownership:
+#   #   type: redis                  # required for multi-instance / load-balanced
+#   #   redis_url: redis://redis:6379/0
+#   #   renewal_interval_seconds: 30 # how often an owner refreshes its leases
+#   #   ttl_multiplier: 4            # lease TTL = interval x this (min 2, so a
+#   #                                # single missed renewal cannot expire a live
+#   #                                # owner). Liveness is deliberately independent
+#   #                                # of idle_timeout: renewal keeps running even
+#   #                                # at idle_timeout: 0.
+#   #   key_prefix: deerflow:sandbox:owner
+#   #
+#   # NOTE: the redis ownership store is fail-closed, matching the stream bridge's
+#   # fail-hard policy. Redis.from_url is lazy so a down Redis does not block
+#   # startup, but a sandbox whose ownership cannot be published is not handed out
+#   # — acquiring raises instead. The alternative (proceed unowned) is exactly the
+#   # #4206 cross-instance kill. Run Redis with HA / a restart policy.
+#   #
+#   # NOTE: the other boundary is the lease TTL (renewal_interval_seconds x
+#   # ttl_multiplier). A Redis outage longer than the TTL can let a reconciling
+#   # instance adopt a live owner's container: a lapsed lease is indistinguishable
+#   # from a dead owner, so one TTL of adoption grace is the whole safety margin.
+#   # Size the TTL against your Redis availability target (HA Redis keeps this
+#   # window out of reach).
 
 # Option 3: BoxLite micro-VM Sandbox
 # Runs each sandbox as a BoxLite micro-VM. Released boxes stay in an in-process
