@@ -313,13 +313,22 @@ class MemoryManager(BaseModel):
     # A-class: agent-side has real callers (startup warm-up, manual reload, fact
     # CRUD). Previously reached via ``hasattr`` probing; now contracted with
     # defaults so callers invoke directly and catch ``NotImplementedError``.
-    # ``warm`` defaults to True (nothing to warm); the rest default to raise.
-    def warm(self) -> bool:
+    # ``warm`` defaults to None (nothing to warm); the rest default to raise.
+    def warm(self) -> bool | None:
         """Pre-warm backend resources at startup (e.g. the tiktoken encoding
-        cache). Probed off the event loop by the Gateway lifespan. Default: True
-        (nothing to warm); backends with heavy one-time init override. Returns
-        False if warming failed so the host can fall back."""
-        return True
+        cache). Probed off the event loop by the Gateway lifespan.
+
+        Return contract (tri-state so the host logs accurately):
+          * ``True``  -- warmed successfully (or already cached / unnecessary).
+          * ``False`` -- warming was attempted and failed (host falls back).
+          * ``None``  -- this backend has nothing to warm (the default). The
+            host logs a "skipping" message instead of the misleading "warmed
+            successfully", so a non-DeerMem backend doesn't claim a tiktoken
+            cache it never touched.
+
+        Backends with heavy one-time init override and return ``True``/``False``.
+        """
+        return None
 
     def reload_memory(
         self,

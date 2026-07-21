@@ -81,12 +81,12 @@ def test_noop_runs_with_empty_memory() -> None:
 
 def test_tier3_hooks_have_defaults_noop_inherits() -> None:
     """warm/reload/fact CRUD are tier-3 hooks ON the ABC with defaults (no more
-    ``hasattr`` probing): noop inherits ``warm``=True and fact-CRUD/reload raise
-    ``NotImplementedError``. DeerMem overrides the ones it supports (covered
-    elsewhere)."""
+    ``hasattr`` probing): noop inherits ``warm``=None (nothing to warm) and
+    fact-CRUD/reload raise ``NotImplementedError``. DeerMem overrides the ones
+    it supports (covered elsewhere)."""
     set_memory_config(MemoryConfig(manager_class="noop"))
     noop = get_memory_manager()
-    assert noop.warm() is True  # inherited default (nothing to warm)
+    assert noop.warm() is None  # inherited default (nothing to warm)
     with pytest.raises(NotImplementedError):
         noop.reload_memory(user_id="u")
     with pytest.raises(NotImplementedError):

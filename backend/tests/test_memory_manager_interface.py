@@ -86,8 +86,9 @@ def test_minimal_backend_onboards_via_factory_with_only_add_get_context():
     with pytest.raises(NotImplementedError):
         manager.delete_memory(user_id="u")
 
-    # tier-3 inherits defaults: warm=True; B-class no-op; A-class (excl. warm) raise.
-    assert manager.warm() is True
+    # tier-3 inherits defaults: warm=None (nothing to warm); B-class no-op;
+    # A-class (excl. warm) raise.
+    assert manager.warm() is None
     assert manager.on_pre_compress([]) == ""
     assert manager.on_turn_start(1, None) is None
     with pytest.raises(NotImplementedError):

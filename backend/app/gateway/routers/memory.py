@@ -1,12 +1,12 @@
 """Memory API router for retrieving and managing global memory data."""
 
-from typing import Literal
+from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from app.gateway.internal_auth import get_trusted_internal_owner_user_id
-from deerflow.agents.memory import get_memory_manager
+from deerflow.agents.memory import MemoryManager, get_memory_manager
 from deerflow.config.memory_config import get_memory_config
 from deerflow.config.paths import make_safe_user_id
 from deerflow.runtime.user_context import get_effective_user_id
@@ -91,19 +91,38 @@ def _map_memory_fact_value_error(exc: ValueError) -> HTTPException:
 
 
 def _unsupported_501(manager: object, label: str) -> HTTPException:
-    """501 for an unsupported tier-3 operation.
+    """501 for an unsupported memory operation.
 
-    ``reload_memory`` / ``create_fact`` / ``delete_fact`` / ``update_fact`` are
-    tier-3 hooks on ``MemoryManager`` with a default ``raise NotImplementedError``.
-    Backends that support them override; unsupported ones inherit the raise.
-    Callers invoke the method directly and catch ``NotImplementedError`` -> this
-    501 (no more ``hasattr`` probing -- the contract gives every backend the
-    method, so probing is dead).
+    Tier-3 hooks (``reload_memory`` / ``create_fact`` / ``delete_fact`` /
+    ``update_fact``) and tier-2 management ops (``get_memory`` / ``clear_memory``
+    / ``import_memory``) all default to ``raise NotImplementedError``; backends
+    that support them override, unsupported ones inherit the raise. Before the
+    contract change these were ``@abstractmethod`` (every backend implemented
+    them, so the endpoints could never raise); now a minimal backend (only
+    ``add`` + ``get_context``) inherits the raise, so endpoints invoke the
+    method directly and catch ``NotImplementedError`` -> this 501. There is no
+    global ``NotImplementedError`` handler, so an uncaught raise is a raw 500.
     """
     return HTTPException(
         status_code=501,
         detail=f"Operation '{label}' not supported by memory backend '{type(manager).__name__}'.",
     )
+
+
+def _get_memory_or_501(manager: MemoryManager, user_id: str, label: str) -> dict[str, Any]:
+    """Read the full memory doc; 501 if the backend doesn't expose one.
+
+    ``get_memory`` is tier-2 (default ``raise NotImplementedError``); a minimal
+    backend doesn't expose a full doc. The standalone read endpoints (GET
+    /memory, /memory/export, /memory/status) and the /memory/reload fallback all
+    route reads through here so an unsupported backend gets a clean 501 instead
+    of a raw 500. ``label`` is the operation name in the 501 detail (the
+    endpoint's verb, e.g. "get memory" / "export memory" / "reload memory").
+    """
+    try:
+        return manager.get_memory(user_id=user_id)
+    except NotImplementedError:
+        raise _unsupported_501(manager, label) from None
 
 
 class FactCreateRequest(BaseModel):
@@ -181,7 +200,8 @@ async def get_memory(http_request: Request) -> MemoryResponse:
         }
         ```
     """
-    memory_data = get_memory_manager().get_memory(user_id=_resolve_memory_user_id(http_request))
+    manager = get_memory_manager()
+    memory_data = _get_memory_or_501(manager, _resolve_memory_user_id(http_request), "get memory")
     return MemoryResponse(**memory_data)
 
 
@@ -206,11 +226,13 @@ async def reload_memory(http_request: Request) -> MemoryResponse:
     try:
         memory_data = manager.reload_memory(user_id=user_id)
     except NotImplementedError:
-        # Non-DeerMem backends have no reload concept; return current memory.
-        # (Asymmetry vs fact CRUD, which raises 501 when unsupported: reload is a
-        # read-only refresh, so degrading to get_memory is safe and still useful;
-        # silently no-op'ing a write would hide data loss, so writes fail loud.)
-        memory_data = manager.get_memory(user_id=user_id)
+        # Non-DeerMem backends have no reload concept; fall back to get_memory
+        # (read-only refresh, so degrading is safe and still useful -- vs fact
+        # CRUD writes, which fail loud at 501 since silently no-op'ing a write
+        # would hide data loss). If get_memory is also unsupported (a minimal
+        # backend with no full doc), surface 501 rather than a raw 500: reads
+        # degrade only when there is a doc to degrade to.
+        memory_data = _get_memory_or_501(manager, user_id, "reload memory")
     return MemoryResponse(**memory_data)
 
 
@@ -223,8 +245,11 @@ async def reload_memory(http_request: Request) -> MemoryResponse:
 )
 async def clear_memory(http_request: Request) -> MemoryResponse:
     """Clear all persisted memory data."""
+    manager = get_memory_manager()
     try:
-        memory_data = get_memory_manager().clear_memory(user_id=_resolve_memory_user_id(http_request))
+        memory_data = manager.clear_memory(user_id=_resolve_memory_user_id(http_request))
+    except NotImplementedError:
+        raise _unsupported_501(manager, "clear memory") from None
     except OSError as exc:
         raise HTTPException(status_code=500, detail="Failed to clear memory data.") from exc
 
@@ -322,7 +347,8 @@ async def update_memory_fact_endpoint(fact_id: str, request: FactPatchRequest, h
 )
 async def export_memory(http_request: Request) -> MemoryResponse:
     """Export the current memory data."""
-    memory_data = get_memory_manager().get_memory(user_id=_resolve_memory_user_id(http_request))
+    manager = get_memory_manager()
+    memory_data = _get_memory_or_501(manager, _resolve_memory_user_id(http_request), "export memory")
     return MemoryResponse(**memory_data)
 
 
@@ -335,8 +361,11 @@ async def export_memory(http_request: Request) -> MemoryResponse:
 )
 async def import_memory(request: MemoryResponse, http_request: Request) -> MemoryResponse:
     """Import and persist memory data."""
+    manager = get_memory_manager()
     try:
-        memory_data = get_memory_manager().import_memory(request.model_dump(), user_id=_resolve_memory_user_id(http_request))
+        memory_data = manager.import_memory(request.model_dump(), user_id=_resolve_memory_user_id(http_request))
+    except NotImplementedError:
+        raise _unsupported_501(manager, "import memory") from None
     except OSError as exc:
         raise HTTPException(status_code=500, detail="Failed to import memory data.") from exc
 
@@ -406,7 +435,8 @@ async def get_memory_status(http_request: Request) -> MemoryStatusResponse:
         Combined memory configuration and current data.
     """
     config = get_memory_config()
-    memory_data = get_memory_manager().get_memory(user_id=_resolve_memory_user_id(http_request))
+    manager = get_memory_manager()
+    memory_data = _get_memory_or_501(manager, _resolve_memory_user_id(http_request), "get memory status")
 
     return MemoryStatusResponse(
         config=MemoryConfigResponse(

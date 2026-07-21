@@ -313,11 +313,12 @@ class DeerMem(MemoryManager):
     def warm(self) -> bool:
         """Pre-warm DeerMem-specific resources (the tiktoken encoding cache).
 
-        Overrides the base tier-3 hook (default True). The Gateway lifespan calls
-        ``manager.warm()`` directly off the event loop; backends without heavy
-        init inherit the True default. Returns True if the encoding loaded (or
-        was already cached, or warming was unnecessary); False if tiktoken is
-        unavailable or the download failed.
+        Overrides the base tier-3 hook (default None = nothing to warm). The
+        Gateway lifespan calls ``manager.warm()`` directly off the event loop;
+        backends without heavy init inherit the None default (the host logs
+        "skipping"). Returns True if the encoding loaded (or was already cached,
+        or warming was unnecessary); False if tiktoken is unavailable or the
+        download failed.
         """
         if self._config.token_counting == "char":
             logger.info("token_counting='char'; tiktoken not used, skipping warm-up")
