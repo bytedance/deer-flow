@@ -924,19 +924,14 @@ class E2BSandboxProvider(SandboxProvider):
             )
             return evict_id
 
-        try:
-            kill = getattr(client, "kill", None)
-            if callable(kill):
-                kill()
-        except Exception as e:
-            logger.warning("Failed to kill evicted e2b sandbox %s: %s", evict_id, e)
-        finally:
-            close = getattr(client, "close", None)
-            if callable(close):
-                try:
-                    close()
-                except Exception:
-                    pass
+        if error := self._kill_client(client):
+            logger.warning("Failed to kill evicted e2b sandbox %s: %s", evict_id, error)
+        close = getattr(client, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:
+                pass
         logger.info("Evicted warm-pool e2b sandbox %s", evict_id)
         return evict_id
 
@@ -1030,12 +1025,11 @@ class E2BSandboxProvider(SandboxProvider):
     ) -> Exception | None:
         """Kill a remote VM and return an exception for the caller to log."""
         if client is None:
-            return
-        kill = getattr(client, "kill", None)
-        if not callable(kill):
-            return
+            return None
         try:
-            kill()
+            kill = getattr(client, "kill", None)
+            if callable(kill):
+                kill()
         except Exception as e:
             return e
         return None

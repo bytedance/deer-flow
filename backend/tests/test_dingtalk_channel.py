@@ -334,6 +334,102 @@ class TestOnChatbotMessage:
 
         _run(go())
 
+    @pytest.mark.parametrize("sender_staff_id", ["", None])
+    def test_p2p_message_without_sender_is_dropped(self, sender_staff_id):
+        """A P2P chat_id *is* the sender, so an empty one keys every user to one thread.
+
+        ``ChannelStore._key`` builds ``f"{channel}:{chat_id}"`` for a topic-less conversation,
+        so publishing this would put every senderless P2P message under the literal
+        ``"dingtalk:"`` — one shared thread, one shared history, across users.
+        """
+
+        async def go():
+            bus = MessageBus()
+            bus.publish_inbound = AsyncMock()
+            channel = DingTalkChannel(bus, config={})
+            channel._client_id = "test_key"
+            channel._main_loop = asyncio.get_event_loop()
+            channel._running = True
+
+            msg = _make_chatbot_message(
+                text="hello",
+                conversation_type=_CONVERSATION_TYPE_P2P,
+                sender_staff_id=sender_staff_id,
+                message_id="msg_no_sender",
+            )
+
+            channel._send_running_reply = AsyncMock()
+            channel._on_chatbot_message(msg)
+
+            await asyncio.sleep(0.1)
+
+            bus.publish_inbound.assert_not_awaited()
+
+        _run(go())
+
+    def test_group_message_without_conversation_id_is_dropped(self):
+        """The group route reaches the same degenerate key from the other side."""
+
+        async def go():
+            bus = MessageBus()
+            bus.publish_inbound = AsyncMock()
+            channel = DingTalkChannel(bus, config={})
+            channel._client_id = "test_key"
+            channel._main_loop = asyncio.get_event_loop()
+            channel._running = True
+
+            msg = _make_chatbot_message(
+                text="hello group",
+                conversation_type=_CONVERSATION_TYPE_GROUP,
+                sender_staff_id="user_002",
+                conversation_id="",
+                message_id="msg_no_conv",
+            )
+
+            channel._send_running_reply = AsyncMock()
+            channel._on_chatbot_message(msg)
+
+            await asyncio.sleep(0.1)
+
+            bus.publish_inbound.assert_not_awaited()
+
+        _run(go())
+
+    def test_group_message_with_unknown_sender_is_still_delivered(self):
+        """Reverse anchor: the guard is on the conversation identity, not on the sender.
+
+        A group message identifies its conversation through ``conversation_id``, so an
+        unknown sender must not cost the whole message.
+        """
+
+        async def go():
+            bus = MessageBus()
+            bus.publish_inbound = AsyncMock()
+            channel = DingTalkChannel(bus, config={})
+            channel._client_id = "test_key"
+            channel._main_loop = asyncio.get_event_loop()
+            channel._running = True
+
+            msg = _make_chatbot_message(
+                text="hello group",
+                conversation_type=_CONVERSATION_TYPE_GROUP,
+                sender_staff_id="",
+                conversation_id="conv_group_003",
+                message_id="msg_group_003",
+            )
+
+            channel._send_running_reply = AsyncMock()
+            channel._on_chatbot_message(msg)
+
+            await asyncio.sleep(0.1)
+
+            bus.publish_inbound.assert_awaited_once()
+            inbound = bus.publish_inbound.await_args.args[0]
+            assert inbound.chat_id == "conv_group_003"
+            assert inbound.topic_id == "msg_group_003"
+
+        _run(go())
+
     def test_command_classified_correctly(self):
         async def go():
             bus = MessageBus()

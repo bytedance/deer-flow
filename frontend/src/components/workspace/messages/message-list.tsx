@@ -39,6 +39,7 @@ import {
 } from "@/core/messages/human-input";
 import {
   buildTokenDebugSteps,
+  type TokenDebugStep,
   type TokenUsageInlineMode,
 } from "@/core/messages/usage-model";
 import {
@@ -55,6 +56,7 @@ import {
   hasReasoning,
   isAssistantMessageGroupStreaming,
   isHiddenFromUIMessage,
+  type MessageGroup as ThreadMessageGroup,
 } from "@/core/messages/utils";
 import { useRehypeSplitWordsIntoSpans } from "@/core/rehype";
 import {
@@ -71,6 +73,7 @@ import type { AgentThreadState } from "@/core/threads";
 import { cn } from "@/lib/utils";
 
 import { ArtifactFileList } from "../artifacts/artifact-file-list";
+import { useMaybeBrowserView } from "../browser-view";
 import { CopyButton } from "../copy-button";
 import { useMaybeSidecar } from "../sidecar/context";
 import { Tooltip } from "../tooltip";
@@ -88,6 +91,101 @@ import {
 } from "./message-token-usage";
 import { MessageListSkeleton } from "./skeleton";
 import { SubtaskCard } from "./subtask-card";
+
+const EMPTY_TOKEN_DEBUG_STEPS: TokenDebugStep[] = [];
+const EMPTY_ARTIFACT_PATHS: readonly string[] = [];
+
+function messageStableKey(message: Message) {
+  if (
+    message.type === "tool" &&
+    typeof message.tool_call_id === "string" &&
+    message.tool_call_id.length > 0
+  ) {
+    return `tool:${message.tool_call_id}`;
+  }
+  if (typeof message.id === "string" && message.id.length > 0) {
+    return `message:${message.id}`;
+  }
+  return null;
+}
+
+function sameMessageIdentity(previous: Message, next: Message) {
+  if (previous === next) {
+    return true;
+  }
+  if (previous.type !== next.type) {
+    return false;
+  }
+  const previousKey = messageStableKey(previous);
+  const nextKey = messageStableKey(next);
+  return previousKey !== null && previousKey === nextKey;
+}
+
+function canReuseMessageGroup(
+  previous: ThreadMessageGroup | undefined,
+  next: ThreadMessageGroup,
+): previous is ThreadMessageGroup {
+  if (
+    !previous ||
+    previous.id !== next.id ||
+    previous.type !== next.type ||
+    previous.messages.length !== next.messages.length
+  ) {
+    return false;
+  }
+  return previous.messages.every(
+    (message, index) =>
+      next.messages[index] !== undefined &&
+      sameMessageIdentity(message, next.messages[index]),
+  );
+}
+
+function sameStrings(previous: readonly string[], next: readonly string[]) {
+  return (
+    previous.length === next.length &&
+    previous.every((value, index) => value === next[index])
+  );
+}
+
+function useStableArtifactPaths(paths: readonly string[] | undefined) {
+  const previousPathsRef = useRef<readonly string[]>(EMPTY_ARTIFACT_PATHS);
+  return useMemo(() => {
+    const nextPaths = paths ?? EMPTY_ARTIFACT_PATHS;
+    const previousPaths = previousPathsRef.current;
+    if (sameStrings(previousPaths, nextPaths)) {
+      return previousPaths;
+    }
+    previousPathsRef.current = nextPaths;
+    return nextPaths;
+  }, [paths]);
+}
+
+function useStableMessageGroups(
+  messages: Message[],
+  isLoading: boolean,
+): ThreadMessageGroup[] {
+  const previousGroupsRef = useRef<ThreadMessageGroup[]>([]);
+  const previousIsLoadingRef = useRef(false);
+  return useMemo(() => {
+    const nextGroups = getMessageGroups(messages);
+    const previousGroups = previousGroupsRef.current;
+    const activeGroupIndex =
+      isLoading || previousIsLoadingRef.current ? nextGroups.length - 1 : -1;
+    const stableGroups = nextGroups.map((group, index) => {
+      // Keep the actively streaming group fresh even if the SDK mutates a
+      // message object in place while appending token content.
+      if (index === activeGroupIndex) {
+        return group;
+      }
+      return canReuseMessageGroup(previousGroups[index], group)
+        ? previousGroups[index]
+        : group;
+    });
+    previousGroupsRef.current = stableGroups;
+    previousIsLoadingRef.current = isLoading;
+    return stableGroups;
+  }, [isLoading, messages]);
+}
 
 export const MESSAGE_LIST_DEFAULT_PADDING_BOTTOM = 24;
 
@@ -273,7 +371,47 @@ export function MessageList({
     prevIsLoading.current = thread.isLoading;
   }, [thread.isLoading]);
   const messages = thread.messages;
-  const groupedMessages = getMessageGroups(messages);
+  const browserView = useMaybeBrowserView();
+  const pushBrowserFrame = browserView?.pushFrame;
+  const messageCount = messages.length;
+  useEffect(() => {
+    // Only the primary chat surface drives the shared browser panel. The
+    // sidecar renders a different thread's messages against the same
+    // BrowserViewProvider; pushing its frames would make the panel resolve
+    // another thread's screenshot with the primary threadId (404 / wrong page).
+    if (sidecarSurface || !pushBrowserFrame) {
+      return;
+    }
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const message = messages[i];
+      if (message?.type !== "tool") {
+        continue;
+      }
+      const meta = (
+        message.additional_kwargs as
+          | {
+              browser_view?: {
+                screenshot?: string;
+                url?: string;
+                title?: string;
+              };
+            }
+          | undefined
+      )?.browser_view;
+      if (meta && typeof meta.screenshot === "string") {
+        pushBrowserFrame({
+          screenshot: meta.screenshot,
+          url: meta.url,
+          title: meta.title,
+        });
+        return;
+      }
+    }
+    // messages is intentionally read (not a dep) so token updates do not
+    // repeatedly scan long history looking for the last browser frame.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [messageCount, pushBrowserFrame, sidecarSurface]);
+  const groupedMessages = useStableMessageGroups(messages, thread.isLoading);
   const [regeneratingMessageId, setRegeneratingMessageId] = useState<
     string | null
   >(null);
@@ -302,8 +440,47 @@ export function MessageList({
   const turnUsageMessagesByGroupIndex =
     getAssistantTurnUsageMessages(groupedMessages);
   const tokenDebugSteps = useMemo(
-    () => buildTokenDebugSteps(messages, t),
-    [messages, t],
+    () =>
+      tokenUsageInlineMode === "step_debug"
+        ? buildTokenDebugSteps(messages, t)
+        : EMPTY_TOKEN_DEBUG_STEPS,
+    [messages, t, tokenUsageInlineMode],
+  );
+  const showTokenDebugSummaries = tokenUsageInlineMode === "step_debug";
+  const tokenDebugStepsByMessageId = useMemo(() => {
+    const stepsByMessageId = new Map<string, TokenDebugStep[]>();
+    for (const step of tokenDebugSteps) {
+      const messageId = step.messageId;
+      if (!messageId) {
+        continue;
+      }
+      const steps = stepsByMessageId.get(messageId);
+      if (steps) {
+        steps.push(step);
+      } else {
+        stepsByMessageId.set(messageId, [step]);
+      }
+    }
+    return stepsByMessageId;
+  }, [tokenDebugSteps]);
+  const getTokenDebugStepsForMessages = useCallback(
+    (groupMessages: Message[]) => {
+      if (!showTokenDebugSummaries) {
+        return EMPTY_TOKEN_DEBUG_STEPS;
+      }
+      const steps: TokenDebugStep[] = [];
+      for (const message of groupMessages) {
+        if (!message.id) {
+          continue;
+        }
+        const matched = tokenDebugStepsByMessageId.get(message.id);
+        if (matched) {
+          steps.push(...matched);
+        }
+      }
+      return steps;
+    },
+    [showTokenDebugSummaries, tokenDebugStepsByMessageId],
   );
   const streamingMessages = useMemo(
     () =>
@@ -674,7 +851,7 @@ export function MessageList({
         );
       }
 
-      if (tokenUsageInlineMode === "step_debug" && inlineDebug) {
+      if (showTokenDebugSummaries && inlineDebug) {
         const messageIds = new Set(
           debugMessageIds ??
             messages
@@ -695,14 +872,21 @@ export function MessageList({
 
       return null;
     },
-    [thread.isLoading, tokenDebugSteps, tokenUsageInlineMode],
+    [
+      showTokenDebugSummaries,
+      thread.isLoading,
+      tokenDebugSteps,
+      tokenUsageInlineMode,
+    ],
+  );
+
+  const artifactPaths = useStableArtifactPaths(
+    extractArtifactsFromThread(thread),
   );
 
   if (thread.isThreadLoading && messages.length === 0) {
     return <MessageListSkeleton />;
   }
-
-  const artifactPaths = extractArtifactsFromThread(thread);
 
   return (
     <>
@@ -949,12 +1133,9 @@ export function MessageList({
                       key={"thinking-group-" + message.id}
                       messages={[message]}
                       isLoading={groupIsLoading}
-                      tokenDebugSteps={tokenDebugSteps.filter(
-                        (step) => step.messageId === message.id,
-                      )}
-                      showTokenDebugSummaries={
-                        tokenUsageInlineMode === "step_debug"
-                      }
+                      deferBrowserPreviews={thread.isLoading}
+                      tokenDebugSteps={getTokenDebugStepsForMessages([message])}
+                      showTokenDebugSummaries={showTokenDebugSummaries}
                     />,
                   );
                 } else if (message.id) {
@@ -993,15 +1174,13 @@ export function MessageList({
               <div key={"group-" + group.id} className="w-full">
                 <MessageGroup
                   messages={group.messages}
-                  isLoading={thread.isLoading}
-                  tokenDebugSteps={tokenDebugSteps.filter((step) =>
-                    group.messages.some(
-                      (message) => message.id === step.messageId,
-                    ),
+                  isLoading={groupIsLoading}
+                  deferBrowserPreviews={thread.isLoading}
+                  threadId={threadId}
+                  tokenDebugSteps={getTokenDebugStepsForMessages(
+                    group.messages,
                   )}
-                  showTokenDebugSummaries={
-                    tokenUsageInlineMode === "step_debug"
-                  }
+                  showTokenDebugSummaries={showTokenDebugSummaries}
                 />
                 {renderTokenUsage({
                   messages: group.messages,

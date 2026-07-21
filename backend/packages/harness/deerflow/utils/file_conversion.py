@@ -135,7 +135,7 @@ def _do_convert(file_path: Path, pdf_converter: str) -> str:
     return _convert_with_markitdown(file_path)
 
 
-async def convert_file_to_markdown(file_path: Path) -> Path | None:
+async def convert_file_to_markdown(file_path: Path, output_path: Path | None = None) -> Path | None:
     """Convert a supported document file to Markdown.
 
     PDF files are handled with a two-converter strategy (see module docstring).
@@ -144,6 +144,10 @@ async def convert_file_to_markdown(file_path: Path) -> Path | None:
 
     Args:
         file_path: Path to the file to convert.
+        output_path: Optional destination for the generated ``.md`` file.
+            When omitted, writes to ``file_path`` with a ``.md`` suffix.
+            Callers that track per-request filename uniqueness should pass a
+            pre-claimed path so companion markdown cannot clobber other uploads.
 
     Returns:
         Path to the generated .md file, or None if conversion failed.
@@ -157,7 +161,7 @@ async def convert_file_to_markdown(file_path: Path) -> Path | None:
         else:
             text = _do_convert(file_path, pdf_converter)
 
-        md_path = file_path.with_suffix(".md")
+        md_path = output_path if output_path is not None else file_path.with_suffix(".md")
         md_path.write_text(text, encoding="utf-8")
 
         logger.info("Converted %s to markdown: %s (%d chars)", file_path.name, md_path.name, len(text))

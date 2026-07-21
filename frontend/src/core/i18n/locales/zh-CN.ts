@@ -53,6 +53,8 @@ export const zhCN: Translations = {
     regenerate: "重新生成",
     branch: "分叉",
     showArtifacts: "查看此对话的文件",
+    browser: "浏览器",
+    showBrowser: "打开浏览器面板",
   },
 
   // Home
@@ -106,6 +108,7 @@ export const zhCN: Translations = {
     largeUnavailable: "文件过大，已省略 diff。",
     sensitiveUnavailable: "敏感路径，已隐藏内容。",
     truncatedUnavailable: "变更集过大，已省略 diff。",
+    symlinkUnavailable: "符号链接变更，无法展示 diff。",
     truncatedSummary: "部分变更已被截断。",
   },
 
@@ -544,6 +547,15 @@ export const zhCN: Translations = {
     clickToViewContent: "点击查看文件内容",
     writeTodos: "更新 To-do 列表",
     skillInstallTooltip: "安装技能并使其可在 DeerFlow 中使用",
+    browserNavigate: (url: string) => `在浏览器中打开 ${url}`,
+    browserNavigateGeneric: "在浏览器中打开页面",
+    browserClick: "在浏览器中点击元素",
+    browserType: "在浏览器中输入内容",
+    browserSnapshot: "在浏览器中读取页面",
+    browserGetText: "在浏览器中读取页面文本",
+    browserBack: "在浏览器中返回上一页",
+    browserScreenshot: "浏览器截图",
+    browserClose: "关闭浏览器",
   },
 
   humanInput: {
