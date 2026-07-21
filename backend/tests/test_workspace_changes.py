@@ -246,6 +246,85 @@ def test_compare_snapshots_hides_sensitive_and_binary_file_content(tmp_path):
     assert binary_change.diff_unavailable_reason == "binary"
 
 
+@pytest.fixture
+def symlink_support(tmp_path):
+    # Real symlink creation needs elevated privilege on stock Windows (no Developer
+    # Mode / admin); skip gracefully there instead of failing the whole run. Linux/CI
+    # and WSL create symlinks natively, so this exercises the real behavior there.
+    probe_link = tmp_path / "_symlink_probe"
+    try:
+        probe_link.symlink_to(tmp_path)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink creation is not permitted on this platform/user")
+    probe_link.unlink()
+
+
+def test_compare_snapshots_classifies_symlink_replacing_file_as_symlink_created(tmp_path, symlink_support):
+    roots = _roots(tmp_path)
+    workspace = roots[0].host_path
+    outside_target = tmp_path / "outside-secret.txt"
+    outside_target.write_text("host-side content outside the workspace root\n", encoding="utf-8")
+
+    (workspace / "config.txt").write_text("original tracked content\n", encoding="utf-8")
+    before = scan_workspace_roots(roots)
+    assert before.files["/mnt/user-data/workspace/config.txt"].symlink is False
+
+    # Simulate an agent run doing: rm config.txt && ln -s <outside path> config.txt
+    (workspace / "config.txt").unlink()
+    (workspace / "config.txt").symlink_to(outside_target)
+    after = scan_workspace_roots(roots)
+
+    result = compare_snapshots(before, after)
+    changes = {change.path: change for change in result.files}
+    change = changes["/mnt/user-data/workspace/config.txt"]
+
+    assert change.status == "symlink_created"
+    assert change.status != "deleted"
+    assert change.symlink is True
+    assert change.symlink_target_after == str(outside_target)
+    assert change.diff_unavailable_reason == "symlink"
+    assert change.diff == ""
+    assert result.summary.symlink_created == 1
+    assert result.summary.deleted == 0
+    assert result.has_changes() is True
+
+
+def test_scan_workspace_roots_captures_symlinks_as_metadata_only_stubs(tmp_path, symlink_support):
+    roots = _roots(tmp_path)
+    workspace = roots[0].host_path
+    outside_target = tmp_path / "outside-target.txt"
+    outside_target.write_text("outside content\n", encoding="utf-8")
+    (workspace / "link.txt").symlink_to(outside_target)
+
+    snapshot = scan_workspace_roots(roots)
+    file = snapshot.files["/mnt/user-data/workspace/link.txt"]
+
+    assert file.symlink is True
+    assert file.symlink_target == str(outside_target)
+    assert file.text is None
+    assert file.sha256 is None
+    assert file.content_unavailable_reason == "symlink"
+
+
+def test_compare_snapshots_reports_removed_symlink_without_replacement_as_deleted(tmp_path, symlink_support):
+    # Scope boundary: a symlink that is genuinely removed with nothing taking its
+    # place is still "deleted" - only a symlink *newly occupying* a path (created or
+    # replacing a prior non-symlink) gets the distinct "symlink_created" status.
+    roots = _roots(tmp_path)
+    workspace = roots[0].host_path
+    outside_target = tmp_path / "outside-target.txt"
+    outside_target.write_text("outside content\n", encoding="utf-8")
+    (workspace / "link.txt").symlink_to(outside_target)
+    before = scan_workspace_roots(roots)
+
+    (workspace / "link.txt").unlink()
+    after = scan_workspace_roots(roots)
+
+    result = compare_snapshots(before, after)
+    changes = {change.path: change for change in result.files}
+    assert changes["/mnt/user-data/workspace/link.txt"].status == "deleted"
+
+
 def test_compare_snapshots_truncates_large_text_diffs(tmp_path):
     roots = _roots(tmp_path)
     workspace = roots[0].host_path
@@ -354,6 +433,7 @@ async def test_workspace_changes_response_is_empty_when_no_event_exists():
         "created": 0,
         "modified": 0,
         "deleted": 0,
+        "symlink_created": 0,
         "additions": 0,
         "deletions": 0,
         "truncated": False,

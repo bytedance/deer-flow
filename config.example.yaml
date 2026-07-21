@@ -15,7 +15,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 28
+config_version: 29
 
 # ============================================================================
 # Logging
@@ -29,6 +29,23 @@ logging:
   enhance:
     enabled: false
     format: text
+
+# ============================================================================
+# Agent Extensions
+# ============================================================================
+# Optional AgentMiddleware classes loaded into the lead and subagent runtime
+# middleware chains after built-in runtime middlewares, but before the
+# safety/clarification tail. Missing packages, invalid classes, and broken
+# modules fail loudly at agent creation with an actionable import error.
+# The same zero-argument class list applies to both lead and subagent runtimes;
+# lead-only vs subagent-only configuration is not expressible yet. Treat these
+# files as trusted operator config because middleware classes execute code.
+# Uncomment this block to define middlewares in config.yaml. Leaving it commented
+# lets extensions_config.json remain the source of truth for extension packages.
+# extensions:
+#   middlewares:
+#     - my_company.deerflow_middlewares:DomainGuardMiddleware
+#     - my_company.deerflow_middlewares:LatencyStampingMiddleware
 
 # ============================================================================
 # Tracing / Observability (Monocle)
@@ -1185,6 +1202,54 @@ sandbox:
 #   #   DEBUG: "false"
 #   #   API_KEY: $MY_API_KEY        # Reads from host's MY_API_KEY env var
 #   #   DATABASE_URL: $DATABASE_URL  # Reads from host's DATABASE_URL env var
+#
+#   # Optional: Cross-instance container ownership (issue #4206).
+#   #
+#   # Gateway instances share sandbox containers but each keeps its own in-memory
+#   # warm pool. Without shared ownership state, one instance's startup
+#   # reconciliation adopts a container another instance is actively using and
+#   # later idle-destroys it — tool calls then fail with 502 / connection refused.
+#   #
+#   # Single gateway instance? Leave this out; `memory` is the default and the
+#   # cross-instance kill cannot happen.
+#   #
+#   # MULTIPLE gateway instances / workers sharing one container backend
+#   # (load-balanced deployments, Docker Compose) MUST set type: redis. Docker
+#   # Compose already sets DEER_FLOW_STREAM_BRIDGE_REDIS_URL, which is taken as
+#   # proof the deployment is multi-instance, so redis ownership is inferred even
+#   # if this section is omitted.
+#   #
+#   # The redis ownership store requires the optional `redis` extra. It is
+#   # auto-detected from this section on `make dev` and always installed in the
+#   # Docker image. To install it manually:
+#   #     cd backend && uv sync --all-packages --extra redis
+#   #
+#   # ownership:
+#   #   type: memory                 # single gateway instance only
+#   #
+#   # ownership:
+#   #   type: redis                  # required for multi-instance / load-balanced
+#   #   redis_url: redis://redis:6379/0
+#   #   renewal_interval_seconds: 30 # how often an owner refreshes its leases
+#   #   ttl_multiplier: 4            # lease TTL = interval x this (min 2, so a
+#   #                                # single missed renewal cannot expire a live
+#   #                                # owner). Liveness is deliberately independent
+#   #                                # of idle_timeout: renewal keeps running even
+#   #                                # at idle_timeout: 0.
+#   #   key_prefix: deerflow:sandbox:owner
+#   #
+#   # NOTE: the redis ownership store is fail-closed, matching the stream bridge's
+#   # fail-hard policy. Redis.from_url is lazy so a down Redis does not block
+#   # startup, but a sandbox whose ownership cannot be published is not handed out
+#   # — acquiring raises instead. The alternative (proceed unowned) is exactly the
+#   # #4206 cross-instance kill. Run Redis with HA / a restart policy.
+#   #
+#   # NOTE: the other boundary is the lease TTL (renewal_interval_seconds x
+#   # ttl_multiplier). A Redis outage longer than the TTL can let a reconciling
+#   # instance adopt a live owner's container: a lapsed lease is indistinguishable
+#   # from a dead owner, so one TTL of adoption grace is the whole safety margin.
+#   # Size the TTL against your Redis availability target (HA Redis keeps this
+#   # window out of reach).
 
 # Option 3: BoxLite micro-VM Sandbox
 # Runs each sandbox as a BoxLite micro-VM. Released boxes stay in an in-process
@@ -1662,6 +1727,11 @@ skill_evolution:
 database:
   backend: sqlite
   sqlite_dir: .deer-flow/data
+  # Recycle app ORM PostgreSQL connections before the environment's idle cutoff.
+  pool_recycle: 300
+  # App ORM PostgreSQL command timeout. Set to null to disable it or raise it
+  # for intentionally long commands.
+  command_timeout: 30
 
 # ============================================================================
 # Run Events Configuration
@@ -1986,6 +2056,49 @@ authorization:
 #   recovery_timeout_sec: 60
 
 # ============================================================================
+# LLM Call Concurrency Configuration
+# ============================================================================
+# Cap the number of concurrently in-flight LLM calls process-wide. A provider
+# burst-rate (limit_burst_rate) error fires on the *slope* of the request rate,
+# not on a static quota - so the morning peak (e.g. 08:30) ramping from ~0 to
+# full throttle in seconds gets rejected even when total RPM is within budget.
+# Capping concurrency caps that slope. Retries alone make it worse (they add
+# demand inside the very burst being throttled); pair this cap with the
+# decorrelated-jitter backoff already built into the LLM error-handling
+# middleware, and ideally an nginx `limit_req` at the ingress.
+#
+# 0 disables the cap (default) - existing deployments see no behavior change.
+#
+# Per-process, not per-cluster: the cap bounds in-flight LLM calls within ONE
+# gateway process. With GATEWAY_WORKERS > 1 the aggregate cap across the
+# deployment is effectively `max_concurrent_calls * GATEWAY_WORKERS`, and a
+# multi-node rollout multiplies it further - size the per-process value with
+# that in mind (and pair it with an nginx `limit_req` at the ingress for a
+# true cluster-wide slope cap).
+#
+# Startup-only: the cap is captured at the first LLM run and frozen for the
+# process lifetime. Editing `max_concurrent_calls` here takes effect only after
+# a gateway restart; the other `llm_call.*` knobs below remain hot-reloadable.
+# Freezing the cap avoids the downscale and config-freshness races that a
+# runtime-mutable, process-wide/cross-loop limiter would otherwise hit (a
+# lowered cap could keep admitting queued waiters, or a stale config snapshot
+# constructed after a fresher one could restore a higher cap).
+
+# llm_call:
+#   # Max concurrently in-flight LLM calls across the whole process (default: 0 = disabled)
+#   max_concurrent_calls: 0
+#   # Max LLM call attempts for retriable transient errors, 1 = no retry (default: 3)
+#   retry_max_attempts: 3
+#   # Base delay (ms) for the decorrelated-jitter retry backoff (default: 1000)
+#   retry_base_delay_ms: 1000
+#   # Hard cap (ms) on any single retry backoff delay (default: 8000)
+#   retry_cap_delay_ms: 8000
+#   # Backoff base (ms) used ONLY for burst-rate (limit_burst_rate) 429s - higher
+#   # than retry_base_delay_ms so the single burst retry lands after the throttle
+#   # window subsides. Ignored when the provider sends Retry-After (default: 5000)
+#   burst_retry_base_delay_ms: 5000
+
+# ============================================================================
 # SSO / OIDC Authentication (optional)
 # ============================================================================
 # Enable SSO login via any OIDC-compatible provider (Keycloak, Google, Azure AD, Okta, etc.).
@@ -2003,7 +2116,24 @@ authorization:
 #   2. Add Valid Redirect URI: http://localhost:8001/api/v1/auth/callback/keycloak
 #   3. Add Web Origin: http://localhost:8001 (or your frontend origin)
 
+# ============================================================================
+# Local (email/password) authentication
+# ============================================================================
+# Self-registration via POST /api/v1/auth/register is open by default: anyone
+# who can reach the Gateway may create a regular user account.
+#
+# The OIDC provisioning policy below (allowed_email_domains, require_verified_email,
+# auto_create_users) is enforced only in the SSO callback. It does NOT constrain local
+# registration, so on an SSO-provisioned deployment leaving this open lets a visitor
+# create an account outside that policy. Set allow_registration: false there.
+#
+# The first admin account is always created through /initialize regardless of this
+# setting, so turning it off cannot lock you out of a fresh install.
+
 # auth:
+#   local:
+#     allow_registration: false
+#
 #   oidc:
 #     enabled: true
 #     # Base URL of the frontend, used for redirects after SSO callback.

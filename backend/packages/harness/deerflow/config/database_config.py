@@ -63,6 +63,16 @@ class DatabaseConfig(BaseModel):
         default=5,
         description="Connection pool size for the app ORM engine (postgres only).",
     )
+    pool_recycle: int = Field(
+        default=300,
+        gt=0,
+        description="Seconds before app ORM PostgreSQL connections are recycled.",
+    )
+    command_timeout: float | None = Field(
+        default=30,
+        gt=0,
+        description="Timeout in seconds for app ORM PostgreSQL commands. Set to null to disable the command timeout.",
+    )
 
     # -- Derived helpers (not user-configured) --
 

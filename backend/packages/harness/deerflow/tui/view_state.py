@@ -203,7 +203,7 @@ def reduce(state: ViewState, action: Action) -> ViewState:
         return replace(state, title=action.title)
 
     if isinstance(action, ClearRows):
-        return replace(state, rows=(), title=None, streaming_id=None, streaming_anonymous_row_index=None)
+        return replace(state, rows=(), streaming_id=None, streaming_anonymous_row_index=None)
 
     return state
 

@@ -102,6 +102,14 @@ def test_goal_is_builtin_command():
     assert resolved.args == "finish the implementation"
 
 
+def test_clear_is_builtin_command():
+    resolved = resolve("/clear")
+
+    assert resolved.kind == "builtin"
+    assert resolved.name == "clear"
+    assert resolved.args == ""
+
+
 def test_goal_builtin_takes_precedence_over_skill():
     registry = build_registry([{"name": "goal", "description": "skill", "enabled": True}])
 
