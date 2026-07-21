@@ -212,6 +212,13 @@ def test_thread_key_returns_user_thread_tuple():
     assert p._thread_key("t1", "u1") == ("u1", "t1")
 
 
+def test_sandbox_id_falls_back_when_client_id_is_none():
+    client = FakeClient(sandbox_id=None)
+    sandbox = _make_sandbox(client, sandbox_id="fallback-id")
+
+    assert sandbox.sandbox_id == "fallback-id"
+
+
 def test_stable_seed_is_deterministic_and_user_scoped():
     p = _make_provider()
     s_a = p._stable_seed("t1", "u1")
