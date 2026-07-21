@@ -489,6 +489,29 @@ def test_reclaim_warm_pool_sandbox_handles_reconnect_exception(monkeypatch):
     assert "sb-broken" not in p._warm_pool
 
 
+def test_acquire_discards_warm_sandbox_when_bootstrap_fails(monkeypatch):
+    p = _make_provider()
+    fake_cls = _install_fake_sdk(monkeypatch, p)
+    warm_client = FakeClient(
+        sandbox_id="sb-warm",
+        commands=FakeCommandsAPI(
+            [
+                SimpleNamespace(stdout="ok", stderr="", exit_code=0),
+                SimpleNamespace(stdout="", stderr="permission denied", exit_code=1),
+            ]
+        ),
+    )
+    fresh_client = FakeClient(sandbox_id="sb-fresh")
+    fake_cls.connect_factory = lambda _sid, **_kw: warm_client
+    fake_cls.create_factory = lambda **_kw: fresh_client
+    p._warm_pool["sb-warm"] = (p._stable_seed("t1", "u1"), 12345.0)
+
+    assert p.acquire("t1", user_id="u1") == "sb-fresh"
+    assert warm_client.killed is True
+    assert warm_client.closed is True
+    assert p.get("sb-warm") is None
+
+
 def test_reclaim_warm_pool_sandbox_returns_none_on_seed_mismatch(monkeypatch):
     p = _make_provider()
     _install_fake_sdk(monkeypatch, p)
@@ -564,6 +587,27 @@ def test_discover_remote_sandbox_skips_dead_candidate(monkeypatch):
     assert p._discover_remote_sandbox("t1", user_id="u1") is None
     assert ("u1", "t1") not in p._thread_sandboxes
     assert client.closed is True
+
+
+def test_discover_remote_sandbox_discards_candidate_when_bootstrap_fails(monkeypatch):
+    p = _make_provider()
+    fake_cls = _install_fake_sdk(monkeypatch, p)
+    fake_cls.list_return = [_info("sb-broken", "u1", "t1")]
+    client = FakeClient(
+        sandbox_id="sb-broken",
+        commands=FakeCommandsAPI(
+            [
+                SimpleNamespace(stdout="ok", stderr="", exit_code=0),
+                SimpleNamespace(stdout="", stderr="permission denied", exit_code=1),
+            ]
+        ),
+    )
+    fake_cls.connect_factory = lambda _sid, **_kw: client
+
+    assert p._discover_remote_sandbox("t1", user_id="u1") is None
+    assert client.killed is True
+    assert client.closed is True
+    assert ("u1", "t1") not in p._thread_sandboxes
 
 
 def test_kill_client_returns_exception_without_raising():
@@ -645,14 +689,69 @@ def test_bootstrap_sandbox_paths_emits_expected_script():
         assert f"/home/user/{sub}" in script
 
 
-def test_bootstrap_sandbox_paths_swallows_command_failure():
+def test_bootstrap_sandbox_paths_raises_on_command_failure():
     p = _make_provider()
 
     def boom(_cmd: str) -> Any:
         raise RuntimeError("sudo not allowed")
 
     client = FakeClient(commands=FakeCommandsAPI([boom]))
-    p._bootstrap_sandbox_paths(client)
+    with pytest.raises(RuntimeError, match="bootstrap script raised"):
+        p._bootstrap_sandbox_paths(client)
+
+
+def test_acquire_cleans_up_and_fails_when_bootstrap_fails(monkeypatch):
+    provider = _make_provider()
+    fake_cls = _install_fake_sdk(monkeypatch, provider)
+    client = FakeClient(
+        sandbox_id="bootstrap-failure",
+        commands=FakeCommandsAPI([SimpleNamespace(stdout="", stderr="permission denied", exit_code=1)]),
+    )
+    fake_cls.create_factory = lambda **kwargs: client
+
+    with pytest.raises(RuntimeError, match="bootstrap") as error:
+        provider.acquire("thread-1", user_id="user-1")
+
+    assert error.value.__cause__ is not None
+    assert "permission denied" in str(error.value.__cause__)
+    assert client.killed is True
+    assert client.closed is True
+    assert provider.get("bootstrap-failure") is None
+
+
+def test_acquire_rejects_falsey_bootstrap_error(monkeypatch):
+    class FalseyError(RuntimeError):
+        def __bool__(self) -> bool:
+            return False
+
+    provider = _make_provider()
+    fake_cls = _install_fake_sdk(monkeypatch, provider)
+    client = FakeClient(sandbox_id="bootstrap-failure")
+    error = FalseyError("bootstrap failed")
+    fake_cls.create_factory = lambda **kwargs: client
+    provider._bootstrap_or_discard = MagicMock(return_value=error)
+
+    with pytest.raises(RuntimeError, match="bootstrap") as caught:
+        provider.acquire("thread-1", user_id="user-1")
+
+    assert caught.value.__cause__ is error
+    assert provider.get("bootstrap-failure") is None
+
+
+def test_acquire_closes_client_when_bootstrap_cleanup_kill_fails(monkeypatch):
+    provider = _make_provider()
+    fake_cls = _install_fake_sdk(monkeypatch, provider)
+    client = FakeClient(
+        sandbox_id="bootstrap-failure",
+        commands=FakeCommandsAPI([SimpleNamespace(stdout="", stderr="permission denied", exit_code=1)]),
+    )
+    client.kill = MagicMock(side_effect=RuntimeError("sandbox already gone"))
+    fake_cls.create_factory = lambda **kwargs: client
+
+    with pytest.raises(RuntimeError, match="bootstrap"):
+        provider.acquire("thread-1", user_id="user-1")
+
+    assert client.closed is True
 
 
 def test_release_unknown_sandbox_id_is_noop():

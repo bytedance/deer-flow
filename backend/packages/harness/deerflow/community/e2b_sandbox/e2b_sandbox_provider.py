@@ -299,10 +299,8 @@ class E2BSandboxProvider(SandboxProvider):
             return None
 
         self._refresh_remote_timeout(client)
-        try:
-            self._bootstrap_sandbox_paths(client)
-        except Exception as e:
-            logger.debug("bootstrap on warm-pool reclaim failed: %s", e)
+        if self._bootstrap_or_discard(client, target_id) is not None:
+            return None
         self._register_connected_sandbox(target_id, client, thread_id=thread_id, user_id=user_id)
         logger.info(
             "Reclaimed warm-pool e2b sandbox %s for user/thread %s/%s",
@@ -415,10 +413,8 @@ class E2BSandboxProvider(SandboxProvider):
             return None
 
         self._refresh_remote_timeout(client)
-        try:
-            self._bootstrap_sandbox_paths(client)
-        except Exception as e:
-            logger.debug("bootstrap on remote discovery failed: %s", e)
+        if self._bootstrap_or_discard(client, target_id) is not None:
+            return None
         self._register_connected_sandbox(target_id, client, thread_id=thread_id, user_id=user_id)
         logger.info(
             "Discovered remote e2b sandbox %s for user/thread %s/%s (seed=%s)",
@@ -475,14 +471,9 @@ class E2BSandboxProvider(SandboxProvider):
         # use the same /mnt/user-data prefix as LocalSandbox / AioSandbox — fail
         # with PermissionError because /mnt is owned by root in the e2b
         # template. See the path-mapping note in :class:`E2BSandbox`.
-        try:
-            self._bootstrap_sandbox_paths(client)
-        except Exception as e:
-            logger.warning(
-                "Failed to bootstrap virtual paths in e2b sandbox %s: %s",
-                sandbox_id,
-                e,
-            )
+        error = self._bootstrap_or_discard(client, sandbox_id)
+        if error is not None:
+            raise RuntimeError(f"Failed to bootstrap e2b sandbox {sandbox_id}") from error
 
         # One-shot mount uploads.  e2b has no host bind-mount, so we copy
         # files from ``host_path`` into ``container_path`` at sandbox start.
@@ -612,6 +603,18 @@ class E2BSandboxProvider(SandboxProvider):
                 logger.debug("e2b client close raised: %s", e)
                 return
 
+    def _bootstrap_or_discard(self, client: E2BClientSandbox, sandbox_id: str) -> Exception | None:
+        """Bootstrap a sandbox or return its error after cleanup."""
+        try:
+            self._bootstrap_sandbox_paths(client)
+        except Exception as e:
+            logger.exception("Failed to bootstrap e2b sandbox %s. Discarding the unusable sandbox.", sandbox_id)
+            if error := self._kill_client(client):
+                logger.warning("Failed to kill e2b sandbox %s after bootstrap failure: %s", sandbox_id, error)
+            self._safe_close_client(client)
+            return e
+        return None
+
     def _bootstrap_sandbox_paths(self, client: E2BClientSandbox) -> None:
         """Materialise DeerFlow's virtual path layout inside the e2b VM.
 
@@ -637,11 +640,9 @@ class E2BSandboxProvider(SandboxProvider):
            writes through the symlink target succeed.
 
         The e2b code-interpreter template puts ``user`` in the ``sudo`` group
-        with passwordless sudo, so the ``sudo`` calls below succeed without
-        interactive prompts. If the customer template removes that, the
-        commands fail loudly here and we fall back to silently relying on the
-        path remap inside ``E2BSandbox`` — agent shell commands will still
-        fail, but the read/write/list APIs continue to work.
+        with passwordless sudo. Custom templates must provide equivalent
+        permissions. Bootstrap failure makes the sandbox unusable. The
+        provider discards it instead of returning a partially functional VM.
         """
         # Use the configured ``home_dir`` so a custom template can move HOME.
         home_dir = self._config["home_dir"].rstrip("/") or "/home/user"
@@ -669,21 +670,13 @@ class E2BSandboxProvider(SandboxProvider):
         try:
             result = client.commands.run(bootstrap_script)
         except Exception as e:
-            logger.warning(
-                "e2b bootstrap script raised: %s (agent shell commands using /mnt/user-data may fail until the VM is recycled)",
-                e,
-            )
-            return
+            raise RuntimeError("e2b bootstrap script raised") from e
 
         stdout = getattr(result, "stdout", "") or ""
         stderr = getattr(result, "stderr", "") or ""
         exit_code = getattr(result, "exit_code", 0)
         if exit_code not in (0, None) or "BOOTSTRAP_OK" not in stdout:
-            logger.warning(
-                "e2b bootstrap script exited with code=%s; stderr=%s",
-                exit_code,
-                stderr.strip(),
-            )
+            raise RuntimeError(f"e2b bootstrap script failed with exit code {exit_code}; stderr={stderr.strip()}")
 
     def _apply_mounts(self, client: E2BClientSandbox) -> None:
         mounts = self._config.get("mounts") or []
