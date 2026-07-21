@@ -19,6 +19,8 @@ sandbox:
   memory_mb: 2048            # optional per-sandbox memory
   replicas: 3                # active + warm microVM cap per gateway process (default: 3)
   idle_timeout: 600          # warm microVM idle seconds before terminate; 0 disables
+  max_duration: 14400        # Tenki sandbox lifetime in seconds (default: 4h); 0 uses the account default
+  sticky: false              # pin the microVM to its host (only matters with pause/resume)
   home_dir: /home/tenki      # writable dir backing /mnt/user-data (default: /home/tenki)
   environment:               # injected into every command (and as create-time env)
     PYTHONUNBUFFERED: "1"
@@ -42,7 +44,10 @@ turn, and reclaimed (after a liveness health check) by the same thread on the
 next acquire. A terminal session error evicts the sandbox and the next acquire
 rebuilds it; other transport errors surface to the caller (`exec` is never
 auto-retried — it is not idempotent, so re-running could double a command's side
-effects or duplicate a file-write chunk).
+effects). Sandboxes are created with `wait=False` and awaited via `wait_ready()`
+so a readiness failure still leaves this provider holding the handle to
+terminate, and with an explicit `max_duration` so a long-lived thread does not
+lose its sandbox to Tenki's default lifetime mid-conversation.
 
 | File | Role |
 | --- | --- |
@@ -51,14 +56,14 @@ effects or duplicate a file-write chunk).
 
 ## Contract coverage
 
-The full `Sandbox` surface is implemented. File operations run as shell commands
-inside the sandbox and reuse `deerflow.sandbox.search`, mirroring `e2b_sandbox`
-and `boxlite`:
+The full `Sandbox` surface is implemented. File transport uses Tenki's native `sandbox.fs`
+API; directory and content search shell out and reuse `deerflow.sandbox.search`,
+mirroring `e2b_sandbox`:
 
 - `execute_command` — `sh -lc`, with per-call env and timeout.
-- `read_file` / `write_file` / `update_file` — `cat` and chunked `base64` (binary-safe, no arg-size limit).
-- `download_file` — 100 MB cap, restricted to the `/mnt/user-data` prefix.
-- `list_dir` / `glob` / `grep` — `find` / `grep` with busybox-portable flags; results filtered/capped in Python.
+- `read_file` / `write_file` / `update_file` — native `fs.read_text` / `fs.mkdir` / `fs.write_stream` (binary-safe, streamed).
+- `download_file` — native `fs.read_stream`, restricted to the `/mnt/user-data` prefix; the 100 MB cap is enforced on bytes actually received, so a file growing mid-transfer cannot slip past it.
+- `list_dir` / `glob` / `grep` — `find` / `grep` with busybox-portable flags (the fs API is single-level and has no content search); results filtered/capped in Python and reported back under `/mnt/user-data`.
 
 Tenki sandboxes run as the unprivileged `tenki` user with `/mnt` root-owned, so
 DeerFlow's `/mnt/user-data` virtual prefix is remapped under the writable

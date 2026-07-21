@@ -39,6 +39,12 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _SANDBOX_NAME_PREFIX = "deer-flow-tenki-"
+# Tenki terminates a sandbox at its max lifetime (~30 min by default), which
+# would silently drop a long-running thread's state mid-conversation. DeerFlow
+# owns the lifecycle here — the warm pool's idle_timeout reaps unused sandboxes
+# — so ask for a lifetime that comfortably outlives a research run. Override
+# with sandbox.max_duration (seconds); 0 falls back to the Tenki account default.
+DEFAULT_MAX_DURATION = 4 * 60 * 60
 
 
 def _bootstrap_script(home_dir: str) -> str:
@@ -118,7 +124,13 @@ class TenkiSandboxProvider(WarmPoolLifecycleMixin[TenkiSandbox], SandboxProvider
         api_key = _opt("api_key")
         replicas = _opt("replicas")
         idle_timeout = _opt("idle_timeout")
+        max_duration = _opt("max_duration")
         return {
+            "max_duration": float(max_duration if max_duration is not None else DEFAULT_MAX_DURATION),
+            # Off by default (the SDK default). Warm-pool sandboxes stay running
+            # between turns, so host pinning only matters to deployments that
+            # also pause/resume; expose it rather than decide for them.
+            "sticky": bool(_opt("sticky", False)),
             "api_key": api_key,  # None → SDK falls back to TENKI_API_KEY / TENKI_AUTH_TOKEN
             "base_url": _opt("base_url"),
             "image": _opt("image"),  # None → Tenki account default base image
@@ -195,11 +207,7 @@ class TenkiSandboxProvider(WarmPoolLifecycleMixin[TenkiSandbox], SandboxProvider
         return len(self._sandboxes)
 
     def _destroy_warm_entry(self, sandbox_id: str, entry: TenkiSandbox, *, reason: str) -> None:
-        try:
-            entry.close()
-            logger.info("Destroyed warm-pool Tenki sandbox %s (reason=%s)", sandbox_id, reason)
-        except Exception as e:
-            logger.warning("Error closing warm-pool Tenki sandbox %s (reason=%s): %s", sandbox_id, reason, e)
+        self._close_quietly(entry, context=f"warm pool, reason={reason}")
 
     def _invalidate_sandbox(self, sandbox_id: str, reason: str) -> None:
         """Destroy and deregister a sandbox after a terminal command-path failure."""
@@ -215,7 +223,7 @@ class TenkiSandboxProvider(WarmPoolLifecycleMixin[TenkiSandbox], SandboxProvider
             logger.warning("Tenki sandbox %s failed terminally but was not tracked: %s", sandbox_id, reason)
             return
         logger.warning("Invalidating Tenki sandbox %s after terminal failure: %s", sandbox_id, reason)
-        to_close.close()
+        self._close_quietly(to_close, context="terminal failure")
 
     # ── Acquire / release ────────────────────────────────────────────────
 
@@ -262,7 +270,15 @@ class TenkiSandboxProvider(WarmPoolLifecycleMixin[TenkiSandbox], SandboxProvider
             "name": self._sandbox_name(sandbox_id),
             "project_id": project_id,
             "workspace_id": workspace_id,
+            "sticky": self._config["sticky"],
+            # Wait for readiness ourselves (below) instead of inside create():
+            # create(wait=True) raises with the session handle still local to the
+            # SDK, so a readiness failure would leak a running, billed microVM
+            # that this provider never sees and can never terminate.
+            "wait": False,
         }
+        if self._config["max_duration"] > 0:
+            create_kwargs["max_duration"] = self._config["max_duration"]
         for key in ("image", "cpu_cores", "memory_mb"):
             if self._config[key] is not None:
                 create_kwargs[key] = self._config[key]
@@ -270,6 +286,12 @@ class TenkiSandboxProvider(WarmPoolLifecycleMixin[TenkiSandbox], SandboxProvider
             create_kwargs["env"] = self._config["environment"]
 
         remote = client.create(**create_kwargs)
+        try:
+            remote.wait_ready()
+        except Exception:
+            self._terminate_orphan(sandbox_id, remote)
+            raise
+
         # Materialise DeerFlow's virtual path layout under the writable HOME.
         # Best-effort: on failure the file APIs still work via the home remap.
         try:
@@ -291,6 +313,23 @@ class TenkiSandboxProvider(WarmPoolLifecycleMixin[TenkiSandbox], SandboxProvider
             home_dir=self._config["home_dir"],
             on_terminal_failure=self._invalidate_sandbox,
         )
+
+    @staticmethod
+    def _terminate_orphan(sandbox_id: str, remote: Any) -> None:
+        """Terminate a microVM that was created but never handed to the adapter."""
+        try:
+            remote.close()
+            logger.warning("Terminated Tenki sandbox %s after it failed to become ready", sandbox_id)
+        except Exception as e:
+            logger.error("Leaked Tenki sandbox %s (id=%s): could not terminate after readiness failure: %s", sandbox_id, getattr(remote, "id", "?"), e)
+
+    @staticmethod
+    def _close_quietly(sandbox: TenkiSandbox, *, context: str) -> None:
+        """Close a sandbox where the caller has no way to act on a failure."""
+        try:
+            sandbox.close()
+        except Exception as e:
+            logger.warning("Error closing Tenki sandbox %s (%s): %s", sandbox.id, context, e)
 
     def get(self, sandbox_id: str) -> Sandbox | None:
         with self._lock:
@@ -316,7 +355,7 @@ class TenkiSandboxProvider(WarmPoolLifecycleMixin[TenkiSandbox], SandboxProvider
                 self._warm_pool[sandbox_id] = (sandbox, time.time())
 
         if close_sandbox is not None:
-            close_sandbox.close()
+            self._close_quietly(close_sandbox, context="released during shutdown")
             logger.info("Closed released Tenki sandbox %s because shutdown is in progress", sandbox_id)
         else:
             logger.info("Released Tenki sandbox %s to warm pool (microVM still running)", sandbox_id)
@@ -388,7 +427,4 @@ class TenkiSandboxProvider(WarmPoolLifecycleMixin[TenkiSandbox], SandboxProvider
             self._acquire_locks.clear()
 
         for sandbox in active + warm:
-            try:
-                sandbox.close()
-            except Exception as e:  # pragma: no cover - defensive
-                logger.warning("Error closing Tenki sandbox %s during shutdown: %s", sandbox.id, e)
+            self._close_quietly(sandbox, context="shutdown")

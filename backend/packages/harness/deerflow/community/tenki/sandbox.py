@@ -2,11 +2,14 @@
 
 Tenki's Python SDK (``tenki-sandbox``) is synchronous, so — unlike
 ``community/boxlite`` — this adapter calls the SDK directly with no event-loop
-bridge. Every operation is a shell command run inside the sandbox (``cat`` /
-``find`` / ``grep`` / chunked ``base64``), parsed with the shared
-``deerflow.sandbox.search`` helpers, the same exec-driven approach as
-``community/e2b_sandbox`` and ``community/boxlite``. Commands use only
-busybox-portable flags so any Tenki base image works.
+bridge. File transport uses Tenki's native ``sandbox.fs`` API (``read_text`` /
+``read_stream`` / ``write_stream`` / ``mkdir`` / ``stat``), which is binary-safe
+and streams, so no base64/shell encoding is involved. Directory and content
+*search* (``list_dir`` / ``glob`` / ``grep``) still shells out to ``find`` /
+``grep`` — the fs API is single-level and has no content search — and is parsed
+with the shared ``deerflow.sandbox.search`` helpers, the same approach as
+``community/e2b_sandbox``. Those commands use only busybox-portable flags so any
+Tenki base image works.
 
 The Tenki SDK is not imported at module load (only its exception *class names*
 are matched, as strings), so importing this package never requires
@@ -16,23 +19,25 @@ selected and a sandbox is actually created.
 
 from __future__ import annotations
 
-import base64
 import errno
 import logging
 import posixpath
 import re
 import shlex
 import threading
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
 from deerflow.sandbox.sandbox import Sandbox, _validate_extra_env
 from deerflow.sandbox.search import GrepMatch, path_matches, should_ignore_path, truncate_line
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator
 
     from tenki_sandbox import Sandbox as TenkiClientSandbox
+    from tenki_sandbox.fs import SandboxFS
+
+T = TypeVar("T")
 
 logger = logging.getLogger(__name__)
 
@@ -43,10 +48,8 @@ _MAX_DOWNLOAD_SIZE = 100 * 1024 * 1024  # 100 MB
 # this home dir (the provider also best-effort symlinks /mnt/user-data → here so
 # agent shell commands using the literal path still work).
 DEFAULT_TENKI_HOME_DIR = "/home/tenki"
-# One base64 chunk stays well under Linux MAX_ARG_STRLEN (128 KiB per argv
-# entry); 60000 is a multiple of 4 so each chunk is a self-contained base64
-# unit whose decoded bytes concatenate losslessly.
-_B64_CHUNK = 60000
+# Frame size for fs.write_stream uploads.
+_STREAM_CHUNK = 1024 * 1024
 
 # Tenki SDK exception *class names* that mean the remote session is gone for
 # good — matched as strings so this module imports without ``tenki-sandbox``.
@@ -109,29 +112,60 @@ class TenkiSandbox(Sandbox):
         return type(error).__name__ in _TERMINAL_ERROR_NAMES
 
     def close(self) -> None:
-        """Terminate the underlying Tenki session (idempotent)."""
+        """Terminate the underlying Tenki session (idempotent).
+
+        The microVM is terminated *first*; the adapter is only marked closed once
+        the session is actually gone, so a failed termination stays retryable
+        instead of silently leaking a running (billed) sandbox. A terminal
+        session error means it is already gone, which counts as closed; anything
+        else is raised so the caller can retry or alert.
+        """
         with self._lock:
             if self._closed:
                 return
-            self._closed = True
             sandbox = self._sandbox
         try:
             sandbox.close()
         except Exception as e:
-            logger.warning("Error terminating Tenki sandbox %s: %s", self.id, e)
+            if not self._is_terminal_failure(e):
+                logger.error("Error terminating Tenki sandbox %s: %s", self.id, e)
+                raise
+            logger.info("Tenki sandbox %s was already gone at close: %s", self.id, e)
+        with self._lock:
+            self._closed = True
 
     # ── bridge helpers ──────────────────────────────────────────────────
+
+    def _note_failure(self, error: Exception) -> None:
+        """Evict this sandbox when an operation failed with a terminal error."""
+        if self._on_terminal_failure is None or not self._is_terminal_failure(error):
+            return
+        try:
+            self._on_terminal_failure(self.id, str(error))
+        except Exception:
+            logger.exception("Terminal Tenki failure callback errored for %s", self.id)
+
+    def _fs_op(self, op: Callable[[SandboxFS], T]) -> T:
+        """Run a native ``sandbox.fs`` call, evicting the sandbox on terminal errors."""
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("sandbox has been closed")
+            fs = self._sandbox.fs
+        try:
+            return op(fs)
+        except Exception as e:
+            self._note_failure(e)
+            raise
 
     def _exec(self, *argv: str, env: dict[str, str] | None = None, timeout: float | None = None) -> Any:
         # No forced cwd: commands run in the sandbox default working directory
         # (like community/e2b_sandbox and community/boxlite); file ops address
         # absolute, home-remapped paths, so cwd is irrelevant to them.
         #
-        # No auto-retry: exec is not idempotent (a command or a base64 write
-        # chunk may have run server-side before a transport ack dropped), so
-        # re-running it risks double side effects / mid-file corruption. Like
-        # boxlite, a transient error is surfaced to the caller (returned as text
-        # by execute_command / raised by the file ops); a terminal session error
+        # No auto-retry: exec is not idempotent (the command may have run
+        # server-side before a transport ack dropped), so re-running it risks
+        # double side effects. Like boxlite, a transient error is surfaced to the
+        # caller (returned as text by execute_command); a terminal session error
         # additionally evicts the sandbox so the next acquire rebuilds it.
         with self._lock:
             if self._closed:
@@ -140,11 +174,7 @@ class TenkiSandbox(Sandbox):
         try:
             return sandbox.exec(*argv, env=env, timeout=timeout)
         except Exception as e:
-            if self._on_terminal_failure is not None and self._is_terminal_failure(e):
-                try:
-                    self._on_terminal_failure(self.id, str(e))
-                except Exception:
-                    logger.exception("Terminal Tenki failure callback errored for %s", self.id)
+            self._note_failure(e)
             raise
 
     def _sh(self, script: str, env: dict[str, str] | None = None, timeout: float | None = None) -> Any:
@@ -174,6 +204,19 @@ class TenkiSandbox(Sandbox):
             tail = normalized[len(VIRTUAL_PATH_PREFIX) :].lstrip("/")
             return f"{self._home_dir}/{tail}".rstrip("/") if tail else self._home_dir
         return normalized
+
+    def _virtual_path(self, resolved: str) -> str:
+        """Inverse of :meth:`_resolve_path` — the form callers gave us.
+
+        Everything that *returns* paths (``list_dir``/``glob``/``grep``) reports
+        them under ``VIRTUAL_PATH_PREFIX``, not the sandbox-internal home dir, so
+        results can be fed straight back into the other file APIs.
+        """
+        if resolved == self._home_dir:
+            return VIRTUAL_PATH_PREFIX
+        if resolved.startswith(f"{self._home_dir}/"):
+            return f"{VIRTUAL_PATH_PREFIX}/{resolved[len(self._home_dir) :].lstrip('/')}"
+        return resolved
 
     # ── command execution ───────────────────────────────────────────────
 
@@ -214,13 +257,10 @@ class TenkiSandbox(Sandbox):
     def read_file(self, path: str) -> str:
         resolved = self._resolve_path(path)
         try:
-            r = self._exec("cat", "--", resolved)
+            return self._fs_op(lambda fs: fs.read_text(resolved))
         except Exception as e:
             logger.error("read_file %s failed: %s", resolved, e)
             return f"Error: {e}"
-        if r.exit_code not in (0, None):
-            return f"Error: {(r.stderr_text or '').strip() or 'cannot read file'}"
-        return r.stdout_text or ""
 
     def write_file(self, path: str, content: str, append: bool = False) -> None:
         self._write_bytes(self._resolve_path(path), content.encode("utf-8"), append=append)
@@ -231,25 +271,17 @@ class TenkiSandbox(Sandbox):
     def _write_bytes(self, resolved: str, data: bytes, *, append: bool) -> None:
         parent = posixpath.dirname(resolved)
         if parent:
-            mk = self._sh(f"mkdir -p {shlex.quote(parent)}")
-            if mk.exit_code not in (0, None):
-                raise OSError(f"cannot create parent of '{resolved}': {(mk.stderr_text or '').strip()}")
+            self._fs_op(lambda fs: fs.mkdir(parent))
 
-        b64 = base64.b64encode(data).decode("ascii")
-        if not b64:  # empty file — create/truncate without piping
-            r = self._sh(f": {'>>' if append else '>'} {shlex.quote(resolved)}")
-            if r.exit_code not in (0, None):
-                raise OSError(f"write '{resolved}' failed: {(r.stderr_text or '').strip()}")
-            return
-
-        first = True
-        for i in range(0, len(b64), _B64_CHUNK):
-            chunk = b64[i : i + _B64_CHUNK]
-            redir = ">>" if (append or not first) else ">"
-            r = self._sh(f"printf %s {shlex.quote(chunk)} | base64 -d {redir} {shlex.quote(resolved)}")
-            if r.exit_code not in (0, None):
-                raise OSError(f"write '{resolved}' failed: {(r.stderr_text or '').strip()}")
-            first = False
+        if append:
+            # Tenki's write stream has no append mode (it starts at offset 0),
+            # so read-modify-write like community/e2b_sandbox does.
+            try:
+                data = self._fs_op(lambda fs: fs.read_bytes(resolved)) + data
+            except Exception as e:
+                if type(e).__name__ != "FileNotFoundError":
+                    raise
+        self._fs_op(lambda fs: fs.write_stream(resolved, _frames(data)))
 
     def download_file(self, path: str) -> bytes:
         normalized = self._guard_traversal(path)
@@ -259,29 +291,32 @@ class TenkiSandbox(Sandbox):
             raise PermissionError(f"Access denied: path must be under '{VIRTUAL_PATH_PREFIX}': '{path}'")
         resolved = self._resolve_path(path)
 
-        # Enforce the size cap before buffering the whole payload.
-        size_r = self._sh(f"wc -c < {shlex.quote(resolved)}")
-        if size_r.exit_code not in (0, None):
-            raise OSError(f"cannot read '{path}' from sandbox: {(size_r.stderr_text or '').strip() or 'not found'}")
-        try:
-            size = int((size_r.stdout_text or "0").strip() or "0")
-        except ValueError:
-            size = 0
-        if size > _MAX_DOWNLOAD_SIZE:
-            raise OSError(errno.EFBIG, f"File exceeds maximum download size of {_MAX_DOWNLOAD_SIZE} bytes", path)
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("sandbox has been closed")
+            fs = self._sandbox.fs
 
-        r = self._sh(f"base64 {shlex.quote(resolved)}")
-        if r.exit_code not in (0, None):
-            raise OSError(f"cannot read '{path}' from sandbox: {(r.stderr_text or '').strip()}")
+        # The cap is enforced on bytes actually received, so a file that grows
+        # mid-transfer still can't exceed it (a stat-then-read check could).
+        chunks: list[bytes] = []
+        total = 0
         try:
-            return base64.b64decode("".join((r.stdout_text or "").split()))
+            for chunk in fs.read_stream(resolved):
+                total += len(chunk)
+                if total > _MAX_DOWNLOAD_SIZE:
+                    raise OSError(errno.EFBIG, f"File exceeds maximum download size of {_MAX_DOWNLOAD_SIZE} bytes", path)
+                chunks.append(chunk)
+        except OSError:
+            raise
         except Exception as e:
-            raise OSError(f"failed to decode '{path}' from sandbox: {e}") from e
+            self._note_failure(e)
+            raise OSError(f"cannot read '{path}' from sandbox: {e}") from e
+        return b"".join(chunks)
 
     def list_dir(self, path: str, max_depth: int = 2) -> list[str]:
         resolved = self._resolve_path(path)
         r = self._sh(f"find {shlex.quote(resolved)} -maxdepth {int(max_depth)} \\( -type f -o -type d \\) 2>/dev/null | head -500")
-        return [line.strip() for line in (r.stdout_text or "").splitlines() if line.strip()]
+        return [self._virtual_path(line.strip()) for line in (r.stdout_text or "").splitlines() if line.strip()]
 
     def glob(
         self,
@@ -310,7 +345,7 @@ class TenkiSandbox(Sandbox):
             if not rel_path:
                 continue
             if path_matches(pattern, rel_path):
-                matches.append(entry)
+                matches.append(self._virtual_path(entry))
                 if len(matches) >= max_results:
                     return matches, True
         return matches, False
@@ -360,8 +395,14 @@ class TenkiSandbox(Sandbox):
                 continue
             if include and not path_matches(include, posixpath.basename(file_path)):
                 continue
-            matches.append(GrepMatch(path=file_path, line_number=line_number, line=truncate_line(line_text)))
+            matches.append(GrepMatch(path=self._virtual_path(file_path), line_number=line_number, line=truncate_line(line_text)))
             if len(matches) >= max_results:
                 truncated = True
                 break
         return matches, truncated
+
+
+def _frames(data: bytes) -> Iterator[bytes]:
+    """Slice ``data`` into upload frames for ``fs.write_stream``."""
+    for i in range(0, len(data), _STREAM_CHUNK):
+        yield data[i : i + _STREAM_CHUNK]

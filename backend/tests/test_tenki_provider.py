@@ -1,17 +1,16 @@
 """Unit tests for the Tenki community sandbox provider.
 
 These run in CI without ``tenki-sandbox`` installed: they cover the lazy-import
-error path, provider lifecycle, path-safety guards, the base64 file round-trip,
-warm-pool mechanics, and scope resolution — none of which need a live sandbox.
-A single opt-in integration test (``test_integration_real_sandbox``) exercises a
-real Tenki microVM end to end when ``TENKI_API_KEY`` is set.
+error path, provider lifecycle, path-safety guards, the native ``fs`` file
+round-trip, warm-pool mechanics, and scope resolution — none of which need a live
+sandbox. A single opt-in integration test (``test_integration_real_sandbox``)
+exercises a real Tenki microVM end to end when ``TENKI_API_KEY`` is set.
 """
 
 from __future__ import annotations
 
-import base64
+import errno
 import os
-import re
 import shlex
 import sys
 import threading
@@ -49,10 +48,68 @@ class _FakeSessionTerminatedError(RuntimeError):
 _FakeSessionTerminatedError.__name__ = "SessionTerminatedError"
 
 
+class _FakeMissingFileError(Exception):
+    """Stand-in for ``tenki_sandbox.errors.FileNotFoundError`` (matched by name)."""
+
+
+_FakeMissingFileError.__name__ = "FileNotFoundError"
+
+
+class _FakeFileInfo:
+    def __init__(self, path: str, size: int) -> None:
+        self.path = path
+        self.size = size
+        self.is_dir = False
+
+
+class _FakeFS:
+    """In-memory stand-in for Tenki's native ``sandbox.fs`` API."""
+
+    _READ_FRAME = 64  # small, so multi-frame reads are exercised
+
+    def __init__(self, owner: _FakeSandbox) -> None:
+        self._owner = owner
+
+    def _guard(self) -> None:
+        if self._owner.fs_error is not None:
+            raise self._owner.fs_error
+
+    def mkdir(self, path: str, *, recursive: bool = True, mode: int = 0o755) -> None:
+        self._guard()
+        self._owner.dirs.add(path)
+
+    def read_bytes(self, path: str) -> bytes:
+        self._guard()
+        if path not in self._owner.files:
+            raise _FakeMissingFileError(f"no such file or directory: {path}")
+        return self._owner.files[path]
+
+    def read_text(self, path: str, *, encoding: str = "utf-8") -> str:
+        return self.read_bytes(path).decode(encoding, errors="replace")
+
+    def read_stream(self, path: str, *, offset: int = 0, length: int = 0, chunk_bytes: int = 0):
+        # A generator, like the real SDK: errors surface while iterating.
+        data = self.read_bytes(path)
+        for i in range(0, len(data), self._READ_FRAME):
+            yield data[i : i + self._READ_FRAME]
+
+    def write_stream(self, path: str, chunks, *, mode: int = 0o644, truncate: bool = True, sync: bool = False) -> None:
+        self._guard()
+        frames = list(chunks)
+        self._owner.write_frame_counts.append(len(frames))
+        self._owner.files[path] = b"".join(frames)
+
+    def stat(self, path: str) -> _FakeFileInfo:
+        self._guard()
+        if path not in self._owner.files:
+            raise _FakeMissingFileError(f"no such file or directory: {path}")
+        return _FakeFileInfo(path, len(self._owner.files[path]))
+
+
 class _FakeSandbox:
-    """A fake tenki ``Sandbox`` that interprets the handful of shell commands
-    the adapter emits, backed by an in-memory filesystem — so write/read/
-    download/list round-trips are exercised for real without a live VM.
+    """A fake tenki ``Sandbox``: a native ``fs`` API plus the handful of shell
+    commands the adapter still emits for search, backed by one in-memory
+    filesystem — so file and search round-trips are exercised for real.
     """
 
     def __init__(
@@ -60,23 +117,31 @@ class _FakeSandbox:
         *,
         exec_error: Exception | None = None,
         close_error: Exception | None = None,
+        fs_error: Exception | None = None,
+        wait_ready_error: Exception | None = None,
     ) -> None:
         self.id = "remote-session-id"
         self.files: dict[str, bytes] = {}
-        self.exec_calls: list[tuple] = []
+        self.dirs: set[str] = set()
+        self.write_frame_counts: list[int] = []
+        self.exec_calls: list[dict] = []
         self.exec_error = exec_error
         self.close_error = close_error
+        self.fs_error = fs_error
+        self.wait_ready_error = wait_ready_error
+        self.wait_ready_calls = 0
         self.closed = False
+        self.fs = _FakeFS(self)
+
+    def wait_ready(self, timeout: float = 180) -> None:
+        self.wait_ready_calls += 1
+        if self.wait_ready_error is not None:
+            raise self.wait_ready_error
 
     def exec(self, *argv: str, cwd=None, env=None, timeout=None):
         self.exec_calls.append({"argv": argv, "cwd": cwd, "env": env, "timeout": timeout})
         if self.exec_error is not None:
             raise self.exec_error
-        if argv[:2] == ("cat", "--"):
-            path = argv[2]
-            if path not in self.files:
-                return _FakeResult(exit_code=1, stderr=b"cat: no such file")
-            return _FakeResult(stdout=self.files[path])
         if argv[:2] == ("sh", "-lc"):
             return self._run_script(argv[2])
         return _FakeResult()
@@ -86,35 +151,22 @@ class _FakeSandbox:
             return _FakeResult(stdout=b"ok\n")
         if "BOOTSTRAP_OK" in script:  # provider create-time bootstrap script
             return _FakeResult(stdout=b"BOOTSTRAP_OK\n")
-        if script.startswith("mkdir -p"):
-            return _FakeResult()
-        m = re.match(r"^printf %s (.+) \| base64 -d (>>|>) (.+)$", script)
-        if m:
-            chunk_q, redir, path_q = m.groups()
-            chunk = shlex.split(chunk_q)[0]
-            path = shlex.split(path_q)[0]
-            data = base64.b64decode(chunk)
-            self.files[path] = (self.files.get(path, b"") + data) if redir == ">>" else data
-            return _FakeResult()
-        m = re.match(r"^: (>>|>) (.+)$", script)
-        if m:
-            redir, path_q = m.groups()
-            path = shlex.split(path_q)[0]
-            if redir == ">" or path not in self.files:
-                self.files[path] = self.files.get(path, b"") if redir == ">>" else b""
-            return _FakeResult()
-        m = re.match(r"^wc -c < (.+)$", script)
-        if m:
-            path = shlex.split(m.group(1))[0]
-            return _FakeResult(stdout=f"{len(self.files.get(path, b''))}\n".encode())
-        m = re.match(r"^base64 (.+)$", script)
-        if m:
-            path = shlex.split(m.group(1))[0]
-            return _FakeResult(stdout=base64.b64encode(self.files.get(path, b"")))
         if script.startswith("find "):
             root = shlex.split(script)[1]
             hits = [p for p in self.files if p == root or p.startswith(f"{root.rstrip('/')}/")]
             return _FakeResult(stdout=("\n".join(hits) + "\n").encode() if hits else b"")
+        if script.startswith("grep "):
+            # grep <flags> -e <pattern> <root> 2>/dev/null | head -N
+            tokens = shlex.split(script)
+            needle, root = tokens[tokens.index("-e") + 1], tokens[tokens.index("-e") + 2]
+            lines = []
+            for path, blob in sorted(self.files.items()):
+                if not path.startswith(root):
+                    continue
+                for n, text in enumerate(blob.decode(errors="replace").splitlines(), start=1):
+                    if needle in text:
+                        lines.append(f"{path}:{n}:{text}")
+            return _FakeResult(stdout=("\n".join(lines) + "\n").encode() if lines else b"")
         return _FakeResult()
 
     def close(self):
@@ -323,16 +375,37 @@ def test_connection_error_is_terminal() -> None:
     assert invalidated == [("sb", "reset")]
 
 
-def test_close_is_idempotent_and_swallows_errors() -> None:
-    fake = _FakeSandbox(close_error=RuntimeError("close boom"))
+def test_close_is_idempotent() -> None:
+    fake = _FakeSandbox()
     box = TenkiSandbox("sb", fake)
-    box.close()  # must not raise
+    box.close()
     box.close()  # idempotent
     assert box.is_closed is True
     assert fake.closed is True
 
 
-# ── Adapter: real base64 file round-trip ──────────────────────────────
+def test_close_failure_leaves_sandbox_retryable() -> None:
+    # Marking the adapter closed before a failed termination would strand a
+    # running (billed) microVM with no handle left to retry it.
+    fake = _FakeSandbox(close_error=RuntimeError("terminate rejected"))
+    box = TenkiSandbox("sb", fake)
+    with pytest.raises(RuntimeError, match="terminate rejected"):
+        box.close()
+    assert box.is_closed is False  # still ours to terminate
+
+    fake.close_error = None
+    box.close()
+    assert box.is_closed is True
+
+
+def test_close_treats_terminal_error_as_already_gone() -> None:
+    fake = _FakeSandbox(close_error=_FakeSessionTerminatedError("session gone"))
+    box = TenkiSandbox("sb", fake)
+    box.close()  # nothing left to terminate → not an error
+    assert box.is_closed is True
+
+
+# ── Adapter: native fs file round-trip ────────────────────────────────
 
 
 def test_file_round_trip_text() -> None:
@@ -341,11 +414,19 @@ def test_file_round_trip_text() -> None:
     assert box.read_file("/mnt/user-data/workspace/note.txt") == "hello world"
 
 
-def test_file_round_trip_large_binary_chunks() -> None:
-    # Larger than one base64 chunk so the chunked-append path is exercised.
-    box = TenkiSandbox("sb", _FakeSandbox())
-    data = bytes(range(256)) * 400  # ~100 KB → multiple 60000-char b64 chunks
+def test_write_creates_parent_directory() -> None:
+    fake = _FakeSandbox()
+    box = TenkiSandbox("sb", fake)
+    box.write_file("/mnt/user-data/workspace/nested/note.txt", "hi")
+    assert "/home/tenki/workspace/nested" in fake.dirs
+
+
+def test_file_round_trip_large_binary_streams_in_frames() -> None:
+    fake = _FakeSandbox()
+    box = TenkiSandbox("sb", fake)
+    data = bytes(range(256)) * 8192  # 2 MB → more than one 1 MiB upload frame
     box.update_file("/mnt/user-data/outputs/blob.bin", data)
+    assert fake.write_frame_counts[-1] > 1
     assert box.download_file("/mnt/user-data/outputs/blob.bin") == data
 
 
@@ -356,9 +437,68 @@ def test_append_accumulates() -> None:
     assert box.read_file("/mnt/user-data/workspace/log.txt") == "ab"
 
 
+def test_append_to_missing_file_creates_it() -> None:
+    box = TenkiSandbox("sb", _FakeSandbox())
+    box.write_file("/mnt/user-data/workspace/new.txt", "first", append=True)
+    assert box.read_file("/mnt/user-data/workspace/new.txt") == "first"
+
+
 def test_read_missing_file_returns_error() -> None:
     box = TenkiSandbox("sb", _FakeSandbox())
     assert box.read_file("/mnt/user-data/workspace/nope.txt").startswith("Error:")
+
+
+def test_download_missing_file_raises_oserror() -> None:
+    box = TenkiSandbox("sb", _FakeSandbox())
+    with pytest.raises(OSError):
+        box.download_file("/mnt/user-data/outputs/nope.bin")
+
+
+def test_download_cap_counts_bytes_actually_received(monkeypatch) -> None:
+    # The cap must not rely on a separate size probe: a file that grows between
+    # the probe and the read would slip past it.
+    monkeypatch.setattr("deerflow.community.tenki.sandbox._MAX_DOWNLOAD_SIZE", 100)
+    fake = _FakeSandbox()
+    box = TenkiSandbox("sb", fake)
+    fake.files["/home/tenki/outputs/big.bin"] = b"x" * 500
+    with pytest.raises(OSError) as excinfo:
+        box.download_file("/mnt/user-data/outputs/big.bin")
+    assert excinfo.value.errno == errno.EFBIG
+
+
+def test_fs_terminal_failure_evicts_sandbox() -> None:
+    invalidated: list[tuple[str, str]] = []
+    fake = _FakeSandbox(fs_error=_FakeSessionTerminatedError("session gone"))
+    box = TenkiSandbox("sb", fake, on_terminal_failure=lambda sid, reason: invalidated.append((sid, reason)))
+    with pytest.raises(Exception, match="session gone"):
+        box.write_file("/mnt/user-data/workspace/a.txt", "x")
+    assert invalidated == [("sb", "session gone")]
+
+
+# ── Adapter: returned paths stay caller-facing ────────────────────────
+
+
+def test_search_results_use_virtual_paths() -> None:
+    box = TenkiSandbox("sb", _FakeSandbox())
+    box.write_file("/mnt/user-data/workspace/pkg/mod.py", "def foo():\n    return 42\n")
+
+    assert box.list_dir("/mnt/user-data/workspace") == ["/mnt/user-data/workspace/pkg/mod.py"]
+
+    found, truncated = box.glob("/mnt/user-data/workspace", "**/*.py")
+    assert found == ["/mnt/user-data/workspace/pkg/mod.py"] and not truncated
+
+    matches, _ = box.grep("/mnt/user-data/workspace", "return")
+    assert [m.path for m in matches] == ["/mnt/user-data/workspace/pkg/mod.py"]
+    assert matches[0].line_number == 2
+
+    # Results feed straight back into the file APIs.
+    assert box.read_file(found[0]).startswith("def foo()")
+
+
+def test_paths_outside_the_virtual_prefix_are_reported_as_is() -> None:
+    box = TenkiSandbox("sb", _FakeSandbox())
+    assert box._virtual_path("/etc/hostname") == "/etc/hostname"
+    assert box._virtual_path("/home/tenki") == "/mnt/user-data"
 
 
 # ── Provider: id derivation ───────────────────────────────────────────
@@ -395,6 +535,41 @@ def test_create_passes_prefixed_name_and_scope(monkeypatch):
     assert kwargs["name"].startswith("deer-flow-tenki-")
     assert kwargs["project_id"] == "proj1"
     assert kwargs["workspace_id"] == "ws1"
+    provider.shutdown()
+
+
+def test_create_waits_client_side_and_configures_lifetime(monkeypatch):
+    client = _FakeClient()
+    provider = _install(monkeypatch, client=client, config_attrs={"max_duration": 7200})
+    provider.acquire("thread-1", user_id="u1")
+    kwargs = client.create_kwargs[0]
+    # wait=False keeps the handle on our side of create() so a readiness failure
+    # is still terminable (see the next test).
+    assert kwargs["wait"] is False
+    assert client.last_sandbox.wait_ready_calls == 1
+    # Without an explicit lifetime, Tenki reaps the sandbox out from under a
+    # long-lived thread at its default (~30 min).
+    assert kwargs["max_duration"] == 7200
+    assert kwargs["sticky"] is False
+    provider.shutdown()
+
+
+def test_create_default_lifetime_is_explicit(monkeypatch):
+    client = _FakeClient()
+    provider = _install(monkeypatch, client=client)
+    provider.acquire("thread-1", user_id="u1")
+    assert client.create_kwargs[0]["max_duration"] == pytest.approx(4 * 60 * 60)
+    provider.shutdown()
+
+
+def test_create_terminates_the_microvm_when_readiness_fails(monkeypatch):
+    client = _FakeClient(sandbox_factory=lambda: _FakeSandbox(wait_ready_error=RuntimeError("never became ready")))
+    provider = _install(monkeypatch, client=client)
+    with pytest.raises(RuntimeError, match="never became ready"):
+        provider.acquire("thread-1", user_id="u1")
+    # The session exists remotely even though create() failed — it must not leak.
+    assert client.last_sandbox.closed is True
+    assert provider._sandboxes == {}
     provider.shutdown()
 
 
