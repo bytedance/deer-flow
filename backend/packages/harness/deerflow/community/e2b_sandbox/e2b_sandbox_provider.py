@@ -299,7 +299,7 @@ class E2BSandboxProvider(SandboxProvider):
             return None
 
         self._refresh_remote_timeout(client)
-        if not self._bootstrap_or_discard(client, target_id):
+        if self._bootstrap_or_discard(client, target_id) is not None:
             return None
         self._register_connected_sandbox(target_id, client, thread_id=thread_id, user_id=user_id)
         logger.info(
@@ -413,7 +413,7 @@ class E2BSandboxProvider(SandboxProvider):
             return None
 
         self._refresh_remote_timeout(client)
-        if not self._bootstrap_or_discard(client, target_id):
+        if self._bootstrap_or_discard(client, target_id) is not None:
             return None
         self._register_connected_sandbox(target_id, client, thread_id=thread_id, user_id=user_id)
         logger.info(
@@ -471,8 +471,8 @@ class E2BSandboxProvider(SandboxProvider):
         # use the same /mnt/user-data prefix as LocalSandbox / AioSandbox — fail
         # with PermissionError because /mnt is owned by root in the e2b
         # template. See the path-mapping note in :class:`E2BSandbox`.
-        if not self._bootstrap_or_discard(client, sandbox_id):
-            raise RuntimeError(f"Failed to bootstrap e2b sandbox {sandbox_id}")
+        if error := self._bootstrap_or_discard(client, sandbox_id):
+            raise RuntimeError(f"Failed to bootstrap e2b sandbox {sandbox_id}") from error
 
         # One-shot mount uploads.  e2b has no host bind-mount, so we copy
         # files from ``host_path`` into ``container_path`` at sandbox start.
@@ -602,17 +602,17 @@ class E2BSandboxProvider(SandboxProvider):
                 logger.debug("e2b client close raised: %s", e)
                 return
 
-    def _bootstrap_or_discard(self, client: E2BClientSandbox, sandbox_id: str) -> bool:
-        """Bootstrap a sandbox or discard it when required paths are unavailable."""
+    def _bootstrap_or_discard(self, client: E2BClientSandbox, sandbox_id: str) -> Exception | None:
+        """Bootstrap a sandbox or return its error after cleanup."""
         try:
             self._bootstrap_sandbox_paths(client)
-        except Exception:
+        except Exception as e:
             logger.exception("Failed to bootstrap e2b sandbox %s. Discarding the unusable sandbox.", sandbox_id)
             if error := self._kill_client(client):
                 logger.warning("Failed to kill e2b sandbox %s after bootstrap failure: %s", sandbox_id, error)
             self._safe_close_client(client)
-            return False
-        return True
+            return e
+        return None
 
     def _bootstrap_sandbox_paths(self, client: E2BClientSandbox) -> None:
         """Materialise DeerFlow's virtual path layout inside the e2b VM.

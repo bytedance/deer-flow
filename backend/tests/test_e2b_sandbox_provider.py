@@ -709,12 +709,30 @@ def test_acquire_cleans_up_and_fails_when_bootstrap_fails(monkeypatch):
     )
     fake_cls.create_factory = lambda **kwargs: client
 
-    with pytest.raises(RuntimeError, match="bootstrap"):
+    with pytest.raises(RuntimeError, match="bootstrap") as error:
         provider.acquire("thread-1", user_id="user-1")
 
+    assert error.value.__cause__ is not None
+    assert "permission denied" in str(error.value.__cause__)
     assert client.killed is True
     assert client.closed is True
     assert provider.get("bootstrap-failure") is None
+
+
+def test_acquire_closes_client_when_bootstrap_cleanup_kill_fails(monkeypatch):
+    provider = _make_provider()
+    fake_cls = _install_fake_sdk(monkeypatch, provider)
+    client = FakeClient(
+        sandbox_id="bootstrap-failure",
+        commands=FakeCommandsAPI([SimpleNamespace(stdout="", stderr="permission denied", exit_code=1)]),
+    )
+    client.kill = MagicMock(side_effect=RuntimeError("sandbox already gone"))
+    fake_cls.create_factory = lambda **kwargs: client
+
+    with pytest.raises(RuntimeError, match="bootstrap"):
+        provider.acquire("thread-1", user_id="user-1")
+
+    assert client.closed is True
 
 
 def test_release_unknown_sandbox_id_is_noop():
