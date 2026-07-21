@@ -154,20 +154,21 @@ def test_build_subagent_runtime_middlewares_threads_app_config_to_llm_middleware
     middlewares = build_subagent_runtime_middlewares(app_config=app_config, lazy_init=False)
 
     assert captured["app_config"] is app_config
-    # 9 baseline (InputSanitization, ToolOutputBudget, ToolResultSanitization,
-    # ThreadData, IdentityHooks, Sandbox, DanglingToolCall, LLMErrorHandling, SandboxAudit,
+    # 8 baseline (InputSanitization, ToolOutputBudget, ToolResultSanitization,
+    # ThreadData, Sandbox, DanglingToolCall, LLMErrorHandling, SandboxAudit,
     # ToolErrorHandling)
     # + 1 ReadBeforeWriteMiddleware + 1 LoopDetectionMiddleware
     # + 1 TokenBudgetMiddleware (subagents.token_budget enabled by default, #3875 Phase 2)
     # + 1 SafetyFinishReasonMiddleware + 1 DurableContextMiddleware
     # + 1 SystemMessageCoalescingMiddleware (all enabled by default).
+    # IdentityHooksMiddleware is lead-only (gated with UploadsMiddleware).
     from deerflow.agents.middlewares.durable_context_middleware import DurableContextMiddleware
     from deerflow.agents.middlewares.safety_finish_reason_middleware import SafetyFinishReasonMiddleware
     from deerflow.agents.middlewares.system_message_coalescing_middleware import SystemMessageCoalescingMiddleware
     from deerflow.agents.middlewares.token_budget_middleware import TokenBudgetMiddleware
     from deerflow.agents.middlewares.tool_output_budget_middleware import ToolOutputBudgetMiddleware
 
-    assert len(middlewares) == 16
+    assert len(middlewares) == 15
     assert isinstance(middlewares[0], FakeMiddleware)  # InputSanitizationMiddleware stub
     assert isinstance(middlewares[1], ToolOutputBudgetMiddleware)
     assert any(isinstance(m, ToolErrorHandlingMiddleware) for m in middlewares)

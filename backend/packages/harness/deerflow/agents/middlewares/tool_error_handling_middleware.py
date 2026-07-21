@@ -185,12 +185,11 @@ def _build_runtime_middlewares(
     thread_hooks: list[AgentMiddleware] = [
         ThreadDataMiddleware(lazy_init=lazy_init),
     ]
-    from deerflow.agents.middlewares.identity_hooks_middleware import IdentityHooksMiddleware
-
-    thread_hooks.append(IdentityHooksMiddleware())
     if include_uploads:
+        from deerflow.agents.middlewares.identity_hooks_middleware import IdentityHooksMiddleware
         from deerflow.agents.middlewares.uploads_middleware import UploadsMiddleware
 
+        thread_hooks.append(IdentityHooksMiddleware())
         thread_hooks.append(UploadsMiddleware())
     thread_hooks.append(SandboxMiddleware(lazy_init=lazy_init))
 

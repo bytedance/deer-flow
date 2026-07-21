@@ -202,6 +202,28 @@ def _normalize_skill_entry(entry: Mapping[str, object]) -> SkillEntry:
     }
 
 
+class IdentityHooksThreadState(TypedDict):
+    session_start_fired: NotRequired[bool]
+
+
+def merge_identity_hooks_thread_state(
+    existing: IdentityHooksThreadState | None,
+    new: IdentityHooksThreadState | None,
+) -> IdentityHooksThreadState | None:
+    """Reducer for identity-hook scheduling — once fired, stays fired across checkpoints."""
+    if new is None:
+        return existing
+    if existing is None:
+        return new
+    if existing.get("session_start_fired"):
+        return existing
+    merged = dict(existing)
+    merged.update(new)
+    if merged.get("session_start_fired"):
+        return {"session_start_fired": True}
+    return merged
+
+
 def merge_skill_context(existing: list[SkillEntry] | None, new: list[SkillEntry] | None) -> list[SkillEntry]:
     """Reducer for the skill-context channel.
 
@@ -248,4 +270,5 @@ class ThreadState(AgentState):
     promoted: Annotated[PromotedTools | None, merge_promoted]
     delegations: Annotated[list[DelegationEntry], merge_delegations]
     skill_context: Annotated[list[SkillEntry], merge_skill_context]
+    identity_hooks: Annotated[IdentityHooksThreadState | None, merge_identity_hooks_thread_state]
     summary_text: NotRequired[str | None]
