@@ -69,3 +69,7 @@ config.yaml.bak
 
 # Monocle agent-observability trace output (local file exporter)
 .monocle/
+
+# Local pytest basetemp dir (test artifact; the default system temp is
+# permission-denied in this env, so tests run with --basetemp pointing here)
+.tmp-pytest/

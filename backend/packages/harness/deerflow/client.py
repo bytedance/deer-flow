@@ -1268,10 +1268,11 @@ class DeerFlowClient:
         from deerflow.agents.memory import get_memory_manager
 
         manager = get_memory_manager()
-        if hasattr(manager, "reload_memory"):
+        try:
             return manager.reload_memory(user_id=get_effective_user_id())
-        # Non-DeerMem backends have no reload concept; return current memory.
-        return manager.get_memory(user_id=get_effective_user_id())
+        except NotImplementedError:
+            # Non-DeerMem backends have no reload concept; return current memory.
+            return manager.get_memory(user_id=get_effective_user_id())
 
     def clear_memory(self) -> dict:
         """Clear all persisted memory data."""
@@ -1284,8 +1285,6 @@ class DeerFlowClient:
         from deerflow.agents.memory import get_memory_manager
 
         manager = get_memory_manager()
-        if not hasattr(manager, "create_fact"):
-            raise NotImplementedError(f"create_fact not supported by memory backend '{type(manager).__name__}'")
         memory_data, fact_id = manager.create_fact(content=content, category=category, confidence=confidence, user_id=get_effective_user_id())
         if fact_id is None:
             raise ValueError("Fact was not stored because memory.max_facts kept higher-confidence facts")
@@ -1296,8 +1295,6 @@ class DeerFlowClient:
         from deerflow.agents.memory import get_memory_manager
 
         manager = get_memory_manager()
-        if not hasattr(manager, "delete_fact"):
-            raise NotImplementedError(f"delete_fact not supported by memory backend '{type(manager).__name__}'")
         return manager.delete_fact(fact_id, user_id=get_effective_user_id())
 
     def update_memory_fact(
@@ -1311,8 +1308,6 @@ class DeerFlowClient:
         from deerflow.agents.memory import get_memory_manager
 
         manager = get_memory_manager()
-        if not hasattr(manager, "update_fact"):
-            raise NotImplementedError(f"update_fact not supported by memory backend '{type(manager).__name__}'")
         return manager.update_fact(
             fact_id=fact_id,
             content=content,

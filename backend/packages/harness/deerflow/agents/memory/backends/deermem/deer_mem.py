@@ -3,28 +3,29 @@
 DeerMem wraps the DeerFlow memory machinery (the five ``core/`` modules:
 storage / queue / updater / prompt / message_processing) behind the
 backend-neutral :class:`~deerflow.agents.memory.manager.MemoryManager`
-contract. DeerMem owns its storage / queue / updater as injected instance
-attributes (no module-level singletons): the factory passes ``backend_config``
-to ``__init__``, which parses it into a :class:`DeerMemConfig` and constructs
-the dependencies. Behaviour matches the pre-abstraction code: the same filter +
+contract. DeerMem owns its storage / queue / updater as ``PrivateAttr`` dependencies
+(no module-level singletons): the factory passes ``backend_config`` to the
+BaseModel field, and ``model_post_init`` parses it into a :class:`DeerMemConfig`
+and constructs the dependencies. Behaviour matches the pre-abstraction code: the same filter +
 human/ai validation + correction/reinforcement detection feeds the same
 debounced queue; the same ``format_memory_for_injection`` produces injection
 text; the same CRUD backs the management endpoints.
 
 DeerMem-private concerns (filter/detect, the ``<memory>`` wrap, ``enabled``
 gating, the facts model) deliberately stay OUT of the ABC -- they live here.
-Methods not on the ABC (``warm`` / ``reload_memory`` / ``create_fact`` /
-``delete_fact`` / ``update_fact``) are DeerMem internals exposed for
-``hasattr`` capability probing: the gateway probes ``hasattr(manager, "warm")``
-at startup and the gateway/client probe ``hasattr(manager, "create_fact")`` for
-fact CRUD, rather than importing DeerMem, so a non-DeerMem (or removed) backend
-never breaks those modules at import time (see MemoryManager plan, step 8).
+``warm`` / ``reload_memory`` / fact CRUD are tier-3 optional hooks ON the ABC
+(with defaults: ``warm``=True, the rest raise ``NotImplementedError``); DeerMem
+overrides the ones it supports. Callers (gateway / client / tools) invoke them
+directly and catch ``NotImplementedError`` for unsupported backends -- no more
+``hasattr`` probing.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, ClassVar, Literal
+
+from pydantic import PrivateAttr
 
 from deerflow.agents.memory.manager import MemoryManager
 
@@ -47,15 +48,32 @@ logger = logging.getLogger(__name__)
 class DeerMem(MemoryManager):
     """Default memory backend: file-backed facts + debounced LLM extraction."""
 
-    def __init__(self, backend_config: dict[str, Any] | None = None) -> None:
-        """Construct DeerMem with its dependencies (dependency injection).
+    # Backend-private dependencies are PrivateAttr (not pydantic fields): they
+    # are non-pydantic objects (storage / llm / queue) that must NOT participate
+    # in validation / serialization. Built once in model_post_init from
+    # self.backend_config -> DeerMemConfig.
+    _config: Any = PrivateAttr(default=None)
+    _storage: Any = PrivateAttr(default=None)
+    _llm: Any = PrivateAttr(default=None)
+    _updater: Any = PrivateAttr(default=None)
+    _queue: Any = PrivateAttr(default=None)
+    _correction_patterns: Any = PrivateAttr(default=None)
+    _reinforcement_patterns: Any = PrivateAttr(default=None)
 
-        Args:
-            backend_config: DeerMem-private config dict (from
-                ``MemoryConfig.backend_config``). Parsed into a
-                :class:`DeerMemConfig` (defaults apply when empty/None).
+    # DeerMem implements search() (case-insensitive substring over stored facts),
+    # so it is valid for mode="tool" (the base invariant validator requires this
+    # for tool mode). Backends without real search inherit the False default and
+    # cannot be used with mode="tool".
+    supports_search: ClassVar[bool] = True
+
+    def model_post_init(self, __context: Any) -> None:
+        """Construct DeerMem's dependencies from ``self.backend_config``.
+
+        Runs after pydantic's ``__init__`` validates the fields. Parses
+        ``backend_config`` into a :class:`DeerMemConfig` (defaults apply when
+        empty/None) and wires storage / patterns / llm / updater / queue (DI).
         """
-        self._config = DeerMemConfig.from_backend_config(backend_config)
+        self._config = DeerMemConfig.from_backend_config(self.backend_config)
         self._storage = create_storage(self._config)
         # Signal-detection patterns (externalized YAML; ``patterns_dir`` override
         # or bundled defaults = pre-externalization behavior). Loaded once at
@@ -66,7 +84,7 @@ class DeerMem(MemoryManager):
         # so zero-config DeerMem (empty `model`) still extracts via the app default,
         # mirroring pre-abstraction `model_name: null`. Standalone (no factory) -> None.
         self._llm = self._config.host_llm if self._config.host_llm is not None else build_llm(self._config.model)
-        self._updater = MemoryUpdater(self._config, self._storage, self._llm, prompts_dir=self._config.prompts_dir)
+        self._updater = MemoryUpdater(self._config, self._storage, self._llm, prompts_dir=self._config.prompts_dir, callbacks=self.callbacks)
         # Validate the *global* explicit prompt templates at construction so a
         # misconfigured prompts_dir surfaces at startup rather than as a silent
         # dropped update. Per-agent overrides ({prompts_dir}/{agent}/*.yaml)
@@ -85,6 +103,39 @@ class DeerMem(MemoryManager):
             load_prompt("consolidation", prompts_dir=self._config.prompts_dir).format(consolidation_groups="", max_groups=1)
             load_prompt_messages("memory_update", _dummy_vars, prompts_dir=self._config.prompts_dir)
         self._queue = MemoryUpdateQueue(self._config, self._updater)
+
+    @classmethod
+    def from_config(
+        cls,
+        backend_config: dict[str, Any] | None = None,
+        *,
+        mode: Literal["middleware", "tool"] = "middleware",
+        **host_hooks: Any,
+    ) -> DeerMem:
+        """Build a DeerMem with dependencies wired, consuming host hooks.
+
+        The factory passes host hooks (tracing, hidden-message filter,
+        trace-context manager, a host-llm factory) as kwargs rather than
+        injecting them into ``backend_config``; DeerMem merges the ones it
+        consumes (DeerMemConfig fields) here, respecting explicit
+        ``backend_config`` values. ``host_llm`` is built from the host factory
+        only when no model is configured (host_llm takes precedence over
+        ``build_llm(model)``; building an unused host default when a model
+        exists would waste startup time). The actual dependency wiring runs in
+        ``model_post_init`` (shared with direct construction).
+        """
+        config_dict = dict(backend_config or {})
+        for key in ("should_keep_hidden_message", "trace_context_manager"):
+            if key not in config_dict and key in host_hooks:
+                config_dict[key] = host_hooks[key]
+        if "host_llm" not in config_dict:
+            model_cfg = config_dict.get("model")
+            if not (isinstance(model_cfg, dict) and model_cfg.get("model")):
+                host_llm_factory = host_hooks.get("host_llm_factory")
+                if host_llm_factory is not None:
+                    config_dict["host_llm"] = host_llm_factory()
+        # callbacks is a base MemoryManager field (not DeerMemConfig); pass through.
+        return cls(backend_config=config_dict, mode=mode, callbacks=host_hooks.get("callbacks"))
 
     # ── Write ────────────────────────────────────────────────────────────
     def add(
@@ -224,14 +275,9 @@ class DeerMem(MemoryManager):
     ) -> dict[str, Any]:
         return self._updater.get_memory_data(agent_name=agent_name, user_id=user_id)
 
-    def delete_memory(
-        self,
-        *,
-        user_id: str | None = None,
-        agent_name: str | None = None,
-    ) -> None:
-        """Not implemented this phase (storage/updater deletion is a future ``core/`` addition)."""
-        raise NotImplementedError("DeerMem.delete_memory is not implemented yet")
+    # delete_memory / export_memory inherit the base tier-2 default (raise
+    # NotImplementedError) -- they are dead contract (zero callers; /memory/export
+    # routes via get_memory), so DeerMem no longer repeats the raise.
 
     def clear_memory(
         self,
@@ -250,15 +296,6 @@ class DeerMem(MemoryManager):
     ) -> dict[str, Any]:
         return self._updater.import_memory_data(memory_data, agent_name=agent_name, user_id=user_id)
 
-    def export_memory(
-        self,
-        *,
-        user_id: str | None = None,
-        agent_name: str | None = None,
-    ) -> dict[str, Any]:
-        """Not implemented this phase (no distinct export yet; /export routes via get_memory)."""
-        raise NotImplementedError("DeerMem.export_memory is not implemented yet")
-
     # ── Lifecycle ───────────────────────────────────────────────────────
     def shutdown_flush(self, timeout: float) -> bool:
         """Drain the debounce queue within ``timeout`` on graceful shutdown.
@@ -272,16 +309,15 @@ class DeerMem(MemoryManager):
         """
         return self._queue.flush_sync(timeout)
 
-    # ── DeerMem-internal (NOT on the ABC; reached via hasattr probing) ───
+    # ── Tier 3 hooks (override the base defaults; warm/reload/fact CRUD) ─
     def warm(self) -> bool:
         """Pre-warm DeerMem-specific resources (the tiktoken encoding cache).
 
-        Backend-agnostic startup code probes ``hasattr(manager, "warm")`` and
-        calls this off the event loop. Non-DeerMem backends lack the attribute,
-        so their warm-up is skipped entirely (e.g. mem0 does not use tiktoken).
-        Returns True if the encoding loaded (or was already cached, or warming
-        was unnecessary); False if tiktoken is unavailable or the download
-        failed.
+        Overrides the base tier-3 hook (default True). The Gateway lifespan calls
+        ``manager.warm()`` directly off the event loop; backends without heavy
+        init inherit the True default. Returns True if the encoding loaded (or
+        was already cached, or warming was unnecessary); False if tiktoken is
+        unavailable or the download failed.
         """
         if self._config.token_counting == "char":
             logger.info("token_counting='char'; tiktoken not used, skipping warm-up")

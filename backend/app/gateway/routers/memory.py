@@ -90,22 +90,20 @@ def _map_memory_fact_value_error(exc: ValueError) -> HTTPException:
     return HTTPException(status_code=400, detail=detail)
 
 
-def _require_capability(name: str, *, label: str):
-    """Return a DeerMem-internal capability (bound method) or raise 501.
+def _unsupported_501(manager: object, label: str) -> HTTPException:
+    """501 for an unsupported tier-3 operation.
 
     ``reload_memory`` / ``create_fact`` / ``delete_fact`` / ``update_fact`` are
-    not on the ``MemoryManager`` ABC -- they are DeerMem-internal. Probe with
-    ``hasattr`` rather than importing DeerMem, so this router has no hard
-    dependency on the default backend: a non-DeerMem (or removed) backend
-    simply lacks the attribute and the endpoint returns 501.
+    tier-3 hooks on ``MemoryManager`` with a default ``raise NotImplementedError``.
+    Backends that support them override; unsupported ones inherit the raise.
+    Callers invoke the method directly and catch ``NotImplementedError`` -> this
+    501 (no more ``hasattr`` probing -- the contract gives every backend the
+    method, so probing is dead).
     """
-    manager = get_memory_manager()
-    if not hasattr(manager, name):
-        raise HTTPException(
-            status_code=501,
-            detail=f"Operation '{label}' not supported by memory backend '{type(manager).__name__}'.",
-        )
-    return getattr(manager, name)
+    return HTTPException(
+        status_code=501,
+        detail=f"Operation '{label}' not supported by memory backend '{type(manager).__name__}'.",
+    )
 
 
 class FactCreateRequest(BaseModel):
@@ -205,9 +203,9 @@ async def reload_memory(http_request: Request) -> MemoryResponse:
     """
     user_id = _resolve_memory_user_id(http_request)
     manager = get_memory_manager()
-    if hasattr(manager, "reload_memory"):
+    try:
         memory_data = manager.reload_memory(user_id=user_id)
-    else:
+    except NotImplementedError:
         # Non-DeerMem backends have no reload concept; return current memory.
         # (Asymmetry vs fact CRUD, which raises 501 when unsupported: reload is a
         # read-only refresh, so degrading to get_memory is safe and still useful;
@@ -242,14 +240,16 @@ async def clear_memory(http_request: Request) -> MemoryResponse:
 )
 async def create_memory_fact_endpoint(request: FactCreateRequest, http_request: Request) -> MemoryResponse:
     """Create a single fact manually."""
+    manager = get_memory_manager()
     try:
-        create_fact = _require_capability("create_fact", label="create fact")
-        memory_data, fact_id = create_fact(
+        memory_data, fact_id = manager.create_fact(
             content=request.content,
             category=request.category,
             confidence=request.confidence,
             user_id=_resolve_memory_user_id(http_request),
         )
+    except NotImplementedError:
+        raise _unsupported_501(manager, "create fact") from None
     except ValueError as exc:
         raise _map_memory_fact_value_error(exc) from exc
     except OSError as exc:
@@ -270,9 +270,11 @@ async def create_memory_fact_endpoint(request: FactCreateRequest, http_request: 
 )
 async def delete_memory_fact_endpoint(fact_id: str, http_request: Request) -> MemoryResponse:
     """Delete a single fact from memory by fact id."""
+    manager = get_memory_manager()
     try:
-        delete_fact = _require_capability("delete_fact", label="delete fact")
-        memory_data = delete_fact(fact_id, user_id=_resolve_memory_user_id(http_request))
+        memory_data = manager.delete_fact(fact_id, user_id=_resolve_memory_user_id(http_request))
+    except NotImplementedError:
+        raise _unsupported_501(manager, "delete fact") from None
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=f"Memory fact '{fact_id}' not found.") from exc
     except OSError as exc:
@@ -290,15 +292,17 @@ async def delete_memory_fact_endpoint(fact_id: str, http_request: Request) -> Me
 )
 async def update_memory_fact_endpoint(fact_id: str, request: FactPatchRequest, http_request: Request) -> MemoryResponse:
     """Partially update a single fact manually."""
+    manager = get_memory_manager()
     try:
-        update_fact = _require_capability("update_fact", label="update fact")
-        memory_data = update_fact(
+        memory_data = manager.update_fact(
             fact_id=fact_id,
             content=request.content,
             category=request.category,
             confidence=request.confidence,
             user_id=_resolve_memory_user_id(http_request),
         )
+    except NotImplementedError:
+        raise _unsupported_501(manager, "update fact") from None
     except ValueError as exc:
         raise _map_memory_fact_value_error(exc) from exc
     except KeyError as exc:
