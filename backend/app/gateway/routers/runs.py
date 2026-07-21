@@ -26,7 +26,7 @@ router = APIRouter(prefix="/api/runs", tags=["runs"])
 
 def _resolve_thread_id(body: RunCreateRequest) -> str:
     """Return the thread_id from the request body, or generate a new one."""
-    thread_id = (body.config or {}).get("configurable", {}).get("thread_id")
+    thread_id = ((body.config or {}).get("configurable") or {}).get("thread_id")
     if thread_id:
         return str(thread_id)
     return str(uuid.uuid4())

@@ -41,6 +41,18 @@ _backends_cache: dict[str, type[MemoryManager]] | None = None
 _manager_lock = threading.Lock()
 
 
+class MemoryManagerError(RuntimeError):
+    """Backend-neutral base error exposed at the MemoryManager boundary."""
+
+
+class MemoryConflictError(MemoryManagerError):
+    """The requested write lost an optimistic-concurrency race."""
+
+
+class MemoryCorruptionError(MemoryManagerError):
+    """Persisted memory cannot be read safely."""
+
+
 class MemoryManager(ABC):
     """Backend-neutral memory manager contract (9 methods).
 
@@ -167,7 +179,12 @@ class MemoryManager(ABC):
         user_id: str | None = None,
         agent_name: str | None = None,
     ) -> dict[str, Any]:
-        """Clear the bucket's memory; return the cleared (now-empty) document."""
+        """Clear memory and return the empty compatibility document.
+
+        ``agent_name=None`` means all memory owned by the user. An explicit
+        agent name clears only that agent's memory and must preserve shared
+        user-level summaries.
+        """
 
     @abstractmethod
     def import_memory(

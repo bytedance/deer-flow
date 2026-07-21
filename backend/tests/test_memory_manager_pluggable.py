@@ -143,7 +143,7 @@ def test_empty_storage_path_factory_injects_runtime_home(tmp_path, monkeypatch) 
     set_memory_config(MemoryConfig(manager_class="deermem"))  # no storage_path
     manager = get_memory_manager()
     assert Path(manager._config.storage_path) == tmp_path
-    manager.create_fact("hello", user_id="u1")
+    manager.create_fact("hello", user_id="u1", agent_name="test-agent")
     # per-user dir created under the injected runtime_home root
     user_dirs = [p.name for p in (tmp_path / "users").iterdir() if p.is_dir()]
     assert len(user_dirs) == 1

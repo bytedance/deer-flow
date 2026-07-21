@@ -23,10 +23,11 @@ never breaks those modules at import time (see MemoryManager plan, step 8).
 
 from __future__ import annotations
 
+import copy
 import logging
 from typing import Any
 
-from deerflow.agents.memory.manager import MemoryManager
+from deerflow.agents.memory.manager import MemoryConflictError, MemoryCorruptionError, MemoryManager
 
 from .deermem.config import DeerMemConfig
 from .deermem.core.llm import build_llm
@@ -34,13 +35,56 @@ from .deermem.core.message_processing import (
     detect_correction,
     detect_reinforcement,
     filter_messages_for_memory,
+    load_patterns,
 )
-from .deermem.core.prompt import format_memory_for_injection, warm_tiktoken_cache
+from .deermem.core.paths import DEFAULT_AGENT_BUCKET
+from .deermem.core.prompt import format_memory_for_injection, load_prompt, load_prompt_messages, warm_tiktoken_cache
 from .deermem.core.queue import MemoryUpdateQueue
-from .deermem.core.storage import create_storage
+from .deermem.core.storage import MemoryRevisionConflict, MemoryStorageCorruption, create_storage
 from .deermem.core.updater import MemoryUpdater, _coerce_source_confidence
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_agent_name(agent_name: str | None) -> str:
+    """Return DeerFlow's case-insensitive canonical agent identifier."""
+    return agent_name.lower() if agent_name is not None else DEFAULT_AGENT_BUCKET
+
+
+def _call_backend(operation):
+    """Translate DeerMem-private storage errors into the public manager contract."""
+    try:
+        return operation()
+    except MemoryRevisionConflict as exc:
+        raise MemoryConflictError(str(exc)) from exc
+    except MemoryStorageCorruption as exc:
+        raise MemoryCorruptionError(str(exc)) from exc
+
+
+def _legacy_source_value(source: Any) -> str:
+    """Project structured source metadata back to the legacy public string."""
+    if isinstance(source, str):
+        return source
+    if not isinstance(source, dict):
+        return "unknown"
+    source_type = source.get("type")
+    thread_id = source.get("threadId")
+    if source_type == "conversation" and isinstance(thread_id, str) and thread_id:
+        return thread_id
+    if isinstance(source_type, str) and source_type:
+        return source_type
+    if isinstance(thread_id, str) and thread_id:
+        return thread_id
+    return "unknown"
+
+
+def _compat_document(memory_data: dict[str, Any]) -> dict[str, Any]:
+    """Return the historical Manager/API shape without changing persistence."""
+    result = copy.deepcopy(memory_data)
+    for fact in result.get("facts", []):
+        if isinstance(fact, dict):
+            fact["source"] = _legacy_source_value(fact.get("source"))
+    return result
 
 
 class DeerMem(MemoryManager):
@@ -56,11 +100,33 @@ class DeerMem(MemoryManager):
         """
         self._config = DeerMemConfig.from_backend_config(backend_config)
         self._storage = create_storage(self._config)
+        # Signal-detection patterns (externalized YAML; ``patterns_dir`` override
+        # or bundled defaults = pre-externalization behavior). Loaded once at
+        # construction and reused by ``_prepare_update``'s detect_* calls.
+        self._correction_patterns = load_patterns("correction", patterns_dir=self._config.patterns_dir)
+        self._reinforcement_patterns = load_patterns("reinforcement", patterns_dir=self._config.patterns_dir)
         # host_llm (host-injected default model) takes precedence over build_llm(model)
         # so zero-config DeerMem (empty `model`) still extracts via the app default,
         # mirroring pre-abstraction `model_name: null`. Standalone (no factory) -> None.
         self._llm = self._config.host_llm if self._config.host_llm is not None else build_llm(self._config.model)
-        self._updater = MemoryUpdater(self._config, self._storage, self._llm)
+        self._updater = MemoryUpdater(self._config, self._storage, self._llm, prompts_dir=self._config.prompts_dir)
+        # Validate the *global* explicit prompt templates at construction so a
+        # misconfigured prompts_dir surfaces at startup rather than as a silent
+        # dropped update. Per-agent overrides ({prompts_dir}/{agent}/*.yaml)
+        # cannot be known here -- they are validated lazily at first use and
+        # logged at ERROR by the updater's exception handler.
+        # fact_extraction is dormant (not wired to any runtime caller); excluded.
+        if self._config.prompts_dir is not None:
+            _dummy_vars = {
+                "current_memory": "{}",
+                "conversation": "(validation)",
+                "correction_hint": "",
+                "staleness_review_section": "",
+                "consolidation_section": "",
+            }
+            load_prompt("staleness_review", prompts_dir=self._config.prompts_dir).format(stale_facts="")
+            load_prompt("consolidation", prompts_dir=self._config.prompts_dir).format(consolidation_groups="", max_groups=1)
+            load_prompt_messages("memory_update", _dummy_vars, prompts_dir=self._config.prompts_dir)
         self._queue = MemoryUpdateQueue(self._config, self._updater)
 
     # ── Write ────────────────────────────────────────────────────────────
@@ -86,7 +152,7 @@ class DeerMem(MemoryManager):
         self._queue.add(
             thread_id=thread_id,
             messages=filtered,
-            agent_name=agent_name,
+            agent_name=_resolve_agent_name(agent_name),
             user_id=user_id,
             trace_id=trace_id,
             correction_detected=correction_detected,
@@ -113,7 +179,7 @@ class DeerMem(MemoryManager):
         self._queue.add_nowait(
             thread_id=thread_id,
             messages=filtered,
-            agent_name=agent_name,
+            agent_name=_resolve_agent_name(agent_name),
             user_id=user_id,
             correction_detected=correction_detected,
             reinforcement_detected=reinforcement_detected,
@@ -127,8 +193,7 @@ class DeerMem(MemoryManager):
 
         Returns ``(filtered, correction_detected, reinforcement_detected)``
         or ``None`` when there is no meaningful conversation (missing a user
-        or an assistant turn). Identical logic to the pre-abstraction
-        middleware/hook so behaviour is unchanged.
+        or an assistant turn).
         """
         filtered = filter_messages_for_memory(
             messages,
@@ -138,8 +203,8 @@ class DeerMem(MemoryManager):
         assistant_messages = [m for m in filtered if getattr(m, "type", None) == "ai"]
         if not user_messages or not assistant_messages:
             return None
-        correction_detected = detect_correction(filtered)
-        reinforcement_detected = not correction_detected and detect_reinforcement(filtered)
+        correction_detected = detect_correction(filtered, patterns=self._correction_patterns)
+        reinforcement_detected = not correction_detected and detect_reinforcement(filtered, patterns=self._reinforcement_patterns)
         return filtered, correction_detected, reinforcement_detected
 
     # ── Read ─────────────────────────────────────────────────────────────
@@ -157,7 +222,7 @@ class DeerMem(MemoryManager):
         ``injection_enabled`` gate and the ``<memory>`` wrapping stay at the
         call site (``_get_memory_context``); this returns only the body.
         """
-        memory_data = self._updater.get_memory_data(agent_name=agent_name, user_id=user_id)
+        memory_data = _call_backend(lambda: self._updater.get_memory_data(agent_name=_resolve_agent_name(agent_name), user_id=user_id))
         return format_memory_for_injection(
             memory_data,
             max_tokens=self._config.max_injection_tokens,
@@ -188,10 +253,26 @@ class DeerMem(MemoryManager):
         if not query or not query.strip() or top_k <= 0:
             return []
         query_lower = query.strip().lower()
-        memory_data = self._updater.get_memory_data(agent_name=agent_name, user_id=user_id)
+        search_facts = getattr(self._storage, "search_facts", None)
+        resolved_agent_name = _resolve_agent_name(agent_name)
+        scopes = [{"userId": user_id, "agentName": resolved_agent_name}]
+        indexed = (
+            search_facts(
+                query,
+                scopes=scopes,
+                top_k=top_k,
+                mode="hybrid",
+                filters={"category": category} if category else None,
+            )
+            if callable(search_facts)
+            else []
+        )
+        if indexed:
+            return [_compat_document({"facts": [result.get("fact", result)]})["facts"][0] for result in indexed]
+        memory_data = _call_backend(lambda: self._updater.get_memory_data(agent_name=resolved_agent_name, user_id=user_id))
         matched = [fact for fact in memory_data.get("facts", []) if isinstance(fact.get("content"), str) and query_lower in fact["content"].lower() and (category is None or fact.get("category") == category)]
         matched.sort(key=_coerce_source_confidence, reverse=True)
-        return matched[:top_k]
+        return _compat_document({"facts": matched[:top_k]})["facts"]
 
     # ── Manage ───────────────────────────────────────────────────────────
     def get_memory(
@@ -200,7 +281,8 @@ class DeerMem(MemoryManager):
         user_id: str | None = None,
         agent_name: str | None = None,
     ) -> dict[str, Any]:
-        return self._updater.get_memory_data(agent_name=agent_name, user_id=user_id)
+        memory_data = _call_backend(lambda: self._updater.get_memory_data(agent_name=_resolve_agent_name(agent_name), user_id=user_id))
+        return _compat_document(memory_data)
 
     def delete_memory(
         self,
@@ -217,7 +299,11 @@ class DeerMem(MemoryManager):
         user_id: str | None = None,
         agent_name: str | None = None,
     ) -> dict[str, Any]:
-        return self._updater.clear_memory_data(agent_name=agent_name, user_id=user_id)
+        if agent_name is None:
+            memory_data = _call_backend(lambda: self._updater.clear_all_memory_data(user_id=user_id))
+        else:
+            memory_data = _call_backend(lambda: self._updater.clear_memory_data(agent_name=_resolve_agent_name(agent_name), user_id=user_id))
+        return _compat_document(memory_data)
 
     def import_memory(
         self,
@@ -226,7 +312,14 @@ class DeerMem(MemoryManager):
         user_id: str | None = None,
         agent_name: str | None = None,
     ) -> dict[str, Any]:
-        return self._updater.import_memory_data(memory_data, agent_name=agent_name, user_id=user_id)
+        imported = _call_backend(
+            lambda: self._updater.import_memory_data(
+                memory_data,
+                agent_name=_resolve_agent_name(agent_name),
+                user_id=user_id,
+            )
+        )
+        return _compat_document(imported)
 
     def export_memory(
         self,
@@ -273,7 +366,13 @@ class DeerMem(MemoryManager):
         agent_name: str | None = None,
     ) -> dict[str, Any]:
         """Drop the cached memory document and reload from disk."""
-        return self._updater.reload_memory_data(agent_name=agent_name, user_id=user_id)
+        memory_data = _call_backend(
+            lambda: self._updater.reload_memory_data(
+                agent_name=_resolve_agent_name(agent_name),
+                user_id=user_id,
+            )
+        )
+        return _compat_document(memory_data)
 
     def create_fact(
         self,
@@ -284,13 +383,16 @@ class DeerMem(MemoryManager):
         agent_name: str | None = None,
         user_id: str | None = None,
     ) -> tuple[dict[str, Any], str | None]:
-        return self._updater.create_memory_fact(
-            content,
-            category=category,
-            confidence=confidence,
-            agent_name=agent_name,
-            user_id=user_id,
+        memory_data, fact_id = _call_backend(
+            lambda: self._updater.create_memory_fact(
+                content,
+                category=category,
+                confidence=confidence,
+                agent_name=_resolve_agent_name(agent_name),
+                user_id=user_id,
+            )
         )
+        return _compat_document(memory_data), fact_id
 
     def delete_fact(
         self,
@@ -299,7 +401,14 @@ class DeerMem(MemoryManager):
         agent_name: str | None = None,
         user_id: str | None = None,
     ) -> dict[str, Any]:
-        return self._updater.delete_memory_fact(fact_id, agent_name=agent_name, user_id=user_id)
+        memory_data = _call_backend(
+            lambda: self._updater.delete_memory_fact(
+                fact_id,
+                agent_name=_resolve_agent_name(agent_name),
+                user_id=user_id,
+            )
+        )
+        return _compat_document(memory_data)
 
     def update_fact(
         self,
@@ -311,11 +420,14 @@ class DeerMem(MemoryManager):
         agent_name: str | None = None,
         user_id: str | None = None,
     ) -> dict[str, Any]:
-        return self._updater.update_memory_fact(
-            fact_id,
-            content=content,
-            category=category,
-            confidence=confidence,
-            agent_name=agent_name,
-            user_id=user_id,
+        memory_data = _call_backend(
+            lambda: self._updater.update_memory_fact(
+                fact_id,
+                content=content,
+                category=category,
+                confidence=confidence,
+                agent_name=_resolve_agent_name(agent_name),
+                user_id=user_id,
+            )
         )
+        return _compat_document(memory_data)

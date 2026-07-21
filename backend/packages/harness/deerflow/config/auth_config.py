@@ -67,7 +67,22 @@ class OIDCAuthConfig(BaseModel):
     )
 
 
+class LocalAuthConfig(BaseModel):
+    """Configuration for the built-in email/password authentication provider."""
+
+    allow_registration: bool = Field(
+        default=True,
+        description=(
+            "Allow visitors to self-register a local account via POST /api/v1/auth/register. "
+            "Set to false when accounts are provisioned exclusively through SSO — the OIDC "
+            "provisioning policy (allowed_email_domains, require_verified_email, auto_create_users) "
+            "does not apply to local registration."
+        ),
+    )
+
+
 class AuthAppConfig(BaseModel):
     """Authentication configuration section for the DeerFlow app config."""
 
     oidc: OIDCAuthConfig = Field(default_factory=OIDCAuthConfig, description="OIDC SSO authentication settings")
+    local: LocalAuthConfig = Field(default_factory=LocalAuthConfig, description="Built-in email/password authentication settings")

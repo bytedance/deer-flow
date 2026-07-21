@@ -74,6 +74,52 @@ def test_zero_config_defaults_run_non_llm_ops(deermem_data_dir):
     assert dm.get_memory(user_id="u")["facts"][0]["content"] == "x"
 
 
+def test_import_without_agent_name_persists_facts_in_default_markdown_bucket(deermem_data_dir):
+    dm = DeerMem(backend_config=None)
+    dm.import_memory(
+        {
+            "user": {},
+            "history": {},
+            "facts": [
+                {
+                    "id": "fact_default_import",
+                    "content": "imported through the default manager scope",
+                    "category": "context",
+                    "confidence": 0.8,
+                    "source": "import",
+                }
+            ],
+        },
+        user_id="alice",
+    )
+
+    assert [fact["id"] for fact in dm.get_memory(user_id="alice")["facts"]] == ["fact_default_import"]
+    facts_root = deermem_data_dir / "users" / "alice" / "agents" / "__default__" / "facts"
+    assert [path.stem for path in facts_root.glob("**/*.md")] == ["fact_default_import"]
+
+
+def test_import_empty_summary_sections_replace_existing_summaries_with_complete_defaults(deermem_data_dir):
+    dm = DeerMem(backend_config=None)
+    existing = dm.get_memory(user_id="alice")
+    existing["user"]["workContext"] = {"summary": "old work", "updatedAt": "old"}
+    existing["user"]["personalContext"] = {"summary": "old personal", "updatedAt": "old"}
+    existing["history"]["recentMonths"] = {"summary": "old history", "updatedAt": "old"}
+    dm.import_memory(existing, user_id="alice")
+
+    imported = dm.import_memory({"user": {}, "history": {}, "facts": []}, user_id="alice")
+
+    assert imported["user"] == {
+        "workContext": {"summary": "", "updatedAt": ""},
+        "personalContext": {"summary": "", "updatedAt": ""},
+        "topOfMind": {"summary": "", "updatedAt": ""},
+    }
+    assert imported["history"] == {
+        "recentMonths": {"summary": "", "updatedAt": ""},
+        "earlierContext": {"summary": "", "updatedAt": ""},
+        "longTermBackground": {"summary": "", "updatedAt": ""},
+    }
+
+
 def test_trace_id_threads_through_to_tracing_callback(deermem_data_dir):
     calls = []
 
@@ -90,6 +136,63 @@ def test_trace_id_threads_through_to_tracing_callback(deermem_data_dir):
     )
     dm._queue.flush()
     assert calls and calls[0] == ("t1", "trace-42", "gpt-x")
+
+
+def test_default_passive_update_persists_fact_in_reserved_default_bucket(deermem_data_dir):
+    dm = _deermem_with_fake_llm(payload='{"user":{},"history":{},"newFacts":[{"content":"Default agent fact","category":"context","confidence":0.9}],"factsToRemove":[]}')
+
+    dm.add(
+        thread_id="default-thread",
+        messages=[HumanMessage(content="remember this"), AIMessage(content="understood")],
+        user_id="alice",
+    )
+    dm._queue.flush()
+
+    assert [fact["content"] for fact in dm.get_memory(user_id="alice")["facts"]] == ["Default agent fact"]
+    facts_root = deermem_data_dir / "users" / "alice" / "agents" / "__default__" / "facts"
+    assert list(facts_root.glob("**/*.md"))
+
+
+def test_clear_all_memory_removes_global_summaries_and_every_agent_fact(deermem_data_dir):
+    dm = DeerMem()
+    imported = dm.get_memory(user_id="alice")
+    imported["user"]["workContext"] = {"summary": "shared profile", "updatedAt": "now"}
+    imported["facts"] = [
+        {
+            "id": "fact_default",
+            "content": "default fact",
+            "category": "context",
+            "confidence": 0.9,
+            "createdAt": "2026-01-01T00:00:00Z",
+            "source": "manual",
+        }
+    ]
+    dm.import_memory(imported, user_id="alice")
+    dm.create_fact("custom fact", agent_name="custom-agent", user_id="alice")
+    custom_dir = deermem_data_dir / "users" / "alice" / "agents" / "custom-agent"
+    config_path = custom_dir / "config.yaml"
+    config_path.write_text("name: custom-agent\n", encoding="utf-8")
+
+    cleared = dm.clear_memory(user_id="alice")
+
+    assert cleared["user"]["workContext"]["summary"] == ""
+    assert cleared["facts"] == []
+    assert dm.get_memory(agent_name="custom-agent", user_id="alice")["facts"] == []
+    assert config_path.read_text(encoding="utf-8") == "name: custom-agent\n"
+
+
+def test_scoped_clear_preserves_shared_summaries(deermem_data_dir):
+    dm = DeerMem()
+    imported = dm.get_memory(user_id="alice")
+    imported["user"]["workContext"] = {"summary": "shared profile", "updatedAt": "now"}
+    dm.import_memory(imported, user_id="alice")
+    dm.create_fact("custom fact", agent_name="custom-agent", user_id="alice")
+
+    cleared = dm.clear_memory(agent_name="custom-agent", user_id="alice")
+
+    assert cleared["facts"] == []
+    assert cleared["user"]["workContext"]["summary"] == "shared profile"
+    assert dm.get_memory(user_id="alice")["user"]["workContext"]["summary"] == "shared profile"
 
 
 def test_tracing_callback_optional_no_langfuse(deermem_data_dir):
@@ -135,7 +238,7 @@ def test_portability_only_abc_contract_imports_deerflow():
                 deerflow_imports.append((p.relative_to(root).as_posix(), s))
     assert len(deerflow_imports) == 1, deerflow_imports
     assert deerflow_imports[0][0] == "deer_mem.py"
-    assert "memory.manager import MemoryManager" in deerflow_imports[0][1]
+    assert "memory.manager import MemoryConflictError, MemoryCorruptionError, MemoryManager" in deerflow_imports[0][1]
 
 
 # Minimal vendored host contract (what another agent would ship). DeerMem only
@@ -166,6 +269,9 @@ class MemoryManager(ABC):
     def import_memory(self, memory_data, *, user_id=None, agent_name=None) -> dict: ...
     @abstractmethod
     def export_memory(self, *, user_id=None, agent_name=None) -> dict: ...
+
+class MemoryConflictError(RuntimeError): ...
+class MemoryCorruptionError(RuntimeError): ...
 '''
 
 
@@ -190,10 +296,11 @@ def test_portability_vendor_to_other_agent(tmp_path, monkeypatch):
     # Repoint the single ABC-contract import line to the vendored manager.
     deer_mem_file = dst_pkg / "deer_mem.py"
     text = deer_mem_file.read_text(encoding="utf-8")
-    assert "from deerflow.agents.memory.manager import MemoryManager" in text
+    contract_import = "from deerflow.agents.memory.manager import MemoryConflictError, MemoryCorruptionError, MemoryManager"
+    assert contract_import in text
     text = text.replace(
-        "from deerflow.agents.memory.manager import MemoryManager",
-        "from otheragent.manager import MemoryManager",
+        contract_import,
+        "from otheragent.manager import MemoryConflictError, MemoryCorruptionError, MemoryManager",
     )
     deer_mem_file.write_text(text, encoding="utf-8")
 
@@ -229,7 +336,7 @@ def test_per_user_memory_path_matches_host_safe_user_id(deermem_data_dir):
     user_id = "test-user-123@example.com"
     # storage_path mirrors what the host factory injects (runtime_home / base_dir)
     dm = DeerMem(backend_config={"storage_path": str(deermem_data_dir)})
-    dm.create_fact("User prefers concise answers", category="preference", user_id=user_id)
+    dm.create_fact("User prefers concise answers", category="preference", agent_name="default", user_id=user_id)
 
     expected_safe = make_safe_user_id(user_id)
     expected_file = deermem_data_dir / "users" / expected_safe / "memory.json"
