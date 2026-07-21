@@ -1986,6 +1986,49 @@ authorization:
 #   recovery_timeout_sec: 60
 
 # ============================================================================
+# LLM Call Concurrency Configuration
+# ============================================================================
+# Cap the number of concurrently in-flight LLM calls process-wide. A provider
+# burst-rate (limit_burst_rate) error fires on the *slope* of the request rate,
+# not on a static quota - so the morning peak (e.g. 08:30) ramping from ~0 to
+# full throttle in seconds gets rejected even when total RPM is within budget.
+# Capping concurrency caps that slope. Retries alone make it worse (they add
+# demand inside the very burst being throttled); pair this cap with the
+# decorrelated-jitter backoff already built into the LLM error-handling
+# middleware, and ideally an nginx `limit_req` at the ingress.
+#
+# 0 disables the cap (default) - existing deployments see no behavior change.
+#
+# Per-process, not per-cluster: the cap bounds in-flight LLM calls within ONE
+# gateway process. With GATEWAY_WORKERS > 1 the aggregate cap across the
+# deployment is effectively `max_concurrent_calls * GATEWAY_WORKERS`, and a
+# multi-node rollout multiplies it further - size the per-process value with
+# that in mind (and pair it with an nginx `limit_req` at the ingress for a
+# true cluster-wide slope cap).
+#
+# Startup-only: the cap is captured at the first LLM run and frozen for the
+# process lifetime. Editing `max_concurrent_calls` here takes effect only after
+# a gateway restart; the other `llm_call.*` knobs below remain hot-reloadable.
+# Freezing the cap avoids the downscale and config-freshness races that a
+# runtime-mutable, process-wide/cross-loop limiter would otherwise hit (a
+# lowered cap could keep admitting queued waiters, or a stale config snapshot
+# constructed after a fresher one could restore a higher cap).
+
+# llm_call:
+#   # Max concurrently in-flight LLM calls across the whole process (default: 0 = disabled)
+#   max_concurrent_calls: 0
+#   # Max LLM call attempts for retriable transient errors, 1 = no retry (default: 3)
+#   retry_max_attempts: 3
+#   # Base delay (ms) for the decorrelated-jitter retry backoff (default: 1000)
+#   retry_base_delay_ms: 1000
+#   # Hard cap (ms) on any single retry backoff delay (default: 8000)
+#   retry_cap_delay_ms: 8000
+#   # Backoff base (ms) used ONLY for burst-rate (limit_burst_rate) 429s - higher
+#   # than retry_base_delay_ms so the single burst retry lands after the throttle
+#   # window subsides. Ignored when the provider sends Retry-After (default: 5000)
+#   burst_retry_base_delay_ms: 5000
+
+# ============================================================================
 # SSO / OIDC Authentication (optional)
 # ============================================================================
 # Enable SSO login via any OIDC-compatible provider (Keycloak, Google, Azure AD, Okta, etc.).
