@@ -299,10 +299,8 @@ class E2BSandboxProvider(SandboxProvider):
             return None
 
         self._refresh_remote_timeout(client)
-        try:
-            self._bootstrap_sandbox_paths(client)
-        except Exception as e:
-            logger.debug("bootstrap on warm-pool reclaim failed: %s", e)
+        if not self._bootstrap_or_discard(client, target_id):
+            return None
         self._register_connected_sandbox(target_id, client, thread_id=thread_id, user_id=user_id)
         logger.info(
             "Reclaimed warm-pool e2b sandbox %s for user/thread %s/%s",
@@ -415,10 +413,8 @@ class E2BSandboxProvider(SandboxProvider):
             return None
 
         self._refresh_remote_timeout(client)
-        try:
-            self._bootstrap_sandbox_paths(client)
-        except Exception as e:
-            logger.debug("bootstrap on remote discovery failed: %s", e)
+        if not self._bootstrap_or_discard(client, target_id):
+            return None
         self._register_connected_sandbox(target_id, client, thread_id=thread_id, user_id=user_id)
         logger.info(
             "Discovered remote e2b sandbox %s for user/thread %s/%s (seed=%s)",
@@ -475,18 +471,8 @@ class E2BSandboxProvider(SandboxProvider):
         # use the same /mnt/user-data prefix as LocalSandbox / AioSandbox — fail
         # with PermissionError because /mnt is owned by root in the e2b
         # template. See the path-mapping note in :class:`E2BSandbox`.
-        try:
-            self._bootstrap_sandbox_paths(client)
-        except Exception as e:
-            logger.error(
-                "Failed to bootstrap virtual paths in e2b sandbox %s. Cleaning up the unusable sandbox: %s",
-                sandbox_id,
-                e,
-            )
-            if error := self._kill_client(client):
-                logger.warning("Failed to kill e2b sandbox %s after bootstrap failure: %s", sandbox_id, error)
-            self._safe_close_client(client)
-            raise RuntimeError(f"Failed to bootstrap e2b sandbox {sandbox_id}") from e
+        if not self._bootstrap_or_discard(client, sandbox_id):
+            raise RuntimeError(f"Failed to bootstrap e2b sandbox {sandbox_id}")
 
         # One-shot mount uploads.  e2b has no host bind-mount, so we copy
         # files from ``host_path`` into ``container_path`` at sandbox start.
@@ -616,6 +602,18 @@ class E2BSandboxProvider(SandboxProvider):
                 logger.debug("e2b client close raised: %s", e)
                 return
 
+    def _bootstrap_or_discard(self, client: E2BClientSandbox, sandbox_id: str) -> bool:
+        """Bootstrap a sandbox or discard it when required paths are unavailable."""
+        try:
+            self._bootstrap_sandbox_paths(client)
+        except Exception:
+            logger.exception("Failed to bootstrap e2b sandbox %s. Discarding the unusable sandbox.", sandbox_id)
+            if error := self._kill_client(client):
+                logger.warning("Failed to kill e2b sandbox %s after bootstrap failure: %s", sandbox_id, error)
+            self._safe_close_client(client)
+            return False
+        return True
+
     def _bootstrap_sandbox_paths(self, client: E2BClientSandbox) -> None:
         """Materialise DeerFlow's virtual path layout inside the e2b VM.
 
@@ -641,11 +639,9 @@ class E2BSandboxProvider(SandboxProvider):
            writes through the symlink target succeed.
 
         The e2b code-interpreter template puts ``user`` in the ``sudo`` group
-        with passwordless sudo, so the ``sudo`` calls below succeed without
-        interactive prompts. If the customer template removes that, the
-        commands fail loudly here and we fall back to silently relying on the
-        path remap inside ``E2BSandbox`` — agent shell commands will still
-        fail, but the read/write/list APIs continue to work.
+        with passwordless sudo. Custom templates must provide equivalent
+        permissions. Bootstrap failure makes the sandbox unusable. The
+        provider discards it instead of returning a partially functional VM.
         """
         # Use the configured ``home_dir`` so a custom template can move HOME.
         home_dir = self._config["home_dir"].rstrip("/") or "/home/user"
