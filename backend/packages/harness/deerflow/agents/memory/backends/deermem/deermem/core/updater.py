@@ -171,13 +171,11 @@ def _normalize_memory_update_fact(fact: Any) -> dict[str, Any] | None:
             normalized_fact["sourceError"] = normalized_source_error
 
     # Fact lifetime (expected_valid_days): optional LLM-assigned review window.
-    # Accept int/float (reject bool which subclasses int), coerce to int, keep
-    # only positive values; the creation-time cap is applied in _apply_updates.
-    raw_evd = fact.get("expected_valid_days")
-    if isinstance(raw_evd, (int, float)) and not isinstance(raw_evd, bool):
-        evd = int(raw_evd)
-        if evd > 0:
-            normalized_fact["expected_valid_days"] = evd
+    # Validated via the shared _read_expected_valid_days rule (reject bool, require
+    # finite, coerce to int, keep only positive); cap applied in _apply_updates.
+    evd = _read_expected_valid_days(fact)
+    if evd is not None:
+        normalized_fact["expected_valid_days"] = evd
 
     return normalized_fact
 
@@ -392,6 +390,54 @@ def _parse_fact_datetime(raw: str) -> datetime | None:
         return None
 
 
+def _read_expected_valid_days(fact: dict[str, Any]) -> int | None:
+    """Return a fact's ``expected_valid_days`` as a positive int, or ``None``.
+
+    Accepts int/float (rejects ``bool``, which subclasses ``int``) and coerces
+    to int *before* the positivity check, mirroring the original
+    ``_normalize_memory_update_fact`` rule.  Coercing first matters for values
+    in (0, 1): ``0.5`` passes a raw ``> 0`` check but truncates to ``0``, which
+    would otherwise be returned as a (non-positive) lifetime instead of
+    ``None``.  Non-finite floats (``NaN``, ``+/-inf``) are rejected, and huge
+    ints are returned as-is rather than routed through ``float()`` (which
+    raises ``OverflowError`` for ``10**400``): Python's JSON decoder parses an
+    integer literal with no decimal point as an arbitrary-precision ``int``,
+    so a hand-edited ``memory.json`` can carry one.  An int that is too large
+    to participate in ``datetime`` arithmetic is bounded by the caller via
+    :func:`_safe_add_days` - the helper's job is type/positivity validation,
+    not datetime-range validation, because the safe bound depends on the
+    ``datetime`` it is added to, not on the value alone.  Returning ``None``
+    lets callers fall back to the global age or omit the field rather than
+    silently writing a zero/negative/non-finite lifetime.
+    """
+    raw = fact.get("expected_valid_days")
+    if isinstance(raw, bool):
+        return None
+    if isinstance(raw, int):
+        evd = raw  # arbitrary-precision int; never routed through float()
+    elif isinstance(raw, float) and math.isfinite(raw):
+        evd = int(raw)  # coerce before the positivity guard
+    else:
+        return None
+    return evd if evd > 0 else None
+
+
+def _safe_add_days(dt: datetime, days: int) -> datetime | None:
+    """Return ``dt + timedelta(days=days)``, or ``None`` if it overflows.
+
+    A huge persisted ``expected_valid_days`` (e.g. ``10**12``) can exceed
+    ``timedelta.max.days`` or push the result past ``datetime.max`` / below
+    ``datetime.min``.  Both raise ``OverflowError``.  The staleness and
+    consolidation paths add an evd to a ``datetime`` to compute a review
+    deadline; returning ``None`` lets the caller fall back to the configured
+    global lifetime instead of aborting the whole update cycle.
+    """
+    try:
+        return dt + timedelta(days=days)
+    except (OverflowError, ValueError):
+        return None
+
+
 def _effective_fact_staleness_age(fact: dict[str, Any], config: Any) -> int:
     """Return the effective staleness review age in days for *fact*.
 
@@ -404,10 +450,8 @@ def _effective_fact_staleness_age(fact: dict[str, Any], config: Any) -> int:
     ``staleness_age_days`` for facts that pre-date this feature or where the
     LLM did not provide an estimate.
     """
-    raw = fact.get("expected_valid_days")
-    if isinstance(raw, (int, float)) and not isinstance(raw, bool) and raw > 0:
-        return int(raw)
-    return config.staleness_age_days
+    evd = _read_expected_valid_days(fact)
+    return evd if evd is not None else config.staleness_age_days
 
 
 def _select_stale_candidates(
@@ -436,7 +480,11 @@ def _select_stale_candidates(
         if created_at is None:
             continue
         effective_age = _effective_fact_staleness_age(fact, config)
-        if created_at < now - timedelta(days=effective_age):
+        # now - timedelta(days=effective_age) can overflow datetime.min when
+        # effective_age is a huge persisted value; a window that large means the
+        # fact cannot yet be stale, so skip it rather than aborting the cycle.
+        cutoff = _safe_add_days(now, -effective_age)
+        if cutoff is not None and created_at < cutoff:
             candidates.append(fact)
     return candidates
 
@@ -1128,6 +1176,9 @@ class MemoryUpdater:
         # Add new facts
         existing_fact_keys = {fact_key for fact_key in (_fact_content_key(fact.get("content")) for fact in current_memory.get("facts", [])) if fact_key is not None}
         new_facts = update_data.get("newFacts", [])
+        # Creation-time lifetime cap shared with the consolidation path below, so
+        # both fact-creation sites apply the identical bound in one place.
+        creation_cap = int(config.staleness_age_days * config.staleness_max_lifetime_multiplier)
         for fact in new_facts:
             confidence = fact.get("confidence", 0.5)
             if confidence >= config.fact_confidence_threshold:
@@ -1157,14 +1208,13 @@ class MemoryUpdater:
                     normalized_source_error = source_error.strip()
                     if normalized_source_error:
                         fact_entry["sourceError"] = normalized_source_error
-                evd = fact.get("expected_valid_days")
-                if isinstance(evd, int) and not isinstance(evd, bool) and evd > 0:
+                evd = _read_expected_valid_days(fact)
+                if evd is not None:
                     # Apply the creation-time cap so the LLM cannot assign an
                     # unbounded lifetime that defers staleness review indefinitely.
                     # Extensions (staleFactsToExtend) bypass this cap via their own
                     # staleness_max_extension_days ceiling because they represent a
                     # deliberate review decision, not an unchecked initial assignment.
-                    creation_cap = int(config.staleness_age_days * config.staleness_max_lifetime_multiplier)
                     fact_entry["expected_valid_days"] = min(evd, creation_cap)
                 current_memory["facts"].append(fact_entry)
                 if fact_key is not None:
@@ -1190,6 +1240,10 @@ class MemoryUpdater:
                 fact_index = {f.get("id"): f for f in current_memory.get("facts", []) if isinstance(f, dict)}
                 max_groups = config.consolidation_max_groups_per_cycle
                 max_sources = config.consolidation_max_sources
+                # Creation-time lifetime cap shared with the newFacts path: an
+                # inherited expected_valid_days is clamped so a merge of long-lived
+                # sources cannot defer first review indefinitely.
+                creation_cap = int(config.staleness_age_days * config.staleness_max_lifetime_multiplier)
                 ids_consumed: set[str] = set()
                 new_consolidated: list[dict[str, Any]] = []
                 merge_count = 0
@@ -1277,6 +1331,54 @@ class MemoryUpdater:
                     source_errors = list(dict.fromkeys(e for sid in source_ids if isinstance((e := fact_index[sid].get("sourceError")), str) and e.strip()))
                     if source_errors:
                         new_fact["sourceError"] = "\n".join(source_errors)
+
+                    # Inherit expected_valid_days from the sources so the merged
+                    # fact keeps the lifetime signal of the underlying information
+                    # rather than silently degrading to the global staleness_age_days.
+                    # The merged fact is re-reviewed at the EARLIEST source review
+                    # deadline (createdAt + effective lifetime): a merge combines
+                    # details from every source, and a volatile sub-detail (e.g.
+                    # evd=7) must not inherit a stable source's 3650-day window and
+                    # escape staleness review for years - staleness KEEP/REMOVE is the
+                    # only path that re-validates a merged fact, so biasing toward the
+                    # soonest deadline keeps uncertain merges re-checked sooner.
+                    # Every source participates, including legacy facts without an
+                    # explicit evd: their effective lifetime is the configured global
+                    # staleness_age_days (matching _effective_fact_staleness_age's
+                    # read-time fallback), so a legacy source's default 90-day window
+                    # is not silently swallowed by a long-lived sibling. The deadline
+                    # is expressed relative to the merged fact's createdAt (the newest
+                    # source's), so a source already past its deadline yields a
+                    # minimal positive window (review next cycle) rather than the
+                    # global fallback, which would otherwise defer an overdue review.
+                    # Capped at the creation-time multiplier (hoisted above the loop)
+                    # like any new fact so consolidation cannot defer first review
+                    # indefinitely.
+                    # Compute each source's absolute review deadline
+                    # (createdAt + effective lifetime). A huge persisted evd can
+                    # overflow datetime arithmetic; _safe_add_days returns None
+                    # then, and the source falls back to the global lifetime's
+                    # deadline - the same treatment as a legacy (no-evd) source,
+                    # so one malformed field cannot abort the merge.
+                    global_age = config.staleness_age_days
+                    source_deadlines: list[datetime] = []
+                    for sid, dt in zip(source_ids, _source_dts):
+                        eff = _effective_fact_staleness_age(fact_index[sid], config)
+                        deadline = _safe_add_days(dt, eff)
+                        if deadline is None:
+                            deadline = _safe_add_days(dt, global_age) or _newest_dt
+                        source_deadlines.append(deadline)
+                    earliest_deadline = min(source_deadlines)
+                    # int(total_seconds() // 86400) avoids the .days toward-zero
+                    # truncation inconsistency flagged in #4143; a negative result
+                    # (a source already past its deadline) is clamped below.
+                    days_until_earliest = int((earliest_deadline - _newest_dt).total_seconds() // 86400)
+                    # A non-positive value means a source is already past its
+                    # deadline (the merge itself was the overdue review) - surface
+                    # a minimal positive window so the merged fact is re-reviewed
+                    # next cycle instead of inheriting the global fallback.
+                    inherited_evd = max(days_until_earliest, 1)
+                    new_fact["expected_valid_days"] = min(inherited_evd, creation_cap)
 
                     ids_consumed.update(source_ids)
                     new_consolidated.append(new_fact)
