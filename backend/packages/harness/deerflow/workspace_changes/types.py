@@ -4,7 +4,10 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Literal
 
-WORKSPACE_CHANGES_EVENT_TYPE = "workspace_changes"
+from deerflow.runtime.events.catalog import WORKSPACE_CHANGES_EVENT
+
+WORKSPACE_CHANGES_EVENT_TYPE = WORKSPACE_CHANGES_EVENT.event_type
+WORKSPACE_CHANGES_EVENT_CATEGORY = WORKSPACE_CHANGES_EVENT.category
 WORKSPACE_CHANGES_METADATA_KEY = "workspace_changes"
 
 WorkspaceChangeStatus = Literal["created", "modified", "deleted", "symlink_created"]

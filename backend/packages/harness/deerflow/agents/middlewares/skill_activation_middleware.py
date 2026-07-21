@@ -17,6 +17,10 @@ from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.middleware.types import ModelRequest, ModelResponse
 from langchain_core.messages import AIMessage, HumanMessage
 
+from deerflow.runtime.events.catalog import (
+    MIDDLEWARE_SKILL_ACTIVATION_TAG,
+    MIDDLEWARE_SKILL_SECRETS_TAG,
+)
 from deerflow.runtime.secret_context import (
     _SECRETS_BINDING_AUDIT_KEY,
     _SLASH_SKILL_ACTIVATION_RUN_KEY,
@@ -294,7 +298,7 @@ Follow this skill before choosing a general workflow. Load supporting resources 
             return
         try:
             journal.record_middleware(
-                "skill_activation",
+                MIDDLEWARE_SKILL_ACTIVATION_TAG,
                 name="SkillActivationMiddleware",
                 hook=hook,
                 action="activate",
@@ -533,7 +537,7 @@ Follow this skill before choosing a general workflow. Load supporting resources 
             return
         try:
             journal.record_middleware(
-                "skill_secrets",
+                MIDDLEWARE_SKILL_SECRETS_TAG,
                 name="SkillActivationMiddleware",
                 hook=hook,
                 action="bind_secrets",
