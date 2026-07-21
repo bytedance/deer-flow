@@ -2,6 +2,7 @@ import { parseAuthError } from "./types";
 
 export type SetupStatusResponse = {
   needs_setup?: boolean;
+  registration_enabled?: boolean;
 };
 
 export type SetupStatusCheck = {
@@ -30,5 +31,11 @@ export function isSystemAlreadyInitializedError(data: unknown): boolean {
 }
 
 export function canCreateRegularAccount(check: SetupStatusCheck): boolean {
-  return check.checked && check.status?.needs_setup !== true;
+  // registration_enabled is absent on older Gateways; treat that as allowed so
+  // the signup entry only disappears when the backend actively closes it.
+  return (
+    check.checked &&
+    check.status?.needs_setup !== true &&
+    check.status?.registration_enabled !== false
+  );
 }
