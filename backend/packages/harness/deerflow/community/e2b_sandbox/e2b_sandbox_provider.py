@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import atexit
 import hashlib
+import json
 import logging
 import os
 import shlex
@@ -724,6 +725,45 @@ class E2BSandboxProvider(SandboxProvider):
 
     # ── Output mirroring ────────────────────────────────────────────────
     _SYNC_BACK_SUBDIRS = ("outputs", "workspace")
+    _SYNC_MANIFEST_NAME = ".e2b-output-sync.json"
+
+    @staticmethod
+    def _load_sync_manifest(manifest_path: Path) -> dict[str, dict[str, int]]:
+        """Load verified remote and host versions from a prior output sync."""
+        try:
+            data = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return {}
+        except (OSError, json.JSONDecodeError) as e:
+            logger.warning("e2b sync: failed to load manifest %s: %s", manifest_path, e)
+            return {}
+
+        if not isinstance(data, dict) or data.get("version") != 1 or not isinstance(data.get("files"), dict):
+            logger.warning("e2b sync: ignoring invalid manifest %s", manifest_path)
+            return {}
+
+        files: dict[str, dict[str, int]] = {}
+        for key, value in data["files"].items():
+            if not isinstance(key, str) or not isinstance(value, dict):
+                continue
+            required = ("remote_size", "remote_mtime_ns", "host_size", "host_mtime_ns")
+            if all(isinstance(value.get(field), int) for field in required):
+                files[key] = {field: value[field] for field in required}
+        return files
+
+    @staticmethod
+    def _write_sync_manifest(manifest_path: Path, files: dict[str, dict[str, int]]) -> None:
+        """Atomically store output-sync versions after host files are written."""
+        try:
+            manifest_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path = manifest_path.with_name(f"{manifest_path.name}.tmp")
+            tmp_path.write_text(
+                json.dumps({"version": 1, "files": files}, sort_keys=True),
+                encoding="utf-8",
+            )
+            tmp_path.replace(manifest_path)
+        except OSError as e:
+            logger.warning("e2b sync: failed to write manifest %s: %s", manifest_path, e)
 
     def _sync_outputs_to_host(
         self,
@@ -742,9 +782,10 @@ class E2BSandboxProvider(SandboxProvider):
         explicitly pull artifacts back at release time.
 
         We mirror files whose host-side counterpart is missing, has a different
-        size, or has a different remote modification time. The host copy keeps
-        the remote modification time after a successful download. This detects
-        same-size updates while avoiding repeat downloads of unchanged files.
+        size, or has a different remote modification time. A thread-local
+        manifest stores the remote version and the actual host metadata after
+        each write. This avoids false updates on host filesystems that round
+        modification times.
 
         Failures are logged at WARNING level but never raised: artifact
         download is non-critical for sandbox lifecycle, and we already log
@@ -760,8 +801,12 @@ class E2BSandboxProvider(SandboxProvider):
         home_dir = sandbox.home_dir.rstrip("/") or "/home/user"
         paths = get_paths()
 
-        thread_root = paths.thread_dir(thread_id, user_id=user_id) / "user-data"
+        thread_dir = paths.thread_dir(thread_id, user_id=user_id)
+        thread_root = thread_dir / "user-data"
         host_targets: dict[str, Path] = {sub: thread_root / sub for sub in self._SYNC_BACK_SUBDIRS}
+        manifest_path = thread_dir / self._SYNC_MANIFEST_NAME
+        manifest = self._load_sync_manifest(manifest_path)
+        manifest_dirty = False
 
         # Build a single shell command that lists all files in the sync dirs
         # with size, modification time, and path, NUL-separated for safe
@@ -832,10 +877,17 @@ class E2BSandboxProvider(SandboxProvider):
             if sub_match is None:
                 continue
             _sub, host_path, virtual_path = sub_match
+            manifest_key = host_path.relative_to(thread_root).as_posix()
 
             try:
                 host_stat = host_path.stat()
-                if host_stat.st_size == remote_size and host_stat.st_mtime_ns == remote_mtime_ns:
+                entry = manifest.get(manifest_key)
+                if entry == {
+                    "remote_size": remote_size,
+                    "remote_mtime_ns": remote_mtime_ns,
+                    "host_size": host_stat.st_size,
+                    "host_mtime_ns": host_stat.st_mtime_ns,
+                }:
                     skipped += 1
                     continue
             except OSError:
@@ -858,9 +910,20 @@ class E2BSandboxProvider(SandboxProvider):
                 tmp_path.write_bytes(data)
                 os.utime(tmp_path, ns=(remote_mtime_ns, remote_mtime_ns))
                 tmp_path.replace(host_path)
+                host_stat = host_path.stat()
+                manifest[manifest_key] = {
+                    "remote_size": remote_size,
+                    "remote_mtime_ns": remote_mtime_ns,
+                    "host_size": host_stat.st_size,
+                    "host_mtime_ns": host_stat.st_mtime_ns,
+                }
+                manifest_dirty = True
                 synced += 1
             except OSError as e:
                 logger.warning("e2b sync: failed to write %s on host: %s", host_path, e)
+
+        if manifest_dirty:
+            self._write_sync_manifest(manifest_path, manifest)
 
         if synced or skipped:
             logger.info(
