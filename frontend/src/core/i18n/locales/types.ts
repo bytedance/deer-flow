@@ -156,6 +156,8 @@ export interface Translations {
     goalNone: string;
     goalActive: string;
     goalFailed: string;
+    goalTooLong: string;
+    goalLengthCounter: string;
     compactSuccess: string;
     compactSkipped: string;
     compactFailed: string;

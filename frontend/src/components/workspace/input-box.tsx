@@ -140,12 +140,15 @@ import {
   createGoalRequestState,
   findSuggestionTemplatePlaceholder,
   finishGoalRequest,
+  getGoalObjectiveCounter,
   getInputSubmitAction,
   getLeadingSlashSkillQuery,
   getMatchingSkillSuggestions,
   type GoalCommand,
   isAbortError,
   isCurrentGoalRequest,
+  isGoalObjectiveTooLong,
+  MAX_GOAL_OBJECTIVE_CHARS,
   readGoalResponseError,
   type SlashSuggestion,
 } from "./input-box-helpers";
@@ -1145,6 +1148,19 @@ export function InputBox({
         status,
       });
       if (submitAction.kind === "goal") {
+        if (
+          submitAction.command.kind === "set" &&
+          isGoalObjectiveTooLong(submitAction.command.objective)
+        ) {
+          toast.error(
+            t.inputBox.goalTooLong.replace("{max}", () =>
+              String(MAX_GOAL_OBJECTIVE_CHARS),
+            ),
+          );
+          // Reject so the composer keeps the user's text for editing instead of
+          // clearing it (PromptInput only preserves input on a rejected submit).
+          return Promise.reject(new Error("goal-too-long"));
+        }
         promptHistoryIndexRef.current = null;
         promptHistoryDraftRef.current = "";
         setFollowups([]);
@@ -1184,6 +1200,7 @@ export function InputBox({
       selectedSlashSkill,
       status,
       submitThreadMessage,
+      t.inputBox.goalTooLong,
       t.inputBox.pleaseWaitStreaming,
     ],
   );
@@ -1241,6 +1258,10 @@ export function InputBox({
 
   const slashSkillQuery = useMemo(
     () => getLeadingSlashSkillQuery(textInput.value ?? ""),
+    [textInput.value],
+  );
+  const goalObjectiveCounter = useMemo(
+    () => getGoalObjectiveCounter(textInput.value ?? ""),
     [textInput.value],
   );
   const skillSuggestions = useMemo(
@@ -2566,6 +2587,24 @@ export function InputBox({
             )}
           </PromptInputTools>
           <PromptInputTools className="min-w-0 justify-end">
+            {goalObjectiveCounter && (
+              <span
+                aria-label={t.inputBox.goalLengthCounter
+                  .replace("{length}", () =>
+                    String(goalObjectiveCounter.length),
+                  )
+                  .replace("{max}", () => String(goalObjectiveCounter.max))}
+                className={cn(
+                  "shrink-0 text-xs tabular-nums",
+                  goalObjectiveCounter.overLimit
+                    ? "text-destructive font-medium"
+                    : "text-muted-foreground",
+                )}
+                data-testid="goal-length-counter"
+              >
+                {goalObjectiveCounter.length}/{goalObjectiveCounter.max}
+              </span>
+            )}
             <ModelSelector
               open={modelDialogOpen}
               onOpenChange={setModelDialogOpen}
