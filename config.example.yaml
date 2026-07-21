@@ -31,6 +31,23 @@ logging:
     format: text
 
 # ============================================================================
+# Agent Extensions
+# ============================================================================
+# Optional AgentMiddleware classes loaded into the lead and subagent runtime
+# middleware chains after built-in runtime middlewares, but before the
+# safety/clarification tail. Missing packages, invalid classes, and broken
+# modules fail loudly at agent creation with an actionable import error.
+# The same zero-argument class list applies to both lead and subagent runtimes;
+# lead-only vs subagent-only configuration is not expressible yet. Treat these
+# files as trusted operator config because middleware classes execute code.
+# Uncomment this block to define middlewares in config.yaml. Leaving it commented
+# lets extensions_config.json remain the source of truth for extension packages.
+# extensions:
+#   middlewares:
+#     - my_company.deerflow_middlewares:DomainGuardMiddleware
+#     - my_company.deerflow_middlewares:LatencyStampingMiddleware
+
+# ============================================================================
 # Tracing / Observability (Monocle)
 # ============================================================================
 # Optional agent tracing via Monocle. Configured through environment variables

@@ -1117,10 +1117,8 @@ class DeerFlowClient:
 
         current_config = get_extensions_config()
 
-        config_data = {
-            "mcpServers": mcp_servers,
-            "skills": {name: {"enabled": skill.enabled} for name, skill in current_config.skills.items()},
-        }
+        config_data = current_config.to_file_dict()
+        config_data["mcpServers"] = mcp_servers
 
         self._atomic_write_json(config_path, config_data)
 
@@ -1186,10 +1184,7 @@ class DeerFlowClient:
             extensions_config = get_extensions_config()
             extensions_config.skills[name] = SkillStateConfig(enabled=enabled)
 
-            config_data = {
-                "mcpServers": {n: s.model_dump() for n, s in extensions_config.mcp_servers.items()},
-                "skills": {n: {"enabled": sc.enabled} for n, sc in extensions_config.skills.items()},
-            }
+            config_data = extensions_config.to_file_dict()
 
             self._atomic_write_json(config_path, config_data)
             reload_extensions_config()
@@ -1206,10 +1201,7 @@ class DeerFlowClient:
                     raise FileNotFoundError("Cannot locate extensions_config.json. Set DEER_FLOW_EXTENSIONS_CONFIG_PATH or ensure it exists in the project root.")
                 extensions_config = get_extensions_config()
                 extensions_config.skills[name] = SkillStateConfig(enabled=enabled)
-                config_data = {
-                    "mcpServers": {n: s.model_dump() for n, s in extensions_config.mcp_servers.items()},
-                    "skills": {n: {"enabled": sc.enabled} for n, sc in extensions_config.skills.items()},
-                }
+                config_data = extensions_config.to_file_dict()
                 self._atomic_write_json(config_path, config_data)
                 reload_extensions_config()
 
