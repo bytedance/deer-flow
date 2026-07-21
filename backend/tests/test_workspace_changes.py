@@ -182,6 +182,33 @@ def test_count_diff_lines_ignores_only_real_headers():
     assert deletions == 2
 
 
+def test_count_diff_lines_counts_content_starting_with_dashes_or_pluses():
+    """Hunk-body lines whose content starts with '-- '/'++ ' must be counted.
+
+    difflib prefixes a deleted line "-- get users" to "--- get users"; the old
+    prefix skip mistook that for a file header and dropped it, undercounting
+    deletions in the user-visible +N/-M summary.
+    """
+    import difflib
+
+    from deerflow.workspace_changes.diff import _count_diff_lines
+
+    lines = list(
+        difflib.unified_diff(
+            ["SELECT 1", "-- get users"],
+            ["SELECT 1", "SELECT 2"],
+            fromfile="a/x.sql",
+            tofile="b/x.sql",
+            lineterm="",
+        )
+    )
+
+    additions, deletions = _count_diff_lines(lines)
+
+    assert additions == 1
+    assert deletions == 1
+
+
 def test_scan_workspace_roots_skips_excluded_directories(tmp_path):
     roots = _roots(tmp_path)
     workspace = roots[0].host_path
@@ -196,6 +223,20 @@ def test_scan_workspace_roots_skips_excluded_directories(tmp_path):
 
     assert "/mnt/user-data/workspace/visible.txt" in snapshot.files
     assert "/mnt/user-data/workspace/node_modules/ignored.js" not in snapshot.files
+
+
+def test_scan_workspace_roots_skips_browser_frames(tmp_path):
+    roots = _roots(tmp_path)
+    outputs = roots[1].host_path
+    (outputs / "report.md").write_text("keep", encoding="utf-8")
+    frames = outputs / ".browser-frames"
+    frames.mkdir()
+    (frames / "browser-navigate-1.png").write_bytes(b"\x89PNG\r\n\x1a\nshot")
+
+    snapshot = scan_workspace_roots(roots)
+
+    assert "/mnt/user-data/outputs/report.md" in snapshot.files
+    assert "/mnt/user-data/outputs/.browser-frames/browser-navigate-1.png" not in snapshot.files
 
 
 def test_scan_workspace_roots_can_skip_text_loading(tmp_path):

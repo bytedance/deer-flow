@@ -312,10 +312,12 @@ class FeishuChannel(Channel):
 
             if msg.thread_ts:
                 request = self._ReplyMessageRequest.builder().message_id(msg.thread_ts).request_body(self._ReplyMessageRequestBody.builder().msg_type(msg_type).content(content).build()).build()
-                await asyncio.to_thread(self._api_client.im.v1.message.reply, request)
+                response = await asyncio.to_thread(self._api_client.im.v1.message.reply, request)
             else:
                 request = self._CreateMessageRequest.builder().receive_id_type("chat_id").request_body(self._CreateMessageRequestBody.builder().receive_id(msg.chat_id).msg_type(msg_type).content(content).build()).build()
-                await asyncio.to_thread(self._api_client.im.v1.message.create, request)
+                response = await asyncio.to_thread(self._api_client.im.v1.message.create, request)
+            if not response.success():
+                raise RuntimeError(f"Feishu file send failed: code={response.code}, msg={response.msg}, log_id={response.get_log_id()}")
 
             logger.info("[Feishu] file sent: %s (type=%s)", attachment.filename, msg_type)
             return True

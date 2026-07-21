@@ -82,6 +82,13 @@ describe("MarkdownContent streaming code blocks", () => {
     expect(html).toContain('data-custom-code="true"');
     expect(html).toContain("data-streaming-code-block");
   });
+
+  it("does not paint an initial large streaming chunk all at once", () => {
+    const content = "x".repeat(120);
+
+    expect(renderMarkdown(content, true)).not.toContain(content);
+    expect(renderMarkdown(content, false)).toContain(content);
+  });
 });
 
 describe("MarkdownContent strikethrough", () => {

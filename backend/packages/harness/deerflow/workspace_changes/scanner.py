@@ -6,6 +6,8 @@ import os
 from codecs import BOM_UTF16_BE, BOM_UTF16_LE, getincrementaldecoder
 from pathlib import Path
 
+from deerflow.constants import BROWSER_FRAMES_DIRNAME
+
 from .types import (
     DiffUnavailableReason,
     FileSnapshot,
@@ -21,6 +23,10 @@ EXCLUDED_DIR_NAMES = {
     ".cache",
     ".next",
     ".venv",
+    # Transient per-step browser screenshots: live progress feedback surfaced in
+    # the browser panel + inline thumbnails, not workspace deliverables. Shared
+    # constant with the browser tools so the name cannot drift out of sync.
+    BROWSER_FRAMES_DIRNAME,
     "__pycache__",
     "build",
     "dist",

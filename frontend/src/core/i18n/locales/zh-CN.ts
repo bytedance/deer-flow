@@ -53,6 +53,8 @@ export const zhCN: Translations = {
     regenerate: "重新生成",
     branch: "分叉",
     showArtifacts: "查看此对话的文件",
+    browser: "浏览器",
+    showBrowser: "打开浏览器面板",
   },
 
   // Home
@@ -175,6 +177,8 @@ export const zhCN: Translations = {
     goalNone: "当前没有目标。",
     goalActive: "当前目标：{goal}",
     goalFailed: "目标命令执行失败。",
+    goalTooLong: "目标过长，请控制在 {max} 个字符以内。",
+    goalLengthCounter: "目标长度：{length}/{max} 字符",
     compactSuccess:
       "已压缩早期上下文。完整聊天记录仍保留，后续模型将基于摘要和最近消息继续。",
     compactSkipped: "当前上下文还不需要压缩。",
@@ -545,6 +549,15 @@ export const zhCN: Translations = {
     clickToViewContent: "点击查看文件内容",
     writeTodos: "更新 To-do 列表",
     skillInstallTooltip: "安装技能并使其可在 DeerFlow 中使用",
+    browserNavigate: (url: string) => `在浏览器中打开 ${url}`,
+    browserNavigateGeneric: "在浏览器中打开页面",
+    browserClick: "在浏览器中点击元素",
+    browserType: "在浏览器中输入内容",
+    browserSnapshot: "在浏览器中读取页面",
+    browserGetText: "在浏览器中读取页面文本",
+    browserBack: "在浏览器中返回上一页",
+    browserScreenshot: "浏览器截图",
+    browserClose: "关闭浏览器",
   },
 
   humanInput: {

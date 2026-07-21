@@ -53,6 +53,8 @@ export const enUS: Translations = {
     regenerate: "Regenerate",
     branch: "Branch conversation",
     showArtifacts: "Show artifacts of this conversation",
+    browser: "Browser",
+    showBrowser: "Open browser panel",
   },
 
   // Home
@@ -187,6 +189,8 @@ export const enUS: Translations = {
     goalNone: "No active goal.",
     goalActive: "Active goal: {goal}",
     goalFailed: "Goal command failed.",
+    goalTooLong: "Goal is too long. Keep it under {max} characters.",
+    goalLengthCounter: "Goal length: {length}/{max} characters",
     compactSuccess:
       "Earlier context compacted. The full chat remains visible; future model calls will use the summary and recent messages.",
     compactSkipped: "The current context does not need compaction yet.",
@@ -567,6 +571,15 @@ export const enUS: Translations = {
     clickToViewContent: "Click to view file content",
     writeTodos: "Update to-do list",
     skillInstallTooltip: "Install skill and make it available to DeerFlow",
+    browserNavigate: (url: string) => `Open ${url} in browser`,
+    browserNavigateGeneric: "Open page in browser",
+    browserClick: "Click element in browser",
+    browserType: "Type into browser field",
+    browserSnapshot: "Read page in browser",
+    browserGetText: "Read page text in browser",
+    browserBack: "Go back in browser",
+    browserScreenshot: "Capture browser screenshot",
+    browserClose: "Close browser",
   },
 
   humanInput: {
