@@ -23,8 +23,8 @@ class RuntimeFeatures:
     - ``False``: disable
     - An ``AgentMiddleware`` instance: use this custom implementation instead
 
-    ``summarization`` and ``guardrail`` have no built-in default — they only
-    accept ``False`` (disable) or an ``AgentMiddleware`` instance (custom).
+    ``summarization`` has no built-in default — it only accepts ``False``
+    (disable) or an ``AgentMiddleware`` instance (custom).
     """
 
     sandbox: bool | AgentMiddleware = True
@@ -36,7 +36,9 @@ class RuntimeFeatures:
     subagent: bool | AgentMiddleware = False
     vision: bool | AgentMiddleware = False
     auto_title: bool | AgentMiddleware = False
-    guardrail: Literal[False] | AgentMiddleware = False
+    guardrail: bool | AgentMiddleware = False
+    token_usage: bool | AgentMiddleware = False
+    deferred_tool_filter: bool | AgentMiddleware = False
     loop_detection: bool | AgentMiddleware = True
     token_budget: bool | AgentMiddleware = False
 

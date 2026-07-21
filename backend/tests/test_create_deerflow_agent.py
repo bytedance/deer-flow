@@ -1,14 +1,19 @@
 """Tests for create_deerflow_agent SDK entry point."""
 
+from types import SimpleNamespace
 from typing import get_type_hints
 from unittest.mock import MagicMock, patch
 
 import pytest
+from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
+from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.tools import tool
 
 from deerflow.agents.factory import create_deerflow_agent
 from deerflow.agents.features import Next, Prev, RuntimeFeatures
 from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
 from deerflow.agents.thread_state import ThreadState
+from deerflow.tools.mcp_metadata import tag_mcp_tool
 
 
 def _make_mock_model():
@@ -19,6 +24,18 @@ def _make_mock_tool(name: str = "my_tool"):
     tool = MagicMock(name=name)
     tool.name = name
     return tool
+
+
+@tool
+def _factory_active_tool(value: str) -> str:
+    """An always-visible factory integration test tool."""
+    return value
+
+
+@tool
+def _factory_deferred_calc(expression: str) -> str:
+    """A deferred factory integration test calculator."""
+    return expression
 
 
 # ---------------------------------------------------------------------------
@@ -36,6 +53,7 @@ def test_minimal_creation(mock_create_agent):
     call_kwargs = mock_create_agent.call_args[1]
     assert call_kwargs["model"] is model
     assert call_kwargs["system_prompt"] is None
+    assert call_kwargs["name"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -193,6 +211,8 @@ def test_agent_features_defaults():
     assert f.auto_title is False
     assert f.guardrail is False
     assert f.loop_detection is True
+    assert f.token_usage is False
+    assert f.deferred_tool_filter is False
 
 
 # ---------------------------------------------------------------------------
@@ -680,6 +700,166 @@ def test_loop_detection_custom_middleware(mock_create_agent):
 
 
 # ---------------------------------------------------------------------------
+# 30d. TokenUsageMiddleware is opt-in and precedes loop detection
+# ---------------------------------------------------------------------------
+@patch("deerflow.agents.factory.create_agent")
+def test_token_usage_enabled_adds_default_middleware_before_loop_detection(mock_create_agent):
+    mock_create_agent.return_value = MagicMock()
+
+    create_deerflow_agent(
+        _make_mock_model(),
+        features=RuntimeFeatures(sandbox=False, token_usage=True),
+    )
+
+    middleware = mock_create_agent.call_args[1]["middleware"]
+    mw_types = [type(m).__name__ for m in middleware]
+    assert "TokenUsageMiddleware" in mw_types
+    assert mw_types.index("TokenUsageMiddleware") < mw_types.index("LoopDetectionMiddleware")
+    assert mw_types.index("TokenUsageMiddleware") < mw_types.index("ClarificationMiddleware")
+
+
+@patch("deerflow.agents.factory.create_agent")
+def test_token_usage_disabled_skips_middleware(mock_create_agent):
+    mock_create_agent.return_value = MagicMock()
+
+    create_deerflow_agent(_make_mock_model(), features=RuntimeFeatures(sandbox=False, token_usage=False))
+
+    mw_types = [type(m).__name__ for m in mock_create_agent.call_args[1]["middleware"]]
+    assert "TokenUsageMiddleware" not in mw_types
+
+
+@patch("deerflow.agents.factory.create_agent")
+def test_token_usage_custom_middleware_replaces_default(mock_create_agent):
+    from langchain.agents.middleware import AgentMiddleware as AM
+
+    mock_create_agent.return_value = MagicMock()
+
+    class MyTokenUsage(AM):
+        pass
+
+    custom = MyTokenUsage()
+    create_deerflow_agent(
+        _make_mock_model(),
+        features=RuntimeFeatures(sandbox=False, token_usage=custom),
+    )
+
+    middleware = mock_create_agent.call_args[1]["middleware"]
+    mw_types = [type(m).__name__ for m in middleware]
+    assert custom in middleware
+    assert "TokenUsageMiddleware" not in mw_types
+    assert mw_types.index("MyTokenUsage") < mw_types.index("LoopDetectionMiddleware")
+
+
+@patch("deerflow.agents.factory.create_agent")
+def test_guardrail_true_uses_default_configured_middleware(mock_create_agent):
+    from langchain.agents.middleware import AgentMiddleware as AM
+
+    mock_create_agent.return_value = MagicMock()
+
+    class MyGuardrail(AM):
+        pass
+
+    configured_guardrail = MyGuardrail()
+    with (
+        patch("deerflow.config.guardrails_config.get_guardrails_config", return_value=MagicMock()),
+        patch("deerflow.agents.factory.create_guardrail_middleware_from_config", return_value=configured_guardrail),
+    ):
+        create_deerflow_agent(
+            _make_mock_model(),
+            features=RuntimeFeatures(sandbox=False, guardrail=True),
+        )
+
+    middleware = mock_create_agent.call_args[1]["middleware"]
+    mw_types = [type(m).__name__ for m in middleware]
+    assert configured_guardrail in middleware
+    assert mw_types.index("MyGuardrail") < mw_types.index("ToolErrorHandlingMiddleware")
+
+
+@patch("deerflow.agents.factory.create_agent")
+def test_guardrail_true_requires_configured_provider(mock_create_agent):
+    mock_create_agent.return_value = MagicMock()
+
+    with (
+        patch("deerflow.config.guardrails_config.get_guardrails_config", return_value=MagicMock()),
+        patch("deerflow.agents.factory.create_guardrail_middleware_from_config", return_value=None),
+        pytest.raises(ValueError, match="guardrails.enabled"),
+    ):
+        create_deerflow_agent(
+            _make_mock_model(),
+            features=RuntimeFeatures(sandbox=False, guardrail=True),
+        )
+
+
+@patch("deerflow.agents.factory.create_agent")
+def test_deferred_tool_filter_true_assembles_tool_search_and_filter(mock_create_agent):
+    mock_create_agent.return_value = MagicMock()
+    tool = _make_mock_tool("postgres_query")
+    tool_search_tool = _make_mock_tool("tool_search")
+    setup = SimpleNamespace(deferred_names=frozenset({"postgres_query"}), catalog_hash="catalog-1")
+
+    with patch(
+        "deerflow.tools.builtins.tool_search.assemble_deferred_tools",
+        return_value=([tool_search_tool, tool], setup),
+    ) as mock_assemble:
+        create_deerflow_agent(
+            _make_mock_model(),
+            tools=[tool],
+            features=RuntimeFeatures(sandbox=False, deferred_tool_filter=True),
+        )
+
+    mock_assemble.assert_called_once_with([tool], enabled=True)
+    call_kwargs = mock_create_agent.call_args[1]
+    tool_names = [t.name for t in call_kwargs["tools"]]
+    mw_types = [type(m).__name__ for m in call_kwargs["middleware"]]
+    assert tool_names == ["tool_search", "postgres_query", "ask_clarification"]
+    assert "DeferredToolFilterMiddleware" in mw_types
+    assert mw_types.index("DeferredToolFilterMiddleware") < mw_types.index("LoopDetectionMiddleware")
+
+
+def test_deferred_tool_filter_promotes_tool_in_real_compiled_graph():
+    bound_tools: list[list[str]] = []
+
+    class RecordingModel(GenericFakeChatModel):
+        def bind_tools(self, tools, **kwargs):
+            bound_tools.append([getattr(item, "name", None) for item in tools])
+            return self
+
+    model = RecordingModel(
+        messages=iter(
+            [
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "tool_search",
+                            "args": {"query": "select:_factory_deferred_calc"},
+                            "id": "search-1",
+                            "type": "tool_call",
+                        }
+                    ],
+                ),
+                AIMessage(content="factory-deferred-ok"),
+            ]
+        )
+    )
+    graph = create_deerflow_agent(
+        model,
+        tools=[_factory_active_tool, tag_mcp_tool(_factory_deferred_calc)],
+        features=RuntimeFeatures(
+            sandbox=False,
+            deferred_tool_filter=True,
+            loop_detection=False,
+        ),
+    )
+
+    result = graph.invoke({"messages": [HumanMessage(content="use calculator")]})
+
+    assert "_factory_deferred_calc" not in bound_tools[0]
+    assert "_factory_deferred_calc" in bound_tools[1]
+    assert result["messages"][-1].content == "factory-deferred-ok"
+
+
+# ---------------------------------------------------------------------------
 # 31. plan_mode=True adds TodoMiddleware
 # ---------------------------------------------------------------------------
 @patch("deerflow.agents.factory.create_agent")
@@ -719,8 +899,8 @@ def test_summarization_true_raises():
 # ---------------------------------------------------------------------------
 # 34. guardrail=True without built-in → ValueError
 # ---------------------------------------------------------------------------
-def test_guardrail_true_raises():
-    with pytest.raises(ValueError, match="requires a custom AgentMiddleware"):
+def test_guardrail_true_raises_when_no_provider_is_configured():
+    with pytest.raises(ValueError, match="guardrails.enabled"):
         create_deerflow_agent(
             _make_mock_model(),
             features=RuntimeFeatures(sandbox=False, guardrail=True),

@@ -10,18 +10,21 @@
 | 1 | UploadsMiddleware | ✓ | | | | | | ✓ | ✗ | `sandbox` |
 | 2 | SandboxMiddleware | ✓ | | | ✓ | | | ✓ | ✓ | `sandbox` |
 | 3 | DanglingToolCallMiddleware | | | | | ✓ | | ✓ | ✗ | 始终开启 |
-| 4 | GuardrailMiddleware | | | | | | ✓ | ✓ | ✓ | *Phase 2 纳入* |
+| 4 | GuardrailMiddleware | | | | | | ✓ | ✓ | ✓ | `guardrail` |
 | 5 | ToolErrorHandlingMiddleware | | | | | | ✓ | ✓ | ✓ | 始终开启 |
 | 6 | SummarizationMiddleware | | ✓ | | | | | ✓ | ✗ | `summarization` |
 | 7 | TodoMiddleware | | ✓ | ✓ | | ✓ | | ✓ | ✗ | `plan_mode` 参数 |
-| 8 | TitleMiddleware | | | ✓ | | | | ✓ | ✗ | `auto_title` |
-| 9 | MemoryMiddleware | | | | ✓ | | | ✓ | ✗ | `memory` |
-| 10 | ViewImageMiddleware | | ✓ | | | | | ✓ | ✗ | `vision` |
-| 11 | SubagentLimitMiddleware | | | ✓ | | | | ✓ | ✗ | `subagent` |
-| 12 | LoopDetectionMiddleware | ✓ | | ✓ | ✓ | ✓ | | ✓ | ✗ | 始终开启 |
-| 13 | ClarificationMiddleware | | | | | | ✓ | ✓ | ✗ | 始终最后 |
+| 8 | TokenUsageMiddleware | | | | | ✓ | | ✓ | ✓ | `token_usage` |
+| 9 | TitleMiddleware | | | ✓ | | | | ✓ | ✗ | `auto_title` |
+| 10 | MemoryMiddleware | | | | ✓ | | | ✓ | ✗ | `memory` |
+| 11 | ViewImageMiddleware | | ✓ | | | | | ✓ | ✗ | `vision` |
+| 12 | SubagentLimitMiddleware | | | ✓ | | | | ✓ | ✗ | `subagent` |
+| 13 | DeferredToolFilterMiddleware | | | | | ✓ | ✓ | ✓ | ✓ | `deferred_tool_filter` |
+| 14 | LoopDetectionMiddleware | ✓ | | ✓ | ✓ | ✓ | | ✓ | ✗ | 始终开启 |
+| 15 | TokenBudgetMiddleware | ✓ | | ✓ | ✓ | ✓ | | ✓ | ✓ | `token_budget` |
+| 16 | ClarificationMiddleware | | | | | | ✓ | ✓ | ✗ | 始终最后 |
 
-主 agent **14 个** middleware（`make_lead_agent`），subagent **4 个**（ThreadData、Sandbox、Guardrail、ToolErrorHandling）。`create_deerflow_agent` Phase 1 实现 **13 个**（Guardrail 仅支持自定义实例，无内置默认）。
+主 agent middleware 数量随配置变化；`create_deerflow_agent` 的 `RuntimeFeatures` 现在覆盖 TokenUsage、Guardrail、DeferredToolFilter、LoopDetection、TokenBudget 等 runtime 组件，其中 `guardrail=True` 会从 guardrails 配置创建默认 middleware。
 
 ## 执行流程
 
@@ -35,7 +38,7 @@ graph TB
 
     subgraph BA ["<b>before_agent</b> 正序 0→N"]
         direction TB
-        TD["[0] ThreadData<br/>创建线程目录"] --> UL["[1] Uploads<br/>扫描上传文件"] --> SB["[2] Sandbox<br/>获取沙箱"] --> LD_BA["[12] LoopDetection<br/>清理 stale warning"]
+        TD["[0] ThreadData<br/>创建线程目录"] --> UL["[1] Uploads<br/>扫描上传文件"] --> SB["[2] Sandbox<br/>获取沙箱"] --> LD_BA["[14] LoopDetection<br/>清理 stale warning"]
     end
 
     subgraph BM ["<b>before_model</b> 正序 0→N"]
@@ -45,7 +48,7 @@ graph TB
 
     subgraph WM ["<b>wrap_model_call</b>"]
         direction TB
-        DTC_WM["[3] DanglingToolCall<br/>补悬空 ToolMessage"] --> LD_WM["[12] LoopDetection<br/>注入当前 run warning"]
+        DTC_WM["[3] DanglingToolCall<br/>补悬空 ToolMessage"] --> LD_WM["[14] LoopDetection<br/>注入当前 run warning"]
     end
 
     LD_BA --> VI
@@ -54,14 +57,14 @@ graph TB
 
     subgraph AM ["<b>after_model</b> 反序 N→0"]
         direction TB
-        LD["[12] LoopDetection<br/>检测循环/排队 warning"] --> SL["[11] SubagentLimit<br/>截断多余 task"] --> TI["[8] Title<br/>生成标题"]
+        LD["[14] LoopDetection<br/>检测循环/排队 warning"] --> SL["[12] SubagentLimit<br/>截断多余 task"] --> TI["[9] Title<br/>生成标题"]
     end
 
     M --> LD
 
     subgraph AA ["<b>after_agent</b> 反序 N→0"]
         direction TB
-        LD_CLEAN["[12] LoopDetection<br/>清理 pending warning"] --> MEM["[9] Memory<br/>入队记忆"] --> SBR["[2] Sandbox<br/>释放沙箱"]
+        LD_CLEAN["[14] LoopDetection<br/>清理 pending warning"] --> MEM["[10] Memory<br/>入队记忆"] --> SBR["[2] Sandbox<br/>释放沙箱"]
     end
 
     TI --> LD_CLEAN
@@ -167,7 +170,7 @@ sequenceDiagram
 
 ```
 进入 before_*：   [0] → [1] → [2] → ... → [10] → MODEL
-退出 after_*：    MODEL → [13] → [11] → ... → [6] → [3] → [2] → [0]
+退出 after_*：    MODEL → [16] → [14] → ... → [6] → [3] → [2] → [0]
                           ↑ 最内层最先执行
 ```
 

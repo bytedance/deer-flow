@@ -143,7 +143,7 @@ def create_deerflow_agent(
     features: RuntimeFeatures | None = None,
     state_schema: type | None = None,
     checkpointer: BaseCheckpointSaver | None = None,
-    name: str = "default",
+    name: str | None = None,
 ) -> CompiledStateGraph:
     ...
 ```
@@ -163,6 +163,11 @@ class RuntimeFeatures:
     subagent: bool | AgentMiddleware = False
     vision: bool | AgentMiddleware = False
     auto_title: bool | AgentMiddleware = False
+    guardrail: bool | AgentMiddleware = False
+    token_usage: bool | AgentMiddleware = False
+    deferred_tool_filter: bool | AgentMiddleware = False
+    loop_detection: bool | AgentMiddleware = True
+    token_budget: bool | AgentMiddleware = False
 ```
 
 | 值 | 含义 |
@@ -402,19 +407,20 @@ Phase 1 中 `auto_title` 默认为 `False` 以避免无 config 时崩溃。其�
 ```
 Phase 1（当前 PR #1203）:
   ✓ 新增 create_deerflow_agent + RuntimeFeatures（内部 API）
-  ✓ 不改 DeerFlowClient 和 make_lead_agent
+  ✓ DeerFlowClient 和 make_lead_agent 通过 create_deerflow_agent 完成最终图构建
   ✗ middleware 内部仍读 config（已知限制）
 
 Phase 2（#1380）:
   - DeerFlowClient 构造函数增加可选参数（model, tools, features, system_prompt）
   - Options 参数覆盖 config（MemoryOptions, TitleOptions 等）
   - @Next/@Prev 装饰器
-  - 补缺失 middleware（Guardrail, TokenUsage, DeferredToolFilter）
-  - make_lead_agent 改为薄壳调 create_deerflow_agent
+  ✓ 补缺失 middleware（Guardrail, TokenUsage, DeferredToolFilter）
+  ✓ make_lead_agent 的 bootstrap/default 路径收敛到一次 create_deerflow_agent
+    调用；生产 middleware builder 与 DeerFlowClient 共享
 
 Phase 3:
-  - SDK 文档和示例
-  - deerflow.client 稳定 API
+  ✓ SDK 文档和示例
+  ✓ deerflow.client 支持 config/features/extra_middleware 参数
 ```
 
 ## 8. 设计决议

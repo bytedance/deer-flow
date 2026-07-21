@@ -15,10 +15,13 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.tools import tool
 
+from deerflow.agents.features import Prev, RuntimeFeatures
 from deerflow.agents.lead_agent import agent as lead_agent_module
 from deerflow.agents.middlewares import summarization_middleware as summarization_middleware_module
 from deerflow.agents.middlewares.loop_detection_middleware import LoopDetectionMiddleware
 from deerflow.agents.middlewares.subagent_limit_middleware import SubagentLimitMiddleware
+from deerflow.agents.middlewares.title_middleware import TitleMiddleware
+from deerflow.agents.middlewares.token_usage_middleware import TokenUsageMiddleware
 from deerflow.agents.thread_state import ThreadState
 from deerflow.config.app_config import AppConfig
 from deerflow.config.extensions_config import ExtensionsConfig
@@ -152,7 +155,7 @@ def test_make_lead_agent_attaches_tracing_callbacks_at_graph_root(monkeypatch):
         return object()
 
     monkeypatch.setattr(lead_agent_module, "create_chat_model", _fake_create_chat_model)
-    monkeypatch.setattr(lead_agent_module, "create_agent", lambda **kwargs: kwargs)
+    monkeypatch.setattr(lead_agent_module, "create_deerflow_agent", lambda **kwargs: kwargs)
 
     config: dict = {"configurable": {"model_name": "safe-model"}}
     lead_agent_module._make_lead_agent(config, app_config=app_config)
@@ -188,7 +191,7 @@ def test_internal_make_lead_agent_uses_explicit_app_config(monkeypatch):
         return object()
 
     monkeypatch.setattr(lead_agent_module, "create_chat_model", _fake_create_chat_model)
-    monkeypatch.setattr(lead_agent_module, "create_agent", lambda **kwargs: kwargs)
+    monkeypatch.setattr(lead_agent_module, "create_deerflow_agent", lambda **kwargs: kwargs)
 
     result = lead_agent_module._make_lead_agent(
         {"configurable": {"model_name": "explicit-model"}},
@@ -222,7 +225,7 @@ def test_make_lead_agent_uses_runtime_app_config_from_context_without_global_rea
         return object()
 
     monkeypatch.setattr(lead_agent_module, "create_chat_model", _fake_create_chat_model)
-    monkeypatch.setattr(lead_agent_module, "create_agent", lambda **kwargs: kwargs)
+    monkeypatch.setattr(lead_agent_module, "create_deerflow_agent", lambda **kwargs: kwargs)
 
     result = lead_agent_module.make_lead_agent(
         {
@@ -303,7 +306,7 @@ def test_make_lead_agent_disables_thinking_when_model_does_not_support_it(monkey
         return object()
 
     monkeypatch.setattr(lead_agent_module, "create_chat_model", _fake_create_chat_model)
-    monkeypatch.setattr(lead_agent_module, "create_agent", lambda **kwargs: kwargs)
+    monkeypatch.setattr(lead_agent_module, "create_deerflow_agent", lambda **kwargs: kwargs)
 
     result = lead_agent_module.make_lead_agent(
         {
@@ -347,7 +350,7 @@ def test_make_lead_agent_reads_runtime_options_from_context(monkeypatch):
         return object()
 
     monkeypatch.setattr(lead_agent_module, "create_chat_model", _fake_create_chat_model)
-    monkeypatch.setattr(lead_agent_module, "create_agent", lambda **kwargs: kwargs)
+    monkeypatch.setattr(lead_agent_module, "create_deerflow_agent", lambda **kwargs: kwargs)
 
     result = lead_agent_module.make_lead_agent(
         {
@@ -390,7 +393,7 @@ def test_make_lead_agent_filters_clarification_tool_for_non_interactive_runs(mon
     )
     monkeypatch.setattr(lead_agent_module, "build_middlewares", lambda config, model_name, agent_name=None, **kwargs: [])
     monkeypatch.setattr(lead_agent_module, "create_chat_model", lambda **kwargs: object())
-    monkeypatch.setattr(lead_agent_module, "create_agent", lambda **kwargs: kwargs)
+    monkeypatch.setattr(lead_agent_module, "create_deerflow_agent", lambda **kwargs: kwargs)
 
     result = lead_agent_module.make_lead_agent(
         {
@@ -688,6 +691,71 @@ def test_build_middlewares_omits_loop_detection_when_disabled(monkeypatch):
     )
 
     assert not any(isinstance(m, LoopDetectionMiddleware) for m in middlewares)
+
+
+def test_build_middlewares_runtime_features_can_disable_token_usage(monkeypatch):
+    app_config = _make_app_config(
+        [_make_model("safe-model", supports_thinking=False)],
+        loop_detection=LoopDetectionConfig(enabled=False),
+    )
+    app_config.token_usage.enabled = True
+
+    monkeypatch.setattr(lead_agent_module, "get_app_config", lambda: app_config)
+    monkeypatch.setattr(lead_agent_module, "build_lead_runtime_middlewares", lambda *, app_config, lazy_init=True: [])
+    monkeypatch.setattr(lead_agent_module, "_create_summarization_middleware", lambda *, app_config=None: None)
+    monkeypatch.setattr(lead_agent_module, "_create_todo_list_middleware", lambda is_plan_mode: None)
+
+    middlewares = lead_agent_module.build_middlewares(
+        {"configurable": {"is_plan_mode": False, "subagent_enabled": False}},
+        model_name="safe-model",
+        app_config=app_config,
+        runtime_features=RuntimeFeatures(token_usage=False),
+    )
+
+    assert not any(isinstance(m, TokenUsageMiddleware) for m in middlewares)
+
+
+def test_build_middlewares_runtime_features_can_disable_loop_detection(monkeypatch):
+    app_config = _make_app_config(
+        [_make_model("safe-model", supports_thinking=False)],
+        loop_detection=LoopDetectionConfig(enabled=True),
+    )
+
+    monkeypatch.setattr(lead_agent_module, "build_lead_runtime_middlewares", lambda *, app_config, lazy_init=True: [])
+    monkeypatch.setattr(lead_agent_module, "_create_summarization_middleware", lambda *, app_config=None: None)
+    monkeypatch.setattr(lead_agent_module, "_create_todo_list_middleware", lambda is_plan_mode: None)
+
+    middlewares = lead_agent_module.build_middlewares(
+        {"configurable": {"is_plan_mode": False, "subagent_enabled": False}},
+        model_name="safe-model",
+        app_config=app_config,
+        runtime_features=RuntimeFeatures(loop_detection=False),
+    )
+
+    assert not any(isinstance(m, LoopDetectionMiddleware) for m in middlewares)
+
+
+def test_build_middlewares_extra_middleware_honors_positioning(monkeypatch):
+    app_config = _make_app_config([_make_model("safe-model", supports_thinking=False)])
+
+    @Prev(TitleMiddleware)
+    class BeforeTitleMiddleware(AgentMiddleware):
+        pass
+
+    monkeypatch.setattr(lead_agent_module, "build_lead_runtime_middlewares", lambda *, app_config, lazy_init=True: [])
+    monkeypatch.setattr(lead_agent_module, "_create_summarization_middleware", lambda *, app_config=None: None)
+    monkeypatch.setattr(lead_agent_module, "_create_todo_list_middleware", lambda is_plan_mode: None)
+
+    middlewares = lead_agent_module.build_middlewares(
+        {"configurable": {"is_plan_mode": False, "subagent_enabled": False}},
+        model_name="safe-model",
+        app_config=app_config,
+        extra_middlewares=[BeforeTitleMiddleware()],
+    )
+
+    before_title_index = next(i for i, middleware in enumerate(middlewares) if isinstance(middleware, BeforeTitleMiddleware))
+    title_index = next(i for i, middleware in enumerate(middlewares) if isinstance(middleware, TitleMiddleware))
+    assert before_title_index < title_index
 
 
 def test_build_middlewares_injects_configured_extension_middlewares(monkeypatch):

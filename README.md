@@ -825,8 +825,15 @@ DeerFlow can be used as an embedded Python library without running the full HTTP
 
 ```python
 from deerflow.client import DeerFlowClient
+from deerflow.agents.features import RuntimeFeatures
 
 client = DeerFlowClient()
+
+# Optional embedded-only overrides
+client = DeerFlowClient(
+    config={"token_usage": {"enabled": True}},
+    features=RuntimeFeatures(token_usage=True),
+)
 
 # Chat
 response = client.chat("Analyze this paper for me", thread_id="my-thread")

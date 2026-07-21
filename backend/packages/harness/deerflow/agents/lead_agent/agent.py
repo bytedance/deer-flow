@@ -27,10 +27,11 @@ from __future__ import annotations
 import logging
 import secrets
 
-from langchain.agents import create_agent
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.runnables import RunnableConfig
 
+from deerflow.agents.factory import create_deerflow_agent, insert_extra_middlewares
+from deerflow.agents.features import RuntimeFeatures
 from deerflow.agents.lead_agent.prompt import apply_prompt_template
 from deerflow.agents.middlewares.clarification_middleware import ClarificationMiddleware
 from deerflow.agents.middlewares.configured_extensions import load_configured_extension_middlewares
@@ -43,7 +44,7 @@ from deerflow.agents.middlewares.terminal_response_middleware import TerminalRes
 from deerflow.agents.middlewares.title_middleware import TitleMiddleware
 from deerflow.agents.middlewares.todo_middleware import TodoMiddleware
 from deerflow.agents.middlewares.token_usage_middleware import TokenUsageMiddleware
-from deerflow.agents.middlewares.tool_error_handling_middleware import build_lead_runtime_middlewares
+from deerflow.agents.middlewares.tool_error_handling_middleware import build_lead_runtime_middlewares, create_guardrail_middleware_from_config
 from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
 from deerflow.agents.thread_state import ThreadState
 from deerflow.config.agents_config import load_agent_config, validate_agent_name
@@ -230,6 +231,174 @@ Being proactive with task management demonstrates thoroughness and ensures all r
     return TodoMiddleware(system_prompt=system_prompt, tool_description=tool_description)
 
 
+def _remove_middlewares(middlewares: list[AgentMiddleware], middleware_type: type[AgentMiddleware]) -> int | None:
+    first_index = next((idx for idx, middleware in enumerate(middlewares) if isinstance(middleware, middleware_type)), None)
+    if first_index is None:
+        return None
+    middlewares[:] = [middleware for middleware in middlewares if not isinstance(middleware, middleware_type)]
+    return first_index
+
+
+def _insert_middleware(
+    middlewares: list[AgentMiddleware],
+    middleware: AgentMiddleware,
+    *,
+    index: int | None = None,
+    before: type[AgentMiddleware] | None = None,
+) -> None:
+    if index is None and before is not None:
+        index = next((idx for idx, existing in enumerate(middlewares) if isinstance(existing, before)), None)
+    if index is None:
+        middlewares.append(middleware)
+    else:
+        middlewares.insert(index, middleware)
+
+
+def _replace_feature_middleware(
+    middlewares: list[AgentMiddleware],
+    middleware_type: type[AgentMiddleware],
+    spec: bool | AgentMiddleware,
+    *,
+    default_factory,
+    before: type[AgentMiddleware] | tuple[type[AgentMiddleware], ...] | None = None,
+) -> None:
+    """Apply one RuntimeFeatures bool/custom replacement to a built chain."""
+    existing = [(idx, middleware) for idx, middleware in enumerate(middlewares) if isinstance(middleware, middleware_type)]
+    first_index = existing[0][0] if existing else None
+    middlewares[:] = [middleware for middleware in middlewares if not isinstance(middleware, middleware_type)]
+
+    if spec is False:
+        return
+    if isinstance(spec, AgentMiddleware):
+        replacement = spec
+    elif existing:
+        replacement = existing[0][1]
+    else:
+        replacement = default_factory()
+        if replacement is None:
+            return
+    if first_index is None and before is not None:
+        first_index = next((idx for idx, middleware in enumerate(middlewares) if isinstance(middleware, before)), None)
+    _insert_middleware(middlewares, replacement, index=first_index)
+
+
+def _apply_runtime_feature_overrides(
+    middlewares: list[AgentMiddleware],
+    features: RuntimeFeatures | None,
+    *,
+    app_config: AppConfig,
+    deferred_setup,
+    runtime_config: dict,
+    agent_name: str | None,
+) -> None:
+    """Apply embedded-client RuntimeFeatures overrides to the full lead chain."""
+    if features is None:
+        return
+
+    from deerflow.agents.middlewares.deferred_tool_filter_middleware import DeferredToolFilterMiddleware
+    from deerflow.agents.middlewares.sandbox_audit_middleware import SandboxAuditMiddleware
+    from deerflow.agents.middlewares.system_message_coalescing_middleware import SystemMessageCoalescingMiddleware
+    from deerflow.agents.middlewares.thread_data_middleware import ThreadDataMiddleware
+    from deerflow.agents.middlewares.uploads_middleware import UploadsMiddleware
+    from deerflow.sandbox.middleware import SandboxMiddleware
+
+    sandbox_types = (ThreadDataMiddleware, UploadsMiddleware, SandboxMiddleware)
+    if features.sandbox is False:
+        middlewares[:] = [middleware for middleware in middlewares if not isinstance(middleware, sandbox_types)]
+    elif isinstance(features.sandbox, AgentMiddleware):
+        sandbox_index = _remove_middlewares(middlewares, SandboxMiddleware)
+        _insert_middleware(middlewares, features.sandbox, index=sandbox_index, before=SandboxAuditMiddleware)
+
+    _replace_feature_middleware(
+        middlewares,
+        DeerFlowSummarizationMiddleware,
+        features.summarization,
+        default_factory=lambda: _create_summarization_middleware(app_config=app_config),
+        before=TodoMiddleware,
+    )
+    _replace_feature_middleware(
+        middlewares,
+        TokenUsageMiddleware,
+        features.token_usage,
+        default_factory=TokenUsageMiddleware,
+        before=TitleMiddleware,
+    )
+    _replace_feature_middleware(
+        middlewares,
+        TitleMiddleware,
+        features.auto_title,
+        default_factory=lambda: TitleMiddleware(app_config=app_config),
+        before=MemoryMiddleware,
+    )
+    _replace_feature_middleware(
+        middlewares,
+        MemoryMiddleware,
+        features.memory,
+        default_factory=lambda: MemoryMiddleware(agent_name=agent_name, memory_config=app_config.memory),
+        before=ViewImageMiddleware,
+    )
+    _replace_feature_middleware(
+        middlewares,
+        ViewImageMiddleware,
+        features.vision,
+        default_factory=ViewImageMiddleware,
+        before=SystemMessageCoalescingMiddleware,
+    )
+
+    max_concurrent_subagents = runtime_config.get("max_concurrent_subagents", 3)
+    max_total_subagents = runtime_config.get("max_total_subagents", _default_max_total_subagents(app_config))
+    _replace_feature_middleware(
+        middlewares,
+        SubagentLimitMiddleware,
+        features.subagent,
+        default_factory=lambda: SubagentLimitMiddleware(
+            max_concurrent=max_concurrent_subagents,
+            max_total=max_total_subagents,
+        ),
+        before=(LoopDetectionMiddleware, TerminalResponseMiddleware),
+    )
+    _replace_feature_middleware(
+        middlewares,
+        LoopDetectionMiddleware,
+        features.loop_detection,
+        default_factory=lambda: LoopDetectionMiddleware.from_config(app_config.loop_detection),
+        before=TerminalResponseMiddleware,
+    )
+
+    from deerflow.agents.middlewares.token_budget_middleware import TokenBudgetMiddleware
+
+    _replace_feature_middleware(
+        middlewares,
+        TokenBudgetMiddleware,
+        features.token_budget,
+        default_factory=lambda: TokenBudgetMiddleware.from_config(app_config.token_budget),
+        before=TerminalResponseMiddleware,
+    )
+
+    from deerflow.guardrails.middleware import GuardrailMiddleware
+
+    def _default_guardrail():
+        middleware = create_guardrail_middleware_from_config(app_config.guardrails)
+        if middleware is None:
+            raise ValueError("guardrail=True requires guardrails.enabled and guardrails.provider to be configured")
+        return middleware
+
+    _replace_feature_middleware(
+        middlewares,
+        GuardrailMiddleware,
+        features.guardrail,
+        default_factory=_default_guardrail,
+        before=SandboxAuditMiddleware,
+    )
+    _replace_feature_middleware(
+        middlewares,
+        DeferredToolFilterMiddleware,
+        features.deferred_tool_filter,
+        default_factory=lambda: DeferredToolFilterMiddleware(deferred_setup.deferred_names, deferred_setup.catalog_hash) if deferred_setup is not None and deferred_setup.deferred_names else None,
+        before=SystemMessageCoalescingMiddleware,
+    )
+
+
 # ThreadDataMiddleware must be before SandboxMiddleware to ensure thread_id is available
 # UploadsMiddleware should be after ThreadDataMiddleware to access thread_id
 # DanglingToolCallMiddleware patches missing ToolMessages before model sees the history
@@ -245,12 +414,14 @@ def build_middlewares(
     model_name: str | None,
     agent_name: str | None = None,
     custom_middlewares: list[AgentMiddleware] | None = None,
+    extra_middlewares: list[AgentMiddleware] | None = None,
     *,
     available_skills: set[str] | None = None,
     app_config: AppConfig | None = None,
     deferred_setup=None,
     mcp_routing_middleware: AgentMiddleware | None = None,
     user_id: str | None = None,
+    runtime_features: RuntimeFeatures | None = None,
 ):
     """Build the lead-agent middleware chain based on runtime configuration.
 
@@ -264,6 +435,7 @@ def build_middlewares(
         model_name: Resolved runtime model name; gates vision-only middleware.
         agent_name: If provided, MemoryMiddleware will use per-agent memory storage.
         custom_middlewares: Optional list of custom middlewares to inject into the chain.
+        extra_middlewares: Additional middleware positioned with ``@Next``/``@Prev``.
         app_config: Explicit AppConfig; falls back to ``get_app_config()`` when omitted.
         deferred_setup: Optional deferred-MCP-tool setup that attaches
             ``DeferredToolFilterMiddleware`` when ``tool_search`` is enabled.
@@ -271,6 +443,8 @@ def build_middlewares(
             deferred MCP schemas before the deferred filter runs.
         user_id: Effective user ID for user-scoped skill loading. Passed through
             to ``SkillActivationMiddleware`` so it can resolve per-user custom skills.
+        runtime_features: Optional embedded-client feature overrides for the
+            runtime middlewares also exposed by ``create_deerflow_agent``.
 
     Returns:
         List of middleware instances.
@@ -422,8 +596,19 @@ def build_middlewares(
     if safety_config.enabled:
         middlewares.append(SafetyFinishReasonMiddleware.from_config(safety_config))
 
+    _apply_runtime_feature_overrides(
+        middlewares,
+        runtime_features,
+        app_config=resolved_app_config,
+        deferred_setup=deferred_setup,
+        runtime_config=cfg,
+        agent_name=agent_name,
+    )
+
     # ClarificationMiddleware should always be last
     middlewares.append(ClarificationMiddleware())
+    if extra_middlewares:
+        insert_extra_middlewares(middlewares, extra_middlewares)
     return middlewares
 
 
@@ -562,73 +747,35 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
             container_base_path=container_base_path,
         )
         raw_tools = get_available_tools(model_name=model_name, subagent_enabled=subagent_enabled, app_config=resolved_app_config) + [setup_agent]
-        configured_tools = raw_tools
-        if non_interactive:
-            configured_tools = [tool for tool in configured_tools if tool.name not in _NON_INTERACTIVE_DISABLED_TOOL_NAMES]
-        final_tools, setup = assemble_deferred_tools(configured_tools, enabled=resolved_app_config.tool_search.enabled)
-        mcp_routing_middleware = build_mcp_routing_middleware(
-            final_tools,
-            setup,
-            top_k=resolved_app_config.tool_search.auto_promote_top_k,
+        graph_agent_name = None
+        graph_available_skills = set(_BOOTSTRAP_SKILL_NAMES)
+        model_kwargs = {}
+        mcp_routing_hints_section = None
+    else:
+        # Custom agents can update their own SOUL.md / config via update_agent.
+        # The default agent (no agent_name) does not see this tool.
+        skill_setup = build_skill_search_setup(
+            enabled_skills,
+            enabled=skill_search_enabled,
+            container_base_path=container_base_path,
         )
-        if skill_setup.describe_skill_tool:
-            final_tools.append(skill_setup.describe_skill_tool)
-        if should_use_memory_tools(resolved_app_config.memory):
-            _append_memory_tools_without_name_conflicts(final_tools)
-        return create_agent(
-            model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, app_config=resolved_app_config, attach_tracing=False),
-            tools=final_tools,
-            middleware=build_middlewares(
-                config,
-                model_name=model_name,
-                available_skills=set(_BOOTSTRAP_SKILL_NAMES),
-                app_config=resolved_app_config,
-                deferred_setup=setup,
-                mcp_routing_middleware=mcp_routing_middleware,
-                user_id=resolved_user_id,
-            ),
-            system_prompt=apply_prompt_template(
-                subagent_enabled=subagent_enabled,
-                max_concurrent_subagents=max_concurrent_subagents,
-                max_total_subagents=max_total_subagents,
-                available_skills=set(_BOOTSTRAP_SKILL_NAMES),
-                app_config=resolved_app_config,
-                deferred_names=setup.deferred_names,
-                user_id=resolved_user_id,
-                skill_names=skill_setup.skill_names or None,
-            ),
-            state_schema=ThreadState,
+        # Webhook prompts are untrusted, so they cannot persistently mutate a
+        # custom agent's SOUL.md or config through update_agent.
+        channel_name = cfg.get("channel_name")
+        is_webhook_channel = channel_name in _WEBHOOK_CHANNELS
+        extra_tools = [update_agent] if agent_name and not is_webhook_channel else []
+        raw_tools = get_available_tools(
+            model_name=model_name,
+            groups=agent_config.tool_groups if agent_config else None,
+            subagent_enabled=subagent_enabled,
+            app_config=resolved_app_config,
         )
+        raw_tools += extra_tools
+        graph_agent_name = agent_name
+        graph_available_skills = available_skills
+        model_kwargs = {"reasoning_effort": reasoning_effort}
 
-    # Custom agents can update their own SOUL.md / config via update_agent.
-    # The default agent (no agent_name) does not see this tool.
-    # Build skill search setup from the agent-available skills. The same
-    # allowlist is enforced by the runtime policy resolver, so describe_skill
-    # cannot expose a skill this custom agent is not allowed to activate.
-    skill_setup = build_skill_search_setup(
-        enabled_skills,
-        enabled=skill_search_enabled,
-        container_base_path=container_base_path,
-    )
-    #
-    # Withhold ``update_agent`` from runs triggered by webhook channels
-    # (currently only ``github``). Webhook prompts come from arbitrary
-    # external commenters — anyone who can post on a configured repo and
-    # types ``@<bot>`` clears the trigger gate. Exposing the tool there
-    # gives that commenter a path to mutate the agent's ``tool_groups``
-    # / ``SOUL.md`` / ``model``, and the change persists for every
-    # subsequent run. Self-mutation belongs in operator-trusted surfaces
-    # (the chat UI, the HTTP API), not in webhook fan-out.
-    #
-    # The channel name is plumbed into ``run_context`` by
-    # ``ChannelManager._resolve_run_params``; bootstrap and direct invocations
-    # leave it unset, so ``update_agent`` remains available there.
-    channel_name = cfg.get("channel_name")
-    is_webhook_channel = channel_name in _WEBHOOK_CHANNELS
-    extra_tools = [update_agent] if agent_name and not is_webhook_channel else []
-    # Default lead agent (unchanged behavior)
-    raw_tools = get_available_tools(model_name=model_name, groups=agent_config.tool_groups if agent_config else None, subagent_enabled=subagent_enabled, app_config=resolved_app_config)
-    configured_tools = raw_tools + extra_tools
+    configured_tools = raw_tools
     if non_interactive:
         configured_tools = [tool for tool in configured_tools if tool.name not in _NON_INTERACTIVE_DISABLED_TOOL_NAMES]
     final_tools, setup = assemble_deferred_tools(configured_tools, enabled=resolved_app_config.tool_search.enabled)
@@ -637,19 +784,27 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
         setup,
         top_k=resolved_app_config.tool_search.auto_promote_top_k,
     )
-    mcp_routing_hints_section = get_mcp_routing_hints_prompt_section(configured_tools, deferred_names=setup.deferred_names)
+    if not is_bootstrap:
+        mcp_routing_hints_section = get_mcp_routing_hints_prompt_section(configured_tools, deferred_names=setup.deferred_names)
     if skill_setup.describe_skill_tool:
         final_tools.append(skill_setup.describe_skill_tool)
     if should_use_memory_tools(resolved_app_config.memory):
         _append_memory_tools_without_name_conflicts(final_tools)
-    return create_agent(
-        model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, reasoning_effort=reasoning_effort, app_config=resolved_app_config, attach_tracing=False),
+
+    return create_deerflow_agent(
+        model=create_chat_model(
+            name=model_name,
+            thinking_enabled=thinking_enabled,
+            app_config=resolved_app_config,
+            attach_tracing=False,
+            **model_kwargs,
+        ),
         tools=final_tools,
         middleware=build_middlewares(
             config,
             model_name=model_name,
-            agent_name=agent_name,
-            available_skills=available_skills,
+            agent_name=graph_agent_name,
+            available_skills=graph_available_skills,
             app_config=resolved_app_config,
             deferred_setup=setup,
             mcp_routing_middleware=mcp_routing_middleware,
@@ -659,8 +814,8 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
             subagent_enabled=subagent_enabled,
             max_concurrent_subagents=max_concurrent_subagents,
             max_total_subagents=max_total_subagents,
-            agent_name=agent_name,
-            available_skills=available_skills,
+            agent_name=graph_agent_name,
+            available_skills=graph_available_skills,
             app_config=resolved_app_config,
             deferred_names=setup.deferred_names,
             mcp_routing_hints_section=mcp_routing_hints_section,
