@@ -825,6 +825,16 @@ async def launch_scheduled_thread_run(
     return {"run_id": record.run_id, "thread_id": record.thread_id}
 
 
+# Shared response headers for every Gateway SSE endpoint. ``no-transform``
+# prevents intermediary re-encoding or compression, while nginx honors
+# ``X-Accel-Buffering`` to disable its response buffering.
+SSE_RESPONSE_HEADERS = {
+    "Cache-Control": "no-cache, no-transform",
+    "Connection": "keep-alive",
+    "X-Accel-Buffering": "no",
+}
+
+
 async def sse_consumer(
     bridge: StreamBridge,
     record: RunRecord,

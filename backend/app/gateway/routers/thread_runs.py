@@ -25,7 +25,7 @@ from pydantic import BaseModel, Field
 from app.gateway.authz import require_permission
 from app.gateway.deps import get_checkpointer, get_current_user, get_feedback_repo, get_run_event_store, get_run_manager, get_run_store, get_stream_bridge
 from app.gateway.pagination import trim_run_message_page
-from app.gateway.services import sse_consumer, start_run, wait_for_run_completion
+from app.gateway.services import SSE_RESPONSE_HEADERS, sse_consumer, start_run, wait_for_run_completion
 from deerflow.runtime import CancelOutcome, RunRecord, RunStatus, serialize_channel_values_for_api
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, get_original_user_content_text, message_to_text
 from deerflow.workspace_changes import get_workspace_changes_response
@@ -510,9 +510,7 @@ async def stream_run(thread_id: str, body: RunCreateRequest, request: Request) -
         sse_consumer(bridge, record, request, run_mgr),
         media_type="text/event-stream",
         headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
+            **SSE_RESPONSE_HEADERS,
             # LangGraph Platform includes run metadata in this header.
             # The SDK uses a greedy regex to extract the run id from this path,
             # so it must point at the canonical run resource without extra suffixes.
@@ -630,11 +628,7 @@ async def join_run(thread_id: str, run_id: str, request: Request) -> StreamingRe
     return StreamingResponse(
         sse_consumer(bridge, record, request, run_mgr),
         media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
+        headers=SSE_RESPONSE_HEADERS,
     )
 
 
@@ -690,11 +684,7 @@ async def stream_existing_run(
     return StreamingResponse(
         sse_consumer(bridge, record, request, run_mgr),
         media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
+        headers=SSE_RESPONSE_HEADERS,
     )
 
 
