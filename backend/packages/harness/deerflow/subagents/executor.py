@@ -26,8 +26,9 @@ from deerflow.agents.thread_state import SandboxState, ThreadDataState, ThreadSt
 from deerflow.authz.principal import normalize_authz_attributes
 from deerflow.config import get_app_config
 from deerflow.config.app_config import AppConfig
+from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
 from deerflow.models import create_chat_model
-from deerflow.skills.tool_policy import filter_tools_by_skill_allowed_tools
+from deerflow.skills.tool_policy import ALWAYS_AVAILABLE_BUILTIN_TOOL_NAMES, filter_tools_by_skill_allowed_tools
 from deerflow.skills.types import Skill
 from deerflow.subagents.config import SubagentConfig, resolve_subagent_model_name
 from deerflow.subagents.step_events import capture_new_step_messages
@@ -44,6 +45,8 @@ if TYPE_CHECKING:
     from deerflow.tools.builtins.tool_search import DeferredToolSetup
 
 logger = logging.getLogger(__name__)
+
+_SKILL_LOADER_TOOL_NAME = "read_file"
 
 
 _previous_shutdown_isolated_subagent_loop = globals().get("_shutdown_isolated_subagent_loop")
@@ -588,41 +591,82 @@ class SubagentExecutor:
         return all_skills
 
     def _apply_skill_allowed_tools(self, skills: list[Skill]) -> list[BaseTool]:
-        return filter_tools_by_skill_allowed_tools(self._base_tools, skills)
+        return filter_tools_by_skill_allowed_tools(
+            self._base_tools,
+            skills,
+            always_allowed_tool_names=ALWAYS_AVAILABLE_BUILTIN_TOOL_NAMES,
+        )
 
-    async def _load_skill_messages(self, skills: list[Skill]) -> list[SystemMessage]:
-        """Load skill content as conversation items based on config.skills.
+    def _skills_container_path(self) -> str:
+        """Return the configured skills mount path, falling back safely in tests."""
+        if self.app_config is not None:
+            configured = getattr(getattr(self.app_config, "skills", None), "container_path", None)
+            return configured or DEFAULT_SKILLS_CONTAINER_PATH
 
-        Aligned with Codex's pattern: each subagent loads its own skills
-        per-session and injects them as conversation items (developer messages),
-        not as system prompt text. The config.skills whitelist controls which
-        skills are loaded:
-        - None: load all enabled skills
-        - []: no skills
-        - ["skill-a", "skill-b"]: only these skills
+        try:
+            configured = get_app_config().skills.container_path
+        except Exception:
+            return DEFAULT_SKILLS_CONTAINER_PATH
+        return configured or DEFAULT_SKILLS_CONTAINER_PATH
 
-        Returns:
-            List of SystemMessages containing skill content.
-        """
+    def _skill_mutability_label(self, category: object) -> str:
+        category_value = getattr(category, "value", category)
+        if category_value == "custom":
+            return "[custom, editable]"
+        if category_value == "legacy":
+            return "[legacy, read-only]"
+        return "[built-in]"
+
+    def _render_available_skill(self, skill: Skill, container_path: str) -> str:
+        """Render escaped skill metadata for the progressive-loading prompt."""
+        name = html.escape(getattr(skill, "name", ""), quote=False)
+        description = html.escape(getattr(skill, "description", ""), quote=False)
+        location = html.escape(skill.get_container_file_path(container_path), quote=False)
+        category = getattr(skill, "category", "public")
+        return f"    <skill>\n        <name>{name}</name>\n        <description>{description} {self._skill_mutability_label(category)}</description>\n        <location>{location}</location>\n    </skill>"
+
+    def _build_skill_section(self, skills: list[Skill]) -> str:
+        """Build a metadata-only skill section for progressive loading."""
         if not skills:
-            return []
+            return ""
 
-        # Read each skill's SKILL.md content and create conversation items
-        messages = []
+        container_path = self._skills_container_path()
+        skill_items = "\n".join(self._render_available_skill(skill, container_path) for skill in skills)
+        return f"""<skill_system>
+You have access to skills that provide optimized workflows for specific tasks. Each skill contains best practices, frameworks, and references to additional resources.
+
+**Progressive Loading Pattern:**
+1. When a task matches a skill's use case, immediately call `{_SKILL_LOADER_TOOL_NAME}` on the skill's main file using the path provided in the skill tag below
+2. Read and understand the skill's workflow and instructions
+3. The skill file contains references to external resources under the same folder
+4. Load referenced resources only when needed during execution
+5. Follow the skill's instructions precisely
+
+**Skills are located at:** {html.escape(container_path, quote=False)}
+
+<available_skills>
+{skill_items}
+</available_skills>
+
+</skill_system>"""
+
+    async def _build_eager_skill_section(self, skills: list[Skill]) -> str:
+        """Build escaped eager skill instructions when read_file is unavailable."""
+        skill_items: list[str] = []
         for skill in skills:
             try:
                 content = await asyncio.to_thread(skill.skill_file.read_text, encoding="utf-8")
-                content = content.strip()
-                if content:
-                    # name/body are untrusted (installable ``.skill`` archive); escape
-                    # both so the body cannot forge a framework tag, matching the
-                    # slash-activation sibling (name quote=True attribute, body quote=False).
-                    messages.append(SystemMessage(content=f'<skill name="{html.escape(skill.name, quote=True)}">\n{html.escape(content, quote=False)}\n</skill>'))
-                    logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} loaded skill: {skill.name}")
-            except Exception:
-                logger.debug(f"[trace={self.trace_id}] Failed to read skill {skill.name}", exc_info=True)
+            except Exception as exc:
+                raise RuntimeError(f"Failed to load instructions for skill {skill.name!r} from {skill.skill_file} because {_SKILL_LOADER_TOOL_NAME} is unavailable") from exc
 
-        return messages
+            content = content.strip()
+            if not content:
+                continue
+            name = html.escape(skill.name, quote=True)
+            body = html.escape(content, quote=False)
+            skill_items.append(f'<skill name="{name}">\n{body}\n</skill>')
+
+        return "\n".join(skill_items)
 
     async def _build_initial_state(self, task: str) -> tuple[dict[str, Any], list[BaseTool], "DeferredToolSetup"]:
         """Build the initial state for agent execution.
@@ -653,7 +697,11 @@ class SubagentExecutor:
         # surface a tool the policy denied. This matches the lead agent.
         enabled = (self.app_config or get_app_config()).tool_search.enabled
         final_tools, deferred_setup = assemble_deferred_tools(filtered_tools, enabled=enabled)
-        skill_messages = await self._load_skill_messages(skills)
+        if skills and not any(tool.name == _SKILL_LOADER_TOOL_NAME for tool in final_tools):
+            logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} {_SKILL_LOADER_TOOL_NAME} unavailable; eagerly loading skill instructions")
+            skill_section = await self._build_eager_skill_section(skills)
+        else:
+            skill_section = self._build_skill_section(skills)
 
         # Combine system_prompt and skills into a single SystemMessage.
         # Some LLM APIs reject multiple SystemMessages with
@@ -661,8 +709,8 @@ class SubagentExecutor:
         system_parts: list[str] = []
         if self.config.system_prompt:
             system_parts.append(self.config.system_prompt)
-        for skill_msg in skill_messages:
-            system_parts.append(skill_msg.content)
+        if skill_section:
+            system_parts.append(skill_section)
         # Name the deferred MCP tools in the prompt; their schemas stay withheld
         # until tool_search promotes them. Empty set -> "" -> appends nothing.
         deferred_section = get_deferred_tools_prompt_section(deferred_names=deferred_setup.deferred_names)
