@@ -6,7 +6,11 @@ import {
   isValidElement,
   type ReactNode,
   useContext,
+  useDeferredValue,
+  useEffect,
   useMemo,
+  useRef,
+  useState,
 } from "react";
 
 import { type ClipboardSafeStreamdownProps } from "@/components/ai-elements/streamdown";
@@ -33,7 +37,124 @@ type StreamingCodeProps = ComponentProps<"code"> & {
   children?: ReactNode;
 };
 
+const SMOOTH_REVEAL_MIN_DELTA = 80;
+const SMOOTH_REVEAL_MIN_CHARS_PER_FRAME = 8;
+const SMOOTH_REVEAL_DURATION_MS = 300;
+
 const StreamingCodeBlockContext = createContext(false);
+
+function useSmoothStreamingContent(content: string, isLoading: boolean) {
+  const initialContent =
+    isLoading && content.length >= SMOOTH_REVEAL_MIN_DELTA ? "" : content;
+  const [displayContent, setDisplayContent] = useState(initialContent);
+  const displayContentRef = useRef(initialContent);
+  const targetContentRef = useRef(content);
+  const sawLoadingRef = useRef(isLoading);
+
+  useEffect(() => {
+    if (isLoading) {
+      sawLoadingRef.current = true;
+    }
+  }, [isLoading]);
+
+  useEffect(() => {
+    targetContentRef.current = content;
+
+    const current = displayContentRef.current;
+    const delta = content.length - current.length;
+    const shouldSmoothReveal =
+      delta >= SMOOTH_REVEAL_MIN_DELTA &&
+      content.startsWith(current) &&
+      (isLoading || sawLoadingRef.current);
+
+    if (!shouldSmoothReveal) {
+      if (current !== content) {
+        displayContentRef.current = content;
+        setDisplayContent(content);
+      }
+      if (!isLoading) {
+        sawLoadingRef.current = false;
+      }
+      return;
+    }
+
+    let cancelled = false;
+    let frame: number | null = null;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let generation = 0;
+    const startedAt = performance.now();
+    const startLength = current.length;
+
+    const tick = (now: number, scheduledGeneration: number) => {
+      if (cancelled || scheduledGeneration !== generation) {
+        return;
+      }
+      generation += 1;
+      if (frame !== null) {
+        cancelAnimationFrame(frame);
+        frame = null;
+      }
+      if (timer !== null) {
+        clearTimeout(timer);
+        timer = null;
+      }
+
+      const target = targetContentRef.current;
+      const latest = displayContentRef.current;
+      if (!target.startsWith(latest) || latest.length >= target.length) {
+        if (!isLoading) {
+          sawLoadingRef.current = false;
+        }
+        return;
+      }
+
+      const progress = Math.min(
+        1,
+        (now - startedAt) / SMOOTH_REVEAL_DURATION_MS,
+      );
+      const elapsedLength = startLength + Math.ceil(delta * progress);
+      const nextLength = Math.max(
+        latest.length + SMOOTH_REVEAL_MIN_CHARS_PER_FRAME,
+        elapsedLength,
+      );
+      const next = target.slice(0, nextLength);
+      displayContentRef.current = next;
+      setDisplayContent(next);
+
+      if (next.length < target.length) {
+        scheduleTick();
+      } else if (!isLoading) {
+        sawLoadingRef.current = false;
+      }
+    };
+
+    const scheduleTick = () => {
+      const scheduledGeneration = ++generation;
+      frame = requestAnimationFrame((now) => tick(now, scheduledGeneration));
+      timer = setTimeout(
+        () => tick(performance.now(), scheduledGeneration),
+        50,
+      );
+    };
+
+    scheduleTick();
+    return () => {
+      cancelled = true;
+      generation += 1;
+      if (frame !== null) {
+        cancelAnimationFrame(frame);
+      }
+      if (timer !== null) {
+        clearTimeout(timer);
+      }
+    };
+  }, [content, isLoading]);
+
+  return {
+    content: displayContent,
+    isRevealing: displayContent !== content,
+  };
+}
 
 function StreamingPre({ children }: ComponentProps<"pre">) {
   const childClassName = isValidElement<{ className?: string }>(children)
@@ -101,9 +222,16 @@ export function MarkdownContent({
   remarkPlugins = streamdownPluginsWithoutRawHtml.remarkPlugins,
   components: componentsFromProps,
 }: MarkdownContentProps) {
+  const deferredContent = useDeferredValue(content);
+  const targetContent = isLoading ? deferredContent : content;
+  const { content: displayContent, isRevealing } = useSmoothStreamingContent(
+    targetContent,
+    isLoading,
+  );
+  const isStreamingRender = isLoading || isRevealing;
   const normalizedContent = useMemo(
-    () => preprocessStreamdownMarkdown(content),
-    [content],
+    () => preprocessStreamdownMarkdown(displayContent),
+    [displayContent],
   );
   const effectiveRehypePlugins = useMemo(() => {
     const base = streamdownPluginsWithoutRawHtml.rehypePlugins ?? [];
@@ -115,7 +243,7 @@ export function MarkdownContent({
       a: createMarkdownLinkComponent(),
       ...componentsFromProps,
     };
-    if (!isLoading) {
+    if (!isStreamingRender) {
       return baseComponents;
     }
     return {
@@ -123,9 +251,9 @@ export function MarkdownContent({
       code: componentsFromProps?.code ?? StreamingCode,
       pre: componentsFromProps?.pre ?? StreamingPre,
     };
-  }, [componentsFromProps, isLoading]);
+  }, [componentsFromProps, isStreamingRender]);
 
-  if (!content) return null;
+  if (!displayContent) return null;
 
   return (
     <SafeMessageResponse
@@ -133,7 +261,7 @@ export function MarkdownContent({
       remarkPlugins={remarkPlugins}
       rehypePlugins={effectiveRehypePlugins}
       components={components}
-      parseIncompleteMarkdown={isLoading}
+      parseIncompleteMarkdown={isStreamingRender}
     >
       {normalizedContent}
     </SafeMessageResponse>
