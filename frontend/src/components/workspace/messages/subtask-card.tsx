@@ -7,7 +7,7 @@ import {
   WrenchIcon,
   XCircleIcon,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import {
   ChainOfThought,
@@ -23,6 +23,7 @@ import { useModels } from "@/core/models/hooks";
 import { useRehypeSplitWordsIntoSpans } from "@/core/rehype";
 import { streamdownPluginsWithWordAnimation } from "@/core/streamdown";
 import { SafeStreamdown } from "@/core/streamdown/components";
+import type { Subtask } from "@/core/tasks";
 import { fetchSubtaskSteps } from "@/core/tasks/api";
 import { useSubtask, useUpdateSubtask } from "@/core/tasks/context";
 import {
@@ -30,6 +31,7 @@ import {
   resolveSubtaskModelLabel,
 } from "@/core/tasks/presentation";
 import { stepsForDisplay } from "@/core/tasks/steps";
+import { resolveRenderedSubtask } from "@/core/tasks/subtask-render";
 import { explainLastToolCall } from "@/core/tools/utils";
 import { cn } from "@/lib/utils";
 
@@ -44,42 +46,36 @@ export function SubtaskCard({
   threadId,
   runId,
   isLoading,
+  fallbackTask,
 }: {
   className?: string;
   taskId: string;
   threadId?: string;
   runId?: string;
   isLoading: boolean;
+  fallbackTask?: Subtask;
 }) {
   const { t } = useI18n();
   const [collapsed, setCollapsed] = useState(true);
   const rehypePlugins = useRehypeSplitWordsIntoSpans(isLoading);
-  const task = useSubtask(taskId)!;
+  const liveTask = useSubtask(taskId);
+  const task = resolveRenderedSubtask(liveTask, fallbackTask);
   const { models, tokenUsageEnabled } = useModels();
   const updateSubtask = useUpdateSubtask();
-  const modelLabel = resolveSubtaskModelLabel(task.modelName, models);
-  const tokenLabel = tokenUsageEnabled
-    ? formatSubtaskTokenUsage(task.usage)
-    : undefined;
-  const runtimeUsageLabel = tokenUsageEnabled
-    ? tokenLabel
-      ? `${tokenLabel} ${t.tokenUsage.label}`
-      : task.status === "in_progress"
-        ? t.tokenUsage.collecting
-        : t.tokenUsage.unavailableShort
-    : undefined;
 
   // The card shows the subagent's step timeline (#3779): its reasoning turns
   // (AI text) interleaved with the tools it ran (by name). See stepsForDisplay
   // for what is kept/dropped.
-  const displaySteps = stepsForDisplay(task.steps, task.status);
+  const displaySteps = task ? stepsForDisplay(task.steps, task.status) : [];
 
   // Backfill step history on expand for historical runs (#3779). Live runs
   // already have steps from SSE, so the `steps.length` guard skips the fetch.
-  const stepsCount = task.steps?.length ?? 0;
+  const stepsCount = task?.steps?.length ?? 0;
+  const taskStatus = task?.status;
+  const hasTask = task !== undefined;
   const backfilledRef = useRef(false);
   useEffect(() => {
-    if (collapsed || backfilledRef.current || stepsCount > 0) {
+    if (!hasTask || collapsed || backfilledRef.current || stepsCount > 0) {
       return;
     }
     if (!threadId || !runId) {
@@ -96,16 +92,33 @@ export function SubtaskCard({
         // Allow a retry on the next expand if the fetch failed.
         backfilledRef.current = false;
       });
-  }, [collapsed, stepsCount, threadId, runId, taskId, updateSubtask]);
-  const icon = useMemo(() => {
-    if (task.status === "completed") {
-      return <CheckCircleIcon className="size-3" />;
-    } else if (task.status === "failed") {
-      return <XCircleIcon className="size-3 text-red-500" />;
-    } else if (task.status === "in_progress") {
-      return <Loader2Icon className="size-3 animate-spin" />;
-    }
-  }, [task.status]);
+  }, [collapsed, hasTask, stepsCount, threadId, runId, taskId, updateSubtask]);
+
+  const icon =
+    taskStatus === "completed" ? (
+      <CheckCircleIcon className="size-3" />
+    ) : taskStatus === "failed" ? (
+      <XCircleIcon className="size-3 text-red-500" />
+    ) : taskStatus === "in_progress" ? (
+      <Loader2Icon className="size-3 animate-spin" />
+    ) : null;
+
+  if (!task) {
+    return null;
+  }
+
+  const modelLabel = resolveSubtaskModelLabel(task.modelName, models);
+  const tokenLabel = tokenUsageEnabled
+    ? formatSubtaskTokenUsage(task.usage)
+    : undefined;
+  const runtimeUsageLabel = tokenUsageEnabled
+    ? tokenLabel
+      ? `${tokenLabel} ${t.tokenUsage.label}`
+      : task.status === "in_progress"
+        ? t.tokenUsage.collecting
+        : t.tokenUsage.unavailableShort
+    : undefined;
+
   return (
     <ChainOfThought
       className={cn("relative w-full gap-2 rounded-lg border py-0", className)}
