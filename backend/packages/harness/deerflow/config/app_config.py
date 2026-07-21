@@ -378,9 +378,17 @@ class AppConfig(BaseModel):
         if "circuit_breaker" in config_data:
             config_data["circuit_breaker"] = config_data["circuit_breaker"]
 
-        # Load extensions config separately (it's in a different file)
+        # Load extensions config separately (it's in a different file), while
+        # preserving any config.yaml-backed extension fields. config.yaml wins
+        # when it explicitly declares a field because those values are part of
+        # the main AppConfig hot-reload contract.
+        yaml_extensions = config_data.get("extensions")
         extensions_config = ExtensionsConfig.from_file()
-        config_data["extensions"] = extensions_config.model_dump()
+        extensions_data = extensions_config.model_dump(by_alias=True)
+        if isinstance(yaml_extensions, Mapping):
+            yaml_extensions_config = ExtensionsConfig.model_validate(yaml_extensions)
+            extensions_data.update(yaml_extensions_config.model_dump(by_alias=True, exclude_unset=True))
+        config_data["extensions"] = extensions_data
 
         result = cls.model_validate(config_data)
         if not result.models:

@@ -107,6 +107,7 @@ export const enUS: Translations = {
     largeUnavailable: "Large file. Diff omitted.",
     sensitiveUnavailable: "Sensitive path. Content hidden.",
     truncatedUnavailable: "Diff omitted because the change set is too large.",
+    symlinkUnavailable: "Symlink change. Diff unavailable.",
     truncatedSummary: "Some changes were truncated.",
   },
 

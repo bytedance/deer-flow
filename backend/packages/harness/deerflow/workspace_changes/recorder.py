@@ -147,7 +147,7 @@ async def record_workspace_changes(
 
         payload = result.to_dict()
         summary = result.summary
-        changed_file_count = summary.created + summary.modified + summary.deleted
+        changed_file_count = summary.created + summary.modified + summary.deleted + summary.symlink_created
         content = f"{changed_file_count} file{'s' if changed_file_count != 1 else ''} changed +{summary.additions} -{summary.deletions}"
         return await event_store.put(
             thread_id=thread_id,
