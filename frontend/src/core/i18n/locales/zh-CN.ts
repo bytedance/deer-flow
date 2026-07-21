@@ -177,6 +177,8 @@ export const zhCN: Translations = {
     goalNone: "当前没有目标。",
     goalActive: "当前目标：{goal}",
     goalFailed: "目标命令执行失败。",
+    goalTooLong: "目标过长，请控制在 {max} 个字符以内。",
+    goalLengthCounter: "目标长度：{length}/{max} 字符",
     compactSuccess:
       "已压缩早期上下文。完整聊天记录仍保留，后续模型将基于摘要和最近消息继续。",
     compactSkipped: "当前上下文还不需要压缩。",
