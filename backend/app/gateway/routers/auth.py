@@ -315,13 +315,46 @@ async def login_local(
     )
 
 
+def _local_registration_enabled() -> bool:
+    """Whether visitors may self-register a local account.
+
+    Local registration bypasses the OIDC provisioning policy entirely
+    (allowed_email_domains, require_verified_email, auto_create_users are only
+    enforced in the SSO callback), so SSO-provisioned deployments need a way to
+    close this path.
+
+    ``config.yaml`` is absent in bare-app contexts that never load it (tests build the
+    gateway without one). Registration was unconditionally open before this gate existed,
+    so an absent config file falls back to that same default rather than turning these two
+    endpoints into a hard dependency on the file. Only ``FileNotFoundError`` is caught:
+    a malformed config must not silently re-open a closed deployment, so it propagates.
+
+    ``/register`` reads this fresh on every request (``get_app_config`` reloads on file
+    change); ``/setup-status`` may serve it up to 60s stale via its per-IP result cache.
+    """
+    from deerflow.config.app_config import get_app_config
+
+    try:
+        return get_app_config().auth.local.allow_registration
+    except FileNotFoundError:
+        return True
+
+
 @router.post("/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
 async def register(request: Request, response: Response, body: RegisterRequest):
     """Register a new user account (always 'user' role).
 
     The first admin is created explicitly through /initialize. This endpoint creates regular users.
     Auto-login by setting the session cookie.
+
+    Returns 403 when ``auth.local.allow_registration`` is false.
     """
+    if not _local_registration_enabled():
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=AuthErrorResponse(code=AuthErrorCode.REGISTRATION_DISABLED, message="Self-registration is disabled on this deployment").model_dump(),
+        )
+
     try:
         user = await get_local_provider().create_user(email=body.email, password=body.password, system_role="user")
     except ValueError:
@@ -465,7 +498,7 @@ async def setup_status(request: Request):
 
             async def _compute_setup_status() -> dict:
                 admin_count = await get_local_provider().count_admin_users()
-                return {"needs_setup": admin_count == 0}
+                return {"needs_setup": admin_count == 0, "registration_enabled": _local_registration_enabled()}
 
             task = asyncio.create_task(_compute_setup_status())
             _SETUP_STATUS_INFLIGHT[client_ip] = task

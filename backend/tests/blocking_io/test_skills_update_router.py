@@ -40,6 +40,7 @@ from app.gateway.routers import mcp as mcp_router
 from app.gateway.routers import skills as skills_router
 from app.gateway.routers.mcp import McpConfigUpdateRequest
 from app.gateway.routers.skills import SkillUpdateRequest, update_skill
+from deerflow.config.extensions_config import ExtensionsConfig, SkillStateConfig
 from deerflow.skills import Skill
 
 pytestmark = pytest.mark.asyncio
@@ -66,20 +67,17 @@ def _make_skill(name: str, *, enabled: bool) -> Skill:
     )
 
 
-def _patch_config_infra(monkeypatch, config_path: Path, *, reload_hook=None) -> None:
+def _patch_config_infra(monkeypatch, config_path: Path, *, reload_hook=None) -> ExtensionsConfig:
     mock_storage = SimpleNamespace(load_skills=lambda *, enabled_only: [_make_skill("demo-skill", enabled=True)])
+    shared_config = ExtensionsConfig()
     monkeypatch.setattr("app.gateway.routers.skills._get_user_skill_storage", lambda _config: mock_storage)
-    monkeypatch.setattr("app.gateway.routers.skills.get_extensions_config", lambda: SimpleNamespace(mcp_servers={}, skills={}))
+    monkeypatch.setattr("app.gateway.routers.skills.get_extensions_config", lambda: shared_config)
     monkeypatch.setattr("app.gateway.routers.skills.reload_extensions_config", reload_hook or (lambda: None))
     monkeypatch.setattr(skills_router.ExtensionsConfig, "resolve_config_path", staticmethod(lambda _path=None: config_path))
     # PUBLIC toggles drop every user's prompt cache; the handler offloads this
     # sync call, so a no-op keeps the test focused on the config write.
     monkeypatch.setattr("app.gateway.routers.skills.clear_skills_system_prompt_cache", lambda: None)
-
-
-class _MutationRejectingDict(dict):
-    def __setitem__(self, key: object, value: object) -> None:
-        raise AssertionError("update_skill must not mutate the shared extensions_config singleton")
+    return shared_config
 
 
 async def test_update_skill_does_not_block_event_loop(tmp_path: Path, monkeypatch) -> None:
@@ -96,8 +94,7 @@ async def test_update_skill_does_not_block_event_loop(tmp_path: Path, monkeypatc
 async def test_update_skill_writes_from_snapshot_without_mutating_singleton(tmp_path: Path, monkeypatch) -> None:
     config_path = tmp_path / "extensions_config.json"
     mock_storage = SimpleNamespace(load_skills=lambda *, enabled_only: [_make_skill("demo-skill", enabled=True)])
-    shared_skills = _MutationRejectingDict({"existing-skill": SimpleNamespace(enabled=True)})
-    shared_config = SimpleNamespace(mcp_servers={}, skills=shared_skills)
+    shared_config = ExtensionsConfig(skills={"existing-skill": SkillStateConfig(enabled=True)})
 
     monkeypatch.setattr("app.gateway.routers.skills._get_user_skill_storage", lambda _config: mock_storage)
     monkeypatch.setattr("app.gateway.routers.skills.get_extensions_config", lambda: shared_config)
@@ -108,15 +105,18 @@ async def test_update_skill_writes_from_snapshot_without_mutating_singleton(tmp_
     result = await update_skill("demo-skill", SkillUpdateRequest(enabled=False), _admin_request(), SimpleNamespace())
 
     assert result.name == "demo-skill"
-    assert "demo-skill" not in shared_skills
+    # The cached singleton must not have been mutated: the new skill only exists
+    # in the deep copy that was serialized to disk.
+    assert "demo-skill" not in shared_config.skills
     config_text = await asyncio.to_thread(config_path.read_text, encoding="utf-8")
-    assert json.loads(config_text) == {
-        "mcpServers": {},
-        "skills": {
-            "existing-skill": {"enabled": True},
-            "demo-skill": {"enabled": False},
-        },
+    written = json.loads(config_text)
+    assert written["skills"] == {
+        "existing-skill": {"enabled": True},
+        "demo-skill": {"enabled": False},
     }
+    # to_file_dict() serializes the full shape, so unrelated top-level keys survive.
+    assert written["mcpServers"] == {}
+    assert "middlewares" in written
 
 
 @pytest.mark.allow_blocking_io  # gate-exempt: needs real worker-thread overlap to observe serialization

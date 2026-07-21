@@ -36,6 +36,7 @@ class Resolution:
 BUILTIN_COMMANDS: tuple[Command, ...] = (
     Command("help", "Show commands and keybindings"),
     Command("new", "Start a fresh thread"),
+    Command("clear", "Clear the transcript display"),
     Command("threads", "Open the thread switcher"),
     Command("switch", "Open the thread switcher"),
     Command("resume", "Resume a thread by id or title"),

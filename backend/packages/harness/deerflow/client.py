@@ -1117,10 +1117,8 @@ class DeerFlowClient:
 
         current_config = get_extensions_config()
 
-        config_data = {
-            "mcpServers": mcp_servers,
-            "skills": {name: {"enabled": skill.enabled} for name, skill in current_config.skills.items()},
-        }
+        config_data = current_config.to_file_dict()
+        config_data["mcpServers"] = mcp_servers
 
         self._atomic_write_json(config_path, config_data)
 
@@ -1186,10 +1184,7 @@ class DeerFlowClient:
             extensions_config = get_extensions_config()
             extensions_config.skills[name] = SkillStateConfig(enabled=enabled)
 
-            config_data = {
-                "mcpServers": {n: s.model_dump() for n, s in extensions_config.mcp_servers.items()},
-                "skills": {n: {"enabled": sc.enabled} for n, sc in extensions_config.skills.items()},
-            }
+            config_data = extensions_config.to_file_dict()
 
             self._atomic_write_json(config_path, config_data)
             reload_extensions_config()
@@ -1206,10 +1201,7 @@ class DeerFlowClient:
                     raise FileNotFoundError("Cannot locate extensions_config.json. Set DEER_FLOW_EXTENSIONS_CONFIG_PATH or ensure it exists in the project root.")
                 extensions_config = get_extensions_config()
                 extensions_config.skills[name] = SkillStateConfig(enabled=enabled)
-                config_data = {
-                    "mcpServers": {n: s.model_dump() for n, s in extensions_config.mcp_servers.items()},
-                    "skills": {n: {"enabled": sc.enabled} for n, sc in extensions_config.skills.items()},
-                }
+                config_data = extensions_config.to_file_dict()
                 self._atomic_write_json(config_path, config_data)
                 reload_extensions_config()
 
@@ -1412,8 +1404,8 @@ class DeerFlowClient:
                 # creating a new ThreadPoolExecutor per converted file.
                 conversion_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
 
-        def _convert_in_thread(path: Path):
-            return asyncio.run(convert_file_to_markdown(path))
+        def _convert_in_thread(path: Path, output_path: Path | None = None):
+            return asyncio.run(convert_file_to_markdown(path, output_path=output_path))
 
         try:
             for src_path, dest_name in resolved_files:
@@ -1431,11 +1423,17 @@ class DeerFlowClient:
                     info["original_filename"] = src_path.name
 
                 if src_path.suffix.lower() in CONVERTIBLE_EXTENSIONS:
+                    # Reserve companion .md name before convert so two stems
+                    # that collapse to the same .md (or a prior .md upload)
+                    # cannot silently overwrite each other.
+                    provisional_md_name = Path(dest_name).with_suffix(".md").name
+                    unique_md_name = claim_unique_filename(provisional_md_name, seen_names)
+                    md_output = dest.with_name(unique_md_name)
                     try:
                         if conversion_pool is not None:
-                            md_path = conversion_pool.submit(_convert_in_thread, dest).result()
+                            md_path = conversion_pool.submit(_convert_in_thread, dest, md_output).result()
                         else:
-                            md_path = asyncio.run(convert_file_to_markdown(dest))
+                            md_path = asyncio.run(convert_file_to_markdown(dest, output_path=md_output))
                     except Exception:
                         logger.warning(
                             "Failed to convert %s to markdown",
@@ -1449,6 +1447,11 @@ class DeerFlowClient:
                         info["markdown_path"] = str(uploads_dir / md_path.name)
                         info["markdown_virtual_path"] = upload_virtual_path(md_path.name)
                         info["markdown_artifact_url"] = upload_artifact_url(thread_id, md_path.name)
+                    else:
+                        # Conversion failed and wrote nothing, so release the
+                        # claim; holding it would rename a later same-stem
+                        # upload against a name nothing occupies.
+                        seen_names.discard(unique_md_name)
 
                 uploaded_files.append(info)
         finally:

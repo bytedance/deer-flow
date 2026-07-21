@@ -104,6 +104,14 @@ def _write_extensions_config(path: Path) -> None:
     path.write_text(json.dumps({"mcpServers": {}, "skills": {}}), encoding="utf-8")
 
 
+def test_config_example_does_not_enable_empty_extensions_block_by_default():
+    config_example_path = Path(__file__).resolve().parents[2] / "config.example.yaml"
+
+    config_data = yaml.safe_load(config_example_path.read_text(encoding="utf-8"))
+
+    assert "extensions" not in config_data
+
+
 def test_app_config_defaults_missing_database_to_sqlite(tmp_path, monkeypatch):
     config_path = tmp_path / "config.yaml"
     extensions_path = tmp_path / "extensions_config.json"
@@ -116,6 +124,79 @@ def test_app_config_defaults_missing_database_to_sqlite(tmp_path, monkeypatch):
 
     assert config.database.backend == "sqlite"
     assert config.database.sqlite_dir == ".deer-flow/data"
+
+
+def test_app_config_preserves_config_yaml_extension_middlewares(tmp_path, monkeypatch):
+    config_path = tmp_path / "config.yaml"
+    extensions_path = tmp_path / "extensions_config.json"
+    extensions_path.write_text(
+        json.dumps({"mcpServers": {}, "skills": {}, "middlewares": ["pkg.from_file:FileMiddleware"]}),
+        encoding="utf-8",
+    )
+    _write_config_with_sections(
+        config_path,
+        {
+            "extensions": {
+                "middlewares": ["pkg.from_yaml:YamlMiddleware"],
+            }
+        },
+    )
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(extensions_path))
+
+    config = AppConfig.from_file(str(config_path))
+
+    assert config.extensions.middlewares == ["pkg.from_yaml:YamlMiddleware"]
+
+
+def test_app_config_normalizes_config_yaml_extension_aliases_before_override(tmp_path, monkeypatch):
+    config_path = tmp_path / "config.yaml"
+    extensions_path = tmp_path / "extensions_config.json"
+    extensions_path.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "from-file": {
+                        "command": "file-mcp",
+                    }
+                },
+                "skills": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    _write_config_with_sections(
+        config_path,
+        {
+            "extensions": {
+                "mcp_servers": {
+                    "from-yaml": {
+                        "command": "yaml-mcp",
+                    }
+                },
+            }
+        },
+    )
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(extensions_path))
+
+    config = AppConfig.from_file(str(config_path))
+
+    assert set(config.extensions.mcp_servers) == {"from-yaml"}
+    assert config.extensions.mcp_servers["from-yaml"].command == "yaml-mcp"
+
+
+def test_app_config_loads_extension_middlewares_from_extensions_config(tmp_path, monkeypatch):
+    config_path = tmp_path / "config.yaml"
+    extensions_path = tmp_path / "extensions_config.json"
+    extensions_path.write_text(
+        json.dumps({"mcpServers": {}, "skills": {}, "middlewares": ["pkg.from_file:FileMiddleware"]}),
+        encoding="utf-8",
+    )
+    _write_config_with_sections(config_path)
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(extensions_path))
+
+    config = AppConfig.from_file(str(config_path))
+
+    assert config.extensions.middlewares == ["pkg.from_file:FileMiddleware"]
 
 
 def test_app_config_defaults_empty_database_to_sqlite(tmp_path, monkeypatch):

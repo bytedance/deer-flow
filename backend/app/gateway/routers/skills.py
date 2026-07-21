@@ -425,18 +425,15 @@ def _write_extensions_skill_state(skill_name: str, enabled: bool) -> None:
             config_path = Path.cwd().parent / "extensions_config.json"
             logger.info(f"No existing extensions config found. Creating new config at: {config_path}")
 
-        extensions_config = get_extensions_config()
-        # Snapshot before merging: mutating the cached singleton in place would
-        # publish the new state to readers before it is durable on disk, and leave
-        # it applied even if the write below fails.
-        mcp_servers = dict(extensions_config.mcp_servers)
-        skill_states = dict(extensions_config.skills)
-        skill_states[skill_name] = SkillStateConfig(enabled=enabled)
+        # Work on a deep copy rather than the cached singleton: mutating the
+        # singleton in place would publish the new state to readers before it is
+        # durable on disk, and leave it applied even if the write below fails.
+        # to_file_dict() serializes the full extensions_config.json shape (all
+        # top-level keys), so no field is dropped from the file.
+        extensions_config = get_extensions_config().model_copy(deep=True)
+        extensions_config.skills[skill_name] = SkillStateConfig(enabled=enabled)
 
-        config_data = {
-            "mcpServers": {name: server.model_dump() for name, server in mcp_servers.items()},
-            "skills": {name: {"enabled": skill_config.enabled} for name, skill_config in skill_states.items()},
-        }
+        config_data = extensions_config.to_file_dict()
 
         with open(config_path, "w", encoding="utf-8") as f:
             json.dump(config_data, f, indent=2)

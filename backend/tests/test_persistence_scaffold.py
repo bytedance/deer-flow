@@ -49,6 +49,15 @@ class TestDatabaseConfig:
         assert url.startswith("postgresql+asyncpg://")
         assert "u:p@h:5432/db" in url
 
+    def test_app_sqlalchemy_url_postgres_short_scheme(self):
+        c = DatabaseConfig(
+            backend="postgres",
+            postgres_url="postgres://u:p@h:5432/db",
+        )
+        url = c.app_sqlalchemy_url
+        assert url.startswith("postgresql+asyncpg://")
+        assert "u:p@h:5432/db" in url
+
     def test_app_sqlalchemy_url_postgres_already_asyncpg(self):
         c = DatabaseConfig(
             backend="postgres",

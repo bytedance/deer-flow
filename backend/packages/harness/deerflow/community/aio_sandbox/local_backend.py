@@ -200,6 +200,11 @@ class LocalContainerBackend(SandboxBackend):
     - Support for volume mounts and environment variables
     """
 
+    # Wall clock for a single `stop`. Comfortably above the runtime's own default
+    # SIGKILL escalation (10s for docker/podman), so this only fires when the
+    # daemon itself is wedged rather than truncating a slow-but-progressing stop.
+    _STOP_TIMEOUT_SECONDS = 120.0
+
     def __init__(
         self,
         *,
@@ -603,15 +608,30 @@ class LocalContainerBackend(SandboxBackend):
             raise RuntimeError(f"Failed to start sandbox container: {e.stderr}")
 
     def _stop_container(self, container_id: str) -> None:
-        """Stop a container (--rm ensures automatic removal)."""
+        """Stop a container (--rm ensures automatic removal).
+
+        The timeout bounds the worst case independently of the ownership layer.
+        The teardown lease keeps a peer from re-acquiring the container while
+        this runs, but that exclusion is a lease and can lapse (a store outage
+        longer than the TTL); an unbounded ``docker stop`` against a wedged
+        daemon could then outlive it and land on a peer's live container — #4206.
+        Bounding the stop caps how long that exposure can last even when the
+        store is perfectly healthy.
+        """
         try:
             subprocess.run(
                 [self._runtime, "stop", container_id],
                 capture_output=True,
                 text=True,
                 check=True,
+                timeout=self._STOP_TIMEOUT_SECONDS,
             )
             logger.info(f"Stopped container {container_id} using {self._runtime}")
+        except subprocess.TimeoutExpired:
+            # Deliberately not swallowed like a CalledProcessError: the container
+            # may still be running, so the caller must not report a clean stop.
+            logger.error(f"Timed out after {self._STOP_TIMEOUT_SECONDS}s stopping container {container_id} using {self._runtime}")
+            raise
         except subprocess.CalledProcessError as e:
             logger.warning(f"Failed to stop container {container_id}: {e.stderr}")
 

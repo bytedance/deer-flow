@@ -466,7 +466,7 @@ def build_run_config(
                 logger.warning(
                     "build_run_config: client sent both 'context' and 'configurable'; preferring 'context' (LangGraph >= 0.6.0). thread_id=%s, caller_configurable keys=%s",
                     thread_id,
-                    list(request_config.get("configurable", {}).keys()),
+                    list((request_config.get("configurable") or {}).keys()),
                 )
             context_value = request_config["context"]
             if context_value is None:
@@ -493,7 +493,7 @@ def build_run_config(
             config["configurable"] = {"thread_id": thread_id}
         else:
             configurable = {"thread_id": thread_id}
-            configurable.update(request_config.get("configurable", {}))
+            configurable.update(request_config.get("configurable") or {})
             config["configurable"] = configurable
         for k, v in request_config.items():
             if k not in ("configurable", "context"):
