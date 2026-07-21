@@ -478,11 +478,15 @@ class E2BSandboxProvider(SandboxProvider):
         try:
             self._bootstrap_sandbox_paths(client)
         except Exception as e:
-            logger.warning(
-                "Failed to bootstrap virtual paths in e2b sandbox %s: %s",
+            logger.error(
+                "Failed to bootstrap virtual paths in e2b sandbox %s. Cleaning up the unusable sandbox: %s",
                 sandbox_id,
                 e,
             )
+            if error := self._kill_client(client):
+                logger.warning("Failed to kill e2b sandbox %s after bootstrap failure: %s", sandbox_id, error)
+            self._safe_close_client(client)
+            raise RuntimeError(f"Failed to bootstrap e2b sandbox {sandbox_id}") from e
 
         # One-shot mount uploads.  e2b has no host bind-mount, so we copy
         # files from ``host_path`` into ``container_path`` at sandbox start.
@@ -669,21 +673,13 @@ class E2BSandboxProvider(SandboxProvider):
         try:
             result = client.commands.run(bootstrap_script)
         except Exception as e:
-            logger.warning(
-                "e2b bootstrap script raised: %s (agent shell commands using /mnt/user-data may fail until the VM is recycled)",
-                e,
-            )
-            return
+            raise RuntimeError("e2b bootstrap script raised") from e
 
         stdout = getattr(result, "stdout", "") or ""
         stderr = getattr(result, "stderr", "") or ""
         exit_code = getattr(result, "exit_code", 0)
         if exit_code not in (0, None) or "BOOTSTRAP_OK" not in stdout:
-            logger.warning(
-                "e2b bootstrap script exited with code=%s; stderr=%s",
-                exit_code,
-                stderr.strip(),
-            )
+            raise RuntimeError(f"e2b bootstrap script failed with exit code {exit_code}; stderr={stderr.strip()}")
 
     def _apply_mounts(self, client: E2BClientSandbox) -> None:
         mounts = self._config.get("mounts") or []
