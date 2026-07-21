@@ -121,7 +121,31 @@ _memory_config: MemoryConfig = MemoryConfig()
 
 
 def get_memory_config() -> MemoryConfig:
-    """Get the current memory configuration."""
+    """Get the current memory configuration.
+
+    ``_memory_config`` is only refreshed as a side effect of ``get_app_config()``
+    reloading (via ``_apply_singleton_configs`` -> ``load_memory_config_from_dict``).
+    A reader that reaches memory config without going through ``get_app_config()``
+    first -- e.g. the agent factory deciding whether to bind the memory tools --
+    would otherwise see a stale ``memory.mode`` after a ``config.yaml`` edit, even
+    though ``memory.*`` is documented as hot-reloadable. Trigger the same
+    signature-checked reload here so the singleton follows the config file.
+
+    If no config file is on disk (tests, or a minimal deployment running purely
+    on defaults / ``set_memory_config``), there is nothing to reload from, so we
+    keep the pre-existing behavior of returning the in-memory singleton instead of
+    becoming more fragile than before. The catch is deliberately narrow: a config
+    file that exists but fails to load (malformed YAML, failed validation) is a
+    real error and is surfaced here just as it is at every other unguarded
+    ``get_app_config()`` call site, leaving the last-good singleton untouched.
+    """
+    # Lazy import: app_config imports this module, so a top-level import cycles.
+    from .app_config import get_app_config
+
+    try:
+        get_app_config()
+    except FileNotFoundError:
+        pass
     return _memory_config
 
 
