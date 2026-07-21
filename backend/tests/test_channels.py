@@ -5311,6 +5311,150 @@ class TestFeishuChannel:
         _run(go())
 
 
+class TestFeishuSendFileSuccessChecks:
+    """``send_file`` uploads via ``_upload_image``/``_upload_file`` (which already
+    raise on a ``response.success() is False`` business failure), then sends the
+    resulting file/image message with a raw ``message.reply``/``message.create``
+    call whose response was never checked. lark-oapi signals that same kind of
+    business-level failure (invalid receiver, permission error, etc.) by
+    returning ``success()=False`` without raising, so a failed file/image send
+    logged "file sent" and returned ``True`` exactly like a real success.
+    """
+
+    def test_send_file_returns_false_on_reply_business_failure(self, tmp_path):
+        from lark_oapi.api.im.v1 import ReplyMessageRequest, ReplyMessageRequestBody
+
+        from app.channels.feishu import FeishuChannel
+
+        async def go():
+            bus = MessageBus()
+            channel = FeishuChannel(bus, config={})
+            channel._api_client = MagicMock()
+            channel._ReplyMessageRequest = ReplyMessageRequest
+            channel._ReplyMessageRequestBody = ReplyMessageRequestBody
+            channel._upload_image = AsyncMock(return_value="img-key-1")
+
+            failure_response = MagicMock()
+            failure_response.success.return_value = False
+            failure_response.code = 99991400
+            failure_response.msg = "param invalid"
+            failure_response.get_log_id.return_value = "log-send-file-1"
+            channel._api_client.im.v1.message.reply = MagicMock(return_value=failure_response)
+
+            path = tmp_path / "image.png"
+            path.write_bytes(b"png")
+            attachment = ResolvedAttachment(
+                virtual_path="/mnt/user-data/outputs/image.png",
+                actual_path=path,
+                filename="image.png",
+                mime_type="image/png",
+                size=path.stat().st_size,
+                is_image=True,
+            )
+            msg = OutboundMessage(
+                channel_name="feishu",
+                chat_id="chat-1",
+                thread_id="thread-1",
+                text="",
+                is_final=True,
+                thread_ts="om-source-msg",
+            )
+
+            result = await channel.send_file(msg, attachment)
+
+            assert result is False
+
+        _run(go())
+
+    def test_send_file_returns_false_on_create_business_failure(self, tmp_path):
+        from lark_oapi.api.im.v1 import CreateMessageRequest, CreateMessageRequestBody
+
+        from app.channels.feishu import FeishuChannel
+
+        async def go():
+            bus = MessageBus()
+            channel = FeishuChannel(bus, config={})
+            channel._api_client = MagicMock()
+            channel._CreateMessageRequest = CreateMessageRequest
+            channel._CreateMessageRequestBody = CreateMessageRequestBody
+            channel._upload_file = AsyncMock(return_value="file-key-1")
+
+            failure_response = MagicMock()
+            failure_response.success.return_value = False
+            failure_response.code = 99991400
+            failure_response.msg = "param invalid"
+            failure_response.get_log_id.return_value = "log-send-file-2"
+            channel._api_client.im.v1.message.create = MagicMock(return_value=failure_response)
+
+            path = tmp_path / "report.pdf"
+            path.write_bytes(b"pdf")
+            attachment = ResolvedAttachment(
+                virtual_path="/mnt/user-data/outputs/report.pdf",
+                actual_path=path,
+                filename="report.pdf",
+                mime_type="application/pdf",
+                size=path.stat().st_size,
+                is_image=False,
+            )
+            msg = OutboundMessage(
+                channel_name="feishu",
+                chat_id="chat-1",
+                thread_id="thread-1",
+                text="",
+                is_final=True,
+                thread_ts=None,
+            )
+
+            result = await channel.send_file(msg, attachment)
+
+            assert result is False
+
+        _run(go())
+
+    def test_send_file_returns_true_on_reply_business_success(self, tmp_path):
+        """Control case: a genuinely successful response still returns True."""
+        from lark_oapi.api.im.v1 import ReplyMessageRequest, ReplyMessageRequestBody
+
+        from app.channels.feishu import FeishuChannel
+
+        async def go():
+            bus = MessageBus()
+            channel = FeishuChannel(bus, config={})
+            channel._api_client = MagicMock()
+            channel._ReplyMessageRequest = ReplyMessageRequest
+            channel._ReplyMessageRequestBody = ReplyMessageRequestBody
+            channel._upload_image = AsyncMock(return_value="img-key-1")
+
+            success_response = MagicMock()
+            success_response.success.return_value = True
+            channel._api_client.im.v1.message.reply = MagicMock(return_value=success_response)
+
+            path = tmp_path / "image.png"
+            path.write_bytes(b"png")
+            attachment = ResolvedAttachment(
+                virtual_path="/mnt/user-data/outputs/image.png",
+                actual_path=path,
+                filename="image.png",
+                mime_type="image/png",
+                size=path.stat().st_size,
+                is_image=True,
+            )
+            msg = OutboundMessage(
+                channel_name="feishu",
+                chat_id="chat-1",
+                thread_id="thread-1",
+                text="",
+                is_final=True,
+                thread_ts="om-source-msg",
+            )
+
+            result = await channel.send_file(msg, attachment)
+
+            assert result is True
+
+        _run(go())
+
+
 class TestWeComChannel:
     def test_publish_ws_inbound_starts_stream_and_publishes_message(self, monkeypatch):
         from app.channels.wecom import WeComChannel
