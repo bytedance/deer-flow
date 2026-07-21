@@ -794,6 +794,9 @@ class E2BSandboxProvider(SandboxProvider):
         each write. This avoids false updates on host filesystems that round
         modification times.
 
+        The remote file is the source of truth. The next sync overwrites a
+        host-side edit when its size or modification time differs.
+
         Failures are logged at WARNING level but never raised: artifact
         download is non-critical for sandbox lifecycle, and we already log
         the underlying e2b SDK errors elsewhere.
