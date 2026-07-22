@@ -1212,6 +1212,54 @@ def test_sync_outputs_to_host_truncated_pass_preserves_stale_manifest(monkeypatc
     assert len(files.read_calls) == 1
 
 
+def test_sync_outputs_to_host_converges_across_passes(monkeypatch, tmp_path):
+    """The deferred tail drains over successive passes without re-downloading
+    already-synced files.
+
+    The budget check sits *below* the manifest-skip path, so a file synced in
+    an earlier pass is skipped before it can consume the cap on later passes.
+    That is what lets ``c``/``d`` finish instead of ``a``/``b`` being re-fetched
+    every release forever. A refactor that moved the budget check above the skip
+    would still pass the single-pass truncation tests but fail this one.
+    """
+    p = _make_provider()
+    p._MAX_SYNC_FILES = 2
+    _setup_paths(monkeypatch, tmp_path)
+
+    names = ["a.txt", "b.txt", "c.txt", "d.txt"]
+    listing = "".join(f"5\t2.000000000\t/home/user/outputs/{n}\x00" for n in names)
+    files = FakeFilesAPI(store={f"/home/user/outputs/{n}": b"hello" for n in names})
+    # One listing per pass; both passes share the same host tree, manifest and
+    # files API (so downloads accumulate and the manifest carries over).
+    cmds = FakeCommandsAPI(
+        [
+            SimpleNamespace(stdout=listing, stderr="", exit_code=0),
+            SimpleNamespace(stdout=listing, stderr="", exit_code=0),
+        ]
+    )
+    sb = _make_sandbox(FakeClient(commands=cmds, files=files), sandbox_id="sb-converge")
+    out_dir = _outputs_dir(tmp_path)
+
+    # Pass 1: the file cap stops the pass after a, b.
+    p._sync_outputs_to_host(sb, thread_id="t1", user_id="u1")
+    assert sorted(f.name for f in out_dir.iterdir()) == ["a.txt", "b.txt"]
+    assert [r[0] for r in files.read_calls] == [
+        "/home/user/outputs/a.txt",
+        "/home/user/outputs/b.txt",
+    ]
+
+    # Pass 2: a, b are manifest hits skipped before the budget check, so the cap
+    # is spent draining the deferred tail c, d rather than re-downloading a, b.
+    p._sync_outputs_to_host(sb, thread_id="t1", user_id="u1")
+    assert sorted(f.name for f in out_dir.iterdir()) == ["a.txt", "b.txt", "c.txt", "d.txt"]
+    assert [r[0] for r in files.read_calls] == [
+        "/home/user/outputs/a.txt",
+        "/home/user/outputs/b.txt",
+        "/home/user/outputs/c.txt",
+        "/home/user/outputs/d.txt",
+    ]
+
+
 def test_download_file_uses_streaming_read_and_returns_full_bytes():
     payload = b"A" * (128 * 1024)  # 128 KiB — well below the cap.
     files = FakeFilesAPI(store={"/home/user/outputs/small.bin": payload})
