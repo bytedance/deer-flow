@@ -33,40 +33,40 @@ distinguishes it from a release.
 ## Helper scripts
 
 - `scripts/bump_version.sh <version>` — set all four fields at once, then
-  self-verify. Tolerates a leading `v` (e.g. `v2.2.0`).
+  self-verify. Tolerates a leading `v` (e.g. `v2.1.0`).
   ```bash
-  scripts/bump_version.sh 2.2.0
+  scripts/bump_version.sh 2.1.0
   ```
 - `scripts/verify_versions.sh [version]` — check that all sources agree. With
   no argument it requires mutual equality; with an argument it requires every
   source to equal it. Exits non-zero on mismatch. Run it locally before tagging
   to catch drift early:
   ```bash
-  scripts/verify_versions.sh 2.2.0
+  scripts/verify_versions.sh 2.1.0
   ```
 
 ## Release procedure
 
 1. **Bump the version** across all sources:
    ```bash
-   scripts/bump_version.sh 2.2.0
+   scripts/bump_version.sh 2.1.0
    ```
 2. **Update `CHANGELOG.md`**: rename the `## [Unreleased]` section to
-   `## [2.2.0] — YYYY-MM-DD` (note the em dash `—`), and add a link reference
+   `## [2.1.0] — YYYY-MM-DD` (note the em dash `—`), and add a link reference
    at the bottom of the file:
    ```
-   [2.2.0]: https://github.com/bytedance/deer-flow/releases/tag/v2.2.0
+   [2.1.0]: https://github.com/bytedance/deer-flow/releases/tag/v2.1.0
    ```
    Start a fresh `## [Unreleased]` section above it for the next cycle.
 3. **Commit** the version + changelog changes:
    ```bash
    git add -A
-   git commit -m "release: v2.2.0"
+   git commit -m "release: v2.1.0"
    ```
 4. **Tag and push**:
    ```bash
-   git tag v2.2.0
-   git push origin v2.2.0
+   git tag v2.1.0
+   git push origin v2.1.0
    ```
    Pushing the tag triggers the publishing workflows (below).
 
@@ -78,7 +78,7 @@ distinguishes it from a release.
 - `.github/workflows/chart.yaml` — packages the Helm chart and pushes it as an
   OCI artifact to `ghcr.io`. Users install with:
   ```bash
-  helm install deer-flow oci://ghcr.io/<owner>/deer-flow --version 2.2.0
+  helm install deer-flow oci://ghcr.io/<owner>/charts/deer-flow --version 2.1.0
   ```
 
 ## Nightly builds
@@ -96,16 +96,16 @@ Artifacts (under the running repo's owner, where `<date>` is `YYYYMMDD`):
   (rolling, overwritten each run) and `:nightly-<date>` (pinned to a day, but
   mutable within it - a same-day re-dispatch overwrites it). For a truly
   immutable pin, use `:sha-<short>`.
-- Chart: `oci://ghcr.io/<owner>/deer-flow`, version `<base>-nightly.<date>-<sha>`
-  (e.g. `2.2.0-nightly.20260710-77a3652`). The short SHA makes each dispatch's
+- Chart: `oci://ghcr.io/<owner>/charts/deer-flow`, version `<base>-nightly.<date>-<sha>`
+  (e.g. `2.1.0-nightly.20260710-77a3652`). The short SHA makes each dispatch's
   chart version unique, so a same-day re-dispatch re-publishes cleanly (OCI
   chart versions are immutable and otherwise can't be overwritten). The
   packaged chart defaults `image.registry=ghcr.io/<owner>` and
   `image.tag=nightly`, so installing it pulls the matching nightly images with
   no values overrides:
   ```bash
-  helm install deer-flow oci://ghcr.io/<owner>/deer-flow \
-    --version 2.2.0-nightly.20260710-77a3652
+  helm install deer-flow oci://ghcr.io/<owner>/charts/deer-flow \
+    --version 2.1.0-nightly.20260710-77a3652
   ```
 
 The chart version is patched in-workflow only - `Chart.yaml` and `values.yaml`
@@ -122,20 +122,20 @@ When it fails, the job annotation names the offending file and suggests the
 fix:
 
 ```
-::error::frontend/package.json is '2.1.0' but expected '2.2.0'.
-Tip: run scripts/bump_version.sh 2.2.0 to align all sources.
+::error::frontend/package.json is '2.0.0' but expected '2.1.0'.
+Tip: run scripts/bump_version.sh 2.1.0 to align all sources.
 ```
 
 ## Pre-releases (RCs)
 
-Pre-release tags like `v2.2.0-rc1` are valid `v*` tags and trigger the same
+Pre-release tags like `v2.1.0-rc1` are valid `v*` tags and trigger the same
 workflows. The version sources must equal the full pre-release string
-(`2.2.0-rc1`) — the gate compares exact strings. Use the same procedure with
+(`2.1.0-rc1`) — the gate compares exact strings. Use the same procedure with
 the rc version:
 
 ```bash
-scripts/bump_version.sh 2.2.0-rc1
-# update CHANGELOG, commit, tag v2.2.0-rc1, push
+scripts/bump_version.sh 2.1.0-rc1
+# update CHANGELOG, commit, tag v2.1.0-rc1, push
 ```
 
 ## Recovering from a failed gate
@@ -146,10 +146,10 @@ If the gate failed because a source was forgotten:
 2. Amend or add a follow-up commit.
 3. Delete and re-create the tag, then push it:
    ```bash
-   git tag -d v2.2.0
-   git tag v2.2.0
-   git push origin :refs/tags/v2.2.0
-   git push origin v2.2.0
+   git tag -d v2.1.0
+   git tag v2.1.0
+   git push origin :refs/tags/v2.1.0
+   git push origin v2.1.0
    ```
 
 Re-pushing the tag re-triggers the workflows. Because the gate blocks **all**
@@ -161,3 +161,8 @@ is safe — no images or chart were pushed to overwrite.
 Optionally draft a **GitHub Release** from the tag, pasting the corresponding
 `CHANGELOG.md` section as the release notes. The changelog link references
 point at these release URLs.
+
+For the 2.1.0 chart release (the first chart release), pre-`charts/` nightly
+builds remain at the legacy bare `ghcr.io/<owner>/deer-flow` package. That
+package receives no new versions after 2.1.0; delete it or revoke its
+visibility once nothing still pulls from it.

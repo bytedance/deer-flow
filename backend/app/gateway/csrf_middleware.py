@@ -15,6 +15,7 @@ from starlette.responses import JSONResponse
 from starlette.types import ASGIApp
 
 from app.gateway.auth.config import get_auth_config
+from app.gateway.auth.session_cookie_state import SESSION_COOKIE_ISSUED_STATE_ATTR, SESSION_COOKIE_MAX_AGE_STATE_ATTR, SESSION_COOKIE_SECURE_STATE_ATTR, SKIP_AUTH_CSRF_COOKIE_STATE_ATTR
 from app.gateway.auth_disabled import is_auth_disabled
 
 CSRF_COOKIE_NAME = "csrf_token"
@@ -181,6 +182,20 @@ def is_allowed_auth_origin(request: Request) -> bool:
     return normalized_origin in _configured_cors_origins() or (request_origin is not None and normalized_origin == request_origin)
 
 
+def auth_csrf_cookie_settings(request: Request) -> tuple[bool, int | None]:
+    """Return ``(secure, max_age)`` for auth-created CSRF cookies."""
+    session_cookie_issued = getattr(request.state, SESSION_COOKIE_ISSUED_STATE_ATTR, False)
+    if session_cookie_issued:
+        return (
+            bool(getattr(request.state, SESSION_COOKIE_SECURE_STATE_ATTR, is_secure_request(request))),
+            getattr(request.state, SESSION_COOKIE_MAX_AGE_STATE_ATTR, None),
+        )
+
+    secure = is_secure_request(request)
+    max_age = get_auth_config().token_expiry_days * 24 * 3600 if secure else None
+    return secure, max_age
+
+
 class CSRFMiddleware(BaseHTTPMiddleware):
     """Middleware that implements CSRF protection using Double Submit Cookie pattern."""
 
@@ -214,23 +229,26 @@ class CSRFMiddleware(BaseHTTPMiddleware):
 
         response = await call_next(request)
 
-        # For auth endpoints that set up session, also set CSRF cookie
-        if _is_auth and request.method == "POST":
+        # For auth endpoints that set up session, also set CSRF cookie.
+        # Session-creating handlers may stamp the final access-token max_age on
+        # request.state; mirroring it here keeps the double-submit cookie pair
+        # from diverging across HTTPS, localhost, and sandbox deployments.
+        if _is_auth and request.method == "POST" and not getattr(request.state, SKIP_AUTH_CSRF_COOKIE_STATE_ATTR, False):
             # Generate a new CSRF token for the session
             csrf_token = generate_csrf_token()
-            is_https = is_secure_request(request)
+            secure, max_age = auth_csrf_cookie_settings(request)
             response.set_cookie(
                 key=CSRF_COOKIE_NAME,
                 value=csrf_token,
                 httponly=False,  # Must be JS-readable for Double Submit Cookie pattern
-                secure=is_https,
+                secure=secure,
                 samesite="strict",
                 # Match the access_token cookie's lifetime (auth.py::_set_session_cookie)
                 # so the double-submit pair never diverges. A session-only csrf_token is
                 # evicted when iOS Safari terminates a home-screen PWA while the persistent
                 # access_token survives — leaving the user "logged in" but unable to make
                 # any state-changing request (403 "CSRF token missing").
-                max_age=get_auth_config().token_expiry_days * 24 * 3600 if is_https else None,
+                max_age=max_age,
             )
 
         return response

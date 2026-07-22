@@ -45,6 +45,7 @@ class MemoryRunStore(RunStore):
         metadata=None,
         kwargs=None,
         error=None,
+        stop_reason=None,
         created_at=None,
         owner_worker_id=None,
         lease_expires_at=None,
@@ -61,6 +62,7 @@ class MemoryRunStore(RunStore):
             "metadata": metadata or {},
             "kwargs": kwargs or {},
             "error": error,
+            "stop_reason": stop_reason,
             "created_at": created_at or now,
             "updated_at": now,
             "owner_worker_id": owner_worker_id,
@@ -105,7 +107,7 @@ class MemoryRunStore(RunStore):
         thread_run_ids = self._runs_by_thread.get(thread_id) or ()
         return {run_id: run for run_id in thread_run_ids if run_id in run_ids and (run := self._runs.get(run_id)) is not None and (user_id is None or run.get("user_id") == user_id)}
 
-    async def update_status(self, run_id, status, *, error=None):
+    async def update_status(self, run_id, status, *, error=None, stop_reason=None):
         run = self._runs.get(run_id)
         if run is None:
             return False
@@ -116,6 +118,8 @@ class MemoryRunStore(RunStore):
         run["status"] = status
         if error is not None:
             run["error"] = error
+        if stop_reason is not None:
+            run["stop_reason"] = stop_reason
         run["updated_at"] = datetime.now(UTC).isoformat()
         return True
 

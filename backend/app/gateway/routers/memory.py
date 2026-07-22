@@ -1,18 +1,12 @@
 """Memory API router for retrieving and managing global memory data."""
 
+from typing import Any, Literal
+
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from app.gateway.internal_auth import get_trusted_internal_owner_user_id
-from deerflow.agents.memory.updater import (
-    clear_memory_data,
-    create_memory_fact,
-    delete_memory_fact,
-    get_memory_data,
-    import_memory_data,
-    reload_memory_data,
-    update_memory_fact,
-)
+from deerflow.agents.memory import MemoryConflictError, MemoryCorruptionError, get_memory_manager
 from deerflow.config.memory_config import get_memory_config
 from deerflow.config.paths import make_safe_user_id
 from deerflow.runtime.user_context import get_effective_user_id
@@ -71,16 +65,44 @@ class Fact(BaseModel):
     id: str = Field(..., description="Unique identifier for the fact")
     content: str = Field(..., description="Fact content")
     category: str = Field(default="context", description="Fact category")
+    categoryExtension: str | None = Field(default=None, description="Extension category when category is 'other'")
+    topics: list[str] | None = Field(default=None, description="Retrieval-oriented topic labels")
     confidence: float = Field(default=0.5, description="Confidence score (0-1)")
     createdAt: str = Field(default="", description="Creation timestamp")
-    source: str = Field(default="unknown", description="Source thread ID")
+    source: str = Field(default="unknown", description="Legacy source string; structured metadata remains internal to storage")
     sourceError: str | None = Field(default=None, description="Optional description of the prior mistake or wrong approach")
+    schemaVersion: int | None = Field(default=None, description="Per-fact schema version")
+    status: str | None = Field(default=None, description="Fact lifecycle status")
+    scope: dict[str, str | None] | None = Field(default=None, description="Canonical user/agent scope")
+    revision: int | None = Field(default=None, description="Fact optimistic revision")
+    updatedAt: str | None = Field(default=None, description="Last fact update timestamp")
+    consolidatedAt: str | None = None
+    consolidatedFrom: list[str] | None = None
+
+    @field_validator("source", mode="before")
+    @classmethod
+    def _legacy_source_string(cls, value: Any) -> str:
+        """Keep the HTTP contract stable while Markdown stores rich metadata."""
+        if isinstance(value, str):
+            return value
+        if not isinstance(value, dict):
+            return "unknown"
+        source_type = value.get("type")
+        thread_id = value.get("threadId")
+        if source_type == "conversation" and isinstance(thread_id, str) and thread_id:
+            return thread_id
+        if isinstance(source_type, str) and source_type:
+            return source_type
+        if isinstance(thread_id, str) and thread_id:
+            return thread_id
+        return "unknown"
 
 
 class MemoryResponse(BaseModel):
     """Response model for memory data."""
 
     version: str = Field(default="1.0", description="Memory schema version")
+    revision: int | None = Field(default=None, description="Manifest revision")
     lastUpdated: str = Field(default="", description="Last update timestamp")
     user: UserContext = Field(default_factory=UserContext)
     history: HistoryContext = Field(default_factory=HistoryContext)
@@ -91,9 +113,36 @@ def _map_memory_fact_value_error(exc: ValueError) -> HTTPException:
     """Convert updater validation errors into stable API responses."""
     if exc.args and exc.args[0] == "confidence":
         detail = "Invalid confidence value; must be between 0 and 1."
+    elif exc.args and exc.args[0] == "agent_name":
+        detail = "An agent name is required for fact operations; user-global memory stores summaries only."
     else:
         detail = "Memory fact content cannot be empty."
     return HTTPException(status_code=400, detail=detail)
+
+
+def _map_memory_manager_error(exc: MemoryConflictError | MemoryCorruptionError) -> HTTPException:
+    """Map backend-neutral manager errors without importing a storage plugin."""
+    if isinstance(exc, MemoryConflictError):
+        return HTTPException(status_code=409, detail="Memory changed concurrently; reload and retry.")
+    return HTTPException(status_code=500, detail="Stored memory data is corrupted.")
+
+
+def _require_capability(name: str, *, label: str):
+    """Return a DeerMem-internal capability (bound method) or raise 501.
+
+    ``reload_memory`` / ``create_fact`` / ``delete_fact`` / ``update_fact`` are
+    not on the ``MemoryManager`` ABC -- they are DeerMem-internal. Probe with
+    ``hasattr`` rather than importing DeerMem, so this router has no hard
+    dependency on the default backend: a non-DeerMem (or removed) backend
+    simply lacks the attribute and the endpoint returns 501.
+    """
+    manager = get_memory_manager()
+    if not hasattr(manager, name):
+        raise HTTPException(
+            status_code=501,
+            detail=f"Operation '{label}' not supported by memory backend '{type(manager).__name__}'.",
+        )
+    return getattr(manager, name)
 
 
 class FactCreateRequest(BaseModel):
@@ -115,27 +164,12 @@ class FactPatchRequest(BaseModel):
 class MemoryConfigResponse(BaseModel):
     """Response model for memory configuration."""
 
-    enabled: bool = Field(..., description="Whether memory is enabled")
-    storage_path: str = Field(..., description="Path to memory storage file")
-    debounce_seconds: int = Field(..., description="Debounce time for memory updates")
-    max_facts: int = Field(..., description="Maximum number of facts to store")
-    fact_confidence_threshold: float = Field(..., description="Minimum confidence threshold for facts")
-    injection_enabled: bool = Field(..., description="Whether memory injection is enabled")
-    max_injection_tokens: int = Field(..., description="Maximum tokens for memory injection")
-    token_counting: str = Field(..., description="Token counting strategy for memory injection ('tiktoken' or 'char')")
-    guaranteed_categories: list[str] = Field(
-        ...,
-        description="Fact categories that bypass the regular injection budget (always injected from a reserved allowance)",
-    )
-    guaranteed_token_budget: int = Field(
-        ...,
-        description="Token ceiling for guaranteed-category facts (displaces regular lines in the common case; additive only when guaranteed alone overflows max_injection_tokens)",
-    )
-    staleness_review_enabled: bool = Field(..., description="Whether staleness review is enabled for aged facts")
-    staleness_age_days: int = Field(..., description="Facts older than this many days are candidates for staleness review")
-    staleness_min_candidates: int = Field(..., description="Minimum stale facts required to trigger a review cycle")
-    staleness_max_removals_per_cycle: int = Field(..., description="Maximum number of facts staleness review can remove per cycle")
-    staleness_protected_categories: list[str] = Field(..., description="Fact categories exempt from staleness review")
+    enabled: bool = Field(..., description="Whether the memory mechanism is enabled (call-site gate).")
+    mode: Literal["middleware", "tool"] = Field(..., description="Memory operation mode: 'middleware' (passive per-turn LLM summarization) or 'tool' (model calls memory tools directly). Mechanism-level, applies to any backend.")
+    injection_enabled: bool = Field(..., description="Whether memory is injected into the system prompt (call-site gate).")
+    shutdown_flush_timeout_seconds: float = Field(..., description="Hard budget (s) to drain pending memory updates on Gateway graceful shutdown; must fit inside the pod's K8s terminationGracePeriodSeconds.")
+    manager_class: str = Field(..., description="Active memory backend selector (backend name or dotted path).")
+    backend_config: dict = Field(..., description="Backend-private config (self-interpreted by the backend).")
 
 
 class MemoryStatusResponse(BaseModel):
@@ -186,7 +220,10 @@ async def get_memory(http_request: Request) -> MemoryResponse:
         }
         ```
     """
-    memory_data = get_memory_data(user_id=_resolve_memory_user_id(http_request))
+    try:
+        memory_data = get_memory_manager().get_memory(user_id=_resolve_memory_user_id(http_request))
+    except (MemoryConflictError, MemoryCorruptionError) as exc:
+        raise _map_memory_manager_error(exc) from exc
     return MemoryResponse(**memory_data)
 
 
@@ -206,7 +243,19 @@ async def reload_memory(http_request: Request) -> MemoryResponse:
     Returns:
         The reloaded memory data.
     """
-    memory_data = reload_memory_data(user_id=_resolve_memory_user_id(http_request))
+    user_id = _resolve_memory_user_id(http_request)
+    manager = get_memory_manager()
+    try:
+        if hasattr(manager, "reload_memory"):
+            memory_data = manager.reload_memory(user_id=user_id)
+        else:
+            # Non-DeerMem backends have no reload concept; return current memory.
+            # (Asymmetry vs fact CRUD, which raises 501 when unsupported: reload is a
+            # read-only refresh, so degrading to get_memory is safe and still useful;
+            # silently no-op'ing a write would hide data loss, so writes fail loud.)
+            memory_data = manager.get_memory(user_id=user_id)
+    except (MemoryConflictError, MemoryCorruptionError) as exc:
+        raise _map_memory_manager_error(exc) from exc
     return MemoryResponse(**memory_data)
 
 
@@ -220,7 +269,9 @@ async def reload_memory(http_request: Request) -> MemoryResponse:
 async def clear_memory(http_request: Request) -> MemoryResponse:
     """Clear all persisted memory data."""
     try:
-        memory_data = clear_memory_data(user_id=_resolve_memory_user_id(http_request))
+        memory_data = get_memory_manager().clear_memory(user_id=_resolve_memory_user_id(http_request))
+    except (MemoryConflictError, MemoryCorruptionError) as exc:
+        raise _map_memory_manager_error(exc) from exc
     except OSError as exc:
         raise HTTPException(status_code=500, detail="Failed to clear memory data.") from exc
 
@@ -237,7 +288,8 @@ async def clear_memory(http_request: Request) -> MemoryResponse:
 async def create_memory_fact_endpoint(request: FactCreateRequest, http_request: Request) -> MemoryResponse:
     """Create a single fact manually."""
     try:
-        memory_data = create_memory_fact(
+        create_fact = _require_capability("create_fact", label="create fact")
+        memory_data, fact_id = create_fact(
             content=request.content,
             category=request.category,
             confidence=request.confidence,
@@ -245,9 +297,14 @@ async def create_memory_fact_endpoint(request: FactCreateRequest, http_request: 
         )
     except ValueError as exc:
         raise _map_memory_fact_value_error(exc) from exc
+    except (MemoryConflictError, MemoryCorruptionError) as exc:
+        raise _map_memory_manager_error(exc) from exc
     except OSError as exc:
         raise HTTPException(status_code=500, detail="Failed to create memory fact.") from exc
 
+    if fact_id is None:
+        # max_facts cap evicted the new (lower-confidence) fact; it was not stored.
+        raise HTTPException(status_code=409, detail="Fact was not stored because memory.max_facts kept higher-confidence facts")
     return MemoryResponse(**memory_data)
 
 
@@ -261,9 +318,12 @@ async def create_memory_fact_endpoint(request: FactCreateRequest, http_request: 
 async def delete_memory_fact_endpoint(fact_id: str, http_request: Request) -> MemoryResponse:
     """Delete a single fact from memory by fact id."""
     try:
-        memory_data = delete_memory_fact(fact_id, user_id=_resolve_memory_user_id(http_request))
+        delete_fact = _require_capability("delete_fact", label="delete fact")
+        memory_data = delete_fact(fact_id, user_id=_resolve_memory_user_id(http_request))
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=f"Memory fact '{fact_id}' not found.") from exc
+    except (MemoryConflictError, MemoryCorruptionError) as exc:
+        raise _map_memory_manager_error(exc) from exc
     except OSError as exc:
         raise HTTPException(status_code=500, detail="Failed to delete memory fact.") from exc
 
@@ -280,7 +340,8 @@ async def delete_memory_fact_endpoint(fact_id: str, http_request: Request) -> Me
 async def update_memory_fact_endpoint(fact_id: str, request: FactPatchRequest, http_request: Request) -> MemoryResponse:
     """Partially update a single fact manually."""
     try:
-        memory_data = update_memory_fact(
+        update_fact = _require_capability("update_fact", label="update fact")
+        memory_data = update_fact(
             fact_id=fact_id,
             content=request.content,
             category=request.category,
@@ -291,6 +352,8 @@ async def update_memory_fact_endpoint(fact_id: str, request: FactPatchRequest, h
         raise _map_memory_fact_value_error(exc) from exc
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=f"Memory fact '{fact_id}' not found.") from exc
+    except (MemoryConflictError, MemoryCorruptionError) as exc:
+        raise _map_memory_manager_error(exc) from exc
     except OSError as exc:
         raise HTTPException(status_code=500, detail="Failed to update memory fact.") from exc
 
@@ -306,7 +369,10 @@ async def update_memory_fact_endpoint(fact_id: str, request: FactPatchRequest, h
 )
 async def export_memory(http_request: Request) -> MemoryResponse:
     """Export the current memory data."""
-    memory_data = get_memory_data(user_id=_resolve_memory_user_id(http_request))
+    try:
+        memory_data = get_memory_manager().get_memory(user_id=_resolve_memory_user_id(http_request))
+    except (MemoryConflictError, MemoryCorruptionError) as exc:
+        raise _map_memory_manager_error(exc) from exc
     return MemoryResponse(**memory_data)
 
 
@@ -320,7 +386,9 @@ async def export_memory(http_request: Request) -> MemoryResponse:
 async def import_memory(request: MemoryResponse, http_request: Request) -> MemoryResponse:
     """Import and persist memory data."""
     try:
-        memory_data = import_memory_data(request.model_dump(), user_id=_resolve_memory_user_id(http_request))
+        memory_data = get_memory_manager().import_memory(request.model_dump(exclude_none=True), user_id=_resolve_memory_user_id(http_request))
+    except (MemoryConflictError, MemoryCorruptionError) as exc:
+        raise _map_memory_manager_error(exc) from exc
     except OSError as exc:
         raise HTTPException(status_code=500, detail="Failed to import memory data.") from exc
 
@@ -337,39 +405,42 @@ async def get_memory_config_endpoint() -> MemoryConfigResponse:
     """Get the memory system configuration.
 
     Returns:
-        The current memory configuration settings.
+        The current memory configuration. The response is backend-agnostic:
+        ``enabled`` / ``injection_enabled`` / ``mode`` are mechanism-level
+        fields that apply to any backend (``mode`` selects middleware vs tool
+        operation), and ``backend_config`` is an opaque dict the active
+        backend (``manager_class``) self-interprets. DeerMem's knobs
+        (``storage_path``, ``max_facts``, ``debounce_seconds``, ...) live under
+        ``backend_config`` -- they are NOT top-level, because a non-DeerMem
+        backend has its own (different) knobs.
 
     Example Response:
         ```json
         {
             "enabled": true,
-            "storage_path": ".deer-flow/memory.json",
-            "debounce_seconds": 30,
-            "max_facts": 100,
-            "fact_confidence_threshold": 0.7,
             "injection_enabled": true,
-            "max_injection_tokens": 2000,
-            "token_counting": "tiktoken"
+            "shutdown_flush_timeout_seconds": 30.0,
+            "mode": "middleware",
+            "manager_class": "deermem",
+            "backend_config": {
+                "storage_path": "/.../.deer-flow",
+                "debounce_seconds": 30,
+                "max_facts": 100,
+                "fact_confidence_threshold": 0.7,
+                "max_injection_tokens": 2000,
+                "token_counting": "tiktoken"
+            }
         }
         ```
     """
     config = get_memory_config()
     return MemoryConfigResponse(
         enabled=config.enabled,
-        storage_path=config.storage_path,
-        debounce_seconds=config.debounce_seconds,
-        max_facts=config.max_facts,
-        fact_confidence_threshold=config.fact_confidence_threshold,
+        mode=config.mode,
         injection_enabled=config.injection_enabled,
-        max_injection_tokens=config.max_injection_tokens,
-        token_counting=config.token_counting,
-        guaranteed_categories=config.guaranteed_categories,
-        guaranteed_token_budget=config.guaranteed_token_budget,
-        staleness_review_enabled=config.staleness_review_enabled,
-        staleness_age_days=config.staleness_age_days,
-        staleness_min_candidates=config.staleness_min_candidates,
-        staleness_max_removals_per_cycle=config.staleness_max_removals_per_cycle,
-        staleness_protected_categories=config.staleness_protected_categories,
+        shutdown_flush_timeout_seconds=config.shutdown_flush_timeout_seconds,
+        manager_class=config.manager_class,
+        backend_config=config.backend_config,
     )
 
 
@@ -387,25 +458,16 @@ async def get_memory_status(http_request: Request) -> MemoryStatusResponse:
         Combined memory configuration and current data.
     """
     config = get_memory_config()
-    memory_data = get_memory_data(user_id=_resolve_memory_user_id(http_request))
+    memory_data = get_memory_manager().get_memory(user_id=_resolve_memory_user_id(http_request))
 
     return MemoryStatusResponse(
         config=MemoryConfigResponse(
             enabled=config.enabled,
-            storage_path=config.storage_path,
-            debounce_seconds=config.debounce_seconds,
-            max_facts=config.max_facts,
-            fact_confidence_threshold=config.fact_confidence_threshold,
+            mode=config.mode,
             injection_enabled=config.injection_enabled,
-            max_injection_tokens=config.max_injection_tokens,
-            token_counting=config.token_counting,
-            guaranteed_categories=config.guaranteed_categories,
-            guaranteed_token_budget=config.guaranteed_token_budget,
-            staleness_review_enabled=config.staleness_review_enabled,
-            staleness_age_days=config.staleness_age_days,
-            staleness_min_candidates=config.staleness_min_candidates,
-            staleness_max_removals_per_cycle=config.staleness_max_removals_per_cycle,
-            staleness_protected_categories=config.staleness_protected_categories,
+            shutdown_flush_timeout_seconds=config.shutdown_flush_timeout_seconds,
+            manager_class=config.manager_class,
+            backend_config=config.backend_config,
         ),
         data=MemoryResponse(**memory_data),
     )

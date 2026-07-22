@@ -357,6 +357,7 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
             evicted_id, _ = self._history.popitem(last=False)
             self._warned.pop(evicted_id, None)
             self._tool_name_history.pop(evicted_id, None)
+            self._tool_name_counter.pop(evicted_id, None)
             self._tool_freq_warned.pop(evicted_id, None)
             for key in list(self._pending_warnings):
                 if key[0] == evicted_id:
@@ -592,6 +593,11 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
             run_id = self._get_run_id(runtime)
             with self._lock:
                 self._stop_reason[run_id] = "loop_capped"
+            # Also write to runtime.context so the lead worker can read it
+            # without needing a reference to this middleware instance (#4176).
+            ctx = getattr(runtime, "context", None)
+            if isinstance(ctx, dict):
+                ctx["stop_reason"] = "loop_capped"
             # Strip tool_calls from the last AIMessage to force text output.
             # Once tool_calls are stripped, the AIMessage no longer requires
             # matching ToolMessage responses, so mutating it in place here
@@ -713,6 +719,7 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
                 self._history.pop(thread_id, None)
                 self._warned.pop(thread_id, None)
                 self._tool_name_history.pop(thread_id, None)
+                self._tool_name_counter.pop(thread_id, None)
                 self._tool_freq_warned.pop(thread_id, None)
                 for key in list(self._pending_warnings):
                     if key[0] == thread_id:
@@ -721,6 +728,7 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
                 self._history.clear()
                 self._warned.clear()
                 self._tool_name_history.clear()
+                self._tool_name_counter.clear()
                 self._tool_freq_warned.clear()
                 self._pending_warnings.clear()
                 self._pending_warning_touch_order.clear()

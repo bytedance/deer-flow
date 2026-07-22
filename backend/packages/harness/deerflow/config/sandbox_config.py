@@ -1,4 +1,47 @@
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field
+
+SandboxOwnershipType = Literal["memory", "redis"]
+
+
+class SandboxOwnershipConfig(BaseModel):
+    """Configuration for cross-instance sandbox container ownership (#4206).
+
+    Gateway instances share sandbox containers but each keeps its own in-memory
+    warm pool. Without shared ownership state, one instance's reconciliation
+    adopts another's live container and later idle-destroys it. This selects
+    where that ownership state lives.
+    """
+
+    type: SandboxOwnershipType = Field(
+        default="memory",
+        description=(
+            "Sandbox ownership store backend. 'memory' keeps ownership in-process (single-instance deployments only, where cross-instance adoption cannot occur). "
+            "'redis' shares ownership across gateway instances and is required for load-balanced / multi-worker deployments that share a container backend."
+        ),
+    )
+    redis_url: str | None = Field(
+        default=None,
+        description="Redis URL for the redis ownership type. If omitted, DEER_FLOW_SANDBOX_OWNERSHIP_REDIS_URL, DEER_FLOW_STREAM_BRIDGE_REDIS_URL, REDIS_URL, or redis://localhost:6379/0 is used.",
+    )
+    renewal_interval_seconds: float = Field(
+        default=30.0,
+        gt=0,
+        description=(
+            "How often an owning instance refreshes its leases. The lease TTL is derived from this (interval x ttl_multiplier), so ownership liveness is independent of sandbox.idle_timeout: "
+            "renewal keeps running even when idle cleanup is disabled (idle_timeout: 0)."
+        ),
+    )
+    ttl_multiplier: float = Field(
+        default=4.0,
+        ge=2,
+        description="Lease TTL as a multiple of renewal_interval_seconds. At least 2, so a single missed renewal (slow host, brief Redis blip) cannot expire a live owner's lease. Default 4 tolerates three consecutive misses.",
+    )
+    key_prefix: str = Field(
+        default="deerflow:sandbox:owner",
+        description="Redis key prefix for ownership leases. Only applies to the redis ownership type.",
+    )
 
 
 class VolumeMountConfig(BaseModel):
@@ -43,6 +86,8 @@ class SandboxConfig(BaseModel):
         port: Base port for sandbox containers (default: 8080)
         container_prefix: Prefix for container names (default: deer-flow-sandbox)
         mounts: List of volume mounts to share directories with the container
+        ownership: Cross-instance container ownership store (memory | redis). Multi-instance
+            deployments sharing a container backend need redis; see SandboxOwnershipConfig.
     """
 
     use: str = Field(
@@ -77,6 +122,13 @@ class SandboxConfig(BaseModel):
         default=None,
         ge=0,
         description="BoxLite-only reclaim skip window in seconds for boxes recently released by this provider instance. Set to 0 to always validate before warm reuse.",
+    )
+    ownership: SandboxOwnershipConfig | None = Field(
+        default=None,
+        description=(
+            "AioSandboxProvider-only: where cross-instance container ownership is tracked (#4206). Omitted = memory (single-instance). "
+            "Multi-worker / load-balanced gateways sharing one container backend must set type: redis, or peers will adopt and idle-destroy each other's live sandboxes."
+        ),
     )
     mounts: list[VolumeMountConfig] = Field(
         default_factory=list,

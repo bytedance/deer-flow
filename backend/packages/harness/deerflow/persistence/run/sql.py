@@ -96,6 +96,7 @@ class RunRepository(RunStore):
         metadata=None,
         kwargs=None,
         error=None,
+        stop_reason: str | None = None,
         created_at=None,
         follow_up_to_run_id=None,
         owner_worker_id: str | None = None,
@@ -121,6 +122,7 @@ class RunRepository(RunStore):
             "metadata_json": self._safe_json(metadata) or {},
             "kwargs_json": self._safe_json(kwargs) or {},
             "error": error,
+            "stop_reason": stop_reason,
             "follow_up_to_run_id": follow_up_to_run_id,
             "owner_worker_id": owner_worker_id,
             "lease_expires_at": lease_dt,
@@ -203,10 +205,12 @@ class RunRepository(RunStore):
             result = await session.execute(stmt)
             return {row.run_id: self._row_to_dict(row) for row in result.scalars()}
 
-    async def update_status(self, run_id, status, *, error=None) -> bool:
+    async def update_status(self, run_id, status, *, error=None, stop_reason=None) -> bool:
         values: dict[str, Any] = {"status": status, "updated_at": datetime.now(UTC)}
         if error is not None:
             values["error"] = error
+        if stop_reason is not None:
+            values["stop_reason"] = stop_reason
         # Guard: only transition rows that are still active. ``interrupted`` is
         # included because the rollback path goes ``running → interrupted``
         # (cancel acknowledged) then ``interrupted → error`` (task finalize).

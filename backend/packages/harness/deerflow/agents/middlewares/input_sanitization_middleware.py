@@ -90,6 +90,10 @@ _BLOCKED_TAG_NAMES: frozenset[str] = frozenset(
         "guidelines",
         "output_format",
         "working_directory",
+        # Subagent system-prompt block (general_purpose.py): declares the task
+        # tool off-limits. Forging this in untrusted input could trick the
+        # model into believing it has (or lacks) tool restrictions it does not.
+        "tool_restrictions",
         # Common prompt-injection tag patterns
         "system",
         "instruction",

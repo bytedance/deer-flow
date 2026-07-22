@@ -102,6 +102,7 @@ class RunJournal(BaseCallbackHandler):
         self._counted_llm_run_ids: set[str] = set()
         self._counted_external_source_ids: set[str] = set()
         self._counted_message_llm_run_ids: set[str] = set()
+        self._memory_context_recorded = False
 
         # Convenience fields
         self._last_ai_msg: str | None = None
@@ -629,6 +630,23 @@ class RunJournal(BaseCallbackHandler):
             category="middleware",
             content={"name": name, "hook": hook, "action": action, "changes": changes},
         )
+
+    def record_memory_context(self, *, content_sha256: str) -> None:
+        """Record the effective hidden memory block for this run.
+
+        The full block already lives in checkpoint state and may contain user
+        data, so the event stores only its exact SHA-256 identity. Operators
+        consume it through the existing run-events debug API to compare the
+        effective memory used by different runs without copying that content.
+        """
+        if self._memory_context_recorded:
+            return
+        self._put(
+            event_type="context:memory",
+            category="context",
+            content={"content_sha256": content_sha256},
+        )
+        self._memory_context_recorded = True
 
     async def flush(self) -> None:
         """Force flush remaining buffer. Called in worker's finally block."""

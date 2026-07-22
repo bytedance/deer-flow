@@ -7,6 +7,13 @@ When memory.mode == "tool", these tools are registered on the agent
 instead of appending MemoryMiddleware.  The model gains agency over
 its own persistent memory: it decides what to remember, when to
 search, and when to update or remove stale facts.
+
+Backend-agnostic: every tool goes through the ``MemoryManager`` ABC
+(:func:`get_memory_manager`) -- ``search``/``get_memory`` are on the ABC;
+``create_fact``/``update_fact``/``delete_fact`` are backend-internal
+capabilities reached via attribute access (absent -> the tool returns a
+JSON ``error`` instead of crashing). So tool mode works for any backend
+that exposes those ops (DeerMem does; noop returns empty/errors).
 """
 
 import json
@@ -14,13 +21,7 @@ import logging
 
 from langchain.tools import tool
 
-from deerflow.agents.memory.updater import (
-    create_memory_fact_with_created_fact,
-    delete_memory_fact,
-    get_memory_data,
-    search_memory_facts,
-    update_memory_fact,
-)
+from deerflow.agents.memory.manager import get_memory_manager
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.tools.types import Runtime
 
@@ -55,7 +56,7 @@ def memory_search_tool(
     """Search existing facts by natural language query.
 
     Use this when you need to check what you already know about the user
-    — their preferences, past corrections, context, or any stored facts.
+    - their preferences, past corrections, context, or any stored facts.
 
     Args:
         query: Natural language query to match against fact content.
@@ -70,12 +71,12 @@ def memory_search_tool(
     """
     agent_name, user_id = _resolve_scope(runtime)
     try:
-        results = search_memory_facts(
+        results = get_memory_manager().search(
             query,
-            category=category,
-            limit=limit,
-            agent_name=agent_name,
+            top_k=limit,
             user_id=user_id,
+            agent_name=agent_name,
+            category=category,
         )
         return json.dumps({"results": results, "count": len(results)}, ensure_ascii=False)
     except Exception as exc:
@@ -93,7 +94,7 @@ def memory_add_tool(
     """Store a new fact about the user or conversation context.
 
     Use this when the user shares something worth remembering for future
-    conversations — preferences, corrections, personal details, work context.
+    conversations - preferences, corrections, personal details, work context.
     The fact persists across sessions and will be available via memory_search
     and automatic context injection.
 
@@ -112,23 +113,33 @@ def memory_add_tool(
     agent_name, user_id = _resolve_scope(runtime)
     try:
         normalized_content = content.strip()
-        existing_key = _memory_content_key(normalized_content)
-        existing_facts = get_memory_data(agent_name, user_id=user_id).get("facts", [])
+        if not normalized_content:
+            return json.dumps({"error": "empty content"})
+        content_key = _memory_content_key(normalized_content)
+        manager = get_memory_manager()
+        existing_facts = manager.get_memory(agent_name=agent_name, user_id=user_id).get("facts", [])
         # Tool calls normally run one-at-a-time per user turn. If tool-mode
         # writing broadens to multiple concurrent calls for the same user,
         # move duplicate rejection into the storage/update critical section.
-        if any(_memory_content_key(str(fact.get("content", ""))) == existing_key for fact in existing_facts):
+        if any(_memory_content_key(str(fact.get("content", ""))) == content_key for fact in existing_facts):
             return json.dumps({"error": "Duplicate fact"})
 
-        updated_memory, created_fact = create_memory_fact_with_created_fact(
+        create = getattr(manager, "create_fact", None)
+        if not callable(create):
+            return json.dumps({"error": f"memory backend {type(manager).__name__} does not support create_fact"})
+        # create_fact returns (memory_data, fact_id) -- use the id directly rather
+        # than re-deriving it by content matching (which would couple the tool to
+        # the backend's content normalization and could misreport a storage cap).
+        _memory_data, fact_id = create(
             normalized_content,
             category=category,
             confidence=confidence,
             agent_name=agent_name,
             user_id=user_id,
         )
-        fact_id = created_fact["id"]
-        if all(fact.get("id") != fact_id for fact in updated_memory.get("facts", [])):
+        if fact_id is None:
+            # max_facts cap kept higher-confidence facts and evicted the new one;
+            # the fact was not stored -- report honestly instead of a dangling id.
             return json.dumps({"error": "Fact was not stored because memory.max_facts kept higher-confidence facts"})
         return json.dumps({"fact_id": fact_id, "status": "added"})
     except ValueError as exc:
@@ -170,7 +181,11 @@ def memory_update_tool(
     """
     agent_name, user_id = _resolve_scope(runtime)
     try:
-        update_memory_fact(
+        manager = get_memory_manager()
+        update = getattr(manager, "update_fact", None)
+        if not callable(update):
+            return json.dumps({"error": f"memory backend {type(manager).__name__} does not support update_fact"})
+        update(
             fact_id,
             content=content,
             category=category,
@@ -204,7 +219,11 @@ def memory_delete_tool(runtime: Runtime, fact_id: str) -> str:
     """
     agent_name, user_id = _resolve_scope(runtime)
     try:
-        delete_memory_fact(fact_id, agent_name=agent_name, user_id=user_id)
+        manager = get_memory_manager()
+        delete = getattr(manager, "delete_fact", None)
+        if not callable(delete):
+            return json.dumps({"error": f"memory backend {type(manager).__name__} does not support delete_fact"})
+        delete(fact_id, agent_name=agent_name, user_id=user_id)
         return json.dumps({"fact_id": fact_id, "status": "deleted"})
     except KeyError:
         return json.dumps({"error": f"Fact not found: {fact_id}"})

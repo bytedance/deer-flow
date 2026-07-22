@@ -15,7 +15,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 24
+config_version: 29
 
 # ============================================================================
 # Logging
@@ -29,6 +29,23 @@ logging:
   enhance:
     enabled: false
     format: text
+
+# ============================================================================
+# Agent Extensions
+# ============================================================================
+# Optional AgentMiddleware classes loaded into the lead and subagent runtime
+# middleware chains after built-in runtime middlewares, but before the
+# safety/clarification tail. Missing packages, invalid classes, and broken
+# modules fail loudly at agent creation with an actionable import error.
+# The same zero-argument class list applies to both lead and subagent runtimes;
+# lead-only vs subagent-only configuration is not expressible yet. Treat these
+# files as trusted operator config because middleware classes execute code.
+# Uncomment this block to define middlewares in config.yaml. Leaving it commented
+# lets extensions_config.json remain the source of truth for extension packages.
+# extensions:
+#   middlewares:
+#     - my_company.deerflow_middlewares:DomainGuardMiddleware
+#     - my_company.deerflow_middlewares:LatencyStampingMiddleware
 
 # ============================================================================
 # Tracing / Observability (Monocle)
@@ -631,6 +648,7 @@ tool_groups:
   - name: file:read
   - name: file:write
   - name: bash
+  - name: browser
 
 # ============================================================================
 # Tools Configuration
@@ -784,6 +802,65 @@ tools:
   #   # allow_private_addresses: false      # SSRF guard: keep false in production. Set true ONLY to
   #   #                                     # capture internal/private targets (loopback, RFC1918, etc.)
 
+  # Agentic browser control (stateful navigate → observe → click/type loop).
+  # Unlike web_fetch/web_capture (read-only, stateless), these tools keep a live
+  # per-thread Playwright browser so the agent can interact with JavaScript-heavy
+  # pages, fill forms, and follow multi-step flows. Elements are addressed by the
+  # numeric [ref] index returned in each page snapshot.
+  #
+  # Requires the optional dependency, installed once per environment:
+  #   cd backend && uv sync --extra browser && uv run playwright install chromium
+  # make dev / Docker startup auto-detect an active browser_navigate entry and
+  # preserve the browser extra during dependency sync.
+  #
+  # Uncomment the whole block to enable. Launch and URL-policy settings are read
+  # canonically from browser_navigate and shared by every browser tool + Live.
+  # - name: browser_navigate
+  #   group: browser
+  #   use: deerflow.community.browser_automation.tools:browser_navigate_tool
+  #   headless: true                   # Set false only for local, trusted debugging
+  #   timeout_ms: 30000                # Per-action navigation/interaction timeout
+  #   viewport_width: 1280
+  #   viewport_height: 720
+  #   # allow_private_addresses: false # SSRF guard: keep false in production
+  #   # cdp_url: http://127.0.0.1:9222 # Attach to YOUR running Chrome (Codex-style)
+  #   # allow_unguarded_cdp: false      # REQUIRED true with cdp_url: attaching to an
+  #   #                                # existing Chrome prevents DeerFlow from
+  #   #                                # enforcing its subresource/redirect SSRF guard.
+  #   #                                # instead of launching a private headless one.
+  #   #                                # Start Chrome with --remote-debugging-port=9222
+  #   #                                # so you watch the agent drive your real browser
+  #   #                                # with your real login sessions. Local/trusted only;
+  #   #                                # never enable for an untrusted CDP endpoint.
+  #   #                                # Chrome must be version-matched to the bundled
+  #   #                                # Playwright; a much newer Chrome can reject the
+  #   #                                # CDP handshake. If so, use headless: false to launch
+  #   #                                # Playwright's own visible browser instead.
+  #   # Multi-worker note: browser sessions live in one Gateway worker's memory.
+  #   # Keep GATEWAY_WORKERS=1 while this tool group is enabled.
+  # - name: browser_snapshot
+  #   group: browser
+  #   use: deerflow.community.browser_automation.tools:browser_snapshot_tool
+  # - name: browser_click
+  #   group: browser
+  #   use: deerflow.community.browser_automation.tools:browser_click_tool
+  # - name: browser_type
+  #   group: browser
+  #   use: deerflow.community.browser_automation.tools:browser_type_tool
+  # - name: browser_get_text
+  #   group: browser
+  #   use: deerflow.community.browser_automation.tools:browser_get_text_tool
+  #   max_chars: 8000                  # Truncation cap for browser_get_text output
+  # - name: browser_back
+  #   group: browser
+  #   use: deerflow.community.browser_automation.tools:browser_back_tool
+  # - name: browser_screenshot
+  #   group: browser
+  #   use: deerflow.community.browser_automation.tools:browser_screenshot_tool
+  # - name: browser_close
+  #   group: browser
+  #   use: deerflow.community.browser_automation.tools:browser_close_tool
+
   # Web fetch tool (uses Exa)
   # NOTE: Only one web_fetch provider can be active at a time.
   # Comment out the Jina AI web_fetch entry below before enabling this one.
@@ -934,8 +1011,8 @@ tool_search:
 # ============================================================================
 # Prevents oversized tool results from blowing the model context window.
 # Outputs exceeding `externalize_min_chars` are persisted to disk and replaced
-# with a compact preview + file reference. The model can read the full output
-# via read_file.  When disk persistence is unavailable, outputs exceeding
+# with a compact typed synopsis + file reference. The model can read the full output
+# via read_file. When disk persistence is unavailable, outputs exceeding
 # `fallback_max_chars` are head+tail truncated instead.
 #
 # `exempt_tools` prevents persist→read→persist infinite loops for read tools.
@@ -944,6 +1021,8 @@ tool_search:
 tool_output:
   enabled: true
   externalize_min_chars: 12000
+  # Sampling budget for the inline raw head/tail sample appended to every
+  # typed synopsis; ignored for binary-like output, which carries its own sample.
   preview_head_chars: 2000
   preview_tail_chars: 1000
   fallback_max_chars: 30000
@@ -1183,6 +1262,54 @@ sandbox:
 #   #   DEBUG: "false"
 #   #   API_KEY: $MY_API_KEY        # Reads from host's MY_API_KEY env var
 #   #   DATABASE_URL: $DATABASE_URL  # Reads from host's DATABASE_URL env var
+#
+#   # Optional: Cross-instance container ownership (issue #4206).
+#   #
+#   # Gateway instances share sandbox containers but each keeps its own in-memory
+#   # warm pool. Without shared ownership state, one instance's startup
+#   # reconciliation adopts a container another instance is actively using and
+#   # later idle-destroys it — tool calls then fail with 502 / connection refused.
+#   #
+#   # Single gateway instance? Leave this out; `memory` is the default and the
+#   # cross-instance kill cannot happen.
+#   #
+#   # MULTIPLE gateway instances / workers sharing one container backend
+#   # (load-balanced deployments, Docker Compose) MUST set type: redis. Docker
+#   # Compose already sets DEER_FLOW_STREAM_BRIDGE_REDIS_URL, which is taken as
+#   # proof the deployment is multi-instance, so redis ownership is inferred even
+#   # if this section is omitted.
+#   #
+#   # The redis ownership store requires the optional `redis` extra. It is
+#   # auto-detected from this section on `make dev` and always installed in the
+#   # Docker image. To install it manually:
+#   #     cd backend && uv sync --all-packages --extra redis
+#   #
+#   # ownership:
+#   #   type: memory                 # single gateway instance only
+#   #
+#   # ownership:
+#   #   type: redis                  # required for multi-instance / load-balanced
+#   #   redis_url: redis://redis:6379/0
+#   #   renewal_interval_seconds: 30 # how often an owner refreshes its leases
+#   #   ttl_multiplier: 4            # lease TTL = interval x this (min 2, so a
+#   #                                # single missed renewal cannot expire a live
+#   #                                # owner). Liveness is deliberately independent
+#   #                                # of idle_timeout: renewal keeps running even
+#   #                                # at idle_timeout: 0.
+#   #   key_prefix: deerflow:sandbox:owner
+#   #
+#   # NOTE: the redis ownership store is fail-closed, matching the stream bridge's
+#   # fail-hard policy. Redis.from_url is lazy so a down Redis does not block
+#   # startup, but a sandbox whose ownership cannot be published is not handed out
+#   # — acquiring raises instead. The alternative (proceed unowned) is exactly the
+#   # #4206 cross-instance kill. Run Redis with HA / a restart policy.
+#   #
+#   # NOTE: the other boundary is the lease TTL (renewal_interval_seconds x
+#   # ttl_multiplier). A Redis outage longer than the TTL can let a reconciling
+#   # instance adopt a live owner's container: a lapsed lease is indistinguishable
+#   # from a dead owner, so one TTL of adoption grace is the whole safety margin.
+#   # Size the TTL against your Redis availability target (HA Redis keeps this
+#   # window out of reach).
 
 # Option 3: BoxLite micro-VM Sandbox
 # Runs each sandbox as a BoxLite micro-VM. Released boxes stay in an in-process
@@ -1362,8 +1489,10 @@ skills:
 # Native deterministic skill safety scanning. This runs before the LLM skill
 # scanner on skill install/update and agent-managed skill writes.
 skill_scan:
-  # Set false to disable the new deterministic analyzers. Safe archive
-  # extraction and the LLM skill scanner still run.
+  # Set false to disable the new deterministic analyzers (nested-archive,
+  # secret-pattern, and other content-level checks). Safe archive extraction
+  # (path traversal, symlinks, executable-binary, total-size, and entry-count
+  # limits) and the LLM skill scanner still run unconditionally.
   enabled: true
 
 # Note: To restrict which skills are loaded for a specific custom agent,
@@ -1448,87 +1577,131 @@ summarization:
 # ============================================================================
 # Memory Configuration
 # ============================================================================
-# Global memory mechanism
-# Stores user context and conversation history for personalized responses
+# Global memory mechanism (pluggable + self-contained).
+#
+# Shared fields (host level, backend-agnostic):
+#   enabled             - Master switch for the memory mechanism (call-site gate)
+#   injection_enabled   - Whether to inject memory into the system prompt (call-site gate)
+#   shutdown_flush_timeout_seconds - Hard budget (s) to drain pending updates on Gateway graceful shutdown (default: 30)
+#   manager_class       - Backend selector: registered name (deermem/noop) or dotted path
+#   backend_config      - Backend-private config dict (passthrough; each backend self-interprets)
+#
+# DeerMem-private fields live under ``backend_config`` (NOT at the memory: top level):
+#   storage_path        - Data root. Empty = deer-flow base_dir (factory injects absolute
+#                         runtime_home). Absolute path = that root. Relative = CWD-relative.
+#   model               - LLM config for memory extraction: {provider, model, api_key, base_url,
+#                         temperature}. Omit all fields = no extraction (non-LLM ops still work).
+#   debounce_seconds    - Debounce wait before processing queued updates (default: 30)
+#   max_facts           - Maximum facts to store (default: 100)
+#   fact_confidence_threshold - Minimum confidence for storing facts (default: 0.7)
+#   max_injection_tokens     - Token budget for memory injection (default: 2000)
+#   token_counting          - tiktoken (accurate, network on first use) or char (network-free)
+#   guaranteed_categories   - Fact categories always injected (default: ["correction"])
+#   guaranteed_token_budget - Token ceiling for guaranteed categories (default: 500)
+#   staleness_review_enabled       - Enable staleness pruning (default: true)
+#   staleness_age_days             - Age threshold for staleness candidates (default: 90)
+#   staleness_min_candidates       - Minimum stale facts to trigger review (default: 3)
+#   staleness_max_removals_per_cycle - Safety cap on removals per cycle (default: 10)
+#   staleness_protected_categories - Categories exempt from staleness review (default: ["correction"])
+#   staleness_max_lifetime_multiplier - Creation-time cap multiplier for a fact LLM-assigned
+#                                       expected_valid_days; new facts clamped to
+#                                       staleness_age_days x multiplier. Default 20.0
+#                                       (90 x 20 = 1800d ~ 5 years) supports the very-stable
+#                                       prompt tier. (default: 20.0, range: 1.0-100.0)
+#   staleness_max_extension_days   - Absolute ceiling (in days) on expected_valid_days after a
+#                                    lifetime extension (staleFactsToExtend). Prevents timedelta
+#                                    overflow and LLM misfire from permanently deferring a fact.
+#                                    (default: 3650, range: 90-36500)
 memory:
   enabled: true
+  injection_enabled: true # Whether to inject memory into system prompt
+  # Hard budget (seconds) to drain pending memory updates on Gateway graceful
+  # shutdown. Each pending item does one LLM call, so large IM batches may need
+  # more. Must fit inside the pod's K8s terminationGracePeriodSeconds (channel
+  # stop + this drain + buffer) or K8s SIGKILLs the drain -- set that on the
+  # gateway Helm deployment (see deploy/helm/deer-flow). Default 30s.
+  shutdown_flush_timeout_seconds: 30.0
+  # Memory backend selector. Either a registered backend name (matching a
+  # backends/<name>/ folder that exposes MANAGER_CLASS, e.g. deermem / noop)
+  # or a dotted import path to a MemoryManager subclass.
+  manager_class: deermem
   # Memory operation mode:
   #   middleware (default) - passive background extraction after each turn.
   #   tool - experimental opt-in; the model calls memory_search/memory_add/
   #     memory_update/memory_delete directly. This gives the model agency over
   #     memory writes, but effectiveness depends on model tool-use behavior.
-  # Only one mode runs at a time.
+  # Only one mode runs at a time. (tool mode calls the MemoryManager ABC --
+  # memory_search/add/update/delete go through the active backend; backends
+  # without fact-CRUD return a JSON error instead of crashing.)
   mode: middleware
-  storage_path: memory.json # Absolute path opts out of per-user isolation; a relative path resolves under the data base_dir, not the backend directory
-  debounce_seconds: 30 # Wait time before processing queued updates
-  model_name: null # Use default model
-  max_facts: 100 # Maximum number of facts to store
-  fact_confidence_threshold: 0.7 # Minimum confidence for storing facts
-  injection_enabled: true # Whether to inject memory into system prompt
-  max_injection_tokens: 2000 # Maximum tokens for memory injection
-  # Token counting strategy for memory-injection budgeting:
-  #   tiktoken (default) - accurate, but the encoding's BPE data may be
-  #     downloaded from a public network endpoint on first use. In
-  #     network-restricted environments this download can block for a long
-  #     time (see issues #3402 / #3429). Pre-cache the encoding or set this
-  #     to "char" to avoid it.
-  #   char - network-free CJK-aware character-based estimate; never touches
-  #     tiktoken. Slightly less precise budgeting, zero network I/O.
-  token_counting: tiktoken
-  # Guaranteed injection: fact categories that bypass the regular token budget
-  # and draw from a reserved allowance, so high-signal corrections (e.g.
-  # "don't use `pip`, use `uv`") survive even when the budget is tight.
-  #   guaranteed_categories - list of fact categories to guarantee. Pass [] to
-  #     disable; defaults to ["correction"].
-  #   guaranteed_token_budget - token ceiling for guaranteed facts. In the
-  #     common case the total injection stays within ``max_injection_tokens``
-  #     (guaranteed lines displace regular ones); the allowance becomes
-  #     additive only when guaranteed lines alone would overflow
-  #     ``max_injection_tokens``, in which case the safety-truncation ceiling
-  #     is raised accordingly.
-  guaranteed_categories:
-    - correction
-  guaranteed_token_budget: 500
-  # Staleness review: periodically prune aged facts that may no longer reflect
-  # the user's current situation.  When triggered, the LLM reviews facts older
-  # than ``staleness_age_days`` during the normal memory-update call (same LLM
-  # invocation — no extra API call) and decides KEEP or REMOVE for each.
-  #   staleness_review_enabled - master switch (default: true)
-  #   staleness_age_days       - facts older than this are candidates (default: 90)
-  #   staleness_min_candidates - minimum stale facts required to trigger a review
-  #                              cycle; avoids wasteful LLM calls when there are
-  #                              very few candidates (default: 3)
-  #   staleness_max_removals_per_cycle - safety cap on removals per cycle; when
-  #                                      exceeded, the lowest-confidence entries
-  #                                      are kept (default: 10)
-  #   staleness_protected_categories - fact categories exempt from review
-  #                                    (default: ["correction"])
-  staleness_review_enabled: true
-  staleness_age_days: 90
-  staleness_min_candidates: 3
-  staleness_max_removals_per_cycle: 10
-  staleness_protected_categories:
-    - correction
-
-  # Memory consolidation: when a single category accumulates many fragmented
-  # facts, the LLM reviews them during the normal memory-update call (same
-  # invocation — no extra API call) and decides whether groups of related facts
-  # can be synthesized into a single richer fact.
-  # consolidation_enabled defaults to false because consolidation is lossy:
-  # source fact content is permanently replaced by the LLM-synthesized fact
-  # (only the source IDs are kept in consolidatedFrom). Enable explicitly once
-  # you are comfortable with that trade-off.
-  #   consolidation_enabled          - master switch (default: false)
-  #   consolidation_min_facts        - minimum facts in a category to trigger
-  #                                    consolidation review (default: 8)
-  #   consolidation_max_groups_per_cycle - safety cap on merges per cycle
-  #                                        (default: 3)
-  #   consolidation_max_sources      - max source facts per merge group;
-  #                                    prevents over-merging (default: 8)
-  consolidation_enabled: false
-  consolidation_min_facts: 8
-  consolidation_max_groups_per_cycle: 3
-  consolidation_max_sources: 8
+  # Backend-private config (a dict), passed verbatim to the backend __init__.
+  # Each backend self-interprets it (DeerMem parses it into DeerMemConfig).
+  backend_config:
+    storage_path: ""            # empty = deer-flow base_dir (factory injects absolute runtime_home); a non-empty path is the root DIRECTORY (per-user memory under {storage_path}/users/{uid}/memory.json)
+    storage_class: file         # file (default) or a dotted MemoryStorage class path; invalid persistent backends fail fast
+    strict_user_scope: false    # set true in authenticated deployments after all callers propagate user_id
+    manifest_filename: memory.json # user-global JSON: version/revision/time + user/history only; no facts or fact index
+    file_lock_timeout_seconds: 10 # per-scope cross-process advisory lock timeout (single-machine local filesystem)
+    retrieval_adapter: ""       # optional dotted factory(config) supplied by the retrieval module
+    debounce_seconds: 30 # Wait time before processing queued updates
+    model:                      # LLM for memory extraction; omit all fields = no extraction (non-LLM ops still work; an update raises)
+      # provider: openai
+      # model: gpt-4o-mini
+      # api_key: $OPENAI_API_KEY
+      # base_url:               # optional, for OpenAI-compatible gateways (e.g. DeepSeek)
+      # temperature:            # optional
+    max_facts: 100 # Maximum number of facts to store
+    fact_confidence_threshold: 0.7 # Minimum confidence for storing facts
+    max_injection_tokens: 2000 # Maximum tokens for memory injection
+    # Token counting strategy for memory-injection budgeting:
+    #   tiktoken (default) - accurate, but the encoding BPE data may be
+    #     downloaded from a public network endpoint on first use. In
+    #     network-restricted environments this download can block for a long
+    #     time (see issues #3402 / #3429). Pre-cache the encoding or set this
+    #     to "char" to avoid it.
+    #   char - network-free CJK-aware character-based estimate; never touches
+    #     tiktoken. Slightly less precise budgeting, zero network I/O.
+    token_counting: tiktoken
+    # Guaranteed injection: fact categories that bypass the regular token budget
+    # and draw from a reserved allowance, so high-signal corrections (e.g.
+    # "don use pip, use uv") survive even when the budget is tight.
+    guaranteed_categories:
+      - correction
+    guaranteed_token_budget: 500
+    # Staleness review: periodically prune aged facts that may no longer reflect
+    # the user current situation. When triggered, the LLM reviews facts older
+    # than their individual review window (expected_valid_days, or
+    # staleness_age_days as fallback) during the normal memory-update call (same
+    # LLM invocation - no extra API call) and decides KEEP, REMOVE, or EXTEND
+    # for each. The LLM assigns expected_valid_days when creating a fact; EXTEND
+    # (staleFactsToExtend) recalibrates that window at review time.
+    staleness_review_enabled: true
+    staleness_age_days: 90
+    staleness_min_candidates: 3
+    staleness_max_removals_per_cycle: 10
+    staleness_protected_categories:
+      - correction
+    staleness_max_lifetime_multiplier: 20.0   # creation cap = staleness_age_days x multiplier (90 x 20 = 1800d)
+    staleness_max_extension_days: 3650        # absolute ceiling on extended expected_valid_days (~10 years)
+    # Memory consolidation (opt-in, lossy: source facts are replaced by a
+    # synthesized one; only consolidatedFrom IDs are kept). Runs in the same
+    # memory-update LLM call as extraction/staleness - no extra API cost.
+    # consolidation_enabled defaults to false because consolidation is lossy.
+    consolidation_enabled: false       # set true to opt into fact consolidation
+    consolidation_min_facts: 8         # min facts in one category to trigger review (3-30)
+    consolidation_max_groups_per_cycle: 3  # max groups merged per update cycle (1-10)
+    consolidation_max_sources: 8       # max source facts per consolidation group (2-20)
+    # Message processing (externalized patterns / prompt templates):
+    #   patterns_dir        - dir with correction.yaml / reinforcement.yaml overriding
+    #                         the bundled signal-detection patterns. None (default) =
+    #                         bundled core/message_patterns/. When explicitly set, both
+    #                         files must exist (typos or missing mounts raise an error).
+    #   prompts_dir         - dir with custom memory-extraction prompt templates
+    #                         (memory_update.chat.yaml, staleness_review.yaml,
+    #                         consolidation.yaml, fact_extraction.yaml). None (default)
+    #                         = bundled core/prompts/. Supports per-agent subdirectories.
+    # patterns_dir: ""            # empty = bundled defaults
+    # prompts_dir: ""             # empty = bundled defaults
 
 # ============================================================================
 # Custom Agent Management API
@@ -1545,6 +1718,7 @@ agents_api:
 skill_evolution:
   enabled: false # Set to true to allow agent-managed writes under skills/custom
   moderation_model_name: null # Model for LLM-based security scanning (null = use default model)
+  security_fail_closed: true # Moderation model unavailable: true blocks all writes; false allows non-executable content with a warning (executable is always blocked)
 
 # ============================================================================
 # Checkpointer Configuration (DEPRECATED — use `database` instead)
@@ -1618,6 +1792,14 @@ skill_evolution:
 database:
   backend: sqlite
   sqlite_dir: .deer-flow/data
+  # Recycle app ORM PostgreSQL connections before the environment's idle cutoff.
+  pool_recycle: 300
+  # App ORM PostgreSQL command timeout. Set to null to disable it or raise it
+  # for intentionally long commands.
+  command_timeout: 30
+  # Restart required. Use one value across every process sharing this database.
+  # full: current full-message checkpoints; delta: DeltaChannel for messages.
+  checkpoint_channel_mode: full
 
 # ============================================================================
 # Run Events Configuration
@@ -1824,11 +2006,12 @@ run_ownership:
 #     # Optional: sent as SKRouteTag header when provided
 #     route_tag: ""
 #     allowed_users: []               # empty = allow all
-#     # Optional: long-polling timeout in seconds
+#     # Optional: timing values must be positive finite seconds
 #     polling_timeout: 35
-#     # Optional: QR poll interval in seconds when qrcode_login_enabled is true
+#     polling_retry_delay: 5
+#     # QR poll interval when qrcode_login_enabled is true
 #     qrcode_poll_interval: 2
-#     # Optional: QR bootstrap timeout in seconds
+#     # QR bootstrap timeout
 #     qrcode_poll_timeout: 180
 #     # Optional: persist getupdates cursor under the gateway container volume
 #     state_dir: ./.deer-flow/wechat/state
@@ -1914,6 +2097,16 @@ run_ownership:
 #       key: value
 
 # ============================================================================
+# Authorization Configuration
+# ============================================================================
+# Fine-grained resource authorization (RBAC and beyond). Disabled by default;
+# every authenticated user has access to all resources. Schema is present but
+# inert; the built-in RBAC provider and runtime wiring arrive in subsequent phases.
+# See RFC: https://github.com/bytedance/deer-flow/issues/4063
+authorization:
+  enabled: false
+
+# ============================================================================
 # Circuit Breaker Configuration
 # ============================================================================
 # Circuit breaker for LLM calls prevents repeated requests to a failing provider.
@@ -1929,6 +2122,49 @@ run_ownership:
 #   failure_threshold: 5
 #   # Time in seconds before attempting to recover (default: 60)
 #   recovery_timeout_sec: 60
+
+# ============================================================================
+# LLM Call Concurrency Configuration
+# ============================================================================
+# Cap the number of concurrently in-flight LLM calls process-wide. A provider
+# burst-rate (limit_burst_rate) error fires on the *slope* of the request rate,
+# not on a static quota - so the morning peak (e.g. 08:30) ramping from ~0 to
+# full throttle in seconds gets rejected even when total RPM is within budget.
+# Capping concurrency caps that slope. Retries alone make it worse (they add
+# demand inside the very burst being throttled); pair this cap with the
+# decorrelated-jitter backoff already built into the LLM error-handling
+# middleware, and ideally an nginx `limit_req` at the ingress.
+#
+# 0 disables the cap (default) - existing deployments see no behavior change.
+#
+# Per-process, not per-cluster: the cap bounds in-flight LLM calls within ONE
+# gateway process. With GATEWAY_WORKERS > 1 the aggregate cap across the
+# deployment is effectively `max_concurrent_calls * GATEWAY_WORKERS`, and a
+# multi-node rollout multiplies it further - size the per-process value with
+# that in mind (and pair it with an nginx `limit_req` at the ingress for a
+# true cluster-wide slope cap).
+#
+# Startup-only: the cap is captured at the first LLM run and frozen for the
+# process lifetime. Editing `max_concurrent_calls` here takes effect only after
+# a gateway restart; the other `llm_call.*` knobs below remain hot-reloadable.
+# Freezing the cap avoids the downscale and config-freshness races that a
+# runtime-mutable, process-wide/cross-loop limiter would otherwise hit (a
+# lowered cap could keep admitting queued waiters, or a stale config snapshot
+# constructed after a fresher one could restore a higher cap).
+
+# llm_call:
+#   # Max concurrently in-flight LLM calls across the whole process (default: 0 = disabled)
+#   max_concurrent_calls: 0
+#   # Max LLM call attempts for retriable transient errors, 1 = no retry (default: 3)
+#   retry_max_attempts: 3
+#   # Base delay (ms) for the decorrelated-jitter retry backoff (default: 1000)
+#   retry_base_delay_ms: 1000
+#   # Hard cap (ms) on any single retry backoff delay (default: 8000)
+#   retry_cap_delay_ms: 8000
+#   # Backoff base (ms) used ONLY for burst-rate (limit_burst_rate) 429s - higher
+#   # than retry_base_delay_ms so the single burst retry lands after the throttle
+#   # window subsides. Ignored when the provider sends Retry-After (default: 5000)
+#   burst_retry_base_delay_ms: 5000
 
 # ============================================================================
 # SSO / OIDC Authentication (optional)
@@ -1948,7 +2184,24 @@ run_ownership:
 #   2. Add Valid Redirect URI: http://localhost:8001/api/v1/auth/callback/keycloak
 #   3. Add Web Origin: http://localhost:8001 (or your frontend origin)
 
+# ============================================================================
+# Local (email/password) authentication
+# ============================================================================
+# Self-registration via POST /api/v1/auth/register is open by default: anyone
+# who can reach the Gateway may create a regular user account.
+#
+# The OIDC provisioning policy below (allowed_email_domains, require_verified_email,
+# auto_create_users) is enforced only in the SSO callback. It does NOT constrain local
+# registration, so on an SSO-provisioned deployment leaving this open lets a visitor
+# create an account outside that policy. Set allow_registration: false there.
+#
+# The first admin account is always created through /initialize regardless of this
+# setting, so turning it off cannot lock you out of a fresh install.
+
 # auth:
+#   local:
+#     allow_registration: false
+#
 #   oidc:
 #     enabled: true
 #     # Base URL of the frontend, used for redirects after SSO callback.

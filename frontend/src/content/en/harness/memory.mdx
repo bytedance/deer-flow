@@ -43,38 +43,50 @@ In tool mode, the four `memory_*` tool names are reserved. If an MCP server or c
 ```yaml
 memory:
   enabled: true
+  injection_enabled: true
+
+  # Backend selector: deermem (default) | noop | a dotted path to a custom
+  # MemoryManager subclass. Swap backend = drop a backends/<name>/ folder and
+  # set this (see backend/.../agents/memory/backends/).
+  manager_class: deermem
 
   # Operation mode:
   #   middleware - default; passive background extraction after each turn
   #   tool - experimental; model calls memory_* tools directly
   mode: middleware
 
-  # Storage path for the global memory file.
-  # Default: {base_dir}/memory.json  (resolves to backend/.deer-flow/memory.json)
-  # Absolute paths are used as-is.
-  # Relative paths are resolved against base_dir (not the backend working directory).
-  storage_path: memory.json
+  # DeerMem-private knobs. These live under backend_config (NOT at the top
+  # level) because they are DeerMem-specific -- a different backend
+  # self-interprets its own backend_config. Unknown keys are ignored.
+  backend_config:
+    # Data root. Empty = deer-flow base_dir; per-user memory at
+    # {root}/users/{user_id}/memory.json. Absolute path = that root.
+    storage_path: ""
 
-  # Storage class (default: file-based JSON storage)
-  storage_class: deerflow.agents.memory.storage.FileMemoryStorage
+    # Storage class (empty = FileMemoryStorage, the portable default; no importlib).
+    storage_class: ""
 
-  # Seconds to wait before processing queued memory updates (debounce)
-  debounce_seconds: 30
+    # Seconds to wait before processing queued memory updates (debounce)
+    debounce_seconds: 30
 
-  # Model for memory update extraction (null = use default model)
-  model_name: null
+    # LLM for memory extraction. Omit all fields = the host factory injects the
+    # app default model (mirrors the old model_name: null). Set explicitly to
+    # use a different/cheaper model.
+    model:
+      # provider: openai
+      # model: gpt-4o-mini
+      # api_key: $OPENAI_API_KEY
+      # base_url:               # optional, for OpenAI-compatible gateways
+      # temperature:            # optional
 
-  # Maximum number of facts to store
-  max_facts: 100
+    # Maximum number of facts to store
+    max_facts: 100
 
-  # Minimum confidence score required to store a fact (0.0–1.0)
-  fact_confidence_threshold: 0.7
+    # Minimum confidence score required to store a fact (0.0–1.0)
+    fact_confidence_threshold: 0.7
 
-  # Whether to inject memory into the system prompt
-  injection_enabled: true
-
-  # Maximum tokens to use for memory injection into system prompt
-  max_injection_tokens: 2000
+    # Maximum tokens to use for memory injection into system prompt
+    max_injection_tokens: 2000
 ```
 
 ## Global vs per-agent memory

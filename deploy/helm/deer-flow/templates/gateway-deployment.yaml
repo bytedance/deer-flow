@@ -24,6 +24,10 @@ spec:
         checksum/extensions: {{ include "deer-flow.extensionsChecksum" . }}
     spec:
       {{- include "deer-flow.imagePullSecrets" . | nindent 6 }}
+      # MUST exceed channel stop (~5s) + memory shutdown_flush_timeout_seconds
+      # (default 30s) + buffer, or K8s SIGKILLs the memory drain mid-flight
+      # (values.yaml gateway.terminationGracePeriodSeconds). K8s defaults to 30s.
+      terminationGracePeriodSeconds: {{ .Values.gateway.terminationGracePeriodSeconds | default 45 }}
       securityContext:
         # Non-root: the gateway image has no USER directive and would otherwise
         # run as root. uid/gid 1000; fsGroup 1000 so the .deer-flow PVC is
@@ -145,6 +149,16 @@ spec:
               port: http
             initialDelaySeconds: 30
             periodSeconds: 20
+          {{- /* preStop sleep so the Service/ingress deregisters the pod and
+                  in-flight requests drain before SIGTERM begins graceful shutdown
+                  (which runs the memory queue drain). 0 / unset disables it.
+                  Counts against terminationGracePeriodSeconds. */ -}}
+          {{- if and .Values.gateway.preStopSleepSeconds (gt (.Values.gateway.preStopSleepSeconds | int) 0) }}
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sleep", "{{ .Values.gateway.preStopSleepSeconds | int }}"]
+          {{- end }}
           {{- with .Values.gateway.resources }}
           resources:
             {{- toYaml . | nindent 12 }}

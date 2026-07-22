@@ -12,6 +12,7 @@ from langgraph.errors import GraphBubbleUp
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
 
+from deerflow.authz.principal import normalize_authz_attributes
 from deerflow.guardrails.provider import GuardrailDecision, GuardrailProvider, GuardrailReason, GuardrailRequest
 
 logger = logging.getLogger(__name__)
@@ -53,6 +54,9 @@ class GuardrailMiddleware(AgentMiddleware[AgentState]):
             oauth_id=context.get("oauth_id"),
             run_id=context.get("run_id"),
             tool_call_id=request.tool_call.get("id"),
+            channel_user_id=context.get("channel_user_id"),
+            is_internal=context.get("is_internal") is True,
+            authz_attributes=normalize_authz_attributes(context.get("authz_attributes")),
         )
 
     def _build_denied_message(self, request: ToolCallRequest, decision: GuardrailDecision) -> ToolMessage:

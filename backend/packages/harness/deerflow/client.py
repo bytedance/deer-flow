@@ -36,12 +36,18 @@ from langchain_core.runnables import RunnableConfig
 
 from deerflow.agents.lead_agent.agent import build_middlewares
 from deerflow.agents.lead_agent.prompt import apply_prompt_template, get_enabled_skills_for_config
-from deerflow.agents.thread_state import ThreadState
+from deerflow.agents.thread_state import get_thread_state_schema, normalize_middleware_state_schemas
 from deerflow.config.agents_config import AGENT_NAME_PATTERN
 from deerflow.config.app_config import get_app_config, is_trace_correlation_enabled, reload_app_config
 from deerflow.config.extensions_config import ExtensionsConfig, SkillStateConfig, get_extensions_config, reload_extensions_config
 from deerflow.config.paths import get_paths
 from deerflow.models import create_chat_model
+from deerflow.runtime import CheckpointStateAccessor
+from deerflow.runtime.checkpoint_mode import (
+    ensure_checkpoint_mode_compatible,
+    freeze_checkpoint_channel_mode,
+    inject_checkpoint_mode,
+)
 from deerflow.runtime.goal import DEFAULT_MAX_GOAL_CONTINUATIONS, build_goal_state, goal_thread_lock, read_thread_goal, write_thread_goal
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.skills.describe import build_skill_search_setup
@@ -171,6 +177,7 @@ class DeerFlowClient:
         if config_path is not None:
             reload_app_config(config_path)
         self._app_config = get_app_config()
+        self._checkpoint_channel_mode = freeze_checkpoint_channel_mode(self._app_config.database.checkpoint_channel_mode)
 
         if agent_name is not None and not AGENT_NAME_PATTERN.match(agent_name):
             raise ValueError(f"Invalid agent name '{agent_name}'. Must match pattern: {AGENT_NAME_PATTERN.pattern}")
@@ -247,6 +254,7 @@ class DeerFlowClient:
             cfg.get("max_total_subagents"),
             self._agent_name,
             frozenset(self._available_skills) if self._available_skills is not None else None,
+            self._checkpoint_channel_mode,
         )
 
         if self._agent is not None and self._agent_config_key == key:
@@ -286,16 +294,19 @@ class DeerFlowClient:
             # Attaching them again on the model would emit duplicate spans.
             "model": create_chat_model(name=model_name, thinking_enabled=thinking_enabled, attach_tracing=False),
             "tools": final_tools,
-            "middleware": build_middlewares(
-                config,
-                model_name=model_name,
-                agent_name=self._agent_name,
-                available_skills=self._available_skills,
-                custom_middlewares=self._middlewares,
-                app_config=self._app_config,
-                deferred_setup=deferred_setup,
-                mcp_routing_middleware=mcp_routing_middleware,
-                user_id=get_effective_user_id(),
+            "middleware": normalize_middleware_state_schemas(
+                build_middlewares(
+                    config,
+                    model_name=model_name,
+                    agent_name=self._agent_name,
+                    available_skills=self._available_skills,
+                    custom_middlewares=self._middlewares,
+                    app_config=self._app_config,
+                    deferred_setup=deferred_setup,
+                    mcp_routing_middleware=mcp_routing_middleware,
+                    user_id=get_effective_user_id(),
+                ),
+                self._checkpoint_channel_mode,
             ),
             "system_prompt": apply_prompt_template(
                 subagent_enabled=subagent_enabled,
@@ -309,7 +320,7 @@ class DeerFlowClient:
                 user_id=get_effective_user_id(),
                 skill_names=skill_setup.skill_names or None,
             ),
-            "state_schema": ThreadState,
+            "state_schema": get_thread_state_schema(self._checkpoint_channel_mode),
         }
         checkpointer = self._checkpointer
         if checkpointer is None:
@@ -555,41 +566,50 @@ class DeerFlowClient:
         return {"thread_list": threads[:limit]}
 
     def get_thread(self, thread_id: str) -> dict:
-        """Get the complete thread record, including all node execution records.
-
-        Args:
-            thread_id: Thread ID.
-
-        Returns:
-            Dict containing the thread's full checkpoint history.
-        """
+        """Get the complete materialized checkpoint history for a thread."""
         checkpointer = self._get_thread_checkpointer()
+        config = self._get_runnable_config(thread_id)
+        self._ensure_agent(config)
+        if self._agent is None:
+            raise RuntimeError("Agent was not initialized")
 
-        config = {"configurable": {"thread_id": thread_id}}
+        accessor = CheckpointStateAccessor.bind(
+            self._agent,
+            checkpointer,
+            mode=self._checkpoint_channel_mode,
+        )
+        # One streaming walk collects pending_writes per checkpoint id; a
+        # per-snapshot get_tuple would cost one round-trip per checkpoint.
+        pending_writes_by_checkpoint: dict[str, list] = {}
+        for raw_tuple in checkpointer.list(config):
+            raw_checkpoint_id = raw_tuple.config.get("configurable", {}).get("checkpoint_id")
+            if raw_checkpoint_id:
+                pending_writes_by_checkpoint[raw_checkpoint_id] = list(getattr(raw_tuple, "pending_writes", ()) or ())
+
         checkpoints = []
+        for snapshot in accessor.history(config):
+            values = dict(snapshot.values or {})
+            if "messages" in values:
+                values["messages"] = [self._serialize_message(message) if hasattr(message, "content") else message for message in values["messages"]]
 
-        for cp in checkpointer.list(config):
-            channel_values = dict(cp.checkpoint.get("channel_values", {}))
-            if "messages" in channel_values:
-                channel_values["messages"] = [self._serialize_message(m) if hasattr(m, "content") else m for m in channel_values["messages"]]
-
-            cfg = cp.config.get("configurable", {})
-            parent_cfg = cp.parent_config.get("configurable", {}) if cp.parent_config else {}
+            snapshot_config = snapshot.config or {}
+            configurable = snapshot_config.get("configurable", {})
+            parent_config = snapshot.parent_config or {}
+            parent_configurable = parent_config.get("configurable", {})
+            pending_writes = pending_writes_by_checkpoint.get(configurable.get("checkpoint_id"), [])
 
             checkpoints.append(
                 {
-                    "checkpoint_id": cfg.get("checkpoint_id"),
-                    "parent_checkpoint_id": parent_cfg.get("checkpoint_id"),
-                    "ts": cp.checkpoint.get("ts"),
-                    "metadata": cp.metadata,
-                    "values": channel_values,
-                    "pending_writes": [{"task_id": w[0], "channel": w[1], "value": w[2]} for w in getattr(cp, "pending_writes", [])],
+                    "checkpoint_id": configurable.get("checkpoint_id"),
+                    "parent_checkpoint_id": parent_configurable.get("checkpoint_id"),
+                    "ts": snapshot.created_at,
+                    "metadata": snapshot.metadata,
+                    "values": values,
+                    "pending_writes": [{"task_id": write[0], "channel": write[1], "value": write[2]} for write in pending_writes],
                 }
             )
 
-        # Sort globally by timestamp to prevent partial ordering issues caused by different namespaces (e.g., subgraphs)
-        checkpoints.sort(key=lambda x: x["ts"] if x["ts"] else "")
-
+        checkpoints.sort(key=lambda checkpoint: checkpoint["ts"] or "")
         return {"thread_id": thread_id, "checkpoints": checkpoints}
 
     # ------------------------------------------------------------------
@@ -736,6 +756,24 @@ class DeerFlowClient:
             thread_id = str(uuid.uuid4())
 
         config = self._get_runnable_config(thread_id, **kwargs)
+        inject_checkpoint_mode(config, self._checkpoint_channel_mode)
+        checkpoint_config = {
+            "configurable": {
+                "thread_id": thread_id,
+                "checkpoint_ns": "",
+            }
+        }
+        checkpointer = self._checkpointer
+        if checkpointer is None:
+            from deerflow.runtime.checkpointer import get_checkpointer
+
+            checkpointer = get_checkpointer()
+        if checkpointer is not None:
+            ensure_checkpoint_mode_compatible(
+                checkpointer,
+                checkpoint_config,
+                self._checkpoint_channel_mode,
+            )
 
         # Inject tracing callbacks and Langfuse trace metadata at the graph
         # invocation root so the embedded client matches the gateway worker's
@@ -1043,21 +1081,21 @@ class DeerFlowClient:
         Returns:
             Memory data dict (see src/agents/memory/updater.py for structure).
         """
-        from deerflow.agents.memory.updater import get_memory_data
+        from deerflow.agents.memory import get_memory_manager
 
-        return get_memory_data(user_id=get_effective_user_id())
+        return get_memory_manager().get_memory(user_id=get_effective_user_id())
 
     def export_memory(self) -> dict:
         """Export current memory data for backup or transfer."""
-        from deerflow.agents.memory.updater import get_memory_data
+        from deerflow.agents.memory import get_memory_manager
 
-        return get_memory_data(user_id=get_effective_user_id())
+        return get_memory_manager().get_memory(user_id=get_effective_user_id())
 
     def import_memory(self, memory_data: dict) -> dict:
         """Import and persist full memory data."""
-        from deerflow.agents.memory.updater import import_memory_data
+        from deerflow.agents.memory import get_memory_manager
 
-        return import_memory_data(memory_data, user_id=get_effective_user_id())
+        return get_memory_manager().import_memory(memory_data, user_id=get_effective_user_id())
 
     def get_model(self, name: str) -> dict | None:
         """Get a specific model's configuration by name.
@@ -1117,10 +1155,8 @@ class DeerFlowClient:
 
         current_config = get_extensions_config()
 
-        config_data = {
-            "mcpServers": mcp_servers,
-            "skills": {name: {"enabled": skill.enabled} for name, skill in current_config.skills.items()},
-        }
+        config_data = current_config.to_file_dict()
+        config_data["mcpServers"] = mcp_servers
 
         self._atomic_write_json(config_path, config_data)
 
@@ -1186,10 +1222,7 @@ class DeerFlowClient:
             extensions_config = get_extensions_config()
             extensions_config.skills[name] = SkillStateConfig(enabled=enabled)
 
-            config_data = {
-                "mcpServers": {n: s.model_dump() for n, s in extensions_config.mcp_servers.items()},
-                "skills": {n: {"enabled": sc.enabled} for n, sc in extensions_config.skills.items()},
-            }
+            config_data = extensions_config.to_file_dict()
 
             self._atomic_write_json(config_path, config_data)
             reload_extensions_config()
@@ -1206,10 +1239,7 @@ class DeerFlowClient:
                     raise FileNotFoundError("Cannot locate extensions_config.json. Set DEER_FLOW_EXTENSIONS_CONFIG_PATH or ensure it exists in the project root.")
                 extensions_config = get_extensions_config()
                 extensions_config.skills[name] = SkillStateConfig(enabled=enabled)
-                config_data = {
-                    "mcpServers": {n: s.model_dump() for n, s in extensions_config.mcp_servers.items()},
-                    "skills": {n: {"enabled": sc.enabled} for n, sc in extensions_config.skills.items()},
-                }
+                config_data = extensions_config.to_file_dict()
                 self._atomic_write_json(config_path, config_data)
                 reload_extensions_config()
 
@@ -1273,27 +1303,40 @@ class DeerFlowClient:
         Returns:
             The reloaded memory data dict.
         """
-        from deerflow.agents.memory.updater import reload_memory_data
+        from deerflow.agents.memory import get_memory_manager
 
-        return reload_memory_data(user_id=get_effective_user_id())
+        manager = get_memory_manager()
+        if hasattr(manager, "reload_memory"):
+            return manager.reload_memory(user_id=get_effective_user_id())
+        # Non-DeerMem backends have no reload concept; return current memory.
+        return manager.get_memory(user_id=get_effective_user_id())
 
     def clear_memory(self) -> dict:
         """Clear all persisted memory data."""
-        from deerflow.agents.memory.updater import clear_memory_data
+        from deerflow.agents.memory import get_memory_manager
 
-        return clear_memory_data(user_id=get_effective_user_id())
+        return get_memory_manager().clear_memory(user_id=get_effective_user_id())
 
     def create_memory_fact(self, content: str, category: str = "context", confidence: float = 0.5) -> dict:
         """Create a single fact manually."""
-        from deerflow.agents.memory.updater import create_memory_fact
+        from deerflow.agents.memory import get_memory_manager
 
-        return create_memory_fact(content=content, category=category, confidence=confidence)
+        manager = get_memory_manager()
+        if not hasattr(manager, "create_fact"):
+            raise NotImplementedError(f"create_fact not supported by memory backend '{type(manager).__name__}'")
+        memory_data, fact_id = manager.create_fact(content=content, category=category, confidence=confidence, user_id=get_effective_user_id())
+        if fact_id is None:
+            raise ValueError("Fact was not stored because memory.max_facts kept higher-confidence facts")
+        return memory_data
 
     def delete_memory_fact(self, fact_id: str) -> dict:
         """Delete a single fact from memory by fact id."""
-        from deerflow.agents.memory.updater import delete_memory_fact
+        from deerflow.agents.memory import get_memory_manager
 
-        return delete_memory_fact(fact_id)
+        manager = get_memory_manager()
+        if not hasattr(manager, "delete_fact"):
+            raise NotImplementedError(f"delete_fact not supported by memory backend '{type(manager).__name__}'")
+        return manager.delete_fact(fact_id, user_id=get_effective_user_id())
 
     def update_memory_fact(
         self,
@@ -1303,13 +1346,17 @@ class DeerFlowClient:
         confidence: float | None = None,
     ) -> dict:
         """Update a single fact manually, preserving omitted fields."""
-        from deerflow.agents.memory.updater import update_memory_fact
+        from deerflow.agents.memory import get_memory_manager
 
-        return update_memory_fact(
+        manager = get_memory_manager()
+        if not hasattr(manager, "update_fact"):
+            raise NotImplementedError(f"update_fact not supported by memory backend '{type(manager).__name__}'")
+        return manager.update_fact(
             fact_id=fact_id,
             content=content,
             category=category,
             confidence=confidence,
+            user_id=get_effective_user_id(),
         )
 
     def get_memory_config(self) -> dict:
@@ -1323,20 +1370,11 @@ class DeerFlowClient:
         config = get_memory_config()
         return {
             "enabled": config.enabled,
-            "storage_path": config.storage_path,
-            "debounce_seconds": config.debounce_seconds,
-            "max_facts": config.max_facts,
-            "fact_confidence_threshold": config.fact_confidence_threshold,
+            "mode": config.mode,
             "injection_enabled": config.injection_enabled,
-            "max_injection_tokens": config.max_injection_tokens,
-            "token_counting": config.token_counting,
-            "guaranteed_categories": config.guaranteed_categories,
-            "guaranteed_token_budget": config.guaranteed_token_budget,
-            "staleness_review_enabled": config.staleness_review_enabled,
-            "staleness_age_days": config.staleness_age_days,
-            "staleness_min_candidates": config.staleness_min_candidates,
-            "staleness_max_removals_per_cycle": config.staleness_max_removals_per_cycle,
-            "staleness_protected_categories": config.staleness_protected_categories,
+            "shutdown_flush_timeout_seconds": config.shutdown_flush_timeout_seconds,
+            "manager_class": config.manager_class,
+            "backend_config": config.backend_config,
         }
 
     def get_memory_status(self) -> dict:
@@ -1404,8 +1442,8 @@ class DeerFlowClient:
                 # creating a new ThreadPoolExecutor per converted file.
                 conversion_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
 
-        def _convert_in_thread(path: Path):
-            return asyncio.run(convert_file_to_markdown(path))
+        def _convert_in_thread(path: Path, output_path: Path | None = None):
+            return asyncio.run(convert_file_to_markdown(path, output_path=output_path))
 
         try:
             for src_path, dest_name in resolved_files:
@@ -1423,11 +1461,17 @@ class DeerFlowClient:
                     info["original_filename"] = src_path.name
 
                 if src_path.suffix.lower() in CONVERTIBLE_EXTENSIONS:
+                    # Reserve companion .md name before convert so two stems
+                    # that collapse to the same .md (or a prior .md upload)
+                    # cannot silently overwrite each other.
+                    provisional_md_name = Path(dest_name).with_suffix(".md").name
+                    unique_md_name = claim_unique_filename(provisional_md_name, seen_names)
+                    md_output = dest.with_name(unique_md_name)
                     try:
                         if conversion_pool is not None:
-                            md_path = conversion_pool.submit(_convert_in_thread, dest).result()
+                            md_path = conversion_pool.submit(_convert_in_thread, dest, md_output).result()
                         else:
-                            md_path = asyncio.run(convert_file_to_markdown(dest))
+                            md_path = asyncio.run(convert_file_to_markdown(dest, output_path=md_output))
                     except Exception:
                         logger.warning(
                             "Failed to convert %s to markdown",
@@ -1441,6 +1485,11 @@ class DeerFlowClient:
                         info["markdown_path"] = str(uploads_dir / md_path.name)
                         info["markdown_virtual_path"] = upload_virtual_path(md_path.name)
                         info["markdown_artifact_url"] = upload_artifact_url(thread_id, md_path.name)
+                    else:
+                        # Conversion failed and wrote nothing, so release the
+                        # claim; holding it would rename a later same-stem
+                        # upload against a name nothing occupies.
+                        seen_names.discard(unique_md_name)
 
                 uploaded_files.append(info)
         finally:

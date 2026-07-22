@@ -9,11 +9,20 @@ import pytest
 import yaml
 from fastapi.testclient import TestClient
 
+from app.gateway.routers.agents import AGENT_NAME_PATTERN as GATEWAY_AGENT_NAME_PATTERN
+from deerflow.agents.memory.backends.deermem.deermem.core.paths import AGENT_NAME_PATTERN as DEERMEM_AGENT_NAME_PATTERN
+from deerflow.agents.memory.backends.deermem.deermem.core.paths import DEFAULT_AGENT_BUCKET, validate_agent_name
 from deerflow.config.agents_api_config import AgentsApiConfig, get_agents_api_config, set_agents_api_config
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def test_reserved_memory_bucket_stays_outside_both_public_agent_patterns() -> None:
+    assert GATEWAY_AGENT_NAME_PATTERN.fullmatch(DEFAULT_AGENT_BUCKET) is None
+    assert DEERMEM_AGENT_NAME_PATTERN.fullmatch(DEFAULT_AGENT_BUCKET) is None
+    validate_agent_name(DEFAULT_AGENT_BUCKET)  # Internal storage sentinel remains usable.
 
 
 def _make_paths(base_dir: Path):
@@ -466,48 +475,37 @@ class TestListCustomAgents:
 
 
 class TestMemoryFilePath:
-    def test_global_memory_path(self, tmp_path):
+    def test_global_memory_path(self, tmp_path, monkeypatch):
         """None agent_name should return global memory file."""
-        from deerflow.agents.memory.storage import FileMemoryStorage
-        from deerflow.config.memory_config import MemoryConfig
+        from deerflow.agents.memory.backends.deermem.deermem.config import DeerMemConfig
+        from deerflow.agents.memory.backends.deermem.deermem.core.storage import FileMemoryStorage
 
-        with (
-            patch("deerflow.agents.memory.storage.get_paths", return_value=_make_paths(tmp_path)),
-            patch("deerflow.agents.memory.storage.get_memory_config", return_value=MemoryConfig(storage_path="")),
-        ):
-            storage = FileMemoryStorage()
-            path = storage._get_memory_file_path(None)
+        monkeypatch.setenv("DEERMEM_DATA_DIR", str(tmp_path))
+        storage = FileMemoryStorage(DeerMemConfig())
+        path = storage._get_memory_file_path(None)
         assert path == tmp_path / "memory.json"
 
-    def test_agent_memory_path(self, tmp_path):
-        """Providing agent_name should return per-agent memory file."""
-        from deerflow.agents.memory.storage import FileMemoryStorage
-        from deerflow.config.memory_config import MemoryConfig
+    def test_agent_memory_path(self, tmp_path, monkeypatch):
+        """All agents share the user-global summary JSON path."""
+        from deerflow.agents.memory.backends.deermem.deermem.config import DeerMemConfig
+        from deerflow.agents.memory.backends.deermem.deermem.core.storage import FileMemoryStorage
 
-        with (
-            patch("deerflow.agents.memory.storage.get_paths", return_value=_make_paths(tmp_path)),
-            patch("deerflow.agents.memory.storage.get_memory_config", return_value=MemoryConfig(storage_path="")),
-        ):
-            storage = FileMemoryStorage()
-            path = storage._get_memory_file_path("code-reviewer")
-        assert path == tmp_path / "agents" / "code-reviewer" / "memory.json"
+        monkeypatch.setenv("DEERMEM_DATA_DIR", str(tmp_path))
+        storage = FileMemoryStorage(DeerMemConfig())
+        path = storage._get_memory_file_path("code-reviewer")
+        assert path == tmp_path / "memory.json"
 
-    def test_different_paths_for_different_agents(self, tmp_path):
-        from deerflow.agents.memory.storage import FileMemoryStorage
-        from deerflow.config.memory_config import MemoryConfig
+    def test_agents_share_summary_path(self, tmp_path, monkeypatch):
+        from deerflow.agents.memory.backends.deermem.deermem.config import DeerMemConfig
+        from deerflow.agents.memory.backends.deermem.deermem.core.storage import FileMemoryStorage
 
-        with (
-            patch("deerflow.agents.memory.storage.get_paths", return_value=_make_paths(tmp_path)),
-            patch("deerflow.agents.memory.storage.get_memory_config", return_value=MemoryConfig(storage_path="")),
-        ):
-            storage = FileMemoryStorage()
-            path_global = storage._get_memory_file_path(None)
-            path_a = storage._get_memory_file_path("agent-a")
-            path_b = storage._get_memory_file_path("agent-b")
+        monkeypatch.setenv("DEERMEM_DATA_DIR", str(tmp_path))
+        storage = FileMemoryStorage(DeerMemConfig())
+        path_global = storage._get_memory_file_path(None)
+        path_a = storage._get_memory_file_path("agent-a")
+        path_b = storage._get_memory_file_path("agent-b")
 
-        assert path_global != path_a
-        assert path_global != path_b
-        assert path_a != path_b
+        assert path_global == path_a == path_b
 
 
 # ===========================================================================
@@ -695,6 +693,32 @@ class TestAgentsAPI:
             ],
         }
 
+    def test_update_memory_only_user_dir_with_legacy_agent_returns_409(self, agent_client, tmp_path):
+        """Regression for #3390's PUT /api/agents/{name} guard.
+
+        A per-user agent directory can exist containing only memory.json
+        (written the first time this user chats with a legacy shared
+        agent). The stale guard checked bare directory existence and
+        missed this case, letting the route silently fork a brand-new
+        config.yaml/SOUL.md into the memory-only directory instead of
+        blocking with the migration-script guidance.
+        """
+        legacy_dir = tmp_path / "agents" / "legacy-agent"
+        legacy_dir.mkdir(parents=True)
+        (legacy_dir / "config.yaml").write_text("name: legacy-agent\ndescription: legacy\n", encoding="utf-8")
+        (legacy_dir / "SOUL.md").write_text("legacy soul", encoding="utf-8")
+
+        user_agent_dir = tmp_path / "users" / "test-user-autouse" / "agents" / "legacy-agent"
+        user_agent_dir.mkdir(parents=True)
+        (user_agent_dir / "memory.json").write_text("{}", encoding="utf-8")
+
+        response = agent_client.put("/api/agents/legacy-agent", json={"soul": "should not write"})
+
+        assert response.status_code == 409
+        assert not (user_agent_dir / "config.yaml").exists()
+        assert not (user_agent_dir / "SOUL.md").exists()
+        assert (user_agent_dir / "memory.json").exists(), "the user's existing memory must be left untouched"
+
     def test_update_missing_agent_404(self, agent_client):
         response = agent_client.put("/api/agents/ghost-agent", json={"soul": "new"})
         assert response.status_code == 404
@@ -712,6 +736,22 @@ class TestAgentsAPI:
     def test_delete_missing_agent_404(self, agent_client):
         response = agent_client.delete("/api/agents/does-not-exist")
         assert response.status_code == 404
+
+    def test_delete_rejects_memory_only_directory_without_removing_facts(self, agent_client, tmp_path):
+        agent_dir = tmp_path / "users" / "test-user-autouse" / "agents" / "lead-agent"
+        facts_dir = agent_dir / "facts"
+        facts_dir.mkdir(parents=True)
+        fact_path = facts_dir / "fact_keep.md"
+        fact_path.write_text("memory data", encoding="utf-8")
+
+        response = agent_client.delete("/api/agents/lead-agent")
+
+        assert response.status_code == 409
+        assert fact_path.read_text(encoding="utf-8") == "memory data"
+
+    def test_reserved_default_bucket_cannot_be_created_as_custom_agent(self, agent_client):
+        response = agent_client.post("/api/agents", json={"name": "__default__", "soul": "must fail"})
+        assert response.status_code == 422
 
     def test_create_agent_with_model_and_tool_groups(self, agent_client):
         payload = {

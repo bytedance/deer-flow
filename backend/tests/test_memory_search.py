@@ -1,9 +1,14 @@
-"""Tests for search_memory_facts function."""
+"""Tests for DeerMem.search (the ABC search implementation).
 
-import json
+DeerMem.search is a case-insensitive substring search over stored facts
+(stand-in for the planned semantic retrieval). The optional ``category`` kwarg
+filters BEFORE the ``top_k`` slice (it is on the ABC signature; the
+``memory_search`` tool forwards it). These tests cover the backend's own search.
+"""
 
-from deerflow.agents.memory.storage import FileMemoryStorage, create_empty_memory
-from deerflow.agents.memory.updater import search_memory_facts
+from types import SimpleNamespace
+
+from deerflow.agents.memory.backends.deermem.deer_mem import DeerMem
 
 
 def _make_fact(content: str, category: str = "context", confidence: float = 0.7) -> dict:
@@ -17,84 +22,74 @@ def _make_fact(content: str, category: str = "context", confidence: float = 0.7)
     }
 
 
-class TestSearchMemoryFacts:
-    """Tests for search_memory_facts function."""
+def _deer_mem_with_facts(facts: list[dict]) -> DeerMem:
+    """Build a DeerMem whose updater returns the given facts (no disk I/O)."""
+    mgr = DeerMem(backend_config=None)
+    mgr._updater = SimpleNamespace(get_memory_data=lambda agent_name=None, *, user_id=None: {"facts": facts})
+    return mgr
 
-    def test_basic_substring_match(self, tmp_path, monkeypatch):
+
+class TestDeerMemSearch:
+    """Tests for DeerMem.search."""
+
+    def test_basic_substring_match(self):
         """Should find facts containing the query string (case-insensitive)."""
         facts = [
             _make_fact("User prefers Python", "preference", 0.9),
             _make_fact("User works with TypeScript", "context", 0.7),
             _make_fact("User lives in Beijing", "personal", 0.8),
         ]
-        _setup_memory(tmp_path, monkeypatch, facts)
+        mgr = _deer_mem_with_facts(facts)
 
-        results = search_memory_facts("python")
+        results = mgr.search("python")
         assert len(results) == 1
         assert results[0]["content"] == "User prefers Python"
 
-    def test_case_insensitive(self, tmp_path, monkeypatch):
+    def test_case_insensitive(self):
         """Should match regardless of case."""
-        facts = [_make_fact("User prefers Python", "preference", 0.9)]
-        _setup_memory(tmp_path, monkeypatch, facts)
+        mgr = _deer_mem_with_facts([_make_fact("User prefers Python", "preference", 0.9)])
 
-        assert len(search_memory_facts("PYTHON")) == 1
-        assert len(search_memory_facts("python")) == 1
-        assert len(search_memory_facts("Python")) == 1
+        assert len(mgr.search("PYTHON")) == 1
+        assert len(mgr.search("python")) == 1
+        assert len(mgr.search("Python")) == 1
 
-    def test_category_filter(self, tmp_path, monkeypatch):
-        """Should only return facts matching the given category."""
-        facts = [
-            _make_fact("Likes dark mode", "preference", 0.8),
-            _make_fact("Works remotely", "context", 0.7),
-            _make_fact("Prefers short answers", "preference", 0.6),
-        ]
-        _setup_memory(tmp_path, monkeypatch, facts)
-
-        results = search_memory_facts("prefer", category="preference")
-        assert len(results) == 1
-        assert results[0]["content"] == "Prefers short answers"
-
-    def test_category_filter_no_match(self, tmp_path, monkeypatch):
-        """Should return empty list when category doesn't match."""
-        facts = [_make_fact("Likes dark mode", "preference", 0.8)]
-        _setup_memory(tmp_path, monkeypatch, facts)
-
-        results = search_memory_facts("dark", category="context")
-        assert results == []
-
-    def test_empty_query_returns_empty(self, tmp_path, monkeypatch):
+    def test_empty_query_returns_empty(self):
         """Should return empty list for empty query, not error."""
-        facts = [_make_fact("Some fact")]
-        _setup_memory(tmp_path, monkeypatch, facts)
+        mgr = _deer_mem_with_facts([_make_fact("Some fact")])
 
-        results = search_memory_facts("")
-        assert results == []
+        assert mgr.search("") == []
+        assert mgr.search("   ") == []
 
-    def test_no_match_returns_empty(self, tmp_path, monkeypatch):
+    def test_no_match_returns_empty(self):
         """Should return empty list when nothing matches."""
-        facts = [_make_fact("User prefers Python")]
-        _setup_memory(tmp_path, monkeypatch, facts)
+        mgr = _deer_mem_with_facts([_make_fact("User prefers Python")])
 
-        results = search_memory_facts("Rust")
-        assert results == []
+        assert mgr.search("Rust") == []
 
-    def test_sorted_by_confidence_desc(self, tmp_path, monkeypatch):
+    def test_sorted_by_confidence_desc(self):
         """Should return results sorted by confidence descending."""
         facts = [
             _make_fact("Fact A", confidence=0.3),
             _make_fact("Fact B", confidence=0.9),
             _make_fact("Fact C", confidence=0.6),
         ]
-        _setup_memory(tmp_path, monkeypatch, facts)
+        mgr = _deer_mem_with_facts(facts)
 
-        results = search_memory_facts("Fact")
+        results = mgr.search("Fact")
         assert len(results) == 3
         assert results[0]["confidence"] == 0.9
         assert results[1]["confidence"] == 0.6
         assert results[2]["confidence"] == 0.3
 
-    def test_null_confidence_does_not_crash_sort(self, tmp_path, monkeypatch):
+    def test_respects_top_k(self):
+        """Should return at most ``top_k`` results."""
+        facts = [_make_fact(f"Fact {i}", confidence=0.5) for i in range(20)]
+        mgr = _deer_mem_with_facts(facts)
+
+        results = mgr.search("Fact", top_k=5)
+        assert len(results) == 5
+
+    def test_null_confidence_does_not_crash_sort(self):
         """A fact stored with ``"confidence": null`` (corrupted/hand-edited memory)
         must not break the confidence sort. ``.get("confidence", 0)`` returns the
         stored ``None`` and comparing None with floats raises TypeError; the coerce
@@ -112,10 +107,10 @@ class TestSearchMemoryFacts:
             null_fact,
             _make_fact("Fact low", confidence=0.2),
         ]
-        _setup_memory(tmp_path, monkeypatch, facts)
+        mgr = _deer_mem_with_facts(facts)
 
         # Must not raise TypeError during the confidence sort.
-        results = search_memory_facts("Fact")
+        results = mgr.search("Fact")
 
         assert len(results) == 3
         # Highest real confidence still sorts first; null (coerced to 0.5) sits
@@ -123,45 +118,59 @@ class TestSearchMemoryFacts:
         assert results[0]["content"] == "Fact high"
         assert {r["content"] for r in results} == {"Fact high", "Fact with null confidence", "Fact low"}
 
-    def test_respects_limit(self, tmp_path, monkeypatch):
-        """Should return at most `limit` results."""
-        facts = [_make_fact(f"Fact {i}", confidence=0.5) for i in range(20)]
-        _setup_memory(tmp_path, monkeypatch, facts)
+    def test_non_positive_top_k_returns_empty(self):
+        """Should return empty for top_k <= 0 (no negative-slice expansion)."""
+        mgr = _deer_mem_with_facts([_make_fact(f"Fact {i}", confidence=0.5) for i in range(3)])
 
-        results = search_memory_facts("Fact", limit=5)
-        assert len(results) == 5
+        assert mgr.search("Fact", top_k=0) == []
+        assert mgr.search("Fact", top_k=-1) == []
 
-    def test_negative_limit_returns_empty(self, tmp_path, monkeypatch):
-        """Should not let negative limits expand the result set via slicing."""
-        facts = [_make_fact(f"Fact {i}", confidence=0.5) for i in range(3)]
-        _setup_memory(tmp_path, monkeypatch, facts)
-
-        results = search_memory_facts("Fact", limit=-1)
-        assert results == []
-
-    def test_no_facts_returns_empty(self, tmp_path, monkeypatch):
+    def test_no_facts_returns_empty(self):
         """Should return empty list when memory has no facts."""
-        _setup_memory(tmp_path, monkeypatch, [])
+        mgr = _deer_mem_with_facts([])
 
-        results = search_memory_facts("anything")
-        assert results == []
+        assert mgr.search("anything") == []
 
+    def test_non_string_content_is_skipped(self):
+        """Facts whose content is not a str are skipped, not crashed on."""
+        facts = [
+            {"id": "f1", "content": "likes uv", "category": "preference", "confidence": 0.9},
+            {"id": "f2", "content": 42, "category": "context", "confidence": 0.5},
+            {"id": "f3", "content": None, "category": "context", "confidence": 0.5},
+        ]
+        mgr = _deer_mem_with_facts(facts)
 
-def _setup_memory(tmp_path, monkeypatch, facts: list[dict]):
-    """Set up a FileMemoryStorage with given facts at a temp path."""
-    memory_file = tmp_path / "memory.json"
-    memory_data = create_empty_memory()
-    memory_data["facts"] = facts
+        results = mgr.search("uv")
+        assert len(results) == 1
+        assert results[0]["id"] == "f1"
 
-    memory_file.write_text(json.dumps(memory_data))
+    def test_category_filters_before_top_k_slice(self):
+        """category filters BEFORE the top_k slice, so a category-scoped search
+        is not starved by higher-confidence facts in other categories."""
+        facts = [
+            _make_fact("uv fast", "preference", 0.9),
+            _make_fact("uv tool", "context", 0.95),
+            _make_fact("uv python", "context", 0.9),
+            _make_fact("uv rust", "context", 0.85),
+        ]
+        mgr = _deer_mem_with_facts(facts)
 
-    storage = FileMemoryStorage()
-    # Force the storage to use our temp file
-    monkeypatch.setattr(
-        "deerflow.agents.memory.updater.get_memory_storage",
-        lambda: storage,
-    )
-    monkeypatch.setattr(
-        "deerflow.agents.memory.updater.get_memory_data",
-        lambda agent_name=None, user_id=None: json.loads(memory_file.read_text()),
-    )
+        # top_k=1 without category -> the single highest-confidence fact (context, 0.95)
+        assert mgr.search("uv", top_k=1)[0]["category"] == "context"
+        # top_k=1 WITH category=preference -> the preference fact (0.9), not
+        # starved by the higher-confidence context facts that would otherwise
+        # occupy the top_k slice first.
+        pref = mgr.search("uv", top_k=1, category="preference")
+        assert len(pref) == 1
+        assert pref[0]["category"] == "preference"
+        assert pref[0]["content"] == "uv fast"
+
+    def test_category_none_returns_all_categories(self):
+        """category=None (default) returns facts from all categories."""
+        facts = [
+            _make_fact("uv a", "preference", 0.9),
+            _make_fact("uv b", "context", 0.5),
+        ]
+        mgr = _deer_mem_with_facts(facts)
+
+        assert len(mgr.search("uv", category=None)) == 2

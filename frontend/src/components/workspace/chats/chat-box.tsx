@@ -5,6 +5,11 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { ConversationEmptyState } from "@/components/ai-elements/conversation";
 import { Button } from "@/components/ui/button";
 import {
+  ResizableHandle,
+  ResizablePanel,
+  ResizablePanelGroup,
+} from "@/components/ui/resizable";
+import {
   Sheet,
   SheetContent,
   SheetDescription,
@@ -20,17 +25,19 @@ import {
   ArtifactFileList,
   useArtifacts,
 } from "../artifacts";
+import { BrowserViewPanel, useMaybeBrowserView } from "../browser-view";
 import { useThread } from "../messages/context";
 import { SidecarPanel, useMaybeSidecar } from "../sidecar";
 
 const RIGHT_PANEL_ANIMATION_MS = 280;
 
-type RightPanelKind = "sidecar" | "artifacts";
+type RightPanelKind = "sidecar" | "artifacts" | "browser";
 
-const ChatBox: React.FC<{ children: React.ReactNode; threadId: string }> = ({
-  children,
-  threadId,
-}) => {
+const ChatBox: React.FC<{
+  children: React.ReactNode;
+  threadId: string;
+  browserEnabled?: boolean;
+}> = ({ children, threadId, browserEnabled = true }) => {
   const { thread } = useThread();
   const isMobile = useIsMobile();
   const pathname = usePathname();
@@ -47,6 +54,8 @@ const ChatBox: React.FC<{ children: React.ReactNode; threadId: string }> = ({
   } = useArtifacts();
   const sidecar = useMaybeSidecar();
   const sidecarOpen = sidecar?.open ?? false;
+  const browserView = useMaybeBrowserView();
+  const browserViewOpen = browserEnabled && (browserView?.open ?? false);
 
   const [autoSelectFirstArtifact, setAutoSelectFirstArtifact] = useState(true);
   useEffect(() => {
@@ -104,9 +113,11 @@ const ChatBox: React.FC<{ children: React.ReactNode; threadId: string }> = ({
 
   const activeRightPanel: RightPanelKind | null = sidecarOpen
     ? "sidecar"
-    : artifactPanelOpen
-      ? "artifacts"
-      : null;
+    : browserViewOpen
+      ? "browser"
+      : artifactPanelOpen
+        ? "artifacts"
+        : null;
   const rightPanelOpen = activeRightPanel !== null;
   const [renderedRightPanel, setRenderedRightPanel] =
     useState<RightPanelKind | null>(activeRightPanel);
@@ -136,7 +147,16 @@ const ChatBox: React.FC<{ children: React.ReactNode; threadId: string }> = ({
     }
   }, [artifactsOpen, setArtifactsOpen, sidecarOpen]);
 
+  useEffect(() => {
+    if (!browserEnabled && browserView?.open) {
+      browserView.close();
+    }
+  }, [browserEnabled, browserView]);
+
   const rightPanelContent = useMemo(() => {
+    if (renderedRightPanel === "browser") {
+      return <BrowserViewPanel threadId={threadId} className="size-full" />;
+    }
     if (renderedRightPanel === "sidecar") {
       return <SidecarPanel />;
     }
@@ -208,6 +228,9 @@ const ChatBox: React.FC<{ children: React.ReactNode; threadId: string }> = ({
             if (sidecarOpen) {
               sidecar?.close();
             }
+            if (browserViewOpen) {
+              browserView?.close();
+            }
             if (artifactsOpen) {
               setArtifactsOpen(false);
             }
@@ -219,7 +242,11 @@ const ChatBox: React.FC<{ children: React.ReactNode; threadId: string }> = ({
           >
             <SheetHeader className="sr-only">
               <SheetTitle>
-                {renderedRightPanel === "sidecar" ? "Sidecar" : "Artifacts"}
+                {renderedRightPanel === "sidecar"
+                  ? "Sidecar"
+                  : renderedRightPanel === "browser"
+                    ? "Browser"
+                    : "Artifacts"}
               </SheetTitle>
               <SheetDescription>
                 Browse the side panel for this conversation.
@@ -236,41 +263,79 @@ const ChatBox: React.FC<{ children: React.ReactNode; threadId: string }> = ({
     <div
       id={`${resizableIdBase}-panels`}
       className={cn(
-        "[container-type:inline-size] grid size-full min-h-0 transition-[grid-template-columns] duration-[280ms] ease-out motion-reduce:transition-none",
-        rightPanelOpen
-          ? "grid-cols-[minmax(0,1fr)_1px_minmax(0,40%)]"
-          : "grid-cols-[minmax(0,1fr)_0px_0px]",
+        "[container-type:inline-size] size-full min-h-0",
+        activeRightPanel !== "browser" &&
+          "grid transition-[grid-template-columns] duration-[280ms] ease-out motion-reduce:transition-none",
+        activeRightPanel !== "browser" &&
+          (rightPanelOpen
+            ? "grid-cols-[minmax(0,1fr)_1px_minmax(0,40%)]"
+            : "grid-cols-[minmax(0,1fr)_0px_0px]"),
       )}
     >
-      <div className="relative min-h-0 min-w-0" id="chat">
-        {children}
-      </div>
-      <div
-        id={`${resizableIdBase}-separator`}
-        aria-hidden="true"
-        className={cn(
-          "bg-border opacity-33 transition-opacity duration-200 ease-out motion-reduce:transition-none",
-          !rightPanelOpen && "pointer-events-none opacity-0",
-        )}
-      />
-      <aside
-        aria-hidden={!rightPanelOpen}
-        className={cn(
-          "min-h-0 min-w-0 overflow-hidden transition-opacity duration-[280ms] ease-out motion-reduce:transition-none",
-          !rightPanelOpen && "pointer-events-none opacity-0",
-        )}
-        id="artifacts"
-      >
-        <div
-          className={cn(
-            "ml-auto h-full w-[40cqw] transition-opacity duration-[280ms] ease-out motion-reduce:transition-none",
-            renderedRightPanel === "sidecar" ? "p-0" : "p-4",
-            rightPanelOpen ? "opacity-100" : "opacity-0",
-          )}
+      {activeRightPanel === "browser" ? (
+        <ResizablePanelGroup
+          id={`${resizableIdBase}-group`}
+          orientation="horizontal"
+          className="size-full min-h-0"
         >
-          {rightPanelContent}
-        </div>
-      </aside>
+          <ResizablePanel
+            id={`${resizableIdBase}-chat`}
+            minSize="30%"
+            className="relative min-h-0 min-w-0"
+          >
+            <div className="relative size-full min-h-0 min-w-0" id="chat">
+              {children}
+            </div>
+          </ResizablePanel>
+          <ResizableHandle withHandle />
+          <ResizablePanel
+            id={`${resizableIdBase}-side`}
+            defaultSize="40%"
+            minSize="20%"
+            maxSize="75%"
+            className="min-h-0 min-w-0"
+          >
+            <aside
+              className="size-full min-h-0 min-w-0 overflow-hidden p-0"
+              id="artifacts"
+            >
+              {rightPanelContent}
+            </aside>
+          </ResizablePanel>
+        </ResizablePanelGroup>
+      ) : (
+        <>
+          <div className="relative min-h-0 min-w-0" id="chat">
+            {children}
+          </div>
+          <div
+            id={`${resizableIdBase}-separator`}
+            aria-hidden="true"
+            className={cn(
+              "bg-border opacity-33 transition-opacity duration-200 ease-out motion-reduce:transition-none",
+              !rightPanelOpen && "pointer-events-none opacity-0",
+            )}
+          />
+          <aside
+            aria-hidden={!rightPanelOpen}
+            className={cn(
+              "min-h-0 min-w-0 overflow-hidden transition-opacity duration-[280ms] ease-out motion-reduce:transition-none",
+              !rightPanelOpen && "pointer-events-none opacity-0",
+            )}
+            id="artifacts"
+          >
+            <div
+              className={cn(
+                "ml-auto h-full w-[40cqw] transition-opacity duration-[280ms] ease-out motion-reduce:transition-none",
+                renderedRightPanel === "sidecar" ? "p-0" : "p-4",
+                rightPanelOpen ? "opacity-100" : "opacity-0",
+              )}
+            >
+              {rightPanelContent}
+            </div>
+          </aside>
+        </>
+      )}
     </div>
   );
 };

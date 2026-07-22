@@ -702,7 +702,7 @@ class TestConfigManagement:
         """update_mcp_config() writes extensions_config.json and invalidates the agent."""
         # Set up a writable extensions_config.json
         config_file = tmp_path / "extensions_config.json"
-        config_file.write_text(json.dumps({"mcpServers": {}, "skills": {}}))
+        config_file.write_text(json.dumps({"mcpServers": {}, "skills": {}, "middlewares": ["pkg:Middleware"]}))
         monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(config_file))
 
         # Force reload so the singleton picks up our test file
@@ -725,11 +725,12 @@ class TestConfigManagement:
         # File should be written
         written = json.loads(config_file.read_text())
         assert "test-server" in written["mcpServers"]
+        assert written["middlewares"] == ["pkg:Middleware"]
 
     def test_update_skill_writes_and_invalidates(self, e2e_env, tmp_path, monkeypatch):
         """update_skill() writes extensions_config.json and invalidates the agent."""
         config_file = tmp_path / "extensions_config.json"
-        config_file.write_text(json.dumps({"mcpServers": {}, "skills": {}}))
+        config_file.write_text(json.dumps({"mcpServers": {}, "skills": {}, "middlewares": ["pkg:Middleware"]}))
         monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(config_file))
 
         from deerflow.config.extensions_config import reload_extensions_config
@@ -749,6 +750,8 @@ class TestConfigManagement:
         result = c.update_skill(skill_name, enabled=False)
         assert result["name"] == skill_name
         assert result["enabled"] is False
+        written = json.loads(config_file.read_text())
+        assert written["middlewares"] == ["pkg:Middleware"]
 
         # Agent should be invalidated
         assert c._agent is None
@@ -794,12 +797,10 @@ class TestMemoryAccess:
         c = DeerFlowClient(checkpointer=None, thinking_enabled=False)
         result = c.get_memory_config()
         assert "enabled" in result
-        assert "storage_path" in result
-        assert "debounce_seconds" in result
-        assert "max_facts" in result
-        assert "fact_confidence_threshold" in result
         assert "injection_enabled" in result
-        assert "max_injection_tokens" in result
+        assert "manager_class" in result
+        assert "backend_config" in result
+        assert "mode" in result
 
     def test_get_memory_status_combines_config_and_data(self, e2e_env):
         """get_memory_status() returns both 'config' and 'data' keys."""
@@ -808,4 +809,5 @@ class TestMemoryAccess:
         assert "config" in result
         assert "data" in result
         assert "enabled" in result["config"]
+        assert "mode" in result["config"]
         assert isinstance(result["data"], dict)

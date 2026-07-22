@@ -301,7 +301,15 @@ async def update_agent(name: str, request: AgentUpdateRequest) -> AgentResponse:
 
     paths = get_paths()
     agent_dir = paths.user_agent_dir(user_id, name)
-    if not agent_dir.exists() and paths.agent_dir(name).exists():
+    legacy_dir = paths.agent_dir(name)
+    # Require config.yaml, not bare directory existence — a per-user agent
+    # directory can exist containing only memory.json (written the first
+    # time this user chats with a legacy shared agent, before this route
+    # is ever called). Bare .exists() would miss that case and let this
+    # fall through to a silent fork of a brand-new config.yaml/SOUL.md
+    # into the memory-only directory instead of blocking (mirrors
+    # resolve_agent_dir's guard, see #3390).
+    if not (agent_dir / "config.yaml").exists() and (legacy_dir / "config.yaml").exists():
         raise HTTPException(
             status_code=409,
             detail=(f"Agent '{name}' only exists in the legacy shared layout and is not scoped to a user. Run scripts/migrate_user_isolation.py to move legacy agents into the per-user layout before updating."),
@@ -462,6 +470,8 @@ async def delete_agent(name: str) -> None:
         if not agent_dir.exists():
             outcome = "legacy" if paths.agent_dir(name).exists() else "missing"
             return outcome, str(agent_dir)
+        if not (agent_dir / "config.yaml").is_file():
+            return "not-custom-agent", str(agent_dir)
         shutil.rmtree(agent_dir)
         return "deleted", str(agent_dir)
 
@@ -478,5 +488,10 @@ async def delete_agent(name: str) -> None:
         )
     if outcome == "missing":
         raise HTTPException(status_code=404, detail=f"Agent '{name}' not found")
+    if outcome == "not-custom-agent":
+        raise HTTPException(
+            status_code=409,
+            detail=(f"Directory for '{name}' contains memory data but is not a custom agent because config.yaml is missing; it was preserved."),
+        )
 
     logger.info(f"Deleted agent '{name}' from {agent_dir}")

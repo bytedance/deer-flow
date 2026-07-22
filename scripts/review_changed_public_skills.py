@@ -161,8 +161,8 @@ def parse_name_status(output: bytes) -> list[ChangedPath]:
 
 
 def select_skill_packages(changes: Sequence[ChangedPath], repo_root: Path) -> list[Path]:
-    packages: list[Path] = []
-    seen: set[PurePosixPath] = set()
+    package_statuses: dict[PurePosixPath, list[str]] = {}
+    resolutions: list[tuple[ChangedPath, PurePosixPath]] = []
 
     for change in changes:
         if not is_public_skill_package_path(change.path):
@@ -177,15 +177,40 @@ def select_skill_packages(changes: Sequence[ChangedPath], repo_root: Path) -> li
             print(f"[skill-review] Skipping path outside public skill package: {change.path}")
             continue
 
+        package_statuses.setdefault(package_rel, []).append(change.status)
+        resolutions.append((change, package_rel))
+
+    packages: list[Path] = []
+    seen: set[PurePosixPath] = set()
+
+    for _, package_rel in resolutions:
         if package_rel in seen:
             print(f"[skill-review] Already queued package: {package_rel}")
             continue
-
         seen.add(package_rel)
+
+        if is_fully_removed_package(package_rel, package_statuses[package_rel], repo_root):
+            print(f"[skill-review] Skipping fully removed package: {package_rel}")
+            continue
+
         packages.append(repo_root / package_rel)
         print(f"[skill-review] Queued package: {package_rel}")
 
     return packages
+
+
+def is_fully_removed_package(package_rel: PurePosixPath, statuses: Sequence[str], repo_root: Path) -> bool:
+    """Whether every changed file that resolved to ``package_rel`` was a deletion and the
+    package directory itself no longer exists on disk.
+
+    This identifies a whole public skill package being intentionally deleted (all of its
+    files removed, not just SKILL.md), as distinct from a package left in a broken/partial
+    state (e.g. SKILL.md deleted while other package files remain on disk) — the latter
+    must still be reviewed and flagged.
+    """
+    if not all(status.startswith("D") for status in statuses):
+        return False
+    return not (repo_root / package_rel).is_dir()
 
 
 def is_public_skill_md(path: PurePosixPath) -> bool:

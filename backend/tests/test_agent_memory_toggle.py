@@ -116,12 +116,12 @@ def test_preserve_non_managed_fields_keeps_memory() -> None:
 # disabled_memory_config (pure)
 # --------------------------------------------------------------------------- #
 def test_disabled_memory_config_turns_off_both_sides() -> None:
-    base = MemoryConfig(enabled=True, injection_enabled=True, debounce_seconds=42)
+    base = MemoryConfig(enabled=True, injection_enabled=True, shutdown_flush_timeout_seconds=42)
     off = disabled_memory_config(base)
     assert off.enabled is False
     assert off.injection_enabled is False
     # Unrelated tuning is preserved so re-enabling later restores prior settings.
-    assert off.debounce_seconds == 42
+    assert off.shutdown_flush_timeout_seconds == 42
     # The input is not mutated.
     assert base.enabled is True
     assert base.injection_enabled is True
