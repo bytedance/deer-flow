@@ -34,6 +34,18 @@ test.describe("Chat workspace", () => {
     await expect(page.getByRole("button", { name: /load more/i })).toBeHidden();
   });
 
+  test("shows the localized AI disclaimer", async ({ page }) => {
+    await page.goto("/workspace/chats/new");
+    await page.evaluate(() => {
+      document.cookie = "locale=zh-CN; path=/; SameSite=Lax";
+    });
+    await page.reload();
+
+    await expect(
+      page.getByText("内容由AI生成，重要信息请务必核查", { exact: true }),
+    ).toBeVisible({ timeout: 15_000 });
+  });
+
   test("can type a message in the input box", async ({ page }) => {
     await page.goto("/workspace/chats/new");
 

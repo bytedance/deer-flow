@@ -2688,6 +2688,10 @@ export function InputBox({
           </div>
         )}
 
+      <p className="text-muted-foreground/67 px-4 text-center text-xs leading-4">
+        {t.inputBox.disclaimer}
+      </p>
+
       <Dialog open={confirmOpen} onOpenChange={setConfirmOpen}>
         <DialogContent>
           <DialogHeader>
