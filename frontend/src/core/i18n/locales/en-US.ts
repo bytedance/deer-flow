@@ -444,10 +444,10 @@ export const enUS: Translations = {
     agentCreated: "Agent created!",
     startChatting: "Start chatting",
     backToGallery: "Back to Gallery",
-    settings: "Model settings",
-    settingsTitle: "Model settings",
+    settings: "Agent settings",
+    settingsTitle: "Agent settings",
     settingsDescription:
-      "Choose the default model and generation parameters for this agent. Changes take effect on the next message.",
+      "Configure this agent's system prompt, skills, and model. Changes take effect on the next message.",
     settingsModel: "Default model",
     settingsModelDefault: "Use global default",
     settingsTemperature: "Temperature",
@@ -459,10 +459,21 @@ export const enUS: Translations = {
     settingsThinkingOff: "Off",
     settingsReasoningEffort: "Reasoning effort",
     settingsInherit: "Inherit",
-    settingsSaved: "Model settings saved",
+    settingsSaved: "Agent settings saved",
     settingsInvalidTemperature: "Temperature must be between 0 and 2",
     settingsInvalidMaxTokens:
       "Max output tokens must be a positive integer up to 200,000",
+    settingsLoadError: "Could not load this agent's details. Please try again.",
+    settingsSectionModel: "Model",
+    settingsSystemPrompt: "System prompt",
+    settingsSystemPromptHint:
+      "The agent's SOUL.md — its persona and behavioral guardrails.",
+    settingsSystemPromptPlaceholder: "Describe how this agent should behave…",
+    settingsSkills: "Skills",
+    settingsSkillsUseAll: "Use all enabled skills",
+    settingsSkillsUseAllHint:
+      "This agent can use every skill enabled on the server. Turn off to pick a specific subset.",
+    settingsSkillsEmpty: "No enabled skills to choose from.",
   },
 
   // Breadcrumb

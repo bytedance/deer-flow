@@ -363,6 +363,15 @@ export interface Translations {
     settingsSaved: string;
     settingsInvalidTemperature: string;
     settingsInvalidMaxTokens: string;
+    settingsLoadError: string;
+    settingsSectionModel: string;
+    settingsSystemPrompt: string;
+    settingsSystemPromptHint: string;
+    settingsSystemPromptPlaceholder: string;
+    settingsSkills: string;
+    settingsSkillsUseAll: string;
+    settingsSkillsUseAllHint: string;
+    settingsSkillsEmpty: string;
   };
 
   // Breadcrumb

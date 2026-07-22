@@ -213,8 +213,8 @@ export function AgentCard({ agent }: AgentCardProps) {
         </CardFooter>
       </Card>
 
-      {/* Model settings — mounted only while open so its form state always
-          re-seeds from the latest agent props (avoids stale values on reopen). */}
+      {/* Agent settings — mounted only while open so it re-fetches the full
+          agent (incl. SOUL.md) and re-seeds form state on each open. */}
       {settingsOpen && (
         <AgentSettingsDialog
           agent={agent}

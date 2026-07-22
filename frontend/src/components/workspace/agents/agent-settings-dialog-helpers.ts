@@ -50,6 +50,36 @@ export function resolveEffectiveModel(
   return models.find((m) => m.name === modelValue);
 }
 
+/**
+ * Seed the skills-picker UI state from a custom agent's persisted ``skills``
+ * whitelist. The tri-state mirrors ``AgentConfig.skills`` on the backend:
+ * - ``null`` / ``undefined`` → inherit every enabled skill (``useAll``)
+ * - ``[]`` → an explicit empty allowlist (no skills)
+ * - ``["a", "b"]`` → only those skills
+ */
+export function seedSkillsSelection(agentSkills: string[] | null | undefined): {
+  useAll: boolean;
+  selected: string[];
+} {
+  if (agentSkills == null) return { useAll: true, selected: [] };
+  return { useAll: false, selected: [...agentSkills] };
+}
+
+/**
+ * Inverse of {@link seedSkillsSelection} for the update payload. Returns
+ * ``null`` (inherit all) when the "use all enabled skills" switch is on, else
+ * a de-duplicated allowlist (``[]`` when nothing is selected). ``null`` is a
+ * meaningful value the backend distinguishes from "field omitted" via
+ * ``model_fields_set``, so the caller must always send this key when saving.
+ */
+export function skillsSelectionToPayload(
+  useAll: boolean,
+  selected: string[],
+): string[] | null {
+  if (useAll) return null;
+  return Array.from(new Set(selected));
+}
+
 export type AgentSettingsValidationError = "temperature" | "max_tokens";
 
 export type ParsedAgentModelSettings =

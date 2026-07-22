@@ -6,7 +6,9 @@ import {
   MAX_AGENT_OUTPUT_TOKENS,
   parseAgentModelSettingsDraft,
   resolveEffectiveModel,
+  seedSkillsSelection,
   selectionToThinkingEnabled,
+  skillsSelectionToPayload,
   thinkingEnabledToSelection,
 } from "@/components/workspace/agents/agent-settings-dialog-helpers";
 import type { Model } from "@/core/models/types";
@@ -74,6 +76,56 @@ describe("selectionToThinkingEnabled", () => {
     expect(selectionToThinkingEnabled(INHERIT_VALUE)).toBeNull();
     expect(selectionToThinkingEnabled("on")).toBe(true);
     expect(selectionToThinkingEnabled("off")).toBe(false);
+  });
+});
+
+describe("seedSkillsSelection", () => {
+  it("maps null/undefined to 'use all enabled skills'", () => {
+    // null on the backend means "inherit every enabled skill", not "no skills".
+    expect(seedSkillsSelection(null)).toEqual({ useAll: true, selected: [] });
+    expect(seedSkillsSelection(undefined)).toEqual({
+      useAll: true,
+      selected: [],
+    });
+  });
+
+  it("maps an explicit empty list to an empty allowlist (not use-all)", () => {
+    expect(seedSkillsSelection([])).toEqual({ useAll: false, selected: [] });
+  });
+
+  it("maps a whitelist to an explicit selection and copies the array", () => {
+    const input = ["a", "b"];
+    const result = seedSkillsSelection(input);
+    expect(result).toEqual({ useAll: false, selected: ["a", "b"] });
+    expect(result.selected).not.toBe(input);
+  });
+});
+
+describe("skillsSelectionToPayload", () => {
+  it("returns null when 'use all' is on, regardless of selection", () => {
+    expect(skillsSelectionToPayload(true, [])).toBeNull();
+    expect(skillsSelectionToPayload(true, ["a"])).toBeNull();
+  });
+
+  it("returns an empty allowlist when nothing is selected", () => {
+    // [] is a meaningful "no skills" value the caller must send explicitly.
+    expect(skillsSelectionToPayload(false, [])).toEqual([]);
+  });
+
+  it("de-duplicates the selected allowlist", () => {
+    expect(skillsSelectionToPayload(false, ["a", "b", "a"])).toEqual([
+      "a",
+      "b",
+    ]);
+  });
+
+  it("round-trips seedSkillsSelection output", () => {
+    for (const input of [null, [], ["x", "y"]] as (string[] | null)[]) {
+      const seed = seedSkillsSelection(input);
+      expect(skillsSelectionToPayload(seed.useAll, seed.selected)).toEqual(
+        input,
+      );
+    }
   });
 });
 
