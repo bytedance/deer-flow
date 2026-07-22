@@ -15,7 +15,7 @@ import logging
 from collections.abc import Sequence
 from typing import Any
 
-from langgraph.channels.binop import BinaryOperatorAggregate, _get_overwrite
+from langgraph.channels.binop import BinaryOperatorAggregate
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.errors import ErrorCode, InvalidUpdateError, create_error_message
@@ -104,6 +104,23 @@ _BINOP_PATCH_FLAG = "_deerflow_overwrite_first_write_patched"
 _unpatched_binop_update = BinaryOperatorAggregate.update
 
 
+def _as_overwrite(value: Any) -> tuple[bool, Any]:
+    """Local stand-in for langgraph's private ``_get_overwrite``.
+
+    Matches only the public ``Overwrite`` *class* form - the sole form
+    DeerFlow's write paths produce for these Union channels (the branch and
+    ``/state`` routes wrap replace-style writes in ``Overwrite(...)``).
+    Avoiding the underscored ``_get_overwrite`` import keeps an upstream
+    refactor that drops it - plausibly the very release that fixes the bug -
+    from failing this module's import and crashing startup before the probe
+    can stand the patch down. The dict sentinel form upstream also accepts is
+    an internal serialization detail DeerFlow never emits into these channels.
+    """
+    if isinstance(value, Overwrite):
+        return True, value.value
+    return False, None
+
+
 def _binop_first_write_stores_overwrite_wrapper() -> bool:
     """Probe whether upstream still stores an Overwrite first write literally.
 
@@ -126,11 +143,11 @@ def _binop_update_unwrapping_empty_channel(self: Any, values: Sequence[Any]) -> 
     are skipped and a second Overwrite raises ``InvalidUpdateError``.
     """
     if not self.is_available() and values:
-        is_overwrite, overwrite_value = _get_overwrite(values[0])
+        is_overwrite, overwrite_value = _as_overwrite(values[0])
         if is_overwrite:
             self.value = overwrite_value
             for value in values[1:]:
-                if _get_overwrite(value)[0]:
+                if _as_overwrite(value)[0]:
                     msg = create_error_message(
                         message="Can receive only one Overwrite value per super-step.",
                         error_code=ErrorCode.INVALID_CONCURRENT_GRAPH_UPDATE,

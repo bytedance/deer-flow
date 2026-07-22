@@ -1991,7 +1991,7 @@ def test_branch_copies_union_typed_reducer_channels_as_plain_values(monkeypatch,
 
     Union-typed reducer channels (``goal``, ``todos``, ``promoted``,
     ``sandbox``) have no constructible default, so they start MISSING on the
-    branch thread; an un-unwrapped ``Overwrite`` first write is stored
+    branch thread; an ``Overwrite`` first write that isn't unwrapped is stored
     literally and the next consumer crashes with ``TypeError: 'Overwrite'
     object is not subscriptable``.
     """

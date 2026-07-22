@@ -25,7 +25,7 @@ def _replace(existing, new):
 
 
 def _empty_union_channel() -> BinaryOperatorAggregate:
-    """A channel shaped like ``sandbox``/``goal``/``todos``: Union typ, starts MISSING."""
+    """A channel shaped like ``sandbox``/``goal``/``todos``: Union type, starts MISSING."""
     channel = BinaryOperatorAggregate(dict | None, _replace)
     channel.key = "probe"
     return channel
