@@ -64,6 +64,17 @@ def get_agent_store() -> AgentStore:
     functions in ``agents_config`` must keep working in lightweight contexts
     (CLI, tests, tools) that never load a full ``config.yaml``. Only an
     explicit ``agent_storage.backend: db`` diverges from the file default.
+
+    Cross-process invariant (the ``db`` backend's whole point): the per-run
+    agent build runs in the **graph subprocess**, a different process from the
+    gateway. Its cross-node guarantee holds only because ``get_app_config()``
+    resolves ``config.yaml`` there too and returns ``backend: db`` — so the read
+    path in the graph process sees the same shared table the gateway wrote. The
+    ``except`` below is a genuine *no resolvable config* fallback (CLI/tests),
+    **not** a mask for a misconfigured graph process: if ``config.yaml`` is
+    reachable there (it is, same working tree), ``db`` is honoured, not silently
+    downgraded to node-local ``file``. Pinned by
+    ``test_get_agent_store_resolves_db_backend_from_on_disk_config``.
     """
     from deerflow.config.app_config import get_app_config
 

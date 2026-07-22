@@ -153,22 +153,40 @@ class SqlAgentStore(AgentStore):
         effective_user = user_id or get_effective_user_id()
         with self._Session() as session:
             row = self._row(session, name, effective_user)
-            if row is None:
-                # Upsert: setup_agent and any first-time write land here.
-                row = AgentRow(
-                    id=uuid.uuid4().hex,
-                    user_id=effective_user,
-                    name=name.lower(),
-                    config=_config_document(config or {}),
-                    soul=soul or "",
-                )
-                session.add(row)
-            else:
-                if config is not None:
-                    row.config = _config_document(config)
-                if soul is not None:
-                    row.soul = soul
-            session.commit()
+            if row is not None:
+                self._apply_update(row, config, soul)
+                session.commit()
+                return
+            # Upsert: setup_agent and any first-time write land here. Two
+            # concurrent first-time updates (e.g. two setup_agent handshakes) can
+            # both see row is None and both insert; UNIQUE(user_id, name) rejects
+            # the loser. Re-fetch the winner's row and apply the update to it
+            # rather than letting a raw IntegrityError surface as a 500 — a true
+            # upsert, symmetric with create()'s conflict handling.
+            row = AgentRow(
+                id=uuid.uuid4().hex,
+                user_id=effective_user,
+                name=name.lower(),
+                config=_config_document(config or {}),
+                soul=soul or "",
+            )
+            session.add(row)
+            try:
+                session.commit()
+            except IntegrityError:
+                session.rollback()
+                existing = self._row(session, name, effective_user)
+                if existing is None:
+                    raise
+                self._apply_update(existing, config, soul)
+                session.commit()
+
+    @staticmethod
+    def _apply_update(row: AgentRow, config: dict | None, soul: str | None) -> None:
+        if config is not None:
+            row.config = _config_document(config)
+        if soul is not None:
+            row.soul = soul
 
     def delete(self, name: str, *, user_id: str | None = None) -> AgentDeleteOutcome:
         effective_user = user_id or get_effective_user_id()

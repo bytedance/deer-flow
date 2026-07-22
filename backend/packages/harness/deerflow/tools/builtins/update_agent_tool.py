@@ -7,9 +7,21 @@ initial creation handshake.
 
 The tool writes back through the configured agent store (file: per-user
 ``config.yaml``/``SOUL.md``; db: the shared ``agents`` table) so an agent created
-by one user is never visible to (or mutable by) another. The store commits config
-and soul atomically, so a partial failure cannot leave config.yaml updated while
-SOUL.md still holds stale content.
+by one user is never visible to (or mutable by) another.
+
+Cross-field write atomicity depends on the backend: the ``db`` store commits
+config and soul in a single transaction, so a partial failure never leaves one
+updated and the other stale. The ``file`` store stages both to temp files and
+commits them with two sequential ``os.replace`` calls (see
+``FileAgentStore._write``): each file is all-or-nothing, but a crash *between*
+the two replaces can leave a freshly-written config.yaml beside a stale SOUL.md
+(single-node, sub-millisecond window). The pre-store tool reported that partial
+window explicitly ("Partial update for agent 'X': ..."); routing through the
+store drops the *reporting* (a mid-replace crash now surfaces as the generic
+"Failed to update agent"). That is an intentional tradeoff — the stage-then-
+replace *safety* is preserved (no corruption, no leftover temp files), only the
+diagnostic is gone. If cross-file atomicity ever matters on ``file``, restore
+that reporting in ``FileAgentStore._write``.
 """
 
 from __future__ import annotations
@@ -229,8 +241,10 @@ def update_agent(
         updated_fields.append("soul")
 
     # Persist config (when a managed field changed) and/or soul through the
-    # store, which commits both atomically. Nothing to write if the provided
-    # values all matched the existing config and no soul was supplied.
+    # store. The db backend commits both in one transaction; the file backend
+    # commits each atomically but sequentially (see this module's docstring).
+    # Nothing to write if the provided values all matched the existing config
+    # and no soul was supplied.
     if config_changed or soul is not None:
         try:
             get_agent_store().update(agent_name, config_data if config_changed else None, soul, user_id=user_id)

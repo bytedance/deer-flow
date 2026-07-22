@@ -6,12 +6,14 @@ import sys
 from types import SimpleNamespace
 
 import pytest
+import yaml
 from sqlalchemy import create_engine
 
 from app.gateway.deps import _validate_agent_storage
 from deerflow.config.agent_storage_config import AgentStorageConfig
+from deerflow.config.app_config import reset_app_config
 from deerflow.config.database_config import DatabaseConfig
-from deerflow.persistence.agents import make_agent_store
+from deerflow.persistence.agents import get_agent_store, make_agent_store
 from deerflow.persistence.agents.file import FileAgentStore
 from deerflow.persistence.agents.model import AgentRow
 from deerflow.persistence.agents.sql import SqlAgentStore
@@ -182,3 +184,48 @@ def test_file_create_race_maps_file_exists_to_agent_exists(tmp_path, monkeypatch
     fs = FileAgentStore()
     with pytest.raises(AgentExistsError):
         fs.create("racy", {"name": "racy"}, "soul", user_id="u1")
+
+
+# -- graph-subprocess config resolution (db backend's core cross-process invariant) --
+
+
+def _write_min_config(path, extra: dict) -> None:
+    """Minimal but valid config.yaml (sandbox + models are the only hard requirements)."""
+    doc = {
+        "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"},
+        "models": [{"name": "m", "use": "langchain_openai:ChatOpenAI", "model": "gpt-test"}],
+        **extra,
+    }
+    path.write_text(yaml.safe_dump(doc), encoding="utf-8")
+
+
+def test_get_agent_store_resolves_db_backend_from_on_disk_config(tmp_path, monkeypatch):
+    """Pins the db backend's headline cross-process guarantee.
+
+    The per-run agent build runs in the graph subprocess, a different process
+    from the gateway; its db visibility holds only because ``get_agent_store()``
+    resolves ``agent_storage.backend: db`` from the real on-disk ``config.yaml``
+    there (not a monkeypatched stub) rather than silently falling back to
+    node-local ``file``. Existing coverage monkeypatches ``get_app_config``;
+    this drives the genuine file-resolution path a fresh process would take.
+    """
+    cfg_path = tmp_path / "config.yaml"
+    _write_min_config(cfg_path, {"agent_storage": {"backend": "db"}, "database": {"backend": "sqlite", "sqlite_dir": str(tmp_path / "db")}})
+    monkeypatch.setenv("DEER_FLOW_CONFIG_PATH", str(cfg_path))
+    try:
+        reset_app_config()  # force a fresh read from the on-disk file
+        assert isinstance(get_agent_store(), SqlAgentStore)
+    finally:
+        reset_app_config()  # don't leak the custom config into other tests
+
+
+def test_get_agent_store_falls_back_to_file_without_config(tmp_path, monkeypatch):
+    """The ``except -> file`` fallback is for genuinely unresolvable config only
+    (CLI/tests); it must not fire when a config exists — that asymmetry is what
+    keeps a misconfigured graph process from silently downgrading db to file."""
+    monkeypatch.setenv("DEER_FLOW_CONFIG_PATH", str(tmp_path / "does-not-exist.yaml"))
+    try:
+        reset_app_config()
+        assert isinstance(get_agent_store(), FileAgentStore)
+    finally:
+        reset_app_config()
