@@ -127,7 +127,13 @@ class FileAgentStore(AgentStore):
         # not be shadowed; a per-user dir may be memory-only but still blocks).
         if agent_dir.exists() or paths.agent_dir(name).exists():
             raise AgentExistsError(f"Agent '{name}' already exists for user '{effective_user}'")
-        agent_dir.mkdir(parents=True, exist_ok=False)
+        try:
+            agent_dir.mkdir(parents=True, exist_ok=False)
+        except FileExistsError as e:
+            # A concurrent create passed the existence check above and reached
+            # mkdir first. Surface the router's 409 (via AgentExistsError) rather
+            # than a generic 500 — mirrors SqlAgentStore's IntegrityError path.
+            raise AgentExistsError(f"Agent '{name}' already exists for user '{effective_user}'") from e
         try:
             self._write(agent_dir, config, soul)
         except Exception:
@@ -211,12 +217,16 @@ class FileAgentStore(AgentStore):
 
     @staticmethod
     def _write(agent_dir: Path, config: dict | None, soul: str | None) -> None:
-        """Atomically write config.yaml and/or SOUL.md.
+        """Write config.yaml and/or SOUL.md, each via an atomic ``os.replace``.
 
-        Each part is written only when supplied (``config``/``soul`` non-None).
-        Both are staged to temp files in the target directory, then committed
-        with ``os.replace`` so a crash never leaves a half-written config next to
-        an old soul (the ``update_agent`` tool's guarantee).
+        Each part is written only when supplied (``config``/``soul`` non-None),
+        staged to a temp file then committed with ``os.replace``, so neither file
+        is ever observed half-written. The two commits are sequential, **not** a
+        single transaction: a crash between them can leave a freshly-replaced
+        config.yaml beside a stale SOUL.md (single-node, sub-millisecond window).
+        The ``db`` backend commits both fields in one transaction; if cross-file
+        atomicity ever matters here, restore ``update_agent``'s partial-write
+        reporting.
         """
         pending: list[tuple[Path, Path]] = []
         staged: list[Path] = []

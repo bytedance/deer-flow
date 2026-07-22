@@ -129,3 +129,35 @@ def test_signature_changes_on_mutation(store):
 
     store.update("x", {"name": "x", "description": "changed"}, None, user_id="u1")
     assert store.signature() != after_create
+
+
+def test_sync_engine_mirrors_async_pragmas(tmp_path):
+    # The db backend's sync engine must set the same per-connection SQLite PRAGMAs
+    # the async engine does (persistence/engine.py), not leave synchronous=FULL
+    # and pysqlite's default 5s busy_timeout. WAL is persistent on the file;
+    # synchronous / busy_timeout are per-connection and must be re-applied here.
+    from sqlalchemy import text
+
+    from deerflow.persistence.agents.sql import _get_sessionmaker
+
+    url = f"sqlite:///{tmp_path}/pragma.db"
+    Session = _get_sessionmaker(url)
+    with Session() as session:
+        busy_timeout = session.execute(text("PRAGMA busy_timeout")).scalar()
+        synchronous = session.execute(text("PRAGMA synchronous")).scalar()
+        journal_mode = session.execute(text("PRAGMA journal_mode")).scalar()
+
+    assert busy_timeout == 30000
+    assert synchronous == 1  # NORMAL
+    assert str(journal_mode).lower() == "wal"
+
+
+def test_engine_cache_is_reused_per_url(tmp_path):
+    # Two stores on the same URL share one cached engine (the lock-guarded
+    # double-checked cache), so we never build duplicate engines/pools.
+    from deerflow.persistence.agents.sql import _get_sessionmaker
+
+    url = f"sqlite:///{tmp_path}/reuse.db"
+    first = _get_sessionmaker(url)
+    second = _get_sessionmaker(url)
+    assert first.kw["bind"] is second.kw["bind"]

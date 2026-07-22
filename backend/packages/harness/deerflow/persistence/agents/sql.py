@@ -14,11 +14,12 @@ from __future__ import annotations
 
 import logging
 import shutil
+import threading
 import uuid
 from collections.abc import Hashable
 from datetime import UTC, datetime
 
-from sqlalchemy import Engine, create_engine, delete, func, select
+from sqlalchemy import Engine, create_engine, delete, event, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -38,16 +39,46 @@ logger = logging.getLogger(__name__)
 
 # Cache sync engines by URL: the store is constructed on demand in multiple
 # places (gateway routes, the graph factory) and each process should reuse one
-# engine/pool rather than opening a connection per call.
+# engine/pool rather than opening a connection per call. The lock keeps two
+# threads first-touching the same URL from building — and registering connect
+# listeners on — duplicate engines.
 _engines: dict[str, Engine] = {}
+_engines_lock = threading.Lock()
+
+
+def _build_engine(url: str) -> Engine:
+    connect_args = {"check_same_thread": False} if url.startswith("sqlite") else {}
+    engine = create_engine(url, future=True, pool_pre_ping=True, connect_args=connect_args)
+    if url.startswith("sqlite"):
+        # Mirror the async engine's per-connection PRAGMAs (persistence/engine.py).
+        # journal_mode=WAL is persistent on the DB file (the async bootstrap sets
+        # it), but synchronous and busy_timeout are per-connection: without this
+        # these sync connections run synchronous=FULL and pysqlite's default 5s
+        # busy_timeout rather than the async engine's NORMAL + 30s. Match them so
+        # both engines behave identically against the shared DB and a concurrent
+        # writer waits up to 30s instead of failing early on lock contention.
+        @event.listens_for(engine, "connect")
+        def _enable_sqlite_pragmas(dbapi_conn, _record):  # noqa: ARG001 — SQLAlchemy contract
+            cursor = dbapi_conn.cursor()
+            try:
+                cursor.execute("PRAGMA journal_mode=WAL;")
+                cursor.execute("PRAGMA synchronous=NORMAL;")
+                cursor.execute("PRAGMA foreign_keys=ON;")
+                cursor.execute("PRAGMA busy_timeout=30000;")
+            finally:
+                cursor.close()
+
+    return engine
 
 
 def _get_sessionmaker(url: str) -> sessionmaker[Session]:
     engine = _engines.get(url)
     if engine is None:
-        connect_args = {"check_same_thread": False} if url.startswith("sqlite") else {}
-        engine = create_engine(url, future=True, pool_pre_ping=True, connect_args=connect_args)
-        _engines[url] = engine
+        with _engines_lock:
+            engine = _engines.get(url)
+            if engine is None:
+                engine = _build_engine(url)
+                _engines[url] = engine
     return sessionmaker(engine, expire_on_commit=False)
 
 
@@ -156,6 +187,11 @@ class SqlAgentStore(AgentStore):
         return "deleted" if deleted else "missing"
 
     def signature(self) -> Hashable:
+        # MAX(updated_at) is not covered by an index (only user_id and the
+        # (user_id, name) unique constraint are), so this is a small full scan.
+        # It runs only on the webhook registry's cache-freshness check against a
+        # tiny agents table, so an index is not warranted; revisit if agents ever
+        # grow into the thousands with frequent webhook deliveries.
         with self._Session() as session:
             max_updated, count = session.execute(select(func.max(AgentRow.updated_at), func.count(AgentRow.id))).one()
         token = coerce_iso(max_updated) if isinstance(max_updated, datetime) else str(max_updated)

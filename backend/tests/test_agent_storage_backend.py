@@ -158,3 +158,27 @@ def test_read_free_functions_dispatch_to_db_backend(file_home, monkeypatch):
     assert [c.name for c in list_custom_agents(user_id="u1")] == ["dbonly"]
     assert load_agent_config("dbonly", user_id="u1").description == "shared"
     assert load_agent_soul("dbonly", user_id="u1") == "db soul"
+
+
+def test_file_create_race_maps_file_exists_to_agent_exists(tmp_path, monkeypatch):
+    # TOCTOU: the existence guard passes (no agent yet), but a concurrent create
+    # wins the race so mkdir(exist_ok=False) raises FileExistsError. The store
+    # must translate that to AgentExistsError so the router returns 409, not a
+    # generic 500 — matching SqlAgentStore's IntegrityError path.
+    import pathlib
+
+    from deerflow.persistence.agents.base import AgentExistsError
+
+    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+    from deerflow.config import paths as paths_module
+
+    monkeypatch.setattr(paths_module, "_paths", None)
+
+    def _racing_mkdir(self, *args, **kwargs):
+        raise FileExistsError(str(self))
+
+    monkeypatch.setattr(pathlib.Path, "mkdir", _racing_mkdir)
+
+    fs = FileAgentStore()
+    with pytest.raises(AgentExistsError):
+        fs.create("racy", {"name": "racy"}, "soul", user_id="u1")

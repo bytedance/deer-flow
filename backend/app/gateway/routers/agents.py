@@ -118,9 +118,16 @@ async def list_agents() -> AgentsListResponse:
     _require_agents_api_enabled()
 
     user_id = get_effective_user_id()
-    try:
+
+    def _list() -> AgentsListResponse:
+        # Worker thread: the store read plus the per-agent SOUL read inside
+        # _agent_config_to_response are filesystem IO (file backend) or DB round
+        # trips (db backend) and must stay off the event loop.
         agents = list_custom_agents(user_id=user_id)
         return AgentsListResponse(agents=[_agent_config_to_response(a, include_soul=True, user_id=user_id) for a in agents])
+
+    try:
+        return await asyncio.to_thread(_list)
     except Exception as e:
         logger.error(f"Failed to list agents: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to list agents: {str(e)}")
@@ -148,9 +155,10 @@ async def check_agent_name(name: str) -> dict:
     normalized = _normalize_agent_name(name)
     user_id = get_effective_user_id()
     # Availability is defined by the active backend and stays consistent with
-    # create()'s conflict rule (file: per-user or legacy dir; db: a row).
-    available = not get_agent_store().exists(normalized, user_id=user_id)
-    return {"available": available, "name": normalized}
+    # create()'s conflict rule (file: per-user or legacy dir; db: a row). The
+    # exists() probe is filesystem IO / a DB round trip, so keep it off the loop.
+    exists = await asyncio.to_thread(get_agent_store().exists, normalized, user_id=user_id)
+    return {"available": not exists, "name": normalized}
 
 
 @router.get(
@@ -176,9 +184,13 @@ async def get_agent(name: str) -> AgentResponse:
     name = _normalize_agent_name(name)
     user_id = get_effective_user_id()
 
-    try:
+    def _get() -> AgentResponse:
+        # Worker thread: config read + SOUL read must stay off the event loop.
         agent_cfg = load_agent_config(name, user_id=user_id)
         return _agent_config_to_response(agent_cfg, include_soul=True, user_id=user_id)
+
+    try:
+        return await asyncio.to_thread(_get)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail=f"Agent '{name}' not found")
     except Exception as e:
@@ -266,22 +278,26 @@ async def update_agent(name: str, request: AgentUpdateRequest) -> AgentResponse:
     user_id = get_effective_user_id()
 
     try:
-        agent_cfg = load_agent_config(name, user_id=user_id)
+        agent_cfg = await asyncio.to_thread(load_agent_config, name, user_id=user_id)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail=f"Agent '{name}' not found")
 
-    paths = get_paths()
-    agent_dir = paths.user_agent_dir(user_id, name)
-    legacy_dir = paths.agent_dir(name)
-    # Require config.yaml, not bare directory existence — a per-user agent
-    # directory can exist containing only memory.json (written the first
-    # time this user chats with a legacy shared agent, before this route
-    # is ever called). Bare .exists() would miss that case and let this
-    # fall through to a silent fork of a brand-new config.yaml/SOUL.md
-    # into the memory-only directory instead of blocking (mirrors
-    # resolve_agent_dir's guard, see #3390). The db backend has no legacy
-    # shared layout, so this file-only guard is a no-op there.
-    if not (agent_dir / "config.yaml").exists() and (legacy_dir / "config.yaml").exists():
+    def _is_legacy_only_layout() -> bool:
+        # Require config.yaml, not bare directory existence — a per-user agent
+        # directory can exist containing only memory.json (written the first
+        # time this user chats with a legacy shared agent, before this route
+        # is ever called). Bare .exists() would miss that case and let this
+        # fall through to a silent fork of a brand-new config.yaml/SOUL.md
+        # into the memory-only directory instead of blocking (mirrors
+        # resolve_agent_dir's guard, see #3390). The db backend has no legacy
+        # shared layout, so this file-only guard is a no-op there. The .exists()
+        # probes are filesystem IO, so they run off the event loop.
+        paths = get_paths()
+        agent_dir = paths.user_agent_dir(user_id, name)
+        legacy_dir = paths.agent_dir(name)
+        return not (agent_dir / "config.yaml").exists() and (legacy_dir / "config.yaml").exists()
+
+    if await asyncio.to_thread(_is_legacy_only_layout):
         raise HTTPException(
             status_code=409,
             detail=(f"Agent '{name}' only exists in the legacy shared layout and is not scoped to a user. Run scripts/migrate_user_isolation.py to move legacy agents into the per-user layout before updating."),
@@ -335,8 +351,12 @@ async def update_agent(name: str, request: AgentUpdateRequest) -> AgentResponse:
 
         logger.info(f"Updated agent '{name}'")
 
-        refreshed_cfg = load_agent_config(name, user_id=user_id)
-        return _agent_config_to_response(refreshed_cfg, include_soul=True, user_id=user_id)
+        def _refresh() -> AgentResponse:
+            # Worker thread: re-read config + SOUL off the event loop.
+            refreshed_cfg = load_agent_config(name, user_id=user_id)
+            return _agent_config_to_response(refreshed_cfg, include_soul=True, user_id=user_id)
+
+        return await asyncio.to_thread(_refresh)
 
     except HTTPException:
         raise
