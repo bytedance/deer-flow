@@ -2688,7 +2688,12 @@ export function InputBox({
           </div>
         )}
 
-      <p className="text-muted-foreground/67 px-4 text-center text-xs leading-4">
+      <p
+        className={cn(
+          "text-muted-foreground/67 z-10 px-4 text-center text-xs leading-4",
+          !isWelcomeMode && "absolute top-full right-0 left-0",
+        )}
+      >
         {t.inputBox.disclaimer}
       </p>
 
