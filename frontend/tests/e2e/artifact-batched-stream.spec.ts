@@ -147,7 +147,7 @@ async function startBatchedWriteFileStreamServer() {
   };
 }
 
-test("appends batched tool-call argument deltas in the artifact preview", async ({
+test("assembles streamed write-file argument deltas in the artifact preview", async ({
   page,
 }) => {
   let streamStarted = false;

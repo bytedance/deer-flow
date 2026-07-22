@@ -405,12 +405,25 @@ async def test_run_agent_batches_incremental_file_args_and_keeps_complete_values
     assert any(event["messages"][0]["tool_calls"][0]["args"]["content"] == "Hello world" for event in values_events)
 
 
+@pytest.mark.parametrize(
+    ("stream_error", "flush_publish_error", "expected_error"),
+    [
+        (True, False, "stream failed"),
+        (True, True, "stream failed"),
+        (False, True, "flush publish failed"),
+    ],
+)
 @pytest.mark.anyio
-async def test_run_agent_flushes_pending_file_args_when_stream_raises():
+async def test_run_agent_handles_pending_file_args_when_stream_or_flush_raises(stream_error: bool, flush_publish_error: bool, expected_error: str):
     run_manager = RunManager()
     record = await run_manager.create("thread-file-stream-error")
+
+    async def publish(_run_id: str, event: str, _data: Any):
+        if flush_publish_error and event == "messages":
+            raise RuntimeError("flush publish failed")
+
     bridge = SimpleNamespace(
-        publish=AsyncMock(),
+        publish=AsyncMock(side_effect=publish),
         publish_end=AsyncMock(),
         cleanup=AsyncMock(),
     )
@@ -436,7 +449,8 @@ async def test_run_agent_flushes_pending_file_args_when_stream_raises():
                     {},
                 ),
             )
-            raise RuntimeError("stream failed")
+            if stream_error:
+                raise RuntimeError("stream failed")
 
     await run_agent(
         bridge,
@@ -453,7 +467,7 @@ async def test_run_agent_flushes_pending_file_args_when_stream_raises():
     assert len(message_events) == 1
     assert message_events[0][2][0]["tool_call_chunks"][0]["args"].endswith('"content":"partial')
     error_events = [call.args for call in bridge.publish.await_args_list if call.args[1] == "error"]
-    assert error_events[0][2]["message"] == "stream failed"
+    assert error_events[0][2]["message"] == expected_error
 
 
 @pytest.mark.anyio

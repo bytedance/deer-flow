@@ -20,6 +20,7 @@ import copy
 import inspect
 import logging
 import os
+import sys
 import threading
 import weakref
 from collections.abc import AsyncIterator
@@ -103,6 +104,7 @@ async def _checkpoint_thread_lock(thread_id: str) -> AsyncIterator[None]:
 
 # Valid stream_mode values for LangGraph's graph.astream()
 _VALID_LG_MODES = {"values", "updates", "checkpoints", "tasks", "debug", "messages", "custom"}
+# Keep this streaming policy separate from middleware write-authorization sets.
 _LARGE_FILE_TOOL_NAMES = frozenset({"str_replace", "write_file"})
 _LARGE_FILE_TOOL_BATCH_SIZE = 32
 
@@ -670,9 +672,7 @@ async def run_agent(
                                 break
                             llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(chunk, pre_existing_message_ids)
                             sse_event = _lg_mode_to_sse_event(single_mode)
-                            chunks_to_publish = file_tool_chunk_batcher.push(chunk) if single_mode == "messages" and file_tool_chunk_batcher is not None else [chunk]
-                            for publish_chunk in chunks_to_publish:
-                                await bridge.publish(run_id, sse_event, serialize(publish_chunk, mode=single_mode))
+                            await bridge.publish(run_id, sse_event, serialize(chunk, mode=single_mode))
                             if single_mode == "custom":
                                 await subagent_events.add(chunk)
                         return
@@ -703,9 +703,15 @@ async def run_agent(
                         if mode == "custom":
                             await subagent_events.add(chunk)
             finally:
+                stream_error = sys.exception()
                 if file_tool_chunk_batcher is not None:
-                    for publish_chunk in file_tool_chunk_batcher.finish():
-                        await bridge.publish(run_id, "messages", serialize(publish_chunk, mode="messages"))
+                    try:
+                        for publish_chunk in file_tool_chunk_batcher.finish():
+                            await bridge.publish(run_id, "messages", serialize(publish_chunk, mode="messages"))
+                    except Exception:
+                        if stream_error is None:
+                            raise
+                        logger.debug("Could not flush pending file-tool chunks for run %s", run_id, exc_info=True)
 
         # 7. Stream the requested turn, then optionally continue hidden goal turns.
         # Clear any stale stop_reason before the first (user-visible) turn only.
