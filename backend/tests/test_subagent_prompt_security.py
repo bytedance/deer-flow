@@ -43,6 +43,48 @@ def test_build_subagent_section_includes_bash_when_available(monkeypatch) -> Non
     assert "available tools (bash, ls, read_file, web_search, etc.)" in section
 
 
+def test_subagent_routing_requires_clear_net_benefit(monkeypatch) -> None:
+    monkeypatch.setattr(prompt_module, "get_available_subagent_names", lambda: ["general-purpose"])
+
+    section = prompt_module._build_subagent_section(3)
+
+    assert "Default to direct execution" in section
+    assert "Do not delegate merely because a task is complex" in section
+    assert "Delegate only when the expected benefit is clearly greater than the expected cost" in section
+    assert "parallel wall-clock savings" in section
+    assert "specialist capability" in section
+    assert "context isolation" in section
+    assert "duplicate context and repository discovery" in section
+    assert "coordination and synthesis" in section
+    assert "state-conflict risk" in section
+    assert "side-effect risk" in section
+
+
+def test_subagent_routing_rejects_unsafe_parallelism_and_rechecks_batches(monkeypatch) -> None:
+    monkeypatch.setattr(prompt_module, "get_available_subagent_names", lambda: ["general-purpose"])
+
+    section = prompt_module._build_subagent_section(3)
+
+    assert "Sequential dependencies" in section
+    assert "overlapping files, shared mutable state, or external side effects" in section
+    assert "Re-evaluate the remaining work after every batch" in section
+    assert "Use the fewest subagents needed" in section
+
+
+def test_subagent_tool_and_role_descriptions_match_benefit_based_routing() -> None:
+    from deerflow.subagents.builtins.general_purpose import GENERAL_PURPOSE_CONFIG
+    from deerflow.tools.builtins.task_tool import task_tool
+
+    tool_description = task_tool.description
+    role_description = GENERAL_PURPOSE_CONFIG.description
+
+    assert "expected benefit" in tool_description
+    assert "independent" in tool_description
+    assert "multiple dependent steps" not in tool_description
+    assert "clear delegation benefit" in role_description
+    assert "Multiple dependent steps" not in role_description
+
+
 def test_bash_subagent_prompt_mentions_workspace_relative_paths() -> None:
     from deerflow.subagents.builtins.bash_agent import BASH_AGENT_CONFIG
 

@@ -231,6 +231,9 @@ def test_apply_prompt_template_includes_subagent_total_limit(monkeypatch):
 
     assert "MAXIMUM 3 `task` CALLS PER RESPONSE" in prompt
     assert "MAXIMUM 5 `task` CALLS PER RUN" in prompt
+    assert "Default to direct execution" in prompt
+    assert "DELEGATION CHECK" in prompt
+    assert "decompose complex tasks into parallel sub-tasks" not in prompt
 
 
 def test_apply_prompt_template_clamps_subagent_limits_to_enforced_bounds(monkeypatch):

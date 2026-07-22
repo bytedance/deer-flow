@@ -235,17 +235,19 @@ async def task_tool(
     subagent_type: str,
     tool_call_id: Annotated[str, InjectedToolCallId],
 ) -> str | Command:
-    """Delegate a task to a specialized subagent that runs in its own context.
+    """Delegate a bounded task to a specialized subagent in its own context.
 
-    Subagents help you:
-    - Preserve context by keeping exploration and implementation separate
-    - Handle complex multi-step tasks autonomously
-    - Execute commands or operations in isolated contexts
+    Delegate only when expected benefit clearly exceeds delegation overhead.
+    Useful benefits are:
+    - Material wall-clock savings from independent parallel work
+    - Specialist tools, skills, models, or domain instructions
+    - Context isolation for a bounded, unusually context-heavy investigation
 
     Built-in subagent types:
-    - **general-purpose**: A capable agent for complex, multi-step tasks that require
-      both exploration and action. Use when the task requires complex reasoning,
-      multiple dependent steps, or would benefit from isolated context.
+    - **general-purpose**: A capable agent for bounded exploration and action. Use
+      when the assignment has clear specialist or context-isolation benefit, or is
+      one of several independent, non-overlapping tasks that can actually run in
+      parallel.
     - **bash**: Command execution specialist for running bash commands. This is only
       available when host bash is explicitly allowed or when using an isolated shell
       sandbox such as `AioSandboxProvider`.
@@ -256,13 +258,16 @@ async def task_tool(
     is provided, the error message will list all available types.
 
     When to use this tool:
-    - Complex tasks requiring multiple steps or tools
-    - Tasks that produce verbose output
-    - When you want to isolate context from the main conversation
-    - Parallel research or exploration tasks
+    - Independent tasks that materially reduce wall-clock time when run in parallel
+    - A specialist subagent provides capability unavailable on the direct path
+    - Bounded exploration that would otherwise displace important parent context
 
     When NOT to use this tool:
-    - Simple, single-step operations (use tools directly)
+    - Merely because a task is complex, multi-step, verbose, or touches a large repo
+    - Sequential work whose later steps depend on earlier results
+    - Work that repeats the same repository discovery in multiple contexts
+    - Work with overlapping files, shared mutable state, or external side effects
+    - Any task the parent can complete more cheaply with direct tools
     - Tasks requiring user interaction or clarification
 
     Args:
