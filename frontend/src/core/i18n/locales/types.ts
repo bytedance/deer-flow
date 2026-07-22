@@ -748,6 +748,9 @@ export interface Translations {
     haveAccountSignIn: string;
     backToHome: string;
     networkError: string;
+    serviceUnavailableTitle: string;
+    serviceUnavailableDescription: string;
+    retry: string;
     authFailed: string;
     errors: {
       sso_failed: string;
