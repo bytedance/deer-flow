@@ -379,7 +379,8 @@ class TenkiSandbox(Sandbox):
         cmd = "grep " + " ".join(flags) + f" -e {shlex.quote(pattern)} {shlex.quote(resolved)} 2>/dev/null | head -{total_cap}"
         r = self._sh(cmd)
 
-        include = glob.split("/")[-1] if glob else None
+        root = resolved.rstrip("/") or "/"
+        root_prefix = root if root == "/" else f"{root}/"
         matches: list[GrepMatch] = []
         truncated = False
         for raw in (r.stdout_text or "").splitlines():
@@ -393,8 +394,15 @@ class TenkiSandbox(Sandbox):
                 continue
             if should_ignore_path(file_path):
                 continue
-            if include and not path_matches(include, posixpath.basename(file_path)):
-                continue
+            if glob is not None:
+                # Match the caller's real directory scope: a pattern like
+                # "src/*.js" must not broaden to every *.js in the tree. Same
+                # helper, same relative-to-root semantics as glob() above.
+                if file_path != root and not file_path.startswith(root_prefix):
+                    continue
+                rel_path = file_path[len(root) :].lstrip("/")
+                if not rel_path or not path_matches(glob, rel_path):
+                    continue
             matches.append(GrepMatch(path=self._virtual_path(file_path), line_number=line_number, line=truncate_line(line_text)))
             if len(matches) >= max_results:
                 truncated = True

@@ -495,6 +495,15 @@ def test_search_results_use_virtual_paths() -> None:
     assert box.read_file(found[0]).startswith("def foo()")
 
 
+def test_grep_glob_keeps_its_directory_prefix() -> None:
+    box = TenkiSandbox("sb", _FakeSandbox())
+    box.write_file("/mnt/user-data/workspace/src/a.js", "const x = 1;\n")
+    box.write_file("/mnt/user-data/workspace/vendor/b.js", "const x = 2;\n")
+
+    matches, _ = box.grep("/mnt/user-data/workspace", "const x", glob="src/*.js")
+    assert [m.path for m in matches] == ["/mnt/user-data/workspace/src/a.js"]
+
+
 def test_paths_outside_the_virtual_prefix_are_reported_as_is() -> None:
     box = TenkiSandbox("sb", _FakeSandbox())
     assert box._virtual_path("/etc/hostname") == "/etc/hostname"
