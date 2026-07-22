@@ -4,6 +4,8 @@ import asyncio
 import logging
 import re
 import shutil
+import threading
+import zlib
 from typing import Literal
 
 import yaml
@@ -27,6 +29,43 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["agents"])
 
 AGENT_NAME_PATTERN = re.compile(r"^[A-Za-z0-9-]+$")
+
+# Per-agent write locks, as a fixed-size stripe array.
+#
+# The create/update/delete handlers each run their whole load-modify-write in a
+# worker thread, which removes the implicit serialization the single-threaded
+# event loop used to provide. Without a lock two overlapping partial updates
+# each load a full AgentConfig snapshot and rewrite the complete config.yaml, so
+# the later write silently restores every field it read before the earlier
+# update landed.
+#
+# These are threading.Locks taken *inside* the worker rather than an
+# asyncio.Lock around the await: ownership then belongs to the thread doing the
+# writing, so cancelling the awaiting coroutine cannot release the critical
+# section while that thread is still mid-write.
+#
+# Striping keeps the structure bounded. A registry keyed by (user_id, name)
+# would insert an entry per distinct name and never remove it — and because the
+# lock is taken before the agent's existence is known, repeated 404s for fresh
+# names would retain a lock per name for the process lifetime. A fixed array
+# avoids that without introducing eviction races: nothing is ever removed, so a
+# waiter can never be handed a lock that is concurrently being discarded. The
+# only cost is that two different agents may share a stripe and serialize
+# against each other, which is harmless for these low-frequency writes.
+_AGENT_WRITE_LOCK_STRIPES = 64
+_agent_write_locks: tuple[threading.Lock, ...] = tuple(threading.Lock() for _ in range(_AGENT_WRITE_LOCK_STRIPES))
+
+
+def _agent_write_lock(user_id: str, name: str) -> threading.Lock:
+    """Return the write lock guarding one agent's directory.
+
+    A given ``(user_id, name)`` always maps to the same stripe, which is what
+    provides same-agent exclusion. ``zlib.crc32`` is used rather than ``hash()``
+    so the mapping does not depend on per-process hash randomization.
+    """
+    key = f"{user_id}\x00{name}".encode()
+    return _agent_write_locks[zlib.crc32(key) % _AGENT_WRITE_LOCK_STRIPES]
+
 
 ReasoningEffort = Literal["low", "medium", "high"]
 
@@ -242,10 +281,17 @@ async def check_agent_name(name: str) -> dict:
     normalized = _normalize_agent_name(name)
     user_id = get_effective_user_id()
     paths = get_paths()
-    # Treat the name as taken if either the per-user path or the legacy shared
-    # path holds an agent — picking a name that collides with an unmigrated
-    # legacy agent would shadow the legacy entry once migration runs.
-    available = not paths.user_agent_dir(user_id, normalized).exists() and not paths.agent_dir(normalized).exists()
+
+    # Existence probes against the per-user and legacy agent directories are
+    # blocking filesystem IO; run them in a worker thread.
+    def _is_available() -> bool:
+        # Treat the name as taken if either the per-user path or the legacy
+        # shared path holds an agent — picking a name that collides with an
+        # unmigrated legacy agent would shadow the legacy entry once migration
+        # runs.
+        return not paths.user_agent_dir(user_id, normalized).exists() and not paths.agent_dir(normalized).exists()
+
+    available = await asyncio.to_thread(_is_available)
     return {"available": available, "name": normalized}
 
 
@@ -309,47 +355,51 @@ async def create_agent_endpoint(request: AgentCreateRequest) -> AgentResponse:
     paths = get_paths()
 
     def _create_agent() -> AgentResponse | None:
-        # Worker thread: base-dir resolution, existence checks, directory/file
-        # creation, read-back, and failure cleanup are all blocking filesystem
-        # IO that must stay off the event loop.
-        agent_dir = paths.user_agent_dir(user_id, normalized_name)
-        legacy_dir = paths.agent_dir(normalized_name)
+        # Same per-agent lock as update/delete: the mkdir/write/read-back and
+        # its failure cleanup must not interleave with another mutation of
+        # this agent.
+        with _agent_write_lock(user_id, normalized_name):
+            # Worker thread: base-dir resolution, existence checks, directory/file
+            # creation, read-back, and failure cleanup are all blocking filesystem
+            # IO that must stay off the event loop.
+            agent_dir = paths.user_agent_dir(user_id, normalized_name)
+            legacy_dir = paths.agent_dir(normalized_name)
 
-        if legacy_dir.exists():
-            return None  # signals 409 to the caller
-
-        try:
-            try:
-                agent_dir.mkdir(parents=True, exist_ok=False)
-            except FileExistsError:
+            if legacy_dir.exists():
                 return None  # signals 409 to the caller
-            # Write config.yaml
-            config_data: dict = {"name": normalized_name}
-            if request.description:
-                config_data["description"] = request.description
-            if request.tool_groups is not None:
-                config_data["tool_groups"] = request.tool_groups
-            if request.skills is not None:
-                config_data["skills"] = request.skills
-            _apply_model_behavior(config_data, request)
 
-            config_file = agent_dir / "config.yaml"
-            with open(config_file, "w", encoding="utf-8") as f:
-                yaml.dump(config_data, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+            try:
+                try:
+                    agent_dir.mkdir(parents=True, exist_ok=False)
+                except FileExistsError:
+                    return None  # signals 409 to the caller
+                # Write config.yaml
+                config_data: dict = {"name": normalized_name}
+                if request.description:
+                    config_data["description"] = request.description
+                if request.tool_groups is not None:
+                    config_data["tool_groups"] = request.tool_groups
+                if request.skills is not None:
+                    config_data["skills"] = request.skills
+                _apply_model_behavior(config_data, request)
 
-            # Write SOUL.md
-            soul_file = agent_dir / "SOUL.md"
-            soul_file.write_text(request.soul, encoding="utf-8")
+                config_file = agent_dir / "config.yaml"
+                with open(config_file, "w", encoding="utf-8") as f:
+                    yaml.dump(config_data, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
 
-            logger.info(f"Created agent '{normalized_name}' at {agent_dir}")
+                # Write SOUL.md
+                soul_file = agent_dir / "SOUL.md"
+                soul_file.write_text(request.soul, encoding="utf-8")
 
-            agent_cfg = load_agent_config(normalized_name, user_id=user_id)
-            return _agent_config_to_response(agent_cfg, include_soul=True, user_id=user_id)
-        except Exception:
-            # Clean up partial state on failure before surfacing the error.
-            if agent_dir.exists():
-                shutil.rmtree(agent_dir)
-            raise
+                logger.info(f"Created agent '{normalized_name}' at {agent_dir}")
+
+                agent_cfg = load_agent_config(normalized_name, user_id=user_id)
+                return _agent_config_to_response(agent_cfg, include_soul=True, user_id=user_id)
+            except Exception:
+                # Clean up partial state on failure before surfacing the error.
+                if agent_dir.exists():
+                    shutil.rmtree(agent_dir)
+                raise
 
     try:
         response = await asyncio.to_thread(_create_agent)
@@ -387,90 +437,111 @@ async def update_agent(name: str, request: AgentUpdateRequest) -> AgentResponse:
     name = _normalize_agent_name(name)
     user_id = get_effective_user_id()
 
+    def _update_agent_sync() -> AgentResponse | str:
+        # Worker thread: the config load, existence checks, model validation,
+        # config/SOUL.md writes, and the read-back are all blocking filesystem
+        # IO that must stay off the event loop. String returns signal HTTP
+        # error outcomes.
+        #
+        # Serialize the whole load -> legacy guard -> config/SOUL write ->
+        # read-back sequence for this agent. Two overlapping partial updates
+        # would otherwise each rewrite the full config.yaml from their own
+        # snapshot, and the later write would drop the earlier one's fields.
+        with _agent_write_lock(user_id, name):
+            try:
+                agent_cfg = load_agent_config(name, user_id=user_id)
+            except FileNotFoundError:
+                return "not_found"  # signals 404
+
+            paths = get_paths()
+            agent_dir = paths.user_agent_dir(user_id, name)
+            legacy_dir = paths.agent_dir(name)
+            # Require config.yaml, not bare directory existence — a per-user agent
+            # directory can exist containing only memory.json (written the first
+            # time this user chats with a legacy shared agent, before this route
+            # is ever called). Bare .exists() would miss that case and let this
+            # fall through to a silent fork of a brand-new config.yaml/SOUL.md
+            # into the memory-only directory instead of blocking (mirrors
+            # resolve_agent_dir's guard, see #3390).
+            if not (agent_dir / "config.yaml").exists() and (legacy_dir / "config.yaml").exists():
+                return "legacy_only"  # signals 409
+
+            if "model" in request.model_fields_set:
+                # Raises HTTPException; propagates out through to_thread.
+                _validate_model_exists(request.model)
+
+            # Update config if any config fields changed
+            # Use model_fields_set to distinguish "field omitted" from "explicitly set to null".
+            # This is critical for skills where None means "inherit all" (not "don't change").
+            fields_set = request.model_fields_set
+            config_changed = bool(fields_set & ({"description", "tool_groups", "skills"} | set(_MODEL_BEHAVIOR_FIELDS)))
+
+            if config_changed:
+                updated: dict = {
+                    "name": agent_cfg.name,
+                    "description": request.description if "description" in fields_set else agent_cfg.description,
+                }
+
+                new_tool_groups = request.tool_groups if "tool_groups" in fields_set else agent_cfg.tool_groups
+                if new_tool_groups is not None:
+                    updated["tool_groups"] = new_tool_groups
+
+                # skills: None = inherit all, [] = no skills, ["a","b"] = whitelist
+                if "skills" in fields_set:
+                    new_skills = request.skills
+                else:
+                    new_skills = agent_cfg.skills
+                if new_skills is not None:
+                    updated["skills"] = new_skills
+
+                # model / model_settings / thinking_enabled / reasoning_effort:
+                # take explicitly-set request fields, else preserve the existing
+                # value (issue #4336).
+                _apply_model_behavior(updated, request, existing=agent_cfg)
+
+                # Carry forward every top-level AgentConfig field this route does
+                # not manage (currently ``github:``, plus any future field added
+                # to :class:`AgentConfig`). The harness ``update_agent`` tool uses
+                # the same helper, so an operator editing the agent description
+                # from the Web UI does not silently strip a hand-authored
+                # ``github:`` binding — which would otherwise leave the next
+                # webhook delivery unable to find the agent in the registry and
+                # silently no-op.
+                for key, value in preserve_non_managed_fields(agent_cfg).items():
+                    updated.setdefault(key, value)
+
+                config_file = agent_dir / "config.yaml"
+                with open(config_file, "w", encoding="utf-8") as f:
+                    yaml.dump(updated, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+
+            # Update SOUL.md if provided
+            if request.soul is not None:
+                soul_path = agent_dir / "SOUL.md"
+                soul_path.write_text(request.soul, encoding="utf-8")
+
+            logger.info(f"Updated agent '{name}'")
+
+            refreshed_cfg = load_agent_config(name, user_id=user_id)
+            return _agent_config_to_response(refreshed_cfg, include_soul=True, user_id=user_id)
+
     try:
-        agent_cfg = load_agent_config(name, user_id=user_id)
-    except FileNotFoundError:
-        raise HTTPException(status_code=404, detail=f"Agent '{name}' not found")
-
-    paths = get_paths()
-    agent_dir = paths.user_agent_dir(user_id, name)
-    legacy_dir = paths.agent_dir(name)
-    # Require config.yaml, not bare directory existence — a per-user agent
-    # directory can exist containing only memory.json (written the first
-    # time this user chats with a legacy shared agent, before this route
-    # is ever called). Bare .exists() would miss that case and let this
-    # fall through to a silent fork of a brand-new config.yaml/SOUL.md
-    # into the memory-only directory instead of blocking (mirrors
-    # resolve_agent_dir's guard, see #3390).
-    if not (agent_dir / "config.yaml").exists() and (legacy_dir / "config.yaml").exists():
-        raise HTTPException(
-            status_code=409,
-            detail=(f"Agent '{name}' only exists in the legacy shared layout and is not scoped to a user. Run scripts/migrate_user_isolation.py to move legacy agents into the per-user layout before updating."),
-        )
-
-    if "model" in request.model_fields_set:
-        _validate_model_exists(request.model)
-
-    try:
-        # Update config if any config fields changed
-        # Use model_fields_set to distinguish "field omitted" from "explicitly set to null".
-        # This is critical for skills where None means "inherit all" (not "don't change").
-        fields_set = request.model_fields_set
-        config_changed = bool(fields_set & ({"description", "tool_groups", "skills"} | set(_MODEL_BEHAVIOR_FIELDS)))
-
-        if config_changed:
-            updated: dict = {
-                "name": agent_cfg.name,
-                "description": request.description if "description" in fields_set else agent_cfg.description,
-            }
-
-            new_tool_groups = request.tool_groups if "tool_groups" in fields_set else agent_cfg.tool_groups
-            if new_tool_groups is not None:
-                updated["tool_groups"] = new_tool_groups
-
-            # skills: None = inherit all, [] = no skills, ["a","b"] = whitelist
-            if "skills" in fields_set:
-                new_skills = request.skills
-            else:
-                new_skills = agent_cfg.skills
-            if new_skills is not None:
-                updated["skills"] = new_skills
-
-            # model / model_settings / thinking_enabled / reasoning_effort:
-            # take explicitly-set request fields, else preserve the existing
-            # value (issue #4336).
-            _apply_model_behavior(updated, request, existing=agent_cfg)
-
-            # Carry forward every top-level AgentConfig field this route does
-            # not manage (currently ``github:``, plus any future field added
-            # to :class:`AgentConfig`). The harness ``update_agent`` tool uses
-            # the same helper, so an operator editing the agent description
-            # from the Web UI does not silently strip a hand-authored
-            # ``github:`` binding — which would otherwise leave the next
-            # webhook delivery unable to find the agent in the registry and
-            # silently no-op.
-            for key, value in preserve_non_managed_fields(agent_cfg).items():
-                updated.setdefault(key, value)
-
-            config_file = agent_dir / "config.yaml"
-            with open(config_file, "w", encoding="utf-8") as f:
-                yaml.dump(updated, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
-
-        # Update SOUL.md if provided
-        if request.soul is not None:
-            soul_path = agent_dir / "SOUL.md"
-            soul_path.write_text(request.soul, encoding="utf-8")
-
-        logger.info(f"Updated agent '{name}'")
-
-        refreshed_cfg = load_agent_config(name, user_id=user_id)
-        return _agent_config_to_response(refreshed_cfg, include_soul=True, user_id=user_id)
-
+        result = await asyncio.to_thread(_update_agent_sync)
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Failed to update agent '{name}': {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to update agent: {str(e)}")
+
+    if isinstance(result, str):
+        if result == "not_found":
+            raise HTTPException(status_code=404, detail=f"Agent '{name}' not found")
+        # result == "legacy_only"
+        raise HTTPException(
+            status_code=409,
+            detail=(f"Agent '{name}' only exists in the legacy shared layout and is not scoped to a user. Run scripts/migrate_user_isolation.py to move legacy agents into the per-user layout before updating."),
+        )
+
+    return result
 
 
 class UserProfileResponse(BaseModel):
@@ -561,17 +632,20 @@ async def delete_agent(name: str) -> None:
     paths = get_paths()
 
     def _remove_agent_dir() -> tuple[str, str]:
-        # Runs in a worker thread: resolving the base dir, probing the directory
-        # (`exists`), and removing it (`rmtree`) are all blocking filesystem IO
-        # that must stay off the event loop.
-        agent_dir = paths.user_agent_dir(user_id, name)
-        if not agent_dir.exists():
-            outcome = "legacy" if paths.agent_dir(name).exists() else "missing"
-            return outcome, str(agent_dir)
-        if not (agent_dir / "config.yaml").is_file():
-            return "not-custom-agent", str(agent_dir)
-        shutil.rmtree(agent_dir)
-        return "deleted", str(agent_dir)
+        # Same per-agent lock as create/update: a delete must not interleave
+        # with an in-flight config write for the same agent.
+        with _agent_write_lock(user_id, name):
+            # Runs in a worker thread: resolving the base dir, probing the directory
+            # (`exists`), and removing it (`rmtree`) are all blocking filesystem IO
+            # that must stay off the event loop.
+            agent_dir = paths.user_agent_dir(user_id, name)
+            if not agent_dir.exists():
+                outcome = "legacy" if paths.agent_dir(name).exists() else "missing"
+                return outcome, str(agent_dir)
+            if not (agent_dir / "config.yaml").is_file():
+                return "not-custom-agent", str(agent_dir)
+            shutil.rmtree(agent_dir)
+            return "deleted", str(agent_dir)
 
     try:
         outcome, agent_dir = await asyncio.to_thread(_remove_agent_dir)
