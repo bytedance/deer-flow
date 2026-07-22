@@ -8,6 +8,8 @@ signature the GitHub registry keys its cache off.
 
 from __future__ import annotations
 
+from unittest import mock
+
 import pytest
 from sqlalchemy import create_engine
 
@@ -79,6 +81,33 @@ def test_update_is_upsert_and_partial(store):
     store.update("a", {"name": "a", "description": "second"}, None, user_id="u1")
     assert store.get("a", user_id="u1").description == "second"
     assert store.get_soul("a", user_id="u1") == "soul2"
+
+
+def test_update_insert_race_recovers_via_upsert(store):
+    """update()'s insert-on-missing branch is a true upsert under a write race.
+
+    Two concurrent first-time writes (e.g. two ``setup_agent`` handshakes) both
+    see ``row is None`` and both insert; ``UNIQUE(user_id, name)`` rejects the
+    loser. The loser must re-fetch the winner's row and apply its update rather
+    than surfacing the raw ``IntegrityError`` as a 500. Simulated deterministically
+    by making the first ``_row`` probe (the check-then-insert window) miss the
+    already-committed winner, forcing the ``IntegrityError`` recovery path.
+    """
+    store.create("a", {"name": "a", "description": "winner"}, "winner-soul", user_id="u1")
+    real_row = store._row  # bound method captured before patching
+    seen = {"n": 0}
+
+    def racing_row(session, name, user_id):
+        seen["n"] += 1
+        # First call is the pre-insert probe: pretend the winner isn't there yet.
+        return None if seen["n"] == 1 else real_row(session, name, user_id)
+
+    with mock.patch.object(store, "_row", side_effect=racing_row):
+        # Must not raise: the loser recovers into a true upsert (last write wins).
+        store.update("a", {"name": "a", "description": "loser"}, "loser-soul", user_id="u1")
+
+    assert store.get("a", user_id="u1").description == "loser"
+    assert store.get_soul("a", user_id="u1") == "loser-soul"
 
 
 def test_list_and_list_all(store):
