@@ -95,8 +95,29 @@ async def test_help_command_renders_system_row_without_calling_agent():
 
     assert any(r.kind == "system" for r in app.state.rows)
     assert any(r.kind == "system" and "/clear" in r.text for r in app.state.rows)
+    # Commands previously missing from the hardcoded help string must now appear,
+    # since the help text is derived from the command registry.
+    help_rows = [r for r in app.state.rows if r.kind == "system"]
+    for command in ("/help", "/resume", "/switch", "/uploads", "/artifacts", "/details"):
+        assert any(command in r.text for r in help_rows), command
     # /help must not produce a user turn or start streaming.
     assert not any(r.kind == "user" for r in app.state.rows)
+
+
+@pytest.mark.asyncio
+async def test_help_text_matches_command_registry():
+    from deerflow.tui.command_registry import format_command_help
+
+    app = DeerFlowTUI(_FakeSession(), LaunchPlan(mode="tui"))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        for ch in "/help":
+            await pilot.press(ch)
+        await pilot.press("enter")
+        await _wait_until(lambda: any(r.kind == "system" for r in app.state.rows), pilot)
+
+    expected = format_command_help()
+    assert any(r.kind == "system" and expected in r.text for r in app.state.rows)
 
 
 @pytest.mark.asyncio

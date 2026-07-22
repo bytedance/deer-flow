@@ -33,7 +33,7 @@ Lead Agent 不硬编码特定的工作流。它使用模型的推理能力来适
 
 Lead Agent 基于 **LangGraph** 和 **LangChain Agent** 原语构建：
 
-- `langchain.agents` 的 [`create_agent`](https://python.langchain.com/docs/concepts/agents/) 将 LLM 封装成工具调用 Agent 循环。
+- `langchain.agents` 的 [`create_agent`](https://docs.langchain.com/oss/python/langchain/agents) 将 LLM 封装成工具调用 Agent 循环。
 - LangGraph 管理 `ThreadState`，提供检查点、流式传输和图执行模型。
 - **中间件链**包裹 Agent 循环的每一轮，提供记忆、摘要和澄清等跨领域能力。
 

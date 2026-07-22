@@ -64,6 +64,18 @@ class MemoryCallbacks:
         before the backend invokes the model. Default: no-op."""
 
 
+class MemoryManagerError(RuntimeError):
+    """Backend-neutral base error exposed at the MemoryManager boundary."""
+
+
+class MemoryConflictError(MemoryManagerError):
+    """The requested write lost an optimistic-concurrency race."""
+
+
+class MemoryCorruptionError(MemoryManagerError):
+    """Persisted memory cannot be read safely."""
+
+
 class MemoryManager(BaseModel):
     """Backend-neutral memory manager contract.
 
@@ -272,7 +284,12 @@ class MemoryManager(BaseModel):
         agent_name: str | None = None,
     ) -> dict[str, Any]:
         """Clear the bucket's memory; return the cleared (now-empty) document.
-        Default: unsupported."""
+
+        ``agent_name=None`` means all memory owned by the user. An explicit
+        agent name clears only that agent's memory and must preserve shared
+        user-level summaries. Default: unsupported (raise
+        ``NotImplementedError``); backends that support clearing override.
+        """
         raise NotImplementedError(f"clear_memory not supported by {type(self).__name__}")
 
     def import_memory(

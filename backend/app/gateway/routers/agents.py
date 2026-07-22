@@ -470,6 +470,8 @@ async def delete_agent(name: str) -> None:
         if not agent_dir.exists():
             outcome = "legacy" if paths.agent_dir(name).exists() else "missing"
             return outcome, str(agent_dir)
+        if not (agent_dir / "config.yaml").is_file():
+            return "not-custom-agent", str(agent_dir)
         shutil.rmtree(agent_dir)
         return "deleted", str(agent_dir)
 
@@ -486,5 +488,10 @@ async def delete_agent(name: str) -> None:
         )
     if outcome == "missing":
         raise HTTPException(status_code=404, detail=f"Agent '{name}' not found")
+    if outcome == "not-custom-agent":
+        raise HTTPException(
+            status_code=409,
+            detail=(f"Directory for '{name}' contains memory data but is not a custom agent because config.yaml is missing; it was preserved."),
+        )
 
     logger.info(f"Deleted agent '{name}' from {agent_dir}")

@@ -51,4 +51,33 @@ test.describe("Localized documentation links", () => {
     );
     await expect(page.locator("main h1")).toContainText("Agents and Threads");
   });
+
+  test("excludes non-documentation app routes from the docs navigation", async ({
+    page,
+  }) => {
+    await page.goto("/en/docs");
+
+    const invalidDocsLinks = page.locator(
+      ["auth", "blog", "login", "setup", "workspace"]
+        .map((root) => `a[href^="/en/docs/${root}"]`)
+        .join(", "),
+    );
+    await expect(invalidDocsLinks).toHaveCount(0);
+  });
+
+  test("uses valid repository links for documentation feedback and edits", async ({
+    page,
+  }) => {
+    await page.goto("/en/docs/application/quick-start");
+
+    await expect(
+      page.getByRole("link", { name: "Question? Give us feedback" }),
+    ).toHaveAttribute("href", /github\.com\/bytedance\/deer-flow\/issues\/new/);
+    await expect(
+      page.getByRole("link", { name: "Edit this page" }),
+    ).toHaveAttribute(
+      "href",
+      "https://github.com/bytedance/deer-flow/tree/main/frontend/src/content/en/application/quick-start.mdx",
+    );
+  });
 });
