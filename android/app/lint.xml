@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<lint>
+    <!-- AAPT requires adaptive icons in a v26 resource folder even though the
+         app's minSdk is 26; moving them to anydpi makes linking fail. -->
+    <issue id="ObsoleteSdkInt">
+        <ignore path="src/main/res/mipmap-anydpi-v26" />
+    </issue>
+</lint>

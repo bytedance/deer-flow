@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <shortcut
+        android:shortcutId="new-conversation"
+        android:enabled="true"
+        android:icon="@mipmap/ic_launcher"
+        android:shortcutShortLabel="@string/new_chat"
+        android:shortcutLongLabel="@string/shortcut_new_chat_description"
+        android:shortcutDisabledMessage="@string/shortcut_unavailable">
+        <intent
+            android:action="com.deerflow.mobile.action.NEW_CONVERSATION"
+            android:targetClass="com.deerflow.mobile.MainActivity"
+            android:targetPackage="com.deerflow.mobile" />
+    </shortcut>
+</shortcuts>
