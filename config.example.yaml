@@ -1797,6 +1797,9 @@ database:
   # App ORM PostgreSQL command timeout. Set to null to disable it or raise it
   # for intentionally long commands.
   command_timeout: 30
+  # Restart required. Use one value across every process sharing this database.
+  # full: current full-message checkpoints; delta: DeltaChannel for messages.
+  checkpoint_channel_mode: full
 
 # ============================================================================
 # Run Events Configuration
