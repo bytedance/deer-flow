@@ -120,7 +120,7 @@ class GuardrailMiddleware(AgentMiddleware[AgentState]):
                 changes=changes,
             )
         except Exception:  # noqa: BLE001
-            logger.debug("Failed to record middleware:guardrail event", exc_info=True)
+            logger.warning("Failed to record middleware:guardrail event", exc_info=True)
 
     @override
     def wrap_tool_call(

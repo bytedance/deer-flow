@@ -310,7 +310,7 @@ Follow this skill before choosing a general workflow. Load supporting resources 
                 },
             )
         except Exception:
-            logger.debug("Failed to record slash skill activation audit event", exc_info=True)
+            logger.warning("Failed to record slash skill activation audit event", exc_info=True)
 
     def _prepare_model_request(self, request: ModelRequest, *, hook: str) -> tuple[ModelRequest | AIMessage | None, _Activation | None]:
         run_context = self._run_context(request)
@@ -544,7 +544,7 @@ Follow this skill before choosing a general workflow. Load supporting resources 
                 changes=audit_state,
             )
         except Exception:
-            logger.debug("Failed to record skill secret binding audit event", exc_info=True)
+            logger.warning("Failed to record skill secret binding audit event", exc_info=True)
 
     @staticmethod
     def _make_activation_message(target: HumanMessage, activation_content: str) -> HumanMessage:

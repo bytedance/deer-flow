@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import json
 from pathlib import Path
 from uuid import uuid4
@@ -17,13 +18,16 @@ from deerflow.runtime.events.catalog import (
     MIDDLEWARE_EVENT_PATTERN,
     MIDDLEWARE_EVENT_TAG_MAX_LENGTH,
     MIDDLEWARE_EVENT_TAGS,
+    RUN_EVENT_CATEGORY_MAX_LENGTH,
     RUN_EVENT_TYPE_MAX_LENGTH,
     SUBAGENT_RUN_EVENT_DEFINITIONS,
     WORKSPACE_RUN_EVENT_DEFINITIONS,
+    RunEventDefinition,
+    RunEventPattern,
 )
 from deerflow.runtime.events.store.memory import MemoryRunEventStore
 from deerflow.runtime.journal import RunJournal
-from deerflow.subagents.step_events import SUBAGENT_STEP_MAX_CHARS, subagent_run_event
+from deerflow.subagents.step_events import SUBAGENT_STEP_MAX_CHARS, capture_step_message, subagent_run_event
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CONTRACT_PATH = REPO_ROOT / "contracts" / "run_event_stream_contract.json"
@@ -114,14 +118,48 @@ def test_contract_and_runtime_catalog_have_the_same_fixed_events():
     assert set(contract["categories"]) == {definition.category for definition in FIXED_RUN_EVENT_DEFINITIONS} | {MIDDLEWARE_EVENT_PATTERN.category}
 
     event_type_schema = contract["record_schema"]["properties"]["event_type"]
+    category_schema = contract["record_schema"]["properties"]["category"]
     middleware_pattern = contract["dynamic_event_patterns"][0]
     assert event_type_schema["maxLength"] == RUN_EVENT_TYPE_MAX_LENGTH
+    assert category_schema["maxLength"] == RUN_EVENT_CATEGORY_MAX_LENGTH
     assert middleware_pattern["event_type_schema"]["maxLength"] == RUN_EVENT_TYPE_MAX_LENGTH
     assert middleware_pattern["tag_schema"]["maxLength"] == MIDDLEWARE_EVENT_TAG_MAX_LENGTH
 
     from deerflow.persistence.models.run_event import RunEventRow
 
     assert RunEventRow.__table__.c.event_type.type.length == RUN_EVENT_TYPE_MAX_LENGTH
+    assert RunEventRow.__table__.c.category.type.length == RUN_EVENT_CATEGORY_MAX_LENGTH
+
+
+@pytest.mark.parametrize(
+    ("definition_type", "kwargs"),
+    [
+        (RunEventDefinition, {"event_type": "test.event"}),
+        (RunEventPattern, {"pattern": "test:{tag}", "prefix": "test:"}),
+    ],
+)
+def test_runtime_catalog_rejects_categories_that_do_not_fit_persistence(definition_type, kwargs):
+    assert definition_type(category="x" * RUN_EVENT_CATEGORY_MAX_LENGTH, **kwargs).category
+
+    for invalid_category in ("", "x" * (RUN_EVENT_CATEGORY_MAX_LENGTH + 1)):
+        with pytest.raises(ValueError, match="category"):
+            definition_type(category=invalid_category, **kwargs)
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    [
+        "persistence/models/run_event.py",
+        "workspace_changes/types.py",
+    ],
+)
+def test_lower_level_run_event_modules_do_not_import_runtime(relative_path):
+    module_path = REPO_ROOT / "backend" / "packages" / "harness" / "deerflow" / relative_path
+    tree = ast.parse(module_path.read_text(encoding="utf-8"), filename=str(module_path))
+    imports = [node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom) and node.module is not None]
+    imports.extend(alias.name for node in ast.walk(tree) if isinstance(node, ast.Import) for alias in node.names)
+
+    assert not [module for module in imports if module == "deerflow.runtime" or module.startswith("deerflow.runtime.")]
 
 
 def test_legacy_aliases_are_read_only_and_outside_the_current_catalog():
@@ -394,6 +432,36 @@ def test_subagent_observed_events_exactly_match_its_catalog_and_payloads():
         "cancelled",
         "timed_out",
     }
+
+
+def test_captured_subagent_message_survives_task_running_conversion():
+    captured: list[dict] = []
+    assert capture_step_message(
+        AIMessage(
+            content="searching",
+            id="ai-step-1",
+            tool_calls=[{"id": "call-1", "name": "web_search", "args": {"query": "deerflow"}}],
+        ),
+        captured,
+        set(),
+    )
+
+    event = subagent_run_event(
+        {
+            "type": "task_running",
+            "task_id": "task-1",
+            "message": captured[0],
+            "message_index": 0,
+        }
+    )
+
+    assert event is not None
+    assert event["event_type"] == "subagent.step"
+    assert event["content"]["task_id"] == "task-1"
+    assert event["content"]["message_index"] == 0
+    assert event["content"]["text"] == "searching"
+    assert event["content"]["tool_calls"] == [{"name": "web_search", "args": {"query": "deerflow"}}]
+    _assert_fixed_event_valid(event)
 
 
 @pytest.mark.parametrize(

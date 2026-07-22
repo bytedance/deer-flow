@@ -260,7 +260,7 @@ class SafetyFinishReasonMiddleware(AgentMiddleware[AgentState]):
             )
         except Exception:  # noqa: BLE001
             # Audit-event persistence must never break agent execution.
-            logger.debug("Failed to record middleware:safety_termination event", exc_info=True)
+            logger.warning("Failed to record middleware:safety_termination event", exc_info=True)
 
     # ----- main apply ------------------------------------------------------
 

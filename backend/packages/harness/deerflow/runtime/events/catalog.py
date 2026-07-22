@@ -9,9 +9,19 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-# Shared with RunEventRow.event_type. Keeping the persistence limit here lets
-# producers reject unsupported dynamic names before backend behavior diverges.
-RUN_EVENT_TYPE_MAX_LENGTH = 32
+from deerflow.constants import (
+    RUN_EVENT_CATEGORY_MAX_LENGTH,
+    RUN_EVENT_TYPE_MAX_LENGTH,
+    WORKSPACE_CHANGES_EVENT_CATEGORY,
+    WORKSPACE_CHANGES_EVENT_TYPE,
+)
+
+
+def _validate_category(category: str) -> None:
+    if not category:
+        raise ValueError("Run event category must not be empty")
+    if len(category) > RUN_EVENT_CATEGORY_MAX_LENGTH:
+        raise ValueError(f"Run event category must not exceed {RUN_EVENT_CATEGORY_MAX_LENGTH} characters: {category!r}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,6 +34,7 @@ class RunEventDefinition:
             raise ValueError("Run event type must not be empty")
         if len(self.event_type) > RUN_EVENT_TYPE_MAX_LENGTH:
             raise ValueError(f"Run event type must not exceed {RUN_EVENT_TYPE_MAX_LENGTH} characters: {self.event_type!r}")
+        _validate_category(self.category)
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,6 +42,9 @@ class RunEventPattern:
     pattern: str
     prefix: str
     category: str
+
+    def __post_init__(self) -> None:
+        _validate_category(self.category)
 
     def event_type(self, suffix: str) -> str:
         if not suffix:
@@ -54,7 +68,7 @@ SUBAGENT_START_EVENT = RunEventDefinition("subagent.start", "subagent")
 SUBAGENT_STEP_EVENT = RunEventDefinition("subagent.step", "subagent")
 SUBAGENT_END_EVENT = RunEventDefinition("subagent.end", "subagent")
 
-WORKSPACE_CHANGES_EVENT = RunEventDefinition("workspace_changes", "workspace")
+WORKSPACE_CHANGES_EVENT = RunEventDefinition(WORKSPACE_CHANGES_EVENT_TYPE, WORKSPACE_CHANGES_EVENT_CATEGORY)
 
 MIDDLEWARE_EVENT_PATTERN = RunEventPattern(
     pattern="middleware:{tag}",

@@ -47,7 +47,7 @@
       "run_id": {"type": "string"},
       "seq": {"type": "integer", "minimum": 1},
       "event_type": {"type": "string", "minLength": 1, "maxLength": 32},
-      "category": {"type": "string", "minLength": 1},
+      "category": {"type": "string", "minLength": 1, "maxLength": 16},
       "content": {"type": ["string", "object", "array", "number", "boolean", "null"]},
       "metadata": {"type": "object"},
       "created_at": {"type": "string", "format": "date-time"},

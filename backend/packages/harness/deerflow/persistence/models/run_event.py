@@ -7,8 +7,8 @@ from datetime import UTC, datetime
 from sqlalchemy import JSON, DateTime, Index, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
+from deerflow.constants import RUN_EVENT_CATEGORY_MAX_LENGTH, RUN_EVENT_TYPE_MAX_LENGTH
 from deerflow.persistence.base import Base
-from deerflow.runtime.events.catalog import RUN_EVENT_TYPE_MAX_LENGTH
 
 
 class RunEventRow(Base):
@@ -22,7 +22,7 @@ class RunEventRow(Base):
     # new writes and by the boot-time orphan migration on existing rows.
     user_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     event_type: Mapped[str] = mapped_column(String(RUN_EVENT_TYPE_MAX_LENGTH), nullable=False)
-    category: Mapped[str] = mapped_column(String(16), nullable=False)
+    category: Mapped[str] = mapped_column(String(RUN_EVENT_CATEGORY_MAX_LENGTH), nullable=False)
     # Category values and semantics are defined by runtime/events/catalog.py
     content: Mapped[str] = mapped_column(Text, default="")
     event_metadata: Mapped[dict] = mapped_column(JSON, default=dict)

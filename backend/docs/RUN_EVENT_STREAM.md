@@ -28,9 +28,9 @@ Backends may return additional fields. `DbRunEventStore`, for example, returns
 `user_id` and may add serialization markers such as `content_is_json` to
 metadata. Consumers must ignore unknown envelope and metadata fields.
 
-`event_type` is limited to 32 characters by the database schema. Catalog-backed
-dynamic producers enforce the same limit before writing so they cannot emit a
-name that only the memory or JSONL store accepts.
+`event_type` is limited to 32 characters and `category` to 16 characters by the
+database schema. Catalog-backed definitions enforce the same limits before
+writing so they cannot emit values that only the memory or JSONL store accepts.
 
 `seq` is thread-global, not run-local. Memory and database stores assign it
 monotonically for their supported deployment modes. JSONL only provides this
