@@ -682,6 +682,9 @@ Unsent Web UI composer drafts survive page reloads and switching between convers
 
 The Web UI composer also supports browser-based voice dictation when the browser exposes the Web Speech API. The microphone button transcribes speech into the local draft only; DeerFlow receives only the transcribed text, while audio handling is delegated to the browser or operating system speech-recognition service according to that environment's policy. Users can review or edit the text before sending.
 
+The Web UI displays a localized AI-generated-content disclaimer below the composer in both standard and custom-agent conversations, reminding users to verify important
+information.
+
 Interrupted first-turn runs still persist a fallback conversation title, so stopping a streaming response does not leave the thread as "Untitled" after refresh.
 
 Streaming Markdown responses animate only newly arrived words; text that is already visible is not faded out and replayed when the next chunk extends the same block.
