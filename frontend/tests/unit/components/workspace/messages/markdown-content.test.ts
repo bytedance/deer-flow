@@ -43,9 +43,9 @@ describe("MarkdownContent streaming code blocks", () => {
     expect(html).not.toContain('data-streaming-inline-code="true"');
   });
 
-  it("restores Streamdown highlighting after streaming finishes", () => {
+  it("restores Streamdown code rendering after streaming finishes", () => {
     const html = renderMarkdown(
-      ["```html", '<main class="report">Hello</main>', "```"].join("\n"),
+      ["```typescript", "const answer: number = 42;", "```"].join("\n"),
       false,
     );
 
@@ -88,6 +88,23 @@ describe("MarkdownContent streaming code blocks", () => {
 
     expect(renderMarkdown(content, true)).not.toContain(content);
     expect(renderMarkdown(content, false)).toContain(content);
+  });
+});
+
+describe("MarkdownContent streaming animation", () => {
+  it("uses Streamdown animation only for newly streamed words", () => {
+    const html = renderMarkdown("Hello streaming world", true);
+
+    expect(html).toContain("data-sd-animate");
+    expect(html).toContain("--sd-animation:sd-fadeIn");
+    expect(html).toContain("--sd-duration:200ms");
+    expect(html).not.toContain("animate-fade-in");
+  });
+
+  it("does not animate completed markdown", () => {
+    const html = renderMarkdown("Hello completed world", false);
+
+    expect(html).not.toContain("data-sd-animate");
   });
 });
 

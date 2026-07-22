@@ -2,22 +2,31 @@ import asyncio
 import copy
 from contextlib import suppress
 from types import SimpleNamespace
-from typing import Any
-from unittest.mock import AsyncMock, call
+from typing import Annotated, Any, NotRequired, TypedDict
+from unittest.mock import AsyncMock, call, patch
 
 import pytest
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, AnyMessage, HumanMessage
+from langgraph.channels.delta import DeltaChannel
 from langgraph.checkpoint.base import empty_checkpoint
 from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+from langgraph.graph import StateGraph
+from langgraph.graph.message import add_messages
+from langgraph.types import Overwrite
 
+from deerflow.agents.thread_state import merge_artifacts, merge_message_writes
+from deerflow.runtime.checkpoint_state import CheckpointStateAccessor
 from deerflow.runtime.context_keys import CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY
 from deerflow.runtime.runs.manager import ConflictError, RunManager
 from deerflow.runtime.runs.schemas import RunStatus
 from deerflow.runtime.runs.worker import (
+    RollbackPoint,
     RunContext,
     _agent_factory_supports_app_config,
     _build_runtime_context,
     _bump_channel_version,
+    _capture_rollback_point,
     _collect_pre_existing_message_ids,
     _ensure_interrupted_title,
     _extract_llm_error_fallback_message,
@@ -29,18 +38,59 @@ from deerflow.runtime.runs.worker import (
 
 
 class FakeCheckpointer:
-    def __init__(self, *, put_result):
+    def __init__(self):
         self.adelete_thread = AsyncMock()
-        self.aput = AsyncMock(return_value=put_result)
+        self.aget_tuple = AsyncMock(return_value=None)
         self.aput_writes = AsyncMock()
 
 
-def _make_checkpoint(checkpoint_id: str, messages: list[str], version: int):
-    checkpoint = empty_checkpoint()
-    checkpoint["id"] = checkpoint_id
-    checkpoint["channel_values"] = {"messages": messages}
-    checkpoint["channel_versions"] = {"messages": version}
-    return checkpoint
+def _make_rollback_point(*, checkpoint_id="ckpt-1", messages=("before",), pending_writes=()):
+    return RollbackPoint(
+        config={
+            "configurable": {
+                "thread_id": "thread-1",
+                "checkpoint_ns": "",
+                "checkpoint_id": checkpoint_id,
+            }
+        },
+        messages=tuple(messages),
+        metadata={"source": "input"},
+        pending_writes=tuple(pending_writes),
+    )
+
+
+def _stub_mutation_graph(monkeypatch, *, restored_config):
+    """Replace the rollback mutation graph with a stub returning ``restored_config``."""
+    mock_graph = SimpleNamespace()
+    mock_graph.aupdate_state = AsyncMock(return_value=restored_config)
+    monkeypatch.setattr(
+        "deerflow.runtime.runs.worker.build_state_mutation_graph",
+        lambda *args, **kwargs: mock_graph,
+    )
+    return mock_graph
+
+
+def _rollback_accessor(checkpointer):
+    return CheckpointStateAccessor(graph=SimpleNamespace(), checkpointer=checkpointer, mode="full")
+
+
+class _DeltaChannelState(TypedDict):
+    messages: Annotated[list[AnyMessage], DeltaChannel(merge_message_writes, snapshot_frequency=1000)]
+
+
+class _FullChannelState(TypedDict):
+    messages: Annotated[list[AnyMessage], add_messages]
+
+
+def _build_message_append_graph(state_schema: type, checkpointer: Any):
+    async def _append_message(state: dict[str, Any]) -> dict[str, Any]:
+        return {"messages": [HumanMessage(content=f"turn-{len(state.get('messages') or [])}")]}
+
+    builder = StateGraph(state_schema)
+    builder.add_node("append_message", _append_message)
+    builder.set_entry_point("append_message")
+    builder.set_finish_point("append_message")
+    return builder.compile(checkpointer=checkpointer)
 
 
 def test_build_runtime_context_includes_app_config_when_present():
@@ -142,12 +192,34 @@ async def test_run_agent_threads_pre_existing_message_ids_into_runtime_context()
         async def aget_tuple(self, _config):
             return SimpleNamespace(
                 config={"configurable": {"checkpoint_id": "checkpoint-1"}},
-                checkpoint={"channel_values": {"messages": [AIMessage(id="old-ai", content="old")]}},
+                checkpoint={"channel_values": {}},
                 metadata={},
                 pending_writes=[],
             )
 
     class DummyAgent:
+        async def aget_state(self, _config):
+            return SimpleNamespace(
+                values={
+                    "messages": [
+                        HumanMessage(id="h1", content="question"),
+                        AIMessage(id="a1", content="answer"),
+                    ]
+                },
+                config={
+                    "configurable": {
+                        "thread_id": "thread-1",
+                        "checkpoint_ns": "",
+                        "checkpoint_id": "checkpoint-1",
+                    }
+                },
+                parent_config=None,
+                metadata={},
+                next=(),
+                tasks=(),
+                created_at=None,
+            )
+
         async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
             captured["context"] = config["context"]
             yield {"messages": []}
@@ -166,7 +238,69 @@ async def test_run_agent_threads_pre_existing_message_ids_into_runtime_context()
     )
 
     context = captured["context"]
-    assert context[CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY] == frozenset({"old-ai"})
+    assert context[CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY] == frozenset({"h1", "a1"})
+
+
+@pytest.mark.anyio
+async def test_run_agent_marks_rollback_unusable_when_capture_fails():
+    """A failed pre-run capture must disable rollback entirely.
+
+    Rollback now restores messages by forking the pre-run checkpoint through
+    the graph (raw checkpoint blobs cannot reconstruct Delta-channel history),
+    so there is no safe fallback when materialization fails: the worker must
+    report ``snapshot_capture_failed=True`` with no rollback point rather
+    than restoring an empty or partial message history.
+    """
+    run_manager = RunManager()
+    record = await run_manager.create("thread-1")
+    record.abort_action = "rollback"
+    record.abort_event.set()
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+
+    class DummyCheckpointer:
+        async def aget_tuple(self, _config):
+            return SimpleNamespace(
+                config={
+                    "configurable": {
+                        "thread_id": "thread-1",
+                        "checkpoint_ns": "",
+                        "checkpoint_id": "checkpoint-1",
+                    }
+                },
+                checkpoint={"id": "checkpoint-1", "channel_values": {}},
+                metadata={"source": "loop"},
+                pending_writes=[],
+            )
+
+    class DummyAgent:
+        async def aget_state(self, _config):
+            raise RuntimeError("materialization failed")
+
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            yield {"messages": []}
+
+    with patch(
+        "deerflow.runtime.runs.worker._rollback_to_pre_run_checkpoint",
+        new_callable=AsyncMock,
+    ) as rollback:
+        await run_agent(
+            bridge,
+            run_manager,
+            record,
+            ctx=RunContext(checkpointer=DummyCheckpointer()),
+            agent_factory=lambda *, config: DummyAgent(),
+            graph_input={},
+            config={},
+        )
+
+    rollback.assert_awaited_once()
+    rollback_kwargs = rollback.await_args.kwargs
+    assert rollback_kwargs["snapshot_capture_failed"] is True
+    assert rollback_kwargs["rollback_point"] is None
 
 
 @pytest.mark.anyio
@@ -351,42 +485,37 @@ async def test_run_agent_defaults_root_run_name_from_configurable_agent_name():
 
 
 @pytest.mark.anyio
-async def test_rollback_restores_snapshot_without_deleting_thread():
-    checkpointer = FakeCheckpointer(put_result={"configurable": {"thread_id": "thread-1", "checkpoint_ns": "", "checkpoint_id": "restored-1"}})
+async def test_rollback_forks_pre_run_checkpoint_without_deleting_thread(monkeypatch):
+    checkpointer = FakeCheckpointer()
+    mock_graph = _stub_mutation_graph(
+        monkeypatch,
+        restored_config={"configurable": {"thread_id": "thread-1", "checkpoint_ns": "", "checkpoint_id": "restored-1"}},
+    )
+    rollback_point = _make_rollback_point(
+        pending_writes=[
+            ("task-a", "messages", {"content": "first"}),
+            ("task-a", "status", "done"),
+            ("task-b", "events", {"type": "tool"}),
+        ],
+    )
 
     await _rollback_to_pre_run_checkpoint(
+        accessor=_rollback_accessor(checkpointer),
         checkpointer=checkpointer,
         thread_id="thread-1",
         run_id="run-1",
-        pre_run_checkpoint_id="ckpt-1",
-        pre_run_snapshot={
-            "checkpoint_ns": "",
-            "checkpoint": {
-                "id": "ckpt-1",
-                "channel_versions": {"messages": 3},
-                "channel_values": {"messages": ["before"]},
-            },
-            "metadata": {"source": "input"},
-            "pending_writes": [
-                ("task-a", "messages", {"content": "first"}),
-                ("task-a", "status", "done"),
-                ("task-b", "events", {"type": "tool"}),
-            ],
-        },
+        rollback_point=rollback_point,
         snapshot_capture_failed=False,
     )
 
     checkpointer.adelete_thread.assert_not_awaited()
-    checkpointer.aput.assert_awaited_once()
-    restore_config, restored_checkpoint, restored_metadata, new_versions = checkpointer.aput.await_args.args
-    assert restore_config == {"configurable": {"thread_id": "thread-1", "checkpoint_ns": ""}}
-    assert restored_checkpoint["id"] != "ckpt-1"
-    assert "channel_versions" in restored_checkpoint
-    assert "channel_values" in restored_checkpoint
-    assert restored_checkpoint["channel_versions"] == {"messages": 3}
-    assert restored_checkpoint["channel_values"] == {"messages": ["before"]}
-    assert restored_metadata == {"source": "input"}
-    assert new_versions == {"messages": 3}
+    mock_graph.aupdate_state.assert_awaited_once()
+    update_config, update_values = mock_graph.aupdate_state.await_args.args[:2]
+    assert update_config["configurable"]["checkpoint_id"] == "ckpt-1"
+    overwrite = update_values["messages"]
+    assert isinstance(overwrite, Overwrite)
+    assert overwrite.value == ["before"]
+    assert mock_graph.aupdate_state.await_args.kwargs["as_node"] == "rollback_restore"
     assert checkpointer.aput_writes.await_args_list == [
         call(
             {"configurable": {"thread_id": "thread-1", "checkpoint_ns": "", "checkpoint_id": "restored-1"}},
@@ -402,189 +531,499 @@ async def test_rollback_restores_snapshot_without_deleting_thread():
 
 
 @pytest.mark.anyio
-async def test_rollback_restored_checkpoint_becomes_latest_with_real_checkpointer():
-    checkpointer = InMemorySaver()
-    thread_config = {"configurable": {"thread_id": "thread-1", "checkpoint_ns": ""}}
-    before_checkpoint = _make_checkpoint("0001", ["before"], 1)
-    before_config = checkpointer.put(thread_config, before_checkpoint, {"step": 1}, {"messages": 1})
-    after_checkpoint = _make_checkpoint("0002", ["after"], 2)
-    after_config = checkpointer.put(before_config, after_checkpoint, {"step": 2}, {"messages": 2})
-    checkpointer.put_writes(after_config, [("messages", "pending-after")], task_id="task-after")
+async def test_rollback_skips_when_rollback_point_has_no_checkpoint_id(monkeypatch):
+    """A rollback point without a checkpoint id cannot anchor a fork - skip safely."""
+    checkpointer = FakeCheckpointer()
+    mock_graph = _stub_mutation_graph(
+        monkeypatch,
+        restored_config={"configurable": {"thread_id": "thread-1", "checkpoint_ns": "", "checkpoint_id": "restored-1"}},
+    )
 
     await _rollback_to_pre_run_checkpoint(
+        accessor=_rollback_accessor(checkpointer),
         checkpointer=checkpointer,
         thread_id="thread-1",
         run_id="run-1",
-        pre_run_checkpoint_id="0001",
-        pre_run_snapshot={
-            "checkpoint_ns": "",
-            "checkpoint": before_checkpoint,
-            "metadata": {"step": 1},
-            "pending_writes": [("task-before", "messages", "pending-before")],
-        },
+        rollback_point=_make_rollback_point(checkpoint_id=None),
         snapshot_capture_failed=False,
     )
 
-    latest = checkpointer.get_tuple(thread_config)
+    checkpointer.adelete_thread.assert_not_awaited()
+    mock_graph.aupdate_state.assert_not_awaited()
+    checkpointer.aput_writes.assert_not_awaited()
 
-    assert latest is not None
-    assert latest.config["configurable"]["checkpoint_id"] != "0001"
-    assert latest.config["configurable"]["checkpoint_id"] != "0002"
-    assert latest.checkpoint["channel_values"] == {"messages": ["before"]}
-    assert latest.pending_writes == [("task-before", "messages", "pending-before")]
-    assert ("task-after", "messages", "pending-after") not in latest.pending_writes
+
+class _ArtifactChannelState(TypedDict):
+    messages: Annotated[list[AnyMessage], add_messages]
+    artifacts: Annotated[list[str], merge_artifacts]
+
+
+def _build_message_and_artifact_graph(checkpointer: Any):
+    async def _append(state: dict[str, Any]) -> dict[str, Any]:
+        n = len(state.get("messages") or [])
+        return {"messages": [HumanMessage(content=f"turn-{n}")], "artifacts": [f"a{n}"]}
+
+    builder = StateGraph(_ArtifactChannelState)
+    builder.add_node("append", _append)
+    builder.set_entry_point("append")
+    builder.set_finish_point("append")
+    return builder.compile(checkpointer=checkpointer)
+
+
+class _ExtensionFullState(TypedDict):
+    """Full-mode schema with a channel base ThreadState does not know about.
+
+    Mirrors a custom ``AgentMiddleware.state_schema`` contribution (memory,
+    todos, uploads, …): absent from the base schema the mutation graph falls
+    back to, so a base-schema restore silently drops it.
+    """
+
+    messages: Annotated[list[AnyMessage], add_messages]
+    memory_notes: NotRequired[str]
+
+
+class _ExtensionDeltaState(TypedDict):
+    messages: Annotated[list[AnyMessage], DeltaChannel(merge_message_writes, snapshot_frequency=1000)]
+    memory_notes: NotRequired[str]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "mode,state_schema",
+    [("full", _ExtensionFullState), ("delta", _ExtensionDeltaState)],
+)
+async def test_rollback_preserves_middleware_contributed_channels(mode, state_schema):
+    """The rollback mutation graph must compile with the thread's effective schema.
+
+    Regression: ``_rollback_to_pre_run_checkpoint`` used to build the mutation
+    graph from the base ThreadState fallback, silently dropping channels
+    contributed by custom middleware from the restored checkpoint.
+    """
+    checkpointer = InMemorySaver()
+
+    async def _step(state: dict[str, Any]) -> dict[str, Any]:
+        n = len(state.get("messages") or [])
+        return {"messages": [HumanMessage(content=f"turn-{n}")], "memory_notes": f"note-{n}"}
+
+    builder = StateGraph(state_schema)
+    builder.add_node("step", _step)
+    builder.set_entry_point("step")
+    builder.set_finish_point("step")
+    graph = builder.compile(checkpointer=checkpointer)
+
+    accessor = CheckpointStateAccessor.bind(graph, checkpointer, mode=mode)
+    thread_config = {"configurable": {"thread_id": "thread-1"}}
+
+    await graph.ainvoke({}, thread_config)
+    rollback_point = await _capture_rollback_point(accessor, checkpointer, thread_config)
+    assert rollback_point is not None
+
+    await graph.ainvoke({}, thread_config)
+
+    await _rollback_to_pre_run_checkpoint(
+        accessor=accessor,
+        checkpointer=checkpointer,
+        thread_id="thread-1",
+        run_id="run-1",
+        rollback_point=rollback_point,
+        snapshot_capture_failed=False,
+    )
+
+    latest_snapshot = await accessor.aget(thread_config)
+    assert [message.content for message in latest_snapshot.values["messages"]] == ["turn-0"]
+    assert latest_snapshot.values["memory_notes"] == "note-0"
+
+
+@pytest.mark.anyio
+async def test_rollback_restores_non_message_channels_via_fork_inheritance():
+    """Rollback overwrites only messages; sibling reducer channels must be
+    restored to their pre-run values by forking the pre-run checkpoint
+    (non-updated channels inherit from the parent). Locks in the load-bearing
+    assumption of the rollback design."""
+    checkpointer = InMemorySaver()
+    graph = _build_message_and_artifact_graph(checkpointer)
+    accessor = CheckpointStateAccessor.bind(graph, checkpointer, mode="full")
+    thread_config = {"configurable": {"thread_id": "thread-1"}}
+
+    await graph.ainvoke({}, thread_config)
+    rollback_point = await _capture_rollback_point(accessor, checkpointer, thread_config)
+    assert rollback_point is not None
+
+    await graph.ainvoke({}, thread_config)
+    cancelled_snapshot = await accessor.aget(thread_config)
+    assert cancelled_snapshot.values["artifacts"] == ["a0", "a1"]
+    assert [message.content for message in cancelled_snapshot.values["messages"]] == ["turn-0", "turn-1"]
+
+    await _rollback_to_pre_run_checkpoint(
+        accessor=accessor,
+        checkpointer=checkpointer,
+        thread_id="thread-1",
+        run_id="run-1",
+        rollback_point=rollback_point,
+        snapshot_capture_failed=False,
+    )
+
+    latest_snapshot = await accessor.aget(thread_config)
+    assert [message.content for message in latest_snapshot.values["messages"]] == ["turn-0"]
+    assert latest_snapshot.values["artifacts"] == ["a0"]
+
+
+@pytest.mark.anyio
+async def test_rollback_restored_checkpoint_becomes_latest_with_real_checkpointer():
+    """Full-mode: the restored fork becomes latest, keeps pre-run values and
+    pre-run pending writes, and drops writes attached to the cancelled run."""
+    checkpointer = InMemorySaver()
+    graph = _build_message_append_graph(_FullChannelState, checkpointer)
+    accessor = CheckpointStateAccessor.bind(graph, checkpointer, mode="full")
+    thread_config = {"configurable": {"thread_id": "thread-1"}}
+
+    await graph.ainvoke({}, thread_config)
+    pre_run_snapshot = await accessor.aget(thread_config)
+    pre_run_checkpoint_id = pre_run_snapshot.config["configurable"]["checkpoint_id"]
+    pre_run_config = {
+        "configurable": {
+            "thread_id": "thread-1",
+            "checkpoint_ns": "",
+            "checkpoint_id": pre_run_checkpoint_id,
+        }
+    }
+    checkpointer.put_writes(pre_run_config, [("title", "pending-before")], task_id="task-before")
+
+    rollback_point = await _capture_rollback_point(accessor, checkpointer, thread_config)
+    assert rollback_point is not None
+    assert rollback_point.pending_writes == (("task-before", "title", "pending-before"),)
+
+    await graph.ainvoke({}, thread_config)
+    cancelled_snapshot = await accessor.aget(thread_config)
+    cancelled_checkpoint_id = cancelled_snapshot.config["configurable"]["checkpoint_id"]
+    checkpointer.put_writes(
+        {"configurable": {"thread_id": "thread-1", "checkpoint_ns": "", "checkpoint_id": cancelled_checkpoint_id}},
+        [("title", "pending-after")],
+        task_id="task-after",
+    )
+
+    await _rollback_to_pre_run_checkpoint(
+        accessor=accessor,
+        checkpointer=checkpointer,
+        thread_id="thread-1",
+        run_id="run-1",
+        rollback_point=rollback_point,
+        snapshot_capture_failed=False,
+    )
+
+    latest_snapshot = await accessor.aget(thread_config)
+    restored_checkpoint_id = latest_snapshot.config["configurable"]["checkpoint_id"]
+    assert restored_checkpoint_id not in (pre_run_checkpoint_id, cancelled_checkpoint_id)
+    assert [message.content for message in latest_snapshot.values["messages"]] == ["turn-0"]
+
+    latest_tuple = await checkpointer.aget_tuple(thread_config)
+    assert latest_tuple.pending_writes == [("task-before", "title", "pending-before")]
+    restored_tuple = await checkpointer.aget_tuple({"configurable": {"thread_id": "thread-1", "checkpoint_ns": "", "checkpoint_id": restored_checkpoint_id}})
+    assert restored_tuple.parent_config["configurable"]["checkpoint_id"] == pre_run_checkpoint_id
 
 
 @pytest.mark.anyio
 async def test_rollback_deletes_thread_when_no_snapshot_exists():
-    checkpointer = FakeCheckpointer(put_result=None)
+    checkpointer = FakeCheckpointer()
 
     await _rollback_to_pre_run_checkpoint(
+        accessor=_rollback_accessor(checkpointer),
         checkpointer=checkpointer,
         thread_id="thread-1",
         run_id="run-1",
-        pre_run_checkpoint_id=None,
-        pre_run_snapshot=None,
+        rollback_point=None,
         snapshot_capture_failed=False,
     )
 
     checkpointer.adelete_thread.assert_awaited_once_with("thread-1")
-    checkpointer.aput.assert_not_awaited()
     checkpointer.aput_writes.assert_not_awaited()
 
 
 @pytest.mark.anyio
-async def test_rollback_raises_when_restore_config_has_no_checkpoint_id():
-    checkpointer = FakeCheckpointer(put_result={"configurable": {"thread_id": "thread-1", "checkpoint_ns": ""}})
+async def test_rollback_raises_when_restore_config_has_no_checkpoint_id(monkeypatch):
+    checkpointer = FakeCheckpointer()
+    _stub_mutation_graph(
+        monkeypatch,
+        restored_config={"configurable": {"thread_id": "thread-1", "checkpoint_ns": ""}},
+    )
 
     with pytest.raises(RuntimeError, match="did not return checkpoint_id"):
         await _rollback_to_pre_run_checkpoint(
+            accessor=_rollback_accessor(checkpointer),
             checkpointer=checkpointer,
             thread_id="thread-1",
             run_id="run-1",
-            pre_run_checkpoint_id="ckpt-1",
-            pre_run_snapshot={
-                "checkpoint_ns": "",
-                "checkpoint": {"id": "ckpt-1", "channel_versions": {}},
-                "metadata": {},
-                "pending_writes": [("task-a", "messages", "value")],
-            },
+            rollback_point=_make_rollback_point(pending_writes=[("task-a", "messages", "value")]),
             snapshot_capture_failed=False,
         )
 
     checkpointer.adelete_thread.assert_not_awaited()
-    checkpointer.aput.assert_awaited_once()
     checkpointer.aput_writes.assert_not_awaited()
 
 
 @pytest.mark.anyio
-async def test_rollback_normalizes_none_checkpoint_ns_to_root_namespace():
-    checkpointer = FakeCheckpointer(put_result={"configurable": {"thread_id": "thread-1", "checkpoint_ns": "", "checkpoint_id": "restored-1"}})
+async def test_capture_rollback_point_normalizes_missing_checkpoint_ns():
+    """Snapshots whose config omits ``checkpoint_ns`` must anchor the root namespace."""
 
-    await _rollback_to_pre_run_checkpoint(
-        checkpointer=checkpointer,
-        thread_id="thread-1",
-        run_id="run-1",
-        pre_run_checkpoint_id="ckpt-1",
-        pre_run_snapshot={
-            "checkpoint_ns": None,
-            "checkpoint": {"id": "ckpt-1", "channel_versions": {}},
-            "metadata": {},
-            "pending_writes": [],
-        },
-        snapshot_capture_failed=False,
-    )
+    class _TupleCheckpointer:
+        async def aget_tuple(self, _config):
+            return SimpleNamespace(pending_writes=[])
 
-    checkpointer.aput.assert_awaited_once()
-    restore_config, restored_checkpoint, restored_metadata, new_versions = checkpointer.aput.await_args.args
-    assert restore_config == {"configurable": {"thread_id": "thread-1", "checkpoint_ns": ""}}
-    assert restored_checkpoint["id"] != "ckpt-1"
-    assert restored_checkpoint["channel_versions"] == {}
-    assert restored_metadata == {}
-    assert new_versions == {}
+    class _SnapshotAgent:
+        async def aget_state(self, _config):
+            return SimpleNamespace(
+                values={"messages": [HumanMessage(id="h1", content="before")]},
+                config={"configurable": {"thread_id": "thread-1", "checkpoint_id": "ckpt-1"}},
+                metadata={"source": "loop"},
+            )
+
+    checkpointer = _TupleCheckpointer()
+    accessor = CheckpointStateAccessor(graph=_SnapshotAgent(), checkpointer=checkpointer, mode="full")
+
+    rollback_point = await _capture_rollback_point(accessor, checkpointer, {"configurable": {"thread_id": "thread-1"}})
+
+    assert rollback_point is not None
+    assert rollback_point.config["configurable"]["checkpoint_ns"] == ""
+    assert rollback_point.config["configurable"]["checkpoint_id"] == "ckpt-1"
+    assert [message.content for message in rollback_point.messages] == ["before"]
+    assert rollback_point.metadata == {"source": "loop"}
 
 
 @pytest.mark.anyio
-async def test_rollback_raises_on_malformed_pending_write_not_a_tuple():
+async def test_capture_rollback_point_returns_none_without_checkpoint():
+    """A thread with no checkpoints has no rollback point (delete/reset contract)."""
+
+    class _EmptyAgent:
+        async def aget_state(self, _config):
+            return SimpleNamespace(
+                values={},
+                config={"configurable": {"thread_id": "thread-1", "checkpoint_ns": ""}},
+                metadata={},
+            )
+
+    checkpointer = SimpleNamespace(aget_tuple=AsyncMock(return_value=None))
+    accessor = CheckpointStateAccessor(graph=_EmptyAgent(), checkpointer=checkpointer, mode="full")
+
+    assert await _capture_rollback_point(accessor, checkpointer, {"configurable": {"thread_id": "thread-1"}}) is None
+
+
+@pytest.mark.anyio
+async def test_rollback_raises_on_malformed_pending_write_not_a_tuple(monkeypatch):
     """pending_writes containing a non-3-tuple item should raise RuntimeError."""
-    checkpointer = FakeCheckpointer(put_result={"configurable": {"thread_id": "thread-1", "checkpoint_ns": "", "checkpoint_id": "restored-1"}})
+    checkpointer = FakeCheckpointer()
+    _stub_mutation_graph(
+        monkeypatch,
+        restored_config={"configurable": {"thread_id": "thread-1", "checkpoint_ns": "", "checkpoint_id": "restored-1"}},
+    )
 
     with pytest.raises(RuntimeError, match="rollback failed: pending_write is not a 3-tuple"):
         await _rollback_to_pre_run_checkpoint(
+            accessor=_rollback_accessor(checkpointer),
             checkpointer=checkpointer,
             thread_id="thread-1",
             run_id="run-1",
-            pre_run_checkpoint_id="ckpt-1",
-            pre_run_snapshot={
-                "checkpoint_ns": "",
-                "checkpoint": {"id": "ckpt-1", "channel_versions": {}},
-                "metadata": {},
-                "pending_writes": [
+            rollback_point=_make_rollback_point(
+                pending_writes=[
                     ("task-a", "messages", "valid"),  # valid
                     ["only", "two"],  # malformed: only 2 elements
                 ],
-            },
+            ),
             snapshot_capture_failed=False,
         )
 
-    # aput succeeded but aput_writes should not be called due to malformed data
-    checkpointer.aput.assert_awaited_once()
     checkpointer.aput_writes.assert_not_awaited()
 
 
 @pytest.mark.anyio
-async def test_rollback_raises_on_malformed_pending_write_non_string_channel():
+async def test_rollback_raises_on_malformed_pending_write_non_string_channel(monkeypatch):
     """pending_writes containing a non-string channel should raise RuntimeError."""
-    checkpointer = FakeCheckpointer(put_result={"configurable": {"thread_id": "thread-1", "checkpoint_ns": "", "checkpoint_id": "restored-1"}})
+    checkpointer = FakeCheckpointer()
+    _stub_mutation_graph(
+        monkeypatch,
+        restored_config={"configurable": {"thread_id": "thread-1", "checkpoint_ns": "", "checkpoint_id": "restored-1"}},
+    )
 
     with pytest.raises(RuntimeError, match="rollback failed: pending_write has non-string channel"):
         await _rollback_to_pre_run_checkpoint(
+            accessor=_rollback_accessor(checkpointer),
             checkpointer=checkpointer,
             thread_id="thread-1",
             run_id="run-1",
-            pre_run_checkpoint_id="ckpt-1",
-            pre_run_snapshot={
-                "checkpoint_ns": "",
-                "checkpoint": {"id": "ckpt-1", "channel_versions": {}},
-                "metadata": {},
-                "pending_writes": [
+            rollback_point=_make_rollback_point(
+                pending_writes=[
                     ("task-a", 123, "value"),  # malformed: channel is not a string
                 ],
-            },
+            ),
             snapshot_capture_failed=False,
         )
 
-    checkpointer.aput.assert_awaited_once()
     checkpointer.aput_writes.assert_not_awaited()
 
 
 @pytest.mark.anyio
-async def test_rollback_propagates_aput_writes_failure():
+async def test_rollback_propagates_aput_writes_failure(monkeypatch):
     """If aput_writes fails, the exception should propagate (not be swallowed)."""
-    checkpointer = FakeCheckpointer(put_result={"configurable": {"thread_id": "thread-1", "checkpoint_ns": "", "checkpoint_id": "restored-1"}})
-    # Simulate aput_writes failure
+    checkpointer = FakeCheckpointer()
     checkpointer.aput_writes.side_effect = RuntimeError("Database connection lost")
+    _stub_mutation_graph(
+        monkeypatch,
+        restored_config={"configurable": {"thread_id": "thread-1", "checkpoint_ns": "", "checkpoint_id": "restored-1"}},
+    )
 
     with pytest.raises(RuntimeError, match="Database connection lost"):
         await _rollback_to_pre_run_checkpoint(
+            accessor=_rollback_accessor(checkpointer),
             checkpointer=checkpointer,
             thread_id="thread-1",
             run_id="run-1",
-            pre_run_checkpoint_id="ckpt-1",
-            pre_run_snapshot={
-                "checkpoint_ns": "",
-                "checkpoint": {"id": "ckpt-1", "channel_versions": {}},
-                "metadata": {},
-                "pending_writes": [
+            rollback_point=_make_rollback_point(
+                pending_writes=[
                     ("task-a", "messages", "value"),
                 ],
-            },
+            ),
             snapshot_capture_failed=False,
         )
 
-    # aput succeeded, aput_writes was called but failed
-    checkpointer.aput.assert_awaited_once()
     checkpointer.aput_writes.assert_awaited_once()
+
+
+@pytest.mark.anyio
+async def test_rollback_forks_pre_run_lineage_for_delta_checkpoints():
+    """Delta channels omit messages from checkpoint blobs, so rollback must
+    fork the pre-run lineage through the graph: the restored checkpoint's
+    messages are reconstructed by replaying ancestor writes, and writes from
+    the cancelled run (not ancestors of the fork) must not leak back in."""
+    checkpointer = InMemorySaver()
+    graph = _build_message_append_graph(_DeltaChannelState, checkpointer)
+    accessor = CheckpointStateAccessor.bind(graph, checkpointer, mode="delta")
+    thread_config = {"configurable": {"thread_id": "thread-1"}}
+
+    await graph.ainvoke({}, thread_config)
+    await graph.ainvoke({}, thread_config)
+    rollback_point = await _capture_rollback_point(accessor, checkpointer, thread_config)
+    assert rollback_point is not None
+    assert [message.content for message in rollback_point.messages] == ["turn-0", "turn-1"]
+    pre_run_checkpoint_id = rollback_point.config["configurable"]["checkpoint_id"]
+
+    await graph.ainvoke({}, thread_config)  # the run that gets cancelled
+    cancelled_snapshot = await accessor.aget(thread_config)
+    cancelled_checkpoint_id = cancelled_snapshot.config["configurable"]["checkpoint_id"]
+    assert len(cancelled_snapshot.values["messages"]) == 3
+
+    await _rollback_to_pre_run_checkpoint(
+        accessor=accessor,
+        checkpointer=checkpointer,
+        thread_id="thread-1",
+        run_id="run-1",
+        rollback_point=rollback_point,
+        snapshot_capture_failed=False,
+    )
+
+    latest_snapshot = await accessor.aget(thread_config)
+    restored_checkpoint_id = latest_snapshot.config["configurable"]["checkpoint_id"]
+    assert restored_checkpoint_id not in (pre_run_checkpoint_id, cancelled_checkpoint_id)
+    assert [message.content for message in latest_snapshot.values["messages"]] == ["turn-0", "turn-1"]
+
+    restored_tuple = await checkpointer.aget_tuple({"configurable": {"thread_id": "thread-1", "checkpoint_ns": "", "checkpoint_id": restored_checkpoint_id}})
+    assert restored_tuple.parent_config["configurable"]["checkpoint_id"] == pre_run_checkpoint_id
+    assert restored_tuple.metadata.get("source") == "update"
+    # A non-snapshot Delta checkpoint must not persist the full message list.
+    raw_messages = restored_tuple.checkpoint.get("channel_values", {}).get("messages")
+    assert not isinstance(raw_messages, list)
+
+
+@pytest.mark.anyio
+async def test_rollback_restores_pre_run_pending_writes_for_delta_checkpoints():
+    """Pre-run pending writes are re-attached to the restored fork; writes
+    attached to the cancelled run are not."""
+    checkpointer = InMemorySaver()
+    graph = _build_message_append_graph(_DeltaChannelState, checkpointer)
+    accessor = CheckpointStateAccessor.bind(graph, checkpointer, mode="delta")
+    thread_config = {"configurable": {"thread_id": "thread-1"}}
+
+    await graph.ainvoke({}, thread_config)
+    pre_run_snapshot = await accessor.aget(thread_config)
+    pre_run_checkpoint_id = pre_run_snapshot.config["configurable"]["checkpoint_id"]
+    checkpointer.put_writes(
+        {"configurable": {"thread_id": "thread-1", "checkpoint_ns": "", "checkpoint_id": pre_run_checkpoint_id}},
+        [("title", "in-flight-title")],
+        task_id="task-in-flight",
+    )
+
+    rollback_point = await _capture_rollback_point(accessor, checkpointer, thread_config)
+    assert rollback_point is not None
+    assert rollback_point.pending_writes == (("task-in-flight", "title", "in-flight-title"),)
+
+    await graph.ainvoke({}, thread_config)  # cancelled run
+    cancelled_snapshot = await accessor.aget(thread_config)
+    cancelled_checkpoint_id = cancelled_snapshot.config["configurable"]["checkpoint_id"]
+    checkpointer.put_writes(
+        {"configurable": {"thread_id": "thread-1", "checkpoint_ns": "", "checkpoint_id": cancelled_checkpoint_id}},
+        [("title", "cancelled-title")],
+        task_id="task-cancelled",
+    )
+
+    await _rollback_to_pre_run_checkpoint(
+        accessor=accessor,
+        checkpointer=checkpointer,
+        thread_id="thread-1",
+        run_id="run-1",
+        rollback_point=rollback_point,
+        snapshot_capture_failed=False,
+    )
+
+    latest_tuple = await checkpointer.aget_tuple(thread_config)
+    assert latest_tuple.pending_writes == [("task-in-flight", "title", "in-flight-title")]
+    assert [message.content for message in (await accessor.aget(thread_config)).values["messages"]] == ["turn-0"]
+
+
+@pytest.mark.anyio
+async def test_rollback_forks_pre_run_lineage_for_delta_checkpoints_sqlite_reopen(tmp_path):
+    """Same lineage contract against a disk-backed saver, verified after a
+    close/reopen so only persisted bytes can satisfy the assertions."""
+    db_path = tmp_path / "rollback.sqlite3"
+
+    async with AsyncSqliteSaver.from_conn_string(str(db_path)) as checkpointer:
+        await checkpointer.setup()
+        graph = _build_message_append_graph(_DeltaChannelState, checkpointer)
+        accessor = CheckpointStateAccessor.bind(graph, checkpointer, mode="delta")
+        thread_config = {"configurable": {"thread_id": "thread-1"}}
+
+        await graph.ainvoke({}, thread_config)
+        await graph.ainvoke({}, thread_config)
+        rollback_point = await _capture_rollback_point(accessor, checkpointer, thread_config)
+        assert rollback_point is not None
+        pre_run_checkpoint_id = rollback_point.config["configurable"]["checkpoint_id"]
+
+        await graph.ainvoke({}, thread_config)  # cancelled run
+
+        await _rollback_to_pre_run_checkpoint(
+            accessor=accessor,
+            checkpointer=checkpointer,
+            thread_id="thread-1",
+            run_id="run-1",
+            rollback_point=rollback_point,
+            snapshot_capture_failed=False,
+        )
+
+        restored_snapshot = await accessor.aget(thread_config)
+        restored_checkpoint_id = restored_snapshot.config["configurable"]["checkpoint_id"]
+        assert restored_checkpoint_id != pre_run_checkpoint_id
+        assert [message.content for message in restored_snapshot.values["messages"]] == ["turn-0", "turn-1"]
+
+    async with AsyncSqliteSaver.from_conn_string(str(db_path)) as checkpointer:
+        graph = _build_message_append_graph(_DeltaChannelState, checkpointer)
+        accessor = CheckpointStateAccessor.bind(graph, checkpointer, mode="delta")
+        thread_config = {"configurable": {"thread_id": "thread-1"}}
+
+        latest_snapshot = await accessor.aget(thread_config)
+        assert latest_snapshot.config["configurable"]["checkpoint_id"] == restored_checkpoint_id
+        assert [message.content for message in latest_snapshot.values["messages"]] == ["turn-0", "turn-1"]
+
+        restored_tuple = await checkpointer.aget_tuple({"configurable": {"thread_id": "thread-1", "checkpoint_ns": "", "checkpoint_id": restored_checkpoint_id}})
+        assert restored_tuple.parent_config["configurable"]["checkpoint_id"] == pre_run_checkpoint_id
+        raw_messages = restored_tuple.checkpoint.get("channel_values", {}).get("messages")
+        assert not isinstance(raw_messages, list)
 
 
 def test_agent_factory_supports_app_config_detects_supported_signature():
@@ -886,28 +1325,21 @@ def test_extract_llm_error_fallback_message_default_filter_is_empty():
     assert _extract_llm_error_fallback_message(state) == "Connection error."
 
 
-def test_collect_pre_existing_message_ids_pulls_ids_from_snapshot():
-    snapshot = {
-        "checkpoint": {
-            "channel_values": {
-                "messages": [
-                    AIMessage(id="a", content="x"),
-                    AIMessage(id="b", content="y"),
-                    AIMessage(content="no-id-here"),  # ignored
-                ]
-            }
-        }
+def test_collect_pre_existing_message_ids_pulls_ids_from_values():
+    values = {
+        "messages": [
+            AIMessage(id="a", content="x"),
+            AIMessage(id="b", content="y"),
+            AIMessage(content="no-id-here"),  # ignored
+        ]
     }
-    assert _collect_pre_existing_message_ids(snapshot) == {"a", "b"}
+    assert _collect_pre_existing_message_ids(values) == {"a", "b"}
 
 
 def test_collect_pre_existing_message_ids_handles_missing_pieces():
     assert _collect_pre_existing_message_ids(None) == set()
     assert _collect_pre_existing_message_ids({}) == set()
-    assert _collect_pre_existing_message_ids({"checkpoint": None}) == set()
-    assert _collect_pre_existing_message_ids({"checkpoint": {}}) == set()
-    assert _collect_pre_existing_message_ids({"checkpoint": {"channel_values": None}}) == set()
-    assert _collect_pre_existing_message_ids({"checkpoint": {"channel_values": {"messages": None}}}) == set()
+    assert _collect_pre_existing_message_ids({"messages": None}) == set()
 
 
 @pytest.mark.anyio
@@ -952,6 +1384,23 @@ async def test_run_agent_ignores_stale_llm_error_fallback_from_prior_run():
             )
 
     class DummyAgent:
+        async def aget_state(self, _config):
+            return SimpleNamespace(
+                values={"messages": [stale_fallback]},
+                config={
+                    "configurable": {
+                        "thread_id": "thread-1",
+                        "checkpoint_ns": "",
+                        "checkpoint_id": "ckpt-stale",
+                    }
+                },
+                parent_config=None,
+                metadata={},
+                next=(),
+                tasks=(),
+                created_at=None,
+            )
+
         async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
             # Replay the prior fallback message (as LangGraph would when using
             # stream_mode="values") and then yield a fresh successful AIMessage.
@@ -1561,7 +2010,10 @@ async def test_ensure_interrupted_title_bumps_channel_version_and_declares_it_in
     assert written_metadata["source"] == "update"
     assert written_metadata["step"] == 8
     assert written_metadata["writes"] == {"runtime_interrupt_title": {"title": "Generated Title"}}
-    assert write_config == {"configurable": {"thread_id": "thread-1", "checkpoint_ns": ""}}
+    # The write is parented to the checkpoint it was derived from - without
+    # the parent pointer the saver stores a root checkpoint, severing
+    # Delta-channel replay ancestry and full-mode history walks.
+    assert write_config == {"configurable": {"thread_id": "thread-1", "checkpoint_ns": "", "checkpoint_id": "ckpt-1"}}
 
 
 @pytest.mark.anyio

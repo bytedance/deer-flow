@@ -166,6 +166,11 @@ class FileAgentStore(AgentStore):
             # A legacy shared-layout agent is intentionally left in place (the
             # write path never targets it); report it distinctly.
             return "legacy" if paths.agent_dir(name).exists() else "missing"
+        if not (agent_dir / "config.yaml").is_file():
+            # The directory holds memory/facts data but is not a custom agent
+            # (no config.yaml) — preserve it rather than deleting a user's memory
+            # (#4279). rmtree below would otherwise take the whole tree.
+            return "not-custom-agent"
         # rmtree removes config.yaml, SOUL.md and the co-located memory.json in
         # one shot — the historical behaviour.
         shutil.rmtree(agent_dir)

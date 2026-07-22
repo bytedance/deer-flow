@@ -1,4 +1,5 @@
 import asyncio
+import json
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -6,6 +7,8 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.gateway.routers import memory
+from deerflow.agents.memory import MemoryConflictError, MemoryCorruptionError
+from deerflow.agents.memory.backends.deermem.deer_mem import DeerMem
 
 
 def _sample_memory(facts: list[dict] | None = None) -> dict:
@@ -86,6 +89,36 @@ def test_import_memory_route_returns_imported_memory() -> None:
     assert response.json()["facts"] == imported_memory["facts"]
 
 
+def test_import_route_without_agent_name_persists_default_bucket_markdown(tmp_path) -> None:
+    app = FastAPI()
+    app.include_router(memory.router)
+    manager = DeerMem(backend_config={"storage_path": str(tmp_path)})
+    imported_memory = _sample_memory(
+        facts=[
+            {
+                "id": "fact_gateway_import",
+                "content": "Gateway imports use the default agent bucket.",
+                "category": "context",
+                "confidence": 0.9,
+                "createdAt": "2026-07-21T00:00:00Z",
+                "source": "import",
+            }
+        ]
+    )
+
+    with (
+        patch("app.gateway.routers.memory.get_memory_manager", return_value=manager),
+        patch("app.gateway.routers.memory.get_effective_user_id", return_value="alice"),
+        TestClient(app) as client,
+    ):
+        response = client.post("/api/memory/import", json=imported_memory)
+
+    assert response.status_code == 200
+    assert [fact["id"] for fact in response.json()["facts"]] == ["fact_gateway_import"]
+    facts_root = tmp_path / "users" / "alice" / "agents" / "__default__" / "facts"
+    assert [path.stem for path in facts_root.glob("**/*.md")] == ["fact_gateway_import"]
+
+
 def test_import_memory_route_preserves_source_error() -> None:
     app = FastAPI()
     app.include_router(memory.router)
@@ -144,6 +177,34 @@ def test_create_memory_fact_route_returns_updated_memory() -> None:
     assert response.json()["facts"] == updated_memory["facts"]
 
 
+def test_create_memory_fact_route_maps_conflict_to_409() -> None:
+    app = FastAPI()
+    app.include_router(memory.router)
+    mock_mgr = MagicMock()
+    mock_mgr.create_fact.side_effect = MemoryConflictError("stale write")
+
+    with patch("app.gateway.routers.memory.get_memory_manager", return_value=mock_mgr):
+        with TestClient(app) as client:
+            response = client.post("/api/memory/facts", json={"content": "fact"})
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "Memory changed concurrently; reload and retry."
+
+
+def test_get_memory_route_maps_corruption_to_stable_500() -> None:
+    app = FastAPI()
+    app.include_router(memory.router)
+    mock_mgr = MagicMock()
+    mock_mgr.get_memory.side_effect = MemoryCorruptionError("private path and parser detail")
+
+    with patch("app.gateway.routers.memory.get_memory_manager", return_value=mock_mgr):
+        with TestClient(app) as client:
+            response = client.get("/api/memory")
+
+    assert response.status_code == 500
+    assert response.json()["detail"] == "Stored memory data is corrupted."
+
+
 def test_delete_memory_fact_route_returns_updated_memory() -> None:
     app = FastAPI()
     app.include_router(memory.router)
@@ -182,6 +243,63 @@ def test_update_memory_fact_route_returns_updated_memory() -> None:
             response = client.patch("/api/memory/facts/fact_edit", json={"content": "User prefers spaces", "category": "workflow", "confidence": 0.91})
     assert response.status_code == 200
     assert response.json()["facts"] == updated_memory["facts"]
+
+
+def test_settings_fact_crud_without_agent_name_uses_default_agent(tmp_path) -> None:
+    """The current Settings API sends no agent_name; it must remain usable."""
+    app = FastAPI()
+    app.include_router(memory.router)
+    memory_path = tmp_path / "users" / "alice" / "memory.json"
+    memory_path.parent.mkdir(parents=True)
+    legacy = _sample_memory(
+        facts=[
+            {
+                "id": "fact_legacy",
+                "content": "Legacy global fact",
+                "category": "context",
+                "confidence": 0.9,
+                "createdAt": "2026-03-20T00:00:00Z",
+                "source": "manual",
+            }
+        ]
+    )
+    memory_path.write_text(json.dumps(legacy), encoding="utf-8")
+    manager = DeerMem(backend_config={"storage_path": str(tmp_path)})
+
+    with (
+        patch("app.gateway.routers.memory.get_memory_manager", return_value=manager),
+        patch("app.gateway.routers.memory.get_effective_user_id", return_value="alice"),
+        TestClient(app) as client,
+    ):
+        fetched = client.get("/api/memory")
+        assert fetched.status_code == 200
+        assert [fact["content"] for fact in fetched.json()["facts"]] == ["Legacy global fact"]
+
+        exported = client.get("/api/memory/export")
+        assert exported.status_code == 200
+        assert [fact["content"] for fact in exported.json()["facts"]] == ["Legacy global fact"]
+
+        created = client.post("/api/memory/facts", json={"content": "Project uses Python", "category": "context", "confidence": 0.8})
+        assert created.status_code == 200
+        assert all(isinstance(fact["source"], str) for fact in created.json()["facts"])
+        fact_id = next(fact["id"] for fact in created.json()["facts"] if fact["content"] == "Project uses Python")
+
+        updated = client.patch(f"/api/memory/facts/{fact_id}", json={"content": "Project uses Python 3.12"})
+        assert updated.status_code == 200
+        assert updated.json()["facts"][0]["content"] == "Project uses Python 3.12"
+
+        deleted = client.delete(f"/api/memory/facts/{fact_id}")
+        assert deleted.status_code == 200
+        assert [fact["id"] for fact in deleted.json()["facts"]] == ["fact_legacy"]
+
+        deleted_legacy = client.delete("/api/memory/facts/fact_legacy")
+        assert deleted_legacy.status_code == 200
+        assert deleted_legacy.json()["facts"] == []
+
+    facts_root = tmp_path / "users" / "alice" / "agents" / "__default__" / "facts"
+    assert facts_root.exists()
+    assert not list(facts_root.glob("**/*.md"))
+    assert "facts" not in json.loads(memory_path.read_text(encoding="utf-8"))
 
 
 def test_update_memory_fact_route_preserves_omitted_fields() -> None:

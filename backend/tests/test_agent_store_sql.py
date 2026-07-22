@@ -161,3 +161,43 @@ def test_engine_cache_is_reused_per_url(tmp_path):
     first = _get_sessionmaker(url)
     second = _get_sessionmaker(url)
     assert first.kw["bind"] is second.kw["bind"]
+
+
+def test_delete_preserves_memory_only_dir_when_no_row(store, tmp_path, monkeypatch):
+    # #4279 invariant carried into the db backend: with no agent row, a bare
+    # on-disk directory holds only memory/facts data (config lives in the row in
+    # db mode), so delete must preserve it and report "not-custom-agent" instead
+    # of rmtree-ing a user's memory.
+    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+    from deerflow.config import paths as paths_module
+
+    monkeypatch.setattr(paths_module, "_paths", None)
+
+    from deerflow.config.paths import get_paths
+
+    facts_dir = get_paths().user_agent_dir("u1", "ghost") / "facts"
+    facts_dir.mkdir(parents=True)
+    fact = facts_dir / "fact_keep.md"
+    fact.write_text("memory data", encoding="utf-8")
+
+    assert store.delete("ghost", user_id="u1") == "not-custom-agent"
+    assert fact.read_text(encoding="utf-8") == "memory data"
+
+
+def test_delete_removes_memory_dir_when_row_exists(store, tmp_path, monkeypatch):
+    # The complement: when the agent row exists, its co-located on-disk memory is
+    # cleaned along with the row.
+    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+    from deerflow.config import paths as paths_module
+
+    monkeypatch.setattr(paths_module, "_paths", None)
+
+    from deerflow.config.paths import get_paths
+
+    store.create("real", {"name": "real"}, "s", user_id="u1")
+    mem_dir = get_paths().user_agent_dir("u1", "real")
+    mem_dir.mkdir(parents=True, exist_ok=True)
+    (mem_dir / "memory.json").write_text("{}", encoding="utf-8")
+
+    assert store.delete("real", user_id="u1") == "deleted"
+    assert not mem_dir.exists()

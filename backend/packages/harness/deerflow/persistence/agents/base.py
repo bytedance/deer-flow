@@ -47,11 +47,13 @@ def parse_agent_config(data: dict[str, Any], name: str) -> AgentConfig:
     return AgentConfig(**data)
 
 
-# Delete outcome, mirroring the agents router's three-way result:
+# Delete outcome, mirroring the agents router's result:
 # a row/dir was removed ("deleted"); only a legacy shared-layout entry exists,
-# which the current write path never removes ("legacy"); or nothing was there
-# ("missing").
-AgentDeleteOutcome = Literal["deleted", "legacy", "missing"]
+# which the current write path never removes ("legacy"); nothing was there
+# ("missing"); or a per-user directory exists holding memory/facts data but is
+# not a custom agent (no config.yaml), so it is preserved rather than deleting a
+# user's memory ("not-custom-agent", #4279).
+AgentDeleteOutcome = Literal["deleted", "legacy", "missing", "not-custom-agent"]
 
 
 class AgentExistsError(Exception):

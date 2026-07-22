@@ -175,16 +175,21 @@ class SqlAgentStore(AgentStore):
         with self._Session() as session:
             result = session.execute(delete(AgentRow).where(AgentRow.user_id == effective_user, AgentRow.name == name.lower()))
             session.commit()
-            deleted = result.rowcount > 0
-        # Explicit memory cleanup: in db mode the definition lives in the row, but
-        # any co-located on-disk memory.json (deermem file backend) must not be
-        # orphaned — remove the agent's on-disk directory if it exists. Mirrors
-        # the file backend's rmtree, which bundles config + soul + memory.
+            row_deleted = result.rowcount > 0
         agent_dir = get_paths().user_agent_dir(effective_user, name)
+        if row_deleted:
+            # The agent existed as a row; remove any co-located on-disk memory
+            # (deermem file backend) so it is not orphaned. Mirrors the file
+            # backend's rmtree, which bundles config + soul + memory.
+            if agent_dir.exists():
+                shutil.rmtree(agent_dir)
+            return "deleted"
+        # No agent row. A bare on-disk directory here holds only memory/facts
+        # data (in db mode the config lives in the row, not on disk), so preserve
+        # it rather than deleting a user's memory (#4279) — do not rmtree it.
         if agent_dir.exists():
-            shutil.rmtree(agent_dir)
-            deleted = True
-        return "deleted" if deleted else "missing"
+            return "not-custom-agent"
+        return "missing"
 
     def signature(self) -> Hashable:
         # MAX(updated_at) is not covered by an index (only user_id and the

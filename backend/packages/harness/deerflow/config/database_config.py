@@ -36,11 +36,22 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+CheckpointChannelMode = Literal["full", "delta"]
+
 
 class DatabaseConfig(BaseModel):
     backend: Literal["memory", "sqlite", "postgres"] = Field(
         default="memory",
         description=("Storage backend for both checkpointer and application data. 'memory' for development (no persistence across restarts), 'sqlite' for single-node deployment, 'postgres' for production multi-node deployment."),
+    )
+    checkpoint_channel_mode: CheckpointChannelMode = Field(
+        default="full",
+        description=(
+            "Checkpoint representation for accumulating channels. "
+            "'full' preserves full-value message checkpoints; 'delta' uses "
+            "LangGraph DeltaChannel for messages. Restart is required, and all "
+            "processes sharing one checkpoint database must use the same value."
+        ),
     )
     sqlite_dir: str = Field(
         default=".deer-flow/data",

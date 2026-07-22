@@ -23,9 +23,9 @@ from langchain_core.messages import BaseMessage
 from pydantic import BaseModel, Field
 
 from app.gateway.authz import require_permission
-from app.gateway.deps import get_checkpointer, get_current_user, get_feedback_repo, get_run_event_store, get_run_manager, get_run_store, get_stream_bridge
+from app.gateway.deps import get_current_user, get_feedback_repo, get_run_event_store, get_run_manager, get_run_store, get_stream_bridge
 from app.gateway.pagination import trim_run_message_page
-from app.gateway.services import sse_consumer, start_run, wait_for_run_completion
+from app.gateway.services import build_checkpoint_state_accessor, build_thread_checkpoint_state_accessor, sse_consumer, start_run, wait_for_run_completion
 from deerflow.runtime import CancelOutcome, RunRecord, RunStatus, serialize_channel_values_for_api
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, get_original_user_content_text, message_to_text
 from deerflow.workspace_changes import get_workspace_changes_response
@@ -293,10 +293,9 @@ def _is_middleware_message_row(row: dict[str, Any]) -> bool:
     return str((row.get("metadata") or {}).get("caller", "")).startswith("middleware:")
 
 
-def _checkpoint_messages(checkpoint_tuple: Any) -> list[Any]:
-    checkpoint = getattr(checkpoint_tuple, "checkpoint", None) or {}
-    channel_values = checkpoint.get("channel_values", {}) if isinstance(checkpoint, dict) else {}
-    messages = channel_values.get("messages", []) if isinstance(channel_values, dict) else []
+def _checkpoint_messages(snapshot: Any) -> list[Any]:
+    values = getattr(snapshot, "values", None) or {}
+    messages = values.get("messages", []) if isinstance(values, dict) else []
     return messages if isinstance(messages, list) else []
 
 
@@ -387,10 +386,9 @@ async def _find_target_run_id(thread_id: str, message_id: str, target_message: A
 
 
 async def _find_base_checkpoint_before_human(thread_id: str, human_message_id: str, request: Request) -> Any:
-    checkpointer = get_checkpointer(request)
-    base_config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+    accessor, base_config = await build_thread_checkpoint_state_accessor(request, thread_id=thread_id)
     try:
-        raw_checkpoints = [item async for item in checkpointer.alist(base_config, limit=REGENERATE_HISTORY_RAW_SCAN_LIMIT)]
+        raw_checkpoints = await accessor.ahistory(base_config, limit=REGENERATE_HISTORY_RAW_SCAN_LIMIT)
         checkpoints = [item for item in raw_checkpoints if not _is_duration_only_checkpoint(item)]
     except Exception as exc:
         logger.exception("Failed to list checkpoints for regenerate thread %s", thread_id)
@@ -424,14 +422,14 @@ async def _find_base_checkpoint_before_human(thread_id: str, human_message_id: s
 
 
 async def _prepare_regenerate_payload(thread_id: str, message_id: str, request: Request) -> RegeneratePrepareResponse:
-    checkpointer = get_checkpointer(request)
-    latest_config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+    accessor, latest_config = await build_thread_checkpoint_state_accessor(request, thread_id=thread_id)
     try:
-        latest_checkpoint = await checkpointer.aget_tuple(latest_config)
+        latest_checkpoint = await accessor.aget(latest_config)
     except Exception as exc:
         logger.exception("Failed to read latest checkpoint for regenerate thread %s", thread_id)
         raise HTTPException(status_code=500, detail="Failed to read latest checkpoint") from exc
-    if latest_checkpoint is None:
+    latest_checkpoint_id = _checkpoint_configurable(latest_checkpoint).get("checkpoint_id")
+    if not latest_checkpoint_id:
         raise HTTPException(status_code=404, detail=f"Thread {thread_id} has no checkpoint")
 
     messages = _checkpoint_messages(latest_checkpoint)
@@ -534,14 +532,16 @@ async def wait_run(thread_id: str, body: RunCreateRequest, request: Request) -> 
         completed = await wait_for_run_completion(bridge, record, request, run_mgr)
 
     if completed:
-        checkpointer = get_checkpointer(request)
-        config = {"configurable": {"thread_id": thread_id}}
         try:
-            checkpoint_tuple = await checkpointer.aget_tuple(config)
-            if checkpoint_tuple is not None:
-                checkpoint = getattr(checkpoint_tuple, "checkpoint", {}) or {}
-                channel_values = checkpoint.get("channel_values", {})
-                return serialize_channel_values_for_api(channel_values)
+            accessor, config = build_checkpoint_state_accessor(
+                request,
+                thread_id=thread_id,
+                assistant_id=body.assistant_id,
+            )
+            snapshot = await accessor.aget(config)
+            snapshot_config = snapshot.config or {}
+            if snapshot_config.get("configurable", {}).get("checkpoint_id"):
+                return serialize_channel_values_for_api(snapshot.values)
         except Exception:
             logger.exception("Failed to fetch final state for run %s", record.run_id)
 
