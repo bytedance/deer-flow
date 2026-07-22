@@ -565,9 +565,12 @@ def test_build_middlewares_passes_explicit_app_config_to_shared_factory(monkeypa
     def _raise_get_app_config():
         raise AssertionError("ambient get_app_config() must not be used when app_config is explicit")
 
-    def _fake_build_lead_runtime_middlewares(*, app_config, lazy_init):
+    provider = object()
+
+    def _fake_build_lead_runtime_middlewares(*, app_config, lazy_init, authorization_provider):
         captured["app_config"] = app_config
         captured["lazy_init"] = lazy_init
+        captured["authorization_provider"] = authorization_provider
         return ["base-middleware"]
 
     monkeypatch.setattr(lead_agent_module, "get_app_config", _raise_get_app_config)
@@ -593,11 +596,13 @@ def test_build_middlewares_passes_explicit_app_config_to_shared_factory(monkeypa
         {"configurable": {"is_plan_mode": False, "subagent_enabled": False}},
         model_name="safe-model",
         app_config=app_config,
+        authorization_provider=provider,
     )
 
     assert captured == {
         "app_config": app_config,
         "lazy_init": True,
+        "authorization_provider": provider,
         "title_app_config": app_config,
         "memory_config": app_config.memory,
     }
