@@ -186,6 +186,31 @@ def test_normalize_input_strips_external_dynamic_context_metadata():
     assert result["messages"][0].additional_kwargs == {"hide_from_ui": True, "custom": "keep-me"}
 
 
+def test_normalize_input_strips_external_view_image_context_marker():
+    from app.gateway.services import normalize_input
+    from deerflow.agents.middlewares.view_image_middleware import _IMAGE_CONTEXT_MESSAGE_MARKER_KEY
+
+    result = normalize_input(
+        {
+            "messages": [
+                {
+                    "role": "user",
+                    "id": "view-image-context:client-supplied",
+                    "content": "client-authored message",
+                    "additional_kwargs": {
+                        _IMAGE_CONTEXT_MESSAGE_MARKER_KEY: True,
+                        "custom": "keep-me",
+                    },
+                }
+            ]
+        }
+    )
+
+    message = result["messages"][0]
+    assert message.id == "view-image-context:client-supplied"
+    assert message.additional_kwargs == {"custom": "keep-me"}
+
+
 def test_normalize_input_preserves_trusted_internal_original_user_content():
     from app.gateway.services import normalize_input
     from deerflow.agents.middlewares.dynamic_context_middleware import _DYNAMIC_CONTEXT_REMINDER_KEY, _REMINDER_DATE_KEY
@@ -320,6 +345,33 @@ def test_build_run_config_with_overrides():
     assert config["configurable"]["model_name"] == "gpt-4"
     assert config["tags"] == ["test"]
     assert config["metadata"]["user"] == "alice"
+
+
+def test_build_run_config_route_thread_id_overrides_client_configurable():
+    from app.gateway.services import build_run_config
+
+    config = build_run_config(
+        "route-thread",
+        {"configurable": {"thread_id": "caller-thread"}},
+        None,
+    )
+
+    assert config["configurable"]["thread_id"] == "route-thread"
+
+
+@pytest.mark.parametrize("section", ["configurable", "context"])
+def test_build_run_config_strips_external_checkpoint_mode_override(section):
+    from app.gateway.services import build_run_config
+    from deerflow.runtime.checkpoint_mode import INTERNAL_CHECKPOINT_MODE_KEY
+
+    config = build_run_config(
+        "thread-1",
+        {section: {INTERNAL_CHECKPOINT_MODE_KEY: "delta", "model_name": "gpt-4"}},
+        None,
+    )
+
+    assert INTERNAL_CHECKPOINT_MODE_KEY not in config[section]
+    assert config[section]["model_name"] == "gpt-4"
 
 
 def test_build_run_config_context_path_still_sets_configurable_thread_id(_stub_app_config):
@@ -478,6 +530,76 @@ def test_resolve_agent_factory_returns_make_lead_agent():
     assert resolve_agent_factory("lead_agent") is make_lead_agent
     assert resolve_agent_factory("finalis") is make_lead_agent
     assert resolve_agent_factory("custom-agent-123") is make_lead_agent
+
+
+@pytest.mark.parametrize(
+    ("checkpoint_id", "includes_checkpoint_id"),
+    [(None, False), ("checkpoint-1", True)],
+)
+def test_build_checkpoint_state_accessor_uses_frozen_mode_and_binds_runtime_persistence(
+    _stub_app_config,
+    checkpoint_id,
+    includes_checkpoint_id,
+):
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from app.gateway.services import build_checkpoint_state_accessor
+    from deerflow.config.app_config import get_app_config
+    from deerflow.runtime.checkpoint_mode import CHECKPOINT_MODE_METADATA_KEY, INTERNAL_CHECKPOINT_MODE_KEY
+
+    class FakeGraph:
+        checkpointer = None
+        store = None
+
+    graph = FakeGraph()
+    captured = {}
+
+    def fake_factory(*, config):
+        captured["config"] = config
+        return graph
+
+    checkpointer = object()
+    store = object()
+    ctx = SimpleNamespace(
+        checkpointer=checkpointer,
+        store=store,
+        checkpoint_channel_mode="delta",
+        app_config=get_app_config(),
+    )
+    request = SimpleNamespace(
+        state=SimpleNamespace(checkpoint_channel_mode="full"),
+    )
+
+    with (
+        patch("app.gateway.services.get_run_context", return_value=ctx),
+        patch("app.gateway.services.resolve_agent_factory", return_value=fake_factory) as resolve,
+    ):
+        accessor, config = build_checkpoint_state_accessor(
+            request,
+            thread_id="thread-1",
+            assistant_id="Research_Agent",
+            checkpoint_id=checkpoint_id,
+        )
+
+    resolve.assert_called_once_with("Research_Agent")
+    assert captured["config"] is config
+    assert accessor.graph is graph
+    assert accessor.checkpointer is checkpointer
+    assert accessor.mode == "delta"
+    assert graph.checkpointer is checkpointer
+    assert graph.store is store
+    assert config["configurable"]["thread_id"] == "thread-1"
+    assert config["configurable"]["checkpoint_ns"] == ""
+    assert config["configurable"]["agent_name"] == "research-agent"
+    assert config["context"]["agent_name"] == "research-agent"
+    assert config["context"]["app_config"] is ctx.app_config
+    assert config["configurable"][INTERNAL_CHECKPOINT_MODE_KEY] == "delta"
+    assert config["metadata"][CHECKPOINT_MODE_METADATA_KEY] == "delta"
+    assert INTERNAL_CHECKPOINT_MODE_KEY not in config["context"]
+    assert ("checkpoint_id" in config["configurable"]) is includes_checkpoint_id
+    if checkpoint_id is not None:
+        assert config["configurable"]["checkpoint_id"] == checkpoint_id
 
 
 def test_build_run_config_configurable_custom_agent_dual_writes_agent_name():
@@ -1633,3 +1755,161 @@ class TestInjectAuthenticatedUserContextAuthz:
         config = {"context": "not a dict"}
         with pytest.raises(TypeError, match="run context must be a mapping"):
             inject_authenticated_user_context(config, _make_request_with_auth_source("session"))
+
+
+@pytest.mark.asyncio
+async def test_run_agent_full_mode_rejects_delta_before_graph_invocation():
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, MagicMock
+
+    from deerflow.runtime.checkpoint_mode import (
+        CHECKPOINT_MODE_METADATA_KEY,
+        INTERNAL_CHECKPOINT_MODE_KEY,
+    )
+    from deerflow.runtime.runs.manager import RunRecord
+    from deerflow.runtime.runs.schemas import DisconnectMode, RunStatus
+    from deerflow.runtime.runs.worker import RunContext, run_agent
+
+    checkpointer = AsyncMock()
+    checkpointer.aget_tuple.return_value = SimpleNamespace(
+        metadata={CHECKPOINT_MODE_METADATA_KEY: "delta"},
+        checkpoint={"channel_values": {}},
+    )
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+    run_manager = SimpleNamespace(
+        wait_for_prior_finalizing=AsyncMock(),
+        set_status=AsyncMock(),
+    )
+    record = RunRecord(
+        run_id="run-checkpoint-mode",
+        thread_id="thread-delta",
+        assistant_id="lead-agent",
+        status=RunStatus.pending,
+        on_disconnect=DisconnectMode.cancel,
+    )
+    record.abort_event = asyncio.Event()
+    agent_factory = MagicMock()
+    config = {
+        "configurable": {
+            "thread_id": record.thread_id,
+            INTERNAL_CHECKPOINT_MODE_KEY: "delta",
+        },
+        "metadata": {CHECKPOINT_MODE_METADATA_KEY: "delta"},
+    }
+
+    await run_agent(
+        bridge,
+        run_manager,
+        record,
+        ctx=RunContext(
+            checkpointer=checkpointer,
+            checkpoint_channel_mode="full",
+        ),
+        agent_factory=agent_factory,
+        graph_input={"messages": []},
+        config=config,
+    )
+
+    assert config["configurable"][INTERNAL_CHECKPOINT_MODE_KEY] == "full"
+    assert CHECKPOINT_MODE_METADATA_KEY not in config["metadata"]
+    agent_factory.assert_not_called()
+    run_manager.set_status.assert_any_await(
+        record.run_id,
+        RunStatus.error,
+        error="Thread requires delta mode; materialize and convert its checkpoints before using full mode.",
+    )
+
+
+@pytest.mark.asyncio
+async def test_run_agent_full_mode_checks_selected_checkpoint_before_graph():
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, MagicMock, call
+
+    from deerflow.runtime.checkpoint_mode import CHECKPOINT_MODE_METADATA_KEY
+    from deerflow.runtime.runs.manager import RunRecord
+    from deerflow.runtime.runs.schemas import DisconnectMode, RunStatus
+    from deerflow.runtime.runs.worker import RunContext, run_agent
+
+    checkpointer = AsyncMock()
+    checkpointer.aget_tuple.side_effect = [
+        SimpleNamespace(
+            metadata={},
+            checkpoint={"channel_values": {"messages": ["latest full"]}},
+        ),
+        SimpleNamespace(
+            metadata={CHECKPOINT_MODE_METADATA_KEY: "delta"},
+            checkpoint={"channel_values": {}},
+        ),
+    ]
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+    run_manager = SimpleNamespace(
+        wait_for_prior_finalizing=AsyncMock(),
+        set_status=AsyncMock(),
+    )
+    record = RunRecord(
+        run_id="run-selected-checkpoint-mode",
+        thread_id="thread-selected-delta",
+        assistant_id="lead-agent",
+        status=RunStatus.pending,
+        on_disconnect=DisconnectMode.cancel,
+    )
+    record.abort_event = asyncio.Event()
+    agent_factory = MagicMock()
+    selected_config = {
+        "configurable": {
+            "thread_id": record.thread_id,
+            "checkpoint_ns": "branch",
+            "checkpoint_id": "delta-checkpoint",
+            "checkpoint_map": {"": "delta-checkpoint"},
+        }
+    }
+
+    await run_agent(
+        bridge,
+        run_manager,
+        record,
+        ctx=RunContext(
+            checkpointer=checkpointer,
+            checkpoint_channel_mode="full",
+        ),
+        agent_factory=agent_factory,
+        graph_input={"messages": []},
+        config=selected_config,
+    )
+
+    agent_factory.assert_not_called()
+    assert checkpointer.aget_tuple.await_args_list[:2] == [
+        call(
+            {
+                "configurable": {
+                    "thread_id": record.thread_id,
+                    "checkpoint_ns": "",
+                }
+            }
+        ),
+        call(
+            {
+                "configurable": {
+                    "thread_id": record.thread_id,
+                    "checkpoint_ns": "branch",
+                    "checkpoint_id": "delta-checkpoint",
+                    "checkpoint_map": {"": "delta-checkpoint"},
+                }
+            }
+        ),
+    ]
+    run_manager.set_status.assert_any_await(
+        record.run_id,
+        RunStatus.error,
+        error="Thread requires delta mode; materialize and convert its checkpoints before using full mode.",
+    )

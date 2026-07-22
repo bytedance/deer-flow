@@ -13,6 +13,7 @@ from deerflow.agents import thread_state as thread_state_module
 from deerflow.agents.thread_state import (
     _SKILL_CONTEXT_MAX_ENTRIES,
     TERMINAL_STATUSES,
+    THREAD_STATE_REDUCER_FIELDS,
     SkillEntry,
     ThreadState,
     merge_artifacts,
@@ -352,3 +353,16 @@ class TestThreadStateAnnotations:
     def test_skill_context_field_is_wired_to_merge_skill_context(self):
         hints = get_type_hints(ThreadState, include_extras=True)
         assert merge_skill_context in hints["skill_context"].__metadata__
+
+    def test_public_reducer_field_names_match_thread_state_contract(self):
+        assert THREAD_STATE_REDUCER_FIELDS == {
+            "messages",
+            "sandbox",
+            "artifacts",
+            "todos",
+            "goal",
+            "viewed_images",
+            "promoted",
+            "delegations",
+            "skill_context",
+        }

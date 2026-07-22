@@ -1,24 +1,35 @@
 import type { Message } from "@langchain/langgraph-sdk";
-import { describe, expect, it, rs } from "@rstest/core";
+import { afterEach, describe, expect, it, rs } from "@rstest/core";
 import { createElement, type ComponentProps } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import { MessageGroup } from "@/components/workspace/messages/message-group";
 import { I18nContext } from "@/core/i18n/context";
 
+const artifactsMockState = rs.hoisted(() => ({
+  autoOpen: false,
+  autoSelect: false,
+}));
+
 rs.mock("@/components/workspace/artifacts", () => ({
   useArtifacts: () => ({
     artifacts: [],
     setArtifacts: () => undefined,
     selectedArtifact: null,
-    autoSelect: false,
+    autoSelect: artifactsMockState.autoSelect,
     select: () => undefined,
     deselect: () => undefined,
     open: false,
-    autoOpen: false,
+    autoOpen: artifactsMockState.autoOpen,
     setOpen: () => undefined,
   }),
 }));
+
+afterEach(() => {
+  artifactsMockState.autoOpen = false;
+  artifactsMockState.autoSelect = false;
+  rs.restoreAllMocks();
+});
 
 describe("MessageGroup", () => {
   it("renders assistant text attached to a tool-calling processing message", () => {
@@ -93,6 +104,8 @@ describe("MessageGroup", () => {
   });
 
   it("does not schedule artifact auto-open during render", () => {
+    artifactsMockState.autoOpen = true;
+    artifactsMockState.autoSelect = true;
     const timeoutSpy = rs.spyOn(globalThis, "setTimeout");
     const html = renderGroup(
       [
@@ -117,7 +130,6 @@ describe("MessageGroup", () => {
 
     expect(html).toContain("/mnt/user-data/outputs/report.md");
     expect(timeoutSpy).not.toHaveBeenCalled();
-    timeoutSpy.mockRestore();
   });
 
   it("keeps tool-calling assistant text visible when reasoning is also present", () => {

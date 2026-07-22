@@ -52,6 +52,24 @@ class DeerMemConfig(BaseModel):
         default="",
         description="Dotted class path for an alternative storage provider; empty (default) = FileMemoryStorage (no importlib, portable).",
     )
+    strict_user_scope: bool = Field(
+        default=False,
+        description="Require user_id for every storage scope. False preserves no-auth and legacy callers.",
+    )
+    manifest_filename: str = Field(
+        default="memory.json",
+        description="User-global summary JSON filename. Kept under this name for config compatibility; must be a plain .json filename.",
+    )
+    file_lock_timeout_seconds: int = Field(
+        default=10,
+        ge=1,
+        le=120,
+        description="Maximum wait for the per-scope cross-process advisory file lock.",
+    )
+    retrieval_adapter: str = Field(
+        default="",
+        description="Optional dotted retrieval-adapter factory. It receives DeerMemConfig and must implement RetrievalPort.",
+    )
     # ── Queue ────────────────────────────────────────────────────────────
     debounce_seconds: int = Field(
         default=30,
@@ -254,6 +272,7 @@ class DeerMemConfig(BaseModel):
         """
         if not backend_config:
             return cls()
+        backend_config = dict(backend_config)
         known = {k: v for k, v in backend_config.items() if k in cls.model_fields and v is not None}
         unknown = sorted(k for k in backend_config if k not in cls.model_fields)
         if unknown:

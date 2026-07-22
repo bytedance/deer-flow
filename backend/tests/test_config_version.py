@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import tempfile
 from pathlib import Path
 
@@ -123,6 +124,53 @@ def test_newer_user_version_no_warning(caplog):
                 config_path,
             )
         assert "outdated" not in caplog.text
+
+
+def test_version_26_config_upgrades_to_checkpoint_channel_mode(tmp_path, caplog):
+    """A v26 user config must be flagged outdated and merge the new persisted field.
+
+    `database.checkpoint_channel_mode` shipped with config_version 27; the
+    upgrade path must add it with the safe default (``full``) without touching
+    the user's existing database backend settings. Uses the repository's real
+    config.example.yaml and the real config-upgrade script.
+    """
+    import subprocess
+
+    repo_root = Path(__file__).resolve().parents[2]
+    example_src = repo_root / "config.example.yaml"
+    example_data = yaml.safe_load(example_src.read_text(encoding="utf-8"))
+    expected_version = example_data["config_version"]
+    assert expected_version > 26, "config.example.yaml must be bumped past 26 for checkpoint_channel_mode"
+
+    config_path = tmp_path / "config.yaml"
+    (tmp_path / "config.example.yaml").write_text(example_src.read_text(encoding="utf-8"), encoding="utf-8")
+    user_config = {
+        "config_version": 26,
+        "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"},
+        "database": {"backend": "sqlite", "sqlite_dir": "custom-data"},
+    }
+    config_path.write_text(yaml.dump(user_config), encoding="utf-8")
+
+    with caplog.at_level(logging.WARNING, logger="deerflow.config.app_config"):
+        AppConfig._check_config_version(dict(user_config), config_path)
+    assert "outdated" in caplog.text
+    assert "(version 26)" in caplog.text
+
+    env = {**os.environ, "DEER_FLOW_CONFIG_PATH": str(config_path)}
+    result = subprocess.run(
+        ["bash", str(repo_root / "scripts" / "config-upgrade.sh")],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert result.returncode == 0, result.stderr
+
+    upgraded = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert upgraded["config_version"] == expected_version
+    assert upgraded["database"]["checkpoint_channel_mode"] == "full"
+    assert upgraded["database"]["backend"] == "sqlite"
+    assert upgraded["database"]["sqlite_dir"] == "custom-data"
 
 
 def _load_repo_example() -> dict:

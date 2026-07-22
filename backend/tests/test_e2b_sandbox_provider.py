@@ -1230,3 +1230,78 @@ def test_sync_outputs_to_host_skips_oversize_files(monkeypatch, tmp_path):
     assert files.read_calls == [], "oversize files must be skipped without invoking download_file"
     host_target = Paths(base_dir=tmp_path).thread_dir("t1", user_id="u1") / "user-data" / "outputs" / "huge.bin"
     assert not host_target.exists(), "no oversize artefact must be written to host"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# grep() directory-scoped glob filtering
+#
+# Real GNU grep's ``--include=PATTERN`` matches by basename only, at any
+# depth -- it cannot express the directory-scoping portion of a pattern like
+# ``src/*.js``. These tests can't invoke a real grep binary (the command
+# runs remotely inside the e2b VM via the mocked ``client.commands.run``), so
+# they instead supply the raw stdout a real broadened ``--include=*.js``
+# grep would actually return (matches from every directory, not just the
+# intended one) and assert ``E2BSandbox.grep`` narrows it down to the
+# caller's real directory scope via ``path_matches`` -- the same helper
+# ``glob()`` already uses -- exactly as verified empirically against a real
+# GNU grep binary during development of this fix.
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def test_grep_scoped_glob_excludes_unrelated_directory_matches():
+    """Regression: grep(glob="src/*.js") must not leak matches from sibling
+    directories that merely share the file extension."""
+    raw_stdout = "/home/user/workspace/other_dir/unrelated.js:1:console.log('needle in other_dir');\n/home/user/workspace/src/app.js:1:console.log('needle in src');\n"
+    client = FakeClient(commands=FakeCommandsAPI([SimpleNamespace(stdout=raw_stdout, stderr="", exit_code=0)]))
+    sb = _make_sandbox(client)
+
+    matches, truncated = sb.grep("/mnt/user-data/workspace", "needle", glob="src/*.js")
+
+    paths = [m.path for m in matches]
+    assert paths == ["/home/user/workspace/src/app.js"]
+    assert "/home/user/workspace/other_dir/unrelated.js" not in paths
+    assert truncated is False
+
+
+def test_grep_plain_glob_matches_files_in_any_directory():
+    """No regression: a plain non-scoped glob (no ``/`` in the pattern) must
+    keep matching files at any depth, same as before the directory-scoping
+    fix."""
+    raw_stdout = "/home/user/workspace/other_dir/deep/mod.py:1:needle in a deeply nested file\n/home/user/workspace/src/app.py:1:needle in a python file too\n"
+    client = FakeClient(commands=FakeCommandsAPI([SimpleNamespace(stdout=raw_stdout, stderr="", exit_code=0)]))
+    sb = _make_sandbox(client)
+
+    matches, truncated = sb.grep("/mnt/user-data/workspace", "needle", glob="*.py")
+
+    paths = {m.path for m in matches}
+    assert paths == {
+        "/home/user/workspace/other_dir/deep/mod.py",
+        "/home/user/workspace/src/app.py",
+    }
+    assert truncated is False
+
+
+def test_grep_scoped_glob_still_passes_coarse_include_flag():
+    """The coarse ``--include=<basename>`` pre-filter is kept as a perf
+    optimization (it narrows what grep has to search) even though it can't
+    express directory scoping by itself -- the real scoping enforcement
+    happens in the post-filter, not by dropping ``--include``."""
+    client = FakeClient(commands=FakeCommandsAPI([SimpleNamespace(stdout="", stderr="", exit_code=0)]))
+    sb = _make_sandbox(client)
+
+    sb.grep("/mnt/user-data/workspace", "needle", glob="src/*.js")
+
+    assert any("--include=*.js" in cmd for cmd in client.commands.calls)
+
+
+def test_grep_without_glob_is_unaffected():
+    """No regression: omitting ``glob`` entirely must return every match
+    with no path-based post-filtering."""
+    raw_stdout = "/home/user/workspace/anywhere/file.txt:3:needle here\n"
+    client = FakeClient(commands=FakeCommandsAPI([SimpleNamespace(stdout=raw_stdout, stderr="", exit_code=0)]))
+    sb = _make_sandbox(client)
+
+    matches, truncated = sb.grep("/mnt/user-data/workspace", "needle")
+
+    assert [m.path for m in matches] == ["/home/user/workspace/anywhere/file.txt"]
+    assert truncated is False
