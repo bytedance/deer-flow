@@ -135,7 +135,15 @@ class DeerMem(MemoryManager):
                 if host_llm_factory is not None:
                     config_dict["host_llm"] = host_llm_factory()
         # callbacks is a base MemoryManager field (not DeerMemConfig); pass through.
-        return cls(backend_config=config_dict, mode=mode, callbacks=host_hooks.get("callbacks"))
+        # config_dict carries the host hooks merged above so model_post_init can
+        # parse them into DeerMemConfig (self._config, PrivateAttr). After wiring,
+        # restore backend_config to the pure data the host passed (no injected
+        # hooks) so the field stays serializable and matches the README contract
+        # ("host hooks arrive as from_config kwargs, NOT in backend_config") --
+        # the hooks live in self._config, not the backend_config field.
+        instance = cls(backend_config=config_dict, mode=mode, callbacks=host_hooks.get("callbacks"))
+        instance.backend_config = dict(backend_config or {})
+        return instance
 
     # ── Write ────────────────────────────────────────────────────────────
     def add(

@@ -137,6 +137,48 @@ def test_invariant_tool_mode_factory_path_raises():
         get_memory_manager()
 
 
+class _SearchOverrideForgotFlag(_MinimalBackend):
+    """Overrides search() but forgets supports_search=True (flag/impl drift)."""
+
+    def search(self, query, top_k=5, *, user_id=None, agent_name=None, category=None):
+        return []
+
+
+class _FlagWithoutSearchOverride(_MinimalBackend):
+    """Sets supports_search=True without overriding search() (flag/impl drift)."""
+
+    supports_search = True
+
+
+class _ConsistentSearchBackend(_MinimalBackend):
+    """Overrides search() AND sets supports_search=True -- consistent, tool-OK."""
+
+    supports_search = True
+
+    def search(self, query, top_k=5, *, user_id=None, agent_name=None, category=None):
+        return []
+
+
+def test_invariant_supports_search_flag_must_match_override():
+    """supports_search (ClassVar) must match whether search() is overridden, so
+    the flag can't drift from the implementation -- caught at instantiation, not
+    as a misleading tool-mode rejection (override-but-forgot-flag) or a runtime
+    NotImplementedError on the first memory_search call (flag-without-override)."""
+    with pytest.raises(ValueError, match="inconsistent"):
+        _SearchOverrideForgotFlag(backend_config={})
+    with pytest.raises(ValueError, match="inconsistent"):
+        _FlagWithoutSearchOverride(backend_config={})
+
+
+def test_invariant_consistent_search_backend_runs_in_tool_mode():
+    """A backend that overrides search() AND sets supports_search=True is
+    consistent and may run in tool mode (the override is the real capability;
+    the flag agrees with it)."""
+    manager = _ConsistentSearchBackend(backend_config={}, mode="tool")
+    assert manager.mode == "tool"
+    assert manager.search("q") == []
+
+
 def test_async_defaults_delegate_to_sync():
     """a* methods default to the sync path (no concurrency benefit); a future
     async LLM client overrides without changing the contract."""

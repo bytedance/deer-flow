@@ -64,6 +64,37 @@ def test_di_construction_owns_dependencies():
     assert dm._queue._updater is dm._updater
 
 
+def test_from_config_keeps_backend_config_pure_of_injected_hooks(deermem_data_dir):
+    """Host hooks (should_keep_hidden_message / trace_context_manager / host_llm)
+    arrive as from_config kwargs and are parsed into DeerMemConfig
+    (self._config, PrivateAttr); the instance's backend_config field stays the
+    pure data the host passed (no callables / LLM), so it remains serializable
+    and matches the README contract ("host hooks ... NOT in backend_config")."""
+
+    def _keep(ak):
+        return False
+
+    trace_cm = object()  # sentinel; trace_context_manager is typed Any
+    fake_llm = _FakeLLM()
+    dm = DeerMem.from_config(
+        backend_config={"storage_path": str(deermem_data_dir), "max_facts": 20},
+        mode="middleware",
+        should_keep_hidden_message=_keep,
+        trace_context_manager=trace_cm,
+        host_llm_factory=lambda: fake_llm,
+        callbacks=None,
+    )
+    # hooks reached DeerMemConfig (PrivateAttr) -- wired, not lost
+    assert dm._config.should_keep_hidden_message is _keep
+    assert dm._config.trace_context_manager is trace_cm
+    assert dm._config.host_llm is fake_llm
+    # backend_config field is the pure original data (no injected hooks)
+    assert dm.backend_config == {"storage_path": str(deermem_data_dir), "max_facts": 20}
+    assert "should_keep_hidden_message" not in dm.backend_config
+    assert "trace_context_manager" not in dm.backend_config
+    assert "host_llm" not in dm.backend_config
+
+
 def test_zero_config_defaults_run_non_llm_ops(deermem_data_dir):
     dm = DeerMem(backend_config=None)  # zero config
     assert dm._llm is None  # no model -> no LLM

@@ -48,6 +48,12 @@ This section accumulates work toward the **2.1.0** milestone
   with a warning** and the factory **raises** if `storage_path` resolves to an
   existing file. Set `memory.backend_config.storage_path` to a directory for a
   custom root. ([#4122])
+- **memory:** `memory.mode: tool` with a backend that does not implement
+  `search()` (e.g. `noop`) now fails fast at Gateway startup with a `ValueError`
+  from the `MemoryManager` invariant, instead of starting successfully and
+  silently returning empty results on every `memory_search` call. This is
+  intentional -- silent empties are worse than a loud startup error. Fix: switch
+  to `mode: middleware` or use a search-capable backend. ([#4324])
 
 ### Added
 
@@ -1099,3 +1105,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#4264]: https://github.com/bytedance/deer-flow/pull/4264
 [#4287]: https://github.com/bytedance/deer-flow/pull/4287
 [#4288]: https://github.com/bytedance/deer-flow/pull/4288
+[#4324]: https://github.com/bytedance/deer-flow/issues/4324

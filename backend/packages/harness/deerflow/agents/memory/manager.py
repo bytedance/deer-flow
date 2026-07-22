@@ -123,11 +123,13 @@ class MemoryManager(BaseModel):
         """Accept None (zero-config) as an empty dict; leave dicts untouched."""
         return value or {}
 
-    # Search capability flag (ClassVar, not a field): backends that implement a
-    # real search() override to True. Required for mode="tool" -- the agent calls
+    # Search capability flag (ClassVar, not a field): set True iff the backend
+    # overrides search(). The invariant validator checks the flag MATCHES whether
+    # search() is actually overridden (type(self).search is not MemoryManager.search),
+    # so the two can't drift -- required for mode="tool" (the agent calls
     # memory_search in tool mode, so a non-search backend is a misconfiguration
-    # (fail fast at instantiation rather than silently returning empty results).
-    # Default False: a new backend must explicitly opt in to tool mode.
+    # that fails fast at instantiation rather than silently returning empty
+    # results). Default False: a new backend must explicitly opt in to tool mode.
     supports_search: ClassVar[bool] = False
 
     @model_validator(mode="after")
@@ -137,13 +139,25 @@ class MemoryManager(BaseModel):
         Fires on the factory path AND when a backend is constructed directly
         (bypassing the factory), since it lives on the base model. DeerMem-private
         invariants (e.g. storage_path is a directory) stay on ``DeerMemConfig``.
+
+        ``supports_search`` (ClassVar flag) must match whether ``search()`` is
+        actually overridden, so the declarative flag can't drift from the
+        implementation -- a backend that overrides ``search()`` but forgets
+        ``supports_search = True`` (or sets the flag without overriding) is a bug
+        caught at instantiation, not a misleading tool-mode rejection or a runtime
+        ``NotImplementedError`` on the first ``memory_search`` call.
         """
-        if self.mode == "tool" and not type(self).supports_search:
+        search_overridden = type(self).search is not MemoryManager.search
+        if type(self).supports_search != search_overridden:
             raise ValueError(
-                f"memory mode='tool' requires a backend that implements search(), "
-                f"but {type(self).__name__} does not support search "
-                f"(supports_search=False). Use mode='middleware' or a search-capable "
-                f"backend (set supports_search=True on the backend)."
+                f"{type(self).__name__}.supports_search={type(self).supports_search} "
+                f"is inconsistent with search(): search() is "
+                f"{'overridden' if search_overridden else 'inherited (not implemented)'}. "
+                f"Set supports_search={search_overridden} on the backend to match."
+            )
+        if self.mode == "tool" and not search_overridden:
+            raise ValueError(
+                f"memory mode='tool' requires a backend that implements search(), but {type(self).__name__} does not override search(). Use mode='middleware' or a backend that overrides search() (and sets supports_search=True)."
             )
         return self
 

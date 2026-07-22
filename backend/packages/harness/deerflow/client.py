@@ -1264,15 +1264,24 @@ class DeerFlowClient:
 
         Returns:
             The reloaded memory data dict.
+
+        Backends without a reload concept (e.g. noop) fall back to
+        ``get_memory``; a backend that exposes neither (a minimal ``add`` +
+        ``get_context`` backend) raises ``NotImplementedError`` so the caller
+        sees a clean unsupported-op error instead of an uncaught propagation.
         """
         from deerflow.agents.memory import get_memory_manager
 
         manager = get_memory_manager()
+        user_id = get_effective_user_id()
         try:
-            return manager.reload_memory(user_id=get_effective_user_id())
+            return manager.reload_memory(user_id=user_id)
         except NotImplementedError:
-            # Non-DeerMem backends have no reload concept; return current memory.
-            return manager.get_memory(user_id=get_effective_user_id())
+            pass  # no reload concept; fall back to current memory below
+        try:
+            return manager.get_memory(user_id=user_id)
+        except NotImplementedError:
+            raise NotImplementedError(f"reload_memory not supported by memory backend {type(manager).__name__}: implements neither reload_memory nor get_memory") from None
 
     def clear_memory(self) -> dict:
         """Clear all persisted memory data."""

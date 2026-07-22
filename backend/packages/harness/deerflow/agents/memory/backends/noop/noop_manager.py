@@ -39,7 +39,7 @@ disabling memory without touching ``enabled``, and as a baseline.
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any, ClassVar, Literal
 
 from pydantic import PrivateAttr
 
@@ -73,6 +73,11 @@ class NoopMemoryManager(MemoryManager):
     # etc. storage_path comes from here (host-injected) -- never import a
     # deer-flow path helper.
     _config: Any = PrivateAttr(default=None)
+
+    # noop overrides search() to return [] (its "store/recall nothing" design --
+    # every read returns empty, never raises), so it is search-capable; the flag
+    # is True to match the override (the invariant requires flag == override).
+    supports_search: ClassVar[bool] = True
 
     def model_post_init(self, __context: Any) -> None:
         self._config = NoopConfig.from_backend_config(self.backend_config)
