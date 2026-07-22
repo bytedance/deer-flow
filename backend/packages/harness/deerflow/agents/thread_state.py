@@ -1,9 +1,16 @@
-from collections.abc import Mapping
-from typing import Annotated, NotRequired, TypedDict
+import copy
+from collections.abc import Mapping, Sequence
+from functools import cache
+from typing import Annotated, Any, NotRequired, TypedDict, get_type_hints
 
 from langchain.agents import AgentState
+from langchain_core.messages import AnyMessage
+from langgraph.channels import DeltaChannel
+from langgraph.graph.message import add_messages
 
+import deerflow.checkpoint_patches as _checkpoint_patches  # noqa: F401 - import-time saver fixes
 from deerflow.agents.goal_state import GoalState
+from deerflow.config.database_config import CheckpointChannelMode
 from deerflow.subagents.status_contract import SUBAGENT_STATUS_VALUES
 
 
@@ -249,3 +256,67 @@ class ThreadState(AgentState):
     delegations: Annotated[list[DelegationEntry], merge_delegations]
     skill_context: Annotated[list[SkillEntry], merge_skill_context]
     summary_text: NotRequired[str | None]
+
+
+def merge_message_writes(state: list[AnyMessage], writes: Sequence[Any]) -> list[AnyMessage]:
+    result = list(state)
+    for write in writes:
+        result = list(add_messages(result, write))
+    return result
+
+
+DELTA_MESSAGES_FIELD = Annotated[
+    list[AnyMessage],
+    DeltaChannel(merge_message_writes, snapshot_frequency=1000),
+]
+
+
+class DeltaThreadState(ThreadState):
+    messages: DELTA_MESSAGES_FIELD
+
+
+THREAD_STATE_REDUCER_FIELDS = frozenset(
+    {
+        "messages",
+        "sandbox",
+        "artifacts",
+        "todos",
+        "goal",
+        "viewed_images",
+        "promoted",
+        "delegations",
+        "skill_context",
+    }
+)
+
+
+def get_thread_state_schema(mode: CheckpointChannelMode) -> type:
+    return DeltaThreadState if mode == "delta" else ThreadState
+
+
+@cache
+def adapt_state_schema_for_mode(schema: type, mode: CheckpointChannelMode) -> type:
+    if mode == "full":
+        return schema
+    annotations = get_type_hints(schema, include_extras=True)
+    annotations["messages"] = DELTA_MESSAGES_FIELD
+    return TypedDict(
+        f"Delta{schema.__module__.replace('.', '_')}_{schema.__name__}",
+        annotations,
+        total=getattr(schema, "__total__", True),
+    )
+
+
+def normalize_middleware_state_schemas(middleware: Sequence[Any], mode: CheckpointChannelMode) -> list[Any]:
+    if mode == "full":
+        return list(middleware)
+    normalized = []
+    for item in middleware:
+        schema = getattr(item, "state_schema", None)
+        if schema is None:
+            normalized.append(item)
+            continue
+        adapted = copy.copy(item)
+        adapted.state_schema = adapt_state_schema_for_mode(schema, mode)
+        normalized.append(adapted)
+    return normalized

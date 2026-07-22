@@ -508,6 +508,7 @@ class TestModeGating:
             memory=MemoryConfig(enabled=True, mode="tool"),
             skills=SimpleNamespace(deferred_discovery=False, container_path="/tmp/skills"),
             tool_search=SimpleNamespace(enabled=False, auto_promote_top_k=0),
+            database=SimpleNamespace(checkpoint_channel_mode="full"),
         )
 
         agent_kwargs = lead_agent_module._make_lead_agent({"configurable": {"agent_name": "test-agent"}}, app_config=app_config)
@@ -540,6 +541,7 @@ class TestModeGating:
             memory=MemoryConfig(enabled=True, mode="tool"),
             skills=SimpleNamespace(deferred_discovery=False, container_path="/tmp/skills"),
             tool_search=SimpleNamespace(enabled=False, auto_promote_top_k=0),
+            database=SimpleNamespace(checkpoint_channel_mode="full"),
         )
 
         agent_kwargs = lead_agent_module._make_lead_agent({"configurable": {"agent_name": "test-agent"}}, app_config=app_config)

@@ -2,17 +2,14 @@
 
 from __future__ import annotations
 
-import hashlib
 from dataclasses import dataclass
 from types import SimpleNamespace
-from typing import Any
 
-from langgraph.checkpoint.base import uuid6
+from langgraph.types import Overwrite
 
 from deerflow.agents.middlewares.summarization_middleware import DeerFlowSummarizationMiddleware, create_summarization_middleware
 from deerflow.config.app_config import AppConfig, get_app_config
-from deerflow.runtime.goal import _call_checkpointer_method, _next_channel_version
-from deerflow.utils.time import now_iso
+from deerflow.runtime.checkpoint_state import CheckpointStateAccessor
 
 
 class ContextCompactionDisabled(RuntimeError):
@@ -48,15 +45,8 @@ def _create_compaction_middleware(
     return middleware
 
 
-def _checkpoint_namespace(checkpoint_tuple: Any) -> str:
-    config = getattr(checkpoint_tuple, "config", {}) or {}
-    configurable = config.get("configurable", {}) if isinstance(config, dict) else {}
-    checkpoint_ns = configurable.get("checkpoint_ns", "") if isinstance(configurable, dict) else ""
-    return checkpoint_ns if isinstance(checkpoint_ns, str) else ""
-
-
 async def compact_thread_context(
-    checkpointer: Any,
+    accessor: CheckpointStateAccessor,
     thread_id: str,
     *,
     keep: tuple[str, int | float] | None = None,
@@ -70,13 +60,13 @@ async def compact_thread_context(
     middleware = _create_compaction_middleware(app_config=resolved_app_config, keep=keep)
 
     read_config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
-    checkpoint_tuple = await _call_checkpointer_method(checkpointer, "aget_tuple", "get_tuple", read_config)
-    if checkpoint_tuple is None:
+    snapshot = await accessor.aget(read_config)
+    snapshot_config = snapshot.config or {}
+    checkpoint_id = snapshot_config.get("configurable", {}).get("checkpoint_id")
+    if not checkpoint_id:
         raise LookupError(f"Thread {thread_id} checkpoint not found")
 
-    checkpoint: dict[str, Any] = dict(getattr(checkpoint_tuple, "checkpoint", {}) or {})
-    metadata: dict[str, Any] = dict(getattr(checkpoint_tuple, "metadata", {}) or {})
-    channel_values: dict[str, Any] = dict(checkpoint.get("channel_values", {}) or {})
+    channel_values = snapshot.values or {}
     messages = channel_values.get("messages")
     if not isinstance(messages, list) or not messages:
         return ThreadCompactionResult(thread_id=thread_id, compacted=False, reason="not_enough_messages")
@@ -94,42 +84,15 @@ async def compact_thread_context(
     if result is None:
         return ThreadCompactionResult(thread_id=thread_id, compacted=False, reason="not_enough_messages")
 
-    channel_values["messages"] = list(result.preserved_messages)
-    channel_values["summary_text"] = result.summary_text
-    checkpoint["channel_values"] = channel_values
-
-    channel_versions = dict(checkpoint.get("channel_versions", {}) or {})
-    new_versions: dict[str, Any] = {}
-    for channel in ("messages", "summary_text"):
-        next_version = _next_channel_version(checkpointer, channel_versions.get(channel))
-        channel_versions[channel] = next_version
-        new_versions[channel] = next_version
-    checkpoint["channel_versions"] = channel_versions
-    checkpoint["id"] = str(uuid6())
-    checkpoint["ts"] = now_iso()
-
-    metadata["source"] = "update"
-    metadata["updated_at"] = now_iso()
-    prev_step = metadata.get("step")
-    metadata["step"] = (prev_step + 1) if isinstance(prev_step, int) else 1
-    metadata["writes"] = {
-        "manual_compaction": {
-            "messages": {
-                "removed": len(result.messages_to_summarize),
-                "preserved": len(result.preserved_messages),
-            },
-            "summary_text": {
-                "sha256": hashlib.sha256(result.summary_text.encode("utf-8")).hexdigest(),
-                "chars": len(result.summary_text),
-            },
-        }
-    }
-
-    write_config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": _checkpoint_namespace(checkpoint_tuple)}}
-    new_config = await _call_checkpointer_method(checkpointer, "aput", "put", write_config, checkpoint, metadata, new_versions)
-    new_checkpoint_id = None
-    if isinstance(new_config, dict):
-        new_checkpoint_id = new_config.get("configurable", {}).get("checkpoint_id")
+    updated_config = await accessor.aupdate(
+        snapshot.config,
+        {
+            "messages": Overwrite(list(result.preserved_messages)),
+            "summary_text": result.summary_text,
+        },
+        as_node="manual_compaction",
+    )
+    new_checkpoint_id = updated_config.get("configurable", {}).get("checkpoint_id")
 
     return ThreadCompactionResult(
         thread_id=thread_id,

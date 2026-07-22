@@ -35,7 +35,6 @@ import {
   extractReasoningContentFromMessage,
   findToolCallResult,
 } from "@/core/messages/utils";
-import { useRehypeSplitWordsIntoSpans } from "@/core/rehype";
 import { extractTitleFromMarkdown } from "@/core/utils/markdown";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
@@ -121,7 +120,6 @@ function MessageGroupComponent({
       return filteredSteps[filteredSteps.length - 1];
     }
   }, [lastToolCallStep, steps]);
-  const rehypePlugins = useRehypeSplitWordsIntoSpans(isLoading);
   const firstEligibleDebugSummaryStepIndexByMessageId = useMemo(() => {
     const firstIndices = new Map<string, number>();
 
@@ -242,13 +240,7 @@ function MessageGroupComponent({
     <ChainOfThoughtStep
       key={step.id}
       icon={MessageSquareTextIcon}
-      label={
-        <MarkdownContent
-          content={step.content}
-          isLoading={isLoading}
-          rehypePlugins={rehypePlugins}
-        />
-      }
+      label={<MarkdownContent content={step.content} isLoading={isLoading} />}
     ></ChainOfThoughtStep>
   );
 
@@ -269,7 +261,6 @@ function MessageGroupComponent({
             <MarkdownContent
               content={step.reasoning ?? ""}
               isLoading={isLoading}
-              rehypePlugins={rehypePlugins}
             />
           }
         ></ChainOfThoughtStep>,
@@ -390,7 +381,6 @@ function MessageGroupComponent({
                   <MarkdownContent
                     content={lastReasoningStep.reasoning ?? ""}
                     isLoading={isLoading}
-                    rehypePlugins={rehypePlugins}
                   />
                 }
               ></ChainOfThoughtStep>

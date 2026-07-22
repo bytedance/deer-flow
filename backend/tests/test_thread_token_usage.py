@@ -509,15 +509,13 @@ async def test_load_checkpoint_messages_returns_raw_promoted_entry():
 
     msg = HumanMessage(content="hi")
     promoted = {"catalog_hash": "abc", "names": ["mcp_a", "mcp_b", "mcp_a"]}
+    snapshot = SimpleNamespace(values={"messages": [msg], "promoted": promoted}, config={})
+    accessor = SimpleNamespace(aget=AsyncMock(return_value=snapshot))
+    config = {"configurable": {"thread_id": "t1", "checkpoint_ns": ""}}
 
-    class _Tuple:
-        checkpoint = {"channel_values": {"messages": [msg], "promoted": promoted}}
+    messages, result, checkpoint_id = await context_usage._load_checkpoint_messages(accessor, config)
 
-    class _Chk:
-        async def aget_tuple(self, _config):
-            return _Tuple()
-
-    messages, result, checkpoint_id = await context_usage._load_checkpoint_messages(_Chk(), "t1")
+    accessor.aget.assert_awaited_once_with(config)
     assert messages == [msg]
     assert result == promoted  # raw, untouched; dedup happens in _effective_promoted_names
     assert checkpoint_id.startswith("snapshot:")
@@ -526,29 +524,28 @@ async def test_load_checkpoint_messages_returns_raw_promoted_entry():
 @pytest.mark.asyncio
 async def test_load_checkpoint_messages_returns_none_when_missing():
     """No promoted channel (or non-dict) -> None."""
+    snapshot = SimpleNamespace(values={"messages": []}, config={})
+    accessor = SimpleNamespace(aget=AsyncMock(return_value=snapshot))
+    config = {"configurable": {"thread_id": "t1", "checkpoint_ns": ""}}
 
-    class _Tuple:
-        checkpoint = {"channel_values": {"messages": []}}
+    _messages, promoted, checkpoint_id = await context_usage._load_checkpoint_messages(accessor, config)
 
-    class _Chk:
-        async def aget_tuple(self, _config):
-            return _Tuple()
-
-    _messages, promoted, checkpoint_id = await context_usage._load_checkpoint_messages(_Chk(), "t1")
     assert promoted is None
     assert checkpoint_id.startswith("snapshot:")
 
 
 @pytest.mark.asyncio
 async def test_load_checkpoint_messages_uses_checkpoint_id():
-    class _Tuple:
-        checkpoint = {"id": "checkpoint-7", "channel_values": {"messages": []}}
+    snapshot = SimpleNamespace(
+        values={"messages": []},
+        config={"configurable": {"thread_id": "t1", "checkpoint_id": "checkpoint-7"}},
+    )
+    accessor = SimpleNamespace(aget=AsyncMock(return_value=snapshot))
 
-    class _Chk:
-        async def aget_tuple(self, _config):
-            return _Tuple()
-
-    _messages, _promoted, checkpoint_id = await context_usage._load_checkpoint_messages(_Chk(), "t1")
+    _messages, _promoted, checkpoint_id = await context_usage._load_checkpoint_messages(
+        accessor,
+        {"configurable": {"thread_id": "t1", "checkpoint_ns": ""}},
+    )
 
     assert checkpoint_id == "checkpoint-7"
 
@@ -1797,15 +1794,18 @@ def test_bootstrap_context_ignores_custom_agent_metadata_and_uses_runtime_defaul
 
 @pytest.mark.asyncio
 async def test_context_rendering_is_offloaded_from_event_loop(monkeypatch):
-    checkpointer = MagicMock()
+    accessor = MagicMock()
+    checkpoint_config = {"configurable": {"thread_id": "thread-1", "checkpoint_ns": ""}}
     messages = [HumanMessage(content="hello")]
     counts = _kwargs(max_context_tokens=10_000, messages_tokens=4)
-    monkeypatch.setattr(context_usage, "get_checkpointer", lambda _request: checkpointer)
+    build_accessor = AsyncMock(return_value=(accessor, checkpoint_config))
+    monkeypatch.setattr(context_usage, "build_thread_checkpoint_state_accessor", build_accessor)
     monkeypatch.setattr(context_usage, "get_config", lambda: SimpleNamespace())
+    load_checkpoint = AsyncMock(return_value=(messages, None, "checkpoint-1"))
     monkeypatch.setattr(
         context_usage,
         "_load_checkpoint_messages",
-        AsyncMock(return_value=(messages, None, "checkpoint-1")),
+        load_checkpoint,
     )
     monkeypatch.setattr(
         context_usage,
@@ -1820,6 +1820,8 @@ async def test_context_rendering_is_offloaded_from_event_loop(monkeypatch):
 
     assert payload is not None
     assert payload["used_tokens"] == 4
+    build_accessor.assert_awaited_once_with(ANY, thread_id="thread-1")
+    load_checkpoint.assert_awaited_once_with(accessor, checkpoint_config)
     get_counts.assert_awaited_once_with(
         ANY,
         messages,
@@ -1833,9 +1835,14 @@ async def test_context_rendering_is_offloaded_from_event_loop(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_context_rendering_overload_returns_unknown_usage(monkeypatch):
-    checkpointer = MagicMock()
+    accessor = MagicMock()
+    checkpoint_config = {"configurable": {"thread_id": "thread-1", "checkpoint_ns": ""}}
     messages = [HumanMessage(content="hello")]
-    monkeypatch.setattr(context_usage, "get_checkpointer", lambda _request: checkpointer)
+    monkeypatch.setattr(
+        context_usage,
+        "build_thread_checkpoint_state_accessor",
+        AsyncMock(return_value=(accessor, checkpoint_config)),
+    )
     monkeypatch.setattr(context_usage, "get_config", lambda: SimpleNamespace())
     monkeypatch.setattr(
         context_usage,

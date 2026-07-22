@@ -525,6 +525,11 @@ async def write_thread_goal(
         "configurable": {
             "thread_id": thread_id,
             "checkpoint_ns": "",
+            # Parent the new checkpoint to the one it was derived from.
+            # Without this the saver stores a parentless checkpoint, which
+            # severs Delta-channel replay ancestry (and truncates history
+            # walks in full mode too).
+            "checkpoint_id": _checkpoint_id_from_tuple(checkpoint_tuple),
         }
     }
     await _call_checkpointer_method(checkpointer, "aput", "put", write_config, checkpoint, metadata, {"goal": next_version})

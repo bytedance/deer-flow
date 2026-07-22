@@ -26,7 +26,8 @@ from typing import Any
 
 from fastapi import HTTPException, Request
 
-from app.gateway.deps import get_checkpointer, get_config, get_thread_store
+from app.gateway.deps import get_config, get_thread_store
+from app.gateway.services import build_thread_checkpoint_state_accessor
 
 logger = logging.getLogger(__name__)
 
@@ -551,23 +552,27 @@ def _checkpoint_cache_token(checkpoint: dict[str, Any], messages: list[Any], pro
     return f"snapshot:{hashlib.sha256(serialized.encode()).hexdigest()}"
 
 
-async def _load_checkpoint_messages(checkpointer: Any, thread_id: str) -> tuple[list[Any], dict[str, Any] | None, str]:
-    """Load messages and the raw promoted-tool entry from the thread checkpoint.
+async def _load_checkpoint_messages(accessor: Any, config: dict[str, Any]) -> tuple[list[Any], dict[str, Any] | None, str]:
+    """Load messages and the raw promoted-tool entry from materialized state.
 
     Returns ``(messages, promoted, checkpoint_token)``. ``promoted`` is the raw
     ``{"catalog_hash", "names"}`` dict persisted by ``tool_search`` (or ``None``);
     it is scoped by catalog hash later in :func:`_split_tools` so a stale
     promotion from MCP-config drift cannot inflate the active count. The stable
-    checkpoint token keys the bounded per-turn render cache.
+    checkpoint token keys the bounded per-turn render cache. Reading through a
+    ``CheckpointStateAccessor`` is required because delta-mode checkpoints do
+    not store complete raw ``channel_values``.
     """
-    checkpoint_tuple = await checkpointer.aget_tuple({"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}})
-    if checkpoint_tuple is None:
-        return [], None, _checkpoint_cache_token({}, [], None)
-    checkpoint = getattr(checkpoint_tuple, "checkpoint", {}) or {}
-    channel_values = checkpoint.get("channel_values", {}) if isinstance(checkpoint, dict) else {}
-    messages = list(channel_values.get("messages") or [])
-    promoted = channel_values.get("promoted")
+    snapshot = await accessor.aget(config)
+    values = getattr(snapshot, "values", None) or {}
+    values = values if isinstance(values, dict) else {}
+    messages = list(values.get("messages") or [])
+    promoted = values.get("promoted")
     promoted = promoted if isinstance(promoted, dict) else None
+    snapshot_config = getattr(snapshot, "config", None) or {}
+    configurable = snapshot_config.get("configurable", {}) if isinstance(snapshot_config, dict) else {}
+    checkpoint_id = configurable.get("checkpoint_id") if isinstance(configurable, dict) else None
+    checkpoint = {"id": checkpoint_id} if isinstance(checkpoint_id, str) else {}
     return messages, promoted, _checkpoint_cache_token(checkpoint, messages, promoted)
 
 
@@ -1270,17 +1275,13 @@ async def build_context_usage(request: Request, thread_id: str, run_store: Any) 
     and omit the field from the response.
     """
     try:
-        checkpointer = get_checkpointer(request)
-    except HTTPException:
-        return None
-
-    try:
         app_config = get_config()
     except HTTPException:
         app_config = None
 
     try:
-        messages, promoted, checkpoint_token = await _load_checkpoint_messages(checkpointer, thread_id)
+        accessor, checkpoint_config = await build_thread_checkpoint_state_accessor(request, thread_id=thread_id)
+        messages, promoted, checkpoint_token = await _load_checkpoint_messages(accessor, checkpoint_config)
     except Exception:
         logger.warning("Failed to load checkpoint for thread %s", thread_id, exc_info=True)
         return None

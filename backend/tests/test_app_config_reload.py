@@ -13,6 +13,7 @@ from deerflow.config.acp_config import load_acp_config_from_dict
 from deerflow.config.agents_api_config import get_agents_api_config, load_agents_api_config_from_dict
 from deerflow.config.app_config import AppConfig, get_app_config, reset_app_config
 from deerflow.config.checkpointer_config import get_checkpointer_config, load_checkpointer_config_from_dict
+from deerflow.config.database_config import DatabaseConfig
 from deerflow.config.guardrails_config import get_guardrails_config, load_guardrails_config_from_dict
 from deerflow.config.memory_config import get_memory_config, load_memory_config_from_dict
 from deerflow.config.stream_bridge_config import get_stream_bridge_config, load_stream_bridge_config_from_dict
@@ -102,6 +103,20 @@ def _write_config_with_sections(path: Path, sections: dict | None = None) -> Non
 
 def _write_extensions_config(path: Path) -> None:
     path.write_text(json.dumps({"mcpServers": {}, "skills": {}}), encoding="utf-8")
+
+
+def test_checkpoint_channel_mode_defaults_to_full() -> None:
+    assert DatabaseConfig().checkpoint_channel_mode == "full"
+
+
+@pytest.mark.parametrize("mode", ["full", "delta"])
+def test_checkpoint_channel_mode_accepts_supported_values(mode: str) -> None:
+    assert DatabaseConfig(checkpoint_channel_mode=mode).checkpoint_channel_mode == mode
+
+
+def test_checkpoint_channel_mode_rejects_unknown_value() -> None:
+    with pytest.raises(ValidationError):
+        DatabaseConfig(checkpoint_channel_mode="auto")
 
 
 def test_config_example_does_not_enable_empty_extensions_block_by_default():
