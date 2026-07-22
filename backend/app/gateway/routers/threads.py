@@ -366,6 +366,7 @@ class ThreadCompactRequest(BaseModel):
     force: bool = Field(default=True, description="Run compaction even if automatic summarization thresholds are not met")
     keep: ContextSize | None = Field(default=None, description="Optional retention policy for this compaction only")
     agent_name: str | None = Field(default=None, max_length=128, description="Optional custom agent name for memory attribution")
+    model_name: str | None = Field(default=None, max_length=128, description="Optional model to summarize with; resolved request override -> custom-agent model -> default, mirroring run model selection")
 
 
 class ThreadCompactResponse(BaseModel):
@@ -993,6 +994,7 @@ async def compact_thread(thread_id: str, body: ThreadCompactRequest, request: Re
                 force=body.force,
                 user_id=get_effective_user_id(),
                 agent_name=body.agent_name,
+                model_name=body.model_name,
             )
     except _CHECKPOINT_MODE_ERRORS as exc:
         raise _checkpoint_mode_http_error(exc, thread_id) from exc

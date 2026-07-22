@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass
 from types import SimpleNamespace
@@ -49,29 +50,49 @@ def _create_compaction_middleware(
     return middleware
 
 
-def _resolve_thread_model_name(agent_name: str | None, app_config: AppConfig) -> str | None:
-    """Resolve the model a thread's agent runs with, for null-model summarization.
+def _safe_load_agent_config(agent_name: str, user_id: str | None):
+    """Load a custom agent's config, returning ``None`` on any failure.
 
-    Manual ``/compact`` does not execute the agent, so there is no live runtime to
-    read a model from; mirror the lead-agent resolution (custom agent's configured
-    model, else the default) so the summary is generated with the thread's own model
-    rather than ``config.models[0]``.
+    A missing / unparseable agent config must not fail compaction; the run model is a
+    best-effort optimization and the default is a safe fallback. The caller runs this
+    off the event loop via ``asyncio.to_thread``, so the strict blocking-IO detector
+    does not flag the filesystem read and the broad ``except`` here cannot mask a
+    ``BlockingError`` raised on the loop.
     """
-    default = app_config.models[0].name if getattr(app_config, "models", None) else None
-    if not agent_name:
-        return default
     from deerflow.config.agents_config import load_agent_config
 
     try:
-        agent_config = load_agent_config(agent_name)
+        return load_agent_config(agent_name, user_id=user_id)
     except Exception:
-        # A missing/unparseable agent config must not fail compaction; the run model
-        # is a best-effort optimization and the default is a safe fallback.
         logger.warning("Could not load agent config for %r; using the default model for summarization", agent_name, exc_info=True)
-        return default
-    requested = agent_config.model if agent_config and agent_config.model else None
-    if requested and app_config.get_model_config(requested):
-        return requested
+        return None
+
+
+async def _aresolve_thread_model_name(
+    model_name: str | None,
+    agent_name: str | None,
+    user_id: str | None,
+    app_config: AppConfig,
+) -> str | None:
+    """Resolve the model a thread should summarize with, mirroring lead resolution.
+
+    Precedence matches ``lead_agent._resolve_model_name``: an explicit request model
+    override (validated against configured models) wins, else the thread's custom-agent
+    configured model, else ``config.models[0]``. Manual ``/compact`` does not execute
+    the agent, so there is no live runtime carrying the selected model — the caller
+    (route / client) supplies it as ``model_name`` the same way a normal run submits
+    ``context.model_name``. The custom-agent config read happens only when no request
+    model was supplied, runs off the event loop, and passes the owning ``user_id`` so
+    the per-user agent directory resolves.
+    """
+    default = app_config.models[0].name if getattr(app_config, "models", None) else None
+    candidate = model_name
+    if not candidate and agent_name:
+        agent_config = await asyncio.to_thread(_safe_load_agent_config, agent_name, user_id)
+        if agent_config and agent_config.model:
+            candidate = agent_config.model
+    if candidate and app_config.get_model_config(candidate):
+        return candidate
     return default
 
 
@@ -83,11 +104,12 @@ async def compact_thread_context(
     force: bool = True,
     user_id: str | None = None,
     agent_name: str | None = None,
+    model_name: str | None = None,
     app_config: AppConfig | None = None,
 ) -> ThreadCompactionResult:
     """Summarize old messages in a thread and write a compacted checkpoint."""
     resolved_app_config = app_config or get_app_config()
-    run_model_name = _resolve_thread_model_name(agent_name, resolved_app_config)
+    run_model_name = await _aresolve_thread_model_name(model_name, agent_name, user_id, resolved_app_config)
     middleware = _create_compaction_middleware(app_config=resolved_app_config, keep=keep, run_model_name=run_model_name)
 
     read_config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}

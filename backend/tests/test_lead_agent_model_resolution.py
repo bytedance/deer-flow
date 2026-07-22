@@ -1013,7 +1013,10 @@ def test_create_summarization_middleware_uses_configured_model_alias(monkeypatch
     fake_model.with_config.assert_called_once_with(tags=["middleware:summarize"])
 
 
-def test_create_summarization_middleware_omits_model_name_when_unconfigured(monkeypatch):
+def test_create_summarization_middleware_uses_default_when_unconfigured(monkeypatch):
+    """Null summary config with no supplied run model builds the anchor from the default
+    model — now with an explicit name rather than relying on create_chat_model's internal
+    default, so the factory has no implicit models[0] dependency. Same resulting model."""
     app_config = _make_app_config([_make_model("default-model", supports_thinking=False)])
     app_config.summarization = SummarizationConfig(enabled=True, model_name=None)
     app_config.memory = MemoryConfig(enabled=False)
@@ -1031,10 +1034,11 @@ def test_create_summarization_middleware_omits_model_name_when_unconfigured(monk
 
     middleware = lead_agent_module._create_summarization_middleware(app_config=app_config)
 
-    assert "name" not in captured
+    assert captured["name"] == "default-model"
     assert captured["thinking_enabled"] is False
     assert captured["app_config"] is app_config
     assert middleware["model"] is fake_model
+    assert middleware["anchor_model_name"] == "default-model"
 
 
 def test_create_summarization_middleware_threads_run_model_name(monkeypatch):

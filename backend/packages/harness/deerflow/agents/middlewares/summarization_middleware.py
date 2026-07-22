@@ -104,16 +104,17 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         app_config: Any | None = None,
         configured_model_name: str | None = None,
         run_model_name: str | None = None,
+        anchor_model_name: str | None = _UNSET,  # type: ignore[assignment]
         **kwargs,
     ) -> None:
         super().__init__(*args, **kwargs)
         self._before_summarization_hooks = before_summarization or []
-        # Model-ownership state. The summary model is built once at graph build time,
-        # but the model that actually executes the run is selected per run and is the
-        # authoritative source of truth, so the caller (lead / subagent / manual
-        # builders) supplies it directly as ``run_model_name`` instead of the
-        # middleware re-deriving it from ``runtime.context`` / ``get_config()`` — those
-        # fields do not carry a custom agent's or a subagent's resolved model.
+        # Model-ownership state. The model that actually executes the run is selected
+        # per run and is the authoritative source of truth, so the caller (lead /
+        # subagent / manual builders) supplies it directly as ``run_model_name``
+        # instead of the middleware re-deriving it from ``runtime.context`` /
+        # ``get_config()`` — those fields do not carry a custom agent's or a subagent's
+        # resolved model.
         #
         # ``configured_model_name`` is the explicitly configured summary model
         # (``None`` => summarize with the run's own model). ``run_model_name`` is the
@@ -129,14 +130,19 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         # with TAG_NOSTREAM so the streaming handler skips it.
         # Keep self.model untagged so the parent's profile / ls_params inspection still works.
         self._summary_model = self._tag_nostream(self.model)
-        # The name ``self.model`` (hence ``self._summary_model``) was built from: the
-        # explicit summary model, else the default. The run model reuses this instance
-        # when it resolves to the same name instead of rebuilding it.
-        self._primary_built_name = configured_model_name or self._default_model_name()
-        # Lazily-built nostream model for the run's own model. Built at most once per
-        # instance, and only when actually needed (the null-case primary, or the
-        # explicit-case fallback after the primary fails).
-        self._run_summary_model_cache: Any = _UNSET
+        # ``self.model`` is the pre-built *anchor* model: it drives the parent's token
+        # counter / profile inspection and is reused verbatim by generation when a
+        # candidate matches its name. The factory builds it guarded and passes its name
+        # explicitly; direct construction (tests) mirrors the old factory choice
+        # (configured model, else default) so the passed ``model`` is the primary.
+        if anchor_model_name is _UNSET:
+            self._anchor_model_name = configured_model_name or self._default_model_name()
+        else:
+            self._anchor_model_name = anchor_model_name
+        # Nostream generation models built lazily by name and cached (None = a build
+        # that failed, so a broken candidate config is not retried every turn and does
+        # not escape the fail-open boundary).
+        self._model_cache: dict[str | None, Any] = {}
 
     def _tag_nostream(self, model: Any) -> Any:
         """Return a copy of ``model`` carrying TAG_NOSTREAM without clobbering tags.
@@ -155,49 +161,55 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         models = getattr(self._app_config, "models", None)
         return models[0].name if models else None
 
-    def _run_summary_model(self) -> Any | None:
-        """The nostream summary model for the run's own model, built once and guarded.
+    def _generation_candidate_names(self) -> list[str | None]:
+        """Ordered summary-generation candidates by name (deduplicated).
 
-        Returns ``None`` when there is no resolvable run model (no ``run_model_name``
-        and no default to fall back to) or when its construction fails. Construction is
-        guarded and cached so a broken run-model config cannot escape the automatic
-        failure boundary or be retried every turn.
+        Explicit summary model: the configured model first, then the run's own model
+        as a distinct fallback. ``model_name: null``: the run's own model only — its
+        construction is the primary, so there is no eager dependency on
+        ``config.models[0]`` (a bare default is used only when no run model was
+        resolved). A ``None`` entry means "let ``create_chat_model`` pick the default",
+        which only occurs when nothing resolves a name.
         """
-        if self._run_summary_model_cache is _UNSET:
-            try:
-                self._run_summary_model_cache = self._build_run_summary_model()
-            except Exception:
-                logger.exception("Failed to build the run-model summary fallback")
-                self._run_summary_model_cache = None
-        return self._run_summary_model_cache
+        default = self._default_model_name()
+        if self._configured_summary_model_name is not None:
+            names = [self._configured_summary_model_name, self._run_model_name or default]
+        else:
+            names = [self._run_model_name or default]
+        deduped: list[str | None] = []
+        seen: set[str | None] = set()
+        for name in names:
+            if name in seen:
+                continue
+            seen.add(name)
+            deduped.append(name)
+        return deduped
 
-    def _build_run_summary_model(self) -> Any | None:
-        name = self._run_model_name or self._default_model_name()
-        if name is None:
-            return None
-        if name == self._primary_built_name:
-            # The run model is the model self.model was already built from; reuse it
-            # instead of building a second identical nostream copy.
+    def _model_for(self, name: str | None) -> Any | None:
+        """The nostream summary model for ``name``, built lazily and guarded.
+
+        Returns the pre-built anchor when ``name`` matches it (no rebuild), otherwise
+        constructs and caches. A construction failure is caught and cached as ``None``
+        so a broken candidate config never escapes the fail-open boundary, is never
+        retried this turn, and still lets the next candidate run.
+        """
+        if name == self._anchor_model_name:
             return self._summary_model
-        model = create_chat_model(
-            name=name,
-            thinking_enabled=False,
-            app_config=self._app_config,
-            attach_tracing=False,
-        )
-        return self._tag_nostream(model.with_config(tags=["middleware:summarize"]))
-
-    def _has_distinct_run_fallback(self) -> bool:
-        """Whether a run-model fallback distinct from the primary exists — a name-only
-        check that does NOT build the model.
-
-        Used by the explicit-summary path to decide whether the primary is the last
-        candidate before invoking it (honest logging) while still deferring the actual
-        fallback construction until the primary has failed. When the run model resolves
-        to the configured summary model there is nothing to fall back to.
-        """
-        name = self._run_model_name or self._default_model_name()
-        return name is not None and name != self._primary_built_name
+        if name in self._model_cache:
+            return self._model_cache[name]
+        try:
+            model = create_chat_model(
+                name=name,
+                thinking_enabled=False,
+                app_config=self._app_config,
+                attach_tracing=False,
+            )
+            built = self._tag_nostream(model.with_config(tags=["middleware:summarize"]))
+        except Exception:
+            logger.exception("Failed to build summary model %r; trying the next candidate", name)
+            built = None
+        self._model_cache[name] = built
+        return built
 
     @override
     def _create_summary(self, messages_to_summarize: list[AnyMessage]) -> str | None:
@@ -247,46 +259,45 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         prompt = self._prepare_summary_prompt(messages_to_summarize, previous_summary)
         if prompt is None or prompt in _CANNED_SUMMARIES:
             return prompt
-        if self._configured_summary_model_name is not None:
-            # Explicit summary model generates; on failure fall back to the run's own
-            # model — but only when it is a distinct model (when the run model IS the
-            # configured summary model there is nothing to fall back to, and re-invoking
-            # the same failed model would just burn another call). The fallback is built
-            # lazily *after* the primary fails so a broken fallback config can never skip
-            # a healthy primary.
-            has_fallback = self._has_distinct_run_fallback()
-            text = self._invoke_summary(self._summary_model, prompt, last=not has_fallback)
-            if text is not None or not has_fallback:
+        # Walk the ordered candidates; each attempt owns its full lifecycle (lazy
+        # guarded construction -> invoke -> text extraction -> non-empty validation),
+        # and any failure at any stage falls through to the next candidate. When all
+        # candidates fail the caller leaves compaction state unchanged.
+        names = self._generation_candidate_names()
+        for index, name in enumerate(names):
+            text = self._invoke_summary(self._model_for(name), prompt, last=index == len(names) - 1)
+            if text is not None:
                 return text
-            return self._invoke_summary(self._run_summary_model(), prompt, last=True)
-        # model_name: null — summarize with the model the run actually executes with,
-        # not config.models[0]. Fall back to the build-time model only when the run
-        # model cannot be resolved/built.
-        return self._invoke_summary(self._run_summary_model() or self._summary_model, prompt, last=True)
+        return None
 
     async def _asummarize_with(self, messages_to_summarize: list[AnyMessage], previous_summary: str | None = None) -> str | None:
         """Async counterpart of :meth:`_summarize_with` using the nostream model."""
         prompt = self._prepare_summary_prompt(messages_to_summarize, previous_summary)
         if prompt is None or prompt in _CANNED_SUMMARIES:
             return prompt
-        if self._configured_summary_model_name is not None:
-            has_fallback = self._has_distinct_run_fallback()
-            text = await self._ainvoke_summary(self._summary_model, prompt, last=not has_fallback)
-            if text is not None or not has_fallback:
+        names = self._generation_candidate_names()
+        for index, name in enumerate(names):
+            text = await self._ainvoke_summary(self._model_for(name), prompt, last=index == len(names) - 1)
+            if text is not None:
                 return text
-            return await self._ainvoke_summary(self._run_summary_model(), prompt, last=True)
-        return await self._ainvoke_summary(self._run_summary_model() or self._summary_model, prompt, last=True)
+        return None
 
     def _invoke_summary(self, model: Any | None, prompt: str, *, last: bool = False) -> str | None:
-        """Invoke ``model`` for a summary; ``None`` on error or a blank response."""
+        """Invoke ``model`` for a summary; ``None`` on error or a blank response.
+
+        Text extraction / non-empty validation runs *inside* the try: reading the
+        response's ``.text`` is part of consuming the provider result, so a failing
+        accessor must convert to a candidate failure (fall through) rather than escape
+        the fail-open boundary.
+        """
         if model is None:
             return None
         try:
             response = model.invoke(prompt, config={"metadata": {"lc_source": "summarization"}})
+            return self._checked_summary(response, last)
         except Exception:
             self._log_summary_error(last)
             return None
-        return self._checked_summary(response, last)
 
     async def _ainvoke_summary(self, model: Any | None, prompt: str, *, last: bool = False) -> str | None:
         """Async counterpart of :meth:`_invoke_summary`."""
@@ -294,10 +305,10 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
             return None
         try:
             response = await model.ainvoke(prompt, config={"metadata": {"lc_source": "summarization"}})
+            return self._checked_summary(response, last)
         except Exception:
             self._log_summary_error(last)
             return None
-        return self._checked_summary(response, last)
 
     def _checked_summary(self, response: Any, last: bool) -> str | None:
         summary = self._nonempty_summary(getattr(response, "text", None))
@@ -636,6 +647,31 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
                 logger.exception("before_summarization hook %s failed", hook_name)
 
 
+def _build_summary_anchor(candidate_names: list[str | None], app_config: Any) -> tuple[Any | None, str | None]:
+    """Build the first constructible model among ``candidate_names`` (guarded).
+
+    The returned model is tagged for RunJournal attribution but *not* TAG_NOSTREAM (the
+    middleware wraps a nostream copy). It becomes the parent's token-counter / profile
+    anchor and is reused for generation when a candidate matches its name. A per-name
+    construction failure is swallowed and the next candidate tried, so a broken primary
+    constructor neither breaks agent construction nor skips the healthy run model; a
+    trailing ``None`` name asks ``create_chat_model`` for its own default. Returns
+    ``(None, None)`` when nothing can be constructed.
+    """
+    tried: set[str | None] = set()
+    for name in candidate_names:
+        if name in tried:
+            continue
+        tried.add(name)
+        try:
+            model = create_chat_model(name=name, thinking_enabled=False, app_config=app_config, attach_tracing=False)
+        except Exception:
+            logger.exception("Failed to build summary anchor model %r; trying the next candidate", name)
+            continue
+        return model.with_config(tags=["middleware:summarize"]), name
+    return None, None
+
+
 def create_summarization_middleware(
     *,
     app_config: Any | None = None,
@@ -677,23 +713,25 @@ def create_summarization_middleware(
         else:
             trigger = config.trigger.to_tuple()
 
-    if config.model_name:
-        model = create_chat_model(
-            name=config.model_name,
-            thinking_enabled=False,
-            app_config=resolved_app_config,
-            attach_tracing=False,
-        )
-    else:
-        model = create_chat_model(
-            thinking_enabled=False,
-            app_config=resolved_app_config,
-            attach_tracing=False,
-        )
-    model = model.with_config(tags=["middleware:summarize"])
+    default_name = resolved_app_config.models[0].name if getattr(resolved_app_config, "models", None) else None
+    # Build the anchor (token-counter / profile model, reused for generation) guarded,
+    # rather than eagerly building the configured/default model and letting a broken
+    # constructor escape. Candidates in order: the primary generation model (configured
+    # summary model, else the run's own model), then the run model, then the default,
+    # then ``None`` (create_chat_model's default) as a last resort. So the null case
+    # builds from ``run_model_name`` — not ``config.models[0]`` — and a broken primary
+    # falls through to the healthy run model instead of failing agent construction.
+    primary_name = config.model_name or run_model_name or default_name
+    anchor_model, anchor_name = _build_summary_anchor(
+        [primary_name, run_model_name or default_name, default_name, None],
+        resolved_app_config,
+    )
+    if anchor_model is None:
+        logger.warning("Summarization is enabled but no summary model could be constructed; compaction is unavailable for this build")
+        return None
 
     kwargs: dict[str, Any] = {
-        "model": model,
+        "model": anchor_model,
         "trigger": trigger,
         "keep": keep or config.keep.to_tuple(),
     }
@@ -714,4 +752,5 @@ def create_summarization_middleware(
         app_config=resolved_app_config,
         configured_model_name=config.model_name,
         run_model_name=run_model_name,
+        anchor_model_name=anchor_name,
     )

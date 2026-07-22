@@ -1075,3 +1075,134 @@ def test_before_summarization_hook_not_fired_when_summary_fails(monkeypatch: pyt
     # The run uses the default model, which fails; no distinct fallback in the null case.
     assert middleware.before_model({"messages": _messages()}, _runtime()) is None
     assert captured == []
+
+
+def _factory_app_config(model_names, *, summary_model_name=None):
+    """AppConfig-shaped stub for the factory: summarization enabled + ordered models."""
+    models = [SimpleNamespace(name=name) for name in model_names]
+    return SimpleNamespace(
+        summarization=SummarizationConfig(enabled=True, model_name=summary_model_name),
+        memory=MemoryConfig(enabled=False),
+        models=models,
+        get_model_config=lambda name: next((model for model in models if model.name == name), None),
+    )
+
+
+def test_factory_null_case_anchor_is_run_model_not_models0(monkeypatch):
+    """model_name: null builds the summary model from ``run_model_name``, never
+    config.models[0]. A run on a non-default model whose models[0] provider is broken
+    still gets a working summarization middleware — the factory has no eager models[0]
+    dependency."""
+    built: list = []
+    monkeypatch.setattr("deerflow.agents.middlewares.summarization_middleware.create_chat_model", _tracking_create_chat_model(built))
+
+    middleware = create_summarization_middleware(
+        app_config=_factory_app_config(("models0", "run-model")),
+        keep=("messages", 2),
+        run_model_name="run-model",
+    )
+
+    assert middleware is not None
+    assert built == ["run-model"]  # anchor built from the run model, not models0 / None
+    result = middleware.compact_state({"messages": _messages()}, _runtime(), force=True)
+    assert result is not None
+    assert result.summary_text == "from-run-model"
+
+
+def test_factory_configured_constructor_failure_falls_back_to_run_model(monkeypatch):
+    """A configured summary model whose *constructor* raises must not break middleware
+    creation or skip the healthy run model. The anchor falls through the broken
+    constructor to the run model, and generation summarizes with it (the reviewer's
+    ``configured='broken-summary'`` reproduction)."""
+    built: list = []
+
+    def _factory(*, name=None, thinking_enabled=False, app_config=None, attach_tracing=True, **kwargs):
+        if name == "broken-summary":
+            raise RuntimeError("cannot construct summary provider")
+        model = MagicMock()
+        model.with_config.return_value = model
+        model.invoke.return_value = SimpleNamespace(text=f"from-{name}")
+        model.ainvoke = AsyncMock(return_value=SimpleNamespace(text=f"from-{name}"))
+        built.append(name)
+        return model
+
+    monkeypatch.setattr("deerflow.agents.middlewares.summarization_middleware.create_chat_model", _factory)
+
+    middleware = create_summarization_middleware(
+        app_config=_factory_app_config(("models0", "run-model"), summary_model_name="broken-summary"),
+        keep=("messages", 2),
+        run_model_name="run-model",
+    )
+
+    assert middleware is not None  # a broken configured constructor did not break creation
+    assert "run-model" in built  # the healthy run model was constructed as the anchor
+    result = middleware.compact_state({"messages": _messages()}, _runtime(), force=True)
+    assert result is not None
+    assert result.summary_text == "from-run-model"
+
+
+class _RaisingTextResponse:
+    """A provider response whose ``.text`` accessor fails — a realistic malformed result."""
+
+    @property
+    def text(self):
+        raise ValueError("malformed content blocks")
+
+
+def _text_raises_model() -> MagicMock:
+    model = MagicMock()
+    model.with_config.return_value = model
+    model.invoke.return_value = _RaisingTextResponse()
+    model.ainvoke = AsyncMock(return_value=_RaisingTextResponse())
+    return model
+
+
+def test_text_extraction_failure_falls_back_to_run_model(monkeypatch):
+    """A response whose ``.text`` accessor raises is part of consuming the provider
+    result, so it must be a candidate failure that falls back to the run model — not an
+    exception that escapes automatic compaction."""
+    built: list = []
+    monkeypatch.setattr("deerflow.agents.middlewares.summarization_middleware.create_chat_model", _tracking_create_chat_model(built))
+
+    primary = _text_raises_model()
+    middleware = DeerFlowSummarizationMiddleware(
+        model=primary,
+        trigger=("messages", 4),
+        keep=("messages", 2),
+        token_counter=len,
+        app_config=_app_config(("default-model", "run-model")),
+        configured_model_name="summary-model",
+        run_model_name="run-model",
+    )
+
+    result = middleware.before_model({"messages": _messages()}, _runtime())
+
+    primary.invoke.assert_called_once()  # primary invoked; its .text raised
+    assert built == ["run-model"]  # fell back to the run model
+    assert result is not None
+    assert result["summary_text"] == "from-run-model"
+
+
+@pytest.mark.anyio
+async def test_text_extraction_failure_falls_back_to_run_model_async(monkeypatch):
+    """Async counterpart: a ``.text`` accessor failure falls back to the run model."""
+    built: list = []
+    monkeypatch.setattr("deerflow.agents.middlewares.summarization_middleware.create_chat_model", _tracking_create_chat_model(built))
+
+    primary = _text_raises_model()
+    middleware = DeerFlowSummarizationMiddleware(
+        model=primary,
+        trigger=("messages", 4),
+        keep=("messages", 2),
+        token_counter=len,
+        app_config=_app_config(("default-model", "run-model")),
+        configured_model_name="summary-model",
+        run_model_name="run-model",
+    )
+
+    result = await middleware.abefore_model({"messages": _messages()}, _runtime())
+
+    primary.ainvoke.assert_awaited_once()
+    assert built == ["run-model"]
+    assert result is not None
+    assert result["summary_text"] == "from-run-model"
