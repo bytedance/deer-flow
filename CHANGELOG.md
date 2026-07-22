@@ -49,11 +49,14 @@ This section accumulates work toward the **2.1.0** milestone
   existing file. Set `memory.backend_config.storage_path` to a directory for a
   custom root. ([#4122])
 - **memory:** `memory.mode: tool` with a backend that does not implement
-  `search()` (e.g. `noop`) now fails fast at Gateway startup with a `ValueError`
-  from the `MemoryManager` invariant, instead of starting successfully and
-  silently returning empty results on every `memory_search` call. This is
+  `search()` now fails fast at Gateway startup with a `ValueError` from the
+  `MemoryManager` invariant, instead of starting successfully and silently
+  returning empty results on every `memory_search` call. Both shipping backends
+  implement `search()` (DeerMem retrieves; `noop` returns `[]`), so this only
+  affects a custom backend that onboards without overriding `search()`. It is
   intentional -- silent empties are worse than a loud startup error. Fix: switch
-  to `mode: middleware` or use a search-capable backend. ([#4324])
+  to `mode: middleware` or override `search()` (and set `supports_search=True`).
+  ([#4324])
 
 ### Added
 
