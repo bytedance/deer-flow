@@ -1,7 +1,7 @@
 """Phase-2 (self-contained DeerMem) tests.
 
 Covers: DI construction (owns storage/updater/queue/llm), zero-config defaults,
-``trace_id`` threading to the optional ``tracing_callback``, langfuse being
+``trace_id`` threading to the optional ``callbacks`` hook, langfuse being
 optional, ``hide_from_ui`` default-skip + hook-keep, empty ``storage_class``
 (portable default), and portability -- ``backends/deermem/`` has exactly one
 ``from deerflow`` line (the ABC contract) and can be vendored into another agent
@@ -25,6 +25,7 @@ from deerflow.agents.memory.backends.deermem.deermem.core.message_processing imp
 )
 from deerflow.agents.memory.backends.deermem.deermem.core.storage import FileMemoryStorage
 from deerflow.agents.memory.backends.deermem.deermem.core.updater import _trim_facts_to_max
+from deerflow.agents.memory.manager import MemoryCallbacks
 
 
 @pytest.fixture
@@ -46,8 +47,8 @@ class _FakeLLM:
         return type("R", (), {"content": self._payload})()
 
 
-def _deermem_with_fake_llm(backend_config=None, payload=None) -> DeerMem:
-    dm = DeerMem(backend_config=backend_config)
+def _deermem_with_fake_llm(backend_config=None, payload=None, callbacks=None) -> DeerMem:
+    dm = DeerMem(backend_config=backend_config, callbacks=callbacks)
     fake = _FakeLLM(payload)
     dm._llm = fake
     dm._updater._llm = fake
@@ -61,6 +62,37 @@ def test_di_construction_owns_dependencies():
     # dependencies are wired (DI), not globals:
     assert dm._updater._storage is dm._storage
     assert dm._queue._updater is dm._updater
+
+
+def test_from_config_keeps_backend_config_pure_of_injected_hooks(deermem_data_dir):
+    """Host hooks (should_keep_hidden_message / trace_context_manager / host_llm)
+    arrive as from_config kwargs and are parsed into DeerMemConfig
+    (self._config, PrivateAttr); the instance's backend_config field stays the
+    pure data the host passed (no callables / LLM), so it remains serializable
+    and matches the README contract ("host hooks ... NOT in backend_config")."""
+
+    def _keep(ak):
+        return False
+
+    trace_cm = object()  # sentinel; trace_context_manager is typed Any
+    fake_llm = _FakeLLM()
+    dm = DeerMem.from_config(
+        backend_config={"storage_path": str(deermem_data_dir), "max_facts": 20},
+        mode="middleware",
+        should_keep_hidden_message=_keep,
+        trace_context_manager=trace_cm,
+        host_llm_factory=lambda: fake_llm,
+        callbacks=None,
+    )
+    # hooks reached DeerMemConfig (PrivateAttr) -- wired, not lost
+    assert dm._config.should_keep_hidden_message is _keep
+    assert dm._config.trace_context_manager is trace_cm
+    assert dm._config.host_llm is fake_llm
+    # backend_config field is the pure original data (no injected hooks)
+    assert dm.backend_config == {"storage_path": str(deermem_data_dir), "max_facts": 20}
+    assert "should_keep_hidden_message" not in dm.backend_config
+    assert "trace_context_manager" not in dm.backend_config
+    assert "host_llm" not in dm.backend_config
 
 
 def test_zero_config_defaults_run_non_llm_ops(deermem_data_dir):
@@ -120,13 +152,15 @@ def test_import_empty_summary_sections_replace_existing_summaries_with_complete_
     }
 
 
-def test_trace_id_threads_through_to_tracing_callback(deermem_data_dir):
+def test_trace_id_threads_through_to_callbacks(deermem_data_dir):
+    """trace_id reaches the pre-LLM-call callbacks hook (on_memory_llm_call)."""
     calls = []
 
-    def tracer(cfg, *, thread_id, user_id, trace_id, model_name):
-        calls.append((thread_id, trace_id, model_name))
+    class _RecordingCallbacks(MemoryCallbacks):
+        def on_memory_llm_call(self, invoke_config, *, thread_id, user_id, trace_id, model_name):
+            calls.append((thread_id, trace_id, model_name))
 
-    dm = _deermem_with_fake_llm({"tracing_callback": tracer, "model": {"provider": "openai", "model": "gpt-x", "api_key": "k", "base_url": "u"}})
+    dm = _deermem_with_fake_llm({"model": {"provider": "openai", "model": "gpt-x", "api_key": "k", "base_url": "u"}}, callbacks=_RecordingCallbacks())
     dm.add(
         thread_id="t1",
         messages=[HumanMessage(content="hi"), AIMessage(content="hello")],
@@ -195,9 +229,9 @@ def test_scoped_clear_preserves_shared_summaries(deermem_data_dir):
     assert dm.get_memory(user_id="alice")["user"]["workContext"]["summary"] == "shared profile"
 
 
-def test_tracing_callback_optional_no_langfuse(deermem_data_dir):
+def test_callbacks_optional_no_langfuse(deermem_data_dir):
     dm = _deermem_with_fake_llm({"model": {"provider": "openai", "model": "gpt-x", "api_key": "k", "base_url": "u"}})
-    assert dm._config.tracing_callback is None  # langfuse not hard-required
+    assert dm.callbacks is None  # no callbacks = no langfuse (not hard-required)
     dm.add(
         thread_id="t2",
         messages=[HumanMessage(content="hi"), AIMessage(content="hello")],
@@ -205,7 +239,7 @@ def test_tracing_callback_optional_no_langfuse(deermem_data_dir):
         user_id="u2",
         trace_id="t-99",
     )
-    dm._queue.flush()  # no callback, no error, update completes
+    dm._queue.flush()  # no callbacks, no error, update completes
 
 
 def test_hide_from_ui_default_skip_hook_keeps():
@@ -244,31 +278,74 @@ def test_portability_only_abc_contract_imports_deerflow():
 # Minimal vendored host contract (what another agent would ship). DeerMem only
 # needs this ABC -- nothing else from a host.
 _VENDORED_MANAGER_PY = '''
-"""Vendored host contract (minimal ABC) for the portability demo."""
-from abc import ABC, abstractmethod
-from typing import Any
+"""Vendored host contract (pydantic BaseModel + three-tier ABC) for the portability demo."""
+from abc import abstractmethod
+from typing import Any, ClassVar, Literal
 
-class MemoryManager(ABC):
-    def __init__(self, backend_config: dict | None = None) -> None:
-        self._backend_config = backend_config
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+
+class MemoryManager(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    backend_config: dict[str, Any] = Field(default_factory=dict)
+    mode: Literal["middleware", "tool"] = "middleware"
+    callbacks: Any = None
+    supports_search: ClassVar[bool] = False
+
+    @field_validator("backend_config", mode="before")
+    @classmethod
+    def _coerce_backend_config(cls, value):
+        return value or {}
+
+    @model_validator(mode="after")
+    def _check_invariants(self):
+        if self.mode == "tool" and not type(self).supports_search:
+            raise ValueError("tool mode requires search")
+        return self
+
+    # Tier 1: abstract (every backend must implement).
     @abstractmethod
     def add(self, thread_id, messages, *, agent_name=None, user_id=None, trace_id=None) -> None: ...
     @abstractmethod
-    def add_nowait(self, thread_id, messages, *, agent_name=None, user_id=None) -> None: ...
-    @abstractmethod
     def get_context(self, user_id, *, agent_name=None, thread_id=None) -> str: ...
+    @classmethod
     @abstractmethod
-    def search(self, query, top_k=5, *, user_id=None, agent_name=None) -> list: ...
-    @abstractmethod
-    def get_memory(self, *, user_id=None, agent_name=None) -> dict: ...
-    @abstractmethod
-    def delete_memory(self, *, user_id=None, agent_name=None) -> None: ...
-    @abstractmethod
-    def clear_memory(self, *, user_id=None, agent_name=None) -> dict: ...
-    @abstractmethod
-    def import_memory(self, memory_data, *, user_id=None, agent_name=None) -> dict: ...
-    @abstractmethod
-    def export_memory(self, *, user_id=None, agent_name=None) -> dict: ...
+    def from_config(cls, backend_config, *, mode="middleware", **host_hooks): ...
+
+    # Tier 2: management defaults (override if supported).
+    def add_nowait(self, thread_id, messages, *, agent_name=None, user_id=None) -> None:
+        self.add(thread_id, messages, agent_name=agent_name, user_id=user_id)
+    def search(self, query, top_k=5, *, user_id=None, agent_name=None, category=None) -> list:
+        raise NotImplementedError
+    def get_memory(self, *, user_id=None, agent_name=None) -> dict:
+        raise NotImplementedError
+    def delete_memory(self, *, user_id=None, agent_name=None) -> None:
+        raise NotImplementedError
+    def clear_memory(self, *, user_id=None, agent_name=None) -> dict:
+        raise NotImplementedError
+    def import_memory(self, memory_data, *, user_id=None, agent_name=None) -> dict:
+        raise NotImplementedError
+    def export_memory(self, *, user_id=None, agent_name=None) -> dict:
+        raise NotImplementedError
+    def shutdown_flush(self, timeout) -> bool:
+        return True
+
+    # Tier 3: optional hooks (override if supported).
+    def warm(self) -> bool | None:
+        return None
+    def reload_memory(self, *, user_id=None, agent_name=None) -> dict:
+        raise NotImplementedError
+    def create_fact(self, content, category="context", confidence=0.5, *, agent_name=None, user_id=None):
+        raise NotImplementedError
+    def delete_fact(self, fact_id, *, agent_name=None, user_id=None) -> dict:
+        raise NotImplementedError
+    def update_fact(self, fact_id, content=None, category=None, confidence=None, *, agent_name=None, user_id=None) -> dict:
+        raise NotImplementedError
+    def on_pre_compress(self, messages) -> str:
+        return ""
+    def on_turn_start(self, turn_number, message, **kwargs) -> None:
+        return None
 
 class MemoryConflictError(RuntimeError): ...
 class MemoryCorruptionError(RuntimeError): ...

@@ -51,6 +51,7 @@ backend_config:
     base_url: https://api.openai.com/v1
   debounce_seconds: 30
   max_facts: 100
-  # tracing_callback / should_keep_hidden_message: programmatic callables
-  # (cannot come from YAML); set them on the config object in code if desired.
+  # callbacks / should_keep_hidden_message: programmatic (cannot come from
+  # YAML); the host factory injects them via from_config. Set programmatically
+  # only if overriding the host defaults.
 ```

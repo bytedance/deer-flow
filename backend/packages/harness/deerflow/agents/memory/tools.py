@@ -9,11 +9,11 @@ its own persistent memory: it decides what to remember, when to
 search, and when to update or remove stale facts.
 
 Backend-agnostic: every tool goes through the ``MemoryManager`` ABC
-(:func:`get_memory_manager`) -- ``search``/``get_memory`` are on the ABC;
-``create_fact``/``update_fact``/``delete_fact`` are backend-internal
-capabilities reached via attribute access (absent -> the tool returns a
-JSON ``error`` instead of crashing). So tool mode works for any backend
-that exposes those ops (DeerMem does; noop returns empty/errors).
+(:func:`get_memory_manager`) -- ``search``/``get_memory`` are tier-2 methods;
+``create_fact``/``update_fact``/``delete_fact`` are tier-3 hooks with a default
+``raise NotImplementedError`` (unsupported -> the tool catches it and returns a
+JSON ``error`` instead of crashing). So tool mode works for any backend that
+overrides those ops (DeerMem does; noop inherits the raises -> errors).
 """
 
 import json
@@ -124,19 +124,20 @@ def memory_add_tool(
         if any(_memory_content_key(str(fact.get("content", ""))) == content_key for fact in existing_facts):
             return json.dumps({"error": "Duplicate fact"})
 
-        create = getattr(manager, "create_fact", None)
-        if not callable(create):
-            return json.dumps({"error": f"memory backend {type(manager).__name__} does not support create_fact"})
         # create_fact returns (memory_data, fact_id) -- use the id directly rather
         # than re-deriving it by content matching (which would couple the tool to
         # the backend's content normalization and could misreport a storage cap).
-        _memory_data, fact_id = create(
-            normalized_content,
-            category=category,
-            confidence=confidence,
-            agent_name=agent_name,
-            user_id=user_id,
-        )
+        # Unsupported backends raise NotImplementedError (tier-3 default) -> JSON error.
+        try:
+            _memory_data, fact_id = manager.create_fact(
+                normalized_content,
+                category=category,
+                confidence=confidence,
+                agent_name=agent_name,
+                user_id=user_id,
+            )
+        except NotImplementedError:
+            return json.dumps({"error": f"memory backend {type(manager).__name__} does not support create_fact"})
         if fact_id is None:
             # max_facts cap kept higher-confidence facts and evicted the new one;
             # the fact was not stored -- report honestly instead of a dangling id.
@@ -182,17 +183,17 @@ def memory_update_tool(
     agent_name, user_id = _resolve_scope(runtime)
     try:
         manager = get_memory_manager()
-        update = getattr(manager, "update_fact", None)
-        if not callable(update):
+        try:
+            manager.update_fact(
+                fact_id,
+                content=content,
+                category=category,
+                confidence=confidence,
+                agent_name=agent_name,
+                user_id=user_id,
+            )
+        except NotImplementedError:
             return json.dumps({"error": f"memory backend {type(manager).__name__} does not support update_fact"})
-        update(
-            fact_id,
-            content=content,
-            category=category,
-            confidence=confidence,
-            agent_name=agent_name,
-            user_id=user_id,
-        )
         return json.dumps({"fact_id": fact_id, "status": "updated"})
     except KeyError:
         return json.dumps({"error": f"Fact not found: {fact_id}"})
@@ -220,10 +221,10 @@ def memory_delete_tool(runtime: Runtime, fact_id: str) -> str:
     agent_name, user_id = _resolve_scope(runtime)
     try:
         manager = get_memory_manager()
-        delete = getattr(manager, "delete_fact", None)
-        if not callable(delete):
+        try:
+            manager.delete_fact(fact_id, agent_name=agent_name, user_id=user_id)
+        except NotImplementedError:
             return json.dumps({"error": f"memory backend {type(manager).__name__} does not support delete_fact"})
-        delete(fact_id, agent_name=agent_name, user_id=user_id)
         return json.dumps({"fact_id": fact_id, "status": "deleted"})
     except KeyError:
         return json.dumps({"error": f"Fact not found: {fact_id}"})

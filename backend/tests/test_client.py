@@ -1771,6 +1771,19 @@ class TestMemoryManagement:
             result = client.reload_memory()
         assert result == data
 
+    def test_reload_memory_raises_clean_error_when_read_also_unsupported(self, client):
+        """A minimal backend (only add + get_context) exposes neither reload nor
+        get_memory; reload_memory surfaces a clean NotImplementedError instead of
+        an uncaught propagation from the fallback (mirrors the router's 501)."""
+        mock_mgr = MagicMock()
+        mock_mgr.reload_memory.side_effect = NotImplementedError("reload not supported")
+        mock_mgr.get_memory.side_effect = NotImplementedError("get_memory not supported")
+        with patch("deerflow.agents.memory.get_memory_manager", return_value=mock_mgr):
+            with pytest.raises(NotImplementedError, match="implements neither"):
+                client.reload_memory()
+        mock_mgr.reload_memory.assert_called_once()
+        mock_mgr.get_memory.assert_called_once()
+
     def test_clear_memory(self, client):
         data = {"version": "1.0", "facts": []}
         mock_mgr = MagicMock()
