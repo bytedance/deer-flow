@@ -44,7 +44,10 @@ import { writeTextToClipboard } from "@/core/clipboard";
 import { useI18n } from "@/core/i18n/hooks";
 import { findToolCallResult } from "@/core/messages/utils";
 import { installSkill, SkillRequestError } from "@/core/skills/api";
-import { SafeStreamdown } from "@/core/streamdown/components";
+import {
+  SafeStreamdown,
+  toStreamdownComponents,
+} from "@/core/streamdown/components";
 import {
   canBrowserPreviewFile,
   checkCodeFile,
@@ -521,7 +524,7 @@ export function ArtifactFilePreview({
         <SafeStreamdown
           className="min-w-0"
           {...artifactMarkdownPlugins}
-          components={{ a: ArtifactLink }}
+          components={toStreamdownComponents({ a: ArtifactLink })}
         >
           {content ?? ""}
         </SafeStreamdown>

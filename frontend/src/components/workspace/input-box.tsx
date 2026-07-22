@@ -292,6 +292,7 @@ export function InputBox({
   threadId,
   draftThreadId = threadId,
   draftAgentName,
+  defaultModelName,
   initialValue,
   onContextChange,
   onFollowupsVisibilityChange,
@@ -320,6 +321,13 @@ export function InputBox({
   threadId: string;
   draftThreadId?: string;
   draftAgentName?: string | null;
+  /**
+   * The active custom agent's configured default model, if any. Used as the
+   * auto-selection fallback so an agent chat honors the agent's own default
+   * model instead of silently snapping to the first configured model
+   * (issue #4336). ``null`` / undefined = no agent default → use models[0].
+   */
+  defaultModelName?: string | null;
   initialValue?: string;
   onContextChange?: (
     context: Omit<
@@ -546,7 +554,13 @@ export function InputBox({
       return;
     }
     const currentModel = models.find((m) => m.name === context.model_name);
-    const fallbackModel = currentModel ?? models[0]!;
+    // Prefer the active agent's configured default model over models[0] as the
+    // auto-selection fallback, so an agent chat respects the agent's own
+    // default instead of snapping to the first model (issue #4336).
+    const agentDefaultModel = defaultModelName
+      ? models.find((m) => m.name === defaultModelName)
+      : undefined;
+    const fallbackModel = currentModel ?? agentDefaultModel ?? models[0]!;
     const supportsThinking = fallbackModel.supports_thinking ?? false;
     const nextModelName = fallbackModel.name;
     const nextMode = getResolvedMode(context.mode, supportsThinking);
@@ -560,7 +574,7 @@ export function InputBox({
       model_name: nextModelName,
       mode: nextMode,
     });
-  }, [context, models, onContextChange]);
+  }, [context, models, defaultModelName, onContextChange]);
 
   const selectedModel = useMemo(() => {
     if (models.length === 0) {

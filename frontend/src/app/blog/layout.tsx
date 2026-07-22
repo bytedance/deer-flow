@@ -13,7 +13,7 @@ export default async function BlogLayout({ children }) {
       navbar={<Header className="relative max-w-full px-10" homeURL="/" />}
       pageMap={pageMap}
       sidebar={{ defaultOpen: true }}
-      docsRepositoryBase="https://github.com/bytedance/deerflow/tree/main/frontend/src/content"
+      docsRepositoryBase="https://github.com/bytedance/deer-flow/tree/main/frontend"
       footer={<Footer />}
     >
       {children}

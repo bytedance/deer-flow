@@ -356,11 +356,12 @@ class TestAgentConstruction:
         skill_file.write_text("Use demo skill", encoding="utf-8")
         captured: dict[str, object] = {}
 
-        def fake_get_or_new_skill_storage(*, app_config=None):
+        def fake_get_or_new_user_skill_storage(user_id, *, app_config=None):
+            captured["user_id"] = user_id
             captured["app_config"] = app_config
             return SimpleNamespace(load_skills=lambda *, enabled_only: [SimpleNamespace(name="demo-skill", skill_file=skill_file)])
 
-        monkeypatch.setattr(sys.modules["deerflow.skills.storage"], "get_or_new_skill_storage", fake_get_or_new_skill_storage)
+        monkeypatch.setattr(sys.modules["deerflow.skills.storage"], "get_or_new_user_skill_storage", fake_get_or_new_user_skill_storage)
 
         executor = SubagentExecutor(
             config=base_config,
@@ -372,9 +373,58 @@ class TestAgentConstruction:
         skills = await executor._load_skills()
         messages = await executor._load_skill_messages(skills)
 
-        assert captured["app_config"] is app_config
+        assert captured == {"user_id": "default", "app_config": app_config}
         assert len(messages) == 1
         assert "Use demo skill" in messages[0].content
+
+    @pytest.mark.anyio
+    async def test_load_skills_uses_each_subagent_users_scoped_storage(
+        self,
+        classes,
+        base_config,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        SubagentExecutor = classes["SubagentExecutor"]
+        app_config = SimpleNamespace(models=[SimpleNamespace(name="default-model")])
+        storage_calls: list[tuple[str, object]] = []
+
+        def user_storage(user_id: str, *, app_config=None):
+            storage_calls.append((user_id, app_config))
+            return SimpleNamespace(load_skills=lambda *, enabled_only: [SimpleNamespace(name="shared-skill", owner=user_id)])
+
+        global_storage = MagicMock(side_effect=AssertionError("subagents must not read the global-only skill catalog"))
+        monkeypatch.setattr(sys.modules["deerflow.skills.storage"], "get_or_new_skill_storage", global_storage)
+        monkeypatch.setattr(sys.modules["deerflow.skills.storage"], "get_or_new_user_skill_storage", user_storage)
+
+        alice = SubagentExecutor(config=base_config, tools=[], app_config=app_config, thread_id="alice-thread", user_id="alice")
+        bob = SubagentExecutor(config=base_config, tools=[], app_config=app_config, thread_id="bob-thread", user_id="bob")
+
+        alice_skills = await alice._load_skills()
+        bob_skills = await bob._load_skills()
+
+        assert [skill.owner for skill in alice_skills] == ["alice"]
+        assert [skill.owner for skill in bob_skills] == ["bob"]
+        assert storage_calls == [("alice", app_config), ("bob", app_config)]
+        global_storage.assert_not_called()
+
+    @pytest.mark.anyio
+    async def test_load_skills_defaults_missing_user_to_default_scope(
+        self,
+        classes,
+        base_config,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        SubagentExecutor = classes["SubagentExecutor"]
+        user_storage = MagicMock(return_value=SimpleNamespace(load_skills=lambda *, enabled_only: []))
+        global_storage = MagicMock(side_effect=AssertionError("subagents must not read the global-only skill catalog"))
+        monkeypatch.setattr(sys.modules["deerflow.skills.storage"], "get_or_new_skill_storage", global_storage)
+        monkeypatch.setattr(sys.modules["deerflow.skills.storage"], "get_or_new_user_skill_storage", user_storage)
+
+        executor = SubagentExecutor(config=base_config, tools=[], thread_id="test-thread", user_id=None)
+
+        assert await executor._load_skills() == []
+        user_storage.assert_called_once_with("default")
+        global_storage.assert_not_called()
 
     @pytest.mark.anyio
     async def test_load_skill_messages_escapes_untrusted_name_and_content(
@@ -427,8 +477,8 @@ class TestAgentConstruction:
 
         monkeypatch.setattr(
             sys.modules["deerflow.skills.storage"],
-            "get_or_new_skill_storage",
-            lambda *, app_config=None: SimpleNamespace(load_skills=lambda *, enabled_only: [SimpleNamespace(name="my-skill", skill_file=skill_file, allowed_tools=None)]),
+            "get_or_new_user_skill_storage",
+            lambda user_id, *, app_config=None: SimpleNamespace(load_skills=lambda *, enabled_only: [SimpleNamespace(name="my-skill", skill_file=skill_file, allowed_tools=None)]),
         )
 
         executor = SubagentExecutor(
@@ -465,8 +515,8 @@ class TestAgentConstruction:
 
         monkeypatch.setattr(
             sys.modules["deerflow.skills.storage"],
-            "get_or_new_skill_storage",
-            lambda *, app_config=None: SimpleNamespace(load_skills=lambda *, enabled_only: []),
+            "get_or_new_user_skill_storage",
+            lambda user_id, *, app_config=None: SimpleNamespace(load_skills=lambda *, enabled_only: []),
         )
 
         executor = SubagentExecutor(
@@ -510,8 +560,8 @@ class TestAgentConstruction:
 
         monkeypatch.setattr(
             sys.modules["deerflow.skills.storage"],
-            "get_or_new_skill_storage",
-            lambda *, app_config=None: SimpleNamespace(load_skills=lambda *, enabled_only: [SimpleNamespace(name="my-skill", skill_file=skill_file, allowed_tools=None)]),
+            "get_or_new_user_skill_storage",
+            lambda user_id, *, app_config=None: SimpleNamespace(load_skills=lambda *, enabled_only: [SimpleNamespace(name="my-skill", skill_file=skill_file, allowed_tools=None)]),
         )
 
         SubagentExecutor = classes["SubagentExecutor"]
@@ -546,8 +596,8 @@ class TestAgentConstruction:
 
         monkeypatch.setattr(
             sys.modules["deerflow.skills.storage"],
-            "get_or_new_skill_storage",
-            lambda *, app_config=None: SimpleNamespace(load_skills=lambda *, enabled_only: []),
+            "get_or_new_user_skill_storage",
+            lambda user_id, *, app_config=None: SimpleNamespace(load_skills=lambda *, enabled_only: []),
         )
         monkeypatch.setattr(executor_module, "get_app_config", lambda: SimpleNamespace(tool_search=SimpleNamespace(enabled=True)))
 
@@ -587,8 +637,8 @@ class TestAgentConstruction:
 
         monkeypatch.setattr(
             sys.modules["deerflow.skills.storage"],
-            "get_or_new_skill_storage",
-            lambda *, app_config=None: SimpleNamespace(load_skills=lambda *, enabled_only: []),
+            "get_or_new_user_skill_storage",
+            lambda user_id, *, app_config=None: SimpleNamespace(load_skills=lambda *, enabled_only: []),
         )
         monkeypatch.setattr(executor_module, "get_app_config", lambda: SimpleNamespace(tool_search=SimpleNamespace(enabled=False)))
 
@@ -632,8 +682,8 @@ class TestAgentConstruction:
 
         monkeypatch.setattr(
             sys.modules["deerflow.skills.storage"],
-            "get_or_new_skill_storage",
-            lambda *, app_config=None: SimpleNamespace(load_skills=lambda *, enabled_only: []),
+            "get_or_new_user_skill_storage",
+            lambda user_id, *, app_config=None: SimpleNamespace(load_skills=lambda *, enabled_only: []),
         )
         monkeypatch.setattr(executor_module, "get_app_config", lambda: SimpleNamespace(tool_search=SimpleNamespace(enabled=True)))
 
@@ -1418,8 +1468,8 @@ class TestAsyncExecutionPath:
 
         monkeypatch.setattr(
             sys.modules["deerflow.skills.storage"],
-            "get_or_new_skill_storage",
-            lambda *, app_config=None: SimpleNamespace(load_skills=lambda *, enabled_only: [SimpleNamespace(name="regression-skill", skill_file=skill_dir / "SKILL.md", allowed_tools=None)]),
+            "get_or_new_user_skill_storage",
+            lambda user_id, *, app_config=None: SimpleNamespace(load_skills=lambda *, enabled_only: [SimpleNamespace(name="regression-skill", skill_file=skill_dir / "SKILL.md", allowed_tools=None)]),
         )
 
         captured_states: list[dict] = []

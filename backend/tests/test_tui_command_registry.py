@@ -4,6 +4,7 @@ from deerflow.tui.command_registry import (
     BUILTIN_COMMANDS,
     build_registry,
     filter_commands,
+    format_command_help,
     resolve,
 )
 
@@ -115,3 +116,38 @@ def test_goal_builtin_takes_precedence_over_skill():
 
     assert [command.name for command in registry].count("goal") == 1
     assert resolve("/goal finish", skills=["goal"]).kind == "builtin"
+
+
+# --------------------------------------------------------------------------- #
+# /help text <-> registry parity
+# --------------------------------------------------------------------------- #
+
+
+def test_help_lists_every_builtin_command():
+    help_line = format_command_help()
+    # Every registered built-in must be advertised in /help; this is the guard
+    # against the help text silently drifting from BUILTIN_COMMANDS.
+    for command in BUILTIN_COMMANDS:
+        assert f"/{command.name}" in help_line
+
+
+def test_help_lists_only_builtin_commands():
+    help_line = format_command_help()
+    slugs = [token[1:] for token in help_line.split() if token.startswith("/")]
+    assert set(slugs) == {command.name for command in BUILTIN_COMMANDS}
+
+
+def test_help_preserves_registry_order():
+    help_line = format_command_help()
+    slugs = [token[1:] for token in help_line.split() if token.startswith("/")]
+    assert slugs == [command.name for command in BUILTIN_COMMANDS]
+
+
+def test_help_has_no_duplicate_commands():
+    help_line = format_command_help()
+    slugs = [token[1:] for token in help_line.split() if token.startswith("/")]
+    assert len(slugs) == len(set(slugs))
+
+
+def test_help_starts_with_commands_label():
+    assert format_command_help().startswith("Commands:  /")
