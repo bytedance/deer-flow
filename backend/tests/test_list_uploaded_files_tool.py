@@ -9,7 +9,7 @@ import pytest
 from langchain_core.messages import HumanMessage, ToolMessage
 
 from deerflow.config.paths import Paths
-from deerflow.tools.builtins.list_uploaded_files_tool import _format_omitted_summary, _list_uploaded_files_impl, _resolve_thread_id
+from deerflow.tools.builtins.list_uploaded_files_tool import _format_omitted_summary, _list_uploaded_files_impl, _resolve_thread_id, list_uploaded_files
 
 
 def _paths(tmp_path):
@@ -840,3 +840,29 @@ def test_all_string_fields_in_result_are_neutralized(tmp_path):
     # Sanity: the result is non-empty and well-formed
     assert len(result["files"]) == 1
     assert result["total_count"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Tool schema — runtime parameter must be injected, not exposed to the model
+# ---------------------------------------------------------------------------
+
+
+def test_list_uploaded_files_runtime_is_injected_not_in_schema():
+    """The ``runtime`` parameter is a ``ToolRuntime`` and must be auto-injected.
+
+    Regression: annotating it as ``Annotated[Runtime, InjectedToolArg] | None``
+    wrapped the type in ``Union``, so LangChain's ``_is_directly_injected_arg_type``
+    no longer recognized it as a ``ToolRuntime`` injection. The runtime then leaked
+    into the model-facing schema, and generating its JSON schema failed with
+    ``Cannot generate a JsonSchema for core_schema.CallableSchema`` (ThreadState
+    carries Callable reducers), which aborted every agent LLM call.
+    """
+    # The model-facing schema must build without raising (it currently raises
+    # PydanticInvalidForJsonSchema when runtime leaks in).
+    schema = list_uploaded_files.tool_call_schema.model_json_schema()
+
+    # runtime is injected at call time and must never reach the model.
+    properties = set(schema.get("properties", {}).keys())
+    assert "runtime" not in properties, f"runtime leaked into model-facing schema: {sorted(properties)}; it must be a bare ToolRuntime annotation so LangChain injects it."
+    # The user-facing knobs must still be present.
+    assert {"include_outline", "max_results"}.issubset(properties)
