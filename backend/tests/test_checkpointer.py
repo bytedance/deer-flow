@@ -196,7 +196,7 @@ class TestHarnessPackaging:
         assert "postgres" in optional_dependencies
         assert optional_dependencies["postgres"] == [
             "asyncpg>=0.29",
-            "langgraph-checkpoint-postgres>=3.0.5",
+            "langgraph-checkpoint-postgres>=3.1.0,<3.2",
             "psycopg[binary]>=3.3.3",
             "psycopg-pool>=3.3.0",
         ]
@@ -225,7 +225,7 @@ class TestGetCheckpointer:
         """get_checkpointer should return InMemorySaver when not configured."""
         from langgraph.checkpoint.memory import InMemorySaver
 
-        with patch("deerflow.config.app_config.get_app_config", side_effect=FileNotFoundError):
+        with patch("deerflow.runtime.checkpointer.provider.get_app_config", side_effect=FileNotFoundError):
             cp = get_checkpointer()
         assert cp is not None
         assert isinstance(cp, InMemorySaver)

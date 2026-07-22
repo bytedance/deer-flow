@@ -72,6 +72,7 @@ def _make_client(_monkeypatch, *, enhance_enabled: bool = True) -> DeerFlowClien
     )
     client = DeerFlowClient.__new__(DeerFlowClient)
     client._app_config = fake_app_config
+    client._checkpoint_channel_mode = "full"
     client._extensions_config = None
     client._model_name = "stub-model"
     client._thinking_enabled = False

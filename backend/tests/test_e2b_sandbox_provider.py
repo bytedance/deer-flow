@@ -1117,6 +1117,149 @@ def test_sync_outputs_to_host_is_noop_when_client_closed():
     p._sync_outputs_to_host(sb, thread_id="t1", user_id="u1")
 
 
+def _outputs_dir(tmp_path):
+    return Paths(base_dir=tmp_path).thread_dir("t1", user_id="u1") / "user-data" / "outputs"
+
+
+def test_sync_outputs_to_host_stops_at_file_count_cap(monkeypatch, tmp_path):
+    """A pass downloads at most ``_MAX_SYNC_FILES`` artefacts, deferring the rest."""
+    p = _make_provider()
+    p._MAX_SYNC_FILES = 2
+    _setup_paths(monkeypatch, tmp_path)
+
+    names = ["a.txt", "b.txt", "c.txt", "d.txt"]
+    listing = "".join(f"5\t2.000000000\t/home/user/outputs/{n}\x00" for n in names)
+    files = FakeFilesAPI(store={f"/home/user/outputs/{n}": b"hello" for n in names})
+    cmds = FakeCommandsAPI([SimpleNamespace(stdout=listing, stderr="", exit_code=0)])
+    sb = _make_sandbox(FakeClient(commands=cmds, files=files), sandbox_id="sb-cap-files")
+
+    p._sync_outputs_to_host(sb, thread_id="t1", user_id="u1")
+
+    out_dir = _outputs_dir(tmp_path)
+    written = sorted(f.name for f in out_dir.iterdir()) if out_dir.exists() else []
+    assert written == ["a.txt", "b.txt"]
+    assert len(files.read_calls) == 2
+
+
+def test_sync_outputs_to_host_stops_at_total_byte_budget(monkeypatch, tmp_path):
+    """A pass stops before the cumulative download exceeds ``_MAX_SYNC_TOTAL_BYTES``."""
+    p = _make_provider()
+    p._MAX_SYNC_TOTAL_BYTES = 25  # fits two 10-byte files, not a third
+    _setup_paths(monkeypatch, tmp_path)
+
+    names = ["a.txt", "b.txt", "c.txt"]
+    listing = "".join(f"10\t2.000000000\t/home/user/outputs/{n}\x00" for n in names)
+    files = FakeFilesAPI(store={f"/home/user/outputs/{n}": b"0123456789" for n in names})
+    cmds = FakeCommandsAPI([SimpleNamespace(stdout=listing, stderr="", exit_code=0)])
+    sb = _make_sandbox(FakeClient(commands=cmds, files=files), sandbox_id="sb-cap-bytes")
+
+    p._sync_outputs_to_host(sb, thread_id="t1", user_id="u1")
+
+    out_dir = _outputs_dir(tmp_path)
+    written = sorted(f.name for f in out_dir.iterdir()) if out_dir.exists() else []
+    assert written == ["a.txt", "b.txt"]
+    assert len(files.read_calls) == 2
+
+
+def test_sync_outputs_to_host_stops_at_deadline(monkeypatch, tmp_path):
+    """A zero wall-clock budget aborts the pass before any download."""
+    p = _make_provider()
+    p._SYNC_DEADLINE_SECONDS = 0  # monotonic() >= deadline on the first entry
+    _setup_paths(monkeypatch, tmp_path)
+
+    listing = "5\t2.000000000\t/home/user/outputs/a.txt\x00"
+    files = FakeFilesAPI(store={"/home/user/outputs/a.txt": b"hello"})
+    cmds = FakeCommandsAPI([SimpleNamespace(stdout=listing, stderr="", exit_code=0)])
+    sb = _make_sandbox(FakeClient(commands=cmds, files=files), sandbox_id="sb-cap-deadline")
+
+    p._sync_outputs_to_host(sb, thread_id="t1", user_id="u1")
+
+    out_dir = _outputs_dir(tmp_path)
+    assert not out_dir.exists() or list(out_dir.iterdir()) == []
+    assert files.read_calls == []
+
+
+def test_sync_outputs_to_host_truncated_pass_preserves_stale_manifest(monkeypatch, tmp_path):
+    """A capped pass must not prune manifest entries it never got to inspect."""
+    p = _make_provider()
+    p._MAX_SYNC_FILES = 1
+    _setup_paths(monkeypatch, tmp_path)
+    thread_dir = Paths(base_dir=tmp_path).thread_dir("t1", user_id="u1")
+    thread_dir.mkdir(parents=True, exist_ok=True)
+    # A prior-sync entry for a file absent from this listing. A complete pass
+    # would prune it as deleted; a truncated pass must leave it for next time.
+    (thread_dir / ".e2b-output-sync.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "sandbox_id": "sb-trunc",
+                "files": {"outputs/kept.txt": {"remote_size": 3, "remote_mtime_ns": 1, "host_size": 3, "host_mtime_ns": 1}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    names = ["a.txt", "b.txt", "c.txt"]
+    listing = "".join(f"5\t2.000000000\t/home/user/outputs/{n}\x00" for n in names)
+    files = FakeFilesAPI(store={f"/home/user/outputs/{n}": b"hello" for n in names})
+    cmds = FakeCommandsAPI([SimpleNamespace(stdout=listing, stderr="", exit_code=0)])
+    sb = _make_sandbox(FakeClient(sandbox_id="sb-trunc", commands=cmds, files=files), sandbox_id="sb-trunc")
+
+    p._sync_outputs_to_host(sb, thread_id="t1", user_id="u1")
+
+    manifest = json.loads((thread_dir / ".e2b-output-sync.json").read_text(encoding="utf-8"))
+    assert "outputs/kept.txt" in manifest["files"]  # un-reached entry survives
+    assert "outputs/a.txt" in manifest["files"]  # the one download is recorded
+    assert len(files.read_calls) == 1
+
+
+def test_sync_outputs_to_host_converges_across_passes(monkeypatch, tmp_path):
+    """The deferred tail drains over successive passes without re-downloading
+    already-synced files.
+
+    The budget check sits *below* the manifest-skip path, so a file synced in
+    an earlier pass is skipped before it can consume the cap on later passes.
+    That is what lets ``c``/``d`` finish instead of ``a``/``b`` being re-fetched
+    every release forever. A refactor that moved the budget check above the skip
+    would still pass the single-pass truncation tests but fail this one.
+    """
+    p = _make_provider()
+    p._MAX_SYNC_FILES = 2
+    _setup_paths(monkeypatch, tmp_path)
+
+    names = ["a.txt", "b.txt", "c.txt", "d.txt"]
+    listing = "".join(f"5\t2.000000000\t/home/user/outputs/{n}\x00" for n in names)
+    files = FakeFilesAPI(store={f"/home/user/outputs/{n}": b"hello" for n in names})
+    # One listing per pass; both passes share the same host tree, manifest and
+    # files API (so downloads accumulate and the manifest carries over).
+    cmds = FakeCommandsAPI(
+        [
+            SimpleNamespace(stdout=listing, stderr="", exit_code=0),
+            SimpleNamespace(stdout=listing, stderr="", exit_code=0),
+        ]
+    )
+    sb = _make_sandbox(FakeClient(commands=cmds, files=files), sandbox_id="sb-converge")
+    out_dir = _outputs_dir(tmp_path)
+
+    # Pass 1: the file cap stops the pass after a, b.
+    p._sync_outputs_to_host(sb, thread_id="t1", user_id="u1")
+    assert sorted(f.name for f in out_dir.iterdir()) == ["a.txt", "b.txt"]
+    assert [r[0] for r in files.read_calls] == [
+        "/home/user/outputs/a.txt",
+        "/home/user/outputs/b.txt",
+    ]
+
+    # Pass 2: a, b are manifest hits skipped before the budget check, so the cap
+    # is spent draining the deferred tail c, d rather than re-downloading a, b.
+    p._sync_outputs_to_host(sb, thread_id="t1", user_id="u1")
+    assert sorted(f.name for f in out_dir.iterdir()) == ["a.txt", "b.txt", "c.txt", "d.txt"]
+    assert [r[0] for r in files.read_calls] == [
+        "/home/user/outputs/a.txt",
+        "/home/user/outputs/b.txt",
+        "/home/user/outputs/c.txt",
+        "/home/user/outputs/d.txt",
+    ]
+
+
 def test_download_file_uses_streaming_read_and_returns_full_bytes():
     payload = b"A" * (128 * 1024)  # 128 KiB — well below the cap.
     files = FakeFilesAPI(store={"/home/user/outputs/small.bin": payload})
@@ -1230,3 +1373,78 @@ def test_sync_outputs_to_host_skips_oversize_files(monkeypatch, tmp_path):
     assert files.read_calls == [], "oversize files must be skipped without invoking download_file"
     host_target = Paths(base_dir=tmp_path).thread_dir("t1", user_id="u1") / "user-data" / "outputs" / "huge.bin"
     assert not host_target.exists(), "no oversize artefact must be written to host"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# grep() directory-scoped glob filtering
+#
+# Real GNU grep's ``--include=PATTERN`` matches by basename only, at any
+# depth -- it cannot express the directory-scoping portion of a pattern like
+# ``src/*.js``. These tests can't invoke a real grep binary (the command
+# runs remotely inside the e2b VM via the mocked ``client.commands.run``), so
+# they instead supply the raw stdout a real broadened ``--include=*.js``
+# grep would actually return (matches from every directory, not just the
+# intended one) and assert ``E2BSandbox.grep`` narrows it down to the
+# caller's real directory scope via ``path_matches`` -- the same helper
+# ``glob()`` already uses -- exactly as verified empirically against a real
+# GNU grep binary during development of this fix.
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def test_grep_scoped_glob_excludes_unrelated_directory_matches():
+    """Regression: grep(glob="src/*.js") must not leak matches from sibling
+    directories that merely share the file extension."""
+    raw_stdout = "/home/user/workspace/other_dir/unrelated.js:1:console.log('needle in other_dir');\n/home/user/workspace/src/app.js:1:console.log('needle in src');\n"
+    client = FakeClient(commands=FakeCommandsAPI([SimpleNamespace(stdout=raw_stdout, stderr="", exit_code=0)]))
+    sb = _make_sandbox(client)
+
+    matches, truncated = sb.grep("/mnt/user-data/workspace", "needle", glob="src/*.js")
+
+    paths = [m.path for m in matches]
+    assert paths == ["/home/user/workspace/src/app.js"]
+    assert "/home/user/workspace/other_dir/unrelated.js" not in paths
+    assert truncated is False
+
+
+def test_grep_plain_glob_matches_files_in_any_directory():
+    """No regression: a plain non-scoped glob (no ``/`` in the pattern) must
+    keep matching files at any depth, same as before the directory-scoping
+    fix."""
+    raw_stdout = "/home/user/workspace/other_dir/deep/mod.py:1:needle in a deeply nested file\n/home/user/workspace/src/app.py:1:needle in a python file too\n"
+    client = FakeClient(commands=FakeCommandsAPI([SimpleNamespace(stdout=raw_stdout, stderr="", exit_code=0)]))
+    sb = _make_sandbox(client)
+
+    matches, truncated = sb.grep("/mnt/user-data/workspace", "needle", glob="*.py")
+
+    paths = {m.path for m in matches}
+    assert paths == {
+        "/home/user/workspace/other_dir/deep/mod.py",
+        "/home/user/workspace/src/app.py",
+    }
+    assert truncated is False
+
+
+def test_grep_scoped_glob_still_passes_coarse_include_flag():
+    """The coarse ``--include=<basename>`` pre-filter is kept as a perf
+    optimization (it narrows what grep has to search) even though it can't
+    express directory scoping by itself -- the real scoping enforcement
+    happens in the post-filter, not by dropping ``--include``."""
+    client = FakeClient(commands=FakeCommandsAPI([SimpleNamespace(stdout="", stderr="", exit_code=0)]))
+    sb = _make_sandbox(client)
+
+    sb.grep("/mnt/user-data/workspace", "needle", glob="src/*.js")
+
+    assert any("--include=*.js" in cmd for cmd in client.commands.calls)
+
+
+def test_grep_without_glob_is_unaffected():
+    """No regression: omitting ``glob`` entirely must return every match
+    with no path-based post-filtering."""
+    raw_stdout = "/home/user/workspace/anywhere/file.txt:3:needle here\n"
+    client = FakeClient(commands=FakeCommandsAPI([SimpleNamespace(stdout=raw_stdout, stderr="", exit_code=0)]))
+    sb = _make_sandbox(client)
+
+    matches, truncated = sb.grep("/mnt/user-data/workspace", "needle")
+
+    assert [m.path for m in matches] == ["/home/user/workspace/anywhere/file.txt"]
+    assert truncated is False

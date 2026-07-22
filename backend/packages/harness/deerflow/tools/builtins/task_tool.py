@@ -367,11 +367,15 @@ async def task_tool(
         resolved_app_config = get_app_config()
     effective_model = resolve_subagent_model_name(config, parent_model, app_config=resolved_app_config)
 
-    # Subagents should not have subagent tools enabled (prevent recursive nesting)
+    # Subagents should not have subagent tools enabled (prevent recursive nesting).
+    # Subagents also must not get list_uploaded_files — they have an independent
+    # ThreadState where runtime.state["uploaded_files"] is absent, so the
+    # current-run file exclusion would not work.
     available_tools_kwargs = {
         "model_name": effective_model,
         "groups": parent_tool_groups,
         "subagent_enabled": False,
+        "include_upload_tool": False,
     }
     if resolved_app_config is not None:
         available_tools_kwargs["app_config"] = resolved_app_config

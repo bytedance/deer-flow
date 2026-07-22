@@ -6,13 +6,22 @@ import re
 import shutil
 import threading
 import zlib
+from typing import Literal
 
 import yaml
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from deerflow.config.agents_api_config import get_agents_api_config
-from deerflow.config.agents_config import AgentConfig, list_custom_agents, load_agent_config, load_agent_soul, preserve_non_managed_fields
+from deerflow.config.agents_config import (
+    AgentConfig,
+    AgentModelSettings,
+    list_custom_agents,
+    load_agent_config,
+    load_agent_soul,
+    preserve_non_managed_fields,
+)
+from deerflow.config.app_config import get_app_config
 from deerflow.config.paths import get_paths
 from deerflow.runtime.user_context import get_effective_user_id
 
@@ -58,6 +67,14 @@ def _agent_write_lock(user_id: str, name: str) -> threading.Lock:
     return _agent_write_locks[zlib.crc32(key) % _AGENT_WRITE_LOCK_STRIPES]
 
 
+ReasoningEffort = Literal["low", "medium", "high"]
+
+# Fields carrying a custom agent's per-agent model behavior (issue #4336),
+# shared by the create/update request bodies and the response so the three
+# stay in lockstep. ``model`` picks the profile; the rest layer on top of it.
+_MODEL_BEHAVIOR_FIELDS = ("model", "model_settings", "thinking_enabled", "reasoning_effort")
+
+
 class AgentResponse(BaseModel):
     """Response model for a custom agent."""
 
@@ -66,6 +83,9 @@ class AgentResponse(BaseModel):
     model: str | None = Field(default=None, description="Optional model override")
     tool_groups: list[str] | None = Field(default=None, description="Optional tool group whitelist")
     skills: list[str] | None = Field(default=None, description="Optional skill whitelist (None=all, []=none)")
+    model_settings: AgentModelSettings | None = Field(default=None, description="Per-agent sampling overrides (temperature / max_tokens)")
+    thinking_enabled: bool | None = Field(default=None, description="Per-agent thinking-mode default (None = runtime default)")
+    reasoning_effort: ReasoningEffort | None = Field(default=None, description="Per-agent reasoning-effort default (None = runtime default)")
     soul: str | None = Field(default=None, description="SOUL.md content")
 
 
@@ -83,6 +103,9 @@ class AgentCreateRequest(BaseModel):
     model: str | None = Field(default=None, description="Optional model override")
     tool_groups: list[str] | None = Field(default=None, description="Optional tool group whitelist")
     skills: list[str] | None = Field(default=None, description="Optional skill whitelist (None=all enabled, []=none)")
+    model_settings: AgentModelSettings | None = Field(default=None, description="Per-agent sampling overrides (temperature / max_tokens)")
+    thinking_enabled: bool | None = Field(default=None, description="Per-agent thinking-mode default (None = runtime default)")
+    reasoning_effort: ReasoningEffort | None = Field(default=None, description="Per-agent reasoning-effort default (None = runtime default)")
     soul: str = Field(default="", description="SOUL.md content — agent personality and behavioral guardrails")
 
 
@@ -93,6 +116,9 @@ class AgentUpdateRequest(BaseModel):
     model: str | None = Field(default=None, description="Updated model override")
     tool_groups: list[str] | None = Field(default=None, description="Updated tool group whitelist")
     skills: list[str] | None = Field(default=None, description="Updated skill whitelist (None=all, []=none)")
+    model_settings: AgentModelSettings | None = Field(default=None, description="Updated per-agent sampling overrides")
+    thinking_enabled: bool | None = Field(default=None, description="Updated per-agent thinking-mode default")
+    reasoning_effort: ReasoningEffort | None = Field(default=None, description="Updated per-agent reasoning-effort default")
     soul: str | None = Field(default=None, description="Updated SOUL.md content")
 
 
@@ -126,6 +152,71 @@ def _require_agents_api_enabled() -> None:
         )
 
 
+def _validate_model_exists(model: str | None) -> None:
+    """Reject an agent ``model`` that is not a configured profile.
+
+    Mirrors the ``update_agent`` harness tool: without this, an unknown model
+    silently falls back to the default at runtime and the user sees confusing
+    repeated warnings on every later turn instead of an actionable error here.
+    ``None``/empty means "use the global default" and is always allowed.
+
+    Best-effort: if the app config cannot be loaded (e.g. no ``config.yaml`` on
+    disk in a bare/test deployment), skip the check rather than failing the
+    write — the runtime still falls back to the default for an unknown model.
+    """
+    if not model:
+        return
+    try:
+        app_config = get_app_config()
+    except Exception:
+        logger.warning("Could not load app config to validate agent model %r; skipping model existence check.", model)
+        return
+    if app_config.get_model_config(model) is None:
+        raise HTTPException(status_code=422, detail=f"Unknown model '{model}'. Use a model name defined under `models:` in config.yaml.")
+
+
+def _merge_model_settings_update(value: AgentModelSettings, existing: AgentModelSettings | None) -> dict:
+    """Merge an explicit ``model_settings`` update with existing sub-fields.
+
+    The top-level ``model_settings`` key is optional in update requests:
+    omitted means "preserve the current block", while explicit ``null`` means
+    "clear the block". Inside the block, omitted sub-fields should behave the
+    same way. This lets API callers update only ``temperature`` without
+    accidentally clearing an existing ``max_tokens``.
+    """
+    merged = existing.model_dump(exclude_none=True) if existing is not None else {}
+    for field in value.model_fields_set:
+        field_value = getattr(value, field)
+        if field_value is None:
+            merged.pop(field, None)
+        else:
+            merged[field] = field_value
+    return merged
+
+
+def _apply_model_behavior(config_data: dict, source: BaseModel, existing: AgentConfig | None = None) -> None:
+    """Write the model-behavior fields (issue #4336) onto ``config_data``.
+
+    Only fields explicitly set on ``source`` (``model_fields_set``) are taken
+    from it; the rest fall back to ``existing`` (on update) so an omitted field
+    is preserved rather than cleared. A resulting ``None`` is dropped so the
+    persisted YAML stays minimal and "unset" round-trips cleanly.
+    """
+    for field in _MODEL_BEHAVIOR_FIELDS:
+        if field in source.model_fields_set:
+            value = getattr(source, field)
+        else:
+            value = getattr(existing, field, None) if existing is not None else None
+        if value is None:
+            continue
+        if field == "model_settings" and isinstance(value, AgentModelSettings):
+            dumped_settings = _merge_model_settings_update(value, existing.model_settings if existing is not None else None)
+            if dumped_settings:
+                config_data[field] = dumped_settings
+            continue
+        config_data[field] = value.model_dump(exclude_none=True) if isinstance(value, BaseModel) else value
+
+
 def _agent_config_to_response(agent_cfg: AgentConfig, include_soul: bool = False, *, user_id: str | None = None) -> AgentResponse:
     """Convert AgentConfig to AgentResponse."""
     soul: str | None = None
@@ -138,6 +229,9 @@ def _agent_config_to_response(agent_cfg: AgentConfig, include_soul: bool = False
         model=agent_cfg.model,
         tool_groups=agent_cfg.tool_groups,
         skills=agent_cfg.skills,
+        model_settings=agent_cfg.model_settings,
+        thinking_enabled=agent_cfg.thinking_enabled,
+        reasoning_effort=agent_cfg.reasoning_effort,
         soul=soul,
     )
 
@@ -255,6 +349,7 @@ async def create_agent_endpoint(request: AgentCreateRequest) -> AgentResponse:
     """
     _require_agents_api_enabled()
     _validate_agent_name(request.name)
+    _validate_model_exists(request.model)
     normalized_name = _normalize_agent_name(request.name)
     user_id = get_effective_user_id()
     paths = get_paths()
@@ -282,16 +377,15 @@ async def create_agent_endpoint(request: AgentCreateRequest) -> AgentResponse:
                 config_data: dict = {"name": normalized_name}
                 if request.description:
                     config_data["description"] = request.description
-                if request.model is not None:
-                    config_data["model"] = request.model
                 if request.tool_groups is not None:
                     config_data["tool_groups"] = request.tool_groups
                 if request.skills is not None:
                     config_data["skills"] = request.skills
+                _apply_model_behavior(config_data, request)
 
                 config_file = agent_dir / "config.yaml"
                 with open(config_file, "w", encoding="utf-8") as f:
-                    yaml.dump(config_data, f, default_flow_style=False, allow_unicode=True)
+                    yaml.dump(config_data, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
 
                 # Write SOUL.md
                 soul_file = agent_dir / "SOUL.md"
@@ -344,14 +438,16 @@ async def update_agent(name: str, request: AgentUpdateRequest) -> AgentResponse:
     user_id = get_effective_user_id()
 
     def _update_agent_sync() -> AgentResponse | str:
+        # Worker thread: the config load, existence checks, model validation,
+        # config/SOUL.md writes, and the read-back are all blocking filesystem
+        # IO that must stay off the event loop. String returns signal HTTP
+        # error outcomes.
+        #
         # Serialize the whole load -> legacy guard -> config/SOUL write ->
         # read-back sequence for this agent. Two overlapping partial updates
         # would otherwise each rewrite the full config.yaml from their own
         # snapshot, and the later write would drop the earlier one's fields.
         with _agent_write_lock(user_id, name):
-            # Worker thread: the config load, existence checks, config/SOUL.md
-            # writes, and the read-back are all blocking filesystem IO that must
-            # stay off the event loop. String returns signal HTTP error outcomes.
             try:
                 agent_cfg = load_agent_config(name, user_id=user_id)
             except FileNotFoundError:
@@ -370,20 +466,21 @@ async def update_agent(name: str, request: AgentUpdateRequest) -> AgentResponse:
             if not (agent_dir / "config.yaml").exists() and (legacy_dir / "config.yaml").exists():
                 return "legacy_only"  # signals 409
 
+            if "model" in request.model_fields_set:
+                # Raises HTTPException; propagates out through to_thread.
+                _validate_model_exists(request.model)
+
             # Update config if any config fields changed
             # Use model_fields_set to distinguish "field omitted" from "explicitly set to null".
             # This is critical for skills where None means "inherit all" (not "don't change").
             fields_set = request.model_fields_set
-            config_changed = bool(fields_set & {"description", "model", "tool_groups", "skills"})
+            config_changed = bool(fields_set & ({"description", "tool_groups", "skills"} | set(_MODEL_BEHAVIOR_FIELDS)))
 
             if config_changed:
                 updated: dict = {
                     "name": agent_cfg.name,
                     "description": request.description if "description" in fields_set else agent_cfg.description,
                 }
-                new_model = request.model if "model" in fields_set else agent_cfg.model
-                if new_model is not None:
-                    updated["model"] = new_model
 
                 new_tool_groups = request.tool_groups if "tool_groups" in fields_set else agent_cfg.tool_groups
                 if new_tool_groups is not None:
@@ -396,6 +493,11 @@ async def update_agent(name: str, request: AgentUpdateRequest) -> AgentResponse:
                     new_skills = agent_cfg.skills
                 if new_skills is not None:
                     updated["skills"] = new_skills
+
+                # model / model_settings / thinking_enabled / reasoning_effort:
+                # take explicitly-set request fields, else preserve the existing
+                # value (issue #4336).
+                _apply_model_behavior(updated, request, existing=agent_cfg)
 
                 # Carry forward every top-level AgentConfig field this route does
                 # not manage (currently ``github:``, plus any future field added
@@ -410,7 +512,7 @@ async def update_agent(name: str, request: AgentUpdateRequest) -> AgentResponse:
 
                 config_file = agent_dir / "config.yaml"
                 with open(config_file, "w", encoding="utf-8") as f:
-                    yaml.dump(updated, f, default_flow_style=False, allow_unicode=True)
+                    yaml.dump(updated, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
 
             # Update SOUL.md if provided
             if request.soul is not None:
@@ -424,6 +526,8 @@ async def update_agent(name: str, request: AgentUpdateRequest) -> AgentResponse:
 
     try:
         result = await asyncio.to_thread(_update_agent_sync)
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Failed to update agent '{name}': {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to update agent: {str(e)}")
@@ -466,17 +570,12 @@ async def get_user_profile() -> UserProfileResponse:
     """
     _require_agents_api_enabled()
 
-    def _read_user_profile() -> str | None:
-        # Worker thread: the existence probe and file read are blocking
-        # filesystem IO that must stay off the event loop.
+    try:
         user_md_path = get_paths().user_md_file
         if not user_md_path.exists():
-            return None
-        return user_md_path.read_text(encoding="utf-8").strip() or None
-
-    try:
-        content = await asyncio.to_thread(_read_user_profile)
-        return UserProfileResponse(content=content)
+            return UserProfileResponse(content=None)
+        raw = user_md_path.read_text(encoding="utf-8").strip()
+        return UserProfileResponse(content=raw or None)
     except Exception as e:
         logger.error(f"Failed to read user profile: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to read user profile: {str(e)}")
@@ -499,16 +598,11 @@ async def update_user_profile(request: UserProfileUpdateRequest) -> UserProfileR
     """
     _require_agents_api_enabled()
 
-    def _write_user_profile() -> None:
-        # Worker thread: directory creation and the file write are blocking
-        # filesystem IO that must stay off the event loop.
+    try:
         paths = get_paths()
         paths.base_dir.mkdir(parents=True, exist_ok=True)
         paths.user_md_file.write_text(request.content, encoding="utf-8")
         logger.info(f"Updated USER.md at {paths.user_md_file}")
-
-    try:
-        await asyncio.to_thread(_write_user_profile)
         return UserProfileResponse(content=request.content or None)
     except Exception as e:
         logger.error(f"Failed to update user profile: {e}", exc_info=True)

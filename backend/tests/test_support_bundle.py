@@ -298,7 +298,7 @@ def test_create_support_bundle_masks_provider_config_secret_shaped_keys(tmp_path
     project_root = tmp_path / "project"
     project_root.mkdir()
     (project_root / "config.yaml").write_text(
-        "config_version: 26\n"
+        "config_version: 27\n"
         "models:\n  - name: default\n"
         "guardrails:\n"
         "  enabled: true\n"

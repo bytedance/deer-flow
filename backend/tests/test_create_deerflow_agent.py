@@ -4,15 +4,29 @@ from typing import get_type_hints
 from unittest.mock import MagicMock, patch
 
 import pytest
+from langchain.agents import AgentState
+from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+from langchain_core.messages import AIMessage
+from langgraph.channels import DeltaChannel
+from langgraph.checkpoint.memory import InMemorySaver
 
 from deerflow.agents.factory import create_deerflow_agent
 from deerflow.agents.features import Next, Prev, RuntimeFeatures
 from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
-from deerflow.agents.thread_state import ThreadState
+from deerflow.agents.thread_state import DeltaThreadState, ThreadState
 
 
 def _make_mock_model():
     return MagicMock(name="mock_model")
+
+
+class _FakeModel(FakeMessagesListChatModel):
+    def bind_tools(self, tools, **kwargs):  # type: ignore[override]
+        return self
+
+
+class _CustomState(AgentState):
+    custom_value: str
 
 
 def _make_mock_tool(name: str = "my_tool"):
@@ -36,6 +50,69 @@ def test_minimal_creation(mock_create_agent):
     call_kwargs = mock_create_agent.call_args[1]
     assert call_kwargs["model"] is model
     assert call_kwargs["system_prompt"] is None
+    assert call_kwargs["state_schema"] is ThreadState
+
+
+@patch("deerflow.agents.factory.create_agent")
+def test_delta_creation_selects_delta_state_and_copies_middleware(mock_create_agent):
+    mock_create_agent.return_value = MagicMock(name="compiled_graph")
+    middleware = ViewImageMiddleware()
+    original_schema = middleware.state_schema
+
+    create_deerflow_agent(
+        _make_mock_model(),
+        middleware=[middleware],
+        checkpoint_channel_mode="delta",
+    )
+
+    call_kwargs = mock_create_agent.call_args.kwargs
+    assert call_kwargs["state_schema"] is DeltaThreadState
+    assert call_kwargs["middleware"][0] is not middleware
+    assert middleware.state_schema is original_schema
+
+
+@patch("deerflow.agents.factory.create_agent")
+def test_custom_state_schema_is_preserved_in_full_mode_and_adapted_in_delta_mode(mock_create_agent):
+    mock_create_agent.return_value = MagicMock(name="compiled_graph")
+
+    create_deerflow_agent(_make_mock_model(), state_schema=_CustomState)
+    assert mock_create_agent.call_args.kwargs["state_schema"] is _CustomState
+
+    create_deerflow_agent(
+        _make_mock_model(),
+        state_schema=_CustomState,
+        checkpoint_channel_mode="delta",
+    )
+    adapted = mock_create_agent.call_args.kwargs["state_schema"]
+    hints = get_type_hints(adapted, include_extras=True)
+    assert "custom_value" in hints
+    assert any(isinstance(item, DeltaChannel) for item in hints["messages"].__metadata__)
+
+
+def test_delta_checkpointer_combination_is_rejected_before_any_persistence():
+    """Mixed-mode corruption guard: delta + checkpointer must fail loudly at
+    construction, before any state is read or written through the ungated graph."""
+    saver = InMemorySaver()
+    with pytest.raises(ValueError, match="checkpoint_channel_mode='delta'"):
+        create_deerflow_agent(
+            _FakeModel(responses=[AIMessage(content="ok")]),
+            checkpoint_channel_mode="delta",
+            checkpointer=saver,
+        )
+    assert list(saver.list(None)) == []
+
+
+def test_compiled_factory_graph_selects_full_and_delta_message_channels():
+    full_graph = create_deerflow_agent(
+        _FakeModel(responses=[AIMessage(id="full-response", content="done")]),
+    )
+    delta_graph = create_deerflow_agent(
+        _FakeModel(responses=[AIMessage(id="delta-response", content="done")]),
+        checkpoint_channel_mode="delta",
+    )
+
+    assert type(full_graph.channels["messages"]).__name__ == "BinaryOperatorAggregate"
+    assert isinstance(delta_graph.channels["messages"], DeltaChannel)
 
 
 # ---------------------------------------------------------------------------

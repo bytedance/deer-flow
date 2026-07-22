@@ -111,8 +111,83 @@ detect-blocking-io` resolve to the same repo-root path). JSON findings include
 `code` for model-assisted or manual review. `priority` is a deterministic
 review ordering from operation type, not proof of a bug. Bare-name same-file
 calls are resolved by function name, so duplicate helper names in one file can
-conservatively over-report async reachability. It is intentionally
-informational and is not run from CI in this round.
+conservatively over-report async reachability. The call graph also resolves
+multi-hop `self.`/`cls.` attribute chains (`self.store.flush()`) and local
+variables or parameters traced back — within the same function only — to a
+`self.`/`cls.` attribute (`store = self.store; store.flush()`); both fall back
+to the same bare-method-name resolution as an unresolvable receiver, so they
+share its over-report risk rather than adding a new kind. Deeper cross-function
+or cross-module aliasing is out of scope and stays an unreported false
+negative.
+
+That same-function alias tracing is deliberately narrower than the symbolic
+names `dotted_name()` builds for blocking-call pattern matching elsewhere in
+this module: receiver/alias extraction uses a restricted extractor that only
+recognizes `Name`/`Attribute` chains, so a `Call` or `Subscript` result (e.g.
+`factory().flush()`, or `client = factory(); client.flush()` /
+`client = clients[0]; client.flush()`) is never treated as inheriting its
+base's alias-worthiness — including when the unsupported node is buried
+deeper in the chain (`factory().client.flush()`, `clients[0].client.flush()`):
+an unrecognized shape anywhere in the chain makes the whole receiver
+unresolved, it never falls back to just the chain's trailing attribute name,
+or that name alone could still collide with an unrelated traced parameter or
+local alias. Reassigning a traced name to a non-traceable value (anything
+other than a `self.`/`cls.` attribute or an already-traced name) kills its
+alias instead of leaving it traceable, so a stale alias from an earlier
+assignment cannot keep exposing an unrelated same-named method after the
+variable is reassigned to something else; the assignment's right-hand side is
+always analyzed against the alias state as it stood *before* this kill-or-add
+update, matching Python's own evaluate-then-bind order, so
+`client = client.flush()` still resolves that call against `client`'s prior
+(pre-reassignment) alias instead of the state after it's gone. `if`/`else`
+branches get isolated alias state — an alias added in one branch cannot leak
+into the other — and the state after the whole `if` is the union of what each
+branch produced (a conservative may-alias join), so the result no longer
+depends on which branch is textually `body` vs. `orelse`. This branch
+isolation is deliberately scoped to `ast.If` only; `ast.Try`/`ast.Match` have
+different, more complex control-flow semantics and keep the older unisolated
+traversal. Finally, a function's decorators and parameter defaults are
+analyzed in the *enclosing* scope rather than the new function's own, and
+parameter/return annotations get the same enclosing-scope treatment unless
+the module postpones annotation evaluation (`from __future__ import
+annotations`), in which case they are skipped entirely, in either scope —
+those expressions run at definition time, before the function has ever been
+called (or, when postponed, never run at all), so a call there is never
+attributed to the function being defined (it moves to whatever scope actually
+contains the `def`, e.g. the enclosing function, or disappears if that scope
+is module/class level and therefore never async-reachable). PEP 695
+type-parameter bounds are not visited in either scope: CPython evaluates each
+one lazily, in its own hidden function, only if something like `T.__bound__`
+is actually accessed, never as part of running the `def` statement itself.
+A `lambda`'s body and a bare generator expression's element/filters/later
+`for` clauses are excluded from traversal ONLY while walking another
+function's own definition-time expressions (decorators, parameter defaults/
+annotations, return annotation): there, we know structurally that the
+enclosing `def` statement is executing right now, and neither a lambda body
+nor a generator's element runs just because the lambda/generator object is
+created — only a lambda's own parameter defaults and a generator's
+outermost iterable are genuinely eager at that moment. This exclusion is
+absolute and has no exceptions: even a lambda that is immediately invoked at
+its own definition site (`(lambda: ...)()`), or a generator passed directly
+to an eager-consuming builtin, is still excluded when it appears inside
+another function's decorator/default/annotation — a narrow, intentional
+limitation given how rarely a definition-time expression contains an
+executed call at all, preferred over special-casing specific shapes there.
+
+Everywhere else — module level, class bodies, and ordinary function-body
+statements — a lambda body or generator expression's element is scanned
+unconditionally, the same conservative, over-report-rather-than-infer stance
+this file already takes for reachability elsewhere (the `ast.If` may-alias
+union, the bare-name call-graph resolution). This file does not attempt to
+distinguish a lambda that is invoked immediately, invoked later through a
+stored variable, passed as a callback, or never called at all, nor a
+generator that is consumed by an eager builtin (`list`, `sum`, `any`, etc.),
+wrapped in another lazy iterator (`map`, `filter`), or never consumed —
+telling these apart in the general case would mean inferring evaluation
+order and consumption across arbitrary code rather than reading a fixed,
+structural fact, so none of them are special-cased; all are scanned the
+same way. This is intentionally informational and is not run from CI in
+this round.
 
 For a diff-scoped view of the same findings, `scripts/scan_changed_blocking_io.py`
 (repo root) reports findings on the added lines of `git diff <base>...HEAD`
@@ -260,7 +335,7 @@ Before changing a later authorization phase, read the [authorization RFC](../doc
 20. **TokenUsageMiddleware** - *(optional, if `token_usage.enabled`)* Records token usage metrics; subagent usage is merged back into the dispatching AIMessage by message position
 21. **TitleMiddleware** - Auto-generates the thread title after the first complete exchange and normalizes structured message content before prompting the title model. If a first-turn run is interrupted before this middleware can write a title, `runtime/runs/worker.py` keeps the run in a finalizing state, persists a local fallback title from the latest checkpoint or original run input, and then syncs it to `threads_meta.display_name`. Replacement runs admitted by `multitask_strategy="interrupt"` / `"rollback"` wait for older same-thread finalization before entering the graph; the interrupted run only skips the fallback title write once a later run has started and may have advanced the checkpoint.
 22. **MemoryMiddleware** - Queues conversations for async memory update (filters to user + final AI responses)
-23. **ViewImageMiddleware** - *(optional, if the model supports vision)* Injects base64 image data before the LLM call
+23. **ViewImageMiddleware** - *(optional, if the model supports vision)* Injects a hidden HumanMessage with base64 image data, identified by a reserved ID prefix plus a server-owned metadata marker, before the LLM call. Because `before_model`, `model`, and `after_model` are separate graph nodes, the `before_model` and `model` node checkpoints for that call still contain the payload; `after_model` / `aafter_model` then emits `RemoveMessage`, so subsequent checkpoints do not retain it
 24. **McpRoutingMiddleware** - *(optional, if `tool_search.enabled` and PR1 MCP routing metadata produce a routing index)* Auto-promotes matching deferred MCP tool schemas before the model call by writing a minimal `promoted` state update. It matches only the latest real `HumanMessage`, uses the global `tool_search.auto_promote_top_k` limit (default 3, clamped to 1..5), never executes tools, and must be installed before `DeferredToolFilterMiddleware`
 25. **DeferredToolFilterMiddleware** - *(optional, if `tool_search.enabled`)* Hides deferred (MCP) tool schemas from the bound model until `tool_search` or `McpRoutingMiddleware` promotes them (reads per-thread promotions from `ThreadState.promoted`, hash-scoped)
 26. **SystemMessageCoalescingMiddleware** - Merges every SystemMessage into a single leading SystemMessage per request; provider-agnostic fix for strict backends (vLLM/SGLang/Qwen/Anthropic) that reject non-leading system messages. Touches the per-request payload only (checkpoint state unchanged); on midnight crossings only the latest `dynamic_context_reminder` SystemMessage survives
@@ -424,6 +499,7 @@ Proxied through nginx: `/api/langgraph/*` → Gateway LangGraph-compatible runti
 ### Subagent System (`packages/harness/deerflow/subagents/`)
 
 **Built-in Agents**: `general-purpose` (all tools except `task`) and `bash` (command specialist)
+**User-scoped Skills**: Subagents resolve their configured skills through `get_or_new_user_skill_storage(user_id)` using the parent runtime identity, with `DEFAULT_USER_ID` only when no identity is available. This keeps custom-skill shadowing and visibility aligned with the lead agent instead of reading the global-only catalog.
 **Execution**: Dual thread pool - `_scheduler_pool` (3 workers) + `_execution_pool` (3 workers)
 **Concurrency and total delegation cap**: `MAX_CONCURRENT_SUBAGENTS = 3` is enforced by `SubagentLimitMiddleware` (truncates excess tool calls in `after_model`; runtime `max_concurrent_subagents` is clamped to 2-4). The same middleware also enforces `subagents.max_total_per_run` (default 6, config schema 1-50, runtime override `max_total_subagents` clamped to the same range) against current-run entries in the durable delegation ledger, so a long lead-agent run cannot bypass concurrency limits by launching repeated legal-sized batches at each planning checkpoint, but historical delegations from previous runs in the same thread do not consume the new run's budget. The lead-agent prompt uses the same clamped values, so model-visible limits match enforcement. Gateway `run_agent()` and embedded `DeerFlowClient.stream()` both provide a per-invocation `run_id` in runtime context; `DeerFlowClient.stream()` also tags its input `HumanMessage` with that same id so durable-context capture can identify the current request boundary. Gateway resume paths may not append a new `HumanMessage`, so the worker also exposes the pre-run checkpoint's message ids in runtime context; durable-context capture uses that as the current-run boundary and never re-tags older task calls as the resumed run. When no delegation slots remain, task calls are stripped, provider raw tool-call metadata is synced, `finish_reason` is forced to `stop`, and a visible "subagent delegation limit" note is appended so the agent can synthesize already-collected results. Default subagent timeout `subagents.timeout_seconds=1800` (30 min) and built-in `general-purpose` `max_turns=150` (raised from 100/15-min so deep-research subtasks stop hitting `GraphRecursionError` out of the box)
 **Flow**: `task()` tool → `SubagentExecutor` → background thread → poll 5s → SSE events → result. `task_started` carries the resolved effective model name. The per-subagent `SubagentTokenCollector` publishes a cumulative usage snapshot to the shared `SubagentResult` after every completed LLM response; the next `task_running` event carries that snapshot, so collapsed workspace cards can update without re-accounting parent-run totals. Terminal ToolMessage metadata (`subagent_model_name`, `subagent_token_usage`) and the persisted `subagent.end` event retain the model/usage after reload; absent provider usage stays absent rather than being estimated as zero.
@@ -464,7 +540,7 @@ Scheduled-task runtime note:
 
 Additional providers also live here (`boxlite`, `brave`, `browserless`, `crawl4ai`, `ddg_search`, `e2b_sandbox`, `exa`, `fastcrw`, `groundroute`, `infoquest`, `searxng`, `serper`); see each subpackage for specifics. E2B bootstrap is required. If it fails, the provider kills and closes the unusable remote sandbox. New sandbox creation raises an error. Warm-pool reclaim and remote discovery discard the sandbox and continue acquisition. E2B mounts remain optional.
 
-E2B output sync records remote file versions and actual host file metadata in a thread-local manifest. The manifest binds to the remote sandbox ID. A complete output listing removes entries for deleted files. This avoids repeat downloads when the host filesystem rounds modification times.
+E2B output sync records remote file versions and actual host file metadata in a thread-local manifest. The manifest binds to the remote sandbox ID. A complete output listing removes entries for deleted files. This avoids repeat downloads when the host filesystem rounds modification times. A single release-time sync pass is bounded by aggregate ceilings (`_MAX_SYNC_TOTAL_BYTES`, `_MAX_SYNC_FILES`, `_SYNC_DEADLINE_SECONDS`) on top of the per-file `_MAX_DOWNLOAD_SIZE` cap, so a pathological outputs tree cannot make release download unboundedly; a truncated pass logs what it dropped and leaves the manifest un-pruned (only entries observed in that pass are reconciled), so files it never reached are retried on the next release rather than being forgotten.
 
 **ACP agent tools**:
 - `invoke_acp_agent` - Invokes external ACP-compatible agents from `config.yaml`
@@ -721,6 +797,28 @@ This invokes `alembic revision --autogenerate` against the live ORM models. Revi
 - `persistence/bootstrap.py` — `bootstrap_schema(engine, backend=...)`, the three-branch decision + locking
 - Tests: `tests/test_persistence_bootstrap.py` (branches), `tests/test_persistence_bootstrap_concurrency.py` (concurrency), `tests/test_persistence_bootstrap_regression.py` (issue #3682), `tests/test_persistence_migrations_env.py` (filter), `tests/blocking_io/test_persistence_bootstrap.py` (asyncio.to_thread anchor)
 
+### Checkpoint Channel Modes (`full` / `delta`)
+
+Checkpointer storage runs in one of two channel modes, selected by `checkpoint_channel_mode` in `config.yaml` (default `full`). `delta` mode adopts LangGraph 1.2's `DeltaChannel` for `messages`: checkpoints store a sentinel + per-step writes instead of the full message list, so storage/serde grows O(N) instead of O(N²) in turns. All checkpointer backends (memory/sqlite/postgres) serve both modes unchanged — the semantics live in the compiled graph's channel table, not in the saver.
+
+**Mode is process-frozen and restart-required.** `make_lead_agent` freezes the resolved mode (`runtime/checkpoint_mode.py::freeze_checkpoint_channel_mode`) before compiling the graph with the mode-matched schema (`agents/thread_state.py::get_thread_state_schema`, plus `adapt_state_schema_for_mode` / `normalize_middleware_state_schemas` for middleware state). A second, different mode in the same process raises `CheckpointModeReconfigurationError`. To switch: edit config, restart.
+
+**Compatibility is asymmetric and fail-closed.** Every checkpoint written in delta mode carries metadata marker `deerflow_checkpoint_channel_mode: "delta"` (injected via `inject_checkpoint_mode`; absence of marker = full, so pre-feature checkpoints need no migration). Before any state read/write, `ensure_checkpoint_mode_compatible` rejects a full-mode process opening a delta thread with `CheckpointModeMismatchError` (surfaced as HTTP 409 with the cause and thread id by the threads router; `CheckpointModeReconfigurationError` maps to 503) — a full-mode raw read of a delta blob would silently return empty/partial `messages`. The reverse direction is allowed: delta-mode processes read full checkpoints transparently (old full checkpoints seed the delta channel), so full → delta is the smooth migration path; delta → full requires materializing/converting the data first. Detection also honors upstream's `counters_since_delta_snapshot.messages` metadata, and an explicit config marker takes precedence over any ambient context value.
+
+**Never bypass `CheckpointStateAccessor` (`runtime/checkpoint_state.py`) for thread-state access.** It is the single choke point binding graph + checkpointer + mode: it injects the mode marker into configs, runs the compatibility check before every `get`/`update`/`history`, and returns materialized state (delta checkpoints lack `channel_values.messages` — raw `get_tuple` reads see a sentinel). Gateway `services.py` builds and passes the accessor; thread-owned reads (state/history/regeneration) must use `build_thread_checkpoint_state_accessor` so the recorded assistant's middleware schema materializes every channel. `history(limit)` semantics: `0` means zero items (explicit empty), `None` means unlimited — do not pass `limit=0` through to `graph.get_state_history`. Assistant metadata lookup is fail-closed for mutation accessors so a store outage cannot silently select the default schema and discard extension channels. In `full` mode the read path degrades to a raw checkpointer read (`_RawCheckpointReadAccessor`) when the agent factory cannot build the graph (bad model config, MCP outage) — full checkpoints carry complete `channel_values`, so reads don't need the graph; degraded snapshots take `created_at` from the standard checkpoint `ts` field, falling back to metadata only for compatibility. The delta gate still applies on the degraded path; `next`/`tasks` degrade to empty and thread status falls back to the stored status because task presence is not derivable, while delta mode has no fallback (materialization needs the channel table).
+
+**Wholesale message replacement uses a state-only mutation graph + `Overwrite`.** `update_state` values pass through channel reducers (`add_messages` merge in full, append in delta), so replacing `messages` wholesale (run rollback, context compaction) requires `{"messages": Overwrite([...])}`. The write goes through `build_state_mutation_graph(as_node, mode, state_schema)` — when the write carries materialized state, `state_schema` MUST be the thread's effective schema (`graph_state_schema(assistant_graph)`), because the base-ThreadState fallback silently discards written channels contributed by custom `AgentMiddleware.state_schema`. Channels absent from the write are unaffected: forked checkpoints clone the parent's channel blobs, so middleware channels survive rollback/compaction regardless of schema (locked by `test_rollback_preserves_middleware_contributed_channels` and `test_compact_thread_context_preserves_middleware_contributed_channels`) — a compiled graph with one no-op node (entry = finish) whose checkpoint machinery (channels/versions/metadata) is identical to the agent graph's but schedules no pending tasks, so the restored/compacted head stays idle instead of re-triggering the agent. Never hand-write checkpoints via `checkpointer.aput` for this; raw writers elsewhere must preserve checkpoint parentage — severed ancestry breaks delta replay (see `runtime/runs/worker.py` writer parenting and `checkpoint_patches.py`).
+
+**Run rollback flow** (`runtime/runs/worker.py`): `_capture_rollback_point` materializes pre-run state (messages via accessor, raw `pending_writes` via `aget_tuple`) into an immutable `RollbackPoint` before the run starts — capture failure disables rollback (fail-closed), never restores partial state. Cancel-with-rollback then forks from the pre-run checkpoint via the mutation graph and replays the captured pending writes.
+
+**Where things live**:
+- `runtime/checkpoint_mode.py` — mode freeze, marker injection, delta detection, compatibility gate, both error types
+- `runtime/checkpoint_state.py` — `CheckpointStateAccessor`, `build_state_mutation_graph`, `RollbackPoint`
+- `checkpoint_patches.py` (package root) — saver patches: delta-history folding for `InMemorySaver` (delegating to the base walk), stable message IDs across materialization, upstream first-write drop fix
+- `agents/thread_state.py` — `ThreadState`/`DeltaThreadState`, `DELTA_MESSAGES_FIELD` (`DeltaChannel` with `snapshot_frequency=1000`), schema adaptation helpers
+- `runtime/context_compaction.py` — compaction via accessor + mutation graph (reference consumer)
+- Tests: `tests/test_checkpoint_mode.py` (freeze/detect/gate), `tests/test_checkpoint_state.py` (accessor/mutation graph), `tests/test_delta_channel_checkpointers.py` (saver parity), `tests/test_threads_checkpoint_mode.py`, `tests/test_gateway_checkpoint_mode.py` (dual-mode e2e parity), `tests/test_context_compaction.py` (mutation-graph write, no scheduling), `tests/test_run_worker_rollback.py`
+
 ### Terminal Workbench / TUI (`packages/harness/deerflow/tui/`)
 
 A terminal-native UI over the embedded harness, exposed as the `deerflow` console script (`[project.scripts]` in `packages/harness/pyproject.toml`). It is a UI shell over `DeerFlowClient` and does **not** fork agent behavior. `textual` is an optional dependency (`deerflow-harness[tui]`; also in the backend dev group); the console script degrades to headless help when it is absent. Full guide: [docs/TUI.md](docs/TUI.md).
@@ -961,7 +1059,7 @@ See [docs/summarization.md](docs/summarization.md) for details.
 For models with `supports_vision: true`:
 - `ViewImageMiddleware` processes images in conversation
 - `view_image_tool` added to agent's toolset
-- Images automatically converted to base64 and injected into state
+- Images are converted to base64 and injected into a hidden message carrying both a reserved ID prefix and a server-owned metadata marker for the model call; Gateway strips that marker from untrusted input, and the middleware requires both identifiers before removing the message. The `before_model` and `model` node checkpoints for that call still contain the payload; after `after_model` cleanup, subsequent checkpoints retain only lightweight `viewed_images` metadata, while client-chosen IDs survive
 
 ## Code Style
 

@@ -332,7 +332,7 @@ _UPLOAD_SENTENCE_RE = re.compile(
     r"upload(?:ed|ing)?(?:\s+\w+){0,3}\s+(?:file|files?|document|documents?|attachment|attachments?)"
     r"|file\s+upload"
     r"|/mnt/user-data/uploads/"
-    r"|<uploaded_files>"
+    r"|<(?:uploaded_files|current_uploads)>"
     r")[^.!?]*[.!?]?\s*",
     re.IGNORECASE,
 )
@@ -613,7 +613,7 @@ def _escape_memory_for_prompt(memory: Any) -> Any:
 class MemoryUpdater:
     """Updates memory using LLM based on conversation context."""
 
-    def __init__(self, config: DeerMemConfig, storage: MemoryStorage, llm: Any = None, *, prompts_dir: str | None = None):
+    def __init__(self, config: DeerMemConfig, storage: MemoryStorage, llm: Any = None, *, prompts_dir: str | None = None, callbacks: Any = None):
         """Initialize the memory updater with injected config + storage + llm (DI).
 
         Args:
@@ -623,11 +623,15 @@ class MemoryUpdater:
                 here). None when no LLM is configured; an update raises in that case.
             prompts_dir: Optional custom prompt-template directory forwarded to
                 ``load_prompt`` / ``load_prompt_messages``. None = bundled defaults.
+            callbacks: Optional ``MemoryCallbacks`` (owned by DeerMem, injected
+                here). ``on_memory_llm_call`` is invoked before the LLM call to
+                merge trace metadata into ``invoke_config``; None = no tracing.
         """
         self._config = config
         self._storage = storage
         self._llm = llm
         self._prompts_dir = prompts_dir
+        self._callbacks = callbacks
 
     # ── Data access + fact CRUD (formerly module-level functions; use self._storage) ──
 
@@ -1093,7 +1097,7 @@ class MemoryUpdater:
 
         The update runs on a Timer / executor thread with no request ContextVar
         inheritance, so log records emitted here would otherwise lose the
-        request trace id (it only reached ``tracing_callback`` before). The
+        request trace id (it only reached the pre-LLM-call tracing hook before). The
         host-injected ``trace_context_manager`` hook (``None`` when DeerMem runs
         standalone, outside the deer-flow factory) binds ``trace_id`` for the
         duration of the call and restores the prior binding on exit. A ``None``
@@ -1156,11 +1160,12 @@ class MemoryUpdater:
             if model is None:
                 raise RuntimeError("DeerMem memory update requested but no LLM is configured (set memory.backend_config.model in config).")
             invoke_config: dict[str, Any] = {"run_name": "memory_agent"}
-            # Optional observability callback (e.g. langfuse), injected via
-            # backend_config.tracing_callback. None = no tracing (langfuse is not
-            # hard-required); the host may pass a wrapper around its own tracer.
-            if self._config.tracing_callback is not None:
-                self._config.tracing_callback(
+            # Pre-LLM-call observability hook (e.g. langfuse): merge trace
+            # metadata into invoke_config before the call so a tracer emits a
+            # span at the LLM boundary. None = no tracing (langfuse not
+            # hard-required). Subsumes the former backend_config.tracing_callback.
+            if self._callbacks is not None:
+                self._callbacks.on_memory_llm_call(
                     invoke_config,
                     thread_id=thread_id,
                     user_id=user_id,

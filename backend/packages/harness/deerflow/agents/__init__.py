@@ -7,6 +7,7 @@ __all__ = [
     "Prev",
     "make_lead_agent",
     "SandboxState",
+    "DeltaThreadState",
     "ThreadState",
 ]
 
@@ -28,10 +29,14 @@ def __getattr__(name: str):
         prime_enabled_skills_cache()
         globals()[name] = make_lead_agent
         return make_lead_agent
-    if name in {"SandboxState", "ThreadState"}:
-        from .thread_state import SandboxState, ThreadState
+    if name in {"DeltaThreadState", "SandboxState", "ThreadState"}:
+        from .thread_state import DeltaThreadState, SandboxState, ThreadState
 
-        exports = {"SandboxState": SandboxState, "ThreadState": ThreadState}
+        exports = {
+            "DeltaThreadState": DeltaThreadState,
+            "SandboxState": SandboxState,
+            "ThreadState": ThreadState,
+        }
         globals().update(exports)
         return exports[name]
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

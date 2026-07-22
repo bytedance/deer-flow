@@ -261,6 +261,7 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
     """
     from deerflow.persistence.engine import close_engine, get_session_factory, init_engine_from_config
     from deerflow.runtime import make_store, make_stream_bridge
+    from deerflow.runtime.checkpoint_mode import freeze_checkpoint_channel_mode
     from deerflow.runtime.checkpointer.async_provider import make_checkpointer
     from deerflow.runtime.events.store import make_run_event_store
 
@@ -272,6 +273,7 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
 
     async with AsyncExitStack() as stack:
         config = startup_config
+        app.state.checkpoint_channel_mode = freeze_checkpoint_channel_mode(config.database.checkpoint_channel_mode)
 
         app.state.stream_bridge = await stack.enter_async_context(make_stream_bridge(config))
 
@@ -433,6 +435,7 @@ def get_run_context(request: Request) -> RunContext:
         store=get_store(request),
         event_store=get_run_event_store(request),
         run_events_config=getattr(request.app.state, "run_events_config", None),
+        checkpoint_channel_mode=getattr(request.app.state, "checkpoint_channel_mode", "full"),
         thread_store=get_thread_store(request),
         app_config=get_config(),
         on_run_completed=getattr(request.app.state, "scheduled_task_service", None).handle_run_completion if getattr(request.app.state, "scheduled_task_service", None) is not None else None,

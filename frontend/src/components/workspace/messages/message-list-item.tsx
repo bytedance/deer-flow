@@ -45,7 +45,6 @@ import {
   stripUploadedFilesTag,
   type FileInMessage,
 } from "@/core/messages/utils";
-import { useRehypeSplitWordsIntoSpans } from "@/core/rehype";
 import { readReferenceMessageContexts } from "@/core/sidecar";
 import {
   parseSlashSkillReference,
@@ -295,7 +294,6 @@ function MessageContent_({
   runId?: string;
   turnStartTime?: number | null;
 }) {
-  const rehypePlugins = useRehypeSplitWordsIntoSpans(isLoading);
   const isHuman = message.type === "human";
   const rawTurnDuration = message.additional_kwargs?.turn_duration as
     | number
@@ -478,7 +476,6 @@ function MessageContent_({
       <MarkdownContent
         content={contentToDisplay}
         isLoading={isLoading}
-        rehypePlugins={rehypePlugins}
         className="my-3"
         components={components}
       />

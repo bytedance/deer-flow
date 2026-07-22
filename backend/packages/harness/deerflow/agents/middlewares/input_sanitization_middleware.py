@@ -39,6 +39,12 @@ logger = logging.getLogger(__name__)
 _SUMMARY_MESSAGE_NAME = "summary"
 
 # Finite set of blocked tag names: system-reserved + common injection patterns.
+#
+# Maintenance: when adding a new framework block tag that the system emits into
+# model input, you MUST also update the expected count in
+# test_input_sanitization_middleware.py::test_denylist_covers_framework_authority_blocks.
+# The test pins the exact number of blocked tags so a new framework tag cannot
+# be added without the corresponding regression guard.
 _BLOCKED_TAG_NAMES: frozenset[str] = frozenset(
     {
         # Framework-injected structured/authority blocks. The lead-agent system
@@ -73,13 +79,14 @@ _BLOCKED_TAG_NAMES: frozenset[str] = frozenset(
         "critical_reminders",
         "response_style",
         "citations",
+        "uploaded_files",  # old uploads tag — still processed by deermem for backward-compat
+        "current_uploads",
         "subagent_system",
         "skill_system",
         "skill_index",
         "available_skills",
         "disabled_skills",
         "memory_tool_system",
-        "uploaded_files",
         "todo_list_system",
         "durable_context_data",
         "slash_skill_activation",
@@ -235,7 +242,10 @@ class InputSanitizationMiddleware(AgentMiddleware[AgentState]):
         text_blocks: list[dict] = []
         for block in content:
             if isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str):
-                text_parts.append(block["text"])
+                text = block["text"]
+                if not text:  # skip empty blocks — matches message_content_to_text behaviour
+                    continue
+                text_parts.append(text)
                 text_blocks.append(block)
         return "\n".join(text_parts), text_blocks
 
@@ -297,10 +307,82 @@ class InputSanitizationMiddleware(AgentMiddleware[AgentState]):
                 logger.debug("_process_request: no text content in message — passing through")
                 return request
 
-            processed = _check_user_content(text_content)
+            # Sanitize only the user's original input when available (set by
+            # UploadsMiddleware before it prepends the <current_uploads> block),
+            # so server-injected trusted blocks are never scanned for blocked
+            # tags.  Fall back to full-content scanning only when the marker is
+            # absent — UploadsMiddleware sets it on upload turns, so plain text
+            # messages without uploads won't have it.  Full-content scanning is
+            # safe for those: no server-injected <current_uploads> block exists
+            # to accidentally escape.
+            preserved_kwargs = dict(msg.additional_kwargs or {})
+            original_user_content = preserved_kwargs.get(ORIGINAL_USER_CONTENT_KEY)
+            if isinstance(original_user_content, str) and original_user_content:
+                processed_user = _check_user_content(original_user_content)
+                if processed_user != original_user_content:
+                    # Replace only the user's text suffix within the full
+                    # content — server-prepended blocks stay untouched.
+                    idx = text_content.rfind(original_user_content)
+                    if idx >= 0:
+                        processed = text_content[:idx] + processed_user
+                    else:
+                        # _extract_text_from_content and message_content_to_text
+                        # disagreed on text extraction — rfind failed (only
+                        # reachable for multimodal list content; see Decision 18).
+                        if isinstance(content, list) and len(content) >= 2:
+                            # content[0] is the server-injected
+                            # <current_uploads> block (UploadsMiddleware
+                            # prepends it as the first element for list
+                            # content).  Sanitize only user blocks (content[1:])
+                            # and rebuild directly — _rebuild_content only
+                            # handles type:"text" blocks and would miss raw
+                            # strings or non-standard dict blocks that
+                            # message_content_to_text sees.
+                            logger.warning(
+                                "rfind failed on multimodal content; sanitizing user content blocks individually",
+                            )
+                            new_content: list = [content[0]]
+                            for block in content[1:]:
+                                if isinstance(block, str):
+                                    new_content.append(neutralize_untrusted_tags(block))
+                                elif isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str):
+                                    sanitized = neutralize_untrusted_tags(block["text"])
+                                    if sanitized != block["text"]:
+                                        new_content.append({**block, "text": sanitized})
+                                    else:
+                                        new_content.append(block)
+                                else:
+                                    new_content.append(block)
+                            messages[i] = HumanMessage(
+                                content=new_content,
+                                id=msg.id,
+                                name=msg.name,
+                                additional_kwargs=preserved_kwargs,
+                            )
+                            return request.override(messages=messages)
+                        else:
+                            # Cannot distinguish server block from user blocks
+                            # (non-list content or len(content) < 2).
+                            # Degrade to full-content sanitization — server
+                            # block may be escaped (UX degradation) but user
+                            # forgeries are still neutralized (no security
+                            # regression).
+                            logger.warning(
+                                "rfind failed with original_user_content set; cannot distinguish blocks, falling back to full-content sanitization",
+                            )
+                            processed = _check_user_content(text_content)
+                else:
+                    processed = text_content  # no change needed
+            elif isinstance(original_user_content, str):
+                # Key is present but empty string (e.g. file upload with no
+                # text input).  No user text to sanitize; server-injected
+                # blocks must survive untouched.
+                processed = text_content
+            else:
+                processed = _check_user_content(text_content)  # fallback
 
             if processed == text_content:
-                # Already wrapped — no override needed
+                # Already clean / already wrapped — no override needed
                 return request
 
             if text_blocks:
@@ -313,8 +395,6 @@ class InputSanitizationMiddleware(AgentMiddleware[AgentState]):
             # recover it after the BEGIN/END wrapping. Keep a valid value set by
             # UploadsMiddleware or an IM channel, but repair malformed metadata so
             # persistence never falls back to the wrapped model-facing content.
-            preserved_kwargs = dict(msg.additional_kwargs or {})
-            original_user_content = preserved_kwargs.get(ORIGINAL_USER_CONTENT_KEY)
             if not isinstance(original_user_content, str):
                 if ORIGINAL_USER_CONTENT_KEY in preserved_kwargs:
                     logger.warning(
