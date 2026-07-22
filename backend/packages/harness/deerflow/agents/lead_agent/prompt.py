@@ -309,7 +309,9 @@ def _build_available_subagents_description(available_names: list[str], bash_avai
     builtin_descriptions = {
         "general-purpose": "For bounded work with clear delegation benefit from specialist capability, context isolation, or independent parallel execution.",
         "bash": (
-            "For command execution (git, build, test, deploy operations)" if bash_available else "Not available in the current sandbox configuration. Use direct file/web tools or switch to AioSandboxProvider for isolated shell access."
+            "For bounded shell workflows with clear context-isolation or independent-parallel benefit. Routine git, build, test, or deploy operations are not sufficient reason to delegate."
+            if bash_available
+            else "Not available in the current sandbox configuration. Use direct file/web tools or switch to AioSandboxProvider for isolated shell access."
         ),
     }
 
@@ -361,7 +363,7 @@ def _build_subagent_section(
     available_subagents = _build_available_subagents_description(available_names, bash_available, app_config=app_config)
     direct_tool_examples = "bash, ls, read_file, web_search, etc." if bash_available else "ls, read_file, web_search, etc."
     direct_execution_example = (
-        '# User asks: "Run the tests"\n# Thinking: Cannot decompose into parallel sub-tasks\n# → Execute directly\n\nbash("npm test")  # Direct execution, not task()'
+        '# User asks: "Run the tests"\n# Thinking: Direct bash is cheaper than delegation\n# → Execute directly\n\nbash("npm test")  # Direct execution, not task()'
         if bash_available
         else '# User asks: "Read the README"\n# Thinking: Single straightforward file read\n# → Execute directly\n\nread_file("/mnt/user-data/workspace/README.md")  # Direct execution, not task()'
     )
@@ -378,12 +380,18 @@ Expected cost = delegation and startup overhead + duplicate context and reposito
 
 **Delegate only when the expected benefit is clearly greater than the expected cost.** When uncertain, execute directly.
 
-**Hard vetoes - execute directly instead:**
-- **Sequential dependencies**: A later task needs an earlier result. Complete the dependency chain directly; reconsider only when genuinely independent work appears.
+**Hard vetoes for parallel dispatch - do not launch these scopes concurrently:**
+- **Inter-agent dependencies**: One delegated task needs another delegated task's result. Keep the dependency chain together instead of splitting it across parallel subagents.
 - **Unsafe shared state**: Tasks may touch overlapping files, shared mutable state, or external side effects without disjoint ownership.
+
+A bounded sequential chain may still be delegated to one subagent when specialist capability or context isolation clearly outweighs delegation overhead.
+
+**Delegation costs and negative signals - include these in the net-benefit comparison:**
 - **Duplicate discovery**: Each subagent would need to read the same repository area or reconstruct context the lead agent already has.
 - **Cheap direct path**: The lead agent can finish with a small number of tool calls or less work than delegation plus synthesis.
-- **User interaction needed**: Requirements must be clarified before execution.
+- **Coordination burden**: The lead agent would spend substantial work reconciling or verifying subagent results.
+
+**Clarify first**: Requirements that need user input must be resolved before direct execution or delegation.
 
 **Valid sources of delegation benefit:**
 - **Parallel latency**: Two or more independent, non-overlapping tasks can run concurrently and materially reduce wall-clock time.
@@ -396,14 +404,14 @@ A single subagent is justified only by material specialist or context-isolation 
 - **MAXIMUM {n} `task` CALLS PER RESPONSE.** Excess calls are discarded.
 - **MAXIMUM {total} `task` CALLS PER RUN.** Count only delegations for the current user request/run; older thread history does not consume this run's allowance.
 - Never start a batch that would exceed either limit. When a limit is reached, synthesize existing results or continue directly.
-- **Re-evaluate the remaining work after every batch.** Do not pre-commit to later batches merely because the task was initially decomposed; sequential batches lose parallel-latency benefit and may no longer justify their cost.
+- **Re-evaluate the remaining work after every batch.** Later batches cannot overlap earlier batches, but can still deliver material within-batch parallel savings. Recompute benefit and cost instead of automatically continuing or stopping.
 
 **Available Subagents:**
 {available_subagents}
 
 **Delegation workflow:**
 1. Establish the cheapest credible direct-execution path.
-2. Apply the hard vetoes.
+2. Apply the parallel-dispatch hard vetoes and include all negative signals in expected cost.
 3. Compare expected benefit with all listed costs.
 4. If delegation wins clearly, give each subagent a bounded, non-overlapping scope, relevant known context and paths, an expected output, and explicit side-effect ownership.
 5. Launch only the smallest useful batch, up to {n} calls and the remaining run allowance.
@@ -413,6 +421,7 @@ A single subagent is justified only by material specialist or context-isolation 
 - Refactor authentication implementation and its tests: execute directly when analysis, edits, and test feedback share files or depend on one another. Complexity alone does not justify delegation.
 - Compare independent providers: parallel read-only research can be worthwhile when every subagent owns one provider and returns the same bounded schema.
 - Use one specialized subagent only when its configured capability provides material benefit unavailable on the direct path.
+- Run a routine test, build, or git command directly. Use one Bash subagent only when a bounded shell workflow has material context-isolation benefit.
 
 Otherwise execute directly using available tools ({direct_tool_examples}):
 
@@ -962,7 +971,7 @@ def apply_prompt_template(
     # Add subagent thinking guidance if enabled
     subagent_thinking = (
         "- **DELEGATION CHECK: Default to direct execution; complexity alone is not a reason to delegate. Before each `task` call, "
-        "rule out sequential dependencies and overlapping state or side effects, then require clear positive net benefit. "
+        "require clear positive net benefit; before parallel calls, rule out inter-agent dependencies and overlapping state or side effects. "
         f"If delegating, use the fewest agents needed and never exceed {n} `task` calls in one response or {total} total in this run.**\n"
         if subagent_enabled
         else ""

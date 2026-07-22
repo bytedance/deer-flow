@@ -250,7 +250,9 @@ async def task_tool(
       parallel.
     - **bash**: Command execution specialist for running bash commands. This is only
       available when host bash is explicitly allowed or when using an isolated shell
-      sandbox such as `AioSandboxProvider`.
+      sandbox such as `AioSandboxProvider`. Use it only for a bounded shell workflow
+      with clear context-isolation or independent-parallel benefit.
+      Routine git, build, test, or deploy operations are not sufficient reason to delegate.
 
     Additional custom subagent types may be defined in config.yaml under
     `subagents.custom_agents`. Each custom type can have its own system prompt,
@@ -264,11 +266,16 @@ async def task_tool(
 
     When NOT to use this tool:
     - Merely because a task is complex, multi-step, verbose, or touches a large repo
-    - Sequential work whose later steps depend on earlier results
-    - Work that repeats the same repository discovery in multiple contexts
-    - Work with overlapping files, shared mutable state, or external side effects
-    - Any task the parent can complete more cheaply with direct tools
+    - Splitting dependent steps across parallel subagents; keep the chain together
+      and delegate it as one bounded task only when specialist or context-isolation
+      benefit clearly wins
+    - Parallel work with overlapping files, shared mutable state, or external side effects
     - Tasks requiring user interaction or clarification
+
+    Costs to include in the delegation decision:
+    - Repeating the same repository discovery in multiple contexts
+    - Coordination, verification, and synthesis of returned results
+    - Any task the parent can complete more cheaply with direct tools
 
     Args:
         description: A short (3-5 word) description of the task for logging/display. ALWAYS PROVIDE THIS PARAMETER FIRST.
