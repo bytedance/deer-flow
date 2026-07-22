@@ -9,7 +9,7 @@ from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import ToolMessage
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.runtime import Runtime
-from langgraph.types import Command
+from langgraph.types import Command, Overwrite
 
 from deerflow.agents.thread_state import SandboxStateField, ThreadDataState
 from deerflow.runtime.user_context import resolve_runtime_user_id
@@ -23,6 +23,20 @@ class SandboxMiddlewareState(AgentState):
 
     sandbox: SandboxStateField
     thread_data: NotRequired[ThreadDataState | None]
+
+
+def _unwrap_sandbox(sandbox: object) -> object:
+    """Unwrap an ``Overwrite``-wrapped sandbox channel value, if present.
+
+    Fork-restored checkpoints can deliver the sandbox channel still wrapped in
+    ``langgraph.types.Overwrite`` (the rollback restore applies replace-style
+    writes through a state-mutation graph in delta checkpoint mode). Reading
+    ``sandbox["sandbox_id"]`` on the wrapper itself crashes with ``TypeError:
+    'Overwrite' object is not subscriptable``, so unwrap before use.
+    """
+    if isinstance(sandbox, Overwrite):
+        return sandbox.value
+    return sandbox
 
 
 class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
@@ -99,7 +113,7 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
 
     @override
     def after_agent(self, state: SandboxMiddlewareState, runtime: Runtime) -> dict | None:
-        sandbox = state.get("sandbox")
+        sandbox = _unwrap_sandbox(state.get("sandbox"))
         if sandbox is not None:
             sandbox_id = sandbox["sandbox_id"]
             logger.info(f"Releasing sandbox {sandbox_id}")
@@ -117,7 +131,7 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
 
     @override
     async def aafter_agent(self, state: SandboxMiddlewareState, runtime: Runtime) -> dict | None:
-        sandbox = state.get("sandbox")
+        sandbox = _unwrap_sandbox(state.get("sandbox"))
         if sandbox is not None:
             sandbox_id = sandbox["sandbox_id"]
             logger.info(f"Releasing sandbox {sandbox_id}")

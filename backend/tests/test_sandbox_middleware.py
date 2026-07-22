@@ -9,7 +9,7 @@ from langchain.tools import ToolRuntime
 from langchain_core.messages import ToolMessage
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.runtime import Runtime
-from langgraph.types import Command
+from langgraph.types import Command, Overwrite
 
 from deerflow.agents.thread_state import ThreadState
 from deerflow.sandbox.middleware import SandboxMiddleware, SandboxMiddlewareState
@@ -250,6 +250,34 @@ async def test_aafter_agent_delegates_to_super_when_no_sandbox(monkeypatch: pyte
 
     assert result == {"delegated": True}
     assert calls == [(state, runtime)]
+
+
+def test_after_agent_unwraps_overwrite_sandbox_state() -> None:
+    """Fork-restored state may carry the sandbox channel Overwrite-wrapped."""
+    provider = _AsyncOnlyProvider()
+    set_sandbox_provider(provider)
+    try:
+        state = {"sandbox": Overwrite({"sandbox_id": "fork-restored"})}
+        result = SandboxMiddleware().after_agent(state, Runtime(context={}))
+    finally:
+        reset_sandbox_provider()
+
+    assert result is None
+    assert provider.released_ids == ["fork-restored"]
+
+
+@pytest.mark.anyio
+async def test_aafter_agent_unwraps_overwrite_sandbox_state() -> None:
+    provider = _AsyncOnlyProvider()
+    set_sandbox_provider(provider)
+    try:
+        state = {"sandbox": Overwrite({"sandbox_id": "fork-restored"})}
+        result = await SandboxMiddleware().aafter_agent(state, Runtime(context={}))
+    finally:
+        reset_sandbox_provider()
+
+    assert result is None
+    assert provider.released_ids == ["fork-restored"]
 
 
 # ---------------------------------------------------------------------------
