@@ -62,7 +62,21 @@ class SkillSecurityScanError(ValueError):
 
 
 def is_unsafe_zip_member(info: zipfile.ZipInfo) -> bool:
-    """Return True if the zip member path is absolute or attempts directory traversal."""
+    """Return True if the zip member path is absolute, attempts directory
+    traversal, or contains a colon.
+
+    A colon has no legitimate use in a relative archive member path — zip
+    entries always use ``/`` separators, and a real Windows drive prefix
+    (``C:\\...``) is already rejected above as absolute. But on Windows/NTFS,
+    a colon anywhere else in a path (e.g. ``scripts/run.sh:hidden.txt``)
+    addresses an Alternate Data Stream on the preceding path component
+    instead of creating a new file: it silently attaches extra content to
+    ``scripts/run.sh`` rather than creating a sibling file. That stream is
+    invisible to ``Path.rglob()`` / ``os.walk()``-based listing, so it would
+    let an archive smuggle content past directory-based security scanning
+    while the content still lands on disk. Reject outright rather than
+    trying to allow-list "safe" colon positions.
+    """
     name = info.filename
     if not name:
         return False
@@ -75,6 +89,8 @@ def is_unsafe_zip_member(info: zipfile.ZipInfo) -> bool:
     if PureWindowsPath(name).is_absolute():
         return True
     if ".." in path.parts:
+        return True
+    if ":" in name:
         return True
     return False
 
@@ -118,6 +134,7 @@ def safe_extract_skill_archive(
     zip_ref: zipfile.ZipFile,
     dest_path: Path,
     max_total_size: int = 512 * 1024 * 1024,
+    max_entries: int = 4096,
 ) -> None:
     """Safely extract a skill archive with security protections.
 
@@ -125,15 +142,28 @@ def safe_extract_skill_archive(
     - Reject absolute paths and directory traversal (..).
     - Skip symlink entries instead of materialising them.
     - Enforce a hard limit on total uncompressed size (zip bomb defence).
+    - Enforce a hard limit on member count (zip bomb defence by entry count —
+      a huge number of tiny/empty members can be cheap to store yet still
+      slow to extract, independent of total size).
     - Reject executable binaries (ELF/PE/Mach-O) by magic bytes.
 
     Raises:
-        ValueError: If unsafe members, executable binaries, or size limit exceeded.
+        ValueError: If unsafe members, executable binaries, entry count, or size limit exceeded.
     """
     dest_root = dest_path.resolve()
     total_written = 0
 
-    for info in zip_ref.infolist():
+    infos = zip_ref.infolist()
+    if len(infos) > max_entries:
+        # Early-abort before any per-member work below — mirrors the same
+        # early-abort in skillscan/orchestrator.py::scan_archive_preflight
+        # (its comment: "a huge member count is a bounded DoS vector even
+        # when the total size is small"). That scan is optional
+        # (skill_scan.enabled); this check must hold unconditionally since
+        # it lives in the extraction path every install goes through.
+        raise ValueError(f"Skill archive contains too many entries ({len(infos)} > {max_entries}).")
+
+    for info in infos:
         if is_unsafe_zip_member(info):
             raise ValueError(f"Archive contains unsafe member path: {info.filename!r}")
 

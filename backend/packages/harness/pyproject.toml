@@ -11,13 +11,15 @@ dependencies = [
     "exa-py>=1.0.0",
     "httpx>=0.28.0",
     "kubernetes>=30.0.0",
-    "langchain>=1.2.15",
+    # Lower bound reflects what the lockfile resolves and tests run against
+    # (langgraph 1.2.9 pulls langchain >=1.3 transitively).
+    "langchain>=1.3",
     "langchain-anthropic>=1.4.1",
     "langchain-deepseek>=1.0.1",
     "langchain-mcp-adapters>=0.2.2",
     "langchain-openai>=1.2.1",
     "langfuse>=3.4.1",
-    "langgraph>=1.1.9",
+    "langgraph>=1.2.9,<1.3",
     "langgraph-api>=0.8.1",
     "langgraph-cli>=0.4.24",
     "langgraph-runtime-inmem>=0.28.0",
@@ -32,7 +34,7 @@ dependencies = [
     "ddgs>=9.10.0",
     "duckdb>=1.4.4",
     "langchain-google-genai>=4.2.1",
-    "langgraph-checkpoint-sqlite>=3.0.3",
+    "langgraph-checkpoint-sqlite>=3.1.0,<3.2",
     "langgraph-sdk>=0.1.51",
     "sqlalchemy[asyncio]>=2.0,<3.0",
     "aiosqlite>=0.19",
@@ -55,7 +57,7 @@ groundroute = []
 ollama = ["langchain-ollama>=0.3.0"]
 postgres = [
     "asyncpg>=0.29",
-    "langgraph-checkpoint-postgres>=3.0.5",
+    "langgraph-checkpoint-postgres>=3.1.0,<3.2",
     "psycopg[binary]>=3.3.3",
     "psycopg-pool>=3.3.0",
 ]
@@ -68,6 +70,10 @@ boxlite = ["boxlite>=0.9.7"]
 # Agent observability (Monocle). Optional so a default install stays free of the
 # OpenTelemetry stack; only pulled in when MONOCLE_TRACING is used.
 monocle = ["monocle_apptrace>=0.8.8"]
+# Agentic browser control (browser_navigate/click/type/... tool group). Optional
+# so the core harness install stays lean; import is lazy inside the private
+# Playwright loop. After install, run `playwright install chromium` once.
+browser = ["playwright>=1.40"]
 
 [build-system]
 requires = ["hatchling"]

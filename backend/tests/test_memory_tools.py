@@ -500,8 +500,7 @@ class TestModeGating:
             "load_agent_config",
             lambda name: SimpleNamespace(model=None, skills=None, tool_groups=None),
         )
-        monkeypatch.setattr(lead_agent_module, "_load_enabled_skills_for_tool_policy", lambda available_skills, *, app_config, user_id=None: [])
-        monkeypatch.setattr(lead_agent_module, "filter_tools_by_skill_allowed_tools", lambda tools, skills, always_allowed_tool_names=(): tools)
+        monkeypatch.setattr(lead_agent_module, "_load_enabled_available_skills", lambda available_skills, *, app_config, user_id=None: [])
         monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [_NamedTool("memory_search"), _NamedTool("bash")])
 
         app_config = SimpleNamespace(
@@ -509,6 +508,7 @@ class TestModeGating:
             memory=MemoryConfig(enabled=True, mode="tool"),
             skills=SimpleNamespace(deferred_discovery=False, container_path="/tmp/skills"),
             tool_search=SimpleNamespace(enabled=False, auto_promote_top_k=0),
+            database=SimpleNamespace(checkpoint_channel_mode="full"),
         )
 
         agent_kwargs = lead_agent_module._make_lead_agent({"configurable": {"agent_name": "test-agent"}}, app_config=app_config)
@@ -533,8 +533,7 @@ class TestModeGating:
             "load_agent_config",
             lambda name: SimpleNamespace(model=None, skills=None, tool_groups=None),
         )
-        monkeypatch.setattr(lead_agent_module, "_load_enabled_skills_for_tool_policy", lambda available_skills, *, app_config, user_id=None: [])
-        monkeypatch.setattr(lead_agent_module, "filter_tools_by_skill_allowed_tools", lambda tools, skills, always_allowed_tool_names=(): tools)
+        monkeypatch.setattr(lead_agent_module, "_load_enabled_available_skills", lambda available_skills, *, app_config, user_id=None: [])
         monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [_NamedTool("bash"), _NamedTool("bash")])
 
         app_config = SimpleNamespace(
@@ -542,6 +541,7 @@ class TestModeGating:
             memory=MemoryConfig(enabled=True, mode="tool"),
             skills=SimpleNamespace(deferred_discovery=False, container_path="/tmp/skills"),
             tool_search=SimpleNamespace(enabled=False, auto_promote_top_k=0),
+            database=SimpleNamespace(checkpoint_channel_mode="full"),
         )
 
         agent_kwargs = lead_agent_module._make_lead_agent({"configurable": {"agent_name": "test-agent"}}, app_config=app_config)

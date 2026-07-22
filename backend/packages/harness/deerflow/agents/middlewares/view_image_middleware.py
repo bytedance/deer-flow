@@ -5,9 +5,10 @@ import base64
 import logging
 from pathlib import Path
 from typing import override
+from uuid import uuid4
 
 from langchain.agents.middleware import AgentMiddleware
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage, ToolMessage
 from langgraph.runtime import Runtime
 
 from deerflow.agents.thread_state import ThreadState
@@ -18,6 +19,8 @@ logger = logging.getLogger(__name__)
 # enforces this at write time; the middleware re-checks at read time in
 # case the file grew on disk between view and injection.
 _MAX_IMAGE_BYTES = 20 * 1024 * 1024
+_IMAGE_CONTEXT_MESSAGE_ID_PREFIX = "view-image-context:"
+_IMAGE_CONTEXT_MESSAGE_MARKER_KEY = "deerflow_view_image_context"
 
 
 class ViewImageMiddlewareState(ThreadState):
@@ -33,12 +36,18 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
     3. Verifies all tool calls in that message have been completed (have corresponding ToolMessages)
     4. If conditions are met, creates a human message with all viewed image details (including base64 data)
     5. Adds the message to state so the LLM can see and analyze the images
+    6. Removes the transient message after the LLM call so later checkpoints do not retain its base64 data
 
     This enables the LLM to automatically receive and analyze images that were loaded via view_image tool,
     without requiring explicit user prompts to describe the images.
     """
 
     state_schema = ViewImageMiddlewareState
+
+    @staticmethod
+    def _is_image_context_message(message: object) -> bool:
+        """Return whether a message is trusted transient image context."""
+        return isinstance(message, HumanMessage) and bool(message.id) and message.id.startswith(_IMAGE_CONTEXT_MESSAGE_ID_PREFIX) and message.additional_kwargs.get(_IMAGE_CONTEXT_MESSAGE_MARKER_KEY) is True
 
     def _get_last_assistant_message(self, messages: list) -> AIMessage | None:
         """Get the last assistant message from the message list.
@@ -204,12 +213,34 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
         assistant_idx = messages.index(last_assistant_msg)
         for msg in messages[assistant_idx + 1 :]:
             if isinstance(msg, HumanMessage):
+                if self._is_image_context_message(msg):
+                    return False
                 content_str = str(msg.content)
                 if "Here are the images you've viewed" in content_str or "Here are the details of the images you've viewed" in content_str:
                     # Already added, don't add again
                     return False
 
         return True
+
+    @staticmethod
+    def _create_image_context_message(content: list[str | dict]) -> HumanMessage:
+        """Create an identifiable, model-only image context message."""
+        return HumanMessage(
+            id=f"{_IMAGE_CONTEXT_MESSAGE_ID_PREFIX}{uuid4().hex}",
+            content=content,
+            additional_kwargs={
+                "hide_from_ui": True,
+                _IMAGE_CONTEXT_MESSAGE_MARKER_KEY: True,
+            },
+        )
+
+    @staticmethod
+    def _remove_image_context_messages(state: ViewImageMiddlewareState) -> dict | None:
+        """Remove transient image context messages after the model consumed them."""
+        removals = [RemoveMessage(id=msg.id) for msg in state.get("messages", []) if ViewImageMiddleware._is_image_context_message(msg)]
+        if not removals:
+            return None
+        return {"messages": removals}
 
     def _inject_image_message(self, state: ViewImageMiddlewareState) -> dict | None:
         """Internal helper to inject image details message.
@@ -229,7 +260,7 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
         # Create a new human message with mixed content (text + images). This is
         # internal context for the model only, so hide it from the chat UI and IM
         # channels (matches the other middleware-injected context messages).
-        human_msg = HumanMessage(content=image_content, additional_kwargs={"hide_from_ui": True})
+        human_msg = self._create_image_context_message(image_content)
 
         logger.debug("Injecting image details message with images before LLM call")
 
@@ -273,6 +304,16 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
         # Image reads + base64 encoding can be slow (up to 20MB), so offload
         # the blocking work to a thread rather than stalling the event loop.
         image_content = await asyncio.to_thread(self._create_image_details_message, state)
-        human_msg = HumanMessage(content=image_content, additional_kwargs={"hide_from_ui": True})
+        human_msg = self._create_image_context_message(image_content)
         logger.debug("Injecting image details message with images before LLM call")
         return {"messages": [human_msg]}
+
+    @override
+    def after_model(self, state: ViewImageMiddlewareState, runtime: Runtime) -> dict | None:
+        """Remove model-only image data before subsequent checkpoints (sync version)."""
+        return self._remove_image_context_messages(state)
+
+    @override
+    async def aafter_model(self, state: ViewImageMiddlewareState, runtime: Runtime) -> dict | None:
+        """Remove model-only image data before subsequent checkpoints (async version)."""
+        return self._remove_image_context_messages(state)

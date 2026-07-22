@@ -23,7 +23,7 @@ import yaml
 from langchain_core.messages import ToolMessage
 from langchain_core.tools import tool
 from langgraph.types import Command
-from pydantic import BeforeValidator
+from pydantic import BaseModel, BeforeValidator
 
 from deerflow.config.agents_config import load_agent_config, preserve_non_managed_fields, validate_agent_name
 from deerflow.config.app_config import get_app_config
@@ -42,6 +42,12 @@ _NULLISH_STRINGS = frozenset({"null", "none", "undefined"})
 # so a custom factory that re-attaches ``update_agent`` cannot silently
 # expose self-mutation over a webhook.
 _UNTRUSTED_CHANNELS: frozenset[str] = frozenset({"github"})
+
+_MODEL_BEHAVIOR_FIELDS: tuple[str, ...] = (
+    "model_settings",
+    "thinking_enabled",
+    "reasoning_effort",
+)
 
 
 def _stage_temp(path: Path, text: str) -> Path:
@@ -145,6 +151,13 @@ def update_agent(
     if soul is None and description is None and skills is None and tool_groups is None and model is None:
         return _err('No fields provided. Pass at least one of: soul, description, skills, tool_groups, model. Omit unchanged fields instead of passing null-like strings such as "null", "none", or "undefined".')
 
+    # Reject empty / whitespace-only soul before touching the filesystem.
+    # setup_agent already refuses this (#3553 / #3549); update_agent must too,
+    # otherwise a custom agent can report success while wiping a working
+    # SOUL.md and leaving the next turn with an empty personality.
+    if soul is not None and not soul.strip():
+        return _err("soul content is empty; refusing to update agent with an empty SOUL.md. Omit the soul field if you do not want to change it.")
+
     try:
         agent_name = validate_agent_name(agent_name_raw)
     except ValueError as e:
@@ -219,6 +232,22 @@ def update_agent(
         config_data["skills"] = new_skills
     if skills is not None and skills != existing_cfg.skills:
         updated_fields.append("skills")
+
+    # This tool intentionally does not expose the #4336 model-behavior fields
+    # as LLM-callable arguments yet, but it still rewrites config.yaml when any
+    # of its supported fields changes. Carry those values forward explicitly so
+    # an agent refining its description/model/skills cannot erase UI/API-owned
+    # defaults such as temperature or reasoning effort.
+    for key in _MODEL_BEHAVIOR_FIELDS:
+        value = getattr(existing_cfg, key, None)
+        if value is None:
+            continue
+        if isinstance(value, BaseModel):
+            dumped = value.model_dump(exclude_none=True)
+            if dumped:
+                config_data[key] = dumped
+        else:
+            config_data[key] = value
 
     # Preserve every top-level AgentConfig field that this tool does not
     # expose as an argument (currently ``github:``, plus any future field

@@ -1536,3 +1536,57 @@ def test_api_base_reaches_real_minimax_constructor_as_base_url(monkeypatch):
 
     assert instance.openai_api_base == "https://api.minimax.io/v1"
     assert "api_base" not in (instance.model_kwargs or {})
+
+
+# ---------------------------------------------------------------------------
+# Per-agent model_overrides (issue #4336)
+# ---------------------------------------------------------------------------
+
+
+def test_model_overrides_layer_on_top_of_profile(monkeypatch):
+    """A caller's model_overrides win over the profile's same-named values."""
+    cfg = _make_app_config([_make_model("base", max_tokens=4096)])
+    _patch_factory(monkeypatch, cfg)
+
+    FakeChatModel.captured_kwargs = {}
+    factory_module.create_chat_model(name="base", model_overrides={"temperature": 0.2, "max_tokens": 12000})
+
+    assert FakeChatModel.captured_kwargs.get("temperature") == 0.2
+    assert FakeChatModel.captured_kwargs.get("max_tokens") == 12000
+
+
+def test_model_overrides_ignore_none_values(monkeypatch):
+    """A None override never clobbers a configured profile value."""
+    cfg = _make_app_config([_make_model("base", max_tokens=4096)])
+    _patch_factory(monkeypatch, cfg)
+
+    FakeChatModel.captured_kwargs = {}
+    factory_module.create_chat_model(name="base", model_overrides={"temperature": None, "max_tokens": None})
+
+    assert "temperature" not in FakeChatModel.captured_kwargs
+    assert FakeChatModel.captured_kwargs.get("max_tokens") == 4096
+
+
+def test_model_overrides_none_is_a_noop(monkeypatch):
+    """Passing model_overrides=None leaves the profile untouched."""
+    cfg = _make_app_config([_make_model("base", max_tokens=4096)])
+    _patch_factory(monkeypatch, cfg)
+
+    FakeChatModel.captured_kwargs = {}
+    factory_module.create_chat_model(name="base", model_overrides=None)
+
+    assert FakeChatModel.captured_kwargs.get("max_tokens") == 4096
+
+
+def test_codex_still_strips_overridden_max_tokens(monkeypatch):
+    """Codex drops max_tokens even when it arrived via an override, so the
+    provider-specific normalization still governs the merged value."""
+    cfg = _make_app_config([_make_model("codex", use="deerflow.models.openai_codex_provider:CodexChatModel")])
+    captured: dict = {}
+    monkeypatch.setattr(factory_module, "get_app_config", lambda: cfg)
+    monkeypatch.setattr(factory_module, "resolve_class", lambda path, base: _capturing_class(codex_provider_module.CodexChatModel, captured))
+    monkeypatch.setattr(factory_module, "build_tracing_callbacks", lambda: [])
+
+    factory_module.create_chat_model(name="codex", model_overrides={"max_tokens": 9999})
+
+    assert "max_tokens" not in captured

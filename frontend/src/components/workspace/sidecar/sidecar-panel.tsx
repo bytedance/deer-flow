@@ -550,7 +550,7 @@ export function SidecarPanel({ className }: { className?: string }) {
                 : t.sidecar.noContext}
           </div>
         </div>
-        {hasSidecarThread ? (
+        {hasSidecarThread && (
           <Tooltip content={t.sidecar.delete}>
             <Button
               aria-label={t.sidecar.delete}
@@ -563,22 +563,21 @@ export function SidecarPanel({ className }: { className?: string }) {
               <Trash2Icon />
             </Button>
           </Tooltip>
-        ) : (
-          // No conversation yet — nothing to delete, so this just discards the
-          // draft and closes the panel. A plain X (no confirm) keeps it light.
-          <Tooltip content={t.common.close}>
-            <Button
-              aria-label={t.common.close}
-              className="text-muted-foreground hover:text-foreground"
-              data-testid="sidecar-close-button"
-              size="icon-sm"
-              variant="ghost"
-              onClick={() => discardDraftAndClose()}
-            >
-              <XIcon />
-            </Button>
-          </Tooltip>
         )}
+        <Tooltip content={t.common.close}>
+          <Button
+            aria-label={t.common.close}
+            className="text-muted-foreground hover:text-foreground"
+            data-testid="sidecar-close-button"
+            size="icon-sm"
+            variant="ghost"
+            onClick={() =>
+              hasSidecarThread ? sidecar.close() : discardDraftAndClose()
+            }
+          >
+            <XIcon />
+          </Button>
+        </Tooltip>
       </header>
 
       <div className="min-h-0 flex-1">

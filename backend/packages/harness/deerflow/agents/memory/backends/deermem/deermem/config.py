@@ -52,6 +52,24 @@ class DeerMemConfig(BaseModel):
         default="",
         description="Dotted class path for an alternative storage provider; empty (default) = FileMemoryStorage (no importlib, portable).",
     )
+    strict_user_scope: bool = Field(
+        default=False,
+        description="Require user_id for every storage scope. False preserves no-auth and legacy callers.",
+    )
+    manifest_filename: str = Field(
+        default="memory.json",
+        description="User-global summary JSON filename. Kept under this name for config compatibility; must be a plain .json filename.",
+    )
+    file_lock_timeout_seconds: int = Field(
+        default=10,
+        ge=1,
+        le=120,
+        description="Maximum wait for the per-scope cross-process advisory file lock.",
+    )
+    retrieval_adapter: str = Field(
+        default="",
+        description="Optional dotted retrieval-adapter factory. It receives DeerMemConfig and must implement RetrievalPort.",
+    )
     # ── Queue ────────────────────────────────────────────────────────────
     debounce_seconds: int = Field(
         default=30,
@@ -179,6 +197,15 @@ class DeerMemConfig(BaseModel):
         le=20,
         description=("Maximum number of source facts per consolidation group. Prevents the LLM from merging too many facts into one and losing important details."),
     )
+    # ── Message processing (externalized patterns / prompts) ──
+    patterns_dir: str | None = Field(
+        default=None,
+        description=("Directory with correction.yaml / reinforcement.yaml overriding the bundled signal-detection patterns. None (default) = bundled core/message_patterns/. When set explicitly, both files must exist."),
+    )
+    prompts_dir: str | None = Field(
+        default=None,
+        description=("Directory with custom memory-extraction prompt templates (memory_update.chat.yaml, staleness_review.yaml, consolidation.yaml, fact_extraction.yaml). None (default) = bundled core/prompts/."),
+    )
     # ── LLM (step 13: structured model sub-config consumed by core/llm.py build_llm) ──
     model: DeerMemModelConfig = Field(
         default_factory=DeerMemModelConfig,
@@ -245,6 +272,7 @@ class DeerMemConfig(BaseModel):
         """
         if not backend_config:
             return cls()
+        backend_config = dict(backend_config)
         known = {k: v for k, v in backend_config.items() if k in cls.model_fields and v is not None}
         unknown = sorted(k for k in backend_config if k not in cls.model_fields)
         if unknown:

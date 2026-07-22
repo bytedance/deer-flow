@@ -1610,9 +1610,10 @@ CHANNEL_USER_ID_ENV = "DEERFLOW_CHANNEL_USER_ID"
 
 _CHANNEL_USER_ID_CONTEXT_KEY = "channel_user_id"
 
-# body.context is client-writable on web requests, so bound the value: real
-# platform ids are tens of chars; anything past this is hostile or corrupt and
-# must not bloat every command string sent to the sandbox.
+# Gateway accepts this identity only from internally authenticated channel
+# requests, but embedded runtimes can still construct context directly. Bound
+# the value defensively: real platform ids are tens of chars; anything past
+# this is corrupt and must not bloat every sandbox command string.
 _CHANNEL_USER_ID_MAX_LEN = 256
 
 
@@ -2278,11 +2279,11 @@ def str_replace_tool(
             # Custom mount paths are resolved by LocalSandbox._resolve_path()
         with get_file_operation_lock(sandbox, path):
             content = sandbox.read_file(path)
-            if not content:
-                if not old_str:
-                    return "OK"
-                return f"Error: String to replace not found in file: {requested_path}"
-            if old_str not in content:
+            if not old_str:
+                # A no-op edit. str.replace("", new_str) would insert new_str at
+                # every character boundary, so this cannot fall through.
+                return "OK"
+            if not content or old_str not in content:
                 return f"Error: String to replace not found in file: {requested_path}"
             if replace_all:
                 content = content.replace(old_str, new_str)

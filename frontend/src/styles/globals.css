@@ -1,7 +1,9 @@
 @import "tailwindcss";
 @import "tw-animate-css";
 
-@source "../node_modules/streamdown/dist/index.js";
+@source "../../node_modules/streamdown/dist/index.js";
+@source "../../node_modules/@streamdown/code/dist/*.js";
+@source "../../node_modules/@streamdown/mermaid/dist/*.js";
 
 /* Heading */
 @source inline("text-{xs,sm,base,lg,xl,2xl,3xl,4xl,5xl,6xl}");
@@ -82,6 +84,16 @@
     }
     100% {
       opacity: 1;
+    }
+  }
+
+  --animate-loading-bar: loading-bar 1s ease-in-out infinite;
+  @keyframes loading-bar {
+    0% {
+      transform: translateX(-100%);
+    }
+    100% {
+      transform: translateX(400%);
     }
   }
 

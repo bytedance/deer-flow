@@ -12,6 +12,11 @@ const MOCK_AGENTS = [
     description: "A test agent for E2E tests",
     system_prompt: "You are a test agent.",
   },
+  {
+    name: "second-agent",
+    description: "Another test agent for E2E tests",
+    system_prompt: "You are another test agent.",
+  },
 ];
 
 test.describe("Agent chat", () => {
@@ -34,6 +39,25 @@ test.describe("Agent chat", () => {
     // The prompt input textarea should be visible
     const textarea = page.getByPlaceholder(/how can i assist you/i);
     await expect(textarea).toBeVisible({ timeout: 15_000 });
+  });
+
+  test("keeps new-chat drafts isolated between agents", async ({ page }) => {
+    mockLangGraphAPI(page, { agents: MOCK_AGENTS });
+
+    await page.goto("/workspace/agents/test-agent/chats/new");
+    const firstAgentInput = page.getByPlaceholder(/how can i assist you/i);
+    await expect(firstAgentInput).toBeVisible({ timeout: 15_000 });
+    await firstAgentInput.fill("Draft for the first agent");
+
+    await page.goto("/workspace/agents/second-agent/chats/new");
+    const secondAgentInput = page.getByPlaceholder(/how can i assist you/i);
+    await expect(secondAgentInput).toHaveValue("");
+    await secondAgentInput.fill("Draft for the second agent");
+
+    await page.goto("/workspace/agents/test-agent/chats/new");
+    await expect(page.getByPlaceholder(/how can i assist you/i)).toHaveValue(
+      "Draft for the first agent",
+    );
   });
 
   test("agent chat page shows agent badge", async ({ page }) => {

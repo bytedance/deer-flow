@@ -45,7 +45,6 @@ import {
   stripUploadedFilesTag,
   type FileInMessage,
 } from "@/core/messages/utils";
-import { useRehypeSplitWordsIntoSpans } from "@/core/rehype";
 import { readReferenceMessageContexts } from "@/core/sidecar";
 import {
   parseSlashSkillReference,
@@ -212,14 +211,30 @@ function MessageImage({
   const imgClassName = cn("overflow-hidden rounded-lg", `max-w-[${maxWidth}]`);
 
   if (typeof src !== "string") {
-    return <img className={imgClassName} src={src} alt={alt} {...props} />;
+    return (
+      <img
+        className={imgClassName}
+        src={src}
+        alt={alt}
+        loading="lazy"
+        decoding="async"
+        {...props}
+      />
+    );
   }
 
   const url = resolveMessageImageURL(src, threadId, artifactPaths);
 
   return (
     <a href={url} target="_blank" rel="noopener noreferrer">
-      <img className={imgClassName} src={url} alt={alt} {...props} />
+      <img
+        className={imgClassName}
+        src={url}
+        alt={alt}
+        loading="lazy"
+        decoding="async"
+        {...props}
+      />
     </a>
   );
 }
@@ -279,7 +294,6 @@ function MessageContent_({
   runId?: string;
   turnStartTime?: number | null;
 }) {
-  const rehypePlugins = useRehypeSplitWordsIntoSpans(isLoading);
   const isHuman = message.type === "human";
   const rawTurnDuration = message.additional_kwargs?.turn_duration as
     | number
@@ -462,7 +476,6 @@ function MessageContent_({
       <MarkdownContent
         content={contentToDisplay}
         isLoading={isLoading}
-        rehypePlugins={rehypePlugins}
         className="my-3"
         components={components}
       />
@@ -611,6 +624,8 @@ function RichFileCard({
         <img
           src={fileUrl}
           alt={file.filename}
+          loading="lazy"
+          decoding="async"
           className="h-32 w-auto max-w-60 object-cover transition-transform group-hover:scale-105"
         />
       </a>

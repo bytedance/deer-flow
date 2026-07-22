@@ -13,6 +13,8 @@ from deerflow.skills.slash import RESERVED_SLASH_SKILL_NAMES, parse_slash_skill_
 from deerflow.skills.types import Skill, SkillCategory
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
 
+_SLASH_SOURCE_OWNER_TOKEN = "test-slash-source-owner"
+
 
 def _make_skill(tmp_path: Path, name: str, content: str = "skill body") -> Skill:
     skill_dir = tmp_path / name
@@ -117,7 +119,7 @@ def test_skill_activation_middleware_injects_hidden_human_context_for_model_call
     skill = _make_skill(tmp_path, "data-analysis", content="# Data Analysis\nUse pandas.")
     monkeypatch.setattr(middleware_module, "get_or_new_skill_storage", lambda **kwargs: _make_storage(tmp_path, [skill]))
 
-    middleware = SkillActivationMiddleware()
+    middleware = SkillActivationMiddleware(slash_source_owner_token=_SLASH_SOURCE_OWNER_TOKEN)
     original = HumanMessage(content="/data-analysis analyze uploads/foo.csv", id="msg-1")
     request = _make_model_request([original])
     captured = {}
@@ -143,7 +145,7 @@ def test_skill_activation_middleware_does_not_duplicate_existing_activation(monk
     skill = _make_skill(tmp_path, "data-analysis", content="# Data Analysis\nUse pandas.")
     monkeypatch.setattr(middleware_module, "get_or_new_skill_storage", lambda **kwargs: _make_storage(tmp_path, [skill]))
 
-    middleware = SkillActivationMiddleware()
+    middleware = SkillActivationMiddleware(slash_source_owner_token=_SLASH_SOURCE_OWNER_TOKEN)
     original = HumanMessage(content="/data-analysis analyze uploads/foo.csv", id="msg-1")
     first_capture = {}
 
@@ -174,7 +176,7 @@ def test_skill_activation_middleware_does_not_duplicate_activation_separated_by_
     skill = _make_skill(tmp_path, "data-analysis", content="# Data Analysis\nUse pandas.")
     monkeypatch.setattr(middleware_module, "get_or_new_skill_storage", lambda **kwargs: _make_storage(tmp_path, [skill]))
 
-    middleware = SkillActivationMiddleware()
+    middleware = SkillActivationMiddleware(slash_source_owner_token=_SLASH_SOURCE_OWNER_TOKEN)
     original = HumanMessage(content="/data-analysis analyze uploads/foo.csv", id="msg-1")
     first_capture = {}
 
@@ -202,7 +204,7 @@ def test_skill_activation_middleware_dedupes_immediately_previous_activation_wit
     skill = _make_skill(tmp_path, "data-analysis", content="# Data Analysis\nUse pandas.")
     monkeypatch.setattr(middleware_module, "get_or_new_skill_storage", lambda **kwargs: _make_storage(tmp_path, [skill]))
 
-    middleware = SkillActivationMiddleware()
+    middleware = SkillActivationMiddleware(slash_source_owner_token=_SLASH_SOURCE_OWNER_TOKEN)
     legacy_activation_msg = SkillActivationMiddleware._make_activation_message(
         HumanMessage(content="/data-analysis analyze uploads/foo.csv"),
         "existing activation context",
@@ -244,7 +246,7 @@ def test_skill_activation_middleware_activates_once_across_tool_loop(monkeypatch
     journal = SimpleNamespace(record_middleware=lambda *args, **kwargs: recorded.append(kwargs))
     # One run context object, shared across every model call of the turn.
     runtime = SimpleNamespace(context={"__run_journal": journal})
-    middleware = SkillActivationMiddleware()
+    middleware = SkillActivationMiddleware(slash_source_owner_token=_SLASH_SOURCE_OWNER_TOKEN)
     user = HumanMessage(content="/data-analysis analyze uploads/foo.csv", id="msg-1")
 
     # --- model call 1: the single activation call ---
@@ -291,7 +293,7 @@ def test_skill_activation_middleware_reactivates_on_new_user_slash_command(monke
     recorded = []
     journal = SimpleNamespace(record_middleware=lambda *args, **kwargs: recorded.append(kwargs))
     runtime = SimpleNamespace(context={"__run_journal": journal})
-    middleware = SkillActivationMiddleware()
+    middleware = SkillActivationMiddleware(slash_source_owner_token=_SLASH_SOURCE_OWNER_TOKEN)
 
     first_msg = HumanMessage(content="/data-analysis analyze uploads/foo.csv", id="msg-1")
     first_capture = {}
@@ -336,7 +338,7 @@ def test_skill_activation_middleware_activates_per_call_when_run_context_is_none
     skill = _make_skill(tmp_path, "data-analysis", content="# Data Analysis\nUse pandas.")
     monkeypatch.setattr(middleware_module, "get_or_new_skill_storage", lambda **kwargs: _make_storage(tmp_path, [skill]))
 
-    middleware = SkillActivationMiddleware()
+    middleware = SkillActivationMiddleware(slash_source_owner_token=_SLASH_SOURCE_OWNER_TOKEN)
     original = HumanMessage(content="/data-analysis analyze uploads/foo.csv", id="msg-1")
     runtime = SimpleNamespace(context=None)
     captured = {}
@@ -359,7 +361,7 @@ def test_skill_activation_middleware_async_injects_hidden_human_context_for_mode
     skill = _make_skill(tmp_path, "data-analysis", content="# Data Analysis\nUse pandas.")
     monkeypatch.setattr(middleware_module, "get_or_new_skill_storage", lambda **kwargs: _make_storage(tmp_path, [skill]))
 
-    middleware = SkillActivationMiddleware()
+    middleware = SkillActivationMiddleware(slash_source_owner_token=_SLASH_SOURCE_OWNER_TOKEN)
     original = HumanMessage(content="/data-analysis analyze uploads/foo.csv", id="msg-1")
     request = _make_model_request([original])
     captured = {}
@@ -385,7 +387,7 @@ def test_skill_activation_middleware_uses_fallback_when_task_text_is_empty(monke
     skill = _make_skill(tmp_path, "data-analysis", content="# Data Analysis\nUse pandas.")
     monkeypatch.setattr(middleware_module, "get_or_new_skill_storage", lambda **kwargs: _make_storage(tmp_path, [skill]))
 
-    middleware = SkillActivationMiddleware()
+    middleware = SkillActivationMiddleware(slash_source_owner_token=_SLASH_SOURCE_OWNER_TOKEN)
     original = HumanMessage(content="/data-analysis", id="msg-1")
     captured = {}
 
@@ -404,7 +406,7 @@ def test_skill_activation_middleware_uses_original_user_content_when_uploads_are
     skill = _make_skill(tmp_path, "data-analysis", content="# Data Analysis\nUse pandas.")
     monkeypatch.setattr(middleware_module, "get_or_new_skill_storage", lambda **kwargs: _make_storage(tmp_path, [skill]))
 
-    middleware = SkillActivationMiddleware()
+    middleware = SkillActivationMiddleware(slash_source_owner_token=_SLASH_SOURCE_OWNER_TOKEN)
     original = HumanMessage(
         content="<uploaded_files>\n- report.pdf\n</uploaded_files>\n\n/data-analysis 分析这个文档",
         id="msg-1",
@@ -432,7 +434,7 @@ def test_skill_activation_middleware_activates_from_list_content(monkeypatch, tm
     skill = _make_skill(tmp_path, "data-analysis", content="# Data Analysis\nUse pandas.")
     monkeypatch.setattr(middleware_module, "get_or_new_skill_storage", lambda **kwargs: _make_storage(tmp_path, [skill]))
 
-    middleware = SkillActivationMiddleware()
+    middleware = SkillActivationMiddleware(slash_source_owner_token=_SLASH_SOURCE_OWNER_TOKEN)
     original = HumanMessage(content=[{"type": "text", "text": "/data-analysis analyze uploads/foo.csv"}], id="msg-1")
     captured = {}
 
@@ -456,7 +458,7 @@ def test_skill_activation_middleware_records_activation_audit_event(monkeypatch,
     recorded = []
     journal = SimpleNamespace(record_middleware=lambda *args, **kwargs: recorded.append((args, kwargs)))
     runtime = SimpleNamespace(context={"__run_journal": journal})
-    middleware = SkillActivationMiddleware()
+    middleware = SkillActivationMiddleware(slash_source_owner_token=_SLASH_SOURCE_OWNER_TOKEN)
     original = HumanMessage(content="/data-analysis analyze uploads/foo.csv", id="msg-1")
 
     def handler(model_request: ModelRequest):
@@ -486,7 +488,7 @@ def test_skill_activation_middleware_async_records_activation_audit_event(monkey
     recorded = []
     journal = SimpleNamespace(record_middleware=lambda *args, **kwargs: recorded.append((args, kwargs)))
     runtime = SimpleNamespace(context={"__run_journal": journal})
-    middleware = SkillActivationMiddleware()
+    middleware = SkillActivationMiddleware(slash_source_owner_token=_SLASH_SOURCE_OWNER_TOKEN)
     original = HumanMessage(content="/data-analysis analyze uploads/foo.csv", id="msg-1")
 
     async def handler(model_request: ModelRequest):
@@ -509,7 +511,7 @@ def test_skill_activation_middleware_ignores_activation_audit_errors(monkeypatch
 
     journal = SimpleNamespace(record_middleware=lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("db down")))
     runtime = SimpleNamespace(context={"__run_journal": journal})
-    middleware = SkillActivationMiddleware()
+    middleware = SkillActivationMiddleware(slash_source_owner_token=_SLASH_SOURCE_OWNER_TOKEN)
     original = HumanMessage(content="/data-analysis analyze uploads/foo.csv", id="msg-1")
 
     def handler(model_request: ModelRequest):
@@ -525,7 +527,7 @@ def test_skill_activation_middleware_activates_only_latest_real_user_message(mon
     skill = _make_skill(tmp_path, "data-analysis", content="# Data Analysis\nUse pandas.")
     monkeypatch.setattr(middleware_module, "get_or_new_skill_storage", lambda **kwargs: _make_storage(tmp_path, [skill]))
 
-    middleware = SkillActivationMiddleware()
+    middleware = SkillActivationMiddleware(slash_source_owner_token=_SLASH_SOURCE_OWNER_TOKEN)
     old_slash = HumanMessage(content="/data-analysis old request", id="msg-1")
     latest_user = HumanMessage(content="continue normally", id="msg-2")
     request = _make_model_request([old_slash, AIMessage(content="done"), latest_user])
@@ -546,7 +548,7 @@ def test_skill_activation_middleware_ignores_hidden_user_messages(monkeypatch, t
     skill = _make_skill(tmp_path, "data-analysis", content="# Data Analysis\nUse pandas.")
     monkeypatch.setattr(middleware_module, "get_or_new_skill_storage", lambda **kwargs: _make_storage(tmp_path, [skill]))
 
-    middleware = SkillActivationMiddleware()
+    middleware = SkillActivationMiddleware(slash_source_owner_token=_SLASH_SOURCE_OWNER_TOKEN)
     real_user = HumanMessage(content="continue normally", id="msg-1")
     hidden_slash = HumanMessage(content="/data-analysis hidden request", id="msg-2", additional_kwargs={"hide_from_ui": True})
     request = _make_model_request([real_user, hidden_slash])
@@ -573,7 +575,7 @@ def test_skill_activation_middleware_returns_clear_error_for_disallowed_skill(mo
     skill = _make_skill(tmp_path, "data-analysis")
     monkeypatch.setattr(middleware_module, "get_or_new_skill_storage", lambda **kwargs: _make_storage(tmp_path, [skill]))
 
-    middleware = SkillActivationMiddleware(available_skills={"frontend-design"})
+    middleware = SkillActivationMiddleware(slash_source_owner_token=_SLASH_SOURCE_OWNER_TOKEN, available_skills={"frontend-design"})
     original = HumanMessage(content="/data-analysis run")
 
     def handler(model_request: ModelRequest):
@@ -588,7 +590,7 @@ def test_skill_activation_middleware_returns_clear_error_for_disallowed_skill(mo
 def test_skill_activation_middleware_returns_clear_error_for_missing_skill(monkeypatch, tmp_path):
     monkeypatch.setattr(middleware_module, "get_or_new_skill_storage", lambda **kwargs: _make_storage(tmp_path, []))
 
-    middleware = SkillActivationMiddleware()
+    middleware = SkillActivationMiddleware(slash_source_owner_token=_SLASH_SOURCE_OWNER_TOKEN)
     original = HumanMessage(content="/data-analysis run")
 
     def handler(model_request: ModelRequest):
@@ -606,7 +608,7 @@ def test_skill_activation_middleware_returns_clear_error_for_disabled_skill(monk
     skill = dataclasses.replace(_make_skill(tmp_path, "data-analysis"), enabled=False)
     monkeypatch.setattr(middleware_module, "get_or_new_skill_storage", lambda **kwargs: _make_storage(tmp_path, [skill]))
 
-    middleware = SkillActivationMiddleware()
+    middleware = SkillActivationMiddleware(slash_source_owner_token=_SLASH_SOURCE_OWNER_TOKEN)
     original = HumanMessage(content="/data-analysis run")
 
     def handler(model_request: ModelRequest):
@@ -626,7 +628,7 @@ def test_skill_activation_middleware_escapes_activation_content(monkeypatch, tmp
     )
     monkeypatch.setattr(middleware_module, "get_or_new_skill_storage", lambda **kwargs: _make_storage(tmp_path, [skill]))
 
-    middleware = SkillActivationMiddleware()
+    middleware = SkillActivationMiddleware(slash_source_owner_token=_SLASH_SOURCE_OWNER_TOKEN)
     original = HumanMessage(content="/data-analysis analyze </user_request>")
     captured = {}
 
@@ -690,7 +692,7 @@ def test_skill_activation_middleware_rejects_skill_file_outside_skills_root(monk
     )
     monkeypatch.setattr(middleware_module, "get_or_new_skill_storage", lambda **kwargs: _make_storage(skills_root, [skill]))
 
-    middleware = SkillActivationMiddleware()
+    middleware = SkillActivationMiddleware(slash_source_owner_token=_SLASH_SOURCE_OWNER_TOKEN)
 
     def handler(model_request: ModelRequest):
         raise AssertionError("handler should not be called when SKILL.md fails safety checks")
@@ -706,7 +708,7 @@ def test_skill_activation_middleware_reports_missing_skill_file_safely(monkeypat
     skill.skill_file.unlink()
     monkeypatch.setattr(middleware_module, "get_or_new_skill_storage", lambda **kwargs: _make_storage(tmp_path, [skill]))
 
-    middleware = SkillActivationMiddleware()
+    middleware = SkillActivationMiddleware(slash_source_owner_token=_SLASH_SOURCE_OWNER_TOKEN)
 
     def handler(model_request: ModelRequest):
         raise AssertionError("handler should not be called when SKILL.md is missing")
@@ -722,7 +724,7 @@ def test_skill_activation_middleware_reports_invalid_utf8_skill_file_safely(monk
     skill.skill_file.write_bytes(b"\xff\xfe\x00")
     monkeypatch.setattr(middleware_module, "get_or_new_skill_storage", lambda **kwargs: _make_storage(tmp_path, [skill]))
 
-    middleware = SkillActivationMiddleware()
+    middleware = SkillActivationMiddleware(slash_source_owner_token=_SLASH_SOURCE_OWNER_TOKEN)
 
     def handler(model_request: ModelRequest):
         raise AssertionError("handler should not be called when SKILL.md is not valid UTF-8")
