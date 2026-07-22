@@ -2492,7 +2492,8 @@ export function InputBox({
                       " " + t.inputBox.reasoningEffortMinimal}
                     {context.reasoning_effort === "low" &&
                       " " + t.inputBox.reasoningEffortLow}
-                    {context.reasoning_effort === "medium" &&
+                    {(context.reasoning_effort === "medium" ||
+                      !context.reasoning_effort) &&
                       " " + t.inputBox.reasoningEffortMedium}
                     {context.reasoning_effort === "high" &&
                       " " + t.inputBox.reasoningEffortHigh}
