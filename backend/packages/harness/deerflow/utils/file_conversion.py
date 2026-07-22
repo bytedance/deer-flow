@@ -17,6 +17,9 @@ No FastAPI or HTTP dependencies — pure utility functions.
 import asyncio
 import logging
 import re
+import shutil
+import subprocess
+import tempfile
 from pathlib import Path
 
 from deerflow.config.app_config import get_app_config
@@ -102,6 +105,46 @@ def _convert_with_markitdown(file_path: Path) -> str:
     return md.convert(str(file_path)).text_content
 
 
+def _try_convert_doc_to_docx(file_path: Path) -> Path | None:
+    """Convert a legacy .doc file to .docx using LibreOffice/soffice.
+
+    Returns the path to a temporary .docx file (inside a newly-created temp
+    directory), or None if soffice/libreoffice is unavailable or conversion
+    fails.  **The caller is responsible for removing the returned path's parent
+    directory** with ``shutil.rmtree``.
+    """
+    soffice = shutil.which("soffice") or shutil.which("libreoffice")
+    if soffice is None:
+        return None
+
+    tmp_dir = Path(tempfile.mkdtemp())
+    try:
+        result = subprocess.run(
+            [soffice, "--headless", "--convert-to", "docx", "--outdir", str(tmp_dir), str(file_path)],
+            capture_output=True,
+            timeout=60,
+        )
+        if result.returncode != 0:
+            logger.warning(
+                "soffice failed to convert %s (exit %d): %s",
+                file_path.name,
+                result.returncode,
+                result.stderr.decode(errors="replace"),
+            )
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            return None
+        docx_path = tmp_dir / (file_path.stem + ".docx")
+        if docx_path.exists():
+            return docx_path
+        logger.warning("soffice did not produce expected .docx output for %s", file_path.name)
+    except subprocess.TimeoutExpired:
+        logger.warning("soffice timed out converting %s", file_path.name)
+    except Exception:
+        logger.exception("Unexpected error during soffice conversion of %s", file_path.name)
+    shutil.rmtree(tmp_dir, ignore_errors=True)
+    return None
+
+
 def _do_convert(file_path: Path, pdf_converter: str) -> str:
     """Synchronous conversion — called directly or via asyncio.to_thread.
 
@@ -109,7 +152,32 @@ def _do_convert(file_path: Path, pdf_converter: str) -> str:
         file_path: Path to the file.
         pdf_converter: "auto" | "pymupdf4llm" | "markitdown"
     """
-    is_pdf = file_path.suffix.lower() == ".pdf"
+    suffix = file_path.suffix.lower()
+    is_pdf = suffix == ".pdf"
+
+    # Legacy .doc: prefer LibreOffice/soffice → .docx → MarkItDown pipeline.
+    # Direct MarkItDown .doc support is unreliable; soffice produces a proper .docx first.
+    if suffix == ".doc":
+        docx_path = _try_convert_doc_to_docx(file_path)
+        if docx_path is not None:
+            try:
+                return _convert_with_markitdown(docx_path)
+            finally:
+                shutil.rmtree(str(docx_path.parent), ignore_errors=True)
+        # soffice not available — fall back to MarkItDown with a clear warning
+        logger.warning(
+            "LibreOffice/soffice not found; attempting MarkItDown for legacy .doc file %r. "
+            "Install LibreOffice for reliable .doc conversion.",
+            file_path.name,
+        )
+        text = _convert_with_markitdown(file_path)
+        if not text.strip():
+            raise RuntimeError(
+                f"Failed to extract text from {file_path.name!r}: MarkItDown produced no output "
+                "and LibreOffice/soffice is not available. "
+                "Install LibreOffice for reliable .doc conversion."
+            )
+        return text
 
     if is_pdf and pdf_converter != "markitdown":
         # Try pymupdf4llm first (auto or explicit)
