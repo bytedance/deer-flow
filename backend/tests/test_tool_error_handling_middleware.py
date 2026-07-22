@@ -3,6 +3,7 @@ import sys
 from types import ModuleType, SimpleNamespace
 
 import pytest
+from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import ToolMessage
 from langgraph.errors import GraphInterrupt
 
@@ -15,10 +16,15 @@ from deerflow.agents.middlewares.tool_result_meta import TOOL_META_KEY
 from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
 from deerflow.config import summarization_config
 from deerflow.config.app_config import AppConfig, CircuitBreakerConfig
+from deerflow.config.extensions_config import ExtensionsConfig
 from deerflow.config.guardrails_config import GuardrailsConfig
 from deerflow.config.model_config import ModelConfig
 from deerflow.config.sandbox_config import SandboxConfig
 from deerflow.subagents.status_contract import SUBAGENT_ERROR_KEY, SUBAGENT_STATUS_KEY
+
+
+class ConfiguredSubagentMiddleware(AgentMiddleware):
+    pass
 
 
 def _request(name: str = "web_search", tool_call_id: str | None = "tc-1"):
@@ -558,6 +564,24 @@ def test_subagent_runtime_middlewares_attach_deferred_filter_when_setup_has_name
     filter_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, DeferredToolFilterMiddleware))
     safety_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, SafetyFinishReasonMiddleware))
     assert filter_idx < safety_idx
+
+
+def test_subagent_runtime_middlewares_inject_configured_extension_middlewares(monkeypatch):
+    from deerflow.agents.middlewares.safety_finish_reason_middleware import SafetyFinishReasonMiddleware
+
+    app_config = _make_app_config()
+    app_config.extensions = ExtensionsConfig(middlewares=[f"{__name__}:ConfiguredSubagentMiddleware"])
+    _stub_runtime_middleware_imports(monkeypatch)
+
+    middlewares = build_subagent_runtime_middlewares(app_config=app_config)
+
+    extension_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, ConfiguredSubagentMiddleware))
+    safety_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, SafetyFinishReasonMiddleware))
+    for guard_name in ("LoopDetectionMiddleware", "TokenBudgetMiddleware"):
+        guard_idx = next((i for i, m in enumerate(middlewares) if type(m).__name__ == guard_name), None)
+        if guard_idx is not None:
+            assert guard_idx < extension_idx
+    assert extension_idx < safety_idx
 
 
 def test_subagent_runtime_middlewares_place_mcp_routing_before_deferred_filter(monkeypatch):

@@ -1,21 +1,24 @@
 import asyncio
 import re
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from _router_auth_helpers import make_authed_test_app
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
-from langgraph.checkpoint.base import empty_checkpoint
+from langgraph.checkpoint.base import empty_checkpoint, uuid6
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.store.memory import InMemoryStore
+from langgraph.types import Overwrite
 
+from app.gateway import services as gateway_services
 from app.gateway.routers import threads
 from deerflow.config.paths import Paths
 from deerflow.persistence.thread_meta import InvalidMetadataFilterError
 from deerflow.persistence.thread_meta.memory import THREADS_NS, MemoryThreadMetaStore
+from deerflow.runtime.checkpoint_state import CheckpointStateAccessor
 
 _ISO_TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}")
 
@@ -66,6 +69,136 @@ def _build_thread_app() -> tuple[FastAPI, InMemoryStore, InMemorySaver]:
     app.state.thread_store = _PermissiveThreadMetaStore(store)
     app.include_router(threads.router)
     return app, store, checkpointer
+
+
+class _RawStateAccessor:
+    def __init__(self, checkpointer: InMemorySaver):
+        self.checkpointer = checkpointer
+
+    @staticmethod
+    def _snapshot(checkpoint_tuple, fallback_config):
+        if checkpoint_tuple is None:
+            return SimpleNamespace(
+                values={},
+                config=fallback_config,
+                parent_config=None,
+                metadata={},
+                next=(),
+                tasks=(),
+                created_at=None,
+            )
+        checkpoint = checkpoint_tuple.checkpoint or {}
+        metadata = checkpoint_tuple.metadata or {}
+        return SimpleNamespace(
+            values=dict(checkpoint.get("channel_values", {})),
+            config=checkpoint_tuple.config,
+            parent_config=checkpoint_tuple.parent_config,
+            metadata=metadata,
+            next=(),
+            tasks=(),
+            created_at=checkpoint.get("ts") or metadata.get("created_at"),
+        )
+
+    async def aget(self, config):
+        checkpoint_tuple = await self.checkpointer.aget_tuple(config)
+        return self._snapshot(checkpoint_tuple, config)
+
+    async def ahistory(self, config, *, limit=None):
+        snapshots = []
+        async for checkpoint_tuple in self.checkpointer.alist(config, limit=limit):
+            snapshots.append(self._snapshot(checkpoint_tuple, config))
+        return snapshots
+
+    async def aupdate(self, config, values, *, as_node=None):
+        checkpoint_tuple = await self.checkpointer.aget_tuple(config)
+        checkpoint = dict(checkpoint_tuple.checkpoint if checkpoint_tuple is not None else empty_checkpoint())
+        channel_values = dict(checkpoint.get("channel_values", {}))
+        channel_values.update({key: value.value if isinstance(value, Overwrite) else value for key, value in values.items()})
+        checkpoint["channel_values"] = channel_values
+        channel_versions = dict(checkpoint.get("channel_versions", {}))
+        new_versions = {}
+        for key in values:
+            current_version = channel_versions.get(key)
+            next_version = current_version + 1 if isinstance(current_version, int) else 1
+            channel_versions[key] = next_version
+            new_versions[key] = next_version
+        checkpoint["channel_versions"] = channel_versions
+        checkpoint["id"] = str(uuid6())
+        metadata = dict(checkpoint_tuple.metadata if checkpoint_tuple is not None else {})
+        metadata.update(
+            {
+                "source": "update",
+                "step": metadata.get("step", -1) + 1,
+                "writes": {as_node: values},
+            }
+        )
+        write_config = {
+            "configurable": {
+                "thread_id": config["configurable"]["thread_id"],
+                "checkpoint_ns": config["configurable"].get("checkpoint_ns", ""),
+            }
+        }
+        return await self.checkpointer.aput(write_config, checkpoint, metadata, new_versions)
+
+
+@pytest.fixture(autouse=True)
+def _patch_checkpoint_state_builder(monkeypatch):
+    def _builder(request, *, thread_id, assistant_id=None, checkpoint_id=None):
+        config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+        if checkpoint_id is not None:
+            config["configurable"]["checkpoint_id"] = checkpoint_id
+        return _RawStateAccessor(request.app.state.checkpointer), config
+
+    def _mutation_builder(request, *, thread_id, as_node, checkpoint_id=None, state_schema=None):
+        config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+        if checkpoint_id is not None:
+            config["configurable"]["checkpoint_id"] = checkpoint_id
+        return _RawStateAccessor(request.app.state.checkpointer), config
+
+    async def _read_boundary(request, *, thread_id, checkpoint_id=None):
+        return _builder(request, thread_id=thread_id, checkpoint_id=checkpoint_id)
+
+    async def _mutation_boundary(request, *, thread_id, as_node, checkpoint_id=None):
+        return _mutation_builder(request, thread_id=thread_id, as_node=as_node, checkpoint_id=checkpoint_id)
+
+    monkeypatch.setattr(threads, "build_checkpoint_state_accessor", _builder)
+    monkeypatch.setattr(threads, "build_checkpoint_state_mutation_accessor", _mutation_builder)
+    monkeypatch.setattr(threads, "build_thread_checkpoint_state_accessor", _read_boundary)
+    monkeypatch.setattr(threads, "build_thread_checkpoint_state_mutation_accessor", _mutation_boundary)
+
+
+class _FakeStateAccessor:
+    def __init__(self, snapshot: SimpleNamespace):
+        self.snapshot = snapshot
+
+    async def aget(self, config):
+        return self.snapshot
+
+    async def ahistory(self, config, *, limit=None):
+        return [self.snapshot][:limit]
+
+
+def _materialized_snapshot() -> SimpleNamespace:
+    return SimpleNamespace(
+        values={
+            "messages": [
+                HumanMessage(id="h1", content="question"),
+                AIMessage(id="a1", content="answer"),
+            ]
+        },
+        config={
+            "configurable": {
+                "thread_id": "thread-1",
+                "checkpoint_ns": "",
+                "checkpoint_id": "ckpt-2",
+            }
+        },
+        parent_config={"configurable": {"checkpoint_id": "ckpt-1"}},
+        metadata={"step": 2},
+        next=(),
+        tasks=(),
+        created_at=None,
+    )
 
 
 async def _write_checkpoint(
@@ -156,6 +289,29 @@ def test_delete_thread_route_cleans_thread_directory(tmp_path):
     assert response.status_code == 200
     assert response.json() == {"success": True, "message": "Deleted local thread data for thread-route"}
     assert not thread_dir.exists()
+
+
+def test_delete_thread_route_closes_browser_session(tmp_path):
+    """Deleting a thread tears down its live browser session so a later caller
+    who reuses the id cannot inherit the retained page/cookies."""
+    paths = Paths(tmp_path)
+
+    app = make_authed_test_app()
+    app.include_router(threads.router)
+
+    manager = SimpleNamespace(close_session=AsyncMock(return_value=True))
+    with (
+        patch("app.gateway.routers.threads.get_paths", return_value=paths),
+        patch(
+            "deerflow.community.browser_automation.get_browser_session_manager",
+            return_value=manager,
+        ),
+    ):
+        with TestClient(app) as client:
+            response = client.delete("/api/threads/thread-browser")
+
+    assert response.status_code == 200
+    manager.close_session.assert_awaited_once_with("thread-browser")
 
 
 def test_delete_thread_route_rejects_invalid_thread_id(tmp_path):
@@ -539,6 +695,147 @@ def test_get_thread_returns_iso_for_legacy_unix_record() -> None:
     assert _ISO_TIMESTAMP_RE.match(body["updated_at"]), body["updated_at"]
 
 
+def test_latest_thread_readers_use_materialized_snapshot_values() -> None:
+    app, store, checkpointer = _build_thread_app()
+    thread_id = "thread-1"
+
+    async def _seed() -> None:
+        await store.aput(
+            THREADS_NS,
+            thread_id,
+            {
+                "thread_id": thread_id,
+                "status": "idle",
+                "created_at": "2026-07-18T00:00:00+00:00",
+                "updated_at": "2026-07-18T00:00:00+00:00",
+                "metadata": {},
+            },
+        )
+        await checkpointer.aput(
+            {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}},
+            empty_checkpoint(),
+            {"step": 2, "source": "loop", "writes": {}, "parents": {}},
+            {},
+        )
+
+    asyncio.run(_seed())
+    accessor = _FakeStateAccessor(_materialized_snapshot())
+    thread_accessor = AsyncMock(return_value=(accessor, {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}))
+
+    with (
+        patch(
+            "app.gateway.routers.threads.build_checkpoint_state_accessor",
+            create=True,
+            return_value=(accessor, {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}),
+        ),
+        patch(
+            "app.gateway.routers.threads.build_thread_checkpoint_state_accessor",
+            new=thread_accessor,
+        ),
+        TestClient(app) as client,
+    ):
+        thread_response = client.get(f"/api/threads/{thread_id}")
+        state_response = client.get(f"/api/threads/{thread_id}/state")
+        history_response = client.post(f"/api/threads/{thread_id}/history", json={"limit": 10})
+
+    assert thread_response.status_code == 200, thread_response.text
+    assert state_response.status_code == 200, state_response.text
+    assert history_response.status_code == 200, history_response.text
+    assert [message["id"] for message in thread_response.json()["values"]["messages"]] == ["h1", "a1"]
+    assert [message["id"] for message in state_response.json()["values"]["messages"]] == ["h1", "a1"]
+    assert [message["id"] for message in history_response.json()[0]["values"]["messages"]] == ["h1", "a1"]
+    assert [call.kwargs["thread_id"] for call in thread_accessor.await_args_list] == [thread_id, thread_id]
+
+
+def test_get_thread_status_uses_raw_pending_writes_for_materialized_checkpoint() -> None:
+    app, store, _checkpointer = _build_thread_app()
+    thread_id = "thread-1"
+
+    async def _seed() -> None:
+        await store.aput(
+            THREADS_NS,
+            thread_id,
+            {
+                "thread_id": thread_id,
+                "status": "idle",
+                "created_at": "2026-07-18T00:00:00+00:00",
+                "updated_at": "2026-07-18T00:00:00+00:00",
+                "metadata": {},
+            },
+        )
+
+    asyncio.run(_seed())
+    requested_configs = []
+
+    class _AdvancingCheckpointer:
+        async def aget_tuple(self, config):
+            requested_configs.append(config)
+            checkpoint_id = config.get("configurable", {}).get("checkpoint_id")
+            return SimpleNamespace(
+                pending_writes=[] if checkpoint_id == "ckpt-2" else [("task-old", "__error__", "stale")],
+            )
+
+    app.state.checkpointer = _AdvancingCheckpointer()
+    snapshot = _materialized_snapshot()
+    accessor = _FakeStateAccessor(snapshot)
+
+    with (
+        patch(
+            "app.gateway.routers.threads.build_checkpoint_state_accessor",
+            return_value=(accessor, {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}),
+        ),
+        TestClient(app) as client,
+    ):
+        response = client.get(f"/api/threads/{thread_id}")
+
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "idle"
+    assert requested_configs == [snapshot.config]
+
+
+@pytest.mark.parametrize("stored_status", ["running", "error"])
+def test_get_thread_preserves_metadata_status_without_checkpoint(stored_status: str) -> None:
+    app, store, _checkpointer = _build_thread_app()
+    thread_id = "thread-without-checkpoint"
+
+    async def _seed() -> None:
+        await store.aput(
+            THREADS_NS,
+            thread_id,
+            {
+                "thread_id": thread_id,
+                "status": stored_status,
+                "created_at": "2026-07-18T00:00:00+00:00",
+                "updated_at": "2026-07-18T00:00:00+00:00",
+                "metadata": {},
+            },
+        )
+
+    asyncio.run(_seed())
+    snapshot = SimpleNamespace(
+        values={},
+        config={"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}},
+        parent_config=None,
+        metadata={},
+        next=(),
+        tasks=(),
+        created_at=None,
+    )
+    accessor = _FakeStateAccessor(snapshot)
+
+    with (
+        patch(
+            "app.gateway.routers.threads.build_checkpoint_state_accessor",
+            return_value=(accessor, snapshot.config),
+        ),
+        TestClient(app) as client,
+    ):
+        response = client.get(f"/api/threads/{thread_id}")
+
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == stored_status
+
+
 def test_patch_thread_returns_iso_and_advances_updated_at() -> None:
     app, store, _checkpointer = _build_thread_app()
     thread_id = "patch-target"
@@ -865,6 +1162,333 @@ def test_branch_thread_from_older_assistant_turn_creates_truncated_thread() -> N
     assert branch_entry["values"]["title"] == "Original chat"
 
 
+def test_branch_thread_uses_materialized_history_and_overwrites_fresh_seed(monkeypatch) -> None:
+    app, _store, _checkpointer = _build_thread_app()
+    source_thread_id = "source-materialized"
+    messages = [
+        HumanMessage(id="h1", content="First question"),
+        AIMessage(id="a1", content="First answer"),
+        HumanMessage(id="h2", content="Second question"),
+        AIMessage(id="a2", content="Second answer"),
+    ]
+
+    def snapshot(checkpoint_id: str, materialized_messages: list[object]) -> SimpleNamespace:
+        return SimpleNamespace(
+            values={"messages": materialized_messages, "title": "Materialized title"},
+            config={
+                "configurable": {
+                    "thread_id": source_thread_id,
+                    "checkpoint_ns": "",
+                    "checkpoint_id": checkpoint_id,
+                }
+            },
+            metadata={"step": int(checkpoint_id[-1])},
+        )
+
+    source_accessor = SimpleNamespace()
+    source_history = [
+        snapshot("ckpt-2", messages),
+        snapshot("ckpt-1", messages[:2]),
+    ]
+    branch_updates: list[tuple[dict, dict, str | None]] = []
+
+    async def source_ahistory(config, *, limit=None):
+        assert config["configurable"]["thread_id"] == source_thread_id
+        assert limit == 200
+        return source_history
+
+    async def branch_aupdate(config, values, *, as_node=None):
+        branch_updates.append((config, values, as_node))
+        return {
+            "configurable": {
+                "thread_id": config["configurable"]["thread_id"],
+                "checkpoint_ns": "",
+                "checkpoint_id": "branch-seed",
+            }
+        }
+
+    source_accessor.ahistory = source_ahistory
+    branch_accessor = SimpleNamespace(aupdate=branch_aupdate)
+
+    def build_accessor(_request, *, thread_id, assistant_id=None, checkpoint_id=None):
+        assert thread_id == source_thread_id
+        return source_accessor, {
+            "configurable": {
+                "thread_id": source_thread_id,
+                "checkpoint_ns": "",
+            }
+        }
+
+    def build_mutation_accessor(_request, *, thread_id, as_node, checkpoint_id=None, state_schema=None):
+        return branch_accessor, {
+            "configurable": {
+                "thread_id": thread_id,
+                "checkpoint_ns": "",
+            }
+        }
+
+    monkeypatch.setattr(threads, "build_checkpoint_state_accessor", build_accessor)
+    monkeypatch.setattr(threads, "build_checkpoint_state_mutation_accessor", build_mutation_accessor)
+
+    with TestClient(app) as client:
+        created = client.post(
+            "/api/threads",
+            json={"thread_id": source_thread_id, "metadata": {}, "assistant_id": "agent"},
+        )
+        assert created.status_code == 200, created.text
+        response = client.post(
+            f"/api/threads/{source_thread_id}/branches",
+            json={"message_id": "a1", "message_ids": ["a1"]},
+        )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["parent_checkpoint_id"] == "ckpt-1"
+    assert len(branch_updates) == 1
+    update_config, update_values, as_node = branch_updates[0]
+    assert isinstance(update_values["messages"], Overwrite)
+    assert [message.id for message in update_values["messages"].value] == ["h1", "a1"]
+    assert update_config["configurable"]["thread_id"] == body["thread_id"]
+    assert update_config["metadata"]["source"] == "branch"
+    assert as_node == "branch"
+
+
+def test_branch_thread_real_mutation_graph_finishes_without_scheduling(monkeypatch) -> None:
+    app, _store, _checkpointer = _build_thread_app()
+    app.state.checkpoint_channel_mode = "delta"
+    source_thread_id = "source-real-branch"
+    messages = [
+        HumanMessage(id="h1", content="First question"),
+        AIMessage(id="a1", content="First answer"),
+        HumanMessage(id="h2", content="Second question"),
+        AIMessage(id="a2", content="Second answer"),
+    ]
+
+    def snapshot(checkpoint_id: str, materialized_messages: list[object]) -> SimpleNamespace:
+        return SimpleNamespace(
+            values={"messages": materialized_messages},
+            config={
+                "configurable": {
+                    "thread_id": source_thread_id,
+                    "checkpoint_ns": "",
+                    "checkpoint_id": checkpoint_id,
+                }
+            },
+            metadata={},
+        )
+
+    source_accessor = SimpleNamespace(
+        ahistory=AsyncMock(
+            return_value=[
+                snapshot("ckpt-2", messages),
+                snapshot("ckpt-1", messages[:2]),
+            ]
+        )
+    )
+
+    def source_builder(_request, *, thread_id, assistant_id=None, checkpoint_id=None):
+        if thread_id != source_thread_id:
+            raise AssertionError("fresh branches must use the dedicated mutation graph")
+        return source_accessor, {
+            "configurable": {
+                "thread_id": source_thread_id,
+                "checkpoint_ns": "",
+            }
+        }
+
+    real_mutation_builder = gateway_services.build_checkpoint_state_mutation_accessor
+    monkeypatch.setattr(threads, "build_checkpoint_state_accessor", source_builder)
+    monkeypatch.setattr(
+        threads,
+        "build_checkpoint_state_mutation_accessor",
+        real_mutation_builder,
+        raising=False,
+    )
+
+    with TestClient(app) as client:
+        created = client.post(
+            "/api/threads",
+            json={"thread_id": source_thread_id, "metadata": {}, "assistant_id": "agent"},
+        )
+        assert created.status_code == 200, created.text
+        response = client.post(
+            f"/api/threads/{source_thread_id}/branches",
+            json={"message_id": "a1", "message_ids": ["a1"]},
+        )
+
+    assert response.status_code == 200, response.text
+    new_thread_id = response.json()["thread_id"]
+    accessor, config = real_mutation_builder(
+        SimpleNamespace(app=app),
+        thread_id=new_thread_id,
+        as_node="branch",
+    )
+    branch_snapshot = asyncio.run(accessor.aget(config))
+    assert [message.id for message in branch_snapshot.values["messages"]] == ["h1", "a1"]
+    assert branch_snapshot.next == ()
+    assert branch_snapshot.metadata["deerflow_branch"] is True
+    assert branch_snapshot.metadata["branch_parent_checkpoint_id"] == "ckpt-1"
+
+
+def _wire_extension_agent(monkeypatch, app, checkpointer, mode):
+    """Stub only the infra context + assistant factory; keep builders real.
+
+    The production resolution path stays live: thread record -> assistant_id
+    -> resolve_agent_factory -> effective graph (base schema for ``mode`` plus
+    a non-identity reducer channel contributed by AgentMiddleware.state_schema).
+    """
+    import operator
+    from typing import Annotated, NotRequired, TypedDict
+
+    from langchain.agents import create_agent
+    from langchain.agents.middleware import AgentMiddleware
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+
+    from deerflow.agents.thread_state import get_thread_state_schema
+
+    class ExtensionState(TypedDict):
+        ext_list: NotRequired[Annotated[list[str], operator.add]]
+
+    class ExtensionMiddleware(AgentMiddleware):
+        state_schema = ExtensionState
+
+    app.state.checkpoint_channel_mode = mode
+    model = FakeMessagesListChatModel(responses=[AIMessage(content="ok")])
+
+    def custom_factory(*, config=None):
+        return create_agent(model, middleware=[ExtensionMiddleware()], state_schema=get_thread_state_schema(mode))
+
+    def default_factory(*, config=None):
+        return create_agent(model, state_schema=get_thread_state_schema(mode))
+
+    def selective_factory(assistant_id):
+        # Only the thread's recorded assistant yields the extension graph;
+        # unresolved assistant_id must materialize with the default schema so
+        # the tests actually guard the resolution boundary.
+        return custom_factory if assistant_id == "extension-agent" else default_factory
+
+    ctx = SimpleNamespace(checkpointer=checkpointer, store=None, checkpoint_channel_mode=mode, app_config=None)
+    monkeypatch.setattr(gateway_services, "get_run_context", lambda _request: ctx)
+    monkeypatch.setattr(gateway_services, "resolve_agent_factory", selective_factory)
+    monkeypatch.setattr(threads, "build_checkpoint_state_accessor", gateway_services.build_checkpoint_state_accessor)
+    monkeypatch.setattr(threads, "build_checkpoint_state_mutation_accessor", gateway_services.build_checkpoint_state_mutation_accessor)
+    monkeypatch.setattr(threads, "build_thread_checkpoint_state_accessor", gateway_services.build_thread_checkpoint_state_accessor)
+    monkeypatch.setattr(threads, "build_thread_checkpoint_state_mutation_accessor", gateway_services.build_thread_checkpoint_state_mutation_accessor)
+    return custom_factory
+
+
+async def _seed_extension_source(checkpointer, custom_factory, mode, source_thread_id):
+    accessor = CheckpointStateAccessor.bind(custom_factory(), checkpointer, mode=mode)
+    await accessor.aupdate(
+        {"configurable": {"thread_id": source_thread_id, "checkpoint_ns": ""}},
+        {"messages": [HumanMessage(id="h1", content="question")], "ext_list": ["merged"]},
+        as_node="model",
+    )
+    await accessor.aupdate(
+        {"configurable": {"thread_id": source_thread_id, "checkpoint_ns": ""}},
+        {"messages": [AIMessage(id="a1", content="answer")], "ext_list": ["payload"]},
+        as_node="model",
+    )
+
+
+@pytest.mark.parametrize("mode", ["full", "delta"])
+def test_state_endpoints_preserve_extension_reducer_channels(monkeypatch, mode) -> None:
+    """A non-identity middleware reducer channel survives state endpoints.
+
+    GET /state must return the extension value (resolved via the thread's
+    assistant_id), POST /state must replace it, and branch must preserve it
+    byte-for-byte by copying reducer channels with Overwrite semantics.
+    """
+    app, _store, checkpointer = _build_thread_app()
+    custom_factory = _wire_extension_agent(monkeypatch, app, checkpointer, mode)
+
+    recorded_updates: list[dict] = []
+    real_mutation_builder = gateway_services.build_checkpoint_state_mutation_accessor
+
+    def recording_mutation_builder(request, *, thread_id, as_node, checkpoint_id=None, state_schema=None):
+        accessor, config = real_mutation_builder(request, thread_id=thread_id, as_node=as_node, checkpoint_id=checkpoint_id, state_schema=state_schema)
+        original_aupdate = accessor.aupdate
+
+        async def recording_aupdate(config, values, *, as_node=None):
+            recorded_updates.append(dict(values))
+            return await original_aupdate(config, values, as_node=as_node)
+
+        accessor.aupdate = recording_aupdate
+        return accessor, config
+
+    monkeypatch.setattr(gateway_services, "build_checkpoint_state_mutation_accessor", recording_mutation_builder)
+    monkeypatch.setattr(threads, "build_checkpoint_state_mutation_accessor", recording_mutation_builder)
+
+    source_thread_id = "extension-source"
+
+    with TestClient(app) as client:
+        created = client.post(
+            "/api/threads",
+            json={"thread_id": source_thread_id, "metadata": {}, "assistant_id": "extension-agent"},
+        )
+        assert created.status_code == 200, created.text
+
+        # Seed after creation: create_thread writes an empty head checkpoint.
+        asyncio.run(_seed_extension_source(checkpointer, custom_factory, mode, source_thread_id))
+
+        read_response = client.get(f"/api/threads/{source_thread_id}/state")
+        assert read_response.status_code == 200, read_response.text
+        assert read_response.json()["values"]["ext_list"] == ["merged", "payload"]
+
+        update_response = client.post(
+            f"/api/threads/{source_thread_id}/state",
+            json={"values": {"ext_list": ["replaced"]}},
+        )
+        assert update_response.status_code == 200, update_response.text
+        assert update_response.json()["values"]["ext_list"] == ["replaced"]
+
+        branch_response = client.post(
+            f"/api/threads/{source_thread_id}/branches",
+            json={"message_id": "a1", "message_ids": ["a1"]},
+        )
+        assert branch_response.status_code == 200, branch_response.text
+        branch_thread_id = branch_response.json()["thread_id"]
+
+    # The branch write must copy every reducer channel with replace semantics.
+    branch_update = recorded_updates[-1]
+    assert isinstance(branch_update["ext_list"], Overwrite)
+    assert branch_update["ext_list"].value == ["replaced"]
+    assert isinstance(branch_update["messages"], Overwrite)
+
+    async def materialize(thread_id):
+        accessor = CheckpointStateAccessor.bind(custom_factory(), checkpointer, mode=mode)
+        snapshot = await accessor.aget({"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}})
+        return snapshot.values
+
+    branch_values = asyncio.run(materialize(branch_thread_id))
+    assert branch_values["ext_list"] == ["replaced"]
+    assert [message.id for message in branch_values["messages"]] == ["h1", "a1"]
+
+
+def test_update_thread_state_rejects_unknown_state_fields(monkeypatch) -> None:
+    """Unknown fields fail 422 instead of a false-success 200."""
+    app, _store, checkpointer = _build_thread_app()
+    custom_factory = _wire_extension_agent(monkeypatch, app, checkpointer, "full")
+    source_thread_id = "extension-source-422"
+
+    with TestClient(app) as client:
+        created = client.post(
+            "/api/threads",
+            json={"thread_id": source_thread_id, "metadata": {}, "assistant_id": "extension-agent"},
+        )
+        assert created.status_code == 200, created.text
+
+        asyncio.run(_seed_extension_source(checkpointer, custom_factory, "full", source_thread_id))
+
+        response = client.post(
+            f"/api/threads/{source_thread_id}/state",
+            json={"values": {"not_a_state_field": 1}},
+        )
+
+    assert response.status_code == 422, response.text
+    assert "not_a_state_field" in response.json()["detail"]
+
+
 def test_branch_display_name_strips_legacy_branch_prefix_only_for_branch_sources() -> None:
     assert threads._default_branch_display_name("Original chat") == "Original chat"
     assert threads._default_branch_display_name("Branch: Original chat") == "Branch: Original chat"
@@ -1064,6 +1688,159 @@ def test_search_threads_succeeds_with_valid_metadata() -> None:
 
 
 # ── update_thread_state: each call inserts a new checkpoint (regression) ───────
+
+
+def test_update_thread_state_overwrites_reducer_fields_and_writes_last_values_directly(monkeypatch) -> None:
+    app, _store, _checkpointer = _build_thread_app()
+    update_calls: list[tuple[dict, dict, str | None]] = []
+    updated_config = {
+        "configurable": {
+            "thread_id": "state-overwrite",
+            "checkpoint_ns": "",
+            "checkpoint_id": "ckpt-updated",
+        }
+    }
+    snapshot = SimpleNamespace(
+        values={
+            "messages": [{"type": "human", "id": "h1", "content": "replacement"}],
+            "artifacts": ["artifact-1"],
+            "title": "Renamed",
+        },
+        config=updated_config,
+        parent_config={"configurable": {"checkpoint_id": "ckpt-original"}},
+        metadata={"source": "update", "step": 1},
+        next=(),
+        tasks=(),
+        created_at="2026-07-18T00:00:00+00:00",
+    )
+
+    async def aupdate(config, values, *, as_node=None):
+        update_calls.append((config, values, as_node))
+        return updated_config
+
+    accessor = SimpleNamespace(
+        aupdate=aupdate,
+        aget=AsyncMock(return_value=snapshot),
+    )
+
+    async def build_accessor(_request, *, thread_id, as_node, checkpoint_id=None):
+        assert thread_id == "state-overwrite"
+        return accessor, {
+            "configurable": {
+                "thread_id": thread_id,
+                "checkpoint_ns": "",
+                **({"checkpoint_id": checkpoint_id} if checkpoint_id else {}),
+            }
+        }
+
+    monkeypatch.setattr(threads, "build_thread_checkpoint_state_mutation_accessor", build_accessor)
+
+    with TestClient(app) as client:
+        created = client.post(
+            "/api/threads",
+            json={"thread_id": "state-overwrite", "metadata": {}},
+        )
+        assert created.status_code == 200, created.text
+        response = client.post(
+            "/api/threads/state-overwrite/state",
+            json={
+                "values": {
+                    "messages": [{"type": "human", "id": "h1", "content": "replacement"}],
+                    "artifacts": ["artifact-1"],
+                    "title": "Renamed",
+                }
+            },
+        )
+
+    assert response.status_code == 200, response.text
+    assert len(update_calls) == 1
+    read_config, updates, as_node = update_calls[0]
+    assert read_config["configurable"]["thread_id"] == "state-overwrite"
+    assert isinstance(updates["messages"], Overwrite)
+    assert updates["messages"].value[0]["id"] == "h1"
+    assert isinstance(updates["artifacts"], Overwrite)
+    assert updates["artifacts"].value == ["artifact-1"]
+    assert updates["title"] == "Renamed"
+    assert as_node == "manual_state_update"
+    accessor.aget.assert_awaited_once_with(updated_config)
+    assert response.json()["checkpoint_id"] == "ckpt-updated"
+
+
+def test_update_thread_state_real_mutation_graph_finishes_without_scheduling(monkeypatch) -> None:
+    app, _store, _checkpointer = _build_thread_app()
+    app.state.checkpoint_channel_mode = "delta"
+    real_mutation_builder = gateway_services.build_checkpoint_state_mutation_accessor
+
+    async def mutation_boundary(request, *, thread_id, as_node, checkpoint_id=None):
+        # No real assistant graph in this unit context: the boundary falls
+        # back to the base schema while writes still use the mutation graph.
+        return real_mutation_builder(request, thread_id=thread_id, as_node=as_node, checkpoint_id=checkpoint_id)
+
+    monkeypatch.setattr(threads, "build_thread_checkpoint_state_mutation_accessor", mutation_boundary)
+
+    with TestClient(app) as client:
+        created = client.post(
+            "/api/threads",
+            json={"thread_id": "state-real-mutation", "metadata": {}},
+        )
+        assert created.status_code == 200, created.text
+        response = client.post(
+            "/api/threads/state-real-mutation/state",
+            json={
+                "values": {
+                    "messages": [{"type": "human", "id": "h1", "content": "replacement"}],
+                    "artifacts": ["artifact-1"],
+                    "title": "Renamed",
+                }
+            },
+        )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert [message["id"] for message in body["values"]["messages"]] == ["h1"]
+    assert body["values"]["artifacts"] == ["artifact-1"]
+    assert body["values"]["title"] == "Renamed"
+    assert body["next"] == []
+
+
+@pytest.mark.parametrize("missing_checkpoint_id", ["does-not-exist", ""])
+def test_update_thread_state_rejects_missing_explicit_checkpoint_without_writing(
+    missing_checkpoint_id: str,
+) -> None:
+    app, _store, checkpointer = _build_thread_app()
+
+    with TestClient(app) as client:
+        created = client.post(
+            "/api/threads",
+            json={"thread_id": "state-missing-checkpoint", "metadata": {}},
+        )
+        assert created.status_code == 200, created.text
+        response = client.post(
+            "/api/threads/state-missing-checkpoint/state",
+            json={
+                "checkpoint_id": missing_checkpoint_id,
+                "values": {"title": "Must not be written"},
+            },
+        )
+
+    assert response.status_code == 404, response.text
+
+    async def collect_checkpoint_ids():
+        return [
+            item.config["configurable"]["checkpoint_id"]
+            async for item in checkpointer.alist(
+                {
+                    "configurable": {
+                        "thread_id": "state-missing-checkpoint",
+                        "checkpoint_ns": "",
+                    }
+                }
+            )
+        ]
+
+    checkpoint_ids = asyncio.run(collect_checkpoint_ids())
+    assert missing_checkpoint_id not in checkpoint_ids
+    assert len(checkpoint_ids) == 1
 
 
 def test_update_thread_state_inserts_new_checkpoint_each_call() -> None:

@@ -132,6 +132,10 @@ class SkillStateConfig(BaseModel):
 class ExtensionsConfig(BaseModel):
     """Unified configuration for MCP servers and skills."""
 
+    middlewares: list[str] = Field(
+        default_factory=list,
+        description="AgentMiddleware class paths loaded into the lead-agent middleware chain. Each entry uses 'module.path:ClassName'.",
+    )
     mcp_servers: dict[str, McpServerConfig] = Field(
         default_factory=dict,
         description="Map of MCP server name to configuration",
@@ -142,6 +146,10 @@ class ExtensionsConfig(BaseModel):
         description="Map of skill name to state configuration",
     )
     model_config = ConfigDict(extra="allow", populate_by_name=True)
+
+    def to_file_dict(self) -> dict[str, Any]:
+        """Serialize in the public extensions_config.json shape."""
+        return self.model_dump(by_alias=True)
 
     @classmethod
     def resolve_config_path(cls, config_path: str | None = None) -> Path | None:

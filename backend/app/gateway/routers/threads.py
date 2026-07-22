@@ -12,7 +12,6 @@ matching the LangGraph Platform wire format expected by the
 
 from __future__ import annotations
 
-import copy
 import logging
 import shutil
 import uuid
@@ -20,17 +19,27 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
-from langgraph.checkpoint.base import empty_checkpoint, uuid6
+from langgraph.checkpoint.base import empty_checkpoint
+from langgraph.types import Overwrite
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.exc import IntegrityError
 
 from app.gateway.authz import require_permission
 from app.gateway.deps import get_checkpointer, get_run_manager
 from app.gateway.internal_auth import get_trusted_internal_owner_user_id
+from app.gateway.services import (
+    build_checkpoint_state_accessor,
+    build_checkpoint_state_mutation_accessor,
+    build_thread_checkpoint_state_accessor,
+    build_thread_checkpoint_state_mutation_accessor,
+)
 from app.gateway.utils import sanitize_log_param
+from deerflow.agents.thread_state import THREAD_STATE_REDUCER_FIELDS
 from deerflow.config.paths import Paths, get_paths
 from deerflow.config.summarization_config import ContextSize
 from deerflow.runtime import serialize_channel_values_for_api
+from deerflow.runtime.checkpoint_mode import CheckpointModeMismatchError, CheckpointModeReconfigurationError
+from deerflow.runtime.checkpoint_state import graph_reducer_channels, graph_state_schema, graph_writable_channels
 from deerflow.runtime.context_compaction import (
     ContextCompactionDisabled,
     ContextCompactionFailed,
@@ -52,6 +61,22 @@ from deerflow.utils.time import coerce_iso, now_iso
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/threads", tags=["threads"])
+
+_CHECKPOINT_MODE_ERRORS = (CheckpointModeMismatchError, CheckpointModeReconfigurationError)
+
+
+def _checkpoint_mode_http_error(exc: Exception, thread_id: str) -> HTTPException:
+    """Map checkpoint-mode guard failures to precise HTTP statuses.
+
+    A mismatch means the thread's persisted checkpoints conflict with the
+    process's frozen mode (operator-actionable, 409); a reconfiguration means
+    the process itself is mid mode-flip (transient, 503). Both must surface
+    their message — a generic 500 would force operators to grep logs to
+    discover the root cause after a mode flip.
+    """
+    if isinstance(exc, CheckpointModeMismatchError):
+        return HTTPException(status_code=409, detail=f"Thread {thread_id}: {exc}")
+    return HTTPException(status_code=503, detail=str(exc))
 
 
 # Metadata keys that the server controls; clients are not allowed to set
@@ -107,15 +132,14 @@ def _is_branch_assistant_message(message: Any) -> bool:
     return _message_type(message) == "ai"
 
 
-def _checkpoint_messages(checkpoint_tuple: Any) -> list[Any]:
-    checkpoint = getattr(checkpoint_tuple, "checkpoint", {}) or {}
-    channel_values = checkpoint.get("channel_values", {}) or {}
-    messages = channel_values.get("messages") or []
+def _checkpoint_messages(snapshot: Any) -> list[Any]:
+    values = getattr(snapshot, "values", None) or {}
+    messages = values.get("messages") if isinstance(values, dict) else None
     return list(messages) if isinstance(messages, list) else []
 
 
-def _checkpoint_id(checkpoint_tuple: Any) -> str | None:
-    config = getattr(checkpoint_tuple, "config", {}) or {}
+def _checkpoint_id(snapshot: Any) -> str | None:
+    config = getattr(snapshot, "config", {}) or {}
     raw = config.get("configurable", {}).get("checkpoint_id")
     return raw if isinstance(raw, str) and raw else None
 
@@ -134,37 +158,38 @@ def _matches_branch_target(messages: list[Any], target_message_ids: set[str]) ->
     return not any(_is_branch_visible_message(message) for message in messages[target_end_index + 1 :])
 
 
-async def _find_branch_checkpoint(checkpointer: Any, thread_id: str, target_message_ids: set[str]) -> Any:
-    config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+async def _find_branch_checkpoint(
+    accessor: Any,
+    config: dict[str, Any],
+    target_message_ids: set[str],
+) -> Any:
     try:
-        async for checkpoint_tuple in checkpointer.alist(config, limit=_BRANCH_HISTORY_SCAN_LIMIT):
-            if _matches_branch_target(_checkpoint_messages(checkpoint_tuple), target_message_ids):
-                return checkpoint_tuple
+        for snapshot in await accessor.ahistory(config, limit=_BRANCH_HISTORY_SCAN_LIMIT):
+            if _matches_branch_target(_checkpoint_messages(snapshot), target_message_ids):
+                return snapshot
+    except _CHECKPOINT_MODE_ERRORS as exc:
+        raise _checkpoint_mode_http_error(exc, config.get("configurable", {}).get("thread_id", "")) from exc
     except Exception:
+        thread_id = config.get("configurable", {}).get("thread_id", "")
         logger.exception("Failed to scan branch checkpoint history for thread %s", sanitize_log_param(thread_id))
         raise HTTPException(status_code=500, detail="Failed to find branch checkpoint")
     raise HTTPException(status_code=409, detail="This turn can no longer be branched from.")
 
 
-async def _branch_targets_latest_turn(checkpointer: Any, thread_id: str, target_message_ids: set[str]) -> bool:
-    """Return True when the target turn is the final visible turn in the current state.
-
-    ``alist`` yields newest-first; we take the newest checkpoint that actually holds
-    messages (thread creation writes an empty checkpoint that must be skipped) and
-    reuse ``_matches_branch_target`` to check the target turn is its tail. Used to
-    decide whether cloning the (uncheckpointed) workspace onto a branch is safe: only
-    a branch from the latest turn shares the current workspace timeline. On any lookup
-    failure we fail closed (treat as historical) so a branch from an older turn never
-    inherits a later timeline's workspace files.
-    """
-    config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+async def _branch_targets_latest_turn(
+    accessor: Any,
+    config: dict[str, Any],
+    target_message_ids: set[str],
+) -> bool:
+    """Return whether the target turn is the final visible turn."""
     try:
-        async for checkpoint_tuple in checkpointer.alist(config, limit=_BRANCH_HISTORY_SCAN_LIMIT):
-            messages = _checkpoint_messages(checkpoint_tuple)
+        for snapshot in await accessor.ahistory(config, limit=_BRANCH_HISTORY_SCAN_LIMIT):
+            messages = _checkpoint_messages(snapshot)
             if not messages:
                 continue
             return _matches_branch_target(messages, target_message_ids)
     except Exception:
+        thread_id = config.get("configurable", {}).get("thread_id", "")
         logger.warning(
             "Failed to resolve latest turn for thread %s; treating branch as historical",
             sanitize_log_param(thread_id),
@@ -416,19 +441,38 @@ def _delete_thread_data(thread_id: str, paths: Paths | None = None, *, user_id: 
     return ThreadDeleteResponse(success=True, message=f"Deleted local thread data for {thread_id}")
 
 
-def _derive_thread_status(checkpoint_tuple) -> str:
-    """Derive thread status from checkpoint metadata."""
-    if checkpoint_tuple is None:
-        return "idle"
-    pending_writes = getattr(checkpoint_tuple, "pending_writes", None) or []
+async def _fetch_raw_pending_writes(checkpointer: Any, config: dict[str, Any]) -> list[Any]:
+    """Fetch pending writes attached to a specific checkpoint.
 
-    # Check for error in pending writes
-    for pw in pending_writes:
-        if len(pw) >= 2 and pw[1] == "__error__":
+    Snapshot ``tasks`` only reflect writes that were pending while a task was
+    still scheduled; writes attached to the latest checkpoint afterwards
+    (rollback reattachment, worker error fallback) never surface there, so the
+    status derivation needs one raw tuple fetch on the resolved checkpoint.
+    """
+    raw_tuple = await checkpointer.aget_tuple(config)
+    if raw_tuple is None:
+        return []
+    return list(getattr(raw_tuple, "pending_writes", ()) or ())
+
+
+def _derive_thread_status(snapshot: Any, pending_writes: list[Any], *, fallback_status: str = "idle") -> str:
+    """Derive thread status from the materialized snapshot plus the raw
+    pending writes attached to the resolved checkpoint."""
+    if snapshot is None:
+        return "idle"
+
+    for write in pending_writes:
+        if isinstance(write, (list, tuple)) and len(write) >= 2 and write[1] == "__error__":
             return "error"
 
-    # Check for pending next tasks (indicates interrupt)
-    tasks = getattr(checkpoint_tuple, "tasks", None)
+    tasks = getattr(snapshot, "tasks", None) or ()
+    for task in tasks:
+        if getattr(task, "error", None) is not None:
+            return "error"
+
+    if not getattr(snapshot, "tasks_known", True):
+        return fallback_status
+
     if tasks:
         return "interrupted"
 
@@ -500,6 +544,18 @@ async def delete_thread_data(thread_id: str, request: Request) -> ThreadDeleteRe
         await thread_store.delete(thread_id)
     except Exception:
         logger.debug("Could not delete thread_meta for %s (not critical)", sanitize_log_param(thread_id))
+
+    # Tear down any live browser session (best-effort). Sessions are keyed only
+    # by thread_id, so leaving one alive after the owner deletes the thread lets
+    # a later caller who guesses the id reuse the retained page/cookies.
+    try:
+        from deerflow.community.browser_automation import get_browser_session_manager
+
+        await get_browser_session_manager().close_session(thread_id)
+    except ImportError:
+        pass  # Playwright is an optional dependency.
+    except Exception:
+        logger.debug("Could not close browser session for %s (not critical)", sanitize_log_param(thread_id))
 
     return response
 
@@ -620,7 +676,6 @@ async def branch_thread(thread_id: str, body: ThreadBranchRequest, request: Requ
     """Create a new main-thread branch from a completed assistant turn."""
     from app.gateway.deps import get_thread_store
 
-    checkpointer = get_checkpointer(request)
     thread_store = get_thread_store(request)
 
     source_record = await thread_store.get(thread_id)
@@ -630,10 +685,15 @@ async def branch_thread(thread_id: str, body: ThreadBranchRequest, request: Requ
     source_metadata = source_record.get("metadata") or {}
     if source_metadata.get(_SIDECAR_METADATA_KEY) is True:
         raise HTTPException(status_code=409, detail="Branching is only available in the main conversation.")
+    source_accessor, source_config = build_checkpoint_state_accessor(
+        request,
+        thread_id=thread_id,
+        assistant_id=source_record.get("assistant_id"),
+    )
 
     target_message_ids = {body.message_id, *body.message_ids}
-    checkpoint_tuple = await _find_branch_checkpoint(checkpointer, thread_id, target_message_ids)
-    parent_checkpoint_id = _checkpoint_id(checkpoint_tuple)
+    snapshot = await _find_branch_checkpoint(source_accessor, source_config, target_message_ids)
+    parent_checkpoint_id = _checkpoint_id(snapshot)
     if not parent_checkpoint_id:
         raise HTTPException(status_code=409, detail="This turn can no longer be branched from.")
 
@@ -642,7 +702,7 @@ async def branch_thread(thread_id: str, body: ThreadBranchRequest, request: Requ
     # after that turn (message history rolls back, workspace would not). Restrict the
     # best-effort clone to branches taken from the latest turn so history and workspace
     # stay consistent.
-    branch_from_latest_turn = await _branch_targets_latest_turn(checkpointer, thread_id, target_message_ids)
+    branch_from_latest_turn = await _branch_targets_latest_turn(source_accessor, source_config, target_message_ids)
 
     new_thread_id = str(uuid.uuid4())
     now = now_iso()
@@ -661,22 +721,37 @@ async def branch_thread(thread_id: str, body: ThreadBranchRequest, request: Requ
     thread_owner_user_id = get_trusted_internal_owner_user_id(request)
     thread_owner_kwargs = {"user_id": thread_owner_user_id} if thread_owner_user_id else {}
 
-    checkpoint = copy.deepcopy(getattr(checkpoint_tuple, "checkpoint", {}) or {})
-    metadata = copy.deepcopy(getattr(checkpoint_tuple, "metadata", {}) or {})
-    checkpoint["id"] = str(uuid6())
-    metadata.update(
+    # Copy materialized values with replace semantics: reducer channels must
+    # not re-merge an already-aggregated value, so every copied reducer value
+    # is wrapped in Overwrite (not just messages).
+    branch_accessor, new_config = build_checkpoint_state_mutation_accessor(
+        request,
+        thread_id=new_thread_id,
+        as_node="branch",
+        # The branch write carries the full materialized snapshot; use the
+        # source assistant's effective schema so extension middleware channels
+        # survive instead of being silently discarded as unknown channels.
+        state_schema=graph_state_schema(getattr(source_accessor, "graph", None)),
+    )
+    branch_reducer_fields = graph_reducer_channels(getattr(branch_accessor, "graph", None))
+    if branch_reducer_fields is None:
+        branch_reducer_fields = THREAD_STATE_REDUCER_FIELDS
+    branch_values = {}
+    for key, value in dict(snapshot.values).items():
+        if key in branch_reducer_fields:
+            branch_values[key] = Overwrite(list(value) if key == "messages" and isinstance(value, list) else value)
+        else:
+            branch_values[key] = value
+    new_config.setdefault("metadata", {}).update(
         {
-            "source": "branch",
-            "updated_at": now,
-            "created_at": now,
             **branch_metadata,
+            "source": "branch",
         }
     )
-
-    write_config = {"configurable": {"thread_id": new_thread_id, "checkpoint_ns": ""}}
-    new_versions = dict(checkpoint.get("channel_versions", {}) or {})
     try:
-        await checkpointer.aput(write_config, checkpoint, metadata, new_versions)
+        await branch_accessor.aupdate(new_config, branch_values, as_node="branch")
+    except _CHECKPOINT_MODE_ERRORS as exc:
+        raise _checkpoint_mode_http_error(exc, new_thread_id) from exc
     except Exception:
         logger.exception("Failed to write branch checkpoint for thread %s", sanitize_log_param(new_thread_id))
         raise HTTPException(status_code=500, detail="Failed to create branch") from None
@@ -775,49 +850,45 @@ async def patch_thread(thread_id: str, body: ThreadPatchRequest, request: Reques
 @router.get("/{thread_id}", response_model=ThreadResponse)
 @require_permission("threads", "read", owner_check=True)
 async def get_thread(thread_id: str, request: Request) -> ThreadResponse:
-    """Get thread info.
-
-    Reads metadata from the ThreadMetaStore and derives the accurate
-    execution status from the checkpointer.  Falls back to the checkpointer
-    alone for threads that pre-date ThreadMetaStore adoption (backward compat).
-    """
+    """Get thread info from metadata plus the graph's materialized state."""
     from app.gateway.deps import get_thread_store
 
     thread_store = get_thread_store(request)
     checkpointer = get_checkpointer(request)
-
     record: dict | None = await thread_store.get(thread_id)
-
-    # Derive accurate status from the checkpointer
-    config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
     try:
-        checkpoint_tuple = await checkpointer.aget_tuple(config)
+        accessor, config = build_checkpoint_state_accessor(
+            request,
+            thread_id=thread_id,
+            assistant_id=record.get("assistant_id") if record is not None else None,
+        )
+    except _CHECKPOINT_MODE_ERRORS as exc:
+        raise _checkpoint_mode_http_error(exc, thread_id) from exc
+
+    try:
+        snapshot = await accessor.aget(config)
+        checkpoint_id = (snapshot.config or {}).get("configurable", {}).get("checkpoint_id")
+        pending_writes = await _fetch_raw_pending_writes(checkpointer, snapshot.config) if checkpoint_id else []
+    except _CHECKPOINT_MODE_ERRORS as exc:
+        raise _checkpoint_mode_http_error(exc, thread_id) from exc
     except Exception:
         logger.exception("Failed to get checkpoint for thread %s", sanitize_log_param(thread_id))
         raise HTTPException(status_code=500, detail="Failed to get thread")
 
-    if record is None and checkpoint_tuple is None:
+    if record is None and not checkpoint_id:
         raise HTTPException(status_code=404, detail=f"Thread {thread_id} not found")
 
-    # If the thread exists in the checkpointer but not in thread_meta (e.g.
-    # legacy data created before thread_meta adoption), synthesize a minimal
-    # record from the checkpoint metadata.
-    if record is None and checkpoint_tuple is not None:
-        ckpt_meta = getattr(checkpoint_tuple, "metadata", {}) or {}
+    metadata = snapshot.metadata or {}
+    if record is None:
         record = {
             "thread_id": thread_id,
             "status": "idle",
-            "created_at": coerce_iso(ckpt_meta.get("created_at", "")),
-            "updated_at": coerce_iso(ckpt_meta.get("updated_at", ckpt_meta.get("created_at", ""))),
-            "metadata": {k: v for k, v in ckpt_meta.items() if k not in ("created_at", "updated_at", "step", "source", "writes", "parents")},
+            "created_at": coerce_iso(snapshot.created_at or metadata.get("created_at", "")),
+            "updated_at": coerce_iso(metadata.get("updated_at", snapshot.created_at or metadata.get("created_at", ""))),
+            "metadata": {key: value for key, value in metadata.items() if key not in ("created_at", "updated_at", "step", "source", "writes", "parents")},
         }
-
-    if record is None:
-        raise HTTPException(status_code=404, detail=f"Thread {thread_id} not found")
-
-    status = _derive_thread_status(checkpoint_tuple) if checkpoint_tuple is not None else record.get("status", "idle")
-    checkpoint = getattr(checkpoint_tuple, "checkpoint", {}) or {} if checkpoint_tuple is not None else {}
-    channel_values = checkpoint.get("channel_values", {})
+    stored_status = record.get("status", "idle")
+    status = _derive_thread_status(snapshot, pending_writes, fallback_status=stored_status) if checkpoint_id else stored_status
 
     return ThreadResponse(
         thread_id=thread_id,
@@ -825,7 +896,7 @@ async def get_thread(thread_id: str, request: Request) -> ThreadResponse:
         created_at=coerce_iso(record.get("created_at", "")),
         updated_at=coerce_iso(record.get("updated_at", "")),
         metadata=record.get("metadata", {}),
-        values=serialize_channel_values_for_api(channel_values),
+        values=serialize_channel_values_for_api(snapshot.values),
     )
 
 
@@ -898,20 +969,33 @@ def _thread_compact_response(result: ThreadCompactionResult) -> ThreadCompactRes
 async def compact_thread(thread_id: str, body: ThreadCompactRequest, request: Request) -> ThreadCompactResponse:
     """Manually summarize old thread context while preserving the visible history."""
     run_manager = get_run_manager(request)
-    checkpointer = get_checkpointer(request)
+    # Compaction writes only base-schema channels (messages + summary_text);
+    # every other channel — including middleware-contributed ones — is carried
+    # forward by checkpoint fork inheritance, so the base-schema mutation
+    # graph is sufficient (and avoids building the full lead graph per call).
+    try:
+        accessor, _ = build_checkpoint_state_mutation_accessor(
+            request,
+            thread_id=thread_id,
+            as_node="manual_compaction",
+        )
+    except _CHECKPOINT_MODE_ERRORS as exc:
+        raise _checkpoint_mode_http_error(exc, thread_id) from exc
     keep = body.keep.to_tuple() if body.keep is not None else None
     try:
         async with goal_thread_lock(thread_id):
             if await run_manager.has_inflight(thread_id):
                 raise HTTPException(status_code=409, detail="Thread has a run in flight. Compact after the run finishes.")
             result = await compact_thread_context(
-                checkpointer,
+                accessor,
                 thread_id,
                 keep=keep,
                 force=body.force,
                 user_id=get_effective_user_id(),
                 agent_name=body.agent_name,
             )
+    except _CHECKPOINT_MODE_ERRORS as exc:
+        raise _checkpoint_mode_http_error(exc, thread_id) from exc
     except ContextCompactionDisabled:
         raise HTTPException(status_code=409, detail="Context compaction is disabled.") from None
     except ContextCompactionFailed:
@@ -930,51 +1014,41 @@ async def compact_thread(thread_id: str, body: ThreadCompactRequest, request: Re
 @router.get("/{thread_id}/state", response_model=ThreadStateResponse)
 @require_permission("threads", "read", owner_check=True)
 async def get_thread_state(thread_id: str, request: Request) -> ThreadStateResponse:
-    """Get the latest state snapshot for a thread.
-
-    Channel values are serialized to ensure LangChain message objects
-    are converted to JSON-safe dicts.
-    """
-    checkpointer = get_checkpointer(request)
-
-    config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+    """Get the latest materialized graph state for a thread."""
+    # Resolve through the thread's assistant so custom middleware channels
+    # appear in the response instead of being dropped by the default schema.
     try:
-        checkpoint_tuple = await checkpointer.aget_tuple(config)
+        accessor, config = await build_thread_checkpoint_state_accessor(request, thread_id=thread_id)
+    except _CHECKPOINT_MODE_ERRORS as exc:
+        raise _checkpoint_mode_http_error(exc, thread_id) from exc
+    try:
+        snapshot = await accessor.aget(config)
+    except _CHECKPOINT_MODE_ERRORS as exc:
+        raise _checkpoint_mode_http_error(exc, thread_id) from exc
     except Exception:
         logger.exception("Failed to get state for thread %s", sanitize_log_param(thread_id))
         raise HTTPException(status_code=500, detail="Failed to get thread state")
 
-    if checkpoint_tuple is None:
+    snapshot_config = snapshot.config or {}
+    checkpoint_id = snapshot_config.get("configurable", {}).get("checkpoint_id")
+    if not checkpoint_id:
         raise HTTPException(status_code=404, detail=f"Thread {thread_id} not found")
 
-    checkpoint = getattr(checkpoint_tuple, "checkpoint", {}) or {}
-    metadata = getattr(checkpoint_tuple, "metadata", {}) or {}
-    checkpoint_id = None
-    ckpt_config = getattr(checkpoint_tuple, "config", {})
-    if ckpt_config:
-        checkpoint_id = ckpt_config.get("configurable", {}).get("checkpoint_id")
-
-    channel_values = checkpoint.get("channel_values", {})
-
-    parent_config = getattr(checkpoint_tuple, "parent_config", None)
-    parent_checkpoint_id = None
-    if parent_config:
-        parent_checkpoint_id = parent_config.get("configurable", {}).get("checkpoint_id")
-
-    tasks_raw = getattr(checkpoint_tuple, "tasks", []) or []
-    next_tasks = [t.name for t in tasks_raw if hasattr(t, "name")]
-    tasks = [{"id": getattr(t, "id", ""), "name": getattr(t, "name", "")} for t in tasks_raw]
-
-    values = serialize_channel_values_for_api(channel_values)
+    parent_config = snapshot.parent_config or {}
+    parent_checkpoint_id = parent_config.get("configurable", {}).get("checkpoint_id")
+    metadata = snapshot.metadata or {}
+    created_at = snapshot.created_at or metadata.get("created_at", "")
+    tasks_raw = snapshot.tasks or ()
+    tasks = [{"id": getattr(task, "id", ""), "name": getattr(task, "name", "")} for task in tasks_raw]
 
     return ThreadStateResponse(
-        values=values,
-        next=next_tasks,
+        values=serialize_channel_values_for_api(snapshot.values),
+        next=list(snapshot.next or ()),
         metadata=metadata,
-        checkpoint={"id": checkpoint_id, "ts": coerce_iso(metadata.get("created_at", ""))},
+        checkpoint={"id": checkpoint_id, "ts": coerce_iso(created_at)},
         checkpoint_id=checkpoint_id,
         parent_checkpoint_id=parent_checkpoint_id,
-        created_at=coerce_iso(metadata.get("created_at", "")),
+        created_at=coerce_iso(created_at),
         tasks=tasks,
     )
 
@@ -982,102 +1056,89 @@ async def get_thread_state(thread_id: str, request: Request) -> ThreadStateRespo
 @router.post("/{thread_id}/state", response_model=ThreadStateResponse)
 @require_permission("threads", "write", owner_check=True, require_existing=True)
 async def update_thread_state(thread_id: str, body: ThreadStateUpdateRequest, request: Request) -> ThreadStateResponse:
-    """Update thread state (e.g. for human-in-the-loop resume or title rename).
-
-    Writes a new checkpoint that merges *body.values* into the latest
-    channel values, then syncs any updated ``title`` field through the
-    ThreadMetaStore abstraction so that ``/threads/search`` reflects the
-    change immediately in both sqlite and memory backends.
-    """
+    """Replace selected thread-state fields through the materialized graph."""
     from app.gateway.deps import get_thread_store
 
-    checkpointer = get_checkpointer(request)
     thread_store = get_thread_store(request)
-
-    # checkpoint_ns must be present in the config for aput — default to ""
-    # (the root graph namespace).  checkpoint_id is optional; omitting it
-    # fetches the latest checkpoint for the thread.
-    read_config: dict[str, Any] = {
-        "configurable": {
-            "thread_id": thread_id,
-            "checkpoint_ns": "",
+    if body.checkpoint_id is not None:
+        if not body.checkpoint_id:
+            raise HTTPException(status_code=404, detail="Checkpoint not found")
+        selected_config = {
+            "configurable": {
+                "thread_id": thread_id,
+                "checkpoint_ns": "",
+                "checkpoint_id": body.checkpoint_id,
+            }
         }
-    }
-    if body.checkpoint_id:
-        read_config["configurable"]["checkpoint_id"] = body.checkpoint_id
+        try:
+            checkpoint_tuple = await get_checkpointer(request).aget_tuple(selected_config)
+        except Exception:
+            logger.exception("Failed to get state for thread %s", sanitize_log_param(thread_id))
+            raise HTTPException(status_code=500, detail="Failed to get thread state")
+        if checkpoint_tuple is None:
+            raise HTTPException(status_code=404, detail=f"Checkpoint {body.checkpoint_id} not found")
 
+    mutation_node = body.as_node or "manual_state_update"
+    # Resolve through the shared boundary (thread metadata -> assistant_id ->
+    # effective schema) so extension middleware channels stay writable.
+    accessor, read_config = await build_thread_checkpoint_state_mutation_accessor(
+        request,
+        thread_id=thread_id,
+        as_node=mutation_node,
+        checkpoint_id=body.checkpoint_id,
+    )
+    values = dict(body.values or {})
+    writable_channels = graph_writable_channels(getattr(accessor, "graph", None))
+    if writable_channels is not None:
+        unknown_fields = sorted(set(values) - writable_channels)
+        if unknown_fields:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Unknown thread-state field(s): {', '.join(unknown_fields)}",
+            )
+    reducer_fields = graph_reducer_channels(getattr(accessor, "graph", None))
+    if reducer_fields is None:
+        reducer_fields = THREAD_STATE_REDUCER_FIELDS
+    updates = {key: Overwrite(value) if key in reducer_fields else value for key, value in values.items()}
     try:
-        checkpoint_tuple = await checkpointer.aget_tuple(read_config)
-    except Exception:
-        logger.exception("Failed to get state for thread %s", sanitize_log_param(thread_id))
-        raise HTTPException(status_code=500, detail="Failed to get thread state")
-
-    if checkpoint_tuple is None:
-        raise HTTPException(status_code=404, detail=f"Thread {thread_id} not found")
-
-    # Work on mutable copies so we don't accidentally mutate cached objects.
-    checkpoint: dict[str, Any] = dict(getattr(checkpoint_tuple, "checkpoint", {}) or {})
-    metadata: dict[str, Any] = dict(getattr(checkpoint_tuple, "metadata", {}) or {})
-    channel_values: dict[str, Any] = dict(checkpoint.get("channel_values", {}))
-
-    if body.values:
-        channel_values.update(body.values)
-
-    checkpoint["channel_values"] = channel_values
-    metadata["updated_at"] = now_iso()
-
-    if body.as_node:
-        metadata["source"] = "update"
-        metadata["step"] = metadata.get("step", 0) + 1
-        metadata["writes"] = {body.as_node: body.values}
-
-    # Assign a new checkpoint ID so aput performs an INSERT rather than an
-    # in-place REPLACE of the existing row.  Use uuid6 (time-ordered) rather
-    # than uuid4 (random) so the new ID is always lexicographically greater
-    # than the previous one — LangGraph's checkpointers determine the "latest"
-    # checkpoint by max(checkpoint_ids) string order, matching the uuid6 epoch.
-    checkpoint["id"] = str(uuid6())
-
-    # aput requires checkpoint_ns in the config — use the same config used for the
-    # read (which always includes checkpoint_ns=""). The fresh checkpoint ID is
-    # assigned above via checkpoint["id"]; keep checkpoint_id out of the config so
-    # the write is keyed by the new checkpoint payload rather than the prior read.
-    # All supported savers (InMemorySaver, AsyncSqliteSaver, AsyncPostgresSaver)
-    # persist and echo back checkpoint["id"] verbatim — none mint their own — so
-    # the new_config below carries the uuid6 we assigned here. (Regression-locked
-    # by test_update_thread_state_inserts_new_checkpoint_each_call.)
-    write_config: dict[str, Any] = {
-        "configurable": {
-            "thread_id": thread_id,
-            "checkpoint_ns": "",
-        }
-    }
-    try:
-        new_config = await checkpointer.aput(write_config, checkpoint, metadata, {})
+        updated_config = await accessor.aupdate(
+            read_config,
+            updates,
+            as_node=mutation_node,
+        )
+        snapshot = await accessor.aget(updated_config)
+    except _CHECKPOINT_MODE_ERRORS as exc:
+        raise _checkpoint_mode_http_error(exc, thread_id) from exc
     except Exception:
         logger.exception("Failed to update state for thread %s", sanitize_log_param(thread_id))
         raise HTTPException(status_code=500, detail="Failed to update thread state")
 
-    new_checkpoint_id: str | None = None
-    if isinstance(new_config, dict):
-        new_checkpoint_id = new_config.get("configurable", {}).get("checkpoint_id")
-
-    # Sync title changes through the ThreadMetaStore abstraction so /threads/search
-    # reflects them immediately in both sqlite and memory backends.
     if thread_store and body.values and "title" in body.values:
         new_title = body.values["title"]
-        if new_title:  # Skip empty strings and None
+        if new_title:
             try:
                 await thread_store.update_display_name(thread_id, new_title)
             except Exception:
                 logger.debug("Failed to sync title to thread_meta for %s (non-fatal)", sanitize_log_param(thread_id))
 
+    snapshot_config = snapshot.config or {}
+    checkpoint_id = snapshot_config.get("configurable", {}).get("checkpoint_id")
+    parent_config = snapshot.parent_config or {}
+    parent_checkpoint_id = parent_config.get("configurable", {}).get("checkpoint_id")
+    metadata = snapshot.metadata or {}
+    created_at = snapshot.created_at or metadata.get("created_at", "")
+    tasks_raw = snapshot.tasks or ()
+    tasks = [{"id": getattr(task, "id", ""), "name": getattr(task, "name", "")} for task in tasks_raw]
+
     return ThreadStateResponse(
-        values=serialize_channel_values_for_api(channel_values),
-        next=[],
+        values=serialize_channel_values_for_api(snapshot.values),
+        next=list(snapshot.next or ()),
         metadata=metadata,
-        checkpoint_id=new_checkpoint_id,
-        created_at=coerce_iso(metadata.get("created_at", "")),
+        checkpoint={"id": checkpoint_id, "ts": coerce_iso(created_at)},
+        checkpoint_id=checkpoint_id,
+        parent_checkpoint_id=parent_checkpoint_id,
+        created_at=coerce_iso(created_at),
+        tasks=tasks,
     )
 
 
@@ -1111,46 +1172,42 @@ async def get_thread_history(
     request: Request,
     background_tasks: BackgroundTasks,
 ) -> list[HistoryEntry]:
-    """Get checkpoint history for a thread.
+    """Get materialized graph state history for a thread.
 
-    Messages are read from the checkpointer's channel values (the
-    authoritative source) and serialized via
-    :func:`~deerflow.runtime.serialization.serialize_channel_values`.
     Only the latest (first) checkpoint carries the ``messages`` key to
-    avoid duplicating them across every entry.
+    avoid duplicating the complete conversation across every entry.
     """
     checkpointer = get_checkpointer(request)
-
-    config: dict[str, Any] = {"configurable": {"thread_id": thread_id}}
-    if body.before:
-        config["configurable"]["checkpoint_id"] = body.before
+    try:
+        accessor, config = await build_thread_checkpoint_state_accessor(
+            request,
+            thread_id=thread_id,
+            checkpoint_id=body.before,
+        )
+    except _CHECKPOINT_MODE_ERRORS as exc:
+        raise _checkpoint_mode_http_error(exc, thread_id) from exc
 
     entries: list[HistoryEntry] = []
     is_latest_checkpoint = True
     try:
-        async for checkpoint_tuple in checkpointer.alist(config, limit=body.limit):
-            ckpt_config = getattr(checkpoint_tuple, "config", {})
-            parent_config = getattr(checkpoint_tuple, "parent_config", None)
-            metadata = getattr(checkpoint_tuple, "metadata", {}) or {}
-            checkpoint = getattr(checkpoint_tuple, "checkpoint", {}) or {}
+        snapshots = await accessor.ahistory(config, limit=body.limit)
+        for snapshot in snapshots:
+            snapshot_config = snapshot.config or {}
+            parent_config = snapshot.parent_config or {}
+            metadata = snapshot.metadata or {}
+            materialized_values = snapshot.values if isinstance(snapshot.values, dict) else {}
 
-            checkpoint_id = ckpt_config.get("configurable", {}).get("checkpoint_id", "")
-            parent_id = None
-            if parent_config:
-                parent_id = parent_config.get("configurable", {}).get("checkpoint_id")
+            checkpoint_id = snapshot_config.get("configurable", {}).get("checkpoint_id", "")
+            parent_id = parent_config.get("configurable", {}).get("checkpoint_id")
 
-            channel_values = checkpoint.get("channel_values", {})
-
-            # Build values from checkpoint channel_values
             values: dict[str, Any] = {}
-            if title := channel_values.get("title"):
+            if title := materialized_values.get("title"):
                 values["title"] = title
-            if thread_data := channel_values.get("thread_data"):
+            if thread_data := materialized_values.get("thread_data"):
                 values["thread_data"] = thread_data
 
-            # Attach messages only to the latest checkpoint entry.
             if is_latest_checkpoint:
-                messages = channel_values.get("messages")
+                messages = materialized_values.get("messages")
                 if messages:
                     serialized_msgs = serialize_channel_values_for_api({"messages": messages}).get("messages", [])
                     try:
@@ -1232,9 +1289,7 @@ async def get_thread_history(
 
             is_latest_checkpoint = False
 
-            # Derive next tasks
-            tasks_raw = getattr(checkpoint_tuple, "tasks", []) or []
-            next_tasks = [t.name for t in tasks_raw if hasattr(t, "name")]
+            next_tasks = list(snapshot.next or ())
 
             # Strip LangGraph internal keys from metadata
             user_meta = {k: v for k, v in metadata.items() if k not in ("created_at", "updated_at", "step", "source", "writes", "parents", "run_durations")}
@@ -1248,10 +1303,12 @@ async def get_thread_history(
                     parent_checkpoint_id=parent_id,
                     metadata=user_meta,
                     values=values,
-                    created_at=coerce_iso(metadata.get("created_at", "")),
+                    created_at=coerce_iso(snapshot.created_at or metadata.get("created_at", "")),
                     next=next_tasks,
                 )
             )
+    except _CHECKPOINT_MODE_ERRORS as exc:
+        raise _checkpoint_mode_http_error(exc, thread_id) from exc
     except Exception:
         logger.exception("Failed to get history for thread %s", sanitize_log_param(thread_id))
         raise HTTPException(status_code=500, detail="Failed to get thread history")

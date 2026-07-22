@@ -416,6 +416,19 @@ class DingTalkChannel(Channel):
             # chat_id uses conversation_id for groups, sender_staff_id for P2P
             chat_id = conversation_id if conversation_type == _CONVERSATION_TYPE_GROUP else sender_staff_id
 
+            # An empty chat_id does not identify a conversation, and ChannelStore keys on it:
+            # a P2P message with no sender keys to the literal "dingtalk:", so every such
+            # message from every user shares one thread and one history. Mirrors the guard the
+            # WeChat channel already applies (wechat.py, `if not chat_id: return`) and the one
+            # this file's own bind path applies before persisting a connection.
+            if not chat_id:
+                logger.warning(
+                    "[DingTalk] ignoring message with no conversation identity: conv_type=%s, msg_id=%s",
+                    conversation_type,
+                    msg_id,
+                )
+                return
+
             inbound = self._make_inbound(
                 chat_id=chat_id,
                 user_id=sender_staff_id,

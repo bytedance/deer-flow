@@ -33,6 +33,7 @@ from langchain_core.runnables import RunnableConfig
 
 from deerflow.agents.lead_agent.prompt import apply_prompt_template
 from deerflow.agents.middlewares.clarification_middleware import ClarificationMiddleware
+from deerflow.agents.middlewares.configured_extensions import load_configured_extension_middlewares
 from deerflow.agents.middlewares.loop_detection_middleware import LoopDetectionMiddleware
 from deerflow.agents.middlewares.memory_middleware import MemoryMiddleware
 from deerflow.agents.middlewares.safety_finish_reason_middleware import SafetyFinishReasonMiddleware
@@ -44,12 +45,18 @@ from deerflow.agents.middlewares.todo_middleware import TodoMiddleware
 from deerflow.agents.middlewares.token_usage_middleware import TokenUsageMiddleware
 from deerflow.agents.middlewares.tool_error_handling_middleware import build_lead_runtime_middlewares
 from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
-from deerflow.agents.thread_state import ThreadState
+from deerflow.agents.thread_state import get_thread_state_schema, normalize_middleware_state_schemas
 from deerflow.config.agents_config import load_agent_config, validate_agent_name
 from deerflow.config.app_config import AppConfig, get_app_config
 from deerflow.config.memory_config import should_use_memory_tools
 from deerflow.config.subagents_config import DEFAULT_MAX_TOTAL_SUBAGENTS_PER_RUN
 from deerflow.models import create_chat_model
+from deerflow.runtime.checkpoint_mode import (
+    INTERNAL_CHECKPOINT_MODE_KEY,
+    freeze_checkpoint_channel_mode,
+    frozen_checkpoint_channel_mode,
+    inject_checkpoint_mode,
+)
 from deerflow.skills.types import Skill
 from deerflow.tracing import build_tracing_callbacks
 
@@ -403,6 +410,10 @@ def build_middlewares(
     if custom_middlewares:
         middlewares.extend(custom_middlewares)
 
+    configured_middlewares = load_configured_extension_middlewares(resolved_app_config)
+    if configured_middlewares:
+        middlewares.extend(configured_middlewares)
+
     # A provider may return an empty AIMessage after tool execution. Retry the
     # final response once, then persist a visible error fallback rather than
     # allowing LangChain's no-tool-call router to end a silent successful run.
@@ -410,9 +421,9 @@ def build_middlewares(
 
     # SafetyFinishReasonMiddleware — suppress tool execution when the provider
     # safety-terminated the response. Registered after the terminal-response
-    # and custom middlewares so LangChain's reverse-order after_model dispatch
-    # runs Safety first; cleared tool_calls then flow through the remaining
-    # accounting/terminal guards without firing extra alarms.
+    # and custom/configured middlewares so LangChain's reverse-order after_model
+    # dispatch runs Safety first; cleared tool_calls then flow through the
+    # remaining accounting/terminal guards without firing extra alarms.
     safety_config = resolved_app_config.safety_finish_reason
     if safety_config.enabled:
         middlewares.append(SafetyFinishReasonMiddleware.from_config(safety_config))
@@ -448,7 +459,27 @@ def make_lead_agent(config: RunnableConfig):
     """LangGraph graph factory; keep the signature compatible with LangGraph Server."""
     runtime_config = _get_runtime_config(config)
     runtime_app_config = runtime_config.get("app_config")
-    return _make_lead_agent(config, app_config=runtime_app_config or get_app_config())
+    if not isinstance(runtime_app_config, AppConfig):
+        runtime_app_config = get_app_config()
+    # Mode selection precedence, pinned by test_checkpoint_mode.py:
+    # - First freeze: the app config owns the process mode; a client-supplied
+    #   configurable key is ignored so a direct LangGraph request cannot
+    #   reconfigure (or crash) a fresh process.
+    # - Once frozen: an internally injected key (run worker / gateway) or the
+    #   app config must match the frozen mode; ``freeze_checkpoint_channel_mode``
+    #   fails closed on any mismatch, so neither a forged key nor a config.yaml
+    #   change can silently reconfigure the process.
+    frozen_mode = frozen_checkpoint_channel_mode()
+    if frozen_mode is None:
+        requested_mode = runtime_app_config.database.checkpoint_channel_mode
+    else:
+        requested_mode = (config.get("configurable", {}) or {}).get(
+            INTERNAL_CHECKPOINT_MODE_KEY,
+            runtime_app_config.database.checkpoint_channel_mode,
+        )
+    mode = freeze_checkpoint_channel_mode(requested_mode)
+    inject_checkpoint_mode(config, mode)
+    return _make_lead_agent(config, app_config=runtime_app_config)
 
 
 def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
@@ -459,6 +490,10 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
 
     cfg = _get_runtime_config(config)
     resolved_app_config = app_config
+    mode = (config.get("configurable", {}) or {}).get(
+        INTERNAL_CHECKPOINT_MODE_KEY,
+        resolved_app_config.database.checkpoint_channel_mode,
+    )
 
     # Extract user_id for user-scoped skill loading.
     # LangGraph gateway injects user_id into config["configurable"];
@@ -573,14 +608,17 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
         return create_agent(
             model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, app_config=resolved_app_config, attach_tracing=False),
             tools=final_tools,
-            middleware=build_middlewares(
-                config,
-                model_name=model_name,
-                available_skills=set(_BOOTSTRAP_SKILL_NAMES),
-                app_config=resolved_app_config,
-                deferred_setup=setup,
-                mcp_routing_middleware=mcp_routing_middleware,
-                user_id=resolved_user_id,
+            middleware=normalize_middleware_state_schemas(
+                build_middlewares(
+                    config,
+                    model_name=model_name,
+                    available_skills=set(_BOOTSTRAP_SKILL_NAMES),
+                    app_config=resolved_app_config,
+                    deferred_setup=setup,
+                    mcp_routing_middleware=mcp_routing_middleware,
+                    user_id=resolved_user_id,
+                ),
+                mode,
             ),
             system_prompt=apply_prompt_template(
                 subagent_enabled=subagent_enabled,
@@ -592,7 +630,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
                 user_id=resolved_user_id,
                 skill_names=skill_setup.skill_names or None,
             ),
-            state_schema=ThreadState,
+            state_schema=get_thread_state_schema(mode),
         )
 
     # Custom agents can update their own SOUL.md / config via update_agent.
@@ -640,15 +678,18 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
     return create_agent(
         model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, reasoning_effort=reasoning_effort, app_config=resolved_app_config, attach_tracing=False),
         tools=final_tools,
-        middleware=build_middlewares(
-            config,
-            model_name=model_name,
-            agent_name=agent_name,
-            available_skills=available_skills,
-            app_config=resolved_app_config,
-            deferred_setup=setup,
-            mcp_routing_middleware=mcp_routing_middleware,
-            user_id=resolved_user_id,
+        middleware=normalize_middleware_state_schemas(
+            build_middlewares(
+                config,
+                model_name=model_name,
+                agent_name=agent_name,
+                available_skills=available_skills,
+                app_config=resolved_app_config,
+                deferred_setup=setup,
+                mcp_routing_middleware=mcp_routing_middleware,
+                user_id=resolved_user_id,
+            ),
+            mode,
         ),
         system_prompt=apply_prompt_template(
             subagent_enabled=subagent_enabled,
@@ -662,5 +703,5 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
             user_id=resolved_user_id,
             skill_names=skill_setup.skill_names or None,
         ),
-        state_schema=ThreadState,
+        state_schema=get_thread_state_schema(mode),
     )

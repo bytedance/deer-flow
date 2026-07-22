@@ -8,6 +8,7 @@ EMPTY_SUMMARY = {
     "created": 0,
     "modified": 0,
     "deleted": 0,
+    "symlink_created": 0,
     "additions": 0,
     "deletions": 0,
     "truncated": False,

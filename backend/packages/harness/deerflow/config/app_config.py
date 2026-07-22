@@ -65,6 +65,63 @@ class CircuitBreakerConfig(BaseModel):
     recovery_timeout_sec: int = Field(default=60, description="Time in seconds before attempting to recover the circuit")
 
 
+class LlmCallConfig(BaseModel):
+    """Configuration for LLM call execution (concurrency / rate shaping).
+
+    Distinct from :class:`CircuitBreakerConfig` (which handles a *failing*
+    provider) and from :class:`ModelConfig` (which describes model endpoints):
+    these knobs shape how many LLM calls run at once and how the retry/backoff
+    loop behaves. Capping concurrency caps the *slope* of the request rate,
+    which is what a provider burst-rate (``limit_burst_rate``) limit fires on.
+    """
+
+    max_concurrent_calls: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Process-wide cap on concurrently in-flight LLM calls. 0 disables "
+            "the cap (default, preserving existing behavior). Set to a positive "
+            "int to smooth provider burst-rate (limit_burst_rate) spikes by "
+            "bounding the request-rate slope at the morning peak. Per-process, "
+            "not per-cluster: with GATEWAY_WORKERS > 1 the aggregate cap is "
+            "effectively max_concurrent_calls * GATEWAY_WORKERS (and a "
+            "multi-node rollout multiplies it further), so size the per-process "
+            "value accordingly and pair it with an nginx limit_req at the ingress "
+            "for a true cluster-wide slope cap. Startup-only: the cap is captured "
+            "at the first LLM run and frozen for the process lifetime, so editing "
+            "it in config.yaml takes effect only after a gateway restart (the "
+            "other llm_call.* knobs remain hot-reloadable). Freezing avoids the "
+            "downscale/config-freshness races a runtime-mutable cap would "
+            "introduce on a process-wide, cross-loop limiter."
+        ),
+    )
+    retry_max_attempts: int = Field(
+        default=3,
+        ge=1,
+        description="Max LLM call attempts (1 = no retry) for retriable transient errors.",
+    )
+    retry_base_delay_ms: int = Field(
+        default=1000,
+        ge=0,
+        description="Base (ms) for the decorrelated-jitter retry backoff; seeds the first retry delay.",
+    )
+    retry_cap_delay_ms: int = Field(
+        default=8000,
+        ge=0,
+        description="Hard cap (ms) on any single retry backoff delay.",
+    )
+    burst_retry_base_delay_ms: int = Field(
+        default=5000,
+        ge=0,
+        description=(
+            "Base (ms) for the backoff when the provider returns a burst-rate "
+            "(limit_burst_rate) 429. Higher than retry_base_delay_ms so the "
+            "single burst retry lands after the throttle window subsides. "
+            "Ignored when the provider sends Retry-After (honored verbatim)."
+        ),
+    )
+
+
 class LoggingEnhanceConfig(BaseModel):
     """Request trace logging enhancement settings."""
 
@@ -175,6 +232,7 @@ class AppConfig(BaseModel):
     input_polish: InputPolishConfig = Field(default_factory=InputPolishConfig, description="Pre-send input polishing configuration.")
     suggestions: SuggestionsConfig = Field(default_factory=SuggestionsConfig, description="Follow-up suggestions configuration.")
     circuit_breaker: CircuitBreakerConfig = Field(default_factory=CircuitBreakerConfig, description="LLM circuit breaker configuration")
+    llm_call: LlmCallConfig = Field(default_factory=LlmCallConfig, description="LLM call execution configuration (concurrency / rate shaping)")
     channel_connections: ChannelConnectionsConfig = Field(
         default_factory=ChannelConnectionsConfig,
         description=format_field_description(
@@ -320,9 +378,17 @@ class AppConfig(BaseModel):
         if "circuit_breaker" in config_data:
             config_data["circuit_breaker"] = config_data["circuit_breaker"]
 
-        # Load extensions config separately (it's in a different file)
+        # Load extensions config separately (it's in a different file), while
+        # preserving any config.yaml-backed extension fields. config.yaml wins
+        # when it explicitly declares a field because those values are part of
+        # the main AppConfig hot-reload contract.
+        yaml_extensions = config_data.get("extensions")
         extensions_config = ExtensionsConfig.from_file()
-        config_data["extensions"] = extensions_config.model_dump()
+        extensions_data = extensions_config.model_dump(by_alias=True)
+        if isinstance(yaml_extensions, Mapping):
+            yaml_extensions_config = ExtensionsConfig.model_validate(yaml_extensions)
+            extensions_data.update(yaml_extensions_config.model_dump(by_alias=True, exclude_unset=True))
+        config_data["extensions"] = extensions_data
 
         result = cls.model_validate(config_data)
         if not result.models:
