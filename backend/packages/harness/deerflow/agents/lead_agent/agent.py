@@ -45,7 +45,7 @@ from deerflow.agents.middlewares.todo_middleware import TodoMiddleware
 from deerflow.agents.middlewares.token_usage_middleware import TokenUsageMiddleware
 from deerflow.agents.middlewares.tool_error_handling_middleware import build_lead_runtime_middlewares
 from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
-from deerflow.agents.thread_state import ThreadState, get_thread_state_schema, normalize_middleware_state_schemas
+from deerflow.agents.thread_state import get_thread_state_schema, normalize_middleware_state_schemas
 from deerflow.config.agents_config import AgentConfig, load_agent_config, validate_agent_name
 from deerflow.config.app_config import AppConfig, get_app_config
 from deerflow.config.memory_config import disabled_memory_config, should_use_memory_tools
@@ -304,6 +304,7 @@ def build_middlewares(
     deferred_setup=None,
     mcp_routing_middleware: AgentMiddleware | None = None,
     user_id: str | None = None,
+    memory_opt_out: bool = False,
 ):
     """Build the lead-agent middleware chain based on runtime configuration.
 
@@ -324,6 +325,11 @@ def build_middlewares(
             deferred MCP schemas before the deferred filter runs.
         user_id: Effective user ID for user-scoped skill loading. Passed through
             to ``SkillActivationMiddleware`` so it can resolve per-user custom skills.
+        memory_opt_out: True when ``app_config.memory`` was switched off by a
+            custom agent's explicit opt-out rather than by the operator's global
+            config. Suppresses the mode/enabled mismatch warning below — that
+            signal is meant for a genuinely misconfigured global ``config.yaml``,
+            not for an intentional per-agent opt-out.
 
     Returns:
         List of middleware instances.
@@ -400,7 +406,7 @@ def build_middlewares(
     if should_use_memory_tools(resolved_app_config.memory):
         pass
     else:
-        if resolved_app_config.memory.mode == "tool" and not resolved_app_config.memory.enabled:
+        if not memory_opt_out and resolved_app_config.memory.mode == "tool" and not resolved_app_config.memory.enabled:
             logger.warning("memory.mode is 'tool' but memory.enabled is false; memory tools will not be registered.")
         middlewares.append(MemoryMiddleware(agent_name=agent_name, memory_config=resolved_app_config.memory))
 
@@ -568,6 +574,11 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
     # A no-op for every other agent (returns the same object), so behavior is
     # unchanged unless an agent explicitly disables memory.
     resolved_app_config = apply_agent_memory_override(resolved_app_config, agent_config)
+    # The fold returns a copy exactly when it applied an opt-out (same object
+    # otherwise), so identity tells build_middlewares to skip the mode/enabled
+    # mismatch warning — that signal is for a misconfigured global config.yaml,
+    # not for a deliberate per-agent opt-out.
+    memory_opt_out = resolved_app_config is not app_config
 
     # Custom agent model from agent config (if any), or None to let _resolve_model_name pick the default
     agent_model_name = agent_config.model if agent_config and agent_config.model else None
@@ -754,6 +765,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
                 deferred_setup=setup,
                 mcp_routing_middleware=mcp_routing_middleware,
                 user_id=resolved_user_id,
+                memory_opt_out=memory_opt_out,
             ),
             mode,
         ),

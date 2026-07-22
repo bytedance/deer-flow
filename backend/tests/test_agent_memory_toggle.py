@@ -233,3 +233,52 @@ def test_build_middlewares_folds_memory_opt_out_into_the_chain(monkeypatch) -> N
     opted = _memory_mw(lead_agent_module.build_middlewares(runnable, model_name="safe-model", app_config=effective))
     assert opted is not None
     assert opted._memory_config.enabled is False
+
+
+# --------------------------------------------------------------------------- #
+# build_middlewares — the mode/enabled warning skips a deliberate opt-out
+# --------------------------------------------------------------------------- #
+def _stub_heavy_middleware_parts(monkeypatch) -> None:
+    from deerflow.agents.lead_agent import agent as lead_agent_module
+
+    monkeypatch.setattr(lead_agent_module, "build_lead_runtime_middlewares", lambda *, app_config, lazy_init=True: [])
+    monkeypatch.setattr(lead_agent_module, "_create_summarization_middleware", lambda *, app_config=None: None)
+    monkeypatch.setattr(lead_agent_module, "_create_todo_list_middleware", lambda is_plan_mode: None)
+
+
+def test_mode_tool_warning_fires_on_global_misconfig(monkeypatch, caplog) -> None:
+    """mode="tool" + enabled=False from the operator's own config.yaml still warns."""
+    import logging
+
+    from deerflow.agents.lead_agent import agent as lead_agent_module
+
+    _stub_heavy_middleware_parts(monkeypatch)
+    runnable = {"configurable": {"is_plan_mode": False, "subagent_enabled": False}}
+
+    with caplog.at_level(logging.WARNING, logger=lead_agent_module.__name__):
+        lead_agent_module.build_middlewares(runnable, model_name="safe-model", app_config=_app_config(enabled=False, mode="tool"))
+    assert "memory tools will not be registered" in caplog.text
+
+
+def test_mode_tool_warning_skipped_for_agent_opt_out(monkeypatch, caplog) -> None:
+    """Same resolved config, but reached via an explicit agent opt-out: no warning.
+
+    The warning reads like a misconfiguration; an agent that opted out through
+    ``memory: {enabled: false}`` alongside a global tool-mode config is
+    intentional, so ``_make_lead_agent`` passes ``memory_opt_out=True`` to keep
+    it quiet (the flag is what the fold's copy-vs-same-object return encodes).
+    """
+    import logging
+
+    from deerflow.agents.lead_agent import agent as lead_agent_module
+
+    _stub_heavy_middleware_parts(monkeypatch)
+    runnable = {"configurable": {"is_plan_mode": False, "subagent_enabled": False}}
+
+    app_config = _app_config(enabled=True, mode="tool")
+    effective = apply_agent_memory_override(app_config, AgentConfig(name="worker", memory={"enabled": False}))
+    assert effective.memory.mode == "tool" and effective.memory.enabled is False
+
+    with caplog.at_level(logging.WARNING, logger=lead_agent_module.__name__):
+        lead_agent_module.build_middlewares(runnable, model_name="safe-model", app_config=effective, memory_opt_out=True)
+    assert "memory tools will not be registered" not in caplog.text
