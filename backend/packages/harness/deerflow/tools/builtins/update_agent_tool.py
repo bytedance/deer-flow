@@ -23,7 +23,7 @@ import yaml
 from langchain_core.messages import ToolMessage
 from langchain_core.tools import tool
 from langgraph.types import Command
-from pydantic import BeforeValidator
+from pydantic import BaseModel, BeforeValidator
 
 from deerflow.config.agents_config import load_agent_config, preserve_non_managed_fields, validate_agent_name
 from deerflow.config.app_config import get_app_config
@@ -42,6 +42,12 @@ _NULLISH_STRINGS = frozenset({"null", "none", "undefined"})
 # so a custom factory that re-attaches ``update_agent`` cannot silently
 # expose self-mutation over a webhook.
 _UNTRUSTED_CHANNELS: frozenset[str] = frozenset({"github"})
+
+_MODEL_BEHAVIOR_FIELDS: tuple[str, ...] = (
+    "model_settings",
+    "thinking_enabled",
+    "reasoning_effort",
+)
 
 
 def _stage_temp(path: Path, text: str) -> Path:
@@ -226,6 +232,22 @@ def update_agent(
         config_data["skills"] = new_skills
     if skills is not None and skills != existing_cfg.skills:
         updated_fields.append("skills")
+
+    # This tool intentionally does not expose the #4336 model-behavior fields
+    # as LLM-callable arguments yet, but it still rewrites config.yaml when any
+    # of its supported fields changes. Carry those values forward explicitly so
+    # an agent refining its description/model/skills cannot erase UI/API-owned
+    # defaults such as temperature or reasoning effort.
+    for key in _MODEL_BEHAVIOR_FIELDS:
+        value = getattr(existing_cfg, key, None)
+        if value is None:
+            continue
+        if isinstance(value, BaseModel):
+            dumped = value.model_dump(exclude_none=True)
+            if dumped:
+                config_data[key] = dumped
+        else:
+            config_data[key] = value
 
     # Preserve every top-level AgentConfig field that this tool does not
     # expose as an argument (currently ``github:``, plus any future field

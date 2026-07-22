@@ -10,16 +10,18 @@ Field names mirror the pre-abstraction ``MemoryConfig`` private fields so the
 migration is a pure move (config.yaml ``memory.<field>`` ->
 ``memory.backend_config.<field>``). ``model`` is a nested ``DeerMemModelConfig``
 (provider/model/api_key/base_url/temperature) consumed by ``core/llm.py``;
-``tracing_callback`` (step 14) and ``should_keep_hidden_message`` (step 15) are
-optional host-injected hooks (None = DeerMem defaults).
+``should_keep_hidden_message`` is an optional host-injected hook (None =
+DeerMem default); tracing is via the base ``MemoryManager.callbacks`` field
+(``on_memory_llm_call`` before the LLM call), not a DeerMemConfig slot.
 """
 
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 logger = logging.getLogger(__name__)
 
@@ -206,7 +208,7 @@ class DeerMemConfig(BaseModel):
         default=None,
         description=("Directory with custom memory-extraction prompt templates (memory_update.chat.yaml, staleness_review.yaml, consolidation.yaml, fact_extraction.yaml). None (default) = bundled core/prompts/."),
     )
-    # ── LLM (step 13: structured model sub-config consumed by core/llm.py build_llm) ──
+    # ── LLM (structured model sub-config consumed by core/llm.py build_llm) ──
     model: DeerMemModelConfig = Field(
         default_factory=DeerMemModelConfig,
         description=(
@@ -217,17 +219,9 @@ class DeerMemConfig(BaseModel):
             "but non-LLM ops still work."
         ),
     )
-    # ── Hooks (steps 14-15: optional host-injected callables; None = DeerMem defaults) ──
-    tracing_callback: Any = Field(
-        default=None,
-        description=(
-            "Optional observability callback (e.g. langfuse) invoked before the "
-            "memory-update LLM call as "
-            "``callback(invoke_config, *, thread_id, user_id, trace_id, model_name)``. "
-            "None = no tracing (langfuse not hard-required). Set programmatically "
-            "(callables cannot come from YAML)."
-        ),
-    )
+    # ── Hooks (optional host-injected callables; None = DeerMem defaults) ──
+    # Tracing is via the base ``MemoryManager.callbacks`` field
+    # (``on_memory_llm_call`` before the LLM call), not a DeerMemConfig slot.
     should_keep_hidden_message: Any = Field(
         default=None,
         description=("Optional ``hook(additional_kwargs) -> bool``; when set, ``hide_from_ui`` messages are kept if it returns True. None = skip all ``hide_from_ui`` (host-agnostic safe default). Set programmatically."),
@@ -250,10 +244,33 @@ class DeerMemConfig(BaseModel):
             "``trace_id`` into the host request-trace ContextVar for the memory-"
             "update worker thread (Timer / executor), restoring structured-log "
             "trace correlation. None = no binding (DeerMem standalone; trace_id "
-            "still reaches ``tracing_callback`` and the log message text). Set "
+            "still reaches ``on_memory_llm_call`` and the log message text). Set "
             "programmatically."
         ),
     )
+
+    @model_validator(mode="after")
+    def _check_storage_path_is_directory(self) -> DeerMemConfig:
+        """DeerMem treats ``storage_path`` as a root DIRECTORY (per-user memory
+        under ``{storage_path}/users/{uid}/memory.json``). A file-style value
+        (e.g. a leftover ``.json`` from the pre-abstraction file-path semantics)
+        would make ``FileMemoryStorage.save``'s ``mkdir(parents=True)`` raise
+        ``NotADirectoryError`` (caught as OSError -> silent write failure). Fail
+        loud at construction instead (memory is persistent state -- a wrong root
+        is a data-integrity footgun). Lives here (not the host factory) so it
+        fires even when DeerMem is built standalone / bypassing the factory.
+        Empty storage_path (zero-config -> host injects a dir) is allowed.
+        """
+        if self.storage_path:
+            resolved = Path(self.storage_path)
+            if resolved.is_file():
+                raise ValueError(
+                    f"memory.backend_config.storage_path={self.storage_path!r} "
+                    f"resolves to an existing file {resolved}; DeerMem treats "
+                    f"storage_path as a root DIRECTORY (per-user memory under "
+                    f"{{storage_path}}/users/{{uid}}/memory.json). Point it at a directory."
+                )
+        return self
 
     @classmethod
     def from_backend_config(cls, backend_config: dict[str, Any] | None) -> DeerMemConfig:

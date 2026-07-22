@@ -92,16 +92,23 @@ class _MockManager:
             raise self._raise_on_delete
         return {"facts": []}
 
-    # Tool uses getattr+callable to probe these; shadow with None to simulate a
-    # backend that does not expose fact CRUD (e.g. noop) -- getattr() returns
-    # None and the tool's callable() check fails gracefully.
+    # fact-CRUD ops are tier-3 hooks that raise NotImplementedError when
+    # unsupported (the tool catches it -> JSON error). Simulate an unsupported
+    # backend by replacing each op with a raiser (no more None/hasattr probing).
     def _drop_fact_ops(self):
         if not self._supports_create:
-            self.create_fact = None
+            self.create_fact = self._unsupported("create_fact")
         if not self._supports_update:
-            self.update_fact = None
+            self.update_fact = self._unsupported("update_fact")
         if not self._supports_delete:
-            self.delete_fact = None
+            self.delete_fact = self._unsupported("delete_fact")
+
+    @staticmethod
+    def _unsupported(name):
+        def _raise(*args, **kwargs):
+            raise NotImplementedError(f"{name} not supported by _MockManager")
+
+        return _raise
 
 
 def _install_manager(monkeypatch, manager):

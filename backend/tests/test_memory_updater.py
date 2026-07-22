@@ -3,7 +3,7 @@ import pytest
 pytest.skip(
     "Pending full DI migration: MemoryUpdater now takes (config, storage, llm); "
     "module-level funcs are instance methods. Key paths (DI, zero-config, trace_id, "
-    "tracing_callback, hide_from_ui, LLM update, fact extraction) are covered by "
+    "callbacks, hide_from_ui, LLM update, fact extraction) are covered by "
     "test_deermem_self_contained.py. Full unit-test migration is a follow-up.",
     allow_module_level=True,
 )

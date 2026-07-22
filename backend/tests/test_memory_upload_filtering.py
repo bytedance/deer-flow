@@ -18,6 +18,8 @@ from deerflow.agents.memory.backends.deermem.deermem.core.updater import _strip_
 
 _UPLOAD_BLOCK = "<uploaded_files>\nThe following files have been uploaded and are available for use:\n\n- filename: secret.txt\n  path: /mnt/user-data/uploads/abc123/secret.txt\n  size: 42 bytes\n</uploaded_files>"
 
+_CURRENT_UPLOADS_BLOCK = "<current_uploads>\nThe following files have been uploaded in this run:\n\n- filename: report.pdf\n  path: /mnt/user-data/uploads/def456/report.pdf\n  size: 2048 bytes\n</current_uploads>"
+
 
 def _human(text: str) -> HumanMessage:
     return HumanMessage(content=text)
@@ -48,6 +50,16 @@ class TestFilterMessagesForMemory:
         result = filter_messages_for_memory(msgs)
         assert result == []
 
+    def test_upload_only_turn_is_excluded_current_uploads(self):
+        """Same as above but with <current_uploads> — the tag actually emitted
+        by UploadsMiddleware in production."""
+        msgs = [
+            _human(_CURRENT_UPLOADS_BLOCK),
+            _ai("I have read the report. It says: Q3 revenue up 12%."),
+        ]
+        result = filter_messages_for_memory(msgs)
+        assert result == []
+
     def test_upload_with_real_question_preserves_question(self):
         """When the user asks a question alongside an upload, the question text
         must reach the memory queue (upload block stripped, AI response kept)."""
@@ -63,6 +75,22 @@ class TestFilterMessagesForMemory:
         assert "<uploaded_files>" not in human_result.content
         assert "What does this file contain?" in human_result.content
         assert result[1].content == "The file contains: Hello DeerFlow."
+
+    def test_upload_with_question_preserves_question_current_uploads(self):
+        """Same as above but with <current_uploads> — the tag actually emitted
+        by UploadsMiddleware in production."""
+        combined = _CURRENT_UPLOADS_BLOCK + "\n\nSummarise this report please."
+        msgs = [
+            _human(combined),
+            _ai("The report indicates Q3 revenue is up 12%."),
+        ]
+        result = filter_messages_for_memory(msgs)
+
+        assert len(result) == 2
+        human_result = result[0]
+        assert "<current_uploads>" not in human_result.content
+        assert "Summarise this report please." in human_result.content
+        assert result[1].content == "The report indicates Q3 revenue is up 12%."
 
     # --- non-upload turns pass through unchanged ---
 
