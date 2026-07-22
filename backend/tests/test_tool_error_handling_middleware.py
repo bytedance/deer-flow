@@ -681,10 +681,11 @@ def test_subagent_runtime_middlewares_attach_durable_context_before_summarizatio
     sentinel = object()
     captured: dict[str, object] = {}
 
-    def fake_create_summarization_middleware(*, app_config=None, keep=None, skip_memory_flush=False):
+    def fake_create_summarization_middleware(*, app_config=None, keep=None, skip_memory_flush=False, run_model_name=None):
         captured["app_config"] = app_config
         captured["keep"] = keep
         captured["skip_memory_flush"] = skip_memory_flush
+        captured["run_model_name"] = run_model_name
         return sentinel
 
     # summarization is enabled by default False; flip it on so the factory path
@@ -703,6 +704,10 @@ def test_subagent_runtime_middlewares_attach_durable_context_before_summarizatio
     # skip_memory_flush=True so subagent-internal turns are not flushed into the
     # PARENT thread's durable memory (#3875 Phase 3 review).
     assert captured["skip_memory_flush"] is True
+    # Model ownership: the subagent's own resolved model is threaded into the factory
+    # so a distinct-model subagent summarizes with its model, not the parent's — the
+    # subagent context/configurable never carries the child model.
+    assert captured["run_model_name"] == "test-model"
     durable = [middleware for middleware in middlewares if isinstance(middleware, DurableContextMiddleware)]
     assert len(durable) == 1
     # ``_skills_root`` is ``posixpath.normpath(container_path)``, so compare against

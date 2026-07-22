@@ -10,9 +10,10 @@ from langgraph.graph.message import add_messages
 from langgraph.types import Overwrite
 
 from app.gateway import services as gateway_services
+from deerflow.agents.middlewares.summarization_middleware import SummaryGenerationError
 from deerflow.runtime import context_compaction
 from deerflow.runtime.checkpoint_state import CheckpointStateAccessor
-from deerflow.runtime.context_compaction import compact_thread_context
+from deerflow.runtime.context_compaction import ContextCompactionFailed, compact_thread_context
 
 
 class _FakeAccessor:
@@ -56,7 +57,7 @@ class _FakeCompactionMiddleware:
             return None
         return (state["messages"][:-1], state["messages"][-1:], state.get("summary_text"), 123)
 
-    async def acompact_state(self, state, runtime, *, force=False):
+    async def acompact_state(self, state, runtime, *, force=False, raise_on_failure=False):
         self.runtime_contexts.append(dict(runtime.context))
         prepared = self._prepare_compaction(state, force=force)
         if prepared is None:
@@ -255,3 +256,81 @@ async def test_compact_thread_context_returns_noop_without_writing(monkeypatch):
     assert result.reason == "not_enough_messages"
     assert accessor.update_args is None
     assert middleware.prepare_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_compact_thread_context_raises_on_summary_generation_failure(monkeypatch):
+    """A compressible thread whose summary LLM fails (after the run-model fallback) is
+    a real failure: it must surface via the already-consumed ``ContextCompactionFailed``
+    path (HTTP 500 -> frontend error toast), not a ``compacted=False`` result that the
+    frontend renders as the benign "does not need compaction" toast."""
+    accessor = _FakeAccessor(
+        {
+            "messages": [
+                HumanMessage(content="old question"),
+                AIMessage(content="old answer"),
+                HumanMessage(content="latest question"),
+            ],
+        }
+    )
+
+    captured: dict[str, object] = {}
+
+    class _FailingMiddleware:
+        async def acompact_state(self, state, runtime, *, force=False, raise_on_failure=False):
+            # The manual path must opt into raise_on_failure regardless of force.
+            captured["raise_on_failure"] = raise_on_failure
+            raise SummaryGenerationError("summary generation failed")
+
+    monkeypatch.setattr(
+        context_compaction,
+        "_create_compaction_middleware",
+        lambda **_kwargs: _FailingMiddleware(),
+    )
+
+    with pytest.raises(ContextCompactionFailed):
+        await compact_thread_context(accessor, "thread-1", app_config=SimpleNamespace())
+
+    assert captured["raise_on_failure"] is True
+    assert accessor.update_args is None
+
+
+def _model_app_config(*names):
+    models = [SimpleNamespace(name=n) for n in names]
+    return SimpleNamespace(
+        models=models,
+        get_model_config=lambda n: next((m for m in models if m.name == n), None),
+    )
+
+
+def test_resolve_thread_model_name_prefers_agent_model(monkeypatch):
+    """Manual /compact resolves the thread agent's own model so a custom-agent thread
+    summarizes with its model, not config.models[0] — the manual-path ownership rule."""
+    import deerflow.config.agents_config as agents_config
+
+    monkeypatch.setattr(agents_config, "load_agent_config", lambda name, **_kw: SimpleNamespace(model="agent-model"))
+    app_config = _model_app_config("default-model", "agent-model")
+
+    assert context_compaction._resolve_thread_model_name("research-agent", app_config) == "agent-model"
+
+
+def test_resolve_thread_model_name_falls_back_to_default(monkeypatch):
+    """No agent, an unloadable agent config, or an agent whose model is not configured
+    all resolve to the default model rather than failing compaction."""
+    import deerflow.config.agents_config as agents_config
+
+    app_config = _model_app_config("default-model")
+
+    # No agent name → default.
+    assert context_compaction._resolve_thread_model_name(None, app_config) == "default-model"
+
+    # Agent config cannot be loaded (missing/unparseable) → default, not a crash.
+    def _raise(name, **_kw):
+        raise FileNotFoundError("agent directory not found")
+
+    monkeypatch.setattr(agents_config, "load_agent_config", _raise)
+    assert context_compaction._resolve_thread_model_name("ghost-agent", app_config) == "default-model"
+
+    # Agent's model is not a configured model → default.
+    monkeypatch.setattr(agents_config, "load_agent_config", lambda name, **_kw: SimpleNamespace(model="unconfigured"))
+    assert context_compaction._resolve_thread_model_name("x-agent", app_config) == "default-model"

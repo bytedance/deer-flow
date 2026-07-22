@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from types import SimpleNamespace
 
 from langgraph.types import Overwrite
 
-from deerflow.agents.middlewares.summarization_middleware import DeerFlowSummarizationMiddleware, create_summarization_middleware
+from deerflow.agents.middlewares.summarization_middleware import DeerFlowSummarizationMiddleware, SummaryGenerationError, create_summarization_middleware
 from deerflow.config.app_config import AppConfig, get_app_config
 from deerflow.runtime.checkpoint_state import CheckpointStateAccessor
+
+logger = logging.getLogger(__name__)
 
 
 class ContextCompactionDisabled(RuntimeError):
@@ -38,11 +41,38 @@ def _create_compaction_middleware(
     *,
     app_config: AppConfig,
     keep: tuple[str, int | float] | None,
+    run_model_name: str | None = None,
 ) -> DeerFlowSummarizationMiddleware:
-    middleware = create_summarization_middleware(app_config=app_config, keep=keep)
+    middleware = create_summarization_middleware(app_config=app_config, keep=keep, run_model_name=run_model_name)
     if middleware is None:
         raise ContextCompactionDisabled("Context compaction is disabled.")
     return middleware
+
+
+def _resolve_thread_model_name(agent_name: str | None, app_config: AppConfig) -> str | None:
+    """Resolve the model a thread's agent runs with, for null-model summarization.
+
+    Manual ``/compact`` does not execute the agent, so there is no live runtime to
+    read a model from; mirror the lead-agent resolution (custom agent's configured
+    model, else the default) so the summary is generated with the thread's own model
+    rather than ``config.models[0]``.
+    """
+    default = app_config.models[0].name if getattr(app_config, "models", None) else None
+    if not agent_name:
+        return default
+    from deerflow.config.agents_config import load_agent_config
+
+    try:
+        agent_config = load_agent_config(agent_name)
+    except Exception:
+        # A missing/unparseable agent config must not fail compaction; the run model
+        # is a best-effort optimization and the default is a safe fallback.
+        logger.warning("Could not load agent config for %r; using the default model for summarization", agent_name, exc_info=True)
+        return default
+    requested = agent_config.model if agent_config and agent_config.model else None
+    if requested and app_config.get_model_config(requested):
+        return requested
+    return default
 
 
 async def compact_thread_context(
@@ -57,7 +87,8 @@ async def compact_thread_context(
 ) -> ThreadCompactionResult:
     """Summarize old messages in a thread and write a compacted checkpoint."""
     resolved_app_config = app_config or get_app_config()
-    middleware = _create_compaction_middleware(app_config=resolved_app_config, keep=keep)
+    run_model_name = _resolve_thread_model_name(agent_name, resolved_app_config)
+    middleware = _create_compaction_middleware(app_config=resolved_app_config, keep=keep, run_model_name=run_model_name)
 
     read_config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
     snapshot = await accessor.aget(read_config)
@@ -80,7 +111,18 @@ async def compact_thread_context(
     if agent_name:
         runtime_context["agent_name"] = agent_name
     runtime = SimpleNamespace(context=runtime_context)
-    result = await middleware.acompact_state(state, runtime, force=force)  # type: ignore[arg-type]
+    try:
+        # ``raise_on_failure`` is independent of ``force``: a manual caller always wants
+        # a generation failure surfaced (even a force=False call that met the threshold),
+        # so it must not collapse into the force=False "nothing to compact" branch below.
+        result = await middleware.acompact_state(state, runtime, force=force, raise_on_failure=True)  # type: ignore[arg-type]
+    except SummaryGenerationError as exc:
+        # A compressible thread whose summary LLM failed (after the run-model fallback)
+        # is a real failure, distinct from "nothing to compact". Route it to the
+        # already-consumed ContextCompactionFailed path (HTTP 500 -> frontend error
+        # toast) instead of a compacted=False result that reads as "does not need
+        # compaction".
+        raise ContextCompactionFailed("summary generation failed") from exc
     if result is None:
         return ThreadCompactionResult(thread_id=thread_id, compacted=False, reason="not_enough_messages")
 
