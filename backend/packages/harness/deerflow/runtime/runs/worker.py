@@ -150,11 +150,16 @@ class _LargeFileToolChunkBatcher:
         namespace = raw_namespace if isinstance(raw_namespace, str) else ""
         identity = (namespace, message_id, discriminator)
         name_fragment = tool_chunk.get("name")
-        if isinstance(name_fragment, str) and name_fragment:
-            self.tool_names[identity] = self.tool_names.get(identity, "") + name_fragment
+        tool_name = self.tool_names.get(identity, "")
+        if tool_name not in _LARGE_FILE_TOOL_NAMES and isinstance(name_fragment, str) and name_fragment:
+            tool_name += name_fragment
+            if any(candidate.startswith(tool_name) for candidate in _LARGE_FILE_TOOL_NAMES):
+                self.tool_names[identity] = tool_name
+            else:
+                self.tool_names.pop(identity, None)
         # Batching starts only after the accumulated name matches; split or
         # incomplete name fragments stream per-chunk until then.
-        if self.tool_names.get(identity) not in _LARGE_FILE_TOOL_NAMES:
+        if tool_name not in _LARGE_FILE_TOOL_NAMES:
             return [*self.flush(), chunk]
 
         model_copy = getattr(message, "model_copy", None)
@@ -207,6 +212,16 @@ class _LargeFileToolChunkBatcher:
         self.pending_metadata = {}
         self.pending_count = 0
         return [chunk]
+
+    def finish(self) -> list[Any]:
+        """Flush and release identities at a values or end-of-stream boundary.
+
+        A regular batch-size or interleaved-mode flush must retain identities
+        because continuation chunks commonly omit the tool name.
+        """
+        chunks = self.flush()
+        self.tool_names.clear()
+        return chunks
 
 
 def _build_runtime_context(
@@ -679,7 +694,8 @@ async def run_agent(
                         llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(chunk, pre_existing_message_ids)
                         sse_event = _lg_mode_to_sse_event(mode)
                         if file_tool_chunk_batcher is not None and mode != "messages":
-                            for publish_chunk in file_tool_chunk_batcher.flush():
+                            pending_chunks = file_tool_chunk_batcher.finish() if mode == "values" else file_tool_chunk_batcher.flush()
+                            for publish_chunk in pending_chunks:
                                 await bridge.publish(run_id, "messages", serialize(publish_chunk, mode="messages"))
                         chunks_to_publish = file_tool_chunk_batcher.push(chunk) if mode == "messages" and file_tool_chunk_batcher is not None else [chunk]
                         for publish_chunk in chunks_to_publish:
@@ -688,7 +704,7 @@ async def run_agent(
                             await subagent_events.add(chunk)
             finally:
                 if file_tool_chunk_batcher is not None:
-                    for publish_chunk in file_tool_chunk_batcher.flush():
+                    for publish_chunk in file_tool_chunk_batcher.finish():
                         await bridge.publish(run_id, "messages", serialize(publish_chunk, mode="messages"))
 
         # 7. Stream the requested turn, then optionally continue hidden goal turns.

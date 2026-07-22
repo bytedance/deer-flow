@@ -26,7 +26,10 @@ import {
 } from "@/components/ai-elements/chain-of-thought";
 import { CodeBlock } from "@/components/ai-elements/code-block";
 import { Button } from "@/components/ui/button";
-import { resolveArtifactURL } from "@/core/artifacts/utils";
+import {
+  buildWriteFileArtifactURL,
+  resolveArtifactURL,
+} from "@/core/artifacts/utils";
 import { useI18n } from "@/core/i18n/hooks";
 import { formatTokenCount } from "@/core/messages/usage";
 import type { TokenDebugStep } from "@/core/messages/usage-model";
@@ -559,11 +562,21 @@ function ToolCall({
     typeof args.path === "string"
       ? args.path
       : undefined;
+  const writeFileArtifactUrl = writeFilePath
+    ? buildWriteFileArtifactURL({
+        filepath: writeFilePath,
+        messageId,
+        toolCallId: id,
+      })
+    : null;
   const autoOpenArtifactUrl =
-    isLoading && isLast && autoOpen && autoSelect && writeFilePath && !result
-      ? new URL(
-          `write-file:${writeFilePath}?message_id=${messageId}&tool_call_id=${id}`,
-        ).toString()
+    isLoading &&
+    isLast &&
+    autoOpen &&
+    autoSelect &&
+    writeFileArtifactUrl &&
+    !result
+      ? writeFileArtifactUrl
       : null;
 
   useEffect(() => {
@@ -777,18 +790,14 @@ function ToolCall({
     return (
       <ChainOfThoughtStep
         key={id}
-        className={writeFilePath ? "cursor-pointer" : undefined}
+        className={writeFileArtifactUrl ? "cursor-pointer" : undefined}
         label={resolveLabel(description)}
         icon={NotebookPenIcon}
         onClick={() => {
-          if (!writeFilePath) {
+          if (!writeFileArtifactUrl) {
             return;
           }
-          select(
-            new URL(
-              `write-file:${writeFilePath}?message_id=${messageId}&tool_call_id=${id}`,
-            ).toString(),
-          );
+          select(writeFileArtifactUrl);
           setOpen(true);
         }}
       >

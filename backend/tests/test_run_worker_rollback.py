@@ -210,6 +210,81 @@ def test_large_file_tool_chunk_batcher_accepts_non_dict_metadata(metadata: Any):
     assert published[0][1] == {}
 
 
+def test_large_file_tool_chunk_batcher_does_not_retain_non_file_names():
+    batcher = _LargeFileToolChunkBatcher()
+
+    for index in range(100):
+        message = AIMessageChunk(
+            content="",
+            id=f"ai-{index}",
+            tool_call_chunks=[
+                {
+                    "id": f"call-{index}",
+                    "index": 0,
+                    "name": "web_search",
+                    "args": '{"query":"deerflow"}',
+                }
+            ],
+        )
+
+        assert batcher.push((message, {})) == [(message, {})]
+
+    assert batcher.tool_names == {}
+
+
+def test_large_file_tool_chunk_batcher_starts_batching_after_split_name_matches():
+    batcher = _LargeFileToolChunkBatcher(batch_size=1)
+    name_prefix = AIMessageChunk(
+        content="",
+        id="ai-file",
+        tool_call_chunks=[{"id": "call-file", "index": 0, "name": "write_", "args": ""}],
+    )
+    name_suffix = AIMessageChunk(
+        content="",
+        id="ai-file",
+        tool_call_chunks=[
+            {
+                "index": 0,
+                "name": "file",
+                "args": '{"path":"report.md","content":"draft"}',
+            }
+        ],
+    )
+
+    assert batcher.push((name_prefix, {})) == [(name_prefix, {})]
+    assert set(batcher.tool_names.values()) == {"write_"}
+    assert len(batcher.push((name_suffix, {}))) == 1
+    assert set(batcher.tool_names.values()) == {"write_file"}
+
+
+def test_large_file_tool_chunk_batcher_keeps_identity_across_batches_then_releases_it():
+    batcher = _LargeFileToolChunkBatcher(batch_size=1)
+    first = AIMessageChunk(
+        content="",
+        id="ai-file",
+        tool_call_chunks=[
+            {
+                "id": "call-file",
+                "index": 0,
+                "name": "write_file",
+                "args": '{"path":"report.md","content":"Hel',
+            }
+        ],
+    )
+    continuation = AIMessageChunk(
+        content="",
+        id="ai-file",
+        tool_call_chunks=[{"index": 0, "name": None, "args": 'lo"}'}],
+    )
+
+    assert len(batcher.push((first, {}))) == 1
+    assert len(batcher.push((continuation, {}))) == 1
+    assert set(batcher.tool_names.values()) == {"write_file"}
+
+    assert batcher.finish() == []
+    assert batcher.tool_names == {}
+
+
 def test_build_runtime_context_includes_app_config_when_present():
     app_config = object()
 
