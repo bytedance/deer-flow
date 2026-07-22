@@ -24,7 +24,6 @@ from app.channels.message_bus import (
 )
 from app.channels.store import ChannelStore
 from deerflow.skills.types import Skill, SkillCategory
-from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
 
 
 def test_known_channel_command_detection_only_matches_control_commands():
@@ -2728,9 +2727,11 @@ class TestChannelManager:
 
             mock_client.runs.wait.assert_called_once()
             human_message = mock_client.runs.wait.call_args[1]["input"]["messages"][0]
-            assert human_message["content"].startswith("<uploaded_files>")
             assert original_text in human_message["content"]
-            assert human_message["additional_kwargs"][ORIGINAL_USER_CONTENT_KEY] == original_text
+            files = human_message.get("additional_kwargs", {}).get("files", [])
+            assert len(files) == 1
+            assert files[0]["filename"] == "report.pdf", "File metadata must reach the run request via additional_kwargs.files"
+            # injects <current_uploads> downstream.
             assert outbound_received[0].text == "Hello from agent!"
 
         _run(go())
@@ -2793,9 +2794,10 @@ class TestChannelManager:
 
             mock_client.runs.stream.assert_called_once()
             human_message = mock_client.runs.stream.call_args[1]["input"]["messages"][0]
-            assert human_message["content"].startswith("<uploaded_files>")
             assert original_text in human_message["content"]
-            assert human_message["additional_kwargs"][ORIGINAL_USER_CONTENT_KEY] == original_text
+            files = human_message.get("additional_kwargs", {}).get("files", [])
+            assert len(files) == 1
+            assert files[0]["filename"] == "report.pdf", "File metadata must reach the run request via additional_kwargs.files"
 
         _run(go())
 

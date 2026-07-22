@@ -885,10 +885,9 @@ def test_lead_runtime_chain_finds_historical_uploads_under_lazy_init_false(tmp_p
     """Integration anchor for the ThreadData → Uploads ordering.
 
     Under lazy_init=False, ThreadDataMiddleware eagerly creates the thread
-    directories in before_agent. UploadsMiddleware then scans the uploads
-    directory. Running both middlewares via the real build_lead_runtime_middlewares
-    chain (TD before UM) must surface pre-existing historical files in the
-    injected <uploaded_files> context.
+    directories in before_agent. UploadsMiddleware then only injects
+    <current_uploads> for new files — historical uploads are discovered
+    on demand via list_uploaded_files, not injected every turn.
 
     This complements the static order contract
     (test_build_lead_runtime_middlewares_orders_thread_data_before_uploads):
@@ -928,11 +927,12 @@ def test_lead_runtime_chain_finds_historical_uploads_under_lazy_init_false(tmp_p
     um_input = {**state, "messages": td_result["messages"]}
     um_result = um.before_agent(um_input, runtime)
 
-    assert um_result is not None, "UploadsMiddleware must inject context when historical files exist"
-    injected_content = um_result["messages"][-1].content
-    assert "<uploaded_files>" in injected_content
-    assert "prior-report.txt" in injected_content
-    assert "previous messages" in injected_content  # historical section header
+    # Historical files are NO LONGER injected — only new (current-run) uploads.
+    # The prior-report.txt file exists in the uploads dir from a previous turn,
+    # so UploadsMiddleware must NOT inject it into the prompt.
+    # It MUST however clear uploaded_files so list_uploaded_files doesn't
+    # incorrectly exclude files that just became historical.
+    assert um_result == {"uploaded_files": []}, "UploadsMiddleware must NOT inject context for historical files, but MUST clear uploaded_files to prevent cross-turn state leakage into list_uploaded_files"
 
 
 def test_subagent_summarization_fires_mid_run_and_produces_usable_result(monkeypatch):
