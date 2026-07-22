@@ -803,6 +803,54 @@ def test_release_healthy_sandbox_parks_in_warm_pool(monkeypatch, tmp_path):
     assert client.timeouts_set
 
 
+def test_acquire_waits_for_same_thread_release_transition(monkeypatch):
+    provider = _make_provider()
+    _install_fake_sdk(monkeypatch, provider)
+    client = FakeClient(sandbox_id="sb-release-race")
+    sandbox = _make_sandbox(client)
+    provider._sandboxes[sandbox.id] = sandbox
+    provider._thread_sandboxes[("user-1", "thread-1")] = sandbox.id
+
+    sync_started = threading.Event()
+    allow_sync_to_finish = threading.Event()
+
+    def blocking_sync(*_args, **_kwargs) -> None:
+        sync_started.set()
+        assert allow_sync_to_finish.wait(timeout=2)
+
+    monkeypatch.setattr(provider, "_sync_outputs_to_host", blocking_sync)
+    early_discovery = MagicMock(return_value="discovered-too-early")
+    early_create = MagicMock(return_value="created-too-early")
+    monkeypatch.setattr(provider, "_discover_remote_sandbox", early_discovery)
+    monkeypatch.setattr(provider, "_create_sandbox", early_create)
+
+    release_thread = threading.Thread(target=provider.release, args=(sandbox.id,))
+    acquired: list[str] = []
+    acquire_done = threading.Event()
+
+    def acquire() -> None:
+        acquired.append(provider.acquire("thread-1", user_id="user-1"))
+        acquire_done.set()
+
+    acquire_thread = threading.Thread(target=acquire)
+    release_thread.start()
+    assert sync_started.wait(timeout=1)
+    acquire_thread.start()
+
+    try:
+        assert not acquire_done.wait(timeout=0.1), "acquire must wait while release is syncing outputs"
+    finally:
+        allow_sync_to_finish.set()
+        release_thread.join(timeout=2)
+        acquire_thread.join(timeout=2)
+
+    assert not release_thread.is_alive()
+    assert not acquire_thread.is_alive()
+    assert acquired == [sandbox.id]
+    early_discovery.assert_not_called()
+    early_create.assert_not_called()
+
+
 def test_release_skips_warm_pool_when_sync_reveals_dead_vm(monkeypatch, tmp_path):
     p = _make_provider()
     _setup_paths(monkeypatch, tmp_path)
