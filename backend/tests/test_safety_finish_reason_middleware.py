@@ -649,7 +649,7 @@ class TestAuditEvent:
         assert result is not None
         assert result["messages"][0].tool_calls == []
 
-    def test_journal_record_exception_does_not_break_run(self):
+    def test_journal_record_exception_warns_without_breaking_run(self, caplog):
         """Buggy journal must never propagate an exception into the agent loop."""
         journal = MagicMock()
         journal.record_middleware.side_effect = RuntimeError("db down")
@@ -663,9 +663,12 @@ class TestAuditEvent:
             ]
         }
         # Must not raise.
-        result = mw._apply(state, self._runtime_with_journal(journal))
+        with caplog.at_level("WARNING"):
+            result = mw._apply(state, self._runtime_with_journal(journal))
+
         assert result is not None
         assert result["messages"][0].tool_calls == []
+        assert "Failed to record middleware:safety_termination event" in caplog.text
 
     def test_no_record_when_passthrough(self):
         """When the middleware does NOT intervene, no audit event is written."""
