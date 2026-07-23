@@ -55,13 +55,13 @@ Consider solutions in this order and stop at the first one that fully satisfies 
 6. Introduce a new abstraction
 7. Introduce a new subsystem or migration path
 
-- Minimize concepts, states, interfaces, irreversible decisions, and maintenance surface—not literal line count.
+- Minimize concepts, states, interfaces, irreversible decisions, and maintenance surface, not literal line count.
 - Require a second current consumer, a demonstrated variation, or a hard boundary before generalizing a local solution.
 - Prefer independently reversible slices over a comprehensive architecture rollout.
 - Distinguish a real problem from an oversized solution. A valid verdict is: “The problem is real; reduce the proposal to this smaller change.”
 - Apply these gates recursively to your own recommendation. Do not propose a new field, contract, abstraction, migration, or validation system without naming its consumer, checking existing mechanisms, and showing why a smaller change is insufficient.
 
-### 4. Map Consequences Proportionally
+### 4. Map Consequences and Verification Proportionally
 
 Inspect only relevant dimensions, but do not omit a dimension merely because the proposal omits it:
 
@@ -75,6 +75,9 @@ Inspect only relevant dimensions, but do not omit a dimension merely because the
 
 For state replay or retry features, explicitly distinguish restored application state from external side effects that cannot be undone.
 Label material risk claims as `VERIFIED`, `INFERENCE`, or `UNKNOWN`. Use an inference to request a focused check, not to require new architecture as though the claim were already proven.
+Evidence labels classify individual claims; verdicts classify the overall decision. An `UNKNOWN` requires `NEEDS_EVIDENCE` only when the unknown blocks a material decision.
+
+Before implementation, require observed evidence for the current-system claims that justify the decision and a proportional, executable verification plan. Treat proposed checks as a verification plan, not observed evidence.
 
 ### 5. Implement Only the Justified Slice
 
@@ -88,10 +91,7 @@ When implementation is authorized:
 
 ### 6. Prove the Result
 
-Before implementation, require observed evidence for the current-system claims that justify the decision and a proportional, executable verification plan. After implementation, require observed evidence for claims about the result.
-
 - Map each important result claim to observed evidence: tests, contract checks, static analysis, runtime traces, benchmarks, or a reproducible manual check.
-- Treat proposed checks as a verification plan, not observed evidence.
 - Do not use the agent's own summary as proof.
 - Verify negative boundaries and failure behavior, not only the happy path.
 - State what remains unverified and how that uncertainty affects the verdict.
@@ -108,7 +108,8 @@ Before implementation, require observed evidence for the current-system claims t
 - `NEEDS_EVIDENCE`: a decision would be guesswork until a specific fact, code path, incident, or consumer is verified.
 
 Do not force a binary approve/reject judgment when evidence is incomplete.
-Choose the verdict for the earliest blocked gate. When more than one condition applies, give one primary verdict and list the other required changes without inventing a compound status.
+Choose the verdict from the condition blocking the earliest gate, not from the gate number: affirmative evidence that no change is needed maps to `STOP`; a decision-blocking unknown maps to `NEEDS_EVIDENCE`; a real problem with unsupported scope or no committed consumer maps to `REDUCE`; and a confirmed correctness, contract, or failure-semantics defect maps to `REVISE`. Use `PROCEED` only when no gate is blocked.
+When more than one condition applies, give one primary verdict and list the other required changes without inventing a compound status.
 A verdict records the decision gate and never expands authorization. After authorized implementation, separately report the implemented slice, observed verification, and remaining uncertainty.
 
 ## Keep the Output Proportional
