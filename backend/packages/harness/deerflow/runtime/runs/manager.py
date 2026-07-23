@@ -1345,7 +1345,9 @@ class RunManager:
                     await self._on_orphans_recovered(recovered)
                 except Exception:
                     logger.warning(
-                        "Periodic orphan recovery callback failed",
+                        "Periodic orphan recovery callback failed for %d run(s): run_ids=%s",
+                        len(recovered),
+                        [record.run_id for record in recovered],
                         exc_info=True,
                     )
 

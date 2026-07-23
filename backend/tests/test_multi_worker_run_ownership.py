@@ -374,6 +374,35 @@ async def test_periodic_reconciliation_notifies_recovery_callback():
     assert recovered[0].status == RunStatus.error
 
 
+@pytest.mark.anyio
+async def test_periodic_reconciliation_logs_recovered_run_ids_when_callback_fails(caplog):
+    """Callback failures must identify every recovered run in the warning."""
+    store = MemoryRunStore()
+    on_orphans_recovered = AsyncMock(side_effect=RuntimeError("callback failed"))
+    manager = _make_manager(
+        store=store,
+        on_orphans_recovered=on_orphans_recovered,
+    )
+    expired_lease = (datetime.now(UTC) - timedelta(seconds=60)).isoformat()
+    created_at = (datetime.now(UTC) - timedelta(seconds=120)).isoformat()
+    for run_id in ("periodic-orphan-1", "periodic-orphan-2"):
+        await store.put(
+            run_id,
+            thread_id=f"thread-{run_id}",
+            status="running",
+            owner_worker_id="dead-worker",
+            lease_expires_at=expired_lease,
+            created_at=created_at,
+        )
+
+    with caplog.at_level("WARNING", logger="deerflow.runtime.runs.manager"):
+        await manager._reconcile_orphans_periodic()
+
+    assert "Periodic orphan recovery callback failed for 2 run(s)" in caplog.text
+    assert "periodic-orphan-1" in caplog.text
+    assert "periodic-orphan-2" in caplog.text
+
+
 # ---------------------------------------------------------------------------
 # Lease heartbeat
 # ---------------------------------------------------------------------------
