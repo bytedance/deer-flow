@@ -20,6 +20,7 @@ import copy
 import inspect
 import logging
 import os
+import sys
 import threading
 import weakref
 from collections.abc import AsyncIterator
@@ -103,6 +104,126 @@ async def _checkpoint_thread_lock(thread_id: str) -> AsyncIterator[None]:
 
 # Valid stream_mode values for LangGraph's graph.astream()
 _VALID_LG_MODES = {"values", "updates", "checkpoints", "tasks", "debug", "messages", "custom"}
+# Keep this streaming policy separate from middleware write-authorization sets.
+_LARGE_FILE_TOOL_NAMES = frozenset({"str_replace", "write_file"})
+_LARGE_FILE_TOOL_BATCH_SIZE = 32
+
+
+@dataclass
+class _LargeFileToolChunkBatcher:
+    """Batch file-body argument deltas to avoid quadratic browser parsing.
+
+    Normal assistant text and non-file tool calls remain token-streamed. Large
+    file arguments still update progressively, but in bounded batches instead
+    of forcing the browser to reparse the growing JSON on every model token.
+    """
+
+    batch_size: int = _LARGE_FILE_TOOL_BATCH_SIZE
+    tool_names: dict[tuple[str, str, str], str] = field(default_factory=dict)
+    pending_identity: tuple[str, str, str] | None = None
+    pending_message: Any | None = None
+    pending_metadata: dict[str, Any] = field(default_factory=dict)
+    pending_count: int = 0
+
+    def push(self, chunk: Any) -> list[Any]:
+        if not isinstance(chunk, tuple) or len(chunk) != 2:
+            return [*self.flush(), chunk]
+
+        message, metadata = chunk
+        message_id = getattr(message, "id", None)
+        tool_call_chunks = getattr(message, "tool_call_chunks", None)
+        if not isinstance(message_id, str) or not message_id or not isinstance(tool_call_chunks, list) or len(tool_call_chunks) != 1:
+            return [*self.flush(), chunk]
+
+        tool_chunk = tool_call_chunks[0]
+        if not isinstance(tool_chunk, dict):
+            return [*self.flush(), chunk]
+        index = tool_chunk.get("index")
+        tool_call_id = tool_chunk.get("id")
+        if isinstance(index, int):
+            discriminator = f"index:{index}"
+        elif isinstance(tool_call_id, str) and tool_call_id:
+            discriminator = f"id:{tool_call_id}"
+        else:
+            discriminator = "single"
+        raw_namespace = None
+        if isinstance(metadata, dict):
+            raw_namespace = metadata.get("langgraph_checkpoint_ns") or metadata.get("checkpoint_ns")
+        namespace = raw_namespace if isinstance(raw_namespace, str) else ""
+        identity = (namespace, message_id, discriminator)
+        name_fragment = tool_chunk.get("name")
+        tool_name = self.tool_names.get(identity, "")
+        if tool_name not in _LARGE_FILE_TOOL_NAMES and isinstance(name_fragment, str) and name_fragment:
+            tool_name += name_fragment
+            if any(candidate.startswith(tool_name) for candidate in _LARGE_FILE_TOOL_NAMES):
+                self.tool_names[identity] = tool_name
+            else:
+                self.tool_names.pop(identity, None)
+        # Batching starts only after the accumulated name matches; split or
+        # incomplete name fragments stream per-chunk until then.
+        if tool_name not in _LARGE_FILE_TOOL_NAMES:
+            return [*self.flush(), chunk]
+
+        model_copy = getattr(message, "model_copy", None)
+        if not callable(model_copy):
+            return [*self.flush(), chunk]
+        additional_kwargs = getattr(message, "additional_kwargs", None)
+        sanitized_additional_kwargs = additional_kwargs
+        if isinstance(additional_kwargs, dict) and ("function_call" in additional_kwargs or "tool_calls" in additional_kwargs):
+            sanitized_additional_kwargs = {key: value for key, value in additional_kwargs.items() if key not in {"function_call", "tool_calls"}}
+        has_non_tool_payload = bool(getattr(message, "content", None) or sanitized_additional_kwargs or getattr(message, "usage_metadata", None) or getattr(message, "response_metadata", None))
+        outputs: list[Any] = []
+        if self.pending_identity is not None and self.pending_identity != identity:
+            outputs.extend(self.flush())
+        if has_non_tool_payload:
+            visible_message = model_copy(
+                update={
+                    "additional_kwargs": sanitized_additional_kwargs,
+                    "invalid_tool_calls": [],
+                    "tool_call_chunks": [],
+                    "tool_calls": [],
+                }
+            )
+            outputs.append((visible_message, metadata))
+
+        tool_only_message = model_copy(
+            update={
+                "additional_kwargs": {},
+                "content": "",
+                "invalid_tool_calls": [],
+                "response_metadata": {},
+                "tool_calls": [],
+                "usage_metadata": None,
+            }
+        )
+        self.pending_identity = identity
+        self.pending_message = tool_only_message if self.pending_message is None else self.pending_message + tool_only_message
+        if isinstance(metadata, dict):
+            self.pending_metadata.update(metadata)
+        self.pending_count += 1
+        if self.pending_count >= self.batch_size:
+            outputs.extend(self.flush())
+        return outputs
+
+    def flush(self) -> list[Any]:
+        if self.pending_message is None:
+            return []
+        chunk = (self.pending_message, self.pending_metadata)
+        self.pending_identity = None
+        self.pending_message = None
+        self.pending_metadata = {}
+        self.pending_count = 0
+        return [chunk]
+
+    def finish(self) -> list[Any]:
+        """Flush and release identities at a values or end-of-stream boundary.
+
+        A regular batch-size or interleaved-mode flush must retain identities
+        because continuation chunks commonly omit the tool name.
+        """
+        chunks = self.flush()
+        self.tool_names.clear()
+        return chunks
 
 
 def _build_runtime_context(
@@ -539,40 +660,58 @@ async def run_agent(
 
         async def _stream_once(input_payload: Any, stream_config: RunnableConfig) -> None:
             nonlocal llm_error_fallback_message
-            async with _checkpoint_thread_lock(thread_id):
-                if len(lg_modes) == 1 and not stream_subgraphs:
-                    # Single mode, no subgraphs: astream yields raw chunks
-                    single_mode = lg_modes[0]
-                    async for chunk in agent.astream(input_payload, config=stream_config, stream_mode=single_mode):
+            file_tool_chunk_batcher = _LargeFileToolChunkBatcher() if "values" in requested_modes else None
+            try:
+                async with _checkpoint_thread_lock(thread_id):
+                    if len(lg_modes) == 1 and not stream_subgraphs:
+                        # Single mode, no subgraphs: astream yields raw chunks
+                        single_mode = lg_modes[0]
+                        async for chunk in agent.astream(input_payload, config=stream_config, stream_mode=single_mode):
+                            if record.abort_event.is_set():
+                                logger.info("Run %s abort requested — stopping", run_id)
+                                break
+                            llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(chunk, pre_existing_message_ids)
+                            sse_event = _lg_mode_to_sse_event(single_mode)
+                            await bridge.publish(run_id, sse_event, serialize(chunk, mode=single_mode))
+                            if single_mode == "custom":
+                                await subagent_events.add(chunk)
+                        return
+                    # Multiple modes or subgraphs: astream yields tuples
+                    async for item in agent.astream(
+                        input_payload,
+                        config=stream_config,
+                        stream_mode=lg_modes,
+                        subgraphs=stream_subgraphs,
+                    ):
                         if record.abort_event.is_set():
                             logger.info("Run %s abort requested — stopping", run_id)
                             break
+
+                        mode, chunk = _unpack_stream_item(item, lg_modes, stream_subgraphs)
+                        if mode is None:
+                            continue
+
                         llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(chunk, pre_existing_message_ids)
-                        sse_event = _lg_mode_to_sse_event(single_mode)
-                        await bridge.publish(run_id, sse_event, serialize(chunk, mode=single_mode))
-                        if single_mode == "custom":
+                        sse_event = _lg_mode_to_sse_event(mode)
+                        if file_tool_chunk_batcher is not None and mode != "messages":
+                            pending_chunks = file_tool_chunk_batcher.finish() if mode == "values" else file_tool_chunk_batcher.flush()
+                            for publish_chunk in pending_chunks:
+                                await bridge.publish(run_id, "messages", serialize(publish_chunk, mode="messages"))
+                        chunks_to_publish = file_tool_chunk_batcher.push(chunk) if mode == "messages" and file_tool_chunk_batcher is not None else [chunk]
+                        for publish_chunk in chunks_to_publish:
+                            await bridge.publish(run_id, sse_event, serialize(publish_chunk, mode=mode))
+                        if mode == "custom":
                             await subagent_events.add(chunk)
-                    return
-                # Multiple modes or subgraphs: astream yields tuples
-                async for item in agent.astream(
-                    input_payload,
-                    config=stream_config,
-                    stream_mode=lg_modes,
-                    subgraphs=stream_subgraphs,
-                ):
-                    if record.abort_event.is_set():
-                        logger.info("Run %s abort requested — stopping", run_id)
-                        break
-
-                    mode, chunk = _unpack_stream_item(item, lg_modes, stream_subgraphs)
-                    if mode is None:
-                        continue
-
-                    llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(chunk, pre_existing_message_ids)
-                    sse_event = _lg_mode_to_sse_event(mode)
-                    await bridge.publish(run_id, sse_event, serialize(chunk, mode=mode))
-                    if mode == "custom":
-                        await subagent_events.add(chunk)
+            finally:
+                stream_error = sys.exception()
+                if file_tool_chunk_batcher is not None:
+                    try:
+                        for publish_chunk in file_tool_chunk_batcher.finish():
+                            await bridge.publish(run_id, "messages", serialize(publish_chunk, mode="messages"))
+                    except Exception:
+                        if stream_error is None:
+                            raise
+                        logger.debug("Could not flush pending file-tool chunks for run %s", run_id, exc_info=True)
 
         # 7. Stream the requested turn, then optionally continue hidden goal turns.
         # Clear any stale stop_reason before the first (user-visible) turn only.

@@ -2492,7 +2492,8 @@ export function InputBox({
                       " " + t.inputBox.reasoningEffortMinimal}
                     {context.reasoning_effort === "low" &&
                       " " + t.inputBox.reasoningEffortLow}
-                    {context.reasoning_effort === "medium" &&
+                    {(context.reasoning_effort === "medium" ||
+                      !context.reasoning_effort) &&
                       " " + t.inputBox.reasoningEffortMedium}
                     {context.reasoning_effort === "high" &&
                       " " + t.inputBox.reasoningEffortHigh}
@@ -2687,6 +2688,15 @@ export function InputBox({
             <SuggestionList onSelectPlaceholder={onSelectPlaceholder} />
           </div>
         )}
+
+      <p
+        className={cn(
+          "text-muted-foreground/67 z-10 px-4 text-center text-xs leading-4",
+          !isWelcomeMode && "absolute top-full right-0 left-0",
+        )}
+      >
+        {t.inputBox.disclaimer}
+      </p>
 
       <Dialog open={confirmOpen} onOpenChange={setConfirmOpen}>
         <DialogContent>

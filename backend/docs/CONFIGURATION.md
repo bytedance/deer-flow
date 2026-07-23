@@ -254,6 +254,31 @@ Notes:
 - Manual trigger uses the same scheduled-task resource and run lifecycle.
 - Scheduled task definitions and task-run history are persisted in the application database.
 
+### Agent Storage
+
+Custom agent **definitions** (`config.yaml` + `SOUL.md`) are stored per-user on
+local disk by default. This is separate from the `database` backend (which holds
+run/thread/event data) and from agent memory.
+
+```yaml
+agent_storage:
+  backend: file   # file (default) | db
+```
+
+- `backend: file` — the historical layout under `{base_dir}/users/{user_id}/agents/`. Single-node by construction: an agent created on one node is not visible to other nodes without a shared mount.
+- `backend: db` — one row per agent in the shared SQL persistence layer (a new `agents` table), so every node in a multi-instance deployment sees the same agents. Requires `database.backend` to be `sqlite` or `postgres`; the Gateway **fails fast at startup** if it is `memory` (a per-process database cannot share definitions).
+- `agent_storage` is restart-required (the backend is captured at Gateway lifespan startup).
+- In a multi-worker Postgres deployment (`GATEWAY_WORKERS > 1`), leaving `agent_storage.backend: file` logs a startup warning — agents written to one node's local disk are invisible to the others, which is exactly the divergence the `db` backend fixes.
+
+Migrating an existing install from `file` to `db`:
+
+```bash
+python backend/scripts/migrate_agents_to_db.py            # copy on-disk agents into the db
+python backend/scripts/migrate_agents_to_db.py --dry-run  # preview without writing
+```
+
+The importer is idempotent (already-present agents are skipped) and leaves the source files untouched, so reverting `agent_storage.backend` to `file` is a clean rollback. Agent *memory* (`memory.json`) is unaffected by this switch.
+
 ### Tools
 
 Configure specific tools available to the agent:

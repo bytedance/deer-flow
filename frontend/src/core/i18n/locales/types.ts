@@ -99,6 +99,7 @@ export interface Translations {
   // Input Box
   inputBox: {
     placeholder: string;
+    disclaimer: string;
     createSkillPrompt: string;
     addAttachments: string;
     inputPolish: string;
