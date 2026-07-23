@@ -99,6 +99,9 @@ class E2BSandboxProvider(SandboxProvider):
         # Evictions with unknown remote state. Each id keeps its transition
         # slot until a later eviction attempt confirms destruction.
         self._eviction_tombstones: set[str] = set()
+        # IDs currently reconnecting or stopping. This grants one retry owner
+        # to each tombstone and prevents a second call from freeing its slot.
+        self._evictions_in_progress: set[str] = set()
         # In-flight creates that have reserved capacity but not yet committed
         # to ``_sandboxes``.  Guarded by ``_lock``.
         self._reserved_slots = 0
@@ -1312,10 +1315,14 @@ class E2BSandboxProvider(SandboxProvider):
         stays occupied until the control plane confirms the VM is gone.
         """
         with self._lock:
-            if self._eviction_tombstones:
-                evict_id = next(iter(self._eviction_tombstones))
+            retryable = self._eviction_tombstones - self._evictions_in_progress
+            if retryable:
+                evict_id = next(iter(retryable))
+                self._evictions_in_progress.add(evict_id)
             elif self._warm_pool:
                 evict_id, (_, _) = self._warm_pool.popitem(last=False)
+                self._eviction_tombstones.add(evict_id)
+                self._evictions_in_progress.add(evict_id)
                 self._begin_transition_locked()
             else:
                 return None
@@ -1329,13 +1336,18 @@ class E2BSandboxProvider(SandboxProvider):
                 e,
             )
             with self._lock:
-                self._eviction_tombstones.add(evict_id)
+                if evict_id in self._evictions_in_progress:
+                    self._evictions_in_progress.discard(evict_id)
+                    if not self._shutdown_called:
+                        self._eviction_tombstones.add(evict_id)
             return None
 
         if client is None:
             with self._lock:
-                self._eviction_tombstones.discard(evict_id)
-                self._end_transition_locked()
+                if evict_id in self._evictions_in_progress:
+                    self._evictions_in_progress.discard(evict_id)
+                    self._eviction_tombstones.discard(evict_id)
+                    self._end_transition_locked()
             logger.info("Evicted warm-pool e2b sandbox %s was already gone", evict_id)
             return evict_id
 
@@ -1343,13 +1355,18 @@ class E2BSandboxProvider(SandboxProvider):
             logger.warning("Failed to kill evicted e2b sandbox %s: %s", evict_id, error)
             self._safe_close_client(client)
             with self._lock:
-                self._eviction_tombstones.add(evict_id)
+                if evict_id in self._evictions_in_progress:
+                    self._evictions_in_progress.discard(evict_id)
+                    if not self._shutdown_called:
+                        self._eviction_tombstones.add(evict_id)
             return None
 
         self._safe_close_client(client)
         with self._lock:
-            self._eviction_tombstones.discard(evict_id)
-            self._end_transition_locked()
+            if evict_id in self._evictions_in_progress:
+                self._evictions_in_progress.discard(evict_id)
+                self._eviction_tombstones.discard(evict_id)
+                self._end_transition_locked()
         logger.info("Evicted warm-pool e2b sandbox %s", evict_id)
         return evict_id
 
@@ -1502,6 +1519,7 @@ class E2BSandboxProvider(SandboxProvider):
             self._thread_locks.clear()
             self._warm_pool.clear()
             self._eviction_tombstones.clear()
+            self._evictions_in_progress.clear()
             self._reserved_slots = 0
             self._transitioning_slots = 0
 
@@ -1515,6 +1533,7 @@ class E2BSandboxProvider(SandboxProvider):
             self._sandboxes.clear()
             self._warm_pool.clear()
             self._eviction_tombstones.clear()
+            self._evictions_in_progress.clear()
             self._thread_sandboxes.clear()
             self._reserved_slots = 0
             self._transitioning_slots = 0

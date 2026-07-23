@@ -181,6 +181,7 @@ def _make_provider(*, replicas: int = 3, idle_timeout: int = 1800, overflow_poli
     provider._thread_locks = {}
     provider._warm_pool = OrderedDict()
     provider._eviction_tombstones = set()
+    provider._evictions_in_progress = set()
     provider._reserved_slots = 0
     provider._transitioning_slots = 0
     provider._capacity_cond = threading.Condition(provider._lock)
@@ -1777,6 +1778,71 @@ def test_capacity_retries_tombstone_until_warm_vm_is_destroyed(monkeypatch):
     assert reconnect_client.killed
     assert p._eviction_tombstones == set()
     assert p._transitioning_slots == 0
+
+
+def test_tombstone_eviction_has_one_retry_owner(monkeypatch):
+    """Only one thread can retry a tombstone at a time."""
+    p = _make_provider()
+    _install_fake_sdk(monkeypatch, p)
+    p._eviction_tombstones = {"a", "b"}
+    p._transitioning_slots = 2
+    p._evictions_in_progress = {"b"}
+
+    reconnect_started = threading.Event()
+    allow_reconnect = threading.Event()
+
+    def slow_reconnect(_cls, sandbox_id):
+        assert sandbox_id == "a"
+        reconnect_started.set()
+        assert allow_reconnect.wait(timeout=2)
+        return None
+
+    monkeypatch.setattr(p, "_reconnect_live_client", slow_reconnect)
+    first = threading.Thread(target=p._evict_oldest_warm)
+    first.start()
+    assert reconnect_started.wait(timeout=1)
+
+    assert p._evict_oldest_warm() is None
+    allow_reconnect.set()
+    first.join(timeout=5)
+
+    assert p._eviction_tombstones == {"b"}
+    assert p._transitioning_slots == 1
+
+
+def test_shutdown_during_initial_eviction_reconnect_failure_tracks_vm(monkeypatch):
+    """Shutdown must destroy a VM while its first eviction reconnects."""
+    p = _make_provider()
+    fake_cls = _install_fake_sdk(monkeypatch, p)
+    p._warm_pool["warm-1"] = ("seed", time.time())
+
+    reconnect_started = threading.Event()
+    allow_failure = threading.Event()
+    shutdown_client = FakeClient(sandbox_id="warm-1")
+    calls = 0
+
+    def reconnect(_sid, **_kw):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            reconnect_started.set()
+            assert allow_failure.wait(timeout=2)
+            raise RuntimeError("network down")
+        return shutdown_client
+
+    fake_cls.connect_factory = reconnect
+    eviction = threading.Thread(target=p._evict_oldest_warm)
+    eviction.start()
+    assert reconnect_started.wait(timeout=1)
+
+    p.shutdown()
+    allow_failure.set()
+    eviction.join(timeout=5)
+
+    assert shutdown_client.killed
+    assert p._warm_pool == {}
+    assert p._eviction_tombstones == set()
+    assert p._evictions_in_progress == set()
 
 
 def test_capacity_reset_clears_reserved_slots(monkeypatch):
