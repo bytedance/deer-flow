@@ -17,7 +17,10 @@ import {
 import { Textarea } from "../../ui/textarea";
 
 /** Maps language-neutral tag slugs to their i18n label keys. */
-const TAG_LABEL_KEYS: Record<FeedbackTagSlug, "incorrect" | "notAsExpected" | "slow" | "styleTone" | "safetyLegal" | "other"> = {
+const TAG_LABEL_KEYS: Record<
+  FeedbackTagSlug,
+  "incorrect" | "notAsExpected" | "slow" | "styleTone" | "safetyLegal" | "other"
+> = {
   incorrect: "incorrect",
   not_as_expected: "notAsExpected",
   slow: "slow",
@@ -58,7 +61,8 @@ export function FeedbackDialog({
     });
   };
 
-  const canSubmit = (selected.size > 0 || comment.trim().length > 0) && !isSubmitting;
+  const canSubmit =
+    (selected.size > 0 || comment.trim().length > 0) && !isSubmitting;
 
   const handleSubmit = async () => {
     if (!canSubmit) return;
